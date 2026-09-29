@@ -660,8 +660,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// absent-strategy close does; see targetScopeCloseFor.
 	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
 	lookbackOwner := &lookbackOwnership{}
-	lookbackEngine, lookbackState, err := buildLookback(observationCapacity, queryClient.Recheck, flights,
-		lookbackOwner, external.Now)
+	lookbackEngine, lookbackState, err := buildLookback(queryClient.Recheck, flights, lookbackOwner, logger,
+		external.Now)
 	if err != nil {
 		return nil, err
 	}

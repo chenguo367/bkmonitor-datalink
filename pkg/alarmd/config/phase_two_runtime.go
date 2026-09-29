@@ -390,10 +390,9 @@ type PhaseTwoNoDataConfig struct {
 // not by whichever container happens to know its limit. An operator turning
 // them on says how much, and nothing here says "unlimited".
 //
-// The late-data lookback (package lookback) is the exception: it runs in
-// every deployment whose container memory is known, in an eighth of this
-// share, or of DefaultLookbackSharePercent when there is none. Nothing
-// configures it; its queries take only permits formal queries leave free.
+// The late-data lookback (package lookback) is not among them: nothing
+// configures it and it takes no share, keeping one summary per owned Query
+// Group; its queries take only permits formal queries leave free.
 type PhaseTwoObservationConfig struct {
 	MemoryPercent int `yaml:"memory_percent"`
 }

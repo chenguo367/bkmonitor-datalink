@@ -121,10 +121,10 @@ type Config struct {
 	// printed with no measured load beside it says nothing about whether
 	// anything is near it. Optional.
 	ObserveSeriesPulled func(records uint64)
-	// Lookback keeps a small sample of first reads as the provider delivered
-	// them, before any target filtering, to read the same window again later;
-	// see package lookback. It sees the query and hands nothing back into the
-	// pipeline. Optional.
+	// Lookback takes one first read of each owned Query Group at a time as
+	// the provider delivered it, before any target filtering, as a summary to
+	// compare later reads of the same window with; see package lookback. It
+	// sees the query and hands nothing back into the pipeline. Optional.
 	Lookback *lookback.Engine
 }
 
@@ -327,7 +327,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			break
 		}
 		kept := source.config.Lookback.Begin(lookback.Query{Contract: request.Contract, Spec: query.Spec,
-			Operation: request.Operation, AttemptNo: attempt.AttemptNo, Plans: prepared.Header.DuePlans, Requirements: query.Requirements})
+			Operation: request.Operation, AttemptNo: attempt.AttemptNo})
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()
@@ -851,8 +851,8 @@ type seriesAdapter struct {
 	round        int64
 	scopeScreens map[execution.PlanIdentity]string
 	scopeTallies map[scopeTallyKey]int
-	// lookback is this query's kept first read when it was sampled; nil
-	// otherwise, and every call on it is then nothing.
+	// lookback is this query's first read when it was taken as its Query
+	// Group's sample; nil otherwise, and every call on it is then nothing.
 	lookback *lookback.Read
 
 	// forwarded accumulates the delivery proofs of the batches that actually
@@ -874,7 +874,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	admitted := adapter.admittedPlans(batch)
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
-	adapter.lookback.Series(batch.Dataset, admitted)
+	adapter.lookback.Series(batch.Dataset)
 	bindings, err := dataBindings(adapter.query, batch, adapter.attemptNo, admitted)
 	if err != nil {
 		return err

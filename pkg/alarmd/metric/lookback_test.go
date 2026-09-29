@@ -10,51 +10,66 @@
 package metric
 
 import (
+	"context"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
+// lookbackSources is how many source labels a process counts: every source a
+// query can be compiled from, and mixed, promql and other.
+func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) + 3 }
+
 // lookbackSeriesUpperBounds is each lookback family's series count once
 // bound, by the family's short name.
 func lookbackSeriesUpperBounds() map[string]int {
-	sources, tiers := len(lookback.Sources), len(lookback.TierNames)
+	sources, rungs := lookbackSources(), len(lookback.RungNames)
 	return map[string]int{
+		"lookback_first_reads_total":      sources,
 		"lookback_samples_total":          sources * len(lookback.SampleOutcomes),
-		"lookback_rechecks_total":         sources * tiers * len(lookback.RecheckOutcomes),
-		"lookback_compared_buckets_total": sources * tiers,
-		"lookback_compared_windows_total": sources * tiers * 2,
-		"lookback_differences_total":      sources * tiers * len(lookback.Differences),
-		"lookback_judgments_total":        sources * tiers * len(lookback.Judgments),
-		"lookback_series_total":           sources * tiers * 2,
-		"lookback_windows_by_age_total":   sources * len(lookback.AgeBuckets) * 2,
-		"lookback_pending":                3,
-		"lookback_preemptions_total":      sources * tiers,
+		"lookback_rechecks_total":         sources * rungs * len(lookback.RecheckOutcomes),
+		"lookback_changed_windows_total":  sources * rungs,
+		"lookback_changes_total":          sources * rungs * len(lookback.Changes),
+		"lookback_completion_total":       sources * len(lookback.AgeBuckets),
+		"lookback_completion_max_seconds": sources,
+		"lookback_rung_depth":             sources,
+		"lookback_rest_steps":             sources,
+		"lookback_coverage":               2,
+		"lookback_pending":                2,
+		"lookback_preemptions_total":      sources * rungs,
 		// Every reason the scheduler refuses with, and other.
 		"lookback_permit_refusals_total": len(scheduler.LookbackRefusals) + 1,
+		"lookback_faults_total":          len(lookback.Faults),
 	}
 }
 
-// Not running emits nothing; running emits every cell, zero included, and
-// each count under its own words.
+// Not running emits nothing; running emits every cell of a production
+// engine's counts, zero included, and each count under its own words.
 func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	if series := gatherFamily(t, r, "bkmonitor_alarmd_lookback_samples_total"); len(series) != 0 {
 		t.Fatalf("a process not running the lookback emitted %v", series)
 	}
-	stats := lookback.Stats{
-		Samples:     map[string]map[string]uint64{lookback.SourceLogSearch: {lookback.OutcomeCaptured: 4}},
-		Differences: map[string]map[string]map[string]uint64{lookback.SourceCollectorLog: {"t210": {lookback.DiffZeroToNonzero: 7}}},
-		ByAge:       map[string]map[string]map[string]uint64{lookback.SourceLogSearch: {"le_240s": {"yes": 2}}},
-		Preempted:   map[string]map[string]uint64{lookback.SourceLogSearch: {"t90": 5}},
-		Pending:     3, PendingBytes: 4096, MemoryBytes: 1 << 20,
-		PermitRefusals: map[string]uint64{},
+	engine, err := lookback.New(lookback.Options{Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{}, nil
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return nil, nil, scheduler.LookbackRefusedWaiting },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 7 }})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, reason := range append([]string{lookback.RefusedOther}, scheduler.LookbackRefusals...) {
-		stats.PermitRefusals[reason] = 0
-	}
+	stats := engine.Stats()
+	logs := controlplane.SupportedSourceSemantics[1]
+	stats.Sources[logs].Samples[lookback.OutcomeCaptured] = 4
+	stats.Sources[logs].Changes[lookback.RungNames[1]][lookback.ChangePointsAdded] = 7
+	stats.Sources[logs].Completion["le_300s"] = 2
+	stats.Sources[logs].Preempted[lookback.RungNames[0]] = 5
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
+	stats.Pending, stats.PendingBytes = 3, 4096
 	r.SetLookbackSource(func() lookback.Stats { return stats })
 	for name, n := range lookbackSeriesUpperBounds() {
 		if got := len(gatherFamily(t, r, "bkmonitor_alarmd_"+name)); got != n {
@@ -79,22 +94,28 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 		t.Fatalf("%s has no series %v", family, want)
 		return 0
 	}
-	if got := value("bkmonitor_alarmd_lookback_samples_total", map[string]string{"source": lookback.SourceLogSearch, "outcome": lookback.OutcomeCaptured}); got != 4 {
+	if got := value("bkmonitor_alarmd_lookback_samples_total", map[string]string{"source": logs, "outcome": lookback.OutcomeCaptured}); got != 4 {
 		t.Fatalf("captured = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_differences_total", map[string]string{"source": lookback.SourceCollectorLog, "tier": "t210", "class": lookback.DiffZeroToNonzero}); got != 7 {
-		t.Fatalf("zero_to_nonzero = %v", got)
+	if got := value("bkmonitor_alarmd_lookback_changes_total", map[string]string{"source": logs, "rung": lookback.RungNames[1], "class": lookback.ChangePointsAdded}); got != 7 {
+		t.Fatalf("points added = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_windows_by_age_total", map[string]string{"source": lookback.SourceLogSearch, "age": "le_240s", "differed": "yes"}); got != 2 {
-		t.Fatalf("by age = %v", got)
+	if got := value("bkmonitor_alarmd_lookback_completion_total", map[string]string{"source": logs, "age": "le_300s"}); got != 2 {
+		t.Fatalf("completion = %v", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": lookback.SourceLogSearch, "tier": "t90"}); got != 5 {
+	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": logs, "rung": lookback.RungNames[0]}); got != 5 {
 		t.Fatalf("preemptions = %v", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_permit_refusals_total", map[string]string{"reason": scheduler.LookbackRefusedWaiting}); got != 9 {
 		t.Fatalf("refusals = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_coverage", map[string]string{"what": "owned"}); got != 7 {
+		t.Fatalf("owned = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_rung_depth", map[string]string{"source": logs}); got != 1 {
+		t.Fatalf("depth = %v", got)
 	}
 }

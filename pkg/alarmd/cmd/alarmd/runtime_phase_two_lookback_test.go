@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
@@ -25,25 +25,28 @@ func noRecheck(context.Context, execution.PhysicalQuerySpec, execution.ProviderS
 	return execution.ProviderCompletion{}, nil
 }
 
-// Nothing configures the lookback: with no observation capacity - the
-// container's memory is not known - it is not running and says why; with
-// room, it runs on its share.
-func TestTheLookbackRunsWhereverItHasAShare(t *testing.T) {
+// Nothing configures the lookback and it needs no share of memory: built,
+// it runs, counting every source a query can be compiled from, and every
+// reason the scheduler refuses a permit with, from the start.
+func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, standing, err := buildLookback(config.ObservationCapacity{}, noRecheck, nil, owner, time.Now)
-	if err != nil || engine != nil || standing != (lookbackStanding{Reason: lookbackNoObservationShare}) {
-		t.Fatalf("no capacity: %v %+v %v", engine, standing, err)
+	engine, standing, err := buildLookback(noRecheck, nil, owner, nil, time.Now)
+	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) {
+		t.Fatalf("built: %v %+v %v", engine, standing, err)
 	}
-	engine, standing, err = buildLookback(config.ObservationCapacity{LookbackBytes: 1 << 20}, noRecheck, nil, owner, time.Now)
-	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) || engine.Stats().MemoryBytes != 1<<20 {
-		t.Fatalf("with a share: %v %+v %v", engine, standing, err)
-	}
-	// Every reason the scheduler refuses with is a series from the start.
-	refusals := engine.Stats().PermitRefusals
-	for _, reason := range append([]string{lookback.RefusedOther}, scheduler.LookbackRefusals...) {
-		if count, present := refusals[reason]; !present || count != 0 {
-			t.Fatalf("refusal %q is not counted from the start: %v", reason, refusals)
+	stats := engine.Stats()
+	for _, source := range controlplane.SupportedSourceSemantics {
+		if entry, present := stats.Sources[source]; !present || len(entry.Samples) != len(lookback.SampleOutcomes) {
+			t.Fatalf("source %s is not counted from the start: %+v", source, entry)
 		}
+	}
+	for _, reason := range append([]string{lookback.RefusedOther}, scheduler.LookbackRefusals...) {
+		if count, present := stats.PermitRefusals[reason]; !present || count != 0 {
+			t.Fatalf("refusal %q is not counted from the start: %v", reason, stats.PermitRefusals)
+		}
+	}
+	if stats.Coverage.Owned != 0 {
+		t.Fatalf("an unbound bundle owns %d Query Groups", stats.Coverage.Owned)
 	}
 }
 
@@ -98,12 +101,11 @@ func TestTheLookbackPermitYieldsToAWaitingFormalQuery(t *testing.T) {
 	}
 }
 
-func sampledLogQuery(t *testing.T, queryGroup execution.QueryGroupIdentity) lookback.Query {
-	t.Helper()
+func sampledQuery(queryGroup execution.QueryGroupIdentity) lookback.Query {
 	return lookback.Query{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: queryGroup, EvaluationTime: 1_700_000_060}},
-		Spec: execution.PhysicalQuerySpec{Digest: "physical", PlanFacts: execution.QueryPlanFacts{SourceSemantics: []string{lookback.SourceLogSearch},
-			QueryList:     []execution.QueryClause{{TimeAggregation: execution.QueryFunction{Method: "count_over_time"}}},
-			Normalization: execution.DatasetNormalizationSpec{CanonicalValueField: "value"}}},
+		Spec: execution.PhysicalQuerySpec{Digest: "physical", LogicalWindow: execution.QueryWindow{Start: 1_700_000_000, End: 1_700_000_060},
+			PlanFacts: execution.QueryPlanFacts{SourceSemantics: []string{controlplane.SupportedSourceSemantics[0]}, StepMillis: 60_000,
+				Normalization: execution.DatasetNormalizationSpec{CanonicalValueField: "value"}}},
 		Operation: execution.OperationNormal, AttemptNo: 1}
 }
 
@@ -113,35 +115,37 @@ func sampledLogQuery(t *testing.T, queryGroup execution.QueryGroupIdentity) look
 // call is in removeRunnerLocked, the one way the Runner set shrinks.
 func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, err := lookback.New(lookback.Options{SampleOneIn: 1, MemoryBytes: 1 << 20, Recheck: noRecheck, Owns: owner.owns,
-		Permit: func() (func(), <-chan struct{}, string) { return nil, nil, "headroom" }})
+	engine, _, err := buildLookback(noRecheck, nil, owner, nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const queryGroup = execution.QueryGroupIdentity("qg-1")
+	source := controlplane.SupportedSourceSemantics[0]
 	if owner.owns(queryGroup) {
 		t.Fatal("owned before the bundle was bound")
 	}
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Lookback: engine},
 		runners: map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle{}}
 	owner.bind(bundle)
-	engine.Begin(sampledLogQuery(t, queryGroup)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	if stats := engine.Stats(); stats.Samples[lookback.SourceLogSearch][lookback.OutcomeOwnerLost] != 1 || stats.Pending != 0 {
-		t.Fatalf("a read of a Query Group with no Runner was kept: %+v", stats.Samples[lookback.SourceLogSearch])
+	engine.Begin(sampledQuery(queryGroup)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	if stats := engine.Stats(); stats.Sources[source].Samples[lookback.OutcomeOwnerLost] != 1 || stats.Pending != 0 {
+		t.Fatalf("a read of a Query Group with no Runner was kept: %+v", stats.Sources[source].Samples)
 	}
 	bundle.mu.Lock()
 	bundle.setRunnerLocked(queryGroup, &phaseTwoQueryGroupLifecycle{})
 	bundle.mu.Unlock()
-	engine.Begin(sampledLogQuery(t, queryGroup)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	if stats := engine.Stats(); stats.Pending != 1 {
-		t.Fatalf("a read of an owned Query Group was not kept: %+v", stats.Samples[lookback.SourceLogSearch])
+	engine.Begin(sampledQuery(queryGroup)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	if stats := engine.Stats(); stats.Pending != 1 || stats.Coverage != (lookback.Coverage{Owned: 1, Covered: 1, Ratio: 1}) {
+		t.Fatalf("a read of an owned Query Group was not kept: pending %d coverage %+v", stats.Pending, stats.Coverage)
 	}
 	bundle.mu.Lock()
 	bundle.removeRunnerLocked(queryGroup)
 	bundle.mu.Unlock()
 	stats := engine.Stats()
-	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Rechecks[lookback.SourceLogSearch]["t90"][lookback.RecheckOwnerLost] != 1 {
-		t.Fatalf("after the Runner left: pending %d bytes %d rechecks %v", stats.Pending, stats.PendingBytes, stats.Rechecks[lookback.SourceLogSearch]["t90"])
+	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Sources[source].Rechecks[lookback.RungNames[0]][lookback.RecheckOwnerLost] != 1 ||
+		stats.Coverage.Owned != 0 {
+		t.Fatalf("after the Runner left: pending %d bytes %d rechecks %v coverage %+v", stats.Pending, stats.PendingBytes,
+			stats.Sources[source].Rechecks[lookback.RungNames[0]], stats.Coverage)
 	}
 	// A bundle without the lookback removes Runners as before.
 	plain := &phaseTwoWorkerBundle{runners: map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle{queryGroup: {}}}
@@ -150,8 +154,8 @@ func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	plain.mu.Unlock()
 }
 
-// lookback.get says whether the answering process runs the lookback and
-// why not, and carries its counts when it does.
+// lookback.get says whether the answering process runs the lookback, and
+// carries its counts when it does.
 func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 	read := func(op obchannel.Operation) cliLookbackReading {
 		t.Helper()
@@ -162,17 +166,17 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 		}
 		return reading
 	}
-	if off := read(cliLookbackOperation(nil, lookbackStanding{Reason: lookbackNoObservationShare})); off.Running ||
-		off.Reason != lookbackNoObservationShare || off.Stats != nil {
+	if off := read(cliLookbackOperation(nil, lookbackStanding{})); off.Running || off.Stats != nil {
 		t.Fatalf("off = %+v", off)
 	}
-	engine, err := lookback.New(lookback.Options{MemoryBytes: 4096, Recheck: noRecheck,
-		Owns: func(execution.QueryGroupIdentity) bool { return true }, Permit: func() (func(), <-chan struct{}, string) { return nil, nil, "headroom" }})
+	engine, standing, err := buildLookback(noRecheck, nil, &lookbackOwnership{}, nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	on := read(cliLookbackOperation(engine, lookbackStanding{Running: true}))
-	if !on.Running || on.Stats == nil || on.Stats.MemoryBytes != 4096 || len(on.Stats.Samples[lookback.SourceLogSearch]) != len(lookback.SampleOutcomes) {
+	on := read(cliLookbackOperation(engine, standing))
+	source := controlplane.SupportedSourceSemantics[0]
+	if !on.Running || on.Stats == nil || len(on.Stats.Sources[source].Samples) != len(lookback.SampleOutcomes) ||
+		len(on.Stats.Sources[source].Rechecks) != len(lookback.RungNames) {
 		t.Fatalf("on = %+v", on)
 	}
 }
