@@ -2321,6 +2321,23 @@ type HistoryCoverage struct {
 	// And without the positions "which minutes" was a question for the logs,
 	// which the page told the reader to go and answer by hand.
 	Windows []WindowCoverage
+	// MissingMinutes is every minute at which some short window of the run
+	// has a position with no point, over all of them and not only the named
+	// ones, oldest first and at most MaxCoverageMissingMinutes long.
+	// MissingMinutesTruncated says the union is not whole: a window held more
+	// missing positions than it lists, or the union ran over the bound.
+	// ShortUnusable is how many short windows held a position whose record
+	// the Level could not use.
+	//
+	// Whose a missing position is -- the data's, or this side's -- is a fact
+	// about the round that evaluated its minute, not about the window, so for
+	// the windows Windows does not name the minutes are what a reader needs.
+	// Without them a Query Group five strategies share, with three hosts that
+	// miss whole minutes, had fifteen short windows, named eight, and was
+	// filed every round as this side's undecided window for want of the rest.
+	MissingMinutes          []int64
+	MissingMinutesTruncated bool
+	ShortUnusable           uint32
 	// End is the newest record source time any window of this run ended at
 	// -- the minute this round evaluated. Carried on every run that
 	// summarised a window, full or short, so the round can be matched to
@@ -2335,6 +2352,11 @@ type HistoryCoverage struct {
 const (
 	MaxCoverageWindows   = 8
 	MaxWindowHolesListed = 16
+	// MaxCoverageMissingMinutes bounds MissingMinutes. It is the union of
+	// minutes, not of holes: every window of a run ends at the same minute, so
+	// the union is no longer than the longest window, and a round whose
+	// windows reach back further than this says so rather than listing more.
+	MaxCoverageMissingMinutes = 64
 )
 
 // WindowCoverage is one short window of the round, by identity.
@@ -2406,6 +2428,43 @@ func (coverage *HistoryCoverage) ObserveWindow(window WindowCoverage) {
 	if coverage == nil || window.Required == 0 || window.Shortfall() == 0 {
 		return
 	}
+	coverage.noteShortWindow(window)
+	coverage.keepWindow(window)
+}
+
+// noteShortWindow folds one short window into the counts every short window
+// contributes to, named or not: where it is missing points, and whether it
+// holds a point its Level could not use.
+func (coverage *HistoryCoverage) noteShortWindow(window WindowCoverage) {
+	if window.UnusableTotal > 0 {
+		coverage.ShortUnusable++
+	}
+	if uint32(len(window.Missing)) < window.MissingTotal {
+		coverage.MissingMinutesTruncated = true
+	}
+	coverage.addMissingMinutes(window.Missing)
+}
+
+// addMissingMinutes adds minutes to the sorted union, marking it truncated
+// instead of growing past MaxCoverageMissingMinutes.
+func (coverage *HistoryCoverage) addMissingMinutes(minutes []int64) {
+	for _, minute := range minutes {
+		index := sort.Search(len(coverage.MissingMinutes), func(i int) bool { return coverage.MissingMinutes[i] >= minute })
+		if index < len(coverage.MissingMinutes) && coverage.MissingMinutes[index] == minute {
+			continue
+		}
+		if len(coverage.MissingMinutes) >= MaxCoverageMissingMinutes {
+			coverage.MissingMinutesTruncated = true
+			continue
+		}
+		coverage.MissingMinutes = append(coverage.MissingMinutes, 0)
+		copy(coverage.MissingMinutes[index+1:], coverage.MissingMinutes[index:])
+		coverage.MissingMinutes[index] = minute
+	}
+}
+
+// keepWindow places one short window among the MaxCoverageWindows named ones.
+func (coverage *HistoryCoverage) keepWindow(window WindowCoverage) {
 	for index, kept := range coverage.Windows {
 		if kept.Plan != window.Plan || kept.Series != window.Series || kept.LevelID != window.LevelID {
 			continue
@@ -2531,8 +2590,15 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	if other.Short > 0 && other.WorstRequired-other.WorstValid > coverage.WorstRequired-coverage.WorstValid {
 		coverage.WorstValid, coverage.WorstRequired = other.WorstValid, other.WorstRequired
 	}
+	// The other side's counts already hold every window it saw, the named
+	// ones included, so its names are only placed here, not counted again.
+	coverage.ShortUnusable += other.ShortUnusable
+	coverage.MissingMinutesTruncated = coverage.MissingMinutesTruncated || other.MissingMinutesTruncated
+	coverage.addMissingMinutes(other.MissingMinutes)
 	for _, window := range other.Windows {
-		coverage.ObserveWindow(window)
+		if window.Required != 0 && window.Shortfall() != 0 {
+			coverage.keepWindow(window)
+		}
 	}
 	if other.End > coverage.End {
 		coverage.End = other.End
