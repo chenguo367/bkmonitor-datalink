@@ -1345,8 +1345,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// cursor older than that describes an object that stopped rather than
 		// one between rounds.
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally),
-		readEarly: lookbackReadEarly(lookbackEngine),
-		applied:   repository.AppliedActivationRevision,
+		readEarly: lookbackReadEarly(lookbackEngine), lateSeries: lookbackLateSeries(lookbackEngine),
+		applied: repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.

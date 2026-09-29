@@ -157,6 +157,13 @@ type Stats struct {
 	// would have read them complete, the furthest from it first, at most
 	// maxLatest.
 	ReadEarly []ReadEarlyReading `json:"read_early"`
+	// LatePastRound is the owned Query Groups whose late series had crossed
+	// their Slots in latePastRoundRepeat supplemented windows in a row, with
+	// the time_delay that would read them, and ResidualMisses the directed
+	// ones with series their supplements could not recover in windows they
+	// recovered part of; each by Query Group, at most maxLatest.
+	LatePastRound  []LatePastRoundReading `json:"late_past_round"`
+	ResidualMisses []ResidualMissReading  `json:"residual_misses"`
 	// Recent is the latest rechecks that found a change, at most maxRecent.
 	Recent []Recent `json:"recent"`
 	// NeverCompleteFirstRead is the owned Query Groups none of whose first
@@ -296,7 +303,7 @@ type GroupLateness struct {
 func (engine *Engine) Stats() Stats {
 	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{},
 		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{},
-		Supplements: []SupplementReading{}}
+		Supplements: []SupplementReading{}, LatePastRound: []LatePastRoundReading{}, ResidualMisses: []ResidualMissReading{}}
 	if engine == nil {
 		return stats
 	}
@@ -306,6 +313,8 @@ func (engine *Engine) Stats() Stats {
 		fresh         bool
 		lateness      *GroupLateness
 		readEarly     *ReadEarlyReading
+		latePastRound *LatePastRoundReading
+		residualMiss  *ResidualMissReading
 		neverComplete *NeverCompleteGroup
 		supplement    *SupplementReading
 	}
@@ -344,6 +353,12 @@ func (engine *Engine) Stats() Stats {
 			if reading, reported := readingOf(queryGroup, state); reported {
 				sum.readEarly++
 				entry.readEarly = &reading
+			}
+			if reading, reported := latePastRoundOf(queryGroup, state); reported {
+				entry.latePastRound = &reading
+			}
+			if reading, reported := residualMissOf(queryGroup, state); reported {
+				entry.residualMiss = &reading
 			}
 			if state.seriesLate != nil {
 				sum.seriesLate++
@@ -477,6 +492,12 @@ func (engine *Engine) Stats() Stats {
 		if entry.readEarly != nil {
 			stats.ReadEarly = append(stats.ReadEarly, *entry.readEarly)
 		}
+		if entry.latePastRound != nil {
+			stats.LatePastRound = append(stats.LatePastRound, *entry.latePastRound)
+		}
+		if entry.residualMiss != nil {
+			stats.ResidualMisses = append(stats.ResidualMisses, *entry.residualMiss)
+		}
 		if entry.supplement != nil {
 			stats.Supplements = append(stats.Supplements, *entry.supplement)
 		}
@@ -501,6 +522,15 @@ func (engine *Engine) Stats() Stats {
 	if len(stats.ReadEarly) > maxLatest {
 		stats.ReadEarly = stats.ReadEarly[:maxLatest]
 	}
+	sort.Slice(stats.LatePastRound, func(i, j int) bool { return stats.LatePastRound[i].QueryGroup < stats.LatePastRound[j].QueryGroup })
+	stats.LatePastRound = stats.LatePastRound[:min(len(stats.LatePastRound), maxLatest)]
+	sort.Slice(stats.ResidualMisses, func(i, j int) bool {
+		if stats.ResidualMisses[i].CrossedSeries != stats.ResidualMisses[j].CrossedSeries {
+			return stats.ResidualMisses[i].CrossedSeries > stats.ResidualMisses[j].CrossedSeries
+		}
+		return stats.ResidualMisses[i].QueryGroup < stats.ResidualMisses[j].QueryGroup
+	})
+	stats.ResidualMisses = stats.ResidualMisses[:min(len(stats.ResidualMisses), maxLatest)]
 	if stats.Coverage.Owned > 0 {
 		stats.Coverage.Ratio = float64(stats.Coverage.Covered) / float64(stats.Coverage.Owned)
 	}

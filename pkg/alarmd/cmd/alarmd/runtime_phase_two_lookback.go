@@ -284,3 +284,42 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 			}}
 		}}
 }
+
+// lookbackLateSeries is what the lookback's supplements could not recover,
+// as the fleet snapshot carries it. Nil without a lookback.
+func lookbackLateSeries(engine *lookback.Engine) func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
+	if engine == nil {
+		return nil
+	}
+	return func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
+		return lateSeriesFacts(engine.LatePastRound(), engine.ResidualMisses())
+	}
+}
+
+// lateSeriesFacts is the lookback's readings as the fleet rows carry them:
+// the objects whose late series had crossed their Slots window after window,
+// and the residual misses of the windows recovered in part, by object, with
+// their samples.
+func lateSeriesFacts(pastRound []lookback.LatePastRoundReading, residual []lookback.ResidualMissReading) (
+	map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
+	past := make(map[string]fleet.LatePastRoundFacts, len(pastRound))
+	for _, reading := range pastRound {
+		row := fleet.LatePastRoundFacts{StepSeconds: reading.StepSeconds, CurrentDelaySeconds: reading.CurrentDelaySeconds,
+			SuggestedDelaySeconds: reading.SuggestedDelaySeconds, Since: reading.Since}
+		for _, sample := range reading.Samples {
+			row.Samples = append(row.Samples, fleet.LatePastRoundSample{EvaluationTime: int64(sample.EvaluationTime),
+				Rung: sample.Rung, SeenAgeSeconds: sample.SeenAgeSeconds, CrossedSeries: sample.CrossedSeries})
+		}
+		past[string(reading.QueryGroup)] = row
+	}
+	missed := make(map[string]fleet.LateSeriesMissedFacts, len(residual))
+	for _, reading := range residual {
+		row := fleet.LateSeriesMissedFacts{Windows: reading.Windows, CrossedSeries: reading.CrossedSeries, Since: reading.Since}
+		for _, sample := range reading.Samples {
+			row.Samples = append(row.Samples, fleet.LateSeriesMissedSample{EvaluationTime: int64(sample.EvaluationTime),
+				AdmittedSeries: sample.AdmittedSeries, CrossedSeries: sample.CrossedSeries})
+		}
+		missed[string(reading.QueryGroup)] = row
+	}
+	return past, missed
+}

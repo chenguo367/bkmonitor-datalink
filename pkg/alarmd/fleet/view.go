@@ -1461,6 +1461,11 @@ type Anomaly struct {
 	// object's query runs under, the one that would have read its samples
 	// complete, and the samples.
 	ReadEarly *ReadEarlyFacts `json:"read_early,omitempty"`
+	// LatePastRound is on rows of KindLatePastRound and LateSeriesMissed on
+	// rows of KindLateSeriesMissed: what the lookback's supplements could not
+	// recover, and the evidence.
+	LatePastRound    *LatePastRoundFacts    `json:"late_past_round,omitempty"`
+	LateSeriesMissed *LateSeriesMissedFacts `json:"late_series_missed,omitempty"`
 	// NoDataMemoryUpkeep is on every row of an object whose Plans this
 	// process has seen the store keep a memory alive for: the last read's
 	// stored shape and the last renewal. Absent until a renewal reached the
@@ -1666,6 +1671,11 @@ type Snapshot struct {
 	// rounds complete -- and listed because their results are read from data
 	// that was not all there, which only the strategy's time_delay changes.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// LateSeries is the objects whose late series the lookback's supplements
+	// could not recover, of KindLatePastRound and KindLateSeriesMissed. In no
+	// column -- the rounds complete -- and listed because those series were
+	// decided without data that came too late for them.
+	LateSeries []Anomaly `json:"late_series,omitempty"`
 	// Capacity is how close this replica is to its own limits. Absent on a
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
@@ -2772,6 +2782,9 @@ type View struct {
 	// ReadEarly is the objects read before their data was complete, from
 	// every counted replica. In no column and in no total, like NoData.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// LateSeries is the objects whose late series were not recovered, from
+	// every counted replica, the same way.
+	LateSeries []Anomaly `json:"late_series,omitempty"`
 	// Recovered is the problems whose objects completed healthily within the
 	// retention, merged over the counted replicas by line and fold. In no
 	// column and in no total, like the skips: the objects are running now.
@@ -3015,6 +3028,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
 		view.RetainedShare = append(view.RetainedShare, snapshot.RetainedShare...)
 		view.ReadEarly = append(view.ReadEarly, snapshot.ReadEarly...)
+		view.LateSeries = append(view.LateSeries, snapshot.LateSeries...)
 		mergeRecovered(&view, snapshot.Recovered)
 		if facts := snapshot.BookkeepingAbandoned; facts != nil && facts.Slots > 0 {
 			if view.BookkeepingAbandoned == nil {
@@ -3351,6 +3365,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.NoDataMemory, now)
 	Attribute(view.RetainedShare, now)
 	Attribute(view.ReadEarly, now)
+	Attribute(view.LateSeries, now)
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a

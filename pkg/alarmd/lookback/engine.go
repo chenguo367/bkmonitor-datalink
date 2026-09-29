@@ -259,6 +259,10 @@ type group struct {
 	// seriesLate the rung its late series were last seen at, if any.
 	readEarly  *readEarlyState
 	seriesLate *seriesLateState
+	// latePastRound and residualMiss are what its supplemented windows
+	// could not recover (noteLateSeriesLocked).
+	latePastRound *latePastRoundState
+	residualMiss  *residualMissState
 	// directed is its Slots read again for their late series while it is
 	// series_late, by evaluation time, and supplement what they came to.
 	directed   map[execution.EvaluationTime]*directedSlot

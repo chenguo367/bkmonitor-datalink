@@ -221,6 +221,10 @@ type directedSlot struct {
 	queries    []*directedQuery
 	running    bool
 	dropped    bool
+	// period is the directed reads the Slot was opened in: a window that
+	// ends after they did still supplements its late series, and is not
+	// counted into the reports of the reads that came after.
+	period *seriesLateState
 }
 
 // supplementTally is what a directed Query Group's Slots came to since it
@@ -250,7 +254,8 @@ func (engine *Engine) captureDirectedLocked(state *group, query Query, source st
 	if slot == nil {
 		engine.nextID++
 		slot = &directedSlot{id: engine.nextID, source: source, queryGroup: query.Contract.Slot.QueryGroup,
-			evaluation: query.Contract.Slot.EvaluationTime, step: step, readAt: now, rung: state.seriesLate.rung}
+			evaluation: query.Contract.Slot.EvaluationTime, step: step, readAt: now, rung: state.seriesLate.rung,
+			period: state.seriesLate}
 		state.directed[query.Contract.Slot.EvaluationTime] = slot
 	}
 	captured := &directedQuery{spec: query.Spec, first: newSeriesSet(engine.options.Memory)}
@@ -314,6 +319,7 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 // its source.
 func (engine *Engine) noteDirectedLocked(state *group, slot *directedSlot, outcome, reason string, facts *execution.SupplementFacts) {
 	engine.counts.directedWindows[key2(slot.source, outcome)]++
+	engine.noteLateSeriesLocked(state, slot, outcome, facts)
 	if state.supplement == nil {
 		state.supplement = newSupplementTally(engine.options.Now())
 	}

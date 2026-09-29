@@ -198,7 +198,7 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		// reads: its series are late no more, as far as its samples read.
 		if state.seriesLate != nil {
 			if state.seriesLate.clean++; state.seriesLate.clean >= seriesLateCleanToEnd {
-				state.seriesLate = nil
+				endLateSeries(state)
 			}
 		}
 	}

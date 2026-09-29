@@ -183,8 +183,16 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// because such an object's rounds complete and its results are read
 	// from data that was not all there, and only the strategy's time_delay
 	// moves the read (user, 09-29: whole-window lateness is time_delay's).
-	if got := len(Checks()); got != 33 || len(checkAnswers) != 33 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 33: a new check has to "+
+	// Thirty-four and thirty-five: LATE_PAST_ROUND and LATE_SERIES_MISSED are
+	// rules over a dimension the rows did not carry before - what the
+	// lookback's supplements could not recover - because a series later than
+	// the next round is decided without its data. Whole windows of such
+	// series are time_delay's, the strategy's, like a window read early; the
+	// tail of a window the supplement recovered in part is the data's, since
+	// a longer time_delay would slow the whole object for a few series
+	// (09-29 ruling).
+	if got := len(Checks()); got != 35 || len(checkAnswers) != 35 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 35: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -257,6 +265,9 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
 		CheckReadBeforeComplete: {Kind: KindReadBeforeComplete,
 			ReadEarly: &ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180}},
+		CheckLatePastRound: {Kind: KindLatePastRound,
+			LatePastRound: &LatePastRoundFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 300}},
+		CheckLateSeriesMissed: {Kind: KindLateSeriesMissed, LateSeriesMissed: &LateSeriesMissedFacts{Windows: 2, CrossedSeries: 3}},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
 		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{

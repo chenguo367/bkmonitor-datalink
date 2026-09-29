@@ -94,7 +94,17 @@ const (
 	// not all there. The strategy's time_delay moves the read; the row
 	// carries the value that would have read those samples complete.
 	CheckReadBeforeComplete Check = "READ_BEFORE_COMPLETE"
-	CheckNoDataPersistent   Check = "NO_DATA_PERSISTENT"
+	// LatePastRound is the objects whose late series had crossed their
+	// Slots in two supplemented windows in a row: the supplement recovered
+	// none, the rounds were decided without them, and only a longer
+	// time_delay reads them. The row carries the value that would.
+	CheckLatePastRound Check = "LATE_PAST_ROUND"
+	// LateSeriesMissed is the objects whose supplements recovered part of a
+	// window and not the rest: the series later still than the supplement
+	// reaches, counted, with the latest windows. A longer time_delay would
+	// slow the whole object for them; the data is what to look at.
+	CheckLateSeriesMissed Check = "LATE_SERIES_MISSED"
+	CheckNoDataPersistent Check = "NO_DATA_PERSISTENT"
 	// Every short window of the object is short only by minutes the query
 	// answered whole without the series: the data was not there when it was
 	// asked for, and nothing on this side is on record as missing it. The
@@ -302,6 +312,9 @@ var checkAnswers = map[Check]struct {
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
 	// The strategy's: its time_delay decides when its window is read.
 	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},
+	CheckLatePastRound:      {OwnerStrategy, GroupByStrategy},
+	// The data's: its late tail is past what a supplement reaches.
+	CheckLateSeriesMissed: {OwnerData, GroupByStrategy},
 	// The strategy's: the backend read the query and rejected it - a
 	// condition value its storage refuses, an expression it cannot parse -
 	// and the platform's own detector is refused the same way. The owner
@@ -367,6 +380,8 @@ var checkOrder = []Check{
 	// Below the lines that stop detection, above the one that only warns:
 	// this one detects, from data read before it was all there.
 	CheckReadBeforeComplete,
+	CheckLatePastRound,
+	CheckLateSeriesMissed,
 	// Below every line that stops detection: this one only says a line that
 	// would is near.
 	CheckRetainedShareApproaching,
@@ -559,7 +574,8 @@ func resultOf(anomaly Anomaly) Result {
 		return ""
 	case anomaly.Kind == KindNoData, anomaly.Kind == KindEmptyEveryRound:
 		return ResultNoData
-	case anomaly.Kind == KindNoDataMemoryRefused, anomaly.Kind == KindRetainedShareApproaching, anomaly.Kind == KindReadBeforeComplete:
+	case anomaly.Kind == KindNoDataMemoryRefused, anomaly.Kind == KindRetainedShareApproaching, anomaly.Kind == KindReadBeforeComplete,
+		anomaly.Kind == KindLatePastRound, anomaly.Kind == KindLateSeriesMissed:
 		// The round completed; what was refused was the memory beside it,
 		// or nothing yet.
 		return ResultCompleted
@@ -1114,7 +1130,7 @@ func checkRowsOf(columns [][]Anomaly, view *View, now time.Time) checkTallies {
 		for check, consequence := range consequences {
 			ensure(check).skipped = consequence
 		}
-		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly} {
+		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.LateSeries} {
 			for index := range list {
 				row := &list[index]
 				if row.Finding.Check == "" {
@@ -1512,6 +1528,7 @@ func todoRowsOf(columns [][]Anomaly, view *View, now time.Time) Todo {
 		count(view.NoDataMemory)
 		count(view.RetainedShare)
 		count(view.ReadEarly)
+		count(view.LateSeries)
 	}
 	if view != nil {
 		// One walk over the records, the same one the lines make. A loss in
@@ -1679,7 +1696,7 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 		}
 	}
 	demoted := demotedObjects(&selected)
-	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly} {
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.LateSeries} {
 		for _, anomaly := range column {
 			if queryGroup != "" && anomaly.QueryGroup != queryGroup {
 				continue
