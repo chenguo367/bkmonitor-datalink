@@ -91,7 +91,10 @@ func (store *Store) LoadProgress(ctx context.Context, identity execution.Progres
 	return store.decodeLoaded(identity, raw, missing)
 }
 
-// LoadProgressBatch loads the Progress of many Query Groups. Every entry of
+// LoadProgressBatch loads the Progress of many Query Groups, bounded by
+// count alone: the production readers of batches read within bytes
+// (LoadProgressWithin), and this serves a store that cannot say how long its
+// records are. Every entry of
 // the result is filled: a per-identity error is returned in place, so one
 // unreadable or invalid Progress does not hide the others. A transport
 // failure of a whole batch is reported on every identity of that batch.
@@ -174,7 +177,9 @@ func (store *Store) LoadProgressWithin(ctx context.Context, identities []executi
 	if len(queryGroups) == 0 {
 		return results, errs, len(identities)
 	}
-	reads, admitted, err := budgeted.ReadControlWithin(ctx, queryGroups, store.options.Prefix+":progress", admit)
+	reads, admitted, err := budgeted.ReadControlWithin(ctx, queryGroups, store.options.Prefix+":progress", func(length uint64) bool {
+		return admit(recordCharge(length))
+	})
 	if err != nil {
 		for index := range errs {
 			if errs[index] == nil {
@@ -190,8 +195,20 @@ func (store *Store) LoadProgressWithin(ctx context.Context, identities []executi
 	for offset := 0; offset < admitted; offset++ {
 		index := positions[offset]
 		results[index], errs[index] = store.decodeRead(identities[index], reads[offset])
+		// Let the raw record go as soon as it is decoded: the batch then
+		// holds its decoded records and what is still raw, not both whole.
+		reads[offset] = ownership.ControlRead{}
 	}
 	return results[:read], errs[:read], read
+}
+
+// recordCharge is what a record of length bytes is admitted as: 3/2 of it,
+// the charge the object cache puts on what it decodes. Read and decoded one
+// after another, a batch holds each record raw and then decoded, and a
+// decoded record is at most 1.33 of its length for a record carrying an
+// unfinished range of 300 plans, about 0.8 for one without.
+func recordCharge(length uint64) uint64 {
+	return length + length/2
 }
 
 func (store *Store) decodeLoaded(identity execution.ProgressIdentity, raw []byte, missing bool) (execution.ProgressLoadResult, error) {

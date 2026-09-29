@@ -45,7 +45,9 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"tracked), cost_projection (the refresh reads no projections), series_sampler (a new sample window "+
 				"gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified), "+
 				"fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; "+
-				"asked again each round while full, so this counts objects times rounds). "+
+				"asked again each round while full, so this counts objects times rounds), "+
+				"fleet_restore (the record and every one after it are left for the next publish, spending no attempt), "+
+				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. Nothing is given "+

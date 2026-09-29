@@ -1258,8 +1258,9 @@ func TestLoadProgressWithinAnswersThePrefixAdmittedInPlace(t *testing.T) {
 		"after": mustEncode(t, execution.ScheduleProgress{Identity: after, NextSlot: 120, LastFullSlot: 60, LastCompletionKind: execution.CompletionFull}),
 	}}, refused: map[execution.QueryGroupIdentity]bool{"broken": true}}
 	store := mustStore(t, fake)
-	spent := uint64(0)
+	spent, charges := uint64(0), []uint64{}
 	within := func(size uint64) bool {
+		charges = append(charges, size)
 		if spent+size > 1_000 {
 			return false
 		}
@@ -1279,6 +1280,10 @@ func TestLoadProgressWithinAnswersThePrefixAdmittedInPlace(t *testing.T) {
 	}
 	if len(fake.asked) != 1 || len(fake.asked[0]) != 4 {
 		t.Fatalf("asked %v, want one read of the four identities that name a Query Group", fake.asked)
+	}
+	// Each record is admitted as 3/2 of its length: held raw, then decoded.
+	if length := uint64(len(fake.values["found"])); len(charges) != 3 || charges[0] != length+length/2 || charges[2] != 15_000 {
+		t.Fatalf("admitted as %v, want 3/2 of each record's length (found is %d bytes, big 10,000)", charges, length)
 	}
 	// Without the budgeted store the whole batch is read.
 	plain := &batchControlFake{values: fake.values}

@@ -375,6 +375,11 @@ func (store *RedisStore) LoadOwned(ctx context.Context, replicas []string) (map[
 	return owned, nil
 }
 
+// readChunkBytes is the most one MGET of a read asks for: the budget one of
+// a snapshot's lists is cut to, so a larger list budget reads in larger
+// MGETs with it.
+func (store *RedisStore) readChunkBytes() int64 { return int64(store.maxAnomalyBytes) }
+
 // read reads the named replicas' keys of one kind and hands visit each
 // value that came back, in order, with the replica's position; it says how
 // many bytes came back. The values' lengths are read first, in one pipeline,
@@ -400,13 +405,15 @@ func (store *RedisStore) read(ctx context.Context, replicas []string, key func(s
 	}); err != nil {
 		return 0, err
 	}
-	bytes := 0
+	bytes, bound := 0, store.readChunkBytes()
 	for start := 0; start < len(keys); {
 		end, spent := start, int64(0)
-		for end < len(keys) && (end == start || spent+lengths[end].Val() <= int64(store.maxAnomalyBytes)) {
+		for end < len(keys) && (end == start || spent+lengths[end].Val() <= bound) {
 			spent += lengths[end].Val()
 			end++
 		}
+		// This MGET's replies are referred to in this pass alone: what visit
+		// keeps it decodes from them, and they go with the pass.
 		values, err := store.client.MGet(ctx, keys[start:end]...).Result()
 		if err != nil {
 			return bytes, err

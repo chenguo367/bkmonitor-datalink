@@ -27,7 +27,10 @@ import (
 // determined without ever seeing records (fleet.Tracker.WantsRestore). The
 // publisher bounds how many it asks for per tick, and each record is admitted
 // by the observation memory line before it is read: the answer covers the
-// ones admitted, in order, and the rest are the next publish's. An object
+// ones admitted, in order, and the rest are the next publish's. A record the
+// line keeps refusing -- room that stays above zero and below that record's
+// length -- holds the objects after it back as long as it lasts, and is seen
+// as fleet_restore refusals that keep rising. An object
 // whose record is missing restores nothing and is not an error; one whose
 // record could not be read or decoded is an error of its own, in its place.
 func progressRestoreSource(store progressBatchLoader, admit func(uint64) bool) func(context.Context, []execution.QueryGroupIdentity) (
