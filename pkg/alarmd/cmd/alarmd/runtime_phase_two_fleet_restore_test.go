@@ -92,6 +92,46 @@ func TestFleetRestoreStopsFailedReadsAndAdvances(t *testing.T) {
 	}
 }
 
+// An object this process determined with an empty round before its record
+// was read still has the record read, once: the record dates the run of
+// empty rounds from before the restart. An object seen with records has no
+// use for it and is not read.
+func TestFleetRestoreReadsTheRecordOfAnObjectDeterminedWithoutRecords(t *testing.T) {
+	at := time.Now()
+	since := at.Add(-70 * time.Minute)
+	tracker := fleet.NewTracker(nil, "pod", func() time.Time { return at })
+	reads := map[execution.QueryGroupIdentity]int{}
+	publisher := fleetPublisher{
+		tracker: tracker, restoreBudget: 8, staleAfter: time.Minute,
+		owned: func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"empty", "data"} },
+		now:   func() time.Time { return at },
+		restore: func(_ context.Context, qg execution.QueryGroupIdentity) (fleet.RestoredState, error) {
+			reads[qg]++
+			return fleet.RestoredState{LastCompletion: "FULL_EMPTY_COMPLETED", NextSlot: at, EmptyRunSince: since,
+				LastRound: &fleet.RestoredRound{Slot: at.Add(-2 * time.Minute), Kind: "FULL_EMPTY_COMPLETED"}}, nil
+		},
+	}
+	round := func(qg, kind string) {
+		tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: kind,
+			Trace: observability.TraceFields{QueryGroupKey: qg, StrategyID: "4101", BusinessID: "2", EvaluationTime: at.Add(-2 * time.Minute).Unix()}})
+	}
+	round("empty", "FULL_EMPTY_COMPLETED")
+	round("data", "FULL_COMPLETED")
+	var snapshot fleet.Snapshot
+	for i := 0; i < 3; i++ {
+		snapshot = publisher.snapshot(context.Background())
+	}
+	if reads["empty"] != 1 || reads["data"] != 0 {
+		t.Fatalf("reads = %v, want the empty object's record read once and the other's not at all", reads)
+	}
+	for _, row := range snapshot.NoData {
+		if row.QueryGroup == "empty" && row.Kind == fleet.KindEmptyEveryRound && row.Since.Equal(since.Truncate(time.Second)) {
+			return
+		}
+	}
+	t.Fatalf("no data rows = %+v, want the empty object listed from its record's start %s", snapshot.NoData, since)
+}
+
 func TestFleetRestoreDoesNotOverwriteConclusionDuringRead(t *testing.T) {
 	at := time.Now()
 	tracker := fleet.NewTracker(nil, "pod", func() time.Time { return at })
