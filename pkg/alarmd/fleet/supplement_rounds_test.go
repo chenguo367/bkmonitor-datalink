@@ -11,6 +11,8 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -58,5 +60,79 @@ func TestASupplementIsNotARoundOfTheObject(t *testing.T) {
 		if state := tracker.groups["qg"]; !tc.defect && state.lastRoundSlot != last {
 			t.Errorf("%s: latest round %d, want the latest round's Slot %d, not the supplemented one", name, state.lastRoundSlot, last)
 		}
+	}
+}
+
+// fullSupplement is every observation a supplement of an earlier Slot
+// reports, in order, under the given operation: its start, the gap scope and
+// state it loaded, its evaluation, the state it admitted and applied, its
+// events (one write refused), a query that failed, and its completion, which
+// completes no Slot.
+func fullSupplement(slot int64, operation observability.Operation) []observability.Observation {
+	trace := observability.TraceFields{StrategyID: "4101", BusinessID: "7", EvaluationTime: slot}
+	components := map[observability.Stage]observability.Component{
+		observability.StageSlotStarted: observability.ComponentScheduler, observability.StageSlotCompleted: observability.ComponentScheduler,
+		observability.StageQueryCompleted: observability.ComponentAccess, observability.StageEvaluationCompleted: observability.ComponentEvaluation,
+		observability.StageGapLoaded: observability.ComponentState, observability.StageStatePreflight: observability.ComponentState,
+		observability.StageStateAdmission: observability.ComponentState, observability.StageStateApplied: observability.ComponentState,
+		observability.StageEventACKed: observability.ComponentOutput,
+	}
+	of := func(stage observability.Stage) observability.Observation {
+		return observability.Observation{Component: components[stage], Stage: stage, Operation: operation,
+			Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone, Trace: trace}
+	}
+	gap := of(observability.StageGapLoaded)
+	gap.GapProgress = &observability.GapProgressFacts{Scope: "window", Status: "HELD", Required: 5, Observed: 2}
+	refused := of(observability.StageEventACKed)
+	refused.Result, refused.Err = observability.ResultFailed, errors.New("sink refused the write")
+	failed := of(observability.StageQueryCompleted)
+	failed.Result = observability.ResultFailed
+	failed.QueryFailure = &observability.QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: "QUERY_TIMEOUT"}
+	completed := of(observability.StageSlotCompleted)
+	completed.ExecuteOutcome = "incomplete"
+	completed.SlotBudgetUsage = &observability.SlotBudgetUsageFacts{RetainedBytes: 99, RetainedShareBytes: 100}
+	return []observability.Observation{of(observability.StageSlotStarted), gap, of(observability.StageStatePreflight),
+		of(observability.StageEvaluationCompleted), of(observability.StageStateAdmission), of(observability.StageStateApplied),
+		of(observability.StageEventACKed), refused, failed, completed}
+}
+
+// Every reading the tracker gives is the same with supplements between its
+// rounds as without, whichever stage of a supplement it is: the tracker
+// leaves out the whole supplement, not its completion alone. The same
+// observations under a round's operation change the readings, which shows
+// they reach the tracker.
+func TestAFullSupplementLeavesEveryTrackerReadingAsItsRoundsLeftIt(t *testing.T) {
+	readings := func(operation observability.Operation) string {
+		tracker := newTracker(t, &clock{at: now})
+		ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg"})
+		const period, first = int64(60), int64(60_000)
+		for index := int64(0); index < int64(DefaultDegradedRounds)+2; index++ {
+			slot := first + index*period
+			round(ctx, tracker, slot, "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED", primary("FULL", "DATA"), nil)
+			if operation != "" {
+				for _, observation := range fullSupplement(slot-2*period, operation) {
+					tracker.Observe(ctx, observation)
+				}
+			}
+		}
+		encoded, err := json.Marshal(map[string]any{
+			"anomalies": tracker.Anomalies(), "undecidable": tracker.Undecidable(), "by_design": tracker.ByDesign(),
+			"demoted": tracker.Demoted(), "demotion_flow": tracker.DemotionFlow(), "determined": tracker.Determined(),
+			"tracked": tracker.Tracked(), "no_data": tracker.NoData(), "no_data_memory": tracker.NoDataMemory(),
+			"gap_skips": tracker.GapSkips(), "pruned_skips": tracker.PrunedSkips(), "recovered": tracker.Recovered(),
+			"retained_share": tracker.RetainedShare(), "round_memory": tracker.RoundMemory(),
+			"bookkeeping_abandoned": tracker.BookkeepingAbandoned(), "no_data_tracking": tracker.NoDataTrackingSummary(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	rounds := readings("")
+	if withSupplements := readings(observability.OperationSupplement); withSupplements != rounds {
+		t.Fatalf("supplements changed the tracker's readings:\n%s\nwant\n%s", withSupplements, rounds)
+	}
+	if asRounds := readings(observability.OperationNormal); asRounds == rounds {
+		t.Fatal("the same observations as a round's changed nothing: the fixture does not reach the tracker")
 	}
 }

@@ -16,17 +16,31 @@ import (
 	"time"
 )
 
-// supplementRun is what a supplement of an earlier Slot reports, under the
-// given operation: started, evaluated, state applied, completed without
-// completing its Slot, with the supplemented Slot's older time and
-// revisions.
+// supplementComponents is the component that reports each stage of a
+// supplement: an observation under any other is not the stage at all.
+var supplementComponents = map[Stage]Component{
+	StageSlotStarted: ComponentScheduler, StageSlotCompleted: ComponentScheduler, StageQueryCompleted: ComponentAccess,
+	StageEvaluationCompleted: ComponentEvaluation, StageGapLoaded: ComponentState, StageStatePreflight: ComponentState,
+	StageStateAdmission: ComponentState, StageStateApplied: ComponentState, StageEventACKed: ComponentOutput,
+}
+
+// supplementRun is every observation a supplement of an earlier Slot
+// reports, in order, under the given operation: its start, the gap and state
+// it loaded, its evaluation, the state it admitted and applied, its events,
+// a query that failed, and its completion, which completes no Slot -- with
+// the supplemented Slot's older time and revisions, and work on each.
 func supplementRun(queryGroup string, operation Operation) []Observation {
 	trace := TraceFields{QueryGroupKey: queryGroup, EvaluationTime: 470, QueryRevision: "query-v0"}
 	run := []Observation{}
-	for _, stage := range []Stage{StageSlotStarted, StageEvaluationCompleted, StageStateApplied, StageSlotCompleted} {
-		observation := Observation{Component: ComponentScheduler, Stage: stage, Operation: operation, Result: ResultSuccess,
-			Duration: time.Second, Trace: trace}
-		if stage == StageSlotCompleted {
+	for _, stage := range []Stage{StageSlotStarted, StageGapLoaded, StageStatePreflight, StageEvaluationCompleted,
+		StageStateAdmission, StageStateApplied, StageEventACKed, StageQueryCompleted, StageSlotCompleted} {
+		observation := Observation{Component: supplementComponents[stage], Stage: stage, Operation: operation, Result: ResultSuccess,
+			Duration: time.Second, Trace: trace, Counts: Counts{Records: 3, Events: 2, Keys: 4}}
+		switch stage {
+		case StageQueryCompleted:
+			observation.Result = ResultFailed
+			observation.QueryFailure = &QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: "QUERY_TIMEOUT"}
+		case StageSlotCompleted:
 			observation.ExecuteOutcome = "incomplete"
 		}
 		run = append(run, observation)
