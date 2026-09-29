@@ -1912,7 +1912,8 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		observation.Counts.EnvelopeReadsApply > 0 {
 		m.envelopeApply.Add(float64(observation.Counts.EnvelopeReadsApply))
 	}
-	if observation.Stage == observability.StageSlotCompleted && observation.Err == nil {
+	if observation.Stage == observability.StageSlotCompleted && observation.Err == nil &&
+		observation.Operation != observability.OperationSupplement {
 		if usage := observation.SlotBudgetUsage; usage != nil &&
 			observability.RetainedShareApproaching(usage.RetainedBytes, usage.RetainedShareBytes) {
 			m.retainedShareApproaching.Inc()
@@ -2201,7 +2202,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			}
 		}
 	}
-	if kind := phaseTwoProgressKind(observation.Stage); kind != "" && observation.Result == observability.ResultSuccess {
+	// Progress means rounds moving: a supplement keeping these fresh would
+	// hide rounds that stopped.
+	if kind := phaseTwoProgressKind(observation.Stage); kind != "" && observation.Result == observability.ResultSuccess &&
+		observation.Operation != observability.OperationSupplement {
 		m.lastProgress.WithLabelValues(kind).Set(float64(time.Now().Unix()))
 	}
 }
