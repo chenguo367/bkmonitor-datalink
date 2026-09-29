@@ -40,6 +40,12 @@ const (
 	GlobalBusinessOutputProtocol = "output_protocol"
 )
 
+// GlobalBusinessRefusalWords is every word a GLOBAL_STRATEGY_UNSUPPORTED
+// refusal names, the reason label's closed set in the global composition.
+var GlobalBusinessRefusalWords = []string{
+	GlobalBusinessLegacyTarget, GlobalBusinessQueryKind, GlobalBusinessQueryTable, GlobalBusinessOutputProtocol,
+}
+
 // globalBusinessQuerySemantics are the query sources a global business Plan
 // may read: the structured time series the metric router serves. An empty
 // SourceSemantics is the first of them alone.
@@ -48,36 +54,60 @@ var globalBusinessQuerySemantics = map[string]struct{}{
 	"custom/time_series":     {},
 }
 
+// GlobalQuerySourcePromQL labels a global strategy whose query is PromQL.
+// PromQL names no source semantics of its own and is refused for a reason of
+// its own - the space is its only scope - so it is counted under this label
+// rather than under the time series it may happen to read.
+const GlobalQuerySourcePromQL = "promql"
+
+// GlobalQuerySource is the label a global strategy's query is counted under in
+// the global composition and named by in its refusal: promql, or the source
+// semantics partition label (SourceSemanticsLabel), so the set stays closed.
+//
+// It exists because the first reading after global strategies reach a
+// deployment is which query sources they were refused for, and that decides
+// which source alarmd learns to run globally next. Until this the refusal
+// said only the word; the source was in the compiled facts and went nowhere.
+func GlobalQuerySource(facts execution.QueryPlanFacts) string {
+	if facts.PromQL != nil {
+		return GlobalQuerySourcePromQL
+	}
+	return SourceSemanticsLabel(facts.SourceSemantics)
+}
+
 // globalBusinessRefusal is the admission a global business strategy passes
 // before its Plan is compiled, and nil for one that passes or is not global.
+// The word it was refused for is returned beside the record, for the round's
+// global composition to count without reading it back out of the detail.
 // The output protocol is decided later and checked where it is.
 func globalBusinessRefusal(
 	sourceID string, identity SourceIdentity, targetScope *contract.TargetScopeV2, facts execution.QueryPlanFacts,
-) *ObjectDisposition {
+) (*ObjectDisposition, string) {
 	if !identity.GlobalBusiness {
-		return nil
+		return nil, ""
+	}
+	source := GlobalQuerySource(facts)
+	refuse := func(reason, fieldPath string) (*ObjectDisposition, string) {
+		refusal := globalBusinessUnsupported(sourceID, reason, fieldPath, source)
+		return &refusal, reason
 	}
 	if targetScope != nil {
-		refusal := globalBusinessUnsupported(sourceID, GlobalBusinessLegacyTarget, "items[0].target")
-		return &refusal
+		return refuse(GlobalBusinessLegacyTarget, "items[0].target")
 	}
 	if facts.PromQL != nil {
-		refusal := globalBusinessUnsupported(sourceID, GlobalBusinessQueryKind, "items[0].query_configs")
-		return &refusal
+		return refuse(GlobalBusinessQueryKind, "items[0].query_configs")
 	}
 	for _, semantics := range facts.SourceSemantics {
 		if _, supported := globalBusinessQuerySemantics[semantics]; !supported {
-			refusal := globalBusinessUnsupported(sourceID, GlobalBusinessQueryKind, "items[0].query_configs")
-			return &refusal
+			return refuse(GlobalBusinessQueryKind, "items[0].query_configs")
 		}
 	}
 	for _, clause := range facts.QueryList {
 		if !namesTableOrDataLabel(clause.TableID) {
-			refusal := globalBusinessUnsupported(sourceID, GlobalBusinessQueryTable, "items[0].query_configs")
-			return &refusal
+			return refuse(GlobalBusinessQueryTable, "items[0].query_configs")
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // namesTableOrDataLabel reports whether a query's table id routes on its
@@ -88,9 +118,12 @@ func namesTableOrDataLabel(tableID string) bool {
 	return strings.TrimSpace(database) != ""
 }
 
-func globalBusinessUnsupported(sourceID, reason, fieldPath string) ObjectDisposition {
+// globalBusinessUnsupported names the word and the query source in the
+// detail, so the object page says which source a strategy was refused for
+// without a second read.
+func globalBusinessUnsupported(sourceID, reason, fieldPath, source string) ObjectDisposition {
 	return ObjectDisposition{
 		SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-		Reason: ReasonGlobalStrategyUnsupported, FieldPath: fieldPath, Detail: "reason=" + reason,
+		Reason: ReasonGlobalStrategyUnsupported, FieldPath: fieldPath, Detail: "reason=" + reason + " source=" + source,
 	}
 }

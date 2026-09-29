@@ -292,7 +292,10 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// ObjectRetention is how long the content is kept, not what it is:
 			// digested, a strategy's cadence change elsewhere would move every
 			// object's digest. It is stored beside the manifest instead.
-			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention", "ObjectRetention"},
+			// GlobalStrategies is a count's input like RetainedStaleRevisions:
+			// the leader's composition reads it and nothing persists it, and
+			// what it says per strategy is in the dispositions already.
+			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention", "ObjectRetention", "GlobalStrategies"},
 		},
 		reflect.TypeOf(controlplane.QueryGroup{}): {
 			execution: []string{"Identity", "QueryPlan", "MembershipDigest", "ScheduleRevision"},

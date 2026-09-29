@@ -543,6 +543,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_required_history_points"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_retained_history_points"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_levels_with_retention_slack"] = "variableLabels: {dominant}"
+	expected["bkmonitor_alarmd_catalog_global_strategies"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_catalog_global_strategies_unsupported"] = "variableLabels: {reason,source_semantics}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
 	expected["bkmonitor_alarmd_platform_settings_authoritative_age_seconds"] = "variableLabels: {}"
@@ -1204,6 +1206,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("catalog_retained_history_points")] = 1
 	// window and recovery: the two ways a paying Level can be shaped.
 	bounds[fqName("catalog_levels_with_retention_slack")] = 2
+	bounds[fqName("catalog_global_strategies")] = len(controlplane.GlobalOutcomes)
+	// Every refusal word against every label GlobalQuerySource can return:
+	// the supported source semantics, other, mixed and promql.
+	bounds[fqName("catalog_global_strategies_unsupported")] = len(controlplane.GlobalBusinessRefusalWords) *
+		(len(controlplane.SupportedSourceSemantics) + 3)
 	bounds[fqName("level_abnormal_total")] = 2
 	bounds[fqName("platform_settings_mode")] = len(platformsettings.Modes)
 	bounds[fqName("platform_settings_authoritative_age_seconds")] = 1
