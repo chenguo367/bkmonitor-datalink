@@ -302,7 +302,9 @@ func publisherOverdue(
 	return anomalies, &facts
 }
 
-// restoreOwned seeds owned objects without conclusive evidence.
+// restoreOwned seeds owned objects without conclusive evidence, and reads
+// once the record of each one determined here without records, whose run
+// of empty rounds the record may date from before this process started.
 //
 // It runs before the snapshot is built, so the first publish after a restart
 // already carries what the control plane knew, instead of reporting the whole
@@ -322,7 +324,10 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 		if publisher.restoreAttempts[queryGroup] >= fleetRestoreMaxAttempts {
 			continue
 		}
-		if publisher.tracker.HasConclusion(string(queryGroup)) {
+		// An object this process has already determined is still read once
+		// while it has not seen records: its record may date its run of empty
+		// rounds from before this process started.
+		if !publisher.tracker.WantsRestore(string(queryGroup)) {
 			publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
 			continue
 		}

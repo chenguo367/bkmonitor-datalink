@@ -281,6 +281,19 @@ type queryGroupState struct {
 	// pace cannot make the next ordinary one look like a hole; a hole clears
 	// it along with the run's start, because a hole is not a pace.
 	emptyStride int64
+	// firstEmptySlot is the Slot of the first empty round this process
+	// watched for the object. recordRun is the run of empty rounds the
+	// object's record carries, held until this process's own run can take
+	// its start (joinRecordedRun), and recordRead whether the record has been
+	// read at all. A restore that came after a round had already determined
+	// the object used to be dropped whole, and the object then waited out an
+	// hour of its own rounds after every release: on a live deployment about
+	// a third of the "every round" line at once, a different third each
+	// rollout, because which objects' first rounds beat their restore changed
+	// with every one.
+	firstEmptySlot int64
+	recordRun      *recordedEmptyRun
+	recordRead     bool
 	// lastDataSlot is the Slot records were last seen at, on the source's
 	// clock: the other end of the data side's hour. Zero until a round with
 	// records is watched or restored; sawData without it is a round that
@@ -1422,7 +1435,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.emptySinceSlot = trace.EvaluationTime
 				state.emptySlotFrom = SinceSnapshotContinuity
 			}
+			if state.firstEmptySlot == 0 {
+				state.firstEmptySlot = trace.EvaluationTime
+			}
 			state.lastEmptySlot = trace.EvaluationTime
+			// A record read before this first empty round is joined now.
+			tracker.joinRecordedRun(state)
 		} else {
 			state.emptyRuns = 0
 			if completion == "FULL_COMPLETED" {

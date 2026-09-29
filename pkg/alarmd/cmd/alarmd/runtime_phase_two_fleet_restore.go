@@ -23,8 +23,9 @@ import (
 // before it can say anything.
 //
 // It reads the same Progress the scheduler reads, one object at a time and only
-// for objects this replica owns and has not yet determined. The publisher bounds
-// how many it asks for per tick.
+// for objects this replica owns and either has not yet determined or has
+// determined without ever seeing records (fleet.Tracker.WantsRestore). The
+// publisher bounds how many it asks for per tick.
 func progressRestoreSource(store *progress.Store) func(context.Context, execution.QueryGroupIdentity) (fleet.RestoredState, error) {
 	if store == nil {
 		return nil
