@@ -862,10 +862,13 @@ func (source *ProductionSlotSource) validateSnapshotRetention(
 
 // classifyRecovery decides whether a Slot past its deadline is replayed or
 // given up on. Past the replay age every Slot is given up on. Inside it, a
-// Slot due before this process took the Query Group over (TakeoverClock,
-// under the owner fence this round holds) is replayed: nobody here could
-// have run it, and a rollout's handover made every short-period Query Group
-// of a restarted replica miss one or more. The distance rule is for the
+// Slot evaluated before this process took the Query Group over
+// (TakeoverClock, under the owner fence this round holds) is replayed: nobody
+// here could have run it, and a rollout's handover made every short-period
+// Query Group of a restarted replica miss one or more. It is the evaluation
+// time that is compared, not when the Slot became ready, so one evaluated
+// just before the takeover and ready after it is replayed too if it falls
+// behind: lenient, and bounded by the replay age. The distance rule is for the
 // Slots a Query Group fell behind on while held here, and gives the old
 // ones up so it stays current.
 func (source *ProductionSlotSource) classifyRecovery(

@@ -1257,12 +1257,13 @@ var ReplayExpiryReasons = []string{
 	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
 }
 
-// ReplayTakeoverFacts is one Slot that was due before this process took its
+// ReplayTakeoverFacts is one Slot evaluated before this process took its
 // Query Group over from another owner (scheduler.TakeoverClock): replayed,
 // because nobody here could have run it and it is within the replay age, or
 // past the replay age and given up on like any Slot that old. The distance
 // rule does not apply to it. TakeoverOffsetSeconds is how long after the
-// takeover the Slot was classified.
+// takeover the Slot was classified. One is reported each time such a Slot
+// is classified, so a Slot retried after a failed replay is reported again.
 type ReplayTakeoverFacts struct {
 	Outcome               string
 	AgeSeconds            float64
