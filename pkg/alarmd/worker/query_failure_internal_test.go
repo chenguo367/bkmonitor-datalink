@@ -130,9 +130,12 @@ func TestProviderFailureFactsProjectLastFailedAttempt(t *testing.T) {
 	if *facts != want {
 		t.Fatalf("facts=%+v, want %+v", facts, want)
 	}
+	// A query that was never sent names that, not the fallback the binding
+	// carries: read as the backend's word, it filed the round under the
+	// backend.
 	bare := execution.PhysicalQueryCompletion{Completeness: execution.CompletenessUnavailable}
 	facts = providerFailureFacts(execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{bare}})
-	want = observability.QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: contract.ReasonQueryUnavailable}
+	want = observability.QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: string(execution.ReasonQueryNotAttempted)}
 	if facts == nil || *facts != want {
 		t.Fatalf("bare facts=%+v, want %+v", facts, want)
 	}
@@ -173,12 +176,15 @@ func TestProviderUnavailableFactsCountEveryUnavailablePhysicalQuery(t *testing.T
 		t.Fatalf("a completion without unavailable queries produced facts: %+v", healthy)
 	}
 	// The code the binding carries is unchanged by the attribution: the last
-	// classified attempt names it, else the fallback.
-	if code := physicalFailureReason(named.RouteFacts); code != execution.ReasonCode(contract.ReasonQueryTimeout) {
-		t.Fatalf("named code = %s", code)
+	// classified attempt names it, else the fallback. The binding keeps where
+	// it came from beside it.
+	if code, from := physicalFailureReason(named.RouteFacts); code != execution.ReasonCode(contract.ReasonQueryTimeout) ||
+		from != execution.UnavailableFromAttempt {
+		t.Fatalf("named code = %s from %s", code, from)
 	}
-	if code := physicalFailureReason(neverSent.RouteFacts); code != execution.ReasonCode(contract.ReasonQueryUnavailable) {
-		t.Fatalf("fallback code = %s", code)
+	if code, from := physicalFailureReason(neverSent.RouteFacts); code != execution.ReasonCode(contract.ReasonQueryUnavailable) ||
+		from != execution.UnavailableNoAttempts {
+		t.Fatalf("fallback code = %s from %s", code, from)
 	}
 }
 

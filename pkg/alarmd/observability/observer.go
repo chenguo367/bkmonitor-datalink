@@ -2295,6 +2295,9 @@ type Observation struct {
 	// population -- on a running deployment, 61 of 62 objects sharing a label
 	// that could not say whose problem they were.
 	ProgressCompletionReason string
+	// ProgressCompletionScope is where that cause was found: the Plan, and the
+	// Level or the physical query. Nil when the completion carried no cause.
+	ProgressCompletionScope *CompletionScopeFacts
 	// HistoryCoverage says how far short of the required window the series in
 	// this run actually were. HISTORY_WARMING alone cannot tell a series two
 	// rounds into its life, which converges by itself, from a series whose
@@ -3302,6 +3305,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 		return reason
 	}
 	if _, ok := absentCloseReasonSet[reason]; ok {
+		return reason
+	}
+	if _, ok := completionAttributionReasonSet[reason]; ok {
 		return reason
 	}
 	return ReasonOther

@@ -903,6 +903,27 @@ type HistoryCoverage struct {
 
 // HoleCause is whose a missing position is, read from the round of that
 // minute as this process remembers it. The closed list the page words.
+// CauseScope is the part of a round its completion cause was found in.
+type CauseScope struct {
+	StrategyID string  `json:"strategy_id,omitempty"`
+	BusinessID string  `json:"business_id,omitempty"`
+	LevelID    *uint32 `json:"level_id,omitempty"`
+	Query      string  `json:"query,omitempty"`
+}
+
+// causeScopeOf is a round's cause scope as a row carries it.
+func causeScopeOf(facts *observability.CompletionScopeFacts) *CauseScope {
+	if facts == nil {
+		return nil
+	}
+	scope := &CauseScope{StrategyID: facts.StrategyID, BusinessID: facts.BusinessID, Query: facts.PhysicalQuery}
+	if facts.HasLevel {
+		level := facts.LevelID
+		scope.LevelID = &level
+	}
+	return scope
+}
+
 type HoleCause string
 
 const (
@@ -1254,6 +1275,10 @@ type Anomaly struct {
 	// wrong -- or the retryable class, which clears on its own. Neither is what
 	// the column heading claims, and the cause alone cannot tell them apart.
 	CauseReason string `json:"cause_reason,omitempty"`
+	// CauseScope is where the latest round's cause was found: the strategy,
+	// and the Level for a Level's outcome or the physical query for the
+	// primary input. Nil when the cause named no place.
+	CauseScope *CauseScope `json:"cause_scope,omitempty"`
 	// HeldBy is what held the latest round's Slot, on a row whose latest
 	// round gave the Slot up (GAP_SKIPPED): the completion's own word, the
 	// vocabulary of run_one_return_total{outcome} plus the readiness
