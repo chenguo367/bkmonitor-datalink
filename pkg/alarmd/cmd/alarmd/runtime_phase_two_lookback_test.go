@@ -24,24 +24,18 @@ func noRecheck(context.Context, execution.PhysicalQuerySpec, execution.ProviderS
 	return execution.ProviderCompletion{}, nil
 }
 
-// Off unless configured; configured with no observation capacity, not
-// running and saying why; configured with room, running on its share.
-func TestTheLookbackRunsOnlyWhenConfiguredAndGivenAShare(t *testing.T) {
+// Nothing configures the lookback: with no observation capacity - the
+// container's memory is not known - it is not running and says why; with
+// room, it runs on its share.
+func TestTheLookbackRunsWhereverItHasAShare(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, standing, err := buildLookback(config.PhaseTwoObservationConfig{MemoryPercent: 4}, config.ObservationCapacity{LookbackBytes: 1 << 20},
-		noRecheck, nil, owner, time.Now)
-	if err != nil || engine != nil || standing != (lookbackStanding{Reason: lookbackNotConfigured}) {
-		t.Fatalf("not configured: %v %+v %v", engine, standing, err)
-	}
-	engine, standing, err = buildLookback(config.PhaseTwoObservationConfig{MemoryPercent: 4, LookbackEnabled: true}, config.ObservationCapacity{},
-		noRecheck, nil, owner, time.Now)
-	if err != nil || engine != nil || standing != (lookbackStanding{Configured: true, Reason: lookbackNoObservationShare}) {
+	engine, standing, err := buildLookback(config.ObservationCapacity{}, noRecheck, nil, owner, time.Now)
+	if err != nil || engine != nil || standing != (lookbackStanding{Reason: lookbackNoObservationShare}) {
 		t.Fatalf("no capacity: %v %+v %v", engine, standing, err)
 	}
-	engine, standing, err = buildLookback(config.PhaseTwoObservationConfig{MemoryPercent: 4, LookbackEnabled: true}, config.ObservationCapacity{LookbackBytes: 1 << 20},
-		noRecheck, nil, owner, time.Now)
-	if err != nil || engine == nil || standing != (lookbackStanding{Configured: true, Running: true}) || engine.Stats().MemoryBytes != 1<<20 {
-		t.Fatalf("configured: %v %+v %v", engine, standing, err)
+	engine, standing, err = buildLookback(config.ObservationCapacity{LookbackBytes: 1 << 20}, noRecheck, nil, owner, time.Now)
+	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) || engine.Stats().MemoryBytes != 1<<20 {
+		t.Fatalf("with a share: %v %+v %v", engine, standing, err)
 	}
 }
 
@@ -109,7 +103,7 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 		}
 		return reading
 	}
-	if off := read(cliLookbackOperation(nil, lookbackStanding{Configured: true, Reason: lookbackNoObservationShare})); off.Running ||
+	if off := read(cliLookbackOperation(nil, lookbackStanding{Reason: lookbackNoObservationShare})); off.Running ||
 		off.Reason != lookbackNoObservationShare || off.Stats != nil {
 		t.Fatalf("off = %+v", off)
 	}
@@ -118,7 +112,7 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	on := read(cliLookbackOperation(engine, lookbackStanding{Configured: true, Running: true}))
+	on := read(cliLookbackOperation(engine, lookbackStanding{Running: true}))
 	if !on.Running || on.Stats == nil || on.Stats.MemoryBytes != 4096 || len(on.Stats.Samples[lookback.SourceLogSearch]) != len(lookback.SampleOutcomes) {
 		t.Fatalf("on = %+v", on)
 	}

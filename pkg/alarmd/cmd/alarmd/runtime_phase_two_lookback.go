@@ -25,19 +25,14 @@ import (
 // tier's window, so a tier is tried several times before it yields.
 const lookbackTick = 5 * time.Second
 
-// Why a process configured for the lookback is not running it, closed.
-const (
-	lookbackNotConfigured      = "not_configured"
-	lookbackNoObservationShare = "no_observation_capacity"
-)
+// Why a process is not running the lookback, closed.
+const lookbackNoObservationShare = "no_observation_capacity"
 
 // lookbackStanding is what lookback.get answers besides the counts: whether
-// this process was asked to run the lookback, whether it does, and if not,
-// why.
+// this process runs the lookback, and if not, why.
 type lookbackStanding struct {
-	Configured bool   `json:"configured"`
-	Running    bool   `json:"running"`
-	Reason     string `json:"reason,omitempty"`
+	Running bool   `json:"running"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // lookbackOwnership answers the lookback's ownership question from the
@@ -66,25 +61,21 @@ func (bundle *phaseTwoWorkerBundle) ownsQueryGroup(queryGroup execution.QueryGro
 	return owned
 }
 
-// buildLookback builds the lookback when the configuration asks for it and
-// the observation share has room for it; otherwise nil and why. Its rechecks
-// read through the same query client as the formal reads, one lookback
-// permit at a time and never queued behind them.
+// buildLookback builds the lookback when the observation capacity has room
+// for it, which it has wherever the container's memory is known; otherwise
+// nil and why. Its rechecks read through the same query client as the formal
+// reads, one lookback permit at a time and never queued behind them.
 func buildLookback(
-	allocation config.PhaseTwoObservationConfig,
 	capacity config.ObservationCapacity,
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
 	ownership *lookbackOwnership,
 	now func() time.Time,
 ) (*lookback.Engine, lookbackStanding, error) {
-	if !allocation.LookbackEnabled {
-		return nil, lookbackStanding{Reason: lookbackNotConfigured}, nil
-	}
 	if capacity.LookbackBytes <= 0 {
-		// The share is allocated but this container's memory is not known,
-		// so no diagnostics run; see config.DeriveObservationCapacity.
-		return nil, lookbackStanding{Configured: true, Reason: lookbackNoObservationShare}, nil
+		// This container's memory is not known, so no diagnostics run; see
+		// config.DeriveObservationCapacity.
+		return nil, lookbackStanding{Reason: lookbackNoObservationShare}, nil
 	}
 	engine, err := lookback.New(lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, MemoryBytes: capacity.LookbackBytes,
 		Permit: func() (func(), string) {
@@ -97,7 +88,7 @@ func buildLookback(
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
-	return engine, lookbackStanding{Configured: true, Running: true}, nil
+	return engine, lookbackStanding{Running: true}, nil
 }
 
 // runLookback rechecks due samples until the bundle stops.
@@ -119,7 +110,7 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：是否开启、没开的原因、抽样与再读的具名计数（只有 compared 进分母）、按（序列，桶）与按原阈值判定的差异分类、按实际读取时延的分布，以及最近有差异的再读及其有界样例；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：是否在跑、没跑的原因、抽样与再读的具名计数（只有 compared 进分母）、按（序列，桶）与按原阈值判定的差异分类、按实际读取时延的分布，以及最近有差异的再读及其有界样例；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "examples_per_recheck": 8},
