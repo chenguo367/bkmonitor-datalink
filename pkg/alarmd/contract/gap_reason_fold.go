@@ -51,6 +51,9 @@ const GapReasonFoldVersion = "gap-reason-fold-v1"
 // found it, not because anybody remembered it.
 var GapReasonFoldOrder = []string{
 	ReasonReadinessBudgetInvalid,
+	// As persistent as the one above: the strategy names data its space does
+	// not route, and nothing changes that but an edit.
+	ReasonQueryTargetMissing,
 	ReasonQueryUnavailable,
 	ReasonQueryTimeout,
 	ReasonExecutionBudgetExhausted,

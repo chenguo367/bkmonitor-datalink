@@ -225,12 +225,19 @@ func TestARejectedQueryIsNotFiledAsTheBackendsAvailability(t *testing.T) {
 		{"degraded on a provider status naming a missing target", degraded("response=status_space_table_id_field_is_not_exists"),
 			CheckQueryTargetMissing, OwnerStrategy},
 		{"cooldown on a not-found status", cooldown("response=status_table_not_found"), CheckQueryTargetMissing, OwnerStrategy},
-		// A status this build has no reading of stays on this side of the
-		// page: refused, by whom is not decided.
-		{"cooldown on an unknown provider status", cooldown("response=status_other"), CheckQueryRefused, OwnerUndetermined},
-		// An HTTP 4xx is the same statement in the transport's vocabulary,
-		// and names nothing.
-		{"cooldown on a 4xx", cooldown("http_status=400"), CheckQueryRefused, OwnerUndetermined},
+		// The same refusal named at the source: the round's own reason says
+		// the target is missing, with no detail needed to read it.
+		{"degraded under the target-missing word", Anomaly{Kind: KindDegradedRun, CauseReason: "QUERY_TARGET_MISSING"},
+			CheckQueryTargetMissing, OwnerStrategy},
+		// A status this build has no reading of: refused, and the query is
+		// what was refused. It is the strategy's line: on one deployment every
+		// refused query the platform's own detector sent for the same strategy
+		// was refused the same way (a condition value the storage rejects, an
+		// expression that does not parse). A query this deployment built wrong
+		// would read here too, which only comparing the two requests tells.
+		{"cooldown on an unknown provider status", cooldown("response=status_other"), CheckQueryRefused, OwnerStrategy},
+		// An HTTP 4xx is the same statement in the transport's vocabulary.
+		{"cooldown on a 4xx", cooldown("http_status=400"), CheckQueryRefused, OwnerStrategy},
 		// A timeout or a 5xx is the backend not answering: the data's.
 		{"cooldown on a timeout", cooldown("transport=timeout"), CheckBackendNotAnswering, OwnerUndetermined},
 		{"degraded on a 503", degraded("http_status=503"), CheckBackendNotAnswering, OwnerUndetermined},

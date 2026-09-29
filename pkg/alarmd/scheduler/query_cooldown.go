@@ -5,7 +5,6 @@ import (
 	"hash/fnv"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -45,6 +44,8 @@ type queryCooldownState struct {
 	scheduleRevision           execution.ScheduleRevision
 	segmentStart               execution.EvaluationTime
 	until, wakeAt, lastQueryAt time.Time
+	// reason is why the latest failed query was unavailable.
+	reason execution.ReasonCode
 }
 
 // queryCooldownMemory is what the pool remembers across membership: since
@@ -79,6 +80,7 @@ type QueryCooldownRecord struct {
 	ExitedAt         time.Time                    `json:"exited_at"`
 	ExitReason       string                       `json:"exit_reason,omitempty"`
 	Reentries        uint32                       `json:"reentries,omitempty"`
+	Reason           execution.ReasonCode         `json:"reason,omitempty"`
 }
 
 // QueryCooldownKey is where a Query Group's record is kept under prefix. The
@@ -128,7 +130,7 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	}
 	runner.queryCooldown = queryCooldownState{failures: record.Failures, queryRevision: record.QueryRevision,
 		scheduleRevision: record.ScheduleRevision, segmentStart: record.SegmentStart,
-		until: record.Until, lastQueryAt: record.LastQueryAt}
+		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason}
 	memory.enteredAt, memory.source = record.EnteredAt, QueryCooldownRestored
 	runner.emitQueryCooldown(ctx, QueryCooldownRestored)
 }
@@ -145,7 +147,7 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		QueryGroup: runner.queryGroup, OwnerEpoch: runner.cooldownFence.OwnerEpoch,
 		EnteredAt: memory.enteredAt, Until: state.until, LastQueryAt: state.lastQueryAt, Failures: state.failures,
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
-		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries,
+		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
 	})
 }
 
@@ -269,6 +271,7 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 	state.scheduleRevision = slot.Contract.ScheduleRevision
 	state.segmentStart = slot.Contract.ScheduleSegmentStart
 	state.lastQueryAt = runner.now()
+	state.reason = result.QueryUnavailableReason
 	if state.failures < 32 {
 		state.failures++
 	}
@@ -323,7 +326,7 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 	}
 	defer func() { _ = recover() }()
 	state, memory := runner.queryCooldown, runner.cooldownMemory
-	result, reason := queryCooldownOutcome(event)
+	result, reason := queryCooldownOutcome(event, state.reason)
 	runner.flights.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryCooldown,
 		Result: result, ReasonCode: reason, Direction: observability.DirectionInternal,
@@ -339,16 +342,22 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 // on its line. The transition used to carry neither: the line's result read
 // _other and its reason reason_not_reported, while the event word sat in the
 // facts. Entering or extending the cooldown is the Query Group degraded by
-// its query being unavailable; leaving it on a query that answered is normal
-// dispatch resumed, and the reason it resumed from travels with it; leaving
-// it because the configuration changed or the policy was switched off is
-// neither, and carries no reason.
-func queryCooldownOutcome(event string) (observability.Result, observability.ReasonCode) {
+// its query being unavailable, under the reason that query failed with;
+// leaving it on a query that answered is normal dispatch resumed, and the
+// reason it resumed from travels with it; leaving it because the
+// configuration changed or the policy was switched off is neither, and
+// carries no reason. A failure whose reason was not recorded - a record kept
+// before records carried one - says so, rather than taking the backend's
+// word for a failure that may have been the strategy's.
+func queryCooldownOutcome(event string, failed execution.ReasonCode) (observability.Result, observability.ReasonCode) {
+	if failed == "" {
+		failed = execution.ReasonQueryReasonUnrecorded
+	}
 	switch event {
 	case QueryCooldownEntered, QueryCooldownReentered, QueryCooldownExtended, QueryCooldownRestored:
-		return observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)
+		return observability.ResultDegraded, observability.ReasonCode(failed)
 	case QueryCooldownRecovered:
-		return observability.ResultResumed, observability.ReasonCode(contract.ReasonQueryUnavailable)
+		return observability.ResultResumed, observability.ReasonCode(failed)
 	default:
 		return observability.ResultSuccess, observability.ReasonNone
 	}

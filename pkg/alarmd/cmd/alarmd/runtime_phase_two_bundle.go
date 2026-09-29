@@ -459,6 +459,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := repository.ConfigureObjectCache(timelineCache.MaxEntries, timelineCache.MaxBytes); err != nil {
 		return nil, err
 	}
+	// The cache's own reading of what its objects take decoded, against the
+	// charge its unused budget is reserved at.
+	if err := recorder.BindDecodedObjects(func() (uint64, float64, float64) {
+		reading := repository.DecodedObjectReading()
+		return reading.Samples, reading.Last, reading.Max
+	}); err != nil {
+		return nil, err
+	}
 	observationMemory.Reserve(repository.UnusedCacheBytes)
 	repository.ConfigureObserver(observer)
 	// The cache counters are what said a decoded-timeline cache was worth
