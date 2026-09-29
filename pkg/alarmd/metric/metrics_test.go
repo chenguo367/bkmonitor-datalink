@@ -545,7 +545,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_levels_with_retention_slack"] = "variableLabels: {dominant}"
 	expected["bkmonitor_alarmd_catalog_global_strategies"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_catalog_global_strategies_unsupported"] = "variableLabels: {reason,source_semantics}"
-	expected["bkmonitor_alarmd_strategy_publisher_info"] = "variableLabels: {state,writer,version}"
+	expected["bkmonitor_alarmd_strategy_publisher_info"] = "variableLabels: {state,writer,version,outcome}"
 	expected["bkmonitor_alarmd_strategy_publisher_reports_total"] = "variableLabels: {outcome,reason}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"

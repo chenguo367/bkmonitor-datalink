@@ -32,7 +32,10 @@ func diagnosisUniverse(source controlplane.StrategySource) fleet.UniverseReader 
 		if source == nil {
 			return nil, errors.New("SOURCE_NOT_WIRED")
 		}
-		ids, err := source.ActiveStrategyIDs(ctx)
+		// The diagnosis reads the active set on whichever replica the request
+		// reaches; the publisher's record that comes back with it is the
+		// control rounds' to keep, not this read's.
+		ids, err := source.ActiveStrategyIDs(controlplane.WithoutPublisherReport(ctx))
 		switch {
 		case err == nil:
 			return ids, nil

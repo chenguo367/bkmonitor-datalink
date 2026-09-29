@@ -17,18 +17,19 @@ import (
 )
 
 // sourcePublisherFleetFacts is the strategy source's publisher record as this
-// process last read it, for the fleet snapshot. Nil on a source that does
-// not read one, and on a process that has not read the active set: a
-// follower that never led says nothing about the publisher, as it says
-// nothing about the source.
-func sourcePublisherFleetFacts(source controlplane.StrategySource) func() *fleet.SourcePublisherReport {
+// process's control rounds last read it, for the fleet snapshot. Nil on a
+// source that does not read one, on a process whose rounds have not read the
+// active set - every follower - and once the last read is older than
+// controlplane.SourceStalenessBound: a leader that handed over keeps its last
+// record, and it is not the publisher's present word.
+func sourcePublisherFleetFacts(source controlplane.StrategySource, now func() time.Time) func() *fleet.SourcePublisherReport {
 	reader, ok := source.(controlplane.PublisherReportSource)
 	if !ok {
 		return nil
 	}
 	return func() *fleet.SourcePublisherReport {
 		report, read := reader.PublisherReport()
-		if !read {
+		if !read || !controlplane.PublisherReportCurrent(report.ReadAt, now()) {
 			return nil
 		}
 		return sourcePublisherFactsOf(report)

@@ -206,4 +206,9 @@ func TestDiagnoseEnvironmentKeepsThePublisherRecordBesideTheSourceStanding(t *te
 	if kept["label"] != "写方自述" || kept["reason"] != "SPLIT_RECORDS_NOT_BACKFILLED" || fleetFacts["source_standing"] == nil {
 		t.Fatalf("fleet = %v, want the publisher record beside the standing", fleetFacts)
 	}
+	// Which replica read it, beside it: the leader's current read and nothing
+	// else is what a reader should take it for.
+	if fleetFacts["source_publisher_replica"] != "pod-a" {
+		t.Fatalf("source_publisher_replica = %v, want pod-a", fleetFacts["source_publisher_replica"])
+	}
 }

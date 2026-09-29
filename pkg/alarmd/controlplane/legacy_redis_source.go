@@ -94,7 +94,9 @@ func (source *LegacyRedisStrategySource) ActiveStrategyIDs(ctx context.Context) 
 	if len(values) != 2 {
 		return nil, fmt.Errorf("alarmd controlplane: read legacy strategy active set: %d values for 2 keys", len(values))
 	}
-	source.notePublisher(decodePublisherReport(values[1], source.now()))
+	if !publisherReportUnrecorded(ctx) {
+		source.notePublisher(decodePublisherReport(values[1], source.now()))
+	}
 	payload, ok := legacyRedisBytes(values[0])
 	if values[0] == nil || (ok && len(payload) == 0) {
 		return nil, ErrLegacySourceIncomplete

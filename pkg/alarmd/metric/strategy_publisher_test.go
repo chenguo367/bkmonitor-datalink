@@ -11,6 +11,7 @@ package metric
 
 import (
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 )
@@ -51,9 +52,9 @@ func TestStrategyPublisherInfoSaysNotProvidedAndIsSilentBeforeARead(t *testing.T
 		t.Fatalf("a process that read nothing emitted %v", got)
 	}
 	r.SetStrategyPublisherSource(publisherSourceStub{read: true,
-		report: controlplane.PublisherReport{State: controlplane.PublisherReportNotProvided}})
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportNotProvided, ReadAt: time.Now()}})
 	got := publisherLabels(t, r, "bkmonitor_alarmd_strategy_publisher_info")
-	if len(got) != 1 || got[0]["state"] != "not_provided" || got[0]["writer"] != "" || got[0]["version"] != "" {
+	if len(got) != 1 || got[0]["state"] != "not_provided" || got[0]["writer"] != "" || got[0]["version"] != "" || got[0]["outcome"] != "" {
 		t.Fatalf("info = %v, want one not_provided series", got)
 	}
 }
@@ -61,11 +62,13 @@ func TestStrategyPublisherInfoSaysNotProvidedAndIsSilentBeforeARead(t *testing.T
 func TestStrategyPublisherInfoNamesTheWriterAndCountsTheRecords(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	r.SetStrategyPublisherSource(publisherSourceStub{read: true,
-		report: controlplane.PublisherReport{State: controlplane.PublisherReportProvided, Writer: "example-publisher", Version: "5.3.0"},
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportProvided, Writer: "example-publisher", Version: "5.3.0",
+			Outcome: "blocked", ReadAt: time.Now()},
 		counts: []controlplane.PublisherReportCount{
 			{Outcome: "published", Count: 3}, {Outcome: "blocked", Reason: "SPLIT_RECORDS_NOT_BACKFILLED", Count: 2}}})
 	info := publisherLabels(t, r, "bkmonitor_alarmd_strategy_publisher_info")
-	if len(info) != 1 || info[0]["state"] != "provided" || info[0]["writer"] != "example-publisher" || info[0]["version"] != "5.3.0" {
+	if len(info) != 1 || info[0]["state"] != "provided" || info[0]["writer"] != "example-publisher" || info[0]["version"] != "5.3.0" ||
+		info[0]["outcome"] != "blocked" {
 		t.Fatalf("info = %v", info)
 	}
 	counted := map[string]float64{}
@@ -78,5 +81,27 @@ func TestStrategyPublisherInfoNamesTheWriterAndCountsTheRecords(t *testing.T) {
 	}
 	if counted["outcome=published;reason=;"] != 3 || counted["outcome=blocked;reason=SPLIT_RECORDS_NOT_BACKFILLED;"] != 2 || len(counted) != 2 {
 		t.Fatalf("reports = %v", counted)
+	}
+}
+
+// A process whose rounds stopped reading - a leader that handed over - does
+// not go on saying what the publisher said then, and an outcome the record
+// defines no word for is counted as other rather than as a new series.
+func TestStrategyPublisherInfoLeavesOutAStaleReadAndBoundsTheOutcome(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	stale := time.Now().Add(-controlplane.SourceStalenessBound - time.Minute)
+	r.SetStrategyPublisherSource(publisherSourceStub{read: true,
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportProvided, Outcome: "published", ReadAt: stale},
+		counts: []controlplane.PublisherReportCount{{Outcome: "published", Count: 4}}})
+	if got := gatherFamily(t, r, "bkmonitor_alarmd_strategy_publisher_info"); len(got) != 0 {
+		t.Fatalf("a read older than the bound emitted %v", got)
+	}
+	if got := gatherFamily(t, r, "bkmonitor_alarmd_strategy_publisher_reports_total"); len(got) != 1 {
+		t.Fatalf("the counts it made while reading are history and stay: %v", got)
+	}
+	r.SetStrategyPublisherSource(publisherSourceStub{read: true,
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportProvided, Outcome: "renamed", ReadAt: time.Now()}})
+	if got := publisherLabels(t, r, "bkmonitor_alarmd_strategy_publisher_info"); len(got) != 1 || got[0]["outcome"] != "other" {
+		t.Fatalf("info = %v, want outcome other", got)
 	}
 }

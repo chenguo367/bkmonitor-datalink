@@ -10,6 +10,7 @@
 package controlplane
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -53,6 +54,31 @@ type PublisherReport struct {
 type PublisherReportSource interface {
 	PublisherReport() (PublisherReport, bool)
 	PublisherReportCounts() []PublisherReportCount
+}
+
+type publisherReportUnrecordedKey struct{}
+
+// WithoutPublisherReport marks a read of the active set that does not speak
+// for the publisher. The record comes back in the same MGET as on every
+// read and is left unrecorded: the report and its counts are the control
+// rounds', which only the leader runs. A diagnosis is answered by whichever
+// replica the request reaches; recording its read left that replica's
+// metrics on that one read for good and counted the record a second time.
+func WithoutPublisherReport(ctx context.Context) context.Context {
+	return context.WithValue(ctx, publisherReportUnrecordedKey{}, true)
+}
+
+func publisherReportUnrecorded(ctx context.Context) bool {
+	unrecorded, _ := ctx.Value(publisherReportUnrecordedKey{}).(bool)
+	return unrecorded
+}
+
+// PublisherReportCurrent says whether a report read at readAt still speaks
+// for the publisher at now. Past SourceStalenessBound the process has stopped
+// reading - a leader that handed over keeps its last record - and the
+// report is left out rather than shown as the publisher's present word.
+func PublisherReportCurrent(readAt, now time.Time) bool {
+	return !readAt.IsZero() && now.Sub(readAt) <= SourceStalenessBound
 }
 
 // PublisherBackfill is the publisher's copy of the last backfill of its
@@ -149,10 +175,17 @@ func decodePublisherReport(value interface{}, readAt time.Time) PublisherReport 
 	}
 	if err := json.Unmarshal(payload, &dto); err != nil {
 		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
-			report.Detail = PublisherReportFieldType
-		} else {
+		switch {
+		case !errors.As(err, &typeErr):
 			report.Detail = PublisherReportNotJSON
+		case dto.SchemaVersion != nil && *dto.SchemaVersion != PublisherReportSchemaVersion1:
+			// A later shape whose fields this reader types differently is a
+			// publisher newer than the reader, not a publisher that wrote a
+			// broken record. The decoder fills every field it can before it
+			// reports the first mistyped one, so the version is there to read.
+			report.Detail = PublisherReportSchemaVersion
+		default:
+			report.Detail = PublisherReportFieldType
 		}
 		return report
 	}

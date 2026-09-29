@@ -11,10 +11,14 @@ package main
 
 import (
 	"context"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
 type publisherReportingSource struct {
@@ -75,17 +79,26 @@ func TestSourcePublisherFactsCarryTheRecordWithItsLabelAndAges(t *testing.T) {
 }
 
 func TestSourcePublisherFleetFactsSayNothingBeforeARead(t *testing.T) {
-	if sourcePublisherFleetFacts(plainStrategySource{}) != nil {
+	now := func() time.Time { return time.Unix(1700000600, 0) }
+	if sourcePublisherFleetFacts(plainStrategySource{}, now) != nil {
 		t.Fatal("a source that reads no publisher record got a reader")
 	}
-	reader := sourcePublisherFleetFacts(publisherReportingSource{})
+	reader := sourcePublisherFleetFacts(publisherReportingSource{}, now)
 	if reader == nil || reader() != nil {
 		t.Fatal("a source that has not read the active set published a record")
 	}
 	read := sourcePublisherFleetFacts(publisherReportingSource{read: true,
-		report: controlplane.PublisherReport{State: controlplane.PublisherReportNotProvided}})
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportNotProvided, ReadAt: now().Add(-time.Minute)}}, now)
 	if facts := read(); facts == nil || facts.State != "not_provided" {
 		t.Fatalf("facts = %+v, want not_provided", facts)
+	}
+	// A leader that handed over keeps its last record; past the bound it is
+	// not published as the publisher's present word.
+	stale := sourcePublisherFleetFacts(publisherReportingSource{read: true,
+		report: controlplane.PublisherReport{State: controlplane.PublisherReportProvided,
+			ReadAt: now().Add(-controlplane.SourceStalenessBound - time.Second)}}, now)
+	if facts := stale(); facts != nil {
+		t.Fatalf("a read older than the bound was published: %+v", facts)
 	}
 }
 
@@ -95,5 +108,82 @@ func TestTheProductionStrategySourceReadsThePublisherRecord(t *testing.T) {
 	var source controlplane.StrategySource = &controlplane.LegacyRedisStrategySource{}
 	if _, ok := source.(controlplane.PublisherReportSource); !ok {
 		t.Fatal("LegacyRedisStrategySource does not implement PublisherReportSource")
+	}
+}
+
+// publisherSeries is every strategy_publisher series the recorder exposes,
+// as name plus labels plus value, so two scrapes compare as text.
+func publisherSeries(t *testing.T, recorder *metric.Recorder) []string {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var series []string
+	for _, family := range families {
+		name := family.GetName()
+		if name != "bkmonitor_alarmd_strategy_publisher_info" && name != "bkmonitor_alarmd_strategy_publisher_reports_total" {
+			continue
+		}
+		for _, m := range family.Metric {
+			line := name
+			for _, label := range m.Label {
+				line += " " + label.GetName() + "=" + label.GetValue()
+			}
+			line += " " + strconv.FormatFloat(m.GetGauge().GetValue()+m.GetCounter().GetValue(), 'f', -1, 64)
+			series = append(series, line)
+		}
+	}
+	sort.Strings(series)
+	return series
+}
+
+// A follower answering a diagnosis reads the active set through the same
+// source its control rounds would use. Before this, that read recorded the
+// publisher's record: the follower's info series stayed on that one read
+// for good and the record was counted a second time beside the leader's.
+func TestADiagnosisReadLeavesThePublisherMetricsAsTheyWere(t *testing.T) {
+	_, client, refused := startOwnPhaseTwoRedis(t, redistest.Server(t), "")
+	if refused != "" {
+		t.Skip(refused)
+	}
+	ctx := context.Background()
+	if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", "[7]", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	record := `{"schema_version":1,"writer":"example-publisher","version":"5.3.0","written_at":1700000000,` +
+		`"outcome":"blocked","reason":"SYSTEMIC_REJECTION"}`
+	if err := client.Set(ctx, "bkmonitor.cache.publisher", record, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := controlplane.NewLegacyRedisStrategySource(client, "bkmonitor.cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	recorder.SetStrategyPublisherSource(source)
+	before := publisherSeries(t, recorder)
+	if len(before) != 0 {
+		t.Fatalf("a process that has read nothing exposes %v", before)
+	}
+	ids, err := diagnosisUniverse(source)(ctx)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("diagnosis universe = %v, %v", ids, err)
+	}
+	if after := publisherSeries(t, recorder); len(after) != 0 {
+		t.Fatalf("a diagnosis read changed the publisher metrics: %v", after)
+	}
+	if _, read := source.PublisherReport(); read {
+		t.Fatal("a diagnosis read recorded the publisher's record")
+	}
+	if facts := sourcePublisherFleetFacts(source, time.Now)(); facts != nil {
+		t.Fatalf("a diagnosis read put the record on the snapshot: %+v", facts)
+	}
+	// The control round's own read is the one that speaks for the publisher.
+	if _, err := source.ActiveStrategyIDs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := publisherSeries(t, recorder); len(got) != 2 {
+		t.Fatalf("after a control read = %v, want the info series and one count", got)
 	}
 }

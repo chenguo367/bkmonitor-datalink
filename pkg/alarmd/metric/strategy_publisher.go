@@ -11,6 +11,7 @@ package metric
 
 import (
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -24,6 +25,7 @@ import (
 type strategyPublisherCollector struct {
 	mu      sync.Mutex
 	source  controlplane.PublisherReportSource
+	now     func() time.Time
 	info    *prometheus.Desc
 	reports *prometheus.Desc
 }
@@ -33,13 +35,18 @@ func newStrategyPublisherCollector() *strategyPublisherCollector {
 		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
 	}
 	return &strategyPublisherCollector{
+		now: time.Now,
 		info: descriptor("strategy_publisher_info",
 			"1, labelled with what the strategy cache's publisher last said about itself in its record beside "+
-				"the active set: state provided, not_provided (the publisher leaves no record, which is not an "+
-				"error) or unreadable, and when provided the writer and version it names, each at most 64 "+
-				"bytes. The publisher's word, best effort: what it runs is read from the platform side. One "+
-				"series; absent on a process that has not read the active set, which every follower is.",
-			"state", "writer", "version"),
+				"the active set, as this process's control rounds read it: state provided, not_provided (the "+
+				"publisher leaves no record, which is not an error) or unreadable; when provided, the writer and "+
+				"version it names, each at most 64 bytes, and the outcome of its last run (published, blocked, "+
+				"failed, other), so a publisher that is refusing to publish right now is one series to read. The "+
+				"publisher's word, best effort: what it runs is read from the platform side. One series, from the "+
+				"control leader only: a diagnosis answered by another replica reads the active set without "+
+				"recording the record, and a process whose last read is older than the source staleness bound - "+
+				"a leader that handed over - emits nothing rather than its last word.",
+			"state", "writer", "version", "outcome"),
 		reports: descriptor("strategy_publisher_reports_total",
 			"Distinct publisher records this process read, by the outcome the record states (published, "+
 				"blocked, failed, other) and its reason. One record is read on every read of the active set "+
@@ -48,7 +55,9 @@ func newStrategyPublisherCollector() *strategyPublisherCollector {
 				"blocks every run as a rising blocked series with its reason. The reason is the record's own "+
 				"word when it is one (an upper-case identifier, at most 16 distinct per process) and other "+
 				"otherwise; a failed run's reason is an exception's class name and is read from the fleet "+
-				"page, not from here. Empty for a record without one.",
+				"page, not from here. Empty for a record without one. Counted by the control leader's reads "+
+				"only; a new leader counts the record it finds once more, so a sum across replicas is one high "+
+				"per hand-over.",
 			"outcome", "reason"),
 	}
 }
@@ -60,23 +69,33 @@ func (c *strategyPublisherCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *strategyPublisherCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
-	source := c.source
+	source, now := c.source, c.now
 	c.mu.Unlock()
 	if source == nil {
 		return
 	}
 	report, read := source.PublisherReport()
-	if !read {
-		return
+	if read && controlplane.PublisherReportCurrent(report.ReadAt, now()) {
+		writer, version, outcome := "", "", ""
+		if report.State == controlplane.PublisherReportProvided {
+			writer, version, outcome = report.Writer, report.Version, publisherOutcomeLabel(report.Outcome)
+		}
+		ch <- prometheus.MustNewConstMetric(c.info, prometheus.GaugeValue, 1, report.State, writer, version, outcome)
 	}
-	writer, version := "", ""
-	if report.State == controlplane.PublisherReportProvided {
-		writer, version = report.Writer, report.Version
-	}
-	ch <- prometheus.MustNewConstMetric(c.info, prometheus.GaugeValue, 1, report.State, writer, version)
 	for _, count := range source.PublisherReportCounts() {
 		ch <- prometheus.MustNewConstMetric(c.reports, prometheus.CounterValue, float64(count.Count), count.Outcome, count.Reason)
 	}
+}
+
+// publisherOutcomeLabel is the outcome under the closed set the counter
+// uses.
+func publisherOutcomeLabel(outcome string) string {
+	for _, known := range controlplane.PublisherOutcomeLabels {
+		if outcome == known {
+			return outcome
+		}
+	}
+	return "other"
 }
 
 // SetStrategyPublisherSource binds the strategy source whose publisher record

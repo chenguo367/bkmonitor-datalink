@@ -1321,7 +1321,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		leaderRound:      bundle.leaderRoundFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
-		sourcePublisher:  sourcePublisherFleetFacts(strategySource),
+		sourcePublisher:  sourcePublisherFleetFacts(strategySource, external.Now),
 		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
 			linkd.Console, linkd.Location, external.Now),

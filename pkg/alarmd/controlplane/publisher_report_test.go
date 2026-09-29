@@ -195,6 +195,10 @@ func TestLegacySourceNamesAnUnreadablePublisherRecordAndStillReadsTheActiveSet(t
 		{"a count that is text", `{"schema_version":1,"outcome":"published","strategies":"45"}`, controlplane.PublisherReportFieldType},
 		{"no schema version", `{"outcome":"published"}`, controlplane.PublisherReportSchemaVersion},
 		{"a later schema version", `{"schema_version":2,"outcome":"published"}`, controlplane.PublisherReportSchemaVersion},
+		// A later shape that types a field differently is a publisher newer
+		// than this reader, not a broken record.
+		{"a later schema version that retypes a field", `{"schema_version":2,"strategies":"many"}`,
+			controlplane.PublisherReportSchemaVersion},
 		{"too large", `{"schema_version":1,"reason":"` + strings.Repeat("x", controlplane.PublisherReportMaxBytes) + `"}`,
 			controlplane.PublisherReportTooLarge},
 	}
@@ -329,4 +333,55 @@ func deref(value *int64) int64 {
 		return -1
 	}
 	return *value
+}
+
+// A read marked as not speaking for the publisher - a diagnosis answered by
+// any replica - returns the active set as every read does and records
+// nothing: neither the report nor a count.
+func TestAReadWithoutThePublisherReportRecordsNothing(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", "[8]", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, "bkmonitor.cache.publisher", publishedRecord, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := controlplane.NewLegacyRedisStrategySource(client, "bkmonitor.cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := source.ActiveStrategyIDs(controlplane.WithoutPublisherReport(ctx))
+	if err != nil || strings.Join(ids, ",") != "8" {
+		t.Fatalf("ActiveStrategyIDs = %v, %v", ids, err)
+	}
+	if _, read := source.PublisherReport(); read {
+		t.Fatal("an unrecorded read recorded the report")
+	}
+	if counts := source.PublisherReportCounts(); len(counts) != 0 {
+		t.Fatalf("an unrecorded read counted %+v", counts)
+	}
+	if _, err := source.ActiveStrategyIDs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if report, read := source.PublisherReport(); !read || report.Outcome != "published" {
+		t.Fatalf("a recorded read = %+v, %v", report, read)
+	}
+}
+
+func TestAPublisherReportSpeaksForThePublisherOnlyWithinTheStalenessBound(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	for _, test := range []struct {
+		readAt  time.Time
+		current bool
+	}{
+		{now, true},
+		{now.Add(-controlplane.SourceStalenessBound), true},
+		{now.Add(-controlplane.SourceStalenessBound - time.Second), false},
+		{time.Time{}, false},
+	} {
+		if got := controlplane.PublisherReportCurrent(test.readAt, now); got != test.current {
+			t.Errorf("read %v before now: current = %v, want %v", now.Sub(test.readAt), got, test.current)
+		}
+	}
 }
