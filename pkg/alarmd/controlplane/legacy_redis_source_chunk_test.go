@@ -143,3 +143,63 @@ func TestLegacyRedisStrategySourceFailsTheWholeReadOnAnyChunk(t *testing.T) {
 		t.Fatalf("second chunk short = %d strategies, %v; want an unstable observation", len(strategies), err)
 	}
 }
+
+// scribblingMGet answers each MGET with the documents as byte slices it
+// keeps, and overwrites the previous answer's slices when the next MGET is
+// sent: a read that still held a chunk's replies when it read the next one
+// would turn documents it had not copied yet into garbage.
+type scribblingMGet struct {
+	redis.Cmdable
+	previous [][]byte
+	calls    int
+}
+
+func (r *scribblingMGet) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
+	for _, value := range r.previous {
+		for index := range value {
+			value[index] = 'x'
+		}
+	}
+	r.calls++
+	values, err := r.Cmdable.MGet(ctx, keys...).Result()
+	if err != nil {
+		return redis.NewSliceResult(nil, err)
+	}
+	r.previous = r.previous[:0]
+	answer := make([]interface{}, len(values))
+	for index, value := range values {
+		if text, ok := value.(string); ok {
+			payload := []byte(text)
+			r.previous = append(r.previous, payload)
+			answer[index] = payload
+		}
+	}
+	return redis.NewSliceResult(answer, nil)
+}
+
+// Each chunk of replies is turned into its strategies before the next chunk
+// is read: the read holds one chunk of replies besides the documents, at two
+// chunks and at four alike. A chunk still held when the next was read would
+// come out overwritten.
+func TestLegacyRedisStrategySourceTurnsEachChunkIntoDocumentsBeforeTheNext(t *testing.T) {
+	chunk := controlplane.LegacyStrategyMGetChunkForTest
+	for _, n := range []int{2 * chunk, 4 * chunk} {
+		client := newControlplaneRedis(t)
+		ids := storeStrategyDocuments(t, client, n)
+		scribbling := &scribblingMGet{Cmdable: client}
+		source, err := controlplane.NewLegacyRedisStrategySource(scribbling, "bkmonitor.cache")
+		if err != nil {
+			t.Fatal(err)
+		}
+		strategies, err := source.Strategies(context.Background(), ids)
+		if err != nil || len(strategies) != n || scribbling.calls != n/chunk {
+			t.Fatalf("%d documents: %d strategies over %d MGETs, %v", n, len(strategies), scribbling.calls, err)
+		}
+		for index, strategy := range strategies {
+			want := fmt.Sprintf(`{"id":%s,"bk_biz_id":2,"bk_tenant_id":"system","space_uid":"bkcc__2"}`, ids[index])
+			if strategy.SourceDisposition != nil || string(strategy.Document) != want {
+				t.Fatalf("%d documents: strategy %s = %q (%+v), want its document intact", n, ids[index], strategy.Document, strategy.SourceDisposition)
+			}
+		}
+	}
+}
