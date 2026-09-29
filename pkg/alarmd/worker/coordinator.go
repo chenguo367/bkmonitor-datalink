@@ -2781,7 +2781,13 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 		Fresh:   coverage.Fresh, ShortFresh: coverage.ShortFresh,
 		Abnormal: coverage.Abnormal, AbnormalOnIncomplete: coverage.AbnormalOnIncomplete,
 		Unusable: coverage.Unusable, UnusableReason: coverage.UnusableReason,
-		End: coverage.End,
+		MissingMinutes:          append([]int64(nil), coverage.MissingMinutes...),
+		MissingMinutesTruncated: coverage.MissingMinutesTruncated,
+		ShortUnusable:           coverage.ShortUnusable,
+		End:                     coverage.End,
+	}
+	if len(facts.MissingMinutes) == 0 {
+		facts.MissingMinutes = nil
 	}
 	for _, window := range coverage.Windows {
 		facts.Windows = append(facts.Windows, observability.HistoryWindowFact{

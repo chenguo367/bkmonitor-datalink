@@ -1565,6 +1565,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			if len(state.coverage.Windows) > 0 {
 				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept
 			}
+			state.coverage.UnlistedHolesAnswered = unlistedHolesAnswered(state.rounds, facts)
 			// The previous count is the previous window's, and is named as
 			// such only when it is this window's.
 			if hadReading && facts.Short != 0 && !worstWindowChanged {

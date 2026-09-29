@@ -414,7 +414,7 @@ func queryRejected(failure *FailureRef) bool {
 // as not remembered, one incomplete round or one empty answer, and it is not
 // proven, and the row stays where the counts put it.
 func sparseEvidence(coverage *HistoryCoverage) bool {
-	if coverage == nil || coverage.Short == 0 || uint32(len(coverage.Windows)) != coverage.Short {
+	if coverage == nil || coverage.Short == 0 || len(coverage.Windows) == 0 || uint32(len(coverage.Windows)) > coverage.Short {
 		return false
 	}
 	for _, window := range coverage.Windows {
@@ -422,7 +422,12 @@ func sparseEvidence(coverage *HistoryCoverage) bool {
 			return false
 		}
 	}
-	return true
+	// The named windows are at most MaxCoverageWindows of the short ones.
+	// The rest are the data's only when their minutes say so: a Query Group
+	// several strategies share multiplies its short windows by its Plans, and
+	// reading "more short windows than named" as undecided filed three hosts
+	// that miss whole minutes as this side's to fix.
+	return uint32(len(coverage.Windows)) == coverage.Short || coverage.UnlistedHolesAnswered
 }
 
 // windowCheck reads a window reason on its counts. decided is false when the

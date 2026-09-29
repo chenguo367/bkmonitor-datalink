@@ -1335,9 +1335,17 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		case reflect.Slice:
 			// The named windows cross into the row's own richer rows, read
 			// against the object's rounds; window_holes_test.go holds that.
-			if source.Type().Field(i).Name != "Windows" {
+			// The missing minutes are read against the same rounds into one
+			// word on the row (unlistedHolesAnswered).
+			switch source.Type().Field(i).Name {
+			case "Windows":
+			case "MissingMinutes":
+				field.Set(reflect.ValueOf([]int64{int64(500 + i)}))
+			default:
 				t.Fatalf("%s is a slice this test has no fixture for; decide how it crosses", source.Type().Field(i).Name)
 			}
+		case reflect.Bool:
+			field.SetBool(true)
 		default:
 			t.Fatalf("%s is neither a uint32 nor a string; decide how it crosses", source.Type().Field(i).Name)
 		}
@@ -1364,7 +1372,8 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	rowOnly := map[string]bool{"ShortRounds": true, "RefusedRounds": true, "Held": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
 		"ConstrainedRounds": true, "ResumedRounds": true,
 		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
-		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true}
+		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true,
+		"UnlistedHolesAnswered": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
@@ -1383,8 +1392,11 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	for i := 0; i < source.NumField(); i++ {
 		name := source.Type().Field(i).Name
 		// End is read into the object's round ring, where every hole is
-		// matched against it, and not rendered on its own.
-		if name == "End" {
+		// matched against it, and not rendered on its own. The missing-minute
+		// union and its two companions are read against that ring into
+		// UnlistedHolesAnswered, and not rendered on their own either.
+		switch name {
+		case "End", "MissingMinutes", "MissingMinutesTruncated", "ShortUnusable":
 			continue
 		}
 		if !published.FieldByName(name).IsValid() {
