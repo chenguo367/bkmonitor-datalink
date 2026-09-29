@@ -378,6 +378,8 @@ func (repository *RedisCatalogRepository) loadQueryGroupObjects(
 	ctx context.Context,
 	batch []ManifestQueryGroup,
 ) (map[execution.ObjectDigest]QueryGroupObject, error) {
+	reading := repository.objects().announce(len(batch))
+	defer reading.settle()
 	replies := make([]*redis.StringCmd, len(batch))
 	if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for index, entry := range batch {
@@ -421,7 +423,7 @@ func (repository *RedisCatalogRepository) loadQueryGroupObjects(
 		// write this key. Storing a bare object here and a decorated one there
 		// made the cache hold two types under one key, which the reader only
 		// finds out about by panicking on whichever it did not expect.
-		repository.objects().store(repository.queryGroupObjectKey(entry.ObjectDigest), storedQueryGroupObject{
+		repository.objects().store(reading, repository.queryGroupObjectKey(entry.ObjectDigest), storedQueryGroupObject{
 			object: object, noDataOccurrences: noDataOccurrencesIn(payload),
 		}, len(payload))
 		objects[entry.ObjectDigest] = object

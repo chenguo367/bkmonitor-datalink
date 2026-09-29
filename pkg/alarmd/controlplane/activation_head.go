@@ -150,6 +150,11 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 		}
 	}
 	missing := identities
+	var reading *cacheReading
+	if version.known {
+		reading = repository.controlCache.announceTimelines(len(missing))
+		defer reading.settle()
+	}
 	for start := 0; start < len(missing); start += openSegmentReadBatch {
 		batch := missing[start:min(start+openSegmentReadBatch, len(missing))]
 		replies := make([]*redis.StringCmd, len(batch))
@@ -177,7 +182,7 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 			}
 			counters.misses.Add(1)
 			if version.known {
-				repository.controlCache.storeTimeline(version.header, identity, timeline, len(payload))
+				repository.controlCache.storeTimeline(reading, version.header, identity, timeline, len(payload))
 			}
 			accept(identity, timeline)
 		}

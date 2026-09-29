@@ -89,6 +89,11 @@ type objectReadCache struct {
 	bytes      int
 	maxEntries int
 	maxBytes   int
+	// working is what the cache is about to hold (cacheWorkingSet), in
+	// stored bytes like bytes.
+	working cacheWorkingSet
+	// hits, misses and evictions are its outcomes since it was configured.
+	hits, misses, evictions uint64
 	// decoded is the running process's reading of the decoded charge.
 	decoded decodedSampler
 }
@@ -106,14 +111,29 @@ func (cache *objectReadCache) lookup(key string) (any, int, bool) {
 	defer cache.mu.Unlock()
 	element, ok := cache.entries[key]
 	if !ok {
+		cache.misses++
 		return nil, 0, false
 	}
+	cache.hits++
 	cache.order.MoveToFront(element)
 	entry := element.Value.(*objectCacheEntry)
 	return entry.value, entry.bytes, true
 }
 
-func (cache *objectReadCache) store(key string, value any, bytes int) {
+// announce is entries a reader is about to read from Redis and store here
+// (cacheWorkingSet); the reader defers settle on what it returns.
+func (cache *objectReadCache) announce(entries int) *cacheReading {
+	if cache == nil {
+		return nil
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.working.announceLocked(&cache.mu, entries)
+}
+
+// store keeps value under key, struck from reading, the announcement it was
+// read under.
+func (cache *objectReadCache) store(reading *cacheReading, key string, value any, bytes int) {
 	if cache == nil || cache.maxEntries <= 0 || cache.maxBytes <= 0 || bytes > cache.maxBytes {
 		return
 	}
@@ -121,6 +141,7 @@ func (cache *objectReadCache) store(key string, value any, bytes int) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if element, ok := cache.entries[key]; ok {
+		cache.working.storedLocked(reading, 0)
 		cache.order.MoveToFront(element)
 		return
 	}
@@ -130,9 +151,11 @@ func (cache *objectReadCache) store(key string, value any, bytes int) {
 		cache.order.Remove(oldest)
 		delete(cache.entries, entry.key)
 		cache.bytes -= entry.bytes
+		cache.evictions++
 	}
 	cache.entries[key] = cache.order.PushFront(&objectCacheEntry{key: key, bytes: bytes, value: value})
 	cache.bytes += bytes
+	cache.working.storedLocked(reading, bytes)
 }
 
 type objectReadFlight struct {
@@ -168,19 +191,20 @@ func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBy
 }
 
 // TimelineCacheBudget is the control timeline cache as a detection budget of
-// observation memory (package memoryline): its size and what it holds, in
-// decoded bytes (cachedTimelineBytes).
+// observation memory (package memoryline): its working set
+// (cacheWorkingSet) and what it holds, in decoded bytes
+// (cachedTimelineBytes).
 func (repository *RedisCatalogRepository) TimelineCacheBudget() (size, held uint64) {
 	if repository == nil || repository.controlCache == nil {
 		return 0, 0
 	}
-	occupancy := repository.controlCache.timelineOccupancy()
-	return uint64(max(occupancy.MaxBytes, 0)), uint64(max(occupancy.Bytes, 0))
+	return repository.controlCache.timelineBudget()
 }
 
 // ObjectCacheBudget is the catalog object cache as a detection budget of
-// observation memory: its size and what it holds, charged as the objects
-// decoded from the stored bytes it counts (decodedObjectBytes).
+// observation memory: its working set (cacheWorkingSet) and what it holds,
+// charged as the objects decoded from the stored bytes it counts
+// (decodedObjectBytes).
 func (repository *RedisCatalogRepository) ObjectCacheBudget() (size, held uint64) {
 	cache := repository.objects()
 	if cache == nil {
@@ -188,7 +212,33 @@ func (repository *RedisCatalogRepository) ObjectCacheBudget() (size, held uint64
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	return uint64(decodedObjectBytes(max(cache.maxBytes, 0))), uint64(decodedObjectBytes(max(cache.bytes, 0)))
+	return uint64(decodedObjectBytes(cache.working.sizeLocked(cache.bytes, cache.maxBytes))),
+		uint64(decodedObjectBytes(max(cache.bytes, 0)))
+}
+
+// ObjectCacheStats is the catalog object cache's outcomes and occupancy,
+// in stored bytes.
+type ObjectCacheStats struct {
+	Hits, Misses, Evictions uint64
+	Occupancy               ControlTimelineCacheOccupancy
+}
+
+// ObjectCacheStats reads the object cache in force, zero before one is
+// configured.
+func (repository *RedisCatalogRepository) ObjectCacheStats() ObjectCacheStats {
+	cache := repository.objects()
+	if cache == nil {
+		return ObjectCacheStats{}
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return ObjectCacheStats{
+		Hits: cache.hits, Misses: cache.misses, Evictions: cache.evictions,
+		Occupancy: ControlTimelineCacheOccupancy{
+			Entries: cache.order.Len(), Bytes: cache.bytes,
+			MaxEntries: cache.maxEntries, MaxBytes: cache.maxBytes, Evictions: cache.evictions,
+		},
+	}
 }
 
 // decodedObjectBytes is the heap the object cache's entries take for stored
@@ -281,13 +331,15 @@ func (repository *RedisCatalogRepository) loadObject(
 		}
 		return flight.value, flight.bytes, flight.err
 	}
+	reading := repository.objects().announce(1)
+	defer reading.settle()
 	flight.value, flight.bytes, flight.err = repository.readObject(ctx, kind, key, domain, digest, decode)
 	flights.mu.Lock()
 	delete(flights.byKey, key)
 	flights.mu.Unlock()
 	close(flight.done)
 	if flight.err == nil {
-		repository.objects().store(key, flight.value, flight.bytes)
+		repository.objects().store(reading, key, flight.value, flight.bytes)
 	}
 	return flight.value, flight.bytes, flight.err
 }

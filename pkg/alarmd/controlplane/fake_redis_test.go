@@ -19,10 +19,15 @@ type scopeRedis struct {
 	gets, mgets, strlens int
 	roundTrips           int
 	getError             error
+	// onGet, when set, sees every key read, before the reply.
+	onGet func(key string)
 }
 
 func (c *scopeRedis) Get(ctx context.Context, k string) *redis.StringCmd {
 	c.gets++
+	if c.onGet != nil {
+		c.onGet(k)
+	}
 	if c.getError != nil {
 		return redis.NewStringResult("", c.getError)
 	}

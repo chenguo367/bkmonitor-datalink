@@ -79,6 +79,8 @@ type Line struct {
 
 	mu      sync.Mutex
 	budgets []Budget
+	// names are the budgets' names, as a reading reports them.
+	names []string
 	// sizes is each budget's size as the collection ended (or as it was
 	// reserved, for one reserved since), and peaks the largest size each has
 	// had since, in the order of budgets.
@@ -176,14 +178,15 @@ func sampleValue(sample runtimemetrics.Sample) uint64 {
 	return sample.Value.Uint64()
 }
 
-// Reserve leaves room for one more detection budget.
-func (line *Line) Reserve(budget Budget) {
+// Reserve leaves room for one more detection budget, reported under name.
+func (line *Line) Reserve(name string, budget Budget) {
 	if line == nil || budget == nil {
 		return
 	}
 	line.mu.Lock()
 	size, held := budget()
 	line.budgets = append(line.budgets, budget)
+	line.names = append(line.names, name)
 	line.sizes = append(line.sizes, size)
 	line.peaks = append(line.peaks, size)
 	// Its own room only: taking every budget's room again would drop what
@@ -277,6 +280,19 @@ type Reading struct {
 	RefusedTotal   map[Consumer]uint64
 	AdmittedBytes  map[Consumer]uint64
 	LimitUnlimited bool
+	// Budgets is each detection budget now, in the order reserved.
+	Budgets []BudgetReading
+}
+
+// BudgetReading is one detection budget as read now: its size and what it
+// holds. Its part of ReservedBytes is not the difference of the two - that
+// was taken as the last collection ended, and grows by the most the size
+// has grown since - but the two read together say what the budget is
+// holding observation off with.
+type BudgetReading struct {
+	Name      string
+	SizeBytes uint64
+	HeldBytes uint64
 }
 
 // Read is the line now.
@@ -292,6 +308,10 @@ func (line *Line) Read() Reading {
 	line.mu.Lock()
 	reserved := line.reservedLocked(heap.cycles)
 	granted := line.granted
+	for index, budget := range line.budgets {
+		size, held := budget()
+		reading.Budgets = append(reading.Budgets, BudgetReading{Name: line.names[index], SizeBytes: size, HeldBytes: held})
+	}
 	line.mu.Unlock()
 	reading.LimitBytes, reading.LiveBytes, reading.ReservedBytes, reading.GrantedBytes = heap.limit, heap.live, reserved, granted
 	reading.LimitUnlimited = heap.limit == math.MaxInt64

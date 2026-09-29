@@ -109,16 +109,33 @@ func worstDecodedObjectHeap(t *testing.T, payload []byte) float64 {
 	return worst
 }
 
-// The object cache as a budget of observation memory is charged in decoded
-// bytes: the cache counts stored bytes, and the heap its objects take is the
-// objects decoded from them.
+// The object cache as a budget of observation memory is its working set,
+// not its ceiling, charged in decoded bytes: the cache counts stored bytes,
+// and the heap its objects take is the objects decoded from them. Nobody
+// reading into it, its size is what it holds.
 func TestTheObjectCachesBudgetIsChargedDecoded(t *testing.T) {
 	h := newObjectCatalogHarness(t)
 	if err := h.repository.ConfigureObjectCache(64, 1<<20); err != nil {
 		t.Fatal(err)
 	}
+	if size, held := h.repository.ObjectCacheBudget(); size != 0 || held != 0 {
+		t.Fatalf("an empty object cache of 1 MiB nobody reads into = (%d, %d), want (0, 0)", size, held)
+	}
+	catalog := objectCatalogTwoGroups(t, 80)
+	h.publish(t, catalog)
+	digest, err := controlplane.DeriveQueryGroupObjectDigest(catalog.QueryGroups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := h.client.Get(h.ctx, h.prefix+":qgobj:"+string(digest)).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.repository.LoadQueryGroupObject(h.ctx, digest); err != nil {
+		t.Fatal(err)
+	}
 	size, held := h.repository.ObjectCacheBudget()
-	if want := uint64(controlplane.DecodedObjectBytesForTest(1 << 20)); size != want || held != 0 {
-		t.Fatalf("an empty object cache of 1 MiB = (%d, %d), want (%d, 0) decoded", size, held, want)
+	if want := uint64(controlplane.DecodedObjectBytesForTest(len(payload))); size != want || held != want {
+		t.Fatalf("one object of %d stored bytes read = (%d, %d), want (%d, %d) decoded", len(payload), size, held, want, want)
 	}
 }
