@@ -245,7 +245,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 				}
 				words = *anomaly.Standing
 			}
-			if rank := foldRank(anomaly.Finding.Check, anomaly.Loss); !found || rank < bestRank {
+			if rank := foldRank(anomaly.Finding.Check, anomaly.Loss); !found || decidesBefore(rank, anomaly, bestRank, best) {
 				best, bestRank, bestWords, found = anomaly, rank, words, true
 			}
 		}
