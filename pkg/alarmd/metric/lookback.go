@@ -44,6 +44,11 @@ type lookbackCollector struct {
 	yields     *prometheus.Desc
 	refused    *prometheus.Desc
 	faults     *prometheus.Desc
+	// yieldReleases, yieldSeconds and yieldMax: how long reads asked to
+	// yield took to give their permits back.
+	yieldReleases *prometheus.Desc
+	yieldSeconds  *prometheus.Desc
+	yieldMax      *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -114,9 +119,18 @@ func newLookbackCollector() *lookbackCollector {
 				"The rung is tried again within its window and counted in lookback_rechecks_total by what it comes to.",
 			"source", "rung"),
 		refused: desc("lookback_permit_refusals_total",
-			"Lookback query permits refused, by reason: waiters (a formal query is waiting), lookback_limit, headroom "+
-				"(granting it would leave the formal queries too little), disabled. A refused rung keeps its window.",
+			"Lookback query permits refused, by reason: waiters (a formal query is waiting), full (every process "+
+				"permit is held), disabled. A refused rung keeps its window.",
 			"reason"),
+		yieldReleases: desc("lookback_yield_releases_total",
+			"Recheck reads a waiting formal query asked to yield that gave their permit back, by source.", "source"),
+		yieldSeconds: desc("lookback_yield_release_seconds_total",
+			"How long those reads took to give their permits back, in all, by source: over "+
+				"lookback_yield_releases_total, the mean wait a formal query owes the lookback once it has to wait. "+
+				"A read still holding its permit RecheckTimeout after the yield is a yield_overdue fault.", "source"),
+		yieldMax: desc("lookback_yield_release_max_seconds",
+			"The longest any of those reads took to give its permit back since the process started, by source.",
+			"source"),
 		faults: desc("lookback_faults_total",
 			"Reads not kept for a defect, by reason. Normal running never meets one; any count is a defect to fix.",
 			"reason"),
@@ -126,7 +140,7 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults} {
+		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
 }
@@ -178,6 +192,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		counter(c.readBytes, source.FirstReadBytes, name)
 		counter(c.checkBytes, source.RecheckBytes, name)
 		counter(c.unknown, source.UnknownLookback, name)
+		counter(c.yieldReleases, source.YieldReleases, name)
+		ch <- prometheus.MustNewConstMetric(c.yieldSeconds, prometheus.CounterValue, source.YieldReleaseSeconds, name)
+		gauge(c.yieldMax, source.YieldReleaseMaxSeconds, name)
 	}
 	for reason, n := range stats.PermitRefusals {
 		counter(c.refused, n, reason)

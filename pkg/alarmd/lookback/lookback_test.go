@@ -157,7 +157,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{t: t, clock: &clock{at: time.Unix(1_700_000_100, 0)}, answers: make(chan answer, 16),
 		owned: map[execution.QueryGroupIdentity]bool{"qg": true, "qg-b": true}}
 	engine, err := New(Options{Now: f.clock.now,
-		Refusals: []string{"waiters", "headroom", "lookback_limit"}, LimitRefusal: "lookback_limit", UnspreadFirstSamples: true,
+		Refusals: []string{"waiters", "full"}, UnspreadFirstSamples: true, ProbeFirstSamples: true,
 		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			if _, ok := ctx.Deadline(); !ok {
 				t.Error("a recheck ran without a deadline")
@@ -712,7 +712,7 @@ func TestAnUnobservedSampleChangesNothingItDidNotSee(t *testing.T) {
 		source.Completion["le_120s"] != 1 || source.UnobservedRatio < 0.9 {
 		t.Fatalf("samples %v completion %v unobserved ratio %v", source.Samples, source.Completion, source.UnobservedRatio)
 	}
-	if stats.PermitRefusals["waiters"] == 0 || stats.Faults[FaultPermitLimit] != 0 {
+	if stats.PermitRefusals["waiters"] == 0 || stats.Faults[FaultYieldOverdue] != 0 {
 		t.Fatalf("refusals %v faults %v", stats.PermitRefusals, stats.Faults)
 	}
 	// A failed read and a partial one leave their samples unobserved too.
@@ -743,8 +743,9 @@ func TestAnUnobservedSampleChangesNothingItDidNotSee(t *testing.T) {
 		source.Rechecks[RungNames[1]][RecheckPartial] != 1 {
 		t.Fatalf("samples %v rechecks %v", source.Samples, source.Rechecks[RungNames[1]])
 	}
-	// An unnamed refusal is other; one at the lookback's own share, a fault.
-	for _, refused := range []string{"unnamed", "lookback_limit"} {
+	// An unnamed refusal is other, a named one by its name; neither is a
+	// fault, only no room now.
+	for _, refused := range []string{"unnamed", "full"} {
 		f.set(func() { f.refuse = refused })
 		slot := f.clock.now().Unix()
 		f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
@@ -753,7 +754,7 @@ func TestAnUnobservedSampleChangesNothingItDidNotSee(t *testing.T) {
 		f.engine.Forget("qg")
 	}
 	stats = f.engine.Stats()
-	if stats.PermitRefusals[RefusedOther] != 1 || stats.PermitRefusals["lookback_limit"] != 1 || stats.Faults[FaultPermitLimit] != 1 {
+	if stats.PermitRefusals[RefusedOther] != 1 || stats.PermitRefusals["full"] != 1 || stats.Faults[FaultYieldOverdue] != 0 {
 		t.Fatalf("refusals %v faults %v", stats.PermitRefusals, stats.Faults)
 	}
 }
@@ -962,6 +963,9 @@ type windowed struct {
 	late   time.Duration
 	window int64
 	specs  []execution.PhysicalQuerySpec
+	// probeFirst probes each group's first sample, as the fixture does;
+	// left false the engine runs as it does in a process.
+	probeFirst bool
 }
 
 func (w *windowed) points(spec execution.PhysicalQuerySpec) map[int64]string {
@@ -992,7 +996,7 @@ func (w *windowed) read(_ context.Context, spec execution.PhysicalQuerySpec, sin
 
 func (w *windowed) engine(t *testing.T) *Engine {
 	t.Helper()
-	engine, err := New(Options{Now: w.clock.now, Recheck: w.read, UnspreadFirstSamples: true,
+	engine, err := New(Options{Now: w.clock.now, Recheck: w.read, UnspreadFirstSamples: true, ProbeFirstSamples: w.probeFirst,
 		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
 		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
 	if err != nil {
@@ -1067,7 +1071,7 @@ func (w *windowed) run(t *testing.T, engine *Engine, span time.Duration, facts e
 // rung and at the deep recheck alike; the buckets outside the tail are not
 // read as vanished.
 func TestARecheckReadsAndComparesOnlyTheTail(t *testing.T) {
-	w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60}
+	w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60, probeFirst: true}
 	engine := w.engine(t)
 	w.run(t, engine, 24*time.Hour, facts(t, minute, "", execution.QueryClause{TimeAggregation: execution.QueryFunction{Method: "avg_over_time", Window: "60s"}}))
 	w.mu.Lock()
@@ -1159,7 +1163,11 @@ func TestATailReadStartsEarlyByTheQuerysLookback(t *testing.T) {
 // its group reads over a window shorter than the delay - empty at each of
 // them - is found by the deep recheck: that sample is probe_changed, and the
 // next reads every rung and settles. A window empty at its first read whose
-// data arrived later is counted as such.
+// data arrived later is counted as such. The engine runs as it does in a
+// process: a group's first sample is not probed, its second is, so data
+// later than every rung over a short window reads as a first read that
+// stayed empty once - the first sample's, before any deep recheck - and no
+// more.
 func TestAConstantLatenessIsFollowedToWhereItStops(t *testing.T) {
 	for _, window := range []time.Duration{time.Hour, 5 * minute} {
 		for _, steps := range []float64{1.8, 3, 3.75, 5, 6, 10, 20, 40} {
@@ -1203,8 +1211,12 @@ func TestAConstantLatenessIsFollowedToWhereItStops(t *testing.T) {
 			for _, n := range source.EmptyFirstReadCompletion {
 				arrived += n
 			}
+			stayed := uint64(0)
+			if window == 5*minute && steps >= 10 {
+				stayed = 1
+			}
 			if empty := window == 5*minute && steps >= 6; empty != (source.EmptyFirstReads[EmptyArrived] > 0) ||
-				arrived != source.EmptyFirstReads[EmptyArrived] || source.EmptyFirstReads[EmptyStayedEmpty] != 0 {
+				arrived != source.EmptyFirstReads[EmptyArrived] || source.EmptyFirstReads[EmptyStayedEmpty] != stayed {
 				t.Fatalf("%s: empty first reads %v, completion %v", name, source.EmptyFirstReads, source.EmptyFirstReadCompletion)
 			}
 		}
