@@ -74,12 +74,10 @@ type Line struct {
 	// does not show yet, so the room stays detection's until then; and what
 	// detection gives back before the next one is still in the live heap
 	// that collection measured, so it is not detection's room a second
-	// time. stale is a budget reserved since: the next reading takes the
-	// reserve again.
+	// time. A budget reserved since adds its own room to it.
 	cycle    uint64
 	granted  uint64
 	reserved uint64
-	stale    bool
 
 	// refused and admitted are by consumer, in the order of Consumers.
 	refused  []atomic.Uint64
@@ -161,7 +159,10 @@ func (line *Line) Reserve(reserve Reserve) {
 	}
 	line.mu.Lock()
 	line.reserves = append(line.reserves, reserve)
-	line.stale = true
+	// Its own room only: taking every budget's room again would drop what
+	// the others took since the collection, which is in neither the live
+	// heap it measured nor their room now.
+	line.reserved = saturatingAdd(line.reserved, reserve())
 	line.mu.Unlock()
 }
 
@@ -205,11 +206,7 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 // whose bytes its live heap holds.
 func (line *Line) reservedLocked(cycle uint64) uint64 {
 	if cycle != line.cycle {
-		line.cycle, line.granted = cycle, 0
-		line.stale = true
-	}
-	if line.stale {
-		line.reserved, line.stale = line.unusedLocked(), false
+		line.cycle, line.granted, line.reserved = cycle, 0, line.unusedLocked()
 	}
 	return line.reserved
 }

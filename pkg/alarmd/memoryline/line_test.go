@@ -103,10 +103,13 @@ func TestWhatDetectionGivesBackIsNotItsRoomTwice(t *testing.T) {
 	if reading := line.Read(); reading.HeadroomBytes != 0 || reading.ReservedBytes != 400 {
 		t.Fatalf("after the next collection = %+v, want 1000-600-400", reading)
 	}
-	// A budget reserved since is room at once.
+	// A budget reserved since is room at once, its own: what the others took
+	// since the collection stays counted in their room as the collection
+	// left it.
+	unused = 100
 	line.Reserve(func() uint64 { return 50 })
 	if reading := line.Read(); reading.ReservedBytes != 450 {
-		t.Fatalf("reserved = %d, want the new budget's 50 beside the 400", reading.ReservedBytes)
+		t.Fatalf("reserved = %d, want the new budget's 50 beside the 400 the collection left", reading.ReservedBytes)
 	}
 }
 
