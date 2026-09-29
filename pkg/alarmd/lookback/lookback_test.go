@@ -1578,21 +1578,31 @@ func TestAnEmptyFirstReadOrAVanishedSeriesIsAWindowReadEarly(t *testing.T) {
 	}
 }
 
-// The series table grows as the memory line admits it, a step of
-// seriesAdmitStep series at a time, and has no bound of its own: a read of
-// one series more than a step asks twice, for a step's bytes each time.
-func TestASeriesTableAsksTheMemoryLineAStepAtATime(t *testing.T) {
+// The series table grows as the memory line admits it, asking first for
+// seriesAdmitFirst series and then for as many again as it holds, and has
+// no bound of its own: what it was admitted is never more than twice what
+// it uses, and a table of n series asks about log2(n/64) times.
+func TestASeriesTableAsksTheMemoryLineForAsMuchAgainAsItHolds(t *testing.T) {
 	f := newFixture(t)
 	var asks []uint64
 	f.engine.options.Memory = func(bytes uint64) bool { asks = append(asks, bytes); return true }
 	slot := f.clock.now().Unix()
 	read := f.engine.Begin(query("qg", slot, minute, sourceLog))
-	for index := 0; index <= seriesAdmitStep; index++ {
+	const series = 4097
+	for index := 0; index < series; index++ {
 		read.Series(dataset(fmt.Sprintf("h%d", index), map[int64]string{slot - 60: "1"}), 1)
 	}
-	if len(asks) != 2 || asks[0] != seriesAdmitStep*seriesEntryBytes || asks[1] != asks[0] ||
-		len(read.summary.series) != seriesAdmitStep+1 || read.summary.seriesRefused {
-		t.Fatalf("asks %v series %d refused %v", asks, len(read.summary.series), read.summary.seriesRefused)
+	var admitted uint64
+	for index, bytes := range asks {
+		if want := uint64(seriesAdmitFirst) * seriesEntryBytes * max(1, uint64(1)<<max(index-1, 0)); bytes != want {
+			t.Fatalf("ask %d for %d bytes, want %d: asks %v", index, bytes, want, asks)
+		}
+		admitted += bytes
+	}
+	// 64, 64, 128 ... 4096: eight asks, 8192 series admitted for 4097 used.
+	if len(asks) != 8 || admitted != 8192*seriesEntryBytes || admitted > 2*series*seriesEntryBytes ||
+		len(read.summary.series) != series {
+		t.Fatalf("asks %v admitted %d series %d", asks, admitted, len(read.summary.series))
 	}
 }
 
@@ -1685,6 +1695,8 @@ func TestARecheckRefusedItsSeriesTableIsClassedByTheOtherRungs(t *testing.T) {
 // rungs have classed it, and the deep recheck reads buckets only.
 func TestASampleWaitingForItsDeepRecheckKeepsNoSeries(t *testing.T) {
 	f := newFixture(t)
+	var asks atomic.Int32
+	f.engine.options.Memory = func(uint64) bool { asks.Add(1); return true }
 	slot := f.clock.now().Unix()
 	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
 	readAt := f.clock.now()
@@ -1696,10 +1708,12 @@ func TestASampleWaitingForItsDeepRecheckKeepsNoSeries(t *testing.T) {
 	if probe == nil || kept {
 		t.Fatalf("probe %v keeps first-read series %v", probe != nil, kept)
 	}
-	// A clean deep recheck leaves the sample complete as its rungs classed it.
+	// A clean deep recheck leaves the sample complete as its rungs classed it,
+	// and builds no series table: the first read and the one rung asked the
+	// memory line, the deep recheck did not.
 	stats := f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(point(slot, "1")), RecheckCompared)
-	if source := stats.Sources[sourceLog]; source.Classes[ClassComplete] != 1 || source.Classes[ClassSeriesLate] != 0 {
-		t.Fatalf("classes %v, want the probed sample complete", source.Classes)
+	if source := stats.Sources[sourceLog]; source.Classes[ClassComplete] != 1 || source.Classes[ClassSeriesLate] != 0 || asks.Load() != 2 {
+		t.Fatalf("classes %v asks %d, want the probed sample complete on two asks", source.Classes, asks.Load())
 	}
 }
 
