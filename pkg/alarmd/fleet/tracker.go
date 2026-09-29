@@ -404,6 +404,8 @@ type queryGroupState struct {
 	// causeReason is the cause's own reason, which is where the answer to
 	// "whose problem is this" actually lives.
 	causeReason string
+	// causeScope is where that cause was found (CauseScope).
+	causeScope *CauseScope
 	// coverage is the evidence behind causeReason when that reason is about
 	// the detection window. It is kept beside the reason and cleared with it,
 	// because a shortfall left over from an earlier round would be read as
@@ -1446,6 +1448,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.reasonCode = completion
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
+		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run
@@ -1731,6 +1734,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.cooldownExposed = false
 	state.cause = ""
 	state.causeReason = ""
+	state.causeScope = nil
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0
@@ -1906,7 +1910,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		QueryCooldown: state.queryCooldown,
 		DemotedSince:  state.demotedSince,
 		Kind:          state.currentKind,
-		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
+		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,
 		Since:            state.runStartedAt,
