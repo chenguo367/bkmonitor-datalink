@@ -458,10 +458,13 @@ func (engine *Engine) advanceLocked(state *group, candidate *sample, now time.Ti
 // read if none did. The source then needs one rung past its last change, a
 // guard showing nothing more arrived: more at once when a sample needed
 // more, one fewer only after cleanSamplesToShallow samples in a row needed
-// fewer. A Query Group rests before its next sample: the deepest rung's
-// length after any change, doubling while nothing changes, up to
-// maxRestSteps - so the rechecks follow the lateness there is - and spread
-// around that by the Query Group (restSpread).
+// fewer. A Query Group rests before its next sample: only the new deepest
+// rung's length when its source just deepened - lateness it had not shown,
+// to be learned quickly - and otherwise twice its last rest, up to
+// maxRestSteps, however late the data is, as long as it is late as before.
+// So a source is rechecked as deep as its lateness goes and, once that
+// holds, about as rarely as a punctual one. Each Query Group's rest is
+// spread around its source's (restSpread).
 func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Time) {
 	state.sample = nil
 	source := engine.sources[candidate.source]
@@ -479,18 +482,16 @@ func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Tim
 	switch {
 	case need > source.depth:
 		source.depth, source.clean = need, 0
+		source.rest = RungSteps[source.depth-1]
 	case need < source.depth:
 		source.clean++
 		if source.clean >= cleanSamplesToShallow {
 			source.depth, source.clean = source.depth-1, 0
 		}
+		source.rest = min(source.rest*2, maxRestSteps)
 	default:
 		source.clean = 0
-	}
-	if candidate.lastChange < 0 {
 		source.rest = min(source.rest*2, maxRestSteps)
-	} else {
-		source.rest = RungSteps[source.depth-1]
 	}
 	state.nextAt = now.Add(time.Duration(source.rest * restSpread(candidate.queryGroup) * float64(state.step)))
 }

@@ -638,3 +638,34 @@ func TestQueryGroupsRestSpreadAroundTheirSourcesRest(t *testing.T) {
 		t.Fatalf("spreads mean %v from %v to %v, want about 1 over most of the range", mean, low, high)
 	}
 }
+
+// A source late by the same rungs every time reads that deep, and rests like
+// a punctual one once that holds: only the sample that deepened it brings
+// its Query Groups back sooner. The rechecks follow how deep the lateness
+// goes, not how often it is seen again.
+func TestAStablyLateSourceRestsUpToSixtyFourStepsAtItsDepth(t *testing.T) {
+	f := newFixture(t)
+	rests := []float64{}
+	for sample := 0; sample < 7; sample++ {
+		f.capture(query("qg", f.clock.now().Unix(), minute, sourceLog), dataset("h1", steady))
+		readAt := f.clock.now()
+		completed := f.engine.Stats().Sources[sourceLog].Samples[OutcomeCompleted]
+		stats := f.engine.Stats()
+		// Every sample: the data changes by the first rung and not after it.
+		for rung := 0; stats.Sources[sourceLog].Samples[OutcomeCompleted] == completed; rung++ {
+			stats = f.recheck(sourceLog, readAt, rung, minute, full(dataset("h1", map[int64]string{1_700_000_040: fmt.Sprint(100 + sample)})), RecheckCompared)
+		}
+		source := stats.Sources[sourceLog]
+		if source.Depth != 2 {
+			t.Fatalf("sample %d: depth %d, want 2 - one past the first rung", sample, source.Depth)
+		}
+		rests = append(rests, source.RestSteps)
+		f.clock.set(f.clock.now().Add(time.Duration(source.RestSteps * restSpread("qg") * float64(minute))))
+	}
+	want := []float64{3.5, 7, 14, 28, 56, 64, 64}
+	for index := range want {
+		if rests[index] != want[index] {
+			t.Fatalf("rests %v, want %v", rests, want)
+		}
+	}
+}
