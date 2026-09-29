@@ -134,11 +134,17 @@ func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarl
 		readings := engine.ReadEarly()
 		facts := make(map[string]fleet.ReadEarlyFacts, len(readings))
 		for _, reading := range readings {
-			// The samples stay on this replica's lookback.get: the row rides
-			// on every snapshot, and the values are all it needs.
-			facts[string(reading.QueryGroup)] = fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
+			// The samples ride with the values: the suggestion and what it
+			// rests on are one read, bounded by the fleet's row.
+			row := fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
 				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
 				Since: reading.Since}
+			for _, sample := range reading.Samples {
+				row.Samples = append(row.Samples, fleet.ReadEarlySample{EvaluationTime: int64(sample.EvaluationTime),
+					FirstReadAgeSeconds: sample.FirstReadAgeSeconds, CompletionAgeSeconds: sample.CompletionAgeSeconds,
+					Rung: sample.Rung, ChangedAgeSeconds: sample.ChangedAgeSeconds, Buckets: sample.Buckets})
+			}
+			facts[string(reading.QueryGroup)] = row
 		}
 		return facts
 	}
