@@ -39,6 +39,7 @@ func NativeOperations(handler http.Handler) []Operation {
 				}
 				if id == "strategy.get" {
 					strategyNext(&out, p, result)
+					strategyGuardWarming(&out, result)
 				}
 				if id == "object.get" {
 					objectSlotNext(&out, p, result)
@@ -51,6 +52,15 @@ func NativeOperations(handler http.Handler) []Operation {
 							out.Summary += "；"
 						}
 						out.Summary += clearing.Line
+					}
+					if anomaly, ok := resultAnomaly(result["anomaly"]); ok {
+						if warming := fleet.GuardWarmingOf(anomaly); warming != nil {
+							result["guard_warming"] = warming
+							if out.Summary != "" {
+								out.Summary += "；"
+							}
+							out.Summary += warming.Line
+						}
 					}
 				}
 				if id == "strategy.list" {
@@ -220,19 +230,61 @@ func objectExtentLine(result map[string]any) string {
 // first fact as the fleet API returned it. Nil when the fact does not say
 // so or lacks the windows or the interval to compute it from.
 func objectWindowClears(result map[string]any) *fleet.WindowClearing {
-	raw, ok := result["anomaly"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var anomaly fleet.Anomaly
-	if json.Unmarshal(encoded, &anomaly) != nil || anomaly.Standing == nil {
+	anomaly, ok := resultAnomaly(result["anomaly"])
+	if !ok || anomaly.Standing == nil {
 		return nil
 	}
 	return fleet.WindowClearsOf(anomaly, *anomaly.Standing)
+}
+
+// resultAnomaly is a fact row of a fleet answer back in its own type, for
+// the computations the fleet package owns; false when it is not one.
+func resultAnomaly(raw any) (fleet.Anomaly, bool) {
+	fields, ok := raw.(map[string]any)
+	if !ok {
+		return fleet.Anomaly{}, false
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return fleet.Anomaly{}, false
+	}
+	var anomaly fleet.Anomaly
+	if json.Unmarshal(encoded, &anomaly) != nil {
+		return fleet.Anomaly{}, false
+	}
+	return anomaly, true
+}
+
+// strategyGuardWarming puts the guard reading on every plan row whose round
+// was filed under GAP_GUARD_WARMING, and says in the summary how many there
+// are and what the guard withholds: the word alone read as a strategy
+// nothing evaluates.
+func strategyGuardWarming(out *Outcome, result map[string]any) {
+	warming := 0
+	plans, _ := result["plans"].([]any)
+	for _, entry := range plans {
+		plan, _ := entry.(map[string]any)
+		rows, _ := plan["rows"].([]any)
+		for _, rawRow := range rows {
+			row, _ := rawRow.(map[string]any)
+			anomaly, ok := resultAnomaly(row)
+			if !ok {
+				continue
+			}
+			if reading := fleet.GuardWarmingOf(anomaly); reading != nil {
+				row["guard_warming"] = reading
+				warming++
+			}
+		}
+	}
+	if warming == 0 {
+		return
+	}
+	if out.Summary != "" {
+		out.Summary += "；"
+	}
+	out.Summary += fmt.Sprintf("%d 个运行对象处于 GAP_GUARD_WARMING：守卫只挡 NORMAL，ABNORMAL 和 RECOVERY 照常判；"+
+		"缺的分钟归谁见各行 guard_warming", warming)
 }
 
 func numberField(m map[string]any, key string) (int64, bool) {
