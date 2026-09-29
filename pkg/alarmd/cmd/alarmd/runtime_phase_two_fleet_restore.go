@@ -15,30 +15,41 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
-// progressRestoreSource reads what the control plane already recorded about an
-// object, so a replica that just started does not have to watch a fresh round
-// before it can say anything.
+// progressRestoreSource reads what the control plane already recorded about
+// objects, so a replica that just started does not have to watch a fresh
+// round before it can say anything.
 //
-// It reads the same Progress the scheduler reads, one object at a time and only
-// for objects this replica owns and either has not yet determined or has
+// It reads the same Progress the scheduler reads, in one batched read, and
+// only for objects this replica owns and either has not yet determined or has
 // determined without ever seeing records (fleet.Tracker.WantsRestore). The
-// publisher bounds how many it asks for per tick.
-func progressRestoreSource(store *progress.Store) func(context.Context, execution.QueryGroupIdentity) (fleet.RestoredState, error) {
+// publisher bounds how many it asks for per tick, and each record is admitted
+// by the observation memory line before it is read: the answer covers the
+// ones admitted, in order, and the rest are the next publish's. An object
+// whose record is missing restores nothing and is not an error; one whose
+// record could not be read or decoded is an error of its own, in its place.
+func progressRestoreSource(store progressBatchLoader, admit func(uint64) bool) func(context.Context, []execution.QueryGroupIdentity) (
+	[]fleet.RestoredState, []error) {
 	if store == nil {
 		return nil
 	}
-	return func(ctx context.Context, queryGroup execution.QueryGroupIdentity) (fleet.RestoredState, error) {
-		result, err := store.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: queryGroup})
-		if err != nil {
-			return fleet.RestoredState{}, err
+	return func(ctx context.Context, queryGroups []execution.QueryGroupIdentity) ([]fleet.RestoredState, []error) {
+		identities := make([]execution.ProgressIdentity, 0, len(queryGroups))
+		for _, queryGroup := range queryGroups {
+			identities = append(identities, execution.ProgressIdentity{QueryGroup: queryGroup})
 		}
-		if result.Progress == nil {
-			return fleet.RestoredState{}, nil
+		results, errs, read := store.LoadProgressWithin(ctx, identities, admit)
+		states := make([]fleet.RestoredState, read)
+		for index := 0; index < read; index++ {
+			// The error decides: a record that decoded and did not validate
+			// comes with its error, and restores nothing.
+			if errs[index] == nil && results[index].Progress != nil {
+				states[index] = restoredStateOf(*results[index].Progress)
+			}
 		}
-		return restoredStateOf(*result.Progress), nil
+		return states, errs[:read]
 	}
 }
 
@@ -99,29 +110,32 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 	return round
 }
 
-// fleetRestoreBudgetPerPublish is how many objects one publish may read back.
+// fleetRestoreBudgetPerPublish is how many objects one publish may ask to
+// read back: one pipeline of a batched control read (ownership.ControlReadBatch),
+// of which each record is read only once the observation memory line admits
+// its length (progressRestoreSource).
 //
 // It is a rate, not a cap: every owned object is eventually restored, just
 // spread across publishes rather than read in one burst at the moment the
 // process is least settled.
 //
 // What it guards is the publish itself. restoreOwned runs inline before the
-// snapshot is built and reads one Progress record per object, one round trip
-// each, so the budget bounds what a publish waits on to 128 round trips --
-// tens of milliseconds at in-cluster latency, against a publish interval of
-// seconds -- and a restarting replica's reads on the control-plane store to
-// 128 per interval.
+// snapshot is built, and its read is two round trips -- the records' lengths,
+// then the records the line admitted -- and a restarting replica's reads on
+// the control-plane store to this many per interval. The bytes are the
+// line's to bound: a record is typically about a kilobyte, so a batch is
+// about half a megabyte, but one carrying an unfinished range may be a
+// megabyte, and a batch of those is read as far as the line has room.
 //
-// What it costs is time to a complete view after a start: ceil(wanted/128)
-// publishes, wanted being the owned objects not yet determined plus those
-// determined without records (fleet.Tracker.WantsRestore). At the default
-// 5 s interval that is about 30 to 40 s for the 700 to 900 a replica wants
-// on the deployments this has run on, and it grows linearly: 20,000 would
-// take about 13 minutes, past RestartCatchUpGrace. Reading in batches the way
-// the diagnosis path does (LoadProgressBatch, one pipeline of many GETs) is
-// what removes that linear term; the budget would then be a byte budget per
-// publish rather than a count.
-const fleetRestoreBudgetPerPublish = 128
+// What it costs is time to a complete view after a start: ceil(wanted/512)
+// publishes while the line has room, wanted being the owned objects not yet
+// determined plus those determined without records (fleet.Tracker.WantsRestore).
+// At the default 5 s interval that is one or two publishes for the 700 to 900
+// a replica wants on the deployments this has run on, and about three minutes
+// for 20,000, within RestartCatchUpGrace; slower when the line refuses. A
+// record-at-a-time read of 128 per publish took about 13 minutes for the same
+// 20,000.
+const fleetRestoreBudgetPerPublish = ownership.ControlReadBatch
 
 // A failed read may be retried on later publishes, within the shared read budget.
 // Stop after three attempts per ownership tenure rather than polling forever.

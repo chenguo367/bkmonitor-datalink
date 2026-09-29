@@ -133,15 +133,20 @@ type ProgressFacts struct {
 
 // ProgressReader reads the persisted progress of the given objects in
 // bounded reads. An object with no record is absent from both maps; an object
-// whose own read failed is in failed; a read that failed as a whole is the
-// error, and every object's progress is then unknown.
-type ProgressReader func(ctx context.Context, queryGroups []string) (found map[string]ProgressFacts, failed map[string]bool, err error)
+// whose progress is unknown for a reason of its own is in unread under that
+// reason -- its own read failed (ProgressReadFailed), or it was not read this
+// time (ProgressDeferred); a read that failed as a whole is the error, and
+// every object's progress is then unknown.
+type ProgressReader func(ctx context.Context, queryGroups []string) (found map[string]ProgressFacts, unread map[string]string, err error)
 
 // The reasons a Plan's progress is unknown, closed.
 const (
 	ProgressUnreadable = "PROGRESS_UNREADABLE"
 	ProgressReadFailed = "PROGRESS_READ_FAILED"
 	ProgressNotFound   = "PROGRESS_NOT_FOUND"
+	// ProgressDeferred is an object whose record was not read for this page:
+	// the observation memory line had no room for it. Asked again, it may be.
+	ProgressDeferred = "PROGRESS_DEFERRED"
 )
 
 // diagnosisContext is what every row of one page is decided against.
@@ -306,7 +311,7 @@ func WindowClearsOf(anomaly Anomaly, words Standing) *WindowClearing {
 // leaves every Plan's progress unknown with the read's reason; an object
 // the read did not find is unknown on its own. Progress never changes a
 // verdict: it says when, not whether.
-func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, failed map[string]bool, unknown string) {
+func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, unread map[string]string, unknown string) {
 	for i := range rows {
 		for j := range rows[i].Plans {
 			plan := &rows[i].Plans[j]
@@ -314,8 +319,8 @@ func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, faile
 				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: unknown})
 				continue
 			}
-			if failed[plan.QueryGroup] {
-				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: ProgressReadFailed})
+			if reason, known := unread[plan.QueryGroup]; known {
+				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: reason})
 				continue
 			}
 			facts, found := progress[plan.QueryGroup]

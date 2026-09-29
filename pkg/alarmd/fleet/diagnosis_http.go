@@ -63,10 +63,15 @@ type DiagnosisResponse struct {
 	// Verdicts and UnknownReasons are the closed lists, on every page.
 	Verdicts       []StateWord `json:"verdicts"`
 	UnknownReasons []string    `json:"unknown_reasons"`
-	// Progress is read, not_wired, or unavailable: whether the Plans'
-	// persisted progress could be read for this page.
-	Progress        string          `json:"progress"`
-	UniverseChanged *UniverseChange `json:"universe_changed,omitempty"`
+	// Progress is read, partial, not_wired, or unavailable: whether the
+	// Plans' persisted progress could be read for this page. partial is some
+	// objects' records left unread because the observation memory line had
+	// no room for them: ProgressDeferred of the ProgressObjects the page
+	// asked about, each under PROGRESS_DEFERRED on its row.
+	Progress         string          `json:"progress"`
+	ProgressObjects  int             `json:"progress_objects,omitempty"`
+	ProgressDeferred int             `json:"progress_deferred,omitempty"`
+	UniverseChanged  *UniverseChange `json:"universe_changed,omitempty"`
 	// SnapshotReread says a later page read the universe and the view
 	// again, because the first page's had expired or the answering
 	// process changed.
@@ -418,14 +423,23 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		body.Timing.RowsMillis = time.Since(started).Milliseconds()
 		if progress != nil {
 			started = time.Now()
-			found, failed, err := progress(request.Context(), pageQueryGroups(page.Rows))
+			objects := pageQueryGroups(page.Rows)
+			found, unread, err := progress(request.Context(), objects)
 			body.Timing.ProgressMillis = millisOf(time.Since(started))
 			if err != nil {
 				body.Progress = "unavailable"
 				applyProgress(page.Rows, nil, nil, ProgressUnreadable)
 			} else {
 				body.Progress = "read"
-				applyProgress(page.Rows, found, failed, "")
+				for _, reason := range unread {
+					if reason == ProgressDeferred {
+						body.ProgressDeferred++
+					}
+				}
+				if body.ProgressDeferred > 0 {
+					body.Progress, body.ProgressObjects = "partial", len(objects)
+				}
+				applyProgress(page.Rows, found, unread, "")
 			}
 		}
 		body.Strategies, body.Page = page.Rows, page
