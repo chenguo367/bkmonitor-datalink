@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -388,12 +389,18 @@ func borrowedLegacyDetect(first legacyDetect) legacyDetect {
 // for a decoder's sentence, not for a document.
 const dispositionDetailMaxBytes = 256
 
-// dispositionDetail bounds a refusal's text for the audit.
+// dispositionDetail bounds a refusal's text for the audit, on a rune
+// boundary: the text can quote a document written in any language, and a
+// cut through a character would reach the reader as a replacement mark.
 func dispositionDetail(text string) string {
 	if len(text) <= dispositionDetailMaxBytes {
 		return text
 	}
-	return text[:dispositionDetailMaxBytes]
+	cut := dispositionDetailMaxBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 type ObjectDisposition struct {
@@ -649,7 +656,14 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			if len(candidate.dispositions) > 0 {
 				catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)
 			} else {
-				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"})
+				// The word is the catch-all's; the text is what went wrong. A
+				// strategy refused as PLAN_INVALID alone had to be compiled again
+				// offline to learn that its expression was empty. The text is
+				// deterministic for one document - the candidate cache returns
+				// the same error for it every round - so it cannot keep a
+				// pending candidate from confirming.
+				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN",
+					Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID", Detail: dispositionDetail(err.Error())})
 			}
 			if shouldRetainLastGood(candidate.dispositions) {
 				retained, retainErr := retainLastGood(source.SourceID)
@@ -2109,7 +2123,8 @@ func compilePlan(
 				break
 			}
 			if err := validateCanonicalAlgorithmQuery(raw.Type, item.QueryConfigs); err != nil {
-				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "ALGORITHM_QUERY_INVALID"})
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "ALGORITHM_QUERY_INVALID",
+					Detail: dispositionDetail(err.Error())})
 				invalid = true
 				break
 			}
@@ -2119,7 +2134,8 @@ func compilePlan(
 				if raw.Type == strategy.DetectorKindThreshold {
 					reason = "THRESHOLD_CONFIG_INVALID"
 				}
-				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: reason})
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: reason,
+					Detail: dispositionDetail(err.Error())})
 				invalid = true
 				break
 			}
@@ -2146,7 +2162,12 @@ func compilePlan(
 		}
 		recoveryConfig, recoveryEnabled, err := decodeLegacyRecovery(detect.Recovery)
 		if err != nil || (recoveryEnabled && recoveryConfig.CheckWindow == 0) {
-			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID"})
+			detail := "recovery_config.check_window is 0"
+			if err != nil {
+				detail = dispositionDetail(err.Error())
+			}
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID",
+				Detail: detail})
 			continue
 		}
 		triggerFields := map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": interval, "window_size": detect.Trigger.CheckWindow}
