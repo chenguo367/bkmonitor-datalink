@@ -47,13 +47,17 @@ func TestAWindowShortOnlyBeforeThisProcessWaits(t *testing.T) {
 		row  Anomaly
 		wait bool
 	}{
-		"every hole before this process":               {row(CheckWindowUndecided, 1, false, false, before), true},
-		"before this process beside answered holes":    {row(CheckWindowUndecided, 2, false, false, mixed, answered), true},
-		"series data missing, before this process":     {row(CheckSeriesDataMissing, 1, false, false, before), true},
-		"one minute not seen whole":                    {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, InputIncomplete: 1})), false},
-		"one minute forgotten":                         {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, NotInMemory: 1})), false},
-		"one answer not recorded":                      {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, PrimaryUnrecorded: 1})), false},
-		"an unusable point":                            {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, Unusable: 1})), false},
+		"every hole before this process":            {row(CheckWindowUndecided, 1, false, false, before), true},
+		"before this process beside answered holes": {row(CheckWindowUndecided, 2, false, false, mixed, answered), true},
+		"series data missing, before this process":  {row(CheckSeriesDataMissing, 1, false, false, before), true},
+		"one minute not seen whole":                 {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, InputIncomplete: 1})), false},
+		"one minute forgotten":                      {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, NotInMemory: 1})), false},
+		"one answer not recorded":                   {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, PrimaryUnrecorded: 1})), false},
+		"an unusable point":                         {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 2, Unusable: 1})), false},
+		"one unusable point, one minute before":     {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 1, Unusable: 1})), false},
+		// As many unusable points as holes of another cause: counting the
+		// unusable among the answered would square the sum and wait.
+		"an unusable point beside a forgotten minute":  {row(CheckWindowUndecided, 1, false, false, window(WindowHoleCounts{BeforeThisProcess: 1, NotInMemory: 1, Unusable: 1})), false},
 		"nothing before this process":                  {row(CheckWindowUndecided, 1, false, false, answered), false},
 		"unnamed windows before this process":          {row(CheckWindowUndecided, 10, false, true, answered), true},
 		"unnamed windows answered, a named one before": {row(CheckWindowUndecided, 10, true, false, before), true},
@@ -123,6 +127,40 @@ func TestTheUnnamedMinutesBeforeThisProcessAreToldApart(t *testing.T) {
 		if tc.want && unlistedHolesAnswered(rounds, tc.facts) {
 			t.Errorf("%s: read as both answered and before this process", name)
 		}
+	}
+	// The first round's own minute, once it has rolled out of the ring, was
+	// seen and forgotten: not before this process.
+	if unlistedHolesBeforeThisProcess(rounds[1:], facts(300, 540), 540) {
+		t.Fatal("the first remembered round's own minute, forgotten, was read as before this process")
+	}
+}
+
+// Every cause windowRows files a hole under is in the closed list the page
+// checks its words against: one of each, each named in HoleCauses.
+func TestEveryCauseAHoleIsFiledUnderIsListed(t *testing.T) {
+	rounds := []roundMark{
+		{slot: 600, end: 540, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
+		{slot: 660, end: 600, kind: "FULL_EMPTY_COMPLETED", primary: primary("FULL", "EMPTY")},
+		{slot: 720, end: 660, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("PARTIAL", "DATA")},
+		{slot: 780, end: 720, kind: "FULL_COMPLETED"},
+		{slot: 900, end: 840, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
+	}
+	rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, End: 840,
+		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 1, Required: 9, End: 840,
+			Missing: []int64{300, 540, 600, 660, 720, 780}, MissingTotal: 6, Unusable: []int64{840}, UnusableTotal: 1}}}, 540)
+	listed := map[HoleCause]bool{}
+	for _, cause := range HoleCauses {
+		listed[cause] = true
+	}
+	seen := map[HoleCause]bool{}
+	for _, hole := range rows[0].Holes {
+		if !listed[hole.Cause] {
+			t.Errorf("hole at %v filed under %s, which HoleCauses does not list", hole.At, hole.Cause)
+		}
+		seen[hole.Cause] = true
+	}
+	if len(seen) != len(HoleCauses) {
+		t.Fatalf("causes filed %v, want one of each of the %d listed", seen, len(HoleCauses))
 	}
 }
 
