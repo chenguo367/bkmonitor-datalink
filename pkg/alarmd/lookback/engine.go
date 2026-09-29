@@ -329,12 +329,13 @@ type sample struct {
 	// delaySeconds the query's effective time_delay.
 	first        map[uint64]seriesSummary
 	delaySeconds int64
-	// existingChanged is set once a rung read a series of the first read
-	// with other points or values, or without it; early is that rung.
-	// seriesAdded is set once a rung read a series the first read did not
-	// have, at rung seriesAddedRung. seriesUnknown is set once a rung
-	// changed and its series could not be compared, one side's table having
-	// been refused.
+	// existingChanged is whether the latest rung whose series were compared
+	// read a series of the first read with other points or values, or
+	// without it; early is the rung that change was first seen at.
+	// seriesAdded is whether that rung read a series the first read did not
+	// have, first seen at rung seriesAddedRung. seriesUnknown is set once a
+	// rung changed and its series could not be compared, one side's table
+	// having been refused.
 	existingChanged bool
 	early           *ReadEarlySample
 	seriesAdded     bool
@@ -832,13 +833,13 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	var read readSummary
 	var series seriesChange
 	var buckets []int64
-	seriesUnknown := false
+	seriesUnknown, seriesCompared := false, false
 	if outcome == RecheckCompared {
 		read = trimSummary(sink.summary.buckets, candidate.keptFrom)
 		changes = compareSummaries(candidate.last, read)
 		switch {
 		case candidate.first != nil && sink.summary.series != nil:
-			series = compareSeries(candidate.first, sink.summary.series)
+			series, seriesCompared = compareSeries(candidate.first, sink.summary.series), true
 		case len(changes) > 0 && !candidate.probing:
 			seriesUnknown = true
 		}
@@ -862,16 +863,28 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	// A rung compared covers any rung before it that was not read: it is
 	// compared with the last read kept, not with the rung it follows.
 	candidate.unread = outcome != RecheckCompared
-	if series.existingChanged > 0 && !candidate.existingChanged {
-		candidate.existingChanged = true
-		candidate.early = &ReadEarlySample{Rung: rung, ChangedAgeSeconds: int64(age / time.Second), Buckets: buckets}
+	// The series stand as this rung read them against the first read, not as
+	// any rung once did: a value that changed and came back was judged as it
+	// stands, and a series that came and went was not late. The rung a
+	// change was first seen at is kept while the change holds.
+	if seriesCompared {
+		switch {
+		case series.existingChanged > 0 && !candidate.existingChanged:
+			candidate.existingChanged = true
+			candidate.early = &ReadEarlySample{Rung: rung, ChangedAgeSeconds: int64(age / time.Second), Buckets: buckets}
+		case series.existingChanged == 0 && candidate.existingChanged:
+			candidate.existingChanged, candidate.early = false, nil
+		}
+		switch {
+		case series.added > 0 && !candidate.seriesAdded:
+			candidate.seriesAdded, candidate.seriesAddedRung = true, candidate.rung
+		case series.added == 0:
+			candidate.seriesAdded = false
+		}
 	}
 	if candidate.emptyFirstRead && len(changes) > 0 && candidate.early == nil {
 		// Nothing was there to change: the rung the data first came at.
 		candidate.early = &ReadEarlySample{Rung: rung, ChangedAgeSeconds: int64(age / time.Second), Buckets: buckets}
-	}
-	if series.added > 0 && !candidate.seriesAdded {
-		candidate.seriesAdded, candidate.seriesAddedRung = true, candidate.rung
 	}
 	if len(changes) > 0 {
 		engine.counts.changed[key2(candidate.source, rung)]++
