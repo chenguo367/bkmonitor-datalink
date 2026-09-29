@@ -603,10 +603,23 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			UptimeSeconds: 300, StartedAt: at.Add(-5 * time.Minute), Ours: 5, External: 26, Truncated: true},
 	}
 	lastExit := at.Add(-2 * time.Minute)
+	// The first screen's count of strategies as /api/diagnose?summary=1 sends
+	// it: eleven strategies made up into six Query Groups, and the same
+	// response with its universe unreadable.
+	six := 6
+	strategyCount := fleet.DiagnosisSummaryResponse{Universe: fleet.DiagnosisUniverse{Status: "ok", Count: 11},
+		Summary: fleet.DiagnosisSummary{Strategies: 11, QueryGroups: &six, ByVerdict: map[fleet.StateWord]int{
+			fleet.StateResultUntrusted: 6, fleet.StateDetecting: 4, fleet.StateDataAbsent: 1}},
+		Verdicts: fleet.DiagnosisVerdicts(), Words: fleet.ProductWords()}
+	strategyCountUnread := strategyCount
+	strategyCountUnread.Universe = fleet.DiagnosisUniverse{Status: "unreadable", Reason: "SOURCE_UNREADABLE"}
+	strategyCountUnread.Summary = fleet.DiagnosisSummary{ByVerdict: map[fleet.StateWord]int{}}
 	fixture := map[string]any{
-		"anomalies": rows,
-		"checks":    checks,
-		"todo":      todo,
+		"strategy_count":        strategyCount,
+		"strategy_count_unread": strategyCountUnread,
+		"anomalies":             rows,
+		"checks":                checks,
+		"todo":                  todo,
 		"summary": fleet.Summary{
 			ByKind:   fleet.Distribution{Top: []fleet.Count{{Value: "DEGRADED_RUN", Count: 7}}, Distinct: 1},
 			ByReason: fleet.Distribution{Top: []fleet.Count{{Value: "COMPLETED_WITH_UNAVAILABLE", Count: 7}}, Distinct: 1},
@@ -821,6 +834,22 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// The one line on the page that answers "what is affected". A reader who
 	// gets no answer here has to assemble it out of five object counts, which is
 	// what they were doing.
+	// Two denominators, each in its own unit, and the strategies by the
+	// words the server sent in its order: never the grid's groups as the
+	// strategies' count, read or unread.
+	if line := lineStarting(text, "STRATEGIES ::"); !strings.Contains(line, "11 条策略，合成 6 个查询组") {
+		t.Errorf("strategy count = %q, want eleven strategies made up into six Query Groups", line)
+	}
+	if line := lineStarting(text, "STRATEGY STATES ::"); !strings.Contains(line, "按策略的状态：在检测 4 · 检测结果不能采信 6 · 数据没到 1") ||
+		strings.Contains(line, "状态未知") {
+		t.Errorf("strategy states = %q, want the three non-zero words in the server's order and nothing else", line)
+	}
+	for _, prefix := range []string{"STRATEGIES UNREAD ::", "STRATEGIES REFUSED ::"} {
+		line := lineStarting(text, prefix)
+		if !strings.Contains(line, "策略条数读不到") || !strings.Contains(line, "不是策略数") || strings.ContainsAny(line, "0123456789") {
+			t.Errorf("%s %q, want the count said unreadable with no number in its place", prefix, line)
+		}
+	}
 	impactLine := lineStarting(text, "IMPACT ::")
 	if impactLine == "" {
 		t.Error("the impact line rendered nothing: the page answers how many objects and never " +
@@ -1607,6 +1636,7 @@ try {
 const calls = [
   ['objectRow (every row shape)', () => data.anomalies.forEach(r => ctx.objectRow(r))],
   ['renderDeployment', () => ctx.renderDeployment(data.health)],
+  ['renderStrategyCount', () => ctx.renderStrategyCount(data.strategy_count, '')],
   ['renderChecks', () => { ctx.latestTodo = data.todo; ctx.renderChecks(data.checks); }],
   ['renderReplicas', () => ctx.renderReplicas(data.per_replica)],
   ['renderCoverage', () => ctx.renderCoverage(data.coverage)],
@@ -1630,6 +1660,15 @@ console.log('UNATTR gap :: ' + (store['unattributedHint'] ? store['unattributedH
 console.log('WHY gap :: ' + (store['why'] ? store['why'].textContent : '(not rendered)'));
 console.log('PARKED :: ' + (store['overdueHint'] ? store['overdueHint'].textContent : '(not rendered)'));
 console.log('PRUNED :: ' + (store['prunedSkips'] ? store['prunedSkips'].textContent : '(not rendered)'));
+
+// The two denominators and the strategies by state, then the same line with
+// the count unreadable: it says so and borrows nothing from the grid.
+console.log('STRATEGIES :: ' + textOf(store['strategyCount']));
+console.log('STRATEGY STATES :: ' + textOf(store['strategyVerdicts']));
+ctx.renderStrategyCount(data.strategy_count_unread, '');
+console.log('STRATEGIES UNREAD :: ' + textOf(store['strategyCount']) + ' | ' + textOf(store['strategyVerdicts']));
+ctx.renderStrategyCount(null, 'LEADER_UNAVAILABLE');
+console.log('STRATEGIES REFUSED :: ' + textOf(store['strategyCount']));
 
 // The first screen and the fold under it, as rendered.
 console.log('CHECKS :: ' + textOf(store['checkRows']));

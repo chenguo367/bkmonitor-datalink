@@ -79,6 +79,65 @@ type DiagnosisResponse struct {
 	Warmed *DiagnosisWarm `json:"warmed,omitempty"`
 }
 
+// DiagnosisSummary is the whole universe's count by verdict, from the rows a
+// diagnosis writes, with no row sent: what the page's first screen says of
+// the strategies. Strategies is the universe's size and ByVerdict sums to
+// it, as the pages of one diagnosis sum; QueryGroups is how many Query
+// Groups the deployment expects, from the view the rows were decided
+// against - the page's other denominator, a different unit that is never
+// the strategies' count - and nil where that view had no expectation.
+type DiagnosisSummary struct {
+	Strategies  int               `json:"strategies"`
+	ByVerdict   map[StateWord]int `json:"by_verdict"`
+	QueryGroups *int              `json:"query_groups"`
+}
+
+// DiagnosisSummaryResponse is GET /api/diagnose?summary=1: the summary and
+// the words it is rendered by, which travel with it for the reason they
+// travel with the strategy list (StrategyListResponse.Words).
+type DiagnosisSummaryResponse struct {
+	Diagnosis  string            `json:"diagnosis_id"`
+	AnsweredBy string            `json:"answered_by"`
+	Universe   DiagnosisUniverse `json:"universe"`
+	Summary    DiagnosisSummary  `json:"summary"`
+	Verdicts   []StateWord       `json:"verdicts"`
+	Words      Words             `json:"words"`
+	Timing     DiagnosisTiming   `json:"timing_ms"`
+}
+
+// DiagnosisSummaryFreshFor is how long one first-screen count answers every
+// page that asks. Each count reads every replica's snapshot and decides a
+// row for every strategy - on one deployment about 2.4 MB of snapshots and
+// three-quarters of a second - and a page asks on each refresh, so without
+// it every open page would pay that on every refresh; with it the leader
+// pays it once in this long however many pages are open. A count that could
+// not be read is not kept.
+const DiagnosisSummaryFreshFor = 30 * time.Second
+
+// summaryCache is the one count kept, and when it was read.
+type summaryCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	body *DiagnosisSummaryResponse
+}
+
+// summarizeDiagnosis counts every id of the universe by the verdict its row
+// takes, the row being the one a page writes for it.
+func summarizeDiagnosis(universe []string, view *View, row func(string) DiagnosisRow) DiagnosisSummary {
+	summary := DiagnosisSummary{Strategies: len(universe), ByVerdict: map[StateWord]int{}}
+	for _, word := range DiagnosisVerdicts() {
+		summary.ByVerdict[word] = 0
+	}
+	for _, id := range universe {
+		summary.ByVerdict[row(id).Verdict]++
+	}
+	if view != nil && view.Expected != nil {
+		expected := *view.Expected
+		summary.QueryGroups = &expected
+	}
+	return summary
+}
+
 type diagnosisEntry struct {
 	id        string
 	universe  []string
@@ -209,6 +268,9 @@ const ForwardFailed = "FORWARD_FAILED"
 // answered where the catalog is: a process without one forwards the page to
 // the Leader once, the way a strategy's standing is forwarded, so every
 // page of one diagnosis is decided against one catalog and one cache.
+// GET /api/diagnose?summary=1 is a diagnosis of its own whose answer is the
+// universe counted by verdict instead of its pages, for the page's first
+// screen: the same rows, read the same way, summed where they are decided.
 func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFunc, forward LeaderForward,
 	universe UniverseReader, progress ProgressReader, replica string, now func() time.Time, stallAfter time.Duration,
 	warmer *DiagnosisWarmer) http.Handler {
@@ -216,6 +278,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		now = time.Now
 	}
 	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	counted := &summaryCache{}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/diagnose" {
 			next.ServeHTTP(response, request)
@@ -226,6 +289,12 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			return
 		}
 		query := request.URL.Query()
+		summaryOnly := query.Get("summary") != ""
+		if summaryOnly && (query.Get("summary") != "1" || query.Has("cursor") || query.Has("limit")) {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_SUMMARY",
+				"detail": "summary=1 takes no cursor or limit: it counts the whole universe"})
+			return
+		}
 		var cursor DiagnosisCursor
 		if raw := query.Get("cursor"); raw != "" {
 			parsed, ok := ParseDiagnosisCursor(raw)
@@ -261,9 +330,43 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			// LOOKUP_UNAVAILABLE and the universe is still counted.
 		}
 		at := now()
-		entry, fresh := cache.get(request.Context(), cursor.Diagnosis, at, func(ctx context.Context) *diagnosisEntry {
-			return readDiagnosisEntry(ctx, service, universe, at, stallAfter)
-		})
+		// held is the count's lock while this request reads for it; it is
+		// given back before any answer is written, so a slow reader of one
+		// answer holds no other page behind it.
+		held := false
+		release := func() {
+			if held {
+				held = false
+				counted.mu.Unlock()
+			}
+		}
+		defer release()
+		if summaryOnly {
+			// One count at a time, and the last one answers while it is
+			// fresh: pages asking together wait for one read, not one each.
+			counted.mu.Lock()
+			held = true
+			if last := counted.body; last != nil && at.Sub(counted.at) < DiagnosisSummaryFreshFor {
+				release()
+				writeJSON(response, http.StatusOK, last)
+				return
+			}
+		}
+		var entry *diagnosisEntry
+		fresh := true
+		if summaryOnly {
+			// Read for this answer alone and kept out of the diagnoses'
+			// cache: a page asks on every refresh, and each ask kept there
+			// would push out a diagnosis somebody is paging through.
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), DiagnosisReadTimeout)
+			entry = readDiagnosisEntry(readCtx, service, universe, at, stallAfter)
+			cancel()
+			entry.id = newDiagnosisID()
+		} else {
+			entry, fresh = cache.get(request.Context(), cursor.Diagnosis, at, func(ctx context.Context) *diagnosisEntry {
+				return readDiagnosisEntry(ctx, service, universe, at, stallAfter)
+			})
+		}
 		body := DiagnosisResponse{Diagnosis: entry.id, AnsweredBy: replica, Strategies: []DiagnosisRow{},
 			Verdicts: DiagnosisVerdicts(), UnknownReasons: append([]string(nil), DiagnosisUnknownReasons...),
 			SnapshotReread: fresh && cursor.Diagnosis != "", Progress: "not_wired", Warmed: warmer.Last()}
@@ -278,6 +381,16 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		body.Universe.Publication = lookup("0").Publication
 		if entry.readError != "" {
 			body.Universe.Status, body.Universe.Reason = "unreadable", entry.readError
+			if summaryOnly {
+				// No population, no count: the reason is the answer, and the
+				// page says the strategies could not be counted rather than
+				// that there are none.
+				release()
+				writeJSON(response, http.StatusOK, DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica,
+					Universe: body.Universe, Summary: DiagnosisSummary{ByVerdict: map[StateWord]int{}},
+					Verdicts: body.Verdicts, Words: ProductWords(), Timing: body.Timing})
+				return
+			}
 			body.Page = DiagnosisPage{ByVerdict: map[StateWord]int{}, Holds: false}
 			writeJSON(response, http.StatusOK, body)
 			return
@@ -287,6 +400,18 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		}
 		ctx := newDiagnosisContext(entry.view, replica, at)
 		started := time.Now()
+		if summaryOnly {
+			summary := DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica, Universe: body.Universe,
+				Verdicts: body.Verdicts, Words: ProductWords(), Timing: body.Timing}
+			summary.Summary = summarizeDiagnosis(entry.universe, entry.view, func(id string) DiagnosisRow {
+				return diagnoseStrategy(id, lookup(id), ctx)
+			})
+			summary.Timing.RowsMillis = time.Since(started).Milliseconds()
+			counted.at, counted.body = at, &summary
+			release()
+			writeJSON(response, http.StatusOK, summary)
+			return
+		}
 		page := buildDiagnosisPage(entry.universe, cursor.After, limit, func(id string) DiagnosisRow {
 			return diagnoseStrategy(id, lookup(id), ctx)
 		})
