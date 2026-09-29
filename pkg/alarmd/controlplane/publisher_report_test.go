@@ -154,6 +154,35 @@ func TestLegacySourceKeepsThePublisherRecordWhenTheActiveSetIsRefused(t *testing
 	}
 }
 
+// A publisher that never backfilled - every fresh deployment - writes no
+// backfill key at all. Its record is the publisher's own account like any
+// other, not a record alarmd cannot read.
+func TestLegacySourceReadsAPublisherRecordWithoutABackfill(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	record := `{"schema_version":1,"writer":"example-strategy-publisher","version":"5.3.0","written_at":1700000000,` +
+		`"outcome":"published","reason":"","strategies":45,"rejected":0,"generation":1}`
+	for key, value := range map[string]string{"bkmonitor.cache.strategy_ids": "[1]", "bkmonitor.cache.publisher": record} {
+		if err := client.Set(ctx, key, value, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, err := controlplane.NewLegacyRedisStrategySource(client, "bkmonitor.cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.ActiveStrategyIDs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	report, read := source.PublisherReport()
+	if !read || report.State != controlplane.PublisherReportProvided || report.Detail != "" {
+		t.Fatalf("a record without a backfill = state %q detail %q (read %v)", report.State, report.Detail, read)
+	}
+	if report.Backfill != nil || report.Outcome != "published" || deref(report.Strategies) != 45 || deref(report.Generation) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 func TestLegacySourceSaysThePublisherLeftNoRecordRatherThanFailing(t *testing.T) {
 	client := newControlplaneRedis(t)
 	ctx := context.Background()
