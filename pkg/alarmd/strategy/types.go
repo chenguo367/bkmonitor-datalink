@@ -94,6 +94,14 @@ type Terminal struct {
 	LevelID    uint32
 	ReasonCode string
 	FieldPath  string
+	// Detail is what the check that refused said, when the refusal came from
+	// an error: which key a strict decode met, which value a parse could not
+	// read. The code and the path say where; this says what, and without it a
+	// level refused as LEVEL_INVALID at level.trigger_plan had to be compiled
+	// again offline to learn a key was one the decoder does not know. Empty
+	// for a refusal decided without an error. Unbounded here; the catalog
+	// bounds it where it becomes a disposition.
+	Detail string
 }
 
 type CompileResult struct {
