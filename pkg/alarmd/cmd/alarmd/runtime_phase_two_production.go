@@ -2671,6 +2671,26 @@ type observedProductionSlotSource struct {
 	observer observability.Observer
 }
 
+// FreezeSupplement is the wrapped source's, for a supplement of a completed
+// Slot.
+func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime) (scheduler.FrozenSlot, error) {
+	next, ok := source.next.(scheduler.SupplementSlotSource)
+	if !ok {
+		return scheduler.FrozenSlot{}, scheduler.ErrSupplementUnsupported
+	}
+	return next.FreezeSupplement(ctx, at)
+}
+
+// Supplement runs a supplement of one of this Query Group's completed Slots
+// on its Runner; see scheduler.Runner.Supplement.
+func (runtime *productionPhaseTwoQueryGroup) Supplement(
+	ctx context.Context,
+	at execution.EvaluationTime,
+	scope execution.SupplementScope,
+) (execution.SupplementFacts, error) {
+	return runtime.runner.Supplement(ctx, at, scope)
+}
+
 func (source observedProductionSlotSource) RangeCreationEnabled() bool {
 	next, ok := source.next.(interface{ RangeCreationEnabled() bool })
 	return ok && next.RangeCreationEnabled()

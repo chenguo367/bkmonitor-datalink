@@ -286,6 +286,7 @@ const (
 	OperationRetry              = "retry"
 	OperationReplay             = "replay"
 	OperationProbe              = "probe"
+	OperationSupplement         = "supplement"
 	OperationOther              = "_other"
 
 	DirectionInput    Direction = "input"
@@ -3575,7 +3576,7 @@ var metricOperations = []Operation{
 	OperationSample, OperationTransition, OperationOther,
 }
 
-var phaseTwoOperations = []Operation{OperationNormal, OperationRetry, OperationReplay, OperationProbe}
+var phaseTwoOperations = []Operation{OperationNormal, OperationRetry, OperationReplay, OperationProbe, OperationSupplement}
 var allOperations = append(append([]Operation(nil), metricOperations...), phaseTwoOperations...)
 
 var allDirections = []Direction{DirectionInput, DirectionOutput, DirectionInternal, DirectionOther}

@@ -32,6 +32,15 @@ type counters struct {
 	classes    map[string]uint64 // source|class: completed samples by what their rungs found
 	// source|reason: unclassified samples by why their series are not known.
 	unclassified map[string]uint64
+	// The directed reads: source|outcome their Slots by what they came to,
+	// source|reason the unobserved ones by why, source|outcome the series
+	// outcomes of the supplements that ran, and per source the points those
+	// were evaluated on and the bytes the directed reads delivered.
+	directedWindows    map[string]uint64
+	directedUnobserved map[string]uint64
+	supplementSeries   map[string]uint64
+	supplementPoints   map[string]uint64
+	directedBytes      map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -54,6 +63,8 @@ func newCounters(sources, refusals []string) counters {
 	c := counters{firstReads: map[string]uint64{}, samples: map[string]uint64{}, rechecks: map[string]uint64{},
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
 		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, unclassified: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
+		directedWindows: map[string]uint64{}, directedUnobserved: map[string]uint64{}, supplementSeries: map[string]uint64{},
+		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -83,6 +94,16 @@ func newCounters(sources, refusals []string) counters {
 		for _, reason := range UnclassifiedReasons {
 			c.unclassified[key2(source, reason)] = 0
 		}
+		for _, outcome := range DirectedOutcomes {
+			c.directedWindows[key2(source, outcome)] = 0
+		}
+		for _, reason := range DirectedUnobservedReasons {
+			c.directedUnobserved[key2(source, reason)] = 0
+		}
+		for _, outcome := range SupplementSeriesOutcomes {
+			c.supplementSeries[key2(source, outcome)] = 0
+		}
+		c.supplementPoints[source], c.directedBytes[source] = 0, 0
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
@@ -133,6 +154,9 @@ type Stats struct {
 	// reads has been whole, the most incomplete reads first, at most
 	// maxLatest; Coverage.NeverCompleteFirstRead counts them all.
 	NeverCompleteFirstRead []NeverCompleteGroup `json:"never_complete_first_read"`
+	// Supplements is the owned Query Groups read directed for their late
+	// series, or that were, the least covered first, at most maxLatest.
+	Supplements []SupplementReading `json:"supplements"`
 }
 
 // Coverage is how many of the Query Groups this process owns have a
@@ -199,6 +223,16 @@ type SourceStats struct {
 	Unclassified     map[string]uint64 `json:"unclassified"`
 	ReadEarlyGroups  int               `json:"read_early_groups"`
 	SeriesLateGroups int               `json:"series_late_groups"`
+	// The directed reads of its series_late Query Groups: their Slots by
+	// outcome (DirectedOutcomes) and the unobserved ones by why, the series
+	// outcomes of the supplements that ran and the points those were
+	// evaluated on, and the bytes the directed reads delivered - a Slot's
+	// frozen query each, so read against FirstReadBytes over FirstReads.
+	SupplementWindows    map[string]uint64 `json:"supplement_windows"`
+	SupplementUnobserved map[string]uint64 `json:"supplement_unobserved"`
+	SupplementSeries     map[string]uint64 `json:"supplement_series"`
+	SupplementPoints     uint64            `json:"supplement_points"`
+	DirectedReadBytes    uint64            `json:"directed_read_bytes"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -247,7 +281,8 @@ type GroupLateness struct {
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
 	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{},
-		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{}}
+		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{},
+		Supplements: []SupplementReading{}}
 	if engine == nil {
 		return stats
 	}
@@ -258,6 +293,7 @@ func (engine *Engine) Stats() Stats {
 		lateness      *GroupLateness
 		readEarly     *ReadEarlyReading
 		neverComplete *NeverCompleteGroup
+		supplement    *SupplementReading
 	}
 	type groupSums struct {
 		groups     int
@@ -306,6 +342,14 @@ func (engine *Engine) Stats() Stats {
 			entry.neverComplete = &NeverCompleteGroup{QueryGroup: queryGroup, Source: state.source,
 				IncompleteFirstReads: state.incompleteFirstReads}
 		}
+		if reading, directed := supplementReading(queryGroup, state); directed {
+			entry.supplement = &reading
+		}
+		for _, slot := range state.directed {
+			for _, captured := range slot.queries {
+				stats.PendingBytes += len(captured.first.set) * seriesSetEntryBytes
+			}
+		}
 		if state.measured {
 			entry.lateness = &GroupLateness{QueryGroup: queryGroup, Source: state.source,
 				CompletionSeconds: int64(state.completion / time.Second), StepSeconds: int64(state.step / time.Second),
@@ -328,7 +372,9 @@ func (engine *Engine) Stats() Stats {
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
 			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{},
 			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{},
-			Classes: map[string]uint64{}, Unclassified: map[string]uint64{}}
+			Classes: map[string]uint64{}, Unclassified: map[string]uint64{},
+			SupplementWindows: map[string]uint64{}, SupplementUnobserved: map[string]uint64{}, SupplementSeries: map[string]uint64{},
+			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source]}
 		for _, depth := range DepthLabels {
 			entry.DepthGroups[depth] = 0
 		}
@@ -345,6 +391,15 @@ func (engine *Engine) Stats() Stats {
 		}
 		for _, reason := range UnclassifiedReasons {
 			entry.Unclassified[reason] = engine.counts.unclassified[key2(source, reason)]
+		}
+		for _, outcome := range DirectedOutcomes {
+			entry.SupplementWindows[outcome] = engine.counts.directedWindows[key2(source, outcome)]
+		}
+		for _, reason := range DirectedUnobservedReasons {
+			entry.SupplementUnobserved[reason] = engine.counts.directedUnobserved[key2(source, reason)]
+		}
+		for _, outcome := range SupplementSeriesOutcomes {
+			entry.SupplementSeries[outcome] = engine.counts.supplementSeries[key2(source, outcome)]
 		}
 		for _, outcome := range SampleOutcomes {
 			entry.Samples[outcome] = engine.counts.samples[key2(source, outcome)]
@@ -404,6 +459,18 @@ func (engine *Engine) Stats() Stats {
 		if entry.readEarly != nil {
 			stats.ReadEarly = append(stats.ReadEarly, *entry.readEarly)
 		}
+		if entry.supplement != nil {
+			stats.Supplements = append(stats.Supplements, *entry.supplement)
+		}
+	}
+	sort.Slice(stats.Supplements, func(i, j int) bool {
+		if stats.Supplements[i].Coverage != stats.Supplements[j].Coverage {
+			return stats.Supplements[i].Coverage < stats.Supplements[j].Coverage
+		}
+		return stats.Supplements[i].QueryGroup < stats.Supplements[j].QueryGroup
+	})
+	if len(stats.Supplements) > maxLatest {
+		stats.Supplements = stats.Supplements[:maxLatest]
 	}
 	sort.Slice(stats.ReadEarly, func(i, j int) bool {
 		left := stats.ReadEarly[i].SuggestedDelaySeconds - stats.ReadEarly[i].CurrentDelaySeconds

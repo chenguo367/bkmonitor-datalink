@@ -94,11 +94,15 @@ const (
 	OperationRetry  Operation = "retry"
 	OperationReplay Operation = "replay"
 	OperationProbe  Operation = "probe"
+	// OperationSupplement evaluates, for a Slot already completed, the series
+	// its own read did not have and a later read of the same frozen query
+	// did. See SupplementScope.
+	OperationSupplement Operation = "supplement"
 )
 
 func (operation Operation) Validate() error {
 	switch operation {
-	case OperationNormal, OperationRetry, OperationReplay, OperationProbe:
+	case OperationNormal, OperationRetry, OperationReplay, OperationProbe, OperationSupplement:
 		return nil
 	default:
 		return fmt.Errorf("alarmd execution: unsupported operation %q", operation)
@@ -169,6 +173,9 @@ type SlotExecutionRequest struct {
 	// for a Segment written before Segments named their content, in which
 	// case the fence compares what it always compared and nothing more.
 	ContentScope string
+	// Supplement is set exactly when Operation is OperationSupplement: the
+	// series this execution may evaluate. See SupplementScope.
+	Supplement *SupplementScope
 }
 
 func (request SlotExecutionRequest) Validate() error {
@@ -190,6 +197,17 @@ func (request SlotExecutionRequest) Validate() error {
 	}
 	if err := request.Operation.Validate(); err != nil {
 		return err
+	}
+	if (request.Operation == OperationSupplement) != (request.Supplement != nil) {
+		return errors.New("alarmd execution: a supplement scope goes with the supplement operation and only with it")
+	}
+	if request.Supplement != nil {
+		if err := request.Supplement.Validate(); err != nil {
+			return err
+		}
+		if request.ExpiredRange != nil {
+			return errors.New("alarmd execution: a supplement is of one Slot, not of an expired range")
+		}
 	}
 	if request.AttemptNo == 0 {
 		return errors.New("alarmd execution: positive Slot attempt number is required")
@@ -4722,6 +4740,9 @@ type SlotExecutionResult struct {
 	// person to add a field would find an invariant that no longer holds
 	// without being told which field broke it.
 	Timing SlotTiming
+	// Supplement is what a supplement execution did with each series it was
+	// given; nil for every other operation.
+	Supplement *SupplementFacts
 }
 
 // SlotTiming is where one Slot's wall clock went, in milliseconds.
