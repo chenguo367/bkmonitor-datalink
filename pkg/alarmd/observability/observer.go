@@ -113,6 +113,7 @@ const (
 	StageSlotSourceCompleted    = "slot_source_completed"
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
 	StageReplayExpired          = "replay_expired"
+	StageReplayTakeover         = "replay_takeover"
 	StageRangeDistanceExpired   = "range_distance_expired"
 	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
@@ -1256,6 +1257,27 @@ var ReplayExpiryReasons = []string{
 	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
 }
 
+// ReplayTakeoverFacts is one Slot that was due before this process took its
+// Query Group over from another owner (scheduler.TakeoverClock): replayed,
+// because nobody here could have run it and it is within the replay age, or
+// past the replay age and given up on like any Slot that old. The distance
+// rule does not apply to it. TakeoverOffsetSeconds is how long after the
+// takeover the Slot was classified.
+type ReplayTakeoverFacts struct {
+	Outcome               string
+	AgeSeconds            float64
+	TakeoverOffsetSeconds float64
+}
+
+// The outcomes of a Slot due before a takeover, closed.
+const (
+	ReplayTakeoverReplayed    = "replayed"
+	ReplayTakeoverAgeExceeded = "age_exceeded"
+)
+
+// ReplayTakeoverOutcomes is every outcome, for the metric to pre-create.
+var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeExceeded}
+
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for
 // one publication. Written counts objects the operation created, Present
@@ -2368,6 +2390,7 @@ type Observation struct {
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
+	ReplayTakeover        *ReplayTakeoverFacts
 	// HeldBy is what the round before this one did with the Query Group. It
 	// sits on the Observation rather than inside one cohort's fact bundle:
 	// it first shipped inside ShortPeriodCompletionFacts, and every Query
@@ -3502,6 +3525,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageDispatchTurnaway},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
+	{ComponentScheduler, StageReplayTakeover},
 	{ComponentScheduler, StageRangeDistanceExpired},
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},

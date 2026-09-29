@@ -98,6 +98,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverDuration        *prometheus.HistogramVec
 	scheduleCutovers               *prometheus.CounterVec
 	replayExpiries                 *prometheus.CounterVec
+	replayTakeovers                *prometheus.CounterVec
 	rangeGateDecisions             *prometheus.CounterVec
 	statePreflights                *prometheus.CounterVec
 	stateAdmissions                *prometheus.CounterVec
@@ -913,6 +914,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"reason"})
 	for _, reason := range observability.ReplayExpiryReasons {
 		metrics.replayExpiries.WithLabelValues(reason)
+	}
+	metrics.replayTakeovers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_takeover_slots_total",
+		Help: "Slots due before this process took their Query Group over from another owner, by outcome: " +
+			"replayed, because nobody here could have run them and they are within the replay age; " +
+			"age_exceeded, given up on like any Slot that old. The distance rule, which gives up on Slots a " +
+			"Query Group fell behind on while it held them, does not apply to these. A rollout's handover " +
+			"is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero " +
+			"while a handover takes less than the replay age.",
+	}, []string{"outcome"})
+	for _, outcome := range observability.ReplayTakeoverOutcomes {
+		metrics.replayTakeovers.WithLabelValues(outcome)
 	}
 	// The word each round that gave up on a Slot puts on its range_gate line,
 	// as a series: the log had the thirteen words and the metric had none, so
@@ -1732,7 +1745,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
-		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
+		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1872,6 +1885,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
+	}
+	if facts := observation.ReplayTakeover; facts != nil {
+		m.replayTakeovers.WithLabelValues(facts.Outcome).Inc()
 	}
 	if facts := observation.RangeGate; facts != nil {
 		// The normalized word: an outcome outside the list has already been

@@ -209,9 +209,25 @@ type ProductionSlotSource struct {
 	snapshotRetention         time.Duration
 	publicationDelayAllowance time.Duration
 	observer                  observability.Observer
+	// takeovers is when this process took Query Groups over (TakeoverClock),
+	// shared by every source the process builds; nil keeps the distance rule
+	// on every Slot, as before.
+	takeovers *TakeoverClock
 }
 
 type ProductionSlotSourceOption func(*ProductionSlotSource) error
+
+// WithTakeoverClock lets the source tell a Slot due before this process took
+// its Query Group over -- replayed within the replay age -- from one the
+// Query Group fell behind on while held here, which the distance rule gives
+// up on to keep it current. One clock per process, shared by every source:
+// a Runner rebuilt here must find the moment its predecessor recorded.
+func WithTakeoverClock(clock *TakeoverClock) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		source.takeovers = clock
+		return nil
+	}
+}
 
 // WithObserver lets the source report the facts it acts on itself, such
 // as a cursor it advanced past a pruned range; without it those facts are
@@ -339,6 +355,11 @@ func (source *ProductionSlotSource) Next(
 	if err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
+	// The takeover is noted on the first round under a new owner epoch,
+	// whatever that round finds: noted only when a Slot first came up past
+	// its deadline, it would be the moment this owner first fell behind, and
+	// the Slots it fell behind on itself would read as due before it.
+	source.takeovers.Anchor(queryGroup, initialFence, at)
 	decision = "progress_load"
 	identity := execution.ProgressIdentity{QueryGroup: source.queryGroup}
 	load, err := source.progress.LoadProgress(ctx, identity)
@@ -505,7 +526,7 @@ func (source *ProductionSlotSource) Next(
 	if err := source.validateSnapshotRetention(fact.Contract.Slot.EvaluationTime, queryDeadline); err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
-	operation, recovery, err := source.classifyRecovery(ctx, fact.Contract.Slot.EvaluationTime, queryDeadline, at)
+	operation, recovery, err := source.classifyRecovery(ctx, fact.Contract.Slot.EvaluationTime, queryDeadline, at, initialFence)
 	if err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
@@ -715,7 +736,7 @@ func (source *ProductionSlotSource) slotFromProjection(
 	if err != nil || projection.KeepUntilUnixMilli <= recoveryUntil {
 		return FrozenSlot{}, false, &SourceBlockedError{Err: ErrSlotContractDrift}
 	}
-	operation, recovery, err := source.classifyRecovery(ctx, projection.Contract.Slot.EvaluationTime, projection.EarliestQueryDeadlineUnixMilli, at)
+	operation, recovery, err := source.classifyRecovery(ctx, projection.Contract.Slot.EvaluationTime, projection.EarliestQueryDeadlineUnixMilli, at, initialFence)
 	if err != nil {
 		return FrozenSlot{}, false, err
 	}
@@ -784,7 +805,7 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 	if err := source.validateSnapshotRetention(nextSlot, deadline); err != nil {
 		return FrozenSlot{}, false, err
 	}
-	operation, recovery, err := source.classifyRecovery(ctx, nextSlot, deadline, at)
+	operation, recovery, err := source.classifyRecovery(ctx, nextSlot, deadline, at, initialFence)
 	if err != nil {
 		return FrozenSlot{}, false, err
 	}
@@ -839,11 +860,20 @@ func (source *ProductionSlotSource) validateSnapshotRetention(
 	return nil
 }
 
+// classifyRecovery decides whether a Slot past its deadline is replayed or
+// given up on. Past the replay age every Slot is given up on. Inside it, a
+// Slot due before this process took the Query Group over (TakeoverClock,
+// under the owner fence this round holds) is replayed: nobody here could
+// have run it, and a rollout's handover made every short-period Query Group
+// of a restarted replica miss one or more. The distance rule is for the
+// Slots a Query Group fell behind on while held here, and gives the old
+// ones up so it stays current.
 func (source *ProductionSlotSource) classifyRecovery(
 	ctx context.Context,
 	evaluationTime execution.EvaluationTime,
 	deadline int64,
 	at time.Time,
+	fence execution.OwnerFence,
 ) (execution.Operation, SlotRecoveryFacts, error) {
 	if source.recovery == nil {
 		return execution.OperationNormal, SlotRecoveryFacts{}, nil
@@ -855,6 +885,8 @@ func (source *ProductionSlotSource) classifyRecovery(
 		return execution.OperationNormal, SlotRecoveryFacts{Disposition: ReplayLive, RecheckAtUnixMilli: deadline}, nil
 	}
 	age := at.Sub(time.UnixMilli(deadline))
+	takenOver := source.takeovers.Anchor(source.queryGroup, fence, at)
+	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver)
 	if age >= source.recovery.MaxReplayAge {
 		aged := SlotRecoveryFacts{
 			Disposition: ReplayExpired,
@@ -863,6 +895,9 @@ func (source *ProductionSlotSource) classifyRecovery(
 			Age:         age,
 		}
 		source.observeReplayExpiry(ctx, evaluationTime, aged)
+		if beforeTakeover {
+			source.observeReplayTakeover(ctx, evaluationTime, observability.ReplayTakeoverAgeExceeded, age, at.Sub(takenOver))
+		}
 		return execution.OperationNormal, aged, nil
 	}
 	distance, recheckAt, err := source.replayDistance(ctx, evaluationTime, at)
@@ -870,6 +905,10 @@ func (source *ProductionSlotSource) classifyRecovery(
 		return "", SlotRecoveryFacts{}, err
 	}
 	facts := SlotRecoveryFacts{Disposition: ReplayEligible, Distance: distance, Age: age, RecheckAtUnixMilli: recheckAt}
+	if beforeTakeover {
+		source.observeReplayTakeover(ctx, evaluationTime, observability.ReplayTakeoverReplayed, age, at.Sub(takenOver))
+		return execution.OperationReplay, facts, nil
+	}
 	// The contradiction is decided before the distance, and the order is the
 	// meaning. Both can be true of the same Slot, and they are not two ways of
 	// saying one thing: distance says the Query Group fell behind and the gap
@@ -928,6 +967,29 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 			// behind, and the four Query Groups that did this for hours were
 			// being held every round by something this line never named.
 			HeldBy: HeldByFromContext(ctx),
+		},
+	})
+}
+
+// observeReplayTakeover reports one Slot due before this process took its
+// Query Group over, and what became of it. Counted each time such a Slot is
+// classified: one replayed on its first attempt counts once.
+func (source *ProductionSlotSource) observeReplayTakeover(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	outcome string,
+	age, sinceTakeover time.Duration,
+) {
+	if source.observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	source.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageReplayTakeover,
+		Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
+		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+		ReplayTakeover: &observability.ReplayTakeoverFacts{
+			Outcome: outcome, AgeSeconds: age.Seconds(), TakeoverOffsetSeconds: sinceTakeover.Seconds(),
 		},
 	})
 }
