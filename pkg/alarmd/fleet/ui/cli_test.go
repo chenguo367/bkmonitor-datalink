@@ -242,7 +242,7 @@ func TestTheLoginPageShowsOneStepAtATimeAndFoldsTheRest(t *testing.T) {
 		return false
 	}
 	for container, ids := range map[string][]string{
-		"step-command":   {"listen-command", "copy-command", "command-status", "probe"},
+		"step-command":   {"listen-command", "copy-command", "command-status", "probe", "check-cli"},
 		"step-inspect":   {"admin-key", "inspect", "admin-key-help", "preview", "inspect-status"},
 		"step-authorize": {"authorize", "authorize-hint", "authorize-status"},
 		"manual":         {"fallback", "issue", "grant", "code", "copy", "issue-status"},
@@ -270,7 +270,7 @@ func TestTheLoginPageShowsOneStepAtATimeAndFoldsTheRest(t *testing.T) {
 		if node.Type == xhtml.ElementNode && node.Data == "details" && !hasAttribute(node, "open") {
 			folded = true
 		}
-		if node.Type == xhtml.ElementNode && node.Data == "button" && !folded {
+		if node.Type == xhtml.ElementNode && node.Data == "button" && !folded && !hasAttribute(node, "hidden") {
 			visible = append(visible, idOf(node))
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {

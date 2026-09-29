@@ -16,31 +16,17 @@ import (
 // before the button, the fallback to the server's own sentence, and the
 // answer when whatever replied was not alarmd.
 func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not on PATH, so the authorization page's script is NOT executed by this run -- " +
-			"only its source was read")
-	}
-	w := httptest.NewRecorder()
-	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "cli.html"), w.Body.Bytes(), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "run.js"), []byte(cliPageHarness), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	output, err := exec.Command(node, filepath.Join(dir, "run.js"), filepath.Join(dir, "cli.html")).CombinedOutput()
-	if err != nil {
-		t.Fatalf("the page's script failed: %v\n%s", err, output)
-	}
-	var runs map[string]cliPageRun
-	if err := json.Unmarshal(output, &runs); err != nil {
-		t.Fatalf("harness output: %v\n%s", err, output)
-	}
-	var loops map[string]json.RawMessage
-	_ = json.Unmarshal(output, &loops)
+	loops := runLoginPage(t)
 	checkLoopback(t, loops)
+	runs := map[string]cliPageRun{}
+	for name, raw := range loops {
+		var result cliPageRun
+		// Runs that are not a page's state, such as the way back's address,
+		// have no messages to count.
+		if json.Unmarshal(raw, &result) == nil {
+			runs[name] = result
+		}
+	}
 	run := func(name string) cliPageRun {
 		t.Helper()
 		result, ok := runs[name]
@@ -67,9 +53,13 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 		t.Errorf("the same origin spelled with :80 and upper case is still the entry: %+v", got)
 	}
 	got := run("other_origin")
-	if !got.IssueDisabled || !got.Error || !strings.Contains(got.Status, "http://192.0.2.10:8080") ||
+	if !got.Error || !strings.Contains(got.Status, "http://192.0.2.10:8080") ||
 		!strings.Contains(got.Status, entry+"cli") || got.Requests != 1 || got.At != "inspect-status" {
-		t.Errorf("opened from another origin, the page says where to open it and offers nothing to press: %+v", got)
+		t.Errorf("opened from another origin, the page says where to open it: %+v", got)
+	}
+	if got := run("other_origin_pressed"); !got.Error || !strings.Contains(got.Status, entry+"cli") || got.Requests != 1 ||
+		got.At != "inspect-status" {
+		t.Errorf("opened from another origin, generating says where to open the page and sends nothing: %+v", got)
 	}
 	if got := run("refused_after_preview"); !strings.Contains(got.Status, entry+"cli") || !got.Error || got.At != "issue-status" {
 		t.Errorf("a generation refused for its origin says the entry the preview named: %+v", got)
@@ -105,6 +95,116 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 	}
 }
 
+// Copying works on a page served over plain http, which has no clipboard:
+// through the copy command, and when the browser refuses that too, by
+// selecting the text so one key press copies it. The fallback buttons are
+// pressable before the environment is checked: pressed, they send the
+// operator to the check and bring them back to the button once it passed.
+// The way back leads to the first observability page.
+func TestTheAuthorizationPageCopiesAndLeadsToTheCheck(t *testing.T) {
+	raw := runLoginPage(t)
+	type copyRun struct {
+		Status   string `json:"status"`
+		Error    bool   `json:"error"`
+		At       string `json:"at"`
+		Copied   string `json:"copied"`
+		Command  string `json:"command"`
+		Selected string `json:"selected"`
+		Focused  string `json:"focused"`
+	}
+	read := func(name string, into any) {
+		t.Helper()
+		if err := json.Unmarshal(raw[name], into); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"copy_clipboard", "copy_command"} {
+		var got copyRun
+		read(name, &got)
+		if got.Error || got.Copied == "" || got.Copied != got.Command || !strings.Contains(got.Status, "已复制") || got.At != "command-status" {
+			t.Errorf("%s: the command is copied: %+v", name, got)
+		}
+	}
+	var refused copyRun
+	read("copy_refused", &refused)
+	if refused.Copied != "" || refused.Selected != "listen-command" || !strings.Contains(refused.Status, "已替你选中") || refused.Error {
+		t.Errorf("neither copy allowed, the command is selected for a key press: %+v", refused)
+	}
+	var code copyRun
+	read("copy_code_refused", &code)
+	if code.Selected != "code" || code.Focused != "code" || !strings.Contains(code.Status, "已替你选中") || code.At != "issue-status" {
+		t.Errorf("neither copy allowed, the code is selected for a key press: %+v", code)
+	}
+	for _, action := range []string{"issue", "revoke"} {
+		var got struct {
+			Enabled bool `json:"enabled"`
+			Sent    struct {
+				Status  string `json:"status"`
+				At      string `json:"at"`
+				Focused string `json:"focused"`
+				Steps   string `json:"steps"`
+				Posts   int    `json:"posts"`
+			} `json:"sent"`
+			Typed struct {
+				Focused string `json:"focused"`
+			} `json:"typed"`
+			Back struct {
+				Status  string `json:"status"`
+				At      string `json:"at"`
+				Focused string `json:"focused"`
+				Posts   int    `json:"posts"`
+			} `json:"back"`
+			Posts int `json:"posts"`
+		}
+		read("gate_"+action, &got)
+		if !got.Enabled || got.Sent.Posts != 0 || got.Sent.Focused != "admin-key" || got.Sent.At != "inspect-status" ||
+			!strings.Contains(got.Sent.Status, "核对环境") || !strings.HasPrefix(got.Sent.Steps, "later current") {
+			t.Errorf("%s pressed before the check leads to the check and sends nothing: %+v", action, got)
+		}
+		if got.Typed.Focused != "inspect" {
+			t.Errorf("%s pressed with the key typed leads to the check button: %+v", action, got.Typed)
+		}
+		if got.Back.Focused != action || got.Back.At != action+"-status" || !strings.Contains(got.Back.Status, "环境已核对") ||
+			got.Back.Posts != 0 || got.Posts != 1 {
+			t.Errorf("%s: once checked, back to the button, and pressed again it acts: %+v", action, got)
+		}
+	}
+	var back string
+	read("back", &back)
+	if back != "http://apps.example.test/alarmd/" {
+		t.Errorf("the way back leads to %q, not the first observability page", back)
+	}
+}
+
+// runLoginPage runs the authorization page's script against a stubbed
+// document and fetch, and returns every run's result by name.
+func runLoginPage(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH, so the authorization page's script is NOT executed by this run -- " +
+			"only its source was read")
+	}
+	w := httptest.NewRecorder()
+	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cli.html"), w.Body.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.js"), []byte(cliPageHarness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(node, filepath.Join(dir, "run.js"), filepath.Join(dir, "cli.html")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the page's script failed: %v\n%s", err, output)
+	}
+	var runs map[string]json.RawMessage
+	if err := json.Unmarshal(output, &runs); err != nil {
+		t.Fatalf("harness output: %v\n%s", err, output)
+	}
+	return runs
+}
+
 type cliPageRun struct {
 	Status        string `json:"status"`
 	Error         bool   `json:"error"`
@@ -121,20 +221,40 @@ const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const script = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'));
 
-function load(pageURL, respond, loop) {
+// env.clipboard false is a page over plain http, with no clipboard; then
+// env.copyCommand says whether the browser lets the copy command copy.
+function load(pageURL, respond, loop, env = { clipboard: true }) {
   const elements = {};
+  let focused = '', selected = '', copied = null;
+  // The page's own hidden state: only these elements start hidden.
+  const startsHidden = ['check-cli', 'grant'];
   const element = id => elements[id] || (elements[id] = {
-    id, textContent: '', value: '', disabled: false, hidden: false, className: '', href: '', listeners: {},
-    addEventListener(type, listener) { this.listeners[type] = listener; }, focus() {}, select() {},
+    id, textContent: '', value: '', disabled: false, hidden: startsHidden.includes(id), className: '', href: '', listeners: {},
+    addEventListener(type, listener) { this.listeners[type] = listener; }, focus() { focused = id; },
+    scrollIntoView() {},
+    // Only the text fields select themselves; the command blocks are selected
+    // through a range, as a <pre> is.
+    select: ['code', 'admin-key'].includes(id) ? () => { selected = id; } : undefined,
   });
   let requests = 0;
   const calls = [];
   const ticks = [];
+  let scratch;
+  const documentListeners = {};
   const context = {
-    document: { getElementById: element },
+    document: {
+      getElementById: element,
+      addEventListener(type, listener) { documentListeners[type] = listener; },
+      createElement: () => (scratch = { value: '', style: {}, setAttribute() {}, select() {}, remove() {} }),
+      body: { appendChild() {} },
+      execCommand: () => { if (!env.copyCommand) return false; copied = scratch.value; return true; },
+      createRange: () => ({ selectNodeContents(node) { this.node = node; } }),
+    },
+    getSelection: () => ({ removeAllRanges() {}, addRange(range) { selected = range.node.id; },
+      containsNode(node) { return node.id === selected; } }),
     location: new URL(pageURL),
     addEventListener() {},
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: env.clipboard ? { clipboard: { writeText: async text => { copied = text; } } } : {},
     crypto: require('crypto').webcrypto,
     btoa: s => Buffer.from(s, 'binary').toString('base64'),
     confirm: () => true,
@@ -152,7 +272,10 @@ function load(pageURL, respond, loop) {
     },
   };
   new Function(...Object.keys(context), script)(...Object.values(context));
-  return { elements, requests: () => requests, calls, tick: async () => { for (const fn of ticks) await fn(); } };
+  return { elements, requests: () => requests, calls, tick: async () => { for (const fn of ticks) await fn(); },
+    focused: () => focused, selected: () => selected, copied: () => copied,
+    // What an operator does by hand: select an element's text, and copy.
+    selectByHand: id => { selected = id; }, copyByHand: () => documentListeners.copy() };
 }
 
 const answer = (status, body) => ({ ok: status < 400, status, json: async () => body });
@@ -243,16 +366,93 @@ async function inspect(pageURL, respond, then) {
     ? answer(200, { state: commandState(url), code_challenge: challenge }) : answer(200, {}),
     () => answer(403, { status: 'error', error: { code: 'admin_unauthorized', message: 'server sentence' } }));
   {
-    // Nothing answers on the loopback address: after five probes the page
-    // says the browser may be blocking it and opens the copy fallback.
+    // Nothing answers on the loopback address. The probes in the background
+    // only ever say waiting, however many; once the command is copied a
+    // check button is offered, and asked, it says the browser may be
+    // blocking the local address and opens the copy fallback.
     const page = load(entryPage, () => answer(200, preview), null);
+    const e = page.elements;
     await settle();
     // An element the script never touched keeps the page's own state: closed.
-    const hidden = () => !(page.elements.manual && page.elements.manual.open === true);
-    const early = { probe: page.elements.probe.textContent, manual_hidden: hidden() };
-    for (let i = 0; i < 4; i++) await page.tick();
-    runs.blocked = { early, probe: page.elements.probe.textContent, manual_hidden: hidden() };
+    const hidden = () => !(e.manual && e.manual.open === true);
+    for (let i = 0; i < 9; i++) await page.tick();
+    const waiting = { probe: e.probe.textContent, error: e.probe.className === 'error', manual_hidden: hidden(), check_hidden: e['check-cli'].hidden };
+    await e['copy-command'].listeners.click();
+    const offered = { check_hidden: e['check-cli'].hidden };
+    await e['check-cli'].listeners.click();
+    runs.blocked = { waiting, offered, probe: e.probe.textContent, error: e.probe.className === 'error', manual_hidden: hidden() };
   }
+  {
+    // A command copied by hand offers the check too; a CLI that answers
+    // takes the check away.
+    let up = false;
+    const page = load(entryPage, () => answer(200, preview),
+      async url => { if (!up) throw new TypeError('Failed to fetch'); return answer(200, { state: url.searchParams.get('state'), code_challenge: challenge }); });
+    const e = page.elements;
+    await settle();
+    page.selectByHand('preview');
+    page.copyByHand();
+    const otherText = !e['check-cli'].hidden;
+    page.selectByHand('listen-command');
+    page.copyByHand();
+    const offered = !otherText && !e['check-cli'].hidden;
+    up = true;
+    await e['check-cli'].listeners.click();
+    runs.check_ready = { offered, check_hidden: e['check-cli'].hidden, probe: e.probe.textContent, error: e.probe.className === 'error' };
+  }
+  // Copying: the clipboard on a secure page; the copy command on a page over
+  // plain http; neither allowed, the text selected for a key press.
+  for (const [name, env] of Object.entries({ copy_clipboard: { clipboard: true }, copy_command: { clipboard: false, copyCommand: true },
+    copy_refused: { clipboard: false, copyCommand: false } })) {
+    const page = load(entryPage, () => answer(200, preview), null, env);
+    const e = page.elements;
+    await settle();
+    await e['copy-command'].listeners.click();
+    runs[name] = { ...shown(e), copied: page.copied(), command: e['listen-command'].textContent, selected: page.selected() };
+  }
+  {
+    const page = load(entryPage, (url, options) => options.method === 'POST' ? grantOK() : answer(200, preview), null,
+      { clipboard: false, copyCommand: false });
+    const e = page.elements;
+    e['admin-key'].value = 'k'.repeat(40);
+    await e.inspect.listeners.click();
+    await e.issue.listeners.click();
+    await e.copy.listeners.click();
+    runs.copy_code_refused = { ...shown(e), selected: page.selected(), focused: page.focused() };
+  }
+  // The fallback buttons are pressable before the check: pressed, they send
+  // the operator to the check and, once checked, back to the button.
+  for (const action of ['issue', 'revoke']) {
+    const posts = [];
+    const page = load(entryPage, (url, options) => {
+      if (options.method === 'POST') { posts.push(String(url)); return String(url).endsWith('/revoke-all')
+        ? answer(200, { revoked_pairings: 3, sessions_revoked: true }) : grantOK(); }
+      return answer(200, preview);
+    }, null);
+    const e = page.elements;
+    await settle();
+    const enabled = !e[action].disabled;
+    await e[action].listeners.click();
+    const sent = { ...shown(e), focused: page.focused(), steps: stepsOf(e), posts: posts.length };
+    e['admin-key'].value = 'k'.repeat(40);
+    await e[action].listeners.click();
+    const typed = { focused: page.focused() };
+    await e.inspect.listeners.click();
+    const back = { ...shown(e), focused: page.focused(), posts: posts.length };
+    await e[action].listeners.click();
+    runs['gate_' + action] = { enabled, sent, typed, back, posts: posts.length };
+  }
+  {
+    // Opened from another origin, a pressed fallback says where to open the
+    // page and sends nothing.
+    const page = load('http://192.0.2.10:8080/alarmd/cli', () => answer(200, preview), null);
+    const e = page.elements;
+    e['admin-key'].value = 'k'.repeat(40);
+    await e.inspect.listeners.click();
+    await e.issue.listeners.click();
+    runs.other_origin_pressed = { ...shown(e), requests: page.requests() };
+  }
+  runs.back = load(entryPage, () => answer(200, preview), null).elements.back.href;
   {
     const page = load(entryPage, (url, options) => String(url).endsWith('/revoke-all')
       ? (runs.revoke_body = JSON.parse(options.body), answer(200, { revoked_pairings: 3, sessions_revoked: true }))
@@ -361,17 +561,41 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 		}
 	}
 	var blocked struct {
-		Early struct {
+		Waiting struct {
 			Probe        string `json:"probe"`
+			Error        bool   `json:"error"`
 			ManualHidden bool   `json:"manual_hidden"`
-		} `json:"early"`
+			CheckHidden  bool   `json:"check_hidden"`
+		} `json:"waiting"`
+		Offered struct {
+			CheckHidden bool `json:"check_hidden"`
+		} `json:"offered"`
 		Probe        string `json:"probe"`
+		Error        bool   `json:"error"`
 		ManualHidden bool   `json:"manual_hidden"`
 	}
 	_ = json.Unmarshal(raw["blocked"], &blocked)
-	if strings.Contains(blocked.Early.Probe, "拦截") || !blocked.Early.ManualHidden ||
-		!strings.Contains(blocked.Probe, "拦截") || !strings.Contains(blocked.Probe, "复制授权码") || blocked.ManualHidden {
-		t.Errorf("five unanswered probes say the browser may block the local address and open the fallback: %+v", blocked)
+	// Ten probes unanswered in the background - a command slow to start - say
+	// only that the page waits: no error, nothing opened, no check offered
+	// before the command was copied.
+	if w := blocked.Waiting; w.Error || !strings.Contains(w.Probe, "等待") || !w.ManualHidden || !w.CheckHidden || blocked.Offered.CheckHidden {
+		t.Errorf("unanswered background probes stay quiet, and copying offers the check: %+v", blocked)
+	}
+	// Asked, the check probes once more and says what the silence may mean,
+	// counting every probe in a row, and opens the fallback.
+	if !blocked.Error || !strings.Contains(blocked.Probe, "已连续 11 次（约 22 秒）") || !strings.Contains(blocked.Probe, "拦截") ||
+		!strings.Contains(blocked.Probe, "复制授权码") || blocked.ManualHidden {
+		t.Errorf("the check says the browser may block the local address and opens the fallback: %+v", blocked)
+	}
+	var ready struct {
+		Offered     bool   `json:"offered"`
+		CheckHidden bool   `json:"check_hidden"`
+		Probe       string `json:"probe"`
+		Error       bool   `json:"error"`
+	}
+	_ = json.Unmarshal(raw["check_ready"], &ready)
+	if !ready.Offered || !ready.CheckHidden || ready.Error || !strings.Contains(ready.Probe, "已就绪") {
+		t.Errorf("a command copied by hand offers the check, and a CLI that answers it takes it away: %+v", ready)
 	}
 	var revoke struct {
 		Status string `json:"status"`

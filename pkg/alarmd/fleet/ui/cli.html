@@ -23,6 +23,7 @@ details{margin:8px 0}summary{cursor:pointer;color:#1769c2;font-size:14px}details
 <pre id="listen-command"></pre>
 <button id="copy-command" type="button" class="primary">复制命令</button><span id="command-status" role="status"></span>
 <p id="probe" class="muted" aria-live="polite">等待本机 CLI 响应…</p>
+<button id="check-cli" type="button" hidden>检查本机 CLI 连接</button>
 </li>
 <li id="step-inspect" class="later">
 <h2>输入部署管理凭据，核对环境</h2>
@@ -47,7 +48,7 @@ details{margin:8px 0}summary{cursor:pointer;color:#1769c2;font-size:14px}details
 </ol>
 <details id="manual" class="aside"><summary id="fallback">浏览器和 CLI 不在同一台机器？改用复制授权码</summary>
 <p class="muted">先完成上面第 2 步核对环境，再生成授权码。</p>
-<button id="issue" type="button" disabled>生成授权码</button>
+<button id="issue" type="button">生成授权码</button>
 <section id="grant" hidden>
 <p>在 CLI 所在机器的终端运行 <code>alarmd-cli auth login</code>，按提示粘贴下方授权码。授权码 5 分钟内有效且仅能兑换一次；不要放入聊天记录、工单或命令参数。</p>
 <label for="code">一次性授权码</label><textarea id="code" readonly autocomplete="off" spellcheck="false"></textarea>
@@ -60,10 +61,10 @@ details{margin:8px 0}summary{cursor:pointer;color:#1769c2;font-size:14px}details
 <p class="muted">会话有效期 1 小时，到期由 CLI 用续期凭据自动换新；续期凭据每用一次换一个。闲置 30 天或被撤销后才需要重新配对。</p>
 <p class="muted">撤销本机的配对：在终端执行 <code>alarmd-cli auth logout --env 环境ID</code>。</p>
 <p class="muted">撤销本环境全部 CLI 授权：所有已配对的 CLI 都要重新配对；管理凭据轮换后，旧的配对也会自动失效。需要先完成上面第 2 步核对环境。</p>
-<button id="revoke" type="button" disabled>撤销本环境全部 CLI 授权</button>
+<button id="revoke" type="button">撤销本环境全部 CLI 授权</button>
 <p id="revoke-status" role="status"></p>
 </details>
-<p class="back muted"><a id="back" href="./v2">返回可观测页面</a></p>
+<p class="back muted"><a id="back" href="./">返回可观测页面</a></p>
 </main>
 <script>
 'use strict';
@@ -71,7 +72,7 @@ const base = new URL(location.href);
 base.pathname = base.pathname.replace(/\/cli(?:\.html)?\/?$/, '/');
 base.search = ''; base.hash = '';
 const api = path => new URL('api/cli/auth/' + path, base);
-document.getElementById('back').href = new URL('v2', base).href;
+document.getElementById('back').href = base.href;
 const $ = id => document.getElementById(id);
 const issue = $('issue');
 const authorize = $('authorize');
@@ -81,6 +82,7 @@ const adminKey = $('admin-key');
 const inspect = $('inspect');
 const preview = $('preview');
 const probe = $('probe');
+const checkCLI = $('check-cli');
 let revision = 0;
 let expiryTimer;
 let configuredEntry = '';
@@ -88,6 +90,12 @@ let previewed = false;
 let ready = null;
 let done = false;
 let misses = 0;
+// pending is the fallback button pressed before the environment was checked:
+// issue or revoke. The page sends the operator to the check and back.
+let pending = null;
+let blockedEntry = false;
+let issuing = false;
+let revoking = false;
 // Every message sits beside the control it is about, and only one is shown
 // at a time: a new one clears the rest, as the single status line did.
 const NOTES = ['command-status', 'admin-key-status', 'inspect-status', 'authorize-status', 'issue-status', 'revoke-status'];
@@ -99,7 +107,8 @@ function message(at, text, error) {
 // order; this only says where to look.
 function steps() {
   const finished = [done || !!ready, done || previewed, done];
-  const current = finished.indexOf(false);
+  // Sent to the check from the fallback: the command is not needed there.
+  const current = pending && !previewed ? 1 : finished.indexOf(false);
   ['step-command', 'step-inspect', 'step-authorize'].forEach((id, index) => {
     $(id).className = finished[index] ? 'done' : index === current ? 'current' : 'later';
   });
@@ -147,8 +156,9 @@ function hint(code, fallback) {
 function clearCode() { code.value = ''; $('grant').hidden = true; clearTimeout(expiryTimer); }
 function offer() {
   authorize.disabled = done || !previewed || !ready;
-  issue.disabled = !previewed;
-  revoke.disabled = !previewed;
+  // Pressable before the check: pressing one then leads to the check.
+  issue.disabled = issuing;
+  revoke.disabled = revoking;
   // A button that cannot be pressed yet says what it waits for.
   $('authorize-hint').textContent = done || !authorize.disabled ? ''
     : !ready && !previewed ? '完成第 1、2 步后才能授权。'
@@ -170,6 +180,10 @@ async function request(method, path, key, body) {
 }
 // The probe only says whether to offer the button; the CLI checks the state
 // again on the callback and the server checks the verifier on the exchange.
+// It runs every two seconds and only ever says ready or waiting: a command
+// that is slow to start looks the same as a browser refusing this page's
+// requests to the local address, so the page says which it may be only when
+// asked, through the check button.
 async function probeCLI() {
   if (done) return;
   try {
@@ -178,15 +192,41 @@ async function probeCLI() {
     ready = response.ok && value.state === state && /^[A-Za-z0-9_-]{43}$/.test(value.code_challenge || '') ? value.code_challenge : null;
   } catch (_) { ready = null; }
   misses = ready ? 0 : misses + 1;
-  // Five probes in a row with no answer: the command may be running and the
-  // browser refusing this page's requests to the local address, which looks
-  // exactly like a CLI that was never started.
-  probe.textContent = ready ? 'CLI 已就绪。' : misses >= 5
-    ? '已连续 5 次（约 10 秒）连不上本机 CLI。如果命令已经在运行，可能是浏览器拦截了网页访问本机（127.0.0.1）的请求；请改用下方已展开的「复制授权码」。'
-    : '等待本机 CLI 响应…';
-  probe.className = misses >= 5 ? 'error' : 'muted';
-  if (misses >= 5) $('manual').open = true;
+  if (ready) { probe.textContent = 'CLI 已就绪。'; probe.className = 'muted'; checkCLI.hidden = true; }
+  else if (probe.className !== 'error') probe.textContent = '等待本机 CLI 响应…';
   offer();
+}
+// The check button appears once the command was copied: asked, the page
+// probes at once and, with no answer, says what that may mean and opens the
+// copy-code fallback.
+function offerCheck() { if (!ready && !done) checkCLI.hidden = false; }
+checkCLI.addEventListener('click', async () => {
+  checkCLI.disabled = true;
+  await probeCLI();
+  checkCLI.disabled = false;
+  if (ready || done) return;
+  probe.textContent = `已连续 ${misses} 次（约 ${misses * 2} 秒）连不上本机 CLI。如果命令已经在运行，可能是浏览器拦截了网页访问本机（127.0.0.1）的请求；请改用下方已展开的「复制授权码」。`;
+  probe.className = 'error';
+  $('manual').open = true;
+});
+// A fallback button pressed before the environment is checked sends the
+// operator to the check - to the key, or to the button when the key is typed
+// - and, once checked, back to the button pressed.
+function toCheck(action) {
+  pending = action; offer();
+  const target = adminKey.value ? inspect : adminKey;
+  $('step-inspect').scrollIntoView?.({block:'center'});
+  target.focus();
+  message('inspect-status', blockedEntry ? wrongEntry(configuredEntry)
+    : action === 'issue' ? '生成授权码前先核对环境：输入部署管理凭据后点「核对环境」。'
+    : '撤销前先核对环境：输入部署管理凭据后点「核对环境」。', blockedEntry);
+}
+function backFromCheck() {
+  const action = pending;
+  pending = null; offer();
+  if (action === 'issue') { issue.focus(); message('issue-status', '环境已核对（见第 2 步）：确认环境无误后生成授权码。', false); }
+  if (action === 'revoke') { revoke.focus(); message('revoke-status', '环境已核对（见第 2 步）：确认环境无误后再撤销。', false); }
+  return action !== null;
 }
 adminKey.addEventListener('input', () => { revision++; previewed = false; offer(); preview.textContent = ''; clearCode(); });
 inspect.addEventListener('click', async () => {
@@ -200,10 +240,12 @@ inspect.addEventListener('click', async () => {
     configuredEntry = new URL(value.public_base_url).origin + new URL(value.public_base_url).pathname;
     // Generation checks that this page's origin is the configured entry's.
     // Said here, before the button, rather than as a refusal after it.
-    if (new URL(value.public_base_url).origin !== location.origin) {
+    blockedEntry = new URL(value.public_base_url).origin !== location.origin;
+    if (blockedEntry) {
       message('inspect-status', wrongEntry(configuredEntry), true); return;
     }
-    previewed = true; offer(); message('inspect-status', '请确认上面的环境无误。', false);
+    previewed = true; offer();
+    if (!backFromCheck()) message('inspect-status', '请确认上面的环境无误。', false);
   } catch (error) {
     if (currentRevision !== revision) return;
     adminKey.value = ''; preview.textContent = ''; message('inspect-status', error.message, true);
@@ -227,8 +269,9 @@ authorize.addEventListener('click', async () => {
   message('authorize-status', `CLI 已登录：环境 ${value.environment_id}，可以回到终端。`, false);
 });
 issue.addEventListener('click', async () => {
+  if (!previewed) { toCheck('issue'); return; }
   const currentRevision = revision;
-  issue.disabled = true; inspect.disabled = true; adminKey.disabled = true; clearCode(); message('issue-status', '正在生成…', false);
+  issuing = true; issue.disabled = true; inspect.disabled = true; adminKey.disabled = true; clearCode(); message('issue-status', '正在生成…', false);
   try {
     const value = await request('POST', 'grants', adminKey.value, {confirm:true});
     if (currentRevision !== revision) return;
@@ -238,28 +281,53 @@ issue.addEventListener('click', async () => {
     expiryTimer = setTimeout(() => { clearCode(); message('issue-status', '授权码已到期，可以重新生成。', false); }, Math.max(0, new Date(value.grant_expires_at).getTime()-Date.now()));
     message('issue-status', '授权码已生成。', false);
   } catch (error) { if (currentRevision === revision) message('issue-status', error.message, true); }
-  finally { adminKey.value = ''; adminKey.disabled = false; inspect.disabled = false; previewed = false; offer(); }
+  finally { issuing = false; adminKey.value = ''; adminKey.disabled = false; inspect.disabled = false; previewed = false; offer(); }
 });
 revoke.addEventListener('click', async () => {
+  if (!previewed) { toCheck('revoke'); return; }
   if (!confirm('撤销后，本环境所有已配对的 CLI 都要重新配对。确定撤销？')) return;
-  revoke.disabled = true;
+  revoking = true; revoke.disabled = true;
   try {
     const value = await request('POST', 'revoke-all', adminKey.value, {confirm:true});
     message('revoke-status', `已撤销本环境全部 CLI 授权（配对 ${value.revoked_pairings} 个，所有会话同时失效）。`, false);
   } catch (error) { message('revoke-status', error.message, true); }
-  finally { offer(); }
+  finally { revoking = false; offer(); }
 });
+// Copies what an element shows: through the clipboard where the page is a
+// secure context, through the copy command where it is not - a page over
+// plain http has no clipboard - and, when neither is allowed, by selecting
+// the text itself so one key press copies it.
+async function copyFrom(element, text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+  const scratch = document.createElement('textarea');
+  scratch.value = text; scratch.setAttribute('readonly', ''); scratch.style.position = 'fixed'; scratch.style.opacity = '0';
+  document.body.appendChild(scratch);
+  scratch.select();
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch (_) {}
+  scratch.remove();
+  if (copied) return true;
+  if (typeof element.select === 'function') { element.focus(); element.select(); return false; }
+  const range = document.createRange(); range.selectNodeContents(element);
+  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  return false;
+}
+const SELECTED = '浏览器不允许网页直接复制，已替你选中，按 Ctrl+C（Mac 上 ⌘C）复制。';
 $('copy').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(code.value); message('issue-status', '已复制，请粘贴到 CLI 登录提示中。', false); }
-  catch (_) { code.focus(); code.select(); message('issue-status', '浏览器无法直接复制，已选中授权码，请手动复制。', false); }
+  message('issue-status', await copyFrom(code, code.value) ? '已复制，请粘贴到 CLI 登录提示中。' : SELECTED, false);
 });
 $('copy-command').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($('listen-command').textContent); message('command-status', '命令已复制。', false); }
-  catch (_) { message('command-status', '浏览器无法直接复制，请手动选中命令。', false); }
+  const command = $('listen-command');
+  message('command-status', await copyFrom(command, command.textContent) ? '命令已复制，请在本机终端运行。' : SELECTED, false);
+  offerCheck();
 });
+// Copied by hand, the command offers the check the same way. A copy event
+// goes to the focused element or the body, not to the <pre>: the selection
+// says what was copied.
+document.addEventListener('copy', () => { if (getSelection()?.containsNode($('listen-command'), true)) offerCheck(); });
 $('copy-admin-key-command').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($('admin-key-command').textContent); message('admin-key-status', '命令已复制。', false); }
-  catch (_) { message('admin-key-status', '浏览器无法直接复制，请手动选中命令。', false); }
+  const command = $('admin-key-command');
+  message('admin-key-status', await copyFrom(command, command.textContent) ? '命令已复制。' : SELECTED, false);
 });
 addEventListener('pagehide', () => { revision++; adminKey.value = ''; previewed = false; done = true; offer(); clearCode(); });
 offer();
