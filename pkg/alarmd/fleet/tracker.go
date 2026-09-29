@@ -64,6 +64,14 @@ const (
 	// rounds complete; its results are read from data that was not all
 	// there, and the strategy's time_delay is what moves the read.
 	KindReadBeforeComplete = "READ_BEFORE_COMPLETE"
+	// KindLatePastRound is an object whose late series had crossed their
+	// Slots in two supplemented windows in a row: the supplement recovered
+	// none of them, and only a longer time_delay reads them.
+	KindLatePastRound = "LATE_PAST_ROUND"
+	// KindLateSeriesMissed is an object read directed with series its
+	// supplements could not recover in windows they recovered part of: a
+	// residual miss, the data's to look at.
+	KindLateSeriesMissed = "LATE_SERIES_MISSED"
 	// KindRetainedShareApproaching is an object whose latest completed Slot
 	// held at least RetainedShareApproachPercent of the retained pool's
 	// one-object share. Its rounds complete and its results stand; the row is

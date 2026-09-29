@@ -230,6 +230,12 @@ var checkWords = map[Check]wordPair{
 	// Detecting, from data read before it was all there: its results cannot
 	// be taken as they stand, and the strategy's owner moves the read.
 	CheckReadBeforeComplete: {StateResultUntrusted, ActionStrategyEdit},
+	// The same pair for data later still: decided without it, and the read
+	// moved by the strategy's owner.
+	CheckLatePastRound: {StateResultUntrusted, ActionStrategyEdit},
+	// Detecting, and for these series at these Slots decided without data
+	// that came later than a supplement reaches: the data's to look at.
+	CheckLateSeriesMissed: {StateResultUntrusted, ActionDataCheck},
 }
 
 // unpairedWords is where a code word the table does not know folds: this

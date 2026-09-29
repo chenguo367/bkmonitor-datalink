@@ -179,6 +179,9 @@ type fleetPublisher struct {
 	// before their data was complete, by object. Nil on a process that runs
 	// no lookback, and the snapshot then carries no such line.
 	readEarly func() map[string]fleet.ReadEarlyFacts
+	// lateSeries is what the lookback's supplements could not recover, by
+	// kind; nil without a lookback.
+	lateSeries func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts)
 	// applied is the Activation record revision this replica executes by,
 	// published on every snapshot so the page can compare it with what the
 	// control plane published.
@@ -566,6 +569,12 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// complete: rounds completing, from data that was not all there.
 	if publisher.readEarly != nil {
 		snapshot.ReadEarly = publisher.tracker.ReadEarly(publisher.readEarly())
+	}
+	// And the objects whose late series the lookback's supplements could
+	// not recover: past their round, or the tail of a window recovered in
+	// part.
+	if publisher.lateSeries != nil {
+		snapshot.LateSeries = publisher.tracker.LateSeries(publisher.lateSeries())
 	}
 	// And the problems whose objects recovered within the hour: the evidence
 	// the RECOVERED reading is made of, which nothing on the current lines
