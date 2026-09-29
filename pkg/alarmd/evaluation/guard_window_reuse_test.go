@@ -171,6 +171,13 @@ func TestALoadedHistoryTheWindowRefusesFailsTheSameWayOnEveryPath(t *testing.T) 
 // evaluation allocates less than the rebuilding one by at least nine tenths of
 // what building that window alone allocates.
 func TestTheFirstRecordDoesNotBuildTheWindowAgain(t *testing.T) {
+	if raceEnabled {
+		// Plain runs read the same counts every time (reused 1176, rebuilt
+		// 1275: 99 saved against 87 wanted). Under the race detector a pooled
+		// buffer is dropped at random and grown again, the saving swings by
+		// about a dozen either way, and 3 runs in 60 read it below the bar.
+		t.Skip("allocation counts are not stable through pooled buffers under the race detector")
+	}
 	const points = 16
 	plan := compiledWindow(t, points, 2)
 	history := make([]execution.StateHistoryPoint, 0, points)
