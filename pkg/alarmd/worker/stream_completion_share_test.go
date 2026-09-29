@@ -198,25 +198,35 @@ func TestSlotExecutionCoordinatorDoesNotCompleteFullEmptyWhenPrimaryIsUnavailabl
 // with the fallback code on its binding - the gap and the round's result
 // read it as before - and the completion and the query's failure name what
 // the fallback stands in for, so neither files the round under the backend.
+// Whichever binding the round is judged on says so: access's, and a
+// streamed series' whose query then failed.
 func TestAnUnavailablePrimaryWithoutANamedAttemptSaysSo(t *testing.T) {
+	silent := []execution.RouteAttemptFact{{AttemptNo: 1, Endpoint: "uq", Result: execution.RouteAttemptFailed}}
 	for _, testCase := range []struct {
 		name     string
 		attempts []execution.RouteAttemptFact
 		want     execution.ReasonCode
+		streamed bool
 	}{
 		{name: "never sent", want: execution.ReasonQueryNotAttempted},
-		{name: "no attempt said why", attempts: []execution.RouteAttemptFact{{AttemptNo: 1, Endpoint: "uq", Result: execution.RouteAttemptFailed}},
-			want: execution.ReasonQueryReasonUnrecorded},
+		{name: "no attempt said why", attempts: silent, want: execution.ReasonQueryReasonUnrecorded},
+		{name: "streamed, then no attempt said why", attempts: silent, want: execution.ReasonQueryReasonUnrecorded, streamed: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			header, batches := workerG4StreamFixture(t, strategy.DetectorKindOsRestart)
 			primary, history := shareFixtureQueries(t, header)
-			historyBatch := batches[history.index]
+			primaryBatch, historyBatch := batches[primary.index], batches[history.index]
 			fallback := execution.ReasonCode(contract.ReasonQueryUnavailable)
+			unavailable := execution.PhysicalQueryCompletion{Ref: "unavailable-primary", PhysicalQuery: primary.query.Digest,
+				QueryRevision: primary.query.QueryRevision, Completeness: execution.CompletenessUnavailable, DataState: execution.DataStateUnknown,
+				RouteFacts: execution.ProviderRouteFacts{Attempts: testCase.attempts}}
+			streamedBatches := []execution.SeriesExecutionBatch{historyBatch}
+			if testCase.streamed {
+				unavailable.Ref, unavailable.DataState, unavailable.Delivery = primaryBatch.CompletionRef, execution.DataStateData, primaryBatch.Delivery
+				streamedBatches = []execution.SeriesExecutionBatch{primaryBatch, historyBatch}
+			}
 			completion := execution.QueryExecutionCompletion{AllRequiredCompleted: true, PhysicalQueries: []execution.PhysicalQueryCompletion{
-				{Ref: "unavailable-primary", PhysicalQuery: primary.query.Digest, QueryRevision: primary.query.QueryRevision,
-					Completeness: execution.CompletenessUnavailable, DataState: execution.DataStateUnknown,
-					RouteFacts: execution.ProviderRouteFacts{Attempts: testCase.attempts}},
+				unavailable,
 				{Ref: historyBatch.CompletionRef, PhysicalQuery: history.query.Digest, QueryRevision: history.query.QueryRevision,
 					Completeness: execution.CompletenessFull, DataState: execution.DataStateData, Delivery: historyBatch.Delivery},
 			}}
@@ -228,7 +238,7 @@ func TestAnUnavailablePrimaryWithoutANamedAttemptSaysSo(t *testing.T) {
 			})
 			ports, _, coordinator := workerG4CoordinatorWithObserver(t, observer)
 			ports.gapMissing = true
-			ports.executeOverride = streamExecution(header, []execution.SeriesExecutionBatch{historyBatch}, completion)
+			ports.executeOverride = streamExecution(header, streamedBatches, completion)
 
 			result, err := coordinator.Execute(context.Background(), workerSlotRequest(header.Contract))
 			if err != nil || !result.Completed || result.ReasonCode != fallback {
