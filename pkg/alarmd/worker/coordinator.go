@@ -361,6 +361,11 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid execution request: %w", err)
 	}
+	if request.Supplement != nil {
+		// Before the evidence mark is armed: a supplement neither begins nor
+		// completes its Slot, so it has nothing of either to leave behind.
+		return coordinator.executeSupplement(withSlotTrace(ctx, request), request)
+	}
 	ctx, applied := withAppliedPlans(ctx)
 	// On the way out, and only when this attempt wrote state and then could not
 	// write the Slot down. Best-effort by construction: the mark is what lets a
@@ -368,16 +373,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// leave it costs that completion its evidence -- it must not also change
 	// what this attempt reports to the scheduler, which is about the Slot.
 	defer func() { coordinator.recordExecutionEvidence(ctx, request, applied) }()
-	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{
-		QueryGroupKey:        string(request.Contract.Slot.QueryGroup),
-		SnapshotRevision:     string(request.Contract.SnapshotRevision),
-		QueryRevision:        string(request.Contract.QueryRevision),
-		ScheduleRevision:     string(request.Contract.ScheduleRevision),
-		ScheduleSegmentStart: int64(request.Contract.ScheduleSegmentStart),
-		DuePlanSetDigest:     string(request.Contract.DuePlanSetDigest),
-		OwnerID:              request.OwnerFence.OwnerID, OwnerEpoch: request.OwnerFence.OwnerEpoch,
-		EvaluationTime: int64(request.Contract.Slot.EvaluationTime),
-	})
+	ctx = withSlotTrace(ctx, request)
 	if request.ExpiredRange != nil {
 		return coordinator.executeExpiredRange(ctx, request)
 	}
@@ -509,6 +505,21 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	result.Usage = stream.budgetUsage()
 	result.Timing = stream.timing()
 	return result, nil
+}
+
+// withSlotTrace puts the Slot's coordinates on every line this execution
+// emits.
+func withSlotTrace(ctx context.Context, request execution.SlotExecutionRequest) context.Context {
+	return observability.ContextWithTraceFields(ctx, observability.TraceFields{
+		QueryGroupKey:        string(request.Contract.Slot.QueryGroup),
+		SnapshotRevision:     string(request.Contract.SnapshotRevision),
+		QueryRevision:        string(request.Contract.QueryRevision),
+		ScheduleRevision:     string(request.Contract.ScheduleRevision),
+		ScheduleSegmentStart: int64(request.Contract.ScheduleSegmentStart),
+		DuePlanSetDigest:     string(request.Contract.DuePlanSetDigest),
+		OwnerID:              request.OwnerFence.OwnerID, OwnerEpoch: request.OwnerFence.OwnerEpoch,
+		EvaluationTime: int64(request.Contract.Slot.EvaluationTime),
+	})
 }
 
 // timing is where this execution's wall clock went, for the completion row.

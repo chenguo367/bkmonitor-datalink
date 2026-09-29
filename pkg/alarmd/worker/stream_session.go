@@ -89,6 +89,9 @@ type streamedExecution struct {
 	effects  effectCounts
 	gapFacts uint64
 	began    bool
+	// supplement is set on a supplement execution and nil on every Slot.
+	// See supplement.go.
+	supplement *supplementRun
 }
 
 // slotPhase says which part of a Slot a stretch of wall clock was spent in.
@@ -254,7 +257,11 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
 	stream.effective = effective
-	stream.openCensusGate(header.Contract.Slot.QueryGroup)
+	if stream.supplement == nil {
+		// A supplement is not a round of the Query Group: it takes no census,
+		// and the gate left closed is what keeps it from counting one.
+		stream.openCensusGate(header.Contract.Slot.QueryGroup)
+	}
 	// The target plans are resolved here, before any series arrives: the
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.
@@ -816,7 +823,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		return left.RequirementID < right.RequirementID
 	})
 	for _, due := range stream.header.DuePlans {
-		if len(stream.planSeries[due.Identity]) == 0 {
+		// A supplement decides nothing for a Plan without series: that
+		// judgement was the Slot's, on the Slot's own read.
+		if len(stream.planSeries[due.Identity]) == 0 && stream.supplement == nil {
 			if err := stream.validateCompletionOnlyExactSet(due, completionBindings, completion.PhysicalQueries); err != nil {
 				return err
 			}
@@ -830,7 +839,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	}
 	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {
 		var exceeded *provisionalBudgetExceededError
-		if errors.As(err, &exceeded) && exceeded.slot {
+		// A supplement over its budget fails as it is: the replacement opens
+		// a gap on every Plan, and a supplement moves no marker.
+		if errors.As(err, &exceeded) && exceeded.slot && stream.supplement == nil {
 			return stream.completeBeyondSlotBudget(ctx)
 		}
 		return err
@@ -871,6 +882,9 @@ func (stream *streamedExecution) evaluateSeries(
 	// the Slot's intent, and every later count is measured against it.
 	stream.seriesCensus.Due += len(preparedSeriesEvaluations)
 	for _, prepared := range preparedSeriesEvaluations {
+		if stream.supplement != nil && !stream.supplementTakes(prepared) {
+			continue
+		}
 		if incomplete := primaryIncompleteBindings(prepared.inputs); len(incomplete) != 0 {
 			if err := flush(); err != nil {
 				return err
@@ -897,6 +911,10 @@ func (stream *streamedExecution) evaluateSeries(
 	}
 	if err := flush(); err != nil {
 		return err
+	}
+	if stream.supplement != nil {
+		// Absence and the Plans without series were the Slot's to decide.
+		return nil
 	}
 	// Absence is decided after the Slot's own series, because which groups
 	// reported is the evidence it is decided from. The synthetic series it
@@ -996,6 +1014,10 @@ func (stream *streamedExecution) loadGaps(ctx context.Context) error {
 	result, reason := summarizeGapLoad(stream.gaps)
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
 		stream.request.Operation, started, result, reason, observability.Counts{Keys: int64(len(stream.gaps.Items))}, nil)
+	if stream.supplement != nil {
+		stream.gaps, err = guardsAsOfSlot(stream.header, stream.gaps)
+		return err
+	}
 	stream.observeGapProgress(ctx)
 	return nil
 }
@@ -1043,6 +1065,12 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 		observability.Counts{Keys: int64(len(stream.noData.Items))}, nil)
 	stream.observeNoDataRepresentations(ctx)
 	stream.observeNoDataRenewals(ctx)
+	if stream.supplement != nil {
+		// Read for what it recorded at the Slot, not to judge absence: a
+		// supplement's series are a subset, and every group outside it would
+		// read as absent.
+		return nil
+	}
 	return stream.resolveNoDataRosterHosts()
 }
 
@@ -1571,6 +1599,9 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 		if outcome != "" {
 			outcomes[outcome]++
 		}
+		if stream.supplement != nil && stream.supplementReached(view) {
+			continue
+		}
 		if err := stream.evaluateLoadedSeries(ctx, entry, view); err != nil {
 			return err
 		}
@@ -1653,6 +1684,9 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	retained, err := evaluationRetainedSize(loaded, execution.EvaluationResult{})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: measure evaluated retention: %w", err)
+	}
+	if stream.supplement != nil {
+		stream.noteSupplementEvaluated(due, series, inputs, &evaluated)
 	}
 	if err := stream.mergeProvisional(ctx, evaluated, retained); err != nil {
 		return err
