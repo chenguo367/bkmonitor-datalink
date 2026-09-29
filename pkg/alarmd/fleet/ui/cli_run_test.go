@@ -383,6 +383,18 @@ async function inspect(pageURL, respond, then) {
     runs.blocked = { waiting, offered, probe: e.probe.textContent, error: e.probe.className === 'error', manual_hidden: hidden() };
   }
   {
+    // A command typed by hand is never copied: the check is offered after
+    // fifteen probes unanswered, and nothing is said to be wrong.
+    const page = load(entryPage, () => answer(200, preview), null);
+    const e = page.elements;
+    await settle();
+    for (let i = 0; i < 13; i++) await page.tick();
+    const at14 = e['check-cli'].hidden;
+    await page.tick();
+    runs.typed_by_hand = { hidden_at_14: at14, hidden_at_15: e['check-cli'].hidden, probe: e.probe.textContent,
+      error: e.probe.className === 'error', manual_open: !!(e.manual && e.manual.open) };
+  }
+  {
     // A command copied by hand offers the check too; a CLI that answers
     // takes the check away.
     let up = false;
@@ -586,6 +598,17 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 	if !blocked.Error || !strings.Contains(blocked.Probe, "已连续 11 次（约 22 秒）") || !strings.Contains(blocked.Probe, "拦截") ||
 		!strings.Contains(blocked.Probe, "复制授权码") || blocked.ManualHidden {
 		t.Errorf("the check says the browser may block the local address and opens the fallback: %+v", blocked)
+	}
+	var typed struct {
+		HiddenAt14 bool   `json:"hidden_at_14"`
+		HiddenAt15 bool   `json:"hidden_at_15"`
+		Probe      string `json:"probe"`
+		Error      bool   `json:"error"`
+		ManualOpen bool   `json:"manual_open"`
+	}
+	_ = json.Unmarshal(raw["typed_by_hand"], &typed)
+	if !typed.HiddenAt14 || typed.HiddenAt15 || typed.Error || typed.ManualOpen || !strings.Contains(typed.Probe, "等待") {
+		t.Errorf("a command typed by hand is offered the check after fifteen probes, quietly: %+v", typed)
 	}
 	var ready struct {
 		Offered     bool   `json:"offered"`

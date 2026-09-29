@@ -194,11 +194,14 @@ async function probeCLI() {
   misses = ready ? 0 : misses + 1;
   if (ready) { probe.textContent = 'CLI 已就绪。'; probe.className = 'muted'; checkCLI.hidden = true; }
   else if (probe.className !== 'error') probe.textContent = '等待本机 CLI 响应…';
+  // A command typed by hand is never copied: after half a minute unanswered
+  // the check is offered anyway, still without saying anything is wrong.
+  if (misses >= 15) offerCheck();
   offer();
 }
-// The check button appears once the command was copied: asked, the page
-// probes at once and, with no answer, says what that may mean and opens the
-// copy-code fallback.
+// The check button appears once the command was copied, or after half a
+// minute without an answer: asked, the page probes at once and, with no
+// answer, says what that may mean and opens the copy-code fallback.
 function offerCheck() { if (!ready && !done) checkCLI.hidden = false; }
 checkCLI.addEventListener('click', async () => {
   checkCLI.disabled = true;
