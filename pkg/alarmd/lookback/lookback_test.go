@@ -350,8 +350,8 @@ func TestEveryOwnedQueryGroupKeepsOneSampleAtATime(t *testing.T) {
 	}
 	f.capture(query("qg-b", 1_700_000_100, minute, sourceTimeSeries), dataset("h1", steady))
 	stats := f.engine.Stats()
-	if stats.Pending != 2 || stats.PendingBytes != 2*summaryEntryBytes {
-		t.Fatalf("pending %d bytes %d, want two one-bucket samples", stats.Pending, stats.PendingBytes)
+	if stats.Pending != 2 || stats.PendingBytes != 2*(summaryEntryBytes+seriesEntryBytes) {
+		t.Fatalf("pending %d bytes %d, want two samples of one bucket and one series", stats.Pending, stats.PendingBytes)
 	}
 	if stats.Coverage != (Coverage{Owned: 2, Covered: 2, Ratio: 1}) {
 		t.Fatalf("coverage %+v, want both owned Query Groups", stats.Coverage)
@@ -827,9 +827,9 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 		t.Fatalf("samples %v", stats.Sources[sourceLog].Samples)
 	}
 	// Waiting for its deep recheck, the sample still covers its group, and
-	// is pending with its one bucket.
+	// is pending with its one bucket and its one series.
 	if _, waiting := f.rung("qg"); !waiting || f.group("qg").sample != nil || stats.Coverage != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) ||
-		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes {
+		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes+seriesEntryBytes {
 		t.Fatalf("coverage %+v pending %d (%d bytes) while the deep recheck waits", stats.Coverage, stats.Pending, stats.PendingBytes)
 	}
 	f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(dataset("h1", steady)), RecheckCompared)
@@ -1091,6 +1091,11 @@ func TestARecheckReadsAndComparesOnlyTheTail(t *testing.T) {
 		}
 	}
 	source := engine.Stats().Sources[sourceTimeSeries]
+	// The series are summed over the tail both reads kept, so a first read of
+	// the whole day and a tail read agree on them: complete.
+	if source.Classes[ClassComplete] != 1 || source.Classes[ClassWindowReadEarly] != 0 {
+		t.Fatalf("classes %v, want a day read against its tail to be complete", source.Classes)
+	}
 	if source.Samples[OutcomeCompleted] != 1 || source.ChangedWindows[RungNames[0]] != 0 || source.Probes[ProbeClean] != 1 ||
 		source.RecheckBytes != 20 || source.FirstReadBytes != 10 {
 		t.Fatalf("samples %v changed %v probes %v bytes %d/%d: the buckets outside the tail must not read as vanished",
@@ -1114,8 +1119,9 @@ func TestAFirstReadIsKeptToItsTail(t *testing.T) {
 	if tailSteps != 65 {
 		t.Fatalf("a tail of %d steps, want ceil(63.5) + 1", tailSteps)
 	}
-	if stats := f.engine.Stats(); stats.PendingBytes != 65*summaryEntryBytes {
-		t.Fatalf("a day's first read holds %d bytes, want 65 buckets'", stats.PendingBytes)
+	// 65 buckets, and the one series over them.
+	if stats := f.engine.Stats(); stats.PendingBytes != 65*summaryEntryBytes+seriesEntryBytes {
+		t.Fatalf("a day's first read holds %d bytes, want 65 buckets' and one series'", stats.PendingBytes)
 	}
 }
 
@@ -1471,5 +1477,113 @@ func TestQueryLookbackReadsWindowsRangesAndOffsets(t *testing.T) {
 		if got, ok := parseDuration(text); !ok || got != want {
 			t.Fatalf("parseDuration(%q) = %v %v, want %v", text, got, ok, want)
 		}
+	}
+}
+
+// classSample reads one sample of qg over the minute window ending now: the
+// first read's datasets, then at every rung the datasets later gives it.
+func (f *fixture) classSample(delaySeconds int64, first []*execution.Dataset, later func(slot int64) []*execution.Dataset) {
+	f.t.Helper()
+	slot := f.clock.now().Unix()
+	q := query("qg", slot, minute, sourceLog)
+	q.Spec.PlanFacts.QueryDelaySeconds = delaySeconds
+	f.capture(q, first...)
+	readAt := f.clock.now()
+	for rung, pending := f.rung("qg"); pending; rung, pending = f.rung("qg") {
+		f.recheck(sourceLog, readAt, rung, minute, full(later(slot)...), RecheckCompared)
+	}
+	f.rest("qg")
+}
+
+// A series the first read had and a later rung read with another value is a
+// window read early: a value revised after it was judged. Twice in a row,
+// the Query Group is reported with the time_delay that would have read its
+// samples complete - the time_delay it runs under, and how much later than
+// its first read its data was complete, aligned up to the step.
+func TestAWindowReadEarlyTwiceInARowIsReportedWithTheTimeDelayThatReadsItComplete(t *testing.T) {
+	f := newFixture(t)
+	revised := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} }
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, revised)
+	if readings := f.engine.ReadEarly(); len(readings) != 0 {
+		t.Fatalf("reported after one sample: %+v", readings)
+	}
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, revised)
+	readings := f.engine.ReadEarly()
+	if len(readings) != 1 {
+		t.Fatalf("readings %+v, want the Query Group reported after two samples in a row", readings)
+	}
+	reading := readings[0]
+	// Complete at the first rung, 90 s past the window's end; read at its
+	// end: 90 s late. 60 + 90 aligned up to the minute step is 180.
+	if reading.CurrentDelaySeconds != 60 || reading.SuggestedDelaySeconds != 180 || reading.StepSeconds != 60 ||
+		len(reading.Samples) != 2 || reading.Samples[1].Rung != RungNames[0] || reading.Samples[1].CompletionAgeSeconds != 90 ||
+		reading.Samples[1].FirstReadAgeSeconds != 0 || len(reading.Samples[1].Buckets) != 1 {
+		t.Fatalf("reading %+v", reading)
+	}
+	stats := f.engine.Stats()
+	if source := stats.Sources[sourceLog]; source.Classes[ClassWindowReadEarly] != 2 || source.ReadEarlyGroups != 1 ||
+		len(stats.ReadEarly) != 1 || stats.ReadEarly[0].SuggestedDelaySeconds != 180 {
+		t.Fatalf("classes %v read early %d list %+v", source.Classes, source.ReadEarlyGroups, stats.ReadEarly)
+	}
+	// A sample whose rungs found nothing ends the run, and the report.
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "3")}, revised)
+	if readings := f.engine.ReadEarly(); len(readings) != 0 || f.engine.Stats().Sources[sourceLog].Classes[ClassComplete] != 1 {
+		t.Fatalf("still reported after a complete sample: %+v", readings)
+	}
+}
+
+// Every series the first read had came back as it was, and another came
+// later: some series are late. That is not a window read early - the Query
+// Group is marked for its late series and the rung they were seen at.
+func TestSeriesThatComeLaterWhileTheFirstReadsStandAreSeriesLate(t *testing.T) {
+	f := newFixture(t)
+	f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"})}
+	})
+	source := f.engine.Stats().Sources[sourceLog]
+	state := f.group("qg")
+	if source.Classes[ClassSeriesLate] != 1 || source.Classes[ClassWindowReadEarly] != 0 || source.SeriesLateGroups != 1 ||
+		state.seriesLate == nil || state.seriesLate.rung != 0 || state.readEarly != nil {
+		t.Fatalf("classes %v series late %+v read early %+v", source.Classes, state.seriesLate, state.readEarly)
+	}
+	// A series of the first read changing beside the late one is the window
+	// read early: the first read's own series were not complete.
+	f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "2"), dataset("h2", map[int64]string{slot - 60: "5"})}
+	})
+	if source := f.engine.Stats().Sources[sourceLog]; source.Classes[ClassWindowReadEarly] != 1 {
+		t.Fatalf("classes %v, want a changed first-read series to be the window read early", source.Classes)
+	}
+}
+
+// A first read with nothing in it whose data came at a later rung read the
+// window early, and so did one whose series later went missing.
+func TestAnEmptyFirstReadOrAVanishedSeriesIsAWindowReadEarly(t *testing.T) {
+	f := newFixture(t)
+	f.classSample(0, nil, func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} })
+	f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1"), dataset("h2", map[int64]string{f.clock.now().Unix() - 60: "1"})},
+		func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} })
+	readings := f.engine.ReadEarly()
+	if source := f.engine.Stats().Sources[sourceLog]; source.Classes[ClassWindowReadEarly] != 2 || len(readings) != 1 ||
+		readings[0].Samples[0].Rung != RungNames[0] {
+		t.Fatalf("classes %v readings %+v", source.Classes, readings)
+	}
+}
+
+// A read with more series than maxSeriesPerSample is a defect like one with
+// more buckets than any window: counted under its own fault, reported, and
+// not kept.
+func TestAReadPastEverySeriesBoundIsAFault(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	read := f.engine.Begin(query("qg", slot, minute, sourceLog))
+	for index := 0; index <= maxSeriesPerSample; index++ {
+		read.Series(dataset(fmt.Sprintf("h%d", index), map[int64]string{slot - 60: "1"}), 1)
+	}
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	stats := f.engine.Stats()
+	if stats.Faults[FaultSeriesExceeded] != 1 || stats.Faults[FaultBucketsExceeded] != 0 || stats.Pending != 0 ||
+		stats.Sources[sourceLog].Samples[OutcomeFault] != 1 {
+		t.Fatalf("faults %v samples %v pending %d", stats.Faults, stats.Sources[sourceLog].Samples, stats.Pending)
 	}
 }

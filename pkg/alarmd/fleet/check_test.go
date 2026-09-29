@@ -177,8 +177,14 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// carry - each short window's verdict from its holes - because a window
 	// short only by minutes the query answered without the series is the
 	// data's, and it sat on the undetermined list as this deployment's.
-	if got := len(Checks()); got != 32 || len(checkAnswers) != 32 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 32: a new check has to "+
+	// Thirty-three: READ_BEFORE_COMPLETE is a rule over a dimension the rows
+	// did not carry before - the late-data lookback's reading that a
+	// window was read before its data was complete, twice in a row -
+	// because such an object's rounds complete and its results are read
+	// from data that was not all there, and only the strategy's time_delay
+	// moves the read (user, 09-29: whole-window lateness is time_delay's).
+	if got := len(Checks()); got != 33 || len(checkAnswers) != 33 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 33: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -249,6 +255,8 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
+		CheckReadBeforeComplete: {Kind: KindReadBeforeComplete,
+			ReadEarly: &ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180}},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
 		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{

@@ -218,6 +218,9 @@ var checkWords = map[Check]wordPair{
 	// Detecting: every round completes. The strategy's to act on before the
 	// share refuses it whole.
 	CheckRetainedShareApproaching: {StateDetecting, ActionStrategyEdit},
+	// Detecting, from data read before it was all there: its results cannot
+	// be taken as they stand, and the strategy's owner moves the read.
+	CheckReadBeforeComplete: {StateResultUntrusted, ActionStrategyEdit},
 }
 
 // unpairedWords is where a code word the table does not know folds: this

@@ -58,6 +58,11 @@ const (
 	// that was written, a group that goes absent after that is never recorded
 	// as first absent, and its no-data alert never fires.
 	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
+	// KindReadBeforeComplete is an object the late-data lookback found read
+	// before its data was complete, in two completed samples in a row. Its
+	// rounds complete; its results are read from data that was not all
+	// there, and the strategy's time_delay is what moves the read.
+	KindReadBeforeComplete = "READ_BEFORE_COMPLETE"
 	// KindRetainedShareApproaching is an object whose latest completed Slot
 	// held at least RetainedShareApproachPercent of the retained pool's
 	// one-object share. Its rounds complete and its results stand; the row is

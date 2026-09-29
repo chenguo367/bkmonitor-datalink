@@ -87,7 +87,14 @@ const (
 	// QG_BUDGET_SHARE_EXCEEDED, which refuses the object's every round and
 	// stops the strategy whole, and which nothing announced before it came.
 	CheckRetainedShareApproaching Check = "RETAINED_SHARE_APPROACHING"
-	CheckNoDataPersistent         Check = "NO_DATA_PERSISTENT"
+	// ReadBeforeComplete is an object the late-data lookback found read
+	// before its data was complete in two completed samples in a row: the
+	// first read was empty and data came later, or a series it had came back
+	// with other points or values. Its results are read from data that was
+	// not all there. The strategy's time_delay moves the read; the row
+	// carries the value that would have read those samples complete.
+	CheckReadBeforeComplete Check = "READ_BEFORE_COMPLETE"
+	CheckNoDataPersistent   Check = "NO_DATA_PERSISTENT"
 	// Every short window of the object is short only by minutes the query
 	// answered whole without the series: the data was not there when it was
 	// asked for, and nothing on this side is on record as missing it. The
@@ -293,6 +300,8 @@ var checkAnswers = map[Check]struct {
 	// The strategy's, as the refusal it warns of is: what fits in a share is
 	// the strategy's size, and the remedy is to shard or reshape it.
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
+	// The strategy's: its time_delay decides when its window is read.
+	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},
 
 	CheckQueryRefused:     {OwnerUndetermined, GroupByBlocked},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
@@ -347,6 +356,9 @@ var checkOrder = []Check{
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
 	CheckConfigRejected,
+	// Below the lines that stop detection, above the one that only warns:
+	// this one detects, from data read before it was all there.
+	CheckReadBeforeComplete,
 	// Below every line that stops detection: this one only says a line that
 	// would is near.
 	CheckRetainedShareApproaching,
@@ -539,7 +551,7 @@ func resultOf(anomaly Anomaly) Result {
 		return ""
 	case anomaly.Kind == KindNoData, anomaly.Kind == KindEmptyEveryRound:
 		return ResultNoData
-	case anomaly.Kind == KindNoDataMemoryRefused, anomaly.Kind == KindRetainedShareApproaching:
+	case anomaly.Kind == KindNoDataMemoryRefused, anomaly.Kind == KindRetainedShareApproaching, anomaly.Kind == KindReadBeforeComplete:
 		// The round completed; what was refused was the memory beside it,
 		// or nothing yet.
 		return ResultCompleted
@@ -1071,7 +1083,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for check, consequence := range consequences {
 			ensure(check).skipped = consequence
 		}
-		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare} {
+		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly} {
 			for index := range list {
 				row := &list[index]
 				if row.Finding.Check == "" {
@@ -1451,6 +1463,7 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		count(view.NoData)
 		count(view.NoDataMemory)
 		count(view.RetainedShare)
+		count(view.ReadEarly)
 	}
 	if view != nil {
 		// One walk over the records, the same one the lines make. A loss in
@@ -1612,7 +1625,7 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 		}
 	}
 	demoted := demotedObjects(&selected)
-	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare} {
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly} {
 		for _, anomaly := range column {
 			if queryGroup != "" && anomaly.QueryGroup != queryGroup {
 				continue

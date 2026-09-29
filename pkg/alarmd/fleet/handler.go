@@ -228,6 +228,11 @@ type HealthResponse struct {
 	// list, because what a reader acts on is which strategy and how close,
 	// and the refusal it warns of stops that strategy whole.
 	RetainedShare []RetainedShareRef `json:"retained_share,omitempty"`
+	// ReadEarly is the objects the late-data lookback found read before
+	// their data was complete in two samples in a row, with the time_delay
+	// that would have read them complete. In no column and no total: they
+	// are detecting, from data that was not all there.
+	ReadEarly []ReadEarlyRef `json:"read_early,omitempty"`
 	// PublishedVersion and Workers are the acknowledgement view: which
 	// Activation the control plane published and how many counted replicas
 	// have applied it. Per-replica versions are on PerReplica.
@@ -927,6 +932,7 @@ func NewHandler(
 			LastDemotionExit:  momentOrNil(view.LastDemotionExit),
 			PrunedSkips:       prunedSkipList(view.PrunedSkips),
 			RetainedShare:     retainedShareList(view.RetainedShare),
+			ReadEarly:         readEarlyList(view.ReadEarly),
 			Coverage:          view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
@@ -1181,7 +1187,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// view and stay; a reader who wants the rows of another column asks
 	// for that column, and gets them paged.
 	view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
-	view.RetainedShare = []Anomaly{}
+	view.RetainedShare, view.ReadEarly = []Anomaly{}, []Anomaly{}
 	view.GapSkips, view.PrunedSkips = map[string]SkippedSpan{}, map[string]PrunedSkip{}
 	// Each replica's dependency record is the verdict route's; here it would
 	// ride on every thirty-second poll for rows this request is not about.
@@ -1564,6 +1570,34 @@ func retainedShareList(rows []Anomaly) []RetainedShareRef {
 	sort.SliceStable(list, func(left, right int) bool {
 		return list[left].PercentOfShare > list[right].PercentOfShare
 	})
+	return list
+}
+
+// ReadEarlyRef is one object read before its data was complete, as the
+// health response carries it: which object, whose strategies, and the
+// time_delay it runs under beside the one that would have read it complete.
+type ReadEarlyRef struct {
+	QueryGroup            string        `json:"query_group"`
+	Strategies            []StrategyRef `json:"strategies,omitempty"`
+	Replica               string        `json:"replica,omitempty"`
+	CurrentDelaySeconds   int64         `json:"current_time_delay_seconds"`
+	SuggestedDelaySeconds int64         `json:"suggested_time_delay_seconds"`
+	Since                 time.Time     `json:"since"`
+}
+
+// readEarlyList keeps the view's order, the furthest from its suggestion
+// first.
+func readEarlyList(rows []Anomaly) []ReadEarlyRef {
+	if len(rows) == 0 {
+		return nil
+	}
+	list := make([]ReadEarlyRef, 0, len(rows))
+	for _, row := range rows {
+		if facts := row.ReadEarly; facts != nil {
+			list = append(list, ReadEarlyRef{QueryGroup: row.QueryGroup, Strategies: row.Strategies, Replica: row.Replica,
+				CurrentDelaySeconds: facts.CurrentDelaySeconds, SuggestedDelaySeconds: facts.SuggestedDelaySeconds, Since: facts.Since})
+		}
+	}
 	return list
 }
 
