@@ -545,6 +545,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_levels_with_retention_slack"] = "variableLabels: {dominant}"
 	expected["bkmonitor_alarmd_catalog_global_strategies"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_catalog_global_strategies_unsupported"] = "variableLabels: {reason,source_semantics}"
+	expected["bkmonitor_alarmd_strategy_publisher_info"] = "variableLabels: {state,writer,version,outcome}"
+	expected["bkmonitor_alarmd_strategy_publisher_reports_total"] = "variableLabels: {outcome,reason}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
 	expected["bkmonitor_alarmd_platform_settings_authoritative_age_seconds"] = "variableLabels: {}"
@@ -1098,6 +1100,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// source and fails when they pass the headroom this number is built from,
 	// so the bound is wrong only if that test is also red.
 	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * catalogReasonHeadroom
+	// One series: the record as last read. The reasons a process names are
+	// capped, and every outcome can also carry no reason or other.
+	bounds[fqName("strategy_publisher_info")] = 1
+	bounds[fqName("strategy_publisher_reports_total")] = controlplane.PublisherReasonLabelLimit + 2*len(controlplane.PublisherOutcomeLabels)
 	// Every source an accepted no-data Plan can declare. There is no other
 	// bucket: a source outside the list cannot be produced, because the same
 	// list is what the classification returns.

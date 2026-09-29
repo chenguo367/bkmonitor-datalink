@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -51,11 +52,20 @@ type legacyRedisCommands interface {
 // LegacyRedisStrategySource adapts only the Python StrategyCacheManager String
 // contract: <prefix>.strategy_ids, <prefix>.strategy_<id> and, as its change
 // signal, <prefix>.last_updated. Legacy DTOs do not escape this adapter.
+//
+// Beside the active set it reads <prefix>.publisher, the record a publisher
+// may leave about its own last run, in the same MGET; see PublisherReport.
 type LegacyRedisStrategySource struct {
 	client          legacyRedisCommands
 	strategyIDsKey  string
 	strategyKeyStem string
 	lastUpdatedKey  string
+
+	publisherKey string
+	now          func() time.Time
+	mu           sync.Mutex
+	publisher    *PublisherReport
+	published    publisherCounter
 }
 
 func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*LegacyRedisStrategySource, error) {
@@ -66,6 +76,7 @@ func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*Le
 		client: client, strategyIDsKey: cachePrefix + ".strategy_ids",
 		strategyKeyStem: cachePrefix + ".strategy_",
 		lastUpdatedKey:  cachePrefix + ".last_updated",
+		publisherKey:    cachePrefix + ".publisher", now: time.Now,
 	}, nil
 }
 
@@ -73,12 +84,25 @@ func (source *LegacyRedisStrategySource) ActiveStrategyIDs(ctx context.Context) 
 	if source == nil || source.client == nil {
 		return nil, errors.New("alarmd controlplane: legacy Redis strategy source is required")
 	}
-	payload, err := source.client.Get(ctx, source.strategyIDsKey).Bytes()
-	if errors.Is(err, redis.Nil) || (err == nil && len(payload) == 0) {
-		return nil, ErrLegacySourceIncomplete
-	}
+	// One round trip for both: the publisher's record is read on every read
+	// of the active set, and kept before the active set is judged, so a
+	// round the active set refuses still says what the publisher said.
+	values, err := source.client.MGet(ctx, source.strategyIDsKey, source.publisherKey).Result()
 	if err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: read legacy strategy active set: %w", err)
+	}
+	if len(values) != 2 {
+		return nil, fmt.Errorf("alarmd controlplane: read legacy strategy active set: %d values for 2 keys", len(values))
+	}
+	if !publisherReportUnrecorded(ctx) {
+		source.notePublisher(decodePublisherReport(values[1], source.now()))
+	}
+	payload, ok := legacyRedisBytes(values[0])
+	if values[0] == nil || (ok && len(payload) == 0) {
+		return nil, ErrLegacySourceIncomplete
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: active strategy set is a %T", ErrLegacySourceIncomplete, values[0])
 	}
 	var rawIDs []json.RawMessage
 	if err := json.Unmarshal(payload, &rawIDs); err != nil {
@@ -98,6 +122,38 @@ func (source *LegacyRedisStrategySource) ActiveStrategyIDs(ctx context.Context) 
 		ids = append(ids, strconv.FormatUint(id, 10))
 	}
 	return ids, nil
+}
+
+func (source *LegacyRedisStrategySource) notePublisher(report PublisherReport) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.publisher = &report
+	source.published.note(report)
+}
+
+// PublisherReport is the publisher's record as this process last read it,
+// and false when it has not read the active set yet.
+func (source *LegacyRedisStrategySource) PublisherReport() (PublisherReport, bool) {
+	if source == nil {
+		return PublisherReport{}, false
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.publisher == nil {
+		return PublisherReport{}, false
+	}
+	return *source.publisher, true
+}
+
+// PublisherReportCounts is how many distinct records this process has read,
+// by outcome and reason; see publisherCounter.
+func (source *LegacyRedisStrategySource) PublisherReportCounts() []PublisherReportCount {
+	if source == nil {
+		return nil
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	return source.published.snapshot()
 }
 
 func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []string) ([]SourceStrategy, error) {
