@@ -12,6 +12,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -662,5 +663,19 @@ func TestTheCompatibilityTopicMustCarryThePrefixTheOutputRequires(t *testing.T) 
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "legacy_adapter.topic must start with") {
 		t.Fatalf("Validate() = %v, want the topic refused for its prefix", err)
+	}
+}
+
+// The deployment's namespace list is read from the environment when asked:
+// split on commas and spaces, empty and repeated entries dropped, and a name
+// that is not a namespace name kept for the read to report.
+func TestObservedNamespacesSplitsTheListTheChartRenders(t *testing.T) {
+	t.Setenv(ObserveNamespacesEnvironment, " kingdom, other  kingdom,,Bad_Name ")
+	if got, want := ObservedNamespaces(), []string{"kingdom", "other", "Bad_Name"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ObservedNamespaces() = %v, want %v", got, want)
+	}
+	t.Setenv(ObserveNamespacesEnvironment, "")
+	if got := ObservedNamespaces(); len(got) != 0 {
+		t.Fatalf("unset list = %v, want none", got)
 	}
 }

@@ -5,10 +5,17 @@
 // the Pod's ServiceAccount: its Pods' state and restarts, the events on its
 // Deployment, ReplicaSets and Pods, and a bounded tail of a container's log.
 //
-// Only GET requests are sent, and only for the workload this process belongs
-// to: the Deployment is found from this Pod's own owner chain and every read
-// is scoped by that Deployment's selector. A Pod outside it is refused by
-// name, whatever the ServiceAccount's role would allow.
+// Only GET requests are sent. Pods, events and logs are read only for the
+// workload this process belongs to: the Deployment is found from this Pod's
+// own owner chain and every such read is scoped by that Deployment's
+// selector. A Pod outside it is refused by name, whatever the
+// ServiceAccount's role would allow.
+//
+// Workloads reads further, and only what it names: the workloads and recent
+// rollouts of this process's namespace, of the namespaces its dependencies'
+// in-cluster addresses name, and of the namespaces the deployment lists. It
+// lists pods and ReplicaSets and decodes their owners, times, counts and
+// container images - never env, Secrets or ConfigMaps.
 //
 // Every way a read can fail is a named Error. A read that did not happen is
 // never returned as an empty list: "no events" is only ever said of a read
@@ -323,6 +330,7 @@ func (r *Reader) getJSON(ctx context.Context, resource, path string, query url.V
 type objectMeta struct {
 	Name              string            `json:"name"`
 	Labels            map[string]string `json:"labels"`
+	Annotations       map[string]string `json:"annotations"`
 	CreationTimestamp time.Time         `json:"creationTimestamp"`
 	DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
 	OwnerReferences   []struct {

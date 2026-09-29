@@ -122,6 +122,32 @@ func (c *CLIConfig) resolveAdminKeySecret() {
 	}
 }
 
+// ObserveNamespacesEnvironment lists the other namespaces alarmd's
+// dependencies run in, separated by commas or spaces, as the chart renders
+// them beside the Role it grants alarmd in each. The workload read covers
+// them besides its own namespace and the ones its dependencies' addresses
+// name. It is read when asked, not decoded into the configuration: it is a
+// fact about where the deployment put things, handed over by the chart like
+// the administrator key's Secret.
+const ObserveNamespacesEnvironment = "ALARMD_OBSERVE_NAMESPACES"
+
+// ObservedNamespaces is ObserveNamespacesEnvironment split into names, in the
+// order given. Empty and repeated entries are dropped; a name that is not a
+// namespace name is kept, for the read to report it rather than skip it.
+func ObservedNamespaces() []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, name := range strings.FieldsFunc(os.Getenv(ObserveNamespacesEnvironment), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // CLIAdminKeyEnvironment carries the administrator key when the deployment
 // keeps it in a Secret of its own rather than in the rendered configuration:
 // a chart then references the Secret and the key never appears in values.
