@@ -26,6 +26,9 @@ func partReplicas() []Snapshot {
 		snapshot := &snapshots[index]
 		ended := now.Add(-time.Duration(index+1) * 7 * time.Minute)
 		snapshot.Demoted[0].QueryCooldown = &observability.QueryCooldownFacts{Until: ended}
+		// Each replica's cooling reason dated differently, so the earliest
+		// is one replica's and not every replica's.
+		snapshot.Demoted[0].ReasonSince = now.Add(-time.Duration(index+1) * time.Hour)
 		later := snapshot.Demoted[0]
 		later.QueryGroup += "-later"
 		later.QueryCooldown = &observability.QueryCooldownFacts{Until: now.Add(time.Hour)}
@@ -94,6 +97,13 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 		}
 	}
 	merged := MergeReplicaParts(parts...)
+	unattributed := 0
+	for _, replica := range whole.PerReplica {
+		unattributed += replica.Unattributed
+	}
+	if merged.Attribution.Unknown+merged.Attribution.Other != unattributed {
+		t.Errorf("merged unattributed %+v, the replicas' split adds up to %d", merged.Attribution, unattributed)
+	}
 	if merged.Attribution.Ours != OursCount(whole.Anomalies) || merged.Attribution.Unknown != UnattributedCount(whole.Anomalies) {
 		t.Errorf("merged attribution %+v, whole view ours %d unattributed %d", merged.Attribution,
 			OursCount(whole.Anomalies), UnattributedCount(whole.Anomalies))
@@ -152,5 +162,35 @@ func sameJSON(t *testing.T, what string, got, want any) {
 	encodedWant, _ := json.Marshal(want)
 	if string(encodedGot) != string(encodedWant) {
 		t.Errorf("%s from parts:\n%s\nfrom the whole view:\n%s", what, encodedGot, encodedWant)
+	}
+}
+
+// Each health list is in one order across replicas, ties broken by object,
+// so the first few are the same objects whichever replica's rows came first.
+func TestTheHealthListsBreakTiesByObject(t *testing.T) {
+	rows := func(facts func(*Anomaly)) []Anomaly {
+		list := []Anomaly{}
+		for _, queryGroup := range []string{"qg-c", "qg-a", "qg-b"} {
+			row := Anomaly{QueryGroup: queryGroup}
+			facts(&row)
+			list = append(list, row)
+		}
+		return list
+	}
+	order := func(groups ...string) string { return fmt.Sprint(groups) }
+	early := readEarlyList(rows(func(row *Anomaly) { row.ReadEarly = &ReadEarlyFacts{SuggestedDelaySeconds: 60} }))
+	retained := retainedShareList(rows(func(row *Anomaly) { row.RetainedShare = &RetainedShareFacts{PercentOfShare: 90} }))
+	pruned := prunedSkipList(map[string]PrunedSkip{"qg-c": {To: 60}, "qg-a": {To: 60}, "qg-b": {To: 60}})
+	got := []string{}
+	for _, list := range [][]string{{early[0].QueryGroup, early[1].QueryGroup, early[2].QueryGroup},
+		{retained[0].QueryGroup, retained[1].QueryGroup, retained[2].QueryGroup},
+		{pruned[0].QueryGroup, pruned[1].QueryGroup, pruned[2].QueryGroup}} {
+		got = append(got, order(list...))
+	}
+	want := order("qg-a", "qg-b", "qg-c")
+	for index, name := range []string{"read early", "retained share", "pruned skips"} {
+		if got[index] != want {
+			t.Errorf("%s ties in order %s, want %s", name, got[index], want)
+		}
 	}
 }
