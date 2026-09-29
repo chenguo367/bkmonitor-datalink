@@ -122,6 +122,10 @@ func TestAConfiguredPrefixIsKeptAsItIs(t *testing.T) {
 		t.Errorf("with the prefix configured = %q", got)
 	}
 	if got := NewVocabulary("tenantprefix:").FamilyOf("tenantprefix:alarmd:alice"); got != "tenantprefix:alarmd:*" {
-		t.Errorf("a configured prefix's word = %q", got)
+		t.Errorf("a configured prefix's segment = %q", got)
+	}
+	// Its words are the deployment's too, wherever a key repeats them.
+	if got := NewVocabulary("tenantprefix:").FamilyOf("alarmd:tenantprefix_cache:1"); got != "alarmd:tenantprefix_cache:*" {
+		t.Errorf("a configured prefix's word inside another segment = %q", got)
 	}
 }
