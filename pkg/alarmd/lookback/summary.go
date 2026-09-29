@@ -199,17 +199,24 @@ func changedBuckets(earlier, later readSummary, limit int) []int64 {
 }
 
 // valueFractionBits is how many of a number's 52 fraction bits it is compared
-// by. The store sums a query's series in no fixed order, so one window read
-// twice comes back different in its last bits: in one deployment, three
-// reads of the same twenty-minute-old window of a sum by one dimension over
-// many series differed at every point, by at most about 1.4e-15 of the
-// value. Compared bit for bit, every rung of such a group found a value
-// revised after it was judged, and the group was reported read early with a
-// time_delay of minutes. Rounded to 28 fraction bits, one part in 2^28 or
-// about 3.7e-9 of the value, those reads agree; a revision smaller than that
-// is not one a threshold turns on. Two reads whose noise straddles a
-// rounding boundary still differ, about once in ten million values at that
-// noise.
+// by, set from the bound on a sum's rounding error. A store sums a query's
+// series in no fixed order, and a sum of n doubles, in any order, is within
+// (n-1)*2^-53*sum|x| of the exact sum. One query sums fewer than 2^25
+// values - the largest single read measured, on the largest deployment, is
+// about 1.64 million points, and 2^25 is about 33.5 million - so each read
+// is within 2^-28*sum|x| of the exact sum, and 2^-28 is the unit of the 28th
+// fraction bit relative to the value. For terms of one sign, which counts
+// and sums of rates are, sum|x| is the value itself, and every read of the
+// same data rounds to the same 28 bits unless the exact sum lies within that
+// error of a rounding boundary. The error met in practice is far smaller:
+// three reads of the same twenty-minute-old window of a sum by one
+// dimension over many series differed at every point, by at most about
+// 1.4e-15 of the value, and compared bit for bit every rung of such a group
+// found a value revised after it was judged and reported the group read
+// early. At that noise a boundary falls between two reads about once in a
+// million values. A sum whose terms cancel, whose sum|x| is far larger than
+// the value, can still read as changed; a revision smaller than one part in
+// 2^28 is not one a threshold turns on.
 const valueFractionBits = 28
 
 // valueBits is a value as the bits it is compared by: a number's IEEE bits

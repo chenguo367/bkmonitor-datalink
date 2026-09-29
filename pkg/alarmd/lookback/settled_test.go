@@ -50,6 +50,44 @@ func TestValuesThatDifferOnlyInHowTheyWereSummedAreOneValue(t *testing.T) {
 	}
 }
 
+// The same values summed in three orders - one after another, in 64 shards
+// added up at the end, and backwards - at close to the most a query sums,
+// 2^25, come back three different doubles and one value. The terms are made
+// from their index, so no order needs them all held at once.
+func TestASumNearTheLargestReadIsOneValueInAnyOrder(t *testing.T) {
+	const n = 1<<25 - 1
+	term := func(i uint64) float64 {
+		// splitmix64 of the index, to a value in [1, 1001).
+		z := i + 0x9e3779b97f4a7c15
+		z = (z ^ z>>30) * 0xbf58476d1ce4e5b9
+		z = (z ^ z>>27) * 0x94d049bb133111eb
+		z ^= z >> 31
+		return 1 + float64(z>>11)/(1<<53)*1000
+	}
+	forward, backward := 0.0, 0.0
+	var shards [64]float64
+	for i := uint64(0); i < n; i++ {
+		value := term(i)
+		forward += value
+		shards[i%64] += value
+		backward += term(n - 1 - i)
+	}
+	sharded := 0.0
+	for _, shard := range shards {
+		sharded += shard
+	}
+	sums := []float64{forward, sharded, backward}
+	if forward == sharded && sharded == backward {
+		t.Fatalf("the three orders summed to one double %v; the case needs their noise", forward)
+	}
+	for _, sum := range sums[1:] {
+		left, right := strconv.FormatFloat(forward, 'g', -1, 64), strconv.FormatFloat(sum, 'g', -1, 64)
+		if valueBits([]byte(left)) != valueBits([]byte(right)) {
+			t.Errorf("%s and %s, one sum in two orders, are two values", left, right)
+		}
+	}
+}
+
 // A Query Group whose every read of a window comes back different only in
 // how its store summed it is complete: no rung changed, and it is not read
 // early however many samples say so.
