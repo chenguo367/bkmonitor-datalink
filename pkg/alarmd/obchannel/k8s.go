@@ -16,7 +16,7 @@ const k8sBoundary = "Read through the answering replica's own ServiceAccount; wi
 
 // workloadsBoundary is said on every workload read: what it can and cannot
 // see, whatever the answer holds.
-const workloadsBoundary = "Covers alarmd's own namespace, the namespaces its dependencies' in-cluster addresses name, and the namespaces the deployment lists (ALARMD_OBSERVE_NAMESPACES, each with a Role granting the read); a workload elsewhere - one alarmd does not connect to, such as the strategy cache's writer reached only through Redis - is not seen until it runs in one of them."
+const workloadsBoundary = "Covers alarmd's own namespace, the namespaces its dependencies' in-cluster addresses name, and the namespaces the deployment lists (ALARMD_OBSERVE_NAMESPACES, each with a Role granting the read); a workload elsewhere - one alarmd does not connect to, such as the strategy cache's writer reached only through Redis - is not seen until it runs in one of them. A dependency addressed by a bare Service name is placed in alarmd's own namespace (origin short_name), where a Pod's resolver looks it up first; one a hostAliases entry or the node's search domains send elsewhere is placed there all the same."
 
 // K8sOperations reads alarmd's own workload from the Kubernetes API: its
 // Pods, the events on it, and a bounded log tail. Any replica answers, the

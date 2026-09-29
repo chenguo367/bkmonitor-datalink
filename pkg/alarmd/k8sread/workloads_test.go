@@ -283,7 +283,7 @@ func TestWorkloadsNamesEveryNamespaceByItsOriginAndReadsEachOnce(t *testing.T) {
 	}
 	want := map[string][]NamespaceOrigin{
 		"ns": {{Kind: OriginOwn}, {Kind: OriginDerived, Dependency: "output_kafka", Address: "kafka.ns.svc:9092"},
-			{Kind: OriginDerived, Dependency: "strategy_cache", Address: "bk-redis:6379"}},
+			{Kind: OriginShortName, Dependency: "strategy_cache", Address: "bk-redis:6379"}},
 		"other": {{Kind: OriginDerived, Dependency: "query_backend", Address: "http://uq.other.svc.cluster.local:10205"}, {Kind: OriginConfigured}, {Kind: OriginConfigured}},
 		"extra": {{Kind: OriginConfigured}},
 	}

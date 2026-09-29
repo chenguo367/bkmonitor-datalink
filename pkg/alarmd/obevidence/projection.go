@@ -19,6 +19,9 @@ type policy struct {
 	values     *policy
 	scalar     bool
 	namedValue bool
+	// guardKeys marks a dictionary whose keys are data - field names -
+	// rather than a schema: a key named like a credential is left out.
+	guardKeys bool
 }
 
 var leaf = &policy{scalar: true}
@@ -34,6 +37,10 @@ func fields(names string, children map[string]*policy) *policy {
 	return p
 }
 func dictionary(value *policy) *policy { return &policy{values: value} }
+
+// guardedDictionary is a dictionary keyed by data, not by a schema; see
+// policy.guardKeys.
+func guardedDictionary(value *policy) *policy { return &policy{values: value, guardKeys: true} }
 
 func namedValues(p *policy) *policy { p.namedValue = true; return p }
 
@@ -61,13 +68,13 @@ var targetPolicy = fields("schema_version model_id target_rule failure_policy st
 	// left the list empty.
 	"dynamic_groups": scalarOr(fields("dynamic_group_id", nil)),
 })
-var uptimePolicy = fields("is_enabled type timezone start end begin end_time begin_time week weekdays days months exclude_days include_days", map[string]*policy{
+var uptimePolicy = fields("is_enabled type timezone start end begin end_time begin_time week weekdays days months exclude_days include_days calendars active_calendars", map[string]*policy{
 	"time_ranges": fields("start end begin end_time begin_time", nil),
 	"date_ranges": fields("start end", nil),
 })
 var noDataPolicy = fields("is_enabled continuous level agg_dimension tracking_horizon_seconds", nil)
 var algorithmConfigPolicy = func() *policy {
-	p := fields("method threshold operator threshold_decimal value value_field data_unit threshold_unit_prefix ceil floor ceil_interval floor_interval ratio days count window window_size required_anomalies required_normals check_window trigger_count recovery_count threshold_count sensitivity period upper lower abs is_ratio multiplier comparison unit unit_prefix invalid_policy version floor_ratio ceil_ratio shock shock_unit", nil)
+	p := fields("method threshold operator threshold_decimal value value_field data_unit threshold_unit_prefix ceil floor ceil_interval floor_interval ratio days count window window_size required_anomalies required_normals check_window trigger_count recovery_count threshold_count sensitivity period upper lower abs is_ratio multiplier comparison unit unit_prefix invalid_policy version floor_ratio ceil_ratio shock shock_unit fetch_type", nil)
 	p.fields["precision"] = fields("decimal_places rounding", nil)
 	p.fields["groups"] = p
 	p.fields["conditions"] = p
@@ -77,11 +84,21 @@ var algorithmConfigPolicy = func() *policy {
 var algorithmPolicy = fields("type version level unit_prefix", map[string]*policy{"config": algorithmConfigPolicy})
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
-var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset", map[string]*policy{"agg_condition": conditionPolicy, "functions": functionPolicy})
+var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset", map[string]*policy{
+	"agg_condition": conditionPolicy, "functions": functionPolicy,
+	// A PromQL query's label filter (field -> value or values), read by the
+	// polling compiler as agg_condition is by the others: the same kind of
+	// value, shown the same way, a field named like a credential left out.
+	"filter_dict": guardedDictionary(leaf),
+})
+
+// targetValuePolicy is one value of a legacy target condition: a bare value,
+// or the object naming a host, instance, node or group the compiler reads.
+var targetValuePolicy = scalarOr(fields("bk_cloud_id bk_host_id bk_inst_id bk_obj_id bk_target_cloud_id bk_target_ip bk_target_service_instance_id dynamic_group_id ip service_instance_id", nil))
 var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strategy name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
 	"items": fields("id query_md5 expression time_delay unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
-		"target":      namedValues(fields("condition key method value type model_id target_type", map[string]*policy{"conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
+		"target":      namedValues(fields("condition key field method type model_id target_type", map[string]*policy{"value": targetValuePolicy, "conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,
 	}),
 	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": triggerPolicy, "effective_time": uptimePolicy}),
@@ -186,6 +203,10 @@ func project(value any, p *policy, path string, depth int, omitted *[]Omission, 
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
+			if p.guardKeys && credentialFieldName(key) {
+				omit(omitted, path+"."+key, "credential_parameter")
+				continue
+			}
 			lowerKey := strings.ToLower(key)
 			if p.namedValue && (lowerKey == "value" || lowerKey == "values" || lowerKey == "keys") && credentialParameter(value) {
 				omit(omitted, path+"."+key, "credential_parameter")
@@ -262,7 +283,7 @@ func shapeOf(value any, depth int) any {
 // key it misses would show a credential's length.
 func credentialFieldName(key string) bool {
 	lower := strings.ToLower(key)
-	for _, word := range []string{"password", "passwd", "pwd", "secret", "token", "authorization", "cookie", "header", "credential",
+	for _, word := range []string{"password", "passwd", "pwd", "pass", "secret", "token", "auth", "cookie", "header", "credential", "cert",
 		"private_key", "privatekey", "api_key", "apikey", "access_key", "accesskey", "signature", "session"} {
 		if strings.Contains(lower, word) {
 			return true

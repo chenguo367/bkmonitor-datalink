@@ -115,19 +115,23 @@ func TestTheSourceViewShowsAnUnlistedKeyByItsShape(t *testing.T) {
 	raw := []byte(`{"id":54,"webhook_secret":"HOOK_SECRET","runtime_config":{"api_token":"TOKEN_SECRET","depth":3,"on":true,"none":null},` +
 		`"detects":[{"level":1,"trigger_config":{"check_window":5,"count":1,"uptime":{"time_ranges":[{"start":"00:00","end":"23:59"}],` +
 		`"active_calendars":[3],"cw_calendars":[]}}}],` +
-		`"items":[{"id":1,"query_configs":[{"metric_id":"system.disk.in_use","filter_dict":{"ip":"198.51.100.4","n":2}}]}]}`)
+		`"global_scope":{"owner":"team-a","n":2},` +
+		`"items":[{"id":1,"query_configs":[{"metric_id":"system.disk.in_use","filter_dict":{"ip":"198.51.100.4","api_token":"FILTER_SECRET"}}]}]}`)
 	value, omitted, err := projectSourceJSON(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := plainJSON(t, value)
-	for _, want := range []string{`"cw_calendars":[]`, `"active_calendars":[3]`, `"filter_dict":{"ip":"<string of 12 bytes>","n":2}`,
+	// Keys alarmd reads - filter_dict, active_calendars - are shown as
+	// written; keys it does not - global_scope, cw_calendars - by shape.
+	for _, want := range []string{`"cw_calendars":[]`, `"active_calendars":[3]`, `"filter_dict":{"ip":"198.51.100.4"}`,
+		`"global_scope":{"n":2,"owner":"<string of 6 bytes>"}`,
 		`"runtime_config":{"api_token":"<credential field>","depth":3,"none":null,"on":true}`, `"metric_id":"system.disk.in_use"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("projection lacks %s: %s", want, text)
 		}
 	}
-	for _, leak := range []string{"SECRET", "198.51.100.4", "webhook_secret"} {
+	for _, leak := range []string{"SECRET", "team-a", "webhook_secret"} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("projection shows %s: %s", leak, text)
 		}
@@ -138,9 +142,9 @@ func TestTheSourceViewShowsAnUnlistedKeyByItsShape(t *testing.T) {
 	}
 	for path, reason := range map[string]string{
 		"$.webhook_secret": "credential_field", "$.runtime_config": "value_shape_only",
-		"$.detects[0].trigger_config.uptime.cw_calendars":     "value_shape_only",
-		"$.detects[0].trigger_config.uptime.active_calendars": "value_shape_only",
-		"$.items[0].query_configs[0].filter_dict":             "value_shape_only",
+		"$.detects[0].trigger_config.uptime.cw_calendars": "value_shape_only",
+		"$.global_scope": "value_shape_only",
+		"$.items[0].query_configs[0].filter_dict.api_token": "credential_parameter",
 	} {
 		if reasons[path] != reason {
 			t.Errorf("omission of %s = %q, want %q (all: %+v)", path, reasons[path], reason, omitted)
@@ -183,7 +187,7 @@ func TestTheShapeViewKeepsEveryRedactionAndOnlyTheSourceViewShapes(t *testing.T)
 func TestACredentialNamedKeyIsKnownByItsName(t *testing.T) {
 	for key, want := range map[string]bool{
 		"password": true, "db_passwd": true, "webhook_secret": true, "api_token": true, "Authorization": true, "cookie": true,
-		"credentials": true, "headers": true, "private_key": true, "apiKey": true, "access_key_id": true, "signature": true, "session_id": true,
+		"credentials": true, "headers": true, "private_key": true, "basic_auth": true, "pass": true, "passphrase": true, "cert": true, "apiKey": true, "access_key_id": true, "signature": true, "session_id": true,
 		"cw_calendars": false, "filter_dict": false, "runtime_config": false, "global_scope": false, "bk_biz_ids": false,
 	} {
 		if got := credentialFieldName(key); got != want {
@@ -203,4 +207,24 @@ func plainJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(buffer.String())
+}
+
+// A legacy target condition is read by its field and each value's host,
+// instance, node or group, and the source view shows them as written.
+func TestTheSourceViewShowsATargetConditionAsAlarmdReadsIt(t *testing.T) {
+	raw := []byte(`{"id":9,"items":[{"id":1,"target":[[{"field":"bk_target_ip","method":"eq","value":[{"bk_target_ip":"192.0.2.9","bk_target_cloud_id":0}]},` +
+		`{"field":"host_topo_node","method":"eq","value":[{"bk_obj_id":"set","bk_inst_id":7}]}]]}]}`)
+	value, omitted, err := projectSourceJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := plainJSON(t, value)
+	for _, want := range []string{`"field":"bk_target_ip"`, `"bk_target_ip":"192.0.2.9"`, `"bk_target_cloud_id":0`, `"bk_obj_id":"set"`, `"bk_inst_id":7`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("projection lacks %s: %s", want, text)
+		}
+	}
+	if len(omitted) != 0 {
+		t.Fatalf("a target alarmd reads left omissions: %+v", omitted)
+	}
 }
