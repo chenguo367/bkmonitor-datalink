@@ -121,6 +121,10 @@ type SourceRefreshResult struct {
 	// Catalog did not retain because their persisted revision no longer
 	// derives from their facts. See BuildCatalog.
 	RetainedStaleRevisions int
+	// LastGoodIdentityChanged is how many last-good Plans this round's
+	// Catalog did not retain because the source now states another identity
+	// for the strategy (Catalog.LastGoodIdentityChanged).
+	LastGoodIdentityChanged int
 	// Composition is what the Catalog this round built is made of: Query
 	// Groups and Plans by the data sources they query, and source objects by
 	// disposition. Set on every round that got as far as a complete Catalog,
@@ -156,11 +160,12 @@ type sourceRoundMemory struct {
 // reusableRound is a round that ended UNCHANGED, kept whole so that the next
 // one can stand on it when nothing it was built from has moved.
 type reusableRound struct {
-	catalog                Catalog
-	composition            CatalogComposition
-	current                *PublishedSnapshot
-	roundKey               string
-	retainedStaleRevisions int
+	catalog                 Catalog
+	composition             CatalogComposition
+	current                 *PublishedSnapshot
+	roundKey                string
+	retainedStaleRevisions  int
+	lastGoodIdentityChanged int
 	// until is the first moment the Catalog would change with every input
 	// the same: the earliest end of an absence grace (absenceGraceEnd). Zero
 	// when no strategy is serving one.
@@ -404,7 +409,7 @@ func (reconciler *SourceReconciler) Refresh(
 	// copied into each return. A round that fails leaves its observation
 	// unsettled, so the next round reads the source again.
 	cycle, read, err := reconciler.observe(ctx, source)
-	retainedStaleRevisions := 0
+	retainedStaleRevisions, lastGoodIdentityChanged := 0, 0
 	var composition CatalogComposition
 	var withheld, suspended WithheldReport
 	build := SourceRefreshRebuilt
@@ -419,6 +424,7 @@ func (reconciler *SourceReconciler) Refresh(
 		}
 		result.Build = build
 		result.RetainedStaleRevisions = retainedStaleRevisions
+		result.LastGoodIdentityChanged = lastGoodIdentityChanged
 		result.Composition = composition
 		result.Withheld = withheld
 		result.Suspended = suspended
@@ -453,7 +459,7 @@ func (reconciler *SourceReconciler) Refresh(
 		activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 		if activationErr == nil && activation.Current.SnapshotRevision == reuse.catalog.SnapshotRevision {
 			build, reuseNext = SourceRefreshReused, reuse
-			retainedStaleRevisions, composition = reuse.retainedStaleRevisions, reuse.composition
+			retainedStaleRevisions, lastGoodIdentityChanged, composition = reuse.retainedStaleRevisions, reuse.lastGoodIdentityChanged, reuse.composition
 			withheld = ChangedWithheld(composition.WithheldObjects, reconciler.namedWithheld)
 			reconciler.namedWithheld = RememberNamed(reconciler.namedWithheld, composition.WithheldObjects, withheld.Lines)
 			suspended = ChangedWithheld(composition.SuspendedNoDataObjects, reconciler.namedSuspended)
@@ -499,6 +505,9 @@ func (reconciler *SourceReconciler) Refresh(
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitRetainExecutable, err)
 	}
+	// Read after the runtime step: it refuses last-good Plans of another
+	// identity too, and adds its own to the build's.
+	lastGoodIdentityChanged = catalog.LastGoodIdentityChanged
 	if catalog.ObservationID != observationID {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitObservationChanged,
 			errors.New("alarmd controlplane: source observation changed while building Catalog"))
@@ -541,7 +550,8 @@ func (reconciler *SourceReconciler) Refresh(
 	// forever when non-semantic observation details change between refreshes.
 	remember := func() *reusableRound {
 		return &reusableRound{catalog: catalog, composition: composition, current: current, roundKey: roundKey,
-			retainedStaleRevisions: retainedStaleRevisions, until: absenceGraceEnd(catalog.Dispositions)}
+			retainedStaleRevisions: retainedStaleRevisions, lastGoodIdentityChanged: lastGoodIdentityChanged,
+			until: absenceGraceEnd(catalog.Dispositions)}
 	}
 	activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 	if activationErr == nil && activation.Current.SnapshotRevision == catalog.SnapshotRevision {

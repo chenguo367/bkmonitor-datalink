@@ -763,6 +763,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if facts.RetainedStaleRevisions > 0 {
 			attributes = append(attributes, slog.Int("source_retained_stale_revisions", facts.RetainedStaleRevisions))
 		}
+		if facts.LastGoodIdentityChanged > 0 {
+			attributes = append(attributes, slog.Int("source_last_good_identity_changed", facts.LastGoodIdentityChanged))
+		}
 		if facts.ReadMode != "" {
 			attributes = append(attributes,
 				slog.String("source_read_mode", string(facts.ReadMode)),
