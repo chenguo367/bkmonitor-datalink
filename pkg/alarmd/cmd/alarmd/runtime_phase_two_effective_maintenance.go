@@ -168,32 +168,40 @@ type effectiveMaintenance struct {
 	sourceLossAt time.Time
 }
 
-// maintenanceRecentKept bounds the outcomes kept of each word, and
-// maintenanceErrorBytes the text kept of each one's error.
+// maintenanceRecentKept bounds the Query Groups kept of each outcome word,
+// and maintenanceErrorBytes the text kept of each one's error.
 const (
 	maintenanceRecentKept = 32
 	maintenanceErrorBytes = 256
 )
 
-// maintenanceOutcome is one outcome of the loop that was not an
-// acknowledged close: the Query Group, the strategy when the outcome was
-// about one, when, and the error's text, cut to maintenanceErrorBytes.
+// maintenanceOutcome is one Query Group, and strategy when the outcome was
+// about one, that the loop did not complete, kept by outcome word: when it
+// was first and last seen in this process, how many times, and the latest
+// error's text, cut to maintenanceErrorBytes. The loop ticks every second
+// and repeats a close it holds back or a read that failed on every tick, so
+// each one is kept once and counted rather than listed per tick: one Query
+// Group repeating would otherwise push every other one out within a minute,
+// and "held since" is what the one-by-one list could not say.
 type maintenanceOutcome struct {
-	At         time.Time `json:"at"`
 	QueryGroup string    `json:"query_group"`
 	StrategyID string    `json:"strategy_id,omitempty"`
 	BusinessID string    `json:"business_id,omitempty"`
+	FirstAt    time.Time `json:"first_at"`
+	LastAt     time.Time `json:"last_at"`
+	Count      uint64    `json:"count"`
 	Error      string    `json:"error,omitempty"`
 }
 
-// maintenanceReading is the loop's counts and its latest outcomes of every
-// word but close_acked, each list present, empty when none was seen.
+// maintenanceReading is the loop's counts and the Query Groups it did not
+// complete, by every word but close_acked, the most recently seen first,
+// each list present, empty when none was seen.
 type maintenanceReading struct {
 	Counts map[string]uint64               `json:"counts"`
 	Recent map[string][]maintenanceOutcome `json:"recent"`
 }
 
-// Reading is the counts and the recent outcomes, copied.
+// Reading is the counts and the outcomes kept, copied.
 func (m *effectiveMaintenance) Reading() maintenanceReading {
 	reading := maintenanceReading{Counts: m.Stats(), Recent: map[string][]maintenanceOutcome{}}
 	m.countsMu.Lock()
@@ -202,31 +210,49 @@ func (m *effectiveMaintenance) Reading() maintenanceReading {
 		if string(outcome) == closeOutcomeAcked {
 			continue
 		}
-		reading.Recent[string(outcome)] = append([]maintenanceOutcome{}, m.recent[string(outcome)]...)
+		kept := append([]maintenanceOutcome{}, m.recent[string(outcome)]...)
+		sort.SliceStable(kept, func(i, j int) bool { return kept[i].LastAt.After(kept[j].LastAt) })
+		reading.Recent[string(outcome)] = kept
 	}
 	return reading
 }
 
-// remember keeps an outcome that was not an acknowledged close.
+// remember keeps an outcome that was not an acknowledged close, once per
+// Query Group and strategy: a repeat moves its last time and count, and a
+// new one past the bound takes the place of the one seen longest ago.
 func (m *effectiveMaintenance) remember(trace observability.TraceFields, outcome string, err error) {
 	if outcome == closeOutcomeAcked {
 		return
 	}
-	kept := maintenanceOutcome{At: m.bundle.dependencies.Now().UTC(), QueryGroup: trace.QueryGroupKey,
-		StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
+	at := m.bundle.dependencies.Now().UTC()
+	text := ""
 	if err != nil {
-		kept.Error = cutAtRune(err.Error(), maintenanceErrorBytes)
+		text = cutAtRune(err.Error(), maintenanceErrorBytes)
 	}
 	m.countsMu.Lock()
 	defer m.countsMu.Unlock()
 	if m.recent == nil {
 		m.recent = make(map[string][]maintenanceOutcome, len(observability.EffectiveCloseOutcomes))
 	}
-	list := append(m.recent[outcome], kept)
-	if len(list) > maintenanceRecentKept {
-		list = append([]maintenanceOutcome(nil), list[len(list)-maintenanceRecentKept:]...)
+	list := m.recent[outcome]
+	oldest := -1
+	for index := range list {
+		kept := &list[index]
+		if kept.QueryGroup == trace.QueryGroupKey && kept.StrategyID == trace.StrategyID && kept.BusinessID == trace.BusinessID {
+			kept.LastAt, kept.Count, kept.Error = at, kept.Count+1, text
+			return
+		}
+		if oldest < 0 || kept.LastAt.Before(list[oldest].LastAt) {
+			oldest = index
+		}
 	}
-	m.recent[outcome] = list
+	entry := maintenanceOutcome{QueryGroup: trace.QueryGroupKey, StrategyID: trace.StrategyID, BusinessID: trace.BusinessID,
+		FirstAt: at, LastAt: at, Count: 1, Error: text}
+	if len(list) < maintenanceRecentKept {
+		m.recent[outcome] = append(list, entry)
+		return
+	}
+	list[oldest] = entry
 }
 
 // cutAtRune is text cut to at most limit bytes on a rune boundary.
@@ -960,6 +986,6 @@ func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
 			}
 			return obchannel.Outcome{Value: reading, Complete: reading.Running,
 				Limitations: []string{"Use meta.answered_by to identify this process: each replica maintains the Query Groups it owns, and another replica's outcomes are read by targeting it.",
-					"Counts and outcomes are this process's since it started; the last 32 of each outcome word are kept, and each error's text is cut to 256 bytes."}}
+					"Counts and outcomes are this process's since it started: first_at is when this process first saw the Query Group under the word, not when the condition began. At most 32 Query Groups are kept per word, the one seen longest ago giving way; each error's text is cut to 256 bytes."}}
 		}}
 }
