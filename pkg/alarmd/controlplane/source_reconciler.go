@@ -796,7 +796,8 @@ func (reconciler *SourceReconciler) rememberLastGood(publication SnapshotPublica
 		reconciler.departed.record(reconciler.lastGood.QueryGroups, groups, reconciler.now())
 	}
 	reconciler.lastGood = &PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication, QueryGroups: groups}
-	reconciler.strategies.replace(buildStrategyIndex(publication, groups, catalog.Dispositions).withGlobal(catalog.GlobalStrategies))
+	reconciler.strategies.replace(buildStrategyIndex(publication, groups, catalog.Dispositions).
+		withGlobal(catalog.GlobalStrategies).withObservation(catalog.ObservationID))
 }
 
 // currentSnapshot is the content of the latest publication: from memory

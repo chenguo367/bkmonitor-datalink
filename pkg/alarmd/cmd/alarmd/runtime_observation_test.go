@@ -174,7 +174,7 @@ func TestObservationCapacityCannotBlockExecutionAtSmallOrLargeResources(t *testi
 			t.Fatalf("collector reservation %d > half budget %d", got, capacity.CostBytes/2)
 		}
 		if resources.MemoryLimitBytes == 1<<30 {
-			t.Logf("1GiB/1CPU: capacity=%+v directory_entry_reservation=%d cost_groups=%d cost_plans=%d cost_top_n=%d cost_reservation=%d sample=%+v projection=%+v", capacity, controlplane.DirectoryEntryReservationBytes(), o.GroupCapacity, o.PlanCapacity, o.TopN, observability.CostSummaryCapacityBytes(o), limits, observationProjectionLimits(capacity, 30*time.Second))
+			t.Logf("1GiB/1CPU: capacity=%+v cost_groups=%d cost_plans=%d cost_top_n=%d cost_reservation=%d sample=%+v projection=%+v", capacity, o.GroupCapacity, o.PlanCapacity, o.TopN, observability.CostSummaryCapacityBytes(o), limits, observationProjectionLimits(capacity, 30*time.Second))
 		}
 		if resources.MemoryLimitBytes <= 2<<20 && enabled {
 			t.Fatalf("enabled without one complete buffer %+v", limits)

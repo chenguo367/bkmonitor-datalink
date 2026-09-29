@@ -183,15 +183,14 @@ func (r *observationCostRefresh) publish(ctx context.Context, at time.Time, cost
 	r.cache.Update(out)
 }
 
-// Directory refresh runs on the fleet publisher's independent maintenance
-// loop, not the scheduler/control loop or an HTTP caller. Only identity
-// metadata enters the scalar collector; no frozen config is retained twice.
+// The cost roster refresh runs on the fleet publisher's independent
+// maintenance loop, not the scheduler/control loop or an HTTP caller. Only
+// identity metadata enters the scalar collector.
 type observationRefresh struct {
-	directory *controlplane.ObservationDirectory
-	cost      *observability.CostSummary
-	now       func() time.Time
-	interval  time.Duration
-	last      time.Time
+	cost     *observability.CostSummary
+	now      func() time.Time
+	interval time.Duration
+	last     time.Time
 	// owned is this replica's Query Groups with the timeline revision each
 	// lease names, and identity what each executes under at a time, from
 	// memory (controlplane.RedisCatalogRepository.CachedExecutionIdentity).
@@ -211,11 +210,7 @@ func (r *observationRefresh) publish(ctx context.Context) {
 	at := r.now()
 	if r.last.IsZero() || at.Sub(r.last) >= r.interval {
 		r.last = at
-		// The roster is read from memory, not from the directory, so it no
-		// longer waits on a directory this replica may not keep.
-		if r.directory != nil {
-			r.directory.Refresh(ctx, at)
-		}
+		// The roster is read from memory, not from the directory.
 		var owned []ownedLease
 		if r.owned != nil {
 			owned = r.owned()

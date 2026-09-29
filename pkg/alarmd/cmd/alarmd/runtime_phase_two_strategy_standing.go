@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -137,7 +138,23 @@ type leaderDiscovery interface {
 // the reader is told that rather than kept waiting.
 const strategyStandingForwardTimeout = 2 * time.Second
 
-// leaderForwarder hands a request to the Leader's HTTP listener once. It
+// directoryReadTimeout bounds the reads one directory request makes on the
+// Leader: the activation header, a carried publication's content when the
+// activation round has not already read it, and the objects of the rows
+// the page returns. directoryForwardTimeout bounds a follower's hop to it,
+// above the Leader's own bound so the Leader's answer, not the hop's, is
+// what a slow read comes back as.
+const (
+	directoryReadTimeout    = 2 * time.Second
+	directoryForwardTimeout = 2500 * time.Millisecond
+)
+
+// forwardBodyBytes bounds the body a hop carries: the one request that has
+// one, a sample window's open, is itself read within the same bound.
+const forwardBodyBytes = 64 << 10
+
+// leaderForwarder hands a request to the Leader's HTTP listener once, with
+// its method and, for a write, its body. It
 // marks the request so the Leader answers or refuses it and never hands it
 // on; it copies the Leader's status and body back as they are. No Leader
 // -- no lease, a lease holder without a registration, a registration
@@ -181,12 +198,24 @@ func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *ht
 			observe(route, "no_leader", time.Since(started))
 			return false, viewstream.MissLeaderNoEndpoint
 		}
+		var body io.Reader
+		if request.Method != http.MethodGet && request.Body != nil {
+			payload, readErr := io.ReadAll(io.LimitReader(request.Body, forwardBodyBytes+1))
+			if readErr != nil || len(payload) > forwardBodyBytes {
+				observe(route, "error", time.Since(started))
+				return false, fleet.ForwardFailed
+			}
+			body = bytes.NewReader(payload)
+		}
 		ctx, cancel := context.WithTimeout(request.Context(), timeout)
 		defer cancel()
-		forwarded, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+leader.Endpoint+request.URL.RequestURI(), nil)
+		forwarded, err := http.NewRequestWithContext(ctx, request.Method, "http://"+leader.Endpoint+request.URL.RequestURI(), body)
 		if err != nil {
 			observe(route, "error", time.Since(started))
 			return false, fleet.ForwardFailed
+		}
+		if contentType := request.Header.Get("Content-Type"); contentType != "" && body != nil {
+			forwarded.Header.Set("Content-Type", contentType)
 		}
 		forwarded.Header.Set(fleet.ForwardedHeader(), replica)
 		reply, err := client.Do(forwarded)

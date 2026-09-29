@@ -1028,7 +1028,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 		diagnosticsClient = nil
 	}
 	var diagnostics *fleet.DiagnosticStore
-	var directory *controlplane.ObservationDirectory
 	var seriesSampler *observability.SeriesSampler
 	if diagnosticsClient != nil {
 		legacyClients = append(legacyClients, diagnosticsClient)
@@ -1036,17 +1035,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 			productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"))
 		if err != nil {
 			return nil, err
-		}
-		if observationCapacity.DirectoryBytes > 0 {
-			directory, err = controlplane.NewObservationDirectory(repository, controlplane.DirectoryLimits{
-				WireBytes: observationCapacity.DirectoryReadBytes, Commands: observationCapacity.DirectoryCommands,
-				Entries:  observationCapacity.DirectoryBytes / controlplane.DirectoryEntryReservationBytes(),
-				Timeout:  min(time.Second, cfg.PhaseTwo.Control.ReconcileInterval.Duration()/2),
-				FreshFor: 3 * cfg.PhaseTwo.Control.RefreshInterval.Duration(),
-			}, diagnosticsClient)
-			if err != nil {
-				return nil, err
-			}
 		}
 		if limits, enabled := observationSampleLimits(observationCapacity); enabled {
 			seriesSampler, err = observability.NewSeriesSampler(limits)
@@ -1080,7 +1068,18 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, external.Now)
+	// The strategy directory is the control Leader's view over the catalog it
+	// published: no copy, no refresh, rows built for the page asked. A
+	// follower forwards to the Leader; a Leader before its first round
+	// answers not ready.
+	directoryView, err := controlplane.NewDirectoryView(reconciler, repository, directoryReadTimeout)
+	if err != nil {
+		return nil, err
+	}
+	var directory fleet.StrategyDirectory = directoryView
+	directoryForward := leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil,
+		directoryForwardTimeout, "directory", recorder.ObserveLeaderForward)
+	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, directoryForward, external.Now)
 	// One strategy's standing by id, from the Leader's catalog memory: no
 	// Redis, no copy, no background work; a follower forwards the one
 	// request to the Leader's listener, found the way the view stream's
@@ -1113,8 +1112,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 			replica:        cfg.PhaseTwo.Worker.ID, interval: cfg.PhaseTwo.Control.RefreshInterval.Duration()}
 	}
 	fleetAPI = fleet.WithCostCandidates(fleetAPI, costCandidatesCache)
-	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, windowStore, diagnostics, seriesSampler, external.Now)
-	observationRefresh := &observationRefresh{directory: directory, cost: costSummary, now: external.Now,
+	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, directoryForward, windowStore, diagnostics, seriesSampler, external.Now)
+	observationRefresh := &observationRefresh{cost: costSummary, now: external.Now,
 		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), identity: repository.CachedExecutionIdentity}
 	// The same judgment the page shows, exported so the host writes alert rules
 	// against it instead of reimplementing the arithmetic. The deadline is a
