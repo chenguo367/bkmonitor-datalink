@@ -112,6 +112,33 @@ type SupplementOutcome struct {
 	Ran     bool
 	Facts   execution.SupplementFacts
 	Refused string
+	// Held is how long the supplement held its Query Group's flight, from
+	// taking it to the supplement's return - freezing the contract,
+	// evaluating, writing State and any Redis wait inside them: the time its
+	// group's own Slot waited behind it. Zero when it never took the flight.
+	Held time.Duration
+}
+
+// SupplementHoldBuckets are the upper bounds a supplement's hold of its
+// Query Group's flight is counted under, the last one unbounded: a Slot
+// behind it waits that long, and the bound the design holds it to is
+// seconds.
+var SupplementHoldBuckets = []string{"le_100ms", "le_500ms", "le_1s", "le_5s", "gt_5s"}
+
+// holdBucket is the bucket a hold falls in.
+func holdBucket(held time.Duration) string {
+	switch {
+	case held <= 100*time.Millisecond:
+		return "le_100ms"
+	case held <= 500*time.Millisecond:
+		return "le_500ms"
+	case held <= time.Second:
+		return "le_1s"
+	case held <= 5*time.Second:
+		return "le_5s"
+	default:
+		return "gt_5s"
+	}
 }
 
 // KeptRead is the late series of one physical query, as the provider
@@ -461,6 +488,10 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 		return
 	}
 	delete(state.directed, slot.evaluation)
+	if outcome.Held > 0 {
+		engine.counts.supplementHold[key2(slot.source, holdBucket(outcome.Held))]++
+		engine.counts.supplementHoldMax[slot.source] = max(engine.counts.supplementHoldMax[slot.source], outcome.Held)
+	}
 	switch {
 	case outcome.Ran:
 		engine.noteDirectedLocked(state, slot, DirectedSupplemented, "", &outcome.Facts)

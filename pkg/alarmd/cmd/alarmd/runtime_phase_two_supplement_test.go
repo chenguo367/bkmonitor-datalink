@@ -31,10 +31,17 @@ type supplementingQueryGroup struct {
 	calls   []execution.EvaluationTime
 	scopes  []execution.SupplementScope
 	read    []bool
+	// clock, when set, is moved on by took for every call that is not
+	// refused for the flight: the time the call held it.
+	clock *time.Time
+	took  time.Duration
 }
 
 func (runner *supplementingQueryGroup) Supplement(ctx context.Context, at execution.EvaluationTime, scope execution.SupplementScope) (execution.SupplementFacts, error) {
 	runner.calls, runner.scopes = append(runner.calls, at), append(runner.scopes, scope)
+	if runner.clock != nil && !errors.Is(runner.answers[0], scheduler.ErrSupplementFlightBusy) {
+		*runner.clock = runner.clock.Add(runner.took)
+	}
 	_, kept := access.KeptReadOf(ctx)
 	runner.read = append(runner.read, kept)
 	err := runner.answers[0]
@@ -198,4 +205,32 @@ type fakeSlotSourceOnly struct{}
 
 func (fakeSlotSourceOnly) Next(context.Context, execution.QueryGroupIdentity) (scheduler.FrozenSlot, bool, scheduler.SlotDueFacts, error) {
 	return scheduler.FrozenSlot{}, false, scheduler.SlotDueFacts{}, nil
+}
+
+// A supplement that took its Query Group's flight says how long it held
+// it, whatever it came to; one refused for the flight held nothing, and a
+// retry after one counts only the call that ran.
+func TestALookbackSupplementSaysHowLongItHeldTheFlight(t *testing.T) {
+	job := lookback.SupplementJob{QueryGroup: "qg-late", EvaluationTime: 1_799_999_940,
+		Series: []execution.SeriesIdentityDigest{"a"}, Read: &lookback.KeptRead{}}
+	for _, tc := range []struct {
+		name    string
+		answers []error
+		held    time.Duration
+	}{
+		{"ran", []error{nil}, 2 * time.Second},
+		{"expired", []error{scheduler.ErrSupplementContractExpired}, 2 * time.Second},
+		{"failed", []error{errors.New("redis: connection refused")}, 2 * time.Second},
+		{"busy then ran", []error{scheduler.ErrSupplementFlightBusy, nil}, 2 * time.Second},
+		{"busy twice", []error{scheduler.ErrSupplementFlightBusy, scheduler.ErrSupplementFlightBusy}, 0},
+	} {
+		now := time.Unix(1_800_000_000, 0)
+		job.Deadline = now.Add(40 * time.Second)
+		runner := &supplementingQueryGroup{answers: tc.answers, clock: &now, took: 2 * time.Second}
+		outcome := lookbackSupplement(supplementOwnership(runner), nil, func() time.Time { return now },
+			func(context.Context, time.Duration) error { return nil })(context.Background(), job)
+		if outcome.Held != tc.held {
+			t.Errorf("%s: held %v, want %v", tc.name, outcome.Held, tc.held)
+		}
+	}
 }

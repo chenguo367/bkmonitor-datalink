@@ -43,6 +43,8 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_supplement_series_total":           sources * len(lookback.SupplementSeriesOutcomes),
 		"lookback_supplement_points_total":           sources,
 		"lookback_directed_read_bytes_total":         sources,
+		"lookback_supplement_hold_total":             sources * len(lookback.SupplementHoldBuckets),
+		"lookback_supplement_hold_max_seconds":       sources,
 		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
 		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds":            sources,
@@ -90,6 +92,8 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	stats.Sources[logs].EmptyFirstReadCompletion["le_600s"] = 3
 	entry := stats.Sources[logs]
 	entry.RecheckBytes = 2048
+	entry.SupplementHold["le_5s"] = 11
+	entry.SupplementHoldMaxSeconds = 3.5
 	stats.Sources[logs] = entry
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
@@ -152,5 +156,11 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_recheck_bytes_total", map[string]string{"source": logs}); got != 2048 {
 		t.Fatalf("recheck bytes = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_supplement_hold_total", map[string]string{"source": logs, "bucket": "le_5s"}); got != 11 {
+		t.Fatalf("supplement holds up to 5s = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_supplement_hold_max_seconds", map[string]string{"source": logs}); got != 3.5 {
+		t.Fatalf("longest supplement hold = %v", got)
 	}
 }

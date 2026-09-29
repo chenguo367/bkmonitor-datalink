@@ -405,3 +405,87 @@ func TestADirectedGroupsSlotsAreReadOneAtATimeOldestFirst(t *testing.T) {
 		t.Fatalf("supplements %v, want %d then %d", order, first, second)
 	}
 }
+
+// A supplement that took its Query Group's flight is counted by how long it
+// held it - the time the group's own Slot waited behind it - with the
+// longest kept; one refused for the flight never held it and is not counted.
+func TestASupplementIsCountedByHowLongItHeldItsQueryGroupsFlight(t *testing.T) {
+	for _, test := range []struct {
+		outcome SupplementOutcome
+		bucket  string
+	}{
+		{SupplementOutcome{Ran: true, Held: 40 * time.Millisecond}, "le_100ms"},
+		{SupplementOutcome{Ran: true, Held: 300 * time.Millisecond}, "le_500ms"},
+		{SupplementOutcome{Refused: DirectedContractExpired, Held: 900 * time.Millisecond}, "le_1s"},
+		{SupplementOutcome{Refused: "redis", Held: 4 * time.Second}, "le_5s"},
+		{SupplementOutcome{Ran: true, Held: 7 * time.Second}, "gt_5s"},
+		{SupplementOutcome{Refused: DirectedFlightBusy}, ""},
+	} {
+		f, _ := directedFixture(t, test.outcome)
+		slot := f.clock.now().Unix()
+		f.firstRead(slot, execution.CompletenessFull)
+		f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
+		f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+		f.engine.Step(context.Background())
+		stats := f.waitFor(func(stats Stats) bool {
+			windows := uint64(0)
+			for _, n := range stats.Sources[sourceLog].SupplementWindows {
+				windows += n
+			}
+			return windows == 1
+		})
+		source := stats.Sources[sourceLog]
+		counted := uint64(0)
+		for _, bucket := range SupplementHoldBuckets {
+			counted += source.SupplementHold[bucket]
+		}
+		switch {
+		case test.bucket == "":
+			if counted != 0 || source.SupplementHoldMaxSeconds != 0 {
+				t.Errorf("refused for the flight: hold %v max %v, want nothing counted", source.SupplementHold, source.SupplementHoldMaxSeconds)
+			}
+		case counted != 1 || source.SupplementHold[test.bucket] != 1 || source.SupplementHoldMaxSeconds != test.outcome.Held.Seconds():
+			t.Errorf("held %v: hold %v max %v, want one under %s and the max %v", test.outcome.Held, source.SupplementHold,
+				source.SupplementHoldMaxSeconds, test.bucket, test.outcome.Held.Seconds())
+		}
+	}
+}
+
+// Each bound is the top of its bucket: exactly 100 ms is le_100ms and a
+// nanosecond past it is le_500ms, and so on up to gt_5s.
+func TestASupplementsHoldFallsInTheBucketItsBoundCloses(t *testing.T) {
+	for held, want := range map[time.Duration]string{
+		0: "le_100ms", 100 * time.Millisecond: "le_100ms", 100*time.Millisecond + 1: "le_500ms",
+		500 * time.Millisecond: "le_500ms", 500*time.Millisecond + 1: "le_1s",
+		time.Second: "le_1s", time.Second + 1: "le_5s",
+		5 * time.Second: "le_5s", 5*time.Second + 1: "gt_5s",
+	} {
+		if got := holdBucket(held); got != want {
+			t.Errorf("holdBucket(%v) = %s, want %s", held, got, want)
+		}
+	}
+}
+
+// The longest hold is kept, not the last one: a long supplement followed by
+// a short one leaves the long one as the maximum, both counted.
+func TestTheLongestSupplementHoldIsKeptNotTheLast(t *testing.T) {
+	f, recorder := directedFixture(t, SupplementOutcome{Ran: true, Held: 3 * time.Second})
+	for index, held := range []time.Duration{3 * time.Second, time.Second} {
+		recorder.mu.Lock()
+		recorder.outcome = SupplementOutcome{Ran: true, Held: held}
+		recorder.mu.Unlock()
+		slot := f.clock.now().Unix()
+		f.firstRead(slot, execution.CompletenessFull)
+		f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
+		f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+		f.engine.Step(context.Background())
+		want := uint64(index + 1)
+		f.waitFor(func(stats Stats) bool {
+			return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == want
+		})
+	}
+	source := f.engine.Stats().Sources[sourceLog]
+	if source.SupplementHoldMaxSeconds != 3 || source.SupplementHold["le_5s"] != 1 || source.SupplementHold["le_1s"] != 1 {
+		t.Fatalf("hold %v max %v, want both counted and the longest, 3 s, kept", source.SupplementHold, source.SupplementHoldMaxSeconds)
+	}
+}

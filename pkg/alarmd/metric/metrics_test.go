@@ -511,6 +511,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_supplement_series_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_supplement_points_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_directed_read_bytes_total"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_supplement_hold_total"] = "variableLabels: {source,bucket}"
+	expected["bkmonitor_alarmd_lookback_supplement_hold_max_seconds"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_empty_first_reads_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_empty_first_read_completion_total"] = "variableLabels: {source,age}"
 	expected["bkmonitor_alarmd_lookback_completion_max_seconds"] = "variableLabels: {source}"
