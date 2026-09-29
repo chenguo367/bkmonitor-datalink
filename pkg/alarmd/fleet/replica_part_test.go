@@ -283,3 +283,21 @@ func TestAPartCountsEachAttributionAndPartsAddThem(t *testing.T) {
 		t.Fatalf("merged attribution %+v, want every place doubled", merged)
 	}
 }
+
+// An object two replicas list during a handover is on the merged lists once,
+// the later entry, as the whole view keeps one record of it.
+func TestAnObjectListedByTwoReplicasIsOnTheMergedListsOnce(t *testing.T) {
+	earlier, later := now.Add(-time.Hour), now.Add(-time.Minute)
+	part := func(at time.Time, percent uint64) ReplicaPart {
+		return ReplicaPart{PrunedSkips: []PrunedSkipRef{{QueryGroup: "qg-handed-over", SpanSeconds: int64(percent), At: at}},
+			RetainedShare: []RetainedShareRef{{QueryGroup: "qg-handed-over", PercentOfShare: percent, Since: at}},
+			ReadEarly:     []ReadEarlyRef{{QueryGroup: "qg-handed-over", SuggestedDelaySeconds: int64(percent), Since: at}}}
+	}
+	merged := MergeReplicaParts(part(earlier, 90), part(later, 70))
+	if len(merged.PrunedSkips) != 1 || len(merged.RetainedShare) != 1 || len(merged.ReadEarly) != 1 {
+		t.Fatalf("lists %d/%d/%d long, want the object once on each", len(merged.PrunedSkips), len(merged.RetainedShare), len(merged.ReadEarly))
+	}
+	if !merged.PrunedSkips[0].At.Equal(later) || merged.RetainedShare[0].PercentOfShare != 70 || merged.ReadEarly[0].SuggestedDelaySeconds != 70 {
+		t.Fatalf("kept %+v %+v %+v, want the later entry of each", merged.PrunedSkips[0], merged.RetainedShare[0], merged.ReadEarly[0])
+	}
+}
