@@ -432,3 +432,38 @@ func TestNormalizeUniverseDigestIsPinned(t *testing.T) {
 		t.Fatalf("ids %v digest %s", ids, digest)
 	}
 }
+
+// One pass over the rows lists every global strategy: the row carries the
+// source's mark whatever the verdict, a withheld global strategy as surely as
+// a running one, and the field is left out for every other strategy so the
+// rows of a deployment without global strategies read as they always did.
+func TestADiagnosisRowMarksAStrategyTheSourceMarksGlobal(t *testing.T) {
+	facts := diagnosisFacts()
+	withheld := facts["4102"]
+	withheld.Global = true
+	facts["4102"] = withheld
+	rig := newDiagnosisRig(t, facts, nil)
+	rig.universe = []string{"4101", "4102"}
+	w := httptest.NewRecorder()
+	rig.handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnose", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var body DiagnosisResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	global := map[string]bool{}
+	for _, row := range body.Strategies {
+		global[row.StrategyID] = row.Global
+	}
+	if !global["4102"] || global["4101"] || len(global) != 2 {
+		t.Fatalf("global marks = %v, want 4102 marked and 4101 not", global)
+	}
+	if n := strings.Count(w.Body.String(), `"global":true`); n != 1 {
+		t.Fatalf(`"global":true appears %d times, want once: the field is left out when false`, n)
+	}
+	if strings.Contains(w.Body.String(), `"global":false`) {
+		t.Fatal(`"global":false was written: the field is omitted for ordinary strategies`)
+	}
+}

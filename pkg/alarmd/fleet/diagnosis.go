@@ -117,6 +117,12 @@ type DiagnosisRow struct {
 	Dispositions []DiagnosisDisposition `json:"dispositions,omitempty"`
 	Plans        []DiagnosisPlan        `json:"plans"`
 	UnknownParts []DiagnosisPart        `json:"unknown_parts,omitempty"`
+
+	// Global marks a strategy the source marks global, so one pass over
+	// the rows lists every global strategy with its verdict - the first
+	// thing asked after global strategies reach a deployment. Omitted for
+	// the rest.
+	Global bool `json:"global,omitempty"`
 }
 
 // ProgressFacts is one object's persisted progress, as the runtime reads it.
@@ -176,6 +182,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 		row.Verdict, row.Reason = DiagnosisUnknown, UnknownLookupUnavailable
 		return row
 	}
+	row.Global = facts.Global
 	standing := StrategyStandingOf(id, "", "", ctx.replica, facts, ctx.view, ctx.now)
 	row.Catalog = standing.Standing
 	for _, disposition := range standing.Dispositions {

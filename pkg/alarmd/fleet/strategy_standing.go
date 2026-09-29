@@ -54,6 +54,9 @@ type StrategyLookupFacts struct {
 	// Dispositions is every disposition the round recorded for the
 	// strategy, accepted and withheld, one per item.
 	Dispositions []StrategyDisposition
+	// Global says the source marks the strategy global, whatever the round
+	// did with it (controlplane.StrategyLookup.Global).
+	Global bool
 }
 
 // StrategyPublication is the catalog a standing was answered from.

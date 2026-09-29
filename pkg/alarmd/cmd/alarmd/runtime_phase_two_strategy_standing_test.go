@@ -30,10 +30,11 @@ import (
 // The control plane's answer maps onto the fleet's facts field for field:
 // the publication, the Plans with their revisions and digests, every
 // disposition with its scope, level, reason, field and the compiler's words
-// -- and the three booleans that tell the standings apart.
+// -- the three booleans that tell the standings apart, and whether the
+// source marks the strategy global.
 func TestTheStrategyLookupReachesTheFleetFieldForField(t *testing.T) {
 	lookup := controlplane.StrategyLookup{
-		Available: true, Found: true, Retained: true,
+		Available: true, Found: true, Retained: true, Global: true,
 		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: "s1", PublicationEpoch: 7},
 		Plans: []controlplane.StrategyPlanRef{{
 			Plan:       execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"},
@@ -46,7 +47,7 @@ func TestTheStrategyLookupReachesTheFleetFieldForField(t *testing.T) {
 			{SourceID: "4101", Scope: "LEVEL", LevelID: 2, Disposition: controlplane.DispositionAccepted}},
 	}
 	want := fleet.StrategyLookupFacts{
-		Available: true, Found: true, Retained: true, Publication: fleet.StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+		Available: true, Found: true, Retained: true, Global: true, Publication: fleet.StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
 		Plans: []fleet.StrategyPlanRef{{Tenant: "default", Business: "2", QueryGroup: "qg-a", ObjectDigest: "d-a",
 			SnapshotRevision: "s1", QueryRevision: "q1", ScheduleRevision: "r1"}},
 		Dispositions: []fleet.StrategyDisposition{
