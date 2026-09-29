@@ -56,7 +56,7 @@ func TestTheObjectCacheSamplesWhatItsObjectsTakeDecoded(t *testing.T) {
 		if err := json.Unmarshal(payload, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		cache.store(strings.Repeat("k", index+1), storedQueryGroupObject{object: decoded}, len(payload))
+		cache.store(nil, strings.Repeat("k", index+1), storedQueryGroupObject{object: decoded}, len(payload))
 	}
 	reading := cache.decoded.reading()
 	if reading.Samples != 1 || reading.Last <= 0 || reading.Max != reading.Last {
@@ -64,7 +64,7 @@ func TestTheObjectCacheSamplesWhatItsObjectsTakeDecoded(t *testing.T) {
 	}
 	var decoded QueryGroupObject
 	_ = json.Unmarshal(payload, &decoded)
-	cache.store("last", storedQueryGroupObject{object: decoded}, len(payload))
+	cache.store(nil, "last", storedQueryGroupObject{object: decoded}, len(payload))
 	if reading := cache.decoded.reading(); reading.Samples != 2 {
 		t.Fatalf("reading after %d stores = %+v, want two samples", 2*decodeSampleEvery, reading)
 	}

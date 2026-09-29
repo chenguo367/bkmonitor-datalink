@@ -63,6 +63,8 @@ func (repository *RedisCatalogRepository) loadScheduleTimelineAtRevision(
 		counters.hits.Add(1)
 		return timeline, nil
 	}
+	reading := repository.controlCache.announceTimelines(1)
+	defer reading.settle()
 	timeline, payload, err := repository.readScheduleTimeline(ctx, queryGroup)
 	if err != nil {
 		return persistedScheduleTimeline{}, err
@@ -72,7 +74,7 @@ func (repository *RedisCatalogRepository) loadScheduleTimelineAtRevision(
 		return persistedScheduleTimeline{}, errTimelineRevisionMoved
 	}
 	counters.misses.Add(1)
-	repository.controlCache.storeTimelineAtCurrentVersion(queryGroup, timeline, len(payload))
+	repository.controlCache.storeTimelineAtCurrentVersion(reading, queryGroup, timeline, len(payload))
 	return timeline, nil
 }
 

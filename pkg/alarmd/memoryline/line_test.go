@@ -29,8 +29,8 @@ func (h *fakeHeap) read() heap { return h.heap }
 func TestObservationGrowsUpToTheLineAndNoFurther(t *testing.T) {
 	h := &fakeHeap{heap{limit: 1000, live: 600, cycles: 1}}
 	line := newLine(h.read)
-	unused := uint64(100)
-	line.Reserve(func() uint64 { return unused })
+	held := uint64(0)
+	line.Reserve("detection", func() (uint64, uint64) { return 100, held })
 
 	if !line.Admit(ConsumerCostSummary, 200) {
 		t.Fatal("200 refused with 300 of room")
@@ -53,7 +53,7 @@ func TestObservationGrowsUpToTheLineAndNoFurther(t *testing.T) {
 	// Detection taking what it had room for gives observation nothing: the
 	// room was never observation's, and until the next collection the live
 	// heap does not show that detection took it.
-	unused = 0
+	held = 100
 	if line.Admit(ConsumerSeriesSampler, 1) {
 		t.Fatal("admitted into room detection had and filled")
 	}
@@ -84,14 +84,14 @@ func TestWhatDetectionGivesBackIsNotItsRoomTwice(t *testing.T) {
 	// Detection held 300 of its 400 when the collection measured 700 live.
 	h := &fakeHeap{heap{limit: 1000, live: 700, cycles: 1}}
 	line := newLine(h.read)
-	unused := uint64(100)
-	line.Reserve(func() uint64 { return unused })
+	held := uint64(300)
+	line.Reserve("detection", func() (uint64, uint64) { return 400, held })
 	if reading := line.Read(); reading.HeadroomBytes != 200 {
 		t.Fatalf("headroom = %d, want 1000-700-100", reading.HeadroomBytes)
 	}
 	// Its Slots finish: all 400 are room again, and the 300 they held are
 	// still in the 700 until the next collection.
-	unused = 400
+	held = 0
 	if reading := line.Read(); reading.HeadroomBytes != 200 || reading.ReservedBytes != 100 {
 		t.Fatalf("after detection gave back = %+v, want headroom 200: the 300 are live, not room as well", reading)
 	}
@@ -106,10 +106,80 @@ func TestWhatDetectionGivesBackIsNotItsRoomTwice(t *testing.T) {
 	// A budget reserved since is room at once, its own: what the others took
 	// since the collection stays counted in their room as the collection
 	// left it.
-	unused = 100
-	line.Reserve(func() uint64 { return 50 })
+	held = 300
+	line.Reserve("detection", func() (uint64, uint64) { return 50, 0 })
 	if reading := line.Read(); reading.ReservedBytes != 450 {
 		t.Fatalf("reserved = %d, want the new budget's 50 beside the 400 the collection left", reading.ReservedBytes)
+	}
+}
+
+// A budget that grows between two collections - a Worker taking on Query
+// Groups, a Leader reading a larger publication - is room at once, before
+// anything is read into it; one that shrinks keeps its room until the next
+// collection, and what it holds moving in between changes nothing.
+func TestABudgetThatGrowsIsRoomAtOnce(t *testing.T) {
+	h := &fakeHeap{heap{limit: 1000, live: 500, cycles: 1}}
+	line := newLine(h.read)
+	size, held := uint64(100), uint64(40)
+	line.Reserve("detection", func() (uint64, uint64) { return size, held })
+	if reading := line.Read(); reading.ReservedBytes != 60 {
+		t.Fatalf("reserved = %d, want 100-40", reading.ReservedBytes)
+	}
+	size = 300
+	if reading := line.Read(); reading.ReservedBytes != 260 {
+		t.Fatalf("after growing by 200 = %d, want 60+200 before anything is read into it", reading.ReservedBytes)
+	}
+	held = 250
+	if line.Admit(ConsumerLookback, 250) {
+		t.Fatal("observation took the room the grown budget was filling")
+	}
+	size, held = 150, 0
+	if reading := line.Read(); reading.ReservedBytes != 260 {
+		t.Fatalf("after shrinking and giving back = %d, want 260 until the next collection", reading.ReservedBytes)
+	}
+	h.heap = heap{limit: 1000, live: 500, cycles: 2}
+	if reading := line.Read(); reading.ReservedBytes != 150 {
+		t.Fatalf("at the next collection = %d, want 150-0", reading.ReservedBytes)
+	}
+}
+
+// A reading names each budget with its size and what it holds now, in the
+// order reserved.
+func TestAReadingNamesEachBudget(t *testing.T) {
+	line := newLine((&fakeHeap{heap{limit: 1000, live: 100, cycles: 1}}).read)
+	size := uint64(300)
+	line.Reserve("retained", func() (uint64, uint64) { return 500, 20 })
+	line.Reserve("object_cache", func() (uint64, uint64) { return size, 200 })
+	size = 250
+	budgets := line.Read().Budgets
+	if len(budgets) != 2 || budgets[0] != (BudgetReading{Name: "retained", SizeBytes: 500, HeldBytes: 20}) ||
+		budgets[1] != (BudgetReading{Name: "object_cache", SizeBytes: 250, HeldBytes: 200}) {
+		t.Fatalf("budgets = %+v, want each by name as it reads now", budgets)
+	}
+}
+
+// A cache that names each batch it is about to store grows by the batch and
+// falls back as it stores it; two batches in turn are room for the larger
+// rise, not for the two added, or the line would hold observation off with
+// room no batch took until the next collection.
+func TestABudgetsGrowthIsItsHighestSizeNotItsRisesAdded(t *testing.T) {
+	h := &fakeHeap{heap{limit: 1000, live: 400, cycles: 1}}
+	line := newLine(h.read)
+	size, held := uint64(100), uint64(100)
+	line.Reserve("detection", func() (uint64, uint64) { return size, held })
+	for _, batch := range []struct{ named, stored uint64 }{{200, 20}, {150, 20}, {200, 20}} {
+		size = held + batch.named
+		line.Read()
+		held += batch.stored
+		size = held
+		line.Read()
+	}
+	// The highest size was the third batch named over the 40 stored before
+	// it: 100 + 40 + 200. Its rise over the collection's 100 is what detection
+	// can have taken since - the 60 stored lie within it - where the rises
+	// added would be 200 + 150 + 200.
+	if reading := line.Read(); reading.ReservedBytes != 240 {
+		t.Fatalf("after three batches = %d, want the highest size's rise, 240, not the rises added (550)", reading.ReservedBytes)
 	}
 }
 
@@ -147,9 +217,9 @@ func TestTheLineReadsTheRunningProcess(t *testing.T) {
 // fill nowhere and given its room to observation.
 func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
 	line := New()
-	var unused atomic.Uint64
-	unused.Store(1 << 30)
-	line.Reserve(func() uint64 { return unused.Load() })
+	var held atomic.Uint64
+	held.Store(0)
+	line.Reserve("detection", func() (uint64, uint64) { return 1 << 30, held.Load() })
 	before := line.read().cycles
 	runtime.GC()
 	deadline := time.Now().Add(10 * time.Second)
@@ -166,7 +236,7 @@ func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	// Detection fills 900 MiB of its budget before observation asks.
-	unused.Store(1<<30 - 900<<20)
+	held.Store(900 << 20)
 	if reading := line.Read(); reading.ReservedBytes != 1<<30 {
 		t.Fatalf("reserved = %d, want the %d the budgets could take as the collection ended", reading.ReservedBytes, uint64(1<<30))
 	}

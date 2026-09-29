@@ -470,7 +470,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}); err != nil {
 		return nil, err
 	}
-	observationMemory.Reserve(repository.UnusedCacheBytes)
+	observationMemory.Reserve("timeline_cache", repository.TimelineCacheBudget)
+	observationMemory.Reserve("object_cache", repository.ObjectCacheBudget)
 	repository.ConfigureObserver(observer)
 	// The cache counters are what said a decoded-timeline cache was worth
 	// building, and nothing consumed them before. The timeline occupancy joins
@@ -480,6 +481,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetControlCacheSource(func() []metric.ControlCacheCounts {
 		stats := repository.ControlReadCacheStats()
 		occupancy := stats.TimelineOccupancy
+		objects := repository.ObjectCacheStats()
 		counts := []metric.ControlCacheCounts{
 			{Object: "version", Hits: stats.Version.Hits, Misses: stats.Version.Misses, Refreshes: stats.Version.Refreshes},
 			{Object: "activation", Hits: stats.Activation.Hits, Misses: stats.Activation.Misses, Refreshes: stats.Activation.Refreshes},
@@ -505,6 +507,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 				Occupancy: &metric.ControlCacheOccupancy{
 					Entries: float64(occupancy.Entries), Bytes: float64(occupancy.Bytes),
 					BytesLimit: float64(occupancy.MaxBytes),
+				}},
+			// The Query Group objects and output contexts by digest, in the
+			// stored bytes it is bounded by; the observation memory line
+			// charges them decoded (observation_memory_budget_*_bytes).
+			{Object: "catalog_object", Hits: objects.Hits, Misses: objects.Misses, Evictions: objects.Evictions,
+				Occupancy: &metric.ControlCacheOccupancy{
+					Entries: float64(objects.Occupancy.Entries), Bytes: float64(objects.Occupancy.Bytes),
+					BytesLimit: float64(objects.Occupancy.MaxBytes),
 				}},
 		}
 		// The key segment memos are caches too, and they report through the same
@@ -894,8 +904,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
-	observationMemory.Reserve(func() uint64 {
-		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes - min(worker.RetainedReserved(coordinator), cfg.PhaseTwo.Coordinator.MaxRetainedBytes)
+	observationMemory.Reserve("retained", func() (uint64, uint64) {
+		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes, worker.RetainedReserved(coordinator)
 	})
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
