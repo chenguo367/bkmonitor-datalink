@@ -161,6 +161,13 @@ func allocatedBytesPerCall(call func()) uint64 {
 // number of allocations is the same -- the encoder is one object where the
 // document was one -- so it is the bytes that are held to it.
 func TestTheRetainedSizeDoesNotKeepTheDocument(t *testing.T) {
+	if raceEnabled {
+		// Both arms encode through the JSON encoder's pooled buffer. Under the
+		// race detector the pool drops a quarter of what is put back, calls
+		// grow a new buffer at random, and 14 runs in 150 read a difference
+		// below the document's length; plain runs never do.
+		t.Skip("allocation is not measurable through a pooled buffer under the race detector")
+	}
 	random := rand.New(rand.NewSource(7))
 	bindings := make([]execution.NamedInputBinding, 3)
 	for position := range bindings {
