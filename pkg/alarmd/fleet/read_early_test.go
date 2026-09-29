@@ -16,9 +16,7 @@ import (
 )
 
 func readEarlyFacts(since time.Time) ReadEarlyFacts {
-	return ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180, Since: since,
-		Samples: []ReadEarlySample{{EvaluationTime: since.Unix(), CompletionAgeSeconds: 90, Rung: "x1.5",
-			ChangedAgeSeconds: 90, Buckets: []int64{since.Unix() - 60}}}}
+	return ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180, Since: since}
 }
 
 // An object the lookback reports as read early is a row under the
@@ -61,6 +59,11 @@ func TestAReadEarlyObjectReachesItsLineTheDiagnosisAndTheHealthResponse(t *testi
 	finding := view.ReadEarly[0].Finding
 	if finding.Check != CheckReadBeforeComplete || finding.Owner != OwnerStrategy || finding.Result != ResultCompleted {
 		t.Fatalf("finding %+v, want the strategy's line with its rounds completed", finding)
+	}
+	// Nothing is stuck anywhere: the rounds complete, so the row names no
+	// stage, dependency or class a failure would.
+	if blocked := view.ReadEarly[0].Blocked; blocked != nil {
+		t.Fatalf("blocked %+v, want none on a row whose rounds complete", blocked)
 	}
 	var line *CheckReport
 	for _, report := range ReportChecks(nil, nil, &view, now) {

@@ -247,9 +247,13 @@ func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 	}
 	facts := lookbackReadEarly(engine)()
 	got, reported := facts[string(queryGroup)]
-	if !reported || got.CurrentDelaySeconds != 60 || got.SuggestedDelaySeconds != 180 || got.StepSeconds != 60 ||
-		len(got.Samples) != 2 || got.Samples[1].Rung != lookback.RungNames[0] {
+	if !reported || got.CurrentDelaySeconds != 60 || got.SuggestedDelaySeconds != 180 || got.StepSeconds != 60 {
 		t.Fatalf("facts %+v, want the object with 60 s now and 180 s suggested", facts)
+	}
+	// The samples it was read from stay on this replica's lookback.
+	if readings := engine.Stats().ReadEarly; len(readings) != 1 || len(readings[0].Samples) != 2 ||
+		readings[0].Samples[1].Rung != lookback.RungNames[0] {
+		t.Fatalf("lookback read_early %+v, want the two samples", readings)
 	}
 }
 

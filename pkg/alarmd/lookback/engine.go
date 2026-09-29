@@ -137,10 +137,8 @@ var RecheckOutcomes = []string{RecheckCompared, RecheckYielded, RecheckFailed, R
 // Faults, closed. Normal running never meets one: each is a defect to fix,
 // logged through Options.OnFault as well as counted.
 const (
-	// FaultBucketsExceeded is a read with more buckets than any window has,
-	// FaultSeriesExceeded one with more series than maxSeriesPerSample.
+	// FaultBucketsExceeded is a read with more buckets than any window has.
 	FaultBucketsExceeded = "buckets_exceeded"
-	FaultSeriesExceeded  = "series_exceeded"
 	// FaultYieldOverdue is a recheck that still held its permit
 	// RecheckTimeout after a waiting formal query asked it to yield. The
 	// yield cancels the read, and the read's own deadline is RecheckTimeout
@@ -151,7 +149,7 @@ const (
 )
 
 // Faults is every fault.
-var Faults = []string{FaultBucketsExceeded, FaultSeriesExceeded, FaultYieldOverdue}
+var Faults = []string{FaultBucketsExceeded, FaultYieldOverdue}
 
 // RefusedOther counts a permit refusal whose reason Options.Refusals does
 // not name.
@@ -186,6 +184,12 @@ type Permit func() (release func(), yield <-chan struct{}, refused string)
 // restCap, and ProbeFirstSamples probes that first sample instead of the
 // second; only a test sets either, to pin a mechanism on a group's first
 // sample.
+//
+// Memory is the process's memory line: asked for bytes before a read's
+// series table grows, it answers whether they may be taken. A refusal stops
+// that read's series sums and nothing else. Nothing is given back: what a
+// table took is in the live heap from the next collection on, and a sample
+// that ends leaves it there no longer. Nil admits everything.
 type Options struct {
 	Now                  func() time.Time
 	Recheck              Recheck
@@ -194,6 +198,7 @@ type Options struct {
 	Owns                 func(execution.QueryGroupIdentity) bool
 	Owned                func() int
 	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
+	Memory               func(bytes uint64) bool
 	UnspreadFirstSamples bool
 	ProbeFirstSamples    bool
 }
@@ -313,17 +318,22 @@ type sample struct {
 	// emptyFirstRead is a first read complete with no point in it.
 	emptyFirstRead bool
 	// first is the first read's series over the kept tail, which every rung
-	// is classified against; delaySeconds the query's effective time_delay.
+	// is classified against - nil when the memory line refused it, and once
+	// the sample waits for its deep recheck, which classifies nothing;
+	// delaySeconds the query's effective time_delay.
 	first        map[uint64]seriesSummary
 	delaySeconds int64
 	// existingChanged is set once a rung read a series of the first read
 	// with other points or values, or without it; early is that rung.
 	// seriesAdded is set once a rung read a series the first read did not
-	// have, at rung seriesAddedRung.
+	// have, at rung seriesAddedRung. seriesUnknown is set once a rung
+	// changed and its series could not be compared, one side's table having
+	// been refused.
 	existingChanged bool
 	early           *ReadEarlySample
 	seriesAdded     bool
 	seriesAddedRung int
+	seriesUnknown   bool
 }
 
 // Recent is one recheck that found a change, kept whole for a reader.
@@ -403,7 +413,7 @@ func (engine *Engine) Begin(query Query) *Read {
 	state.capturing = true
 	read.query, read.step, read.readAt, read.depth = query, step, now, state.depth
 	read.keptFrom = tailFrom(query.Spec.LogicalWindow, step, tailSteps)
-	read.summary = newSummarizer(facts.Normalization.CanonicalValueField).trackSeries(read.keptFrom)
+	read.summary = newSummarizer(facts.Normalization.CanonicalValueField).trackSeries(read.keptFrom, engine.options.Memory)
 	return read
 }
 
@@ -459,7 +469,7 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		engine.counts.samples[key2(read.source, OutcomeFirstReadIncomplete)]++
 		return
 	case read.summary.faulted:
-		engine.faultLocked(read.summary.faultReason, read.source, queryGroup)
+		engine.faultLocked(FaultBucketsExceeded, read.source, queryGroup)
 		return
 	case !owned:
 		engine.counts.samples[key2(read.source, OutcomeOwnerLost)]++
@@ -483,7 +493,7 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 }
 
 func (engine *Engine) faultLocked(reason, source string, queryGroup execution.QueryGroupIdentity) {
-	if reason == FaultBucketsExceeded || reason == FaultSeriesExceeded {
+	if reason == FaultBucketsExceeded {
 		engine.counts.samples[key2(source, OutcomeFault)]++
 	}
 	engine.counts.faults[reason]++
@@ -665,7 +675,11 @@ func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Tim
 	}
 	state.nextAt = now.Add(time.Duration(min(state.rest*float64(state.step), float64(restCap)) * restSpread(candidate.queryGroup)))
 	if outcome == OutcomeCompleted && candidate.probe && candidate.planned < len(RungSteps) && state.probe == nil {
+		// Its rungs have classed it already, and a clean deep recheck cannot
+		// add to that - a series that changes changes its buckets - so the
+		// first read's series are not kept through the wait.
 		candidate.probing, candidate.rung, candidate.planned = true, len(RungSteps)-1, len(RungSteps)
+		candidate.first = nil
 		state.probe, state.sinceProbe = candidate, 0
 		return
 	}
@@ -765,7 +779,10 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	} else {
 		close(watched)
 	}
-	sink := &recheckSink{summary: newSummarizer(candidate.spec.PlanFacts.Normalization.CanonicalValueField).trackSeries(candidate.keptFrom)}
+	sink := &recheckSink{summary: newSummarizer(candidate.spec.PlanFacts.Normalization.CanonicalValueField)}
+	if candidate.first != nil {
+		sink.summary.trackSeries(candidate.keptFrom, engine.options.Memory)
+	}
 	started := engine.options.Now()
 	completion, err := engine.options.Recheck(readCtx, tailSpec(candidate.spec, recheckFrom(candidate)), sink)
 	engine.mu.Lock()
@@ -805,10 +822,16 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	var read readSummary
 	var series seriesChange
 	var buckets []int64
+	seriesUnknown := false
 	if outcome == RecheckCompared {
 		read = trimSummary(sink.summary.buckets, candidate.keptFrom)
 		changes = compareSummaries(candidate.last, read)
-		series = compareSeries(candidate.first, sink.summary.series)
+		switch {
+		case candidate.first != nil && sink.summary.series != nil:
+			series = compareSeries(candidate.first, sink.summary.series)
+		case len(changes) > 0 && !candidate.probing:
+			seriesUnknown = true
+		}
 		if len(changes) > 0 {
 			buckets = changedBuckets(candidate.last, read, maxEvidenceBuckets)
 		}
@@ -822,8 +845,9 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	}
 	engine.counts.recheckBytes[candidate.source] += sink.bytes
 	if sink.summary.faulted {
-		engine.faultLocked(sink.summary.faultReason, candidate.source, candidate.queryGroup)
+		engine.faultLocked(FaultBucketsExceeded, candidate.source, candidate.queryGroup)
 	}
+	candidate.seriesUnknown = candidate.seriesUnknown || seriesUnknown
 	engine.counts.rechecks[key3(candidate.source, rung, outcome)]++
 	// A rung compared covers any rung before it that was not read: it is
 	// compared with the last read kept, not with the rung it follows.

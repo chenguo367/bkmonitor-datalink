@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -827,9 +828,10 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 		t.Fatalf("samples %v", stats.Sources[sourceLog].Samples)
 	}
 	// Waiting for its deep recheck, the sample still covers its group, and
-	// is pending with its one bucket and its one series.
+	// is pending with its one bucket - its series are not kept through the
+	// wait.
 	if _, waiting := f.rung("qg"); !waiting || f.group("qg").sample != nil || stats.Coverage != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) ||
-		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes+seriesEntryBytes {
+		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes {
 		t.Fatalf("coverage %+v pending %d (%d bytes) while the deep recheck waits", stats.Coverage, stats.Pending, stats.PendingBytes)
 	}
 	f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(dataset("h1", steady)), RecheckCompared)
@@ -1484,13 +1486,19 @@ func TestQueryLookbackReadsWindowsRangesAndOffsets(t *testing.T) {
 // first read's datasets, then at every rung the datasets later gives it.
 func (f *fixture) classSample(delaySeconds int64, first []*execution.Dataset, later func(slot int64) []*execution.Dataset) {
 	f.t.Helper()
+	f.classSampleByRung(delaySeconds, first, func(slot int64, _ int) []*execution.Dataset { return later(slot) })
+}
+
+// classSampleByRung is classSample with the datasets given by rung.
+func (f *fixture) classSampleByRung(delaySeconds int64, first []*execution.Dataset, later func(slot int64, rung int) []*execution.Dataset) {
+	f.t.Helper()
 	slot := f.clock.now().Unix()
 	q := query("qg", slot, minute, sourceLog)
 	q.Spec.PlanFacts.QueryDelaySeconds = delaySeconds
 	f.capture(q, first...)
 	readAt := f.clock.now()
 	for rung, pending := f.rung("qg"); pending; rung, pending = f.rung("qg") {
-		f.recheck(sourceLog, readAt, rung, minute, full(later(slot)...), RecheckCompared)
+		f.recheck(sourceLog, readAt, rung, minute, full(later(slot, rung)...), RecheckCompared)
 	}
 	f.rest("qg")
 }
@@ -1570,20 +1578,151 @@ func TestAnEmptyFirstReadOrAVanishedSeriesIsAWindowReadEarly(t *testing.T) {
 	}
 }
 
-// A read with more series than maxSeriesPerSample is a defect like one with
-// more buckets than any window: counted under its own fault, reported, and
-// not kept.
-func TestAReadPastEverySeriesBoundIsAFault(t *testing.T) {
+// The series table grows as the memory line admits it, a step of
+// seriesAdmitStep series at a time, and has no bound of its own: a read of
+// one series more than a step asks twice, for a step's bytes each time.
+func TestASeriesTableAsksTheMemoryLineAStepAtATime(t *testing.T) {
 	f := newFixture(t)
+	var asks []uint64
+	f.engine.options.Memory = func(bytes uint64) bool { asks = append(asks, bytes); return true }
 	slot := f.clock.now().Unix()
 	read := f.engine.Begin(query("qg", slot, minute, sourceLog))
-	for index := 0; index <= maxSeriesPerSample; index++ {
+	for index := 0; index <= seriesAdmitStep; index++ {
 		read.Series(dataset(fmt.Sprintf("h%d", index), map[int64]string{slot - 60: "1"}), 1)
 	}
-	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	if len(asks) != 2 || asks[0] != seriesAdmitStep*seriesEntryBytes || asks[1] != asks[0] ||
+		len(read.summary.series) != seriesAdmitStep+1 || read.summary.seriesRefused {
+		t.Fatalf("asks %v series %d refused %v", asks, len(read.summary.series), read.summary.seriesRefused)
+	}
+}
+
+// A first read whose series table the memory line refused keeps its
+// buckets and goes on: its rungs are compared bucket by bucket, and a rung
+// that changed, having no series to be compared with, leaves the sample
+// unclassified by memory_refused - counted, and no fault.
+func TestASeriesTableTheMemoryLineRefusesLeavesAChangedSampleUnclassified(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.Memory = func(uint64) bool { return false }
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")},
+		func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} })
 	stats := f.engine.Stats()
-	if stats.Faults[FaultSeriesExceeded] != 1 || stats.Faults[FaultBucketsExceeded] != 0 || stats.Pending != 0 ||
-		stats.Sources[sourceLog].Samples[OutcomeFault] != 1 {
-		t.Fatalf("faults %v samples %v pending %d", stats.Faults, stats.Sources[sourceLog].Samples, stats.Pending)
+	source := stats.Sources[sourceLog]
+	if source.Classes[ClassUnclassified] != 1 || source.Unclassified[UnclassifiedMemoryRefused] != 1 ||
+		source.Classes[ClassWindowReadEarly] != 0 || source.Samples[OutcomeCompleted] != 1 ||
+		source.ChangedWindows[RungNames[0]] != 1 || len(f.faults) != 0 {
+		t.Fatalf("classes %v unclassified %v samples %v changed %v faults %v", source.Classes, source.Unclassified,
+			source.Samples, source.ChangedWindows, f.faults)
+	}
+	// Unknown either way, it neither starts a run of window_read_early nor
+	// ends one.
+	if state := f.group("qg"); state.readEarly != nil || state.seriesLate != nil {
+		t.Fatalf("an unclassified sample marked its group: %+v %+v", state.readEarly, state.seriesLate)
+	}
+	// A sample whose rungs found nothing is complete without its series: a
+	// series that changes changes its buckets.
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")},
+		func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} })
+	if source := f.engine.Stats().Sources[sourceLog]; source.Classes[ClassComplete] != 1 || source.Classes[ClassUnclassified] != 1 {
+		t.Fatalf("classes %v, want the unchanged sample complete", source.Classes)
+	}
+}
+
+// An unclassified sample between two read early is not known to break the
+// run: the Query Group is reported as read early twice in a row.
+func TestAnUnclassifiedSampleDoesNotEndARunOfWindowReadEarly(t *testing.T) {
+	f := newFixture(t)
+	var refuse atomic.Bool
+	f.engine.options.Memory = func(uint64) bool { return !refuse.Load() }
+	revised := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} }
+	for _, refused := range []bool{false, true, false} {
+		refuse.Store(refused)
+		f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, revised)
+	}
+	source := f.engine.Stats().Sources[sourceLog]
+	if readings := f.engine.ReadEarly(); len(readings) != 1 || len(readings[0].Samples) != 2 ||
+		source.Classes[ClassUnclassified] != 1 || source.Classes[ClassWindowReadEarly] != 2 {
+		t.Fatalf("readings %+v classes %v, want the run across the unclassified sample", readings, source.Classes)
+	}
+}
+
+// A first read whose series table was admitted and rechecks whose tables
+// were refused compare no series at any rung: a changed sample is
+// unclassified, as when the first read's own table was refused.
+func TestRechecksRefusedTheirSeriesTablesLeaveAChangedSampleUnclassified(t *testing.T) {
+	f := newFixture(t)
+	asks := 0
+	f.engine.options.Memory = func(uint64) bool { asks++; return asks == 1 }
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")},
+		func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} })
+	if source := f.engine.Stats().Sources[sourceLog]; source.Classes[ClassUnclassified] != 1 ||
+		source.Classes[ClassWindowReadEarly] != 0 || asks < 2 {
+		t.Fatalf("classes %v asks %d, want unclassified with every recheck refused", source.Classes, asks)
+	}
+}
+
+// A recheck whose series table is refused compares no series at that rung,
+// and the sample is classed by what the other rungs' series said: here the
+// first rung found a late series before the line refused the second's.
+func TestARecheckRefusedItsSeriesTableIsClassedByTheOtherRungs(t *testing.T) {
+	f := newFixture(t)
+	asks := 0
+	// The first read's table and the first rung's are admitted.
+	f.engine.options.Memory = func(uint64) bool { asks++; return asks <= 2 }
+	f.classSampleByRung(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64, rung int) []*execution.Dataset {
+		late := dataset("h2", map[int64]string{slot - 60: "5"})
+		if rung == 0 {
+			return []*execution.Dataset{point(slot, "1"), late}
+		}
+		return []*execution.Dataset{point(slot, "1"), late, dataset("h3", map[int64]string{slot - 60: "7"})}
+	})
+	source := f.engine.Stats().Sources[sourceLog]
+	if source.Classes[ClassSeriesLate] != 1 || source.Classes[ClassUnclassified] != 0 || f.group("qg").seriesLate == nil {
+		t.Fatalf("classes %v, want series_late from the rung that compared", source.Classes)
+	}
+}
+
+// A sample that waits for its deep recheck keeps no first-read series: its
+// rungs have classed it, and the deep recheck reads buckets only.
+func TestASampleWaitingForItsDeepRecheckKeepsNoSeries(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	readAt := f.clock.now()
+	f.recheck(sourceLog, readAt, 0, minute, full(point(slot, "1")), RecheckCompared)
+	f.engine.mu.Lock()
+	probe := f.engine.groups["qg"].probe
+	kept := probe != nil && probe.first != nil
+	f.engine.mu.Unlock()
+	if probe == nil || kept {
+		t.Fatalf("probe %v keeps first-read series %v", probe != nil, kept)
+	}
+	// A clean deep recheck leaves the sample complete as its rungs classed it.
+	stats := f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(point(slot, "1")), RecheckCompared)
+	if source := stats.Sources[sourceLog]; source.Classes[ClassComplete] != 1 || source.Classes[ClassSeriesLate] != 0 {
+		t.Fatalf("classes %v, want the probed sample complete", source.Classes)
+	}
+}
+
+// The suggestion covers every sample of the run, not the latest alone: an
+// earlier sample complete later than the latest one sets it.
+func TestTheSuggestedTimeDelayCoversTheSlowestSampleOfTheRun(t *testing.T) {
+	f := newFixture(t)
+	// Still changing at the second rung, 210 s past the window's end.
+	f.classSampleByRung(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64, rung int) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, map[bool]string{true: "2", false: "3"}[rung == 0])}
+	})
+	// Complete at the first rung, 90 s past it.
+	f.classSampleByRung(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64, _ int) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "3")}
+	})
+	readings := f.engine.ReadEarly()
+	if len(readings) != 1 || readings[0].Samples[0].CompletionAgeSeconds != 210 || readings[0].Samples[1].CompletionAgeSeconds != 90 ||
+		readings[0].SuggestedDelaySeconds != 300 {
+		t.Fatalf("readings %+v, want 60 + 210 aligned up to 300", readings)
+	}
+	// A Query Group this process no longer owns is not its to report.
+	f.set(func() { f.owned["qg"] = false })
+	if readings := f.engine.ReadEarly(); len(readings) != 0 {
+		t.Fatalf("readings %+v, want none for a group no longer owned", readings)
 	}
 }

@@ -18,33 +18,23 @@ import (
 // the late-data lookback found the object's window read before its data
 // was complete in two completed samples in a row. The strategy's time_delay
 // is what moves the read, so the row is the strategy's, with the value
-// that would have read those samples complete.
+// that would have read those samples complete. The samples themselves are
+// read from the owning replica's lookback (lookback.get), not carried here:
+// the row rides on every snapshot.
 type ReadEarlyFacts struct {
 	// StepSeconds is the object's data step; CurrentDelaySeconds the
 	// time_delay its query runs under, as compiled - aligned up to the step,
 	// and 60 for a log keyword query that sets none - and
 	// SuggestedDelaySeconds that plus how much later than its first read the
-	// samples' data was complete, aligned up to the step the same way.
+	// samples' data was complete, aligned up to the step the same way. The
+	// completion is the age of the recheck that first read the data whole,
+	// so the suggestion is an upper bound: the data came between that
+	// recheck and the one before it.
 	StepSeconds           int64 `json:"step_seconds"`
 	CurrentDelaySeconds   int64 `json:"current_time_delay_seconds"`
 	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds"`
 	// Since is when the samples in a row began, as this process saw them.
 	Since time.Time `json:"since"`
-	// Samples are the samples read from, newest last.
-	Samples []ReadEarlySample `json:"samples"`
-}
-
-// ReadEarlySample is one sample: the Slot, how long after the window's end
-// its first read was and its data complete, and the rung at which a series
-// of the first read was first seen changed - or, for an empty first read,
-// data first seen - with the buckets that changed there.
-type ReadEarlySample struct {
-	EvaluationTime       int64   `json:"evaluation_time"`
-	FirstReadAgeSeconds  int64   `json:"first_read_age_seconds"`
-	CompletionAgeSeconds int64   `json:"completion_age_seconds"`
-	Rung                 string  `json:"rung,omitempty"`
-	ChangedAgeSeconds    int64   `json:"changed_age_seconds,omitempty"`
-	Buckets              []int64 `json:"buckets,omitempty"`
 }
 
 // ReadEarly is a row for every object the lookback reports as read early,

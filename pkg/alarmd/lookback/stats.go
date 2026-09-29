@@ -30,6 +30,8 @@ type counters struct {
 	completion map[string]uint64 // source|age: completed samples by when the window was complete
 	probes     map[string]uint64 // source|outcome: deep rechecks
 	classes    map[string]uint64 // source|class: completed samples by what their rungs found
+	// source|reason: unclassified samples by why their series are not known.
+	unclassified map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -51,7 +53,7 @@ type counters struct {
 func newCounters(sources, refusals []string) counters {
 	c := counters{firstReads: map[string]uint64{}, samples: map[string]uint64{}, rechecks: map[string]uint64{},
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
-		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
+		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, unclassified: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -77,6 +79,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, class := range SampleClasses {
 			c.classes[key2(source, class)] = 0
+		}
+		for _, reason := range UnclassifiedReasons {
+			c.unclassified[key2(source, reason)] = 0
 		}
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
@@ -166,10 +171,12 @@ type SourceStats struct {
 	// how often a group's data was later than the rungs it read.
 	Probes map[string]uint64 `json:"probes"`
 	// Classes: class -> completed samples by what their rungs found against
-	// the first read (see ClassWindowReadEarly). ReadEarlyGroups is its
+	// the first read (see ClassWindowReadEarly), and Unclassified: reason ->
+	// those of them whose series are not known. ReadEarlyGroups is its
 	// Query Groups now reported as read early, SeriesLateGroups those whose
 	// late series were seen.
 	Classes          map[string]uint64 `json:"classes"`
+	Unclassified     map[string]uint64 `json:"unclassified"`
 	ReadEarlyGroups  int               `json:"read_early_groups"`
 	SeriesLateGroups int               `json:"series_late_groups"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
@@ -293,7 +300,7 @@ func (engine *Engine) Stats() Stats {
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
 			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{},
 			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{},
-			Classes: map[string]uint64{}}
+			Classes: map[string]uint64{}, Unclassified: map[string]uint64{}}
 		for _, depth := range DepthLabels {
 			entry.DepthGroups[depth] = 0
 		}
@@ -307,6 +314,9 @@ func (engine *Engine) Stats() Stats {
 		}
 		for _, class := range SampleClasses {
 			entry.Classes[class] = engine.counts.classes[key2(source, class)]
+		}
+		for _, reason := range UnclassifiedReasons {
+			entry.Unclassified[reason] = engine.counts.unclassified[key2(source, reason)]
 		}
 		for _, outcome := range SampleOutcomes {
 			entry.Samples[outcome] = engine.counts.samples[key2(source, outcome)]

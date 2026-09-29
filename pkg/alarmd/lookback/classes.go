@@ -28,14 +28,25 @@ import (
 //     series it did not have came later: some series are late, which is the
 //     supplementary detection's to fill.
 //   - complete: nothing any rung read differed from the first read.
+//   - unclassified: a rung differed and its series could not be compared,
+//     and no other rung's series said which of the two it was. Counted, and
+//     by why (UnclassifiedReasons); not a fault.
 const (
 	ClassComplete        = "complete"
 	ClassWindowReadEarly = "window_read_early"
 	ClassSeriesLate      = "series_late"
+	ClassUnclassified    = "unclassified"
 )
 
 // SampleClasses is every class.
-var SampleClasses = []string{ClassComplete, ClassWindowReadEarly, ClassSeriesLate}
+var SampleClasses = []string{ClassComplete, ClassWindowReadEarly, ClassSeriesLate, ClassUnclassified}
+
+// UnclassifiedMemoryRefused is the one reason a sample is unclassified: the
+// process's memory line refused a series table it needed.
+const UnclassifiedMemoryRefused = "memory_refused"
+
+// UnclassifiedReasons is every reason.
+var UnclassifiedReasons = []string{UnclassifiedMemoryRefused}
 
 const (
 	// readEarlyRepeat is how many completed samples of a Query Group in a
@@ -63,10 +74,12 @@ type ReadEarlySample struct {
 
 // ReadEarlyReading is a Query Group whose window was read early in
 // readEarlyRepeat completed samples in a row: the time_delay its query runs
-// under, the one that would have read its samples complete - their latest
-// completion past their first read's age, added and aligned up to the
+// under, the one that would have read its samples complete - the most any
+// of them completed past its first read's age, added and aligned up to the
 // step, as a strategy's time_delay is aligned when it is compiled - and the
-// samples it is read from, newest last.
+// samples it is read from, newest last. A completion is the age of the
+// recheck that first read the data whole, so the suggestion is an upper
+// bound: the data came between that recheck and the one before it.
 type ReadEarlyReading struct {
 	QueryGroup            execution.QueryGroupIdentity `json:"query_group"`
 	Source                string                       `json:"source"`
@@ -100,7 +113,12 @@ func classOf(candidate *sample) string {
 		return ClassWindowReadEarly
 	case candidate.seriesAdded:
 		return ClassSeriesLate
+	case candidate.seriesUnknown:
+		return ClassUnclassified
 	default:
+		// No rung changed, or every one that did was compared: a series
+		// that changes changes its buckets, so a sample whose buckets stood
+		// is complete whatever its series tables were.
 		return ClassComplete
 	}
 }
@@ -127,6 +145,9 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		if len(run.samples) > readEarlyKept {
 			run.samples = append([]ReadEarlySample(nil), run.samples[len(run.samples)-readEarlyKept:]...)
 		}
+	case ClassUnclassified:
+		// Not known either way: it neither adds to a run nor ends one.
+		engine.counts.unclassified[key2(candidate.source, UnclassifiedMemoryRefused)]++
 	default:
 		state.readEarly = nil
 	}

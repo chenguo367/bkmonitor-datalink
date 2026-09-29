@@ -54,34 +54,54 @@ type seriesSummary struct {
 }
 
 // seriesEntryBytes is what one series is charged: its key, its two words
-// and the map's share of an entry.
-const seriesEntryBytes = 40
+// and the map's share of an entry, as the heap holds them after a
+// collection - measured at 44 to 53 bytes, charged a little above.
+const seriesEntryBytes = 56
 
-// maxSeriesPerSample guards the per-series sums the way maxBucketsPerSample
-// guards the buckets: a defect to fix, never a bound normal running meets.
-const maxSeriesPerSample = 1 << 17
+// seriesAdmitStep is how many series a table grows by between two asks of
+// the process's memory line: one call per step keeps the ask off the path
+// every point takes.
+const seriesAdmitStep = 4096
 
 // summarizer builds a readSummary from delivered series, and, from
 // seriesFrom on, a summary per series: which series a read had, and what.
+//
+// The series table has no bound of its own. It grows as the process's
+// memory line admits it, a step at a time; once the line refuses, the read
+// stops summing series (seriesRefused) and keeps its buckets, so the sample
+// goes on and only what the series would have told is not known.
 type summarizer struct {
-	valueField string
-	buckets    readSummary
-	series     map[uint64]seriesSummary
-	seriesFrom int64
-	buffer     []byte
-	faulted    bool
-	// faultReason is the guard the read ran past: buckets or series.
-	faultReason string
+	valueField    string
+	buckets       readSummary
+	series        map[uint64]seriesSummary
+	seriesFrom    int64
+	admit         func(bytes uint64) bool
+	granted       int
+	seriesRefused bool
+	buffer        []byte
+	faulted       bool
 }
 
 func newSummarizer(valueField string) *summarizer {
 	return &summarizer{valueField: valueField, buckets: readSummary{}}
 }
 
-// trackSeries sums every series too, over its records from from on.
-func (summarizer *summarizer) trackSeries(from int64) *summarizer {
-	summarizer.series, summarizer.seriesFrom = map[uint64]seriesSummary{}, from
+// trackSeries sums every series too, over its records from from on, as far
+// as admit lets the table grow; a nil admit lets it grow as far as it goes.
+func (summarizer *summarizer) trackSeries(from int64, admit func(bytes uint64) bool) *summarizer {
+	summarizer.series, summarizer.seriesFrom, summarizer.admit = map[uint64]seriesSummary{}, from, admit
 	return summarizer
+}
+
+// grow asks for room for seriesAdmitStep more series, and stops the series
+// sums for good when it is refused.
+func (summarizer *summarizer) grow() bool {
+	if summarizer.admit != nil && !summarizer.admit(seriesAdmitStep*seriesEntryBytes) {
+		summarizer.series, summarizer.seriesRefused = nil, true
+		return false
+	}
+	summarizer.granted += seriesAdmitStep
+	return true
 }
 
 // add sums one delivered series: every record's bucket, and the series.
@@ -97,7 +117,7 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 		at := record.SourceTime()
 		bucket, known := summarizer.buckets[at]
 		if !known && len(summarizer.buckets) >= maxBucketsPerSample {
-			summarizer.fault(FaultBucketsExceeded)
+			summarizer.fault()
 			return
 		}
 		summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
@@ -110,9 +130,8 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 			continue
 		}
 		sum, known := summarizer.series[series]
-		if !known && len(summarizer.series) >= maxSeriesPerSample {
-			summarizer.fault(FaultSeriesExceeded)
-			return
+		if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
+			continue
 		}
 		sum.points++
 		sum.values += point
@@ -120,8 +139,9 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 	}
 }
 
-func (summarizer *summarizer) fault(reason string) {
-	summarizer.faulted, summarizer.faultReason = true, reason
+// fault drops a read past every window's buckets.
+func (summarizer *summarizer) fault() {
+	summarizer.faulted = true
 	summarizer.buckets, summarizer.series = nil, nil
 }
 
