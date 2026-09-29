@@ -20,8 +20,8 @@ import (
 )
 
 // lookbackSources is how many source labels a process counts: every source a
-// query can be compiled from, and mixed, promql and other.
-func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) + 3 }
+// query can be compiled from, and mixed and other.
+func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) + 2 }
 
 // lookbackSeriesUpperBounds is each lookback family's series count once
 // bound, by the family's short name.
@@ -59,7 +59,7 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	if series := gatherFamily(t, r, "bkmonitor_alarmd_lookback_samples_total"); len(series) != 0 {
 		t.Fatalf("a process not running the lookback emitted %v", series)
 	}
-	engine, err := lookback.New(lookback.Options{Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals,
+	engine, err := lookback.New(lookback.Options{Refusals: scheduler.LookbackRefusals,
 		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			return execution.ProviderCompletion{}, nil
 		},

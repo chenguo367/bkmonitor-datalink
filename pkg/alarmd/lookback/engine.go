@@ -171,8 +171,7 @@ type Recheck func(ctx context.Context, spec execution.PhysicalQuerySpec, sink ex
 type Permit func() (release func(), yield <-chan struct{}, refused string)
 
 // Options wire an Engine. Owned is how many Query Groups this process owns,
-// the denominator of the coverage. Sources are the data sources counted by
-// name; any other is counted as SourceOther. Refusals is every reason Permit
+// the denominator of the coverage. Refusals is every reason Permit
 // refuses with, counted from the start, any other as RefusedOther; a refusal
 // for LimitRefusal - the lookback's own share of the permits - is also a
 // fault. OnFault, when set, is told of every fault. UnspreadFirstSamples
@@ -186,7 +185,6 @@ type Options struct {
 	LimitRefusal         string
 	Owns                 func(execution.QueryGroupIdentity) bool
 	Owned                func() int
-	Sources              []string
 	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
 	UnspreadFirstSamples bool
 }
@@ -203,8 +201,6 @@ type Query struct {
 // Engine is the lookback of one process.
 type Engine struct {
 	options Options
-	named   map[string]bool
-	labels  []string
 	// firstReadBytes is every formal first read's delivered bytes by
 	// source, counted on the query's own goroutine: the map is built once
 	// and only its counters change.
@@ -316,23 +312,12 @@ func New(options Options) (*Engine, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	engine := &Engine{options: options, named: map[string]bool{}, groups: map[execution.QueryGroupIdentity]*group{},
+	engine := &Engine{options: options, groups: map[execution.QueryGroupIdentity]*group{},
 		firstReadBytes: map[string]*atomic.Uint64{}}
-	for _, source := range options.Sources {
-		if !engine.named[source] {
-			engine.named[source] = true
-			engine.labels = append(engine.labels, source)
-		}
-	}
-	for _, source := range []string{SourceMixed, SourcePromQL, SourceOther} {
-		if !engine.named[source] {
-			engine.labels = append(engine.labels, source)
-		}
-	}
-	for _, source := range engine.labels {
+	for _, source := range Sources {
 		engine.firstReadBytes[source] = &atomic.Uint64{}
 	}
-	engine.counts = newCounters(engine.labels, options.Refusals)
+	engine.counts = newCounters(Sources, options.Refusals)
 	return engine, nil
 }
 
@@ -345,7 +330,7 @@ func (engine *Engine) Begin(query Query) *Read {
 		return nil
 	}
 	facts := query.Spec.PlanFacts
-	source := sourceOf(facts, engine.named)
+	source := sourceOf(facts)
 	read := &Read{engine: engine, source: source, bytes: engine.firstReadBytes[source]}
 	step := time.Duration(facts.StepMillis) * time.Millisecond
 	slot := query.Contract.Slot

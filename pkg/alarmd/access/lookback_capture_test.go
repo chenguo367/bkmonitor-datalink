@@ -80,7 +80,7 @@ func TestAFirstReadIsSummarizedBeforeTheTargetFilter(t *testing.T) {
 	now := time.Unix(1_700_124_010, 0)
 	var clock sync.Mutex
 	recheck := &lookbackRecheck{hosts: map[string]string{"192.0.2.10": "70", "192.0.2.99": "90"}}
-	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, Sources: []string{"bk_log_search/log"}, UnspreadFirstSamples: true,
+	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, UnspreadFirstSamples: true,
 		Now:    func() time.Time { clock.Lock(); defer clock.Unlock(); return now },
 		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true },
 		Owned: func() int { return 1 }})
@@ -130,11 +130,12 @@ func TestAFirstReadIsSummarizedBeforeTheTargetFilter(t *testing.T) {
 	}
 }
 
-// Every source is measured: a query of a source the list does not name is
-// taken as its Query Group's sample all the same, counted as other.
+// Every source is measured, under the label the catalog gives its Query
+// Group: the fixture's query names no source, as the compiler writes plain
+// time series, and is counted as bk_monitor/time_series - not as other.
 func TestAQueryOfAnySourceIsTakenAsItsQueryGroupsSample(t *testing.T) {
 	contractRef, frozen := frozenExecution(t)
-	engine, err := lookback.New(lookback.Options{Sources: []string{"bk_monitor/time_series"}, UnspreadFirstSamples: true,
+	engine, err := lookback.New(lookback.Options{UnspreadFirstSamples: true,
 		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			return execution.ProviderCompletion{}, nil
 		},
@@ -154,10 +155,10 @@ func TestAQueryOfAnySourceIsTakenAsItsQueryGroupsSample(t *testing.T) {
 		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1}, &recordingConsumer{}); err != nil {
 		t.Fatal(err)
 	}
-	// The fixture's query names no listed source, so it is counted as other:
-	// measured all the same.
 	stats := engine.Stats()
-	if stats.Sources[lookback.SourceOther].Samples[lookback.OutcomeCaptured] != 1 || stats.Coverage.Covered != 1 {
-		t.Fatalf("samples %v coverage %+v, want the Query Group sampled", stats.Sources[lookback.SourceOther].Samples, stats.Coverage)
+	if stats.Sources["bk_monitor/time_series"].Samples[lookback.OutcomeCaptured] != 1 || stats.Coverage.Covered != 1 ||
+		stats.Sources[lookback.SourceOther].FirstReads != 0 {
+		t.Fatalf("samples %v, other %d, coverage %+v; want the Query Group sampled as bk_monitor/time_series",
+			stats.Sources["bk_monitor/time_series"].Samples, stats.Sources[lookback.SourceOther].FirstReads, stats.Coverage)
 	}
 }

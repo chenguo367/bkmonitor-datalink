@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -155,7 +156,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{t: t, clock: &clock{at: time.Unix(1_700_000_100, 0)}, answers: make(chan answer, 16),
 		owned: map[execution.QueryGroupIdentity]bool{"qg": true, "qg-b": true}}
-	engine, err := New(Options{Now: f.clock.now, Sources: []string{sourceTimeSeries, sourceLog},
+	engine, err := New(Options{Now: f.clock.now,
 		Refusals: []string{"waiters", "headroom", "lookback_limit"}, LimitRefusal: "lookback_limit", UnspreadFirstSamples: true,
 		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			if _, ok := ctx.Deadline(); !ok {
@@ -839,12 +840,15 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 	}
 }
 
-// Every source is counted under a bounded label from the start: the named
-// ones, and mixed, promql and other for the rest.
+// Every source is counted under a bounded label from the start - every data
+// source a query can be compiled from, mixed and other - and a query is
+// labelled as the catalog labels its Query Group: a plan with no semantics
+// is plain time series, as the compiler writes it; a PromQL query reads the
+// source its plan names; one source named twice is that source.
 func TestSourcesAreBoundedAndCountedFromTheStart(t *testing.T) {
 	f := newFixture(t)
 	stats := f.engine.Stats()
-	for _, source := range []string{sourceTimeSeries, sourceLog, SourceMixed, SourcePromQL, SourceOther} {
+	for _, source := range Sources {
 		entry, present := stats.Sources[source]
 		if !present || len(entry.Samples) != len(SampleOutcomes) || len(entry.Rechecks) != len(RungNames) ||
 			len(entry.DepthGroups) != len(DepthLabels) || len(entry.Probes) != len(ProbeOutcomes) ||
@@ -852,20 +856,29 @@ func TestSourcesAreBoundedAndCountedFromTheStart(t *testing.T) {
 			t.Fatalf("source %s is not counted from the start: %+v", source, entry)
 		}
 	}
-	if len(stats.Sources) != 5 {
-		t.Fatalf("sources %d, want 5", len(stats.Sources))
+	if want := len(controlplane.SupportedSourceSemantics) + 2; len(stats.Sources) != want {
+		t.Fatalf("sources %d, want %d", len(stats.Sources), want)
 	}
-	promql := query("qg", 1_700_000_100, minute)
+	promql := query("qg", 1_700_000_100, minute, "prometheus/time_series")
 	promql.Spec.PlanFacts.PromQL = &execution.PromQLQuery{}
 	for want, facts := range map[string]execution.QueryPlanFacts{
-		SourceMixed:  {SourceSemantics: []string{sourceLog, sourceTimeSeries}},
-		SourcePromQL: promql.Spec.PlanFacts,
-		SourceOther:  {SourceSemantics: []string{"custom/event"}},
-		sourceLog:    {SourceSemantics: []string{sourceLog}},
+		sourceTimeSeries:         {},
+		SourceMixed:              {SourceSemantics: []string{sourceLog, sourceTimeSeries}},
+		"prometheus/time_series": promql.Spec.PlanFacts,
+		SourceOther:              {SourceSemantics: []string{"nobody/compiles_this"}},
+		sourceLog:                {SourceSemantics: []string{sourceLog, sourceLog}},
 	} {
-		if got := sourceOf(facts, f.engine.named); got != want {
+		if got := sourceOf(facts); got != want {
 			t.Fatalf("source of %+v = %s, want %s", facts.SourceSemantics, got, want)
 		}
+	}
+	// Read through a first read: plain time series, as the compiler writes
+	// it, is not other.
+	f.capture(query("qg", 1_700_000_100, minute))
+	stats = f.engine.Stats()
+	if stats.Sources[sourceTimeSeries].FirstReads != 1 || stats.Sources[SourceOther].FirstReads != 0 {
+		t.Fatalf("a plan with no semantics read as time series %d, other %d", stats.Sources[sourceTimeSeries].FirstReads,
+			stats.Sources[SourceOther].FirstReads)
 	}
 }
 
@@ -981,8 +994,7 @@ func (w *windowed) engine(t *testing.T) *Engine {
 	t.Helper()
 	engine, err := New(Options{Now: w.clock.now, Recheck: w.read, UnspreadFirstSamples: true,
 		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
-		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
-		Sources: []string{sourceTimeSeries}})
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1120,12 +1132,7 @@ func TestATailReadStartsEarlyByTheQuerysLookback(t *testing.T) {
 		for range 3 {
 			w.run(t, engine, 2*time.Hour, query)
 		}
-		stats := engine.Stats()
-		label := sourceTimeSeries
-		if query.PromQL != nil {
-			label = SourcePromQL
-		}
-		source := stats.Sources[label]
+		source := engine.Stats().Sources[sourceTimeSeries]
 		if source.Samples[OutcomeCompleted] != 3 || source.ChangedWindows[RungNames[0]] != 0 || source.UnknownLookback != 0 {
 			t.Fatalf("%s: samples %v changed %v unknown %d, want no change read where nothing arrived",
 				name, source.Samples, source.ChangedWindows, source.UnknownLookback)
@@ -1134,7 +1141,7 @@ func TestATailReadStartsEarlyByTheQuerysLookback(t *testing.T) {
 	w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60}
 	engine := w.engine(t)
 	w.run(t, engine, 2*time.Hour, facts(t, minute, "sum(rate(cpu_usage[$__interval]))", execution.QueryClause{}))
-	if source := engine.Stats().Sources[SourcePromQL]; source.UnknownLookback != 1 {
+	if source := engine.Stats().Sources[sourceTimeSeries]; source.UnknownLookback != 1 {
 		t.Fatalf("unknown lookback %d, want the unreadable range counted", source.UnknownLookback)
 	}
 	w.mu.Lock()
@@ -1340,7 +1347,7 @@ func punctualRecheckRate(t *testing.T, step time.Duration) (float64, float64) {
 	t.Helper()
 	c := &clock{at: time.Unix(1_700_006_400, 0)}
 	const groups, warmup, measured = 32, 4 * time.Hour, 12 * time.Hour
-	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true, Sources: []string{sourceTimeSeries},
+	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true,
 		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: point(spec.LogicalWindow.End, "1")})
 			return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil

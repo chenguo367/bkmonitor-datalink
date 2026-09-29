@@ -90,7 +90,7 @@ func key3(a, b, c string) string { return a + "|" + b + "|" + c }
 // Stats is the lookback as it stands.
 type Stats struct {
 	Coverage Coverage `json:"coverage"`
-	// Sources: every counted source, the named ones and mixed, promql, other.
+	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its
 	// window; one that finds no permit in it is counted as yielded.
@@ -244,7 +244,7 @@ func (engine *Engine) Stats() Stats {
 		}
 		candidates = append(candidates, entry)
 	}
-	for _, source := range engine.labels {
+	for _, source := range Sources {
 		entry := SourceStats{FirstReads: engine.counts.firstReads[source], FirstReadBytes: engine.firstReadBytes[source].Load(),
 			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
 			Samples: map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},

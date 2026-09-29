@@ -52,8 +52,9 @@ func newLookbackCollector() *lookbackCollector {
 	}
 	return &lookbackCollector{
 		firstReads: desc("lookback_first_reads_total",
-			"Formal first reads seen, by source: the denominator of the query volume the lookback adds "+
-				"(lookback_rechecks_total over it).", "source"),
+			"Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory "+
+				"labels its Query Groups, so every lookback family reads beside them: the denominator of the query "+
+				"volume the lookback adds (lookback_rechecks_total over it).", "source"),
 		samples: desc("lookback_samples_total",
 			"First reads taken as a Query Group's sample, by source and what became of them: captured, "+
 				"first_read_incomplete, owner_lost, completed (its completion observed), unobserved (its last rungs not "+
