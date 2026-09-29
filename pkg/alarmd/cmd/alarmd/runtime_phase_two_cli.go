@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -276,7 +277,34 @@ func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogReposi
 		&options.QueryProgress, &options.QueryCooldown, &options.TargetGroup, &options.DynamicConfig} {
 		binding.OnFailure = failed
 	}
-	return obchannel.StoreOperations(obevidence.New(options)), obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName})), diagnosticRuntime
+	return obchannel.StoreOperations(obevidence.New(options)),
+		obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName}), workloadDependencies(cfg), config.ObservedNamespaces),
+		diagnosticRuntime
+}
+
+// workloadDependencies is every address this process connects to, taken
+// from the same endpoint list the first screen shows, one entry per host:
+// the workload read derives a namespace from each and connects to none of
+// them. A sentinel deployment's address is its master name followed by the
+// sentinels; each sentinel is an entry. An endpoint the configuration does
+// not name adds nothing.
+func workloadDependencies(cfg config.Config) []k8sread.Dependency {
+	var dependencies []k8sread.Dependency
+	for _, endpoint := range resolveEndpoints(cfg, endpointSharing{}) {
+		if !endpoint.Configured || endpoint.Address == "" {
+			continue
+		}
+		address := endpoint.Address
+		if at := strings.Index(address, "@"); endpoint.Kind == "redis" && at >= 0 {
+			address = address[at+1:]
+		}
+		for _, host := range strings.Split(address, ",") {
+			if host = strings.TrimSpace(host); host != "" {
+				dependencies = append(dependencies, k8sread.Dependency{Name: endpoint.Role, Address: host})
+			}
+		}
+	}
+	return dependencies
 }
 
 // publicSurfaceStanding is what the replica says about its public surface
