@@ -171,7 +171,16 @@ func TestAGroupReadEarlyRestsNoLongerThanItsDeepestRung(t *testing.T) {
 	f := newFixture(t)
 	revised := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} }
 	for range 3 {
-		f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, revised)
+		// Read to its last rung and measured there, the moment it finished,
+		// before the clock is moved on to the next sample.
+		slot := f.clock.now().Unix()
+		q := query("qg", slot, minute, sourceLog)
+		q.Spec.PlanFacts.QueryDelaySeconds = 60
+		f.capture(q, point(slot, "1"))
+		readAt := f.clock.now()
+		for rung, pending := f.rung("qg"); pending; rung, pending = f.rung("qg") {
+			f.recheck(sourceLog, readAt, rung, minute, full(revised(slot)...), RecheckCompared)
+		}
 		state := f.group("qg")
 		floor := RungSteps[state.depth-1]
 		limit := time.Duration(floor * float64(state.step) * 1.25)
@@ -179,6 +188,7 @@ func TestAGroupReadEarlyRestsNoLongerThanItsDeepestRung(t *testing.T) {
 			t.Fatalf("read early: rest %v steps, next sample in %v; want %v steps, at most %v", state.rest,
 				state.nextAt.Sub(f.clock.now()), floor, limit)
 		}
+		f.rest("qg")
 	}
 	if len(f.engine.ReadEarly()) != 1 {
 		t.Fatalf("read early %+v, want the group reported", f.engine.ReadEarly())
