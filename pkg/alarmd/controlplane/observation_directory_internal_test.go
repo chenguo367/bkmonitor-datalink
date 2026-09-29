@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -93,5 +94,24 @@ func TestTheWalkedManifestsAreKeptWhileTheyFit(t *testing.T) {
 	}
 	if kept := rememberWithin([]directoryManifest{small}, small.size()); len(kept) != 1 {
 		t.Fatalf("kept %d in a room of exactly its size, want it kept", len(kept))
+	}
+}
+
+// What remembering a manifest holds, by hand: the directoryManifest itself,
+// the revision, the groups' slice at its capacity, their strings, and each
+// context entry with its strings and its map share.
+func TestAManifestsSizeCountsItsCapacityAndStrings(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("sizes by hand are a 64-bit platform's")
+	}
+	groups := make([]ManifestQueryGroup, 2, 4)
+	groups[0] = ManifestQueryGroup{QueryGroup: "g1", ObjectDigest: "d1"}
+	groups[1] = ManifestQueryGroup{QueryGroup: "g2", ObjectDigest: "d2"}
+	m := directoryManifest{revision: "r", groups: groups,
+		contexts: map[execution.PlanIdentity]execution.OutputContextDigest{{TenantID: "t", BusinessID: "b", StrategyID: "s"}: "c"}}
+	// 48 for the struct, 1 revision, 4 x 32 groups at capacity, 8 group
+	// strings, 48 + 3 + 1 + 48 for the one context entry.
+	if got, want := m.size(), 48+1+4*32+8+(48+3+1+48); got != want {
+		t.Fatalf("size = %d, want %d", got, want)
 	}
 }

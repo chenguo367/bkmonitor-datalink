@@ -260,22 +260,42 @@ func failureReason(err error) string {
 }
 
 // callFailureReason is failureReason for an operation made under ctx. A call
-// issued with its caller's deadline already past, or failing with no
-// Sentinel answering once that deadline passed, failed on the caller's clock:
-// go-redis asks each Sentinel with the spent context, each refuses at once,
-// and the sentence it gives up with is the one a Sentinel outage gives - an
+// issued with its caller's deadline already past failed on the caller's
+// clock, whatever it says: the dialer and go-redis set every connection's
+// deadline from ctx.Deadline(), so each dial fails at once, and asking each
+// Sentinel that way go-redis gives up in the words of a Sentinel outage - an
 // operation that never reached the network read as Sentinels down. It is
-// named by the context, timeout or canceled. A Sentinel that does not answer
-// while the caller still has time stays sentinel_unreachable.
+// named by the context: canceled for a cancelled caller, timeout otherwise,
+// including the moment a deadline has passed and the context's timer has not
+// yet fired, when ctx.Err() is still nil. A call that failed with time left
+// keeps its own words, sentinel_unreachable included: a Sentinel that hangs
+// past a caller's deadline shorter than the read timeout is an outage, not
+// the caller's clock. What no rule tells apart: go-redis's pool, after
+// PoolSize dial failures, answers new callers with the last dial error until
+// a redial succeeds, on contexts that still have time - milliseconds while
+// the Sentinels are well.
 func callFailureReason(ctx context.Context, err error) string {
 	reason := failureReason(err)
-	if reason == "" || ctx.Err() == nil {
+	if reason == "" {
 		return reason
 	}
-	if start, ok := ctx.Value(redisCallStartKey{}).(redisCallStart); (ok && start.spent) || reason == redisfailure.SentinelUnreachable {
-		return redisfailure.Reason(ctx.Err())
+	if start, ok := ctx.Value(redisCallStartKey{}).(redisCallStart); ok && start.spent {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return redisfailure.Reason(ctxErr)
+		}
+		return redisfailure.Timeout
 	}
 	return reason
+}
+
+// spentAtIssue says ctx gave its call no time: cancelled, or its deadline
+// reached by the wall clock the dialer checks it against.
+func spentAtIssue(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func boundedRedisCommand(name string) string {
@@ -326,7 +346,7 @@ func (r *Recorder) RedisClientHealth(client string) (RedisClientHealth, bool) {
 type redisCallStartKey struct{}
 
 // redisCallStart is when an operation was issued, and whether its caller's
-// context was already done then.
+// context gave it no time then (spentAtIssue).
 type redisCallStart struct {
 	at    time.Time
 	spent bool
@@ -338,7 +358,7 @@ func (h *RedisCallHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (conte
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
 	h.callerOperation(ctx)
-	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: ctx.Err() != nil}), nil
+	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
 }
 
 func (h *RedisCallHook) AfterProcess(ctx context.Context, cmd redis.Cmder) error {
@@ -355,7 +375,7 @@ func (h *RedisCallHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmd
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
 	h.callerOperation(ctx)
-	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: ctx.Err() != nil}), nil
+	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
 }
 
 // AfterProcessPipeline counts every member of the batch, because the Redis
