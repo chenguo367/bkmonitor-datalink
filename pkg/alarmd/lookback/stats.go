@@ -28,8 +28,13 @@ type counters struct {
 	changes    map[string]uint64 // source|rung|class: changed buckets
 	preempted  map[string]uint64 // source|rung: reads stopped for a formal query
 	completion map[string]uint64 // source|age: completed samples by when the window was complete
-	refusals   map[string]uint64 // reason: permits refused
-	faults     map[string]uint64 // reason
+	probes     map[string]uint64 // source|outcome: deep rechecks
+	// source|outcome and source|age: completed samples whose first read was
+	// empty, and when those whose data arrived later were complete.
+	emptyFirstReads map[string]uint64
+	emptyCompletion map[string]uint64
+	refusals        map[string]uint64 // reason: permits refused
+	faults          map[string]uint64 // reason
 	// Per source: the latest completion seen, the bytes rechecks read back,
 	// and samples whose query's lookback could not be read.
 	maxCompletion   map[string]time.Duration
@@ -40,7 +45,8 @@ type counters struct {
 func newCounters(sources, refusals []string) counters {
 	c := counters{firstReads: map[string]uint64{}, samples: map[string]uint64{}, rechecks: map[string]uint64{},
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
-		completion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
+		completion: map[string]uint64{}, probes: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
+		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{}}
 	for _, reason := range refusals {
 		c.refusals[reason] = 0
@@ -56,6 +62,13 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, age := range AgeBuckets {
 			c.completion[key2(source, age)] = 0
+			c.emptyCompletion[key2(source, age)] = 0
+		}
+		for _, outcome := range ProbeOutcomes {
+			c.probes[key2(source, outcome)] = 0
+		}
+		for _, outcome := range EmptyFirstReadOutcomes {
+			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
 		for _, rung := range RungNames {
 			c.changed[key2(source, rung)] = 0
@@ -85,8 +98,9 @@ type Stats struct {
 	// Faults: reason -> reads not kept for a defect. Always 0 in normal
 	// running; anything else is a defect to fix.
 	Faults map[string]uint64 `json:"faults"`
-	// Pending is the samples in flight, one at most per Query Group, and
-	// PendingBytes what their summaries hold: computed, not a budget.
+	// Pending is the samples in flight - one at most per Query Group, and
+	// one waiting for its deep recheck - and PendingBytes what their
+	// summaries hold: computed, not a budget.
 	Pending      int `json:"pending"`
 	PendingBytes int `json:"pending_bytes"`
 	// Latest is the measured Query Groups whose data was complete latest,
@@ -117,11 +131,24 @@ type SourceStats struct {
 	FirstReads     uint64 `json:"first_reads"`
 	FirstReadBytes uint64 `json:"first_read_bytes"`
 	RecheckBytes   uint64 `json:"recheck_bytes"`
-	// Samples: outcome -> count. UnobservedRatio is the samples whose
-	// completion was not observed - unobserved or truncated_tail - over all
-	// finished ones.
-	Samples         map[string]uint64 `json:"samples"`
-	UnobservedRatio float64           `json:"unobserved_ratio"`
+	// Samples: outcome -> count. UnobservedRatio is the unobserved samples -
+	// their last rungs not read - over all finished ones, and
+	// ProbeChangedRatio the probe_changed ones: windows later than the rungs
+	// their groups read, which only the deep recheck saw and Completion does
+	// not hold.
+	Samples           map[string]uint64 `json:"samples"`
+	UnobservedRatio   float64           `json:"unobserved_ratio"`
+	ProbeChangedRatio float64           `json:"probe_changed_ratio"`
+	// Probes: outcome -> deep rechecks. Changed over clean and changed is
+	// how often a group's data was later than the rungs it read.
+	Probes map[string]uint64 `json:"probes"`
+	// EmptyFirstReads: outcome -> completed samples whose first read was
+	// complete and held no point - arrived when data came at a later rung,
+	// stayed_empty when none did - and EmptyFirstReadCompletion when those
+	// that arrived were complete. Arrived over completed samples is the
+	// share of windows empty when first read that were not empty.
+	EmptyFirstReads          map[string]uint64 `json:"empty_first_reads"`
+	EmptyFirstReadCompletion map[string]uint64 `json:"empty_first_read_completion"`
 	// UnknownLookback is the samples whose query's lookback could not be
 	// read, rechecked from a step before their tail.
 	UnknownLookback uint64 `json:"unknown_lookback"`
@@ -185,7 +212,7 @@ func (engine *Engine) Stats() Stats {
 		entry := candidate{queryGroup: queryGroup}
 		rest := min(time.Duration(state.rest*float64(state.step)), restCap)
 		switch {
-		case state.capturing || state.sample != nil:
+		case state.capturing || state.sample != nil || state.probe != nil:
 			entry.fresh = true
 		case state.measured:
 			// Fresh within twice the longest a sample of it can take: its
@@ -209,9 +236,11 @@ func (engine *Engine) Stats() Stats {
 				CompletionSeconds: int64(state.completion / time.Second), StepSeconds: int64(state.step / time.Second),
 				MeasuredAt: state.measuredAt}
 		}
-		if state.sample != nil {
-			stats.Pending++
-			stats.PendingBytes += state.sample.last.bytes()
+		for _, pending := range [...]*sample{state.sample, state.probe} {
+			if pending != nil {
+				stats.Pending++
+				stats.PendingBytes += pending.last.bytes()
+			}
 		}
 		candidates = append(candidates, entry)
 	}
@@ -220,7 +249,8 @@ func (engine *Engine) Stats() Stats {
 			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
 			Samples: map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
-			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{}}
+			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{},
+			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{}}
 		for _, depth := range DepthLabels {
 			entry.DepthGroups[depth] = 0
 		}
@@ -234,11 +264,19 @@ func (engine *Engine) Stats() Stats {
 		for _, outcome := range SampleOutcomes {
 			entry.Samples[outcome] = engine.counts.samples[key2(source, outcome)]
 		}
-		if finished := entry.Samples[OutcomeCompleted] + entry.Samples[OutcomeUnobserved] + entry.Samples[OutcomeTruncatedTail]; finished > 0 {
-			entry.UnobservedRatio = float64(entry.Samples[OutcomeUnobserved]+entry.Samples[OutcomeTruncatedTail]) / float64(finished)
+		if finished := entry.Samples[OutcomeCompleted] + entry.Samples[OutcomeUnobserved] + entry.Samples[OutcomeProbeChanged]; finished > 0 {
+			entry.UnobservedRatio = float64(entry.Samples[OutcomeUnobserved]) / float64(finished)
+			entry.ProbeChangedRatio = float64(entry.Samples[OutcomeProbeChanged]) / float64(finished)
 		}
 		for _, age := range AgeBuckets {
 			entry.Completion[age] = engine.counts.completion[key2(source, age)]
+			entry.EmptyFirstReadCompletion[age] = engine.counts.emptyCompletion[key2(source, age)]
+		}
+		for _, outcome := range ProbeOutcomes {
+			entry.Probes[outcome] = engine.counts.probes[key2(source, outcome)]
+		}
+		for _, outcome := range EmptyFirstReadOutcomes {
+			entry.EmptyFirstReads[outcome] = engine.counts.emptyFirstReads[key2(source, outcome)]
 		}
 		for _, rung := range RungNames {
 			entry.ChangedWindows[rung] = engine.counts.changed[key2(source, rung)]

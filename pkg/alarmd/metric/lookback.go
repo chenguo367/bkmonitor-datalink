@@ -30,6 +30,9 @@ type lookbackCollector struct {
 	changed    *prometheus.Desc
 	changes    *prometheus.Desc
 	completion *prometheus.Desc
+	probes     *prometheus.Desc
+	empty      *prometheus.Desc
+	emptyAt    *prometheus.Desc
 	latest     *prometheus.Desc
 	groups     *prometheus.Desc
 	rest       *prometheus.Desc
@@ -54,8 +57,8 @@ func newLookbackCollector() *lookbackCollector {
 		samples: desc("lookback_samples_total",
 			"First reads taken as a Query Group's sample, by source and what became of them: captured, "+
 				"first_read_incomplete, owner_lost, completed (its completion observed), unobserved (its last rungs not "+
-				"read), truncated_tail (data still arriving past the tail it was kept to), fault. Only completed enters "+
-				"lookback_completion_total.",
+				"read), probe_changed (its deep recheck found data arriving after the rungs its group read), fault. Only "+
+				"completed enters lookback_completion_total.",
 			"source", "outcome"),
 		checks: desc("lookback_rechecks_total",
 			"Rechecks by source, rung (its moment in the Query Group's data steps) and outcome. Only compared is a "+
@@ -70,6 +73,18 @@ func newLookbackCollector() *lookbackCollector {
 		completion: desc("lookback_completion_total",
 			"Finished samples by when their window's data was complete, as its age past the window's end: the last "+
 				"rung that changed, or the first read when none did.", "source", "age"),
+		probes: desc("lookback_probes_total",
+			"Deep rechecks - a sample read once more at the deepest rung after the rungs its group reads, one sample "+
+				"in four and a group's first - by source and outcome: clean, changed (data arrived after those rungs; "+
+				"the group then reads every rung and settles), unobserved (not read; the next sample is probed).",
+			"source", "outcome"),
+		empty: desc("lookback_empty_first_reads_total",
+			"Completed samples whose first read was complete and held no point, by source and whether their data "+
+				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
+				"share of windows empty when first read that were not.", "source", "outcome"),
+		emptyAt: desc("lookback_empty_first_read_completion_total",
+			"Those empty first reads whose data arrived later, by when their window's data was complete, as its age "+
+				"past the window's end.", "source", "age"),
 		latest: desc("lookback_completion_max_seconds",
 			"The latest any window of the source was complete, in seconds past its end, since the process started.",
 			"source"),
@@ -86,12 +101,13 @@ func newLookbackCollector() *lookbackCollector {
 				"lookback adds.", "source"),
 		unknown: desc("lookback_unknown_lookback_total",
 			"Samples whose query's lookback (a window, a range, an offset) could not be read, rechecked from one "+
-				"step before their tail instead.", "source"),
+				"step before the window's tail instead.", "source"),
 		coverage: desc("lookback_coverage",
 			"The Query Groups this process owns, and how many of them have a fresh measurement; the aim is all.",
 			"what"),
 		pending: desc("lookback_pending",
-			"Samples in flight, one at most per owned Query Group, and the bytes their summaries hold.", "what"),
+			"Samples in flight - one at most per owned Query Group, and one waiting for its deep recheck - and the "+
+				"bytes their summaries hold.", "what"),
 		yields: desc("lookback_preemptions_total",
 			"Recheck reads stopped because a formal query had to wait for a query permit, by source and rung. "+
 				"The rung is tried again within its window and counted in lookback_rechecks_total by what it comes to.",
@@ -108,7 +124,8 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
-		c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage, c.pending, c.yields, c.refused, c.faults} {
+		c.probes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.pending, c.yields, c.refused, c.faults} {
 		ch <- desc
 	}
 }
@@ -134,6 +151,13 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		for _, age := range lookback.AgeBuckets {
 			counter(c.completion, source.Completion[age], name, age)
+			counter(c.emptyAt, source.EmptyFirstReadCompletion[age], name, age)
+		}
+		for _, outcome := range lookback.ProbeOutcomes {
+			counter(c.probes, source.Probes[outcome], name, outcome)
+		}
+		for _, outcome := range lookback.EmptyFirstReadOutcomes {
+			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}
 		for _, rung := range lookback.RungNames {
 			for _, outcome := range lookback.RecheckOutcomes {

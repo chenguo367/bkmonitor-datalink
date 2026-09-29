@@ -28,21 +28,24 @@ func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) +
 func lookbackSeriesUpperBounds() map[string]int {
 	sources, rungs := lookbackSources(), len(lookback.RungNames)
 	return map[string]int{
-		"lookback_first_reads_total":      sources,
-		"lookback_samples_total":          sources * len(lookback.SampleOutcomes),
-		"lookback_rechecks_total":         sources * rungs * len(lookback.RecheckOutcomes),
-		"lookback_changed_windows_total":  sources * rungs,
-		"lookback_changes_total":          sources * rungs * len(lookback.Changes),
-		"lookback_completion_total":       sources * len(lookback.AgeBuckets),
-		"lookback_completion_max_seconds": sources,
-		"lookback_groups":                 sources * len(lookback.DepthLabels),
-		"lookback_rest_seconds":           sources,
-		"lookback_first_read_bytes_total": sources,
-		"lookback_recheck_bytes_total":    sources,
-		"lookback_unknown_lookback_total": sources,
-		"lookback_coverage":               2,
-		"lookback_pending":                2,
-		"lookback_preemptions_total":      sources * rungs,
+		"lookback_first_reads_total":                 sources,
+		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
+		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),
+		"lookback_changed_windows_total":             sources * rungs,
+		"lookback_changes_total":                     sources * rungs * len(lookback.Changes),
+		"lookback_completion_total":                  sources * len(lookback.AgeBuckets),
+		"lookback_probes_total":                      sources * len(lookback.ProbeOutcomes),
+		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
+		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
+		"lookback_completion_max_seconds":            sources,
+		"lookback_groups":                            sources * len(lookback.DepthLabels),
+		"lookback_rest_seconds":                      sources,
+		"lookback_first_read_bytes_total":            sources,
+		"lookback_recheck_bytes_total":               sources,
+		"lookback_unknown_lookback_total":            sources,
+		"lookback_coverage":                          2,
+		"lookback_pending":                           2,
+		"lookback_preemptions_total":                 sources * rungs,
 		// Every reason the scheduler refuses with, and other.
 		"lookback_permit_refusals_total": len(scheduler.LookbackRefusals) + 1,
 		"lookback_faults_total":          len(lookback.Faults),
@@ -71,6 +74,9 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	stats.Sources[logs].Changes[lookback.RungNames[1]][lookback.ChangePointsAdded] = 7
 	stats.Sources[logs].Completion["le_300s"] = 2
 	stats.Sources[logs].Preempted[lookback.RungNames[0]] = 5
+	stats.Sources[logs].Probes[lookback.ProbeChanged] = 6
+	stats.Sources[logs].EmptyFirstReads[lookback.EmptyArrived] = 8
+	stats.Sources[logs].EmptyFirstReadCompletion["le_600s"] = 3
 	entry := stats.Sources[logs]
 	entry.RecheckBytes = 2048
 	stats.Sources[logs] = entry
@@ -108,6 +114,15 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_completion_total", map[string]string{"source": logs, "age": "le_300s"}); got != 2 {
 		t.Fatalf("completion = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_probes_total", map[string]string{"source": logs, "outcome": lookback.ProbeChanged}); got != 6 {
+		t.Fatalf("deep rechecks changed = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_empty_first_reads_total", map[string]string{"source": logs, "outcome": lookback.EmptyArrived}); got != 8 {
+		t.Fatalf("empty first reads arrived = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_empty_first_read_completion_total", map[string]string{"source": logs, "age": "le_600s"}); got != 3 {
+		t.Fatalf("empty first read completion = %v", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)

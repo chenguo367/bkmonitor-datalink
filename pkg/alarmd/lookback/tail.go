@@ -18,26 +18,16 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// Late data lands in a window's latest buckets only: a bucket older than
-// the lateness a sample looks for, and a step more, is complete at the first
-// read and does not change. So a sample keeps, and its rechecks read and
-// compare, only the window's tail - the cost follows the lateness, not the
-// window's length.
-//
-// tailSteps is the tail a sample planned to depth reads: its deepest planned
-// rung, rounded up to whole steps, and one step. Data arriving at a constant
-// delay is caught while that delay is under about twice the deepest rung
-// and a step; a change inside the deepest rung deepens the sample.
-func tailSteps(depth int) int64 {
-	return int64(math.Ceil(RungSteps[depth-1])) + 1
-}
-
-// keptSteps is the tail a first read is kept to: one rung deeper than
-// planned, so a sample that follows its data one rung further still compares
-// with what it read first. Deeper than that is left to the next sample.
-func keptSteps(planned int) int64 {
-	return tailSteps(min(planned+1, len(RungSteps)))
-}
+// Data that arrives after a first read and no later than the deepest rung
+// lands in the window's last tailSteps steps: a bucket older than that was
+// complete before the first read. So a sample keeps, and its rechecks read
+// and compare, only that tail - the whole of a shorter window - however deep
+// its Query Group reads: the cost follows the deepest rung, not the window's
+// length. A group reading too few rungs sees its data arrive in the tail at
+// the rungs it does read and deepens, as long as the window reaches back as
+// far as the data is late; a shorter window can be empty at every rung it
+// reads, and the deep recheck finds that one.
+var tailSteps = int64(math.Ceil(RungSteps[len(RungSteps)-1])) + 1
 
 // tailFrom is the first bucket of a window's last steps, on the window's
 // own grid and never before the window.
