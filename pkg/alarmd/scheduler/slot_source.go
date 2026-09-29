@@ -889,7 +889,10 @@ func (source *ProductionSlotSource) classifyRecovery(
 	}
 	age := at.Sub(time.UnixMilli(deadline))
 	takenOver := source.takeovers.Anchor(source.queryGroup, fence, at)
-	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver)
+	// Not for a Query Group the degraded pool holds (withQueryCooldownHeld):
+	// its replay could not run, and the pool gives its Slots up for distance
+	// as it always did.
+	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver) && !queryCooldownHeld(ctx)
 	if age >= source.recovery.MaxReplayAge {
 		aged := SlotRecoveryFacts{
 			Disposition: ReplayExpired,
@@ -975,15 +978,15 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 }
 
 // observeReplayTakeover reports one Slot due before this process took its
-// Query Group over, and what became of it. Counted each time such a Slot is
-// classified: one replayed on its first attempt counts once.
+// Query Group over, and what became of it: once per Slot and outcome
+// (TakeoverClock.FirstClassification), however many times it is classified.
 func (source *ProductionSlotSource) observeReplayTakeover(
 	ctx context.Context,
 	evaluationTime execution.EvaluationTime,
 	outcome string,
 	age, sinceTakeover time.Duration,
 ) {
-	if source.observer == nil {
+	if source.observer == nil || !source.takeovers.FirstClassification(source.queryGroup, evaluationTime, outcome) {
 		return
 	}
 	defer func() { _ = recover() }()

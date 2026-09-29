@@ -162,6 +162,37 @@ func (runner *Runner) clearQueryCooldown(ctx context.Context, event string) {
 	runner.queryCooldown = queryCooldownState{}
 }
 
+type queryCooldownHeldKey struct{}
+
+// withQueryCooldownHeld tells the Slot source that this Query Group's
+// queries are held by the degraded pool now. A Slot due before its takeover
+// is then not replayed past the distance rule: the replay's query would be
+// held like every other, the Slot would be classified again each time the
+// Runner woke and never run, and the pool's Slots are given up on for
+// distance by design, takeover or not.
+func withQueryCooldownHeld(ctx context.Context, held bool) context.Context {
+	if !held {
+		return ctx
+	}
+	return context.WithValue(ctx, queryCooldownHeldKey{}, true)
+}
+
+// queryCooldownHeld reports what withQueryCooldownHeld said; false when
+// nothing did.
+func queryCooldownHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(queryCooldownHeldKey{}).(bool)
+	return held
+}
+
+// queryCooldownHolds reports whether the pool holds this Query Group's
+// queries now: the cooldown is on and has not run out. The Slot's own
+// checks (deferUnavailableQuery) can still let one through -- an expired
+// range, a Slot past its maintenance bound -- and none of them is a replay.
+func (runner *Runner) queryCooldownHolds() bool {
+	state := runner.queryCooldown
+	return runner.flights.limits.QueryUnavailableCooldown && !state.until.IsZero() && runner.now().Before(state.until)
+}
+
 func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot) bool {
 	if !runner.flights.limits.QueryUnavailableCooldown {
 		runner.clearQueryCooldown(ctx, QueryCooldownDisabled)

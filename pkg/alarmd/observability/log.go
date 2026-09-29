@@ -203,6 +203,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.QueryCooldown; f != nil {
 		attributes = append(attributes, slog.Any("query_cooldown", f))
 	}
+	// Which outcome, how old the Slot was and how long after the takeover:
+	// a Slot given up on for its age is named by its Query Group and minute
+	// only with these beside them.
+	if f := observation.ReplayTakeover; f != nil {
+		attributes = append(attributes, slog.Any("replay_takeover", f))
+	}
 	if f := observation.QueryTiming; f != nil {
 		attributes = append(attributes, slog.Any("query_timing", f))
 	}
