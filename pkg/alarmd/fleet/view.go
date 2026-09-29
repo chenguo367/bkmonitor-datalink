@@ -1762,6 +1762,11 @@ type Snapshot struct {
 	// line carrying it is gone from the log within minutes. Absent on a
 	// build before this fact existed.
 	Retention *observability.RuntimeRetentionFacts `json:"retention,omitempty"`
+	// RoundMemory is what this replica's tracker keeps to read window holes
+	// by, and the object keeping the most. The counts are metrics too; the
+	// object is named only here, because a label per object is not a metric
+	// anyone can bound. Absent on a build before this fact existed.
+	RoundMemory *RoundMemorySummary `json:"round_memory,omitempty"`
 }
 
 // OutputProtocolFacts is one process's output protocol choice: the word in
@@ -2591,6 +2596,30 @@ type ReplicaView struct {
 	// it. Absent when it published none (an older build), which the page says
 	// rather than filling in.
 	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
+	// RoundMemory is this replica's, as it published it: the rounds and
+	// bytes its tracker keeps and the object keeping the most. Absent when it
+	// published none (an older build).
+	RoundMemory *RoundMemorySummary `json:"round_memory,omitempty"`
+}
+
+// copyRoundMemory copies a published round memory summary, the largest
+// object's strategies and window start with it; nil stays nil, and no
+// strategies stay an empty list rather than becoming null.
+func copyRoundMemory(summary *RoundMemorySummary) *RoundMemorySummary {
+	if summary == nil {
+		return nil
+	}
+	copied := *summary
+	if summary.Largest != nil {
+		largest := *summary.Largest
+		largest.Strategies = append([]StrategyRef{}, summary.Largest.Strategies...)
+		if summary.Largest.WindowStart != nil {
+			start := *summary.Largest.WindowStart
+			largest.WindowStart = &start
+		}
+		copied.Largest = &largest
+	}
+	return &copied
 }
 
 // BuildFacts is one process's build: the three labels of its build_info
@@ -3139,6 +3168,9 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			facts := *snapshot.OutputProtocol
 			perReplica.OutputProtocol = &facts
 		}
+		// And what its tracker keeps, copied so a later read cannot alias
+		// the snapshot's.
+		perReplica.RoundMemory = copyRoundMemory(snapshot.RoundMemory)
 		view.OutputProtocols = addToOutputProtocolGroup(view.OutputProtocols, snapshot.OutputProtocol, replica)
 		view.Retentions = addToRetentionGroup(view.Retentions, snapshot.Retention, replica)
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
