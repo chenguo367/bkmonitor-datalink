@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,36 @@ const storeCensusTimeout = 30 * time.Second
 type censusStore struct {
 	name   string
 	client redis.UniversalClient
+}
+
+// storeAt is a store and the connection it was opened with.
+type storeAt struct {
+	store      censusStore
+	connection any
+}
+
+// distinctStores is each store once, under the first name it was given: two
+// clients opened on one connection are one store, and a census of both would
+// report its keys twice. A store with no client is not one this process
+// opened.
+func distinctStores(candidates ...storeAt) []censusStore {
+	var stores []censusStore
+	for index, candidate := range candidates {
+		if candidate.store.client == nil {
+			continue
+		}
+		distinct := true
+		for _, earlier := range candidates[:index] {
+			if earlier.store.client != nil && reflect.DeepEqual(earlier.connection, candidate.connection) {
+				distinct = false
+				break
+			}
+		}
+		if distinct {
+			stores = append(stores, candidate.store)
+		}
+	}
+	return stores
 }
 
 // storeCensus is the latest census of each store, as the scrape reads it.

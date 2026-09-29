@@ -185,17 +185,38 @@ func TestAClusterIsNotMeasured(t *testing.T) {
 	}
 }
 
-// A key drawn and gone before it was weighed belongs to no family and is not
-// counted as weighed: it would otherwise dilute every family's share, and
-// add its "no size" to its family's bytes.
-func TestAKeyGoneBeforeItWasWeighedCountsForNothing(t *testing.T) {
-	families, weighed, gone := tally([]string{"a:1", "a:2", "b:1"}, []int64{10, -1, 5})
+// A key drawn and gone before it was weighed was one of the store's keys
+// when it was drawn: it counts in its family's keys and adds nothing to its
+// bytes, and a sample is scaled by every draw, so the families' keys add up
+// to the store's count.
+func TestAKeyGoneBeforeItWasWeighedCountsInItsFamilyWithNoBytes(t *testing.T) {
+	families, weighed, gone := estimate([]string{"a:1", "a:2", "b:1"}, []int64{10, -1, 5}, 300, false)
 	if weighed != 2 || gone != 1 || len(families) != 2 {
-		t.Fatalf("tally = %+v weighed %d gone %d, want two families of the two keys there", families, weighed, gone)
+		t.Fatalf("estimate = %+v weighed %d gone %d, want two families of the three keys drawn", families, weighed, gone)
 	}
+	want := map[string]Family{"a:*": {Name: "a:*", Samples: 2, Keys: 200, Bytes: 1000}, "b:*": {Name: "b:*", Samples: 1, Keys: 100, Bytes: 500}}
 	for _, family := range families {
-		if family.Samples != 1 || family.Keys != 1 || family.Name == "a:*" && family.Bytes != 10 || family.Name == "b:*" && family.Bytes != 5 {
-			t.Fatalf("family %+v, want one key and its own size", family)
+		if family != want[family.Name] {
+			t.Fatalf("family %+v, want %+v", family, want[family.Name])
 		}
+	}
+	exact, _, _ := estimate([]string{"a:1", "a:2"}, []int64{10, -1}, 300, true)
+	if len(exact) != 1 || exact[0].Keys != 2 || exact[0].Bytes != 10 {
+		t.Fatalf("an exact census = %+v, want its keys as counted", exact)
+	}
+}
+
+// A walk gives every key once; a store that grew past twice the count it
+// was walked for is not walked whole, and its census is not exact.
+func TestAWalkThatOverrunsIsNotACensusOfEveryKey(t *testing.T) {
+	client := startRedis(t)
+	fill(t, client, "alarmd:state", 300, 20)
+	keys, whole, err := walk(context.Background(), client)
+	if err != nil || !whole || len(keys) != 300 {
+		t.Fatalf("walk = %d keys whole %v err %v, want all 300", len(keys), whole, err)
+	}
+	fill(t, client, "alarmd:gap", 2*SampleKeys, 20)
+	if keys, whole, err := walk(context.Background(), client); err != nil || whole || keys != nil {
+		t.Fatalf("walk past twice its count = %d keys whole %v err %v, want no census of every key", len(keys), whole, err)
 	}
 }

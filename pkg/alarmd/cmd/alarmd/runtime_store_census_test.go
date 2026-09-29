@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
@@ -78,5 +79,34 @@ func TestTheLeaderReportsWhatEachStoreHoldsByFamily(t *testing.T) {
 	census.measure(ctx, false)
 	if readings := gather(); readings["bkmonitor_alarmd_store_census_keys/source"] != 0 {
 		t.Fatalf("a replica that stopped leading still reports %v", readings)
+	}
+}
+
+// Each store is measured once, under the first name it was given: the
+// runtime store when it is the source is the source, the compatibility
+// output's service Redis is a third store only when it is neither, and a
+// store this process did not open is none.
+func TestEachStoreIsMeasuredOnce(t *testing.T) {
+	source, runtime, service := redis.NewClient(&redis.Options{}), redis.NewClient(&redis.Options{}), redis.NewClient(&redis.Options{})
+	t.Cleanup(func() { _ = source.Close(); _ = runtime.Close(); _ = service.Close() })
+	names := func(stores []censusStore) string {
+		var joined string
+		for _, store := range stores {
+			joined += "/" + store.name
+		}
+		return joined
+	}
+	at := func(name string, client redis.UniversalClient, address string) storeAt {
+		return storeAt{censusStore{name: name, client: client}, config.RedisConnectionConfig{Address: address}}
+	}
+	for want, candidates := range map[string][]storeAt{
+		"/source/runtime/legacy_output": {at("source", source, "a"), at("runtime", runtime, "b"), at("legacy_output", service, "c")},
+		"/source/legacy_output":         {at("source", source, "a"), at("runtime", source, "a"), at("legacy_output", service, "c")},
+		"/source/runtime":               {at("source", source, "a"), at("runtime", runtime, "b"), at("legacy_output", service, "a")},
+		"/source":                       {at("source", source, "a"), at("runtime", source, "a"), at("legacy_output", nil, "c")},
+	} {
+		if got := names(distinctStores(candidates...)); got != want {
+			t.Errorf("stores = %s, want %s", got, want)
+		}
 	}
 }

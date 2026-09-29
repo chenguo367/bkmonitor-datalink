@@ -17,7 +17,17 @@
 // A store of at most SampleKeys keys is walked whole and every key weighed:
 // the census is exact. A larger one is sampled: SampleKeys draws of
 // RANDOMKEY, with replacement, each weighed with MEMORY USAGE, and a
-// family's keys and bytes are its share of the draws times DBSIZE.
+// family's keys and bytes are its share of the draws times DBSIZE. So is a
+// small store that grew past twice its count while it was walked: what was
+// walked of it is not every key, and not a sample either.
+//
+// A key drawn and gone before it was weighed was one of the DBSIZE keys when
+// it was drawn: it counts in its family's keys and adds nothing to its
+// bytes, and the share is of every draw. The families' keys then add up to
+// DBSIZE, and a family whose keys come and go quickly - locks, leases -
+// reads as its count with next to no bytes. Leaving such a key out would
+// have shared its part of DBSIZE among the others, and undercounted its
+// own family.
 //
 // The error, by the sample size N = SampleKeys. A family holding a share p
 // of the keys is drawn n = p*N times on average, and its key estimate has a
@@ -67,8 +77,8 @@ var ErrUnsupported = errors.New("storecensus: a cluster client is not measured")
 // Family is one family of keys as a census estimated it.
 type Family struct {
 	Name string
-	// Samples is how many of the keys weighed were of this family: the
-	// estimate below rests on these alone.
+	// Samples is how many of the keys drawn were of this family, gone ones
+	// included: the estimate below rests on these alone.
 	Samples int
 	Keys    float64
 	Bytes   float64
@@ -105,9 +115,9 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 	result.Keys = keys
 	var drawn []string
 	if keys <= SampleKeys {
-		drawn, err = walk(ctx, client)
-		result.Exact = true
-	} else {
+		drawn, result.Exact, err = walk(ctx, client)
+	}
+	if err == nil && !result.Exact {
 		drawn, err = draw(ctx, client)
 	}
 	if err != nil {
@@ -117,32 +127,35 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 	if err != nil {
 		return Result{}, err
 	}
-	families, weighed, gone := tally(drawn, sizes)
+	families, weighed, gone := estimate(drawn, sizes, keys, result.Exact)
 	result.Weighed, result.Gone = weighed, gone
-	scale := 1.0
-	if !result.Exact && weighed > 0 {
-		scale = float64(keys) / float64(weighed)
-	}
-	for index := range families {
-		families[index].Keys *= scale
-		families[index].Bytes *= scale
-	}
 	result.Families = fold(families)
 	result.Duration = now().Sub(started)
 	return result, nil
 }
 
-// tally is the keys weighed by family, unscaled, and how many were weighed
-// and how many had gone before they could be: a key gone is no part of any
-// family, and does not dilute the share of those that were there.
+// estimate is the families of the keys drawn, scaled to a store of keys
+// keys unless they were every key: each family's share of every draw, gone
+// ones included, times the store's count.
+func estimate(drawn []string, sizes []int64, keys int64, exact bool) (families []Family, weighed, gone int) {
+	families, weighed, gone = tally(drawn, sizes)
+	if exact || len(drawn) == 0 {
+		return families, weighed, gone
+	}
+	scale := float64(keys) / float64(len(drawn))
+	for index := range families {
+		families[index].Keys *= scale
+		families[index].Bytes *= scale
+	}
+	return families, weighed, gone
+}
+
+// tally is the keys drawn by family, unscaled, and how many were weighed and
+// how many had gone before they could be: a key gone counts in its family's
+// keys and adds nothing to its bytes.
 func tally(drawn []string, sizes []int64) (families []Family, weighed, gone int) {
 	byName := map[string]int{}
 	for index, key := range drawn {
-		if sizes[index] < 0 {
-			gone++
-			continue
-		}
-		weighed++
 		name := FamilyOf(key)
 		position, found := byName[name]
 		if !found {
@@ -152,25 +165,40 @@ func tally(drawn []string, sizes []int64) (families []Family, weighed, gone int)
 		}
 		families[position].Samples++
 		families[position].Keys++
+		if sizes[index] < 0 {
+			gone++
+			continue
+		}
+		weighed++
 		families[position].Bytes += float64(sizes[index])
 	}
 	return families, weighed, gone
 }
 
-// walk is every key of a small store.
-func walk(ctx context.Context, client redis.UniversalClient) ([]string, error) {
+// walk is every key of a small store, each once, and whether it was every
+// key: a store that grew past twice the count it was walked for is walked
+// no further, and is sampled instead.
+func walk(ctx context.Context, client redis.UniversalClient) ([]string, bool, error) {
 	var keys []string
+	// SCAN may return a key twice while the server rehashes its table.
+	seen := map[string]struct{}{}
 	var cursor uint64
 	for {
 		page, next, err := client.Scan(ctx, cursor, "", batch).Result()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		keys = append(keys, page...)
-		if cursor = next; cursor == 0 || len(keys) > 2*SampleKeys {
-			// A store that grew past its count while walked is walked no
-			// further than twice the count it was walked for.
-			return keys, nil
+		for _, key := range page {
+			if _, repeated := seen[key]; !repeated {
+				seen[key] = struct{}{}
+				keys = append(keys, key)
+			}
+		}
+		if len(keys) > 2*SampleKeys {
+			return nil, false, nil
+		}
+		if cursor = next; cursor == 0 {
+			return keys, true, nil
 		}
 	}
 }

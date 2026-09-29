@@ -729,6 +729,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 	}()
 	var legacyClients []redis.UniversalClient
+	var compatOutputClient redis.UniversalClient
 	stopDiagnosticWriter := func() {}
 	closeLegacyClients := func() error {
 		var errs []error
@@ -761,6 +762,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return nil, fmt.Errorf("open kafka.legacy_adapter.service_redis: %w", err)
 		}
 		legacyClients = append(legacyClients, serviceRedis)
+		compatOutputClient = serviceRedis
 		converter := &legacyoutput.Converter{
 			Store:          legacyoutput.RedisSnapshotStore{Client: serviceRedis},
 			SnapshotPrefix: cfg.Kafka.LegacyAdapter.SnapshotPrefix,
@@ -870,11 +872,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The retained-byte pool's usage, read from the coordinator that owns it
 	// at scrape time, beside the ceiling capacity_budget carries.
 	// What the stores hold by key family, weighed by the stores: one census
-	// for the deployment, the Control Leader's, of each store it writes to.
-	census := &storeCensus{now: external.Now, stores: []censusStore{{name: "source", client: controlClient}}}
-	if !runtimeClientIsSource {
-		census.stores = append(census.stores, censusStore{name: "runtime", client: runtimeClient})
-	}
+	// for the deployment, the Control Leader's, of each store it writes to -
+	// the strategy source, the runtime store, and the service Redis the
+	// compatibility output keeps its strategy snapshots in - each once.
+	census := &storeCensus{now: external.Now, stores: distinctStores(
+		storeAt{censusStore{name: "source", client: controlClient}, sourceConnection},
+		storeAt{censusStore{name: "runtime", client: runtimeClient}, runtimeConnection},
+		storeAt{censusStore{name: "legacy_output", client: compatOutputClient}, cfg.Kafka.LegacyAdapter.ServiceRedis},
+	)}
 	if err := recorder.BindStoreCensus(census.read); err != nil {
 		return nil, err
 	}
