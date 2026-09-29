@@ -425,7 +425,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 					SentShapes: map[string]int{"hex32": 4}, MemberShapes: map[string]int{"hex64": 147},
 					AlertSources:     map[string]int{"src-own": 2, "src-other": 140, "other": 7},
 					SentInCalibrated: 4, SentMatchingAlertID: 0, SentMatchingFingerprint: 0,
-					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "8709", Sent: 1, Members: 3,
+					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "852", Sent: 1, Members: 3,
 						Alerts: 3, Calibrated: true, SentSample: []string{"5f3a9c1e"}, MemberSample: []string{"c0ffee42"},
 						AlertSample: []fleet.OpenAlertComparisonAlert{{AlertID: "d00dfeed", Fingerprint: "c0ffee42", EventSourceID: "src-other"}}}}},
 				// The target-scope close, unarmed: its samples stay in the API.
@@ -483,7 +483,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"qg-losing-now": {
 				FirstSlot: at.Add(-4 * time.Minute).Unix(), LastSlot: at.Add(-3 * time.Minute).Unix(),
 				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}, IntervalSeconds: 10,
+				Strategies: []fleet.StrategyRef{{StrategyID: "852", BusinessID: "9"}}, IntervalSeconds: 10,
 				Reason: "QUERY_PERMIT_DEADLINE", ReasonCategory: "admission"},
 			"qg-demoted-rejected": {
 				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-2 * time.Minute).Unix(),
@@ -650,11 +650,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// link without it lands on an error page.
 		"strategy_link_cases": []map[string]any{
 			{"name": "configured", "base": "https://monitor.example",
-				"strategy": fleet.StrategyRef{StrategyID: "1854", BusinessID: "7"}},
+				"strategy": fleet.StrategyRef{StrategyID: "847", BusinessID: "7"}},
 			{"name": "nobiz", "base": "https://monitor.example",
-				"strategy": fleet.StrategyRef{StrategyID: "1854"}},
+				"strategy": fleet.StrategyRef{StrategyID: "847"}},
 			{"name": "unconfigured", "base": "",
-				"strategy": fleet.StrategyRef{StrategyID: "1854", BusinessID: "7"}},
+				"strategy": fleet.StrategyRef{StrategyID: "847", BusinessID: "7"}},
 		},
 		// A 24-hour window and a 15-minute one. The first ends at the same
 		// wall-clock time it started, which is what made it render empty.
@@ -1347,7 +1347,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// the reference carries everything that console needs. A wrong link sends a
 	// reader to an error page and costs more than no link at all.
 	for _, want := range []struct{ name, says, mustNotSay string }{
-		{"configured", "https://monitor.example?bizId=7#/strategy-config/detail/1854", ""},
+		{"configured", "https://monitor.example?bizId=7#/strategy-config/detail/847", ""},
 		{"nobiz", "(none)", "http"},
 		{"unconfigured", "(none)", "http"},
 	} {

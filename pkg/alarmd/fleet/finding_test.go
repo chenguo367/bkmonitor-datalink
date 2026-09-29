@@ -549,11 +549,11 @@ func TestAReasonHeldByAGuardIsAWindowQuestionNotAConfigOne(t *testing.T) {
 		// No guard: CONFIG_DRIFT is this round's own finding and reads as
 		// the configuration question it is.
 		"not held": {Anomaly{Kind: KindDegradedRun, Cause: "CONFIG_DRIFT", CauseReason: "CONFIG_DRIFT",
-			Coverage: &HistoryCoverage{Levels: 3}}, CheckConfigUnresolved, "1854"},
+			Coverage: &HistoryCoverage{Levels: 3}}, CheckConfigUnresolved, "847"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			item := testCase.anomaly
-			item.Strategies = []StrategyRef{{StrategyID: "1854", BusinessID: "7"}}
+			item.Strategies = []StrategyRef{{StrategyID: "847", BusinessID: "7"}}
 			list := []Anomaly{item}
 			Attribute(list, now)
 			if list[0].Finding.Check != testCase.check {
@@ -659,7 +659,7 @@ func TestATerminalSlotIsFiledUnderItsOwnReason(t *testing.T) {
 			Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
 			Result: observability.ResultTerminal, ReasonCode: observability.ReasonCode(reason),
 			ProgressCompletionKind: kind, ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
-			Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: "2513", BusinessID: "10", EvaluationTime: 1790424000},
+			Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: "848", BusinessID: "10", EvaluationTime: 1790424000},
 		})
 		for _, row := range tracker.Anomalies() {
 			if row.QueryGroup == queryGroup {

@@ -271,7 +271,7 @@ func handlerWithStrategies(t *testing.T) http.Handler {
 	t.Helper()
 	snapshots := healthySnapshots()
 	snapshots[1].Anomalies = []Anomaly{
-		strategyAnomaly("qg-a", "2864", "7"),
+		strategyAnomaly("qg-a", "850", "7"),
 		strategyAnomaly("qg-b", "8904", "47"),
 		strategyAnomaly("qg-c", "1449", "7"),
 	}
@@ -282,9 +282,9 @@ func handlerWithStrategies(t *testing.T) http.Handler {
 func TestObjectsCanBeNarrowedByStrategyAndBusiness(t *testing.T) {
 	handler := handlerWithStrategies(t)
 	for target, want := range map[string]int{
-		"/api/objects?strategy=2864": 1,
-		"/api/objects?business=7":    2,
-		"/api/objects":               3,
+		"/api/objects?strategy=850": 1,
+		"/api/objects?business=7":   2,
+		"/api/objects":              3,
 	} {
 		_, body := get(t, handler, target)
 		anomalies, _ := body["anomalies"].([]any)
@@ -459,9 +459,9 @@ func TestTheStalledTotalSurvivesAFilter(t *testing.T) {
 	budget := 10 * time.Minute
 	snapshots := healthySnapshots()
 	stuck := agedAnomaly("stuck", "error", 2*time.Hour)
-	stuck.Strategies = []StrategyRef{{StrategyID: "8568", BusinessID: "7"}}
+	stuck.Strategies = []StrategyRef{{StrategyID: "851", BusinessID: "7"}}
 	other := agedAnomaly("also-stuck", "error", 2*time.Hour)
-	other.Strategies = []StrategyRef{{StrategyID: "2849", BusinessID: "7"}}
+	other.Strategies = []StrategyRef{{StrategyID: "849", BusinessID: "7"}}
 	snapshots[1].Anomalies = []Anomaly{stuck, other}
 	snapshots[1].TotalAnomalies = 2
 	handler := handlerWithStallBudget(t, snapshots, budget)
@@ -471,7 +471,7 @@ func TestTheStalledTotalSurvivesAFilter(t *testing.T) {
 		t.Fatalf("unfiltered stalled_total = %v, want 2", body["stalled_total"])
 	}
 
-	_, body = get(t, handler, "/api/objects?strategy=8568")
+	_, body = get(t, handler, "/api/objects?strategy=851")
 	if body["page"].(map[string]any)["total"].(float64) != 1 {
 		t.Fatalf("the filter did not narrow the table: %v", body["page"])
 	}

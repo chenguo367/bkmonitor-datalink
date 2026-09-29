@@ -23,7 +23,7 @@ import (
 // owner is not accepting, or whose identity is not in memory, is left out and
 // the roster says it is incomplete.
 func TestTheCostRosterIsWhatEachOwnedGroupExecutes(t *testing.T) {
-	plan := execution.PlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: "11440"}
+	plan := execution.PlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: "858"}
 	running := controlplane.ExecutionIdentity{SnapshotRevision: "snapshot-running", QueryRevision: "query-running",
 		ScheduleRevision: "schedule-running", Plans: []execution.PlanIdentity{plan},
 		Schedules: []execution.FrozenPlanSchedule{{Identity: plan,
@@ -44,7 +44,7 @@ func TestTheCostRosterIsWhatEachOwnedGroupExecutes(t *testing.T) {
 	}
 	g := groups[0]
 	if g.QueryGroupKey != "ours" || g.SnapshotRevision != "snapshot-running" || g.QueryRevision != "query-running" ||
-		g.ScheduleRevision != "schedule-running" || len(g.Members) != 1 || g.Members[0].StrategyID != "11440" {
+		g.ScheduleRevision != "schedule-running" || len(g.Members) != 1 || g.Members[0].StrategyID != "858" {
 		t.Fatalf("roster group = %+v, want the running Segment's revisions and its Plan", g)
 	}
 	// When the Plan is due, as the Segment froze it: its interval, alignment

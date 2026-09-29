@@ -199,7 +199,7 @@ func TestProviderUnavailableFactsCountEveryUnavailablePhysicalQuery(t *testing.T
 // and the Level's own UNKNOWN reason are now the same function of the same
 // inputs.
 func TestInputsThatFailedDifferentlyFoldToOneReason(t *testing.T) {
-	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "9022"}
+	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "857"}
 	due := execution.DuePlan{Identity: plan}
 	consumer := execution.ConsumerRef{Plan: plan, LevelID: 1, HasLevel: true}
 	previous := execution.NamedInputBinding{Consumer: consumer, RequirementID: "req-previous", DatasetName: "previous",
@@ -271,7 +271,7 @@ func TestLoadedFactDispositionRefusalKeepsItsCodeThroughTheEvaluationWrapper(t *
 // function of the same inputs as everywhere else, so no round can be refused
 // for the two derivations disagreeing.
 func TestTheNoSeriesPathTakesTheFoldAndLeavesThePlanResultAlone(t *testing.T) {
-	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "9022"}
+	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "857"}
 	due := execution.DuePlan{Identity: plan}
 	consumer := execution.ConsumerRef{Plan: plan, LevelID: 1, HasLevel: true}
 	primary := execution.NamedInputBinding{Consumer: consumer, RequirementID: "req-primary", DatasetName: "primary",

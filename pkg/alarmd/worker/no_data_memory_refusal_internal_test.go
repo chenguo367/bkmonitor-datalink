@@ -69,8 +69,8 @@ func noDataRefusalFixture(store *refusingNoDataStore) (*SlotExecutionCoordinator
 func refusedMemoryDue(t *testing.T) []execution.DuePlan {
 	t.Helper()
 	return []execution.DuePlan{{
-		Identity:     execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "8946"},
-		CompiledPlan: internalCompiledPlan(t, "8946", 1, 60),
+		Identity:     execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "856"},
+		CompiledPlan: internalCompiledPlan(t, "856", 1, 60),
 	}}
 }
 
@@ -81,7 +81,7 @@ func refusedMemoryMutation(t *testing.T) execution.PlanNoDataMutation {
 		LoadedApplyVersion:     execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
 		ExpectedMarkerRevision: 1,
 		Identity: execution.PlanNoDataIdentity{
-			Plan:            execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "8946"},
+			Plan:            execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "856"},
 			StateGeneration: "generation",
 		},
 		ApplyVersion:     execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
@@ -142,7 +142,7 @@ func TestARefusedNoDataMemoryIsReportedRatherThanFailingTheSlot(t *testing.T) {
 	if *facts != want {
 		t.Fatalf("refusal facts = %+v, want %+v", *facts, want)
 	}
-	if refusals[0].Trace.StrategyID != "8946" {
+	if refusals[0].Trace.StrategyID != "856" {
 		t.Fatalf("refusal strategy = %q, want the Plan whose memory was refused", refusals[0].Trace.StrategyID)
 	}
 	if refusals[0].ReasonCode != observability.ReasonCode(contract.ReasonStateBudgetExceeded) {
