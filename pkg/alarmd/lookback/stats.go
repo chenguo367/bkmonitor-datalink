@@ -41,6 +41,10 @@ type counters struct {
 	supplementSeries   map[string]uint64
 	supplementPoints   map[string]uint64
 	directedBytes      map[string]uint64
+	// source|bucket: how long each supplement held its Query Group's
+	// flight, and per source the longest.
+	supplementHold    map[string]uint64
+	supplementHoldMax map[string]time.Duration
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -65,6 +69,7 @@ func newCounters(sources, refusals []string) counters {
 		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, unclassified: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
 		directedWindows: map[string]uint64{}, directedUnobserved: map[string]uint64{}, supplementSeries: map[string]uint64{},
 		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{},
+		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -104,6 +109,10 @@ func newCounters(sources, refusals []string) counters {
 			c.supplementSeries[key2(source, outcome)] = 0
 		}
 		c.supplementPoints[source], c.directedBytes[source] = 0, 0
+		for _, bucket := range SupplementHoldBuckets {
+			c.supplementHold[key2(source, bucket)] = 0
+		}
+		c.supplementHoldMax[source] = 0
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
@@ -233,6 +242,11 @@ type SourceStats struct {
 	SupplementSeries     map[string]uint64 `json:"supplement_series"`
 	SupplementPoints     uint64            `json:"supplement_points"`
 	DirectedReadBytes    uint64            `json:"directed_read_bytes"`
+	// SupplementHold is how long the supplements held their Query Groups'
+	// flights, by SupplementHoldBuckets, and SupplementHoldMaxSeconds the
+	// longest: what a Query Group's own Slot waited behind one.
+	SupplementHold           map[string]uint64 `json:"supplement_hold"`
+	SupplementHoldMaxSeconds float64           `json:"supplement_hold_max_seconds"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -374,7 +388,11 @@ func (engine *Engine) Stats() Stats {
 			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{},
 			Classes: map[string]uint64{}, Unclassified: map[string]uint64{},
 			SupplementWindows: map[string]uint64{}, SupplementUnobserved: map[string]uint64{}, SupplementSeries: map[string]uint64{},
-			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source]}
+			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source],
+			SupplementHold: map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds()}
+		for _, bucket := range SupplementHoldBuckets {
+			entry.SupplementHold[bucket] = engine.counts.supplementHold[key2(source, bucket)]
+		}
 		for _, depth := range DepthLabels {
 			entry.DepthGroups[depth] = 0
 		}

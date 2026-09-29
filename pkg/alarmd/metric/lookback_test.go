@@ -43,6 +43,8 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_supplement_series_total":           sources * len(lookback.SupplementSeriesOutcomes),
 		"lookback_supplement_points_total":           sources,
 		"lookback_directed_read_bytes_total":         sources,
+		"lookback_supplement_hold_total":             sources * len(lookback.SupplementHoldBuckets),
+		"lookback_supplement_hold_max_seconds":       sources,
 		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
 		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds":            sources,

@@ -111,23 +111,27 @@ func lookbackSupplement(
 		ctx = access.WithKeptRead(ctx, job.Read)
 		scope := execution.SupplementScope{Series: job.Series}
 		for retried := false; ; retried = true {
+			started := now()
 			facts, err := runner.Supplement(ctx, job.EvaluationTime, scope)
+			// A call that was not refused for the flight held it this long:
+			// the time the Query Group's own Slot waited behind it.
+			held := now().Sub(started)
 			switch {
 			case err == nil:
-				return lookback.SupplementOutcome{Ran: true, Facts: facts}
+				return lookback.SupplementOutcome{Ran: true, Facts: facts, Held: held}
 			case errors.Is(err, scheduler.ErrSupplementFlightBusy):
 				if left := job.Deadline.Sub(now()) / 2; !retried && left > 0 && wait(ctx, left) == nil {
 					continue
 				}
 				return lookback.SupplementOutcome{Refused: lookback.DirectedFlightBusy}
 			case errors.Is(err, scheduler.ErrSupplementContractExpired):
-				return lookback.SupplementOutcome{Refused: lookback.DirectedContractExpired}
+				return lookback.SupplementOutcome{Refused: lookback.DirectedContractExpired, Held: held}
 			default:
 				if logger != nil {
 					logger.Warn("lookback", "supplement_failed", 0, 0, slog.String("query_group", string(job.QueryGroup)),
 						slog.Int64("evaluation_time", int64(job.EvaluationTime)), slog.String("error", err.Error()))
 				}
-				return lookback.SupplementOutcome{Refused: lookback.DirectedFailed}
+				return lookback.SupplementOutcome{Refused: lookback.DirectedFailed, Held: held}
 			}
 		}
 	}

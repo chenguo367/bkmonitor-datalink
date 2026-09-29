@@ -59,6 +59,8 @@ type lookbackCollector struct {
 	supplementSeries     *prometheus.Desc
 	supplementPoints     *prometheus.Desc
 	directedBytes        *prometheus.Desc
+	supplementHold       *prometheus.Desc
+	supplementHoldMax    *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -121,6 +123,12 @@ func newLookbackCollector() *lookbackCollector {
 		directedBytes: desc("lookback_directed_read_bytes_total",
 			"Bytes the directed reads delivered, by source: a Slot's frozen query each, read against "+
 				"lookback_first_read_bytes_total over lookback_first_reads_total.", "source"),
+		supplementHold: desc("lookback_supplement_hold_total",
+			"Supplements by how long each held its Query Group's flight, by source: the time the group's own Slot "+
+				"waited behind it, bounded at le_100ms, le_500ms, le_1s, le_5s and gt_5s. A supplement refused for "+
+				"the flight never held it and is not counted.", "source", "bucket"),
+		supplementHoldMax: desc("lookback_supplement_hold_max_seconds",
+			"The longest a supplement held its Query Group's flight in this process, by source.", "source"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -180,7 +188,7 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -228,6 +236,10 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		counter(c.supplementPoints, source.SupplementPoints, name)
 		counter(c.directedBytes, source.DirectedReadBytes, name)
+		for _, bucket := range lookback.SupplementHoldBuckets {
+			counter(c.supplementHold, source.SupplementHold[bucket], name, bucket)
+		}
+		gauge(c.supplementHoldMax, source.SupplementHoldMaxSeconds, name)
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}
