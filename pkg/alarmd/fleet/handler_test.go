@@ -1107,3 +1107,34 @@ func TestTheVerdictRouteCarriesEachReplicasReadiness(t *testing.T) {
 		t.Errorf("pod-b reasons = %v, want the process's one reason", bits["pod-b"]["reasons"])
 	}
 }
+
+// Past FirstScreenListBound the health route carries the first few of each
+// object list in its order and says how many there are: counted before the
+// cut, or the page reads eight where there are twelve.
+func TestHealthCarriesTheFirstOfEachObjectListAndHowManyThereAre(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].PrunedSkips = map[string]PrunedSkip{}
+	for index := 0; index < 12; index++ {
+		queryGroup := fmt.Sprintf("qg-%02d", index)
+		snapshots[0].PrunedSkips[queryGroup] = PrunedSkip{From: 0, To: int64(60 * (index + 1)), At: now.Add(-time.Hour)}
+		snapshots[index%2].RetainedShare = append(snapshots[index%2].RetainedShare, Anomaly{QueryGroup: queryGroup,
+			Replica: snapshots[index%2].Replica, RetainedShare: &RetainedShareFacts{PercentOfShare: uint64(60 + index)}})
+		snapshots[index%2].ReadEarly = append(snapshots[index%2].ReadEarly, Anomaly{QueryGroup: queryGroup,
+			Replica: snapshots[index%2].Replica, ReadEarly: &ReadEarlyFacts{SuggestedDelaySeconds: int64(15 * (index + 1))}})
+	}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+	body := requestJSON(t, handler, "/api/health")
+	for _, list := range []string{"pruned_skips", "retained_share", "read_early"} {
+		listed, _ := body[list].([]any)
+		if len(listed) != FirstScreenListBound || body[list+"_total"] != float64(12) {
+			t.Errorf("%s carried %d with total %v, want the first %d and 12", list, len(listed), body[list+"_total"], FirstScreenListBound)
+			continue
+		}
+		// The first is the one the order ranks first across both replicas:
+		// the eleventh object has the longest span, the fullest share and the
+		// furthest suggestion.
+		if first, _ := listed[0].(map[string]any); first["query_group"] != "qg-11" {
+			t.Errorf("%s starts with %v, want qg-11", list, first["query_group"])
+		}
+	}
+}

@@ -68,10 +68,26 @@ func partReplicas() []Snapshot {
 		if snapshot.GapSkips == nil {
 			snapshot.GapSkips = map[string]SkippedSpan{}
 		}
-		if index > 0 {
-			snapshot.GapSkips[snapshot.Replica+"-lost"] = SkippedSpan{FirstSlot: 1, LastSlot: 3, Slots: 3,
-				At: now.Add(-time.Duration(index*3) * time.Minute), Replica: snapshot.Replica}
+		snapshot.GapSkips[snapshot.Replica+"-lost"] = SkippedSpan{FirstSlot: 1, LastSlot: 3, Slots: 3,
+			At: now.Add(-time.Duration(index*3+1) * time.Minute), Replica: snapshot.Replica}
+		// Every count a merge adds is non-zero on at least two replicas, so
+		// a merge that keeps one replica's instead of adding is seen: a skip
+		// a cooldown held, a skip in a takeover's grace, an extended cooldown,
+		// a row whose round was given up past the replay bound, and a
+		// strategy that names no business.
+		if index < 2 {
+			snapshot.GapSkips[snapshot.Replica+"-cooled"] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
+				At: now.Add(-2 * time.Minute), Replica: snapshot.Replica, HeldBy: "query_cooldown"}
+			snapshot.Demoted[0].QueryCooldown.Event = "extended"
 		}
+		if index > 0 {
+			snapshot.GapSkips[snapshot.Replica+"-taken-over"] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
+				At: now.Add(-3 * time.Minute), FirstSeenAt: now.Add(-5 * time.Minute), Replica: snapshot.Replica}
+		}
+		if index != 1 {
+			snapshot.Anomalies[1].ReasonCode = "GAP_SKIPPED"
+		}
+		snapshot.Demoted[0].Strategies = append(snapshot.Demoted[0].Strategies, StrategyRef{StrategyID: "950"})
 		snapshot.GapSkips[snapshot.Demoted[0].QueryGroup] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
 			At: now.Add(-time.Duration(index+1) * 4 * time.Minute), Replica: snapshot.Replica}
 	}
@@ -113,6 +129,31 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 			}
 		}
 	}
+	// Each count a merge adds is non-zero on two replicas at least.
+	for name, count := range map[string]func(ReplicaPart) int{
+		"ongoing":              func(p ReplicaPart) int { return p.Loss.Ongoing },
+		"after restart":        func(p ReplicaPart) int { return p.Loss.AfterRestart },
+		"after cooldown":       func(p ReplicaPart) int { return p.Loss.AfterCooldown },
+		"while demoted recent": func(p ReplicaPart) int { return p.Loss.WhileDemotedRecent },
+		"cooling extended":     func(p ReplicaPart) int { return p.Cooling.Extended },
+		"cohort gap skipped": func(p ReplicaPart) int {
+			n := 0
+			for _, cohort := range p.CohortRows {
+				n += cohort.GapSkipped
+			}
+			return n
+		},
+	} {
+		replicas := 0
+		for _, part := range parts {
+			if count(part) > 0 {
+				replicas++
+			}
+		}
+		if replicas < 2 {
+			t.Fatalf("fixture: %s is non-zero on %d replicas, want two at least", name, replicas)
+		}
+	}
 	merged := MergeReplicaParts(parts...)
 	unattributed := 0
 	for _, replica := range whole.PerReplica {
@@ -134,6 +175,11 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	}
 	if merged.Impact.Impact() != ImpactOf(whole, now) {
 		t.Errorf("impact %+v, whole view %+v", merged.Impact.Impact(), ImpactOf(whole, now))
+	}
+	// Both paths count businesses with the same code, so the count itself is
+	// pinned: businesses 2 and 3 and not the strategy that names none.
+	if businesses := ImpactOf(whole, now).Blind.Businesses; businesses != 2 {
+		t.Errorf("blind businesses %d, want 2: a strategy naming no business is not one", businesses)
 	}
 	columns := viewColumns(&whole)
 	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))

@@ -23,6 +23,15 @@ import (
 //
 // A duration is never kept, only the moment it runs from: the reader turns
 // it into a duration at its own time, so a part read later reads older.
+// What is decided against the clock -- a pooled object being due, a record
+// being recent -- is decided at the replica's own now, so a part is read at
+// most a publish interval late.
+//
+// The merge equals the whole view while no object is held by two replicas.
+// During a handover one is, briefly: the whole view keeps one record of the
+// object's skips where each replica's part counts its own, so the parts count
+// it twice. That is exactly when the replicas' owned digests do not add up to
+// the expected one (SetDigest), and the reader then goes to the whole view.
 type ReplicaPart struct {
 	Replica string
 	// Attribution counts the anomaly column's rows by who they are

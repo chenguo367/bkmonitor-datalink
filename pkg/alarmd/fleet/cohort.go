@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"maps"
 	"sort"
 	"time"
 )
@@ -183,7 +184,8 @@ func cohortsOf(schedule *ScheduleCensus, rows map[int64]*CohortView) []CohortVie
 			byInterval[interval] = cohort
 		}
 		cohort.Listed, cohort.GapSkipped, cohort.InCooldown = part.Listed, part.GapSkipped, part.InCooldown
-		cohort.ByCheck, cohort.ByOwner = part.ByCheck, part.ByOwner
+		// Copied, so the reading and the part it came from are not one map.
+		cohort.ByCheck, cohort.ByOwner = maps.Clone(part.ByCheck), maps.Clone(part.ByOwner)
 	}
 	cohorts := make([]CohortView, 0, len(byInterval))
 	for _, cohort := range byInterval {
@@ -260,7 +262,7 @@ func mergeCoolingRows(into *coolingRows, from coolingRows) {
 }
 
 func coolingOf(schedule *ScheduleCensus, rows coolingRows, now time.Time) CoolingFacts {
-	facts := CoolingFacts{Listed: rows.Listed, Extended: rows.Extended, ByOwner: rows.ByOwner, ByCheck: rows.ByCheck}
+	facts := CoolingFacts{Listed: rows.Listed, Extended: rows.Extended, ByOwner: maps.Clone(rows.ByOwner), ByCheck: maps.Clone(rows.ByCheck)}
 	if schedule != nil {
 		facts.Objects = schedule.Cooling
 	}

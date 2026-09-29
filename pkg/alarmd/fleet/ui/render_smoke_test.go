@@ -706,6 +706,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 					DiscardedSlot: at.Add(-90 * time.Minute).Unix()},
 				{QueryGroup: "qg-pruned-short", SpanSeconds: 180, At: at.Add(-time.Hour)},
 			},
+			// More spans than the list carries: the count is the total.
+			PrunedSkipsTotal: 12,
 			// Nothing overdue, with the dispatch suppression that makes that zero
 			// mean something. This is the branch a healthy deployment renders and
 			// the one nobody had ever executed.
@@ -1425,6 +1427,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// column, so it needed a line of its own or it could not be said at all.
 		{"PRUNED ::", "从来没有被检测过", "",
 			"这一段的时间点没有被评估过也不会补跑，页面上必须说得出来"},
+		{"PRUNED ::", "有 12 个对象", "",
+			"列表只带最长的几条，个数要读总数，不是列表长度"},
 		{"PRUNED ::", "1 小时 30 分", "",
 			"最长的那一段要给出跨度，它是唯一能排序的量"},
 		{"PRUNED ::", "无法得知", "",
