@@ -37,7 +37,7 @@ func TestStateAdmissionsAreSeriesFromStartupAndCountByResultAndReason(t *testing
 		return observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageStateAdmission,
 			Result: result, ReasonCode: reason, Err: err,
-			Trace:  observability.TraceFields{QueryGroupKey: "qg-secret", StrategyID: "2513", EvaluationTime: 600},
+			Trace:  observability.TraceFields{QueryGroupKey: "qg-secret", StrategyID: "848", EvaluationTime: 600},
 			Counts: observability.Counts{Keys: 14},
 			StateApplyChunk: &observability.StateApplyChunkFacts{Count: 1, RefusalRules: []string{"lifetime_past_ceiling"},
 				RefusalText: "required TTL 840h0m0s exceeds maximum 720h0m0s"},
@@ -79,7 +79,7 @@ func TestStateAdmissionsAreSeriesFromStartupAndCountByResultAndReason(t *testing
 	}
 	for _, m := range after {
 		for _, label := range m.Label {
-			if label.GetValue() == "qg-secret" || label.GetValue() == "2513" || label.GetValue() == contract.ReasonStateWriteRetryable {
+			if label.GetValue() == "qg-secret" || label.GetValue() == "848" || label.GetValue() == contract.ReasonStateWriteRetryable {
 				t.Fatalf("unbounded label on %v", m)
 			}
 		}

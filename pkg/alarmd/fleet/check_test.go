@@ -644,7 +644,7 @@ func TestRetainedRecordsAreConsequenceOngoingOrHistory(t *testing.T) {
 	// In the demoted pool on a refusal: its record is the refusal's consequence.
 	demoted := []Anomaly{{QueryGroup: "qg-refused", Replica: "pod-b", Kind: KindQueryCooldown,
 		Failure:    &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"},
-		Strategies: []StrategyRef{{StrategyID: "2864", BusinessID: "7"}}}}
+		Strategies: []StrategyRef{{StrategyID: "850", BusinessID: "7"}}}}
 	Attribute(anomalies, at)
 	Attribute(demoted, at)
 	view := &View{Anomalies: anomalies, Demoted: demoted,
@@ -881,11 +881,11 @@ func TestRetainedRecordsCarryTheirStrategiesOntoRowsAndFolds(t *testing.T) {
 	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
 	view := &View{
 		GapSkips: map[string]SkippedSpan{"qg-gap": {FirstSlot: 1, LastSlot: 2, Slots: 2, At: at.Add(-time.Minute), Replica: "pod-a",
-			Strategies: []StrategyRef{{StrategyID: "1854", BusinessID: "7"}}}},
+			Strategies: []StrategyRef{{StrategyID: "847", BusinessID: "7"}}}},
 		PrunedSkips: map[string]PrunedSkip{"qg-pruned": {From: 1, To: 900, At: at.Add(-time.Hour), Replica: "pod-a",
 			Strategies: []StrategyRef{{StrategyID: "2001", BusinessID: "9"}}}},
 	}
-	for check, want := range map[Check]string{CheckDetectionAbandoned: "1854", CheckTimelinePruned: "2001"} {
+	for check, want := range map[Check]string{CheckDetectionAbandoned: "847", CheckTimelinePruned: "2001"} {
 		rows := UnderCheck(check, "", view, now)
 		if len(rows) != 1 || len(rows[0].Strategies) != 1 || rows[0].Strategies[0].StrategyID != want {
 			t.Fatalf("%s rows = %+v, want one row naming strategy %s", check, rows, want)

@@ -252,7 +252,7 @@ func TestTrackerKeepsTheLastHealthyCompletionAcrossRuns(t *testing.T) {
 			Trace: observability.TraceFields{QueryGroupKey: queryGroup, EvaluationTime: slot},
 		})
 	}
-	tracker.Observe(context.Background(), completion("qg-1", "FULL_COMPLETED", "8709"))
+	tracker.Observe(context.Background(), completion("qg-1", "FULL_COMPLETED", "852"))
 	healthyAt := at.at
 	at.at = at.at.Add(time.Minute)
 	for round := 0; round < DefaultDegradedRounds; round++ {

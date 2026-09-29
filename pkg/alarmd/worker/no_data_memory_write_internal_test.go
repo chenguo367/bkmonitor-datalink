@@ -99,7 +99,7 @@ func TestEveryNoDataMemoryWriteOutcomeIsReportedOnExactlyOneStage(t *testing.T) 
 					if facts.Stored != stored[status] {
 						t.Fatalf("stored = %v for %s, want %v", facts.Stored, status, stored[status])
 					}
-					if observation.Trace.StrategyID != "8946" {
+					if observation.Trace.StrategyID != "856" {
 						t.Fatalf("write line strategy = %q", observation.Trace.StrategyID)
 					}
 				case observability.StageNoDataMemoryRefused:
