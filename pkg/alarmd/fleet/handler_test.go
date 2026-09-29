@@ -1108,6 +1108,56 @@ func TestTheVerdictRouteCarriesEachReplicasReadiness(t *testing.T) {
 	}
 }
 
+// An object two replicas hold during a handover is on the health route's
+// lists once, the later entry, as the view keeps one record of it; each
+// holder's part counts it, so the totals run high for that moment, and the
+// route says so beside them. The same rows on the new holder alone are
+// counted once and carry no note.
+func TestHealthListsAnObjectTwoReplicasHoldOnceAndMarksTheHandover(t *testing.T) {
+	for name, held := range map[string]bool{"held by both": true, "held by one": false} {
+		snapshots := healthySnapshots()
+		snapshots[0].OwnedObjects = []string{"qg-a1"}
+		snapshots[1].OwnedObjects = []string{"qg-b1", "qg-handed-over"}
+		first := 1
+		if held {
+			snapshots[0].OwnedObjects, first = append(snapshots[0].OwnedObjects, "qg-handed-over"), 0
+		}
+		for index := first; index < len(snapshots); index++ {
+			at := []time.Time{now.Add(-time.Hour), now.Add(-time.Minute)}[index]
+			snapshots[index].Owned, snapshots[index].Determined = len(snapshots[index].OwnedObjects), len(snapshots[index].OwnedObjects)
+			snapshots[index].RetainedShare = []Anomaly{{QueryGroup: "qg-handed-over", Replica: snapshots[index].Replica,
+				RetainedShare: &RetainedShareFacts{PercentOfShare: uint64(90 - 20*index), Since: at}}}
+			snapshots[index].ReadEarly = []Anomaly{{QueryGroup: "qg-handed-over", Replica: snapshots[index].Replica,
+				ReadEarly: &ReadEarlyFacts{SuggestedDelaySeconds: int64(90 - 20*index), Since: at}}}
+		}
+		snapshots[0].Owned, snapshots[0].Determined = len(snapshots[0].OwnedObjects), len(snapshots[0].OwnedObjects)
+		// And one object nobody holds, which is no handover and no part of
+		// the note's number.
+		handler := handlerWith(t, snapshots, Expectation{QueryGroups: 4, Known: true,
+			IDs: []string{"qg-a1", "qg-b1", "qg-handed-over", "qg-nobody"}}, []string{"pod-a", "pod-b"})
+		body := requestJSON(t, handler, "/api/health")
+		holders := 1
+		if held {
+			holders = 2
+		}
+		for _, list := range []string{"retained_share", "read_early"} {
+			listed, _ := body[list].([]any)
+			if len(listed) != 1 || body[list+"_total"] != float64(holders) {
+				t.Errorf("%s: %s carried %v with total %v, want the object once, counted by each of its %d holders",
+					name, list, listed, body[list+"_total"], holders)
+				continue
+			}
+			if kept, _ := listed[0].(map[string]any); kept["replica"] != snapshots[1].Replica {
+				t.Errorf("%s: %s kept %v, want the later entry, %s's", name, list, kept, snapshots[1].Replica)
+			}
+		}
+		marker, marked := body["handover"].(map[string]any)
+		if marked != held || (held && marker["objects"] != float64(1)) {
+			t.Errorf("%s: handover %v, want a note naming one object only while two replicas hold it", name, body["handover"])
+		}
+	}
+}
+
 // Past FirstScreenListBound the health route carries the first few of each
 // object list in its order and says how many there are: counted before the
 // cut, or the page reads eight where there are twelve.

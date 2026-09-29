@@ -174,6 +174,9 @@ details.group table{margin:6px 0 0 12px}
       <span id="health" class="badge b-UNKNOWN">…</span>
       <span id="why" class="why"></span>
     </div>
+    <!-- While an object is held by more than one replica, the numbers here
+         are the replicas' own counts added, and each holder counts it. -->
+    <p class="note" id="handoverNote" hidden></p>
     <!-- What produced every number below. One line when the replicas agree on
          a build; two or more when a rollout is in progress or stuck, and the
          totals are then a mix that no single build produced. -->
@@ -323,6 +326,7 @@ details.group table{margin:6px 0 0 12px}
          used to report CPU, memory and permits and leave "is it enough" to
          the reader, who could not answer it from those. -->
     <div id="loadLines" class="basis"></div>
+    <p class="note" id="loadHandover" hidden></p>
     <p class="basis" id="loadLimits"></p>
     <p class="basis">下面是各副本当前的占用与上限，是上面判断的依据。</p>
     <details class="more">
@@ -2792,6 +2796,15 @@ function renderDeployment(deployment) {
     var badge = document.getElementById('health');
     badge.textContent = h;
     badge.className = 'badge b-' + h;
+    // The counts below are the replicas' own counts added. While an object is
+    // held by two of them each counts it, and a skip the old holder records
+    // after the new one pooled the object reads as a loss in progress: said
+    // beside the counts and on the load block for as long as it lasts.
+    var handover = handoverWords(deployment.handover);
+    show('handoverNote', !!handover);
+    text('handoverNote', handover);
+    show('loadHandover', !!handover && !restricted);
+    text('loadHandover', handover);
     text('expected', deployment.expected === null || deployment.expected === undefined ? '未知' : deployment.expected);
     text('covered', deployment.covered);
     text('determined', deployment.determined);
@@ -3899,6 +3912,17 @@ function percentOf(share) {
 
 function rateWords(rate) {
   return rate === null || rate === undefined ? '（无轮次）' : Math.round(rate * 10) / 10 + '%';
+}
+
+// handoverWords is the note for the health route's handover marker, or ''
+// when there is none: how many objects are held by several replicas, or that
+// it cannot be told when the owned sets could not be compared.
+function handoverWords(marker) {
+  if (!marker) {
+    return '';
+  }
+  var held = marker.objects === null || marker.objects === undefined ? '无法判断有多少' : marker.objects + ' 个';
+  return '交接中：' + held + '对象被多个副本同时持有，本时刻计数可能偏多、在途损失可能误判为进行中';
 }
 
 function renderLoad(load) {

@@ -202,6 +202,11 @@ type phaseTwoMetrics struct {
 	fleetSnapshotBytes              prometheus.Gauge
 	fleetViewSnapshotLoads          prometheus.Counter
 	fleetViewSnapshotBytes          prometheus.Counter
+	fleetSummaryBytes               prometheus.Gauge
+	fleetViewSummaryLoads           prometheus.Counter
+	fleetViewSummaryBytes           prometheus.Counter
+	fleetViewOwnedLoads             prometheus.Counter
+	fleetViewOwnedBytes             prometheus.Counter
 	retainedPeakCensusGroups        prometheus.Gauge
 	retainedPeakCensusOverflow      prometheus.Gauge
 	hostDisableMonitorStates        prometheus.Gauge
@@ -1529,6 +1534,33 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Bytes of fleet snapshots this replica read from the snapshot store to build fleet views. Divided by " +
 			"fleet_view_snapshot_loads_total it is the true per-view read size.",
 	})
+	// The summaries beside the snapshots, which the health route and the
+	// verdict read instead of them: the size of this replica's, and the
+	// reads of them and of the owned lists read when the digests disagree.
+	// Owned reads over summary reads is how often a view saw a handover or
+	// an object nobody held.
+	metrics.fleetSummaryBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_summary_bytes",
+		Help: "Bytes of the fleet summary this replica last published beside its snapshot. A summarized fleet view reads " +
+			"every replica's summary, so one costs about the sum of this across the fleet.",
+	})
+	metrics.fleetViewSummaryLoads = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_summary_loads_total",
+		Help: "Fleet summary reads this replica made to build a summarized fleet view: the health route and the verdict.",
+	})
+	metrics.fleetViewSummaryBytes = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_summary_bytes_total",
+		Help: "Bytes of fleet summaries this replica read. Divided by fleet_view_summary_loads_total it is the per-view read size.",
+	})
+	metrics.fleetViewOwnedLoads = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_owned_loads_total",
+		Help: "Owned-list reads a summarized fleet view made because the replicas' owned digests did not add up to the " +
+			"expected objects' digest: an object held by several replicas, held unexpected, or expected unheld.",
+	})
+	metrics.fleetViewOwnedBytes = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_owned_bytes_total",
+		Help: "Bytes of owned lists this replica read for summarized fleet views.",
+	})
 	// The heartbeat's cost census: how many Query Groups it holds a reading
 	// for, and how many observations it dropped for being full. The census is
 	// bounded far above any owned count and pruned to the roster on every
@@ -1761,7 +1793,8 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
-		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
+		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
+		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
 }

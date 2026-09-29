@@ -49,6 +49,15 @@ type SnapshotReader interface {
 	Load(ctx context.Context, replicas []string) ([]Snapshot, error)
 }
 
+// SummaryReader reads what replicas publish beside their snapshots: their
+// summaries, and their owned lists, which are read only when the digests
+// disagree. A replica with nothing readable is absent from the result, as
+// from Load.
+type SummaryReader interface {
+	LoadSummaries(ctx context.Context, replicas []string) ([]ReplicaSummary, error)
+	LoadOwned(ctx context.Context, replicas []string) (map[string][]string, error)
+}
+
 // Service answers deployment-wide questions from any replica.
 type Service struct {
 	expectations ExpectationSource
@@ -74,6 +83,20 @@ type Service struct {
 	replicasErr error
 	expectation Expectation
 	expectErr   error
+	// expected is the digest of the expectation's objects, taken when the
+	// expectation is read rather than on every view.
+	expected SetDigest
+
+	// summaryFlight is the summarized read in progress, which a caller that
+	// comes while it runs waits for and shares instead of reading again.
+	summaryMu     sync.Mutex
+	summaryFlight *summaryFlight
+}
+
+type summaryFlight struct {
+	done chan struct{}
+	view View
+	part ReplicaPart
 }
 
 // NewService wires the three sources. freshness is how old a snapshot may be
@@ -120,18 +143,25 @@ func NewService(
 // stays down for the window, and retrying it per request would add load to a
 // dependency that is already failing.
 func (service *Service) sources(ctx context.Context, at time.Time) ([]string, error, Expectation, error) {
+	replicas, replicasErr, expectation, expectErr, _ := service.sourcesWithDigest(ctx, at)
+	return replicas, replicasErr, expectation, expectErr
+}
+
+// sourcesWithDigest is sources with the digest of the expectation's objects.
+func (service *Service) sourcesWithDigest(ctx context.Context, at time.Time) ([]string, error, Expectation, error, SetDigest) {
 	service.sourceMu.Lock()
 	defer service.sourceMu.Unlock()
 	if !service.sourcesAt.IsZero() && at.Sub(service.sourcesAt) < service.sourcesFor {
-		return service.replicas, service.replicasErr, service.expectation, service.expectErr
+		return service.replicas, service.replicasErr, service.expectation, service.expectErr, service.expected
 	}
 	service.replicas, service.replicasErr = service.registry.ReadyReplicas(ctx, at)
 	service.expectation, service.expectErr = service.expectations.Expectation(ctx)
 	if service.expectErr != nil {
 		service.expectation = Expectation{}
 	}
+	service.expected = DigestOf(service.expectation.IDs)
 	service.sourcesAt = at
-	return service.replicas, service.replicasErr, service.expectation, service.expectErr
+	return service.replicas, service.replicasErr, service.expectation, service.expectErr, service.expected
 }
 
 // View assembles the current answer.
@@ -145,13 +175,7 @@ func (service *Service) View(ctx context.Context) View {
 
 	replicas, replicasErr, expectation, expectationErr := service.sources(ctx, at)
 	if replicasErr != nil {
-		return View{
-			expectation: expectation,
-			Health:      HealthUnknown,
-			Gaps:        []Gap{{Kind: GapRegistryUnavailable, Detail: gapDetail(replicasErr)}},
-			Anomalies:   []Anomaly{},
-			Replicas:    []string{},
-		}
+		return registryUnavailable(expectation, replicasErr)
 	}
 
 	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
@@ -165,6 +189,48 @@ func (service *Service) View(ctx context.Context) View {
 	}
 
 	view := Aggregate(expectation, snapshots, replicas, at, service.freshness)
+	readFailed(&view, snapshotsErr, expectationErr)
+	return view
+}
+
+// ViewAsPublished is View with each replica's rows decided at the moment it
+// published them, as its summary decides them (publishedView): the view a
+// reader that counts rows reads to agree with the health route, which reads
+// the summaries. Its rows are decided already; no Decide follows.
+func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Duration) View {
+	at := service.now()
+	replicas, replicasErr, expectation, expectationErr := service.sources(ctx, at)
+	if replicasErr != nil {
+		return registryUnavailable(expectation, replicasErr)
+	}
+	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
+	if snapshotsErr != nil {
+		snapshots = nil
+	}
+	decided := make([]Snapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		decided = append(decided, decidedAsPublished(snapshot, stallAfter))
+	}
+	view := aggregate(expectation, decided, replicas, at, service.freshness, &headFacts{rowsDecided: true})
+	readFailed(&view, snapshotsErr, expectationErr)
+	return view
+}
+
+// registryUnavailable is the view when the replicas that should have
+// published could not be read.
+func registryUnavailable(expectation Expectation, err error) View {
+	return View{
+		expectation: expectation,
+		Health:      HealthUnknown,
+		Gaps:        []Gap{{Kind: GapRegistryUnavailable, Detail: gapDetail(err)}},
+		Anomalies:   []Anomaly{},
+		Replicas:    []string{},
+	}
+}
+
+// readFailed says on the view what its reads could not: the published
+// replicas, when none could be read, and why the denominator is missing.
+func readFailed(view *View, snapshotsErr, expectationErr error) {
 	if snapshotsErr != nil {
 		kept := make([]Gap, 0, len(view.Gaps)+1)
 		for _, gap := range view.Gaps {
@@ -186,7 +252,101 @@ func (service *Service) View(ctx context.Context) View {
 			}
 		}
 	}
-	return view
+}
+
+// Summarized is View read from the replicas' summaries instead of their
+// snapshots, with the part their rows add up to: what the health route and
+// the verdict are read from. A replica that published no summary -- an
+// older build during a rollout -- is summarized here from its snapshot, at
+// the snapshot's own TakenAt, so it reads as it would have published.
+//
+// A caller that comes while a read is in progress waits for it and shares
+// its answer: a page's viewers then cost one read between them, with no
+// period of its own to keep answers for.
+func (service *Service) Summarized(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
+	service.summaryMu.Lock()
+	if flight := service.summaryFlight; flight != nil {
+		service.summaryMu.Unlock()
+		<-flight.done
+		return flight.view, flight.part
+	}
+	flight := &summaryFlight{done: make(chan struct{})}
+	service.summaryFlight = flight
+	service.summaryMu.Unlock()
+	defer func() {
+		service.summaryMu.Lock()
+		service.summaryFlight = nil
+		service.summaryMu.Unlock()
+		close(flight.done)
+	}()
+	flight.view, flight.part = service.summarize(ctx, stallAfter)
+	return flight.view, flight.part
+}
+
+func (service *Service) summarize(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
+	at := service.now()
+	replicas, replicasErr, expectation, expectationErr, expected := service.sourcesWithDigest(ctx, at)
+	if replicasErr != nil {
+		return registryUnavailable(expectation, replicasErr), ReplicaPart{}
+	}
+	reader, publishing := service.snapshots.(SummaryReader)
+	var summaries []ReplicaSummary
+	var readErr error
+	published := make(map[string]bool, len(replicas))
+	if publishing {
+		summaries, readErr = reader.LoadSummaries(ctx, replicas)
+		for _, summary := range summaries {
+			published[summary.Head.Replica] = true
+		}
+	}
+	missing := make([]string, 0, len(replicas)-len(published))
+	for _, replica := range replicas {
+		if !published[replica] {
+			missing = append(missing, replica)
+		}
+	}
+	if readErr == nil && len(missing) > 0 {
+		var snapshots []Snapshot
+		snapshots, readErr = service.snapshots.Load(ctx, missing)
+		for _, snapshot := range snapshots {
+			summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
+		}
+	}
+	if readErr != nil {
+		summaries = nil
+	}
+	byReplica := make(map[string]*ReplicaSummary, len(summaries))
+	for index := range summaries {
+		byReplica[summaries[index].Head.Replica] = &summaries[index]
+	}
+	ownedSets := func(counted []string) ([][]string, bool) {
+		sets, whole, read := make([][]string, 0, len(counted)), true, make([]string, 0, len(counted))
+		for _, replica := range counted {
+			summary := byReplica[replica]
+			if summary.fromSnapshot {
+				sets = append(sets, summary.owned)
+				whole = whole && len(summary.owned) >= summary.Head.Owned
+				continue
+			}
+			read = append(read, replica)
+		}
+		if len(read) == 0 {
+			return sets, whole
+		}
+		lists, err := reader.LoadOwned(ctx, read)
+		if err != nil {
+			return sets, false
+		}
+		for _, replica := range read {
+			list, found := lists[replica]
+			whole = whole && found
+			sets = append(sets, list)
+		}
+		return sets, whole
+	}
+	view, part := AggregateSummaries(expectation, expected, summaries, replicas, at, service.freshness, ownedSets)
+	readFailed(&view, readErr, expectationErr)
+	return view, part
 }
 
 // gapDetail classifies a dependency failure instead of quoting it.

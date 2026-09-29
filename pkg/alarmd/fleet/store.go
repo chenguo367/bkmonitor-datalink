@@ -76,6 +76,13 @@ type StoreMeter interface {
 	// SnapshotsLoaded is one view's read: how many snapshots came back and
 	// how many bytes they were.
 	SnapshotsLoaded(loaded int, bytes int)
+	// SummaryPublished is the size of the summary just written beside the
+	// snapshot.
+	SummaryPublished(bytes int)
+	// SummariesLoaded and OwnedLoaded are one summarized read: the summaries,
+	// and the owned lists read when the digests disagreed.
+	SummariesLoaded(loaded int, bytes int)
+	OwnedLoaded(loaded int, bytes int)
 }
 
 // Meter attaches a meter to the store. Nil leaves it unmetered, which is
@@ -110,8 +117,22 @@ func NewRedisStore(client redis.Cmdable, prefix string, ttl time.Duration, maxAn
 func (store *RedisStore) TTL() time.Duration { return store.ttl }
 
 func (store *RedisStore) snapshotKey(replica string) string {
+	return store.replicaKey("fleet-snapshot", replica)
+}
+
+// summaryKey and ownedKey are the keys a replica's summary and its owned
+// list are written to, beside its snapshot.
+func (store *RedisStore) summaryKey(replica string) string {
+	return store.replicaKey("fleet-summary", replica)
+}
+
+func (store *RedisStore) ownedKey(replica string) string {
+	return store.replicaKey("fleet-owned", replica)
+}
+
+func (store *RedisStore) replicaKey(kind, replica string) string {
 	digest := sha256.Sum256([]byte(replica))
-	return store.prefix + ":fleet-snapshot:" + hex.EncodeToString(digest[:])
+	return store.prefix + ":" + kind + ":" + hex.EncodeToString(digest[:])
 }
 
 // withinAnomalyBudget keeps the longest prefix of the list that fits the budget.
@@ -162,11 +183,74 @@ func withinObjectBudget(objects []string, budget int) []string {
 // configured byte budget. TotalAnomalies always carries the untruncated count so
 // the reader can tell a short list from a complete one.
 func (store *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
+	snapshot, err := store.written(snapshot)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+	}
+	if err := store.client.Set(ctx, store.snapshotKey(snapshot.Replica), payload, store.ttl).Err(); err != nil {
+		return fmt.Errorf("alarmd fleet: publish snapshot: %w", err)
+	}
+	if store.meter != nil {
+		store.meter.SnapshotPublished(len(payload))
+	}
+	return nil
+}
+
+// PublishSummarized writes this replica's snapshot as Publish does, and
+// beside it its summary and its whole owned list, in one MULTI/EXEC: a
+// reader finds the three from one publish, or the three from the one before
+// until they expire -- never a summary of one snapshot beside another. The
+// summary is of the snapshot as written, its rows decided at stallAfter; its
+// owned digest and list are the whole set, before the snapshot's list is cut.
+func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapshot, stallAfter time.Duration) error {
+	owned := snapshot.OwnedObjects
+	snapshot, err := store.written(snapshot)
+	if err != nil {
+		return err
+	}
+	summary := SummaryOf(snapshot, owned, stallAfter)
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+	}
+	summaryPayload, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("alarmd fleet: encode summary: %w", err)
+	}
+	if owned == nil {
+		owned = []string{}
+	}
+	ownedPayload, err := json.Marshal(owned)
+	if err != nil {
+		return fmt.Errorf("alarmd fleet: encode owned objects: %w", err)
+	}
+	if _, err := store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, store.snapshotKey(snapshot.Replica), payload, store.ttl)
+		pipe.Set(ctx, store.summaryKey(snapshot.Replica), summaryPayload, store.ttl)
+		pipe.Set(ctx, store.ownedKey(snapshot.Replica), ownedPayload, store.ttl)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("alarmd fleet: publish snapshot and summary: %w", err)
+	}
+	if store.meter != nil {
+		store.meter.SnapshotPublished(len(payload))
+		store.meter.SummaryPublished(len(summaryPayload))
+	}
+	return nil
+}
+
+// written is the snapshot as it is written: checked, its totals at least
+// its lists, and its lists cut to the budget.
+func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 	if snapshot.Replica == "" {
-		return errors.New("alarmd fleet: snapshot requires a replica identity")
+		return snapshot, errors.New("alarmd fleet: snapshot requires a replica identity")
 	}
 	if snapshot.TakenAt.IsZero() {
-		return errors.New("alarmd fleet: snapshot requires a capture time")
+		return snapshot, errors.New("alarmd fleet: snapshot requires a capture time")
 	}
 	if snapshot.TotalAnomalies < len(snapshot.Anomalies) {
 		snapshot.TotalAnomalies = len(snapshot.Anomalies)
@@ -193,17 +277,7 @@ func (store *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 	snapshot.Demoted = withinAnomalyBudget(snapshot.Demoted, store.maxAnomalyBytes)
 	snapshot.Undecidable = withinAnomalyBudget(snapshot.Undecidable, store.maxAnomalyBytes)
 	snapshot.ByDesign = withinAnomalyBudget(snapshot.ByDesign, store.maxAnomalyBytes)
-	payload, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
-	}
-	if err := store.client.Set(ctx, store.snapshotKey(snapshot.Replica), payload, store.ttl).Err(); err != nil {
-		return fmt.Errorf("alarmd fleet: publish snapshot: %w", err)
-	}
-	if store.meter != nil {
-		store.meter.SnapshotPublished(len(payload))
-	}
-	return nil
+	return snapshot, nil
 }
 
 // Load reads the named replicas' snapshots. A replica with no readable snapshot
@@ -255,4 +329,90 @@ func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapsho
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
+}
+
+// LoadSummaries reads the named replicas' summaries. A replica with none
+// readable -- one that has not published since this build, or whose summary
+// expired -- is absent from the result, and the reader summarizes its
+// snapshot instead. A decode failure is reported, as Load reports one.
+func (store *RedisStore) LoadSummaries(ctx context.Context, replicas []string) ([]ReplicaSummary, error) {
+	values, bytes, err := store.read(ctx, replicas, store.summaryKey)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd fleet: read summaries: %w", err)
+	}
+	summaries := make([]ReplicaSummary, 0, len(values))
+	defer func() {
+		if store.meter != nil {
+			store.meter.SummariesLoaded(len(summaries), bytes)
+		}
+	}()
+	for index, text := range values {
+		if text == nil {
+			continue
+		}
+		var summary ReplicaSummary
+		if err := json.Unmarshal([]byte(*text), &summary); err != nil {
+			return nil, fmt.Errorf("alarmd fleet: decode summary for %s: %w", replicas[index], err)
+		}
+		if summary.Head.Replica != replicas[index] {
+			return nil, fmt.Errorf("alarmd fleet: summary for %s reports replica %q", replicas[index], summary.Head.Replica)
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
+}
+
+// LoadOwned reads the named replicas' whole owned lists, by replica. A
+// replica with none readable is absent from the result.
+func (store *RedisStore) LoadOwned(ctx context.Context, replicas []string) (map[string][]string, error) {
+	values, bytes, err := store.read(ctx, replicas, store.ownedKey)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd fleet: read owned objects: %w", err)
+	}
+	owned := make(map[string][]string, len(values))
+	defer func() {
+		if store.meter != nil {
+			store.meter.OwnedLoaded(len(owned), bytes)
+		}
+	}()
+	for index, text := range values {
+		if text == nil {
+			continue
+		}
+		var list []string
+		if err := json.Unmarshal([]byte(*text), &list); err != nil {
+			return nil, fmt.Errorf("alarmd fleet: decode owned objects for %s: %w", replicas[index], err)
+		}
+		owned[replicas[index]] = list
+	}
+	return owned, nil
+}
+
+// read is one MGET of the named replicas' keys of one kind, in their order,
+// nil where a replica has none, and the bytes that came back.
+func (store *RedisStore) read(ctx context.Context, replicas []string, key func(string) string) ([]*string, int, error) {
+	if len(replicas) == 0 {
+		return nil, 0, nil
+	}
+	keys := make([]string, 0, len(replicas))
+	for _, replica := range replicas {
+		keys = append(keys, key(replica))
+	}
+	values, err := store.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, 0, err
+	}
+	texts, bytes := make([]*string, len(values)), 0
+	for index, value := range values {
+		if value == nil {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, bytes, fmt.Errorf("value for %s has an unexpected type", replicas[index])
+		}
+		bytes += len(text)
+		texts[index] = &text
+	}
+	return texts, bytes, nil
 }
