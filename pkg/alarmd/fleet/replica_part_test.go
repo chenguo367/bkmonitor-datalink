@@ -194,3 +194,19 @@ func TestTheHealthListsBreakTiesByObject(t *testing.T) {
 		}
 	}
 }
+
+// Each attribution is counted in its own place, the field left unset
+// included -- which the per-replica split counts as unattributed and the
+// verdict does not -- and parts add place by place.
+func TestAPartCountsEachAttributionAndPartsAddThem(t *testing.T) {
+	view := View{Anomalies: []Anomaly{{Attribution: AttributionOurs}, {Attribution: AttributionExternal},
+		{Attribution: AttributionUnknown}, {}}}
+	part := ReplicaPartOf(view, now)
+	one := AttributionTally{Ours: 1, External: 1, Unknown: 1, Other: 1}
+	if part.Attribution != one {
+		t.Fatalf("attribution %+v, want %+v", part.Attribution, one)
+	}
+	if merged := MergeReplicaParts(part, part).Attribution; merged != (AttributionTally{Ours: 2, External: 2, Unknown: 2, Other: 2}) {
+		t.Fatalf("merged attribution %+v, want every place doubled", merged)
+	}
+}
