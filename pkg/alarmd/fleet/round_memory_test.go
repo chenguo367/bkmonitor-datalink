@@ -111,3 +111,39 @@ func TestTheRoundWordsAreHeldOnce(t *testing.T) {
 		t.Fatalf("a full table gave index %d and read the first word back as %q", index, table.word(first))
 	}
 }
+
+// The memory reading counts each object under the least bucket its kept
+// rounds fit, the edges inclusive; the bytes are the slices' capacity, what
+// the heap holds, not their length; and only the objects whose worker named
+// a window start count as window-sized.
+func TestTheRoundMemoryReadingCountsEachObjectOnce(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	kept := map[string][2]int{
+		"a": {16, 16}, "b": {17, 32}, "c": {64, 64}, "d": {65, 128},
+		"e": {256, 256}, "f": {257, 512}, "g": {1440, 1440}, "h": {1441, 2048},
+	}
+	for key, lengths := range kept {
+		tracker.groups[key] = &queryGroupState{rounds: make([]roundMark, lengths[0], lengths[1])}
+	}
+	tracker.groups["a"].windowStart = 0
+	tracker.groups["b"].windowStart = 600
+	tracker.groups["h"].windowStart = 60
+	got := tracker.RoundMemory()
+	want := map[string]int{"le_16": 1, "le_64": 2, "le_256": 2, "le_1440": 2, "gt_1440": 1}
+	for _, bucket := range RoundMemoryBuckets {
+		if got.Objects[bucket] != want[bucket] {
+			t.Fatalf("objects = %v, want %v", got.Objects, want)
+		}
+	}
+	rounds, capacity := 0, 0
+	for _, lengths := range kept {
+		rounds += lengths[0]
+		capacity += lengths[1]
+	}
+	if got.Rounds != rounds || got.Bytes != uint64(capacity)*16 || got.MaxRounds != 1441 || got.WindowSized != 2 {
+		t.Fatalf("reading = %+v, want %d rounds, %d bytes, most 1441, two window-sized", got, rounds, capacity*16)
+	}
+	if empty := (*Tracker)(nil).RoundMemory(); len(empty.Objects) != len(RoundMemoryBuckets) || empty.Rounds != 0 {
+		t.Fatalf("nil tracker reading = %+v, want every bucket at zero", empty)
+	}
+}

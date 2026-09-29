@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -2132,6 +2133,60 @@ func (tracker *Tracker) Tracked() int {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return len(tracker.groups)
+}
+
+// RoundMemoryBuckets are the upper bounds RoundMemoryFacts.Objects counts
+// objects under by the rounds they keep, the last one unbounded: a window
+// of a few positions, of an hour, of a day at the minute, and longer.
+var RoundMemoryBuckets = []string{"le_16", "le_64", "le_256", "le_1440", "gt_1440"}
+
+// RoundMemoryFacts is what the tracker holds to read holes by: objects by
+// the rounds each keeps (RoundMemoryBuckets), the rounds and the bytes held
+// for them over all objects -- the slices' capacity, what the heap holds --
+// the most any one object keeps, and how many objects keep theirs by the
+// window their worker named rather than by the last RecentRoundsKept.
+type RoundMemoryFacts struct {
+	Objects     map[string]int
+	Rounds      int
+	Bytes       uint64
+	MaxRounds   int
+	WindowSized int
+}
+
+// RoundMemory reads what the tracker holds for the holes, at the moment it
+// is asked: one pass over the table under its lock.
+func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
+	facts := RoundMemoryFacts{Objects: make(map[string]int, len(RoundMemoryBuckets))}
+	for _, bucket := range RoundMemoryBuckets {
+		facts.Objects[bucket] = 0
+	}
+	if tracker == nil {
+		return facts
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	for _, state := range tracker.groups {
+		kept := len(state.rounds)
+		switch {
+		case kept <= 16:
+			facts.Objects["le_16"]++
+		case kept <= 64:
+			facts.Objects["le_64"]++
+		case kept <= 256:
+			facts.Objects["le_256"]++
+		case kept <= 1440:
+			facts.Objects["le_1440"]++
+		default:
+			facts.Objects["gt_1440"]++
+		}
+		facts.Rounds += kept
+		facts.Bytes += uint64(cap(state.rounds)) * uint64(unsafe.Sizeof(roundMark{}))
+		facts.MaxRounds = max(facts.MaxRounds, kept)
+		if state.windowStart > 0 {
+			facts.WindowSized++
+		}
+	}
+	return facts
 }
 
 // recordStrategy adds the strategy a trace names to an object's set, one entry
