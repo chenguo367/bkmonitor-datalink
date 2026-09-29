@@ -857,6 +857,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// The retained-byte pool's usage, read from the coordinator that owns it
 	// at scrape time, beside the ceiling capacity_budget carries.
+	// What the stores hold by key family, weighed by the stores: one census
+	// for the deployment, the Control Leader's, of each store it writes to.
+	census := &storeCensus{now: external.Now, stores: []censusStore{{name: "source", client: controlClient}}}
+	if !runtimeClientIsSource {
+		census.stores = append(census.stores, censusStore{name: "runtime", client: runtimeClient})
+	}
+	if err := recorder.BindStoreCensus(census.read); err != nil {
+		return nil, err
+	}
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
@@ -1179,6 +1188,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return openAlertCopy.Run(runCtx)
 		},
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
+		MeasureStores:           census.measure,
 		ApplyObservationWindows: observationWindowApplier{
 			store: windowStore, flow: targetFlow, samples: seriesSampler, now: external.Now,
 			observe: observationWindowObserver(observer),

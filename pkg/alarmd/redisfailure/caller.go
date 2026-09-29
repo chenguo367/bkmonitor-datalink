@@ -59,12 +59,15 @@ const (
 	// CallerLinkd is the alert link's facts when they ride the runtime
 	// connection.
 	CallerLinkd = "linkd"
+	// CallerStoreCensus is the census of what the stores hold by key family
+	// (package storecensus): the Control Leader's, every ten minutes.
+	CallerStoreCensus = "store_census"
 )
 
 // Callers is every caller name, for callers that must enumerate them.
 var Callers = []string{CallerDirectoryRefresh, CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
 	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
-	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd}
+	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus}
 
 type callerKey struct{}
 
