@@ -324,6 +324,10 @@ type queryGroupState struct {
 	rounds          []roundMark
 	slotOffset      int64
 	slotOffsetKnown bool
+	// firstSlot is the Slot of the first round this process remembered for
+	// the object, kept after that round rolls out of rounds: what
+	// rememberedSince tells a hole this process never saw from one it forgot.
+	firstSlot int64
 	// worstWindow is the key of the window the worst pair belonged to on
 	// the last round, so the round-over-round counters know when the pair
 	// moved to another window.
@@ -1565,12 +1569,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
 				WorstWindow: worstWindow, WorstWindowChanged: worstWindowChanged,
-				Windows: windowRows(state.rounds, facts),
+				Windows: windowRows(state.rounds, facts, rememberedSince(state)),
 			}
 			if len(state.coverage.Windows) > 0 {
 				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept
 			}
 			state.coverage.UnlistedHolesAnswered = unlistedHolesAnswered(state.rounds, facts)
+			state.coverage.UnlistedHolesBeforeThisProcess = unlistedHolesBeforeThisProcess(state.rounds, facts, rememberedSince(state))
 			// The previous count is the previous window's, and is named as
 			// such only when it is this window's.
 			if hadReading && facts.Short != 0 && !worstWindowChanged {
