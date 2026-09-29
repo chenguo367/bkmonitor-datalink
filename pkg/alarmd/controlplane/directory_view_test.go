@@ -839,3 +839,52 @@ func TestTheActivationRoundLetsAPublicationsContentGoWhenNothingIsCarriedOnIt(t 
 		}
 	})
 }
+
+// Two cutovers that change only 1001: the activation keeps 1002's record on
+// the first publication, where its Segment opened, while the content it
+// runs follows each cutover. Each strategy is one row, the
+// published catalog's, carrying its activation and naming where the record
+// sits; each resolves, and its Plan is the published object's. The content
+// memo holds two publications: named from the records' publication, most
+// strategies of a deployment that publishes often read as content not held.
+func TestAPlanUnchangedAcrossCutoversIsTheCatalogsRowWithItsActivation(t *testing.T) {
+	f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
+	first := f.published.Publication
+	clock := sharedClock()
+	var latest controlplane.PublishedSnapshot
+	var latestCatalog controlplane.Catalog
+	for _, threshold := range []int{90, 95} {
+		latestCatalog = catalogWithSchedule(t, objectCatalogTwoGroups(t, threshold), 60, 0)
+		latest = f.h.publish(t, latestCatalog)
+		if _, err := indexReconciler(t, f.h.repository, clock).Ensure(f.h.ctx, latest.Publication); err != nil {
+			t.Fatal(err)
+		}
+		f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
+	}
+	s := f.page(t, f.view, "")
+	if s.Published != latest.Publication || s.Current != latest.Publication || !s.Complete || len(s.Rows) != 2 {
+		t.Fatalf("page = published %+v current %+v complete %v rows %+v, want the latest current and one row a strategy",
+			s.Published, s.Current, s.Complete, s.Rows)
+	}
+	for _, row := range s.Rows {
+		group := f.group(t, latestCatalog, row.QueryGroup)
+		digest, err := controlplane.DeriveQueryGroupObjectDigest(group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 1001's edit reopened its Segment on a later publication; 1002's
+		// record never moved.
+		activatedOnFirst := row.ActivatedOn != nil && *row.ActivatedOn == first
+		if row.Publication != latest.Publication || row.Role != string(execution.ActivationCurrent) || row.Activation == nil ||
+			row.Identity.StrategyID == "1002" && !activatedOnFirst || row.ObjectDigest != digest || row.ContentNotHeld {
+			t.Fatalf("row %+v, want the latest catalog's row, current, 1002 activated on the first publication", row)
+		}
+		resolved, err := f.view.ResolveCurrent(f.h.ctx, f.at, "", "", row.Identity.StrategyID, "")
+		if err != nil || resolved.ObjectDigest != digest {
+			t.Fatalf("resolve %s = (%+v, %v), want the catalog's row", row.Identity.StrategyID, resolved, err)
+		}
+		if plan, err := f.view.EffectivePlan(f.h.ctx, resolved); err != nil || plan.Identity != row.Identity {
+			t.Fatalf("effective plan of %s = (%+v, %v), want its Plan from the latest object", row.Identity.StrategyID, plan.Identity, err)
+		}
+	}
+}

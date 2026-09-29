@@ -34,15 +34,23 @@ import (
 // their own: Available is false there, and the reader is sent to the
 // Leader rather than answered from a copy every replica would have to keep.
 //
-// Where a row comes from. A Plan of the published catalog: the catalog. A
-// Plan the activation still carries on an older publication: that
-// publication's content when the activation round holds it, its revisions
-// from its object; otherwise the activation alone, marked ContentNotHeld -
-// the Plan, its publication and selection, nothing guessed about the rest.
-// The published catalog does not stand in for a carried publication's
-// content, even for a Plan whose key, schedule revision and state generation
-// it shares: those are all an activation record says, and a later
-// publication can change a Plan's detection under all three.
+// Where a row's content comes from. An activation record sits on the
+// publication its Query Group's Segment opened on, and stays there while
+// the Segment does - through cutovers that change the Plan's detection and
+// not its schedule - while the content the Plan runs follows every cutover,
+// through its Query Group's content scope. So a Plan runs the activation's
+// current publication's content, wherever its record sits, unless it drains:
+// a Plan with records on two publications runs, on each, that publication's
+// content until the older one retires. The content of the publication the
+// Leader made is the catalog: a Plan whose content is that publication's is
+// the catalog's row, carrying its activation. Another publication's content
+// is what the activation round holds: from there, the revisions from its
+// object; otherwise the activation alone, marked ContentNotHeld - the Plan,
+// its publication and selection, nothing guessed about the rest. The
+// published catalog never stands in for another publication's content: a
+// Plan current on one publication while a later one is published runs the
+// current one's, and the later one can differ from it under every field an
+// activation record carries.
 type DirectoryView struct {
 	reconciler *SourceReconciler
 	repository *RedisCatalogRepository
@@ -69,9 +77,11 @@ func (view *DirectoryView) Available() bool {
 type directoryAnswer struct {
 	snapshot StrategyDirectorySnapshot
 	index    *strategyIndex
-	// records is every Plan the activation carries, by identity; carried the
-	// publications other than the published one it carries them on.
+	// records is every Plan the activation carries, by identity; current the
+	// activation's current publication; carried the publications other than
+	// the published one whose content a row may be named from.
 	records map[execution.PlanIdentity][]PlanActivationRecord
+	current SnapshotPublicationRef
 	carried []SnapshotPublicationRef
 	// contexts is the published content's output context naming, and held
 	// the carried publications whose content the activation round holds.
@@ -127,13 +137,20 @@ func (view *DirectoryView) answer(ctx context.Context, at time.Time) (*directory
 		return a, nil
 	}
 	s.Current, s.ActivationRevision = activation.Current, activation.RecordRevision
+	a.current = activation.Current
 	s.Revision = fmt.Sprintf("%s:%d:%d", index.publication.SnapshotRevision, index.publication.PublicationEpoch, activation.RecordRevision)
 	counts := map[SnapshotPublicationRef]int{}
 	for _, record := range activation.Plans {
 		a.records[record.Fact.Plan] = append(a.records[record.Fact.Plan], record)
 		counts[record.Publication]++
-		if record.Publication != index.publication && counts[record.Publication] == 1 && record.Publication.validate() == nil {
-			a.carried = append(a.carried, record.Publication)
+	}
+	// The publications a row's content may come from besides the published
+	// one: the current one, and each a record sits on (a drain's).
+	named := map[SnapshotPublicationRef]bool{index.publication: true}
+	for _, publication := range append([]SnapshotPublicationRef{activation.Current}, recordPublications(activation.Plans)...) {
+		if !named[publication] && publication.validate() == nil {
+			named[publication] = true
+			a.carried = append(a.carried, publication)
 		}
 	}
 	s.Complete = true
@@ -150,6 +167,28 @@ func (view *DirectoryView) answer(ctx context.Context, at time.Time) (*directory
 		s.Publications = append(s.Publications, read)
 	}
 	return a, nil
+}
+
+// recordPublications is each publication a record sits on, in record order.
+func recordPublications(records []PlanActivationRecord) []SnapshotPublicationRef {
+	publications := make([]SnapshotPublicationRef, 0, len(records))
+	for _, record := range records {
+		publications = append(publications, record.Publication)
+	}
+	return publications
+}
+
+// contentOf is the publication a record's Plan runs the content of: the
+// current one, unless the Plan drains - records on two publications - when
+// each record's is its own.
+func (a *directoryAnswer) contentOf(record PlanActivationRecord) SnapshotPublicationRef {
+	key := record.Fact.Key()
+	for _, other := range a.records[record.Fact.Plan] {
+		if other.Fact.Key() == key && other.Publication != record.Publication {
+			return record.Publication
+		}
+	}
+	return a.current
 }
 
 // fail records the first read that failed and why.
@@ -176,6 +215,9 @@ func (a *directoryAnswer) drafts(identity execution.PlanIdentity) []rowDraft {
 	var drafts []rowDraft
 	published := a.index.publication
 	records := a.records[identity]
+	// A record whose content is the published catalog's is that catalog
+	// row's activation, not a row of its own.
+	onCatalog := make([]bool, len(records))
 	for _, at := range a.index.plans[identity.StrategyID] {
 		group := &a.index.groups[at.group]
 		plan := &group.Plans[at.plan]
@@ -184,21 +226,33 @@ func (a *directoryAnswer) drafts(identity execution.PlanIdentity) []rowDraft {
 		}
 		row := StrategyDirectoryRow{Identity: plan.Identity, QueryGroup: group.Identity, Publication: published, Role: "PUBLISHED",
 			QueryRevision: group.QueryPlan.QueryRevision, ScheduleRevision: group.ScheduleRevision, OutputContext: a.contexts[plan.Identity]}
-		for _, record := range records {
-			if record.Publication == published && record.Fact.Key() == plan.Key() {
-				fact := record.Fact
-				row.Activation, row.Role = &fact, string(fact.Selection)
+		for index, record := range records {
+			if onCatalog[index] || record.Fact.Key() != plan.Key() || a.contentOf(record) != published {
+				continue
 			}
+			onCatalog[index] = true
+			fact := record.Fact
+			row.Activation, row.Role = &fact, string(fact.Selection)
+			if record.Publication != published {
+				activatedOn := record.Publication
+				row.ActivatedOn = &activatedOn
+			}
+			break
 		}
 		drafts = append(drafts, rowDraft{row: row, group: group})
 	}
-	for _, record := range records {
-		if record.Publication == published {
+	for index, record := range records {
+		if onCatalog[index] {
 			continue
 		}
 		fact := record.Fact
-		row := StrategyDirectoryRow{Identity: fact.Plan, Publication: record.Publication, Role: string(fact.Selection), Activation: &fact}
-		if held, holds := a.held[record.Publication]; holds {
+		content := a.contentOf(record)
+		row := StrategyDirectoryRow{Identity: fact.Plan, Publication: content, Role: string(fact.Selection), Activation: &fact}
+		if record.Publication != content {
+			activatedOn := record.Publication
+			row.ActivatedOn = &activatedOn
+		}
+		if held, holds := a.held[content]; holds {
 			if plan, found := held.find(fact.Key()); found {
 				row.QueryGroup, row.ObjectDigest, row.OutputContext = plan.group, plan.digest, held.contexts[fact.Plan]
 				drafts = append(drafts, rowDraft{row: row, object: plan.digest})

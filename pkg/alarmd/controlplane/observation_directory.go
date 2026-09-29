@@ -25,6 +25,11 @@ type StrategyDirectoryRow struct {
 	Publication      SnapshotPublicationRef        `json:"publication"`
 	Role             string                        `json:"role"`
 	Activation       *execution.PlanActivationFact `json:"activation,omitempty"`
+	// ActivatedOn is the publication the row's activation record sits on,
+	// when it is not the one the row's content is from: a Plan whose Segment
+	// opened on an earlier publication keeps its record there while its
+	// content follows every cutover.
+	ActivatedOn *SnapshotPublicationRef `json:"activated_on,omitempty"`
 	// OutputContext names the output context this Plan renders by, which is
 	// where its frozen wire format lives: the execution object above is
 	// deliberately without it. Empty when the publication's manifest was not
@@ -32,9 +37,11 @@ type StrategyDirectoryRow struct {
 	// either, which the output read reports as unknown rather than fetching a
 	// manifest to find out.
 	OutputContext execution.OutputContextDigest `json:"output_context_digest,omitempty"`
-	// ContentNotHeld is a Plan the activation still carries on an older
-	// publication whose content the Leader does not hold: a Query Group that
-	// changed and whose draining content the activation round has not read.
+	// ContentNotHeld is a Plan the activation carries whose content the
+	// Leader does not hold: a draining Query Group whose content the
+	// activation round has not read, or a Plan of the current publication
+	// while a later one is published and the current one's content is not in
+	// memory.
 	// The row names the Plan, its publication and its activation, and
 	// nothing the content would have said - the Query Group, the object, the
 	// revisions - which is left empty rather than guessed.
@@ -42,11 +49,12 @@ type StrategyDirectoryRow struct {
 }
 
 // DirectoryPublication is one publication a directory answer names: how many
-// active Plans the activation carries on it, and where its content came from
-// - memory for the publication the Leader made and for one the activation
-// round holds, not_held for one it does not, whose Plans are named from the
-// published catalog when their content did not change and from the
-// activation alone otherwise (ContentNotHeld).
+// active Plans the activation carries on it, and whether its content is in
+// memory - the publication the Leader made, and one the activation round
+// holds - or not_held. A Plan's content is the current publication's unless
+// the Plan drains (it has records on two publications), whatever
+// publication its record sits on; a Plan whose content is not held is named
+// from the activation alone (ContentNotHeld).
 type DirectoryPublication struct {
 	Publication SnapshotPublicationRef `json:"publication"`
 	Plans       int                    `json:"plans"`
