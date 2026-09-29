@@ -147,3 +147,58 @@ func TestTheRoundMemoryReadingCountsEachObjectOnce(t *testing.T) {
 		t.Fatalf("nil tracker reading = %+v, want every bucket at zero", empty)
 	}
 }
+
+// A minute evaluated twice -- the same Slot run again, or replayed -- has
+// two rounds, and its hole is read against the later: that is what the
+// minute last came to. In either order, and whether the minute was reported
+// or inferred from the Slot.
+func TestAMinuteRunTwiceIsReadAgainstItsLaterRound(t *testing.T) {
+	type run struct {
+		kind, cause, reason string
+		primary             *observability.PrimaryInputFacts
+	}
+	whole := run{"FULL_COMPLETED", "", "", primary("FULL", "DATA")}
+	empty := run{"FULL_EMPTY_COMPLETED", "", "", primary("FULL", "EMPTY")}
+	incomplete := run{"COMPLETED_WITH_UNAVAILABLE", "PRIMARY_INPUT_UNAVAILABLE", "QUERY_TIMEOUT", primary("PARTIAL", "DATA")}
+	for _, tc := range []struct {
+		name         string
+		first, later run
+		reported     bool
+		cause        HoleCause
+		kind         string
+	}{
+		{"whole then incomplete", whole, incomplete, true, HoleInputIncomplete, "COMPLETED_WITH_UNAVAILABLE"},
+		{"incomplete then whole", incomplete, whole, true, HoleAnsweredWithoutSeries, "FULL_COMPLETED"},
+		{"inferred: empty then incomplete", empty, incomplete, false, HoleInputIncomplete, "COMPLETED_WITH_UNAVAILABLE"},
+		{"inferred: incomplete then empty", incomplete, empty, false, HoleAnsweredEmpty, "FULL_EMPTY_COMPLETED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := newTracker(t, &clock{at: now})
+			ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-twice"})
+			// Minute 5880 at Slot 5940 teaches the offset; minute 6000 runs
+			// twice at Slot 6060.
+			round(ctx, tracker, 5940, "FULL_COMPLETED", "", "", primary("FULL", "DATA"), &observability.HistoryCoverageFacts{Levels: 1, End: 5880})
+			for _, r := range []run{tc.first, tc.later} {
+				var coverage *observability.HistoryCoverageFacts
+				if tc.reported {
+					coverage = &observability.HistoryCoverageFacts{Levels: 1, End: 6000}
+				}
+				round(ctx, tracker, 6060, r.kind, r.cause, r.reason, r.primary, coverage)
+			}
+			short := &observability.HistoryCoverageFacts{Levels: 1, Short: 1, WorstValid: 2, WorstRequired: 3, End: 6060,
+				Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 2, Required: 3, End: 6060,
+					Missing: []int64{6000}, MissingTotal: 1}}}
+			for i := 0; i < DefaultDegradedRounds; i++ {
+				round(ctx, tracker, 6120, "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED", primary("FULL", "DATA"), short)
+			}
+			rows := anyColumn(tracker)
+			if len(rows) != 1 || rows[0].Coverage == nil || len(rows[0].Coverage.Windows) != 1 || len(rows[0].Coverage.Windows[0].Holes) != 1 {
+				t.Fatalf("rows = %+v, want the one object with one hole on its one window", rows)
+			}
+			hole := rows[0].Coverage.Windows[0].Holes[0]
+			if hole.Cause != tc.cause || hole.Round != tc.kind || hole.Inferred == tc.reported {
+				t.Fatalf("hole = %+v, want %s from the later %q (inferred %v)", hole, tc.cause, tc.kind, !tc.reported)
+			}
+		})
+	}
+}
