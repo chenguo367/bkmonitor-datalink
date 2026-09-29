@@ -934,75 +934,95 @@ func recoveryOf(group *CheckGroup, historical bool) Recovery {
 // Ordered as checkOrder is, so the page renders the list in the order the
 // reader acts and does not sort by a rule of its own.
 func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, now time.Time) []CheckReport {
-	type tally struct {
-		objects    int
-		strategies map[string]struct{}
-		businesses map[string]struct{}
-		groups     map[string]*CheckGroup
-		groupSets  map[string][2]map[string]struct{}
-		partial    bool
-		demoted    int
-		current    int
-		retained   int
-		lastHour   int
-		newest     time.Time
-		activation *ActivationFacts
-		replica    string
-		rebalance  *RebalanceFacts
-		skipped    *Consequence
-		reasons    map[string]int
-		// recovered is the objects that recovered from this line within the
-		// retention, recoveredLast the latest of them.
-		recovered     int
-		recoveredLast time.Time
-		// sourceStrategies is a source standing's count: withheld records,
-		// summed over its groups, where the object lines count distinct
-		// strategies behind objects.
-		sourceStrategies int
-		// onsets is the no-data lines' objects by the minute their run
-		// began, for the fold that tells one event from many; withoutOnset
-		// the rows of those lines that carry no start, so the fold's sum
-		// and the line's count can be read against each other.
-		onsets       map[time.Time]int
-		withoutOnset int
+	return reportChecksFrom(checkRowsOf(columns, truncated, view, now), view, now)
+}
+
+// checkTally is one check's fold before it is a report.
+type checkTally struct {
+	objects    int
+	strategies map[string]struct{}
+	businesses map[string]struct{}
+	groups     map[string]*CheckGroup
+	groupSets  map[string][2]map[string]struct{}
+	partial    bool
+	demoted    int
+	current    int
+	retained   int
+	lastHour   int
+	newest     time.Time
+	activation *ActivationFacts
+	replica    string
+	rebalance  *RebalanceFacts
+	skipped    *Consequence
+	reasons    map[string]int
+	// recovered is the objects that recovered from this line within the
+	// retention, recoveredLast the latest of them.
+	recovered     int
+	recoveredLast time.Time
+	// sourceStrategies is a source standing's count: withheld records,
+	// summed over its groups, where the object lines count distinct
+	// strategies behind objects.
+	sourceStrategies int
+	// onsets is the no-data lines' objects by the minute their run
+	// began, for the fold that tells one event from many; withoutOnset
+	// the rows of those lines that carry no start, so the fold's sum
+	// and the line's count can be read against each other.
+	onsets       map[time.Time]int
+	withoutOnset int
+}
+
+// checkTallies is every check's fold, by check.
+type checkTallies map[Check]*checkTally
+
+func (tallies checkTallies) ensure(check Check) *checkTally {
+	entry := tallies[check]
+	if entry == nil {
+		entry = &checkTally{strategies: map[string]struct{}{}, businesses: map[string]struct{}{},
+			groups: map[string]*CheckGroup{}, groupSets: map[string][2]map[string]struct{}{}}
+		tallies[check] = entry
 	}
-	tallies := map[Check]*tally{}
-	ensure := func(check Check) *tally {
-		entry := tallies[check]
-		if entry == nil {
-			entry = &tally{strategies: map[string]struct{}{}, businesses: map[string]struct{}{},
-				groups: map[string]*CheckGroup{}, groupSets: map[string][2]map[string]struct{}{}}
-			tallies[check] = entry
-		}
-		return entry
+	return entry
+}
+
+// code is what the fold counts the row under, when the fold is not on
+// the row's own deciding code: the second fact under DEFECT counts the
+// internal code, not the refusal the row is listed for.
+func (entry *checkTally) addAs(key string, anomaly *Anomaly, code string, now time.Time) {
+	entry.objects++
+	group := entry.groups[key]
+	if group == nil {
+		group = &CheckGroup{Key: key}
+		entry.groups[key] = group
+		entry.groupSets[key] = [2]map[string]struct{}{{}, {}}
 	}
-	// code is what the fold counts the row under, when the fold is not on
-	// the row's own deciding code: the second fact under DEFECT counts the
-	// internal code, not the refusal the row is listed for.
-	addAs := func(entry *tally, key string, anomaly *Anomaly, code string) {
-		entry.objects++
-		group := entry.groups[key]
-		if group == nil {
-			group = &CheckGroup{Key: key}
-			entry.groups[key] = group
-			entry.groupSets[key] = [2]map[string]struct{}{{}, {}}
-		}
-		group.Objects++
-		if anomaly == nil {
-			return
-		}
-		noteProblem(group, anomaly, code, now)
-		sets := entry.groupSets[key]
-		for _, strategy := range anomaly.Strategies {
-			entry.strategies[strategy.StrategyID] = struct{}{}
-			sets[0][strategy.StrategyID] = struct{}{}
-			if strategy.BusinessID != "" {
-				entry.businesses[strategy.BusinessID] = struct{}{}
-				sets[1][strategy.BusinessID] = struct{}{}
-			}
+	group.Objects++
+	if anomaly == nil {
+		return
+	}
+	noteProblem(group, anomaly, code, now)
+	sets := entry.groupSets[key]
+	for _, strategy := range anomaly.Strategies {
+		entry.strategies[strategy.StrategyID] = struct{}{}
+		sets[0][strategy.StrategyID] = struct{}{}
+		if strategy.BusinessID != "" {
+			entry.businesses[strategy.BusinessID] = struct{}{}
+			sets[1][strategy.BusinessID] = struct{}{}
 		}
 	}
-	add := func(entry *tally, key string, anomaly *Anomaly) { addAs(entry, key, anomaly, "") }
+}
+
+// checkRowsOf is ReportChecks' rows half: every row of the columns, the
+// skip records and the lists no column holds, each folded into the check it
+// is under. It is what one replica's rows add (ReplicaPart.CheckRows) and
+// what replicas' add up to (mergeCheckTallies). The view supplies the
+// records and the lists, and may be nil.
+func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now time.Time) checkTallies {
+	tallies := checkTallies{}
+	ensure := tallies.ensure
+	addAs := func(entry *checkTally, key string, anomaly *Anomaly, code string) {
+		entry.addAs(key, anomaly, code, now)
+	}
+	add := func(entry *checkTally, key string, anomaly *Anomaly) { entry.addAs(key, anomaly, "", now) }
 	listed := map[string]struct{}{}
 	for columnIndex, column := range columns {
 		columnPartial := false
@@ -1122,6 +1142,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			}
 		}
 	}
+	return tallies
+}
+
+// reportChecksFrom adds what is not a row -- what the view cannot speak
+// for, the standings, the problems that recovered, the source's -- to the
+// rows' folds, and makes the reports. The folds are finished in place.
+func reportChecksFrom(tallies checkTallies, view *View, now time.Time) []CheckReport {
+	ensure := tallies.ensure
+	add := func(entry *checkTally, key string, anomaly *Anomaly) { entry.addAs(key, anomaly, "", now) }
 	// What the view cannot speak for. Unknown is the objects a replica holds
 	// and has said nothing conclusive about; the gaps are the reasons the rest
 	// of the answer may be incomplete. Neither has objects the list can show,
@@ -1443,6 +1472,14 @@ type Todo struct {
 // the columns say which objects are under them, so the distinct count is
 // taken from the objects and not from the lines.
 func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now time.Time) Todo {
+	return todoFrom(todoRowsOf(columns, view, now), reports, view)
+}
+
+// todoRowsOf is SummarizeTodo's rows half: the distinct objects each owner
+// has among the rows and the records, and the records' counts. Replicas
+// hold separate objects, so one replica's half adds to another's
+// (mergeTodoRows).
+func todoRowsOf(columns [][]Anomaly, view *View, now time.Time) Todo {
 	todo := Todo{RecentWindowSeconds: int(RecentSkipWindow / time.Second), RestartGraceSeconds: int(RestartCatchUpGrace / time.Second)}
 	ours := map[string]struct{}{}
 	undetermined := map[string]struct{}{}
@@ -1531,6 +1568,12 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		}
 	}
 	todo.Objects, todo.UndeterminedObjects, todo.GovernanceObjects = len(ours), len(undetermined), len(theirs)
+	return todo
+}
+
+// todoFrom adds the objects nobody can speak for and the lines to the rows'
+// half.
+func todoFrom(todo Todo, reports []CheckReport, view *View) Todo {
 	if view != nil {
 		// The objects a replica holds and has said nothing conclusive about
 		// are under OBSERVATION_GAP and have no row to be distinct by; they
@@ -1785,4 +1828,22 @@ func normalizedOwner(groups []CheckGroup) Owner {
 		}
 	}
 	return OwnerNobody
+}
+
+// mergeTodoRows adds one replica's rows' half of the to-do into another's.
+func mergeTodoRows(into *Todo, from Todo) {
+	into.RecentWindowSeconds, into.RestartGraceSeconds = from.RecentWindowSeconds, from.RestartGraceSeconds
+	into.Objects += from.Objects
+	into.UndeterminedObjects += from.UndeterminedObjects
+	into.GovernanceObjects += from.GovernanceObjects
+	into.Ongoing += from.Ongoing
+	into.AfterRestart += from.AfterRestart
+	into.AfterCooldown += from.AfterCooldown
+	into.RestartGraceUnknown += from.RestartGraceUnknown
+	into.WhileDemoted += from.WhileDemoted
+	into.WhileDemotedRecent += from.WhileDemotedRecent
+	into.Retained += from.Retained
+	into.RetainedLastHour += from.RetainedLastHour
+	into.OngoingNewest = latest(into.OngoingNewest, from.OngoingNewest)
+	into.RetainedNewest = latest(into.RetainedNewest, from.RetainedNewest)
 }

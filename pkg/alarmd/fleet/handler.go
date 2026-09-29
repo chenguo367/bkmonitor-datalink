@@ -222,17 +222,25 @@ type HealthResponse struct {
 	// spans differ by orders of magnitude between a cursor that fell a minute
 	// behind and one that fell a day behind.
 	PrunedSkips []PrunedSkipRef `json:"pruned_skips,omitempty"`
+	// PrunedSkipsTotal, RetainedShareTotal and ReadEarlyTotal are how many
+	// objects each of the three lists has; each list carries the first
+	// FirstScreenListBound of them in its order, and the objects route lists
+	// them all under their checks. Uncapped, a list grew with the deployment
+	// and every page refresh carried all of it.
+	PrunedSkipsTotal int `json:"pruned_skips_total,omitempty"`
 	// RetainedShare is the objects whose latest completed Slot held at least
 	// RetainedShareApproachPercent of the one-object share of the retained
 	// pool, fullest first. In no column and no total: they are detecting. A
 	// list, because what a reader acts on is which strategy and how close,
 	// and the refusal it warns of stops that strategy whole.
-	RetainedShare []RetainedShareRef `json:"retained_share,omitempty"`
+	RetainedShare      []RetainedShareRef `json:"retained_share,omitempty"`
+	RetainedShareTotal int                `json:"retained_share_total,omitempty"`
 	// ReadEarly is the objects the late-data lookback found read before
 	// their data was complete in two samples in a row, with the time_delay
 	// that would have read them complete. In no column and no total: they
 	// are detecting, from data that was not all there.
-	ReadEarly []ReadEarlyRef `json:"read_early,omitempty"`
+	ReadEarly      []ReadEarlyRef `json:"read_early,omitempty"`
+	ReadEarlyTotal int            `json:"read_early_total,omitempty"`
 	// PublishedVersion and Workers are the acknowledgement view: which
 	// Activation the control plane published and how many counted replicas
 	// have applied it. Per-replica versions are on PerReplica.
@@ -915,6 +923,7 @@ func NewHandler(
 		// The columns alone: the check lines and the to-do they would draw
 		// are the list route's, and this route answers neither.
 		columns := viewColumns(&view)
+		pruned, retained, readEarly := prunedSkipList(view.PrunedSkips), retainedShareList(view.RetainedShare), readEarlyList(view.ReadEarly)
 		writeJSON(response, http.StatusOK, HealthResponse{
 			Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
 			Health: view.Health, Expected: view.Expected, Covered: view.Covered,
@@ -932,10 +941,10 @@ func NewHandler(
 			DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
 			DemotionReentries: view.DemotionReentries,
 			LastDemotionExit:  momentOrNil(view.LastDemotionExit),
-			PrunedSkips:       prunedSkipList(view.PrunedSkips),
-			RetainedShare:     retainedShareList(view.RetainedShare),
-			ReadEarly:         readEarlyList(view.ReadEarly),
-			Coverage:          view.Coverage, PerReplica: view.PerReplica,
+			PrunedSkips:       firstScreenList(pruned), PrunedSkipsTotal: len(pruned),
+			RetainedShare: firstScreenList(retained), RetainedShareTotal: len(retained),
+			ReadEarly: firstScreenList(readEarly), ReadEarlyTotal: len(readEarly),
+			Coverage: view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
 			Retentions:      retentionList(view.Retentions),
@@ -1549,7 +1558,7 @@ type RetainedShareRef struct {
 	ThresholdPercent    uint64 `json:"threshold_percent"`
 }
 
-// retainedShareList keeps the view's order, which is fullest first.
+// retainedShareList orders the objects fullest first, across replicas.
 func retainedShareList(rows []Anomaly) []RetainedShareRef {
 	if len(rows) == 0 {
 		return nil
@@ -1569,10 +1578,17 @@ func retainedShareList(rows []Anomaly) []RetainedShareRef {
 			ThresholdPercent: facts.ThresholdPercent,
 		})
 	}
-	sort.SliceStable(list, func(left, right int) bool {
-		return list[left].PercentOfShare > list[right].PercentOfShare
-	})
+	sort.Slice(list, func(left, right int) bool { return retainedShareBefore(list[left], list[right]) })
 	return list
+}
+
+// retainedShareBefore is the list's order, the one each replica's own list
+// is in (RetainedShareAnomalies): fullest first, then by object.
+func retainedShareBefore(left, right RetainedShareRef) bool {
+	if left.PercentOfShare != right.PercentOfShare {
+		return left.PercentOfShare > right.PercentOfShare
+	}
+	return left.QueryGroup < right.QueryGroup
 }
 
 // ReadEarlyRef is one object read before its data was complete, as the
@@ -1587,8 +1603,8 @@ type ReadEarlyRef struct {
 	Since                 time.Time     `json:"since"`
 }
 
-// readEarlyList keeps the view's order, the furthest from its suggestion
-// first.
+// readEarlyList orders the objects furthest from their suggestion first,
+// across replicas.
 func readEarlyList(rows []Anomaly) []ReadEarlyRef {
 	if len(rows) == 0 {
 		return nil
@@ -1600,7 +1616,18 @@ func readEarlyList(rows []Anomaly) []ReadEarlyRef {
 				CurrentDelaySeconds: facts.CurrentDelaySeconds, SuggestedDelaySeconds: facts.SuggestedDelaySeconds, Since: facts.Since})
 		}
 	}
+	sort.Slice(list, func(left, right int) bool { return readEarlyBefore(list[left], list[right]) })
 	return list
+}
+
+// readEarlyBefore is the list's order, the one each replica's own list is
+// in (ReadEarlyAnomalies): the furthest from its suggestion first, then by
+// object.
+func readEarlyBefore(left, right ReadEarlyRef) bool {
+	if lg, rg := left.SuggestedDelaySeconds-left.CurrentDelaySeconds, right.SuggestedDelaySeconds-right.CurrentDelaySeconds; lg != rg {
+		return lg > rg
+	}
+	return left.QueryGroup < right.QueryGroup
 }
 
 // PrunedSkipRef is one object's lost span, as the page receives it.
@@ -1628,11 +1655,28 @@ func prunedSkipList(skips map[string]PrunedSkip) []PrunedSkipRef {
 			At: skip.At, DiscardedSlot: skip.DiscardedSlot,
 		})
 	}
-	sort.Slice(list, func(left, right int) bool {
-		if list[left].SpanSeconds != list[right].SpanSeconds {
-			return list[left].SpanSeconds > list[right].SpanSeconds
-		}
-		return list[left].QueryGroup < list[right].QueryGroup
-	})
+	sort.Slice(list, func(left, right int) bool { return prunedSkipBefore(list[left], list[right]) })
+	return list
+}
+
+// prunedSkipBefore is the list's order: the longest span first, then by
+// object.
+func prunedSkipBefore(left, right PrunedSkipRef) bool {
+	if left.SpanSeconds != right.SpanSeconds {
+		return left.SpanSeconds > right.SpanSeconds
+	}
+	return left.QueryGroup < right.QueryGroup
+}
+
+// FirstScreenListBound is how many objects each of the health route's
+// object lists carries: the first screen reads the first of one of them,
+// and the objects route lists every one.
+const FirstScreenListBound = 8
+
+// firstScreenList is the first FirstScreenListBound of a list in its order.
+func firstScreenList[T any](list []T) []T {
+	if len(list) > FirstScreenListBound {
+		return list[:FirstScreenListBound]
+	}
 	return list
 }

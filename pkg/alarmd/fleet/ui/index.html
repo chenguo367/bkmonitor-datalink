@@ -2991,7 +2991,7 @@ function renderDeployment(deployment) {
     if (restricted) {
       restrictedNotice(document.getElementById('prunedSkips'));
     } else {
-      renderPrunedSkips(deployment.pruned_skips || []);
+      renderPrunedSkips(deployment.pruned_skips || [], deployment.pruned_skips_total);
     }
     var gaps = deployment.gaps || [];
     // UNKNOWN has two ways in and the wording used to describe only one.
@@ -4851,11 +4851,14 @@ function loadRecords(queryGroup) {
 // many Slots are inside it cannot be known, because the parts of the timeline
 // that would have counted them are the parts that were removed. The page says
 // that rather than printing a number that would read as measured.
-function renderPrunedSkips(skips) {
+function renderPrunedSkips(skips, total) {
   show('prunedSkips', skips.length > 0);
   if (!skips.length) return;
   var longest = skips[0];
-  var parts = ['有 ' + skips.length + ' 个对象存在一段"从来没有被检测过"的时间'
+  // The list carries the longest few; the total is how many there are. A
+  // build before the total existed sends every one and no total.
+  var count = total || skips.length;
+  var parts = ['有 ' + count + ' 个对象存在一段"从来没有被检测过"的时间'
     + '——它们的游标曾经指向已经被裁掉的时间线，被移到了时间线还留着的最早一个时间点。'
     + '那一段里的时间点没有被评估过，也不会补跑。'];
   parts.push('最长的一段是 ' + shortId(longest.query_group) + '，跨度 '
