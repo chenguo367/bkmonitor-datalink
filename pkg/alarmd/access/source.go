@@ -160,6 +160,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	if err := request.Validate(); err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}
+	if request.Operation == execution.OperationSupplement {
+		return source.executeSupplement(ctx, request, consumer)
+	}
 	// Read once, before anything this call does can take time. It is what "how
 	// late did we arrive" is measured from, and a clock read taken after the
 	// plan resolve would fold that resolve into the answer.
@@ -380,28 +383,39 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			completion = completeBudgetExhaustedQueries(completion, []PlannedQuery{query}, request.AttemptNo)
 			continue
 		}
-		providerCompletion := result.completion
-		completion.PhysicalQueries = append(completion.PhysicalQueries, execution.PhysicalQueryCompletion{
-			Ref: providerCompletion.Ref, PhysicalQuery: providerCompletion.PhysicalQuery,
-			QueryRevision: query.Spec.PlanFacts.QueryRevision, Completeness: providerCompletion.Completeness,
-			DataState: providerCompletion.DataState, Delivery: providerCompletion.Delivery,
-			RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
-			Stats: providerCompletion.Stats,
-		})
-		// Every valid requirement receives a completion binding, also when the
-		// query delivered series. A Plan whose PRIMARY query returned no series
-		// is completion-only at the worker and requires one binding per frozen
-		// requirement of every Level; a dependency query that returned DATA for
-		// other Plans or series would otherwise leave that Plan without a
-		// binding and fail the Slot deterministically on every attempt. The
-		// worker prefers a streamed binding for each (consumer, series,
-		// requirement) key and falls back to this one only where none exists.
-		completion.CompletionBindings = append(completion.CompletionBindings, completionBindings(query, providerCompletion, request.AttemptNo)...)
-		completion.CompletionBindings = append(completion.CompletionBindings,
-			readinessInvalidBindings(query, providerCompletion.Ref, request.AttemptNo)...)
+		completion = appendQueryCompletion(completion, query, result.completion, request.AttemptNo)
 	}
 	completion.AllRequiredCompleted = true
 	return completion, nil
+}
+
+// appendQueryCompletion adds one physical query's completion, restated for
+// what was forwarded, and its completion bindings.
+func appendQueryCompletion(
+	completion execution.QueryExecutionCompletion,
+	query PlannedQuery,
+	providerCompletion execution.ProviderCompletion,
+	attemptNo uint32,
+) execution.QueryExecutionCompletion {
+	completion.PhysicalQueries = append(completion.PhysicalQueries, execution.PhysicalQueryCompletion{
+		Ref: providerCompletion.Ref, PhysicalQuery: providerCompletion.PhysicalQuery,
+		QueryRevision: query.Spec.PlanFacts.QueryRevision, Completeness: providerCompletion.Completeness,
+		DataState: providerCompletion.DataState, Delivery: providerCompletion.Delivery,
+		RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
+		Stats: providerCompletion.Stats,
+	})
+	// Every valid requirement receives a completion binding, also when the
+	// query delivered series. A Plan whose PRIMARY query returned no series
+	// is completion-only at the worker and requires one binding per frozen
+	// requirement of every Level; a dependency query that returned DATA for
+	// other Plans or series would otherwise leave that Plan without a
+	// binding and fail the Slot deterministically on every attempt. The
+	// worker prefers a streamed binding for each (consumer, series,
+	// requirement) key and falls back to this one only where none exists.
+	completion.CompletionBindings = append(completion.CompletionBindings, completionBindings(query, providerCompletion, attemptNo)...)
+	completion.CompletionBindings = append(completion.CompletionBindings,
+		readinessInvalidBindings(query, providerCompletion.Ref, attemptNo)...)
+	return completion
 }
 
 type physicalQueryResult struct {
