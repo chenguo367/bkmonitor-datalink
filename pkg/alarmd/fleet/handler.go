@@ -1578,18 +1578,22 @@ func retainedShareList(rows []Anomaly) []RetainedShareRef {
 			ThresholdPercent: facts.ThresholdPercent,
 		})
 	}
-	list = latestPerObject(list, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
+	list = latestPerObject(list, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since }, retainedShareBefore)
 	sort.Slice(list, func(left, right int) bool { return retainedShareBefore(list[left], list[right]) })
 	return list
 }
 
 // retainedShareBefore is the list's order, the one each replica's own list
-// is in (RetainedShareAnomalies): fullest first, then by object.
+// is in (RetainedShareAnomalies): fullest first, then by object, then -- for
+// the two entries of one object during a handover -- by replica.
 func retainedShareBefore(left, right RetainedShareRef) bool {
 	if left.PercentOfShare != right.PercentOfShare {
 		return left.PercentOfShare > right.PercentOfShare
 	}
-	return left.QueryGroup < right.QueryGroup
+	if left.QueryGroup != right.QueryGroup {
+		return left.QueryGroup < right.QueryGroup
+	}
+	return left.Replica < right.Replica
 }
 
 // ReadEarlyRef is one object read before its data was complete, as the
@@ -1617,19 +1621,23 @@ func readEarlyList(rows []Anomaly) []ReadEarlyRef {
 				CurrentDelaySeconds: facts.CurrentDelaySeconds, SuggestedDelaySeconds: facts.SuggestedDelaySeconds, Since: facts.Since})
 		}
 	}
-	list = latestPerObject(list, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
+	list = latestPerObject(list, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since }, readEarlyBefore)
 	sort.Slice(list, func(left, right int) bool { return readEarlyBefore(list[left], list[right]) })
 	return list
 }
 
 // readEarlyBefore is the list's order, the one each replica's own list is
 // in (ReadEarlyAnomalies): the furthest from its suggestion first, then by
-// object.
+// object, then -- for the two entries of one object during a handover -- by
+// replica.
 func readEarlyBefore(left, right ReadEarlyRef) bool {
 	if lg, rg := left.SuggestedDelaySeconds-left.CurrentDelaySeconds, right.SuggestedDelaySeconds-right.CurrentDelaySeconds; lg != rg {
 		return lg > rg
 	}
-	return left.QueryGroup < right.QueryGroup
+	if left.QueryGroup != right.QueryGroup {
+		return left.QueryGroup < right.QueryGroup
+	}
+	return left.Replica < right.Replica
 }
 
 // PrunedSkipRef is one object's lost span, as the page receives it.
@@ -1662,24 +1670,30 @@ func prunedSkipList(skips map[string]PrunedSkip) []PrunedSkipRef {
 }
 
 // prunedSkipBefore is the list's order: the longest span first, then by
-// object.
+// object, then -- for the two entries of one object during a handover -- by
+// the Slot discarded.
 func prunedSkipBefore(left, right PrunedSkipRef) bool {
 	if left.SpanSeconds != right.SpanSeconds {
 		return left.SpanSeconds > right.SpanSeconds
 	}
-	return left.QueryGroup < right.QueryGroup
+	if left.QueryGroup != right.QueryGroup {
+		return left.QueryGroup < right.QueryGroup
+	}
+	return left.DiscardedSlot < right.DiscardedSlot
 }
 
 // latestPerObject keeps one entry per object, the later one, as the view
 // keeps one record of an object's pruned span: during a handover two replicas
 // can list the same object, and the list names objects, not replicas' rows.
-func latestPerObject[T any](list []T, keyOf func(T) (string, time.Time)) []T {
+// Of two at the same moment it keeps the one first in the list's order, so
+// which is kept does not depend on the order the replicas' entries came in.
+func latestPerObject[T any](list []T, keyOf func(T) (string, time.Time), before func(T, T) bool) []T {
 	kept := make(map[string]int, len(list))
 	out := make([]T, 0, len(list))
 	for _, entry := range list {
 		key, at := keyOf(entry)
 		if index, seen := kept[key]; seen {
-			if _, earlier := keyOf(out[index]); at.After(earlier) {
+			if _, kept := keyOf(out[index]); at.After(kept) || (at.Equal(kept) && before(entry, out[index])) {
 				out[index] = entry
 			}
 			continue

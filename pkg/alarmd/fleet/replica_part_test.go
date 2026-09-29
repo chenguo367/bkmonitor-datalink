@@ -330,12 +330,44 @@ func TestAnObjectListedByTwoReplicasIsOnTheMergedListsOnce(t *testing.T) {
 			RetainedShare: []RetainedShareRef{{QueryGroup: "qg-handed-over", PercentOfShare: percent, Since: at}},
 			ReadEarly:     []ReadEarlyRef{{QueryGroup: "qg-handed-over", SuggestedDelaySeconds: int64(percent), Since: at}}}
 	}
-	merged := MergeReplicaParts(part(earlier, 90), part(later, 70))
-	if len(merged.PrunedSkips) != 1 || len(merged.RetainedShare) != 1 || len(merged.ReadEarly) != 1 {
-		t.Fatalf("lists %d/%d/%d long, want the object once on each", len(merged.PrunedSkips), len(merged.RetainedShare), len(merged.ReadEarly))
+	// Either way round: the earlier entry ranks first on every list, and is
+	// still not the one kept.
+	for _, merged := range []ReplicaPart{MergeReplicaParts(part(earlier, 90), part(later, 70)), MergeReplicaParts(part(later, 70), part(earlier, 90))} {
+		if len(merged.PrunedSkips) != 1 || len(merged.RetainedShare) != 1 || len(merged.ReadEarly) != 1 {
+			t.Fatalf("lists %d/%d/%d long, want the object once on each", len(merged.PrunedSkips), len(merged.RetainedShare), len(merged.ReadEarly))
+		}
+		if !merged.PrunedSkips[0].At.Equal(later) || merged.RetainedShare[0].PercentOfShare != 70 || merged.ReadEarly[0].SuggestedDelaySeconds != 70 {
+			t.Fatalf("kept %+v %+v %+v, want the later entry of each", merged.PrunedSkips[0], merged.RetainedShare[0], merged.ReadEarly[0])
+		}
 	}
-	if !merged.PrunedSkips[0].At.Equal(later) || merged.RetainedShare[0].PercentOfShare != 70 || merged.ReadEarly[0].SuggestedDelaySeconds != 70 {
-		t.Fatalf("kept %+v %+v %+v, want the later entry of each", merged.PrunedSkips[0], merged.RetainedShare[0], merged.ReadEarly[0])
+}
+
+// Of an object's two entries at the same moment, the merge keeps the one
+// first in the list's order, whichever replica's part comes first -- and of
+// two the order ranks alike, the same one either way.
+func TestTheMergeKeepsTheSameEntryOfAnObjectWhicheverPartComesFirst(t *testing.T) {
+	at := now.Add(-time.Minute)
+	part := func(replica string, value uint64, discarded int64) ReplicaPart {
+		return ReplicaPart{PrunedSkips: []PrunedSkipRef{{QueryGroup: "qg-handed-over", SpanSeconds: int64(value), At: at, DiscardedSlot: discarded}},
+			RetainedShare: []RetainedShareRef{{QueryGroup: "qg-handed-over", Replica: replica, PercentOfShare: value, Since: at}},
+			ReadEarly:     []ReadEarlyRef{{QueryGroup: "qg-handed-over", Replica: replica, SuggestedDelaySeconds: int64(value), Since: at}}}
+	}
+	lists := func(merged ReplicaPart) string {
+		encoded, _ := json.Marshal([]any{merged.PrunedSkips, merged.RetainedShare, merged.ReadEarly})
+		return string(encoded)
+	}
+	for name, parts := range map[string][2]ReplicaPart{
+		"ranked apart": {part("pod-a", 70, 600), part("pod-b", 90, 660)},
+		"ranked alike": {part("pod-b", 90, 660), part("pod-a", 90, 600)},
+	} {
+		forward, backward := MergeReplicaParts(parts[0], parts[1]), MergeReplicaParts(parts[1], parts[0])
+		if lists(forward) != lists(backward) {
+			t.Errorf("%s: kept %s one way and %s the other", name, lists(forward), lists(backward))
+		}
+	}
+	merged := MergeReplicaParts(part("pod-a", 70, 600), part("pod-b", 90, 660))
+	if merged.PrunedSkips[0].SpanSeconds != 90 || merged.RetainedShare[0].PercentOfShare != 90 || merged.ReadEarly[0].SuggestedDelaySeconds != 90 {
+		t.Fatalf("kept %s, want the entry each list ranks first", lists(merged))
 	}
 }
 

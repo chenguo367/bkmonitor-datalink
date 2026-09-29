@@ -161,9 +161,10 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.ReadEarly, merged.ReadEarlyTotal = append(merged.ReadEarly, part.ReadEarly...), merged.ReadEarlyTotal+part.ReadEarlyTotal
 	}
 	merged.Loss = merged.Loss.settled()
-	merged.PrunedSkips = latestPerObject(merged.PrunedSkips, func(ref PrunedSkipRef) (string, time.Time) { return ref.QueryGroup, ref.At })
-	merged.RetainedShare = latestPerObject(merged.RetainedShare, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
-	merged.ReadEarly = latestPerObject(merged.ReadEarly, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
+	merged.PrunedSkips = latestPerObject(merged.PrunedSkips, func(ref PrunedSkipRef) (string, time.Time) { return ref.QueryGroup, ref.At }, prunedSkipBefore)
+	merged.RetainedShare = latestPerObject(merged.RetainedShare, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since },
+		retainedShareBefore)
+	merged.ReadEarly = latestPerObject(merged.ReadEarly, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since }, readEarlyBefore)
 	sort.Slice(merged.PrunedSkips, func(l, r int) bool { return prunedSkipBefore(merged.PrunedSkips[l], merged.PrunedSkips[r]) })
 	sort.Slice(merged.RetainedShare, func(l, r int) bool {
 		return retainedShareBefore(merged.RetainedShare[l], merged.RetainedShare[r])

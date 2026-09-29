@@ -1108,6 +1108,31 @@ func TestTheVerdictRouteCarriesEachReplicasReadiness(t *testing.T) {
 	}
 }
 
+// An object two replicas list during a handover is on the health route's
+// lists once, and counted once: the later entry, as the view keeps one
+// record of it.
+func TestHealthListsAnObjectTwoReplicasListOnce(t *testing.T) {
+	snapshots := healthySnapshots()
+	for index, at := range []time.Time{now.Add(-time.Hour), now.Add(-time.Minute)} {
+		snapshots[index].RetainedShare = []Anomaly{{QueryGroup: "qg-handed-over", Replica: snapshots[index].Replica,
+			RetainedShare: &RetainedShareFacts{PercentOfShare: uint64(90 - 20*index), Since: at}}}
+		snapshots[index].ReadEarly = []Anomaly{{QueryGroup: "qg-handed-over", Replica: snapshots[index].Replica,
+			ReadEarly: &ReadEarlyFacts{SuggestedDelaySeconds: int64(90 - 20*index), Since: at}}}
+	}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+	body := requestJSON(t, handler, "/api/health")
+	for _, list := range []string{"retained_share", "read_early"} {
+		listed, _ := body[list].([]any)
+		if len(listed) != 1 || body[list+"_total"] != float64(1) {
+			t.Errorf("%s carried %v with total %v, want the object once", list, listed, body[list+"_total"])
+			continue
+		}
+		if kept, _ := listed[0].(map[string]any); kept["replica"] != snapshots[1].Replica {
+			t.Errorf("%s kept %v, want the later entry, %s's", list, kept, snapshots[1].Replica)
+		}
+	}
+}
+
 // Past FirstScreenListBound the health route carries the first few of each
 // object list in its order and says how many there are: counted before the
 // cut, or the page reads eight where there are twelve.
