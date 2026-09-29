@@ -313,8 +313,12 @@ func TestALineIsASampleWhenAnyReplicaCutAColumnItsRowsCameFrom(t *testing.T) {
 	at := now.Add(-10 * time.Second)
 	cut := Snapshot{Replica: "pod-a", TakenAt: at, Owned: 10, Determined: 10,
 		Anomalies: []Anomaly{row("qg-a", "pod-a", "QUERY_TIMEOUT")}, TotalAnomalies: 6}
+	// A second fact of this deployment's own on the uncut replica's row: the
+	// DEFECT line it opens came from the same column.
+	second := row("qg-b", "pod-b", "HISTORY_GAPPED")
+	second.Internal = &FailureRef{Stage: "other", Category: "completion_contract", Code: "STATE_VERSION_CONFLICT"}
 	whole := Snapshot{Replica: "pod-b", TakenAt: at, Owned: 10, Determined: 10,
-		Anomalies: []Anomaly{row("qg-b", "pod-b", "HISTORY_GAPPED")}, TotalAnomalies: 1}
+		Anomalies: []Anomaly{second}, TotalAnomalies: 1}
 	view := decidedView([]Snapshot{cut, whole})
 	merged := MergeReplicaParts(ReplicaPartOf(decidedView([]Snapshot{cut}), now), ReplicaPartOf(decidedView([]Snapshot{whole}), now))
 	want := Report(&view, now).Checks
@@ -329,7 +333,11 @@ func TestALineIsASampleWhenAnyReplicaCutAColumnItsRowsCameFrom(t *testing.T) {
 			}
 		}
 	}
-	if lines < 2 {
-		t.Fatalf("fixture: %d lines with rows, want one from each replica", lines)
+	defect := false
+	for _, report := range want {
+		defect = defect || (report.Code == CheckDefect && report.Objects > 0)
+	}
+	if lines < 3 || !defect {
+		t.Fatalf("fixture: %d lines with rows, DEFECT among them %v; want one from each replica and the second fact's", lines, defect)
 	}
 }
