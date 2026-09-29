@@ -22,125 +22,96 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-// thresholdPlan compiles a real one-Level static threshold Plan, the way the
-// formal detector gets one: value >= threshold is abnormal.
-func thresholdPlan(t testing.TB, threshold string) *strategy.CompiledPlan {
-	t.Helper()
-	config, _ := json.Marshal(map[string]any{"value_field": "value", "data_unit": "", "threshold_unit_prefix": "",
-		"precision": map[string]any{"decimal_places": 6, "rounding": "HALF_EVEN"},
-		"groups":    []any{map[string]any{"conditions": []any{map[string]any{"operator": "GTE", "threshold_decimal": threshold}}}}})
-	level := contract.LevelIRV2{Definition: contract.LevelDefinitionV2{LevelID: 1, Priority: 1}, Connector: contract.LevelConnectorAND,
-		DetectPlan:   contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: strategy.DetectorKindThreshold, Version: 1, Config: config}}},
-		TriggerPlan:  contract.TypedPlanV1{Type: strategy.TriggerPlanTypeNOfM, Version: 1, Config: json.RawMessage(`{"window_size":1,"required_anomalies":1,"step_seconds":60}`)},
-		RecoveryPlan: contract.TypedPlanV1{Type: strategy.RecoveryPlanTypeContinuousTriggerMiss, Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)}}
-	ref := contract.StrategyRefV2{TenantID: "default", StrategyID: "1001", Revision: "r1"}
-	projection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"}, BusinessIdentityField: "bk_biz_id",
-		MultiValueAlignment: "SINGLE_VALUE", DataUnit: "", MissingValuePolicy: contract.MissingValuePolicyRequired}
-	plan := contract.EvaluationPlanV2{PlanID: "1001", StrategyRef: ref, InputProjection: projection, StrategyIR: contract.StrategyIRV2{
-		Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref,
-		ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: 300, AggregationInterval: 60,
-			EvaluationInterval: 60, LatenessTolerance: 120},
-		InputProjection: projection, Levels: []contract.LevelIRV2{level}}}
-	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
-		MaxPlanBytes: 1 << 20, MaxLevelsPerPlan: 32, MaxAlgorithmsPerLevel: 32, MaxGroupsPerAlgorithm: 64,
-		MaxConditionsPerAlgorithm: 256, MaxASTNodesPerLevel: 4096, MaxRequiredHistoryPoints: 4096,
-		MaxTriggerWindowSize: 4096, MaxRecoveryConsecutiveWindows: 4096, MaxTriggerComputeCost: 1 << 20,
-		MaxCompiledPlanBytes: 1 << 20, MaxCacheEntries: 128, MaxCacheBytes: 16 << 20, NegativeCacheTTL: time.Minute, BudgetRevision: "test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{Plan: plan,
-		DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64), NormalizationDigest: strings.Repeat("2", 64),
-			IdentityFields: []string{"host"}, SourceTimeField: "time", ReceivedTimeField: "received_time"},
-		StateSemantics: strategy.StateSemantics{StateSchemaVersion: "s", CodecSemanticsVersion: "c", IdentitySchemaDigest: strings.Repeat("3", 64),
-			SourceTimeSemanticsVersion: "t", HistoryCellSemanticsVersion: "h"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	compiled, ok := result.Plan()
-	if !ok {
-		t.Fatalf("threshold plan did not compile: %#v", result.PlanTerminal())
-	}
-	return compiled
-}
+const (
+	sourceTimeSeries = "bk_monitor/time_series"
+	sourceLog        = "bk_log_search/log"
+	minute           = time.Minute
+)
 
-var planA = execution.PlanIdentity{StrategyID: "1001"}
-
-func series(points map[int64]string) *seriesRead {
-	return read(1, "", points)
-}
-
-func read(admitted uint64, dims string, points map[int64]string) *seriesRead {
-	kept := &seriesRead{admitted: admitted, dims: dims}
-	for _, bucket := range sortedBuckets(points) {
-		kept.buckets = append(kept.buckets, bucket)
-		kept.text = append(kept.text, points[bucket]...)
-		kept.ends = append(kept.ends, uint32(len(kept.text)))
-	}
-	return kept
-}
-
-func sortedBuckets(points map[int64]string) []int64 {
+func dataset(host string, points map[int64]string) *execution.Dataset {
 	buckets := make([]int64, 0, len(points))
-	for bucket := range points {
-		buckets = append(buckets, bucket)
+	for at := range points {
+		buckets = append(buckets, at)
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
-	return buckets
+	records := make([]contract.CanonicalRecordV2, 0, len(points))
+	for _, at := range buckets {
+		records = append(records, contract.CanonicalRecordV2{RecordID: fmt.Sprintf("%s-%d", host, at), SourceTime: at,
+			DimensionIdentity: contract.DimensionIdentityV2{Digest: "digest-" + host},
+			Values:            map[string]json.RawMessage{"value": json.RawMessage(points[at])},
+			Dimensions:        map[string]json.RawMessage{"host": json.RawMessage(`"` + host + `"`)}})
+	}
+	return execution.NewDataset(records)
 }
 
-// Every class of difference, and the verdict under the original threshold:
-// the unit is (series, bucket), a missing record is not a 0, and only a
-// Plan that admitted the series at the first read judges it.
-func TestCompareClassesEveryDifferenceAndJudgesUnderTheFrozenThreshold(t *testing.T) {
-	plans := []planCheck{planCheckOf(planA, thresholdPlan(t, "5"), "value")}
-	if !plans[0].comparable {
-		t.Fatal("a static threshold Plan is not comparable")
+func summarize(datasets ...*execution.Dataset) readSummary {
+	summary := newSummarizer("value")
+	for _, one := range datasets {
+		summary.add(one)
 	}
-	first := readSet{
-		"h1": series(map[int64]string{60: "0", 120: "2", 180: "4", 240: "6"}),
-		"h2": series(map[int64]string{60: "5"}),
-		"h4": read(0, "", map[int64]string{60: "1"}),
+	return summary.buckets
+}
+
+// The same data summed in another series order, split into other pages, or
+// with a number rendered another way, is the same bits: an order the
+// provider happens to deliver in must never read as late data.
+func TestTheSummaryDoesNotDependOnOrderOrPagesOrRendering(t *testing.T) {
+	h1 := map[int64]string{60: "1", 120: "2", 180: "3"}
+	h2 := map[int64]string{60: "5", 120: "7"}
+	whole := summarize(dataset("h1", h1), dataset("h2", h2))
+	for name, other := range map[string]readSummary{
+		"series reversed": summarize(dataset("h2", h2), dataset("h1", h1)),
+		"pages split":     summarize(dataset("h1", map[int64]string{180: "3"}), dataset("h2", h2), dataset("h1", map[int64]string{60: "1", 120: "2"})),
+		"number rendered": summarize(dataset("h1", map[int64]string{60: "1.0", 120: "2e0", 180: "3.00"}), dataset("h2", h2)),
+	} {
+		if len(other) != len(whole) {
+			t.Fatalf("%s: %d buckets, want %d", name, len(other), len(whole))
+		}
+		for at, bucket := range whole {
+			if other[at] != bucket {
+				t.Fatalf("%s: bucket %d is %+v, want %+v", name, at, other[at], bucket)
+			}
+		}
 	}
-	recheck := readSet{
-		"h1": read(0, `host="h1"`, map[int64]string{60: "1", 120: "7", 180: "4", 300: "9"}),
-		"h3": read(0, "", map[int64]string{60: "3"}),
-		"h4": read(0, "", map[int64]string{60: "8"}),
+	if zero, negative := summarize(dataset("h1", map[int64]string{60: "0"})), summarize(dataset("h1", map[int64]string{60: "-0"})); zero[60] != negative[60] {
+		t.Fatal("0 and -0 are two values")
 	}
-	got := compare(first, recheck, plans)
-	want := map[string]int{DiffZeroToNonzero: 1, DiffIncreased: 2, DiffUnchanged: 1, DiffVanishedPoint: 1, DiffNewPoint: 1,
-		DiffVanishedSeries: 1, DiffNewSeries: 1}
+	if whole.bytes() != len(whole)*summaryEntryBytes {
+		t.Fatalf("a summary of %d buckets holds %d bytes", len(whole), whole.bytes())
+	}
+}
+
+// A bucket that changed is named by how: more points, fewer, as many from
+// other series, or other values. A read compared with itself changed
+// nothing.
+func TestCompareNamesEveryChange(t *testing.T) {
+	earlier := summarize(dataset("h1", map[int64]string{60: "1", 120: "2", 180: "3", 240: "4"}), dataset("h2", map[int64]string{300: "1"}))
+	later := summarize(dataset("h1", map[int64]string{60: "1", 120: "9", 180: "3"}), dataset("h2", map[int64]string{60: "0"}),
+		dataset("h3", map[int64]string{300: "1"}))
+	got := compareSummaries(earlier, later)
+	// 60: h1 and h2 where h1 was alone - added; 120: 2 -> 9 - values; 240:
+	// gone - removed; 300: h2 -> h3 - series; 180: unchanged.
+	want := map[string]int{ChangePointsAdded: 1, ChangeValuesChanged: 1, ChangePointsRemoved: 1, ChangeSeriesChanged: 1}
+	if len(got) != len(want) {
+		t.Fatalf("changes %v, want %v", got, want)
+	}
 	for class, n := range want {
-		if got.differences[class] != n {
-			t.Fatalf("differences %v, want %v", got.differences, want)
+		if got[class] != n {
+			t.Fatalf("changes %v, want %v", got, want)
 		}
 	}
-	if got.buckets != 8 || got.newSeries != 1 || got.vanishedSeries != 1 || !got.differsInWindow {
-		t.Fatalf("buckets %d new %d vanished %d differs %t", got.buckets, got.newSeries, got.vanishedSeries, got.differsInWindow)
+	if same := compareSummaries(earlier, earlier); len(same) != 0 {
+		t.Fatalf("a read compared with itself changed: %v", same)
 	}
-	// h1: 0->1 normal->normal, 2->7 normal->abnormal, 4->4 unchanged, absent->9 abnormal.
-	// h4 was not admitted by the Plan: 1->8 is data only. h3 is new: no judgment.
-	wantJudge := map[string]int{JudgeUnchanged: 2, JudgeNormalToAbnormal: 1, JudgeAbsentToAbnormal: 1}
-	for class, n := range wantJudge {
-		if got.judgments[class] != n {
-			t.Fatalf("judgments %v, want %v", got.judgments, wantJudge)
-		}
+	// Sums, not exclusive-ors: a series delivered twice in a bucket does not
+	// cancel itself out, so two of h1 and two of h2 are other series.
+	twice := func(host string) readSummary {
+		return summarize(dataset(host, map[int64]string{60: "1"}), dataset(host, map[int64]string{60: "1"}))
 	}
-	if got.judgments[JudgeAbnormalToNormal] != 0 || len(got.examples) == 0 || got.examples[0].Dimensions == "" && got.examples[0].Class != DiffVanishedSeries {
-		t.Fatalf("judgments %v examples %+v", got.judgments, got.examples)
-	}
-	if unchanged := compare(first, first, plans); unchanged.differsInWindow || unchanged.differences[DiffUnchanged] != 6 {
-		t.Fatalf("a read compared with itself differs: %+v", unchanged.differences)
-	}
-	if got := compare(readSet{"h1": series(map[int64]string{60: "6"})}, readSet{"h1": series(map[int64]string{60: "2"})}, plans); got.judgments[JudgeAbnormalToNormal] != 1 || got.differences[DiffDecreased] != 1 {
-		t.Fatalf("6 -> 2 under >= 5: %v %v", got.differences, got.judgments)
-	}
-	notComparable := []planCheck{{identity: planA}}
-	if got := compare(first, recheck, notComparable); len(got.judgments) != 0 || got.differences[DiffIncreased] != 2 {
-		t.Fatalf("a Plan the lookback cannot decide was judged: %v", got.judgments)
+	if got := compareSummaries(twice("h1"), twice("h2")); got[ChangeSeriesChanged] != 1 || len(got) != 1 {
+		t.Fatalf("h1 twice to h2 twice = %v, want the series changed", got)
 	}
 }
 
@@ -150,75 +121,83 @@ type clock struct {
 }
 
 func (c *clock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
-func (c *clock) advance(d time.Duration) {
+func (c *clock) set(at time.Time) {
 	c.mu.Lock()
-	c.at = c.at.Add(d)
+	c.at = at
 	c.mu.Unlock()
 }
 
-func logSpec(digest string) execution.PhysicalQuerySpec {
-	return execution.PhysicalQuerySpec{Digest: execution.PhysicalQueryDigest(digest),
-		LogicalWindow: execution.QueryWindow{Start: 1_700_000_000, End: 1_700_000_060},
-		PlanFacts: execution.QueryPlanFacts{SourceSemantics: []string{SourceLogSearch},
-			QueryList:     []execution.QueryClause{{DataSource: "bklog", TimeAggregation: execution.QueryFunction{Method: "count_over_time"}}},
-			Normalization: execution.DatasetNormalizationSpec{CanonicalValueField: "value"}}}
-}
+type answer func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error)
 
-// sampledQuery finds a Slot the fixed sampling picks for the spec.
-func sampledQuery(t testing.TB, spec execution.PhysicalQuerySpec, plans []execution.DuePlan) Query {
-	t.Helper()
-	for at := execution.EvaluationTime(60); at < 60*100000; at += 60 {
-		if sampled(spec.Digest, at, SampleOneIn) {
-			return Query{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: at}},
-				Spec: spec, Operation: execution.OperationNormal, AttemptNo: 1, Plans: plans}
+func full(series ...*execution.Dataset) answer {
+	return func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+		for _, one := range series {
+			_ = sink.ConsumeProviderSeries(context.Background(), execution.ProviderSeriesBatch{Dataset: one,
+				Delivery: execution.SeriesDelivery{Bytes: 100}})
 		}
+		return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
 	}
-	t.Fatal("no sampled Slot")
-	return Query{}
-}
-
-func dataset(host string, points map[int64]string) *execution.Dataset {
-	records := make([]contract.CanonicalRecordV2, 0, len(points))
-	for _, at := range sortedBuckets(points) {
-		value := points[at]
-		records = append(records, contract.CanonicalRecordV2{RecordID: fmt.Sprintf("%s-%d", host, at), SourceTime: at,
-			DimensionIdentity: contract.DimensionIdentityV2{Digest: "digest-" + host},
-			Values:            map[string]json.RawMessage{"value": json.RawMessage(value)},
-			Dimensions:        map[string]json.RawMessage{"host": json.RawMessage(`"` + host + `"`)}})
-	}
-	return execution.NewDataset(records)
 }
 
 type fixture struct {
+	t       *testing.T
 	clock   *clock
 	engine  *Engine
-	answers chan func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error)
-	refuse  string
-	owned   bool
+	answers chan answer
 	mu      sync.Mutex
+	refuse  string
+	yield   chan struct{}
+	owned   map[execution.QueryGroupIdentity]bool
+	faults  []string
 }
 
-func newFixture(t *testing.T, memory int) *fixture {
+func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{clock: &clock{at: time.Unix(1_700_000_100, 0)}, owned: true,
-		answers: make(chan func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error), 8)}
-	engine, err := New(Options{Now: f.clock.now, MemoryBytes: memory,
-		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+	f := &fixture{t: t, clock: &clock{at: time.Unix(1_700_000_100, 0)}, answers: make(chan answer, 16),
+		owned: map[execution.QueryGroupIdentity]bool{"qg": true, "qg-b": true}}
+	engine, err := New(Options{Now: f.clock.now, Sources: []string{sourceTimeSeries, sourceLog},
+		Refusals: []string{"waiters", "headroom", "lookback_limit"}, LimitRefusal: "lookback_limit", UnspreadFirstSamples: true,
+		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			if _, ok := ctx.Deadline(); !ok {
 				t.Error("a recheck ran without a deadline")
 			}
-			answer := <-f.answers
-			return answer(sink)
+			select {
+			case next := <-f.answers:
+				return next(sink)
+			case <-ctx.Done():
+				return execution.ProviderCompletion{}, ctx.Err()
+			}
 		},
-		Permit: func() (func(), string) {
+		Permit: func() (func(), <-chan struct{}, string) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			if f.refuse != "" {
-				return nil, f.refuse
+				return nil, nil, f.refuse
 			}
-			return func() {}, ""
+			return func() {}, f.yield, ""
 		},
-		Owns: func(execution.QueryGroupIdentity) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.owned }})
+		Owns: func(queryGroup execution.QueryGroupIdentity) bool {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.owned[queryGroup]
+		},
+		Owned: func() int {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			n := 0
+			for _, owned := range f.owned {
+				if owned {
+					n++
+				}
+			}
+			return n
+		},
+		OnFault: func(reason string, _ execution.QueryGroupIdentity) {
+			f.mu.Lock()
+			f.faults = append(f.faults, reason)
+			f.mu.Unlock()
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,300 +211,1178 @@ func (f *fixture) set(change func()) {
 	f.mu.Unlock()
 }
 
-func full(series ...*execution.Dataset) func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-	return func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-		for _, one := range series {
-			_ = sink.ConsumeProviderSeries(context.Background(), execution.ProviderSeriesBatch{Dataset: one})
+// group is a copy of one Query Group's state.
+func (f *fixture) group(queryGroup execution.QueryGroupIdentity) group {
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	return *f.engine.groups[queryGroup]
+}
+
+// rung is the next rung of queryGroup's sample, or of the one waiting for
+// its deep recheck when it has none, read under the engine's lock; false
+// when it has neither.
+func (f *fixture) rung(queryGroup execution.QueryGroupIdentity) (int, bool) {
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	state := f.engine.groups[queryGroup]
+	for _, candidate := range [...]*sample{state.sample, state.probe} {
+		if candidate != nil {
+			return candidate.rung, true
 		}
-		return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
+	}
+	return 0, false
+}
+
+// query is a formal first read of one Query Group's Slot at slot, over the
+// step before it.
+func query(queryGroup string, slot int64, step time.Duration, semantics ...string) Query {
+	return Query{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{
+		QueryGroup: execution.QueryGroupIdentity(queryGroup), EvaluationTime: execution.EvaluationTime(slot)}},
+		Spec: execution.PhysicalQuerySpec{Digest: execution.PhysicalQueryDigest(queryGroup + "-query"),
+			LogicalWindow: execution.QueryWindow{Start: slot - int64(step/time.Second), End: slot},
+			PlanFacts: execution.QueryPlanFacts{SourceSemantics: semantics, StepMillis: step.Milliseconds(),
+				Normalization: execution.DatasetNormalizationSpec{CanonicalValueField: "value"}}},
+		Operation: execution.OperationNormal, AttemptNo: 1}
+}
+
+// point is h1 at the one bucket of the minute window before slot.
+func point(slot int64, value string) *execution.Dataset {
+	return dataset("h1", map[int64]string{slot - 60: value})
+}
+
+// capture takes q as its Query Group's sample, now, with data points.
+func (f *fixture) capture(q Query, datasets ...*execution.Dataset) {
+	f.t.Helper()
+	read := f.engine.Begin(q)
+	if read == nil || read.summary == nil {
+		f.t.Fatalf("%s at %d was not taken as a sample", q.Contract.Slot.QueryGroup, q.Contract.Slot.EvaluationTime)
+	}
+	for _, one := range datasets {
+		read.Series(one, 100)
+	}
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+}
+
+// recheck reads the sample's rung at its moment with the answer given and
+// waits for the outcome to be counted.
+func (f *fixture) recheck(source string, readAt time.Time, rung int, step time.Duration, next answer, outcome string) Stats {
+	f.t.Helper()
+	before := f.engine.Stats().Sources[source].Rechecks[RungNames[rung]][outcome]
+	f.clock.set(readAt.Add(rungDelay(rung, step)))
+	f.answers <- next
+	f.engine.Step(context.Background())
+	return f.waitFor(func(stats Stats) bool { return stats.Sources[source].Rechecks[RungNames[rung]][outcome] > before })
+}
+
+// sample reads one sample of queryGroup to its end, its deep recheck
+// included, at a minute-step window ending now: first at its first read,
+// and values(rung) at each rung.
+func (f *fixture) sample(queryGroup, source string, step time.Duration, first string, values func(rung int) string) Stats {
+	f.t.Helper()
+	slot := f.clock.now().Unix()
+	f.capture(query(queryGroup, slot, step, source), point(slot, first))
+	readAt := f.clock.now()
+	stats := f.engine.Stats()
+	for {
+		rung, pending := f.rung(execution.QueryGroupIdentity(queryGroup))
+		if !pending {
+			return stats
+		}
+		stats = f.recheck(source, readAt, rung, step, full(point(slot, values(rung))), RecheckCompared)
 	}
 }
 
-func (f *fixture) waitRechecks(t *testing.T, source, tier, outcome string, n uint64) Stats {
-	t.Helper()
+// rest moves the clock to the moment queryGroup may be sampled again, or
+// leaves it where it is when that has passed.
+func (f *fixture) rest(queryGroup execution.QueryGroupIdentity) {
+	if next := f.group(queryGroup).nextAt; next.After(f.clock.now()) {
+		f.clock.set(next)
+	}
+}
+
+func (f *fixture) waitFor(done func(Stats) bool) Stats {
+	f.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		stats := f.engine.Stats()
-		if stats.Rechecks[source][tier][outcome] >= n {
+		if done(stats) {
 			return stats
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("rechecks %v, waiting for %s/%s/%s >= %d", stats.Rechecks[source], source, tier, outcome, n)
+			f.t.Fatalf("condition not reached: %+v", stats)
 		}
 		time.Sleep(time.Millisecond)
 	}
 }
 
-// A sampled first read of 0 that is 1 when read again: counted as a zero
-// becoming non-zero and, under the original >= 1, a normal becoming
-// abnormal; rechecked at each tier; released when the last tier is done.
-// Nothing here can write a State: the engine has no port to one.
-func TestASampledReadIsRecheckedAtEveryTierAndReleased(t *testing.T) {
-	f := newFixture(t, 1<<20)
-	query := sampledQuery(t, logSpec("q-zero"), []execution.DuePlan{{Identity: planA, CompiledPlan: thresholdPlan(t, "1")}})
-	read := f.engine.Begin(query)
-	if read == nil {
-		t.Fatal("a sampled log query was not kept")
+var steady = map[int64]string{1_700_000_040: "3"}
+
+// Every owned Query Group keeps one sample at a time: the first formal read
+// of a Slot is taken, a second physical query of it and the reads while the
+// sample is in flight are not, another Query Group is; nothing is sampled
+// by chance. A retry or a recovery read is not a formal first read. Every
+// formal first read is counted, with its bytes.
+func TestEveryOwnedQueryGroupKeepsOneSampleAtATime(t *testing.T) {
+	f := newFixture(t)
+	first := query("qg", 1_700_000_100, minute, sourceLog)
+	read := f.engine.Begin(first)
+	if read == nil || read.summary == nil {
+		t.Fatal("the first read of an owned Query Group was not taken")
 	}
-	read.Series(dataset("h1", map[int64]string{60: "0"}), nil)
+	if second := f.engine.Begin(first); second == nil || second.summary != nil {
+		t.Fatal("a second physical query of the Slot was taken while the first was being read")
+	}
+	read.Series(dataset("h1", steady), 100)
 	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	if stats := f.engine.Stats(); stats.Pending != 1 || stats.PendingBytes == 0 || stats.Samples[SourceLogSearch][OutcomeCaptured] != 1 {
-		t.Fatalf("after capture %+v", stats.Samples)
+	next := f.engine.Begin(query("qg", 1_700_000_160, minute, sourceLog))
+	if next.summary != nil {
+		t.Fatal("the next Slot was taken while the sample was in flight")
 	}
-	f.engine.Step(context.Background())
-	if f.engine.Stats().Rechecks[SourceLogSearch]["t90"][RecheckCompared] != 0 {
-		t.Fatal("rechecked before its tier")
+	next.Series(dataset("h1", steady), 50)
+	next.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	retry := query("qg-b", 1_700_000_100, minute, sourceTimeSeries)
+	retry.AttemptNo = 2
+	recovery := query("qg-b", 1_700_000_100, minute, sourceTimeSeries)
+	recovery.Operation = execution.OperationReplay
+	if f.engine.Begin(retry) != nil || f.engine.Begin(recovery) != nil {
+		t.Fatal("a retry or a recovery read was seen as a formal first read")
 	}
-	for index, offset := range []time.Duration{90 * time.Second, 120 * time.Second, 300 * time.Second} {
-		f.clock.advance(offset)
-		f.answers <- full(dataset("h1", map[int64]string{60: "1"}))
-		f.engine.Step(context.Background())
-		f.waitRechecks(t, SourceLogSearch, TierNames[index], RecheckCompared, 1)
-	}
+	f.capture(query("qg-b", 1_700_000_100, minute, sourceTimeSeries), dataset("h1", steady))
 	stats := f.engine.Stats()
-	if stats.Differences[SourceLogSearch]["t90"][DiffZeroToNonzero] != 1 || stats.Judgments[SourceLogSearch]["t90"][JudgeNormalToAbnormal] != 1 ||
-		stats.ComparedBuckets[SourceLogSearch]["t510"] != 1 || stats.ComparedWindows[SourceLogSearch]["t210"]["yes"] != 1 {
-		t.Fatalf("differences %v judgments %v buckets %v windows %v", stats.Differences[SourceLogSearch], stats.Judgments[SourceLogSearch],
-			stats.ComparedBuckets[SourceLogSearch], stats.ComparedWindows[SourceLogSearch])
+	if stats.Pending != 2 || stats.PendingBytes != 2*summaryEntryBytes {
+		t.Fatalf("pending %d bytes %d, want two one-bucket samples", stats.Pending, stats.PendingBytes)
 	}
-	if stats.Pending != 0 || stats.PendingBytes != 0 || stats.Samples[SourceLogSearch][OutcomeCompleted] != 1 {
-		t.Fatalf("after the last tier pending %d bytes %d samples %v", stats.Pending, stats.PendingBytes, stats.Samples[SourceLogSearch])
+	if stats.Coverage != (Coverage{Owned: 2, Covered: 2, Ratio: 1}) {
+		t.Fatalf("coverage %+v, want both owned Query Groups", stats.Coverage)
 	}
-	if len(stats.Recent) != 3 || stats.Recent[0].ReadAgeSeconds != 130 || stats.Recent[0].Examples[0].Class != DiffZeroToNonzero {
-		t.Fatalf("recent %+v", stats.Recent)
-	}
-	if stats.ByAge[SourceLogSearch]["le_240s"]["yes"] != 1 || stats.ByAge[SourceLogSearch]["le_360s"]["yes"] != 1 || stats.ByAge[SourceLogSearch]["le_600s"]["yes"] != 1 {
-		t.Fatalf("delay profile %v", stats.ByAge[SourceLogSearch])
+	log := stats.Sources[sourceLog]
+	if log.FirstReads != 3 || log.FirstReadBytes != 150 || stats.Sources[sourceTimeSeries].FirstReads != 1 {
+		t.Fatalf("first reads log %d (%d bytes) time series %d", log.FirstReads, log.FirstReadBytes, stats.Sources[sourceTimeSeries].FirstReads)
 	}
 }
 
-// A first read with no series at all is a sample: the empty dimension set
-// is exactly what later arrivals are measured against.
-func TestAnEmptyFirstReadIsKeptAndItsNewSeriesAreDataOnly(t *testing.T) {
-	f := newFixture(t, 1<<20)
-	read := f.engine.Begin(sampledQuery(t, logSpec("q-empty"), []execution.DuePlan{{Identity: planA, CompiledPlan: thresholdPlan(t, "1")}}))
-	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	f.clock.advance(90 * time.Second)
-	f.answers <- full(dataset("h9", map[int64]string{60: "3"}))
-	f.engine.Step(context.Background())
-	stats := f.waitRechecks(t, SourceLogSearch, "t90", RecheckCompared, 1)
-	if stats.Series[SourceLogSearch]["t90"]["new"] != 1 || stats.Differences[SourceLogSearch]["t90"][DiffNewSeries] != 1 {
-		t.Fatalf("new series %v differences %v", stats.Series[SourceLogSearch]["t90"], stats.Differences[SourceLogSearch]["t90"])
+// A first read that was not complete is not a sample and leaves the Query
+// Group free to be sampled at its next Slot.
+func TestAnIncompleteFirstReadLeavesTheQueryGroupFree(t *testing.T) {
+	f := newFixture(t)
+	read := f.engine.Begin(query("qg", 1_700_000_100, minute, sourceLog))
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessPartial}, nil)
+	if n := f.engine.Stats().Sources[sourceLog].Samples[OutcomeFirstReadIncomplete]; n != 1 {
+		t.Fatalf("incomplete first reads %d, want 1", n)
 	}
-	for class, n := range stats.Judgments[SourceLogSearch]["t90"] {
-		if n != 0 {
-			t.Fatalf("a series with no admission was judged: %s=%d", class, n)
-		}
-	}
+	f.capture(query("qg", 1_700_000_160, minute, sourceLog))
 }
 
-// Every way a window is not observed is named and kept out of the
-// denominators: not sampled, an incomplete first read, a first read past
-// its bounds, no memory, a lost owner, no permit past the tier's window,
-// and a recheck that failed, was partial or ran past its bounds.
-func TestEveryUnobservedWindowIsNamedAndNeverCountedAsStable(t *testing.T) {
-	f := newFixture(t, 1<<20)
-	spec := logSpec("q-names")
-	for _, query := range []Query{
-		{Spec: spec, Operation: execution.OperationRetry, AttemptNo: 1},
-		{Spec: spec, Operation: execution.OperationNormal, AttemptNo: 2},
-		{Spec: execution.PhysicalQuerySpec{Digest: "q", PlanFacts: execution.QueryPlanFacts{SourceSemantics: []string{"bk_monitor/time_series"},
-			QueryList: []execution.QueryClause{{}}}}, Operation: execution.OperationNormal, AttemptNo: 1},
-	} {
-		if f.engine.Begin(query) != nil {
-			t.Fatalf("sampled %+v", query.Operation)
-		}
-	}
-	query := sampledQuery(t, spec, nil)
-	f.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessPartial}, nil)
-	f.engine.Begin(query).Complete(execution.ProviderCompletion{}, errors.New("query failed"))
-	big := f.engine.Begin(query)
-	points := map[int64]string{}
-	for at := int64(60); at <= int64(MaxPointsPerSample+1)*60; at += 60 {
-		points[at] = "1"
-	}
-	big.Series(dataset("h1", points), nil)
-	big.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	stats := f.engine.Stats()
-	if stats.Samples[SourceLogSearch][OutcomeFirstReadIncomplete] != 2 || stats.Samples[SourceLogSearch][OutcomeUncovered] != 1 || stats.Pending != 0 {
-		t.Fatalf("samples %v pending %d", stats.Samples[SourceLogSearch], stats.Pending)
-	}
-
-	tiny := newFixture(t, 10)
-	tiny.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	if tiny.engine.Stats().Samples[SourceLogSearch][OutcomeMemoryFull] != 1 {
-		t.Fatal("a sample past the memory share was kept")
-	}
-
-	f.set(func() { f.owned = false })
-	f.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	f.set(func() { f.owned = true })
-	if f.engine.Stats().Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
-		t.Fatal("a read completed after its owner left was kept")
-	}
-
-	// No permit through a tier's whole window: yielded, and the next tier.
-	f.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	f.set(func() { f.refuse = "waiters" })
-	f.clock.advance(90 * time.Second)
-	f.engine.Step(context.Background())
-	f.clock.advance(TierWindow + time.Second)
-	f.engine.Step(context.Background())
-	if n := f.engine.Stats().Rechecks[SourceLogSearch]["t90"][RecheckYielded]; n != 1 {
-		t.Fatalf("yielded %d, want 1", n)
-	}
-	f.set(func() { f.refuse = "" })
-	// t210 fails, then later samples are partial and truncated.
-	f.clock.advance(60 * time.Second)
-	f.answers <- func(execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-		return execution.ProviderCompletion{}, errors.New("timeout")
-	}
-	f.engine.Step(context.Background())
-	f.waitRechecks(t, SourceLogSearch, "t210", RecheckFailed, 1)
-	f.clock.advance(300 * time.Second)
-	f.answers <- func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-		return execution.ProviderCompletion{Completeness: execution.CompletenessPartial}, nil
-	}
-	f.engine.Step(context.Background())
-	stats = f.waitRechecks(t, SourceLogSearch, "t510", RecheckPartial, 1)
-	for _, tier := range TierNames {
-		if stats.ComparedBuckets[SourceLogSearch][tier] != 0 || stats.ComparedWindows[SourceLogSearch][tier]["no"] != 0 {
-			t.Fatalf("an unobserved window entered the denominators at %s: %v", tier, stats.ComparedWindows[SourceLogSearch])
-		}
-	}
-
-	// A recheck past the bounds is truncated, not compared.
-	g := newFixture(t, 1<<20)
-	g.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	g.clock.advance(90 * time.Second)
-	g.answers <- full(dataset("h1", points))
-	g.engine.Step(context.Background())
-	g.waitRechecks(t, SourceLogSearch, "t90", RecheckTruncated, 1)
-
-	// An owner lost while waiting drops the sample.
-	h := newFixture(t, 1<<20)
-	h.engine.Begin(query).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	h.engine.Forget("qg")
-	if stats := h.engine.Stats(); stats.Pending != 0 || stats.PendingBytes != 0 || stats.Rechecks[SourceLogSearch]["t90"][RecheckOwnerLost] != 1 {
-		t.Fatalf("after Forget pending %d bytes %d", stats.Pending, stats.PendingBytes)
-	}
-}
-
-// Every counter cell exists before anything happened: a zero is a count.
-func TestEveryCounterCellExistsFromTheStart(t *testing.T) {
-	stats := newFixture(t, 1).engine.Stats()
-	for _, source := range Sources {
-		if len(stats.Samples[source]) != len(SampleOutcomes) || len(stats.ByAge[source]) != len(AgeBuckets) {
-			t.Fatalf("%s samples %v ages %v", source, stats.Samples[source], stats.ByAge[source])
-		}
-		for _, tier := range TierNames {
-			if len(stats.Rechecks[source][tier]) != len(RecheckOutcomes) || len(stats.Differences[source][tier]) != len(Differences) ||
-				len(stats.Judgments[source][tier]) != len(Judgments) {
-				t.Fatalf("%s/%s cells missing", source, tier)
-			}
-		}
-	}
-	if _, measured := SourceOf(execution.QueryPlanFacts{SourceSemantics: []string{SourceCollectorLog},
-		QueryList: []execution.QueryClause{{FieldName: "event.count", TimeAggregation: execution.QueryFunction{Method: "sum_over_time"}}}}); !measured {
-		t.Fatal("the collector's log event count is not measured")
-	}
-}
-
-// Not sampled costs nothing; sampled at the bounds is timed.
-func BenchmarkFirstReadCapture(b *testing.B) {
-	engine, _ := New(Options{Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-		return execution.ProviderCompletion{}, nil
-	}, Permit: func() (func(), string) { return nil, "x" }, Owns: func(execution.QueryGroupIdentity) bool { return true }, MemoryBytes: 1 << 30})
-	spec := logSpec("q-bench")
-	b.Run("not_sampled", func(b *testing.B) {
-		query := Query{Spec: spec, Operation: execution.OperationRetry, AttemptNo: 1}
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			if engine.Begin(query) != nil {
-				b.Fatal("sampled")
-			}
-		}
-	})
-	b.Run("sampled_at_bounds", func(b *testing.B) {
-		query := sampledQuery(b, spec, nil)
-		sets := make([]*execution.Dataset, MaxSeriesPerSample)
-		for i := range sets {
-			points := map[int64]string{}
-			for p := 0; p < MaxPointsPerSample/MaxSeriesPerSample; p++ {
-				points[int64(60*(p+1))] = "12"
-			}
-			sets[i] = dataset(fmt.Sprintf("h%d", i), points)
-		}
-		b.ReportAllocs()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			read := engine.Begin(query)
-			for _, one := range sets {
-				read.Series(one, nil)
-			}
-		}
-	})
-}
-
-// A series delivered out of order, or with a bucket twice, is kept in
-// bucket order with the later record of a bucket, as a map would have.
-func TestAKeptSeriesIsInBucketOrderWithTheLaterRecordOfABucket(t *testing.T) {
-	kept := &seriesRead{}
-	kept.keep(dataset("h1", map[int64]string{120: "2", 180: "3"}), "value")
-	kept.keep(dataset("h1", map[int64]string{60: "1", 120: "7"}), "value")
-	kept.seal()
-	var got []string
-	for index, bucket := range kept.buckets {
-		got = append(got, fmt.Sprintf("%d=%s", bucket, kept.value(index)))
-	}
-	if strings.Join(got, ",") != "60=1,120=7,180=3" {
-		t.Fatalf("kept %v", got)
-	}
-}
-
-// A Query Group that leaves between Step's ownership check and the moment
-// Step marks the sample running -- Forget from the bundle's removal, here
-// from inside Permit, which sits exactly in that window -- settles the
-// sample once, as owner_lost: its recheck never starts, the permit is given
-// back, and the memory charged returns to zero, not below.
-func TestASampleForgottenWhileStepTakesItIsSettledOnce(t *testing.T) {
-	at := time.Unix(1_700_000_100, 0)
-	var engine *Engine
-	var mu sync.Mutex
-	owned, released := true, 0
-	var err error
-	engine, err = New(Options{Now: func() time.Time { return at }, MemoryBytes: 1 << 20,
+// A process spreads its Query Groups' first samples over an hour, by a hash
+// of each: they all read for the first time within a period of its start,
+// and would all be rechecked at once otherwise.
+func TestFirstSamplesAreSpreadOverAnHour(t *testing.T) {
+	now := time.Unix(1_700_000_100, 0)
+	engine, err := New(Options{Now: func() time.Time { return now },
 		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-			t.Error("the recheck of a forgotten sample started")
 			return execution.ProviderCompletion{}, nil
 		},
-		Owns: func(execution.QueryGroupIdentity) bool { mu.Lock(); defer mu.Unlock(); return owned },
-		Permit: func() (func(), string) {
-			mu.Lock()
-			owned = false
-			mu.Unlock()
-			engine.Forget("qg")
-			return func() { mu.Lock(); released++; mu.Unlock() }, ""
-		}})
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1000 }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	read := engine.Begin(sampledQuery(t, logSpec("q-race"), nil))
-	read.Series(dataset("h1", map[int64]string{60: "1"}), nil)
+	earliest, latest, sampled := time.Duration(restCap), time.Duration(0), 0
+	for index := 0; index < 1000; index++ {
+		queryGroup := fmt.Sprintf("qg-%d", index)
+		if read := engine.Begin(query(queryGroup, 1_700_000_100, minute, sourceLog)); read.summary != nil {
+			sampled++
+		}
+		wait := engine.groups[execution.QueryGroupIdentity(queryGroup)].nextAt.Sub(now)
+		earliest, latest = min(earliest, wait), max(latest, wait)
+	}
+	if sampled > 5 || earliest < 0 || latest >= restCap || latest-earliest < restCap*9/10 {
+		t.Fatalf("%d of 1000 sampled at once; first samples from %v to %v, want spread over the hour", sampled, earliest, latest)
+	}
+}
+
+// Rungs are counted in the Query Group's data steps, not its evaluation
+// period: a Query Group evaluated once a day over minute data is read again
+// 1.5 minutes after its read, not 1.5 days.
+func TestRungsFollowTheDataStepNotTheEvaluationPeriod(t *testing.T) {
+	f := newFixture(t)
+	day := int64(24 * 60 * 60)
+	f.capture(query("qg", 1_700_000_100-day, minute, sourceTimeSeries), dataset("h1", steady))
+	readAt := f.clock.now()
+	f.capture(query("qg-b", 1_700_000_100, 10*time.Second, sourceTimeSeries), dataset("h1", steady))
+	compared := func(at time.Duration, answers int) uint64 {
+		t.Helper()
+		before := f.engine.Stats().Sources[sourceTimeSeries].Rechecks[RungNames[0]][RecheckCompared]
+		f.clock.set(readAt.Add(at))
+		for range answers {
+			f.answers <- full(dataset("h1", steady))
+		}
+		f.engine.Step(context.Background())
+		if answers > 0 {
+			f.waitFor(func(stats Stats) bool {
+				return stats.Sources[sourceTimeSeries].Rechecks[RungNames[0]][RecheckCompared] >= before+uint64(answers)
+			})
+		}
+		return f.engine.Stats().Sources[sourceTimeSeries].Rechecks[RungNames[0]][RecheckCompared]
+	}
+	// Just before 15 seconds nothing is due; at 15 - 1.5 ten-second steps -
+	// the ten-second Query Group is read, and the daily one over minute data
+	// only at 90, 1.5 of its minute steps.
+	if n := compared(14*time.Second, 0); n != 0 {
+		t.Fatalf("a rung was read before its moment: %d", n)
+	}
+	if n := compared(15*time.Second, 1); n != 1 {
+		t.Fatalf("compared at 15s: %d, want the ten-second Query Group only", n)
+	}
+	if n := compared(89*time.Second, 0); n != 1 {
+		t.Fatalf("compared at 89s: %d, want the daily Query Group still waiting", n)
+	}
+	if n := compared(90*time.Second, 1); n != 2 {
+		t.Fatalf("compared at 90s: %d, want both Query Groups", n)
+	}
+}
+
+// A Query Group whose data is always complete at the first read reads one
+// rung and rests longer after each clean sample, doubling up to an hour
+// whatever its step: about one recheck an hour, at ten seconds, a minute or
+// five minutes a step. Its first sample and every fourth one after it are
+// probed; the rest runs from its one rung, not from its deep recheck.
+func TestAPunctualQueryGroupIsRecheckedAboutHourlyWhateverItsStep(t *testing.T) {
+	for step, want := range map[time.Duration][]float64{
+		minute:           {3, 6, 12, 24, 48, 60, 60, 60},
+		10 * time.Second: {3, 6, 12, 24, 48, 96, 192, 360, 360},
+		5 * minute:       {3, 6, 12, 12},
+	} {
+		f := newFixture(t)
+		rests := []float64{}
+		for range want {
+			readAt := f.clock.now()
+			f.sample("qg", sourceTimeSeries, step, "3", func(int) string { return "3" })
+			state := f.group("qg")
+			if state.depth != 1 {
+				t.Fatalf("step %v: depth %d", step, state.depth)
+			}
+			rests = append(rests, state.rest)
+			finished := readAt.Add(rungDelay(0, step))
+			rest := min(time.Duration(state.rest*float64(step)), restCap)
+			if wantAt := finished.Add(time.Duration(float64(rest) * restSpread("qg"))); !state.nextAt.Equal(wantAt) {
+				t.Fatalf("step %v: next sample at %v, want %v", step, state.nextAt, wantAt)
+			}
+			// Not before its rest has passed, and at once after.
+			f.clock.set(state.nextAt.Add(-time.Second))
+			if read := f.engine.Begin(query("qg", f.clock.now().Unix(), step, sourceTimeSeries)); read.summary != nil {
+				t.Fatalf("step %v: sampled before its rest of %v passed", step, rest)
+			}
+			f.rest("qg")
+		}
+		for index := range want {
+			if rests[index] != want[index] {
+				t.Fatalf("step %v: rests %v, want %v", step, rests, want)
+			}
+		}
+		if rest := time.Duration(rests[len(rests)-1] * float64(step)); rest < restCap {
+			t.Fatalf("step %v: settled at a rest of %v, want an hour", step, rest)
+		}
+		source := f.engine.Stats().Sources[sourceTimeSeries]
+		if source.Samples[OutcomeCompleted] != uint64(len(want)) || source.Probes[ProbeClean] != uint64((len(want)+probeEvery-1)/probeEvery) {
+			t.Fatalf("step %v: completed %d, probes %v", step, source.Samples[OutcomeCompleted], source.Probes)
+		}
+	}
+}
+
+// A Query Group whose data still arrives at the last planned rung is
+// followed a rung further within the same sample, the window is complete at
+// the last rung that changed, the group reads one rung past it from then on,
+// and rests only as long as that deepest rung.
+func TestALateQueryGroupIsFollowedToWhereItsDataStops(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	readAt := f.clock.now()
+	f.recheck(sourceLog, readAt, 0, minute, full(point(slot, "4")), RecheckCompared)
+	f.recheck(sourceLog, readAt, 1, minute, full(point(slot, "4"), dataset("h2", map[int64]string{slot - 60: "1"})), RecheckCompared)
+	f.recheck(sourceLog, readAt, 2, minute, full(point(slot, "4"), dataset("h2", map[int64]string{slot - 60: "1"})), RecheckCompared)
+	// The first sample is probed: nothing more at the deepest rung.
+	stats := f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(point(slot, "4"), dataset("h2", map[int64]string{slot - 60: "1"})), RecheckCompared)
+	source := stats.Sources[sourceLog]
+	if source.ChangedWindows[RungNames[0]] != 1 || source.ChangedWindows[RungNames[1]] != 1 || source.ChangedWindows[RungNames[2]] != 0 {
+		t.Fatalf("changed windows %v", source.ChangedWindows)
+	}
+	if source.Changes[RungNames[0]][ChangeValuesChanged] != 1 || source.Changes[RungNames[1]][ChangePointsAdded] != 1 {
+		t.Fatalf("changes %v", source.Changes)
+	}
+	state := f.group("qg")
+	if source.Samples[OutcomeCompleted] != 1 || state.depth != 3 || state.rest != RungSteps[2] || source.DepthGroups["3"] != 1 {
+		t.Fatalf("samples %v depth %d rest %v, want completed at depth 3 resting 7.5 steps", source.Samples, state.depth, state.rest)
+	}
+	// Complete at the second rung: 3.5 steps after the read, which was at
+	// the window's end.
+	lateness := time.Duration(RungSteps[1] * float64(minute))
+	if len(stats.Latest) != 1 || stats.Latest[0].CompletionSeconds != int64(lateness/time.Second) ||
+		source.MaxCompletionSeconds != int64(lateness/time.Second) || source.Completion[ageBucket(lateness)] != 1 {
+		t.Fatalf("latest %+v max %d completion %v, want %v", stats.Latest, source.MaxCompletionSeconds, source.Completion, lateness)
+	}
+	if len(stats.Recent) != 2 || stats.Recent[1].Rung != RungNames[1] || source.RecheckBytes != 700 || source.Probes[ProbeClean] != 1 {
+		t.Fatalf("recent %+v recheck bytes %d", stats.Recent, source.RecheckBytes)
+	}
+}
+
+// Each Query Group learns how deep and how often it is rechecked from its
+// own samples: a late group and a punctual one of the same source read to
+// different depths, and the punctual one is not made to read deeper.
+func TestEachQueryGroupLearnsItsOwnDepth(t *testing.T) {
+	f := newFixture(t)
+	f.sample("qg", sourceLog, minute, "1", func(int) string { return "2" }) // changes by the first rung
+	f.sample("qg-b", sourceLog, minute, "1", func(int) string { return "1" })
+	if late, punctual := f.group("qg"), f.group("qg-b"); late.depth != 2 || punctual.depth != 1 || punctual.rest != 3 {
+		t.Fatalf("late depth %d, punctual depth %d rest %v; want 2, and 1 resting 3 steps", late.depth, punctual.depth, punctual.rest)
+	}
+	if groups := f.engine.Stats().Sources[sourceLog].DepthGroups; groups["1"] != 1 || groups["2"] != 1 {
+		t.Fatalf("groups by depth %v", groups)
+	}
+}
+
+// A Query Group reads one rung less only after cleanSamplesToShallow
+// samples in a row needed less; one sample that needed the rung again
+// restarts the count.
+func TestADeepQueryGroupShallowsOnlyAfterCleanSamplesInARow(t *testing.T) {
+	f := newFixture(t)
+	// sample's data changes at every rung up to lastChange, at none when -1.
+	sample := func(lastChange int) int {
+		t.Helper()
+		f.sample("qg", sourceLog, minute, "3", func(rung int) string {
+			if lastChange < 0 {
+				return "3"
+			}
+			return fmt.Sprint(10 + min(rung, lastChange))
+		})
+		depth := f.group("qg").depth
+		f.rest("qg")
+		return depth
+	}
+	if depth := sample(1); depth != 3 {
+		t.Fatalf("data changing up to the second rung left depth %d, want 3", depth)
+	}
+	for clean := 1; clean < cleanSamplesToShallow; clean++ {
+		if depth := sample(-1); depth != 3 {
+			t.Fatalf("after %d clean samples depth %d, want 3", clean, depth)
+		}
+	}
+	if depth := sample(1); depth != 3 {
+		t.Fatalf("a late sample did not hold the depth: %d", depth)
+	}
+	for clean := 1; clean < cleanSamplesToShallow; clean++ {
+		sample(-1)
+	}
+	if depth := sample(-1); depth != 2 {
+		t.Fatalf("after %d clean samples in a row depth %d, want 2", cleanSamplesToShallow, depth)
+	}
+}
+
+// A Query Group late by the same rungs every time reads that deep, and
+// rests like a punctual one once that holds: only the sample that deepened
+// it brings it back sooner. The rechecks follow how deep the lateness goes,
+// not how often it is seen again.
+func TestAStablyLateQueryGroupRestsUpToAnHourAtItsDepth(t *testing.T) {
+	f := newFixture(t)
+	rests := []float64{}
+	for sample := 0; sample < 7; sample++ {
+		// Every sample: the data changes by the first rung and not after it.
+		f.sample("qg", sourceLog, minute, "1", func(int) string { return fmt.Sprint(100 + sample) })
+		state := f.group("qg")
+		if state.depth != 2 {
+			t.Fatalf("sample %d: depth %d, want 2 - one past the first rung", sample, state.depth)
+		}
+		rests = append(rests, state.rest)
+		f.rest("qg")
+	}
+	want := []float64{3.5, 7, 14, 28, 56, 60, 60}
+	for index := range want {
+		if rests[index] != want[index] {
+			t.Fatalf("rests %v, want %v", rests, want)
+		}
+	}
+}
+
+// Every rung not observed is named and never counted as a window that did
+// not change: no permit through its window (yielded), a failed read, a
+// partial one. A sample whose last rungs were not read is unobserved: no
+// completion, no clean sample, the Query Group's depth and rest untouched -
+// however many there are in a row. A refused permit is counted by its
+// reason, an unnamed one as other, and one refused at the lookback's own
+// share of the permits is a fault.
+func TestAnUnobservedSampleChangesNothingItDidNotSee(t *testing.T) {
+	f := newFixture(t)
+	f.sample("qg", sourceLog, minute, "1", func(int) string { return "2" })
+	f.rest("qg")
+	before := f.group("qg")
+	if before.depth != 2 {
+		t.Fatalf("depth %d, want 2", before.depth)
+	}
+	f.set(func() { f.refuse = "waiters" })
+	for sample := 0; sample < 2*cleanSamplesToShallow; sample++ {
+		slot := f.clock.now().Unix()
+		f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+		readAt := f.clock.now()
+		for rung := 0; f.group("qg").sample != nil; rung++ {
+			f.clock.set(readAt.Add(rungDelay(rung, minute)))
+			f.engine.Step(context.Background())
+			f.clock.set(readAt.Add(rungDelay(rung, minute) + rungWindow(rung, minute) + time.Second))
+			f.engine.Step(context.Background())
+		}
+		f.rest("qg")
+	}
+	stats := f.engine.Stats()
+	source := stats.Sources[sourceLog]
+	after := f.group("qg")
+	if after.depth != before.depth || after.rest != before.rest || after.clean != 0 {
+		t.Fatalf("unobserved samples moved the group: depth %d rest %v clean %d, was depth %d rest %v",
+			after.depth, after.rest, after.clean, before.depth, before.rest)
+	}
+	if source.Samples[OutcomeUnobserved] != 2*cleanSamplesToShallow || source.Samples[OutcomeCompleted] != 1 ||
+		source.Completion["le_120s"] != 1 || source.UnobservedRatio < 0.9 {
+		t.Fatalf("samples %v completion %v unobserved ratio %v", source.Samples, source.Completion, source.UnobservedRatio)
+	}
+	if stats.PermitRefusals["waiters"] == 0 || stats.Faults[FaultPermitLimit] != 0 {
+		t.Fatalf("refusals %v faults %v", stats.PermitRefusals, stats.Faults)
+	}
+	// A failed read and a partial one leave their samples unobserved too.
+	f.set(func() { f.refuse = "" })
+	for _, next := range []answer{
+		func(execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{}, errors.New("timeout")
+		},
+		func(execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{Completeness: execution.CompletenessPartial}, nil
+		},
+	} {
+		slot := f.clock.now().Unix()
+		f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+		readAt := f.clock.now()
+		f.answers <- next
+		f.answers <- next
+		f.clock.set(readAt.Add(rungDelay(0, minute)))
+		f.engine.Step(context.Background())
+		f.waitFor(func(Stats) bool { rung, pending := f.rung("qg"); return !pending || rung >= 1 })
+		f.clock.set(readAt.Add(rungDelay(1, minute)))
+		f.engine.Step(context.Background())
+		f.waitFor(func(Stats) bool { return f.group("qg").sample == nil })
+		f.rest("qg")
+	}
+	source = f.engine.Stats().Sources[sourceLog]
+	if source.Samples[OutcomeUnobserved] != 2*cleanSamplesToShallow+2 || source.Rechecks[RungNames[1]][RecheckFailed] != 1 ||
+		source.Rechecks[RungNames[1]][RecheckPartial] != 1 {
+		t.Fatalf("samples %v rechecks %v", source.Samples, source.Rechecks[RungNames[1]])
+	}
+	// An unnamed refusal is other; one at the lookback's own share, a fault.
+	for _, refused := range []string{"unnamed", "lookback_limit"} {
+		f.set(func() { f.refuse = refused })
+		slot := f.clock.now().Unix()
+		f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+		f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
+		f.engine.Step(context.Background())
+		f.engine.Forget("qg")
+	}
+	stats = f.engine.Stats()
+	if stats.PermitRefusals[RefusedOther] != 1 || stats.PermitRefusals["lookback_limit"] != 1 || stats.Faults[FaultPermitLimit] != 1 {
+		t.Fatalf("refusals %v faults %v", stats.PermitRefusals, stats.Faults)
+	}
+}
+
+// A sample whose last rung was not read still deepens its Query Group by
+// the change it did read: its data arrived at least that late.
+func TestAnUnobservedSampleStillDeepensByTheChangeItRead(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	readAt := f.clock.now()
+	f.recheck(sourceLog, readAt, 0, minute, full(point(slot, "2")), RecheckCompared)
+	f.clock.set(readAt.Add(rungDelay(1, minute) + rungWindow(1, minute) + time.Second))
+	f.engine.Step(context.Background())
+	source := f.engine.Stats().Sources[sourceLog]
+	if state := f.group("qg"); state.depth != 2 || state.sample != nil || state.probe != nil || source.Samples[OutcomeUnobserved] != 1 {
+		t.Fatalf("depth %d, samples %v; want the unobserved sample to deepen its group to 2", state.depth, source.Samples)
+	}
+}
+
+// A read asked to yield - a formal query is waiting for a permit - stops at
+// once and gives its permit back, long before its own timeout. Its rung is
+// not settled by it: counted as preempted, tried again inside its window,
+// and then counted once, by what it came to.
+func TestAReadAskedToYieldStopsAndItsRungIsTriedAgain(t *testing.T) {
+	f := newFixture(t)
+	yield := make(chan struct{})
+	f.set(func() { f.yield = yield })
+	f.capture(query("qg", 1_700_000_100, minute, sourceLog), dataset("h1", steady))
+	readAt := f.clock.now()
+	f.clock.set(readAt.Add(rungDelay(0, minute)))
+	f.engine.Step(context.Background()) // no answer queued: the read blocks until it is asked to yield
+	asked := time.Now()
+	close(yield)
+	f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].Preempted[RungNames[0]] == 1 })
+	if time.Since(asked) > RecheckTimeout/2 {
+		t.Fatal("a read asked to yield kept running")
+	}
+	for _, outcome := range RecheckOutcomes {
+		if n := f.engine.Stats().Sources[sourceLog].Rechecks[RungNames[0]][outcome]; n != 0 {
+			t.Fatalf("the preempted read settled its rung as %s", outcome)
+		}
+	}
+	f.set(func() { f.yield = nil })
+	f.recheck(sourceLog, readAt, 0, minute, full(dataset("h1", steady)), RecheckCompared)
+	stats := f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(dataset("h1", steady)), RecheckCompared)
+	if stats.Sources[sourceLog].Preempted[RungNames[0]] != 1 || stats.Sources[sourceLog].Samples[OutcomeCompleted] != 1 {
+		t.Fatalf("preempted %v samples %v", stats.Sources[sourceLog].Preempted, stats.Sources[sourceLog].Samples)
+	}
+}
+
+// A Query Group this process stops owning is forgotten with its sample,
+// counted as owner_lost, and leaves the coverage; one that is owned but
+// whose last measurement is older than twice a sample's cycle is not
+// covered either.
+func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
+	f := newFixture(t)
+	f.capture(query("qg", 1_700_000_100, minute, sourceLog), dataset("h1", steady))
+	readAt := f.clock.now()
+	f.capture(query("qg-b", 1_700_000_100, minute, sourceLog), dataset("h1", steady))
+	// Ownership moved on before the Runner set told the lookback: the group
+	// is still in the table, and not covered, nor counted as owned.
+	f.set(func() { f.owned["qg-b"] = false })
+	if got := f.engine.Stats().Coverage; got != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) {
+		t.Fatalf("coverage with qg-b no longer owned: %+v", got)
+	}
+	f.engine.Forget("qg-b")
+	stats := f.recheck(sourceLog, readAt, 0, minute, full(dataset("h1", steady)), RecheckCompared)
+	if stats.Sources[sourceLog].Samples[OutcomeOwnerLost] != 1 || stats.Sources[sourceLog].Rechecks[RungNames[0]][RecheckOwnerLost] != 1 {
+		t.Fatalf("samples %v", stats.Sources[sourceLog].Samples)
+	}
+	// Waiting for its deep recheck, the sample still covers its group, and
+	// is pending with its one bucket.
+	if _, waiting := f.rung("qg"); !waiting || f.group("qg").sample != nil || stats.Coverage != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) ||
+		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes {
+		t.Fatalf("coverage %+v pending %d (%d bytes) while the deep recheck waits", stats.Coverage, stats.Pending, stats.PendingBytes)
+	}
+	f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(dataset("h1", steady)), RecheckCompared)
+	state := f.group("qg")
+	cycle := min(time.Duration(state.rest*float64(minute)), restCap)*5/4 + rungDelay(state.depth-1, minute) + state.period
+	f.clock.set(f.clock.now().Add(2*cycle + time.Second))
+	if got := f.engine.Stats().Coverage; got.Covered != 0 || got.Owned != 1 {
+		t.Fatalf("a stale measurement covered: %+v", got)
+	}
+}
+
+// Every source is counted under a bounded label from the start: the named
+// ones, and mixed, promql and other for the rest.
+func TestSourcesAreBoundedAndCountedFromTheStart(t *testing.T) {
+	f := newFixture(t)
+	stats := f.engine.Stats()
+	for _, source := range []string{sourceTimeSeries, sourceLog, SourceMixed, SourcePromQL, SourceOther} {
+		entry, present := stats.Sources[source]
+		if !present || len(entry.Samples) != len(SampleOutcomes) || len(entry.Rechecks) != len(RungNames) ||
+			len(entry.DepthGroups) != len(DepthLabels) || len(entry.Probes) != len(ProbeOutcomes) ||
+			len(entry.EmptyFirstReads) != len(EmptyFirstReadOutcomes) || len(entry.EmptyFirstReadCompletion) != len(AgeBuckets) {
+			t.Fatalf("source %s is not counted from the start: %+v", source, entry)
+		}
+	}
+	if len(stats.Sources) != 5 {
+		t.Fatalf("sources %d, want 5", len(stats.Sources))
+	}
+	promql := query("qg", 1_700_000_100, minute)
+	promql.Spec.PlanFacts.PromQL = &execution.PromQLQuery{}
+	for want, facts := range map[string]execution.QueryPlanFacts{
+		SourceMixed:  {SourceSemantics: []string{sourceLog, sourceTimeSeries}},
+		SourcePromQL: promql.Spec.PlanFacts,
+		SourceOther:  {SourceSemantics: []string{"custom/event"}},
+		sourceLog:    {SourceSemantics: []string{sourceLog}},
+	} {
+		if got := sourceOf(facts, f.engine.named); got != want {
+			t.Fatalf("source of %+v = %s, want %s", facts.SourceSemantics, got, want)
+		}
+	}
+}
+
+// A read with more buckets than any window has is a defect: counted as a
+// fault, reported, and not kept. Normal running never meets it.
+func TestAReadPastEveryWindowIsAFault(t *testing.T) {
+	f := newFixture(t)
+	points := make(map[int64]string, maxBucketsPerSample+1)
+	for at := int64(0); at <= maxBucketsPerSample; at++ {
+		points[at] = "1"
+	}
+	read := f.engine.Begin(query("qg", 1_700_000_100, minute, sourceLog))
+	read.Series(dataset("h1", points), 100)
 	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	at = at.Add(Tiers[0])
-	engine.Step(context.Background())
-	time.Sleep(20 * time.Millisecond)
-	stats := engine.Stats()
-	settled := stats.Samples[SourceLogSearch][OutcomeOwnerLost] + stats.Samples[SourceLogSearch][OutcomeCompleted]
-	if stats.PendingBytes != 0 || stats.Pending != 0 || settled != 1 || stats.Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
-		t.Fatalf("pending %d bytes %d samples %v, want one owner_lost and nothing charged", stats.Pending, stats.PendingBytes, stats.Samples[SourceLogSearch])
+	stats := f.engine.Stats()
+	if stats.Faults[FaultBucketsExceeded] != 1 || stats.Sources[sourceLog].Samples[OutcomeFault] != 1 || stats.Pending != 0 {
+		t.Fatalf("faults %v samples %v pending %d", stats.Faults, stats.Sources[sourceLog].Samples, stats.Pending)
 	}
-	if released != 1 {
-		t.Fatalf("permit released %d times, want once", released)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.faults) != 1 || f.faults[0] != FaultBucketsExceeded {
+		t.Fatalf("faults reported %v", f.faults)
 	}
-	engine.Step(context.Background())
-	if again := engine.Stats(); again.PendingBytes != 0 || again.Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
-		t.Fatalf("a later Step settled it again: %+v", again.Samples[SourceLogSearch])
+}
+
+// Query Groups rest as long on average, each spread by its own hash between
+// three quarters of its rest and a quarter past it: groups read at one
+// moment are not sampled, and rechecked, at one moment again.
+func TestQueryGroupsRestSpreadAroundTheirRest(t *testing.T) {
+	sum, low, high := 0.0, 2.0, 0.0
+	const groups = 1000
+	for index := 0; index < groups; index++ {
+		spread := restSpread(execution.QueryGroupIdentity(fmt.Sprintf("qg-%d", index)))
+		if spread < 0.75 || spread >= 1.25 {
+			t.Fatalf("qg-%d rests %v of its rest", index, spread)
+		}
+		sum, low, high = sum+spread, min(low, spread), max(high, spread)
+	}
+	if mean := sum / groups; mean < 0.97 || mean > 1.03 || high-low < 0.45 {
+		t.Fatalf("spreads mean %v from %v to %v, want about 1 over most of the range", mean, low, high)
+	}
+}
+
+// facts are a valid structured query's, or a PromQL one's, so a tail read's
+// digest can be derived again, as the query service checks it.
+func facts(t testing.TB, step time.Duration, promql string, clause execution.QueryClause) execution.QueryPlanFacts {
+	t.Helper()
+	input := execution.QueryPlanFacts{Provider: execution.ProviderUQ, ProviderRouteRef: "uq-main", TenantID: "tenant", BusinessID: "2",
+		SpaceScope: "bkcc__2", SourceSemantics: []string{sourceTimeSeries}, StepMillis: step.Milliseconds(),
+		AlignmentMillis: step.Milliseconds(), Timezone: "UTC",
+		Normalization: execution.DatasetNormalizationSpec{DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("a", 64),
+			NormalizationDigest: strings.Repeat("b", 64), IdentityFields: []string{"host"}, SourceTimeField: "_time",
+			ReceivedTimeField: "_received_time", DynamicDimensions: promql != ""},
+			SourceTimeUnit: execution.TimeUnitMillisecond, CanonicalSourceTimeUnit: execution.TimeUnitSecond,
+			SeriesIdentityMode: execution.SeriesIdentityUQGroupKeysValuesV1, GroupKeyRule: execution.GroupKeyStripTableSuffixV1,
+			ValueSelectionMode: execution.ValueSelectionResultOrFirstReferenceV1, CanonicalValueField: "value",
+			ReceivedTimeMode: execution.ReceivedTimeProviderReceivedAt, Version: "uq-threshold-normalization-v1"}}
+	if promql != "" {
+		input.PromQL = &execution.PromQLQuery{Expression: promql}
+		input.Normalization.DatasetContract.IdentityFields = []string{}
+	} else {
+		clause.DataSource, clause.TableID, clause.FieldName, clause.ReferenceName = "bkmonitor", "system.cpu", "usage", "a"
+		clause.Driver, clause.TimeField = "influxdb", "time"
+		input.QueryList, input.MetricMerge = []execution.QueryClause{clause}, "a"
+	}
+	built, err := execution.BuildQueryPlanFacts(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return built
+}
+
+// windowed is a query service over one series whose raw points, one a step,
+// arrive late and are summed over a window: a bucket's value is the points
+// less than window before it and not before the read's start that have
+// arrived. Its first read and its rechecks both go through points.
+type windowed struct {
+	mu     sync.Mutex
+	clock  *clock
+	step   int64
+	late   time.Duration
+	window int64
+	specs  []execution.PhysicalQuerySpec
+}
+
+func (w *windowed) points(spec execution.PhysicalQuerySpec) map[int64]string {
+	now := w.clock.now().Unix()
+	points := map[int64]string{}
+	for at := spec.LogicalWindow.Start; at < spec.LogicalWindow.End; at += w.step {
+		count := 0
+		for raw := at - w.window; raw <= at; raw += w.step {
+			if (w.window == 0 || raw > at-w.window) && raw >= spec.LogicalWindow.Start && raw+int64(w.late/time.Second) <= now {
+				count++
+			}
+		}
+		if count > 0 {
+			points[at] = fmt.Sprint(count)
+		}
+	}
+	return points
+}
+
+func (w *windowed) read(_ context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+	w.mu.Lock()
+	w.specs = append(w.specs, spec)
+	w.mu.Unlock()
+	_ = sink.ConsumeProviderSeries(context.Background(), execution.ProviderSeriesBatch{Dataset: dataset("h1", w.points(spec)),
+		Delivery: execution.SeriesDelivery{Bytes: 10}})
+	return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
+}
+
+func (w *windowed) engine(t *testing.T) *Engine {
+	t.Helper()
+	engine, err := New(Options{Now: w.clock.now, Recheck: w.read, UnspreadFirstSamples: true,
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
+		Sources: []string{sourceTimeSeries}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine
+}
+
+// run reads one sample of a window ending now to its end - the first read,
+// then every rung at its moment - and moves the clock to its next sample.
+func (w *windowed) run(t *testing.T, engine *Engine, span time.Duration, facts execution.QueryPlanFacts) {
+	t.Helper()
+	// Read at the window's end, on a whole second.
+	end := w.clock.now().Add(time.Second - time.Nanosecond).Unix()
+	w.clock.set(time.Unix(end, 0))
+	spec := execution.PhysicalQuerySpec{Digest: "physical", PlanFacts: facts,
+		LogicalWindow: execution.QueryWindow{Start: end - int64(span/time.Second), End: end}}
+	spec.ProviderRange, spec.AcceptedRange = spec.LogicalWindow, spec.LogicalWindow
+	read := engine.Begin(Query{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg",
+		EvaluationTime: execution.EvaluationTime(end)}}, Spec: spec, Operation: execution.OperationNormal, AttemptNo: 1})
+	if read.summary == nil {
+		t.Fatal("not sampled")
+	}
+	read.Series(dataset("h1", w.points(spec)), 10)
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	readAt := w.clock.now()
+	step := time.Duration(w.step) * time.Second
+	engine.mu.Lock()
+	state := engine.groups["qg"]
+	candidate := state.sample
+	engine.mu.Unlock()
+	// pending is the sample's next rung while it is its group's sample or
+	// waits for its deep recheck.
+	pending := func() (int, bool) {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		if (state.sample == candidate || state.probe == candidate) && !candidate.running {
+			return candidate.rung, true
+		}
+		return 0, candidate.running
+	}
+	for {
+		rung, open := pending()
+		if !open {
+			break
+		}
+		w.clock.set(readAt.Add(rungDelay(rung, step)))
+		engine.Step(context.Background())
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			next, open := pending()
+			if !open || next > rung {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("rung %d did not settle", rung)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	engine.mu.Lock()
+	next := state.nextAt
+	engine.mu.Unlock()
+	if next.After(w.clock.now()) {
+		w.clock.set(next)
+	}
+}
+
+// A recheck reads and compares only the window's tail - the deepest rung
+// and a step, however deep its Query Group reads - from the query's own
+// lookback before that, under a digest derived again for that range, at a
+// rung and at the deep recheck alike; the buckets outside the tail are not
+// read as vanished.
+func TestARecheckReadsAndComparesOnlyTheTail(t *testing.T) {
+	w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60}
+	engine := w.engine(t)
+	w.run(t, engine, 24*time.Hour, facts(t, minute, "", execution.QueryClause{TimeAggregation: execution.QueryFunction{Method: "avg_over_time", Window: "60s"}}))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.specs) != 2 {
+		t.Fatalf("%d rechecks, want the one rung of a punctual Query Group and its deep recheck", len(w.specs))
+	}
+	end := int64(1_700_006_000)
+	for _, tail := range w.specs {
+		// ceil(63.5) + 1 = 65 steps; the lookback, 60s, before it.
+		if tail.LogicalWindow.Start != end-65*60-60 || tail.ProviderRange.Start != tail.LogicalWindow.Start ||
+			tail.AcceptedRange.Start != tail.LogicalWindow.Start || tail.LogicalWindow.End != end {
+			t.Fatalf("recheck read %+v, want from %d", tail.LogicalWindow, end-66*60)
+		}
+		if digest, err := execution.DerivePhysicalQueryDigest(tail); err != nil || digest != tail.Digest || tail.Digest == "physical" {
+			t.Fatalf("the tail read's digest %q, derived %q %v", tail.Digest, digest, err)
+		}
+	}
+	source := engine.Stats().Sources[sourceTimeSeries]
+	if source.Samples[OutcomeCompleted] != 1 || source.ChangedWindows[RungNames[0]] != 0 || source.Probes[ProbeClean] != 1 ||
+		source.RecheckBytes != 20 || source.FirstReadBytes != 10 {
+		t.Fatalf("samples %v changed %v probes %v bytes %d/%d: the buckets outside the tail must not read as vanished",
+			source.Samples, source.ChangedWindows, source.Probes, source.RecheckBytes, source.FirstReadBytes)
+	}
+}
+
+// A first read is kept to the window's tail, whatever the window's length
+// and however deep its Query Group reads: a Query Group over a day of
+// minutes holds 65 buckets, not a day's.
+func TestAFirstReadIsKeptToItsTail(t *testing.T) {
+	f := newFixture(t)
+	day := map[int64]string{}
+	end := f.clock.now().Unix()
+	for at := end - 24*60*60; at < end; at += 60 {
+		day[at] = "1"
+	}
+	q := query("qg", end, minute, sourceTimeSeries)
+	q.Spec.LogicalWindow.Start = end - 24*60*60
+	f.capture(q, dataset("h1", day))
+	if tailSteps != 65 {
+		t.Fatalf("a tail of %d steps, want ceil(63.5) + 1", tailSteps)
+	}
+	if stats := f.engine.Stats(); stats.PendingBytes != 65*summaryEntryBytes {
+		t.Fatalf("a day's first read holds %d bytes, want 65 buckets'", stats.PendingBytes)
+	}
+}
+
+// A tail read starts the query's own lookback early, so its first compared
+// bucket is computed from the same points the first read computed it from:
+// over a window longer than the tail, a rate over five minutes and a
+// function window of four minutes over a minute's aggregation read no
+// change where nothing arrived. A query whose lookback cannot be read is
+// read from a step early, and counted.
+func TestATailReadStartsEarlyByTheQuerysLookback(t *testing.T) {
+	for name, query := range map[string]execution.QueryPlanFacts{
+		"promql rate": facts(t, minute, "sum(rate(cpu_usage[5m]))", execution.QueryClause{}),
+		"function window": facts(t, minute, "", execution.QueryClause{TimeAggregation: execution.QueryFunction{Method: "sum_over_time", Window: "60s"},
+			Functions: []execution.QueryFunction{{Method: "moving_avg", Window: "4m"}}}),
+	} {
+		w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60, window: 300}
+		engine := w.engine(t)
+		for range 3 {
+			w.run(t, engine, 2*time.Hour, query)
+		}
+		stats := engine.Stats()
+		label := sourceTimeSeries
+		if query.PromQL != nil {
+			label = SourcePromQL
+		}
+		source := stats.Sources[label]
+		if source.Samples[OutcomeCompleted] != 3 || source.ChangedWindows[RungNames[0]] != 0 || source.UnknownLookback != 0 {
+			t.Fatalf("%s: samples %v changed %v unknown %d, want no change read where nothing arrived",
+				name, source.Samples, source.ChangedWindows, source.UnknownLookback)
+		}
+	}
+	w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60}
+	engine := w.engine(t)
+	w.run(t, engine, 2*time.Hour, facts(t, minute, "sum(rate(cpu_usage[$__interval]))", execution.QueryClause{}))
+	if source := engine.Stats().Sources[SourcePromQL]; source.UnknownLookback != 1 {
+		t.Fatalf("unknown lookback %d, want the unreadable range counted", source.UnknownLookback)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if from := w.specs[0].LogicalWindow.Start; from != 1_700_006_000-65*60-60 {
+		t.Fatalf("an unknown lookback read from %d, want a step before the tail", from)
+	}
+}
+
+// Data arriving at a constant delay is followed to where it stops, however
+// late up to the deepest rung and however short the window: within three
+// samples the Query Group reads deep enough to see its last point arrive,
+// and the window is complete no earlier than the delay less a step and no
+// later than the first rung at or past the delay. Data later than every rung
+// its group reads over a window shorter than the delay - empty at each of
+// them - is found by the deep recheck: that sample is probe_changed, and the
+// next reads every rung and settles. A window empty at its first read whose
+// data arrived later is counted as such.
+func TestAConstantLatenessIsFollowedToWhereItStops(t *testing.T) {
+	for _, window := range []time.Duration{time.Hour, 5 * minute} {
+		for _, steps := range []float64{1.8, 3, 3.75, 5, 6, 10, 20, 40} {
+			late := time.Duration(steps * float64(minute))
+			w := &windowed{clock: &clock{at: time.Unix(1_700_006_000, 0)}, step: 60, late: late}
+			engine := w.engine(t)
+			query := facts(t, minute, "", execution.QueryClause{TimeAggregation: execution.QueryFunction{Method: "sum_over_time", Window: "60s"}})
+			for range 3 {
+				w.run(t, engine, window, query)
+			}
+			source := engine.Stats().Sources[sourceTimeSeries]
+			engine.mu.Lock()
+			state := *engine.groups["qg"]
+			engine.mu.Unlock()
+			name := fmt.Sprintf("window %v late %v", window, late)
+			t.Logf("%s: depth %d, complete at %v, samples %v, empty first reads %v", name, state.depth, state.completion,
+				source.Samples, source.EmptyFirstReads)
+			reaches := time.Duration(RungSteps[len(RungSteps)-1] * float64(minute))
+			for _, rung := range RungSteps {
+				if at := time.Duration(rung * float64(minute)); at >= late {
+					reaches = at
+					break
+				}
+			}
+			if !state.measured || state.completion < late-minute || state.completion > reaches {
+				t.Fatalf("%s: measured %v at %v, want from the delay less a step to %v", name, state.measured, state.completion, reaches)
+			}
+			if time.Duration(RungSteps[state.depth-1]*float64(minute)) < state.completion {
+				t.Fatalf("%s: depth %d reads to %v steps only", name, state.depth, RungSteps[state.depth-1])
+			}
+			if source.Samples[OutcomeCompleted] == 0 || source.Samples[OutcomeUnobserved] != 0 {
+				t.Fatalf("%s: samples %v", name, source.Samples)
+			}
+			// Over five minutes, from ten steps late the window is still
+			// empty at the first rung: only the deep recheck sees its data.
+			if short := window == 5*minute && steps >= 10; short != (source.Samples[OutcomeProbeChanged] == 1) {
+				t.Fatalf("%s: probe_changed %d", name, source.Samples[OutcomeProbeChanged])
+			}
+			// Over five minutes, from six steps late the first read is empty.
+			arrived := uint64(0)
+			for _, n := range source.EmptyFirstReadCompletion {
+				arrived += n
+			}
+			if empty := window == 5*minute && steps >= 6; empty != (source.EmptyFirstReads[EmptyArrived] > 0) ||
+				arrived != source.EmptyFirstReads[EmptyArrived] || source.EmptyFirstReads[EmptyStayedEmpty] != 0 {
+				t.Fatalf("%s: empty first reads %v, completion %v", name, source.EmptyFirstReads, source.EmptyFirstReadCompletion)
+			}
+		}
+	}
+}
+
+// A deep recheck that finds data later than every rung its Query Group
+// reads makes its sample probe_changed - no completion, no clean sample -
+// and the group reads every rung from its next sample on; the next completed
+// sample sets its depth at once from where its data stopped, not a rung at a
+// time. Waiting for its deep recheck, a sample does not hold the next one
+// back.
+func TestADeepRecheckThatFindsLateDataSettlesTheDepthAtOnce(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	readAt := f.clock.now()
+	f.recheck(sourceLog, readAt, 0, minute, full(point(slot, "1")), RecheckCompared)
+	if state := f.group("qg"); state.sample != nil || state.probe == nil || state.depth != 1 {
+		t.Fatalf("after its one rung: sample %v, deep recheck %v, depth %d", state.sample != nil, state.probe != nil, state.depth)
+	}
+	// The next sample is taken, and read, while the deep recheck waits.
+	f.rest("qg")
+	next := f.clock.now().Unix()
+	f.capture(query("qg", next, minute, sourceLog), point(next, "1"))
+	f.recheck(sourceLog, f.clock.now(), 0, minute, full(point(next, "1")), RecheckCompared)
+	stats := f.recheck(sourceLog, readAt, len(RungSteps)-1, minute, full(point(slot, "9")), RecheckCompared)
+	source := stats.Sources[sourceLog]
+	state := f.group("qg")
+	if source.Samples[OutcomeProbeChanged] != 1 || source.Samples[OutcomeCompleted] != 1 || source.Probes[ProbeChanged] != 1 ||
+		state.depth != len(RungSteps) || !state.settle || state.clean != 0 || state.rest != RungSteps[len(RungSteps)-1] {
+		t.Fatalf("samples %v probes %v depth %d settle %v clean %d rest %v", source.Samples, source.Probes, state.depth,
+			state.settle, state.clean, state.rest)
+	}
+	completions := uint64(0)
+	for _, n := range source.Completion {
+		completions += n
+	}
+	if completions != 1 || source.ProbeChangedRatio != 0.5 || source.UnobservedRatio != 0 {
+		t.Fatalf("completions %v, probe_changed ratio %v, unobserved ratio %v; want the completed sample's only, 0.5, 0",
+			source.Completion, source.ProbeChangedRatio, source.UnobservedRatio)
+	}
+	// Read to every rung, its data changing up to the second: three rungs
+	// from here, at once.
+	f.rest("qg")
+	f.sample("qg", sourceLog, minute, "1", func(rung int) string { return fmt.Sprint(10 + min(rung, 1)) })
+	if state := f.group("qg"); state.depth != 3 || state.settle {
+		t.Fatalf("settled at depth %d, settle %v; want 3", state.depth, state.settle)
+	}
+}
+
+// A Query Group forgotten while a sample of it waits for its deep recheck
+// counts that sample owner_lost, at the deepest rung, and leaves nothing
+// pending.
+func TestAForgottenQueryGroupDropsTheSampleWaitingForItsDeepRecheck(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	f.recheck(sourceLog, f.clock.now(), 0, minute, full(point(slot, "1")), RecheckCompared)
+	f.engine.Forget("qg")
+	stats := f.engine.Stats()
+	source := stats.Sources[sourceLog]
+	if source.Samples[OutcomeOwnerLost] != 1 || source.Rechecks[RungNames[len(RungNames)-1]][RecheckOwnerLost] != 1 || stats.Pending != 0 {
+		t.Fatalf("samples %v rechecks %v pending %d", source.Samples, source.Rechecks[RungNames[len(RungNames)-1]], stats.Pending)
+	}
+}
+
+// A deep recheck not read leaves its sample complete as its rungs read it,
+// and the next sample is probed instead.
+func TestADeepRecheckNotReadIsTriedAtTheNextSample(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "1"))
+	readAt := f.clock.now()
+	f.recheck(sourceLog, readAt, 0, minute, full(point(slot, "1")), RecheckCompared)
+	deepest := len(RungSteps) - 1
+	f.clock.set(readAt.Add(rungDelay(deepest, minute) + rungWindow(deepest, minute) + time.Second))
+	f.engine.Step(context.Background())
+	source := f.engine.Stats().Sources[sourceLog]
+	if source.Probes[ProbeUnobserved] != 1 || source.Samples[OutcomeCompleted] != 1 || source.Rechecks[RungNames[deepest]][RecheckYielded] != 1 {
+		t.Fatalf("probes %v samples %v", source.Probes, source.Samples)
+	}
+	f.rest("qg")
+	next := f.clock.now().Unix()
+	f.capture(query("qg", next, minute, sourceLog), point(next, "1"))
+	f.engine.mu.Lock()
+	probed := f.engine.groups["qg"].sample.probe
+	f.engine.mu.Unlock()
+	if !probed {
+		t.Fatal("the sample after a deep recheck not read is not probed")
+	}
+}
+
+// A completed sample whose first read was complete and held no point is
+// counted by whether its data arrived at a later rung - with when it was
+// complete - or stayed empty.
+func TestAnEmptyFirstReadIsCountedByWhetherItsDataArrived(t *testing.T) {
+	f := newFixture(t)
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog))
+	readAt := f.clock.now()
+	for rung, pending := f.rung("qg"); pending; rung, pending = f.rung("qg") {
+		f.recheck(sourceLog, readAt, rung, minute, full(point(slot, "1")), RecheckCompared)
+	}
+	f.rest("qg")
+	slot = f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog))
+	readAt = f.clock.now()
+	for rung, pending := f.rung("qg"); pending; rung, pending = f.rung("qg") {
+		f.recheck(sourceLog, readAt, rung, minute, full(), RecheckCompared)
+	}
+	source := f.engine.Stats().Sources[sourceLog]
+	if source.Samples[OutcomeCompleted] != 2 || source.EmptyFirstReads[EmptyArrived] != 1 || source.EmptyFirstReads[EmptyStayedEmpty] != 1 ||
+		source.EmptyFirstReadCompletion["le_120s"] != 1 {
+		t.Fatalf("samples %v empty first reads %v completion %v", source.Samples, source.EmptyFirstReads, source.EmptyFirstReadCompletion)
+	}
+}
+
+// Punctual Query Groups, their formal reads every step, settle at about a
+// sample an hour each and a deep recheck at one in four - 1 to 1.25
+// rechecks an hour, a fifth of them deep - at a ten-second, a minute or a
+// five-minute step: a sample waiting for its deep recheck, hours away at a
+// long step, does not hold the next one back. A longer step is a little
+// less: a group rests from its first rung, 1.5 steps after its read, and
+// its next sample waits for its next first read.
+func TestPunctualQueryGroupsSettleAtAboutOnePointTwoRechecksAnHourWhateverTheStep(t *testing.T) {
+	for _, step := range []time.Duration{10 * time.Second, minute, 5 * minute} {
+		perHour, deep := punctualRecheckRate(t, step)
+		t.Logf("step %v: %.2f rechecks a Query Group an hour, %.0f%% deep", step, perHour, 100*deep)
+		if perHour < 0.95 || perHour > 1.35 || deep < 0.15 || deep > 0.25 {
+			t.Fatalf("step %v: %.2f rechecks a Query Group an hour, %.2f of them deep; want 1 to 1.25, a fifth deep", step, perHour, deep)
+		}
+	}
+}
+
+// punctualRecheckRate runs Query Groups whose data is complete at the first
+// read, reading every step, and returns their rechecks per group an hour
+// once settled, and the share of those that were deep.
+func punctualRecheckRate(t *testing.T, step time.Duration) (float64, float64) {
+	t.Helper()
+	c := &clock{at: time.Unix(1_700_006_400, 0)}
+	const groups, warmup, measured = 32, 4 * time.Hour, 12 * time.Hour
+	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true, Sources: []string{sourceTimeSeries},
+		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: point(spec.LogicalWindow.End, "1")})
+			return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return groups }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := func() bool {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		for _, state := range engine.groups {
+			for _, candidate := range [...]*sample{state.sample, state.probe} {
+				if candidate != nil && candidate.running {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	count := func() (rechecks, probes uint64) {
+		source := engine.Stats().Sources[sourceTimeSeries]
+		for _, outcomes := range source.Rechecks {
+			rechecks += outcomes[RecheckCompared]
+		}
+		return rechecks, source.Probes[ProbeClean]
+	}
+	start := c.now()
+	var rechecksBefore, probesBefore uint64
+	for tick := time.Duration(0); tick < warmup+measured; tick += step {
+		if tick == warmup {
+			rechecksBefore, probesBefore = count()
+		}
+		c.set(start.Add(tick))
+		slot := c.now().Unix()
+		for index := 0; index < groups; index++ {
+			if read := engine.Begin(query(fmt.Sprintf("qg-%d", index), slot, step, sourceTimeSeries)); read.summary != nil {
+				read.Series(point(slot, "1"), 100)
+				read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+			}
+		}
+		engine.Step(context.Background())
+		deadline := time.Now().Add(5 * time.Second)
+		for !settled() {
+			if time.Now().After(deadline) {
+				t.Fatalf("step %v at %v: rechecks did not settle", step, tick)
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
+	rechecksAfter, probesAfter := count()
+	rechecks, probes := rechecksAfter-rechecksBefore, probesAfter-probesBefore
+	return float64(rechecks) / groups / measured.Hours(), float64(probes) / float64(rechecks)
+}
+
+// A rung compared covers the rungs not read before it: it is compared with
+// the last read kept, so a window whose first rung found no permit and whose
+// second found nothing new is complete, not unobserved.
+func TestAComparedRungCoversTheRungsNotReadBeforeIt(t *testing.T) {
+	f := newFixture(t)
+	f.sample("qg", sourceLog, minute, "1", func(int) string { return "2" }) // depth 2 from here
+	f.rest("qg")
+	slot := f.clock.now().Unix()
+	f.capture(query("qg", slot, minute, sourceLog), point(slot, "5"))
+	readAt := f.clock.now()
+	f.clock.set(readAt.Add(rungDelay(0, minute) + rungWindow(0, minute) + time.Second))
+	f.engine.Step(context.Background()) // the first rung passes without a permit
+	stats := f.recheck(sourceLog, readAt, 1, minute, full(point(slot, "5")), RecheckCompared)
+	source := stats.Sources[sourceLog]
+	if source.Rechecks[RungNames[0]][RecheckYielded] != 1 || source.Samples[OutcomeCompleted] != 2 || source.Samples[OutcomeUnobserved] != 0 {
+		t.Fatalf("rechecks %v samples %v, want the second sample complete", source.Rechecks[RungNames[0]], source.Samples)
+	}
+}
+
+// A query's lookback is its longest window, function window and offset, or
+// its PromQL ranges, subquery ranges and offsets, in the durations the query
+// service writes; one it cannot read is unknown.
+func TestQueryLookbackReadsWindowsRangesAndOffsets(t *testing.T) {
+	structured := execution.QueryPlanFacts{QueryList: []execution.QueryClause{
+		{TimeAggregation: execution.QueryFunction{Window: "60s"}, Functions: []execution.QueryFunction{{Window: "4m"}, {Window: "2m"}}, Offset: "1h"},
+		{TimeAggregation: execution.QueryFunction{Window: "30m"}},
+	}}
+	for name, want := range map[string]struct {
+		facts    execution.QueryPlanFacts
+		lookback time.Duration
+		known    bool
+	}{
+		// 60s, the longest function window 4m and the offset 1h; the second
+		// clause's 30m is shorter.
+		"structured": {structured, 65 * time.Minute, true},
+		"range and offset": {execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "sum(rate(x[5m] offset 1h))"}},
+			65 * time.Minute, true},
+		"subquery": {execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "max_over_time(rate(x[1m])[30m:1m])"}},
+			30 * time.Minute, true},
+		"negative offset": {execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "x offset -1d"}}, 24 * time.Hour, true},
+		"no range":        {execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "sum(x)"}}, 0, true},
+		"variable range":  {execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "rate(x[$__interval])"}}, 0, false},
+		"bad window": {execution.QueryPlanFacts{QueryList: []execution.QueryClause{{TimeAggregation: execution.QueryFunction{Window: "1 minute"}}}},
+			0, false},
+	} {
+		lookback, known := queryLookback(want.facts)
+		if lookback != want.lookback || known != want.known {
+			t.Fatalf("%s: %v %v, want %v %v", name, lookback, known, want.lookback, want.known)
+		}
+	}
+	for text, want := range map[string]time.Duration{"": 0, "5ms": 5 * time.Millisecond, "90s": 90 * time.Second, "1w": 7 * 24 * time.Hour,
+		"1h30m": 90 * time.Minute} {
+		if got, ok := parseDuration(text); !ok || got != want {
+			t.Fatalf("parseDuration(%q) = %v %v, want %v", text, got, ok, want)
+		}
 	}
 }

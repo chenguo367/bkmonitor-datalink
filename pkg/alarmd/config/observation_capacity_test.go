@@ -45,24 +45,3 @@ func TestObservationBudgetIsOffWithoutAnOperatorAllocation(t *testing.T) {
 		}
 	}
 }
-
-// The lookback's share comes out of the directory's, so the parts still sum
-// inside the share; off, nothing moves. Enabled with no share is refused.
-func TestTheLookbackShareComesOutOfTheDirectorys(t *testing.T) {
-	known := CapacityInputs{CPUBudget: 2, MemoryLimitBytes: 2 << 30, MemorySource: "pod_limit"}
-	off := DeriveObservationCapacity(known, PhaseTwoObservationConfig{MemoryPercent: 4})
-	on := DeriveObservationCapacity(known, PhaseTwoObservationConfig{MemoryPercent: 4, LookbackEnabled: true})
-	share := (2 << 30) / 100 * 4
-	if off.LookbackBytes != 0 || on.LookbackBytes != share/8 || on.DirectoryBytes != share*3/8 || off.DirectoryBytes != share/2 {
-		t.Fatalf("off %+v on %+v", off, on)
-	}
-	if on.DirectoryBytes+on.LookbackBytes+on.CostBytes+on.SampleBufferBytes > share || on.CostBytes != off.CostBytes {
-		t.Fatalf("the lookback's share did not come out of the directory's: %+v", on)
-	}
-	if err := (PhaseTwoObservationConfig{LookbackEnabled: true}).validate(); err == nil {
-		t.Fatal("the lookback enabled with no memory share validated")
-	}
-	if err := (PhaseTwoObservationConfig{MemoryPercent: 1, LookbackEnabled: true}).validate(); err != nil {
-		t.Fatal(err)
-	}
-}

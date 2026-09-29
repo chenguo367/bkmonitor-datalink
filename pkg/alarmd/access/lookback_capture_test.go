@@ -25,7 +25,7 @@ import (
 func logCountFacts(t *testing.T) execution.QueryPlanFacts {
 	t.Helper()
 	facts, err := execution.BuildQueryPlanFacts(execution.QueryPlanFacts{Provider: execution.ProviderUQ, ProviderRouteRef: "uq-main",
-		TenantID: "tenant", BusinessID: "2", SpaceScope: "bkcc__2", SourceSemantics: []string{lookback.SourceLogSearch},
+		TenantID: "tenant", BusinessID: "2", SpaceScope: "bkcc__2", SourceSemantics: []string{"bk_log_search/log"},
 		QueryList: []execution.QueryClause{{DataSource: "bklog", TableID: "2_bklog.app", FieldName: "_index", ReferenceName: "a",
 			Driver: "elasticsearch", TimeField: "dtEventTimeStamp", TimeAggregation: execution.QueryFunction{Method: "count_over_time", Position: 0, Window: "60s"}}},
 		MetricMerge: "a", StepMillis: 60_000, AlignmentMillis: 60_000, Timezone: "UTC",
@@ -63,12 +63,11 @@ func (recheck *lookbackRecheck) read(ctx context.Context, spec execution.Physica
 	return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
 }
 
-// A sampled log count query is kept at the layer a recheck reads: every
-// series the provider delivered, the out-of-target one included, with which
-// Plans admitted it. The out-of-target series later reads higher -- data,
-// counted -- but the Plan that turned it away does not judge it; the
-// in-target one crosses the Plan's own >= 50.
-func TestASampledQueryIsKeptBeforeTheTargetFilterWithItsAdmissions(t *testing.T) {
+// A first read is summarized at the layer a recheck reads: every series the
+// provider delivered, the out-of-target one included. The recheck then finds
+// both series' values changed in their bucket - not a point added, which is
+// what a summary of the in-target series alone would have read.
+func TestAFirstReadIsSummarizedBeforeTheTargetFilter(t *testing.T) {
 	contractRef, frozen := frozenExecution(t)
 	facts := logCountFacts(t)
 	ref := execution.LogicalQueryRef(facts.QueryRevision)
@@ -81,9 +80,10 @@ func TestASampledQueryIsKeptBeforeTheTargetFilterWithItsAdmissions(t *testing.T)
 	now := time.Unix(1_700_124_010, 0)
 	var clock sync.Mutex
 	recheck := &lookbackRecheck{hosts: map[string]string{"192.0.2.10": "70", "192.0.2.99": "90"}}
-	engine, err := lookback.New(lookback.Options{SampleOneIn: 1, MemoryBytes: 1 << 20, Recheck: recheck.read,
+	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, Sources: []string{"bk_log_search/log"}, UnspreadFirstSamples: true,
 		Now:    func() time.Time { clock.Lock(); defer clock.Unlock(); return now },
-		Permit: func() (func(), string) { return func() {}, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true },
+		Owned: func() int { return 1 }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,28 +103,25 @@ func TestASampledQueryIsKeptBeforeTheTargetFilterWithItsAdmissions(t *testing.T)
 		t.Fatalf("the pipeline got %d batches, want only the in-target series", len(consumer.batches))
 	}
 	stats := engine.Stats()
-	if stats.Samples[lookback.SourceLogSearch][lookback.OutcomeCaptured] != 1 || stats.Pending != 1 {
-		t.Fatalf("samples %v pending %d", stats.Samples[lookback.SourceLogSearch], stats.Pending)
+	if stats.Sources["bk_log_search/log"].Samples[lookback.OutcomeCaptured] != 1 || stats.Pending != 1 {
+		t.Fatalf("samples %v pending %d", stats.Sources["bk_log_search/log"].Samples, stats.Pending)
 	}
 
 	clock.Lock()
-	now = now.Add(lookback.Tiers[0])
+	now = now.Add(time.Duration(lookback.RungSteps[0] * float64(time.Duration(facts.StepMillis)*time.Millisecond)))
 	clock.Unlock()
 	engine.Step(context.Background())
+	first := lookback.RungNames[0]
 	deadline := time.Now().Add(5 * time.Second)
-	for engine.Stats().Rechecks[lookback.SourceLogSearch]["t90"][lookback.RecheckCompared] == 0 {
+	for engine.Stats().Sources["bk_log_search/log"].Rechecks[first][lookback.RecheckCompared] == 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("no recheck: %v", engine.Stats().Rechecks[lookback.SourceLogSearch]["t90"])
+			t.Fatalf("no recheck: %v", engine.Stats().Sources["bk_log_search/log"].Rechecks[first])
 		}
 		time.Sleep(time.Millisecond)
 	}
-	stats = engine.Stats()
-	if stats.Differences[lookback.SourceLogSearch]["t90"][lookback.DiffIncreased] != 2 {
-		t.Fatalf("differences %v, want both series counted as data", stats.Differences[lookback.SourceLogSearch]["t90"])
-	}
-	judged := stats.Judgments[lookback.SourceLogSearch]["t90"]
-	if judged[lookback.JudgeUnchanged] != 1 || judged[lookback.JudgeNormalToAbnormal] != 0 {
-		t.Fatalf("judgments %v, want only the admitted series judged: 60 -> 70 under >= 50 stays abnormal", judged)
+	changes := engine.Stats().Sources["bk_log_search/log"].Changes[first]
+	if changes[lookback.ChangeValuesChanged] != 1 || changes[lookback.ChangePointsAdded] != 0 {
+		t.Fatalf("changes %v, want the one bucket's values changed, both series summarized", changes)
 	}
 	recheck.mu.Lock()
 	defer recheck.mu.Unlock()
@@ -133,15 +130,16 @@ func TestASampledQueryIsKeptBeforeTheTargetFilterWithItsAdmissions(t *testing.T)
 	}
 }
 
-// A time-series query is outside the first version: nothing is kept.
-func TestAQueryOutsideTheMeasuredSourcesIsNotKept(t *testing.T) {
+// Every source is measured: a query of a source the list does not name is
+// taken as its Query Group's sample all the same, counted as other.
+func TestAQueryOfAnySourceIsTakenAsItsQueryGroupsSample(t *testing.T) {
 	contractRef, frozen := frozenExecution(t)
-	engine, err := lookback.New(lookback.Options{SampleOneIn: 1, MemoryBytes: 1 << 20,
+	engine, err := lookback.New(lookback.Options{Sources: []string{"bk_monitor/time_series"}, UnspreadFirstSamples: true,
 		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-			t.Error("a query outside the measured sources was rechecked")
 			return execution.ProviderCompletion{}, nil
 		},
-		Permit: func() (func(), string) { return func() {}, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true },
+		Owned: func() int { return 1 }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,9 +154,10 @@ func TestAQueryOutsideTheMeasuredSourcesIsNotKept(t *testing.T) {
 		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1}, &recordingConsumer{}); err != nil {
 		t.Fatal(err)
 	}
-	for outcome, n := range engine.Stats().Samples[lookback.SourceLogSearch] {
-		if n != 0 {
-			t.Fatalf("%s = %d for a time-series query", outcome, n)
-		}
+	// The fixture's query names no listed source, so it is counted as other:
+	// measured all the same.
+	stats := engine.Stats()
+	if stats.Sources[lookback.SourceOther].Samples[lookback.OutcomeCaptured] != 1 || stats.Coverage.Covered != 1 {
+		t.Fatalf("samples %v coverage %+v, want the Query Group sampled", stats.Sources[lookback.SourceOther].Samples, stats.Coverage)
 	}
 }

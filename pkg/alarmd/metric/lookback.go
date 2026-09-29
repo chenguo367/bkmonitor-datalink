@@ -22,17 +22,28 @@ import (
 // reader tells "not running" from "ran and saw nothing" by whether any
 // series exists. A process that runs it emits every cell from the start.
 type lookbackCollector struct {
-	mu      sync.Mutex
-	source  func() lookback.Stats
-	samples *prometheus.Desc
-	checks  *prometheus.Desc
-	buckets *prometheus.Desc
-	windows *prometheus.Desc
-	diffs   *prometheus.Desc
-	judged  *prometheus.Desc
-	series  *prometheus.Desc
-	ages    *prometheus.Desc
-	pending *prometheus.Desc
+	mu         sync.Mutex
+	source     func() lookback.Stats
+	firstReads *prometheus.Desc
+	samples    *prometheus.Desc
+	checks     *prometheus.Desc
+	changed    *prometheus.Desc
+	changes    *prometheus.Desc
+	completion *prometheus.Desc
+	probes     *prometheus.Desc
+	empty      *prometheus.Desc
+	emptyAt    *prometheus.Desc
+	latest     *prometheus.Desc
+	groups     *prometheus.Desc
+	rest       *prometheus.Desc
+	readBytes  *prometheus.Desc
+	checkBytes *prometheus.Desc
+	unknown    *prometheus.Desc
+	coverage   *prometheus.Desc
+	pending    *prometheus.Desc
+	yields     *prometheus.Desc
+	refused    *prometheus.Desc
+	faults     *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -40,43 +51,81 @@ func newLookbackCollector() *lookbackCollector {
 		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
 	}
 	return &lookbackCollector{
+		firstReads: desc("lookback_first_reads_total",
+			"Formal first reads seen, by source: the denominator of the query volume the lookback adds "+
+				"(lookback_rechecks_total over it).", "source"),
 		samples: desc("lookback_samples_total",
-			"Sampled first reads of the late-data lookback by source and what became of them: captured, uncovered "+
-				"(past the sample bounds), first_read_incomplete, memory_full, owner_lost, completed (every tier done).",
+			"First reads taken as a Query Group's sample, by source and what became of them: captured, "+
+				"first_read_incomplete, owner_lost, completed (its completion observed), unobserved (its last rungs not "+
+				"read), probe_changed (its deep recheck found data arriving after the rungs its group read), fault. Only "+
+				"completed enters lookback_completion_total.",
 			"source", "outcome"),
 		checks: desc("lookback_rechecks_total",
-			"Rechecks by source, tier and outcome. Only compared enters the comparison counts; yielded, "+
-				"recheck_failed, truncated, partial and owner_lost are windows not observed, never windows that did not change.",
-			"source", "tier", "outcome"),
-		buckets: desc("lookback_compared_buckets_total",
-			"(series, bucket) pairs compared, by source and tier: the denominator of lookback_differences_total.",
-			"source", "tier"),
-		windows: desc("lookback_compared_windows_total",
-			"Compared windows by source, tier and whether anything in them differed (yes/no).",
-			"source", "tier", "differed"),
-		diffs: desc("lookback_differences_total",
-			"Compared (series, bucket) pairs by how the recheck differs from the first read. A bucket with no "+
-				"record is not a 0: new_point, vanished_point, new_series and vanished_series are records that were or were not there.",
-			"source", "tier", "class"),
-		judged: desc("lookback_judgments_total",
-			"How each Level's static-threshold verdict moved between the reads, per (Plan, Level, series, bucket), "+
-				"for Plans that admitted the series at the first read; its denominator is its own sum.",
-			"source", "tier", "class"),
-		series: desc("lookback_series_total",
-			"Series the recheck found that the first read did not have (new), and the reverse (vanished).",
-			"source", "tier", "kind"),
-		ages: desc("lookback_windows_by_age_total",
-			"Compared windows by how long after the window's end the recheck actually read, and whether they differed: "+
-				"the delay profile, by the age read rather than the tier planned.",
-			"source", "age", "differed"),
-		pending: desc("lookback_pending",
-			"Samples waiting for their next tier, and the bytes charged for them against memory_bytes, the share.",
+			"Rechecks by source, rung (its moment in the Query Group's data steps) and outcome. Only compared is a "+
+				"window observed; yielded, recheck_failed, partial and owner_lost are windows not observed.",
+			"source", "rung", "outcome"),
+		changed: desc("lookback_changed_windows_total",
+			"Compared windows that changed since the read before, by source and rung: over the compared rechecks "+
+				"of that rung, the share of windows whose data was still arriving.", "source", "rung"),
+		changes: desc("lookback_changes_total",
+			"Buckets of compared windows by how they changed since the read before: points_added, points_removed, "+
+				"series_changed (as many points from other series), values_changed.", "source", "rung", "class"),
+		completion: desc("lookback_completion_total",
+			"Finished samples by when their window's data was complete, as its age past the window's end: the last "+
+				"rung that changed, or the first read when none did.", "source", "age"),
+		probes: desc("lookback_probes_total",
+			"Deep rechecks - a sample read once more at the deepest rung after the rungs its group reads, one sample "+
+				"in four and a group's first - by source and outcome: clean, changed (data arrived after those rungs; "+
+				"the group then reads every rung and settles), unobserved (not read; the next sample is probed).",
+			"source", "outcome"),
+		empty: desc("lookback_empty_first_reads_total",
+			"Completed samples whose first read was complete and held no point, by source and whether their data "+
+				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
+				"share of windows empty when first read that were not.", "source", "outcome"),
+		emptyAt: desc("lookback_empty_first_read_completion_total",
+			"Those empty first reads whose data arrived later, by when their window's data was complete, as its age "+
+				"past the window's end.", "source", "age"),
+		latest: desc("lookback_completion_max_seconds",
+			"The latest any window of the source was complete, in seconds past its end, since the process started.",
+			"source"),
+		groups: desc("lookback_groups",
+			"The source's Query Groups by how many rungs each reads now - one past the last rung its own data still "+
+				"changed at; each group learns that from its own samples.", "source", "depth"),
+		rest: desc("lookback_rest_seconds",
+			"How long the source's Query Groups rest between two samples on average: doubling while their lateness "+
+				"holds, at most an hour.", "source"),
+		readBytes: desc("lookback_first_read_bytes_total",
+			"Bytes the formal first reads delivered, by source, counted as the rechecks' are.", "source"),
+		checkBytes: desc("lookback_recheck_bytes_total",
+			"Bytes the rechecks read back, by source: over lookback_first_read_bytes_total, the query bytes the "+
+				"lookback adds.", "source"),
+		unknown: desc("lookback_unknown_lookback_total",
+			"Samples whose query's lookback (a window, a range, an offset) could not be read, rechecked from one "+
+				"step before the window's tail instead.", "source"),
+		coverage: desc("lookback_coverage",
+			"The Query Groups this process owns, and how many of them have a fresh measurement; the aim is all.",
 			"what"),
+		pending: desc("lookback_pending",
+			"Samples in flight - one at most per owned Query Group, and one waiting for its deep recheck - and the "+
+				"bytes their summaries hold.", "what"),
+		yields: desc("lookback_preemptions_total",
+			"Recheck reads stopped because a formal query had to wait for a query permit, by source and rung. "+
+				"The rung is tried again within its window and counted in lookback_rechecks_total by what it comes to.",
+			"source", "rung"),
+		refused: desc("lookback_permit_refusals_total",
+			"Lookback query permits refused, by reason: waiters (a formal query is waiting), lookback_limit, headroom "+
+				"(granting it would leave the formal queries too little), disabled. A refused rung keeps its window.",
+			"reason"),
+		faults: desc("lookback_faults_total",
+			"Reads not kept for a defect, by reason. Normal running never meets one; any count is a defect to fix.",
+			"reason"),
 	}
 }
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.samples, c.checks, c.buckets, c.windows, c.diffs, c.judged, c.series, c.ages, c.pending} {
+	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
+		c.probes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.pending, c.yields, c.refused, c.faults} {
 		ch <- desc
 	}
 }
@@ -92,37 +141,53 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	counter := func(desc *prometheus.Desc, value uint64, labels ...string) {
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(value), labels...)
 	}
-	for _, source := range lookback.Sources {
+	gauge := func(desc *prometheus.Desc, value float64, labels ...string) {
+		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...)
+	}
+	for name, source := range stats.Sources {
+		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {
-			counter(c.samples, stats.Samples[source][outcome], source, outcome)
+			counter(c.samples, source.Samples[outcome], name, outcome)
 		}
 		for _, age := range lookback.AgeBuckets {
-			for _, differed := range []string{"yes", "no"} {
-				counter(c.ages, stats.ByAge[source][age][differed], source, age, differed)
-			}
+			counter(c.completion, source.Completion[age], name, age)
+			counter(c.emptyAt, source.EmptyFirstReadCompletion[age], name, age)
 		}
-		for _, tier := range lookback.TierNames {
+		for _, outcome := range lookback.ProbeOutcomes {
+			counter(c.probes, source.Probes[outcome], name, outcome)
+		}
+		for _, outcome := range lookback.EmptyFirstReadOutcomes {
+			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
+		}
+		for _, rung := range lookback.RungNames {
 			for _, outcome := range lookback.RecheckOutcomes {
-				counter(c.checks, stats.Rechecks[source][tier][outcome], source, tier, outcome)
+				counter(c.checks, source.Rechecks[rung][outcome], name, rung, outcome)
 			}
-			counter(c.buckets, stats.ComparedBuckets[source][tier], source, tier)
-			for _, differed := range []string{"yes", "no"} {
-				counter(c.windows, stats.ComparedWindows[source][tier][differed], source, tier, differed)
+			counter(c.changed, source.ChangedWindows[rung], name, rung)
+			for _, class := range lookback.Changes {
+				counter(c.changes, source.Changes[rung][class], name, rung, class)
 			}
-			for _, class := range lookback.Differences {
-				counter(c.diffs, stats.Differences[source][tier][class], source, tier, class)
-			}
-			for _, class := range lookback.Judgments {
-				counter(c.judged, stats.Judgments[source][tier][class], source, tier, class)
-			}
-			for _, kind := range []string{"new", "vanished"} {
-				counter(c.series, stats.Series[source][tier][kind], source, tier, kind)
-			}
+			counter(c.yields, source.Preempted[rung], name, rung)
 		}
+		gauge(c.latest, float64(source.MaxCompletionSeconds), name)
+		for _, depth := range lookback.DepthLabels {
+			gauge(c.groups, float64(source.DepthGroups[depth]), name, depth)
+		}
+		gauge(c.rest, source.MeanRestSeconds, name)
+		counter(c.readBytes, source.FirstReadBytes, name)
+		counter(c.checkBytes, source.RecheckBytes, name)
+		counter(c.unknown, source.UnknownLookback, name)
 	}
-	for what, value := range map[string]int{"samples": stats.Pending, "bytes": stats.PendingBytes, "memory_bytes": stats.MemoryBytes} {
-		ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, float64(value), what)
+	for reason, n := range stats.PermitRefusals {
+		counter(c.refused, n, reason)
 	}
+	for reason, n := range stats.Faults {
+		counter(c.faults, n, reason)
+	}
+	gauge(c.coverage, float64(stats.Coverage.Owned), "owned")
+	gauge(c.coverage, float64(stats.Coverage.Covered), "covered")
+	gauge(c.pending, float64(stats.Pending), "samples")
+	gauge(c.pending, float64(stats.PendingBytes), "bytes")
 }
 
 // SetLookbackSource binds the process's lookback to the collector. A process

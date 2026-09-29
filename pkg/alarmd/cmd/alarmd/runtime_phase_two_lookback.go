@@ -11,33 +11,27 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
-// lookbackTick is how often due rechecks are looked for: well inside a
-// tier's window, so a tier is tried several times before it yields.
+// lookbackTick is how often due rechecks are looked for: inside the window
+// of a rung at a ten-second step, so a rung is tried more than once before
+// it yields.
 const lookbackTick = 5 * time.Second
 
-// Why a process configured for the lookback is not running it, closed.
-const (
-	lookbackNotConfigured      = "not_configured"
-	lookbackNoObservationShare = "no_observation_capacity"
-)
-
 // lookbackStanding is what lookback.get answers besides the counts: whether
-// this process was asked to run the lookback, whether it does, and if not,
-// why.
+// this process runs the lookback.
 type lookbackStanding struct {
-	Configured bool   `json:"configured"`
-	Running    bool   `json:"running"`
-	Reason     string `json:"reason,omitempty"`
+	Running bool `json:"running"`
 }
 
 // lookbackOwnership answers the lookback's ownership question from the
@@ -66,38 +60,69 @@ func (bundle *phaseTwoWorkerBundle) ownsQueryGroup(queryGroup execution.QueryGro
 	return owned
 }
 
-// buildLookback builds the lookback when the configuration asks for it and
-// the observation share has room for it; otherwise nil and why. Its rechecks
-// read through the same query client as the formal reads, one lookback
-// permit at a time and never queued behind them.
+// count is how many Query Groups the bound bundle owns: the lookback's
+// coverage denominator.
+func (ownership *lookbackOwnership) count() int {
+	bundle := ownership.bundle.Load()
+	if bundle == nil {
+		return 0
+	}
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	return len(bundle.runners)
+}
+
+// buildLookback builds this process's lookback. Nothing configures it and
+// it takes no share of memory: it keeps one summary per owned Query Group,
+// and its rechecks read through the same query client as the formal reads,
+// one lookback permit at a time, never queued behind them and yielded the
+// moment a formal query waits. Its sources are the ones a query can be
+// compiled from; a fault, which normal running never meets, is logged.
 func buildLookback(
-	allocation config.PhaseTwoObservationConfig,
-	capacity config.ObservationCapacity,
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
 	ownership *lookbackOwnership,
+	logger *observability.Logger,
 	now func() time.Time,
 ) (*lookback.Engine, lookbackStanding, error) {
-	if !allocation.LookbackEnabled {
-		return nil, lookbackStanding{Reason: lookbackNotConfigured}, nil
-	}
-	if capacity.LookbackBytes <= 0 {
-		// The share is allocated but this container's memory is not known,
-		// so no diagnostics run; see config.DeriveObservationCapacity.
-		return nil, lookbackStanding{Configured: true, Reason: lookbackNoObservationShare}, nil
-	}
-	engine, err := lookback.New(lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, MemoryBytes: capacity.LookbackBytes,
-		Permit: func() (func(), string) {
-			permit, refused := flights.TryAcquireLookbackPermit()
-			if permit == nil {
-				return nil, refused
-			}
-			return permit.Release, ""
-		}})
+	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now))
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
-	return engine, lookbackStanding{Configured: true, Running: true}, nil
+	return engine, lookbackStanding{Running: true}, nil
+}
+
+// lookbackOptions wire the lookback to this process: its query client, its
+// permits - a refusal at the lookback's own share of them a fault - its
+// Runner set, the sources a query can be compiled from, and its log.
+func lookbackOptions(
+	recheck lookback.Recheck,
+	flights *scheduler.FlightCoordinator,
+	ownership *lookbackOwnership,
+	logger *observability.Logger,
+	now func() time.Time,
+) lookback.Options {
+	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
+		Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals, LimitRefusal: scheduler.LookbackRefusedLimit,
+		Permit: lookbackPermit(flights),
+		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
+			if logger != nil {
+				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
+			}
+		}}
+}
+
+// lookbackPermit is the lookback's permit from the process's query budget:
+// granted only with room to spare, and yielded the moment a formal query has
+// to wait for one.
+func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
+	return func() (func(), <-chan struct{}, string) {
+		permit, refused := flights.TryAcquireLookbackPermit()
+		if permit == nil {
+			return nil, nil, refused
+		}
+		return permit.Release, permit.Yield(), ""
+	}
 }
 
 // runLookback rechecks due samples until the bundle stops.
@@ -119,10 +144,10 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：是否开启、没开的原因、抽样与再读的具名计数（只有 compared 进分母）、按（序列，桶）与按原阈值判定的差异分类、按实际读取时延的分布，以及最近有差异的再读及其有界样例；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
-		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "examples_per_recheck": 8},
+		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},
 		Run: func(context.Context, obchannel.Params) obchannel.Outcome {
 			reading := cliLookbackReading{Scope: "answering_replica", ReadAt: time.Now().UTC(), lookbackStanding: standing}
 			if engine != nil {
@@ -131,9 +156,11 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 			}
 			return obchannel.Outcome{Value: reading, Complete: true, Limitations: []string{
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
-				"Only rechecks with outcome compared enter compared_buckets, compared_windows, differences, judgments and by_age; every other outcome is a window not observed, not a window that did not change.",
+				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
+				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's last 65 steps - the whole of a shorter window - from the query's own lookback before them.",
+				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung is counted complete there: lateness past it is not measured.",
+				"A sample waiting for its deep recheck does not hold its group's next sample back: a punctual Query Group settles at 1 to 1.25 rechecks an hour, about a fifth of them deep (simulated: 1.23 at a ten-second step, 1.21 at a minute, 1.02 at five minutes - a group rests from its first rung, 1.5 steps after its read, and waits for its next first read).",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
-				"Judgments cover static-threshold Levels of Plans that admitted the series at the first read; other algorithms are compared as data only.",
 			}}
 		}}
 }

@@ -226,9 +226,6 @@ type fleetPublisher struct {
 	// the tests that build a publisher by hand keep working.
 	source    func() *fleet.SourceFacts
 	endpoints func() []fleet.Endpoint
-	// sourcePublisher is the strategy cache publisher's record as this
-	// replica last read it; nil-safe and optional like source.
-	sourcePublisher func() *fleet.SourcePublisherReport
 	// readiness reports this replica's own readiness, bit by bit, from the
 	// same source its readiness endpoint answers from. Nil-safe and optional
 	// like the two above.
@@ -494,9 +491,6 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.source != nil {
 		snapshot.Source = publisher.source()
-	}
-	if publisher.sourcePublisher != nil {
-		snapshot.SourcePublisher = publisher.sourcePublisher()
 	}
 	if publisher.endpoints != nil {
 		snapshot.Dependencies = publisher.endpoints()

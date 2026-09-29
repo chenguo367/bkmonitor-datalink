@@ -7,12 +7,12 @@
 // an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-package controlplane_test
+package sourcereads_test
 
 import (
 	"testing"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/sourcereads"
 )
 
 // The list is only as good as its reach. One key from each way it finds
@@ -20,9 +20,9 @@ import (
 // stopped reaching would be missed here; a walk that stopped short would hold
 // the source view to less than alarmd reads, and the view's own test would
 // pass on the shorter list.
-func TestLegacySourceReadPathsReachEveryWayAKeyIsRead(t *testing.T) {
+func TestThePathsReachEveryWayAKeyIsRead(t *testing.T) {
 	listed := map[string]bool{}
-	for _, path := range controlplane.LegacySourceReadPaths() {
+	for _, path := range sourcereads.Paths() {
 		listed[path] = true
 	}
 	for _, want := range []string{

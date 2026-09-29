@@ -269,6 +269,9 @@ type FlightCoordinator struct {
 type heldPermit struct {
 	operation execution.Operation
 	since     time.Time
+	// yield is a lookback permit's, closed when it is asked to yield; nil
+	// once it has been, and on every other permit.
+	yield chan struct{}
 }
 
 func NewFlightCoordinator() *FlightCoordinator {

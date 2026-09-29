@@ -489,15 +489,26 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_diagnostic_redis_dial_retries_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
+	expected["bkmonitor_alarmd_lookback_first_reads_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_samples_total"] = "variableLabels: {source,outcome}"
-	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,tier,outcome}"
-	expected["bkmonitor_alarmd_lookback_compared_buckets_total"] = "variableLabels: {source,tier}"
-	expected["bkmonitor_alarmd_lookback_compared_windows_total"] = "variableLabels: {source,tier,differed}"
-	expected["bkmonitor_alarmd_lookback_differences_total"] = "variableLabels: {source,tier,class}"
-	expected["bkmonitor_alarmd_lookback_judgments_total"] = "variableLabels: {source,tier,class}"
-	expected["bkmonitor_alarmd_lookback_series_total"] = "variableLabels: {source,tier,kind}"
-	expected["bkmonitor_alarmd_lookback_windows_by_age_total"] = "variableLabels: {source,age,differed}"
+	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,rung,outcome}"
+	expected["bkmonitor_alarmd_lookback_changed_windows_total"] = "variableLabels: {source,rung}"
+	expected["bkmonitor_alarmd_lookback_changes_total"] = "variableLabels: {source,rung,class}"
+	expected["bkmonitor_alarmd_lookback_completion_total"] = "variableLabels: {source,age}"
+	expected["bkmonitor_alarmd_lookback_probes_total"] = "variableLabels: {source,outcome}"
+	expected["bkmonitor_alarmd_lookback_empty_first_reads_total"] = "variableLabels: {source,outcome}"
+	expected["bkmonitor_alarmd_lookback_empty_first_read_completion_total"] = "variableLabels: {source,age}"
+	expected["bkmonitor_alarmd_lookback_completion_max_seconds"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_groups"] = "variableLabels: {source,depth}"
+	expected["bkmonitor_alarmd_lookback_rest_seconds"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_first_read_bytes_total"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_recheck_bytes_total"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_unknown_lookback_total"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_lookback_coverage"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
+	expected["bkmonitor_alarmd_lookback_preemptions_total"] = "variableLabels: {source,rung}"
+	expected["bkmonitor_alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
@@ -545,8 +556,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_levels_with_retention_slack"] = "variableLabels: {dominant}"
 	expected["bkmonitor_alarmd_catalog_global_strategies"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_catalog_global_strategies_unsupported"] = "variableLabels: {reason,source_semantics}"
-	expected["bkmonitor_alarmd_strategy_publisher_info"] = "variableLabels: {state,writer,version,outcome}"
-	expected["bkmonitor_alarmd_strategy_publisher_reports_total"] = "variableLabels: {outcome,reason}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
 	expected["bkmonitor_alarmd_platform_settings_authoritative_age_seconds"] = "variableLabels: {}"
@@ -1100,10 +1109,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// source and fails when they pass the headroom this number is built from,
 	// so the bound is wrong only if that test is also red.
 	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * catalogReasonHeadroom
-	// One series: the record as last read. The reasons a process names are
-	// capped, and every outcome can also carry no reason or other.
-	bounds[fqName("strategy_publisher_info")] = 1
-	bounds[fqName("strategy_publisher_reports_total")] = controlplane.PublisherReasonLabelLimit + 2*len(controlplane.PublisherOutcomeLabels)
 	// Every source an accepted no-data Plan can declare. There is no other
 	// bucket: a source outside the list cannot be produced, because the same
 	// list is what the classification returns.

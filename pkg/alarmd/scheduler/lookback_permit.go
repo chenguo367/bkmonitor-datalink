@@ -22,6 +22,12 @@ import "sync"
 //   - after this one is granted, at least LookbackPermitLimit permits are
 //     still free for the next formal queries.
 //
+// Room at the grant is not room for the whole read: a burst can take the
+// free permits while a lookback read is still running. The moment a formal
+// query has to wait for a permit, every lookback permit held is asked to
+// yield (LookbackPermit.Yield), and the reads stop and give their permits
+// back, so a formal query waits for no lookback read.
+//
 // A lookback permit is not an Operation. It has its own inflight count and
 // held seconds, so the normal and recovery readings the capacity is sized on
 // never include it, while the process total does.
@@ -42,11 +48,21 @@ const (
 	LookbackRefusedHeadroom = "headroom"
 )
 
+// LookbackRefusals is every reason a lookback permit is refused.
+var LookbackRefusals = []string{LookbackRefusedDisabled, LookbackRefusedWaiting, LookbackRefusedLimit, LookbackRefusedHeadroom}
+
 // LookbackPermit is one lookback query's share of the query budget.
 type LookbackPermit struct {
 	coordinator *FlightCoordinator
 	id          uint64
 	once        sync.Once
+	yield       chan struct{}
+}
+
+// Yield is closed when a formal query has to wait for a permit: the read
+// holding this permit stops and releases it.
+func (permit *LookbackPermit) Yield() <-chan struct{} {
+	return permit.yield
 }
 
 // Release returns the permit; a second call does nothing.
@@ -80,11 +96,11 @@ func (coordinator *FlightCoordinator) TryAcquireLookbackPermit() (*LookbackPermi
 	coordinator.queryInflight++
 	coordinator.lookbackInflight++
 	coordinator.permitSequence++
-	permit := &LookbackPermit{coordinator: coordinator, id: coordinator.permitSequence}
+	permit := &LookbackPermit{coordinator: coordinator, id: coordinator.permitSequence, yield: make(chan struct{})}
 	if coordinator.lookbackHeld == nil {
 		coordinator.lookbackHeld = make(map[uint64]heldPermit)
 	}
-	coordinator.lookbackHeld[permit.id] = heldPermit{since: coordinator.now()}
+	coordinator.lookbackHeld[permit.id] = heldPermit{since: coordinator.now(), yield: permit.yield}
 	return permit, ""
 }
 
@@ -106,4 +122,17 @@ func (coordinator *FlightCoordinator) releaseLookbackPermit(id uint64) {
 	// The permit freed room in the shared pool: a formal query waiting for it
 	// gets it now, not at the next release.
 	coordinator.dispatchQueryPermitsLocked()
+}
+
+// yieldLookbackLocked asks every lookback permit held to yield, once each: a
+// formal query is waiting for a permit.
+func (coordinator *FlightCoordinator) yieldLookbackLocked() {
+	for id, held := range coordinator.lookbackHeld {
+		if held.yield == nil {
+			continue
+		}
+		close(held.yield)
+		held.yield = nil
+		coordinator.lookbackHeld[id] = held
+	}
 }
