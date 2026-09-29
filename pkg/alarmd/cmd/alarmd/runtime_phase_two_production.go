@@ -1418,6 +1418,11 @@ type productionPhaseTwoOwnership struct {
 	// from the installed view (decision-016 batch 4); nil is the shadow
 	// step, every read the control plane's way.
 	viewGate *viewExecutionGate
+	// takeovers is when this process took each Query Group over, shared by
+	// every Slot source it opens: a Query Group reopened here keeps the
+	// moment, so only Slots due before a real takeover are replayed past the
+	// distance rule (scheduler.TakeoverClock).
+	takeovers *scheduler.TakeoverClock
 
 	mu        sync.Mutex
 	authority ownership.PublicationAuthority
@@ -1502,6 +1507,7 @@ func newProductionPhaseTwoOwnership(
 	}
 	return &productionPhaseTwoOwnership{
 		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
+		takeovers: scheduler.NewTakeoverClock(),
 	}, nil
 }
 
@@ -2586,6 +2592,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithSnapshotRetention(runtime.dependencies.SnapshotRetention, runtime.dependencies.PublicationDelayAllowance),
 		scheduler.WithExpiredRangeCreation(runtime.dependencies.ExpiredRangeEnabled),
 		scheduler.WithObserver(runtime.dependencies.Observer),
+		scheduler.WithTakeoverClock(runtime.takeovers),
 	)
 	if err != nil {
 		_ = session.Release(ctx)

@@ -557,6 +557,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_range_gate_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_state_preflight_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_state_admission_total"] = "variableLabels: {result,reason}"
@@ -1210,6 +1211,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// written only from the list observability publishes, and the scheduler's
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
+	bounds[fqName("replay_takeover_slots_total")] = len(observability.ReplayTakeoverOutcomes)
 	// One per word the range gate can put on a round, applied included, and
 	// no more: the label is written from the facts after normalization, which
 	// folds any other word to unexplained.
