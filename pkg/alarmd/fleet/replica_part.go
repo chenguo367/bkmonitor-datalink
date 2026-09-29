@@ -54,6 +54,12 @@ type ReplicaPart struct {
 	RetainedShareTotal int
 	ReadEarly          []ReadEarlyRef
 	ReadEarlyTotal     int
+	// CheckRows is the rows' half of the first screen's check lines
+	// (checkRowsOf): the lines' standings, gaps and source records are the
+	// replicas' facts and are added when the lines are made (Checks).
+	CheckRows checkTallies
+	// TodoRows is the rows' half of the first screen's to-do (todoRowsOf).
+	TodoRows Todo
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -88,6 +94,8 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
 	columns := viewColumns(&view)
+	part.CheckRows = checkRowsOf(columns, columnsTruncated(&view), &view, now)
+	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
 	part.Loss = lossOfView(&view, now)
@@ -108,7 +116,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
-	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}}
+	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}}
 	tallies := make([]ImpactTally, 0, len(parts))
 	for _, part := range parts {
 		merged.Attribution.Ours += part.Attribution.Ours
@@ -124,6 +132,8 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
 		mergeLoss(&merged.Loss, part.Loss)
+		mergeCheckTallies(merged.CheckRows, part.CheckRows)
+		mergeTodoRows(&merged.TodoRows, part.TodoRows)
 		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
 		merged.RetainedShare = append(merged.RetainedShare, part.RetainedShare...)
 		merged.RetainedShareTotal += part.RetainedShareTotal
@@ -166,4 +176,19 @@ func (part ReplicaPart) CoolingAt(schedule *ScheduleCensus, now time.Time) Cooli
 // part's loss.
 func (part ReplicaPart) Load(view *View) Load {
 	return loadOf(view, part.Loss)
+}
+
+// Checks is the first screen's check lines from the part's rows and the
+// replicas' facts on view, at now. It reads a copy: making the lines adds the
+// view's own folds, which a second reading would otherwise count again.
+func (part ReplicaPart) Checks(view *View, now time.Time) []CheckReport {
+	rows := checkTallies{}
+	mergeCheckTallies(rows, part.CheckRows)
+	return reportChecksFrom(rows, view, now)
+}
+
+// Todo is the first screen's to-do from the part's rows, the lines made from
+// them (Checks) and the replicas' facts on view.
+func (part ReplicaPart) Todo(reports []CheckReport, view *View) Todo {
+	return todoFrom(part.TodoRows, reports, view)
 }

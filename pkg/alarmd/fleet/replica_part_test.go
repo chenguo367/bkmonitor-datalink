@@ -122,6 +122,16 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))
 	sameJSON(t, "cooling", merged.CoolingAt(whole.Schedule, now), Cooling(&whole, columns, now))
 	sameJSON(t, "load", merged.Load(&whole), LoadOf(&whole, now))
+	screen := Report(&whole, now)
+	sameJSON(t, "check lines", merged.Checks(&whole, now), screen.Checks)
+	sameJSON(t, "check lines read again", merged.Checks(&whole, now), screen.Checks)
+	sameJSON(t, "to-do", merged.Todo(merged.Checks(&whole, now), &whole), screen.Todo)
+	if screen.Todo.Objects == 0 || screen.Todo.UndeterminedObjects == 0 || screen.Todo.Ongoing+screen.Todo.AfterRestart == 0 {
+		t.Fatalf("fixture to-do %+v, want objects on both sides and a loss in progress", screen.Todo)
+	}
+	if len(screen.Checks) < 4 {
+		t.Fatalf("fixture check lines %d, want several", len(screen.Checks))
+	}
 	pruned, retained, readEarly := prunedSkipList(whole.PrunedSkips), retainedShareList(whole.RetainedShare), readEarlyList(whole.ReadEarly)
 	sameJSON(t, "pruned skips", merged.PrunedSkips, firstScreenList(pruned))
 	sameJSON(t, "retained share", merged.RetainedShare, firstScreenList(retained))
