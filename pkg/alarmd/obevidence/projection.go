@@ -61,8 +61,9 @@ var targetPolicy = fields("schema_version model_id target_rule failure_policy st
 	"groups": fields("", map[string]*policy{"conditions": conditionPolicy}), "conditions": conditionPolicy,
 	"conditions_list": conditionPolicy, "nodes": memberPolicy, "hosts": memberPolicy,
 	"static_businesses": dictionary(leaf),
-	// The writer's model mapping for a model_inst_id rule.
-	"model_match": fields("cw_object_model_id", nil),
+	// The writer's model mapping for a model_inst_id rule: one dimension,
+	// named by the writer, and the value the data carries in it.
+	"model_match": guardedDictionary(leaf),
 	// The writer spells each dynamic group as an object naming it, the frozen
 	// plan as the bare id; as a leaf the source's read only while the writer
 	// left the list empty.
@@ -90,13 +91,15 @@ var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name
 	// polling compiler as agg_condition is by the others: the same kind of
 	// value, shown the same way, a field named like a credential left out.
 	"filter_dict": guardedDictionary(leaf),
+	// The object identity pair an object-model target is matched by.
+	"target_identity": fields("type object_model_field object_model_inst_field", nil),
 })
 
 // targetValuePolicy is one value of a legacy target condition: a bare value,
 // or the object naming a host, instance, node or group the compiler reads.
-var targetValuePolicy = scalarOr(fields("bk_cloud_id bk_host_id bk_inst_id bk_obj_id bk_target_cloud_id bk_target_ip bk_target_service_instance_id dynamic_group_id ip service_instance_id", nil))
+var targetValuePolicy = scalarOr(fields("bk_cloud_id bk_host_id bk_inst_id bk_obj_id bk_target_cloud_id bk_target_ip bk_target_service_instance_id dynamic_group_id ip service_instance_id cw_object_model_id cw_object_model_inst_id", nil))
 var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strategy name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
-	"items": fields("id query_md5 expression time_delay unit", map[string]*policy{
+	"items": fields("id name query_md5 expression time_delay unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
 		"target":      namedValues(fields("condition key field method type model_id target_type", map[string]*policy{"value": targetValuePolicy, "conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,

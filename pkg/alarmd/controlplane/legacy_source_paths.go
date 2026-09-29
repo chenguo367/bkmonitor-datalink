@@ -15,7 +15,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/detect"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 // LegacySourceReadPaths is every key of a strategy document this build reads,
@@ -25,26 +28,26 @@ import (
 // list, so a key this build starts reading cannot stay hidden from the view
 // that a refused strategy is read and replayed from.
 //
-// It walks the decoding structs by their json tags. A value kept raw and
-// decoded later is listed by what it is decoded into, from
-// legacySourceRawDecodes; a raw field decoded somewhere new has to be added
-// there, which is the one part of this a reflection cannot find.
+// It is the union of legacySourceReads, which names every place the
+// document, or the frozen copy of it a plan carries to its outputs, is read:
+// in this package and in the others that read it. A struct is walked by its
+// json tags. A struct declared inside a function, a value kept raw and
+// decoded later, and a key read from a map by name are what a walk cannot
+// find, and are registered there by hand. A new place that reads the
+// document has to be registered there too, or the view can hide what it
+// reads.
 func LegacySourceReadPaths() []string {
 	paths := map[string]bool{}
-	// Read beside the decoding structs, by the source adapter and the
-	// target-plan reader.
-	for _, path := range []string{"bk_tenant_id", "space_uid", "is_global_strategy", "items.target_plan"} {
-		paths[path] = true
-	}
-	walkLegacySource(reflect.TypeOf(legacyStrategy{}), "", paths)
-	for path, decoded := range legacySourceRawDecodes() {
-		paths[path] = true
-		switch decoded := decoded.(type) {
+	for _, read := range legacySourceReads() {
+		if read.path != "" {
+			paths[read.path] = true
+		}
+		switch decoded := read.decoded.(type) {
 		case reflect.Type:
-			walkLegacySource(decoded, path, paths)
+			walkLegacySource(decoded, read.path, paths)
 		case []string:
 			for _, key := range decoded {
-				paths[path+"."+key] = true
+				paths[joinSourcePath(read.path, key)] = true
 			}
 		}
 	}
@@ -56,19 +59,77 @@ func LegacySourceReadPaths() []string {
 	return out
 }
 
-// legacySourceRawDecodes is what each value the structs keep raw is decoded
-// into: a struct to walk, or the keys read from it.
-func legacySourceRawDecodes() map[string]any {
-	return map[string]any{
-		"items.query_configs":           reflect.TypeOf(legacyQueryConfig{}),
-		"items.functions":               reflect.TypeOf(legacyFunction{}),
-		"items.no_data_config":          reflect.TypeOf(legacyNoDataConfig{}),
-		"items.target":                  reflect.TypeOf(legacyTargetCondition{}),
-		"items.target.value":            reflect.TypeOf(legacyTargetValue{}),
-		"items.algorithms.config":       strategy.TraditionalComparisonKeys(),
-		"detects.recovery_config":       reflect.TypeOf(legacyRecovery{}),
-		"detects.trigger_config.uptime": strategy.UptimeKeys(),
+// legacySourceRead is one place a strategy document is read: the path of the
+// value read, empty for the whole document, and what the value is decoded
+// into - a struct to walk, or the keys read from it, each a dotted path below
+// the value.
+type legacySourceRead struct {
+	path    string
+	decoded any
+}
+
+func legacySourceReads() []legacySourceRead {
+	reads := []legacySourceRead{
+		// The catalog's decode of the document, and of the values it keeps
+		// raw to decode later.
+		{"", reflect.TypeOf(legacyStrategy{})},
+		{"items.query_configs", reflect.TypeOf(legacyQueryConfig{})},
+		{"items.query_configs", reflect.TypeOf(legacyQueryConfigIdentity{})},
+		{"items.functions", reflect.TypeOf(legacyFunction{})},
+		{"items.no_data_config", reflect.TypeOf(legacyNoDataConfig{})},
+		{"items.target", reflect.TypeOf(legacyTargetCondition{})},
+		{"items.target.value", reflect.TypeOf(legacyTargetValue{})},
+		{"detects.recovery_config", reflect.TypeOf(legacyRecovery{})},
+
+		// Structs declared inside functions of this package, and keys it
+		// reads by name, each under the function that reads it.
+		//
+		// The source adapter's identity read.
+		{"", []string{"id", "bk_biz_id", "bk_tenant_id", "space_uid", "is_global_strategy"}},
+		// decodeLegacyStrategy, for a document without a strategy_revision.
+		{"", []string{"update_time"}},
+		// compileTargetPlanDocument.
+		{"items", []string{"target_plan", "query_configs"}},
+		// itemUnit; frozenSubjectFacts; itemInterval and decodeLegacyQueryConfig.
+		{"items.query_configs", []string{"unit", "result_table_id", "agg_interval"}},
+		// thresholdConfig; compileAlgorithmConfig for SimpleRingRatio.
+		{"items.algorithms.config", []string{"method", "threshold", "floor", "ceil"}},
+		// orderedTargetValues.
+		{"items.target", []string{"value"}},
+		// objectModelInstanceKey.
+		{"items.target.value", []string{defaultObjectModelField, defaultObjectModelInstField}},
+		// isAlwaysActiveUptime.
+		{"detects.trigger_config.uptime", []string{"calendars", "active_calendars", "time_ranges.start", "time_ranges.end"}},
+
+		// What the compiler decodes the values the catalog hands it raw into.
+		{"items.algorithms.config", strategy.TraditionalComparisonKeys()},
+		{"detects.trigger_config.uptime", strategy.UptimeSource()},
+		{"effective_time_snapshot", strategy.EffectiveTimeSnapshotSource()},
+		{"effective_time_snapshot.calendars.items.repeat", strategy.EffectiveTimeRepeatSource()},
+		// The target plan protocol, which its decoder holds a document to
+		// key by key.
+		{"items.target_plan", targetplan.DocumentKeys()},
+
+		// The frozen copy of the document a plan carries: the frozen
+		// output's validation, the threshold processor's decode of it and
+		// the keys it reads from each threshold condition by name
+		// (parseThresholdAlgorithm), and the legacy output converter's
+		// decodes below.
+		{"", []string{"id", "bk_biz_id", "update_time"}}, // contract.LegacyOutputContext.Validate
+		{"", detect.LegacyStrategySource()},
+		{"items.algorithms.config", []string{"method", "threshold"}},
 	}
+	for _, source := range legacyoutput.FrozenStrategySources() {
+		reads = append(reads, legacySourceRead{"", source})
+	}
+	return reads
+}
+
+func joinSourcePath(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
 }
 
 var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
@@ -89,10 +150,7 @@ func walkLegacySource(kind reflect.Type, prefix string, paths map[string]bool) {
 		if !field.IsExported() || name == "" || name == "-" {
 			continue
 		}
-		path := name
-		if prefix != "" {
-			path = prefix + "." + name
-		}
+		path := joinSourcePath(prefix, name)
 		paths[path] = true
 		walkLegacySource(field.Type, path, paths)
 	}

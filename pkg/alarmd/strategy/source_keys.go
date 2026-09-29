@@ -25,6 +25,17 @@ func TraditionalComparisonKeys() []string {
 	return jsonKeys(reflect.TypeOf(TraditionalComparisonParameters{}))
 }
 
+// UptimeSource, EffectiveTimeSnapshotSource and EffectiveTimeRepeatSource are
+// what the compiler decodes the parts of a strategy document it is handed raw
+// into: a detect's uptime, the effective-time snapshot, and the repeat rule
+// each snapshot calendar item carries raw. The operator evidence walks them
+// for the keys alarmd reads.
+func UptimeSource() reflect.Type { return reflect.TypeOf(uptimeConfigV1{}) }
+
+func EffectiveTimeSnapshotSource() reflect.Type { return reflect.TypeOf(effectiveSnapshot{}) }
+
+func EffectiveTimeRepeatSource() reflect.Type { return reflect.TypeOf(effectiveRepeat{}) }
+
 func jsonKeys(kind reflect.Type) []string {
 	keys := make([]string, 0, kind.NumField())
 	for index := 0; index < kind.NumField(); index++ {

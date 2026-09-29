@@ -152,6 +152,32 @@ func TestTheSourceViewShowsAnUnlistedKeyByItsShape(t *testing.T) {
 	}
 }
 
+// What the legacy output reads (an item's name) and what an object-model
+// target is matched by (the identity pair a query config names, the pair a
+// target value holds, a model match under the writer's own dimension) are
+// shown as written, not by shape.
+func TestTheSourceViewShowsWhatTheOutputAndTheObjectTargetRead(t *testing.T) {
+	raw := []byte(`{"id":55,"items":[{"id":1,"name":"disk usage",` +
+		`"query_configs":[{"metric_id":"custom.disk","target_identity":{"type":"object_model_inst","object_model_field":"cw_model","object_model_inst_field":"cw_inst"}}],` +
+		`"target":[[{"field":"cw_object_model_inst","method":"eq","value":[{"cw_object_model_id":"23","cw_object_model_inst_id":"7"}]}]],` +
+		`"target_plan":{"schema_version":1,"model_id":"23","target_rule":"model_inst_id","model_match":{"cw_model":"23"}}}]}`)
+	value, omitted, err := projectSourceJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := plainJSON(t, value)
+	for _, want := range []string{`"name":"disk usage"`,
+		`"target_identity":{"object_model_field":"cw_model","object_model_inst_field":"cw_inst","type":"object_model_inst"}`,
+		`{"cw_object_model_id":"23","cw_object_model_inst_id":"7"}`, `"model_match":{"cw_model":"23"}`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("projection lacks %s: %s", want, text)
+		}
+	}
+	if len(omitted) != 0 {
+		t.Fatalf("keys alarmd reads were left out or shaped: %+v", omitted)
+	}
+}
+
 // What the allowlist already redacts stays redacted in the source view, and
 // the other views keep leaving unlisted keys out.
 func TestTheShapeViewKeepsEveryRedactionAndOnlyTheSourceViewShapes(t *testing.T) {
