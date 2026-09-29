@@ -201,7 +201,7 @@ func (service *Service) Store(ctx context.Context, request StoreRequest) Result 
 		}
 		r, raw := readOne(ctx, request.Family, binding, key)
 		if r.Status == "ok" {
-			r.Value, r.Omitted, err = projectJSON(raw, sourcePolicy)
+			r.Value, r.Omitted, err = projectSourceJSON(raw)
 			if err != nil {
 				r.Status = "invalid_document"
 				r.Complete = false

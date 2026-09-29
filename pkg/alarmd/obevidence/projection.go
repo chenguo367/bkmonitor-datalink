@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -11,7 +12,8 @@ import (
 )
 
 // Policies are allowlists for each configuration object, not a recursive
-// blacklist over arbitrary source JSON. Unknown extensions never pass through.
+// blacklist over arbitrary source JSON. Unknown extensions never pass through
+// as values. The source view shows their shape instead (projectSourceJSON).
 type policy struct {
 	fields     map[string]*policy
 	values     *policy
@@ -128,6 +130,24 @@ var publishedPolicy = fields("object_contract_version query_group_identity query
 })
 
 func projectJSON(raw []byte, p *policy) (any, []Omission, error) {
+	return projectDocument(raw, p, false)
+}
+
+// projectSourceJSON projects a strategy document the platform's writer
+// wrote. A key its policy does not list is shown by its shape rather than
+// left out: the name, and a value with every object key and array element in
+// place, numbers, booleans and nulls as written, and each string as its
+// length alone. A writer that adds a key this build does not know - an
+// uptime's cw_calendars - is exactly what a refusal comes from, and a view
+// that left the key out could not be replayed against the compiler; one that
+// passed its strings through would pass whatever a key the policy never
+// reviewed holds. A key named like a credential gives neither value nor
+// shape, wherever it is.
+func projectSourceJSON(raw []byte) (any, []Omission, error) {
+	return projectDocument(raw, sourcePolicy, true)
+}
+
+func projectDocument(raw []byte, p *policy, shapeUnlisted bool) (any, []Omission, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var value any
@@ -141,7 +161,7 @@ func projectJSON(raw []byte, p *policy) (any, []Omission, error) {
 		return nil, nil, errors.New("trailing JSON")
 	}
 	omitted := []Omission{}
-	return project(value, p, "$", 0, &omitted), omitted, nil
+	return project(value, p, "$", 0, &omitted, shapeUnlisted), omitted, nil
 }
 
 func omit(out *[]Omission, path, reason string) {
@@ -152,7 +172,7 @@ func omit(out *[]Omission, path, reason string) {
 		*out = append(*out, Omission{Path: "$", Reason: "additional_omitted_fields_not_listed"})
 	}
 }
-func project(value any, p *policy, path string, depth int, omitted *[]Omission) any {
+func project(value any, p *policy, path string, depth int, omitted *[]Omission, shapeUnlisted bool) any {
 	if depth > 32 {
 		omit(omitted, path, "projection_depth_limit")
 		return nil
@@ -175,17 +195,26 @@ func project(value any, p *policy, path string, depth int, omitted *[]Omission) 
 			if child == nil {
 				child = p.values
 			}
+			if child == nil && shapeUnlisted {
+				if credentialFieldName(key) {
+					omit(omitted, path+"."+key, "credential_field")
+					continue
+				}
+				omit(omitted, path+"."+key, "value_shape_only")
+				out[key] = shapeOf(value[key], depth+1)
+				continue
+			}
 			if child == nil {
 				omit(omitted, path+"."+key, "field_not_exposed")
 				continue
 			}
-			out[key] = project(value[key], child, path+"."+key, depth+1, omitted)
+			out[key] = project(value[key], child, path+"."+key, depth+1, omitted, shapeUnlisted)
 		}
 		return out
 	case []any:
 		out := make([]any, len(value))
 		for i, item := range value {
-			out[i] = project(item, p, path+"["+strconv.Itoa(i)+"]", depth+1, omitted)
+			out[i] = project(item, p, path+"["+strconv.Itoa(i)+"]", depth+1, omitted, shapeUnlisted)
 		}
 		return out
 	default:
@@ -195,6 +224,51 @@ func project(value any, p *policy, path string, depth int, omitted *[]Omission) 
 		omit(omitted, path, "unexpected_value_shape")
 		return nil
 	}
+}
+
+// shapeOf is a value with its strings replaced by their length: objects keep
+// their keys and arrays their elements, numbers, booleans and nulls are as
+// written. A key named like a credential keeps its name and nothing else.
+func shapeOf(value any, depth int) any {
+	if depth > 32 {
+		return "<beyond projection depth>"
+	}
+	switch value := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, child := range value {
+			if credentialFieldName(key) {
+				out[key] = "<credential field>"
+				continue
+			}
+			out[key] = shapeOf(child, depth+1)
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for index, item := range value {
+			out[index] = shapeOf(item, depth+1)
+		}
+		return out
+	case string:
+		return fmt.Sprintf("<string of %d bytes>", len(value))
+	default:
+		return value
+	}
+}
+
+// credentialFieldName says whether a key is named like what holds a
+// credential. Deliberately wide: a key it catches wrongly loses its shape, a
+// key it misses would show a credential's length.
+func credentialFieldName(key string) bool {
+	lower := strings.ToLower(key)
+	for _, word := range []string{"password", "passwd", "pwd", "secret", "token", "authorization", "cookie", "header", "credential",
+		"private_key", "privatekey", "api_key", "apikey", "access_key", "accesskey", "signature", "session"} {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // An allowed key/value-shaped condition or function parameter still does not

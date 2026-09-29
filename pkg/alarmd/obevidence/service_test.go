@@ -135,6 +135,16 @@ func TestSourceEvidencePreservesValuesAndWithheldDocuments(t *testing.T) {
 	if len(r.Omitted) < 4 {
 		t.Fatalf("missing omissions: %+v", r.Omitted)
 	}
+	// A key the source view does not list is shown by its shape - the key, its
+	// nested keys, each string as its length - and one named like a credential
+	// not at all.
+	value, _ := r.Value.(map[string]any)
+	if extension, _ := value["unknown_extension"].(map[string]any); extension["safe_looking"] != "<string of 10 bytes>" {
+		t.Fatalf("unknown_extension = %v, want its shape", value["unknown_extension"])
+	}
+	if _, present := value["password"]; present {
+		t.Fatalf("a credential-named key is in the view: %v", value["password"])
+	}
 	log.assertBounded(t)
 	// A source key proves its own content, not membership in an active list.
 	if client.Exists(ctx, "source.strategy_ids").Val() != 0 {
