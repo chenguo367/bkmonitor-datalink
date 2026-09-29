@@ -115,91 +115,93 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 		}
 		keys[index] = source.strategyKeyStem + id
 	}
-	values := make([]interface{}, 0, len(keys))
+	// Each chunk is turned into its strategies before the next is read: what
+	// the read holds besides the documents, which are this round's working
+	// set, is one chunk of replies, however many strategies there are.
+	strategies := make([]SourceStrategy, 0, len(ids))
 	for start := 0; start < len(keys); start += legacyStrategyMGetChunk {
 		chunk := keys[start:min(start+legacyStrategyMGetChunk, len(keys))]
 		read, err := source.client.MGet(ctx, chunk...).Result()
 		if err != nil {
 			return nil, fmt.Errorf("alarmd controlplane: read legacy strategy objects: %w", err)
 		}
-		values = append(values, read...)
-	}
-	if len(values) != len(ids) {
-		return nil, ErrObservationUnstable
-	}
-	strategies := make([]SourceStrategy, 0, len(ids))
-	for index, value := range values {
-		payload, ok := legacyRedisBytes(value)
-		if !ok || len(payload) == 0 {
-			strategies = append(strategies, SourceStrategy{SourceID: ids[index], SourceDisposition: &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionSourceIncomplete,
-				Reason: "SOURCE_OBJECT_INCOMPLETE",
-			}})
-			continue
+		if len(read) != len(chunk) {
+			return nil, ErrObservationUnstable
 		}
-		strategy := SourceStrategy{SourceID: ids[index], Document: append(json.RawMessage(nil), payload...)}
-		var identityDTO struct {
-			ID             int64           `json:"id"`
-			BusinessID     int64           `json:"bk_biz_id"`
-			TenantID       json.RawMessage `json:"bk_tenant_id"`
-			SpaceUID       json.RawMessage `json:"space_uid"`
-			GlobalBusiness json.RawMessage `json:"is_global_strategy"`
+		for offset, value := range read {
+			strategies = append(strategies, legacyStrategyOf(ids[start+offset], value))
 		}
-		if err := json.Unmarshal(payload, &identityDTO); err != nil {
-			strategy.SourceDisposition = &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
-				Reason: "STRATEGY_DOCUMENT_INVALID",
-			}
-			strategies = append(strategies, strategy)
-			continue
-		}
-		if identityDTO.ID <= 0 || strconv.FormatInt(identityDTO.ID, 10) != ids[index] {
-			strategy.SourceDisposition = &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
-				Reason: "STRATEGY_IDENTITY_INVALID",
-			}
-			strategies = append(strategies, strategy)
-			continue
-		}
-		if identityDTO.BusinessID == 0 {
-			strategy.SourceDisposition = &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
-				Reason: "STRATEGY_BUSINESS_IDENTITY_INVALID",
-			}
-			strategies = append(strategies, strategy)
-			continue
-		}
-		tenantID, tenantOK := decodeRequiredIdentityString(identityDTO.TenantID)
-		spaceUID, spaceOK := decodeRequiredIdentityString(identityDTO.SpaceUID)
-		if !tenantOK || !spaceOK {
-			// Which field, not only that one was. The source page samples
-			// this disposition with the strategy id and the reason, and a
-			// reader of 47 such rows could not tell whether the writer had
-			// stopped filling the tenant, the space, or both.
-			strategy.SourceDisposition = &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionSourceIncomplete,
-				Reason: "SOURCE_IDENTITY_UNAVAILABLE", FieldPath: missingIdentityFieldPath(tenantOK, spaceOK),
-			}
-			strategies = append(strategies, strategy)
-			continue
-		}
-		global, globalOK := decodeGlobalBusiness(identityDTO.GlobalBusiness)
-		if !globalOK {
-			// Not read as false. A writer that meant true and spelled it
-			// otherwise would have the strategy run as an ordinary one,
-			// scoped to its own business's space: every other business's
-			// data gone with nothing on the page to say so.
-			strategy.SourceDisposition = &ObjectDisposition{
-				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
-				Reason: ReasonGlobalStrategyInvalid, FieldPath: "is_global_strategy",
-			}
-			strategies = append(strategies, strategy)
-			continue
-		}
-		strategy.Identity = SourceIdentity{TenantID: tenantID, BusinessID: strconv.FormatInt(identityDTO.BusinessID, 10), SpaceScope: spaceUID, GlobalBusiness: global}
-		strategies = append(strategies, strategy)
 	}
 	return strategies, nil
+}
+
+// legacyStrategyOf is one strategy document as the source read it, or the
+// disposition that says why it cannot be used. The document is the copy
+// legacyRedisBytes made of the reply, so the reply is not kept.
+func legacyStrategyOf(id string, value interface{}) SourceStrategy {
+	payload, ok := legacyRedisBytes(value)
+	if !ok || len(payload) == 0 {
+		return SourceStrategy{SourceID: id, SourceDisposition: &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionSourceIncomplete,
+			Reason: "SOURCE_OBJECT_INCOMPLETE",
+		}}
+	}
+	strategy := SourceStrategy{SourceID: id, Document: json.RawMessage(payload)}
+	var identityDTO struct {
+		ID             int64           `json:"id"`
+		BusinessID     int64           `json:"bk_biz_id"`
+		TenantID       json.RawMessage `json:"bk_tenant_id"`
+		SpaceUID       json.RawMessage `json:"space_uid"`
+		GlobalBusiness json.RawMessage `json:"is_global_strategy"`
+	}
+	if err := json.Unmarshal(payload, &identityDTO); err != nil {
+		strategy.SourceDisposition = &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionConfigRejected,
+			Reason: "STRATEGY_DOCUMENT_INVALID",
+		}
+		return strategy
+	}
+	if identityDTO.ID <= 0 || strconv.FormatInt(identityDTO.ID, 10) != id {
+		strategy.SourceDisposition = &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionConfigRejected,
+			Reason: "STRATEGY_IDENTITY_INVALID",
+		}
+		return strategy
+	}
+	if identityDTO.BusinessID == 0 {
+		strategy.SourceDisposition = &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionConfigRejected,
+			Reason: "STRATEGY_BUSINESS_IDENTITY_INVALID",
+		}
+		return strategy
+	}
+	tenantID, tenantOK := decodeRequiredIdentityString(identityDTO.TenantID)
+	spaceUID, spaceOK := decodeRequiredIdentityString(identityDTO.SpaceUID)
+	if !tenantOK || !spaceOK {
+		// Which field, not only that one was. The source page samples
+		// this disposition with the strategy id and the reason, and a
+		// reader of 47 such rows could not tell whether the writer had
+		// stopped filling the tenant, the space, or both.
+		strategy.SourceDisposition = &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionSourceIncomplete,
+			Reason: "SOURCE_IDENTITY_UNAVAILABLE", FieldPath: missingIdentityFieldPath(tenantOK, spaceOK),
+		}
+		return strategy
+	}
+	global, globalOK := decodeGlobalBusiness(identityDTO.GlobalBusiness)
+	if !globalOK {
+		// Not read as false. A writer that meant true and spelled it
+		// otherwise would have the strategy run as an ordinary one,
+		// scoped to its own business's space: every other business's
+		// data gone with nothing on the page to say so.
+		strategy.SourceDisposition = &ObjectDisposition{
+			SourceID: id, Scope: "STRATEGY", Disposition: DispositionConfigRejected,
+			Reason: ReasonGlobalStrategyInvalid, FieldPath: "is_global_strategy",
+		}
+		return strategy
+	}
+	strategy.Identity = SourceIdentity{TenantID: tenantID, BusinessID: strconv.FormatInt(identityDTO.BusinessID, 10), SpaceScope: spaceUID, GlobalBusiness: global}
+	return strategy
 }
 
 // ChangeSignal reads <prefix>.last_updated. The cache manager's incremental
