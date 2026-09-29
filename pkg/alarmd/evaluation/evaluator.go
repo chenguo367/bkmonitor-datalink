@@ -286,6 +286,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// time the summary is returned the forced value and the computed one are
 		// the same field.
 		coverage.Observe(summary.ValidPositions, summary.RequiredPositions, completeness != "", fresh)
+		coverage.ObserveWindowStart(summary.WindowStart)
 		if record.SourceTime() > coverage.End {
 			coverage.End = record.SourceTime()
 		}

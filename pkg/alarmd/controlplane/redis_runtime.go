@@ -306,7 +306,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	if changed != 1 {
 		return ErrActivationConflict
 	}
-	repository.written.remember(payload, next)
+	repository.rememberWritten(payload, next)
 	return nil
 }
 
@@ -1357,7 +1357,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
-	repository.written.remember(activationPayload, next)
+	repository.rememberWritten(activationPayload, next)
 	return nil
 }
 
@@ -1453,7 +1453,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
-	repository.written.remember(activationPayload, next)
+	repository.rememberWritten(activationPayload, next)
 	return nil
 }
 
@@ -2909,4 +2909,22 @@ func candidatePublication(candidate ActivationState, group QueryGroup) (Snapshot
 		named = publication
 	}
 	return named, len(group.Plans) > 0
+}
+
+// rememberWritten keeps the activation this process just wrote, and lets the
+// content memo put out an older publication it no longer carries a Plan on:
+// the drain that needed it has ended with this write.
+func (repository *RedisCatalogRepository) rememberWritten(payload []byte, next ActivationState) {
+	repository.written.remember(payload, next)
+	repository.contentMemo.release(func(publication SnapshotPublicationRef) bool {
+		if publication == next.Current || next.Pending != nil && publication == *next.Pending {
+			return true
+		}
+		for _, record := range next.Plans {
+			if record.Publication == publication {
+				return true
+			}
+		}
+		return false
+	})
 }

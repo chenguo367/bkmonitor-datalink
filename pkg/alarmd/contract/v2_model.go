@@ -119,9 +119,19 @@ const (
 	// ReasonQueryEmpty names a dependency query that completed and returned
 	// no rows at all. The query succeeded, so the binding carries no reason of
 	// its own; this is the one the guard for the Level it starves carries.
-	ReasonQueryEmpty             = "QUERY_EMPTY"
-	ReasonQueryTimeout           = "QUERY_TIMEOUT"
-	ReasonQueryUnavailable       = "QUERY_UNAVAILABLE"
+	ReasonQueryEmpty       = "QUERY_EMPTY"
+	ReasonQueryTimeout     = "QUERY_TIMEOUT"
+	ReasonQueryUnavailable = "QUERY_UNAVAILABLE"
+	// ReasonQueryTargetMissing names a query the backend answered and
+	// refused because the table or field it names does not route in the
+	// strategy's space: a statement about where the data is, not about
+	// whether the backend answers. It stays until somebody changes the
+	// strategy or the space; the routing it reports takes no time range, so
+	// a replay says it as an on-time query does. An expression with a
+	// fallback (`... or vector(100)`) that still produced series is used
+	// despite it, so such a Query Group can leave the query cooldown on the
+	// rounds its fallback answers and return on the rounds it does not.
+	ReasonQueryTargetMissing     = "QUERY_TARGET_MISSING"
 	ReasonReadinessBudgetInvalid = "READINESS_BUDGET_INVALID"
 	// ReasonQueryNotReady names a Slot deferred because the window it would
 	// query is not in yet. It is the normal pacing of every Slot, and the

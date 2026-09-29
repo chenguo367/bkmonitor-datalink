@@ -35,6 +35,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/storecensus"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -598,6 +599,11 @@ type phaseTwoWorkerBundleDependencies struct {
 	// maintenance goroutines and read by nothing in execution.
 	ViewClient   *viewstream.Client
 	PublishFleet func(context.Context)
+	// MeasureStores takes a census of what the stores this process writes to
+	// hold, by key family (package storecensus), while it is the Control
+	// Leader, and forgets the last one when it is not: one census for the
+	// deployment, not one per replica.
+	MeasureStores func(ctx context.Context, leading bool)
 	// ApplyObservationWindows makes the windows opened through that API take
 	// effect on this replica. It runs on the reconcile tick rather than on a
 	// timer of its own, so opening a window is bounded by a cadence the
@@ -2513,9 +2519,33 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 		bundle.maintenanceWG.Add(1)
 		go bundle.refreshPlatformSettings()
 	}
+	if bundle.dependencies.MeasureStores != nil {
+		bundle.maintenanceWG.Add(1)
+		go bundle.measureStores()
+	}
 	if bundle.dependencies.ViewClient != nil {
 		bundle.maintenanceWG.Add(1)
 		go bundle.runViewClient()
+	}
+}
+
+// measureStores takes a census of the stores once every storecensus.Interval,
+// on the Control Leader. The first is an interval after the start, not at
+// it: a starting process has rounds to catch up on first.
+func (bundle *phaseTwoWorkerBundle) measureStores() {
+	defer bundle.maintenanceWG.Done()
+	ticker := time.NewTicker(storecensus.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-bundle.maintenanceCtx.Done():
+			return
+		case <-ticker.C:
+			bundle.mu.RLock()
+			leading := bundle.controlLeader
+			bundle.mu.RUnlock()
+			bundle.dependencies.MeasureStores(bundle.maintenanceCtx, leading)
+		}
 	}
 }
 

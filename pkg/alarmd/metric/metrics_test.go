@@ -337,6 +337,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_expired_slots_finalized_total":                "variableLabels: {reason}",
 		"bkmonitor_alarmd_execute_return_total":                         "variableLabels: {outcome}",
 		"bkmonitor_alarmd_progress_completed_total":                     "variableLabels: {kind}",
+		"bkmonitor_alarmd_progress_completion_causes_total":             "variableLabels: {completion_kind,cause,reason}",
 		"bkmonitor_alarmd_run_one_attempted_total":                      "variableLabels: {}",
 		"bkmonitor_alarmd_scheduler_active_executions":                  "variableLabels: {}",
 		"bkmonitor_alarmd_scheduler_ready_runners":                      "variableLabels: {}",
@@ -437,6 +438,11 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_activation_blocked_set_total":                 "variableLabels: {accounting}",
 		"bkmonitor_alarmd_activation_timeline_reopened_total":           "variableLabels: {}",
 		"bkmonitor_alarmd_activation_body_bytes":                        "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_objects":                   "variableLabels: {rounds}",
+		"bkmonitor_alarmd_fleet_round_memory_rounds":                    "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_bytes":                     "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_max_rounds":                "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_window_sized_objects":      "variableLabels: {}",
 		"bkmonitor_alarmd_loop_turn_age_seconds":                        "variableLabels: {loop}",
 		"bkmonitor_alarmd_loop_turn_duration_seconds":                   "variableLabels: {loop}",
 		"bkmonitor_alarmd_executions_past_deadline":                     "variableLabels: {}",
@@ -464,6 +470,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
 	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_log_lines_total"] = "variableLabels: {stage,admission}"
 	expected["bkmonitor_alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_difference"] = "variableLabels: {side}"
@@ -523,6 +530,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_plans"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_objects"] = "variableLabels: {disposition}"
@@ -555,6 +563,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_range_gate_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_state_preflight_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_state_admission_total"] = "variableLabels: {result,reason}"
@@ -573,6 +582,9 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_platform_settings_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_platform_settings_unavailable_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_platform_settings_change_total"] = "variableLabels: {field}"
+	expected["bkmonitor_alarmd_platform_setting_source"] = "variableLabels: {field,source}"
+	expected["bkmonitor_alarmd_platform_setting_enabled"] = "variableLabels: {field}"
+	expected["bkmonitor_alarmd_platform_setting_entries"] = "variableLabels: {field}"
 
 	descriptions := make(chan string)
 	go func() {
@@ -909,6 +921,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("expired_slots_finalized_total"):                2,
 		fqName("execute_return_total"):                         6,
 		fqName("progress_completed_total"):                     7,
+		fqName("progress_completion_causes_total"):             2 * (len(observability.ProgressCompletionCauses) + 2) * observability.NormalizedReasonCount(),
 		fqName("run_one_attempted_total"):                      1,
 		fqName("scheduler_active_executions"):                  1,
 		fqName("scheduler_ready_runners"):                      1,
@@ -1024,22 +1037,27 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("assignment_index_write_total"):                2,
 		// Closed label sets, every series created at construction; see
 		// control_facts.go.
-		fqName("control_facts_read_total"):           len(controlFactNames),
-		fqName("control_facts_unavailable_total"):    len(controlFactNames) * len(controlFactUnavailableReasons),
-		fqName("control_facts_rebuilt_total"):        len(controlFactNames),
-		fqName("control_health_facts_total"):         len(controlHealthStatuses),
-		fqName("control_health_invalid_total"):       len(controlHealthInvalidFields),
-		fqName("startup_dependency_wait_total"):      len(StartupDependencies),
-		fqName("activation_blocked_query_groups"):    len(ActivationBlockedReasons),
-		fqName("activation_blocked_set_total"):       len(controlplane.BlockedSetAccountings),
-		fqName("activation_timeline_reopened_total"): 1,
-		fqName("activation_body_bytes"):              1,
-		fqName("loop_turn_age_seconds"):              len(LivenessLoops),
-		fqName("loop_turn_duration_seconds"):         histogramSeries(len(LivenessLoops), len(loopTurnDurationBuckets)),
-		fqName("executions_past_deadline"):           1,
-		fqName("assignment_index_read_total"):        4,
-		fqName("assignment_index_confirm_total"):     4,
-		fqName("assignment_record_read_total"):       2,
+		fqName("control_facts_read_total"):                len(controlFactNames),
+		fqName("control_facts_unavailable_total"):         len(controlFactNames) * len(controlFactUnavailableReasons),
+		fqName("control_facts_rebuilt_total"):             len(controlFactNames),
+		fqName("control_health_facts_total"):              len(controlHealthStatuses),
+		fqName("control_health_invalid_total"):            len(controlHealthInvalidFields),
+		fqName("startup_dependency_wait_total"):           len(StartupDependencies),
+		fqName("activation_blocked_query_groups"):         len(ActivationBlockedReasons),
+		fqName("activation_blocked_set_total"):            len(controlplane.BlockedSetAccountings),
+		fqName("activation_timeline_reopened_total"):      1,
+		fqName("activation_body_bytes"):                   1,
+		fqName("fleet_round_memory_objects"):              len(fleet.RoundMemoryBuckets),
+		fqName("fleet_round_memory_rounds"):               1,
+		fqName("fleet_round_memory_bytes"):                1,
+		fqName("fleet_round_memory_max_rounds"):           1,
+		fqName("fleet_round_memory_window_sized_objects"): 1,
+		fqName("loop_turn_age_seconds"):                   len(LivenessLoops),
+		fqName("loop_turn_duration_seconds"):              histogramSeries(len(LivenessLoops), len(loopTurnDurationBuckets)),
+		fqName("executions_past_deadline"):                1,
+		fqName("assignment_index_read_total"):             4,
+		fqName("assignment_index_confirm_total"):          4,
+		fqName("assignment_record_read_total"):            2,
 		// Four outcomes without a refusal, plus a conflict for each refusal
 		// OTHER included, all created at construction.
 		fqName("schedule_cursor_advance_total"):   len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals),
@@ -1074,6 +1092,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_refresh_total")] = 3
 	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
+	// Every stage of the closed list, _other among them, written and limited.
+	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
@@ -1106,6 +1126,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
+	bounds[fqName("control_source_last_good_identity_changed_total")] = 1
 	// The supported data sources, plus other for one the compiler started
 	// accepting without being named, plus mixed for a Query Group that reads
 	// several. Bounded by that list and not by any strategy document, which
@@ -1201,6 +1222,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// written only from the list observability publishes, and the scheduler's
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
+	bounds[fqName("replay_takeover_slots_total")] = len(observability.ReplayTakeoverOutcomes)
 	// One per word the range gate can put on a round, applied included, and
 	// no more: the label is written from the facts after normalization, which
 	// folds any other word to unexplained.
@@ -1239,6 +1261,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("platform_settings_refresh_total")] = 2
 	bounds[fqName("platform_settings_unavailable_total")] = len(platformsettings.UnavailableReasons)
 	bounds[fqName("platform_settings_change_total")] = len(platformsettings.Fields)
+	bounds[fqName("platform_setting_source")] = len(platformsettings.Fields) * len(platformsettings.HorizonSources)
+	bounds[fqName("platform_setting_enabled")] = 1
+	bounds[fqName("platform_setting_entries")] = len(platformsettings.Fields)
 	for _, name := range []string{
 		"messages", "records", "plans", "levels", "events", "bytes", "keys", "state_bytes",
 	} {

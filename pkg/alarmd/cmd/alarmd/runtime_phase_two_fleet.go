@@ -510,6 +510,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		facts := *publisher.retention
 		snapshot.Retention = &facts
 	}
+	// What the tracker keeps to read holes by, and the object keeping the
+	// most: the metrics carry the counts, only the snapshot can name it.
+	roundMemory := publisher.tracker.RoundMemory().Summary()
+	snapshot.RoundMemory = &roundMemory
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is
 	// somebody else's fault" but "this is not a fault". Counting them as

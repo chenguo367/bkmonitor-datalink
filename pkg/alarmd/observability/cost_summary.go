@@ -99,6 +99,13 @@ type CostSummaryOptions struct {
 	MetadataBytes int
 	TopN          int
 	Now           func() time.Time
+	// Admit, when set, sizes the summary by the roster it is given instead
+	// of the capacities above: each Reconcile asks it for the bytes a larger
+	// roster would reserve (CostSummaryCapacityBytes) beyond what is held,
+	// and grows only if they are admitted. A refused roster is tracked as
+	// far as the capacity held reaches, the rest reported on the coverage.
+	// A smaller roster gives its reservation up, so growing back asks again.
+	Admit func(bytes uint64) bool
 }
 
 // CostSummaryCapacityBytes estimates a conservative reservation, including two
@@ -650,7 +657,13 @@ type CostSnapshot struct {
 type CostSummary struct {
 	options CostSummaryOptions
 	enabled bool
-	scope   atomic.Pointer[costScope]
+	// capacity is what Reconcile tracks up to under Admit: the roster's, as
+	// far as it was admitted. Reconcile alone writes it, under reconciling;
+	// capacityBytes is its reservation, for the snapshot. Without Admit the
+	// options' capacities are the capacity.
+	capacity      CostSummaryOptions
+	capacityBytes atomic.Int64
+	scope         atomic.Pointer[costScope]
 	// reconciling and publishing order the maintenance calls among
 	// themselves; Observe takes neither.
 	reconciling sync.Mutex
@@ -716,9 +729,12 @@ func NewCostSummary(o CostSummaryOptions) *CostSummary {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && CostSummaryCapacityBytes(o) > 0, yield: runtime.Gosched,
-		retryClock: time.Now}
-	snapshot := &CostSnapshot{Enabled: c.enabled, ProcessID: o.ProcessID, Scope: "process_observed_candidates", CapacityBytesEstimated: CostSummaryCapacityBytes(o)}
+	admitted := o.Admit != nil && o.TopN > 0
+	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && (admitted || CostSummaryCapacityBytes(o) > 0), yield: runtime.Gosched,
+		retryClock: time.Now, capacity: o}
+	// Under Admit nothing is reserved until a roster asks.
+	c.capacity.GroupCapacity, c.capacity.PlanCapacity, c.capacity.MetadataBytes = 0, 0, 0
+	snapshot := &CostSnapshot{Enabled: c.enabled, ProcessID: o.ProcessID, Scope: "process_observed_candidates", CapacityBytesEstimated: c.capacityEstimate()}
 	snapshot.Coverage.Incomplete = true
 	if !c.enabled {
 		snapshot.DisabledReason = "resource_budget_or_process_identity_missing"
@@ -742,13 +758,18 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 	if scope := c.scope.Load(); scope != nil {
 		previous = scope.groups
 	}
+	capacity := c.options
+	if c.options.Admit != nil {
+		c.admitRoster(groups)
+		capacity = c.capacity
+	}
 	coverage := CostCoverage{CatalogComplete: complete, TotalGroups: len(groups)}
-	next := make(map[string]*costGroupState, min(len(groups), c.options.GroupCapacity))
+	next := make(map[string]*costGroupState, min(len(groups), capacity.GroupCapacity))
 	now := c.options.Now()
 	for _, input := range groups {
 		coverage.TotalPlans += len(input.Members)
 		bytes := len(input.QueryGroupKey) + len(input.QueryRevision) + len(input.SnapshotRevision) + len(input.ScheduleRevision)
-		if input.QueryGroupKey == "" || len(next) >= c.options.GroupCapacity || coverage.MetadataBytes+bytes > c.options.MetadataBytes {
+		if input.QueryGroupKey == "" || len(next) >= capacity.GroupCapacity || coverage.MetadataBytes+bytes > capacity.MetadataBytes {
 			continue
 		}
 		if _, exists := next[input.QueryGroupKey]; exists {
@@ -783,13 +804,13 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 		// All of the group's schedules or none: a group read on some of them
 		// could miss the one due in a window and read as not due when it was.
 		// With none it is due in every window, which can only over-report.
-		if coverage.MetadataBytes+len(state.due)*costDueBytes > c.options.MetadataBytes {
+		if coverage.MetadataBytes+len(state.due)*costDueBytes > capacity.MetadataBytes {
 			state.due = nil
 		}
 		coverage.MetadataBytes += len(state.due) * costDueBytes
 		for _, member := range input.Members {
 			bytes := len(member.TenantID) + len(member.BusinessID) + len(member.StrategyID)
-			if !member.valid() || coverage.TrackedPlans >= c.options.PlanCapacity || coverage.MetadataBytes+bytes > c.options.MetadataBytes {
+			if !member.valid() || coverage.TrackedPlans >= capacity.PlanCapacity || coverage.MetadataBytes+bytes > capacity.MetadataBytes {
 				continue
 			}
 			if _, exists := state.plans[member]; exists {
@@ -812,6 +833,45 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 	coverage.TrackedGroups = len(next)
 	coverage.Incomplete = !complete || coverage.TrackedGroups != coverage.TotalGroups || coverage.TrackedPlans != coverage.TotalPlans
 	c.scope.Store(&costScope{groups: next, coverage: coverage})
+}
+
+// capacityEstimate is the reservation the summary holds: the roster's as
+// admitted under Admit, the options' otherwise.
+func (c *CostSummary) capacityEstimate() int64 {
+	if c.options.Admit != nil {
+		return c.capacityBytes.Load()
+	}
+	return CostSummaryCapacityBytes(c.options)
+}
+
+// admitRoster sizes the capacity to the roster under Admit: the roster's
+// groups, Plans and metadata, as Reconcile counts them. Growth is asked for
+// as the reservation it adds; refused, the capacity held stays. Called
+// under reconciling.
+func (c *CostSummary) admitRoster(groups []CostGroup) {
+	want := c.capacity
+	want.GroupCapacity, want.PlanCapacity, want.MetadataBytes = 0, 0, 0
+	for _, input := range groups {
+		if input.QueryGroupKey == "" {
+			continue
+		}
+		want.GroupCapacity++
+		want.PlanCapacity += len(input.Members)
+		want.MetadataBytes += len(input.QueryGroupKey) + len(input.QueryRevision) + len(input.SnapshotRevision) + len(input.ScheduleRevision) +
+			len(input.Schedules)*costDueBytes
+		for _, member := range input.Members {
+			want.MetadataBytes += len(member.TenantID) + len(member.BusinessID) + len(member.StrategyID)
+		}
+	}
+	// A reservation of nothing is not a summary: the smallest roster still
+	// reserves one group's worth.
+	want.GroupCapacity, want.PlanCapacity, want.MetadataBytes = max(want.GroupCapacity, 1), max(want.PlanCapacity, 1), max(want.MetadataBytes, 1)
+	held, wanted := CostSummaryCapacityBytes(c.capacity), CostSummaryCapacityBytes(want)
+	if wanted > held && !c.options.Admit(uint64(wanted-held)) {
+		return
+	}
+	c.capacity = want
+	c.capacityBytes.Store(wanted)
 }
 
 // Observe never waits for another observer, reconciliation, publication, or an
@@ -1108,7 +1168,7 @@ func (c *CostSummary) Publish(now time.Time) {
 	defer c.publishing.Unlock()
 	epoch := now.UnixNano() / int64(c.options.Window)
 	start := time.Unix(0, epoch*int64(c.options.Window))
-	snapshot := CostSnapshot{Enabled: true, ProcessID: c.options.ProcessID, Scope: "process_observed_candidates", GeneratedAt: now, WindowStart: start.Add(-c.options.Window), CurrentWindowStart: start, WindowEnd: now, CapacityBytesEstimated: CostSummaryCapacityBytes(c.options)}
+	snapshot := CostSnapshot{Enabled: true, ProcessID: c.options.ProcessID, Scope: "process_observed_candidates", GeneratedAt: now, WindowStart: start.Add(-c.options.Window), CurrentWindowStart: start, WindowEnd: now, CapacityBytesEstimated: c.capacityEstimate()}
 	copies := c.copies[:0]
 	if scope := c.scope.Load(); scope != nil {
 		snapshot.Coverage = scope.coverage

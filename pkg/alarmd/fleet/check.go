@@ -302,8 +302,16 @@ var checkAnswers = map[Check]struct {
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
 	// The strategy's: its time_delay decides when its window is read.
 	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},
+	// The strategy's: the backend read the query and rejected it - a
+	// condition value its storage refuses, an expression it cannot parse -
+	// and the platform's own detector is refused the same way. The owner
+	// rests on the cases checked on 2026-09-29: five refused queries, each
+	// compared with the platform detector's request for the same strategy,
+	// all five refused there too (four condition values opening with control
+	// characters, one expression that did not parse). Folded by the stage
+	// and class the refusal was blocked at.
+	CheckQueryRefused: {OwnerStrategy, GroupByBlocked},
 
-	CheckQueryRefused:     {OwnerUndetermined, GroupByBlocked},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
 	// A client-side timeout does not establish a fault on the data side: the
@@ -344,7 +352,6 @@ var checkOrder = []Check{
 	CheckDefect,
 	CheckObservationGap,
 	CheckCoverageReadingRefused,
-	CheckQueryRefused,
 	CheckWindowUndecided,
 	CheckConfigUnresolved,
 	CheckBackendNotAnswering,
@@ -355,6 +362,7 @@ var checkOrder = []Check{
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
+	CheckQueryRefused,
 	CheckConfigRejected,
 	// Below the lines that stop detection, above the one that only warns:
 	// this one detects, from data read before it was all there.

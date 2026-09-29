@@ -238,10 +238,13 @@ func providerFailureFacts(completion execution.QueryExecutionCompletion) *observ
 		if item.Completeness != execution.CompletenessUnavailable {
 			continue
 		}
+		// The completion's reason and this failure name the same word, so a
+		// query that was never sent is not filed under the backend by either.
+		code, from := physicalFailureReason(item.RouteFacts)
 		facts := &observability.QueryFailureFacts{
 			Stage:    observability.QueryFailureStageProvider,
 			Category: physicalFailureCategory(item.RouteFacts),
-			Code:     string(physicalFailureReason(item.RouteFacts)),
+			Code:     string(execution.AttributedReason(code, from)),
 		}
 		for index := len(item.RouteFacts.Attempts) - 1; index >= 0; index-- {
 			attempt := item.RouteFacts.Attempts[index]

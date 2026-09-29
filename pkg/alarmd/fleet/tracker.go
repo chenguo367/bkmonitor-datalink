@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -315,8 +316,8 @@ type queryGroupState struct {
 	// to each of this object's Plans, by Plan, from the Plan's evaluation
 	// lines.
 	planSeries map[StrategyRef]*PlanSeriesMatched
-	// rounds is the object's recent completions, oldest first, at most
-	// RecentRoundsKept of them: what each hole on a window is read against
+	// rounds is the object's completions in minute order, every one from
+	// windowStart (keptRounds): what each hole on a window is read against
 	// to say whose minute it is. slotOffset is the object's distance from a
 	// Slot to the record minute it evaluates, from the latest round that
 	// reported one, so a round that carried no record can still be matched
@@ -328,6 +329,10 @@ type queryGroupState struct {
 	// the object, kept after that round rolls out of rounds: what
 	// rememberedSince tells a hole this process never saw from one it forgot.
 	firstSlot int64
+	// windowStart is where the object's windows start, the latest the
+	// worker said: no hole of theirs is older, so no round older is kept.
+	// Zero while the worker has said nothing (an older worker).
+	windowStart int64
 	// worstWindow is the key of the window the worst pair belonged to on
 	// the last round, so the round-over-round counters know when the pair
 	// moved to another window.
@@ -404,6 +409,8 @@ type queryGroupState struct {
 	// causeReason is the cause's own reason, which is where the answer to
 	// "whose problem is this" actually lives.
 	causeReason string
+	// causeScope is where that cause was found (CauseScope).
+	causeScope *CauseScope
 	// coverage is the evidence behind causeReason when that reason is about
 	// the detection window. It is kept beside the reason and cleared with it,
 	// because a shortfall left over from an earlier round would be read as
@@ -1446,6 +1453,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.reasonCode = completion
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
+		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run
@@ -1573,6 +1581,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			if len(state.coverage.Windows) > 0 {
 				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept
+				if state.windowStart > 0 {
+					// Kept by the window, not by a count: every round from
+					// where the windows start is kept.
+					state.coverage.RoundsKept = len(state.rounds)
+				}
 			}
 			state.coverage.UnlistedHolesAnswered = unlistedHolesAnswered(state.rounds, facts)
 			state.coverage.UnlistedHolesBeforeThisProcess = unlistedHolesBeforeThisProcess(state.rounds, facts, rememberedSince(state))
@@ -1731,6 +1744,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.cooldownExposed = false
 	state.cause = ""
 	state.causeReason = ""
+	state.causeScope = nil
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0
@@ -1906,7 +1920,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		QueryCooldown: state.queryCooldown,
 		DemotedSince:  state.demotedSince,
 		Kind:          state.currentKind,
-		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
+		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,
 		Since:            state.runStartedAt,
@@ -2119,6 +2133,117 @@ func (tracker *Tracker) Tracked() int {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return len(tracker.groups)
+}
+
+// RoundMemoryBuckets are the upper bounds RoundMemoryFacts.Objects counts
+// objects under by the rounds they keep, the last one unbounded: a window
+// of a few positions, of an hour, of a day at the minute, and longer.
+var RoundMemoryBuckets = []string{"le_16", "le_64", "le_256", "le_1440", "gt_1440"}
+
+// RoundMemoryFacts is what the tracker holds to read holes by: objects by
+// the rounds each keeps (RoundMemoryBuckets), the rounds and the bytes held
+// for them over all objects -- the slices' capacity, what the heap holds --
+// the most any one object keeps, and how many objects keep theirs by the
+// window their worker named rather than by the last RecentRoundsKept.
+// Largest names the object keeping MaxRounds; nil while no object keeps
+// any.
+type RoundMemoryFacts struct {
+	Objects     map[string]int
+	Rounds      int
+	Bytes       uint64
+	MaxRounds   int
+	WindowSized int
+	Largest     *LargestRoundMemory
+}
+
+// LargestRoundMemory is the object keeping the most rounds, named so the
+// reading answers which one and not only how many: its Query Group, the
+// strategies it runs (sorted, the first largestStrategiesListed of
+// StrategiesTotal), the rounds it keeps, and where its windows start -- the
+// span that sets how many it keeps once they fill; absent for an object whose
+// worker named no start, which keeps the last RecentRoundsKept. Of objects keeping as
+// many, the one with the least key, so the name does not change from one
+// reading to the next while the counts do not.
+type LargestRoundMemory struct {
+	QueryGroup      string        `json:"query_group"`
+	Strategies      []StrategyRef `json:"strategies"`
+	StrategiesTotal int           `json:"strategies_total"`
+	Rounds          int           `json:"rounds"`
+	WindowStart     *time.Time    `json:"window_start,omitempty"`
+}
+
+// largestStrategiesListed bounds the strategies named for the largest
+// object; the total counts them all.
+const largestStrategiesListed = 4
+
+// RoundMemorySummary is what a replica publishes of its RoundMemoryFacts:
+// the rounds over every object it runs, the bytes they hold, and the object
+// keeping the most. The counts are also metrics; only the snapshot can name
+// the object.
+type RoundMemorySummary struct {
+	Rounds  int                 `json:"rounds"`
+	Bytes   uint64              `json:"bytes"`
+	Largest *LargestRoundMemory `json:"largest,omitempty"`
+}
+
+// Summary is the part of the reading a replica publishes.
+func (facts RoundMemoryFacts) Summary() RoundMemorySummary {
+	return RoundMemorySummary{Rounds: facts.Rounds, Bytes: facts.Bytes, Largest: facts.Largest}
+}
+
+// RoundMemory reads what the tracker holds for the holes, at the moment it
+// is asked: one pass over the table under its lock.
+func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
+	facts := RoundMemoryFacts{Objects: make(map[string]int, len(RoundMemoryBuckets))}
+	for _, bucket := range RoundMemoryBuckets {
+		facts.Objects[bucket] = 0
+	}
+	if tracker == nil {
+		return facts
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	largestKey := ""
+	var largest *queryGroupState
+	for key, state := range tracker.groups {
+		kept := len(state.rounds)
+		if kept > facts.MaxRounds || (kept == facts.MaxRounds && key < largestKey) {
+			largestKey, largest = key, state
+		}
+		switch {
+		case kept <= 16:
+			facts.Objects["le_16"]++
+		case kept <= 64:
+			facts.Objects["le_64"]++
+		case kept <= 256:
+			facts.Objects["le_256"]++
+		case kept <= 1440:
+			facts.Objects["le_1440"]++
+		default:
+			facts.Objects["gt_1440"]++
+		}
+		facts.Rounds += kept
+		facts.Bytes += uint64(cap(state.rounds)) * uint64(unsafe.Sizeof(roundMark{}))
+		facts.MaxRounds = max(facts.MaxRounds, kept)
+		if state.windowStart > 0 {
+			facts.WindowSized++
+		}
+	}
+	if largest != nil {
+		named := &LargestRoundMemory{QueryGroup: largestKey, Rounds: len(largest.rounds), StrategiesTotal: len(largest.strategies)}
+		strategies := make([]StrategyRef, 0, len(largest.strategies))
+		for strategy := range largest.strategies {
+			strategies = append(strategies, strategy)
+		}
+		sortStrategies(strategies)
+		named.Strategies = strategies[:min(len(strategies), largestStrategiesListed)]
+		if largest.windowStart > 0 {
+			start := time.Unix(largest.windowStart, 0).UTC()
+			named.WindowStart = &start
+		}
+		facts.Largest = named
+	}
+	return facts
 }
 
 // recordStrategy adds the strategy a trace names to an object's set, one entry

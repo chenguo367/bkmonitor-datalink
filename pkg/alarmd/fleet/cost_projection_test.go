@@ -265,3 +265,36 @@ func TestCostProjectionCarriesAFilledCoverage(t *testing.T) {
 			snapshot.Coverage.UnevaluatedDuePlans, snapshot.Coverage.UnobservedDueSample)
 	}
 }
+
+// Sized by the replicas it reads (zero read bounds), a refresh reads each
+// replica's projection once, within its publish bound, after asking the
+// memory line for all of them; refused, it reads nothing and defers every
+// replica under MEMORY_REFUSED.
+func TestAProjectionReadIsSizedByItsReplicasAndAdmittedFirst(t *testing.T) {
+	r := &costProjectionRedis{values: make(map[string]string)}
+	s, err := NewCostProjectionStore(r, "test:diagnostics", CostProjectionLimits{PublishBytes: 16 << 10, Timeout: time.Second, TTL: time.Minute, FreshFor: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(600, 0)
+	replicas := []string{"a", "b", "c"}
+	for _, replica := range replicas {
+		if _, err := s.Publish(context.Background(), replica, at, projectionSnapshot(at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asks []uint64
+	admit := true
+	s.AdmitReads(func(bytes uint64) bool { asks = append(asks, bytes); return admit })
+	view := s.Load(context.Background(), replicas, true, at)
+	if !view.Complete || len(view.Snapshots) != 3 || view.ReadCommands != 3 || len(asks) != 1 || asks[0] != uint64(3*(16<<10+1)) {
+		t.Fatalf("view %+v asks %v, want the three read after one ask for three projections", view, asks)
+	}
+	admit = false
+	reads := len(r.readKeys)
+	refused := s.Load(context.Background(), replicas, true, at)
+	if refused.Complete || refused.Deferred != 3 || len(refused.Snapshots) != 0 || len(r.readKeys) != reads ||
+		len(refused.Gaps) != 1 || refused.Gaps[0].Reason != "MEMORY_REFUSED" || refused.Gaps[0].Count != 3 {
+		t.Fatalf("refused view %+v after %d reads, want nothing read and every replica deferred as MEMORY_REFUSED", refused, len(r.readKeys)-reads)
+	}
+}

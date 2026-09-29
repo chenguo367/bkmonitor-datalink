@@ -89,6 +89,8 @@ type objectReadCache struct {
 	bytes      int
 	maxEntries int
 	maxBytes   int
+	// decoded is the running process's reading of the decoded charge.
+	decoded decodedSampler
 }
 
 func newObjectReadCache(maxEntries, maxBytes int) *objectReadCache {
@@ -115,6 +117,7 @@ func (cache *objectReadCache) store(key string, value any, bytes int) {
 	if cache == nil || cache.maxEntries <= 0 || cache.maxBytes <= 0 || bytes > cache.maxBytes {
 		return
 	}
+	cache.decoded.observe(value, bytes)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if element, ok := cache.entries[key]; ok {
@@ -162,6 +165,60 @@ func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBy
 	}
 	repository.objectCache.Store(newObjectReadCache(maxEntries, maxBytes))
 	return nil
+}
+
+// UnusedCacheBytes is what the control timeline cache and the catalog object
+// cache may still take of their budgets: the room detection keeps for them,
+// which observation memory leaves free (package memoryline).
+func (repository *RedisCatalogRepository) UnusedCacheBytes() uint64 {
+	if repository == nil {
+		return 0
+	}
+	var unused uint64
+	if repository.controlCache != nil {
+		// Charged in decoded bytes already (cachedTimelineBytes).
+		occupancy := repository.controlCache.timelineOccupancy()
+		unused += uint64(max(occupancy.MaxBytes-occupancy.Bytes, 0))
+	}
+	if cache := repository.objects(); cache != nil {
+		// Charged in stored bytes; what the rest of it takes on the heap is
+		// the objects decoded from them.
+		cache.mu.Lock()
+		unused += uint64(decodedObjectBytes(max(cache.maxBytes-cache.bytes, 0)))
+		cache.mu.Unlock()
+	}
+	return unused
+}
+
+// decodedObjectBytes is the heap the object cache's entries take for stored
+// bytes of them: the decoded Query Group objects, and each entry's list
+// element and map slot. The cache counts stored bytes, so its unused budget
+// in stored bytes is this much heap still to come.
+//
+// Measured 2026-09-29 by TestDecodedQueryGroupObjectHeapFootprint: retained
+// heap per decoded copy (32 copies held across two collections each side)
+// against its payload, worst of three: 0.84 at one Plan, 1.04
+// at three, 1.34 at eighteen - the tallest tooth, where the Plans slice's
+// doubling lands past a size class - and 1.29 at eighty. Under -race every
+// reading rises by about 0.1 and the tooth reaches 1.46. Three halves covers
+// both, with the entry's overhead, which is under a tenth of the smallest
+// object.
+func decodedObjectBytes(stored int) int {
+	return stored * decodedObjectBytesNumerator / decodedObjectBytesDenominator
+}
+
+const (
+	decodedObjectBytesNumerator   = 3
+	decodedObjectBytesDenominator = 2
+)
+
+// DecodedObjectReading is the object cache's sampled reading of its decoded
+// charge (decodedSampler), zero before a cache is configured.
+func (repository *RedisCatalogRepository) DecodedObjectReading() DecodedObjectReading {
+	if cache := repository.objects(); cache != nil {
+		return cache.decoded.reading()
+	}
+	return DecodedObjectReading{}
 }
 
 // objects is the object cache in force, nil before one is configured; every

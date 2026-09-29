@@ -325,7 +325,9 @@ var failureFacets = map[string]facets{
 	// or a partial answer does not say where the time went.
 	"QUERY_TIMEOUT":     {StageQuery, ClassTimeout, ""},
 	"QUERY_UNAVAILABLE": {StageQuery, ClassUnavailable, ""},
-	"QUERY_PARTIAL":     {StageQuery, ClassUnavailable, ""},
+	// Answered and refused: the table or field does not route in the space.
+	"QUERY_TARGET_MISSING": {StageQuery, ClassRefused, ""},
+	"QUERY_PARTIAL":        {StageQuery, ClassUnavailable, ""},
 	// The backend answered, completely, with nothing: the dependency data is
 	// not there. Not unavailable -- the query succeeded -- and where the data
 	// went is not this deployment's to say.

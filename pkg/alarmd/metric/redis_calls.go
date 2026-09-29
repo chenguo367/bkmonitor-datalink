@@ -212,7 +212,11 @@ func newRedisCallMetrics() redisCallMetrics {
 	callerOperations := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_operation_total",
 		Help: "Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that " +
-			"share one client: directory_refresh, directory_read, diagnostic_write, diagnostic_read, cost_projection.",
+			"share one client: on the diagnostics client directory_read, diagnostic_write, " +
+			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
+			"points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, " +
+			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; " +
+			"store_census on the source and runtime clients.",
 	}, []string{"client", "caller"})
 	callerReasons := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_failure_reason_total",
@@ -357,14 +361,17 @@ func (h *RedisCallHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (conte
 		return ctx, nil
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
-	h.callerOperation(ctx)
 	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
 }
 
+// AfterProcess counts the operation for its caller here rather than before:
+// a client's hooks run in the order added, and a caller a later hook names
+// (the bundle's per-job clones) is in the context only from then on.
 func (h *RedisCallHook) AfterProcess(ctx context.Context, cmd redis.Cmder) error {
 	if h == nil {
 		return nil
 	}
+	h.callerOperation(ctx)
 	h.record(ctx, boundedRedisCommand(cmd.Name()), "false", cmd.Err())
 	return nil
 }
@@ -374,7 +381,6 @@ func (h *RedisCallHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmd
 		return ctx, nil
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
-	h.callerOperation(ctx)
 	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: spentAtIssue(ctx)}), nil
 }
 
@@ -386,6 +392,7 @@ func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.C
 	if h == nil {
 		return nil
 	}
+	h.callerOperation(ctx)
 	var failed error
 	reason := ""
 	for index, cmd := range cmds {

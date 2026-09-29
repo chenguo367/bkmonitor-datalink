@@ -1053,6 +1053,7 @@ func completionBindings(query PlannedQuery, completion execution.ProviderComplet
 	}
 	disposition := execution.AccessAvailable
 	var reason execution.ReasonCode
+	var attribution execution.UnavailableAttribution
 	switch completion.Completeness {
 	case execution.CompletenessFull:
 		dataset = execution.NewDataset(nil)
@@ -1065,7 +1066,7 @@ func completionBindings(query PlannedQuery, completion execution.ProviderComplet
 	case execution.CompletenessUnavailable:
 		dataState = execution.DataStateUnknown
 		disposition = execution.AccessUnavailable
-		reason = providerFailureReason(completion.RouteFacts)
+		reason, attribution = execution.AttributeUnavailable(completion.RouteFacts, execution.ReasonCode(contract.ReasonQueryUnavailable))
 	}
 	for _, requirement := range query.Requirements {
 		for _, consumer := range requirement.Consumers {
@@ -1074,20 +1075,11 @@ func completionBindings(query PlannedQuery, completion execution.ProviderComplet
 				ProviderResult: completion.Ref, QueryWindow: query.Spec.LogicalWindow, Dataset: dataset, View: view,
 				Completeness: completion.Completeness, DataState: dataState,
 				Disposition: disposition, ReasonCode: reason, ImpactScope: execution.ImpactPlan,
-				PartialEvidence: completion.PartialEvidence,
-				Provenance:      execution.InputProvenance{PhysicalQuery: query.Spec.Digest, AttemptNo: attemptNo}})
+				PartialEvidence: completion.PartialEvidence, UnavailableAttribution: attribution,
+				Provenance: execution.InputProvenance{PhysicalQuery: query.Spec.Digest, AttemptNo: attemptNo}})
 		}
 	}
 	return bindings
-}
-
-// providerFailureReason picks the code an unavailable completion carries. The
-// walk and the fallback live in execution.AttributeUnavailable, which also
-// says where the code came from; this caller binds the code only, the
-// attribution is counted where the completion is observed.
-func providerFailureReason(facts execution.ProviderRouteFacts) execution.ReasonCode {
-	code, _ := execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))
-	return code
 }
 
 func waitContext(ctx context.Context, delay time.Duration) error {

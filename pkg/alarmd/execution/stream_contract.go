@@ -229,6 +229,18 @@ func DeriveStreamingCompletion(
 // is the level the answer usually lives at: the cause says a Level could not be
 // decided, the reason says whether that is the data not reaching this window or
 // something that clears on its own.
+// DeriveStreamingCompletionAttribution is DeriveStreamingCompletionDetail
+// with the scope the cause was found in.
+func DeriveStreamingCompletionAttribution(
+	header InternalExecutionHeader,
+	bindings []NamedInputBinding,
+	result EvaluationResult,
+) (CompletionKind, CompletionAttribution, error) {
+	return DeriveCompletionAttribution(InternalExecution{
+		Contract: header.Contract, DuePlans: header.DuePlans, Requirements: header.Requirements, Inputs: bindings,
+	}, result)
+}
+
 func DeriveStreamingCompletionDetail(
 	header InternalExecutionHeader,
 	bindings []NamedInputBinding,

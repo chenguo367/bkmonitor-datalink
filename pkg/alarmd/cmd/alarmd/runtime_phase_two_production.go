@@ -884,7 +884,8 @@ func sourceRefreshIdentity(
 		StrategiesRead:      result.StrategiesRead,
 		Build:               observability.SourceRefreshBuild(result.Build),
 		ChangeSignalPresent: result.ChangeSignalPresent, ChangeSignalAgeSeconds: result.ChangeSignalAgeSeconds,
-		RetainedStaleRevisions: result.RetainedStaleRevisions,
+		RetainedStaleRevisions:  result.RetainedStaleRevisions,
+		LastGoodIdentityChanged: result.LastGoodIdentityChanged,
 	}
 }
 
@@ -1417,6 +1418,11 @@ type productionPhaseTwoOwnership struct {
 	// from the installed view (decision-016 batch 4); nil is the shadow
 	// step, every read the control plane's way.
 	viewGate *viewExecutionGate
+	// takeovers is when this process took each Query Group over, shared by
+	// every Slot source it opens: a Query Group reopened here keeps the
+	// moment, so only Slots due before a real takeover are replayed past the
+	// distance rule (scheduler.TakeoverClock).
+	takeovers *scheduler.TakeoverClock
 
 	mu        sync.Mutex
 	authority ownership.PublicationAuthority
@@ -1501,6 +1507,7 @@ func newProductionPhaseTwoOwnership(
 	}
 	return &productionPhaseTwoOwnership{
 		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
+		takeovers: scheduler.NewTakeoverClock(),
 	}, nil
 }
 
@@ -2500,6 +2507,8 @@ func (runtime *productionPhaseTwoOwnership) MaintainControlLeader(
 		if authority.Fence.QueryGroup == "" {
 			return ownership.ErrStaleFence
 		}
+		// Every line of this renewal names the lease it is about.
+		leaseCtx := observability.ContextWithTraceFields(ctx, leaseTrace(authority.Fence))
 		var renewed ownership.PublicationAuthority
 		err := renewPhaseTwoWithinInterval(ctx, interval, func(attemptCtx context.Context) error {
 			var renewErr error
@@ -2508,7 +2517,7 @@ func (runtime *productionPhaseTwoOwnership) MaintainControlLeader(
 			)
 			return renewErr
 		}, func(err error) {
-			observeProductionRenewalFailure(ctx, runtime.dependencies.Observer, observability.StageLeaseRenewed, err)
+			observeProductionRenewalFailure(leaseCtx, runtime.dependencies.Observer, observability.StageLeaseRenewed, err)
 		}, func() bool {
 			return authority.Deadline.After(runtime.dependencies.Now())
 		})
@@ -2523,7 +2532,7 @@ func (runtime *productionPhaseTwoOwnership) MaintainControlLeader(
 			}
 			continue
 		}
-		observeProductionOwnership(ctx, runtime.dependencies.Observer, observability.StageLeaseRenewed, nil)
+		observeProductionOwnership(leaseCtx, runtime.dependencies.Observer, observability.StageLeaseRenewed, nil)
 		runtime.mu.Lock()
 		if runtime.authority.Fence == authority.Fence {
 			runtime.authority = renewed
@@ -2585,6 +2594,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithSnapshotRetention(runtime.dependencies.SnapshotRetention, runtime.dependencies.PublicationDelayAllowance),
 		scheduler.WithExpiredRangeCreation(runtime.dependencies.ExpiredRangeEnabled),
 		scheduler.WithObserver(runtime.dependencies.Observer),
+		scheduler.WithTakeoverClock(runtime.takeovers),
 	)
 	if err != nil {
 		_ = session.Release(ctx)
@@ -2902,22 +2912,29 @@ func (runtime *productionPhaseTwoQueryGroup) MaintainLease(
 			return ctx.Err()
 		case <-ticker.C:
 		}
+		// Every line of this renewal names the Query Group, and the fence it
+		// renews when the session holds one.
+		trace := observability.TraceFields{QueryGroupKey: string(runtime.queryGroup)}
+		if lease, held := runtime.session.Current(); held {
+			trace = leaseTrace(lease.Fence)
+		}
+		leaseCtx := observability.ContextWithTraceFields(ctx, trace)
 		err := renewPhaseTwoWithinInterval(ctx, interval, func(attemptCtx context.Context) error {
 			return runtime.session.Renew(attemptCtx, runtime.clock(), ttl)
 		}, func(err error) {
-			observeProductionRenewalFailure(ctx, runtime.observer, observability.StageLeaseRenewed, err)
+			observeProductionRenewalFailure(leaseCtx, runtime.observer, observability.StageLeaseRenewed, err)
 		}, func() bool {
 			return runtime.session.Deadline().After(runtime.clock())
 		})
 		if err == nil {
-			observeProductionOwnership(ctx, runtime.observer, observability.StageLeaseRenewed, nil)
+			observeProductionOwnership(leaseCtx, runtime.observer, observability.StageLeaseRenewed, nil)
 			continue
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if isPhaseTwoInvariantError(err) || ownership.IsLeaseDecision(err) {
-			observeProductionOwnership(ctx, runtime.observer, observability.StageLeaseRenewed, err)
+			observeProductionOwnership(leaseCtx, runtime.observer, observability.StageLeaseRenewed, err)
 			return err
 		}
 		if !runtime.session.Deadline().After(runtime.clock()) {
@@ -2943,6 +2960,12 @@ func (runtime *productionPhaseTwoQueryGroup) Release(ctx context.Context) error 
 // observeProductionRenewalFailure reports one failed renewal attempt that is
 // going to be retried. It carries the shared retryable dependency reason so
 // the bounded log policy folds repeats into one limited bucket.
+// leaseTrace is the coordinates a lease line is named by: the Query Group,
+// or the control leader's key, and the owner and epoch holding it.
+func leaseTrace(fence execution.OwnerFence) observability.TraceFields {
+	return observability.TraceFields{QueryGroupKey: string(fence.QueryGroup), OwnerID: fence.OwnerID, OwnerEpoch: fence.OwnerEpoch}
+}
+
 func observeProductionRenewalFailure(
 	ctx context.Context,
 	observer observability.Observer,
@@ -2952,6 +2975,7 @@ func observeProductionRenewalFailure(
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: observability.ResultFailed,
 		Direction: observability.DirectionInternal, ReasonCode: phaseTwoControlDependencyReason, Err: err,
+		Trace: observability.TraceFieldsFromContext(ctx),
 	})
 }
 
@@ -2971,6 +2995,7 @@ func observeProductionOwnership(
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: result,
 		Direction: observability.DirectionInternal, ReasonCode: ownershipObservationReason(err), Err: err,
+		Trace: observability.TraceFieldsFromContext(ctx),
 	})
 }
 
@@ -3057,7 +3082,9 @@ func newPhaseTwoRuntimeObserver(recorder *metric.Recorder, logger *observability
 	if err != nil {
 		return nil, err
 	}
-	return observability.Multi(recorder, observability.NewLoggingObserver(logger, policy)), nil
+	logging := observability.NewLoggingObserver(logger, policy)
+	recorder.SetLogLineSource(logging.LineCounts)
+	return observability.Multi(recorder, logging), nil
 }
 
 // publishedComposition is what a round hands the catalog gauges.

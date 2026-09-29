@@ -169,8 +169,9 @@ func buildLookback(
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) (*lookback.Engine, lookbackStanding, error) {
-	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now))
+	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now, memory))
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
@@ -178,16 +179,18 @@ func buildLookback(
 }
 
 // lookbackOptions wire the lookback to this process: its query client, its
-// permits, its Runner set and its log.
+// permits, its Runner set, its log and the observation memory line its
+// series tables grow under.
 func lookbackOptions(
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights),
+		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights), Memory: memory,
 		Supplement: lookbackSupplement(ownership, logger, now, waitWithin),
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
@@ -220,11 +223,17 @@ func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarl
 		readings := engine.ReadEarly()
 		facts := make(map[string]fleet.ReadEarlyFacts, len(readings))
 		for _, reading := range readings {
-			// The samples stay on this replica's lookback.get: the row rides
-			// on every snapshot, and the values are all it needs.
-			facts[string(reading.QueryGroup)] = fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
+			// The samples ride with the values: the suggestion and what it
+			// rests on are one read, bounded by the fleet's row.
+			row := fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
 				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
 				Since: reading.Since}
+			for _, sample := range reading.Samples {
+				row.Samples = append(row.Samples, fleet.ReadEarlySample{EvaluationTime: int64(sample.EvaluationTime),
+					FirstReadAgeSeconds: sample.FirstReadAgeSeconds, CompletionAgeSeconds: sample.CompletionAgeSeconds,
+					Rung: sample.Rung, ChangedAgeSeconds: sample.ChangedAgeSeconds, Buckets: sample.Buckets})
+			}
+			facts[string(reading.QueryGroup)] = row
 		}
 		return facts
 	}
@@ -249,7 +258,7 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；部分序列迟到的查询组逐个 Slot 定向复查并补充检测（supplements：每组的迟到档、窗口结局——已补、无迟到、Slot 在跑未补、合同已过期、失败、未观测按原因——补充里每对（Plan、序列）的结局与补上的点数、覆盖率＝已补/(已补＋未观测)；按来源的合计与定向复查字节）；到齐最晚的查询组与最近有变化的复查；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（覆盖数 ÷（拥有数 − 从未有过完整首读的组数），目标 100%；从未有过完整首读的组单列计数，并按查询组列出不完整首读的次数，最多 32 个）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；部分序列迟到的查询组逐个 Slot 定向复查并补充检测（supplements：每组的迟到档、窗口结局——已补、无迟到、Slot 在跑未补、合同已过期、失败、未观测按原因——补充里每对（Plan、序列）的结局与补上的点数、覆盖率＝已补/(已补＋未观测)；按来源的合计与定向复查字节）；到齐最晚的查询组与最近有变化的复查；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},
@@ -263,8 +272,8 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
 				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
 				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's last 65 steps - the whole of a shorter window - from the query's own lookback before them.",
-				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung is counted complete there: lateness past it is not measured.",
-				"Each completed sample is classed by the facts of its series against the first read: window_read_early when the first read was empty and data came later, or a series it had came back with other points or values or not at all (the strategy's time_delay moves the read; a value revised after it was judged is not judged again); series_late when every series it had came back as it was and others came later (supplementary detection's); unclassified when a rung changed and its series could not be compared because the memory line refused a series table (counted by reason under unclassified, not a fault); complete otherwise. read_early lists the Query Groups read early twice in a row, with the time_delay they run under and the one that would have read their samples complete: the largest completion past the first read added, aligned up to the step as a strategy's time_delay is compiled. A completion is the age of the recheck that first read the data whole, so the suggestion is an upper bound.",
+				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung has its completion counted there, and lateness past it is not measured; its class is unclassified (unsettled), not complete, because no later read agrees with that last one.",
+				"Each completed sample is classed by the facts of its series against the first read, as its data settled: the read of its last change, which a later rung read again the same, so a change that came back is not one; values are compared to one part in 2^28 (about 3.7e-9 of the value), so reads that differ only in the order the store summed them are one read: window_read_early when the first read was empty and data came later, or a series it had came back with other points or values or not at all (the strategy's time_delay moves the read; a value revised after it was judged is not judged again); series_late when every series it had came back as it was and others came later (supplementary detection's); unclassified when a rung changed and its series could not be compared because the memory line refused a series table (memory_refused), or the deepest rung still changed so no later read says the data settled (unsettled) (counted by reason under unclassified, not a fault); complete otherwise. read_early lists the Query Groups read early twice in a row, with the time_delay they run under and the one that would have read their samples complete: the largest completion past the first read added, aligned up to the step as a strategy's time_delay is compiled. A completion is the age of the recheck that first read the data whole, so the suggestion is an upper bound.",
 				"A series_late Query Group has every Slot read again at the rung its late series were seen at - the Slot's frozen query whole, not a tail - and the series that read has and the first read did not are supplemented at the Slot on the read they came in: the query service is asked once for both. A Slot of more than one physical query is not read (unobserved, multi_query). One Slot of a Query Group at a time, the oldest first; a supplement never waits for its Query Group's Slot, is tried once more within its rung when that Slot is executing, and is counted flight_busy otherwise. Coverage is supplemented Slots over supplemented and unobserved ones; Slots with nothing late are in neither. The series outcomes are the supplement's own: admitted, crossed_t (State already at the Slot or past it), no_data_fact (its no-data group recorded absent at the Slot), config_drift, input_incomplete, withheld.",
 				"A sample waiting for its deep recheck does not hold its group's next sample back: a punctual Query Group settles at 1 to 1.25 rechecks an hour, about a fifth of them deep (simulated: 1.23 at a ten-second step, 1.21 at a minute, 1.02 at five minutes - a group rests from its first rung, 1.5 steps after its read, and waits for its next first read).",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",

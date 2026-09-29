@@ -512,6 +512,12 @@ type NamedInputBinding struct {
 	Terminals       []InputTerminal
 	PartialEvidence *PartialEvidence
 	Provenance      InputProvenance
+	// UnavailableAttribution is where an unavailable binding's ReasonCode
+	// came from (AttributeUnavailable): an attempt that named it, or the
+	// fallback because no attempt named one or none was made. Empty on a
+	// binding that is not unavailable, and on one from a producer that does
+	// not say, whose reason is taken as it is.
+	UnavailableAttribution UnavailableAttribution
 }
 
 type InputProvenance struct {
@@ -2361,6 +2367,21 @@ type HistoryCoverage struct {
 	// summarised a window, full or short, so the round can be matched to
 	// the minute a later hole names.
 	End int64
+	// WindowStart is the oldest position any window of this run reaches
+	// back to, full or short: no hole of this run's windows is older. A
+	// reader that matches holes to the rounds of their minutes needs the
+	// rounds from here to End and no older ones; zero when no window said.
+	WindowStart int64
+}
+
+// ObserveWindowStart notes where one window reaches back to.
+func (coverage *HistoryCoverage) ObserveWindowStart(start int64) {
+	if coverage == nil || start <= 0 {
+		return
+	}
+	if coverage.WindowStart == 0 || start < coverage.WindowStart {
+		coverage.WindowStart = start
+	}
 }
 
 // MaxCoverageWindows bounds how many short windows a round names, and
@@ -2621,6 +2642,7 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	if other.End > coverage.End {
 		coverage.End = other.End
 	}
+	coverage.ObserveWindowStart(other.WindowStart)
 }
 
 type EvaluationResult struct {
@@ -3840,6 +3862,21 @@ type CompletionAttribution struct {
 	// Zero when the Slot did not summarise any window, which is not the same
 	// as a Slot whose windows were all complete.
 	Coverage HistoryCoverage
+	// Scope is where the cause was found: the Plan, and the Level for a
+	// Level's outcome or the physical query for the primary input. The cause
+	// and its reason say what kind of thing went wrong; the scope says which
+	// one, so a round that did not answer whole names the Level or the query
+	// that did not.
+	Scope CompletionScope
+}
+
+// CompletionScope is the part of a Slot a completion cause was found in.
+type CompletionScope struct {
+	Plan          PlanIdentity
+	HasPlan       bool
+	LevelID       uint32
+	HasLevel      bool
+	PhysicalQuery PhysicalQueryDigest
 }
 
 // DeriveCompletionDetail adds the reason that belongs to the reported cause.
@@ -3852,14 +3889,25 @@ func DeriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 	return deriveCompletionDetail(input, result)
 }
 
+// DeriveCompletionAttribution is DeriveCompletionDetail with the scope the
+// cause was found in, from the same traversal.
+func DeriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
+	return deriveCompletionAttribution(input, result)
+}
+
 func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 	CompletionKind, CompletionCause, ReasonCode, error) {
+	kind, attribution, err := deriveCompletionAttribution(input, result)
+	return kind, attribution.Cause, attribution.Reason, err
+}
+
+func deriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
 	if len(result.Plans) == 0 {
-		return "", "", "", errors.New("alarmd execution: no Plan results to complete")
+		return "", CompletionAttribution{}, errors.New("alarmd execution: no Plan results to complete")
 	}
 	primary, err := DerivePrimaryInputFact(input)
 	if err != nil {
-		return "", "", "", err
+		return "", CompletionAttribution{}, err
 	}
 	// A Slot can hit several of these at once. The cause reported is the most
 	// actionable one rather than the first or the commonest: a readiness gap
@@ -3878,18 +3926,32 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 	// 61 of 62 objects sharing a single label that could not say whose problem
 	// they were.
 	reason := ReasonCode("")
-	note := func(candidate CompletionCause, candidateReason ReasonCode) {
+	var scope CompletionScope
+	note := func(candidate CompletionCause, candidateReason ReasonCode, candidateScope CompletionScope) {
 		if causeRank(candidate) > causeRank(cause) {
-			cause, reason = candidate, candidateReason
+			cause, reason, scope = candidate, candidateReason, candidateScope
 		}
 	}
 	hasPartial := primary.Completeness == CompletenessPartial
 	hasUnavailable := primary.Completeness == CompletenessUnavailable
+	// A primary input short or missing names the binding that was, with the
+	// reason access gave it: the query and why, not only that one was.
+	primaryAt := func(completeness Completeness) (ReasonCode, CompletionScope) {
+		for _, binding := range input.Inputs {
+			if binding.Role == InputRolePrimary && binding.Completeness == completeness {
+				return AttributedReason(binding.ReasonCode, binding.UnavailableAttribution), CompletionScope{Plan: binding.Consumer.Plan, HasPlan: true,
+					LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel, PhysicalQuery: binding.Provenance.PhysicalQuery}
+			}
+		}
+		return "", CompletionScope{}
+	}
 	if hasUnavailable {
-		note(CausePrimaryInputUnavailable, "")
+		bindingReason, bindingScope := primaryAt(CompletenessUnavailable)
+		note(CausePrimaryInputUnavailable, bindingReason, bindingScope)
 	}
 	if hasPartial {
-		note(CausePrimaryInputPartial, "")
+		bindingReason, bindingScope := primaryAt(CompletenessPartial)
+		note(CausePrimaryInputPartial, bindingReason, bindingScope)
 	}
 	allFullEmpty := primary.Completeness == CompletenessFull && primary.DataState == DataStateEmpty
 	hasTerminal := false
@@ -3900,12 +3962,12 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 			hasTerminal = true
 		case PlanUnavailable:
 			hasUnavailable = true
-			note(CausePlanUnavailable, plan.ReasonCode)
+			note(CausePlanUnavailable, plan.ReasonCode, CompletionScope{Plan: plan.Plan, HasPlan: true})
 		case PlanReadinessGap:
 			hasUnavailable = true
-			note(CauseDataNotReady, plan.ReasonCode)
+			note(CauseDataNotReady, plan.ReasonCode, CompletionScope{Plan: plan.Plan, HasPlan: true})
 		case PlanRetryPending:
-			return "", "", "", errors.New("alarmd execution: retry-pending Plan cannot derive a completed Slot")
+			return "", CompletionAttribution{}, errors.New("alarmd execution: retry-pending Plan cannot derive a completed Slot")
 		case PlanDecided, PlanDecidedDegraded:
 			if plan.Disposition == PlanDecidedDegraded {
 				// A Plan degraded beside a FULL primary input would complete
@@ -3924,28 +3986,30 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 					hasTerminal = true
 				case LevelOutcomeUnknown:
 					hasUnavailable = true
+					levelScope := CompletionScope{Plan: outcome.Plan, HasPlan: true, LevelID: outcome.LevelID, HasLevel: true}
 					if wholeness.UnknownIsGuardTail(outcome) {
-						note(CauseGapGuardWarming, outcome.ReasonCode)
+						note(CauseGapGuardWarming, outcome.ReasonCode, levelScope)
 					} else {
-						note(CauseLevelOutcomeUnknown, outcome.ReasonCode)
+						note(CauseLevelOutcomeUnknown, outcome.ReasonCode, levelScope)
 					}
 				}
 			}
 		default:
-			return "", "", "", errors.New("alarmd execution: invalid Plan disposition for completion")
+			return "", CompletionAttribution{}, errors.New("alarmd execution: invalid Plan disposition for completion")
 		}
 	}
+	attributed := CompletionAttribution{Cause: cause, Reason: reason, Scope: scope}
 	switch {
 	case hasTerminal:
-		return CompletionTerminal, "", "", nil
+		return CompletionTerminal, CompletionAttribution{}, nil
 	case hasUnavailable:
-		return CompletionUnavailable, cause, reason, nil
+		return CompletionUnavailable, attributed, nil
 	case hasPartial:
-		return CompletionPartialGap, cause, reason, nil
+		return CompletionPartialGap, attributed, nil
 	case allFullEmpty:
-		return CompletionFullEmpty, "", "", nil
+		return CompletionFullEmpty, CompletionAttribution{}, nil
 	default:
-		return CompletionFull, "", "", nil
+		return CompletionFull, CompletionAttribution{}, nil
 	}
 }
 
@@ -4643,6 +4707,11 @@ const (
 type SlotExecutionResult struct {
 	// Set only after successful Progress commit for the unchanged configuration.
 	QueryAvailability QueryAvailability
+	// QueryUnavailableReason is, with QueryAvailabilityUnavailable, why the
+	// primary query was unavailable, as its binding states it
+	// (AttributedReason): what the query cooldown that this result feeds
+	// reports its entries and exits under.
+	QueryUnavailableReason ReasonCode
 	// Set only after a successful Progress commit, not inferred from Result.
 	CompletionKind CompletionKind
 	Completed      bool

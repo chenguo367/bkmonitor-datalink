@@ -484,7 +484,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
 			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
-			stream.noDataMutations, stream.queryEvidence.availability(), stream.seriesCensus, stream.targetSummaries(),
+			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
 	})
@@ -1255,7 +1255,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePrepared(
 ) (execution.SlotExecutionResult, error) {
 	return coordinator.finalizePreparedWithGaps(
 		ctx, request, header, bindings, loadedState, execution.GapLoadResult{}, evaluated, nil,
-		execution.QueryAvailabilityUnknown,
+		queryAvailabilityEvidence{},
 		// The census a caller with no stream can state: the loaded views are
 		// the series it read, and it meant to evaluate exactly those.
 		seriesCensus{Due: len(loadedState.Items), Read: len(loadedState.Items)},
@@ -1272,7 +1272,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	loadedGaps execution.GapLoadResult,
 	evaluated execution.EvaluationResult,
 	noDataMemory []execution.PlanNoDataMutation,
-	queryAvailability execution.QueryAvailability,
+	query queryAvailabilityEvidence,
 	census seriesCensus,
 	targets []execution.TargetResolutionSummary,
 ) (execution.SlotExecutionResult, error) {
@@ -1631,8 +1631,9 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			classifyActivationChange(header.DuePlans, guardActivations, loadedGaps))
 		attribution.Cause = cause
 	} else {
-		completion.Kind, attribution.Cause, attribution.Reason, err =
-			execution.DeriveStreamingCompletionDetail(header, bindings, evaluated)
+		var derived execution.CompletionAttribution
+		completion.Kind, derived, err = execution.DeriveStreamingCompletionAttribution(header, bindings, evaluated)
+		attribution.Cause, attribution.Reason, attribution.Scope = derived.Cause, derived.Reason, derived.Scope
 		if err != nil {
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive completion: %w", err)
 		}
@@ -1687,7 +1688,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
-		result.QueryAvailability = queryAvailability
+		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
 	}
 	return result, err
 }
@@ -1767,8 +1768,8 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		}
 	})
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
-		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage,
-		completion.Evidence, completion.Primary)
+		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionScopeFacts(completionCause),
+		completionCause.Coverage, completion.Evidence, completion.Primary)
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
 }
 
@@ -2721,7 +2722,7 @@ func indexStatePreflight(result execution.StatePreflightResult) map[execution.St
 }
 
 // Called only after this invocation received and validated ProgressCommitted.
-func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence, primary *execution.PrimaryInputFact) {
+func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, scope *observability.CompletionScopeFacts, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence, primary *execution.PrimaryInputFact) {
 	if reason == "" {
 		reason = observability.ReasonNone
 	}
@@ -2742,11 +2743,22 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
-		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
+		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason, ProgressCompletionScope: scope,
 		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
 		PrimaryInput: primaryInputFacts(primary),
 		HeldBy:       heldBy,
 	})
+}
+
+// completionScopeFacts is where a completion's cause was found, for the
+// completion's observation; nil when there is no cause or no scope.
+func completionScopeFacts(attribution execution.CompletionAttribution) *observability.CompletionScopeFacts {
+	scope := attribution.Scope
+	if attribution.Cause == "" || !scope.HasPlan && scope.PhysicalQuery == "" {
+		return nil
+	}
+	return &observability.CompletionScopeFacts{TenantID: scope.Plan.TenantID, BusinessID: scope.Plan.BusinessID,
+		StrategyID: scope.Plan.StrategyID, LevelID: scope.LevelID, HasLevel: scope.HasLevel, PhysicalQuery: string(scope.PhysicalQuery)}
 }
 
 // executionEvidenceFacts carries what an earlier attempt got to onto the
@@ -2796,6 +2808,7 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 		MissingMinutesTruncated: coverage.MissingMinutesTruncated,
 		ShortUnusable:           coverage.ShortUnusable,
 		End:                     coverage.End,
+		WindowStart:             coverage.WindowStart,
 	}
 	if len(facts.MissingMinutes) == 0 {
 		facts.MissingMinutes = nil

@@ -66,11 +66,11 @@ func TestARedisFailureCountsAgainstTheJobThatMadeTheCall(t *testing.T) {
 		ctx, _ = hook.BeforeProcess(ctx, nil)
 		_ = hook.AfterProcess(ctx, failedCommand(name, err))
 	}
-	refresh := redisfailure.WithCaller(context.Background(), redisfailure.CallerDirectoryRefresh)
-	call(refresh, "getrange", context.DeadlineExceeded)
-	call(refresh, "getrange", nil)
+	projection := redisfailure.WithCaller(context.Background(), redisfailure.CallerCostProjection)
+	call(projection, "getrange", context.DeadlineExceeded)
+	call(projection, "getrange", nil)
 	call(context.Background(), "getrange", context.DeadlineExceeded)
-	call(redisfailure.WithCaller(context.Background(), "directroy_refresh"), "getrange", context.DeadlineExceeded)
+	call(redisfailure.WithCaller(context.Background(), "cost_projecton"), "getrange", context.DeadlineExceeded)
 
 	write := redisfailure.WithCaller(context.Background(), redisfailure.CallerDiagnosticWrite)
 	ctx, _ := hook.BeforeProcessPipeline(write, nil)
@@ -78,14 +78,14 @@ func TestARedisFailureCountsAgainstTheJobThatMadeTheCall(t *testing.T) {
 
 	operations, reasons := callerCounts(t, r, callerOperationFamily), callerCounts(t, r, callerReasonFamily)
 	for cell, want := range map[string]float64{
-		"diagnostics/directory_refresh": 2, "diagnostics/other": 1, "diagnostics/diagnostic_write": 1, "diagnostics/diagnostic_read": 0,
+		"diagnostics/cost_projection": 2, "diagnostics/other": 1, "diagnostics/diagnostic_write": 1, "diagnostics/diagnostic_read": 0,
 	} {
 		if operations[cell] != want {
 			t.Errorf("operations %s = %v, want %v; all %v", cell, operations[cell], want, operations)
 		}
 	}
 	for cell, want := range map[string]float64{
-		"diagnostics/directory_refresh/timeout": 1, "diagnostics/other/timeout": 1, "diagnostics/diagnostic_write/timeout": 1,
+		"diagnostics/cost_projection/timeout": 1, "diagnostics/other/timeout": 1, "diagnostics/diagnostic_write/timeout": 1,
 		"diagnostics/directory_read/timeout": 0,
 	} {
 		if reasons[cell] != want {
@@ -154,7 +154,7 @@ func (c passedDeadline) Deadline() (time.Time, bool) { return c.deadline, true }
 // still timed.
 func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	refresh := redisfailure.WithCaller(context.Background(), redisfailure.CallerDirectoryRefresh)
+	refresh := redisfailure.WithCaller(context.Background(), redisfailure.CallerDirectoryRead)
 	refusing := []string{closedPort(t), closedPort(t)}
 	hung := []string{hungListener(t), hungListener(t)}
 	client := func(sentinels []string, readTimeout time.Duration) *redis.Client {
@@ -165,7 +165,7 @@ func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 		return c
 	}
 	passed := func() context.Context {
-		return redisfailure.WithCaller(passedDeadline{Context: context.Background(), deadline: time.Now().Add(-time.Millisecond)}, redisfailure.CallerDirectoryRefresh)
+		return redisfailure.WithCaller(passedDeadline{Context: context.Background(), deadline: time.Now().Add(-time.Millisecond)}, redisfailure.CallerDirectoryRead)
 	}
 	cancelled, cancel := context.WithCancel(refresh)
 	cancel()
@@ -187,8 +187,8 @@ func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 
 	reasons := callerCounts(t, r, callerReasonFamily)
 	for cell, want := range map[string]float64{
-		"diagnostics/directory_refresh/timeout": 3, "diagnostics/directory_refresh/canceled": 1,
-		"diagnostics/directory_refresh/sentinel_unreachable": 2,
+		"diagnostics/directory_read/timeout": 3, "diagnostics/directory_read/canceled": 1,
+		"diagnostics/directory_read/sentinel_unreachable": 2,
 	} {
 		if reasons[cell] != want {
 			t.Errorf("reasons %s = %v, want %v; all %v", cell, reasons[cell], want, reasons)
@@ -209,5 +209,21 @@ func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 	}
 	if timed != 6 {
 		t.Errorf("timed round trips = %d, want the 6 calls", timed)
+	}
+}
+
+// A caller named by a hook after this one - the bundle's per-job clone of a
+// shared client adds its own - is counted: the operation is counted for its
+// caller once every hook has run, one call and one pipeline alike.
+func TestACallerALaterHookNamesIsCounted(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	hook := r.RedisHook("source")
+	ctx, _ := hook.BeforeProcess(context.Background(), nil)
+	_ = hook.AfterProcess(redisfailure.WithCaller(ctx, redisfailure.CallerRuntimeState), failedCommand("mget", context.DeadlineExceeded))
+	ctx, _ = hook.BeforeProcessPipeline(context.Background(), nil)
+	_ = hook.AfterProcessPipeline(redisfailure.WithCaller(ctx, redisfailure.CallerStrategySource), []redis.Cmder{failedCommand("get", nil)})
+	operations, reasons := callerCounts(t, r, callerOperationFamily), callerCounts(t, r, callerReasonFamily)
+	if operations["source/runtime_state"] != 1 || operations["source/strategy_source"] != 1 || reasons["source/runtime_state/timeout"] != 1 {
+		t.Fatalf("operations %v reasons %v, want each job's operation and the state store's timeout under the source client", operations, reasons)
 	}
 }
