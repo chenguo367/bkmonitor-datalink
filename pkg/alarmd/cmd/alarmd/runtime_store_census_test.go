@@ -109,4 +109,20 @@ func TestEachStoreIsMeasuredOnce(t *testing.T) {
 			t.Errorf("stores = %s, want %s", got, want)
 		}
 	}
+
+	// From the configuration: the compatibility output's service Redis on
+	// its own address is a third store; on the runtime store's, with only its
+	// timeouts its own, it is the runtime store.
+	var cfg config.Config
+	cfg.Redis.Address = "runtime:6379"
+	strategy := config.RedisConnectionConfig{Address: "strategy:6379"}
+	cfg.PlatformCache.Strategy = &strategy
+	cfg.Kafka.LegacyAdapter.ServiceRedis = config.RedisConnectionConfig{Address: "service:6379"}
+	if got := names(censusStoresOf(cfg, source, runtime, service)); got != "/source/runtime/legacy_output" {
+		t.Errorf("stores of three addresses = %s, want all three", got)
+	}
+	cfg.Kafka.LegacyAdapter.ServiceRedis = config.RedisConnectionConfig{Address: "runtime:6379", ReadTimeout: config.Duration(time.Second)}
+	if got := names(censusStoresOf(cfg, source, runtime, service)); got != "/source/runtime" {
+		t.Errorf("stores with the service on the runtime address = %s, want it measured as the runtime store", got)
+	}
 }

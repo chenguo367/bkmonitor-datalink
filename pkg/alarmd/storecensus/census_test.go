@@ -219,4 +219,14 @@ func TestAWalkThatOverrunsIsNotACensusOfEveryKey(t *testing.T) {
 	if keys, whole, err := walk(context.Background(), client); err != nil || whole || keys != nil {
 		t.Fatalf("walk past twice its count = %d keys whole %v err %v, want no census of every key", len(keys), whole, err)
 	}
+	// Counted at 300 and walked past twice that: sampled instead.
+	if drawn, exact, err := gather(context.Background(), client, 300); err != nil || exact || len(drawn) != SampleKeys {
+		t.Fatalf("gather = %d keys exact %v err %v, want %d drawn and not exact", len(drawn), exact, err, SampleKeys)
+	}
+	// SCAN may give a key twice while the server rehashes: it is walked once.
+	seen := map[string]struct{}{}
+	walked := appendNew(appendNew(nil, seen, []string{"a", "b"}), seen, []string{"b", "c", "c"})
+	if strings.Join(walked, ",") != "a,b,c" {
+		t.Fatalf("pages walked = %v, want each key once", walked)
+	}
 }

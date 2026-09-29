@@ -875,11 +875,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// for the deployment, the Control Leader's, of each store it writes to -
 	// the strategy source, the runtime store, and the service Redis the
 	// compatibility output keeps its strategy snapshots in - each once.
-	census := &storeCensus{now: external.Now, stores: distinctStores(
-		storeAt{censusStore{name: "source", client: controlClient}, sourceConnection},
-		storeAt{censusStore{name: "runtime", client: runtimeClient}, runtimeConnection},
-		storeAt{censusStore{name: "legacy_output", client: compatOutputClient}, cfg.Kafka.LegacyAdapter.ServiceRedis},
-	)}
+	census := &storeCensus{now: external.Now, stores: censusStoresOf(cfg, controlClient, runtimeClient, compatOutputClient)}
 	if err := recorder.BindStoreCensus(census.read); err != nil {
 		return nil, err
 	}

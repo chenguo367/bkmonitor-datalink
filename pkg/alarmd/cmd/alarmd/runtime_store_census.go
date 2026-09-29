@@ -11,12 +11,13 @@ package main
 
 import (
 	"context"
-	"reflect"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/storecensus"
 )
@@ -36,11 +37,19 @@ type censusStore struct {
 // storeAt is a store and the connection it was opened with.
 type storeAt struct {
 	store      censusStore
-	connection any
+	connection config.RedisConnectionConfig
+}
+
+// storeIdentity is which store a connection reaches: its mode, its address
+// and its database. Two connections that differ only in how they wait -
+// the compatibility output inherits timeouts it does not state - reach one
+// store.
+func storeIdentity(connection config.RedisConnectionConfig) string {
+	return fmt.Sprintf("%s|%s|%d", connection.Mode, redisAddress(connection), connection.DB)
 }
 
 // distinctStores is each store once, under the first name it was given: two
-// clients opened on one connection are one store, and a census of both would
+// clients that reach one store are one store, and a census of both would
 // report its keys twice. A store with no client is not one this process
 // opened.
 func distinctStores(candidates ...storeAt) []censusStore {
@@ -51,7 +60,7 @@ func distinctStores(candidates ...storeAt) []censusStore {
 		}
 		distinct := true
 		for _, earlier := range candidates[:index] {
-			if earlier.store.client != nil && reflect.DeepEqual(earlier.connection, candidate.connection) {
+			if earlier.store.client != nil && storeIdentity(earlier.connection) == storeIdentity(candidate.connection) {
 				distinct = false
 				break
 			}
@@ -61,6 +70,17 @@ func distinctStores(candidates ...storeAt) []censusStore {
 		}
 	}
 	return stores
+}
+
+// censusStoresOf is the stores the process writes to, each once: the
+// strategy source, the runtime store, and the service Redis the
+// compatibility output keeps its strategy snapshots in.
+func censusStoresOf(cfg config.Config, source, runtime, compatOutput redis.UniversalClient) []censusStore {
+	return distinctStores(
+		storeAt{censusStore{name: "source", client: source}, cfg.StrategySourceRedis()},
+		storeAt{censusStore{name: "runtime", client: runtime}, cfg.RuntimeStoreRedis()},
+		storeAt{censusStore{name: "legacy_output", client: compatOutput}, cfg.Kafka.LegacyAdapter.ServiceRedis},
+	)
 }
 
 // storeCensus is the latest census of each store, as the scrape reads it.

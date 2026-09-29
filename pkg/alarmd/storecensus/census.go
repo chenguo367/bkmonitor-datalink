@@ -113,16 +113,11 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 		return Result{}, err
 	}
 	result.Keys = keys
-	var drawn []string
-	if keys <= SampleKeys {
-		drawn, result.Exact, err = walk(ctx, client)
-	}
-	if err == nil && !result.Exact {
-		drawn, err = draw(ctx, client)
-	}
+	drawn, exact, err := gather(ctx, client, keys)
 	if err != nil {
 		return Result{}, err
 	}
+	result.Exact = exact
 	sizes, err := weigh(ctx, client, drawn)
 	if err != nil {
 		return Result{}, err
@@ -175,6 +170,20 @@ func tally(drawn []string, sizes []int64) (families []Family, weighed, gone int)
 	return families, weighed, gone
 }
 
+// gather is the keys a census of a store of keys keys weighs, and whether
+// they are every key: a walk of a small store, or a draw from a larger one
+// or from a small one that outgrew its walk.
+func gather(ctx context.Context, client redis.UniversalClient, keys int64) ([]string, bool, error) {
+	if keys <= SampleKeys {
+		walked, whole, err := walk(ctx, client)
+		if err != nil || whole {
+			return walked, whole, err
+		}
+	}
+	drawn, err := draw(ctx, client)
+	return drawn, false, err
+}
+
 // walk is every key of a small store, each once, and whether it was every
 // key: a store that grew past twice the count it was walked for is walked
 // no further, and is sampled instead.
@@ -188,12 +197,7 @@ func walk(ctx context.Context, client redis.UniversalClient) ([]string, bool, er
 		if err != nil {
 			return nil, false, err
 		}
-		for _, key := range page {
-			if _, repeated := seen[key]; !repeated {
-				seen[key] = struct{}{}
-				keys = append(keys, key)
-			}
-		}
+		keys = appendNew(keys, seen, page)
 		if len(keys) > 2*SampleKeys {
 			return nil, false, nil
 		}
@@ -201,6 +205,17 @@ func walk(ctx context.Context, client redis.UniversalClient) ([]string, bool, er
 			return keys, true, nil
 		}
 	}
+}
+
+// appendNew appends the keys of page not seen before, and marks them seen.
+func appendNew(keys []string, seen map[string]struct{}, page []string) []string {
+	for _, key := range page {
+		if _, repeated := seen[key]; !repeated {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // draw is SampleKeys keys drawn by the server, with replacement.
