@@ -230,3 +230,24 @@ func TestAWalkThatOverrunsIsNotACensusOfEveryKey(t *testing.T) {
 		t.Fatalf("pages walked = %v, want each key once", walked)
 	}
 }
+
+// A census names its families with the vocabulary it is given: a
+// deployment's prefix it knows stays, one it does not is folded.
+func TestACensusNamesFamiliesWithItsVocabulary(t *testing.T) {
+	client := startRedis(t)
+	fill(t, client, "deployment[x]:state", 10, 20)
+	named := func(vocabulary *Vocabulary) string {
+		t.Helper()
+		result, err := Measure(context.Background(), client, "runtime", vocabulary, time.Now)
+		if err != nil || len(result.Families) != 1 {
+			t.Fatalf("census = %+v, %v", result, err)
+		}
+		return result.Families[0].Name
+	}
+	if got := named(NewVocabulary("deployment[x]")); got != "deployment[x]:state:*" {
+		t.Errorf("with the prefix = %q", got)
+	}
+	if got := named(nil); got != "*:state:*" {
+		t.Errorf("without it = %q", got)
+	}
+}

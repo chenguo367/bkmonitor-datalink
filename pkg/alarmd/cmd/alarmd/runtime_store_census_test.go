@@ -127,15 +127,25 @@ func TestEachStoreIsMeasuredOnce(t *testing.T) {
 	}
 }
 
-// The census names keys with the deployment's configured prefixes as they
-// are spelled: the platform's key prefix with its environment in brackets
-// stays, where the built-in words alone would fold it.
+// The census names keys with every key prefix the deployment configures,
+// as it is spelled: each one alone keeps its segment, where the built-in
+// words would fold it.
 func TestTheCensusKnowsTheDeploymentsPrefixes(t *testing.T) {
-	var cfg config.Config
-	cfg.Kafka.LegacyAdapter.SnapshotPrefix = "bk_monitorv3.ee[stag]"
-	cfg.PhaseTwo.Control.StrategyCachePrefix = "bk_monitorv3.ee[stag].cache"
-	key := "bk_monitorv3.ee[stag].detect.result.1.2.3.4"
-	if got := censusVocabulary(cfg).FamilyOf(key); got != "bk_monitorv3.ee[stag].detect.result.*.*.*.*" {
-		t.Errorf("family = %q, want the configured prefix kept", got)
+	for name, configure := range map[string]func(*config.Config, string){
+		"state":             func(cfg *config.Config, prefix string) { cfg.Redis.StatePrefix = prefix },
+		"strategy cache":    func(cfg *config.Config, prefix string) { cfg.PhaseTwo.Control.StrategyCachePrefix = prefix },
+		"platform key":      func(cfg *config.Config, prefix string) { cfg.Kafka.LegacyAdapter.SnapshotPrefix = prefix },
+		"platform settings": func(cfg *config.Config, prefix string) { cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix = prefix },
+		"dynamic groups":    func(cfg *config.Config, prefix string) { cfg.PlatformCache.DynamicGroupKeyPrefix = &prefix },
+		"linkd":             func(cfg *config.Config, prefix string) { cfg.PhaseTwo.Linkd.KeyPrefix = prefix },
+		"pod cache": func(cfg *config.Config, prefix string) {
+			cfg.Kafka.LegacyAdapter.PodCache = &config.LegacyPodCacheConfig{KeyPrefix: prefix}
+		},
+	} {
+		var cfg config.Config
+		configure(&cfg, "deployment[x]")
+		if got := censusVocabulary(cfg).FamilyOf("deployment[x]:state:1"); got != "deployment[x]:state:*" {
+			t.Errorf("%s prefix: family = %q, want it kept", name, got)
+		}
 	}
 }
