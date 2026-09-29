@@ -288,45 +288,31 @@ func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 // snapshot would shorten the anomaly list, which is the exact reading this
 // package exists to prevent.
 func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapshot, error) {
-	if len(replicas) == 0 {
-		return nil, nil
-	}
-	keys := make([]string, 0, len(replicas))
-	for _, replica := range replicas {
-		keys = append(keys, store.snapshotKey(replica))
-	}
-	values, err := store.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("alarmd fleet: read snapshots: %w", err)
-	}
-	snapshots := make([]Snapshot, 0, len(values))
-	// Counted whatever the outcome below: a read that decodes badly still
-	// cost the round trip and the bytes.
-	bytes := 0
-	defer func() {
-		if store.meter != nil {
-			store.meter.SnapshotsLoaded(len(snapshots), bytes)
-		}
-	}()
-	for index, value := range values {
-		if value == nil {
-			continue
-		}
-		text, ok := value.(string)
-		if ok {
-			bytes += len(text)
-		}
-		if !ok {
-			return nil, fmt.Errorf("alarmd fleet: snapshot for %s has an unexpected type", replicas[index])
-		}
+	snapshots := make([]Snapshot, 0, len(replicas))
+	var decodeErr error
+	bytes, err := store.read(ctx, replicas, store.snapshotKey, func(index int, text string) error {
 		var snapshot Snapshot
 		if err := json.Unmarshal([]byte(text), &snapshot); err != nil {
-			return nil, fmt.Errorf("alarmd fleet: decode snapshot for %s: %w", replicas[index], err)
+			decodeErr = fmt.Errorf("alarmd fleet: decode snapshot for %s: %w", replicas[index], err)
+			return decodeErr
 		}
 		if snapshot.Replica != replicas[index] {
-			return nil, fmt.Errorf("alarmd fleet: snapshot for %s reports replica %q", replicas[index], snapshot.Replica)
+			decodeErr = fmt.Errorf("alarmd fleet: snapshot for %s reports replica %q", replicas[index], snapshot.Replica)
+			return decodeErr
 		}
 		snapshots = append(snapshots, snapshot)
+		return nil
+	})
+	if err != nil && decodeErr == nil {
+		return nil, fmt.Errorf("alarmd fleet: read snapshots: %w", err)
+	}
+	// Counted whether or not what came back decoded: a read that decodes
+	// badly still cost the round trips and the bytes.
+	if store.meter != nil && len(replicas) > 0 {
+		store.meter.SnapshotsLoaded(len(snapshots), bytes)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
 	return snapshots, nil
 }
@@ -336,28 +322,29 @@ func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapsho
 // expired -- is absent from the result, and the reader summarizes its
 // snapshot instead. A decode failure is reported, as Load reports one.
 func (store *RedisStore) LoadSummaries(ctx context.Context, replicas []string) ([]ReplicaSummary, error) {
-	values, bytes, err := store.read(ctx, replicas, store.summaryKey)
-	if err != nil {
-		return nil, fmt.Errorf("alarmd fleet: read summaries: %w", err)
-	}
-	summaries := make([]ReplicaSummary, 0, len(values))
-	defer func() {
-		if store.meter != nil {
-			store.meter.SummariesLoaded(len(summaries), bytes)
-		}
-	}()
-	for index, text := range values {
-		if text == nil {
-			continue
-		}
+	summaries := make([]ReplicaSummary, 0, len(replicas))
+	var decodeErr error
+	bytes, err := store.read(ctx, replicas, store.summaryKey, func(index int, text string) error {
 		var summary ReplicaSummary
-		if err := json.Unmarshal([]byte(*text), &summary); err != nil {
-			return nil, fmt.Errorf("alarmd fleet: decode summary for %s: %w", replicas[index], err)
+		if err := json.Unmarshal([]byte(text), &summary); err != nil {
+			decodeErr = fmt.Errorf("alarmd fleet: decode summary for %s: %w", replicas[index], err)
+			return decodeErr
 		}
 		if summary.Head.Replica != replicas[index] {
-			return nil, fmt.Errorf("alarmd fleet: summary for %s reports replica %q", replicas[index], summary.Head.Replica)
+			decodeErr = fmt.Errorf("alarmd fleet: summary for %s reports replica %q", replicas[index], summary.Head.Replica)
+			return decodeErr
 		}
 		summaries = append(summaries, summary)
+		return nil
+	})
+	if err != nil && decodeErr == nil {
+		return nil, fmt.Errorf("alarmd fleet: read summaries: %w", err)
+	}
+	if store.meter != nil && len(replicas) > 0 {
+		store.meter.SummariesLoaded(len(summaries), bytes)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
 	return summaries, nil
 }
@@ -365,54 +352,79 @@ func (store *RedisStore) LoadSummaries(ctx context.Context, replicas []string) (
 // LoadOwned reads the named replicas' whole owned lists, by replica. A
 // replica with none readable is absent from the result.
 func (store *RedisStore) LoadOwned(ctx context.Context, replicas []string) (map[string][]string, error) {
-	values, bytes, err := store.read(ctx, replicas, store.ownedKey)
-	if err != nil {
-		return nil, fmt.Errorf("alarmd fleet: read owned objects: %w", err)
-	}
-	owned := make(map[string][]string, len(values))
-	defer func() {
-		if store.meter != nil {
-			store.meter.OwnedLoaded(len(owned), bytes)
-		}
-	}()
-	for index, text := range values {
-		if text == nil {
-			continue
-		}
+	owned := make(map[string][]string, len(replicas))
+	var decodeErr error
+	bytes, err := store.read(ctx, replicas, store.ownedKey, func(index int, text string) error {
 		var list []string
-		if err := json.Unmarshal([]byte(*text), &list); err != nil {
-			return nil, fmt.Errorf("alarmd fleet: decode owned objects for %s: %w", replicas[index], err)
+		if err := json.Unmarshal([]byte(text), &list); err != nil {
+			decodeErr = fmt.Errorf("alarmd fleet: decode owned objects for %s: %w", replicas[index], err)
+			return decodeErr
 		}
 		owned[replicas[index]] = list
+		return nil
+	})
+	if err != nil && decodeErr == nil {
+		return nil, fmt.Errorf("alarmd fleet: read owned objects: %w", err)
+	}
+	if store.meter != nil && len(replicas) > 0 {
+		store.meter.OwnedLoaded(len(owned), bytes)
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
 	return owned, nil
 }
 
-// read is one MGET of the named replicas' keys of one kind, in their order,
-// nil where a replica has none, and the bytes that came back.
-func (store *RedisStore) read(ctx context.Context, replicas []string, key func(string) string) ([]*string, int, error) {
+// read reads the named replicas' keys of one kind and hands visit each
+// value that came back, in order, with the replica's position; it says how
+// many bytes came back. The values' lengths are read first, in one pipeline,
+// and the values in MGETs of at most maxAnomalyBytes each -- the budget one
+// of a snapshot's lists is cut to -- or of one value when that alone is more:
+// each MGET's replies are decoded and let go before the next is read, where
+// one MGET of every replica held every reply, and a copy of each, beside
+// everything decoded from them. A replica with nothing readable is skipped.
+func (store *RedisStore) read(ctx context.Context, replicas []string, key func(string) string, visit func(index int, text string) error) (int, error) {
 	if len(replicas) == 0 {
-		return nil, 0, nil
+		return 0, nil
 	}
 	keys := make([]string, 0, len(replicas))
 	for _, replica := range replicas {
 		keys = append(keys, key(replica))
 	}
-	values, err := store.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, 0, err
-	}
-	texts, bytes := make([]*string, len(values)), 0
-	for index, value := range values {
-		if value == nil {
-			continue
+	lengths := make([]*redis.IntCmd, len(keys))
+	if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for index, name := range keys {
+			lengths[index] = pipe.StrLen(ctx, name)
 		}
-		text, ok := value.(string)
-		if !ok {
-			return nil, bytes, fmt.Errorf("value for %s has an unexpected type", replicas[index])
-		}
-		bytes += len(text)
-		texts[index] = &text
+		return nil
+	}); err != nil {
+		return 0, err
 	}
-	return texts, bytes, nil
+	bytes := 0
+	for start := 0; start < len(keys); {
+		end, spent := start, int64(0)
+		for end < len(keys) && (end == start || spent+lengths[end].Val() <= int64(store.maxAnomalyBytes)) {
+			spent += lengths[end].Val()
+			end++
+		}
+		values, err := store.client.MGet(ctx, keys[start:end]...).Result()
+		if err != nil {
+			return bytes, err
+		}
+		for offset, value := range values {
+			if value == nil {
+				continue
+			}
+			text, ok := value.(string)
+			if !ok {
+				return bytes, fmt.Errorf("value for %s has an unexpected type", replicas[start+offset])
+			}
+			bytes += len(text)
+			if err := visit(start+offset, text); err != nil {
+				return bytes, err
+			}
+		}
+		start = end
+	}
+	return bytes, nil
 }
