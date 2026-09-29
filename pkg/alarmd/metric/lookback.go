@@ -52,6 +52,13 @@ type lookbackCollector struct {
 	yieldReleases *prometheus.Desc
 	yieldSeconds  *prometheus.Desc
 	yieldMax      *prometheus.Desc
+	// The directed reads of series_late Query Groups and the supplements of
+	// their Slots.
+	supplementWindows    *prometheus.Desc
+	supplementUnobserved *prometheus.Desc
+	supplementSeries     *prometheus.Desc
+	supplementPoints     *prometheus.Desc
+	directedBytes        *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -97,6 +104,23 @@ func newLookbackCollector() *lookbackCollector {
 				"with the time_delay that would have read it complete (lookback.get read_early).", "source"),
 		seriesLate: desc("lookback_series_late_groups",
 			"The source's Query Groups some of whose series were seen coming later than the first read.", "source"),
+		supplementWindows: desc("lookback_supplement_windows_total",
+			"Slots of series_late Query Groups read again for their late series, by source and what they came to: "+
+				"supplemented (the supplement ran), nothing_late, flight_busy (the group's own Slot was executing), "+
+				"contract_expired, failed, unobserved (not read). Coverage is supplemented over supplemented and "+
+				"unobserved.", "source", "outcome"),
+		supplementUnobserved: desc("lookback_supplement_unobserved_total",
+			"Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, "+
+				"first_read_incomplete, multi_query, memory_refused.", "source", "reason"),
+		supplementSeries: desc("lookback_supplement_series_total",
+			"(Plan, series) pairs the supplements that ran were given, by source and what each came to: candidates "+
+				"in all, and admitted, crossed_t, no_data_fact, config_drift, input_incomplete, withheld.",
+			"source", "outcome"),
+		supplementPoints: desc("lookback_supplement_points_total",
+			"Points the admitted series of the supplements were evaluated on, by source.", "source"),
+		directedBytes: desc("lookback_directed_read_bytes_total",
+			"Bytes the directed reads delivered, by source: a Slot's frozen query each, read against "+
+				"lookback_first_read_bytes_total over lookback_first_reads_total.", "source"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -152,7 +176,8 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
-		c.probes, c.classes, c.readEarly, c.seriesLate, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
+		c.supplementPoints, c.directedBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -189,6 +214,17 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		gauge(c.readEarly, float64(source.ReadEarlyGroups), name)
 		gauge(c.seriesLate, float64(source.SeriesLateGroups), name)
+		for _, outcome := range lookback.DirectedOutcomes {
+			counter(c.supplementWindows, source.SupplementWindows[outcome], name, outcome)
+		}
+		for _, reason := range lookback.DirectedUnobservedReasons {
+			counter(c.supplementUnobserved, source.SupplementUnobserved[reason], name, reason)
+		}
+		for _, outcome := range lookback.SupplementSeriesOutcomes {
+			counter(c.supplementSeries, source.SupplementSeries[outcome], name, outcome)
+		}
+		counter(c.supplementPoints, source.SupplementPoints, name)
+		counter(c.directedBytes, source.DirectedReadBytes, name)
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

@@ -151,6 +151,8 @@ type fixture struct {
 	yield   chan struct{}
 	owned   map[execution.QueryGroupIdentity]bool
 	faults  []string
+	// specs is every query a recheck or directed read asked for.
+	specs []execution.PhysicalQuerySpec
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -159,7 +161,10 @@ func newFixture(t *testing.T) *fixture {
 		owned: map[execution.QueryGroupIdentity]bool{"qg": true, "qg-b": true}}
 	engine, err := New(Options{Now: f.clock.now,
 		Refusals: []string{"waiters", "full"}, UnspreadFirstSamples: true, ProbeFirstSamples: true,
-		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			f.mu.Lock()
+			f.specs = append(f.specs, spec)
+			f.mu.Unlock()
 			if _, ok := ctx.Deadline(); !ok {
 				t.Error("a recheck ran without a deadline")
 			}

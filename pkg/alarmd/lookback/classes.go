@@ -57,6 +57,10 @@ const (
 	// maxEvidenceBuckets how many changed buckets each names.
 	readEarlyKept      = 3
 	maxEvidenceBuckets = 8
+	// seriesLateCleanToEnd is how many complete samples in a row end a
+	// series_late Query Group's directed reads: once may be a quiet hour,
+	// twice in a row is its series arriving with the rest again.
+	seriesLateCleanToEnd = 2
 )
 
 // ReadEarlySample is one sample that found its window read early: when its
@@ -104,6 +108,7 @@ type seriesLateState struct {
 	rung  int
 	since time.Time
 	seen  uint64
+	clean int
 }
 
 // classOf is a completed sample's class.
@@ -151,12 +156,22 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 	default:
 		state.readEarly = nil
 	}
-	if class == ClassSeriesLate {
+	switch class {
+	case ClassSeriesLate:
 		if state.seriesLate == nil {
 			state.seriesLate = &seriesLateState{since: now}
 		}
 		state.seriesLate.rung = candidate.seriesAddedRung
 		state.seriesLate.seen++
+		state.seriesLate.clean = 0
+	case ClassComplete:
+		// seriesLateCleanToEnd complete samples in a row end the directed
+		// reads: its series are late no more, as far as its samples read.
+		if state.seriesLate != nil {
+			if state.seriesLate.clean++; state.seriesLate.clean >= seriesLateCleanToEnd {
+				state.seriesLate = nil
+			}
+		}
 	}
 }
 

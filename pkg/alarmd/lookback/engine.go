@@ -190,6 +190,9 @@ type Permit func() (release func(), yield <-chan struct{}, refused string)
 // that read's series sums and nothing else. Nothing is given back: what a
 // table took is in the live heap from the next collection on, and a sample
 // that ends leaves it there no longer. Nil admits everything.
+//
+// Supplement runs a supplement of one Slot on the late series a directed
+// read kept for it (see directed.go); nil reads no Query Group directed.
 type Options struct {
 	Now                  func() time.Time
 	Recheck              Recheck
@@ -199,6 +202,7 @@ type Options struct {
 	Owned                func() int
 	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
 	Memory               func(bytes uint64) bool
+	Supplement           func(context.Context, SupplementJob) SupplementOutcome
 	UnspreadFirstSamples bool
 	ProbeFirstSamples    bool
 }
@@ -255,6 +259,10 @@ type group struct {
 	// seriesLate the rung its late series were last seen at, if any.
 	readEarly  *readEarlyState
 	seriesLate *seriesLateState
+	// directed is its Slots read again for their late series while it is
+	// series_late, by evaluation time, and supplement what they came to.
+	directed   map[execution.EvaluationTime]*directedSlot
+	supplement *supplementTally
 	capturing  bool
 	sample     *sample
 	nextAt     time.Time
@@ -407,6 +415,9 @@ func (engine *Engine) Begin(query Query) *Read {
 		state.lastSlot = slot.EvaluationTime
 	}
 	state.source, state.step = source, step
+	if state.seriesLate != nil && engine.options.Supplement != nil {
+		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
+	}
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
 		return read
 	}
@@ -431,6 +442,9 @@ type Read struct {
 	depth    int
 	keptFrom int64
 	summary  *summarizer
+	// directed is this read kept as its Slot's first read for a directed
+	// read, on a directed Query Group; nil otherwise.
+	directed *directedQuery
 }
 
 // Series counts one delivered series' bytes, and on a sample adds it to the
@@ -443,13 +457,25 @@ func (read *Read) Series(dataset *execution.Dataset, bytes uint64) {
 	if read.summary != nil {
 		read.summary.add(dataset)
 	}
+	if read.directed != nil && dataset != nil && dataset.Len() > 0 {
+		record, _ := dataset.Record(0)
+		read.directed.first.add(hashString(record.DimensionIdentityDigest()))
+	}
 }
 
 // Complete hands a sample's summary to the engine, never waiting, kept to
 // the window's tail. A first read that is not complete is dropped: there is
 // nothing a later read could be compared against.
 func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
-	if read == nil || read.summary == nil {
+	if read == nil {
+		return
+	}
+	if read.directed != nil {
+		read.engine.mu.Lock()
+		completeDirectedLocked(read.directed, completion, err)
+		read.engine.mu.Unlock()
+	}
+	if read.summary == nil {
 		return
 	}
 	engine := read.engine
@@ -520,6 +546,9 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 			engine.counts.rechecks[key3(candidate.source, RungNames[candidate.rung], RecheckOwnerLost)]++
 		}
 	}
+	for _, slot := range state.directed {
+		slot.dropped = true
+	}
 	delete(engine.groups, queryGroup)
 }
 
@@ -546,7 +575,9 @@ func (engine *Engine) Step(ctx context.Context) {
 	now := engine.options.Now()
 	engine.mu.Lock()
 	due := make([]*sample, 0)
+	var directed []*directedSlot
 	for _, state := range engine.groups {
+		directed = append(directed, engine.dueDirectedLocked(state, now)...)
 		for _, candidate := range [...]*sample{state.sample, state.probe} {
 			if candidate != nil && candidate.running {
 				// A read asked to yield that still holds its permit past its
@@ -574,6 +605,34 @@ func (engine *Engine) Step(ctx context.Context) {
 	}
 	engine.mu.Unlock()
 	sort.Slice(due, func(i, j int) bool { return due[i].id < due[j].id })
+	sort.Slice(directed, func(i, j int) bool { return directed[i].id < directed[j].id })
+	// A directed read is the Slot's supplement: it goes before the samples,
+	// which measure and can wait for their next rung.
+	for _, slot := range directed {
+		if !engine.options.Owns(slot.queryGroup) {
+			engine.Forget(slot.queryGroup)
+			continue
+		}
+		release, yield, refused := engine.options.Permit()
+		if refused != "" {
+			engine.mu.Lock()
+			if _, named := engine.counts.refusals[refused]; !named {
+				refused = RefusedOther
+			}
+			engine.counts.refusals[refused]++
+			engine.mu.Unlock()
+			return
+		}
+		engine.mu.Lock()
+		if slot.dropped {
+			engine.mu.Unlock()
+			release()
+			continue
+		}
+		slot.running = true
+		engine.mu.Unlock()
+		go engine.directedRead(ctx, slot, release, yield)
+	}
 	for _, candidate := range due {
 		if !engine.options.Owns(candidate.queryGroup) {
 			engine.Forget(candidate.queryGroup)
