@@ -10,22 +10,34 @@
 package lookback
 
 import (
+	"context"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// lateWindow ends one directed window of the fixture's series_late group:
-// its Slot, the rung it was read at, the time_delay its query runs under,
-// and what the window came to.
-func lateWindow(f *fixture, evaluation int64, rung int, delaySeconds int64, outcome string, facts *execution.SupplementFacts) {
+// openWindow opens one directed window of the fixture's series_late group in
+// the directed reads that stand: its Slot, the rung it is read at, and the
+// time_delay its query runs under.
+func openWindow(f *fixture, evaluation int64, rung int, delaySeconds int64) *directedSlot {
 	f.engine.mu.Lock()
 	defer f.engine.mu.Unlock()
 	state := f.engine.groups["qg"]
-	slot := &directedSlot{queryGroup: "qg", source: state.source, evaluation: execution.EvaluationTime(evaluation),
-		step: state.step, rung: rung, queries: []*directedQuery{{spec: execution.PhysicalQuerySpec{
+	return &directedSlot{queryGroup: "qg", source: state.source, evaluation: execution.EvaluationTime(evaluation),
+		step: state.step, rung: rung, period: state.seriesLate, queries: []*directedQuery{{spec: execution.PhysicalQuerySpec{
 			PlanFacts: execution.QueryPlanFacts{QueryDelaySeconds: delaySeconds}}}}}
-	f.engine.noteDirectedLocked(state, slot, outcome, "", facts)
+}
+
+// endWindow ends an open window with what it came to.
+func endWindow(f *fixture, slot *directedSlot, outcome string, facts *execution.SupplementFacts) {
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	f.engine.noteDirectedLocked(f.engine.groups["qg"], slot, outcome, "", facts)
+}
+
+// lateWindow opens one directed window and ends it.
+func lateWindow(f *fixture, evaluation int64, rung int, delaySeconds int64, outcome string, facts *execution.SupplementFacts) {
+	endWindow(f, openWindow(f, evaluation, rung, delaySeconds), outcome, facts)
 }
 
 func crossed(n int) *execution.SupplementFacts {
@@ -182,27 +194,8 @@ func TestAGroupReadDirectedAgainCountsItsLateSeriesAfresh(t *testing.T) {
 	before := f.engine.groups["qg"].latePastRound.since
 	f.engine.mu.Unlock()
 
-	sample := func(later func(slot int64) []*execution.Dataset) {
-		f.engine.mu.Lock()
-		f.engine.groups["qg"].nextAt = f.clock.now()
-		f.engine.mu.Unlock()
-		f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, later)
-	}
-	f.engine.options.Supplement = nil
-	whole := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} }
-	for round := 0; round < seriesLateCleanToEnd; round++ {
-		sample(whole)
-	}
-	sample(func(slot int64) []*execution.Dataset {
-		return []*execution.Dataset{point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"})}
-	})
-	f.engine.options.Supplement = recorder.run
-	f.engine.mu.Lock()
-	late := f.engine.groups["qg"].seriesLate
-	f.engine.mu.Unlock()
-	if late == nil {
-		t.Fatal("the group is not read directed again")
-	}
+	lateNoMore(f, recorder)
+	lateAgain(f, recorder)
 	if residual := f.engine.ResidualMisses(); len(residual) != 0 {
 		t.Fatalf("a residual miss from before it was late no more: %+v", residual)
 	}
@@ -267,5 +260,93 @@ func TestAGroupAnotherReplicaOwnsIsNotReportedHere(t *testing.T) {
 	f.engine.options.Owns = func(execution.QueryGroupIdentity) bool { return false }
 	if past, residual := f.engine.LatePastRound(), f.engine.ResidualMisses(); len(past) != 0 || len(residual) != 0 {
 		t.Fatalf("reported a group it does not own: %+v %+v", past, residual)
+	}
+}
+
+// directedSample lets the fixture's group take one sample now, its rungs
+// reading later, with no supplement to hand late series to.
+func directedSample(f *fixture, later func(slot int64) []*execution.Dataset) {
+	f.engine.mu.Lock()
+	f.engine.groups["qg"].nextAt = f.clock.now()
+	f.engine.mu.Unlock()
+	f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, later)
+}
+
+// lateNoMore ends the fixture group's directed reads the way they end: its
+// series late no more for seriesLateCleanToEnd samples in a row.
+func lateNoMore(f *fixture, recorder *supplementRecorder) {
+	f.t.Helper()
+	f.engine.options.Supplement = nil
+	whole := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} }
+	for round := 0; round < seriesLateCleanToEnd; round++ {
+		directedSample(f, whole)
+	}
+	f.engine.options.Supplement = recorder.run
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	if f.engine.groups["qg"].seriesLate != nil {
+		f.t.Fatal("the group is still read directed")
+	}
+}
+
+// lateAgain has the fixture group read directed again: a sample with a
+// series its first read did not have.
+func lateAgain(f *fixture, recorder *supplementRecorder) {
+	f.t.Helper()
+	f.engine.options.Supplement = nil
+	directedSample(f, func(slot int64) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"})}
+	})
+	f.engine.options.Supplement = recorder.run
+	f.engine.mu.Lock()
+	defer f.engine.mu.Unlock()
+	if f.engine.groups["qg"].seriesLate == nil {
+		f.t.Fatal("the group is not read directed again")
+	}
+}
+
+// A window in flight when the series were late no more still ends, and is
+// counted into neither report: not while the group is not read directed, and
+// not into the reports of the reads that come after, whether it ends before
+// the group is read directed again or after.
+func TestAWindowOpenedInEarlierDirectedReadsIsNotCountedInLaterOnes(t *testing.T) {
+	f, recorder := directedFixture(t, SupplementOutcome{})
+	inFlight := []*directedSlot{openWindow(f, 600, 1, 60), openWindow(f, 660, 1, 60), openWindow(f, 720, 1, 60), openWindow(f, 780, 1, 60)}
+	lateNoMore(f, recorder)
+	endWindow(f, inFlight[0], DirectedSupplemented, crossed(2))
+	endWindow(f, inFlight[1], DirectedSupplemented, mixed(1, 1))
+	endWindow(f, inFlight[2], DirectedSupplemented, crossed(2))
+	lateAgain(f, recorder)
+	if past, residual := f.engine.LatePastRound(), f.engine.ResidualMisses(); len(past) != 0 || len(residual) != 0 {
+		t.Fatalf("windows that ended after the reads they were opened in were counted: %+v %+v", past, residual)
+	}
+	endWindow(f, inFlight[3], DirectedSupplemented, crossed(2))
+	lateWindow(f, 900, 1, 60, DirectedSupplemented, crossed(2))
+	if readings := f.engine.LatePastRound(); len(readings) != 0 {
+		t.Fatalf("an earlier reads' window ending now completed a run with one new window: %+v", readings)
+	}
+	lateWindow(f, 960, 1, 60, DirectedSupplemented, crossed(2))
+	if readings := f.engine.LatePastRound(); len(readings) != 1 || len(readings[0].Samples) != 2 ||
+		readings[0].Samples[0].EvaluationTime != 900 {
+		t.Fatalf("readings %+v, want a run of the two new windows", readings)
+	}
+}
+
+// Through the reads themselves: two directed Slots in a row whose late
+// series had all crossed their Slots by the supplement report the group.
+func TestTwoDirectedSlotsWhoseLateSeriesCrossedReportTheGroup(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{Ran: true, Facts: execution.SupplementFacts{Candidates: 1, CrossedT: 1}})
+	for window := uint64(1); window <= 2; window++ {
+		slot := f.clock.now().Unix()
+		f.firstRead(slot, execution.CompletenessFull)
+		f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
+		f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+		f.engine.Step(context.Background())
+		f.waitFor(func(stats Stats) bool {
+			return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == window
+		})
+	}
+	if readings := f.engine.LatePastRound(); len(readings) != 1 || len(readings[0].Samples) != 2 {
+		t.Fatalf("readings %+v, want the group reported from its two Slots", readings)
 	}
 }

@@ -40,7 +40,8 @@ import (
 //
 // Both reports stand while the Query Group is read directed (seriesLateState)
 // and go, with what they were counted from, when its series are late no
-// more: a Query Group read directed again starts both afresh.
+// more: a Query Group read directed again starts both afresh, from windows
+// opened since.
 
 // LatePastRoundSample is one supplemented window every late series of which
 // had crossed its Slot: the Slot, the rung its late series were read at and
@@ -114,8 +115,14 @@ type residualMissState struct {
 }
 
 // noteLateSeriesLocked files one directed window's end on the Query Group's
-// late-past-round run and residual miss. Caller holds engine.mu.
+// late-past-round run and residual miss. A window opened in directed reads
+// that have since ended -- in flight when the series were late no more, and
+// ending after, or after the group was read directed again -- is filed on
+// neither. Caller holds engine.mu.
 func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, outcome string, facts *execution.SupplementFacts) {
+	if slot.period != state.seriesLate {
+		return
+	}
 	switch {
 	case outcome == DirectedNothingLate:
 		state.latePastRound = nil
