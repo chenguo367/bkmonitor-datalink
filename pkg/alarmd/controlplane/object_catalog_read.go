@@ -164,6 +164,26 @@ func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBy
 	return nil
 }
 
+// UnusedCacheBytes is what the control timeline cache and the catalog object
+// cache may still take of their budgets: the room detection keeps for them,
+// which observation memory leaves free (package memoryline).
+func (repository *RedisCatalogRepository) UnusedCacheBytes() uint64 {
+	if repository == nil {
+		return 0
+	}
+	var unused uint64
+	if repository.controlCache != nil {
+		occupancy := repository.controlCache.timelineOccupancy()
+		unused += uint64(max(occupancy.MaxBytes-occupancy.Bytes, 0))
+	}
+	if cache := repository.objects(); cache != nil {
+		cache.mu.Lock()
+		unused += uint64(max(cache.maxBytes-cache.bytes, 0))
+		cache.mu.Unlock()
+	}
+	return unused
+}
+
 // objects is the object cache in force, nil before one is configured; every
 // method of the cache treats nil as empty.
 func (repository *RedisCatalogRepository) objects() *objectReadCache {

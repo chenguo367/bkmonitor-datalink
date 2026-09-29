@@ -32,6 +32,7 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -223,8 +224,17 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// metric, for the same reason the rejections are: the page answers from the
 	// snapshot and has to be right one minute after a restart.
 	seriesPullTally := fleet.NewSeriesPullTally()
-	observationCapacity := config.DeriveObservationCapacity(config.DetectCapacityInputs(), cfg.PhaseTwo.Observation)
-	costSummary := observability.NewCostSummary(observationCostOptions(observationCapacity, fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()), external.Now))
+	// Observation memory takes no share of its own: it grows while the live
+	// heap, what the detection budgets may still take and what it was
+	// granted since the last collection stay within the soft limit. The
+	// detection budgets are reserved on the line as they are built below.
+	observationMemory := memoryline.New()
+	if err := recorder.BindObservationMemory(observationMemory.Read); err != nil {
+		return nil, err
+	}
+	warnObservationMemoryPercent(logger, cfg.PhaseTwo.Observation)
+	costSummary := observability.NewCostSummary(observationCostOptions(fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()),
+		external.Now, observationAdmit(observationMemory, memoryline.ConsumerCostSummary)))
 	// The census beside the summary, not instead of it: the summary is the
 	// bounded diagnostic; the census is every owned Query Group's peak for
 	// the heartbeat, which has to be a census.
@@ -447,6 +457,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := repository.ConfigureObjectCache(timelineCache.MaxEntries, timelineCache.MaxBytes); err != nil {
 		return nil, err
 	}
+	observationMemory.Reserve(repository.UnusedCacheBytes)
 	repository.ConfigureObserver(observer)
 	// The cache counters are what said a decoded-timeline cache was worth
 	// building, and nothing consumed them before. The timeline occupancy joins
@@ -858,6 +869,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
+	observationMemory.Reserve(func() uint64 {
+		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes - min(worker.RetainedReserved(coordinator), cfg.PhaseTwo.Coordinator.MaxRetainedBytes)
+	})
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
 	// The view stream this process serves as Leader and joins as Worker
@@ -1036,16 +1050,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 		if err != nil {
 			return nil, err
 		}
-		if limits, enabled := observationSampleLimits(observationCapacity); enabled {
-			seriesSampler, err = observability.NewSeriesSampler(limits)
-			if err != nil {
-				return nil, err
-			}
-			if err = diagnostics.AttachSeriesSampler(seriesSampler, min(fleet.DiagnosticRecordsPerObject, observationCapacity.SampleRecordsPerMinute)); err != nil {
-				return nil, err
-			}
-			evaluator.SetSeriesSampler(seriesSampler)
+		// One encode buffer per open sample window, each admitted by the line.
+		seriesSampler = observability.NewAdmittedSeriesSampler(observationAdmit(observationMemory, memoryline.ConsumerSeriesSampler))
+		if err = diagnostics.AttachSeriesSampler(seriesSampler, fleet.DiagnosticRecordsPerObject); err != nil {
+			return nil, err
 		}
+		evaluator.SetSeriesSampler(seriesSampler)
 		// The writer outlives the constructor's context and is stopped with the
 		// rest of the Bundle's resources.
 		diagnosticsCtx, stopDiagnostics := context.WithCancel(context.Background())
@@ -1101,14 +1111,17 @@ func openProductionPhaseTwoBundleWithDependencies(
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter, diagnosisWarmer)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
-	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {
-		limits := observationProjectionLimits(observationCapacity, cfg.PhaseTwo.Control.RefreshInterval.Duration())
+	if diagnosticsClient != nil {
+		limits := observationProjectionLimits(cfg.PhaseTwo.Control.RefreshInterval.Duration())
 		projection, projectionErr := fleet.NewCostProjectionStore(diagnosticsClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"), limits)
 		if projectionErr != nil {
 			return nil, projectionErr
 		}
+		projection.AdmitReads(observationAdmit(observationMemory, memoryline.ConsumerCostProjection))
+		// The registry page is every registration, as far as the timeout
+		// reaches; the cursor carries the rest to the next refresh.
 		costRefresh = &observationCostRefresh{store: projection, registry: ownershipStore, reader: diagnosticsClient, cache: costCandidatesCache, limits: limits,
-			registryLimits: ownership.ObservationRegistryLimits{Bytes: int64(observationCapacity.CostBytes / 64), Commands: observationCapacity.DirectoryCommands / 2, Rows: observationCapacity.DirectoryCommands/2 - 2, Timeout: time.Second},
+			registryLimits: ownership.ObservationRegistryLimits{Timeout: time.Second},
 			replica:        cfg.PhaseTwo.Worker.ID, interval: cfg.PhaseTwo.Control.RefreshInterval.Duration()}
 	}
 	fleetAPI = fleet.WithCostCandidates(fleetAPI, costCandidatesCache)
