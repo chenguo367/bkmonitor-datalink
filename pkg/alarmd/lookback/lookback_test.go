@@ -354,7 +354,7 @@ func TestEveryOwnedQueryGroupKeepsOneSampleAtATime(t *testing.T) {
 	if stats.Pending != 2 || stats.PendingBytes != 2*(summaryEntryBytes+seriesEntryBytes) {
 		t.Fatalf("pending %d bytes %d, want two samples of one bucket and one series", stats.Pending, stats.PendingBytes)
 	}
-	if stats.Coverage != (Coverage{Owned: 2, Covered: 2, Ratio: 1}) {
+	if stats.Coverage != (Coverage{Owned: 2, Covered: 2, Ratio: 1, CoverableRatio: 1}) {
 		t.Fatalf("coverage %+v, want both owned Query Groups", stats.Coverage)
 	}
 	log := stats.Sources[sourceLog]
@@ -373,6 +373,36 @@ func TestAnIncompleteFirstReadLeavesTheQueryGroupFree(t *testing.T) {
 		t.Fatalf("incomplete first reads %d, want 1", n)
 	}
 	f.capture(query("qg", 1_700_000_160, minute, sourceLog))
+}
+
+// A Query Group none of whose first reads has been whole was never
+// measurable: it is counted apart from the coverage - a read of it in flight
+// covers nothing - and named with how many of its reads were not whole, and
+// the covered are read against the groups that can be. Its first whole read
+// takes it off the list.
+func TestAGroupWhoseFirstReadIsNeverWholeIsCountedApartAndNamed(t *testing.T) {
+	f := newFixture(t)
+	f.capture(query("qg", 1_700_000_100, minute, sourceLog), dataset("h1", steady))
+	for slot := int64(0); slot < 2; slot++ {
+		read := f.engine.Begin(query("qg-b", 1_700_000_100+slot*60, minute, sourceLog))
+		if read == nil || read.summary == nil {
+			t.Fatalf("qg-b not sampled at its read %d", slot)
+		}
+		read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessPartial}, nil)
+	}
+	inFlight := f.engine.Begin(query("qg-b", 1_700_000_220, minute, sourceLog))
+	stats := f.engine.Stats()
+	if stats.Coverage != (Coverage{Owned: 2, Covered: 1, Ratio: 0.5, NeverCompleteFirstRead: 1, CoverableRatio: 1}) {
+		t.Fatalf("coverage %+v, want qg covered, qg-b counted apart - its read in flight covering nothing", stats.Coverage)
+	}
+	if len(stats.NeverCompleteFirstRead) != 1 || stats.NeverCompleteFirstRead[0] != (NeverCompleteGroup{QueryGroup: "qg-b", Source: sourceLog, IncompleteFirstReads: 2}) {
+		t.Fatalf("named %+v, want qg-b with its two incomplete reads", stats.NeverCompleteFirstRead)
+	}
+	inFlight.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	stats = f.engine.Stats()
+	if stats.Coverage != (Coverage{Owned: 2, Covered: 2, Ratio: 1, CoverableRatio: 1}) || len(stats.NeverCompleteFirstRead) != 0 {
+		t.Fatalf("after a whole read: coverage %+v named %+v, want both covered and none named", stats.Coverage, stats.NeverCompleteFirstRead)
+	}
 }
 
 // A process spreads its Query Groups' first samples over an hour, by a hash
@@ -819,7 +849,7 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 	// Ownership moved on before the Runner set told the lookback: the group
 	// is still in the table, and not covered, nor counted as owned.
 	f.set(func() { f.owned["qg-b"] = false })
-	if got := f.engine.Stats().Coverage; got != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) {
+	if got := f.engine.Stats().Coverage; got != (Coverage{Owned: 1, Covered: 1, Ratio: 1, CoverableRatio: 1}) {
 		t.Fatalf("coverage with qg-b no longer owned: %+v", got)
 	}
 	f.engine.Forget("qg-b")
@@ -830,7 +860,7 @@ func TestCoverageCountsOnlyOwnedQueryGroupsWithAFreshMeasurement(t *testing.T) {
 	// Waiting for its deep recheck, the sample still covers its group, and
 	// is pending with its one bucket - its series are not kept through the
 	// wait.
-	if _, waiting := f.rung("qg"); !waiting || f.group("qg").sample != nil || stats.Coverage != (Coverage{Owned: 1, Covered: 1, Ratio: 1}) ||
+	if _, waiting := f.rung("qg"); !waiting || f.group("qg").sample != nil || stats.Coverage != (Coverage{Owned: 1, Covered: 1, Ratio: 1, CoverableRatio: 1}) ||
 		stats.Pending != 1 || stats.PendingBytes != summaryEntryBytes {
 		t.Fatalf("coverage %+v pending %d (%d bytes) while the deep recheck waits", stats.Coverage, stats.Pending, stats.PendingBytes)
 	}

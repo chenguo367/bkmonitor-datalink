@@ -163,7 +163,7 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（覆盖数 ÷（拥有数 − 从未有过完整首读的组数），目标 100%；从未有过完整首读的组单列计数，并按查询组列出不完整首读的次数，最多 32 个）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},

@@ -129,16 +129,36 @@ type Stats struct {
 	ReadEarly []ReadEarlyReading `json:"read_early"`
 	// Recent is the latest rechecks that found a change, at most maxRecent.
 	Recent []Recent `json:"recent"`
+	// NeverCompleteFirstRead is the owned Query Groups none of whose first
+	// reads has been whole, the most incomplete reads first, at most
+	// maxLatest; Coverage.NeverCompleteFirstRead counts them all.
+	NeverCompleteFirstRead []NeverCompleteGroup `json:"never_complete_first_read"`
 }
 
 // Coverage is how many of the Query Groups this process owns have a
 // measurement that is fresh - a sample in flight, or one finished within
 // twice the time a sample of it takes - out of how many it owns. The aim is
 // every one.
+//
+// NeverCompleteFirstRead is the owned Query Groups none of whose first reads
+// has been whole yet: nothing to compare a recheck against, so never
+// measured. They are left out of CoverableRatio's denominator and named on
+// Stats.NeverCompleteFirstRead - a group whose read is never whole is a
+// finding of its own, not a group the lookback has not got to.
 type Coverage struct {
-	Owned   int     `json:"owned"`
-	Covered int     `json:"covered"`
-	Ratio   float64 `json:"ratio"`
+	Owned                  int     `json:"owned"`
+	Covered                int     `json:"covered"`
+	Ratio                  float64 `json:"ratio"`
+	NeverCompleteFirstRead int     `json:"never_complete_first_read"`
+	CoverableRatio         float64 `json:"coverable_ratio"`
+}
+
+// NeverCompleteGroup is an owned Query Group none of whose first reads has
+// been whole: its source and how many first reads were not.
+type NeverCompleteGroup struct {
+	QueryGroup           execution.QueryGroupIdentity `json:"query_group"`
+	Source               string                       `json:"source"`
+	IncompleteFirstReads uint64                       `json:"incomplete_first_reads"`
 }
 
 // SourceStats is one source's Query Groups summed: what their data does,
@@ -227,16 +247,17 @@ type GroupLateness struct {
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
 	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{},
-		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}}
+		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{}}
 	if engine == nil {
 		return stats
 	}
 	now := engine.options.Now()
 	type candidate struct {
-		queryGroup execution.QueryGroupIdentity
-		fresh      bool
-		lateness   *GroupLateness
-		readEarly  *ReadEarlyReading
+		queryGroup    execution.QueryGroupIdentity
+		fresh         bool
+		lateness      *GroupLateness
+		readEarly     *ReadEarlyReading
+		neverComplete *NeverCompleteGroup
 	}
 	type groupSums struct {
 		groups     int
@@ -277,6 +298,13 @@ func (engine *Engine) Stats() Stats {
 			if state.seriesLate != nil {
 				sum.seriesLate++
 			}
+		}
+		if state.incompleteFirstReads > 0 && !state.completeFirstRead {
+			// A read in flight is not a measurement for a group none of
+			// whose reads has been whole.
+			entry.fresh = false
+			entry.neverComplete = &NeverCompleteGroup{QueryGroup: queryGroup, Source: state.source,
+				IncompleteFirstReads: state.incompleteFirstReads}
 		}
 		if state.measured {
 			entry.lateness = &GroupLateness{QueryGroup: queryGroup, Source: state.source,
@@ -366,6 +394,10 @@ func (engine *Engine) Stats() Stats {
 		if entry.fresh {
 			stats.Coverage.Covered++
 		}
+		if entry.neverComplete != nil {
+			stats.Coverage.NeverCompleteFirstRead++
+			stats.NeverCompleteFirstRead = append(stats.NeverCompleteFirstRead, *entry.neverComplete)
+		}
 		if entry.lateness != nil {
 			stats.Latest = append(stats.Latest, *entry.lateness)
 		}
@@ -386,6 +418,19 @@ func (engine *Engine) Stats() Stats {
 	}
 	if stats.Coverage.Owned > 0 {
 		stats.Coverage.Ratio = float64(stats.Coverage.Covered) / float64(stats.Coverage.Owned)
+	}
+	if coverable := stats.Coverage.Owned - stats.Coverage.NeverCompleteFirstRead; coverable > 0 {
+		stats.Coverage.CoverableRatio = float64(stats.Coverage.Covered) / float64(coverable)
+	}
+	sort.Slice(stats.NeverCompleteFirstRead, func(i, j int) bool {
+		left, right := stats.NeverCompleteFirstRead[i], stats.NeverCompleteFirstRead[j]
+		if left.IncompleteFirstReads != right.IncompleteFirstReads {
+			return left.IncompleteFirstReads > right.IncompleteFirstReads
+		}
+		return left.QueryGroup < right.QueryGroup
+	})
+	if len(stats.NeverCompleteFirstRead) > maxLatest {
+		stats.NeverCompleteFirstRead = stats.NeverCompleteFirstRead[:maxLatest]
 	}
 	sort.Slice(stats.Latest, func(i, j int) bool {
 		if stats.Latest[i].CompletionSeconds != stats.Latest[j].CompletionSeconds {

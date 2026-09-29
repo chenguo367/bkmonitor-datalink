@@ -147,7 +147,7 @@ func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	bundle.setRunnerLocked(queryGroup, &phaseTwoQueryGroupLifecycle{})
 	bundle.mu.Unlock()
 	engine.Begin(sampledQuery(queryGroup)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
-	if stats := engine.Stats(); stats.Pending != 1 || stats.Coverage != (lookback.Coverage{Owned: 1, Covered: 1, Ratio: 1}) {
+	if stats := engine.Stats(); stats.Pending != 1 || stats.Coverage != (lookback.Coverage{Owned: 1, Covered: 1, Ratio: 1, CoverableRatio: 1}) {
 		t.Fatalf("a read of an owned Query Group was not kept: pending %d coverage %+v", stats.Pending, stats.Coverage)
 	}
 	bundle.mu.Lock()
