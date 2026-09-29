@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -301,10 +302,16 @@ const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
 // judged before the query's source: a data type this build cannot compile,
 // which the writer publishes with no query_md5, read as a configuration
 // error. See itemRefusal.
+//
+// An empty expression is not among them. The platform's query reads it as
+// its queries' reference names joined by "or" (UnifyQuery.query_data), which
+// for the one query an item carries is that query itself, and
+// compileMetricMerge reads it the same way. A writer that publishes the
+// expression the strategy was declared with publishes it empty for every
+// single-query item.
 const (
 	ReasonItemQueryConfigsMissing = "ITEM_QUERY_CONFIGS_MISSING"
 	ReasonItemQueryMD5Missing     = "ITEM_QUERY_MD5_MISSING"
-	ReasonItemExpressionMissing   = "ITEM_EXPRESSION_MISSING"
 	ReasonItemAlgorithmsMissing   = "ITEM_ALGORITHMS_MISSING"
 )
 
@@ -332,8 +339,6 @@ func itemRefusal(sourceID string, item legacyItem) (ObjectDisposition, bool) {
 	switch {
 	case item.QueryMD5 == "":
 		return rejected(ReasonItemQueryMD5Missing, "items[0].query_md5")
-	case item.Expression == "":
-		return rejected(ReasonItemExpressionMissing, "items[0].expression")
 	case len(item.Algorithms) == 0:
 		return rejected(ReasonItemAlgorithmsMissing, "items[0].algorithms")
 	}
@@ -1791,6 +1796,45 @@ type legacyDetect struct {
 	Trigger   legacyTrigger   `json:"trigger_config"`
 	Recovery  json.RawMessage `json:"recovery_config"`
 }
+
+// sameLegacyDetect reports whether two detects of one level say the same
+// thing. The platform keys detects by level and keeps the last it reads
+// (get_trigger_configs, get_recovery_configs), so a level written twice with
+// the same content is one trigger, and a writer that publishes one detect per
+// algorithm writes exactly that whenever a level has two algorithms. Two that
+// differ are still two triggers at one level, which is refused.
+func sameLegacyDetect(left, right legacyDetect) bool {
+	if left.Level != right.Level || left.Connector != right.Connector ||
+		left.Trigger.Count != right.Trigger.Count || left.Trigger.CheckWindow != right.Trigger.CheckWindow {
+		return false
+	}
+	if (left.Priority == nil) != (right.Priority == nil) || (left.Priority != nil && *left.Priority != *right.Priority) {
+		return false
+	}
+	return sameJSONValue(left.Trigger.Uptime, right.Trigger.Uptime) && sameJSONValue(left.Recovery, right.Recovery)
+}
+
+// sameJSONValue compares two raw JSON values by what they decode to, so key
+// order and spacing do not make one detect two. Absent and null are the same
+// value; a value that does not decode is equal to nothing.
+func sameJSONValue(left, right json.RawMessage) bool {
+	decode := func(raw json.RawMessage) (any, bool) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			return nil, true
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		return value, true
+	}
+	leftValue, leftOK := decode(left)
+	rightValue, rightOK := decode(right)
+	return leftOK && rightOK && reflect.DeepEqual(leftValue, rightValue)
+}
+
 type legacyTrigger struct {
 	Count       uint32          `json:"count"`
 	CheckWindow uint32          `json:"check_window"`
@@ -1957,7 +2001,7 @@ func compilePlan(
 	detectByLevel := make(map[uint32]legacyDetect, len(source.Detects))
 	duplicateDetect := make(map[uint32]struct{})
 	for _, detect := range source.Detects {
-		if _, duplicate := detectByLevel[detect.Level]; duplicate {
+		if earlier, seen := detectByLevel[detect.Level]; seen && !sameLegacyDetect(earlier, detect) {
 			duplicateDetect[detect.Level] = struct{}{}
 		}
 		detectByLevel[detect.Level] = detect
@@ -1996,8 +2040,9 @@ func compilePlan(
 			// level and takes its default. See borrowedLegacyDetect. The first
 			// one is taken whatever it holds, and one that cannot trigger is
 			// refused below as the missing trigger it is, not lent. Nor is one
-			// whose own level is written twice: the platform would lend the
-			// last of the two, and two triggers at one level are refused here.
+			// whose own level is written twice with different content: the
+			// platform would lend the last of the two, and two triggers at one
+			// level are refused here (sameLegacyDetect).
 			if _, twice := duplicateDetect[source.Detects[0].Level]; !twice {
 				detect, ok, borrowed = borrowedLegacyDetect(source.Detects[0]), true, true
 			}

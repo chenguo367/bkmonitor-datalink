@@ -41,8 +41,6 @@ func TestAnItemIsRefusedUnderTheNameOfWhatIsWrongWithIt(t *testing.T) {
 			disposition: controlplane.DispositionUnsupported, reason: "QUERY_FTA_UNSUPPORTED", field: "items[0].query_configs[0]"},
 		{name: "a supported source without query_md5", md5: ``, expression: `a`, configs: `[` + timeSeries + `]`, algos: algorithms,
 			disposition: controlplane.DispositionConfigRejected, reason: controlplane.ReasonItemQueryMD5Missing, field: "items[0].query_md5"},
-		{name: "no expression", md5: `q`, expression: ``, configs: `[` + timeSeries + `]`, algos: algorithms,
-			disposition: controlplane.DispositionConfigRejected, reason: controlplane.ReasonItemExpressionMissing, field: "items[0].expression"},
 		{name: "no algorithm", md5: `q`, expression: `a`, configs: `[` + timeSeries + `]`, algos: `[]`,
 			disposition: controlplane.DispositionConfigRejected, reason: controlplane.ReasonItemAlgorithmsMissing, field: "items[0].algorithms"},
 		{name: "no query config", md5: `q`, expression: `a`, configs: `[]`, algos: algorithms,
@@ -69,5 +67,39 @@ func TestAnItemIsRefusedUnderTheNameOfWhatIsWrongWithIt(t *testing.T) {
 					testCase.disposition, testCase.reason, testCase.field)
 			}
 		})
+	}
+}
+
+// An item that carries no expression is not refused: the platform's query
+// reads an empty expression as its queries' reference names joined by "or",
+// which for an item's one query is that query. It compiles to the query the
+// same item with the expression written out compiles to.
+func TestAnItemWithoutAnExpressionRunsItsQueryAsThePlatformDoes(t *testing.T) {
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	merge := func(t *testing.T, expression string) string {
+		t.Helper()
+		document := fmt.Sprintf(`{"id":1,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"q","expression":%q,`+
+			`"query_configs":[{"data_source_label":"bk_monitor","data_type_label":"time_series","result_table_id":"system.cpu_summary",`+
+			`"metric_field":"usage","alias":"a","agg_method":"AVG","agg_interval":60,"agg_dimension":["bk_target_ip","bk_target_cloud_id"],`+
+			`"agg_condition":[],"functions":[]}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gte","threshold":1}]]}]}],`+
+			`"detects":[{"level":1,"trigger_config":{"count":1,"check_window":5},"recovery_config":{"check_window":3}}]}`, expression)
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Strategies: []controlplane.SourceStrategy{{SourceID: "1", Document: json.RawMessage(document),
+				Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}},
+			Planner: planner,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(catalog.QueryGroups) != 1 {
+			t.Fatalf("expression %q: dispositions %+v, want one Plan", expression, catalog.Dispositions)
+		}
+		return catalog.QueryGroups[0].QueryPlan.MetricMerge
+	}
+	if empty, written := merge(t, ""), merge(t, "a"); empty != "a" || written != empty {
+		t.Fatalf("metric merge without an expression %q, with it written %q, want both a", empty, written)
 	}
 }
