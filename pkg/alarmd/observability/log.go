@@ -90,12 +90,14 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // of the same bucket were merged into it.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 	if mandatoryLogStage(observation.Stage) {
-		return LogAdmission{Allowed: true}
+		return LogAdmission{Allowed: true, Candidate: true}
 	}
 	if !repeatedLogObservation(observation) || p == nil || p.repeated == nil {
 		return LogAdmission{}
 	}
-	return p.repeated.Admit(observation)
+	admission := p.repeated.Admit(observation)
+	admission.Candidate = true
+	return admission
 }
 
 type LoggingObserver struct {
@@ -148,8 +150,9 @@ type LogLineCounts struct {
 
 // LineCounts reads the counts now.
 func (l *LoggingObserver) LineCounts() LogLineCounts {
-	counts := LogLineCounts{Written: make(map[Stage]uint64, len(logStages)), Limited: make(map[Stage]uint64, len(logStages))}
-	for place, stage := range logStages {
+	counts := LogLineCounts{Written: make(map[Stage]uint64, len(logStageIndex)), Limited: make(map[Stage]uint64, len(logStageIndex))}
+	// By the index, the one place countLine adds to for each stage.
+	for stage, place := range logStageIndex {
 		if l == nil || place >= len(l.written) {
 			counts.Written[stage], counts.Limited[stage] = 0, 0
 			continue
@@ -237,9 +240,9 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 	// the Query Group the Coordinator attached to ctx.
 	observation.Trace = mergeTraceFields(observation.Trace, TraceFieldsFromContext(ctx))
 	admission := l.policy.Admit(observation)
-	// Counted only where the policy would write a line: a routine success
-	// it never writes is not a line held back.
-	if mandatoryLogStage(observation.Stage) || repeatedLogObservation(observation) {
+	// Counted only where the policy would write a line, as the policy
+	// decides it: a routine success it never writes is not a line held back.
+	if admission.Candidate {
 		l.countLine(observation.Stage, admission.Allowed)
 	}
 	if !admission.Allowed {
