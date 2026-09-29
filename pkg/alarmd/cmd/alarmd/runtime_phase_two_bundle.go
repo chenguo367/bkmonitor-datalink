@@ -672,7 +672,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
 	lookbackOwner := &lookbackOwnership{}
 	lookbackEngine, lookbackState, err := buildLookback(queryClient.Recheck, flights, lookbackOwner, logger,
-		external.Now)
+		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback))
 	if err != nil {
 		return nil, err
 	}

@@ -34,7 +34,7 @@ func noRecheck(context.Context, execution.PhysicalQuerySpec, execution.ProviderS
 // reason the scheduler refuses a permit with, from the start.
 func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, standing, err := buildLookback(noRecheck, nil, owner, nil, time.Now)
+	engine, standing, err := buildLookback(noRecheck, nil, owner, nil, time.Now, nil)
 	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) {
 		t.Fatalf("built: %v %+v %v", engine, standing, err)
 	}
@@ -53,9 +53,15 @@ func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 		t.Fatalf("an unbound bundle owns %d Query Groups", stats.Coverage.Owned)
 	}
 	// The refusals are the scheduler's, and the first samples are spread.
-	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now); !slices.Equal(options.Refusals, scheduler.LookbackRefusals) ||
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, nil); !slices.Equal(options.Refusals, scheduler.LookbackRefusals) ||
 		options.UnspreadFirstSamples {
 		t.Fatalf("refusals %v, unspread %v", options.Refusals, options.UnspreadFirstSamples)
+	}
+	// Its series tables grow under the memory line it is given.
+	var asked uint64
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, func(bytes uint64) bool { asked = bytes; return false }); options.Memory == nil ||
+		options.Memory(7) || asked != 7 {
+		t.Fatalf("the lookback's memory is not the line it was given (asked %d)", asked)
 	}
 }
 
@@ -125,7 +131,7 @@ func sampledQuery(queryGroup execution.QueryGroupIdentity) lookback.Query {
 func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	owner := &lookbackOwnership{}
 	// Built as buildLookback builds it, with each first sample taken at once.
-	options := lookbackOptions(noRecheck, nil, owner, nil, time.Now)
+	options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, nil)
 	options.UnspreadFirstSamples = true
 	engine, err := lookback.New(options)
 	if err != nil {
@@ -181,7 +187,7 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 	if off := read(cliLookbackOperation(nil, lookbackStanding{})); off.Running || off.Stats != nil {
 		t.Fatalf("off = %+v", off)
 	}
-	engine, standing, err := buildLookback(noRecheck, nil, &lookbackOwnership{}, nil, time.Now)
+	engine, standing, err := buildLookback(noRecheck, nil, &lookbackOwnership{}, nil, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

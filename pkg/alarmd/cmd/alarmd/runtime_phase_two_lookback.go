@@ -84,8 +84,9 @@ func buildLookback(
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) (*lookback.Engine, lookbackStanding, error) {
-	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now))
+	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now, memory))
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
@@ -93,16 +94,18 @@ func buildLookback(
 }
 
 // lookbackOptions wire the lookback to this process: its query client, its
-// permits, its Runner set and its log.
+// permits, its Runner set, its log and the observation memory line its
+// series tables grow under.
 func lookbackOptions(
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights),
+		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights), Memory: memory,
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
 				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
