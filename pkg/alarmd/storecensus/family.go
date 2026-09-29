@@ -62,9 +62,13 @@ func FamilyOf(key string) string {
 }
 
 // kind is a segment with its instances written "*": each of its
-// "_"-separated parts that is one, and otherwise the whole of it when it is
-// one - a long token or a hash tag that happens to hold a "_".
+// "_"-separated parts that is one, a UUID it ends in (celery-task-meta-<uuid>
+// is celery-task-meta-*), and otherwise the whole of it when it is one - a
+// long token or a hash tag that happens to hold a "_".
 func kind(segment string) string {
+	if prefix, found := beforeTrailingUUID(segment); found {
+		return prefix + "*"
+	}
 	if !strings.Contains(segment, "_") {
 		if instance(segment) {
 			return "*"
@@ -122,4 +126,34 @@ func instance(segment string) bool {
 		// as a UUID is written.
 		return hexadecimal >= 16
 	}
+}
+
+// uuidGroups is how many hexadecimal digits each hyphen-separated group of a
+// UUID has.
+var uuidGroups = [...]int{8, 4, 4, 4, 12}
+
+// beforeTrailingUUID is what precedes a UUID a segment ends in, when it ends
+// in one after some prefix: a name made of a word and one instance of it.
+func beforeTrailingUUID(segment string) (string, bool) {
+	const length = 36
+	if len(segment) <= length {
+		return "", false
+	}
+	tail := segment[len(segment)-length:]
+	position := 0
+	for group, digits := range uuidGroups {
+		if group > 0 {
+			if tail[position] != '-' {
+				return "", false
+			}
+			position++
+		}
+		for end := position + digits; position < end; position++ {
+			char := tail[position]
+			if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+				return "", false
+			}
+		}
+	}
+	return segment[:len(segment)-length], true
 }

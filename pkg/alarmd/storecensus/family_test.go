@@ -28,6 +28,11 @@ func TestAKeysFamilyIsItsKindNotItsInstance(t *testing.T) {
 		"a:b:c:d:e:f:g:h:i:j":                                             "a:b:c:d:e:f:g:h:*",
 		"alarmd:qg:550e8400-e29b-41d4-a716-446655440000:state":            "alarmd:qg:*:state",
 		"alarmd:state:{qg.1:a}:series":                                    "alarmd:state:*:series",
+		"celery-task-meta-550e8400-e29b-41d4-a716-446655440000":           "celery-task-meta-*",
+		"_kombu.binding.celery":                                           "_kombu.binding.celery",
+		// Not a UUID at the end: the whole long token is one instance.
+		"celery-task-meta-550e8400xe29bx41d4xa716x446655440000": "*",
+		"celery-task-meta-zzzzzzzz-e29b-41d4-a716-446655440000": "*",
 	} {
 		if got := FamilyOf(key); got != want {
 			t.Errorf("FamilyOf(%q) = %q, want %q", key, got, want)
