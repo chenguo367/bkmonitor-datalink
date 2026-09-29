@@ -314,6 +314,7 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 // its source.
 func (engine *Engine) noteDirectedLocked(state *group, slot *directedSlot, outcome, reason string, facts *execution.SupplementFacts) {
 	engine.counts.directedWindows[key2(slot.source, outcome)]++
+	engine.noteLateSeriesLocked(state, slot, outcome, facts)
 	if state.supplement == nil {
 		state.supplement = newSupplementTally(engine.options.Now())
 	}
