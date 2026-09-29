@@ -27,15 +27,21 @@ type counters struct {
 	changed    map[string]uint64 // source|rung: compared windows that changed since the read before
 	changes    map[string]uint64 // source|rung|class: changed buckets
 	preempted  map[string]uint64 // source|rung: reads stopped for a formal query
-	completion map[string]uint64 // source|age: finished samples by when the window was complete
+	completion map[string]uint64 // source|age: completed samples by when the window was complete
 	refusals   map[string]uint64 // reason: permits refused
 	faults     map[string]uint64 // reason
+	// Per source: the latest completion seen, the bytes rechecks read back,
+	// and samples whose query's lookback could not be read.
+	maxCompletion   map[string]time.Duration
+	recheckBytes    map[string]uint64
+	unknownLookback map[string]uint64
 }
 
 func newCounters(sources, refusals []string) counters {
 	c := counters{firstReads: map[string]uint64{}, samples: map[string]uint64{}, rechecks: map[string]uint64{},
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
-		completion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}}
+		completion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
+		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{}}
 	for _, reason := range refusals {
 		c.refusals[reason] = 0
 	}
@@ -44,6 +50,7 @@ func newCounters(sources, refusals []string) counters {
 	}
 	for _, source := range sources {
 		c.firstReads[source] = 0
+		c.maxCompletion[source], c.recheckBytes[source], c.unknownLookback[source] = 0, 0, 0
 		for _, outcome := range SampleOutcomes {
 			c.samples[key2(source, outcome)] = 0
 		}
@@ -99,14 +106,25 @@ type Coverage struct {
 	Ratio   float64 `json:"ratio"`
 }
 
-// SourceStats is one source: what its data does, how it is rechecked, and
-// what the rechecking costs.
+// SourceStats is one source's Query Groups summed: what their data does,
+// how they are rechecked, and what the rechecking costs. A source does not
+// decide how its groups are rechecked; each group learns that from its own
+// samples.
 type SourceStats struct {
-	// FirstReads is the formal first reads seen; Rechecks over it is the
-	// query volume the lookback adds.
-	FirstReads uint64 `json:"first_reads"`
-	// Samples: outcome -> count.
-	Samples map[string]uint64 `json:"samples"`
+	// FirstReads is the formal first reads seen, FirstReadBytes the bytes
+	// they delivered; Rechecks and RecheckBytes over them are the query
+	// volume the lookback adds, counted the same way.
+	FirstReads     uint64 `json:"first_reads"`
+	FirstReadBytes uint64 `json:"first_read_bytes"`
+	RecheckBytes   uint64 `json:"recheck_bytes"`
+	// Samples: outcome -> count. UnobservedRatio is the samples whose
+	// completion was not observed - unobserved or truncated_tail - over all
+	// finished ones.
+	Samples         map[string]uint64 `json:"samples"`
+	UnobservedRatio float64           `json:"unobserved_ratio"`
+	// UnknownLookback is the samples whose query's lookback could not be
+	// read, rechecked from a step before their tail.
+	UnknownLookback uint64 `json:"unknown_lookback"`
 	// Rechecks: rung -> outcome -> count. Only compared is a window observed.
 	Rechecks map[string]map[string]uint64 `json:"rechecks"`
 	// ChangedWindows: rung -> compared windows that changed since the read
@@ -121,11 +139,16 @@ type SourceStats struct {
 	// was complete by then; MaxCompletionSeconds the latest seen.
 	Completion           map[string]uint64 `json:"completion"`
 	MaxCompletionSeconds int64             `json:"max_completion_seconds"`
-	// Depth is how many rungs a sample of it reads now, RestSteps how long a
-	// Query Group rests between samples, in its steps.
-	Depth     int     `json:"depth"`
-	RestSteps float64 `json:"rest_steps"`
+	// Groups is its Query Groups this process has seen; DepthGroups how
+	// many of them read how many rungs now, by depth "1" to "6"; and
+	// MeanRestSeconds how long they rest between samples on average.
+	Groups          int               `json:"groups"`
+	DepthGroups     map[string]uint64 `json:"depth_groups"`
+	MeanRestSeconds float64           `json:"mean_rest_seconds"`
 }
+
+// DepthLabels label the depths a Query Group can read to.
+var DepthLabels = []string{"1", "2", "3", "4", "5", "6"}
 
 // GroupLateness is one Query Group's last measurement.
 type GroupLateness struct {
@@ -150,17 +173,36 @@ func (engine *Engine) Stats() Stats {
 		fresh      bool
 		lateness   *GroupLateness
 	}
+	type groupSums struct {
+		groups int
+		depths map[string]uint64
+		rest   time.Duration
+	}
+	sums := map[string]*groupSums{}
 	engine.mu.Lock()
 	candidates := make([]candidate, 0, len(engine.groups))
 	for queryGroup, state := range engine.groups {
 		entry := candidate{queryGroup: queryGroup}
+		rest := min(time.Duration(state.rest*float64(state.step)), restCap)
 		switch {
 		case state.capturing || state.sample != nil:
 			entry.fresh = true
 		case state.measured:
-			source := engine.sources[state.source]
-			cycle := time.Duration((source.rest+RungSteps[source.depth-1])*float64(state.step)) + state.period
+			// Fresh within twice the longest a sample of it can take: its
+			// rest at the most spread, its deepest rung, and the wait for
+			// its next first read.
+			cycle := rest*5/4 + rungDelay(state.depth-1, state.step) + state.period
 			entry.fresh = now.Sub(state.measuredAt) <= 2*cycle
+		}
+		if state.source != "" {
+			sum := sums[state.source]
+			if sum == nil {
+				sum = &groupSums{depths: map[string]uint64{}}
+				sums[state.source] = sum
+			}
+			sum.groups++
+			sum.depths[DepthLabels[state.depth-1]]++
+			sum.rest += rest
 		}
 		if state.measured {
 			entry.lateness = &GroupLateness{QueryGroup: queryGroup, Source: state.source,
@@ -174,13 +216,26 @@ func (engine *Engine) Stats() Stats {
 		candidates = append(candidates, entry)
 	}
 	for _, source := range engine.labels {
-		state := engine.sources[source]
-		entry := SourceStats{FirstReads: engine.counts.firstReads[source], Samples: map[string]uint64{},
-			Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
+		entry := SourceStats{FirstReads: engine.counts.firstReads[source], FirstReadBytes: engine.firstReadBytes[source].Load(),
+			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
+			Samples: map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
-			MaxCompletionSeconds: int64(state.maxCompletion / time.Second), Depth: state.depth, RestSteps: state.rest}
+			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{}}
+		for _, depth := range DepthLabels {
+			entry.DepthGroups[depth] = 0
+		}
+		if sum := sums[source]; sum != nil {
+			entry.Groups = sum.groups
+			for depth, n := range sum.depths {
+				entry.DepthGroups[depth] = n
+			}
+			entry.MeanRestSeconds = sum.rest.Seconds() / float64(sum.groups)
+		}
 		for _, outcome := range SampleOutcomes {
 			entry.Samples[outcome] = engine.counts.samples[key2(source, outcome)]
+		}
+		if finished := entry.Samples[OutcomeCompleted] + entry.Samples[OutcomeUnobserved] + entry.Samples[OutcomeTruncatedTail]; finished > 0 {
+			entry.UnobservedRatio = float64(entry.Samples[OutcomeUnobserved]+entry.Samples[OutcomeTruncatedTail]) / float64(finished)
 		}
 		for _, age := range AgeBuckets {
 			entry.Completion[age] = engine.counts.completion[key2(source, age)]

@@ -31,8 +31,11 @@ type lookbackCollector struct {
 	changes    *prometheus.Desc
 	completion *prometheus.Desc
 	latest     *prometheus.Desc
-	depth      *prometheus.Desc
+	groups     *prometheus.Desc
 	rest       *prometheus.Desc
+	readBytes  *prometheus.Desc
+	checkBytes *prometheus.Desc
+	unknown    *prometheus.Desc
 	coverage   *prometheus.Desc
 	pending    *prometheus.Desc
 	yields     *prometheus.Desc
@@ -50,7 +53,9 @@ func newLookbackCollector() *lookbackCollector {
 				"(lookback_rechecks_total over it).", "source"),
 		samples: desc("lookback_samples_total",
 			"First reads taken as a Query Group's sample, by source and what became of them: captured, "+
-				"first_read_incomplete, owner_lost, completed (every planned rung read or passed), fault.",
+				"first_read_incomplete, owner_lost, completed (its completion observed), unobserved (its last rungs not "+
+				"read), truncated_tail (data still arriving past the tail it was kept to), fault. Only completed enters "+
+				"lookback_completion_total.",
 			"source", "outcome"),
 		checks: desc("lookback_rechecks_total",
 			"Rechecks by source, rung (its moment in the Query Group's data steps) and outcome. Only compared is a "+
@@ -68,12 +73,20 @@ func newLookbackCollector() *lookbackCollector {
 		latest: desc("lookback_completion_max_seconds",
 			"The latest any window of the source was complete, in seconds past its end, since the process started.",
 			"source"),
-		depth: desc("lookback_rung_depth",
-			"How many rungs a sample of the source reads now: one past the last rung its data still changed at.",
-			"source"),
-		rest: desc("lookback_rest_steps",
-			"How long a Query Group of the source rests between two samples, in its data steps: doubling while its "+
-				"data is complete at the first read, up to 64.", "source"),
+		groups: desc("lookback_groups",
+			"The source's Query Groups by how many rungs each reads now - one past the last rung its own data still "+
+				"changed at; each group learns that from its own samples.", "source", "depth"),
+		rest: desc("lookback_rest_seconds",
+			"How long the source's Query Groups rest between two samples on average: doubling while their lateness "+
+				"holds, at most an hour.", "source"),
+		readBytes: desc("lookback_first_read_bytes_total",
+			"Bytes the formal first reads delivered, by source, counted as the rechecks' are.", "source"),
+		checkBytes: desc("lookback_recheck_bytes_total",
+			"Bytes the rechecks read back, by source: over lookback_first_read_bytes_total, the query bytes the "+
+				"lookback adds.", "source"),
+		unknown: desc("lookback_unknown_lookback_total",
+			"Samples whose query's lookback (a window, a range, an offset) could not be read, rechecked from one "+
+				"step before their tail instead.", "source"),
 		coverage: desc("lookback_coverage",
 			"The Query Groups this process owns, and how many of them have a fresh measurement; the aim is all.",
 			"what"),
@@ -95,7 +108,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
-		c.latest, c.depth, c.rest, c.coverage, c.pending, c.yields, c.refused, c.faults} {
+		c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage, c.pending, c.yields, c.refused, c.faults} {
 		ch <- desc
 	}
 }
@@ -133,8 +146,13 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.yields, source.Preempted[rung], name, rung)
 		}
 		gauge(c.latest, float64(source.MaxCompletionSeconds), name)
-		gauge(c.depth, float64(source.Depth), name)
-		gauge(c.rest, source.RestSteps, name)
+		for _, depth := range lookback.DepthLabels {
+			gauge(c.groups, float64(source.DepthGroups[depth]), name, depth)
+		}
+		gauge(c.rest, source.MeanRestSeconds, name)
+		counter(c.readBytes, source.FirstReadBytes, name)
+		counter(c.checkBytes, source.RecheckBytes, name)
+		counter(c.unknown, source.UnknownLookback, name)
 	}
 	for reason, n := range stats.PermitRefusals {
 		counter(c.refused, n, reason)

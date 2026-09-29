@@ -48,6 +48,12 @@ func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 	if stats.Coverage.Owned != 0 {
 		t.Fatalf("an unbound bundle owns %d Query Groups", stats.Coverage.Owned)
 	}
+	// A refusal at the lookback's own share of the permits is a fault, and
+	// the first samples are spread.
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now); options.LimitRefusal != scheduler.LookbackRefusedLimit ||
+		options.UnspreadFirstSamples {
+		t.Fatalf("limit refusal %q, unspread %v", options.LimitRefusal, options.UnspreadFirstSamples)
+	}
 }
 
 // The lookback's permit is the scheduler's: a refusal carries its reason,
@@ -115,7 +121,10 @@ func sampledQuery(queryGroup execution.QueryGroupIdentity) lookback.Query {
 // call is in removeRunnerLocked, the one way the Runner set shrinks.
 func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, _, err := buildLookback(noRecheck, nil, owner, nil, time.Now)
+	// Built as buildLookback builds it, with each first sample taken at once.
+	options := lookbackOptions(noRecheck, nil, owner, nil, time.Now)
+	options.UnspreadFirstSamples = true
+	engine, err := lookback.New(options)
 	if err != nil {
 		t.Fatal(err)
 	}

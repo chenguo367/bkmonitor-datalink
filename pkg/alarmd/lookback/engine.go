@@ -14,6 +14,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -46,16 +47,18 @@ func rungWindow(rung int, step time.Duration) time.Duration {
 const (
 	// RecheckTimeout bounds one recheck, below any formal query's budget.
 	RecheckTimeout = 5 * time.Second
-	// maxRestSteps is the longest a source whose data is always complete at
-	// the first read rests between two samples of one Query Group: 64
-	// steps, where the rungs also stop - about one recheck an hour per
-	// Query Group at a minute step.
-	maxRestSteps = 64
-	// cleanSamplesToShallow is how many samples of a source in a row must
-	// show nothing changing at its two deepest rungs before it rechecks one
-	// rung less. At a true late rate of one sample in four there, eight
-	// clean ones in a row happen one time in ten; a single late sample
-	// restores the rung at once.
+	// restCap is the longest a Query Group rests between two samples,
+	// whatever its step: how late a source's data is changes over hours -
+	// a pipeline's load, a deployment upstream - so an hour is as rarely as
+	// a Query Group whose data is complete at the first read is looked at.
+	// It is also the span a process spreads its Query Groups' first samples
+	// over. The rungs still reach 63.5 steps.
+	restCap = time.Hour
+	// cleanSamplesToShallow is how many samples of a Query Group in a row
+	// must show nothing changing at its two deepest rungs before it
+	// rechecks one rung less. At a true late rate of one sample in four
+	// there, eight clean ones in a row happen one time in ten; a single late
+	// sample restores the rung at once.
 	cleanSamplesToShallow = 8
 	// maxRecent bounds the changed rechecks kept whole, maxLatest the Query
 	// Groups listed by their latest completion.
@@ -64,16 +67,25 @@ const (
 )
 
 // Sample outcomes, closed: what became of a first read taken as a sample.
+// completed is a window whose completion was observed; unobserved one whose
+// last rungs were not read (yielded, failed, partial) with no rung compared
+// after them, and
+// truncated_tail one whose data was still arriving deeper than its first
+// read was kept to. Neither of those two is a window that did not change:
+// they enter no completion, and count as no clean sample.
 const (
 	OutcomeCaptured            = "captured"
 	OutcomeFirstReadIncomplete = "first_read_incomplete"
 	OutcomeOwnerLost           = "owner_lost"
 	OutcomeCompleted           = "completed"
+	OutcomeUnobserved          = "unobserved"
+	OutcomeTruncatedTail       = "truncated_tail"
 	OutcomeFault               = "fault"
 )
 
 // SampleOutcomes is every sample outcome.
-var SampleOutcomes = []string{OutcomeCaptured, OutcomeFirstReadIncomplete, OutcomeOwnerLost, OutcomeCompleted, OutcomeFault}
+var SampleOutcomes = []string{OutcomeCaptured, OutcomeFirstReadIncomplete, OutcomeOwnerLost, OutcomeCompleted,
+	OutcomeUnobserved, OutcomeTruncatedTail, OutcomeFault}
 
 // Recheck outcomes, closed: what one rung of one sample came to. Only
 // "compared" is a window observed; every other outcome is a window not
@@ -94,10 +106,13 @@ var RecheckOutcomes = []string{RecheckCompared, RecheckYielded, RecheckFailed, R
 const (
 	// FaultBucketsExceeded is a read with more buckets than any window has.
 	FaultBucketsExceeded = "buckets_exceeded"
+	// FaultPermitLimit is a recheck refused at the lookback's own share of
+	// the query permits, which the spread of the samples keeps it off.
+	FaultPermitLimit = "permit_limit"
 )
 
 // Faults is every fault.
-var Faults = []string{FaultBucketsExceeded}
+var Faults = []string{FaultBucketsExceeded, FaultPermitLimit}
 
 // RefusedOther counts a permit refusal whose reason Options.Refusals does
 // not name.
@@ -127,17 +142,22 @@ type Permit func() (release func(), yield <-chan struct{}, refused string)
 // Options wire an Engine. Owned is how many Query Groups this process owns,
 // the denominator of the coverage. Sources are the data sources counted by
 // name; any other is counted as SourceOther. Refusals is every reason Permit
-// refuses with, counted from the start; any other as RefusedOther. OnFault,
-// when set, is told of every fault.
+// refuses with, counted from the start, any other as RefusedOther; a refusal
+// for LimitRefusal - the lookback's own share of the permits - is also a
+// fault. OnFault, when set, is told of every fault. UnspreadFirstSamples
+// takes each Query Group's first sample at its first read instead of
+// spreading them over restCap; only a test sets it.
 type Options struct {
-	Now      func() time.Time
-	Recheck  Recheck
-	Permit   Permit
-	Refusals []string
-	Owns     func(execution.QueryGroupIdentity) bool
-	Owned    func() int
-	Sources  []string
-	OnFault  func(reason string, queryGroup execution.QueryGroupIdentity)
+	Now                  func() time.Time
+	Recheck              Recheck
+	Permit               Permit
+	Refusals             []string
+	LimitRefusal         string
+	Owns                 func(execution.QueryGroupIdentity) bool
+	Owned                func() int
+	Sources              []string
+	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
+	UnspreadFirstSamples bool
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -154,20 +174,31 @@ type Engine struct {
 	options Options
 	named   map[string]bool
 	labels  []string
+	// firstReadBytes is every formal first read's delivered bytes by
+	// source, counted on the query's own goroutine: the map is built once
+	// and only its counters change.
+	firstReadBytes map[string]*atomic.Uint64
 
-	mu      sync.Mutex
-	groups  map[execution.QueryGroupIdentity]*group
-	sources map[string]*sourceState
-	counts  counters
-	recent  []Recent
-	nextID  uint64
+	mu     sync.Mutex
+	groups map[execution.QueryGroupIdentity]*group
+	counts counters
+	recent []Recent
+	nextID uint64
 }
 
-// group is one Query Group: its sample in flight, if any, when the next may
-// start, and its last measurement.
+// group is one Query Group: how it is rechecked, which it learns from its
+// own samples, its sample in flight, if any, when the next may start, and
+// its last measurement. A source's label only sums its groups' readings; a
+// late group of a source does not make a punctual one of it read deeper.
 type group struct {
-	source    string
-	step      time.Duration
+	source string
+	step   time.Duration
+	// depth is how many rungs its sample reads, rest how long it rests
+	// between two samples, in its steps, and clean its samples in a row
+	// that needed less than depth.
+	depth     int
+	rest      float64
+	clean     int
 	capturing bool
 	sample    *sample
 	nextAt    time.Time
@@ -181,16 +212,6 @@ type group struct {
 	completion time.Duration
 }
 
-// sourceState is how one source is rechecked: how many rungs, how long a
-// Query Group rests between samples, in steps, and the clean samples in a
-// row counted towards one rung less.
-type sourceState struct {
-	depth         int
-	rest          float64
-	clean         int
-	maxCompletion time.Duration
-}
-
 type sample struct {
 	id         uint64
 	source     string
@@ -200,16 +221,27 @@ type sample struct {
 	step       time.Duration
 	windowEnd  time.Time
 	readAt     time.Time
-	// last is the latest read: each rung is compared with the read before it.
-	last readSummary
-	// rung is the next rung, planned how many are read: the source's depth at
+	// lookback is how far before its first compared bucket a recheck reads,
+	// so that bucket is computed from the data the first read had.
+	lookback time.Duration
+	// last is the latest read of the kept tail, from keptFrom on: each rung
+	// is compared with the read before it.
+	last     readSummary
+	keptFrom int64
+	// rung is the next rung, planned how many are read: the group's depth at
 	// capture, one more each time the last planned rung still changed.
 	rung    int
 	planned int
 	// lastChange is the last rung that changed, -1 for none, and
-	// lastChangeAge how long after the window's end it read.
+	// lastChangeAge how long after the window's end it read. unread is
+	// true while the latest rung was not read - no rung compared since; a
+	// rung compared is compared with the last read kept, so it covers the
+	// ones not read before it. truncated once a rung was compared with a
+	// tail reaching past what the first read was kept to.
 	lastChange    int
 	lastChangeAge time.Duration
+	unread        bool
+	truncated     bool
 	running       bool
 	dropped       bool
 }
@@ -234,7 +266,7 @@ func New(options Options) (*Engine, error) {
 		options.Now = time.Now
 	}
 	engine := &Engine{options: options, named: map[string]bool{}, groups: map[execution.QueryGroupIdentity]*group{},
-		sources: map[string]*sourceState{}}
+		firstReadBytes: map[string]*atomic.Uint64{}}
 	for _, source := range options.Sources {
 		if !engine.named[source] {
 			engine.named[source] = true
@@ -247,21 +279,23 @@ func New(options Options) (*Engine, error) {
 		}
 	}
 	for _, source := range engine.labels {
-		engine.sources[source] = &sourceState{depth: 1, rest: RungSteps[0]}
+		engine.firstReadBytes[source] = &atomic.Uint64{}
 	}
 	engine.counts = newCounters(engine.labels, options.Refusals)
 	return engine, nil
 }
 
-// Begin decides whether a physical query is taken as its Query Group's
-// sample, before it is sent: the group's first formal read after its last
-// sample finished and rested. Any other query costs a counter.
+// Begin sees every formal first read before it is sent. It counts it, and
+// takes it as its Query Group's sample when the group has none in flight
+// and has rested since its last; the Read it returns counts the bytes the
+// read delivers either way, and keeps a summary only of a sample.
 func (engine *Engine) Begin(query Query) *Read {
 	if engine == nil || query.Operation != execution.OperationNormal || query.AttemptNo != 1 {
 		return nil
 	}
 	facts := query.Spec.PlanFacts
 	source := sourceOf(facts, engine.named)
+	read := &Read{engine: engine, source: source, bytes: engine.firstReadBytes[source]}
 	step := time.Duration(facts.StepMillis) * time.Millisecond
 	slot := query.Contract.Slot
 	now := engine.options.Now()
@@ -269,11 +303,18 @@ func (engine *Engine) Begin(query Query) *Read {
 	defer engine.mu.Unlock()
 	engine.counts.firstReads[source]++
 	if step <= 0 {
-		return nil
+		return read
 	}
 	state := engine.groups[slot.QueryGroup]
 	if state == nil {
-		state = &group{}
+		state = &group{depth: 1, rest: RungSteps[0]}
+		if !engine.options.UnspreadFirstSamples {
+			// A process's Query Groups all read for the first time within a
+			// period of its start: spread their first samples over an hour,
+			// by the same hash as their rests, or their rechecks would all
+			// come due at once.
+			state.nextAt = now.Add(time.Duration(spreadFraction(slot.QueryGroup) * float64(restCap)))
+		}
 		engine.groups[slot.QueryGroup] = state
 	}
 	if slot.EvaluationTime > state.lastSlot {
@@ -284,43 +325,52 @@ func (engine *Engine) Begin(query Query) *Read {
 	}
 	state.source, state.step = source, step
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
-		return nil
+		return read
 	}
 	state.capturing = true
-	return &Read{engine: engine, source: source, query: query, step: step, readAt: now,
-		summary: newSummarizer(facts.Normalization.CanonicalValueField)}
+	read.query, read.step, read.readAt, read.depth = query, step, now, state.depth
+	read.summary = newSummarizer(facts.Normalization.CanonicalValueField)
+	return read
 }
 
-// Read is one first read being taken as a sample. The access layer calls
-// Series for every series the provider delivered, before any target
-// filtering - the layer a recheck reads at - and Complete once.
+// Read is one formal first read. The access layer calls Series for every
+// series the provider delivered, before any target filtering - the layer a
+// recheck reads at - and Complete once.
 type Read struct {
-	engine  *Engine
-	source  string
+	engine *Engine
+	source string
+	bytes  *atomic.Uint64
+	// The rest is set only on a Query Group's sample.
 	query   Query
 	step    time.Duration
 	readAt  time.Time
+	depth   int
 	summary *summarizer
 }
 
-// Series adds one delivered series to the summary.
-func (read *Read) Series(dataset *execution.Dataset) {
+// Series counts one delivered series' bytes, and on a sample adds it to the
+// summary.
+func (read *Read) Series(dataset *execution.Dataset, bytes uint64) {
 	if read == nil {
 		return
 	}
-	read.summary.add(dataset)
+	read.bytes.Add(bytes)
+	if read.summary != nil {
+		read.summary.add(dataset)
+	}
 }
 
-// Complete hands the summary to the engine, never waiting. A first read
-// that is not complete is dropped: there is nothing a later read could be
-// compared against.
+// Complete hands a sample's summary to the engine, never waiting, kept to
+// its tail. A first read that is not complete is dropped: there is nothing
+// a later read could be compared against.
 func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
-	if read == nil {
+	if read == nil || read.summary == nil {
 		return
 	}
 	engine := read.engine
 	queryGroup := read.query.Contract.Slot.QueryGroup
 	owned := engine.options.Owns(queryGroup)
+	lookback, lookbackKnown := queryLookback(read.query.Spec.PlanFacts)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	state := engine.groups[queryGroup]
@@ -340,16 +390,25 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		engine.counts.samples[key2(read.source, OutcomeOwnerLost)]++
 		return
 	}
+	if !lookbackKnown {
+		// Read from a step early: the tail's first bucket may still differ
+		// where a window reaches further back than that.
+		engine.counts.unknownLookback[read.source]++
+		lookback = read.step
+	}
+	keptFrom := tailFrom(read.query.Spec.LogicalWindow, read.step, keptSteps(read.depth))
 	engine.nextID++
 	state.sample = &sample{id: engine.nextID, source: read.source, queryGroup: queryGroup,
 		evaluation: read.query.Contract.Slot.EvaluationTime, spec: read.query.Spec, step: read.step,
-		windowEnd: time.Unix(read.query.Spec.LogicalWindow.End, 0), readAt: read.readAt,
-		last: read.summary.buckets, planned: engine.sources[read.source].depth, lastChange: -1}
+		windowEnd: time.Unix(read.query.Spec.LogicalWindow.End, 0), readAt: read.readAt, lookback: lookback,
+		last: trimSummary(read.summary.buckets, keptFrom), keptFrom: keptFrom, planned: read.depth, lastChange: -1}
 	engine.counts.samples[key2(read.source, OutcomeCaptured)]++
 }
 
 func (engine *Engine) faultLocked(reason, source string, queryGroup execution.QueryGroupIdentity) {
-	engine.counts.samples[key2(source, OutcomeFault)]++
+	if reason == FaultBucketsExceeded {
+		engine.counts.samples[key2(source, OutcomeFault)]++
+	}
 	engine.counts.faults[reason]++
 	if engine.options.OnFault != nil {
 		engine.options.OnFault(reason, queryGroup)
@@ -392,7 +451,8 @@ func (engine *Engine) Run(ctx context.Context, tick time.Duration) {
 
 // Step is one pass over the samples: a rung whose moment has come is read
 // again if a permit is free, and one past its window without a permit is
-// counted as yielded and the next rung planned.
+// counted as yielded, the window as not read there, and the next rung
+// planned.
 func (engine *Engine) Step(ctx context.Context) {
 	now := engine.options.Now()
 	engine.mu.Lock()
@@ -407,6 +467,7 @@ func (engine *Engine) Step(ctx context.Context) {
 		case now.Before(at):
 		case now.After(at.Add(rungWindow(candidate.rung, candidate.step))):
 			engine.counts.rechecks[key3(candidate.source, RungNames[candidate.rung], RecheckYielded)]++
+			candidate.unread = true
 			engine.advanceLocked(state, candidate, now)
 		default:
 			due = append(due, candidate)
@@ -423,6 +484,9 @@ func (engine *Engine) Step(ctx context.Context) {
 		if refused != "" {
 			// No room now; the rung keeps its window and is tried again.
 			engine.mu.Lock()
+			if refused == engine.options.LimitRefusal {
+				engine.faultLocked(FaultPermitLimit, candidate.source, candidate.queryGroup)
+			}
 			if _, named := engine.counts.refusals[refused]; !named {
 				refused = RefusedOther
 			}
@@ -452,57 +516,88 @@ func (engine *Engine) advanceLocked(state *group, candidate *sample, now time.Ti
 	engine.finishLocked(state, candidate, now)
 }
 
-// finishLocked records a finished sample and what it teaches its source.
+// finishLocked records a finished sample and what it teaches its Query
+// Group.
 //
-// The window was complete at the last rung that changed, or at the first
-// read if none did. The source then needs one rung past its last change, a
-// guard showing nothing more arrived: more at once when a sample needed
-// more, one fewer only after cleanSamplesToShallow samples in a row needed
-// fewer. A Query Group rests before its next sample: only the new deepest
-// rung's length when its source just deepened - lateness it had not shown,
-// to be learned quickly - and otherwise twice its last rest, up to
-// maxRestSteps, however late the data is, as long as it is late as before.
-// So a source is rechecked as deep as its lateness goes and, once that
-// holds, about as rarely as a punctual one. Each Query Group's rest is
-// spread around its source's (restSpread).
+// A sample every rung of which was read after its last change is complete:
+// the window was complete at that change, or at the first read if none. The
+// group then needs one rung past its last change, a guard showing nothing
+// more arrived: more at once when a sample needed more, one fewer only after
+// cleanSamplesToShallow samples in a row needed fewer. It rests only its new
+// deepest rung's length when it just deepened - lateness it had not shown,
+// to be learned quickly - and otherwise twice its last rest, up to restCap,
+// however late its data is, as long as it is late as before: a group is
+// rechecked as deep as its lateness goes and, once that holds, about as
+// rarely as a punctual one.
+//
+// A sample whose last rungs were not read, or whose data went on arriving
+// past the tail its first read was kept to, is not complete:
+// what it read is a lower bound. It still deepens a group whose change it
+// did read, and changes nothing else.
 func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Time) {
 	state.sample = nil
-	source := engine.sources[candidate.source]
-	completion := candidate.readAt.Sub(candidate.windowEnd)
-	if candidate.lastChange >= 0 {
-		completion = candidate.lastChangeAge
-	}
-	completion = max(completion, 0)
-	state.measured, state.measuredAt, state.completion = true, now, completion
-	engine.counts.samples[key2(candidate.source, OutcomeCompleted)]++
-	engine.counts.completion[key2(candidate.source, ageBucket(completion))]++
-	source.maxCompletion = max(source.maxCompletion, completion)
-
 	need := min(max(candidate.lastChange+2, 1), len(RungSteps))
-	switch {
-	case need > source.depth:
-		source.depth, source.clean = need, 0
-		source.rest = RungSteps[source.depth-1]
-	case need < source.depth:
-		source.clean++
-		if source.clean >= cleanSamplesToShallow {
-			source.depth, source.clean = source.depth-1, 0
-		}
-		source.rest = min(source.rest*2, maxRestSteps)
-	default:
-		source.clean = 0
-		source.rest = min(source.rest*2, maxRestSteps)
+	deepened := need > state.depth
+	if deepened {
+		state.depth, state.clean, state.rest = need, 0, RungSteps[need-1]
 	}
-	state.nextAt = now.Add(time.Duration(source.rest * restSpread(candidate.queryGroup) * float64(state.step)))
+	outcome := OutcomeCompleted
+	switch {
+	case candidate.unread:
+		outcome = OutcomeUnobserved
+	case candidate.truncated:
+		outcome = OutcomeTruncatedTail
+	}
+	engine.counts.samples[key2(candidate.source, outcome)]++
+	if outcome == OutcomeCompleted {
+		completion := candidate.readAt.Sub(candidate.windowEnd)
+		if candidate.lastChange >= 0 {
+			completion = candidate.lastChangeAge
+		}
+		completion = max(completion, 0)
+		state.measured, state.measuredAt, state.completion = true, now, completion
+		engine.counts.completion[key2(candidate.source, ageBucket(completion))]++
+		engine.counts.maxCompletion[candidate.source] = max(engine.counts.maxCompletion[candidate.source], completion)
+		if !deepened {
+			if need < state.depth {
+				state.clean++
+				if state.clean >= cleanSamplesToShallow {
+					state.depth, state.clean = state.depth-1, 0
+				}
+			} else {
+				state.clean = 0
+			}
+			state.rest = min(state.rest*2, float64(restCap)/float64(state.step))
+		}
+	}
+	state.nextAt = now.Add(time.Duration(min(state.rest*float64(state.step), float64(restCap)) * restSpread(candidate.queryGroup)))
 }
 
-// restSpread is how much of its source's rest a Query Group rests: from
-// three quarters to a quarter past, by a hash of the Query Group. Every
-// group of a source rests as long on average, and groups whose Slots read at
-// one moment - which all Query Groups of one period do - are not all
-// sampled, and so all rechecked, at one moment again.
+// spreadFraction places a Query Group in [0, 1) by a hash of its identity.
+func spreadFraction(queryGroup execution.QueryGroupIdentity) float64 {
+	return float64(mix(hashString(string(queryGroup)))%1024) / 1024
+}
+
+// restSpread is how much of its rest a Query Group rests: from three
+// quarters to a quarter past, by the same hash. Every group rests as long
+// on average, and groups whose Slots read at one moment - which all Query
+// Groups of one period do - are not all sampled, and so all rechecked, at
+// one moment again.
 func restSpread(queryGroup execution.QueryGroupIdentity) float64 {
-	return 0.75 + 0.5*float64(mix(hashString(string(queryGroup)))%1024)/1024
+	return 0.75 + 0.5*spreadFraction(queryGroup)
+}
+
+// recheckFrom is where a rung of a sample compares from, and reads from: the
+// tail of its planned depth, within what its first read was kept to, and
+// the query's own lookback before that so the first compared bucket is
+// computed from the data the first read had - never before the window,
+// where the first read did not read either.
+func recheckFrom(candidate *sample) (compareFrom, readFrom int64, truncated bool) {
+	window := candidate.spec.LogicalWindow
+	from := tailFrom(window, candidate.step, tailSteps(candidate.planned))
+	compareFrom = max(from, candidate.keptFrom)
+	readFrom = max(window.Start, compareFrom-int64(candidate.lookback/time.Second))
+	return compareFrom, readFrom, from < candidate.keptFrom
 }
 
 func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func(), yield <-chan struct{}) {
@@ -516,9 +611,10 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 			}
 		}()
 	}
+	compareFrom, readFrom, truncated := recheckFrom(candidate)
 	sink := &recheckSink{summary: newSummarizer(candidate.spec.PlanFacts.Normalization.CanonicalValueField)}
 	started := engine.options.Now()
-	completion, err := engine.options.Recheck(readCtx, candidate.spec, sink)
+	completion, err := engine.options.Recheck(readCtx, tailSpec(candidate.spec, readFrom), sink)
 	cancel()
 	release()
 	rung := RungNames[candidate.rung]
@@ -543,8 +639,10 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 		outcome = RecheckFailed
 	}
 	var changes map[string]int
+	var read readSummary
 	if outcome == RecheckCompared {
-		changes = compareSummaries(candidate.last, sink.summary.buckets)
+		read = trimSummary(sink.summary.buckets, compareFrom)
+		changes = compareSummaries(trimSummary(candidate.last, compareFrom), read)
 	}
 	age := started.Sub(candidate.windowEnd)
 	engine.mu.Lock()
@@ -553,16 +651,32 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	if candidate.dropped {
 		return
 	}
+	engine.counts.recheckBytes[candidate.source] += sink.bytes
 	if sink.summary.faulted {
 		engine.faultLocked(FaultBucketsExceeded, candidate.source, candidate.queryGroup)
 	}
 	engine.counts.rechecks[key3(candidate.source, rung, outcome)]++
+	// A rung compared covers any rung before it that was not read: it is
+	// compared with the last read kept, not with the rung it follows. One
+	// whose tail reached past what the first read was kept to compared only
+	// the part kept: the rest is left to the next sample.
+	candidate.unread = outcome != RecheckCompared
+	if truncated && outcome == RecheckCompared {
+		candidate.truncated = true
+	}
 	if len(changes) > 0 {
 		engine.counts.changed[key2(candidate.source, rung)]++
 		for class, n := range changes {
 			engine.counts.changes[key3(candidate.source, rung, class)] += uint64(n)
 		}
-		candidate.last = sink.summary.buckets
+		for at := range candidate.last {
+			if at >= compareFrom {
+				delete(candidate.last, at)
+			}
+		}
+		for at, bucket := range read {
+			candidate.last[at] = bucket
+		}
 		candidate.lastChange, candidate.lastChangeAge = candidate.rung, age
 		if candidate.rung == candidate.planned-1 && candidate.planned < len(RungSteps) {
 			// Still arriving at the last planned rung: follow it one further.
@@ -596,12 +710,15 @@ func (engine *Engine) remember(recent Recent) {
 	}
 }
 
-// recheckSink sums a recheck the way a first read was summed.
+// recheckSink sums a recheck the way a first read was summed, and counts
+// the bytes it delivered as a first read's are counted.
 type recheckSink struct {
 	summary *summarizer
+	bytes   uint64
 }
 
 func (sink *recheckSink) ConsumeProviderSeries(_ context.Context, batch execution.ProviderSeriesBatch) error {
+	sink.bytes += batch.Delivery.Bytes
 	sink.summary.add(batch.Dataset)
 	return nil
 }

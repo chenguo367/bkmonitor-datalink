@@ -851,8 +851,9 @@ type seriesAdapter struct {
 	round        int64
 	scopeScreens map[execution.PlanIdentity]string
 	scopeTallies map[scopeTallyKey]int
-	// lookback is this query's first read when it was taken as its Query
-	// Group's sample; nil otherwise, and every call on it is then nothing.
+	// lookback is this query's first read as the lookback sees it: its bytes
+	// counted, and a summary kept when it was taken as its Query Group's
+	// sample; nil for a query that is not a formal first read.
 	lookback *lookback.Read
 
 	// forwarded accumulates the delivery proofs of the batches that actually
@@ -874,7 +875,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	admitted := adapter.admittedPlans(batch)
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
-	adapter.lookback.Series(batch.Dataset)
+	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
 	bindings, err := dataBindings(adapter.query, batch, adapter.attemptNo, admitted)
 	if err != nil {
 		return err

@@ -35,8 +35,11 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_changes_total":          sources * rungs * len(lookback.Changes),
 		"lookback_completion_total":       sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds": sources,
-		"lookback_rung_depth":             sources,
-		"lookback_rest_steps":             sources,
+		"lookback_groups":                 sources * len(lookback.DepthLabels),
+		"lookback_rest_seconds":           sources,
+		"lookback_first_read_bytes_total": sources,
+		"lookback_recheck_bytes_total":    sources,
+		"lookback_unknown_lookback_total": sources,
 		"lookback_coverage":               2,
 		"lookback_pending":                2,
 		"lookback_preemptions_total":      sources * rungs,
@@ -68,6 +71,9 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	stats.Sources[logs].Changes[lookback.RungNames[1]][lookback.ChangePointsAdded] = 7
 	stats.Sources[logs].Completion["le_300s"] = 2
 	stats.Sources[logs].Preempted[lookback.RungNames[0]] = 5
+	entry := stats.Sources[logs]
+	entry.RecheckBytes = 2048
+	stats.Sources[logs] = entry
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
 	r.SetLookbackSource(func() lookback.Stats { return stats })
@@ -115,7 +121,10 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	if got := value("bkmonitor_alarmd_lookback_coverage", map[string]string{"what": "owned"}); got != 7 {
 		t.Fatalf("owned = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_rung_depth", map[string]string{"source": logs}); got != 1 {
-		t.Fatalf("depth = %v", got)
+	if got := value("bkmonitor_alarmd_lookback_groups", map[string]string{"source": logs, "depth": "1"}); got != 0 {
+		t.Fatalf("groups at depth 1 = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_recheck_bytes_total", map[string]string{"source": logs}); got != 2048 {
+		t.Fatalf("recheck bytes = %v", got)
 	}
 }

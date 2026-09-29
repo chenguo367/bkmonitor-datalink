@@ -80,7 +80,7 @@ func TestAFirstReadIsSummarizedBeforeTheTargetFilter(t *testing.T) {
 	now := time.Unix(1_700_124_010, 0)
 	var clock sync.Mutex
 	recheck := &lookbackRecheck{hosts: map[string]string{"192.0.2.10": "70", "192.0.2.99": "90"}}
-	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, Sources: []string{"bk_log_search/log"},
+	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, Sources: []string{"bk_log_search/log"}, UnspreadFirstSamples: true,
 		Now:    func() time.Time { clock.Lock(); defer clock.Unlock(); return now },
 		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true },
 		Owned: func() int { return 1 }})
@@ -134,7 +134,7 @@ func TestAFirstReadIsSummarizedBeforeTheTargetFilter(t *testing.T) {
 // taken as its Query Group's sample all the same, counted as other.
 func TestAQueryOfAnySourceIsTakenAsItsQueryGroupsSample(t *testing.T) {
 	contractRef, frozen := frozenExecution(t)
-	engine, err := lookback.New(lookback.Options{Sources: []string{"bk_monitor/time_series"},
+	engine, err := lookback.New(lookback.Options{Sources: []string{"bk_monitor/time_series"}, UnspreadFirstSamples: true,
 		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			return execution.ProviderCompletion{}, nil
 		},

@@ -85,17 +85,31 @@ func buildLookback(
 	logger *observability.Logger,
 	now func() time.Time,
 ) (*lookback.Engine, lookbackStanding, error) {
-	engine, err := lookback.New(lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights),
-		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
-			if logger != nil {
-				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
-			}
-		}})
+	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now))
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
 	return engine, lookbackStanding{Running: true}, nil
+}
+
+// lookbackOptions wire the lookback to this process: its query client, its
+// permits - a refusal at the lookback's own share of them a fault - its
+// Runner set, the sources a query can be compiled from, and its log.
+func lookbackOptions(
+	recheck lookback.Recheck,
+	flights *scheduler.FlightCoordinator,
+	ownership *lookbackOwnership,
+	logger *observability.Logger,
+	now func() time.Time,
+) lookback.Options {
+	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
+		Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals, LimitRefusal: scheduler.LookbackRefusedLimit,
+		Permit: lookbackPermit(flights),
+		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
+			if logger != nil {
+				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
+			}
+		}}
 }
 
 // lookbackPermit is the lookback's permit from the process's query budget:
@@ -130,7 +144,7 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、当前档位深度与休息期（步长倍数）、首读数与复查数（额外查询量）、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 与 truncated_tail 占已结束样本）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},
@@ -143,7 +157,7 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 			return obchannel.Outcome{Value: reading, Complete: true, Limitations: []string{
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
 				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
-				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps; a source reads as many as its data needs, and a Query Group rests rest_steps of its steps between two samples.",
+				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's tail - the deepest planned rung and a step - from the query's own lookback before it.",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
 			}}
 		}}
