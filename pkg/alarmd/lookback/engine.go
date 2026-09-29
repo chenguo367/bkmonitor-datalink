@@ -266,6 +266,12 @@ type group struct {
 	measured   bool
 	measuredAt time.Time
 	completion time.Duration
+	// incompleteFirstReads is how many of its first reads were not whole,
+	// and completeFirstRead whether one ever was: a group whose every first
+	// read so far was incomplete has never been measurable, which is its own
+	// finding and not a gap in the coverage (Coverage.NeverCompleteFirstRead).
+	incompleteFirstReads uint64
+	completeFirstRead    bool
 }
 
 type sample struct {
@@ -467,7 +473,11 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 	switch {
 	case err != nil || completion.Completeness != execution.CompletenessFull:
 		engine.counts.samples[key2(read.source, OutcomeFirstReadIncomplete)]++
+		state.incompleteFirstReads++
 		return
+	}
+	state.completeFirstRead = true
+	switch {
 	case read.summary.faulted:
 		engine.faultLocked(FaultBucketsExceeded, read.source, queryGroup)
 		return

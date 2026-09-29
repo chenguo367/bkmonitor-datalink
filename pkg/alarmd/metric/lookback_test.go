@@ -46,7 +46,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_first_read_bytes_total":            sources,
 		"lookback_recheck_bytes_total":               sources,
 		"lookback_unknown_lookback_total":            sources,
-		"lookback_coverage":                          2,
+		"lookback_coverage":                          3,
 		"lookback_pending":                           2,
 		"lookback_preemptions_total":                 sources * rungs,
 		"lookback_yield_releases_total":              sources,
