@@ -330,13 +330,25 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			// LOOKUP_UNAVAILABLE and the universe is still counted.
 		}
 		at := now()
+		// held is the count's lock while this request reads for it; it is
+		// given back before any answer is written, so a slow reader of one
+		// answer holds no other page behind it.
+		held := false
+		release := func() {
+			if held {
+				held = false
+				counted.mu.Unlock()
+			}
+		}
+		defer release()
 		if summaryOnly {
 			// One count at a time, and the last one answers while it is
 			// fresh: pages asking together wait for one read, not one each.
 			counted.mu.Lock()
-			defer counted.mu.Unlock()
-			if counted.body != nil && at.Sub(counted.at) < DiagnosisSummaryFreshFor {
-				writeJSON(response, http.StatusOK, counted.body)
+			held = true
+			if last := counted.body; last != nil && at.Sub(counted.at) < DiagnosisSummaryFreshFor {
+				release()
+				writeJSON(response, http.StatusOK, last)
 				return
 			}
 		}
@@ -373,6 +385,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 				// No population, no count: the reason is the answer, and the
 				// page says the strategies could not be counted rather than
 				// that there are none.
+				release()
 				writeJSON(response, http.StatusOK, DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica,
 					Universe: body.Universe, Summary: DiagnosisSummary{ByVerdict: map[StateWord]int{}},
 					Verdicts: body.Verdicts, Words: ProductWords(), Timing: body.Timing})
@@ -395,6 +408,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			})
 			summary.Timing.RowsMillis = time.Since(started).Milliseconds()
 			counted.at, counted.body = at, &summary
+			release()
 			writeJSON(response, http.StatusOK, summary)
 			return
 		}

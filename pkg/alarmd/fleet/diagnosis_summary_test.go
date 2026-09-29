@@ -14,6 +14,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"testing"
 )
@@ -86,8 +87,14 @@ func TestTheFirstScreenCountIsTheDiagnosisPagesSummed(t *testing.T) {
 // said by name with nothing counted, never as no strategies.
 func TestAFirstScreenCountTakesNoPageAndNamesAnUnreadableUniverse(t *testing.T) {
 	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
-	rig.universe = []string{"4101"}
-	for _, query := range []string{"summary=1&limit=3", "summary=1&cursor=x", "summary=true"} {
+	rig.universe = []string{"4101", "4102", "4103"}
+	// A cursor a page would take, so the refusal is the summary's and not
+	// the cursor's own.
+	cursor := rig.page(t, "", 1).NextCursor
+	if cursor == "" {
+		t.Fatal("setup: no cursor from a one-row page")
+	}
+	for _, query := range []string{"summary=1&limit=3", "summary=1&cursor=" + url.QueryEscape(cursor), "summary=true"} {
 		if code, _ := rig.summary(t, query); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want refused", query, code)
 		}
