@@ -494,6 +494,12 @@ type NamedInputBinding struct {
 	Terminals       []InputTerminal
 	PartialEvidence *PartialEvidence
 	Provenance      InputProvenance
+	// UnavailableAttribution is where an unavailable binding's ReasonCode
+	// came from (AttributeUnavailable): an attempt that named it, or the
+	// fallback because no attempt named one or none was made. Empty on a
+	// binding that is not unavailable, and on one from a producer that does
+	// not say, whose reason is taken as it is.
+	UnavailableAttribution UnavailableAttribution
 }
 
 type InputProvenance struct {
@@ -3899,7 +3905,7 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 	primaryAt := func(completeness Completeness) (ReasonCode, CompletionScope) {
 		for _, binding := range input.Inputs {
 			if binding.Role == InputRolePrimary && binding.Completeness == completeness {
-				return binding.ReasonCode, CompletionScope{Plan: binding.Consumer.Plan, HasPlan: true,
+				return AttributedReason(binding.ReasonCode, binding.UnavailableAttribution), CompletionScope{Plan: binding.Consumer.Plan, HasPlan: true,
 					LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel, PhysicalQuery: binding.Provenance.PhysicalQuery}
 			}
 		}

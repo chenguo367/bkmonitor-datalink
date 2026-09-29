@@ -39,12 +39,21 @@ func NormalizeProgressCompletionCause(cause string) string {
 	}
 }
 
+// CompletionAttributionReasons are the reasons a completion names for a
+// primary input whose code was the fallback: the query was not sent, or no
+// attempt said why (execution.ReasonQueryNotAttempted and
+// ReasonQueryReasonUnrecorded). Named so the counter and the line keep them.
+var CompletionAttributionReasons = []ReasonCode{"QUERY_NOT_ATTEMPTED", "QUERY_REASON_UNRECORDED"}
+
+var completionAttributionReasonSet = makeReasonSet(CompletionAttributionReasons)
+
 // NormalizedReasonCount is how many words NormalizeReason can return: its
 // catalogues and the three words it answers with outside them. A counter
 // labelled by a normalized reason has at most this many values of it.
 func NormalizedReasonCount() int {
 	return len(commonReasonSet) + len(resourceReasonSet) + len(contractObservationReasonSet) + len(activationFailureReasonSet) +
-		len(viewStreamReasonSet) + len(schedulerDecisionReasonSet) + len(effectiveMaintenanceReasonSet) + len(absentCloseReasonSet) + 3
+		len(viewStreamReasonSet) + len(schedulerDecisionReasonSet) + len(effectiveMaintenanceReasonSet) + len(absentCloseReasonSet) +
+		len(completionAttributionReasonSet) + 3
 }
 
 // CompletionScopeFacts is where a committed Slot's completion cause was

@@ -3302,6 +3302,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := absentCloseReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := completionAttributionReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 

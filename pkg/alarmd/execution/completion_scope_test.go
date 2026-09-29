@@ -65,6 +65,31 @@ func TestACompletionCauseNamesTheQueryLevelOrPlanItWasFoundIn(t *testing.T) {
 		}
 	}
 
+	// A primary whose code is the fallback is named for what the fallback
+	// stands in for, not by the fallback: the query was never sent, or no
+	// attempt said why. Its code stays the fallback for what reads bindings.
+	for attribution, want := range map[execution.UnavailableAttribution]execution.ReasonCode{
+		execution.UnavailableNoAttempts:      execution.ReasonQueryNotAttempted,
+		execution.UnavailableNoAttemptReason: execution.ReasonQueryReasonUnrecorded,
+		execution.UnavailableFromAttempt:     contract.ReasonQueryUnavailable,
+	} {
+		fallback := validInternalExecution()
+		fallback.Inputs[0].Completeness = execution.CompletenessUnavailable
+		fallback.Inputs[0].ReasonCode = contract.ReasonQueryUnavailable
+		fallback.Inputs[0].UnavailableAttribution = attribution
+		if _, attributed, err := execution.DeriveCompletionAttribution(fallback, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{decided}}); err != nil ||
+			attributed.Cause != execution.CausePrimaryInputUnavailable || attributed.Reason != want {
+			t.Fatalf("%s: %+v %v, want reason %s", attribution, attributed, err, want)
+		}
+	}
+	// The words are the ones the counter and the line keep.
+	for _, word := range []execution.ReasonCode{execution.ReasonQueryNotAttempted, execution.ReasonQueryReasonUnrecorded} {
+		if !slices.Contains(observability.CompletionAttributionReasons, observability.ReasonCode(word)) ||
+			observability.NormalizeReason(observability.ReasonCode(word), observability.ResultDegraded) != observability.ReasonCode(word) {
+			t.Fatalf("%s is not kept by the counter and the line", word)
+		}
+	}
+
 	// The detail derivation says the same cause and reason.
 	kindDetail, cause, reason, err := execution.DeriveCompletionDetail(unavailable, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{decided}})
 	if err != nil || kindDetail != execution.CompletionUnavailable || cause != execution.CausePrimaryInputUnavailable || reason != contract.ReasonQueryUnavailable {

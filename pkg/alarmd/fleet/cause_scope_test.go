@@ -56,3 +56,51 @@ func TestADegradedRowNamesWhereItsCauseWasFound(t *testing.T) {
 		t.Fatalf("rows = %+v, want the new run without the earlier run's place", rows)
 	}
 }
+
+// Which line a row lands on for the reason its completion named. A reason
+// an attempt gave is the backend's; a reason that stands in for the
+// fallback - the query was never sent, or no attempt said why - is this
+// deployment's and not yet named, so it is DEFECT and unclassified rather
+// than the backend's. The failure the same round logs names the same word,
+// and it is read after the cause's reason, so it cannot carry the fallback
+// to the backend line either. A partial primary is the backend's by design:
+// QUERY_PARTIAL is set from the backend's own answer, not from a fallback.
+func TestACompletionsReasonDecidesWhoseLineTheRowIsOn(t *testing.T) {
+	for _, testCase := range []struct {
+		name, cause, reason, failure string
+		check                        Check
+		unclassified                 bool
+	}{
+		{name: "an attempt named it", cause: "PRIMARY_INPUT_UNAVAILABLE", reason: "QUERY_TIMEOUT", failure: "QUERY_TIMEOUT",
+			check: CheckBackendNotAnswering},
+		{name: "never sent", cause: "PRIMARY_INPUT_UNAVAILABLE", reason: "QUERY_NOT_ATTEMPTED", failure: "QUERY_NOT_ATTEMPTED",
+			check: CheckDefect, unclassified: true},
+		{name: "no attempt said why", cause: "PRIMARY_INPUT_UNAVAILABLE", reason: "QUERY_REASON_UNRECORDED",
+			failure: "QUERY_REASON_UNRECORDED", check: CheckDefect, unclassified: true},
+		{name: "partial primary", cause: "PRIMARY_INPUT_PARTIAL", reason: "QUERY_PARTIAL", check: CheckBackendNotAnswering},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			at := &clock{at: now}
+			tracker := newTracker(t, at)
+			for round := 0; round < DefaultDegradedRounds; round++ {
+				trace := observability.TraceFields{QueryGroupKey: "qg-reason", EvaluationTime: int64(1000 + 60*round)}
+				if testCase.failure != "" {
+					tracker.Observe(context.Background(), observability.Observation{Component: observability.ComponentAccess,
+						Stage: observability.StageQueryCompleted, Result: observability.ResultDegraded,
+						QueryFailure: &observability.QueryFailureFacts{Stage: observability.QueryFailureStageProvider,
+							Category: observability.QueryFailureCategoryProviderTransport, Code: testCase.failure},
+						Trace: trace})
+				}
+				tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE",
+					ProgressCompletionCause: testCase.cause, ProgressCompletionReason: testCase.reason, Trace: trace})
+				at.at = at.at.Add(time.Minute)
+			}
+			rows := anyColumn(tracker)
+			Attribute(rows, at.at)
+			if len(rows) != 1 || rows[0].CauseReason != testCase.reason || rows[0].Finding.Check != testCase.check ||
+				rows[0].Unclassified != testCase.unclassified {
+				t.Fatalf("rows = %+v, want %s filed on %s, unclassified %v", rows, testCase.reason, testCase.check, testCase.unclassified)
+			}
+		})
+	}
+}
