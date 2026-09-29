@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/sourcereads"
 )
 
 // Every key alarmd reads from a strategy document is shown as written by the
@@ -23,7 +23,7 @@ import (
 // following fails here.
 func TestTheSourceViewShowsEveryKeyAlarmdReads(t *testing.T) {
 	var missing []string
-	for _, path := range controlplane.LegacySourceReadPaths() {
+	for _, path := range sourcereads.Paths() {
 		p := sourcePolicy
 		for _, segment := range strings.Split(path, ".") {
 			child := p.fields[segment]
