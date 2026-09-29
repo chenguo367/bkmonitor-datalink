@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -89,21 +90,91 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // of the same bucket were merged into it.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 	if mandatoryLogStage(observation.Stage) {
-		return LogAdmission{Allowed: true}
+		return LogAdmission{Allowed: true, Candidate: true}
 	}
 	if !repeatedLogObservation(observation) || p == nil || p.repeated == nil {
 		return LogAdmission{}
 	}
-	return p.repeated.Admit(observation)
+	admission := p.repeated.Admit(observation)
+	admission.Candidate = true
+	return admission
 }
 
 type LoggingObserver struct {
 	logger *Logger
 	policy *BoundedLogPolicy
+	// written and limited count, by stage, the lines this observer wrote
+	// and the ones its limiter held back, at the place logStageIndex gives
+	// the stage.
+	written []atomic.Uint64
+	limited []atomic.Uint64
 }
 
 func NewLoggingObserver(logger *Logger, policy *BoundedLogPolicy) *LoggingObserver {
-	return &LoggingObserver{logger: logger, policy: policy}
+	return &LoggingObserver{logger: logger, policy: policy,
+		written: make([]atomic.Uint64, len(logStages)), limited: make([]atomic.Uint64, len(logStages))}
+}
+
+// logStages is every stage a line is counted under: the closed list, which
+// holds StageOther for a stage outside it, and logStageIndex each one's
+// place.
+var logStages = func() []Stage {
+	stages := AllStages()
+	for _, stage := range stages {
+		if stage == StageOther {
+			return stages
+		}
+	}
+	return append(stages, StageOther)
+}()
+
+var logStageIndex = func() map[Stage]int {
+	index := make(map[Stage]int, len(logStages))
+	for place, stage := range logStages {
+		if _, seen := index[stage]; !seen {
+			index[stage] = place
+		}
+	}
+	return index
+}()
+
+// LogLineCounts is how many lines the observer wrote and how many its
+// limiter held back, by stage, every stage present: which stage fills the
+// log is then a reading of this process and not a sample of the log, which
+// on a busy Pod holds minutes. A stage outside the closed list counts under
+// StageOther.
+type LogLineCounts struct {
+	Written map[Stage]uint64
+	Limited map[Stage]uint64
+}
+
+// LineCounts reads the counts now.
+func (l *LoggingObserver) LineCounts() LogLineCounts {
+	counts := LogLineCounts{Written: make(map[Stage]uint64, len(logStageIndex)), Limited: make(map[Stage]uint64, len(logStageIndex))}
+	// By the index, the one place countLine adds to for each stage.
+	for stage, place := range logStageIndex {
+		if l == nil || place >= len(l.written) {
+			counts.Written[stage], counts.Limited[stage] = 0, 0
+			continue
+		}
+		counts.Written[stage], counts.Limited[stage] = l.written[place].Load(), l.limited[place].Load()
+	}
+	return counts
+}
+
+// countLine adds one line of the stage to the written or the limited count.
+func (l *LoggingObserver) countLine(stage Stage, written bool) {
+	place, known := logStageIndex[stage]
+	if !known {
+		place = logStageIndex[StageOther]
+	}
+	counts := l.limited
+	if written {
+		counts = l.written
+	}
+	if place < len(counts) {
+		counts[place].Add(1)
+	}
 }
 
 func New(component string, writer io.Writer) *Logger {
@@ -169,6 +240,11 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 	// the Query Group the Coordinator attached to ctx.
 	observation.Trace = mergeTraceFields(observation.Trace, TraceFieldsFromContext(ctx))
 	admission := l.policy.Admit(observation)
+	// Counted only where the policy would write a line, as the policy
+	// decides it: a routine success it never writes is not a line held back.
+	if admission.Candidate {
+		l.countLine(observation.Stage, admission.Allowed)
+	}
 	if !admission.Allowed {
 		return
 	}
