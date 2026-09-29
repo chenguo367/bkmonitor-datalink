@@ -1,0 +1,101 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package fleet
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+)
+
+func (rig *diagnosisRig) summary(t *testing.T, query string) (int, DiagnosisSummaryResponse) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	rig.handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnose?"+query, nil))
+	var body DiagnosisSummaryResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return w.Code, body
+}
+
+// The first screen's count of strategies is the diagnosis's: the universe's
+// size, and by verdict what the pages of a diagnosis sum to, read the same
+// way at the same moment - so the page and the CLI cannot say two things.
+// The Query Groups beside it are the view's own count, another unit: eleven
+// strategies made up into three Query Groups read as eleven and three.
+func TestTheFirstScreenCountIsTheDiagnosisPagesSummed(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
+	rig.universe = []string{"4101", "4102", "4103", "4109"}
+	for i := 1; i <= 7; i++ {
+		rig.universe = append(rig.universe, strconv.Itoa(5000+i))
+	}
+	summed := map[StateWord]int{}
+	for cursor := ""; ; {
+		body := rig.page(t, cursor, 3)
+		for word, n := range body.Page.ByVerdict {
+			summed[word] += n
+		}
+		if cursor = body.NextCursor; cursor == "" {
+			break
+		}
+	}
+	code, body := rig.summary(t, "summary=1")
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	got := body.Summary
+	if got.Strategies != 11 || body.Universe.Count != 11 || body.Universe.Status != "ok" {
+		t.Fatalf("summary %+v universe %+v, want eleven strategies", got, body.Universe)
+	}
+	total := 0
+	for _, word := range DiagnosisVerdicts() {
+		if got.ByVerdict[word] != summed[word] {
+			t.Errorf("%s: summary %d, pages %d", word, got.ByVerdict[word], summed[word])
+		}
+		total += got.ByVerdict[word]
+		if body.Words.State[word] == "" {
+			t.Errorf("verdict %s has no rendering in the words the summary carries", word)
+		}
+	}
+	if total != 11 || got.ByVerdict[DiagnosisUnknown] != 7 {
+		t.Fatalf("by verdict %v, want eleven with the seven unlisted unknown", got.ByVerdict)
+	}
+	if got.QueryGroups == nil || *got.QueryGroups != 3 {
+		t.Fatalf("query groups %v, want the view's three - not the strategies' eleven", got.QueryGroups)
+	}
+	if len(body.Verdicts) != len(DiagnosisVerdicts()) {
+		t.Fatalf("verdicts %v, want the closed list in its order", body.Verdicts)
+	}
+}
+
+// A summary counts the whole universe, so a cursor or a limit beside it is
+// refused rather than read as a page; and a universe that cannot be read is
+// said by name with nothing counted, never as no strategies.
+func TestAFirstScreenCountTakesNoPageAndNamesAnUnreadableUniverse(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
+	rig.universe = []string{"4101"}
+	for _, query := range []string{"summary=1&limit=3", "summary=1&cursor=x", "summary=true"} {
+		if code, _ := rig.summary(t, query); code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want refused", query, code)
+		}
+	}
+	rig.universeErr = errors.New("SOURCE_UNREADABLE")
+	code, body := rig.summary(t, "summary=1")
+	if code != http.StatusOK || body.Universe.Status != "unreadable" || body.Universe.Reason != "SOURCE_UNREADABLE" ||
+		body.Summary.Strategies != 0 || len(body.Summary.ByVerdict) != 0 {
+		t.Fatalf("status %d body %+v, want the universe named unreadable and nothing counted", code, body)
+	}
+}

@@ -164,6 +164,8 @@ func ProductWords() Words {
 			StateDetecting: "在检测", StateResultUntrusted: "检测结果不能采信", StateNotDetecting: "没在检测",
 			StateDataAbsent: "数据没到", StateStrategyInvalid: "策略定义有问题", StateDependencyUnanswered: "依赖没应答",
 			StateDefect: "程序缺陷", StateRecovered: "已恢复",
+			// The one word a diagnosis adds: no standing could be read.
+			DiagnosisUnknown: "状态未知",
 		},
 		Action: map[ActionWord]string{
 			ActionServiceFix: "本服务处理", ActionStrategyEdit: "策略负责人改", ActionDataCheck: "数据负责人查",
