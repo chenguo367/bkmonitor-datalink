@@ -206,11 +206,11 @@ func Cooling(view *View, columns [][]Anomaly, now time.Time) CoolingFacts {
 // replicas: the earliest moment a cooling row's reason is dated from is
 // kept, and the reader measures it at its own time.
 type coolingRows struct {
-	Listed   int
-	Extended int
-	ByOwner  map[Owner]int
-	ByCheck  map[Check]int
-	Oldest   time.Time
+	Listed   int           `json:"listed"`
+	Extended int           `json:"extended"`
+	ByOwner  map[Owner]int `json:"by_owner,omitempty"`
+	ByCheck  map[Check]int `json:"by_check,omitempty"`
+	Oldest   time.Time     `json:"oldest"`
 }
 
 func coolingRowsOf(columns [][]Anomaly, now time.Time) coolingRows {

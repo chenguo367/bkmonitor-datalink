@@ -348,6 +348,9 @@ type HealthResponse struct {
 	// when the sets were available to compare. It is the difference between a
 	// verdict a reader can act on and one that only says "do not trust this".
 	Coverage *Disagreement `json:"coverage"`
+	// Handover is the note beside the numbers read from the replicas' parts
+	// while an object is held by more than one replica: absent when none is.
+	Handover *HandoverMarker `json:"handover,omitempty"`
 	// PerReplica breaks the deployment back down. Present on the verdict route
 	// because that is where a reader lands first, and "which replica" is the
 	// question the totals raise and cannot answer.
@@ -912,62 +915,94 @@ func NewHandler(
 		})
 	}
 	mux.HandleFunc("/api/health", func(response http.ResponseWriter, request *http.Request) {
-		view := service.View(request.Context())
-		// The columns as the first screen partitions them, so the cohort and
-		// cooling arithmetic here is over the same rows, with the same
-		// findings, as the lines the list route draws.
+		// From the replicas' summaries: what the rows give is the parts they
+		// add up to, and a snapshot is read only for a replica that published
+		// no summary.
+		view, part := service.Summarized(request.Context(), stallAfter)
 		at := now()
-		Decide(&view, at, stallAfter)
-		service.RecordVerdict(&view, at)
+		service.RecordSummarizedVerdict(&view, part, at)
 		history, since := service.VerdictHistory()
-		// The columns alone: the check lines and the to-do they would draw
-		// are the list route's, and this route answers neither.
-		columns := viewColumns(&view)
-		pruned, retained, readEarly := prunedSkipList(view.PrunedSkips), retainedShareList(view.RetainedShare), readEarlyList(view.ReadEarly)
-		writeJSON(response, http.StatusOK, HealthResponse{
-			Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
-			Health: view.Health, Expected: view.Expected, Covered: view.Covered,
-			Determined: view.Determined, Unknown: view.Unknown, Healthy: view.Healthy,
-			AnomaliesTotal: view.AnomaliesTotal, DemotedTotal: view.DemotedTotal,
-			UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
-			EmptyEveryRoundTotal: view.EmptyEveryRoundTotal,
-			Ours:                 OursCount(view.Anomalies),
-			Unattributed:         UnattributedCount(view.Anomalies),
-			Impact:               ImpactOf(view, now()),
-			StrategyLinkBase:     strategyLinkBase,
-			DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
-			DemotionEntries:    view.DemotionEntries,
-			DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
-			DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
-			DemotionReentries: view.DemotionReentries,
-			LastDemotionExit:  momentOrNil(view.LastDemotionExit),
-			PrunedSkips:       firstScreenList(pruned), PrunedSkipsTotal: len(pruned),
-			RetainedShare: firstScreenList(retained), RetainedShareTotal: len(retained),
-			ReadEarly: firstScreenList(readEarly), ReadEarlyTotal: len(readEarly),
-			Coverage: view.Coverage, PerReplica: view.PerReplica,
-			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
-			OutputProtocols: outputProtocolList(view.OutputProtocols),
-			Retentions:      retentionList(view.Retentions),
-			OutputPath:      OutputPathOf(&view),
-			Degradations:    degradationList(view.Degradations),
-			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
-			NoDataHorizon: view.NoDataHorizon,
-			Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
-			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
-			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
-			LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
-			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
-			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
-			NoDataTracking: view.NoDataTracking,
-			Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
-			DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
-			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
-			Gaps: view.Gaps, Capacity: view.Capacity,
-			Load:           LoadOf(&view, now()),
-			VerdictHistory: history, VerdictHistorySince: momentOrNil(since), VerdictHistoryReplica: service.VerdictReplica(),
-		})
+		health := healthOf(&view, part, at)
+		health.StrategyLinkBase = strategyLinkBase
+		health.VerdictHistory, health.VerdictHistorySince, health.VerdictHistoryReplica = history, momentOrNil(since), service.VerdictReplica()
+		writeJSON(response, http.StatusOK, health)
 	})
 	return mux, nil
+}
+
+// healthOf is the health route's answer from a view of the replicas'
+// summaries and the part their rows add up to (Summarized), at the moment
+// of the read. The check lines and the to-do are the list route's, and
+// this route answers neither.
+func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
+	return HealthResponse{
+		Cohorts: cohortList(part.Cohorts(view.Schedule)), Cooling: part.CoolingAt(view.Schedule, at),
+		Health: view.Health, Expected: view.Expected, Covered: view.Covered,
+		Determined: view.Determined, Unknown: view.Unknown, Healthy: view.Healthy,
+		AnomaliesTotal: view.AnomaliesTotal, DemotedTotal: view.DemotedTotal,
+		UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
+		EmptyEveryRoundTotal: view.EmptyEveryRoundTotal,
+		Ours:                 part.Attribution.Ours,
+		Unattributed:         part.Attribution.Unknown,
+		Impact:               part.Impact.Impact(),
+		DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
+		DemotionEntries:    view.DemotionEntries,
+		DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
+		DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
+		DemotionReentries: view.DemotionReentries,
+		LastDemotionExit:  momentOrNil(view.LastDemotionExit),
+		PrunedSkips:       part.PrunedSkips, PrunedSkipsTotal: part.PrunedSkipsTotal,
+		RetainedShare: part.RetainedShare, RetainedShareTotal: part.RetainedShareTotal,
+		ReadEarly: part.ReadEarly, ReadEarlyTotal: part.ReadEarlyTotal,
+		Coverage: view.Coverage, Handover: handoverOf(view.Coverage), PerReplica: view.PerReplica,
+		PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
+		OutputProtocols: outputProtocolList(view.OutputProtocols),
+		Retentions:      retentionList(view.Retentions),
+		OutputPath:      OutputPathOf(view),
+		Degradations:    degradationList(view.Degradations),
+		Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
+		NoDataHorizon: view.NoDataHorizon,
+		Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
+		AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
+		AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
+		LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
+		ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
+		Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
+		NoDataTracking: view.NoDataTracking,
+		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
+		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
+		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
+		Gaps: view.Gaps, Capacity: view.Capacity,
+		Load: part.Load(view),
+	}
+}
+
+// HandoverMarker is the note beside the numbers the health route reads from
+// the replicas' parts while an object is held by more than one replica.
+// Each holder's part counts it, so the counts may run high for that moment,
+// and a skip the old holder records while the new one has pooled the object
+// reads as a loss in progress (ReplicaPart). Objects is how many are held
+// by several; null when some replica's owned set was not read whole, which
+// says it may be happening without saying how much. The catalogue plays no
+// part: whether an object is held twice is the owned sets' alone. The page
+// words it.
+type HandoverMarker struct {
+	Objects *int `json:"objects"`
+}
+
+// handoverOf is the marker the coverage calls for, or nil when no object is
+// held by several replicas.
+func handoverOf(coverage *Disagreement) *HandoverMarker {
+	switch {
+	case coverage == nil:
+		return nil
+	case !coverage.setsWhole:
+		return &HandoverMarker{}
+	case coverage.HeldBySeveralTotal > 0:
+		objects := coverage.HeldBySeveralTotal
+		return &HandoverMarker{Objects: &objects}
+	}
+	return nil
 }
 
 // cohortList is the cohorts as an empty list rather than null: no period seen

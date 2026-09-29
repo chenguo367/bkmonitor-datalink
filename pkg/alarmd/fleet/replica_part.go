@@ -37,48 +37,53 @@ import (
 // several, and the first screen says so beside the counts it reads from the
 // parts (held_by_several_total) rather than going back to the whole view,
 // which is the read this exists to stop.
+//
+// A replica publishes its part beside its snapshot (ReplicaSummary), with
+// the fields the health route reads. CheckRows and TodoRows are not
+// published yet: the routes that draw the check lines and the to-do still
+// read rows, and a part read back has neither.
 type ReplicaPart struct {
-	Replica string
+	Replica string `json:"replica"`
 	// Attribution counts the anomaly column's rows by who they are
 	// attributed to: what the verdict and the per-replica split are read from.
-	Attribution AttributionTally
-	Impact      ImpactTally
+	Attribution AttributionTally `json:"attribution"`
+	Impact      ImpactTally      `json:"impact"`
 	// EmptyEveryRound is the objects of KindEmptyEveryRound among the no-data
 	// rows. An object is one replica's, so the count adds.
-	EmptyEveryRound int
+	EmptyEveryRound int `json:"empty_every_round"`
 	// DemotedDue is the pooled objects whose cooldown has ended and
 	// DemotedDueSince the earliest end among them, zero when none has.
-	DemotedDue      int
-	DemotedDueSince time.Time
+	DemotedDue      int       `json:"demoted_due"`
+	DemotedDueSince time.Time `json:"demoted_due_since"`
 	// CohortRows and Cooling are the rows' sides of Cohorts and Cooling; the
 	// census they are joined with is the replicas' schedule, which is not a
 	// row count and is aggregated with it.
-	CohortRows map[int64]*CohortView
-	Cooling    coolingRows
+	CohortRows map[int64]*CohortView `json:"cohort_rows,omitempty"`
+	Cooling    coolingRows           `json:"cooling"`
 	// Loss is the load's loss, counted from the replica's skip records.
-	Loss LoadLoss
+	Loss LoadLoss `json:"loss"`
 	// PrunedSkips, RetainedShare and ReadEarly are the first
 	// FirstScreenListBound of each of the health route's object lists, in the
 	// list's order, and each total is how many there are. The first few of
 	// the merged lists are among the first few of some replica's, so this is
 	// all a merge needs.
-	PrunedSkips        []PrunedSkipRef
-	PrunedSkipsTotal   int
-	RetainedShare      []RetainedShareRef
-	RetainedShareTotal int
-	ReadEarly          []ReadEarlyRef
-	ReadEarlyTotal     int
+	PrunedSkips        []PrunedSkipRef    `json:"pruned_skips,omitempty"`
+	PrunedSkipsTotal   int                `json:"pruned_skips_total"`
+	RetainedShare      []RetainedShareRef `json:"retained_share,omitempty"`
+	RetainedShareTotal int                `json:"retained_share_total"`
+	ReadEarly          []ReadEarlyRef     `json:"read_early,omitempty"`
+	ReadEarlyTotal     int                `json:"read_early_total"`
 	// Truncated is the columns this replica published cut, a bit per
 	// position in columnNames; merged, the columns any replica cut. A check
 	// line is a sample when any column its rows came from was cut on any
 	// replica, which the replica holding the rows cannot know alone.
-	Truncated uint8
+	Truncated uint8 `json:"truncated"`
 	// CheckRows is the rows' half of the first screen's check lines
 	// (checkRowsOf): the lines' standings, gaps and source records are the
 	// replicas' facts and are added when the lines are made (Checks).
-	CheckRows checkTallies
+	CheckRows checkTallies `json:"-"`
 	// TodoRows is the rows' half of the first screen's to-do (todoRowsOf).
-	TodoRows Todo
+	TodoRows Todo `json:"-"`
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -86,10 +91,10 @@ type ReplicaPart struct {
 // with the field not set at all -- which the per-replica split counts as
 // unattributed and the verdict does not (Settle, UnattributedCount).
 type AttributionTally struct {
-	Ours     int
-	External int
-	Unknown  int
-	Other    int
+	Ours     int `json:"ours"`
+	External int `json:"external"`
+	Unknown  int `json:"unknown"`
+	Other    int `json:"other"`
 }
 
 // ReplicaPartOf reads a view's part. A view of one replica's snapshot gives
@@ -100,16 +105,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 		part.Replica = view.PerReplica[0].Replica
 	}
 	for _, anomaly := range view.Anomalies {
-		switch anomaly.Attribution {
-		case AttributionOurs:
-			part.Attribution.Ours++
-		case AttributionExternal:
-			part.Attribution.External++
-		case AttributionUnknown:
-			part.Attribution.Unknown++
-		default:
-			part.Attribution.Other++
-		}
+		part.Attribution.add(anomaly.Attribution)
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
 	columns := viewColumns(&view)

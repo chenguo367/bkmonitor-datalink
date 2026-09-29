@@ -258,11 +258,23 @@ type storeMeterRecord struct {
 	loads       int
 	loadedCount int
 	loadedBytes int
+	summaries   []int
+	// summaryLoads and ownedLoads are the loaded count and bytes of each
+	// summarized read.
+	summaryLoads [][2]int
+	ownedLoads   [][2]int
 }
 
 func (m *storeMeterRecord) SnapshotPublished(bytes int) { m.published = append(m.published, bytes) }
 func (m *storeMeterRecord) SnapshotsLoaded(loaded int, bytes int) {
 	m.loads, m.loadedCount, m.loadedBytes = m.loads+1, m.loadedCount+loaded, m.loadedBytes+bytes
+}
+func (m *storeMeterRecord) SummaryPublished(bytes int) { m.summaries = append(m.summaries, bytes) }
+func (m *storeMeterRecord) SummariesLoaded(loaded int, bytes int) {
+	m.summaryLoads = append(m.summaryLoads, [2]int{loaded, bytes})
+}
+func (m *storeMeterRecord) OwnedLoaded(loaded int, bytes int) {
+	m.ownedLoads = append(m.ownedLoads, [2]int{loaded, bytes})
 }
 
 // The store reports its own traffic. A fleet view is one read of every

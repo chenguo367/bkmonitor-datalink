@@ -906,6 +906,20 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// five objects nobody can speak for: three the view holds undetermined and
 	// two restored without their cause, under three folds with the stale
 	// replica.
+	// The handover note, in full, in both places it is said; and in neither
+	// when there is none.
+	consequence := "本时刻计数可能偏多、在途损失可能误判为进行中"
+	for name, want := range map[string]string{
+		"3":       "交接中：3 个对象被多个副本同时持有，" + consequence,
+		"unknown": "交接中：无法判断有多少对象被多个副本同时持有，" + consequence,
+	} {
+		if line := lineStarting(text, "HANDOVER "+name+" ::"); strings.Count(line, want) != 2 {
+			t.Errorf("handover %s: %q, want %q beside the counts and on the load block", name, line, want)
+		}
+	}
+	if line := lineStarting(text, "HANDOVER none ::"); strings.Count(line, "(hidden)") != 2 {
+		t.Errorf("no handover: %q, want the note hidden in both places", line)
+	}
 	todoLine := lineStarting(text, "CHECKS ::")
 	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd",
 		// Two current: the object whose round ended skipping, and the one
@@ -1716,6 +1730,14 @@ for (const [name, extra] of Object.entries({
 console.log('BUILD :: ' + textOf(store['buildLine']));
 // The operating judgment at the top of the capacity panel, with its limits.
 console.log('LOAD :: ' + textOf(store['loadLines']) + ' ｜ ' + textOf(store['loadLimits']));
+// The handover note beside the counts and on the load block: with a count,
+// with none, and absent.
+for (const [name, marker] of Object.entries({'3': {objects: 3}, 'unknown': {objects: null}, 'none': undefined})) {
+  ctx.renderDeployment(Object.assign({}, data.health, {handover: marker}));
+  const shown = id => store[id] && !store[id].hidden ? textOf(store[id]) : '(hidden)';
+  console.log('HANDOVER ' + name + ' :: ' + shown('handoverNote') + ' ｜ ' + shown('loadHandover'));
+}
+ctx.renderDeployment(data.health);
 // The same judgment in the states a deployment is actually in: behind on
 // permits, behind with nothing pointing anywhere, a budget rejection while
 // keeping up, and nothing to read from.

@@ -9,7 +9,12 @@
 
 package fleet
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"time"
+)
 
 // ImpactPart names one of the counts Impact is made of.
 type ImpactPart string
@@ -50,6 +55,82 @@ type ImpactPartTally struct {
 	Objects    int
 	Listed     int
 	Strategies map[StrategyRef]struct{}
+}
+
+// impactTallyWire is a tally as a replica publishes it: each strategy its
+// parts name once, in order, and each part's strategies as positions in
+// that list. A strategy is named by most of the parts a row is counted in,
+// and written out in every one it took four times the bytes -- nine tenths
+// of a replica's summary.
+type impactTallyWire struct {
+	Strategies   [][2]string                   `json:"strategies,omitempty"`
+	Parts        map[ImpactPart]impactPartWire `json:"parts"`
+	NoStrategies int                           `json:"no_strategies"`
+}
+
+type impactPartWire struct {
+	Objects    int   `json:"objects"`
+	Listed     int   `json:"listed"`
+	Strategies []int `json:"strategies,omitempty"`
+}
+
+// MarshalJSON writes the tally with its strategies once, in order, so one
+// tally always encodes to the same bytes.
+func (tally ImpactTally) MarshalJSON() ([]byte, error) {
+	distinct := map[StrategyRef]int{}
+	for _, part := range tally.Parts {
+		for strategy := range part.Strategies {
+			distinct[strategy] = 0
+		}
+	}
+	ordered := make([]StrategyRef, 0, len(distinct))
+	for strategy := range distinct {
+		ordered = append(ordered, strategy)
+	}
+	sort.Slice(ordered, func(left, right int) bool {
+		if ordered[left].StrategyID != ordered[right].StrategyID {
+			return ordered[left].StrategyID < ordered[right].StrategyID
+		}
+		return ordered[left].BusinessID < ordered[right].BusinessID
+	})
+	wire := impactTallyWire{Strategies: make([][2]string, 0, len(ordered)), Parts: make(map[ImpactPart]impactPartWire, len(tally.Parts)),
+		NoStrategies: tally.NoStrategies}
+	for position, strategy := range ordered {
+		distinct[strategy] = position
+		wire.Strategies = append(wire.Strategies, [2]string{strategy.StrategyID, strategy.BusinessID})
+	}
+	for name, part := range tally.Parts {
+		positions := make([]int, 0, len(part.Strategies))
+		for strategy := range part.Strategies {
+			positions = append(positions, distinct[strategy])
+		}
+		sort.Ints(positions)
+		wire.Parts[name] = impactPartWire{Objects: part.Objects, Listed: part.Listed, Strategies: positions}
+	}
+	return json.Marshal(wire)
+}
+
+// UnmarshalJSON reads a published tally back into its sets, refusing a
+// position its list does not have.
+func (tally *ImpactTally) UnmarshalJSON(data []byte) error {
+	var wire impactTallyWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	tally.NoStrategies = wire.NoStrategies
+	tally.Parts = make(map[ImpactPart]*ImpactPartTally, len(wire.Parts))
+	for name, part := range wire.Parts {
+		read := &ImpactPartTally{Objects: part.Objects, Listed: part.Listed, Strategies: make(map[StrategyRef]struct{}, len(part.Strategies))}
+		for _, position := range part.Strategies {
+			if position < 0 || position >= len(wire.Strategies) {
+				return fmt.Errorf("impact part %s names strategy %d of %d", name, position, len(wire.Strategies))
+			}
+			strategy := wire.Strategies[position]
+			read.Strategies[StrategyRef{StrategyID: strategy[0], BusinessID: strategy[1]}] = struct{}{}
+		}
+		tally.Parts[name] = read
+	}
+	return nil
 }
 
 func newImpactTally() ImpactTally {

@@ -12,6 +12,7 @@ package fleet
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -99,6 +100,76 @@ func BenchmarkMergeReplicaParts(b *testing.B) {
 				merged := MergeReplicaParts(parts...)
 				_ = merged.Impact.Impact()
 			}
+		})
+	}
+}
+
+// benchOwned is a replica's owned list at the length of a production
+// object identity, one per object it owns.
+func benchOwned(snapshot Snapshot) []string {
+	owned := make([]string, 0, snapshot.Owned)
+	for n := 0; n < snapshot.Owned; n++ {
+		owned = append(owned, fmt.Sprintf("%s%060x", snapshot.Replica[len(snapshot.Replica)-3:], n))
+	}
+	return owned
+}
+
+// What a replica spends on its summary once per publish, and what it and
+// the owned list weigh on the wire beside the snapshot.
+func BenchmarkSummaryOf(b *testing.B) {
+	snapshot := benchReplica(0)
+	owned := benchOwned(snapshot)
+	var encoded []byte
+	for i := 0; i < b.N; i++ {
+		encoded, _ = json.Marshal(SummaryOf(snapshot, owned, 10*time.Minute))
+	}
+	b.StopTimer()
+	ownedJSON, _ := json.Marshal(owned)
+	snapshot.OwnedObjects = owned
+	snapshotJSON, _ := json.Marshal(snapshot)
+	b.ReportMetric(float64(len(encoded)), "summary-bytes")
+	b.ReportMetric(float64(len(ownedJSON)), "owned-bytes")
+	b.ReportMetric(float64(len(snapshotJSON)), "snapshot-bytes")
+}
+
+// What one summarized view costs its reader, from the bytes read to the
+// health answer: every replica's summary decoded, aggregated and merged,
+// with the owned digests agreeing so no owned list is read.
+func BenchmarkSummarizedHealth(b *testing.B) {
+	for _, replicas := range []int{4, 210} {
+		b.Run(fmt.Sprintf("replicas=%d", replicas), func(b *testing.B) {
+			payloads, names, expected := make([][]byte, 0, replicas), make([]string, 0, replicas), []string{}
+			for index := 0; index < replicas; index++ {
+				snapshot := benchReplica(index)
+				owned := benchOwned(snapshot)
+				encoded, err := json.Marshal(SummaryOf(snapshot, owned, 10*time.Minute))
+				if err != nil {
+					b.Fatal(err)
+				}
+				payloads, names, expected = append(payloads, encoded), append(names, snapshot.Replica), append(expected, owned...)
+			}
+			expectation := Expectation{QueryGroups: len(expected), Known: true, IDs: expected}
+			digest := DigestOf(expected)
+			read := 0
+			for _, payload := range payloads {
+				read += len(payload)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				summaries := make([]ReplicaSummary, len(payloads))
+				for index, payload := range payloads {
+					if err := json.Unmarshal(payload, &summaries[index]); err != nil {
+						b.Fatal(err)
+					}
+				}
+				view, part := AggregateSummaries(expectation, digest, summaries, names, now, time.Minute,
+					func([]string) ([][]string, bool) {
+						b.Fatal("the digests agree: no owned list is read")
+						return nil, false
+					})
+				_ = healthOf(&view, part, now)
+			}
+			b.ReportMetric(float64(read), "bytes-read")
 		})
 	}
 }

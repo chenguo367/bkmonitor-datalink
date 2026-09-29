@@ -172,6 +172,33 @@ func (r *Recorder) SnapshotsLoaded(loaded int, bytes int) {
 	r.phaseTwo.fleetViewSnapshotBytes.Add(float64(bytes))
 }
 
+// SummaryPublished records the size of the fleet summary this replica just
+// published beside its snapshot; SummariesLoaded and OwnedLoaded record one
+// summarized view's reads, of the summaries and of the owned lists it read
+// when the digests disagreed.
+func (r *Recorder) SummaryPublished(bytes int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.fleetSummaryBytes.Set(float64(bytes))
+}
+
+func (r *Recorder) SummariesLoaded(loaded int, bytes int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.fleetViewSummaryLoads.Inc()
+	r.phaseTwo.fleetViewSummaryBytes.Add(float64(bytes))
+}
+
+func (r *Recorder) OwnedLoaded(loaded int, bytes int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.fleetViewOwnedLoads.Inc()
+	r.phaseTwo.fleetViewOwnedBytes.Add(float64(bytes))
+}
+
 // SetRetainedPeakCensus publishes the heartbeat census's size and how many
 // observations it has dropped for being full.
 func (r *Recorder) SetRetainedPeakCensus(groups int, overflow uint64) {

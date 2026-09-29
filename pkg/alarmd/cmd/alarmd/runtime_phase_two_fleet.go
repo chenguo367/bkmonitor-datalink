@@ -350,7 +350,10 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 	// The outcome is reported either way, including success. Reporting only
 	// failures would leave the observer unable to tell recovery from silence,
 	// and silence is exactly what a broken publisher produces.
-	err := publisher.store.Publish(ctx, snapshot)
+	// With its summary and owned list, which the health route and the
+	// verdict read instead of every snapshot; the rows are decided by the
+	// same bound the readers decide by.
+	err := publisher.store.PublishSummarized(ctx, snapshot, publisher.staleAfter)
 	if publisher.observe != nil {
 		publisher.observe(err)
 	}
@@ -734,11 +737,13 @@ func fleetVerdictSource(
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		at := now()
-		view := service.View(ctx)
-		// The same call the HTTP path makes, so the two never mark or settle
-		// differently: it used to mark stalling on the anomaly list alone
-		// while the page marked every column.
-		fleet.Decide(&view, at, stallAfter)
+		// Rows decided as each replica published them -- every column, the
+		// rule the health route reads the summaries by -- so the page and the
+		// alert rules read one verdict, and the breakdowns by kind, failure,
+		// line and loss below are of the same rows it was settled on. It used
+		// to mark stalling on the anomaly list alone while the page marked
+		// every column.
+		view := service.ViewAsPublished(ctx, stallAfter)
 		// A scrape decides the verdict too, and it is the one that runs
 		// whether or not anybody is looking: it keeps the record current.
 		service.RecordVerdict(&view, at)

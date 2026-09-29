@@ -68,6 +68,20 @@ type verdictHistory struct {
 // paths that decide the verdict for a reader: the health route and the
 // verdict metric's scrape.
 func (service *Service) RecordVerdict(view *View, at time.Time) {
+	if view == nil {
+		return
+	}
+	service.recordVerdict(view, at, AttributionTally{Ours: OursCount(view.Anomalies), Unknown: UnattributedCount(view.Anomalies)})
+}
+
+// RecordSummarizedVerdict is RecordVerdict for a view of replicas' summaries
+// (Summarized), whose rows stayed with the replicas: the counts are the
+// merged part's.
+func (service *Service) RecordSummarizedVerdict(view *View, part ReplicaPart, at time.Time) {
+	service.recordVerdict(view, at, part.Attribution)
+}
+
+func (service *Service) recordVerdict(view *View, at time.Time, attribution AttributionTally) {
 	if service == nil || view == nil {
 		return
 	}
@@ -85,7 +99,7 @@ func (service *Service) RecordVerdict(view *View, at time.Time) {
 	}
 	change := VerdictChange{At: at, From: history.last, To: view.Health,
 		Degradations: distinctDegradations(view.Degradations), Gaps: distinctGaps(view.Gaps),
-		Ours: OursCount(view.Anomalies), Unattributed: UnattributedCount(view.Anomalies),
+		Ours: attribution.Ours, Unattributed: attribution.Unknown,
 		Anomalies: view.AnomaliesTotal, Covered: view.Covered, Determined: view.Determined}
 	history.last = view.Health
 	history.changes[history.next] = change

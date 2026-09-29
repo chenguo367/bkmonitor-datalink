@@ -2541,6 +2541,10 @@ type Disagreement struct {
 	// so the three lists above are not the whole story. A zero from an
 	// incomparable read means "not established", not "none".
 	Comparable bool `json:"comparable"`
+	// setsWhole is whether every counted replica's owned set was read whole,
+	// which is all HeldBySeveral needs: the catalogue is for the other two
+	// lists (handoverOf).
+	setsWhole bool
 }
 
 // ReplicaView is one replica's own numbers, kept beside the deployment totals
@@ -2936,6 +2940,23 @@ type View struct {
 // the denominator locally would make three replicas out of four report full
 // coverage of nothing.
 func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas []string, now time.Time, freshness time.Duration) View {
+	return aggregate(expectation, snapshots, expectedReplicas, now, freshness, nil)
+}
+
+// headFacts is what a view of replicas' heads -- their snapshots without
+// rows, from their summaries -- takes from the summaries where Aggregate
+// reads rows: whether each replica cut its anomaly list, and the coverage
+// its owned sets give. rowsDecided is instead a view of snapshots whose rows
+// were each decided as its replica published it (decidedAsPublished), which
+// Aggregate leaves as they are.
+type headFacts struct {
+	cut         map[string]bool
+	coverage    func(counted []string) *Disagreement
+	rowsDecided bool
+}
+
+func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas []string, now time.Time, freshness time.Duration,
+	heads *headFacts) View {
 	view := View{expectation: expectation, Health: HealthHealthy, Anomalies: []Anomaly{}, Demoted: []Anomaly{},
 		Undecidable: []Anomaly{}, ByDesign: []Anomaly{},
 		Replicas: []string{}, PerReplica: []ReplicaView{}, Builds: []BuildGroup{}}
@@ -2974,6 +2995,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		view.Replicas = append(view.Replicas, replica)
 		counted = append(counted, snapshot)
+		truncated := snapshot.Truncated()
+		if heads != nil && heads.cut != nil {
+			truncated = heads.cut[replica]
+		}
 		ownedByReplica = append(ownedByReplica, fmt.Sprintf("%s %d", shortReplicaName(replica), snapshot.Owned))
 		view.Covered += snapshot.Owned
 		ownedSets = append(ownedSets, snapshot.OwnedObjects)
@@ -3049,7 +3074,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
 		}
-		if snapshot.Truncated() {
+		if truncated {
 			view.Gaps = append(view.Gaps, Gap{Kind: GapListTruncated, Replica: replica})
 		}
 		if snapshot.OpenAlertSet != nil && snapshot.OpenAlertSet.StaleBeyondBound {
@@ -3175,7 +3200,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			// an older build will not. Zero has to read as "not reported" rather
 			// than "started just now", so the page checks before using it.
 			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now), StartedAt: snapshot.StartedAt,
-			Truncated: snapshot.Truncated(), Capacity: snapshot.Capacity,
+			Truncated: truncated, Capacity: snapshot.Capacity,
 			Build: snapshot.Build,
 		}
 		// This replica's own record of its dependencies, copied so a later
@@ -3288,7 +3313,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.Gaps = append(view.Gaps, Gap{Kind: GapUndetermined})
 	}
 
-	view.Coverage = compareCoverage(ownedSets, expectation, setsComplete)
+	if heads != nil && heads.coverage != nil {
+		view.Coverage = heads.coverage(view.Replicas)
+	} else {
+		view.Coverage = compareCoverage(ownedSets, expectation, setsComplete)
+	}
 	if !expectation.Known {
 		view.Gaps = append(view.Gaps, Gap{Kind: GapDenominatorUnavailable})
 	} else {
@@ -3357,15 +3386,17 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	// prevented this" is a real question about a demoted object, and the column
 	// it sits in does not answer it. What the column decides is whether the
 	// object bears on the verdict; who could have prevented it is decided here.
-	Attribute(view.Anomalies, now)
-	Attribute(view.Demoted, now)
-	Attribute(view.Undecidable, now)
-	Attribute(view.ByDesign, now)
-	Attribute(view.NoData, now)
-	Attribute(view.NoDataMemory, now)
-	Attribute(view.RetainedShare, now)
-	Attribute(view.ReadEarly, now)
-	Attribute(view.LateSeries, now)
+	if heads == nil || !heads.rowsDecided {
+		Attribute(view.Anomalies, now)
+		Attribute(view.Demoted, now)
+		Attribute(view.Undecidable, now)
+		Attribute(view.ByDesign, now)
+		Attribute(view.NoData, now)
+		Attribute(view.NoDataMemory, now)
+		Attribute(view.RetainedShare, now)
+		Attribute(view.ReadEarly, now)
+		Attribute(view.LateSeries, now)
+	}
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
@@ -3538,37 +3569,50 @@ func sortBuildGroups(groups []BuildGroup) {
 // are just not this deployment's work, and a verdict that cannot come back
 // while they exist tells nobody anything.
 func Settle(view *View) {
+	byReplica, total := map[string]AttributionTally{}, AttributionTally{}
+	for _, anomaly := range view.Anomalies {
+		tally := byReplica[anomaly.Replica]
+		tally.add(anomaly.Attribution)
+		byReplica[anomaly.Replica] = tally
+		total.add(anomaly.Attribution)
+	}
+	settleFrom(view, byReplica, total)
+}
+
+// add counts one row under its attribution.
+func (tally *AttributionTally) add(attribution Attribution) {
+	switch attribution {
+	case AttributionOurs:
+		tally.Ours++
+	case AttributionExternal:
+		tally.External++
+	case AttributionUnknown:
+		tally.Unknown++
+	default:
+		tally.Other++
+	}
+}
+
+// settleFrom is Settle from the anomaly rows' attributions counted by
+// replica and in all: what a view whose rows stayed with the replicas reads
+// from their parts.
+func settleFrom(view *View, byReplica map[string]AttributionTally, total AttributionTally) {
 	// The per-replica split is refreshed in the same pass that decides the
 	// verdict, because they are two readings of one classification: computed
 	// separately they can disagree, and the disagreement would be invisible --
 	// a deployment reported DEGRADED with every replica showing zero of the
 	// thing that made it so.
-	byReplica := map[string]*ReplicaView{}
 	for index := range view.PerReplica {
 		replica := &view.PerReplica[index]
-		replica.Ours, replica.External, replica.Unattributed = 0, 0, 0
-		byReplica[replica.Replica] = replica
-	}
-	for _, anomaly := range view.Anomalies {
-		replica, known := byReplica[anomaly.Replica]
-		if !known {
-			continue
-		}
-		switch anomaly.Attribution {
-		case AttributionExternal:
-			replica.External++
-		case AttributionOurs:
-			replica.Ours++
-		default:
-			// Ours is named rather than left as the default, and an empty
-			// attribution lands here with AttributionUnknown instead.
-			//
-			// An unset field is not a verdict. It used to fall through to Ours,
-			// which is the difference between "nobody classified this" and "this
-			// is the deployment's fault" -- and the second is what decides the
-			// badge at the top of the page.
-			replica.Unattributed++
-		}
+		tally := byReplica[replica.Replica]
+		// Ours is named rather than left as the default, and an empty
+		// attribution lands with AttributionUnknown as unattributed.
+		//
+		// An unset field is not a verdict. It used to fall through to Ours,
+		// which is the difference between "nobody classified this" and "this
+		// is the deployment's fault" -- and the second is what decides the
+		// badge at the top of the page.
+		replica.Ours, replica.External, replica.Unattributed = tally.Ours, tally.External, tally.Unknown+tally.Other
 	}
 
 	// Order matters: an incomplete view cannot be called healthy, and it cannot
@@ -3583,7 +3627,7 @@ func Settle(view *View) {
 	// show, because every alert it keeps open looks like one still due.
 	case len(view.Degradations) > 0:
 		view.Health = HealthDegraded
-	case OursCount(view.Anomalies) > 0:
+	case total.Ours > 0:
 		view.Health = HealthDegraded
 	// An object whose cause was never recorded is missing evidence about a real
 	// anomaly. This package already refuses to call a view with missing evidence
@@ -3594,7 +3638,7 @@ func Settle(view *View) {
 	// one more round, and one that never completes another is marked stalled,
 	// which is ours. So a rollout reads UNKNOWN for a minute or two instead of
 	// reading DEGRADED, and neither reads as well.
-	case UnattributedCount(view.Anomalies) > 0:
+	case total.Unknown > 0:
 		view.Health = HealthUnknown
 	default:
 		view.Health = HealthHealthy
@@ -3625,7 +3669,7 @@ func compareCoverage(ownedSets [][]string, expectation Expectation, setsComplete
 	if len(held) == 0 {
 		return nil
 	}
-	result := &Disagreement{Comparable: setsComplete && expectation.Known && len(expectation.IDs) > 0}
+	result := &Disagreement{Comparable: setsComplete && expectation.Known && len(expectation.IDs) > 0, setsWhole: setsComplete}
 	for object, holders := range held {
 		if holders > 1 {
 			result.HeldBySeveral = append(result.HeldBySeveral, object)
