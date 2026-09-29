@@ -163,6 +163,17 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		if len(run.samples) > readEarlyKept {
 			run.samples = append([]ReadEarlySample(nil), run.samples[len(run.samples)-readEarlyKept:]...)
 		}
+		// While its window is read early the group rests no longer than its
+		// deepest rung, however long it rested before: the row it is reported
+		// on goes when a sample reads the data whole again, and that sample
+		// is captured one such rest after this one, not up to restCap later.
+		if floor := RungSteps[state.depth-1]; state.rest > floor {
+			state.rest = floor
+			next := now.Add(time.Duration(floor * float64(state.step) * restSpread(candidate.queryGroup)))
+			if next.Before(state.nextAt) {
+				state.nextAt = next
+			}
+		}
 	case ClassUnclassified:
 		// Not known either way: it neither adds to a run nor ends one.
 		engine.counts.unclassified[key2(candidate.source, reason)]++

@@ -682,19 +682,26 @@ func TestASettlingQueryGroupForgetsWhatItsCleanSamplesNeededBefore(t *testing.T)
 // A Query Group late by the same rungs every time reads that deep, and
 // rests like a punctual one once that holds: only the sample that deepened
 // it brings it back sooner. The rechecks follow how deep the lateness goes,
-// not how often it is seen again.
+// not how often it is seen again. Its lateness here is a series that comes
+// later; a window read early rests no longer than its deepest rung
+// (TestAGroupReadEarlyRestsNoLongerThanItsDeepestRung).
 func TestAStablyLateQueryGroupRestsUpToAnHourAtItsDepth(t *testing.T) {
 	f := newFixture(t)
 	rests := []float64{}
 	for sample := 0; sample < 7; sample++ {
-		// Every sample: the data changes by the first rung and not after it.
-		f.sample("qg", sourceLog, minute, "1", func(int) string { return fmt.Sprint(100 + sample) })
+		// Every sample: another series comes by the first rung and nothing
+		// changes after it.
+		f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64) []*execution.Dataset {
+			return []*execution.Dataset{point(slot, "1"), dataset("h2", map[int64]string{slot - 60: fmt.Sprint(100 + sample)})}
+		})
 		state := f.group("qg")
+		if state.seriesLate == nil {
+			t.Fatalf("sample %d: not series late", sample)
+		}
 		if state.depth != 2 {
 			t.Fatalf("sample %d: depth %d, want 2 - one past the first rung", sample, state.depth)
 		}
 		rests = append(rests, state.rest)
-		f.rest("qg")
 	}
 	want := []float64{3.5, 7, 14, 28, 56, 60, 60}
 	for index := range want {
