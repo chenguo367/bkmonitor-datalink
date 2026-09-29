@@ -53,10 +53,27 @@ func rememberRound(state *queryGroupState, slot int64, kind, reason string, cove
 	} else if state.slotOffsetKnown && slot > 0 {
 		mark.end, mark.endInferred = slot-state.slotOffset, true
 	}
+	if state.firstSlot == 0 && slot > 0 {
+		state.firstSlot = slot
+	}
 	state.rounds = append(state.rounds, mark)
 	if len(state.rounds) > RecentRoundsKept {
 		state.rounds = state.rounds[len(state.rounds)-RecentRoundsKept:]
 	}
+}
+
+// rememberedSince is the record minute of the first round this process
+// remembered for the object: a hole before it is one this process never
+// had a chance to see (BEFORE_THIS_PROCESS), where a hole after it that no
+// remembered round covers has rolled out of memory (NOT_IN_MEMORY). Zero
+// while it is not known -- no round remembered with a Slot, or none that
+// told the object's Slot-to-minute offset -- and then no minute is before
+// it, so no hole is filed before this process.
+func rememberedSince(state *queryGroupState) int64 {
+	if state.firstSlot <= 0 || !state.slotOffsetKnown {
+		return 0
+	}
+	return state.firstSlot - state.slotOffset
 }
 
 // roundAt finds the remembered round that evaluated the minute, a round that
@@ -102,8 +119,9 @@ func windowKey(strategy, series string, level uint32) string {
 // windowRows reads every named window of the round against the object's
 // remembered rounds: one WindowRow per fact, each listed hole with whose
 // minute it is, the unlisted holes counted as beyond memory, and the verdict
-// decided from the counts.
-func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts) []WindowRow {
+// decided from the counts. since is rememberedSince: a hole no remembered
+// round covers is BEFORE_THIS_PROCESS when its minute is before it.
+func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, since int64) []WindowRow {
 	if facts == nil || len(facts.Windows) == 0 {
 		return nil
 	}
@@ -140,6 +158,9 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts) [
 					hole.Cause = HolePrimaryUnrecorded
 					row.HolesBy.PrimaryUnrecorded++
 				}
+			} else if minute < since {
+				hole.Cause = HoleBeforeThisProcess
+				row.HolesBy.BeforeThisProcess++
 			} else {
 				hole.Cause = HoleNotInMemory
 				row.HolesBy.NotInMemory++
@@ -192,4 +213,32 @@ func unlistedHolesAnswered(rounds []roundMark, facts *observability.HistoryCover
 		}
 	}
 	return true
+}
+
+// unlistedHolesBeforeThisProcess reads the same unnamed windows for the one
+// other reading that is not this side's: every minute of the union either
+// evaluated by a remembered round that answered whole, or before the first
+// round this process remembers for the object (since, rememberedSince), and
+// at least one of the second. The same union rules hold: some windows
+// unnamed, the union whole, no unusable point. It never holds together with
+// unlistedHolesAnswered.
+func unlistedHolesBeforeThisProcess(rounds []roundMark, facts *observability.HistoryCoverageFacts, since int64) bool {
+	if facts == nil || facts.Short <= uint32(len(facts.Windows)) {
+		return false
+	}
+	if facts.MissingMinutesTruncated || facts.ShortUnusable > 0 || len(facts.MissingMinutes) == 0 {
+		return false
+	}
+	before := false
+	for _, minute := range facts.MissingMinutes {
+		mark, found := roundAt(rounds, minute)
+		switch {
+		case found && mark.primary != nil && mark.primary.Completeness == "FULL":
+		case !found && minute < since:
+			before = true
+		default:
+			return false
+		}
+	}
+	return before
 }

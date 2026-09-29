@@ -893,6 +893,12 @@ type HistoryCoverage struct {
 	// unnamed, and only from the worker's union of missing minutes; a round
 	// whose union is truncated or absent leaves it false.
 	UnlistedHolesAnswered bool `json:"unlisted_holes_answered,omitempty"`
+	// UnlistedHolesBeforeThisProcess says the same of the unnamed windows
+	// with one difference: some of their minutes are before the first round
+	// this process remembers for the object (BEFORE_THIS_PROCESS), and every
+	// other minute's round answered whole. Nothing is decided on them yet;
+	// they are the reader's own gap, and they close as the window slides.
+	UnlistedHolesBeforeThisProcess bool `json:"unlisted_holes_before_this_process,omitempty"`
 }
 
 // HoleCause is whose a missing position is, read from the round of that
@@ -922,14 +928,22 @@ const (
 	// PARTIAL -- folding the two would make "the dependency did not answer"
 	// and "this side did not write it down" one name, the strongest one.
 	HolePrimaryUnrecorded HoleCause = "ROUND_PRIMARY_UNRECORDED"
-	// No round this process remembers evaluated that minute: before this
-	// process took the object, older than the rounds kept, or a hole listed
-	// beyond the listing bound. A limit of the reader, not a finding.
+	// No round this process remembers evaluated that minute, and it is not
+	// one before the first round this process remembers for the object:
+	// older than the rounds kept, or a hole listed beyond the listing bound.
+	// A limit of the reader, not a finding.
 	HoleNotInMemory HoleCause = "NOT_IN_MEMORY"
+	// The minute is before the first round this process remembers for the
+	// object: this process started, or began watching the object, after it.
+	// A limit of the reader like NOT_IN_MEMORY, apart from it because it
+	// ends by itself: once the window slides past that first round every
+	// minute in it is one this process saw.
+	HoleBeforeThisProcess HoleCause = "BEFORE_THIS_PROCESS"
 )
 
 // HoleCauses is the closed list, for the page's completeness check.
-var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable, HolePrimaryUnrecorded, HoleNotInMemory}
+var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable,
+	HolePrimaryUnrecorded, HoleNotInMemory, HoleBeforeThisProcess}
 
 // WindowVerdict is what a window's holes say together about whose the
 // shortfall is. Decided here from the causes, so the page states a verdict
@@ -1018,6 +1032,7 @@ type WindowHoleCounts struct {
 	Unusable              uint32 `json:"unusable"`
 	PrimaryUnrecorded     uint32 `json:"primary_unrecorded"`
 	NotInMemory           uint32 `json:"not_in_memory"`
+	BeforeThisProcess     uint32 `json:"before_this_process"`
 }
 
 // verdictOf reads the counts into the one word: this side's incomplete
@@ -1031,7 +1046,7 @@ func verdictOf(counts WindowHoleCounts) WindowVerdict {
 		return VerdictInputIncomplete
 	case counts.Unusable > 0:
 		return VerdictPointsUnusable
-	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0:
+	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0 || counts.BeforeThisProcess > 0:
 		return VerdictUnknown
 	case counts.AnsweredEmpty > 0:
 		return VerdictQueryAnsweredEmpty

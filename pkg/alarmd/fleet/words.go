@@ -69,7 +69,12 @@ var ActionWords = []ActionWord{ActionServiceFix, ActionStrategyEdit, ActionDataC
 // out. GUARD_MOVING: a guard's count moved within the last StalledRounds
 // rounds. NEXT_ROUND: the round that will say is the next one -- the
 // configuration just changed, or the cause did not survive a restart -- for
-// at most StalledRounds rounds, after which the row is this side's.
+// at most StalledRounds rounds, after which the row is this side's. A window
+// undecided only for minutes before the first round this process remembers
+// for the object (BEFORE_THIS_PROCESS) waits under it too, bounded by the
+// window rather than by a count: the window moves one position a round, and
+// once it has moved past that first round no such minute is left and the
+// row is decided the usual way (awaitingThisProcess).
 //
 // A wait is an assertion about the future: one more round and this will
 // clear. So every reason here is evidence that something is moving, and
@@ -124,6 +129,7 @@ func ProductWords() Words {
 			HoleAnsweredWithoutSeries: "查询正常返回，这条序列不在结果里", HoleAnsweredEmpty: "查询正常返回，整个对象没有数据",
 			HoleInputIncomplete: "本侧那一轮没查全", HolePointUnusable: "记录到了，检测用不了",
 			HolePrimaryUnrecorded: "那一轮查询答了什么没记下来", HoleNotInMemory: "超出本进程记忆",
+			HoleBeforeThisProcess: "早于本进程开始看这个对象，窗口滑过后再判",
 		},
 		Verdict: map[WindowVerdict]string{
 			VerdictDataAbsentWhenQueried: "查询时数据不在", VerdictInputIncomplete: "本侧没查全",
@@ -164,7 +170,7 @@ func ProductWords() Words {
 			ActionCacheWriterFill: "缓存写入方补", ActionWatch: "等着看", ActionNone: "不用处理",
 		},
 		Watch: map[WatchReason]string{
-			WatchWindowFilling: "窗口在补", WatchGuardMoving: "保护在解除", WatchNextRound: "等下一轮",
+			WatchWindowFilling: "窗口在补", WatchGuardMoving: "保护在解除", WatchNextRound: "等后续轮次",
 		},
 	}
 }
@@ -304,6 +310,14 @@ func standingOf(row Anomaly) Standing {
 		// carried on the object's own words so a card can say whose the
 		// object's trouble is, and copied onto each strategy's words.
 		standing.About = implicatedStrategies(row, row.Finding.Check)
+		// Read before stalled: a window short only at minutes this process
+		// never saw is flat for as long as they stay in it, which is what
+		// stalled reads as nobody moving -- and every release starts one for
+		// every sparse object, a window long, filed under this side's fix.
+		if awaitingThisProcess(row) {
+			standing.Action, standing.Watch, standing.RefinedBy = ActionWatch, WatchNextRound, RuleWatch
+			return standing
+		}
 		if stalled(&row) {
 			standing.RefinedBy = RuleStalled
 			if verdict, decided := windowVerdictWords(row); decided {
@@ -409,6 +423,36 @@ func watchReasonOf(row Anomaly) (WatchReason, bool) {
 		return WatchNextRound, true
 	}
 	return "", false
+}
+
+// awaitingThisProcess reports a row whose short windows are undecided only
+// because this process has not seen all their minutes yet: every hole of
+// every named window is either a minute whose round answered whole or one
+// before the first round this process remembers for the object, at least
+// one is the second, and no point is unusable; and every short window is
+// named, or the unnamed ones read the same (UnlistedHolesAnswered or
+// UnlistedHolesBeforeThisProcess). Any hole this side did not see whole,
+// did not record, or forgot leaves it false: those do not end by waiting.
+func awaitingThisProcess(row Anomaly) bool {
+	coverage := row.Coverage
+	if coverage == nil || coverage.Short == 0 || len(coverage.Windows) == 0 || uint32(len(coverage.Windows)) > coverage.Short {
+		return false
+	}
+	before := false
+	for _, window := range coverage.Windows {
+		counts := window.HolesBy
+		if counts.Unusable > 0 || counts.AnsweredWithoutSeries+counts.AnsweredEmpty+counts.BeforeThisProcess != window.MissingTotal {
+			return false
+		}
+		before = before || counts.BeforeThisProcess > 0
+	}
+	if uint32(len(coverage.Windows)) < coverage.Short {
+		if !coverage.UnlistedHolesAnswered && !coverage.UnlistedHolesBeforeThisProcess {
+			return false
+		}
+		before = before || coverage.UnlistedHolesBeforeThisProcess
+	}
+	return before
 }
 
 // SinceBasis is the direction of a duration: what the since source says
