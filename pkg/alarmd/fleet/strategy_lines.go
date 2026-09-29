@@ -143,10 +143,9 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 				last := row.LastHealthyAt
 				fold.line.LastGoodAt = &last
 			}
-			// The deciding row: the most severe check; among equals the
-			// earliest onset, so the sentence does not change with the
-			// order rows were walked in.
-			if rank < fold.rank || (rank == fold.rank && !row.Since.IsZero() && (fold.deciding.Since.IsZero() || row.Since.Before(fold.deciding.Since))) {
+			// The deciding row, by decidesBefore, so the sentence does not
+			// change with the order rows were walked in.
+			if decidesBefore(rank, row, fold.rank, fold.deciding) {
 				fold.rank, fold.deciding = rank, row
 				fold.line.Standing, fold.line.DecidingObject = standing, row.QueryGroup
 			}
@@ -188,6 +187,25 @@ func foldRank(check Check, loss Loss) int {
 		rank += len(checkOrder) + 1
 	}
 	return rank
+}
+
+// decidesBefore reports whether a row of rank decides a strategy's line ahead
+// of the row deciding it so far: the more severe check; among equals the
+// earlier onset, a row with no onset after every row with one; among those
+// the object first by identity. Neither the order rows are walked in nor the
+// replica a row came from decides which of two equal rows the line shows,
+// which is what lets each replica fold its own rows and the folds agree.
+func decidesBefore(rank int, row Anomaly, bestRank int, best Anomaly) bool {
+	if rank != bestRank {
+		return rank < bestRank
+	}
+	switch {
+	case row.Since.IsZero() != best.Since.IsZero():
+		return !row.Since.IsZero()
+	case !row.Since.Equal(best.Since):
+		return row.Since.Before(best.Since)
+	}
+	return row.QueryGroup < best.QueryGroup
 }
 
 // lineRank is foldRank read back from the line, for ordering the list.

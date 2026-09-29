@@ -28,10 +28,15 @@ import (
 // most a publish interval late.
 //
 // The merge equals the whole view while no object is held by two replicas.
-// During a handover one is, briefly: the whole view keeps one record of the
-// object's skips where each replica's part counts its own, so the parts count
-// it twice. That is exactly when the replicas' owned digests do not add up to
-// the expected one (SetDigest), and the reader then goes to the whole view.
+// During a handover one is, for the moment of the handover: the whole view
+// keeps one record of the object's skips where each replica's part counts its
+// own, so the parts count it twice -- and a skip the old owner records while
+// the new owner has already pooled the object reads, on the old owner's part,
+// as a loss in progress where the whole view reads it as the pool's
+// consequence. It is the moment compareCoverage reports the object as held by
+// several, and the first screen says so beside the counts it reads from the
+// parts (held_by_several_total) rather than going back to the whole view,
+// which is the read this exists to stop.
 type ReplicaPart struct {
 	Replica string
 	// Attribution counts the anomaly column's rows by who they are
@@ -63,6 +68,11 @@ type ReplicaPart struct {
 	RetainedShareTotal int
 	ReadEarly          []ReadEarlyRef
 	ReadEarlyTotal     int
+	// Truncated is the columns this replica published cut, a bit per
+	// position in columnNames; merged, the columns any replica cut. A check
+	// line is a sample when any column its rows came from was cut on any
+	// replica, which the replica holding the rows cannot know alone.
+	Truncated uint8
 	// CheckRows is the rows' half of the first screen's check lines
 	// (checkRowsOf): the lines' standings, gaps and source records are the
 	// replicas' facts and are added when the lines are made (Checks).
@@ -103,7 +113,8 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
 	columns := viewColumns(&view)
-	part.CheckRows = checkRowsOf(columns, columnsTruncated(&view), &view, now)
+	part.Truncated = truncatedColumns(columnsTruncated(&view))
+	part.CheckRows = checkRowsOf(columns, &view, now)
 	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
@@ -141,6 +152,7 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
 		mergeLoss(&merged.Loss, part.Loss)
+		merged.Truncated |= part.Truncated
 		mergeCheckTallies(merged.CheckRows, part.CheckRows)
 		mergeTodoRows(&merged.TodoRows, part.TodoRows)
 		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
@@ -149,6 +161,9 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.ReadEarly, merged.ReadEarlyTotal = append(merged.ReadEarly, part.ReadEarly...), merged.ReadEarlyTotal+part.ReadEarlyTotal
 	}
 	merged.Loss = merged.Loss.settled()
+	merged.PrunedSkips = latestPerObject(merged.PrunedSkips, func(ref PrunedSkipRef) (string, time.Time) { return ref.QueryGroup, ref.At })
+	merged.RetainedShare = latestPerObject(merged.RetainedShare, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
+	merged.ReadEarly = latestPerObject(merged.ReadEarly, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
 	sort.Slice(merged.PrunedSkips, func(l, r int) bool { return prunedSkipBefore(merged.PrunedSkips[l], merged.PrunedSkips[r]) })
 	sort.Slice(merged.RetainedShare, func(l, r int) bool {
 		return retainedShareBefore(merged.RetainedShare[l], merged.RetainedShare[r])
@@ -193,7 +208,7 @@ func (part ReplicaPart) Load(view *View) Load {
 func (part ReplicaPart) Checks(view *View, now time.Time) []CheckReport {
 	rows := checkTallies{}
 	mergeCheckTallies(rows, part.CheckRows)
-	return reportChecksFrom(rows, view, now)
+	return reportChecksFrom(rows, part.Truncated, view, now)
 }
 
 // Todo is the first screen's to-do from the part's rows, the lines made from

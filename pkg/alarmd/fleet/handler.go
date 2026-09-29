@@ -1578,6 +1578,7 @@ func retainedShareList(rows []Anomaly) []RetainedShareRef {
 			ThresholdPercent: facts.ThresholdPercent,
 		})
 	}
+	list = latestPerObject(list, func(ref RetainedShareRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
 	sort.Slice(list, func(left, right int) bool { return retainedShareBefore(list[left], list[right]) })
 	return list
 }
@@ -1616,6 +1617,7 @@ func readEarlyList(rows []Anomaly) []ReadEarlyRef {
 				CurrentDelaySeconds: facts.CurrentDelaySeconds, SuggestedDelaySeconds: facts.SuggestedDelaySeconds, Since: facts.Since})
 		}
 	}
+	list = latestPerObject(list, func(ref ReadEarlyRef) (string, time.Time) { return ref.QueryGroup, ref.Since })
 	sort.Slice(list, func(left, right int) bool { return readEarlyBefore(list[left], list[right]) })
 	return list
 }
@@ -1666,6 +1668,26 @@ func prunedSkipBefore(left, right PrunedSkipRef) bool {
 		return left.SpanSeconds > right.SpanSeconds
 	}
 	return left.QueryGroup < right.QueryGroup
+}
+
+// latestPerObject keeps one entry per object, the later one, as the view
+// keeps one record of an object's pruned span: during a handover two replicas
+// can list the same object, and the list names objects, not replicas' rows.
+func latestPerObject[T any](list []T, keyOf func(T) (string, time.Time)) []T {
+	kept := make(map[string]int, len(list))
+	out := make([]T, 0, len(list))
+	for _, entry := range list {
+		key, at := keyOf(entry)
+		if index, seen := kept[key]; seen {
+			if _, earlier := keyOf(out[index]); at.After(earlier) {
+				out[index] = entry
+			}
+			continue
+		}
+		kept[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
 }
 
 // FirstScreenListBound is how many objects each of the health route's

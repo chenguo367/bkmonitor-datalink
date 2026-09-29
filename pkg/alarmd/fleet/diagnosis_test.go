@@ -58,19 +58,26 @@ func newDiagnosisRig(t *testing.T, facts map[string]StrategyLookupFacts, progres
 // (4101's object on pod-b) before the service is built.
 func newDiagnosisRigWith(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader, shape func(*Anomaly)) *diagnosisRig {
 	t.Helper()
-	rig := &diagnosisRig{clock: now}
-	snapshots := healthySnapshots()
-	snapshots[0].Owned, snapshots[0].Determined = 2, 2
-	snapshots[0].OwnedObjects = []string{"qg-4101-a", "qg-other"}
-	snapshots[1].Owned, snapshots[1].Determined = 1, 1
-	snapshots[1].OwnedObjects = []string{"qg-4101-b"}
 	row := anomaly("qg-4101-b")
 	row.Replica = "pod-b"
 	if shape != nil {
 		shape(&row)
 	}
-	snapshots[1].Anomalies = []Anomaly{row}
-	snapshots[1].TotalAnomalies = 1
+	return newDiagnosisRigHolding(t, facts, progress, nil, []Anomaly{row})
+}
+
+// newDiagnosisRigHolding is the rig with the anomaly rows each replica holds:
+// pod-a owns qg-4101-a and qg-other, pod-b owns qg-4101-b.
+func newDiagnosisRigHolding(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader, onA, onB []Anomaly) *diagnosisRig {
+	t.Helper()
+	rig := &diagnosisRig{clock: now}
+	snapshots := healthySnapshots()
+	snapshots[0].Owned, snapshots[0].Determined = 2, 2
+	snapshots[0].OwnedObjects = []string{"qg-4101-a", "qg-other"}
+	snapshots[0].Anomalies, snapshots[0].TotalAnomalies = onA, len(onA)
+	snapshots[1].Owned, snapshots[1].Determined = 1, 1
+	snapshots[1].OwnedObjects = []string{"qg-4101-b"}
+	snapshots[1].Anomalies, snapshots[1].TotalAnomalies = onB, len(onB)
 	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 3, Known: true, IDs: []string{"qg-4101-a", "qg-4101-b", "qg-other"}}},
 		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: snapshots})
 	lookup := func(id string) StrategyLookupFacts {

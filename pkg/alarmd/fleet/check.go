@@ -934,7 +934,7 @@ func recoveryOf(group *CheckGroup, historical bool) Recovery {
 // Ordered as checkOrder is, so the page renders the list in the order the
 // reader acts and does not sort by a rule of its own.
 func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, now time.Time) []CheckReport {
-	return reportChecksFrom(checkRowsOf(columns, truncated, view, now), view, now)
+	return reportChecksFrom(checkRowsOf(columns, view, now), truncatedColumns(truncated), view, now)
 }
 
 // checkTally is one check's fold before it is a report.
@@ -944,7 +944,10 @@ type checkTally struct {
 	businesses map[string]struct{}
 	groups     map[string]*CheckGroup
 	groupSets  map[string][2]map[string]struct{}
-	partial    bool
+	// columns is the columns its rows came from, a bit per position in
+	// columnNames: the line is a sample when any of them was published cut,
+	// on any replica, whichever replica its own rows came from.
+	columns    uint8
 	demoted    int
 	current    int
 	retained   int
@@ -1016,7 +1019,7 @@ func (entry *checkTally) addAs(key string, anomaly *Anomaly, code string, now ti
 // is under. It is what one replica's rows add (ReplicaPart.CheckRows) and
 // what replicas' add up to (mergeCheckTallies). The view supplies the
 // records and the lists, and may be nil.
-func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now time.Time) checkTallies {
+func checkRowsOf(columns [][]Anomaly, view *View, now time.Time) checkTallies {
 	tallies := checkTallies{}
 	ensure := tallies.ensure
 	addAs := func(entry *checkTally, key string, anomaly *Anomaly, code string) {
@@ -1025,9 +1028,9 @@ func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now
 	add := func(entry *checkTally, key string, anomaly *Anomaly) { entry.addAs(key, anomaly, "", now) }
 	listed := map[string]struct{}{}
 	for columnIndex, column := range columns {
-		columnPartial := false
-		if truncated != nil && columnIndex < len(columnNames) {
-			columnPartial = truncated[columnNames[columnIndex]]
+		columnBit := uint8(0)
+		if columnIndex < len(columnNames) {
+			columnBit = 1 << columnIndex
 		}
 		for index := range column {
 			anomaly := &column[index]
@@ -1044,7 +1047,7 @@ func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now
 			// rows were four.
 			if anomaly.Internal != nil && check != CheckDefect {
 				defect := ensure(CheckDefect)
-				defect.partial = defect.partial || columnPartial
+				defect.columns |= columnBit
 				addAs(defect, anomaly.Internal.Code, anomaly, anomaly.Internal.Code)
 				defect.current++
 				listed[underKey(CheckDefect, anomaly.QueryGroup)] = struct{}{}
@@ -1053,7 +1056,7 @@ func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now
 				continue
 			}
 			entry := ensure(check)
-			entry.partial = entry.partial || columnPartial
+			entry.columns |= columnBit
 			add(entry, anomaly.Finding.Group, anomaly)
 			if check == CheckBookkeepingAbandoned {
 				// Interrupted bookkeeping is a record, never work: the object
@@ -1148,7 +1151,7 @@ func checkRowsOf(columns [][]Anomaly, truncated map[string]bool, view *View, now
 // reportChecksFrom adds what is not a row -- what the view cannot speak
 // for, the standings, the problems that recovered, the source's -- to the
 // rows' folds, and makes the reports. The folds are finished in place.
-func reportChecksFrom(tallies checkTallies, view *View, now time.Time) []CheckReport {
+func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now time.Time) []CheckReport {
 	ensure := tallies.ensure
 	add := func(entry *checkTally, key string, anomaly *Anomaly) { entry.addAs(key, anomaly, "", now) }
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -1325,7 +1328,7 @@ func reportChecksFrom(tallies checkTallies, view *View, now time.Time) []CheckRe
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
-			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
+			Partial: entry.columns&truncated != 0, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
 			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance,
 			Recovered: entry.recovered, Onsets: onsetFold(entry.onsets, entry.withoutOnset)}
@@ -1846,4 +1849,16 @@ func mergeTodoRows(into *Todo, from Todo) {
 	into.RetainedLastHour += from.RetainedLastHour
 	into.OngoingNewest = latest(into.OngoingNewest, from.OngoingNewest)
 	into.RetainedNewest = latest(into.RetainedNewest, from.RetainedNewest)
+}
+
+// truncatedColumns is which columns were published cut, a bit per position
+// in columnNames.
+func truncatedColumns(truncated map[string]bool) uint8 {
+	mask := uint8(0)
+	for index, name := range columnNames {
+		if truncated[name] {
+			mask |= 1 << index
+		}
+	}
+	return mask
 }

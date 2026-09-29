@@ -88,6 +88,24 @@ func partReplicas() []Snapshot {
 			snapshot.Anomalies[1].ReasonCode = "GAP_SKIPPED"
 		}
 		snapshot.Demoted[0].Strategies = append(snapshot.Demoted[0].Strategies, StrategyRef{StrategyID: "950"})
+		// The same group's rows last healthy at a different moment on each
+		// replica; empty rows with no start on two replicas, and runs that
+		// began in the same minute on two; a record of a loss that stopped,
+		// on two.
+		snapshot.Anomalies[0].LastHealthyAt = now.Add(-time.Duration(index+2) * 13 * time.Minute)
+		if index < 2 {
+			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-unstarted",
+				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica})
+		}
+		if index > 0 {
+			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-together",
+				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica,
+				Since: now.Add(-5 * time.Hour).Truncate(time.Minute).Add(time.Duration(index) * time.Second)})
+		}
+		if index != 1 {
+			snapshot.GapSkips[snapshot.Replica+"-stopped"] = SkippedSpan{FirstSlot: 1, LastSlot: 4, Slots: 4,
+				At: now.Add(-time.Duration(30+index) * time.Minute), Replica: snapshot.Replica}
+		}
 		snapshot.GapSkips[snapshot.Demoted[0].QueryGroup] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
 			At: now.Add(-time.Duration(index+1) * 4 * time.Minute), Replica: snapshot.Replica}
 	}
@@ -136,6 +154,25 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 		"after cooldown":       func(p ReplicaPart) int { return p.Loss.AfterCooldown },
 		"while demoted recent": func(p ReplicaPart) int { return p.Loss.WhileDemotedRecent },
 		"cooling extended":     func(p ReplicaPart) int { return p.Cooling.Extended },
+		"retained records":     func(p ReplicaPart) int { return p.TodoRows.Retained },
+		"rows without onset": func(p ReplicaPart) int {
+			n := 0
+			for _, tally := range p.CheckRows {
+				n += tally.withoutOnset
+			}
+			return n
+		},
+		"groups last healthy": func(p ReplicaPart) int {
+			n := 0
+			for _, tally := range p.CheckRows {
+				for _, group := range tally.groups {
+					if group.LastSuccess != nil {
+						n++
+					}
+				}
+			}
+			return n
+		},
 		"cohort gap skipped": func(p ReplicaPart) int {
 			n := 0
 			for _, cohort := range p.CohortRows {
@@ -220,7 +257,7 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	// Numbers the fixture must reach, or the equalities above are between
 	// zeros: several due with different waits, several empty rows, and rows
 	// on each side of the verdict.
-	if whole.DemotedDue != 3 || whole.DemotedDueOldestSeconds != 21*60 || whole.EmptyEveryRoundTotal != 6 ||
+	if whole.DemotedDue != 3 || whole.DemotedDueOldestSeconds != 21*60 || whole.EmptyEveryRoundTotal != 10 ||
 		OursCount(whole.Anomalies) == 0 || OursCount(whole.Anomalies) == len(whole.Anomalies) {
 		t.Fatalf("fixture: due %d oldest %ds, empty %d, ours %d of %d", whole.DemotedDue, whole.DemotedDueOldestSeconds,
 			whole.EmptyEveryRoundTotal, OursCount(whole.Anomalies), len(whole.Anomalies))
@@ -281,5 +318,63 @@ func TestAPartCountsEachAttributionAndPartsAddThem(t *testing.T) {
 	}
 	if merged := MergeReplicaParts(part, part).Attribution; merged != (AttributionTally{Ours: 2, External: 2, Unknown: 2, Other: 2}) {
 		t.Fatalf("merged attribution %+v, want every place doubled", merged)
+	}
+}
+
+// An object two replicas list during a handover is on the merged lists once,
+// the later entry, as the whole view keeps one record of it.
+func TestAnObjectListedByTwoReplicasIsOnTheMergedListsOnce(t *testing.T) {
+	earlier, later := now.Add(-time.Hour), now.Add(-time.Minute)
+	part := func(at time.Time, percent uint64) ReplicaPart {
+		return ReplicaPart{PrunedSkips: []PrunedSkipRef{{QueryGroup: "qg-handed-over", SpanSeconds: int64(percent), At: at}},
+			RetainedShare: []RetainedShareRef{{QueryGroup: "qg-handed-over", PercentOfShare: percent, Since: at}},
+			ReadEarly:     []ReadEarlyRef{{QueryGroup: "qg-handed-over", SuggestedDelaySeconds: int64(percent), Since: at}}}
+	}
+	merged := MergeReplicaParts(part(earlier, 90), part(later, 70))
+	if len(merged.PrunedSkips) != 1 || len(merged.RetainedShare) != 1 || len(merged.ReadEarly) != 1 {
+		t.Fatalf("lists %d/%d/%d long, want the object once on each", len(merged.PrunedSkips), len(merged.RetainedShare), len(merged.ReadEarly))
+	}
+	if !merged.PrunedSkips[0].At.Equal(later) || merged.RetainedShare[0].PercentOfShare != 70 || merged.ReadEarly[0].SuggestedDelaySeconds != 70 {
+		t.Fatalf("kept %+v %+v %+v, want the later entry of each", merged.PrunedSkips[0], merged.RetainedShare[0], merged.ReadEarly[0])
+	}
+}
+
+// A check line is a sample when a column its rows came from was published
+// cut on any replica: the replica that cut the column may have cut rows of
+// this line, whichever replica the line's own rows came from.
+func TestALineIsASampleWhenAnyReplicaCutAColumnItsRowsCameFrom(t *testing.T) {
+	row := func(queryGroup, replica, reason string) Anomaly {
+		return Anomaly{QueryGroup: queryGroup, Replica: replica, Kind: KindDegradedRun, CauseReason: reason,
+			Since: now.Add(-time.Hour), SinceFrom: SinceBusinessState, Strategies: []StrategyRef{{StrategyID: "901", BusinessID: "2"}}}
+	}
+	at := now.Add(-10 * time.Second)
+	cut := Snapshot{Replica: "pod-a", TakenAt: at, Owned: 10, Determined: 10,
+		Anomalies: []Anomaly{row("qg-a", "pod-a", "QUERY_TIMEOUT")}, TotalAnomalies: 6}
+	// A second fact of this deployment's own on the uncut replica's row: the
+	// DEFECT line it opens came from the same column.
+	second := row("qg-b", "pod-b", "HISTORY_GAPPED")
+	second.Internal = &FailureRef{Stage: "other", Category: "completion_contract", Code: "STATE_VERSION_CONFLICT"}
+	whole := Snapshot{Replica: "pod-b", TakenAt: at, Owned: 10, Determined: 10,
+		Anomalies: []Anomaly{second}, TotalAnomalies: 1}
+	view := decidedView([]Snapshot{cut, whole})
+	merged := MergeReplicaParts(ReplicaPartOf(decidedView([]Snapshot{cut}), now), ReplicaPartOf(decidedView([]Snapshot{whole}), now))
+	want := Report(&view, now).Checks
+	sameJSON(t, "check lines", merged.Checks(&view, now), want)
+	lines := 0
+	for _, report := range want {
+		// The gap line is the view's, not the columns'.
+		if report.Objects > 0 && report.Code != CheckObservationGap {
+			lines++
+			if !report.Partial {
+				t.Errorf("line %s is not a sample, though the column its rows came from was cut on pod-a", report.Code)
+			}
+		}
+	}
+	defect := false
+	for _, report := range want {
+		defect = defect || (report.Code == CheckDefect && report.Objects > 0)
+	}
+	if lines < 3 || !defect {
+		t.Fatalf("fixture: %d lines with rows, DEFECT among them %v; want one from each replica and the second fact's", lines, defect)
 	}
 }
