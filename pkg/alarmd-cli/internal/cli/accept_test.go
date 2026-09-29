@@ -631,3 +631,25 @@ func TestAcceptListsWhatDoesNotDetectBesideWhatDoes(t *testing.T) {
 		t.Fatalf("an empty set: %v", verdicts)
 	}
 }
+
+// A diagnosis that did not cover the set says nothing about all of it: the
+// table is information even when the part read detects nothing.
+func TestAcceptDoesNotFailDetectingOnAPartialDiagnosis(t *testing.T) {
+	f := healthyFixture()
+	f.diagnosis = func() map[string]any {
+		page := notDetectingPage(map[string]string{"54": "NOT_DETECTING", "55": "NOT_DETECTING"})
+		objectField(page, "page")["holds"] = false
+		return page
+	}
+	_, verdicts, result := acceptRunOf(t, f, "--window", "0")
+	if verdicts["diagnosis covers every strategy"] != verdictFail || verdicts["strategies detecting"] != verdictInfo {
+		t.Fatalf("verdicts %v", verdicts)
+	}
+	items, _ := objectField(result, "result")["items"].([]any)
+	for _, raw := range items {
+		if item := raw.(map[string]any); stringField(item, "item") == "strategies detecting" &&
+			!strings.HasPrefix(stringField(item, "detail"), "coverage does not hold") {
+			t.Fatalf("detail = %q, want it to say the read was partial", stringField(item, "detail"))
+		}
+	}
+}
