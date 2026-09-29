@@ -35,6 +35,17 @@ func (stub fixedSnapshots) Load(context.Context, []string) ([]fleet.Snapshot, er
 	return stub.snapshots, nil
 }
 
+// countedSnapshots counts the reads a scrape makes of the snapshots.
+type countedSnapshots struct {
+	snapshots []fleet.Snapshot
+	loads     *int
+}
+
+func (stub countedSnapshots) Load(context.Context, []string) ([]fleet.Snapshot, error) {
+	*stub.loads++
+	return stub.snapshots, nil
+}
+
 // The scrape and the page decide the same screen from the same view. The
 // scrape used to mark stalling on the anomaly list alone, so an object in
 // the demoted pool that had stopped ending rounds was ROUNDS_STALLED on the
@@ -80,16 +91,17 @@ func TestTheScrapeMarksStallingOnEveryColumnLikeThePage(t *testing.T) {
 // metric alone.
 func TestTheScrapeReportsTheVerdictThePageReports(t *testing.T) {
 	at := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	loads := 0
 	stalling := fleet.Anomaly{QueryGroup: "qg-stalling", Kind: fleet.KindDegradedRun, Replica: "pod-a",
 		Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "QUERY_TIMEOUT", Since: at.Add(-time.Hour),
 		FailingSince: at.Add(-10*time.Minute - 15*time.Second)}
 	service, err := fleet.NewService(
 		fixedExpectations{fleet.Expectation{Known: true, QueryGroups: 2, IDs: []string{"qg-stalling", "fine"}}},
 		fixedRegistry{[]string{"pod-a"}},
-		fixedSnapshots{[]fleet.Snapshot{{
+		countedSnapshots{snapshots: []fleet.Snapshot{{
 			Replica: "pod-a", TakenAt: at.Add(-30 * time.Second), Owned: 2, Determined: 2,
 			OwnedObjects: []string{"qg-stalling", "fine"}, Anomalies: []fleet.Anomaly{stalling}, TotalAnomalies: 1,
-		}}},
+		}}, loads: &loads},
 		time.Minute, func() time.Time { return at })
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +112,13 @@ func TestTheScrapeReportsTheVerdictThePageReports(t *testing.T) {
 	if summarized.Health == whole.Health {
 		t.Fatalf("summaries and whole view both read %s: the fixture does not separate them", whole.Health)
 	}
+	loads = 0
 	verdict := fleetVerdictSource(service, func() time.Time { return at }, 10*time.Minute, time.Second)()
+	// One read of the snapshots for the verdict and every breakdown of it:
+	// two reads could be of two publishes.
+	if loads != 1 {
+		t.Fatalf("a scrape read the snapshots %d times, want once", loads)
+	}
 	if verdict.Health != string(summarized.Health) {
 		t.Fatalf("scrape verdict %s, the page's %s", verdict.Health, summarized.Health)
 	}
