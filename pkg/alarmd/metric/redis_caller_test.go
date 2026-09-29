@@ -211,3 +211,19 @@ func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
 		t.Errorf("timed round trips = %d, want the 6 calls", timed)
 	}
 }
+
+// A caller named by a hook after this one - the bundle's per-job clone of a
+// shared client adds its own - is counted: the operation is counted for its
+// caller once every hook has run, one call and one pipeline alike.
+func TestACallerALaterHookNamesIsCounted(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	hook := r.RedisHook("source")
+	ctx, _ := hook.BeforeProcess(context.Background(), nil)
+	_ = hook.AfterProcess(redisfailure.WithCaller(ctx, redisfailure.CallerRuntimeState), failedCommand("mget", context.DeadlineExceeded))
+	ctx, _ = hook.BeforeProcessPipeline(context.Background(), nil)
+	_ = hook.AfterProcessPipeline(redisfailure.WithCaller(ctx, redisfailure.CallerStrategySource), []redis.Cmder{failedCommand("get", nil)})
+	operations, reasons := callerCounts(t, r, callerOperationFamily), callerCounts(t, r, callerReasonFamily)
+	if operations["source/runtime_state"] != 1 || operations["source/strategy_source"] != 1 || reasons["source/runtime_state/timeout"] != 1 {
+		t.Fatalf("operations %v reasons %v, want each job's operation and the state store's timeout under the source client", operations, reasons)
+	}
+}

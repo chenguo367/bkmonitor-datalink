@@ -30,8 +30,41 @@ const (
 	CallerCostProjection = "cost_projection"
 )
 
+// The jobs that share the source and runtime connections when a deployment
+// points them at one Redis, each named where the bundle hands it its client.
+const (
+	// CallerStrategySource is the strategy cache the control plane reads.
+	CallerStrategySource = "strategy_source"
+	// CallerLegacyEffectiveTime is the strategy and host facts the absent-
+	// strategy close and the effective-time compatibility read.
+	CallerLegacyEffectiveTime = "legacy_effective_time"
+	// CallerControlPlane is the published catalog: publication, activation,
+	// timelines and objects, for the control rounds and for every Slot.
+	CallerControlPlane = "control_plane"
+	// CallerOwnership is leases, registrations and the fence.
+	CallerOwnership = "ownership"
+	// CallerRuntimeState is the Runtime State store: state, progress, gap
+	// markers, no-data memory.
+	CallerRuntimeState = "runtime_state"
+	// CallerQueryCooldown is the shared query cooldowns.
+	CallerQueryCooldown = "query_cooldown"
+	// CallerFleet is the fleet snapshots and observation windows.
+	CallerFleet = "fleet"
+	// CallerCMDBCache is the host and topology cache series admission reads.
+	CallerCMDBCache = "cmdb_cache"
+	// CallerTargetGroup is the dynamic target groups.
+	CallerTargetGroup = "target_group"
+	// CallerDynamicConfig is the platform settings.
+	CallerDynamicConfig = "dynamic_config"
+	// CallerLinkd is the alert link's facts when they ride the runtime
+	// connection.
+	CallerLinkd = "linkd"
+)
+
 // Callers is every caller name, for callers that must enumerate them.
-var Callers = []string{CallerDirectoryRefresh, CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection}
+var Callers = []string{CallerDirectoryRefresh, CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
+	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
+	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd}
 
 type callerKey struct{}
 
