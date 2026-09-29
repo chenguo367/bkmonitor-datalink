@@ -122,11 +122,6 @@ type CatalogAbsenceFacts struct {
 	// recorded anywhere; the age is what exists, and deriving the count from
 	// it would be arithmetic presented as a measurement.
 	FailingSeconds *float64
-	// DirectoryMounted says this process also serves the strategy directory,
-	// which answers the same question from the store rather than from the
-	// published catalog. It is the way out while the catalog is absent, and
-	// it is only offered when the route is actually mounted here.
-	DirectoryMounted bool
 }
 
 // CatalogAbsenceFunc reads that state. Nil leaves the refusal saying it does
@@ -175,15 +170,7 @@ type CatalogAbsence struct {
 	Exit           string   `json:"exit,omitempty"`
 	Text           string   `json:"text,omitempty"`
 	FailingSeconds *float64 `json:"failing_seconds,omitempty"`
-	// Next names the route that answers the same question while this one
-	// cannot, and is absent when this process does not serve it. Absent is
-	// the honest answer: a way out that is not mounted is not a way out.
-	Next string `json:"next,omitempty"`
 }
-
-// strategyDirectoryRoute is where the same question is answered from the
-// store rather than from the published catalog.
-const strategyDirectoryRoute = "/api/objects?scope=strategies"
 
 // controlRoleLeader and controlExitNone are the control plane's words as
 // they arrive here. Spelled out rather than imported: this package does not
@@ -203,9 +190,6 @@ const (
 // which gets its own word rather than the nearest one.
 func catalogAbsenceOf(facts CatalogAbsenceFacts, replica string, wired bool) CatalogAbsence {
 	absence := CatalogAbsence{Error: "NOT_PUBLISHED", Replica: replica, Role: facts.Role}
-	if facts.DirectoryMounted {
-		absence.Next = strategyDirectoryRoute
-	}
 	switch {
 	case !wired || facts.Role == "":
 		absence.Reason, absence.Role = CatalogAbsenceUnknown, ""
@@ -224,9 +208,6 @@ func catalogAbsenceOf(facts CatalogAbsenceFacts, replica string, wired bool) Cat
 	default:
 		absence.Reason = CatalogAbsenceIndexMissing
 		absence.Detail = "这个副本是 leader，最近一轮目录刷新没有失败，手上却没有目录——这是程序缺陷，不是部署状态。"
-	}
-	if absence.Next != "" {
-		absence.Detail += "同一个问题可以用 " + strategyDirectoryRoute + " 从存储直接查。"
 	}
 	return absence
 }

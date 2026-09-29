@@ -235,7 +235,7 @@ var leaderForwardBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5}
 // of leader_forward_duration_seconds; anything else is recorded as the
 // route or result "other" would be, which is not at all.
 var (
-	LeaderForwardRoutes  = []string{"strategy", "diagnosis"}
+	LeaderForwardRoutes  = []string{"strategy", "diagnosis", "directory"}
 	LeaderForwardResults = []string{"answered", "timeout", "refused", "error", "no_leader", "canceled"}
 )
 

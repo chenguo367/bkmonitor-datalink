@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -135,6 +136,41 @@ func TestTheForwarderHandsTheRequestToTheLeaderOnceWithItsMark(t *testing.T) {
 	}
 	if leaderForwarder(nil, "pod-follower", nil, nil) != nil {
 		t.Fatal("a forwarder without discovery forwards")
+	}
+}
+
+// A write a follower cannot answer - a sample window's open, which only the
+// Leader's directory resolves - reaches the Leader as it came: its method,
+// its body and the body's type. A read carries no body. A body past the
+// bound the open itself is read within is not sent at all.
+func TestTheForwarderCarriesAWritesMethodAndBody(t *testing.T) {
+	type seenRequest struct {
+		method, contentType, body string
+	}
+	var seen []seenRequest
+	leader := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		payload, _ := io.ReadAll(request.Body)
+		seen = append(seen, seenRequest{request.Method, request.Header.Get("Content-Type"), string(payload)})
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer leader.Close()
+	forward := leaderForwarderWithin(scriptedLeaderDiscovery{endpoint: viewstream.LeaderEndpoint{WorkerID: "pod-leader",
+		Endpoint: strings.TrimPrefix(leader.URL, "http://")}}, "pod-follower", nil, time.Second, "directory", nil)
+	open := `{"mode":"sample","strategy":"4101"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/windows", strings.NewReader(open))
+	request.Header.Set("Content-Type", "application/json")
+	if forwarded, refusal := forward(httptest.NewRecorder(), request); !forwarded || refusal != "" {
+		t.Fatalf("forward = (%v, %q), want forwarded", forwarded, refusal)
+	}
+	if forwarded, _ := forward(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil)); !forwarded {
+		t.Fatal("a read was not forwarded")
+	}
+	if len(seen) != 2 || seen[0] != (seenRequest{http.MethodPost, "application/json", open}) || seen[1].method != http.MethodGet || seen[1].body != "" {
+		t.Fatalf("the Leader saw %+v, want the POST with its type and body, then a GET with none", seen)
+	}
+	oversized := httptest.NewRequest(http.MethodPost, "/api/windows", strings.NewReader(strings.Repeat("x", forwardBodyBytes+1)))
+	if forwarded, refusal := forward(httptest.NewRecorder(), oversized); forwarded || refusal != fleet.ForwardFailed || len(seen) != 2 {
+		t.Fatalf("an oversized body = (%v, %q) with %d requests seen, want a failed forward and nothing sent", forwarded, refusal, len(seen))
 	}
 }
 

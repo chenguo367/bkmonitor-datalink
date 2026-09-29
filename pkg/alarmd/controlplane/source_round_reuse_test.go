@@ -200,3 +200,36 @@ func TestThePeriodicReadAndANewLeaderAlwaysBuild(t *testing.T) {
 	successor.StepDown()
 	harness.wantBuild(harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0), controlplane.SourceRefreshRebuilt)
 }
+
+// A step-down can come from a path other than the round's - the lease lost
+// while a round is running - and it is safe there: the index goes at once,
+// and the reusable round goes with the next round, which builds.
+func TestAStepDownDuringARoundIsTakenByTheNextOne(t *testing.T) {
+	harness := newChangeGateHarness(t)
+	harness.settleActive()
+	harness.wantBuild(harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0), controlplane.SourceRefreshReused)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				harness.reconciler.StepDown()
+			}
+		}
+	}()
+	result, err := harness.reconciler.Refresh(harness.ctx, harness.source, harness.planner)
+	close(stop)
+	<-done
+	if err != nil || result.Status == "" {
+		t.Fatalf("the round under concurrent step-downs = (%+v, %v)", result, err)
+	}
+	harness.reconciler.StepDown()
+	if lookup := harness.reconciler.LookupStrategy("1001"); lookup.Available {
+		t.Fatalf("after a step-down the lookup = %+v, want nothing published to answer from", lookup)
+	}
+	harness.wantBuild(harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0), controlplane.SourceRefreshRebuilt)
+}

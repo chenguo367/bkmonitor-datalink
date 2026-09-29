@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"slices"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
@@ -82,53 +84,47 @@ func withDialRetry(options *redis.UniversalOptions, dial redisDial, onRetry func
 	}
 }
 
-func observationSampleLimits(capacity config.ObservationCapacity) (observability.SeriesSampleLimits, bool) {
-	queue := min(capacity.SampleBufferBytes/observability.SeriesSampleBufferBytes(), capacity.SampleRecordsPerMinute)
-	limits := observability.SeriesSampleLimits{RecordsPerMinute: capacity.SampleRecordsPerMinute, BytesPerMinute: capacity.SampleBytesPerMinute, QueueCapacity: queue}
-	return limits, queue > 0 && limits.BytesPerMinute >= observability.SeriesSampleMaxBytes
+// observationAdmit is the line's admission for one consumer.
+func observationAdmit(line *memoryline.Line, consumer memoryline.Consumer) func(bytes uint64) bool {
+	return func(bytes uint64) bool { return line.Admit(consumer, bytes) }
 }
 
-// observationCostOptions is the cost summary sized to the most groups whose
-// reservation fits the collector's half of the budget. The reservation grows
-// with the groups, so the most that fit is found by bisection. It was the
-// budget halved until it fit, which could leave up to half the budget
-// unused, and made the count a cliff: a reservation a few hundred bytes a
-// group larger halved the groups a replica could track.
-func observationCostOptions(capacity config.ObservationCapacity, process string, now func() time.Time) observability.CostSummaryOptions {
-	// The other half pays for bounded cross-replica projection I/O and decode.
-	collectorBytes := capacity.CostBytes / 2
-	best := 0
-	for low, high := 1, collectorBytes/2048; low <= high; {
-		groups := low + (high-low)/2
-		if observability.CostSummaryCapacityBytes(observationCostOptionsFor(capacity, groups, process, now)) <= int64(collectorBytes) {
-			best, low = groups, groups+1
-		} else {
-			high = groups - 1
-		}
-	}
-	if best == 0 {
-		return observability.CostSummaryOptions{ProcessID: process, Now: now}
-	}
-	return observationCostOptionsFor(capacity, best, process, now)
+// observationCostTopN is how many rows each cost ranking keeps: what the
+// page shows of a ranking, not a memory share.
+const observationCostTopN = 20
+
+// observationCostOptions is the cost summary sized by the roster it is
+// reconciled with, each growth admitted by the memory line.
+func observationCostOptions(process string, now func() time.Time, admit func(bytes uint64) bool) observability.CostSummaryOptions {
+	return observability.CostSummaryOptions{ProcessID: process, Window: 5 * time.Minute, Now: now, TopN: observationCostTopN, Admit: admit}
 }
 
-// observationCostOptionsFor is the cost summary at a given number of groups,
-// the rest derived from the budget as observationCostOptions derives it.
-func observationCostOptionsFor(capacity config.ObservationCapacity, groups int, process string, now func() time.Time) observability.CostSummaryOptions {
-	o := observability.CostSummaryOptions{ProcessID: process, Window: 5 * time.Minute, Now: now,
-		GroupCapacity: groups, PlanCapacity: groups * 2, MetadataBytes: capacity.CostBytes / 2 / 8}
-	// TopN rows of every ranking -- two scopes times the dimensions -- at
-	// about a contributor row each, inside the projection's publish share.
-	// The dimension count is the summary's own, not a literal: it was a
-	// literal 12 from the six dimensions the summary began with, and
-	// stayed 12 when two more were added.
+// observationProjectionRowBytes is what one ranking row of a published
+// projection is allowed: a contributor row with its identity and counters,
+// with room to spare.
+const observationProjectionRowBytes = 4096
+
+// observationProjectionLimits sizes a replica's projection by what it
+// publishes - every ranking, two scopes by the summary's dimensions, at
+// observationCostTopN rows - and a refresh's read by the replicas it reads,
+// each at most one projection (zero ReadBytes and ReadCommands), admitted by
+// the memory line before it reads.
+func observationProjectionLimits(interval time.Duration) fleet.CostProjectionLimits {
 	rankings := 2 * len(observability.CostDimensions())
-	o.TopN = min(20, groups, max(1, (capacity.CostBytes/16)/(rankings*4096)))
-	return o
+	return fleet.CostProjectionLimits{PublishBytes: rankings * observationCostTopN * observationProjectionRowBytes,
+		Timeout: time.Second, FreshFor: 3 * interval, TTL: 4 * interval}
 }
 
-func observationProjectionLimits(capacity config.ObservationCapacity, interval time.Duration) fleet.CostProjectionLimits {
-	return fleet.CostProjectionLimits{PublishBytes: capacity.CostBytes / 16, ReadBytes: capacity.CostBytes / 16, ReadCommands: capacity.DirectoryCommands / 2, Timeout: time.Second, FreshFor: 3 * interval, TTL: 4 * interval}
+// warnObservationMemoryPercent says, once, that a memory_percent the values
+// still carry is read and not used.
+func warnObservationMemoryPercent(logger *observability.Logger, observation config.PhaseTwoObservationConfig) {
+	if observation.MemoryPercent == 0 || logger == nil {
+		return
+	}
+	logger.Warn(observability.StageStartup, observability.ResultDegraded, 0, 0,
+		slog.String("reason_code", "OBSERVATION_MEMORY_PERCENT_IGNORED"),
+		slog.Int("memory_percent", observation.MemoryPercent),
+		slog.String("detail", "phase_two.observation.memory_percent is read and not used: observation memory grows under the runtime memory line"))
 }
 
 // The existing maintenance loop publishes small cost projections. Cross-replica
@@ -183,15 +179,14 @@ func (r *observationCostRefresh) publish(ctx context.Context, at time.Time, cost
 	r.cache.Update(out)
 }
 
-// Directory refresh runs on the fleet publisher's independent maintenance
-// loop, not the scheduler/control loop or an HTTP caller. Only identity
-// metadata enters the scalar collector; no frozen config is retained twice.
+// The cost roster refresh runs on the fleet publisher's independent
+// maintenance loop, not the scheduler/control loop or an HTTP caller. Only
+// identity metadata enters the scalar collector.
 type observationRefresh struct {
-	directory *controlplane.ObservationDirectory
-	cost      *observability.CostSummary
-	now       func() time.Time
-	interval  time.Duration
-	last      time.Time
+	cost     *observability.CostSummary
+	now      func() time.Time
+	interval time.Duration
+	last     time.Time
 	// owned is this replica's Query Groups with the timeline revision each
 	// lease names, and identity what each executes under at a time, from
 	// memory (controlplane.RedisCatalogRepository.CachedExecutionIdentity).
@@ -211,11 +206,7 @@ func (r *observationRefresh) publish(ctx context.Context) {
 	at := r.now()
 	if r.last.IsZero() || at.Sub(r.last) >= r.interval {
 		r.last = at
-		// The roster is read from memory, not from the directory, so it no
-		// longer waits on a directory this replica may not keep.
-		if r.directory != nil {
-			r.directory.Refresh(ctx, at)
-		}
+		// The roster is read from memory, not from the directory.
 		var owned []ownedLease
 		if r.owned != nil {
 			owned = r.owned()

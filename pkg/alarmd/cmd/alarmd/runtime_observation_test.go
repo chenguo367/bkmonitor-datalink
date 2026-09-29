@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,28 +162,6 @@ func TestObservationRegistryAndCostPaginationCannotStarveReplicas(t *testing.T) 
 	}
 }
 
-func TestObservationCapacityCannotBlockExecutionAtSmallOrLargeResources(t *testing.T) {
-	for _, resources := range []config.CapacityInputs{{}, {CPUBudget: 1, MemoryLimitBytes: 2 << 20, MemorySource: "cgroup"}, {CPUBudget: 1, MemoryLimitBytes: 1 << 30, MemorySource: "cgroup"}, {CPUBudget: 64, MemoryLimitBytes: 64 << 30, MemorySource: "cgroup"}} {
-		capacity := config.DeriveObservationCapacity(resources, config.PhaseTwoObservationConfig{MemoryPercent: 3})
-		limits, enabled := observationSampleLimits(capacity)
-		if enabled {
-			if _, err := observability.NewSeriesSampler(limits); err != nil {
-				t.Fatalf("resource-derived sample rejected %+v: %v", resources, err)
-			}
-		}
-		o := observationCostOptions(capacity, "process", time.Now)
-		if got := observability.CostSummaryCapacityBytes(o); got > int64(capacity.CostBytes/2) {
-			t.Fatalf("collector reservation %d > half budget %d", got, capacity.CostBytes/2)
-		}
-		if resources.MemoryLimitBytes == 1<<30 {
-			t.Logf("1GiB/1CPU: capacity=%+v directory_entry_reservation=%d cost_groups=%d cost_plans=%d cost_top_n=%d cost_reservation=%d sample=%+v projection=%+v", capacity, controlplane.DirectoryEntryReservationBytes(), o.GroupCapacity, o.PlanCapacity, o.TopN, observability.CostSummaryCapacityBytes(o), limits, observationProjectionLimits(capacity, 30*time.Second))
-		}
-		if resources.MemoryLimitBytes <= 2<<20 && enabled {
-			t.Fatalf("enabled without one complete buffer %+v", limits)
-		}
-	}
-}
-
 func TestObservationRedisHasIndependentPoolAndNoHiddenRetries(t *testing.T) {
 	o := observationRedisOptions(config.RedisConnectionConfig{PoolSize: 100, ReadTimeout: config.Duration(5 * time.Second), WriteTimeout: config.Duration(5 * time.Second)})
 	if o.MaxRetries != -1 || o.PoolSize != phaseTwoDiagnosticsPoolSize || o.ReadTimeout > time.Second || o.WriteTimeout > time.Second || o.PoolTimeout > time.Second {
@@ -189,49 +169,36 @@ func TestObservationRedisHasIndependentPoolAndNoHiddenRetries(t *testing.T) {
 	}
 }
 
-// The cost summary is sized to the most groups that fit its half of the
-// budget: those fit, and one group more does not. Halving the budget until it
-// fit left up to half of it unused, so a reservation a few hundred bytes a
-// group larger could halve the groups a replica tracks; at a 5% share of a
-// 4 GiB container it did, from 3276 to 1638.
-func TestTheCostSummaryTracksTheMostGroupsItsBudgetFits(t *testing.T) {
-	for _, percent := range []int{1, 3, 5, 12, 25} {
-		for _, limit := range []uint64{1 << 30, 4 << 30, 16 << 30} {
-			capacity := config.DeriveObservationCapacity(config.CapacityInputs{MemorySource: "pod_limit", MemoryLimitBytes: limit, CPUBudget: 2}, config.PhaseTwoObservationConfig{MemoryPercent: percent})
-			collector := int64(capacity.CostBytes / 2)
-			o := observationCostOptions(capacity, "process", time.Now)
-			if o.GroupCapacity == 0 {
-				t.Fatalf("%d%% of %d MiB: no groups tracked", percent, limit>>20)
-			}
-			if got := observability.CostSummaryCapacityBytes(o); got > collector {
-				t.Fatalf("%d%% of %d MiB: %d groups reserve %d, over the collector's %d", percent, limit>>20, o.GroupCapacity, got, collector)
-			}
-			next := observationCostOptionsFor(capacity, o.GroupCapacity+1, "process", time.Now)
-			if got := observability.CostSummaryCapacityBytes(next); got <= collector {
-				t.Fatalf("%d%% of %d MiB: %d groups tracked, but %d reserve %d and fit the collector's %d", percent, limit>>20, o.GroupCapacity, next.GroupCapacity, got, collector)
-			}
-		}
+// A replica's projection is sized by what it publishes: every ranking - two
+// scopes times the summary's dimensions, not a count of the dimensions it
+// once had - at the rows each keeps. A refresh's read is sized by the
+// replicas it reads (zero read bounds), and the store takes those limits.
+func TestTheProjectionIsSizedByTheRankingsItPublishes(t *testing.T) {
+	limits := observationProjectionLimits(30 * time.Second)
+	rankings := 2 * len(observability.CostDimensions())
+	if limits.PublishBytes != rankings*observationCostTopN*observationProjectionRowBytes || limits.ReadBytes != 0 || limits.ReadCommands != 0 {
+		t.Fatalf("limits = %+v, want %d rankings of %d rows of %d bytes and reads sized by the replicas", limits, rankings, observationCostTopN, observationProjectionRowBytes)
+	}
+	if _, err := fleet.NewCostProjectionStore(windowRedis(t), "test:ob:cost", limits); err != nil {
+		t.Fatalf("the store refuses the derived limits: %v", err)
+	}
+	if o := observationCostOptions("process", time.Now, func(uint64) bool { return true }); o.TopN != observationCostTopN || o.Admit == nil ||
+		o.GroupCapacity != 0 || o.PlanCapacity != 0 || o.MetadataBytes != 0 {
+		t.Fatalf("cost options = %+v, want sized by the roster through admission", o)
 	}
 }
 
-// TopN is derived from the rankings the summary publishes -- two scopes
-// times its dimensions -- not from a count of the dimensions it once had:
-// at a budget where the literal for six dimensions gave one row more than
-// the eight the summary has, the derived TopN follows the list.
-func TestCostTopNFollowsTheSummarysDimensionCount(t *testing.T) {
-	rankings := 2 * len(observability.CostDimensions())
-	// A CostBytes chosen so that CostBytes/16 is exactly 20 rows of the true
-	// ranking count: fewer rows under any larger ranking count, more under
-	// the old literal of twelve rankings.
-	costBytes := 16 * rankings * 4096 * 20
-	capacity := config.ObservationCapacity{CostBytes: costBytes, DirectoryCommands: 64, SampleRecordsPerMinute: 60, SampleBytesPerMinute: 1 << 20, SampleBufferBytes: 1 << 20}
-	o := observationCostOptions(capacity, "process-a", time.Now)
-	if o.TopN != 20 {
-		t.Fatalf("TopN=%d at a budget of exactly 20 rows per ranking (%d rankings), want 20", o.TopN, rankings)
+// A memory_percent older values still carry is read, said once at startup
+// to be unused, and changes nothing; none set says nothing.
+func TestAMemoryPercentStillSetIsLoggedAsUnused(t *testing.T) {
+	var logged bytes.Buffer
+	warnObservationMemoryPercent(observability.New(observability.ComponentRuntime, &logged), config.PhaseTwoObservationConfig{MemoryPercent: 5})
+	if !strings.Contains(logged.String(), "OBSERVATION_MEMORY_PERCENT_IGNORED") || !strings.Contains(logged.String(), `"memory_percent":5`) {
+		t.Fatalf("logged %q, want the key named as unused with its value", logged.String())
 	}
-	smaller := capacity
-	smaller.CostBytes = costBytes - 16*rankings*4096
-	if o := observationCostOptions(smaller, "process-a", time.Now); o.TopN != 19 {
-		t.Fatalf("TopN=%d one ranking-row short of 20, want 19: the derivation does not follow the dimension count", o.TopN)
+	logged.Reset()
+	warnObservationMemoryPercent(observability.New(observability.ComponentRuntime, &logged), config.PhaseTwoObservationConfig{})
+	if logged.Len() != 0 {
+		t.Fatalf("logged %q with no memory_percent set, want nothing", logged.String())
 	}
 }
