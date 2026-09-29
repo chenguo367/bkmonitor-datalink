@@ -27,6 +27,8 @@ type fakeRedis struct {
 	values  map[string]string
 	lastTTL time.Duration
 	setErr  error
+	// mgets is how many keys each MGET asked for.
+	mgets []int
 }
 
 func newFakeRedis() *fakeRedis { return &fakeRedis{values: map[string]string{}} }
@@ -40,7 +42,23 @@ func (client *fakeRedis) Set(_ context.Context, key string, value interface{}, t
 	return redis.NewStatusResult("OK", nil)
 }
 
+// Pipelined runs the batch against a pipe that answers the one command
+// the store pipelines when it reads, the values' lengths.
+func (client *fakeRedis) Pipelined(_ context.Context, batch func(redis.Pipeliner) error) ([]redis.Cmder, error) {
+	return nil, batch(&fakePipe{client: client})
+}
+
+type fakePipe struct {
+	redis.Pipeliner
+	client *fakeRedis
+}
+
+func (pipe *fakePipe) StrLen(_ context.Context, key string) *redis.IntCmd {
+	return redis.NewIntResult(int64(len(pipe.client.values[key])), nil)
+}
+
 func (client *fakeRedis) MGet(_ context.Context, keys ...string) *redis.SliceCmd {
+	client.mgets = append(client.mgets, len(keys))
 	result := make([]interface{}, 0, len(keys))
 	for _, key := range keys {
 		if value, ok := client.values[key]; ok {
@@ -314,5 +332,52 @@ func TestTheStoreReportsWhatItPublishedAndWhatEachViewRead(t *testing.T) {
 	plain := mustStore(t, newFakeRedis(), time.Minute, 10)
 	if err := plain.Publish(context.Background(), snapshotWith(0)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A load reads the replicas' snapshots in MGETs of at most the store's list
+// budget each -- one value alone when it is more -- and decodes each before
+// the next is read, every snapshot coming back in the replicas' order.
+func TestALoadReadsSnapshotsInMGetsOfTheListBudget(t *testing.T) {
+	client := newFakeRedis()
+	store := mustStore(t, client, time.Minute, 1000)
+	replicas := []string{"pod-a", "pod-b", "pod-c", "pod-d"}
+	for index, replica := range replicas {
+		owned := make([]string, 0)
+		// pod-c's alone is past the budget.
+		for n := 0; n < []int{10, 10, 80, 10}[index]; n++ {
+			owned = append(owned, fmt.Sprintf("%s-object-%02d", replica, n))
+		}
+		encoded, err := json.Marshal(Snapshot{Replica: replica, TakenAt: now, Owned: len(owned), OwnedObjects: owned})
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.values[store.snapshotKey(replica)] = string(encoded)
+	}
+	snapshots, err := store.Load(context.Background(), replicas)
+	if err != nil || len(snapshots) != len(replicas) {
+		t.Fatalf("loaded %d snapshots, error %v", len(snapshots), err)
+	}
+	for index, snapshot := range snapshots {
+		if snapshot.Replica != replicas[index] {
+			t.Fatalf("snapshot %d is %s, want %s", index, snapshot.Replica, replicas[index])
+		}
+	}
+	for index, keys := range client.mgets {
+		if keys < 1 {
+			t.Fatalf("MGET %d asked for no keys: %v", index, client.mgets)
+		}
+	}
+	// pod-a and pod-b together within the budget, pod-c alone past it, and
+	// pod-d, which does not fit beside it.
+	if len(client.mgets) != 3 || client.mgets[0] != 2 || client.mgets[1] != 1 || client.mgets[2] != 1 {
+		t.Fatalf("MGETs of %v keys, want [2 1 1]: two within the budget together, pod-c's past it alone, then pod-d", client.mgets)
+	}
+	total := 0
+	for _, value := range client.values {
+		total += len(value)
+	}
+	if total <= 1000 {
+		t.Fatalf("the fixture's snapshots total %d bytes, within one MGET's budget", total)
 	}
 }
