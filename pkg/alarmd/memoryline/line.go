@@ -71,10 +71,15 @@ type Line struct {
 	// detection budgets could still take as that collection ended (New) or,
 	// on a line not told of collections, at its first reading after one:
 	// detection that grows before the next one takes room the live heap
-	// does not show yet, so the room stays detection's until then.
+	// does not show yet, so the room stays detection's until then; and what
+	// detection gives back before the next one is still in the live heap
+	// that collection measured, so it is not detection's room a second
+	// time. stale is a budget reserved since: the next reading takes the
+	// reserve again.
 	cycle    uint64
 	granted  uint64
 	reserved uint64
+	stale    bool
 
 	// refused and admitted are by consumer, in the order of Consumers.
 	refused  []atomic.Uint64
@@ -156,6 +161,7 @@ func (line *Line) Reserve(reserve Reserve) {
 	}
 	line.mu.Lock()
 	line.reserves = append(line.reserves, reserve)
+	line.stale = true
 	line.mu.Unlock()
 }
 
@@ -188,15 +194,24 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 }
 
 // reservedLocked is the room left to detection at collection cycle: what
-// its budgets could take at the first reading after the collection, or
-// more if they could take more now. A new collection forgets the grants,
+// its budgets could take as the collection ended, and no more when they
+// could take more now. A budget that gave back what it held since the
+// collection gave back bytes the collection's live heap still holds:
+// reading its room again as well counted those bytes twice, once live and
+// once as room, until the next collection - on a replica whose Slots
+// released their retained bytes after a collection that ran while they
+// held them, the line went hundreds of megabytes past itself every round
+// and refused observation that fit. A new collection forgets the grants,
 // whose bytes its live heap holds.
 func (line *Line) reservedLocked(cycle uint64) uint64 {
-	unused := line.unusedLocked()
 	if cycle != line.cycle {
-		line.cycle, line.granted, line.reserved = cycle, 0, unused
+		line.cycle, line.granted = cycle, 0
+		line.stale = true
 	}
-	return max(line.reserved, unused)
+	if line.stale {
+		line.reserved, line.stale = line.unusedLocked(), false
+	}
+	return line.reserved
 }
 
 // unusedLocked is what the detection budgets may still take.

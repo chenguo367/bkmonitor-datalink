@@ -76,6 +76,40 @@ func TestObservationGrowsUpToTheLineAndNoFurther(t *testing.T) {
 	}
 }
 
+// What detection gives back after a collection is still in the live heap
+// that collection measured: the line reads detection's room as the
+// collection left it, not again as room. A budget reserved after the
+// collection is room from the next reading on.
+func TestWhatDetectionGivesBackIsNotItsRoomTwice(t *testing.T) {
+	// Detection held 300 of its 400 when the collection measured 700 live.
+	h := &fakeHeap{heap{limit: 1000, live: 700, cycles: 1}}
+	line := newLine(h.read)
+	unused := uint64(100)
+	line.Reserve(func() uint64 { return unused })
+	if reading := line.Read(); reading.HeadroomBytes != 200 {
+		t.Fatalf("headroom = %d, want 1000-700-100", reading.HeadroomBytes)
+	}
+	// Its Slots finish: all 400 are room again, and the 300 they held are
+	// still in the 700 until the next collection.
+	unused = 400
+	if reading := line.Read(); reading.HeadroomBytes != 200 || reading.ReservedBytes != 100 {
+		t.Fatalf("after detection gave back = %+v, want headroom 200: the 300 are live, not room as well", reading)
+	}
+	if !line.Admit(ConsumerCostProjection, 200) {
+		t.Fatal("observation refused the 200 the line has")
+	}
+	// The next collection finds the 300 gone and all 400 room.
+	h.heap = heap{limit: 1000, live: 600, cycles: 2}
+	if reading := line.Read(); reading.HeadroomBytes != 0 || reading.ReservedBytes != 400 {
+		t.Fatalf("after the next collection = %+v, want 1000-600-400", reading)
+	}
+	// A budget reserved since is room at once.
+	line.Reserve(func() uint64 { return 50 })
+	if reading := line.Read(); reading.ReservedBytes != 450 {
+		t.Fatalf("reserved = %d, want the new budget's 50 beside the 400", reading.ReservedBytes)
+	}
+}
+
 // Without a soft limit the runtime reports the largest one; the line then
 // never refuses. A nil line admits everything and reads as empty.
 func TestAProcessWithoutASoftLimitNeverRefuses(t *testing.T) {
