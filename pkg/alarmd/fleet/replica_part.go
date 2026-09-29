@@ -68,6 +68,11 @@ type ReplicaPart struct {
 	RetainedShareTotal int
 	ReadEarly          []ReadEarlyRef
 	ReadEarlyTotal     int
+	// Truncated is the columns this replica published cut, a bit per
+	// position in columnNames; merged, the columns any replica cut. A check
+	// line is a sample when any column its rows came from was cut on any
+	// replica, which the replica holding the rows cannot know alone.
+	Truncated uint8
 	// CheckRows is the rows' half of the first screen's check lines
 	// (checkRowsOf): the lines' standings, gaps and source records are the
 	// replicas' facts and are added when the lines are made (Checks).
@@ -108,7 +113,8 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
 	columns := viewColumns(&view)
-	part.CheckRows = checkRowsOf(columns, columnsTruncated(&view), &view, now)
+	part.Truncated = truncatedColumns(columnsTruncated(&view))
+	part.CheckRows = checkRowsOf(columns, &view, now)
 	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
@@ -146,6 +152,7 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
 		mergeLoss(&merged.Loss, part.Loss)
+		merged.Truncated |= part.Truncated
 		mergeCheckTallies(merged.CheckRows, part.CheckRows)
 		mergeTodoRows(&merged.TodoRows, part.TodoRows)
 		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
@@ -201,7 +208,7 @@ func (part ReplicaPart) Load(view *View) Load {
 func (part ReplicaPart) Checks(view *View, now time.Time) []CheckReport {
 	rows := checkTallies{}
 	mergeCheckTallies(rows, part.CheckRows)
-	return reportChecksFrom(rows, view, now)
+	return reportChecksFrom(rows, part.Truncated, view, now)
 }
 
 // Todo is the first screen's to-do from the part's rows, the lines made from

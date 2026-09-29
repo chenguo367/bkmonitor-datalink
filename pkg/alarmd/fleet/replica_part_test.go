@@ -301,3 +301,35 @@ func TestAnObjectListedByTwoReplicasIsOnTheMergedListsOnce(t *testing.T) {
 		t.Fatalf("kept %+v %+v %+v, want the later entry of each", merged.PrunedSkips[0], merged.RetainedShare[0], merged.ReadEarly[0])
 	}
 }
+
+// A check line is a sample when a column its rows came from was published
+// cut on any replica: the replica that cut the column may have cut rows of
+// this line, whichever replica the line's own rows came from.
+func TestALineIsASampleWhenAnyReplicaCutAColumnItsRowsCameFrom(t *testing.T) {
+	row := func(queryGroup, replica, reason string) Anomaly {
+		return Anomaly{QueryGroup: queryGroup, Replica: replica, Kind: KindDegradedRun, CauseReason: reason,
+			Since: now.Add(-time.Hour), SinceFrom: SinceBusinessState, Strategies: []StrategyRef{{StrategyID: "901", BusinessID: "2"}}}
+	}
+	at := now.Add(-10 * time.Second)
+	cut := Snapshot{Replica: "pod-a", TakenAt: at, Owned: 10, Determined: 10,
+		Anomalies: []Anomaly{row("qg-a", "pod-a", "QUERY_TIMEOUT")}, TotalAnomalies: 6}
+	whole := Snapshot{Replica: "pod-b", TakenAt: at, Owned: 10, Determined: 10,
+		Anomalies: []Anomaly{row("qg-b", "pod-b", "HISTORY_GAPPED")}, TotalAnomalies: 1}
+	view := decidedView([]Snapshot{cut, whole})
+	merged := MergeReplicaParts(ReplicaPartOf(decidedView([]Snapshot{cut}), now), ReplicaPartOf(decidedView([]Snapshot{whole}), now))
+	want := Report(&view, now).Checks
+	sameJSON(t, "check lines", merged.Checks(&view, now), want)
+	lines := 0
+	for _, report := range want {
+		// The gap line is the view's, not the columns'.
+		if report.Objects > 0 && report.Code != CheckObservationGap {
+			lines++
+			if !report.Partial {
+				t.Errorf("line %s is not a sample, though the column its rows came from was cut on pod-a", report.Code)
+			}
+		}
+	}
+	if lines < 2 {
+		t.Fatalf("fixture: %d lines with rows, want one from each replica", lines)
+	}
+}

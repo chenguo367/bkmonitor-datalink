@@ -13,7 +13,7 @@ import "time"
 
 // mergeCheckTallies adds one replica's rows' folds into another's, in
 // everything the rows half writes: counts add, strategy and business sets
-// take their union, a fold is partial when any replica's was, and of the
+// take their union, the columns the rows came from add up, and of the
 // moments the earliest failure and the latest failure, success, record and
 // skip are kept.
 func mergeCheckTallies(into, from checkTallies) {
@@ -22,7 +22,7 @@ func mergeCheckTallies(into, from checkTallies) {
 		entry.objects += part.objects
 		unionInto(entry.strategies, part.strategies)
 		unionInto(entry.businesses, part.businesses)
-		entry.partial = entry.partial || part.partial
+		entry.columns |= part.columns
 		entry.demoted += part.demoted
 		entry.current += part.current
 		entry.retained += part.retained
