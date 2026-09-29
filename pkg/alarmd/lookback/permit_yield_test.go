@@ -29,7 +29,13 @@ func TestAYieldedReadIsTimedFromTheYieldToItsRelease(t *testing.T) {
 	f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
 	f.engine.Step(context.Background()) // no answer queued: the read runs until it is asked to yield
 	close(yield)
-	stats := f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].YieldReleases == 1 })
+	// The release is timed as the permit comes back and the rung is counted
+	// preempted after, under the lock a second time: waited for together, a
+	// read of the counters between the two is not taken for the answer.
+	stats := f.waitFor(func(stats Stats) bool {
+		source := stats.Sources[sourceLog]
+		return source.YieldReleases == 1 && source.Preempted[RungNames[0]] == 1
+	})
 	source := stats.Sources[sourceLog]
 	if source.Preempted[RungNames[0]] != 1 || source.YieldReleaseSeconds < 0 || source.YieldReleaseMaxSeconds > RecheckTimeout.Seconds() ||
 		stats.Faults[FaultYieldOverdue] != 0 {
