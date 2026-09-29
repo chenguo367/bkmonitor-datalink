@@ -1685,12 +1685,6 @@ type Snapshot struct {
 	// and what kept the rest out. Absent on every follower and on a build
 	// before this fact existed.
 	Source *SourceFacts `json:"source,omitempty"`
-	// SourcePublisher is the strategy cache publisher's record of its last
-	// run, as this replica last read it beside the active set. Kept apart
-	// from Source because it is read on every read of the active set,
-	// including the rounds that fail there, which are the rounds it is for.
-	// Absent on a replica that has not read the source.
-	SourcePublisher *SourcePublisherReport `json:"source_publisher,omitempty"`
 	// Dependencies is every external system this replica resolved, with what
 	// it has seen of each. Absent on a build before this fact existed.
 	Dependencies []Endpoint `json:"dependencies,omitempty"`
@@ -2795,10 +2789,6 @@ type View struct {
 	// SourceStanding is Source read against what the deployment executes,
 	// with the two sentences for the first screen. Nil without a round.
 	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
-	// SourcePublisher is the newest publisher record any counted replica
-	// read, and SourcePublisherReplica which one.
-	SourcePublisher        *SourcePublisherReport `json:"source_publisher,omitempty"`
-	SourcePublisherReplica string                 `json:"source_publisher_replica,omitempty"`
 	// Dependencies is what one counted replica resolved its external systems
 	// to, and DependenciesReplica which one: the newest snapshot's. Every
 	// replica renders the same coordinates; what differs is what each has
@@ -3029,10 +3019,6 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
 			facts := *snapshot.Source
 			view.Source, view.SourceReplica = &facts, replica
-		}
-		if newerSourcePublisher(view.SourcePublisher, snapshot.SourcePublisher) {
-			report := *snapshot.SourcePublisher
-			view.SourcePublisher, view.SourcePublisherReplica = &report, replica
 		}
 		if len(snapshot.Dependencies) > 0 {
 			view.DependenciesReplicas++

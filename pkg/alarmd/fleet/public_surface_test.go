@@ -49,7 +49,6 @@ var redactedHealthFields = map[string]bool{
 	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true,
 	"VerdictHistory": true, "VerdictHistorySince": true, "VerdictHistoryReplica": true,
 	"LeaderRound": true, "LeaderRoundReplica": true,
-	"SourcePublisher": true, "SourcePublisherReplica": true,
 }
 
 // fill sets every settable leaf under value to something non-zero: free-form
