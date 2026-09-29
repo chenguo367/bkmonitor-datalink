@@ -11,6 +11,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -70,5 +71,35 @@ func TestAFailedVisitStopsTheRead(t *testing.T) {
 		})
 	if err != stop || visited != 1 {
 		t.Fatalf("read = %v after %d visits, want the visit's error after the first", err, visited)
+	}
+}
+
+// A retired timeline runs nothing and is not handed to the reader. (A
+// timeline whose last Segment is closed and is not retired does not decode:
+// the decode refuses it, so it is never a case of its own here.)
+func TestARetiredTimelineIsNotVisited(t *testing.T) {
+	groups := []execution.QueryGroupIdentity{"qg-open", "qg-retired"}
+	repository, client := timelineCacheFixture(t, groups, 2)
+	timeline, err := decodeScheduleTimeline("qg-retired", []byte(client.values[repository.scheduleTimelineKey("qg-retired")]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := &timeline.Segments[len(timeline.Segments)-1]
+	end := last.Schedule.Segment.Start + 60
+	last.Schedule.Segment.End = &end
+	timeline.RetiredAt = &end
+	payload, err := json.Marshal(timeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.values[repository.scheduleTimelineKey("qg-retired")] = string(payload)
+	var visited []execution.QueryGroupIdentity
+	err = repository.readOpenSegments(context.Background(), groups, controlVersion{},
+		func(identity execution.QueryGroupIdentity, _ persistedScheduleSegment) error {
+			visited = append(visited, identity)
+			return nil
+		})
+	if err != nil || len(visited) != 1 || visited[0] != "qg-open" {
+		t.Fatalf("visited %v (%v), want only the open one", visited, err)
 	}
 }
