@@ -2756,9 +2756,12 @@ func (executor observedProductionSlotExecutor) Execute(
 	request execution.SlotExecutionRequest,
 ) (execution.SlotExecutionResult, error) {
 	trace := frozenSlotTrace(request.Contract, request.OwnerFence)
+	// The operation rides on the start as it does on the completion, so a
+	// reader that leaves supplements out can leave out both ends.
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
-		Result: observability.ResultStarted, Direction: observability.DirectionInternal, Trace: trace,
+		Operation: observability.Operation(request.Operation),
+		Result:    observability.ResultStarted, Direction: observability.DirectionInternal, Trace: trace,
 	})
 	started := time.Now()
 	result, err := executor.next.Execute(ctx, request)

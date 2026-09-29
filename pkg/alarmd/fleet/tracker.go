@@ -881,6 +881,17 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if queryGroup == "" {
 		return
 	}
+	// A supplement is not a round of the object. It evaluates, for a Slot
+	// already completed, the series that arrived late; it completes no Slot
+	// and commits no Progress, and its execute outcome reads "incomplete" by
+	// construction. Read as a round, a supplemented object whose own rounds
+	// end degraded was put on DEFECT as this deployment's, and its latest
+	// round was moved back to the supplemented Slot. Supplements are the
+	// lookback's to count (lookback_supplement_*, lookback.get); the rows
+	// here are rounds.
+	if observation.Operation == observability.OperationSupplement {
+		return
+	}
 
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()

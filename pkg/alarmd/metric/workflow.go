@@ -70,7 +70,9 @@ func (m workflowMetrics) observe(o observability.Observation) {
 			}
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageSlotCompleted:
-		if observability.ValidExecuteOutcome(o.ExecuteOutcome) {
+		// A round's outcome; a supplement completes no Slot and is counted by
+		// the lookback (lookback_supplement_windows_total).
+		if observability.ValidExecuteOutcome(o.ExecuteOutcome) && o.Operation != observability.OperationSupplement {
 			m.execute.WithLabelValues(o.ExecuteOutcome).Inc()
 		}
 	case o.Component == observability.ComponentProgress && o.Stage == observability.StageProgressCommitted:

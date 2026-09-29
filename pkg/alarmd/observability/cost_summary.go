@@ -882,6 +882,14 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	if c == nil || !c.enabled {
 		return
 	}
+	// A supplement is not a round: it evaluates an earlier, completed Slot's
+	// late series. Counted here it was an attempt, made its Query Group and
+	// Plans read observed, ranked the group by the supplemented Slot's age,
+	// and filed its old revisions as a revision change. The lookback counts
+	// supplements and what they held.
+	if o.Operation == OperationSupplement {
+		return
+	}
 	if o.Stage == StageRunnerReturned {
 		c.observeHeld(ctx, o)
 		return
