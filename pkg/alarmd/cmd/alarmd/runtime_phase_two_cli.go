@@ -290,7 +290,9 @@ func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogReposi
 // not name adds nothing.
 func workloadDependencies(cfg config.Config) []k8sread.Dependency {
 	var dependencies []k8sread.Dependency
-	for _, endpoint := range resolveEndpoints(cfg, endpointSharing{}) {
+	// The same endpoints the bundle resolves, the compatibility output's
+	// service Redis included: every address this process connects to.
+	for _, endpoint := range resolveEndpoints(cfg, endpointSharing{compatOutputPresent: true}) {
 		if !endpoint.Configured || endpoint.Address == "" {
 			continue
 		}

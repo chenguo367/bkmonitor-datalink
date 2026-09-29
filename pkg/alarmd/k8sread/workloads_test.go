@@ -181,6 +181,18 @@ func TestNamespaceOfAddress(t *testing.T) {
 // changed its container and its init container, and a StatefulSet whose Pod
 // is thirty hours old and outside the day's window. No env value from any
 // template or Pod reaches the answer.
+func TestIsShortServiceName(t *testing.T) {
+	for address, want := range map[string]bool{
+		"bk-kafka:9092": true, "http://bk-monitor-unify-query-http:10205": true, "redis": true, "Redis.": true,
+		"localhost:6379": false, "192.0.2.1:6379": false, "[2001:db8::1]:6379": false, "redis.blueking": false,
+		"kafka.ns.svc:9092": false, "bad_name:6379": false, "": false, "https://uq.example.com/": false,
+	} {
+		if got := IsShortServiceName(address); got != want {
+			t.Errorf("IsShortServiceName(%q) = %v, want %v", address, got, want)
+		}
+	}
+}
+
 func TestWorkloadsListsANamespaceNewestRolloutFirstWithWhatTheRolloutChanged(t *testing.T) {
 	api := &namespaceAPI{
 		pods: map[string][]any{"ns": {
@@ -251,6 +263,10 @@ func TestWorkloadsNamesEveryNamespaceByItsOriginAndReadsEachOnce(t *testing.T) {
 		{Name: "query_backend", Address: "http://uq.other.svc.cluster.local:10205"},
 		{Name: "state_redis", Address: "192.0.2.10:6379"},
 		{Name: "output_kafka", Address: "kafka.ns.svc:9092"},
+		// A bare Service name resolves in this process's own namespace.
+		{Name: "strategy_cache", Address: "bk-redis:6379"},
+		{Name: "compat_output", Address: "localhost:6379"},
+		{Name: "linkd_console", Address: "https://linkd.example.com/console"},
 	}
 	result, err := reader.Workloads(context.Background(), dependencies, []string{"other", "extra", "Bad_Name", "other"}, 0)
 	if err != nil {
@@ -266,7 +282,8 @@ func TestWorkloadsNamesEveryNamespaceByItsOriginAndReadsEachOnce(t *testing.T) {
 		order = append(order, section.Namespace)
 	}
 	want := map[string][]NamespaceOrigin{
-		"ns":    {{Kind: OriginOwn}, {Kind: OriginDerived, Dependency: "output_kafka", Address: "kafka.ns.svc:9092"}},
+		"ns": {{Kind: OriginOwn}, {Kind: OriginDerived, Dependency: "output_kafka", Address: "kafka.ns.svc:9092"},
+			{Kind: OriginDerived, Dependency: "strategy_cache", Address: "bk-redis:6379"}},
 		"other": {{Kind: OriginDerived, Dependency: "query_backend", Address: "http://uq.other.svc.cluster.local:10205"}, {Kind: OriginConfigured}, {Kind: OriginConfigured}},
 		"extra": {{Kind: OriginConfigured}},
 	}
@@ -284,6 +301,8 @@ func TestWorkloadsNamesEveryNamespaceByItsOriginAndReadsEachOnce(t *testing.T) {
 	}
 	wantUnresolved := []UnresolvedDependency{
 		{Dependency: "state_redis", Address: "192.0.2.10:6379", Reason: ReasonNoNamespace},
+		{Dependency: "compat_output", Address: "localhost:6379", Reason: ReasonNoNamespace},
+		{Dependency: "linkd_console", Address: "https://linkd.example.com/console", Reason: ReasonNoNamespace},
 		{Dependency: OriginConfigured, Address: "Bad_Name", Reason: ReasonConfiguredInvalid},
 	}
 	if !reflect.DeepEqual(result.Unresolved, wantUnresolved) {

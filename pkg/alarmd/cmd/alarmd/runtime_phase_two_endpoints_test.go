@@ -640,6 +640,10 @@ func TestWorkloadDependenciesAreTheEndpointsHostsOnePerHost(t *testing.T) {
 		Password:        "top-secret", SentinelPassword: "sentinel-secret"}
 	cfg.Kafka.Brokers = []string{"kafka-0.queue.svc:9092", "192.0.2.20:9092"}
 	cfg.PhaseTwo.Access.UQEndpoint = "http://query-http.monitoring.svc.cluster.local:10205"
+	// The compatibility output's service Redis is an address this process
+	// connects to like any other, and is read like one.
+	cfg.Kafka.LegacyAdapter.ServiceRedis = config.RedisConnectionConfig{Mode: config.RedisModeStandalone,
+		Address: "compat-redis.legacy.svc:6379"}
 	got := map[string]bool{}
 	for _, dependency := range workloadDependencies(cfg) {
 		got[dependency.Name+" "+dependency.Address] = true
@@ -653,6 +657,7 @@ func TestWorkloadDependenciesAreTheEndpointsHostsOnePerHost(t *testing.T) {
 		fleet.EndpointOutputKafka + " kafka-0.queue.svc:9092",
 		fleet.EndpointOutputKafka + " 192.0.2.20:9092",
 		fleet.EndpointQueryBackend + " http://query-http.monitoring.svc.cluster.local:10205",
+		fleet.EndpointCompatOutput + " compat-redis.legacy.svc:6379",
 	} {
 		if !got[want] {
 			t.Errorf("missing dependency %q in %v", want, got)

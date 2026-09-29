@@ -202,6 +202,36 @@ var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // external name with a label "svc" in it is taken for one: the cost is one
 // more LIST, answered by name (usually forbidden), and one of MaxNamespaces.
 func NamespaceOfAddress(address string) (string, bool) {
+	host, ok := addressHost(address)
+	if !ok {
+		return "", false
+	}
+	labels := strings.Split(host, ".")
+	for i := 2; i < len(labels); i++ {
+		if labels[i] != "svc" {
+			continue
+		}
+		if namespace := labels[i-1]; dnsLabel.MatchString(namespace) && dnsLabel.MatchString(labels[i-2]) {
+			return namespace, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// IsShortServiceName says whether an address names a Service by its bare
+// name: one DNS label, no dots. A Pod's resolver looks such a name up in its
+// own namespace first (<name>.<namespace>.svc under the cluster domain), so
+// the Service it reaches runs where this process runs. localhost is not a
+// Service.
+func IsShortServiceName(address string) bool {
+	host, ok := addressHost(address)
+	return ok && host != "localhost" && !strings.Contains(host, ".") && dnsLabel.MatchString(host)
+}
+
+// addressHost is the lower-cased host of a URL, host:port or bare host,
+// without a trailing dot; false for an empty host or an IP.
+func addressHost(address string) (string, bool) {
 	host := strings.TrimSpace(address)
 	if strings.Contains(host, "://") {
 		parsed, err := url.Parse(host)
@@ -216,17 +246,7 @@ func NamespaceOfAddress(address string) (string, bool) {
 	if host == "" || net.ParseIP(host) != nil {
 		return "", false
 	}
-	labels := strings.Split(host, ".")
-	for i := 2; i < len(labels); i++ {
-		if labels[i] != "svc" {
-			continue
-		}
-		if namespace := labels[i-1]; dnsLabel.MatchString(namespace) && dnsLabel.MatchString(labels[i-2]) {
-			return namespace, true
-		}
-		return "", false
-	}
-	return "", false
+	return host, true
 }
 
 type replicaSetObject struct {
@@ -337,6 +357,12 @@ func (r *Reader) Workloads(ctx context.Context, dependencies []Dependency, confi
 	add(own, NamespaceOrigin{Kind: OriginOwn})
 	for _, dependency := range dependencies {
 		namespace, ok := NamespaceOfAddress(dependency.Address)
+		if !ok && IsShortServiceName(dependency.Address) {
+			// A bare Service name resolves in this process's own namespace:
+			// the dependency is read there, and named on that section, rather
+			// than listed as an address that names none.
+			namespace, ok = own, true
+		}
 		if !ok {
 			result.Unresolved = append(result.Unresolved, UnresolvedDependency{Dependency: dependency.Name, Address: dependency.Address, Reason: ReasonNoNamespace})
 			continue

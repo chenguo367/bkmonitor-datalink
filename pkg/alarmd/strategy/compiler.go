@@ -238,6 +238,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			return CompileResult{planTerminal: &Terminal{
 				ReasonCode: contract.ReasonNoDataPlanUncompilable,
 				FieldPath:  "no_data." + terminal.FieldPath,
+				Detail:     terminal.Detail,
 			}}, nil
 		default:
 			levelCost := triggerComputeCostForLevel(level.trigger, level.recovery)
@@ -266,12 +267,14 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			}
 		}
 		var config triggerPlanConfigV1
-		if json.Unmarshal(raw.TriggerPlan.Config, &config) != nil {
-			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan"}}, nil
+		if err := json.Unmarshal(raw.TriggerPlan.Config, &config); err != nil {
+			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan",
+				Detail: err.Error()}}, nil
 		}
 		requirement, err := compileEffectiveTimeRequirement(config.Uptime, config.TimezoneRef)
 		if err != nil {
-			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan.uptime"}}, nil
+			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan.uptime",
+				Detail: err.Error()}}, nil
 		}
 		compiled.noDataLevel.effectiveTime = requirement
 	}
@@ -313,7 +316,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 func (c *PlanCompiler) validatePlan(request CompileRequest) *Terminal {
 	plan := request.Plan
 	if err := plan.LegacyOutput.Validate(); err != nil {
-		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "legacy_output"}
+		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "legacy_output", Detail: err.Error()}
 	}
 	// The conversion context belongs to the Plans that publish that protocol
 	// and to no others: carrying it elsewhere means a Plan that could be
@@ -431,6 +434,10 @@ func (c *PlanCompiler) compileLevel(
 	terminal := func(reason, field string) (CompiledLevel, []NumericNormalizerSpec, *Terminal, error) {
 		return CompiledLevel{}, nil, &Terminal{LevelID: levelID, ReasonCode: reason, FieldPath: field}, nil
 	}
+	// A refusal decided by an error carries what the error said.
+	refused := func(reason, field string, err error) (CompiledLevel, []NumericNormalizerSpec, *Terminal, error) {
+		return CompiledLevel{}, nil, &Terminal{LevelID: levelID, ReasonCode: reason, FieldPath: field, Detail: err.Error()}, nil
+	}
 	if levelID == 0 || raw.Definition.Priority == 0 || (raw.Connector != contract.LevelConnectorAND && raw.Connector != contract.LevelConnectorOR) ||
 		len(raw.DetectPlan.Algorithms) == 0 {
 		return terminal(contract.ReasonLevelInvalid, "level")
@@ -458,7 +465,7 @@ func (c *PlanCompiler) compileLevel(
 			return terminal(contract.ReasonLevelBudgetExceeded, "level.detect_plan.algorithms")
 		}
 		if errors.Is(err, errAlgorithmConfig) {
-			return terminal(contract.ReasonLevelInvalid, "level.detect_plan.algorithms")
+			return refused(contract.ReasonLevelInvalid, "level.detect_plan.algorithms", err)
 		}
 		if err != nil {
 			return CompiledLevel{}, nil, nil, fmt.Errorf("strategy: compile %s@%d: %w", algorithm.Type, algorithm.Version, err)
@@ -489,11 +496,11 @@ func (c *PlanCompiler) compileLevel(
 	}
 	trigger, effectiveTime, canonicalTrigger, err := compileTriggerPlan(raw.TriggerPlan, execution)
 	if err != nil {
-		return terminal(contract.ReasonLevelInvalid, "level.trigger_plan")
+		return refused(contract.ReasonLevelInvalid, "level.trigger_plan", err)
 	}
 	recovery, canonicalRecovery, err := compileRecoveryPlan(raw.RecoveryPlan)
 	if err != nil {
-		return terminal(contract.ReasonLevelInvalid, "level.recovery_plan")
+		return refused(contract.ReasonLevelInvalid, "level.recovery_plan", err)
 	}
 	if trigger.WindowSize > c.limits.MaxTriggerWindowSize {
 		return terminal(contract.ReasonLevelBudgetExceeded, "level.trigger_plan")

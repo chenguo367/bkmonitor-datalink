@@ -1,6 +1,7 @@
 package obevidence
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -102,4 +103,104 @@ func TestTheFrozenTargetPlanKeepsItsDynamicGroupIDs(t *testing.T) {
 	if len(omitted) != 0 {
 		t.Fatalf("frozen dynamic group ids were omitted: %+v", omitted)
 	}
+}
+
+// The source view shows a key its policy does not list by its shape: the key,
+// every nested key and element, numbers, booleans and nulls as written, and a
+// string as its length. A writer's added key - an uptime's cw_calendars - is
+// then there to replay against the compiler, and nothing the policy never
+// reviewed passes as text. A key named like a credential gives neither value
+// nor shape.
+func TestTheSourceViewShowsAnUnlistedKeyByItsShape(t *testing.T) {
+	raw := []byte(`{"id":54,"webhook_secret":"HOOK_SECRET","runtime_config":{"api_token":"TOKEN_SECRET","depth":3,"on":true,"none":null},` +
+		`"detects":[{"level":1,"trigger_config":{"check_window":5,"count":1,"uptime":{"time_ranges":[{"start":"00:00","end":"23:59"}],` +
+		`"active_calendars":[3],"cw_calendars":[]}}}],` +
+		`"items":[{"id":1,"query_configs":[{"metric_id":"system.disk.in_use","filter_dict":{"ip":"198.51.100.4","n":2}}]}]}`)
+	value, omitted, err := projectSourceJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := plainJSON(t, value)
+	for _, want := range []string{`"cw_calendars":[]`, `"active_calendars":[3]`, `"filter_dict":{"ip":"<string of 12 bytes>","n":2}`,
+		`"runtime_config":{"api_token":"<credential field>","depth":3,"none":null,"on":true}`, `"metric_id":"system.disk.in_use"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("projection lacks %s: %s", want, text)
+		}
+	}
+	for _, leak := range []string{"SECRET", "198.51.100.4", "webhook_secret"} {
+		if strings.Contains(text, leak) {
+			t.Fatalf("projection shows %s: %s", leak, text)
+		}
+	}
+	reasons := map[string]string{}
+	for _, omission := range omitted {
+		reasons[omission.Path] = omission.Reason
+	}
+	for path, reason := range map[string]string{
+		"$.webhook_secret": "credential_field", "$.runtime_config": "value_shape_only",
+		"$.detects[0].trigger_config.uptime.cw_calendars":     "value_shape_only",
+		"$.detects[0].trigger_config.uptime.active_calendars": "value_shape_only",
+		"$.items[0].query_configs[0].filter_dict":             "value_shape_only",
+	} {
+		if reasons[path] != reason {
+			t.Errorf("omission of %s = %q, want %q (all: %+v)", path, reasons[path], reason, omitted)
+		}
+	}
+}
+
+// What the allowlist already redacts stays redacted in the source view, and
+// the other views keep leaving unlisted keys out.
+func TestTheShapeViewKeepsEveryRedactionAndOnlyTheSourceViewShapes(t *testing.T) {
+	raw := []byte(`{"id":7,"items":[{"query_configs":[{"functions":[{"id":"test","params":[{"id":"Authorization","value":"PARAM_SECRET"}]}],"agg_condition":[{"key":"password","method":"eq","value":["CONDITION_SECRET"]},{"key":"bk_host_id","method":"eq","value":["42"]}]}]}],"new_config":{"public_name":"EXTENSION_SECRET"}}`)
+	value, omitted, err := projectSourceJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := plainJSON(t, value)
+	if strings.Contains(data, "SECRET") || !strings.Contains(data, `"42"`) ||
+		!strings.Contains(data, `"new_config":{"public_name":"<string of 16 bytes>"}`) {
+		t.Fatalf("projection: %s", data)
+	}
+	credentials := 0
+	for _, omission := range omitted {
+		if omission.Reason == "credential_parameter" {
+			credentials++
+		}
+	}
+	if credentials != 2 {
+		t.Fatalf("omissions: %+v, want both named credentials still redacted", omitted)
+	}
+	published, publishedOmitted, err := projectJSON([]byte(`{"object_contract_version":1,"added_later":{"x":"y"}}`), publishedPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ := json.Marshal(published); strings.Contains(string(encoded), "added_later") ||
+		len(publishedOmitted) != 1 || publishedOmitted[0].Reason != "field_not_exposed" {
+		t.Fatalf("published view = %s %+v, want the unlisted key left out", encoded, publishedOmitted)
+	}
+}
+
+func TestACredentialNamedKeyIsKnownByItsName(t *testing.T) {
+	for key, want := range map[string]bool{
+		"password": true, "db_passwd": true, "webhook_secret": true, "api_token": true, "Authorization": true, "cookie": true,
+		"credentials": true, "headers": true, "private_key": true, "apiKey": true, "access_key_id": true, "signature": true, "session_id": true,
+		"cw_calendars": false, "filter_dict": false, "runtime_config": false, "global_scope": false, "bk_biz_ids": false,
+	} {
+		if got := credentialFieldName(key); got != want {
+			t.Errorf("credentialFieldName(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// plainJSON encodes without escaping <, > and &, so a shape placeholder reads
+// as written.
+func plainJSON(t *testing.T, value any) string {
+	t.Helper()
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(buffer.String())
 }

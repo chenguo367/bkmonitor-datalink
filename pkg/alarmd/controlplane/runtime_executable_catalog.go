@@ -628,7 +628,8 @@ func terminalDisposition(sourceID, scope string, terminal strategy.Terminal) Obj
 			FieldPath: terminal.FieldPath, Detail: dispositionDetail(terminal.ReasonCode)}
 	}
 	return ObjectDisposition{SourceID: sourceID, Scope: scope, LevelID: terminal.LevelID,
-		Disposition: disposition, Reason: terminal.ReasonCode, FieldPath: terminal.FieldPath}
+		Disposition: disposition, Reason: terminal.ReasonCode, FieldPath: terminal.FieldPath,
+		Detail: dispositionDetail(terminal.Detail)}
 }
 
 func withoutAcceptedPlanDisposition(dispositions []ObjectDisposition, sourceID string) []ObjectDisposition {
