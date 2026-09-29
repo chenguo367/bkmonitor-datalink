@@ -418,7 +418,7 @@ func sparseEvidence(coverage *HistoryCoverage) bool {
 		return false
 	}
 	for _, window := range coverage.Windows {
-		if window.Verdict != VerdictDataAbsentWhenQueried || window.HolesBy.AnsweredWithoutSeries != window.MissingTotal {
+		if !answeredWindow(window) {
 			return false
 		}
 	}
@@ -428,6 +428,20 @@ func sparseEvidence(coverage *HistoryCoverage) bool {
 	// reading "more short windows than named" as undecided filed three hosts
 	// that miss whole minutes as this side's to fix.
 	return uint32(len(coverage.Windows)) == coverage.Short || coverage.UnlistedHolesAnswered
+}
+
+// answeredWindow says a named short window is short only at minutes the query
+// answered whole: without the series, or with nothing at all. A minute the
+// provider answered FULL and empty is a fact about the data, like one it
+// answered without this series; nothing this side did made it empty. A query
+// that is itself wrong is empty every round, which is EMPTY_EVERY_ROUND's line
+// and never reaches a window, so an empty minute here is the data's and is not
+// filed as this side's to fix.
+func answeredWindow(window WindowRow) bool {
+	if window.Verdict != VerdictDataAbsentWhenQueried && window.Verdict != VerdictQueryAnsweredEmpty {
+		return false
+	}
+	return window.HolesBy.AnsweredWithoutSeries+window.HolesBy.AnsweredEmpty == window.MissingTotal
 }
 
 // windowCheck reads a window reason on its counts. decided is false when the

@@ -33,6 +33,17 @@ package execution
 // Nil when there is nothing to say -- no marker, or a marker that is not
 // standing.
 //
+// Known boundary, per series: a Level a marker held keeps WARMING in its own
+// state and converges only on a window that is whole again (evaluation
+// guardConvergenceAllowed), so a series that misses whole minutes stays under
+// GAP_GUARD_WARMING for as long as it keeps missing them. That withholds only
+// NORMAL, which needs a FULL window whether or not a guard holds it: ABNORMAL
+// is decided from the anomalies in the window and RECOVERY steps over minutes
+// nobody observed, so the series still alerts and recovers. A reader should
+// look at the window's missing minutes (answered without the series, or a
+// round this side did not see whole) rather than read the reason as "not
+// evaluated".
+//
 // A marker written under an older Plan schedule revision still recovers, it
 // only restarts its warmup: the store discards the warmup count of every
 // scope whose schedule revision changed (state applyGapScopes), so this Slot

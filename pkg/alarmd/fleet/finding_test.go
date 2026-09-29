@@ -709,10 +709,11 @@ func TestAWindowVerdictIsTheDatasOnlyOnMinutesAnsweredWithoutTheSeries(t *testin
 }
 
 // A window line is the data's when every short window is short only by
-// minutes the query answered whole without the series, however the row came
-// to the window line: by its own reason's counts, or held under a guard. One
-// window that says anything else, a list cut short, or minutes not all read,
-// and the row stays where it was.
+// minutes the query answered whole -- without the series, or with nothing at
+// all -- however the row came to the window line: by its own reason's counts,
+// or held under a guard. One window that says anything else, a list cut short
+// with nothing said about the rest, or minutes not all read, and the row stays
+// where it was.
 func TestAWindowLineIsTheDatasOnlyWhenEveryWindowIsSparse(t *testing.T) {
 	sparse := func(missing uint32) WindowRow {
 		return WindowRow{Verdict: VerdictDataAbsentWhenQueried, MissingTotal: missing, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: missing}}
@@ -734,7 +735,7 @@ func TestAWindowLineIsTheDatasOnlyWhenEveryWindowIsSparse(t *testing.T) {
 	}{
 		"gapped, every window sparse":       {gapped(sparse(2), sparse(1)), CheckSeriesSparse},
 		"gapped, one window incomplete":     {gapped(sparse(2), incomplete), CheckSeriesDataMissing},
-		"gapped, one window answered empty": {gapped(sparse(2), empty), CheckSeriesDataMissing},
+		"gapped, one window answered empty": {gapped(sparse(2), empty), CheckSeriesSparse},
 		"gapped, the list cut short":        {gapped(sparse(2)), CheckSeriesDataMissing},
 		"gapped, minutes not all read":      {gapped(sparse(2), partlyRead), CheckSeriesDataMissing},
 		"guarded, every window sparse":      {guarded(sparse(2), sparse(1)), CheckSeriesSparse},

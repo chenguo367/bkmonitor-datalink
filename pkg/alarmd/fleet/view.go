@@ -887,9 +887,9 @@ type HistoryCoverage struct {
 	RoundsRemembered int `json:"rounds_remembered,omitempty"`
 	RoundsKept       int `json:"rounds_kept,omitempty"`
 	// UnlistedHolesAnswered says every short window the round did not name
-	// is short only at minutes whose round answered its query whole, with no
-	// unusable point in any of them: the data's, read the same way a named
-	// window's ROUND_ANSWERED_WITHOUT_SERIES holes are. It is set only when some short windows went
+	// is short only at minutes whose round answered its query whole, with data
+	// or empty, and with no unusable point in any of them: the data's, read
+	// the same way a named window's holes are. It is set only when some short windows went
 	// unnamed, and only from the worker's union of missing minutes; a round
 	// whose union is truncated or absent leaves it false.
 	UnlistedHolesAnswered bool `json:"unlisted_holes_answered,omitempty"`

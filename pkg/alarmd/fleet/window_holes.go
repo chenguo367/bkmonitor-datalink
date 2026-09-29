@@ -173,11 +173,11 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts) [
 // the object's remembered rounds: true only when some went unnamed, the
 // worker sent a whole union of their missing minutes and no unusable point,
 // and every one of those minutes was evaluated by a remembered round that
-// answered its primary whole -- the reading windowRows gives a named hole as
-// ROUND_ANSWERED_WITHOUT_SERIES. A minute the process does not remember, or a
-// round that answered empty, partial or not at all, leaves it false: those
-// are not a host missing a minute, and an unnamed hole nobody can place is
-// not the data's by default.
+// answered its primary whole, with data or empty -- the readings windowRows
+// gives a named hole as ROUND_ANSWERED_WITHOUT_SERIES and ROUND_ANSWERED_EMPTY.
+// A minute the process does not remember, or a round that answered partly,
+// not at all, or without recording its answer, leaves it false: an unnamed
+// hole nobody can place is not the data's by default.
 func unlistedHolesAnswered(rounds []roundMark, facts *observability.HistoryCoverageFacts) bool {
 	if facts == nil || facts.Short <= uint32(len(facts.Windows)) {
 		return false
@@ -187,7 +187,7 @@ func unlistedHolesAnswered(rounds []roundMark, facts *observability.HistoryCover
 	}
 	for _, minute := range facts.MissingMinutes {
 		mark, found := roundAt(rounds, minute)
-		if !found || !mark.primary.PrimaryAnsweredWhole() {
+		if !found || mark.primary == nil || mark.primary.Completeness != "FULL" {
 			return false
 		}
 	}
