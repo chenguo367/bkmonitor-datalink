@@ -40,7 +40,7 @@ func strategyLookupSource(reconciler *controlplane.SourceReconciler) fleet.Strat
 
 func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLookupFacts {
 	facts := fleet.StrategyLookupFacts{
-		Available: lookup.Available, Found: lookup.Found, Retained: lookup.Retained,
+		Available: lookup.Available, Found: lookup.Found, Retained: lookup.Retained, Global: lookup.Global,
 		Publication: fleet.StrategyPublication{SnapshotRevision: string(lookup.Publication.SnapshotRevision), Epoch: lookup.Publication.PublicationEpoch},
 	}
 	for _, plan := range lookup.Plans {

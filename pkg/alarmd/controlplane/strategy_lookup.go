@@ -52,6 +52,13 @@ type StrategyLookup struct {
 	// withheld is not retained - its Plan is the current one - so any other
 	// non-accepted disposition beside a Plan says nothing about retention.
 	Retained bool
+	// Global says the source marks the strategy global (is_global_strategy),
+	// whatever the round did with it - accepted, refused as a strategy this
+	// build cannot run across businesses, or withheld for another reason.
+	// It is the source's word for the strategy, read from the round's
+	// GlobalStrategies, so a withheld global strategy is marked as surely as
+	// one that runs.
+	Global bool
 }
 
 // StrategyPlanRef is where one Plan of a strategy runs, and under what.
@@ -76,6 +83,22 @@ type strategyIndex struct {
 	groups       []QueryGroup
 	plans        map[string][]strategyPlanAt
 	dispositions map[string][]ObjectDisposition
+
+	// global is the strategies the source marks global (withGlobal).
+	global map[string]bool
+}
+
+// withGlobal marks the strategies the round recorded as global, for the
+// lookup to answer Global from. Nil records leave the index as it was.
+func (index *strategyIndex) withGlobal(records []GlobalStrategy) *strategyIndex {
+	if index == nil || len(records) == 0 {
+		return index
+	}
+	index.global = make(map[string]bool, len(records))
+	for _, record := range records {
+		index.global[record.SourceID] = true
+	}
+	return index
 }
 
 type strategyPlanAt struct{ group, plan int }
@@ -124,6 +147,7 @@ func (index *strategyIndex) lookup(strategyID string) StrategyLookup {
 	})
 	answer.Dispositions = append([]ObjectDisposition(nil), index.dispositions[strategyID]...)
 	answer.Found = len(answer.Plans) > 0 || len(answer.Dispositions) > 0
+	answer.Global = index.global[strategyID]
 	for _, disposition := range answer.Dispositions {
 		if len(answer.Plans) > 0 && retainingDisposition(disposition.Disposition) {
 			answer.Retained = true
