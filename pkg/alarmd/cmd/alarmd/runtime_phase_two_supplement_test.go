@@ -111,7 +111,7 @@ func TestTheLookbacksSupplementsRunOnTheirQueryGroupsRunner(t *testing.T) {
 // The process's lookback hands its late series to supplements: without the
 // executor wired in, it reads no Query Group directed at all.
 func TestTheLookbackIsWiredToRunSupplements(t *testing.T) {
-	if options := lookbackOptions(nil, nil, &lookbackOwnership{}, nil, time.Now); options.Supplement == nil {
+	if options := lookbackOptions(nil, nil, &lookbackOwnership{}, nil, time.Now, nil); options.Supplement == nil {
 		t.Fatal("the lookback has no supplement to hand late series to")
 	}
 }
