@@ -200,8 +200,12 @@ func TestEveryTimelineStorePathAnnouncesBeforeItReads(t *testing.T) {
 			return nil
 		}},
 		{"readOpenSegments", func(repository *RedisCatalogRepository) error {
-			segments, err := repository.readOpenSegments(ctx, groups, version)
-			if err == nil && len(segments) != len(groups) {
+			visited := 0
+			err := repository.readOpenSegments(ctx, groups, version, func(execution.QueryGroupIdentity, persistedScheduleSegment) error {
+				visited++
+				return nil
+			})
+			if err == nil && visited != len(groups) {
 				return errors.New("an open Segment went unread")
 			}
 			return err
