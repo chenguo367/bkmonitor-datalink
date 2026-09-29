@@ -919,7 +919,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	assignmentReconciler.WithTimelineRevisions(repository)
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
-		SteppedDownAsLeader: recorder.ControlLeaderStepDown,
+		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
@@ -1092,14 +1092,16 @@ func openProductionPhaseTwoBundleWithDependencies(
 	var directory fleet.StrategyDirectory = directoryView
 	directoryForward := leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil,
 		directoryForwardTimeout, "directory", recorder.ObserveLeaderForward)
-	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, directoryForward, external.Now)
+	catalogAbsence := catalogAbsenceSource(func() *phaseTwoWorkerBundle { return bundle })
+	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, directoryForward, catalogAbsence,
+		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now)
 	// One strategy's standing by id, from the Leader's catalog memory: no
 	// Redis, no copy, no background work; a follower forwards the one
 	// request to the Leader's listener, found the way the view stream's
 	// clients find it.
 	fleetAPI = fleet.WithStrategyStanding(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, recorder.ObserveLeaderForward),
-		strategyObjectLoader(repository), catalogAbsenceSource(func() *phaseTwoWorkerBundle { return bundle }, directory != nil),
+		strategyObjectLoader(repository), catalogAbsence,
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	// The environment diagnosis: every strategy of the source's active set,
 	// one row each, answered where the catalog is the way a standing is.
@@ -1200,6 +1202,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return controlClient.Ping(probeCtx).Err()
 		},
 		CloseResources: func(shutdownCtx context.Context) error {
+			observationMemory.Close()
 			stopDiagnosticWriter()
 			stopCMDBIndex()
 			viewServer.Close()
@@ -1776,4 +1779,16 @@ func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
 // a cluster and a namespace are never attributed from two snapshots.
 func businessAttributionLookups(index *cmdbcache.HostBusinessLookup) admission.BusinessLookups {
 	return admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index}
+}
+
+// controlLeaderSteppedDown is what losing the Control Leader authority takes
+// with it: the catalog memory the strategy directory and the strategy
+// lookups answer from, at once rather than at this process's next follower
+// tick - a former Leader answered from its old term until then - and the
+// readings that belong to the role.
+func controlLeaderSteppedDown(reconciler interface{ StepDown() }, recorder *metric.Recorder) func() {
+	return func() {
+		reconciler.StepDown()
+		recorder.ControlLeaderStepDown()
+	}
 }

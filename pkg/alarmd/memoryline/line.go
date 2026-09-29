@@ -24,6 +24,7 @@ package memoryline
 
 import (
 	"math"
+	"runtime"
 	runtimemetrics "runtime/metrics"
 	"sync"
 	"sync/atomic"
@@ -67,10 +68,10 @@ type Line struct {
 	reserves []Reserve
 	// cycle is the collection the grants below were made after: from the
 	// next one on, what they took is in the live heap. reserved is what the
-	// detection budgets could still take when the line first read after
-	// that collection: detection that grows before the next one takes room
-	// the live heap does not show yet, so the room stays detection's until
-	// then.
+	// detection budgets could still take as that collection ended (New) or,
+	// on a line not told of collections, at its first reading after one:
+	// detection that grows before the next one takes room the live heap
+	// does not show yet, so the room stays detection's until then.
 	cycle    uint64
 	granted  uint64
 	reserved uint64
@@ -78,18 +79,63 @@ type Line struct {
 	// refused and admitted are by consumer, in the order of Consumers.
 	refused  []atomic.Uint64
 	admitted []atomic.Uint64
+	// closed ends the watch of collections: see Close.
+	closed atomic.Bool
 }
 
-// New is the line over the running process's heap.
+// New is the line over the running process's heap. It is told of every
+// collection until Close, and nothing else lets it go before then.
 func New() *Line {
 	samples := []runtimemetrics.Sample{{Name: "/gc/gomemlimit:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/gc/cycles/total:gc-cycles"}}
 	var mu sync.Mutex
-	return newLine(func() heap {
+	line := newLine(func() heap {
 		mu.Lock()
 		defer mu.Unlock()
 		runtimemetrics.Read(samples)
 		return heap{limit: sampleValue(samples[0]), live: sampleValue(samples[1]), cycles: sampleValue(samples[2])}
 	})
+	line.snapshotAtCollections()
+	return line
+}
+
+// collectionSentinel is an object nothing refers to, whose finalizer tells
+// the line a collection has ended. It holds a pointer so the runtime does
+// not batch it into a tiny allocation, whose finalizer may never run.
+type collectionSentinel struct{ _ *byte }
+
+// snapshotAtCollections takes the detection reserve as each collection
+// ends, rather than at the line's first reading after it. Detection that
+// filled between the two was in neither: not in the live heap the
+// collection measured, and no longer in the reserve read afterwards, so the
+// line counted that fill nowhere and observation could take its room. The
+// finalizer of an unreferenced object runs once the collection that found
+// it has swept; it takes the snapshot and arms the next.
+func (line *Line) snapshotAtCollections() {
+	runtime.SetFinalizer(new(collectionSentinel), func(*collectionSentinel) {
+		if line.closed.Load() {
+			return
+		}
+		line.collected(line.read().cycles)
+		line.snapshotAtCollections()
+	})
+}
+
+// Close ends the line's watch of collections: the next collection arms no
+// other, and the line is let go once nothing else holds it. A closed line
+// still answers, reading the reserve at its first reading after a
+// collection as a line not told of them does.
+func (line *Line) Close() {
+	if line != nil {
+		line.closed.Store(true)
+	}
+}
+
+// collected starts cycle's accounting unless a reading after the collection
+// already did.
+func (line *Line) collected(cycle uint64) {
+	line.mu.Lock()
+	defer line.mu.Unlock()
+	line.reservedLocked(cycle)
 }
 
 func newLine(read func() heap) *Line {

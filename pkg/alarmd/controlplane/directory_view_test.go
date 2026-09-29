@@ -133,7 +133,7 @@ func TestTheDirectoryIsTheLeadersPublicationAndItsActivation(t *testing.T) {
 			t.Fatalf("row %d = digest %s query %s schedule %s, want the published group's %s %s %s", index,
 				row.ObjectDigest, row.QueryRevision, row.ScheduleRevision, digest, group.QueryPlan.QueryRevision, group.ScheduleRevision)
 		}
-		if row.OutputContext == "" || row.ManifestExpired {
+		if row.OutputContext == "" || row.ContentNotHeld {
 			t.Fatalf("row %d = %+v, want its output context named from the content the activation read", index, row)
 		}
 	}
@@ -176,6 +176,19 @@ func TestTheDirectoryIsTheLeadersPublicationAndItsActivation(t *testing.T) {
 	if err != nil || plan.Identity != row.Identity {
 		t.Fatalf("effective plan = (%+v, %v), want the row's Plan", plan.Identity, err)
 	}
+	// A strategy's dispositions are bounded by the page like its rows, and
+	// the answer says when it left some out.
+	if bounded := f.view.Page(f.h.ctx, f.at, "", "", "1002", 0, 1); len(bounded.Unattributed) > 1 ||
+		bounded.SourceTruncated != (bounded.SourceMatchedTotal > 1) {
+		t.Fatalf("dispositions of 1002 at a limit of 1 = %d of %d, truncated %v", len(bounded.Unattributed), bounded.SourceMatchedTotal, bounded.SourceTruncated)
+	}
+	// The object gone from the store is unavailable, not an empty Plan.
+	if err := f.h.client.Del(f.h.ctx, f.h.prefix+":qgobj:"+string(row.ObjectDigest)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.view.EffectivePlan(f.h.ctx, row); !errors.Is(err, controlplane.ErrCatalogObjectUnavailable) {
+		t.Fatalf("effective plan of a deleted object = %v, want ErrCatalogObjectUnavailable", err)
+	}
 
 	// Not ready: a process that never published, and the Leader once it
 	// stepped down.
@@ -199,110 +212,248 @@ func TestTheDirectoryIsTheLeadersPublicationAndItsActivation(t *testing.T) {
 
 // A Query Group drains on the publication before the one the Leader just
 // made: the activation still carries its Plans there. Each such Plan is a
-// row of the carried publication with its revisions read from its object,
-// beside the row the latest publication has for it, and it is the current
-// one. A carried publication whose manifest is past its retention names
-// its Plans from the activation alone and the answer goes on; one whose
-// manifest does not read fails the answer by name and guesses nothing.
+// row of the carried publication, beside the row the latest publication has
+// for it, and it is the current one. Its content comes from the carried
+// publication's content when the activation round holds it, its revisions
+// read from its object; otherwise from the activation alone, marked
+// ContentNotHeld, with no Query Group or object guessed. The answer is
+// still complete: nothing failed, the content is simply not something the
+// Leader holds.
+//
+// The published catalog does not stand in for it. The later publication
+// here changes 1001's threshold and nothing an activation record carries:
+// its key, schedule revision and state generation are the carried Plan's,
+// and a row named from the catalog would show the Slots running 80 as
+// running 90.
 func TestADrainingPublicationsPlansAreRowsNamedFromItsContent(t *testing.T) {
-	for _, side := range []string{"read", "manifest expired", "manifest unreadable"} {
+	for _, side := range []string{"held", "not held"} {
 		t.Run(side, func(t *testing.T) {
 			f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
 			carried := f.published.Publication
-			// A later publication the activation has not cut over to.
+			// A later publication the activation has not cut over to; it
+			// changes strategy 1001 and leaves 1002 as it was.
 			latestCatalog := catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)
 			latest := f.h.publish(t, latestCatalog)
 			f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
-			carriedKey := f.h.prefix + ":manifest:" + string(carried.SnapshotRevision)
-			view := f.view
-			switch side {
-			case "manifest expired":
-				if err := f.h.client.Del(f.h.ctx, carriedKey).Err(); err != nil {
-					t.Fatal(err)
-				}
-			case "manifest unreadable":
-				if err := f.h.client.Set(f.h.ctx, carriedKey, "{", 0).Err(); err != nil {
-					t.Fatal(err)
-				}
-				// A repository that has not read it: the Leader's own would
-				// answer from the content it remembers.
-				view = f.newView(t, f.reconciler, f.h.newRepository(t))
+			repository := f.h.repository
+			if side == "not held" {
+				// A repository whose activation round has not read the carried
+				// publication.
+				repository = f.h.newRepository(t)
 			}
+			if held := repository.HoldsContentForTest(carried); held != (side == "held") {
+				t.Fatalf("setup: the repository holds the carried content %v, want %v", held, side == "held")
+			}
+			view := f.newView(t, f.reconciler, repository)
 			s := f.page(t, view, "")
-			if s.Published != latest.Publication || s.Current != carried {
-				t.Fatalf("published %+v current %+v, want the latest publication beside the carried activation", s.Published, s.Current)
+			if !s.Complete || s.Reason != "" || s.FailedRead != "" || s.Published != latest.Publication || s.Current != carried {
+				t.Fatalf("page = complete %v reason %q failed %q published %+v current %+v, want complete, the latest beside the carried activation",
+					s.Complete, s.Reason, s.FailedRead, s.Published, s.Current)
 			}
-			var latestRows, carriedRows, expiredRows int
+			wantManifest := map[string]string{"held": "memory", "not held": "not_held"}[side]
+			if len(s.Publications) != 2 || s.Publications[1].Publication != carried || s.Publications[1].Plans != 2 ||
+				s.Publications[1].Manifest != wantManifest {
+				t.Fatalf("publications = %+v, want the carried one second, with both Plans, %s", s.Publications, wantManifest)
+			}
+			carriedRows := map[string]controlplane.StrategyDirectoryRow{}
+			latestRows := 0
 			for _, row := range s.Rows {
-				switch {
-				case row.ManifestExpired:
-					expiredRows++
-					if row.Publication != carried || row.QueryGroup != "" || row.ObjectDigest != "" || row.Activation == nil ||
-						row.Role != string(execution.ActivationCurrent) {
-						t.Fatalf("expired row = %+v, want the carried Plan named by its activation and nothing guessed", row)
-					}
-				case row.Publication == latest.Publication:
+				switch row.Publication {
+				case latest.Publication:
 					latestRows++
 					if row.Activation != nil || row.Role != "PUBLISHED" || row.QueryGroup == "" || row.ObjectDigest == "" {
 						t.Fatalf("latest row = %+v, want published and not yet active", row)
 					}
-				case row.Publication == carried:
-					carriedRows++
+				case carried:
+					if row.Activation == nil || row.Role != string(execution.ActivationCurrent) {
+						t.Fatalf("carried row = %+v, want the activation's current row", row)
+					}
+					carriedRows[row.Identity.StrategyID] = row
+				default:
+					t.Fatalf("row %+v belongs to neither publication", row)
+				}
+			}
+			if latestRows != 2 || len(carriedRows) != 2 {
+				t.Fatalf("rows latest %d carried %d, want 2 and 2: %+v", latestRows, len(carriedRows), s.Rows)
+			}
+			for _, strategy := range []string{"1001", "1002"} {
+				row := carriedRows[strategy]
+				switch side {
+				case "held":
 					group := f.group(t, f.catalog, row.QueryGroup)
 					digest, err := controlplane.DeriveQueryGroupObjectDigest(group)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if row.Activation == nil || row.Role != string(execution.ActivationCurrent) || row.ObjectDigest != digest ||
-						row.QueryRevision != group.QueryPlan.QueryRevision || row.ScheduleRevision != group.ScheduleRevision || row.OutputContext == "" {
-						t.Fatalf("carried row = %+v, want current with the carried group's digest %s and revisions %s %s", row, digest,
-							group.QueryPlan.QueryRevision, group.ScheduleRevision)
+					if row.ContentNotHeld || row.ObjectDigest != digest || row.QueryRevision != group.QueryPlan.QueryRevision ||
+						row.ScheduleRevision != group.ScheduleRevision || row.OutputContext == "" {
+						t.Fatalf("carried row %s = %+v, want the carried group's digest %s and revisions from its object", strategy, row, digest)
 					}
-				default:
-					t.Fatalf("row %+v belongs to neither publication", row)
+					resolved, err := view.ResolveCurrent(f.h.ctx, f.at, "", "", strategy, "")
+					if err != nil || resolved.Publication != carried || resolved.ObjectDigest != digest {
+						t.Fatalf("resolve %s = (%+v, %v), want the carried row", strategy, resolved, err)
+					}
+					plan, err := view.EffectivePlan(f.h.ctx, resolved)
+					if err != nil || plan.Identity != row.Identity {
+						t.Fatalf("effective plan of %s = (%+v, %v), want the carried Plan", strategy, plan.Identity, err)
+					}
+				case "not held":
+					if !row.ContentNotHeld || row.QueryGroup != "" || row.ObjectDigest != "" || row.QueryRevision != "" || row.OutputContext != "" {
+						t.Fatalf("carried row %s = %+v, want it named by its activation and nothing guessed", strategy, row)
+					}
+					// A current row that names no Query Group resolves to
+					// nothing, not to the latest publication's row.
+					if _, err := view.ResolveCurrent(f.h.ctx, f.at, "", "", strategy, ""); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
+						t.Fatalf("resolve %s = %v, want ErrSnapshotUnavailable", strategy, err)
+					}
 				}
 			}
-			switch side {
-			case "read":
-				if !s.Complete || latestRows != 2 || carriedRows != 2 || expiredRows != 0 {
-					t.Fatalf("rows latest %d carried %d expired %d complete %v, want 2, 2, 0 and complete: %+v", latestRows, carriedRows, expiredRows, s.Complete, s)
-				}
-				if len(s.Publications) != 2 || s.Publications[1].Publication != carried || s.Publications[1].Plans != 2 || s.Publications[1].Manifest != "memory" {
-					t.Fatalf("publications = %+v, want the carried one second, with both Plans, from memory", s.Publications)
-				}
-				// The current row is the carried one, not the latest.
-				row, err := view.ResolveCurrent(f.h.ctx, f.at, "", "", "1001", "")
-				if err != nil || row.Publication != carried {
-					t.Fatalf("resolve 1001 = (%+v, %v), want the carried row", row, err)
-				}
-				// Rows of one identity: by Query Group, then publication.
-				for index := 1; index < len(s.Rows); index++ {
-					previous, row := s.Rows[index-1], s.Rows[index]
-					if previous.Identity == row.Identity && previous.QueryGroup == row.QueryGroup &&
-						previous.Publication.PublicationEpoch > row.Publication.PublicationEpoch {
-						t.Fatalf("rows %d and %d out of publication order: %+v, %+v", index-1, index, previous, row)
+			// The edited Plan's carried row does not carry the latest
+			// content: its detection changed under the same key, schedule
+			// revision and state generation.
+			if side == "held" {
+				edited := carriedRows["1001"]
+				var latestEdited controlplane.StrategyDirectoryRow
+				for _, row := range s.Rows {
+					if row.Publication == latest.Publication && row.Identity == edited.Identity {
+						latestEdited = row
 					}
 				}
-			case "manifest expired":
-				if !s.Complete || s.FailedRead != "" || latestRows != 2 || expiredRows != 2 || carriedRows != 0 {
-					t.Fatalf("rows latest %d carried %d expired %d complete %v failed %q, want 2, 0, 2, complete", latestRows, carriedRows, expiredRows, s.Complete, s.FailedRead)
+				if latestEdited.ObjectDigest == "" || latestEdited.ObjectDigest == edited.ObjectDigest {
+					t.Fatalf("edited Plan: carried digest %s, latest %s, want two contents", edited.ObjectDigest, latestEdited.ObjectDigest)
 				}
-				if s.Publications[1].Manifest != "expired" {
-					t.Fatalf("publications = %+v, want the carried one expired", s.Publications)
-				}
-			case "manifest unreadable":
-				if s.Complete || s.Reason != "DEPENDENCY_UNAVAILABLE" || s.FailedRead != "manifest" || s.FailedKey != carriedKey ||
-					s.FailedPublication == nil || *s.FailedPublication != carried || s.Error == "" {
-					t.Fatalf("unreadable = complete %v reason %q read %q key %q publication %+v error %q, want the carried manifest named",
-						s.Complete, s.Reason, s.FailedRead, s.FailedKey, s.FailedPublication, s.Error)
-				}
-				if expiredRows != 0 || carriedRows != 0 || s.Publications[1].Manifest != "failed" {
-					t.Fatalf("rows expired %d carried %d publications %+v, want none guessed and the carried one failed", expiredRows, carriedRows, s.Publications)
+			}
+			// Rows of one identity: by Query Group, then publication.
+			for index := 1; index < len(s.Rows); index++ {
+				previous, row := s.Rows[index-1], s.Rows[index]
+				if previous.Identity == row.Identity && previous.QueryGroup == row.QueryGroup &&
+					previous.Publication.PublicationEpoch > row.Publication.PublicationEpoch {
+					t.Fatalf("rows %d and %d out of publication order: %+v, %+v", index-1, index, previous, row)
 				}
 			}
 		})
 	}
 }
+
+// keyHook records the keys every command of a client names.
+type keyHook struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+func (h *keyHook) note(cmd redis.Cmder) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, arg := range cmd.Args()[1:] {
+		if key, ok := arg.(string); ok {
+			h.keys = append(h.keys, key)
+		}
+	}
+}
+
+func (h *keyHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	h.note(cmd)
+	return ctx, nil
+}
+
+func (*keyHook) AfterProcess(context.Context, redis.Cmder) error { return nil }
+
+func (h *keyHook) BeforeProcessPipeline(ctx context.Context, cmds []redis.Cmder) (context.Context, error) {
+	for _, cmd := range cmds {
+		h.note(cmd)
+	}
+	return ctx, nil
+}
+
+func (h *keyHook) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
+
+// A page reads the activation and the objects of the rows it returns, and
+// nothing a Slot reads from changes because a page was read: no manifest is
+// asked for, and the content memo the activation round reads Plans from
+// holds exactly what it held before. The directory used to fill that memo
+// with the carried publication it read, so a page could put out the content
+// a draining Query Group's Slots were running on.
+func TestADirectoryPageReadsNoManifestAndLeavesTheMemoAsItWas(t *testing.T) {
+	f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
+	carried := f.published.Publication
+	latestCatalog := catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)
+	latest := f.h.publish(t, latestCatalog)
+	f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
+	client := redis.NewClient(f.h.client.Options())
+	t.Cleanup(func() { _ = client.Close() })
+	hook := &keyHook{}
+	client.AddHook(hook)
+	repository, err := controlplane.NewRedisCatalogRepository(client, f.h.prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := f.newView(t, f.reconciler, repository)
+	before := [2]bool{repository.HoldsContentForTest(carried), repository.HoldsContentForTest(latest.Publication)}
+	s := f.page(t, view, "")
+	if !s.Complete || len(s.Rows) != 4 {
+		t.Fatalf("page = complete %v rows %d, want complete with 4 rows", s.Complete, len(s.Rows))
+	}
+	// This repository's activation round has not read the carried
+	// publication, and the page does not read it in its place.
+	if _, err := view.ResolveCurrent(f.h.ctx, f.at, "", "", "1002", ""); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
+		t.Fatalf("resolve on a repository that holds no carried content = %v, want ErrSnapshotUnavailable", err)
+	}
+	for _, key := range hook.keys {
+		if strings.Contains(key, ":manifest:") {
+			t.Fatalf("the page read manifest %s; keys %v", key, hook.keys)
+		}
+	}
+	after := [2]bool{repository.HoldsContentForTest(carried), repository.HoldsContentForTest(latest.Publication)}
+	if before != after {
+		t.Fatalf("the memo held carried/latest %v before the page and %v after, want it unchanged", before, after)
+	}
+}
+
+// A page whose time runs out between rows stops and says so: the rows it
+// had are an incomplete answer named DEADLINE, not a complete short one, and
+// the read the time ran out on is named beside it.
+func TestADirectoryPagePastItsTimeSaysDeadline(t *testing.T) {
+	f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
+	latestCatalog := catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)
+	latest := f.h.publish(t, latestCatalog)
+	f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
+	ctx, cancel := context.WithCancel(f.h.ctx)
+	defer cancel()
+	// The request's time runs out on the first object a held row reads,
+	// after the activation has been read.
+	f.h.client.AddHook(&objectReadCancel{prefix: f.h.prefix + ":qgobj:", cancel: cancel})
+	s := f.view.Page(ctx, f.at, "", "", "", 0, 100)
+	if s.Complete || s.Reason != "DEADLINE" || s.Revision == "" || s.FailedRead != "group_object" || len(s.Rows) == 0 || len(s.Rows) == 4 {
+		t.Fatalf("page = complete %v reason %q revision %q failed %q rows %d, want incomplete, DEADLINE, the object read named, rows short",
+			s.Complete, s.Reason, s.Revision, s.FailedRead, len(s.Rows))
+	}
+}
+
+// objectReadCancel cancels a request on its first read of a key with prefix.
+type objectReadCancel struct {
+	prefix string
+	cancel context.CancelFunc
+}
+
+func (h *objectReadCancel) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	for _, arg := range cmd.Args()[1:] {
+		if key, ok := arg.(string); ok && strings.HasPrefix(key, h.prefix) {
+			h.cancel()
+		}
+	}
+	return ctx, nil
+}
+
+func (*objectReadCancel) AfterProcess(context.Context, redis.Cmder) error { return nil }
+
+func (h *objectReadCancel) BeforeProcessPipeline(ctx context.Context, cmds []redis.Cmder) (context.Context, error) {
+	for _, cmd := range cmds {
+		_, _ = h.BeforeProcess(ctx, cmd)
+	}
+	return ctx, nil
+}
+
+func (*objectReadCancel) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
 
 // The strategy-level output read reports the word the Leader froze with the
 // Plan, not what the deployment's choice would resolve to now, from the
@@ -353,7 +504,7 @@ func TestTheDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *testing.T)
 	}
 
 	// Over HTTP, beside the configuration, under the include only.
-	api := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, func() time.Time { return f.at })
+	api := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, nil, "", func() time.Time { return f.at })
 	w := httptest.NewRecorder()
 	api.ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies&tenant=tenant-a&business=2&strategy=1001&include=effective_config", nil))
 	var body struct {
@@ -442,10 +593,10 @@ func (r *forwardRecorder) forward(w http.ResponseWriter, request *http.Request) 
 func TestAFollowerHandsTheDirectoryToTheLeader(t *testing.T) {
 	f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
 	now := func() time.Time { return f.at }
-	leader := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, now)
+	leader := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, nil, "", now)
 	hop := &forwardRecorder{leader: leader}
 	followerView := f.newView(t, f.newReconciler(t), f.h.repository)
-	follower := fleet.WithStrategyDirectory(http.NotFoundHandler(), followerView, hop.forward, now)
+	follower := fleet.WithStrategyDirectory(http.NotFoundHandler(), followerView, hop.forward, nil, "", now)
 
 	w := httptest.NewRecorder()
 	follower.ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies&strategy=1001", nil))
@@ -464,7 +615,7 @@ func TestAFollowerHandsTheDirectoryToTheLeader(t *testing.T) {
 
 	refused := &forwardRecorder{refusal: "NO_LEADER"}
 	w = httptest.NewRecorder()
-	fleet.WithStrategyDirectory(http.NotFoundHandler(), followerView, refused.forward, now).
+	fleet.WithStrategyDirectory(http.NotFoundHandler(), followerView, refused.forward, nil, "", now).
 		ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies", nil))
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "LEADER_UNAVAILABLE") || !strings.Contains(w.Body.String(), "NO_LEADER") {
 		t.Fatalf("no Leader = %d %s, want LEADER_UNAVAILABLE with the reason", w.Code, w.Body.String())
@@ -473,7 +624,7 @@ func TestAFollowerHandsTheDirectoryToTheLeader(t *testing.T) {
 	// The Leader answers itself and hands nothing on.
 	w = httptest.NewRecorder()
 	own := &forwardRecorder{leader: http.NotFoundHandler()}
-	fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, own.forward, now).
+	fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, own.forward, nil, "", now).
 		ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies", nil))
 	if w.Code != 200 || own.calls != 0 {
 		t.Fatalf("the Leader = %d after %d hops, want its own answer", w.Code, own.calls)
@@ -522,6 +673,12 @@ func TestTheDirectoryNamesItsRedisReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The carried publication as the activation round reads it; the calls
+	// counted are the directory's own, after it.
+	if _, err := repository.LoadPublishedContent(f.h.ctx, f.published.Publication); err != nil {
+		t.Fatal(err)
+	}
+	hook.callers = nil
 	view := f.newView(t, f.reconciler, repository)
 	s := f.page(t, view, "")
 	row, err := view.ResolveCurrent(f.h.ctx, f.at, "", "", "1001", "")
@@ -568,7 +725,117 @@ func TestTheContentMemoKeepsTwoPublications(t *testing.T) {
 	if !memo.Holds(ref(2)) || !memo.Holds(ref(3)) {
 		t.Fatalf("the newest read again: holds 2 %v, 3 %v, want both", memo.Holds(ref(2)), memo.Holds(ref(3)))
 	}
+	// While the activation still carries the older one it stays; once
+	// nothing names it, it goes, and the newest stays whatever is named.
+	memo.Release(ref(2))
+	if !memo.Holds(ref(2)) || !memo.Holds(ref(3)) {
+		t.Fatalf("released while carried: holds 2 %v, 3 %v, want both", memo.Holds(ref(2)), memo.Holds(ref(3)))
+	}
+	memo.Release()
+	if memo.Holds(ref(2)) || !memo.Holds(ref(3)) {
+		t.Fatalf("released once nothing names it: holds 2 %v, 3 %v, want only 3", memo.Holds(ref(2)), memo.Holds(ref(3)))
+	}
 	if memo.Holds(controlplane.SnapshotPublicationRef{}) {
 		t.Fatal("an empty publication is held")
 	}
+}
+
+// A page of the directory hands a cursor to the next one, pinned to the
+// revision it was read at and to its filter: the next page follows it, a
+// cursor for another filter or one that does not decode is refused, and one
+// read before the Leader published again is stale rather than answered from
+// a different catalog.
+func TestTheDirectoryCursorWalksOneRevision(t *testing.T) {
+	f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
+	api := fleet.WithStrategyDirectory(http.NotFoundHandler(), f.view, nil, nil, "", func() time.Time { return f.at })
+	get := func(query string) (int, controlplane.StrategyDirectorySnapshot, string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		api.ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies"+query, nil))
+		var body struct {
+			controlplane.StrategyDirectorySnapshot
+			NextCursor string `json:"next_cursor"`
+			Error      string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: %s (%v)", query, w.Body.String(), err)
+		}
+		if body.Error != "" {
+			return w.Code, body.StrategyDirectorySnapshot, body.Error
+		}
+		return w.Code, body.StrategyDirectorySnapshot, body.NextCursor
+	}
+	code, first, cursor := get("&limit=1")
+	if code != 200 || len(first.Rows) != 1 || cursor == "" {
+		t.Fatalf("first page = %d rows %d cursor %q, want one row and a cursor", code, len(first.Rows), cursor)
+	}
+	code, second, last := get("&limit=1&cursor=" + cursor)
+	if code != 200 || len(second.Rows) != 1 || second.Rows[0].Identity == first.Rows[0].Identity || last != "" {
+		t.Fatalf("second page = %d rows %+v cursor %q, want the other row and no cursor", code, second.Rows, last)
+	}
+	if code, _, word := get("&limit=1&strategy=1001&cursor=" + cursor); code != 400 || word != "INVALID_CURSOR" {
+		t.Fatalf("a cursor for another filter = %d %q, want 400 INVALID_CURSOR", code, word)
+	}
+	if code, _, word := get("&limit=1&cursor=not-a-cursor"); code != 400 || word != "INVALID_CURSOR" {
+		t.Fatalf("a cursor that does not decode = %d %q, want 400 INVALID_CURSOR", code, word)
+	}
+	latestCatalog := catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)
+	latest := f.h.publish(t, latestCatalog)
+	f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
+	if code, _, word := get("&limit=1&cursor=" + cursor); code != 409 || word != "CURSOR_STALE" {
+		t.Fatalf("a cursor from before the Leader published again = %d %q, want 409 CURSOR_STALE", code, word)
+	}
+}
+
+// The Leader's activation round keeps a publication's content while its
+// activation carries a Plan on it, and lets it go with the first activation
+// it writes that carries none: the content memo's second slot held a whole
+// catalog's index for as long as nothing newer happened to be read.
+func TestTheActivationRoundLetsAPublicationsContentGoWhenNothingIsCarriedOnIt(t *testing.T) {
+	t.Run("carried", func(t *testing.T) {
+		f := newViewFixture(t, objectCatalogTwoGroups(t, 80))
+		old := f.published.Publication
+		latestCatalog := catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)
+		latest := f.h.publish(t, latestCatalog)
+		if _, err := indexReconciler(t, f.h.repository, sharedClock()).Ensure(f.h.ctx, latest.Publication); err != nil {
+			t.Fatal(err)
+		}
+		activation, err := f.h.repository.LoadActivation(f.h.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		carried := 0
+		for _, record := range activation.Plans {
+			if record.Publication == old {
+				carried++
+			}
+		}
+		if carried == 0 {
+			t.Fatal("setup: the cutover carries nothing on the old publication; the edit did not drain")
+		}
+		if !f.h.repository.HoldsContentForTest(old) {
+			t.Fatal("the activation still carries Plans on the old publication and its content was let go")
+		}
+	})
+	t.Run("nothing carried", func(t *testing.T) {
+		h := newObjectCatalogHarness(t)
+		old := h.publish(t, catalogWithSchedule(t, objectCatalogTwoGroups(t, 80), 60, 0)).Publication
+		latest := h.publish(t, catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0)).Publication
+		for _, publication := range []controlplane.SnapshotPublicationRef{old, latest} {
+			if _, err := h.repository.LoadPublishedContent(h.ctx, publication); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !h.repository.HoldsContentForTest(old) || !h.repository.HoldsContentForTest(latest) {
+			t.Fatal("setup: the repository does not hold both publications")
+		}
+		// The first activation this store has, on the latest publication.
+		if _, err := indexReconciler(t, h.repository, sharedClock()).Ensure(h.ctx, latest); err != nil {
+			t.Fatal(err)
+		}
+		if h.repository.HoldsContentForTest(old) || !h.repository.HoldsContentForTest(latest) {
+			t.Fatalf("after an activation that carries nothing on it: holds old %v, latest %v, want only the latest",
+				h.repository.HoldsContentForTest(old), h.repository.HoldsContentForTest(latest))
+		}
+	})
 }

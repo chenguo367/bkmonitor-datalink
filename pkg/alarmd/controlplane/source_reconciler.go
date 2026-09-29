@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -245,8 +246,10 @@ type SourceReconciler struct {
 	now    func() time.Time
 	memory *sourceRoundMemory
 	// reusable is the last round that ended UNCHANGED, whole; see
-	// reusableFor. Nil after any round that did not, and after StepDown.
-	reusable *reusableRound
+	// reusableFor. Nil after any round that did not, and after StepDown:
+	// steppedDown says one happened since the last round, which drops it.
+	reusable    *reusableRound
+	steppedDown atomic.Bool
 	// lastGood is the content of the latest publication this process knows,
 	// kept in memory from the catalog it published or assembled once from
 	// the object catalog after a restart; the whole snapshot body is no
@@ -403,6 +406,9 @@ func (reconciler *SourceReconciler) Refresh(
 	if reconciler == nil || reconciler.repository == nil || reconciler.publisher == nil || reconciler.compiler == nil ||
 		source == nil || planner == nil {
 		return SourceRefreshResult{}, errors.New("alarmd controlplane: incomplete source refresh request")
+	}
+	if reconciler.steppedDown.Swap(false) {
+		reconciler.reusable = nil
 	}
 	// Every outcome of a round that built a Catalog reports how it was built
 	// and how its source was read; both are filled at the end rather than

@@ -175,6 +175,18 @@ func (memo *publishedContentMemo) store(content PublishedContent) {
 	memo.held[1], memo.held[0] = memo.held[0], content
 }
 
+// release puts out the older content when nothing the activation carries
+// names it any more. The second slot is for a drain; past it, what it holds
+// is a whole publication's index kept for nothing until the next publication
+// happens to push it out. The newest read stays whatever it is.
+func (memo *publishedContentMemo) release(carried func(SnapshotPublicationRef) bool) {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if older := memo.held[1].Publication; older != (SnapshotPublicationRef{}) && !carried(older) {
+		memo.held[1] = PublishedContent{}
+	}
+}
+
 // LoadPublishedContent describes a publication from its manifest and the
 // catalog index, reading from the object catalog only the Query Groups the
 // index does not know for this revision. A missing manifest reads as an

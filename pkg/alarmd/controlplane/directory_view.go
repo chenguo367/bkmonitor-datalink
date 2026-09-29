@@ -24,23 +24,25 @@ import (
 // DirectoryView answers the strategy directory from what the control Leader
 // already holds: the catalog it published (the strategy index its rounds
 // build), the activation its repository has parsed for the version it runs,
-// and the content of the publications that activation carries Plans on. It
-// keeps no copy of its own and refreshes nothing. A row is built when a
-// request asks for it, and only the rows of the page asked for.
+// and whatever content of older publications the activation round already
+// holds. It keeps no copy of its own, refreshes nothing, and writes nothing
+// the Slots read from: a request reads the activation header, and the
+// objects of the rows it returns, and no manifest.
 //
 // Only the Leader answers. A follower, a Leader before its first completed
 // round, and a former Leader after it stepped down hold no publication of
 // their own: Available is false there, and the reader is sent to the
 // Leader rather than answered from a copy every replica would have to keep.
 //
-// What a row needs and where it comes from: the Plan, its Query Group, the
-// Query Group's revisions and the object it is read from from the published
-// catalog; the activation and the role from the activation; the output
-// context from the publication's content. A Plan still active on an older
-// publication - a Query Group draining after its query changed - is named
-// from that publication's content, and its revisions from its object, read
-// for the rows a request returns and no others. A publication whose manifest
-// has expired names its Plans from the activation alone (ManifestExpired).
+// Where a row comes from. A Plan of the published catalog: the catalog. A
+// Plan the activation still carries on an older publication: that
+// publication's content when the activation round holds it, its revisions
+// from its object; otherwise the activation alone, marked ContentNotHeld -
+// the Plan, its publication and selection, nothing guessed about the rest.
+// The published catalog does not stand in for a carried publication's
+// content, even for a Plan whose key, schedule revision and state generation
+// it shares: those are all an activation record says, and a later
+// publication can change a Plan's detection under all three.
 type DirectoryView struct {
 	reconciler *SourceReconciler
 	repository *RedisCatalogRepository
@@ -48,8 +50,7 @@ type DirectoryView struct {
 }
 
 // NewDirectoryView builds the view over one process's control plane. The
-// timeout bounds the reads one request makes: the activation header, an
-// older publication's content, the objects its rows name.
+// timeout bounds one request: its reads and the rows it builds.
 func NewDirectoryView(reconciler *SourceReconciler, repository *RedisCatalogRepository, timeout time.Duration) (*DirectoryView, error) {
 	if reconciler == nil || repository == nil || timeout <= 0 {
 		return nil, errors.New("alarmd controlplane: a directory view needs the reconciler, the repository and a timeout")
@@ -63,35 +64,56 @@ func (view *DirectoryView) Available() bool {
 	return view != nil && view.reconciler.publishedIndex() != nil
 }
 
-// directoryAnswer is what one request reads, once: the publication, the
-// activation, and the rows it names in the order a page reads them.
+// directoryAnswer is what one request reads, once, and the indexes every row
+// of it is built from.
 type directoryAnswer struct {
 	snapshot StrategyDirectorySnapshot
 	index    *strategyIndex
-	// active is every Plan the activation carries, by key, and carried the
-	// publications other than the published one it carries them on, in the
-	// order the activation lists them.
-	active  map[execution.PlanKey]PlanActivationRecord
+	// records is every Plan the activation carries, by identity; carried the
+	// publications other than the published one it carries them on.
+	records map[execution.PlanIdentity][]PlanActivationRecord
 	carried []SnapshotPublicationRef
-	// older is the content of each carried publication read so far, and
-	// expired the carried publications whose manifest is gone.
-	older   map[SnapshotPublicationRef]PublishedContent
-	expired map[SnapshotPublicationRef]bool
+	// contexts is the published content's output context naming, and held
+	// the carried publications whose content the activation round holds.
+	contexts map[execution.PlanIdentity]execution.OutputContextDigest
+	held     map[SnapshotPublicationRef]heldPublication
 	// objects are the Query Group objects read for this answer's rows.
 	objects map[execution.ObjectDigest]QueryGroupObject
 }
 
-// answer reads what every row of this request is built from. It fails only
-// when the view has nothing to answer with; a failed read of a carried
-// publication is recorded on the snapshot and leaves its rows out.
+// heldPublication is a carried publication's content as a page reads it: by
+// Plan identity, where each Plan sits, and its output contexts.
+type heldPublication struct {
+	plans    map[execution.PlanIdentity][]heldPlan
+	contexts map[execution.PlanIdentity]execution.OutputContextDigest
+}
+
+type heldPlan struct {
+	key    execution.PlanKey
+	group  execution.QueryGroupIdentity
+	digest execution.ObjectDigest
+}
+
+func holdPublication(content PublishedContent) heldPublication {
+	held := heldPublication{plans: map[execution.PlanIdentity][]heldPlan{}, contexts: contextRefsOf(content)}
+	for group, entry := range content.Groups {
+		for _, key := range entry.Plans {
+			held.plans[key.PlanIdentity] = append(held.plans[key.PlanIdentity], heldPlan{key: key, group: group, digest: entry.Digest})
+		}
+	}
+	return held
+}
+
+// answer reads what every row of this request is built from: the activation
+// header and nothing else. It fails only when the view has nothing to answer
+// with.
 func (view *DirectoryView) answer(ctx context.Context, at time.Time) (*directoryAnswer, error) {
 	index := view.reconciler.publishedIndex()
 	if index == nil {
 		return nil, ErrSnapshotUnavailable
 	}
-	a := &directoryAnswer{index: index, active: map[execution.PlanKey]PlanActivationRecord{},
-		older: map[SnapshotPublicationRef]PublishedContent{}, expired: map[SnapshotPublicationRef]bool{},
-		objects: map[execution.ObjectDigest]QueryGroupObject{}}
+	a := &directoryAnswer{index: index, records: map[execution.PlanIdentity][]PlanActivationRecord{},
+		held: map[SnapshotPublicationRef]heldPublication{}, objects: map[execution.ObjectDigest]QueryGroupObject{}}
 	s := &a.snapshot
 	s.ObservedAt, s.Published, s.SourceObservation = at, index.publication, index.observation
 	s.GroupsTotal, s.GroupsKnown, s.Rows = len(index.groups), len(index.groups), []StrategyDirectoryRow{}
@@ -108,35 +130,22 @@ func (view *DirectoryView) answer(ctx context.Context, at time.Time) (*directory
 	s.Revision = fmt.Sprintf("%s:%d:%d", index.publication.SnapshotRevision, index.publication.PublicationEpoch, activation.RecordRevision)
 	counts := map[SnapshotPublicationRef]int{}
 	for _, record := range activation.Plans {
-		a.active[record.Fact.Key()] = record
+		a.records[record.Fact.Plan] = append(a.records[record.Fact.Plan], record)
 		counts[record.Publication]++
 		if record.Publication != index.publication && counts[record.Publication] == 1 && record.Publication.validate() == nil {
 			a.carried = append(a.carried, record.Publication)
 		}
 	}
 	s.Complete = true
+	a.contexts = view.repository.rememberedContextRefs(index.publication)
 	s.Publications = append(s.Publications, DirectoryPublication{Publication: index.publication, Plans: counts[index.publication], Manifest: "memory"})
 	for _, publication := range a.carried {
-		read := DirectoryPublication{Publication: publication, Plans: counts[publication], Manifest: "store"}
-		if _, remembered := view.repository.contentMemo.lookup(publication); remembered {
+		read := DirectoryPublication{Publication: publication, Plans: counts[publication], Manifest: "not_held"}
+		// Only what the activation round already holds. A page reads no
+		// manifest and puts nothing in the memo the Slots read from.
+		if content, held := view.repository.contentMemo.lookup(publication); held {
 			read.Manifest = "memory"
-		}
-		content, err := view.repository.LoadPublishedContent(ctx, publication)
-		switch {
-		case errors.Is(err, ErrSnapshotUnavailable):
-			// Its Plans run on objects the cutover renews while the manifest
-			// that listed them is past its retention: named from the
-			// activation, nothing guessed about the rest.
-			read.Manifest = "expired"
-			a.expired[publication] = true
-		case err != nil:
-			read.Manifest = "failed"
-			failed := publication
-			view.fail(s, "manifest", view.repository.catalogManifestKey(publication.SnapshotRevision), &failed, err)
-		default:
-			a.older[publication] = content
-			s.GroupsTotal += len(content.Groups)
-			s.GroupsKnown += len(content.Groups)
+			a.held[publication] = holdPublication(content)
 		}
 		s.Publications = append(s.Publications, read)
 	}
@@ -152,14 +161,21 @@ func (view *DirectoryView) fail(s *StrategyDirectorySnapshot, step, key string, 
 	}
 }
 
-// rowsOf is every row of one Plan identity in this answer: its Plans in the
-// published catalog, then those still active on a carried publication, then
-// those on a carried publication whose manifest expired, each sorted as a
-// page reads them - by Query Group, then by publication.
-func (view *DirectoryView) rowsOf(ctx context.Context, a *directoryAnswer, identity execution.PlanIdentity, s *StrategyDirectorySnapshot) []StrategyDirectoryRow {
-	var rows []StrategyDirectoryRow
+// rowDraft is a row before what only a returned row pays for: the published
+// group's object digest, derived from the group, and a held group's
+// revisions, read from its object.
+type rowDraft struct {
+	row    StrategyDirectoryRow
+	group  *QueryGroup
+	object execution.ObjectDigest
+}
+
+// drafts is every row of one Plan identity, sorted as a page reads them - by
+// Query Group, then by publication, then by shard. Nothing is read.
+func (a *directoryAnswer) drafts(identity execution.PlanIdentity) []rowDraft {
+	var drafts []rowDraft
 	published := a.index.publication
-	contexts := view.repository.rememberedContextRefs(published)
+	records := a.records[identity]
 	for _, at := range a.index.plans[identity.StrategyID] {
 		group := &a.index.groups[at.group]
 		plan := &group.Plans[at.plan]
@@ -167,71 +183,74 @@ func (view *DirectoryView) rowsOf(ctx context.Context, a *directoryAnswer, ident
 			continue
 		}
 		row := StrategyDirectoryRow{Identity: plan.Identity, QueryGroup: group.Identity, Publication: published, Role: "PUBLISHED",
-			QueryRevision: group.QueryPlan.QueryRevision, ScheduleRevision: group.ScheduleRevision, OutputContext: contexts[plan.Identity]}
-		if digest, err := DeriveQueryGroupObjectDigest(*group); err == nil {
-			row.ObjectDigest = digest
-		}
-		if record, active := a.active[plan.Key()]; active && record.Publication == published {
-			fact := record.Fact
-			row.Activation, row.Role = &fact, string(fact.Selection)
-		}
-		rows = append(rows, row)
-	}
-	for _, publication := range a.carried {
-		// Expired and failed publications have no content read.
-		content, read := a.older[publication]
-		if !read {
-			continue
-		}
-		carriedContexts := contextRefsOf(content)
-		for groupIdentity, entry := range content.Groups {
-			for _, key := range entry.Plans {
-				if key.PlanIdentity != identity {
-					continue
-				}
-				record, active := a.active[key]
-				if !active || record.Publication != publication {
-					continue
-				}
+			QueryRevision: group.QueryPlan.QueryRevision, ScheduleRevision: group.ScheduleRevision, OutputContext: a.contexts[plan.Identity]}
+		for _, record := range records {
+			if record.Publication == published && record.Fact.Key() == plan.Key() {
 				fact := record.Fact
-				row := StrategyDirectoryRow{Identity: key.PlanIdentity, QueryGroup: groupIdentity, ObjectDigest: entry.Digest,
-					Publication: publication, Role: string(fact.Selection), Activation: &fact, OutputContext: carriedContexts[key.PlanIdentity]}
-				object, err := view.object(ctx, a, entry.Digest)
-				if err != nil {
-					// The row is named; the revisions only its object holds are
-					// left empty rather than guessed, and the answer says so.
-					failed := publication
-					view.fail(s, "group_object", view.repository.queryGroupObjectKey(entry.Digest), &failed, err)
-				} else {
-					row.QueryRevision, row.ScheduleRevision = object.QueryPlan.QueryRevision, object.ScheduleRevision
-				}
-				rows = append(rows, row)
+				row.Activation, row.Role = &fact, string(fact.Selection)
 			}
 		}
+		drafts = append(drafts, rowDraft{row: row, group: group})
 	}
-	for _, publication := range a.carried {
-		if !a.expired[publication] {
+	for _, record := range records {
+		if record.Publication == published {
 			continue
 		}
-		for _, record := range a.active {
-			if record.Publication != publication || record.Fact.Plan != identity {
+		fact := record.Fact
+		row := StrategyDirectoryRow{Identity: fact.Plan, Publication: record.Publication, Role: string(fact.Selection), Activation: &fact}
+		if held, holds := a.held[record.Publication]; holds {
+			if plan, found := held.find(fact.Key()); found {
+				row.QueryGroup, row.ObjectDigest, row.OutputContext = plan.group, plan.digest, held.contexts[fact.Plan]
+				drafts = append(drafts, rowDraft{row: row, object: plan.digest})
 				continue
 			}
-			fact := record.Fact
-			rows = append(rows, StrategyDirectoryRow{Identity: fact.Plan, Publication: publication, Role: string(fact.Selection),
-				Activation: &fact, ManifestExpired: true})
+		}
+		row.ContentNotHeld = true
+		drafts = append(drafts, rowDraft{row: row})
+	}
+	sort.SliceStable(drafts, func(i, j int) bool {
+		left, right := drafts[i].row, drafts[j].row
+		if left.QueryGroup != right.QueryGroup {
+			return left.QueryGroup < right.QueryGroup
+		}
+		if left.Publication.PublicationEpoch != right.Publication.PublicationEpoch {
+			return left.Publication.PublicationEpoch < right.Publication.PublicationEpoch
+		}
+		return shardOf(left) < shardOf(right)
+	})
+	return drafts
+}
+
+func (held heldPublication) find(key execution.PlanKey) (heldPlan, bool) {
+	for _, plan := range held.plans[key.PlanIdentity] {
+		if plan.key == key {
+			return plan, true
 		}
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].QueryGroup != rows[j].QueryGroup {
-			return rows[i].QueryGroup < rows[j].QueryGroup
+	return heldPlan{}, false
+}
+
+// finish builds a returned row: the published group's digest, a held
+// group's revisions from its object.
+func (view *DirectoryView) finish(ctx context.Context, a *directoryAnswer, s *StrategyDirectorySnapshot, draft rowDraft) StrategyDirectoryRow {
+	row := draft.row
+	if draft.group != nil {
+		if digest, err := DeriveQueryGroupObjectDigest(*draft.group); err == nil {
+			row.ObjectDigest = digest
 		}
-		if rows[i].Publication.PublicationEpoch != rows[j].Publication.PublicationEpoch {
-			return rows[i].Publication.PublicationEpoch < rows[j].Publication.PublicationEpoch
+	}
+	if draft.object != "" {
+		object, err := view.object(ctx, a, draft.object)
+		if err != nil {
+			// The row is named; the revisions only its object holds are left
+			// empty rather than guessed, and the answer says so.
+			failed := row.Publication
+			view.fail(s, "group_object", view.repository.queryGroupObjectKey(draft.object), &failed, err)
+		} else {
+			row.QueryRevision, row.ScheduleRevision = object.QueryPlan.QueryRevision, object.ScheduleRevision
 		}
-		return shardOf(rows[i]) < shardOf(rows[j])
-	})
-	return rows
+	}
+	return row
 }
 
 func shardOf(row StrategyDirectoryRow) int {
@@ -289,12 +308,15 @@ func (a *directoryAnswer) identities(strategy string) []execution.PlanIdentity {
 	// A Plan active only on a carried publication - its strategy left the
 	// catalog's current Query Group, or the catalog no longer has it - is
 	// still a row.
-	for _, record := range a.active {
-		if record.Publication == a.index.publication {
+	for identity, records := range a.records {
+		if strategy != "" && identity.StrategyID != strategy {
 			continue
 		}
-		if strategy == "" || record.Fact.Plan.StrategyID == strategy {
-			add(record.Fact.Plan)
+		for _, record := range records {
+			if record.Publication != a.index.publication {
+				add(identity)
+				break
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return lessPlanIdentity(out[i], out[j]) })
@@ -302,9 +324,11 @@ func (a *directoryAnswer) identities(strategy string) []execution.PlanIdentity {
 }
 
 // Page answers one page of the directory: the rows of one strategy, or of
-// every strategy, from offset, at most limit of them. The source
-// dispositions of the strategy asked for come with it; they carry no tenant
-// and are not joined to a Plan.
+// every strategy, from offset, at most limit of them. The rows before the
+// page cost a walk of the indexes and nothing else; the page's own rows
+// derive their digests and read their objects. The source dispositions of the
+// strategy asked for come with it; they carry no tenant and are not joined to
+// a Plan. A page that runs past the request's time says so and stops.
 func (view *DirectoryView) Page(ctx context.Context, at time.Time, tenant, business, strategy string, offset, limit int) StrategyDirectorySnapshot {
 	ctx, cancel := context.WithTimeout(redisfailure.WithCaller(ctx, redisfailure.CallerDirectoryRead), view.timeout)
 	defer cancel()
@@ -325,10 +349,14 @@ func (view *DirectoryView) Page(ctx context.Context, at time.Time, tenant, busin
 	}
 	s.SourceTruncated = s.SourceMatchedTotal > len(s.Unattributed)
 	for _, identity := range a.identities(strategy) {
+		if ctx.Err() != nil {
+			s.Complete, s.Reason = false, "DEADLINE"
+			return s
+		}
 		if tenant != "" && identity.TenantID != tenant || business != "" && identity.BusinessID != business {
 			continue
 		}
-		for _, row := range view.rowsOf(ctx, a, identity, &s) {
+		for _, draft := range a.drafts(identity) {
 			if offset > 0 {
 				offset--
 				continue
@@ -336,7 +364,7 @@ func (view *DirectoryView) Page(ctx context.Context, at time.Time, tenant, busin
 			if len(s.Rows) >= limit {
 				return s
 			}
-			s.Rows = append(s.Rows, row)
+			s.Rows = append(s.Rows, view.finish(ctx, a, &s, draft))
 		}
 	}
 	return s
@@ -345,8 +373,9 @@ func (view *DirectoryView) Page(ctx context.Context, at time.Time, tenant, busin
 // ResolveCurrent is the one row of a strategy running under the current
 // activation, narrowed by tenant, business and Query Group where given. A
 // strategy whose Plans name two identities, or with two current rows, is
-// ambiguous; one with none is unavailable. expectedRevision, when given,
-// holds the answer to the revision a page was read at.
+// ambiguous; one with none is unavailable - as is one whose current row's
+// content is not held, which names no Query Group. expectedRevision, when
+// given, holds the answer to the revision a page was read at.
 func (view *DirectoryView) ResolveCurrent(ctx context.Context, at time.Time, tenant, business, strategy, group string,
 	expectedRevision ...string) (StrategyDirectoryRow, error) {
 	ctx, cancel := context.WithTimeout(redisfailure.WithCaller(ctx, redisfailure.CallerDirectoryRead), view.timeout)
@@ -362,29 +391,31 @@ func (view *DirectoryView) ResolveCurrent(ctx context.Context, at time.Time, ten
 		return StrategyDirectoryRow{}, ErrSnapshotUnavailable
 	}
 	var identity execution.PlanIdentity
-	var selected StrategyDirectoryRow
+	var selected *rowDraft
 	for _, candidate := range a.identities(strategy) {
 		if tenant != "" && candidate.TenantID != tenant || business != "" && candidate.BusinessID != business {
 			continue
 		}
-		for _, row := range view.rowsOf(ctx, a, candidate, &a.snapshot) {
+		drafts := a.drafts(candidate)
+		for index := range drafts {
+			row := drafts[index].row
 			if identity != (execution.PlanIdentity{}) && identity != row.Identity {
 				return StrategyDirectoryRow{}, ErrObservationAmbiguous
 			}
 			identity = row.Identity
-			if group != "" && string(row.QueryGroup) != group || row.Role != string(execution.ActivationCurrent) {
+			if group != "" && string(row.QueryGroup) != group || row.Role != string(execution.ActivationCurrent) || row.QueryGroup == "" {
 				continue
 			}
-			if selected.QueryGroup != "" {
+			if selected != nil {
 				return StrategyDirectoryRow{}, ErrObservationAmbiguous
 			}
-			selected = row
+			selected = &drafts[index]
 		}
 	}
-	if selected.QueryGroup == "" {
+	if selected == nil {
 		return StrategyDirectoryRow{}, ErrSnapshotUnavailable
 	}
-	return selected, nil
+	return view.finish(ctx, a, &a.snapshot, *selected), nil
 }
 
 // EffectivePlan is the Plan a row names, read from its Query Group object:

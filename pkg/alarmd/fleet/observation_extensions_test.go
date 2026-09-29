@@ -85,7 +85,7 @@ func TestObservationSampleAPIPreservesLegacyAndExposesExtraBudget(t *testing.T) 
 }
 
 func TestObservationUnavailableDirectoryDoesNotDelegateToAnomalyList(t *testing.T) {
-	h := WithStrategyDirectory(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("strategy request became anomaly list") }), nil, nil, time.Now)
+	h := WithStrategyDirectory(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("strategy request became anomaly list") }), nil, nil, nil, "", time.Now)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/objects?scope=strategies", nil))
 	if w.Code != 503 {

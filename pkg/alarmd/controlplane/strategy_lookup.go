@@ -252,10 +252,14 @@ func (reconciler *SourceReconciler) publishedIndex() *strategyIndex {
 // build, not stand on a Catalog from before another Leader may have
 // published: the activation check would refuse most of those, and a term
 // boundary is not where that should rest on one check.
+//
+// Safe from any goroutine: the lease can be lost on a path other than the
+// round's. The index goes at once, under its lock; the reusable round is
+// the round's own field, and the next round drops it before reading it.
 func (reconciler *SourceReconciler) StepDown() {
 	if reconciler == nil {
 		return
 	}
 	reconciler.strategies.replace(nil)
-	reconciler.reusable = nil
+	reconciler.steppedDown.Store(true)
 }

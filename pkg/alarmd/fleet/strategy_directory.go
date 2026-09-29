@@ -47,8 +47,16 @@ func toLeader(w http.ResponseWriter, r *http.Request, directory StrategyDirector
 
 // WithStrategyDirectory extends the existing object endpoint without changing
 // its default anomaly-list meaning. The wrapper needs no second HTTP server.
-// Only the control Leader answers; a follower forwards the request to it.
-func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forward LeaderForward, now func() time.Time) http.Handler {
+// Only the control Leader answers; a follower forwards the request to it. A
+// process that holds no catalog answers not ready with why (absence), read
+// from the control plane now.
+//
+// One page is built at a time: a page's reads go through the runtime's own
+// connections, and a second request while one is in flight is refused as
+// busy rather than queued behind it.
+func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forward LeaderForward, absence CatalogAbsenceFunc,
+	replica string, now func() time.Time) http.Handler {
+	pageRead := make(chan struct{}, 1)
 	// Configuration reads are point reads but can decode a large shared group.
 	// Only one may run per process; the diagnostic request is rejected instead
 	// of occupying more execution connections or keeping a waiting queue.
@@ -68,6 +76,13 @@ func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forwa
 			return
 		}
 		if toLeader(w, r, directory, forward) {
+			return
+		}
+		select {
+		case pageRead <- struct{}{}:
+			defer func() { <-pageRead }()
+		default:
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "OBSERVATION_BUSY"})
 			return
 		}
 		limit := 20
@@ -123,7 +138,19 @@ func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forwa
 			// purpose, and the question "what did the deployment's choice come
 			// out as for this strategy" is asked with the configuration.
 			EffectiveOutput *controlplane.OutputFormatFacts `json:"effective_output,omitempty"`
+			// NotReady is why this process holds no catalog to answer from,
+			// on a not-ready answer: not the Leader, a round still to come or
+			// failing, in the words a strategy's standing refuses with.
+			NotReady *CatalogAbsence `json:"not_ready,omitempty"`
 		}{StrategyDirectorySnapshot: snapshot, NextCursor: nextCursor}
+		if snapshot.Reason == "LEADER_CATALOG_NOT_READY" {
+			facts := CatalogAbsenceFacts{}
+			if absence != nil {
+				facts = absence()
+			}
+			notReady := catalogAbsenceOf(facts, replica, absence != nil)
+			body.NotReady = &notReady
+		}
 		if include := q.Get("include"); include != "" {
 			if include != "effective_config" || strategy == "" || offset != 0 {
 				writeJSON(w, 400, map[string]string{"error": "INVALID_CONFIG_REQUEST"})

@@ -63,8 +63,7 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 // catalogAbsenceSource reads why this process holds no published catalog,
 // live, from the same state the first screen's control source facts are
 // built from. The fleet decides the word from these facts; this only hands
-// them over, plus whether the strategy directory -- the other route that
-// answers the same question, from the store -- is mounted on this process.
+// them over.
 //
 // Read live rather than from the fleet snapshot on purpose: the snapshot is
 // a published copy up to a publication interval old, and the two states this
@@ -89,7 +88,7 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 // fact that settles it is two files away. The nil branch below is not
 // standing in for that ordering -- it is for the readers wired before the
 // bundle exists at all, which is the truth rather than a role invented here.
-func catalogAbsenceSource(bundleOf func() *phaseTwoWorkerBundle, directoryMounted bool) fleet.CatalogAbsenceFunc {
+func catalogAbsenceSource(bundleOf func() *phaseTwoWorkerBundle) fleet.CatalogAbsenceFunc {
 	if bundleOf == nil {
 		return nil
 	}
@@ -98,12 +97,11 @@ func catalogAbsenceSource(bundleOf func() *phaseTwoWorkerBundle, directoryMounte
 		if bundle == nil {
 			// Wired, and with nothing to report yet: the word for that is
 			// the one for "could not be read", not a role invented here.
-			return fleet.CatalogAbsenceFacts{DirectoryMounted: directoryMounted}
+			return fleet.CatalogAbsenceFacts{}
 		}
 		view := bundle.controlSourceView()
 		facts := fleet.CatalogAbsenceFacts{
 			Known: view.known, Role: string(view.role), Exit: view.lastFailureExit, Text: view.lastFailure,
-			DirectoryMounted: directoryMounted,
 		}
 		if !view.degradedSince.IsZero() {
 			seconds := view.now.Sub(view.degradedSince).Seconds()

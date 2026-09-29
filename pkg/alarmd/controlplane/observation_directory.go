@@ -32,19 +32,21 @@ type StrategyDirectoryRow struct {
 	// either, which the output read reports as unknown rather than fetching a
 	// manifest to find out.
 	OutputContext execution.OutputContextDigest `json:"output_context_digest,omitempty"`
-	// ManifestExpired is a Plan the activation still carries on a publication
-	// whose manifest is gone: the row names the Plan, its publication and its
-	// activation, and nothing the manifest would have said -- the Query Group,
-	// the object, the revisions -- which is left empty rather than guessed.
-	ManifestExpired bool `json:"manifest_expired,omitempty"`
+	// ContentNotHeld is a Plan the activation still carries on an older
+	// publication whose content the Leader does not hold: a Query Group that
+	// changed and whose draining content the activation round has not read.
+	// The row names the Plan, its publication and its activation, and
+	// nothing the content would have said - the Query Group, the object, the
+	// revisions - which is left empty rather than guessed.
+	ContentNotHeld bool `json:"content_not_held,omitempty"`
 }
 
-// DirectoryPublication is one publication a directory answer read: how
-// many active Plans the activation carries on it, and where its content came
-// from -- memory for the publication the Leader made and for one its
-// activation round already read, store otherwise; expired when a carried
-// publication's manifest key is gone, failed when the read did not return it
-// for any other reason.
+// DirectoryPublication is one publication a directory answer names: how many
+// active Plans the activation carries on it, and where its content came from
+// - memory for the publication the Leader made and for one the activation
+// round holds, not_held for one it does not, whose Plans are named from the
+// published catalog when their content did not change and from the
+// activation alone otherwise (ContentNotHeld).
 type DirectoryPublication struct {
 	Publication SnapshotPublicationRef `json:"publication"`
 	Plans       int                    `json:"plans"`

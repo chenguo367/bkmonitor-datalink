@@ -12,7 +12,9 @@ package memoryline
 import (
 	"math"
 	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeHeap is the runtime's reading, set by the test.
@@ -98,5 +100,60 @@ func TestTheLineReadsTheRunningProcess(t *testing.T) {
 	}
 	if !line.Admit(ConsumerCostProjection, 1) {
 		t.Fatalf("one byte refused by a test process: %+v", reading)
+	}
+}
+
+// The line over the running process takes detection's reserve as a
+// collection ends. Detection that fills after the collection and before
+// observation next asks is in neither the live heap nor what the budgets can
+// still take by then; read at that next ask, the line would have counted the
+// fill nowhere and given its room to observation.
+func TestTheReserveIsTakenAsTheCollectionEnds(t *testing.T) {
+	line := New()
+	var unused atomic.Uint64
+	unused.Store(1 << 30)
+	line.Reserve(func() uint64 { return unused.Load() })
+	before := line.read().cycles
+	runtime.GC()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		line.mu.Lock()
+		cycle := line.cycle
+		line.mu.Unlock()
+		if cycle > before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no snapshot after the collection: the line is at cycle %d, the collection made it past %d", cycle, before)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Detection fills 900 MiB of its budget before observation asks.
+	unused.Store(1<<30 - 900<<20)
+	if reading := line.Read(); reading.ReservedBytes != 1<<30 {
+		t.Fatalf("reserved = %d, want the %d the budgets could take as the collection ended", reading.ReservedBytes, uint64(1<<30))
+	}
+}
+
+// A closed line is told of no collection after the one that ends its watch:
+// a bundle that closed let its line go instead of keeping it, and every
+// budget it reserves, for the life of the process.
+func TestAClosedLineIsToldOfNoMoreCollections(t *testing.T) {
+	line := New()
+	line.Close()
+	// The collection whose finalizer sees the line closed.
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	line.mu.Lock()
+	cycle := line.cycle
+	line.mu.Unlock()
+	for range 3 {
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+	line.mu.Lock()
+	defer line.mu.Unlock()
+	if line.cycle != cycle {
+		t.Fatalf("a closed line moved from cycle %d to %d with no reading of its own", cycle, line.cycle)
 	}
 }
