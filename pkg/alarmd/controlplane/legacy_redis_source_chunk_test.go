@@ -62,6 +62,12 @@ func storeStrategyDocuments(t *testing.T, client *redis.Client, n int) []string 
 // across the boundary. No documents is no MGET.
 func TestLegacyRedisStrategySourceReadsDocumentsInBoundedMGets(t *testing.T) {
 	chunk := controlplane.LegacyStrategyMGetChunkForTest
+	// The cases below follow the constant, so they pass whatever it is set
+	// to - a value large enough to put every document back in one MGET
+	// included. The bound itself is the decision, and it is held here.
+	if chunk != 500 {
+		t.Fatalf("one MGET reads %d strategy documents, want 500", chunk)
+	}
 	for _, tc := range []struct {
 		n    int
 		want []int
