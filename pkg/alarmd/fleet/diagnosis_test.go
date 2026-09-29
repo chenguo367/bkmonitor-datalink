@@ -282,7 +282,7 @@ func TestALaterPageThatRereadsSaysSoAndNamesAChangedUniverse(t *testing.T) {
 // and neither changes a verdict.
 func TestDiagnosisProgressFillsSlotsAndNamesWhatItCouldNotRead(t *testing.T) {
 	var asked [][]string
-	rig := newDiagnosisRig(t, diagnosisFacts(), func(_ context.Context, groups []string) (map[string]ProgressFacts, map[string]bool, error) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), func(_ context.Context, groups []string) (map[string]ProgressFacts, map[string]string, error) {
 		asked = append(asked, groups)
 		return map[string]ProgressFacts{"qg-4101-a": {LastFullSlot: 1790150400, NextSlot: 1790150460}}, nil, nil
 	})
@@ -299,15 +299,15 @@ func TestDiagnosisProgressFillsSlotsAndNamesWhatItCouldNotRead(t *testing.T) {
 		t.Errorf("row = %+v, want b's progress unknown and the verdict unchanged", row)
 	}
 
-	oneFailed := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]bool, error) {
-		return map[string]ProgressFacts{}, map[string]bool{"qg-4101-a": true}, nil
+	oneFailed := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]string, error) {
+		return map[string]ProgressFacts{}, map[string]string{"qg-4101-a": ProgressReadFailed}, nil
 	})
 	oneFailed.universe = []string{"4103"}
 	if body = oneFailed.page(t, "", 0); !hasPart(body.Strategies[0], "qg-4101-a progress", ProgressReadFailed) {
 		t.Errorf("a failed object read = %+v, want PROGRESS_READ_FAILED apart from not found", body.Strategies[0].UnknownParts)
 	}
 
-	failing := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]bool, error) {
+	failing := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]string, error) {
 		return nil, nil, errors.New("down")
 	})
 	failing.universe = []string{"4103"}
@@ -472,5 +472,32 @@ func TestADiagnosisRowMarksAStrategyTheSourceMarksGlobal(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), `"global":false`) {
 		t.Fatal(`"global":false was written: the field is omitted for ordinary strategies`)
+	}
+}
+
+// Progress the memory line had no room for is deferred on its row, not
+// missing and not failed, and the page says how much of it was left: the
+// objects it asked about and how many it did not read.
+func TestADiagnosisPageSaysHowMuchProgressItLeftUnread(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), func(_ context.Context, groups []string) (map[string]ProgressFacts, map[string]string, error) {
+		return map[string]ProgressFacts{"qg-4101-a": {LastFullSlot: 1790150400, NextSlot: 1790150460}},
+			map[string]string{"qg-4101-b": ProgressDeferred}, nil
+	})
+	rig.universe = []string{"4101"}
+	body := rig.page(t, "", 0)
+	if body.Progress != "partial" || body.ProgressObjects != 2 || body.ProgressDeferred != 1 {
+		t.Fatalf("progress %q objects %d deferred %d, want partial with one of two left", body.Progress, body.ProgressObjects,
+			body.ProgressDeferred)
+	}
+	if row := body.Strategies[0]; !hasPart(row, "qg-4101-b progress", ProgressDeferred) {
+		t.Fatalf("row parts %+v, want the deferred object's progress unknown as deferred", row.UnknownParts)
+	}
+	// Nothing deferred is a read page, and says nothing more.
+	whole := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]string, error) {
+		return map[string]ProgressFacts{}, map[string]string{}, nil
+	})
+	whole.universe = []string{"4101"}
+	if body := whole.page(t, "", 0); body.Progress != "read" || body.ProgressObjects != 0 || body.ProgressDeferred != 0 {
+		t.Fatalf("progress %q objects %d deferred %d, want read and nothing more", body.Progress, body.ProgressObjects, body.ProgressDeferred)
 	}
 }

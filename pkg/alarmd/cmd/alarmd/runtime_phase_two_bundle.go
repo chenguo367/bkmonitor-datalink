@@ -1141,10 +1141,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// process takes the catalog over, on the fleet publish cadence below, so
 	// the first page asked after a hand-over is not the process's first read.
 	diagnosisWarmer := fleet.NewDiagnosisWarmer(fleetService, strategyLookupSource(reconciler),
-		diagnosisUniverse(strategySource), diagnosisProgress(progressStore), external.Now, stallAfter)
+		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)), external.Now, stallAfter)
 	fleetAPI = fleet.WithDiagnosis(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout, "diagnosis", recorder.ObserveLeaderForward),
-		diagnosisUniverse(strategySource), diagnosisProgress(progressStore),
+		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter, diagnosisWarmer)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
@@ -1357,7 +1357,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// overdue count above is only readable next to this: on a build that
 		// suppresses nothing it can only be zero.
 		dispatch:         bundle.dispatchSuppressionFacts,
-		restore:          progressRestoreSource(progressStore),
+		restore:          progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
 		staleAfter:       stallAfter,
 		restoreBudget:    fleetRestoreBudgetPerPublish,
 		openAlerts:       openAlertFacts,

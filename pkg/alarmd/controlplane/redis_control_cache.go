@@ -460,6 +460,13 @@ func (cache *controlReadCache) configureTimelineBounds(maxEntries, maxBytes int)
 	}
 }
 
+// timelineByteBound is the bytes the timeline cache may hold.
+func (cache *controlReadCache) timelineByteBound() int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.maxBytes
+}
+
 func (cache *controlReadCache) timelineOccupancy() ControlTimelineCacheOccupancy {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()

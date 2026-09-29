@@ -48,10 +48,17 @@ const (
 	// ConsumerFleetRounds is the fleet tracker's rounds kept per object past
 	// the fixed last few, sized by how far each object's windows reach back.
 	ConsumerFleetRounds Consumer = "fleet_rounds"
+	// ConsumerFleetRestore is the Progress records a publish reads back to
+	// restore the objects it owns, one batch at a time.
+	ConsumerFleetRestore Consumer = "fleet_restore"
+	// ConsumerDiagnosisProgress is the Progress records a diagnosis page
+	// reads for its objects.
+	ConsumerDiagnosisProgress Consumer = "diagnosis_progress"
 )
 
 // Consumers is every consumer, in the order they are reported.
-var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds}
+var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds,
+	ConsumerFleetRestore, ConsumerDiagnosisProgress}
 
 // Budget is one detection budget as the line reads it: its size - the most
 // it can come to hold, a cache's working set rather than its ceiling - and

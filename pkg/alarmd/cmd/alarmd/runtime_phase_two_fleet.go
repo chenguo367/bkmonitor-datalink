@@ -161,15 +161,16 @@ type fleetPublisher struct {
 	// just started can speak for it without waiting to watch a fresh round.
 	// Nil disables it, and the replica then reports every object as unknown
 	// until each completes one -- the behaviour a restart used to force.
-	restore func(context.Context, execution.QueryGroupIdentity) (fleet.RestoredState, error)
+	// It reads a batch at a time, a state or an error per object, in order.
+	restore func(context.Context, []execution.QueryGroupIdentity) ([]fleet.RestoredState, []error)
 	// staleAfter is how far behind an object's Progress cursor may be before
 	// its persisted completion stops being evidence about now.
 	staleAfter time.Duration
-	// restoreBudget bounds how many objects one publish may restore. Reading
-	// every owned object at once would turn every restart into a burst against
-	// the control plane at exactly the moment the process is least settled;
-	// spreading it over the publish ticks costs a few more seconds of unknown
-	// and no burst at all.
+	// restoreBudget bounds how many objects one publish may restore
+	// (fleetRestoreBudgetPerPublish). Reading every owned object at once would
+	// turn every restart into a burst against the control plane at exactly the
+	// moment the process is least settled; spreading it over the publish
+	// ticks costs a few more seconds of unknown and no burst at all.
 	restoreBudget int
 	// capacity reports this replica's own limits and how much of them is in
 	// use, so the page can answer "how close are we" from the same read that
@@ -319,10 +320,10 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 	if publisher.restoreAttempts == nil {
 		publisher.restoreAttempts = make(map[execution.QueryGroupIdentity]int, len(owned))
 	}
-	spent := 0
+	wanted := make([]execution.QueryGroupIdentity, 0, min(len(owned), publisher.restoreBudget))
 	for _, queryGroup := range owned {
-		if spent >= publisher.restoreBudget {
-			return
+		if len(wanted) >= publisher.restoreBudget {
+			break
 		}
 		if publisher.restoreAttempts[queryGroup] >= fleetRestoreMaxAttempts {
 			continue
@@ -334,14 +335,26 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 			publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
 			continue
 		}
-		spent++
+		wanted = append(wanted, queryGroup)
+	}
+	if len(wanted) == 0 {
+		return
+	}
+	// One read for all of them: the publish waits on one batch, not on a
+	// round trip per object. The read answers for a prefix of them -- as far
+	// as the memory line had room -- and an object it did not get to is no
+	// attempt spent: it is the next publish's.
+	states, errs := publisher.restore(ctx, wanted)
+	for index, queryGroup := range wanted {
+		if index >= len(errs) || index >= len(states) {
+			break
+		}
 		publisher.restoreAttempts[queryGroup]++
-		state, err := publisher.restore(ctx, queryGroup)
-		if err != nil {
+		if errs[index] != nil {
 			continue
 		}
 		publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
-		publisher.tracker.Restore(string(queryGroup), state, at, publisher.staleAfter)
+		publisher.tracker.Restore(string(queryGroup), states[index], at, publisher.staleAfter)
 	}
 }
 
