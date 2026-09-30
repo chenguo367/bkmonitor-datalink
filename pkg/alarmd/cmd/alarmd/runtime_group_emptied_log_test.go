@@ -63,7 +63,7 @@ func TestTheProductionGroupStoreLogsAnEmptyingItHoldsAndItsEnd(t *testing.T) {
 
 	var output bytes.Buffer
 	logger := observability.New(observability.ComponentRuntime, &output)
-	_, groups, err := buildTargetResolver(cfg, client, nil, logger)
+	_, groups, err := buildTargetResolver(cfg, client, nil, 1<<20, logger)
 	if err != nil || groups == nil {
 		t.Fatalf("group store = %v, %v", groups, err)
 	}

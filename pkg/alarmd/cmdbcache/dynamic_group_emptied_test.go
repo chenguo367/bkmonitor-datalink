@@ -13,9 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
@@ -32,59 +31,261 @@ func hostGroupOf(hosts ...int) string {
 
 const emptyHostGroup = `{"model_id":"cw-Host","model_inst_ids":[],"member_list":[]}`
 
-// failingGroupClient serves MGET from a map and fails the call numbered failAt
-// (from 1), counting every call and the keys each asked for.
-type failingGroupClient struct {
-	groupClient
-	failAt int
+// A read over many groups is a window at a time: a window's documents add
+// up to at most the bound, or are the one larger document, and each is
+// handed over, in order, before the next window is read - the next pipeline
+// overwrites a window's replies, so a document handed over late would not
+// decode. With documents of one size and a bound of four and a half of
+// them, a window is four documents, one pipeline of lengths and one of
+// documents, whatever the number of groups: doubling the groups doubles the
+// round trips, not what is held at once. A transport failure part way
+// returns the error after the windows before it were handed over.
+func TestAGroupReadIsAWindowAtATimeAndAFailurePartWayReturnsTheError(t *testing.T) {
+	for _, count := range []int{40, 80} {
+		client := &groupClient{values: map[string]string{}}
+		ids := make([]string, 0, count)
+		for index := 0; index < count; index++ {
+			id := fmt.Sprint(1000 + index)
+			ids = append(ids, id)
+			client.values["p:dynamic_group:"+id] = hostGroupOf(100 + index)
+		}
+		size := len(client.values["p:dynamic_group:1000"])
+		reader, err := NewGroupReader(client, "p:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		visited, ahead := []string{}, 0
+		visit := func(id string, read GroupRead) {
+			if snapshot := snapshotOf(id, read, time.Time{}); len(snapshot.Members) != 1 {
+				t.Fatalf("%d groups: %s handed over as %+v", count, id, snapshot)
+			}
+			visited = append(visited, id)
+			ahead = max(ahead, client.gets()-len(visited))
+		}
+		if err := reader.Read(context.Background(), ids, size*9/2, visit); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(visited) != fmt.Sprint(ids) || ahead != 3 {
+			t.Fatalf("%d groups: handed over %d, at most %d read ahead; want all in order, 3 ahead", count, len(visited), ahead)
+		}
+		if len(client.calls) != count/4 || client.strlens != count {
+			t.Fatalf("%d groups: %d pipelines of documents, %d lengths; want %d and %d", count, len(client.calls), client.strlens, count/4, count)
+		}
+		for _, call := range client.calls {
+			if len(call) != 4 {
+				t.Fatalf("%d groups: a window of %d documents, want 4", count, len(call))
+			}
+		}
+
+		client.calls, client.failAt, visited = nil, 2, nil
+		if err := reader.Read(context.Background(), ids, size*9/2, visit); err == nil || len(visited) != 4 {
+			t.Fatalf("%d groups: a read whose second window failed handed over %d and returned %v; want 4 and the error", count, len(visited), err)
+		}
+	}
 }
 
-func (client *failingGroupClient) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
-	if len(client.calls)+1 == client.failAt {
-		client.calls = append(client.calls, append([]string(nil), keys...))
-		return redis.NewSliceResult(nil, errors.New("connection reset"))
-	}
-	return client.groupClient.MGet(ctx, keys...)
-}
-
-// A read over many groups is 64 keys an MGET, in order, and a transport
-// failure on any of them returns nothing: the caller keeps what it held
-// rather than some groups from this round and none of the rest. The batch is
-// written here as the number it is, not as the constant, so a change to it
-// has to change this test.
-func TestAGroupReadIsBatchedAndAFailurePartWayReturnsNothing(t *testing.T) {
-	client := &failingGroupClient{groupClient: groupClient{values: map[string]string{}}}
-	ids := make([]string, 0, 130)
-	for index := 0; index < 130; index++ {
-		id := fmt.Sprint(1000 + index)
-		ids = append(ids, id)
-		client.values["p:dynamic_group:"+id] = hostGroupOf(index + 1)
-	}
+// A document larger than the bound is read alone, and read: every read
+// makes progress. A key Redis answers with an error says nothing about its
+// group: it is not handed over, the groups beside it are, and the read
+// returns an error counting it.
+func TestALargeDocumentIsReadAloneAndAnAnsweredKeyIsNotHandedOver(t *testing.T) {
+	client := &groupClient{values: map[string]string{
+		"p:dynamic_group:1": hostGroupOf(101), "p:dynamic_group:2": hostGroupOf(102), "p:dynamic_group:3": hostGroupOf(103)},
+		answered: map[string]error{"p:dynamic_group:2": answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")}}
 	reader, err := NewGroupReader(client, "p:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reads, err := reader.Read(context.Background(), ids)
+	handed := []string{}
+	err = reader.Read(context.Background(), []string{"1", "2", "3"}, 1, func(id string, read GroupRead) {
+		handed = append(handed, fmt.Sprintf("%s=%d", id, len(snapshotOf(id, read, time.Time{}).Members)))
+	})
+	var unanswered *redisbatch.UnansweredError
+	if !errors.As(err, &unanswered) || unanswered.Keys != 1 || fmt.Sprint(handed) != "[1=1 3=1]" || len(client.calls) != 3 {
+		t.Fatalf("handed %v in %d pipelines of documents and returned %v; want 1 and 3, one a pipeline, and group 2 unanswered",
+			handed, len(client.calls), err)
+	}
+}
+
+// answerEvery has Redis answer every group's key with err, or, nil, answer
+// them again.
+func (fixture *groupFixture) answerEvery(err error) {
+	fixture.client.answered = map[string]error{}
+	if err == nil {
+		return
+	}
+	for _, id := range fixture.ids {
+		fixture.client.answered["p:dynamic_group:"+id] = err
+	}
+}
+
+// Redis answering every key with an error - LOADING while it restarts -
+// says nothing about the groups: the refresh keeps every snapshot, serves
+// each as past a failed refresh, fails, and counts the groups it could not
+// read. Answered again, the groups are read as before.
+func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T) {
+	fixture := newGroupFixture(t, 3)
+	fixture.answerEvery(answeredError("LOADING Redis is loading the dataset in memory"))
+	fixture.now = fixture.now.Add(time.Minute)
+	err := fixture.store.Refresh(context.Background())
+	var unanswered *redisbatch.UnansweredError
+	if !errors.As(err, &unanswered) || unanswered.Keys != 3 {
+		t.Fatalf("the refresh returned %v, want every group unanswered", err)
+	}
+	for _, id := range fixture.ids {
+		lookup := fixture.store.Group(context.Background(), id, time.Minute)
+		if lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || len(lookup.Snapshot.Members) != 1 || !lookup.RefreshFailed {
+			t.Fatalf("group %s after an unanswered refresh = %+v, %+v; want its members, past a failed refresh", id, lookup, lookup.Snapshot)
+		}
+	}
+	if health := fixture.store.Health(); !health.RefreshFailed || health.Unanswered != 3 || health.UnansweredReads != 3 ||
+		health.ConsecutiveErrors != 1 || health.Loaded != 3 {
+		t.Fatalf("health after an unanswered refresh = %+v", health)
+	}
+
+	fixture.answerEvery(nil)
+	fixture.now = fixture.now.Add(time.Minute)
+	if err := fixture.store.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if lookup := fixture.store.Group(context.Background(), fixture.ids[0], time.Minute); lookup.RefreshFailed || lookup.Age != 0 {
+		t.Fatalf("group after an answered refresh = %+v", lookup)
+	}
+	if health := fixture.store.Health(); health.RefreshFailed || health.Unanswered != 0 || health.UnansweredReads != 3 {
+		t.Fatalf("health after an answered refresh = %+v", health)
+	}
+}
+
+// One group Redis answers with an error keeps its snapshot and is served as
+// past a failed refresh; the groups beside it are refreshed as usual.
+func TestAGroupRedisAnswersWithAnErrorKeepsOnlyItsOwnSnapshot(t *testing.T) {
+	fixture := newGroupFixture(t, 3)
+	for _, id := range fixture.ids {
+		fixture.client.values["p:dynamic_group:"+id] = hostGroupOf(500, 501)
+	}
+	fixture.client.answered = map[string]error{
+		"p:dynamic_group:" + fixture.ids[1]: answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")}
+	fixture.now = fixture.now.Add(time.Minute)
+	if err := fixture.store.Refresh(context.Background()); err == nil {
+		t.Fatal("a refresh with a group unanswered did not fail")
+	}
+	for index, id := range fixture.ids {
+		lookup := fixture.store.Group(context.Background(), id, time.Minute)
+		want, failed := 2, false
+		if index == 1 {
+			want, failed = 1, true
+		}
+		if len(lookup.Snapshot.Members) != want || lookup.RefreshFailed != failed {
+			t.Fatalf("group %s = %d members, refresh failed %v; want %d, %v", id, len(lookup.Snapshot.Members), lookup.RefreshFailed, want, failed)
+		}
+	}
+}
+
+// A group's first read that Redis answers with an error publishes nothing:
+// the lookup says the read failed, and the next ask reads it again.
+func TestAFirstReadRedisAnswersWithAnErrorPublishesNothing(t *testing.T) {
+	client := &groupClient{values: map[string]string{"p:dynamic_group:7": hostGroupOf(7)},
+		answered: map[string]error{"p:dynamic_group:7": answeredError("LOADING Redis is loading the dataset in memory")}}
+	reader, err := NewGroupReader(client, "p:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sizes := make([]int, 0, len(client.calls))
-	for _, call := range client.calls {
-		sizes = append(sizes, len(call))
+	store, err := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: testGroupReadBound})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if fmt.Sprint(sizes) != "[64 64 2]" {
-		t.Fatalf("MGETs of %v keys, want [64 64 2]", sizes)
+	if lookup := store.Group(context.Background(), "7", time.Minute); lookup.ReadErr == nil || lookup.Snapshot != nil {
+		t.Fatalf("a first read Redis answered with an error = %+v, want the error and no snapshot", lookup)
 	}
-	if client.calls[1][0] != "p:dynamic_group:"+ids[64] || client.calls[2][1] != "p:dynamic_group:"+ids[129] {
-		t.Fatalf("batches out of order: %v ... %v", client.calls[1][:1], client.calls[2])
+	if health := store.Health(); health.Loaded != 0 || health.Unavailable != 0 {
+		t.Fatalf("health after it = %+v, want nothing held", health)
 	}
-	if len(reads) != len(ids) || string(reads[ids[len(ids)-1]].Payload) != hostGroupOf(len(ids)) {
-		t.Fatalf("read %d groups, the last %q", len(reads), reads[ids[len(ids)-1]].Payload)
+	client.answered = nil
+	if lookup := store.Group(context.Background(), "7", time.Minute); lookup.ReadErr != nil || lookup.Snapshot == nil ||
+		len(lookup.Snapshot.Members) != 1 || store.Health().SyncReads != 2 {
+		t.Fatalf("the next ask = %+v after %d reads, want the group read again", lookup, store.Health().SyncReads)
 	}
+}
 
-	client.calls, client.failAt = nil, 2
-	if reads, err := reader.Read(context.Background(), ids); err == nil || reads != nil {
-		t.Fatalf("a read whose second batch failed = %d groups, %v; want nothing and the error", len(reads), err)
+// An emptying pending past its settle time is not believed from a refresh
+// Redis answered the group with an error: the group keeps the snapshot it
+// had and stays pending, and is believed once it is read empty again.
+func TestAPendingEmptyingIsNotBelievedFromAnUnansweredRead(t *testing.T) {
+	fixture := newGroupFixture(t, 1)
+	fixture.write(fixture.ids, true)
+	fixture.refresh(t, 10)
+	if !fixture.servesMembers(t, fixture.ids[0]) {
+		t.Fatal("setup: the emptying was believed before its settle time")
+	}
+	fixture.answerEvery(answeredError("LOADING Redis is loading the dataset in memory"))
+	fixture.now = fixture.now.Add(time.Minute)
+	if err := fixture.store.Refresh(context.Background()); err == nil {
+		t.Fatal("an unanswered refresh did not fail")
+	}
+	if !fixture.servesMembers(t, fixture.ids[0]) {
+		t.Fatal("an emptying was believed from a refresh that could not read the group")
+	}
+	fixture.answerEvery(nil)
+	fixture.refresh(t, 1)
+	if lookup := fixture.store.Group(context.Background(), fixture.ids[0], time.Minute); len(lookup.Snapshot.Members) != 0 || lookup.EmptiedHeld {
+		t.Fatalf("the emptying read again after its settle time = %+v, want it believed", lookup)
+	}
+}
+
+// A group first read empty while another's emptying was pending waits
+// with it, and past its settle time is not believed from a refresh Redis
+// answered it with an error either: it stays held back.
+func TestAnUnconfirmedGroupIsNotBelievedFromAnUnansweredRead(t *testing.T) {
+	fixture := newGroupFixture(t, 2)
+	fixture.write(fixture.ids[:1], true)
+	fixture.refresh(t, 1)
+	fixture.client.values["p:dynamic_group:9999"] = emptyHostGroup
+	fixture.ids = append(fixture.ids, "9999")
+	if lookup := fixture.store.Group(context.Background(), "9999", time.Minute); lookup.Snapshot.Unavailable != targetplan.ReasonEmptiedHeld {
+		t.Fatalf("setup: a group first read empty during a pending emptying = %+v", lookup.Snapshot)
+	}
+	fixture.write(fixture.ids[:1], false)
+	fixture.refresh(t, 10)
+	fixture.client.answered = map[string]error{"p:dynamic_group:9999": answeredError("LOADING Redis is loading the dataset in memory")}
+	fixture.now = fixture.now.Add(time.Minute)
+	if err := fixture.store.Refresh(context.Background()); err == nil {
+		t.Fatal("an unanswered refresh did not fail")
+	}
+	if lookup := fixture.store.Group(context.Background(), "9999", time.Minute); lookup.Snapshot == nil ||
+		lookup.Snapshot.Unavailable != targetplan.ReasonEmptiedHeld {
+		t.Fatalf("an unconfirmed group read unanswered past its settle time = %+v, want it still held", lookup)
+	}
+}
+
+// A refresh decodes each window as it is read: with a bound of four and a
+// half documents over forty groups, every group comes out with its member,
+// none decoded from a window the next one overwrote.
+func TestARefreshDecodesEachWindowBeforeReadingTheNext(t *testing.T) {
+	fixture := newGroupFixture(t, 40)
+	size := len(fixture.client.values["p:dynamic_group:"+fixture.ids[0]])
+	fixture.store.readBound = size * 9 / 2
+	fixture.client.calls = nil
+	fixture.refresh(t, 1)
+	if len(fixture.client.calls) != 10 {
+		t.Fatalf("the refresh read %d windows, want 10 of 4", len(fixture.client.calls))
+	}
+	for _, id := range fixture.ids {
+		if lookup := fixture.store.Group(context.Background(), id, time.Minute); lookup.Snapshot == nil ||
+			lookup.Snapshot.Unavailable != "" || len(lookup.Snapshot.Members) != 1 {
+			t.Fatalf("group %s after the refresh = %+v", id, lookup.Snapshot)
+		}
+	}
+}
+
+// A store without a read bound is refused: a bound of zero would read one
+// document a round trip, and no bound at all every document at once.
+func TestAGroupStoreNeedsAReadBound(t *testing.T) {
+	reader, err := NewGroupReader(&groupClient{}, "p:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute}); err == nil {
+		t.Fatal("a store without a read bound was built")
 	}
 }
 
@@ -106,7 +307,7 @@ func newGroupFixture(t *testing.T, count int) *groupFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.store, err = NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute,
+	fixture.store, err = NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: testGroupReadBound,
 		Now:            func() time.Time { return fixture.now },
 		EmptiedChanged: func(held, candidates int) { fixture.said = append(fixture.said, [2]int{held, candidates}) }})
 	if err != nil {
