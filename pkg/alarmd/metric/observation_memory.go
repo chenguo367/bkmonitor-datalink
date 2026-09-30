@@ -47,7 +47,8 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; "+
 				"asked again each round while full, so this counts objects times rounds), "+
 				"fleet_restore (the record and every one after it are left for the next publish, spending no attempt), "+
-				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED). "+
+				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED), "+
+				"fleet_view (the view is not read and is the gap SNAPSHOTS_DEFERRED). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. Nothing is given "+

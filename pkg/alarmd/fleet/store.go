@@ -62,6 +62,30 @@ type RedisStore struct {
 	ttl             time.Duration
 	maxAnomalyBytes int
 	meter           StoreMeter
+	// admitLoad asks the observation memory line for what a load of
+	// snapshots will hold decoded (AdmitLoads); nil admits every load.
+	admitLoad func(bytes uint64) bool
+}
+
+// ErrSnapshotsDeferred is a load of snapshots the observation memory line
+// had no room for: nothing was read.
+var ErrSnapshotsDeferred = errors.New("alarmd fleet: snapshots deferred: no room under the observation memory line")
+
+// snapshotDecodedCharge is how many times its length a snapshot holds once
+// decoded, which a load is admitted as: measured 2.80 on a replica of half
+// a megabyte.
+const snapshotDecodedCharge = 3
+
+// AdmitLoads has every load of snapshots a reader asks for (Load: the
+// objects route, the diagnosis, the strategy standing) ask admit for what
+// the snapshots will hold decoded -- their lengths, read first, times
+// snapshotDecodedCharge -- before any is read, and read none when it says
+// no (ErrSnapshotsDeferred). A view is read whole or not at all. The
+// verdict scrape's read does not ask (LoadUnadmitted).
+func (store *RedisStore) AdmitLoads(admit func(bytes uint64) bool) {
+	if store != nil {
+		store.admitLoad = admit
+	}
 }
 
 // StoreMeter is what the store reports its own Redis traffic to. A fleet
@@ -288,9 +312,25 @@ func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 // snapshot would shorten the anomaly list, which is the exact reading this
 // package exists to prevent.
 func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	return store.load(ctx, replicas, store.admitLoad != nil)
+}
+
+// LoadUnadmitted is Load without asking the memory line: the verdict
+// scrape's read. The verdict must not turn unknown because observation is
+// short of memory -- which is when detection is busiest -- so it reads
+// whatever the line says, until it reads replicas' summaries instead.
+func (store *RedisStore) LoadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	return store.load(ctx, replicas, false)
+}
+
+func (store *RedisStore) load(ctx context.Context, replicas []string, admitted bool) ([]Snapshot, error) {
 	snapshots := make([]Snapshot, 0, len(replicas))
 	var decodeErr error
-	bytes, err := store.read(ctx, replicas, store.snapshotKey, func(index int, text string) error {
+	var admit func(uint64) bool
+	if admitted {
+		admit = func(total uint64) bool { return store.admitLoad(total * snapshotDecodedCharge) }
+	}
+	bytes, err := store.read(ctx, replicas, store.snapshotKey, admit, func(index int, text string) error {
 		var snapshot Snapshot
 		if err := json.Unmarshal([]byte(text), &snapshot); err != nil {
 			decodeErr = fmt.Errorf("alarmd fleet: decode snapshot for %s: %w", replicas[index], err)
@@ -303,6 +343,9 @@ func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapsho
 		snapshots = append(snapshots, snapshot)
 		return nil
 	})
+	if errors.Is(err, ErrSnapshotsDeferred) {
+		return nil, err
+	}
 	if err != nil && decodeErr == nil {
 		return nil, fmt.Errorf("alarmd fleet: read snapshots: %w", err)
 	}
@@ -324,7 +367,7 @@ func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapsho
 func (store *RedisStore) LoadSummaries(ctx context.Context, replicas []string) ([]ReplicaSummary, error) {
 	summaries := make([]ReplicaSummary, 0, len(replicas))
 	var decodeErr error
-	bytes, err := store.read(ctx, replicas, store.summaryKey, func(index int, text string) error {
+	bytes, err := store.read(ctx, replicas, store.summaryKey, nil, func(index int, text string) error {
 		var summary ReplicaSummary
 		if err := json.Unmarshal([]byte(text), &summary); err != nil {
 			decodeErr = fmt.Errorf("alarmd fleet: decode summary for %s: %w", replicas[index], err)
@@ -354,7 +397,7 @@ func (store *RedisStore) LoadSummaries(ctx context.Context, replicas []string) (
 func (store *RedisStore) LoadOwned(ctx context.Context, replicas []string) (map[string][]string, error) {
 	owned := make(map[string][]string, len(replicas))
 	var decodeErr error
-	bytes, err := store.read(ctx, replicas, store.ownedKey, func(index int, text string) error {
+	bytes, err := store.read(ctx, replicas, store.ownedKey, nil, func(index int, text string) error {
 		var list []string
 		if err := json.Unmarshal([]byte(text), &list); err != nil {
 			decodeErr = fmt.Errorf("alarmd fleet: decode owned objects for %s: %w", replicas[index], err)
@@ -388,7 +431,11 @@ func (store *RedisStore) readChunkBytes() int64 { return int64(store.maxAnomalyB
 // each MGET's replies are decoded and let go before the next is read, where
 // one MGET of every replica held every reply, and a copy of each, beside
 // everything decoded from them. A replica with nothing readable is skipped.
-func (store *RedisStore) read(ctx context.Context, replicas []string, key func(string) string, visit func(index int, text string) error) (int, error) {
+//
+// admit, when there is one, is asked for the lengths' total before anything
+// is read, and a refusal reads nothing (ErrSnapshotsDeferred).
+func (store *RedisStore) read(ctx context.Context, replicas []string, key func(string) string, admit func(total uint64) bool,
+	visit func(index int, text string) error) (int, error) {
 	if len(replicas) == 0 {
 		return 0, nil
 	}
@@ -404,6 +451,15 @@ func (store *RedisStore) read(ctx context.Context, replicas []string, key func(s
 		return nil
 	}); err != nil {
 		return 0, err
+	}
+	if admit != nil {
+		total := uint64(0)
+		for _, length := range lengths {
+			total += uint64(length.Val())
+		}
+		if !admit(total) {
+			return 0, ErrSnapshotsDeferred
+		}
 	}
 	bytes, bound := 0, store.readChunkBytes()
 	for start := 0; start < len(keys); {

@@ -54,11 +54,15 @@ const (
 	// ConsumerDiagnosisProgress is the Progress records a diagnosis page
 	// reads for its objects.
 	ConsumerDiagnosisProgress Consumer = "diagnosis_progress"
+	// ConsumerFleetView is the replicas' snapshots a fleet view a reader
+	// asks for reads whole: the objects route, the diagnosis, the strategy
+	// standing. The verdict scrape's read does not ask.
+	ConsumerFleetView Consumer = "fleet_view"
 )
 
 // Consumers is every consumer, in the order they are reported.
 var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds,
-	ConsumerFleetRestore, ConsumerDiagnosisProgress}
+	ConsumerFleetRestore, ConsumerDiagnosisProgress, ConsumerFleetView}
 
 // Budget is one detection budget as the line reads it: its size - the most
 // it can come to hold, a cache's working set rather than its ceiling - and
