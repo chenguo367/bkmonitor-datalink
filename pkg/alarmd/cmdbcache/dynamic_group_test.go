@@ -241,7 +241,7 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	}
 }
 
-// per's table as a test. Plans on 60 s to 900 s periods ask for their
+// The review's table as a test. Plans on 60 s to 900 s periods ask for their
 // group every Slot for an hour under per-minute refreshes: each group costs
 // exactly one read on a Slot path, its first, whatever the period - the
 // reference is kept for max(the staleness bound, twice the Plan's period)
