@@ -711,3 +711,53 @@ func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
 		}
 	}
 }
+
+func TestChangedReadinessBaselineReprojectsTheConfirmedArrivalAge(t *testing.T) {
+	for _, ack := range []bool{false, true} {
+		t.Run(map[bool]string{false: "without predecessor", true: "acknowledged predecessor is unavailable"}[ack], func(t *testing.T) {
+			c, store, now := controllerFixture(t)
+			record := Record{HoldMillis: 150_000, SinceSlot: 120, PreviousSinceSlot: 1, ArrivalAgeMillis: 180_000,
+				SegmentStart: 60, QuietSinceMillis: 1000_000, EarlierMatches: 2}
+			spec := groupSpec("qg", 0)
+			if ack {
+				spec.Previous = []Previous{{QueryGroup: "old", ClosedAt: 60}}
+				record.Plans = []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: 180_000,
+					InheritedQueryGroup: "old", InheritedClosedAt: 60}}
+			}
+			store.values["qg"], _ = json.Marshal(record)
+			prepare(t, c, spec)
+			for index, baseline := range []struct {
+				wait time.Duration
+				want time.Duration
+			}{{10 * time.Second, 170 * time.Second}, {60 * time.Second, 120 * time.Second}} {
+				spec.SettlingWait = baseline.wait
+				if err := c.Configure(spec); err != nil {
+					t.Fatal(err)
+				}
+				slot := execution.EvaluationTime(180 + index*60)
+				if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), slot, holdFence("qg")); err != nil || got != baseline.want {
+					t.Fatalf("changed wait %s: hold=%s err=%v; want %s", baseline.wait, got, err, baseline.want)
+				}
+				got, _ := c.Reading("qg")
+				if got.ArrivalAgeMillis != 180_000 || got.EarlierMatches != 0 || got.QuietSinceMillis != now.UnixMilli() {
+					t.Fatalf("changed baseline lost A or retained old decrease evidence: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestRestoreWithTheSameBaselinePreservesQuietEvidence(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	record := Record{HoldMillis: 150_000, SinceSlot: 120, PreviousSinceSlot: 1, ArrivalAgeMillis: 180_000,
+		SegmentStart: 60, QuietSinceMillis: 1000_000, EarlierMatches: 2}
+	store.values["qg"], _ = json.Marshal(record)
+	prepare(t, c, groupSpec("qg", 0))
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 180, holdFence("qg")); err != nil || got != 150*time.Second {
+		t.Fatalf("restored hold=%s err=%v", got, err)
+	}
+	got, _ := c.Reading("qg")
+	if got.EarlierMatches != record.EarlierMatches || got.QuietSinceMillis != record.QuietSinceMillis {
+		t.Fatalf("unchanged readiness baseline reset persisted quiet evidence: %+v", got)
+	}
+}

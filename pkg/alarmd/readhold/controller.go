@@ -370,10 +370,14 @@ func previousPlans(spec GroupSpec, predecessor Previous) []PlanRef {
 
 func (controller *Controller) seed(state *entry, predecessors map[execution.QueryGroupIdentity]Inspection) (Record, error) {
 	next := clone(state.record)
-	if state.seeded || inherited(next, state.spec) {
+	if state.seeded {
 		return next, nil
 	}
-	for _, predecessor := range state.spec.Previous {
+	previous := state.spec.Previous
+	if inherited(next, state.spec) {
+		previous = nil
+	}
+	for _, predecessor := range previous {
 		old := predecessors[predecessor.QueryGroup]
 		previous := old.Record
 		if !old.Loaded {
@@ -421,8 +425,10 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 		limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds()
 		next.AtLimit, next.LimitMillis = hold > limit, limit
 		hold = min(hold, limit)
-		next.PendingHoldMillis = &hold
-		next.QuietSinceMillis = controller.options.Now().UnixMilli()
+		if hold != current(next) {
+			next.PendingHoldMillis = &hold
+			next.EarlierMatches, next.QuietSinceMillis = 0, controller.options.Now().UnixMilli()
+		}
 	}
 	return next, nil
 }
