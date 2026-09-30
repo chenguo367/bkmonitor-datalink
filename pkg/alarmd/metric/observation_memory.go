@@ -28,6 +28,7 @@ type observationMemoryCollector struct {
 	headroom   *prometheus.Desc
 	refused    *prometheus.Desc
 	admitted   *prometheus.Desc
+	held       *prometheus.Desc
 	budgetSize *prometheus.Desc
 	budgetHeld *prometheus.Desc
 }
@@ -50,8 +51,14 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
-			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. Nothing is given "+
-				"back; what a grant took is in the live heap from the next collection on.", []string{"consumer"}, nil),
+			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. A grant to state "+
+				"that stays is not given back - what it took is in the live heap from the next collection on; a hold, "+
+				"memory taken for one piece of work (a page's snapshots and view), is given back when the work is done "+
+				"(observation_memory_held_bytes).", []string{"consumer"}, nil),
+		held: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_held_bytes"),
+			"What observation holds now for work in progress, admitted by the line and counted against it until "+
+				"the work is done and lets it go. Zero between pages; one that stays above zero is a hold never "+
+				"released.", nil, nil),
 		budgetSize: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_budget_size_bytes"),
 			"A detection budget's size as the line reads it, by budget: retained (the Slots' retained-bytes "+
 				"ceiling), timeline_cache and object_cache (each cache's working set - what it holds and an entry "+
@@ -68,6 +75,7 @@ func (c *observationMemoryCollector) Describe(descriptions chan<- *prometheus.De
 	descriptions <- c.headroom
 	descriptions <- c.refused
 	descriptions <- c.admitted
+	descriptions <- c.held
 	descriptions <- c.budgetSize
 	descriptions <- c.budgetHeld
 }
@@ -75,6 +83,7 @@ func (c *observationMemoryCollector) Describe(descriptions chan<- *prometheus.De
 func (c *observationMemoryCollector) Collect(metrics chan<- prometheus.Metric) {
 	reading := c.source()
 	metrics <- prometheus.MustNewConstMetric(c.headroom, prometheus.GaugeValue, float64(reading.HeadroomBytes))
+	metrics <- prometheus.MustNewConstMetric(c.held, prometheus.GaugeValue, float64(reading.HeldBytes))
 	for _, consumer := range memoryline.Consumers {
 		metrics <- prometheus.MustNewConstMetric(c.refused, prometheus.CounterValue, float64(reading.RefusedTotal[consumer]), string(consumer))
 		metrics <- prometheus.MustNewConstMetric(c.admitted, prometheus.CounterValue, float64(reading.AdmittedBytes[consumer]), string(consumer))

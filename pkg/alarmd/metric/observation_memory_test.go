@@ -91,3 +91,25 @@ func TestEachDetectionBudgetIsReadByName(t *testing.T) {
 		t.Fatalf("sizes %v held %v, want each budget's reading under its name", size, held)
 	}
 }
+
+// What observation holds now is read at the scrape.
+func TestWhatObservationHoldsIsReadAtEachScrape(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "test"})
+	reading := memoryline.Reading{HeldBytes: 7 << 20}
+	if err := recorder.BindObservationMemory(func() memoryline.Reading { return reading }); err != nil {
+		t.Fatal(err)
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "bkmonitor_alarmd_observation_memory_held_bytes" {
+			if got := family.GetMetric()[0].GetGauge().GetValue(); got != 7<<20 {
+				t.Fatalf("held = %v, want the reading's 7 MiB", got)
+			}
+			return
+		}
+	}
+	t.Fatal("no observation_memory_held_bytes")
+}
