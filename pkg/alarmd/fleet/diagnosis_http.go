@@ -213,9 +213,12 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
 	placeholder.universeTook, placeholder.viewTook = filled.universeTook, filled.viewTook
 	close(placeholder.ready)
-	// A view the memory line deferred is answered once and not kept: the
-	// next request asks again, and may be read.
-	if placeholder.readError != "" || (placeholder.view != nil && hasGapKind(placeholder.view.Gaps, GapSnapshotsDeferred)) {
+	// A view the memory line deferred, or whose snapshots could not be read
+	// -- this read's own bound reached while it waited on a shared read --
+	// is answered once and not kept: the next request asks again, and may
+	// be read.
+	if placeholder.readError != "" || (placeholder.view != nil && (hasGapKind(placeholder.view.Gaps, GapSnapshotsDeferred) ||
+		hasGapKind(placeholder.view.Gaps, GapSnapshotsUnreadable))) {
 		cache.mu.Lock()
 		if cache.entries[id] == placeholder {
 			delete(cache.entries, id)

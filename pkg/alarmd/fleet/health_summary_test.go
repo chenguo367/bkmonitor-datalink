@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -278,6 +280,59 @@ func TestTheHealthRoutesVerdictRecordCountsFromTheParts(t *testing.T) {
 	}
 	if change, _ := changes[0].(map[string]any); change["to"] != string(HealthDegraded) || change["ours"] != float64(1) {
 		t.Fatalf("recorded %v, want DEGRADED on the one stalled object", change)
+	}
+}
+
+// A registry that cannot be read is the health route's UNKNOWN with the
+// gap that says so: its part is empty, and an empty part counts nothing.
+// It is no verdict of the deployment, and is not recorded as one.
+func TestTheHealthRouteAnswersAnUnreadableRegistry(t *testing.T) {
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{err: errors.New("registry unreadable")}, stubSnapshots{})
+	handler, err := NewHandler(service, nil, func() time.Time { return now }, 10*time.Minute, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := get(t, handler, "/api/health")
+	gaps, _ := body["gaps"].([]any)
+	gap, _ := func() (map[string]any, bool) {
+		if len(gaps) == 0 {
+			return nil, false
+		}
+		first, ok := gaps[0].(map[string]any)
+		return first, ok
+	}()
+	if code != http.StatusOK || body["health"] != string(HealthUnknown) || gap["kind"] != string(GapRegistryUnavailable) {
+		t.Fatalf("answered %d, health %v, gaps %v; want UNKNOWN with the registry unavailable", code, body["health"], body["gaps"])
+	}
+	if history, _ := service.VerdictHistory(); len(history) != 0 {
+		t.Fatalf("verdict history %+v, want nothing recorded for a registry that could not be read", history)
+	}
+}
+
+// A caller that goes away while the health route reads is not answered,
+// and what it stopped waiting for is not recorded as a verdict.
+func TestAHealthReadItsCallerLeftRecordsNoVerdict(t *testing.T) {
+	reader := &blockingSnapshots{release: make(chan struct{}), snapshots: snapshotsWithAnomalies(2)}
+	defer close(reader.release)
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{replicas: replicas()}, reader)
+	handler, err := NewHandler(service, nil, func() time.Time { return now }, 10*time.Minute, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, leave := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil).WithContext(ctx))
+	}()
+	for deadline := time.Now().Add(2 * time.Second); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	}
+	leave()
+	<-served
+	if history, _ := service.VerdictHistory(); len(history) != 0 {
+		t.Fatalf("verdict history %+v after the caller left, want nothing recorded", history)
 	}
 }
 
