@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,8 @@ type acceptFixture struct {
 	objectsBody string
 	calls       map[string]int
 	leader      func(call int) map[string]any
+	// diagnosis answers diagnose.environment in place of two DETECTING rows.
+	diagnosis func() map[string]any
 }
 
 func series(labels map[string]string, value float64) map[string]any {
@@ -127,7 +130,11 @@ func (f *acceptFixture) serve(t *testing.T, p *Profile) *httptest.Server {
 			params := objectField(body, "params")
 			f.calls[operation]++
 			if operation == "diagnose.environment" {
-				writeJSON(t, w, envelope(*p, "ok", diagnosisPage(2, []string{"1", "2"}, 2, true, "")))
+				page := diagnosisPage(2, []string{"1", "2"}, 2, true, "")
+				if f.diagnosis != nil {
+					page = f.diagnosis()
+				}
+				writeJSON(t, w, envelope(*p, "ok", page))
 				return
 			}
 			var status string
@@ -225,7 +232,7 @@ func TestAcceptPassesAHealthyDeployment(t *testing.T) {
 		"redis noeviction and nothing evicted": verdictPass, "redis memory": verdictPass, "metrics read on every replica": verdictPass,
 		"source refresh counted": verdictPass, "held recovery counter removed": verdictPass, "recovery beside another Level": verdictPass,
 		"target out of scope closes nothing": verdictPass, "control loop slowest turn": verdictPass, "output events refused by alarmd": verdictPass,
-		"diagnosis covers every strategy": verdictPass, "public: restricted read refused": verdictPass,
+		"diagnosis covers every strategy": verdictPass, "strategies detecting": verdictInfo, "public: restricted read refused": verdictPass,
 		"public: health carries no coordinates": verdictPass, "public: metrics not served": verdictPass, "public: login page served": verdictPass,
 		"control source publication not starved": verdictUndecided, "control source publication conflicts": verdictPass,
 		"control source pending age": verdictNotBuilt,
@@ -532,6 +539,117 @@ func TestAcceptFollowsTheLoginLinkToWhereItLeads(t *testing.T) {
 		f.objectsBody = `{"status":"error","error":{"code":"public_surface_restricted","login_href":"` + href + `"}}`
 		if _, verdicts, _ := acceptRunOf(t, f, "--window", "0"); verdicts["public: restricted read refused"] != want {
 			t.Fatalf("login_href %q: %s, want %s", href, verdicts["public: restricted read refused"], want)
+		}
+	}
+}
+
+// notDetectingPage is a covered page whose rows carry the verdicts given,
+// each strategy not DETECTING with the refusal the compiler made of it.
+func notDetectingPage(verdicts map[string]string) map[string]any {
+	ids := make([]string, 0, len(verdicts))
+	for id := range verdicts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	fixtureDigest = universeDigest(ids)
+	page := diagnosisPage(len(ids), ids, len(ids), true, "")
+	byVerdict := map[string]any{}
+	rows := []any{}
+	for _, id := range ids {
+		verdict := verdicts[id]
+		byVerdict[verdict] = number(byVerdict[verdict]) + 1
+		row := map[string]any{"strategy_id": id, "verdict": verdict}
+		if verdict != "DETECTING" {
+			row["reason"] = "LEVEL_INVALID"
+			row["dispositions"] = []any{
+				map[string]any{"scope": "PLAN", "disposition": "ACCEPTED"},
+				map[string]any{"scope": "LEVEL", "level_id": 1, "disposition": "CONFIG_REJECTED", "reason": "LEVEL_INVALID",
+					"field_path": "level.trigger_plan", "detail": `json: unknown field "cw_calendars"`},
+			}
+		}
+		rows = append(rows, row)
+	}
+	objectField(page, "page")["by_verdict"] = byVerdict
+	page["strategies"] = rows
+	return page
+}
+
+// Covering every strategy is not detecting with them. A set that lists
+// strategies and detects none fails, and names each one with the layer it
+// stopped at and the compiler's words, so one read shows what a release
+// would otherwise uncover one at a time.
+func TestAcceptFailsASetThatDetectsNothingAndNamesWhereEachStopped(t *testing.T) {
+	f := healthyFixture()
+	f.diagnosis = func() map[string]any {
+		return notDetectingPage(map[string]string{"54": "NOT_DETECTING", "55": "NOT_DETECTING"})
+	}
+	code, verdicts, result := acceptRunOf(t, f, "--window", "0")
+	if verdicts["diagnosis covers every strategy"] != verdictPass || verdicts["strategies detecting"] != verdictFail || code != 1 {
+		t.Fatalf("code %d verdicts %v", code, verdicts)
+	}
+	var detail string
+	items, _ := objectField(result, "result")["items"].([]any)
+	for _, raw := range items {
+		if item := raw.(map[string]any); stringField(item, "item") == "strategies detecting" {
+			detail = stringField(item, "detail")
+		}
+	}
+	for _, want := range []string{"0 of 2 detecting", "NOT_DETECTING=2", "54 NOT_DETECTING LEVEL_INVALID [LEVEL LEVEL_INVALID level.trigger_plan]", `unknown field "cw_calendars"`} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail lacks %q: %s", want, detail)
+		}
+	}
+	saved := savedResult(t, result)
+	listed, _ := objectField(objectField(saved, "result"), "answers")["not_detecting"].([]any)
+	if len(listed) != 2 {
+		t.Fatalf("record lists %v, want both strategies", listed)
+	}
+	refusals, _ := listed[0].(map[string]any)["refusals"].([]any)
+	if len(refusals) != 1 || stringField(refusals[0].(map[string]any), "field_path") != "level.trigger_plan" {
+		t.Fatalf("refusals = %v, want the one refusal, not the accepted plan", refusals)
+	}
+}
+
+// A set that detects some of its strategies is information, with the rest
+// named; an empty set has nothing to detect.
+func TestAcceptListsWhatDoesNotDetectBesideWhatDoes(t *testing.T) {
+	f := healthyFixture()
+	f.diagnosis = func() map[string]any {
+		return notDetectingPage(map[string]string{"7": "DETECTING", "8": "DATA_ABSENT"})
+	}
+	_, verdicts, result := acceptRunOf(t, f, "--window", "0")
+	if verdicts["strategies detecting"] != verdictInfo {
+		t.Fatalf("verdicts %v", verdicts)
+	}
+	saved := savedResult(t, result)
+	listed, _ := objectField(objectField(saved, "result"), "answers")["not_detecting"].([]any)
+	if len(listed) != 1 || stringField(listed[0].(map[string]any), "strategy_id") != "8" {
+		t.Fatalf("record lists %v, want strategy 8 alone", listed)
+	}
+	f.diagnosis = func() map[string]any { return notDetectingPage(map[string]string{}) }
+	if _, verdicts, _ := acceptRunOf(t, f, "--window", "0"); verdicts["strategies detecting"] != verdictInfo {
+		t.Fatalf("an empty set: %v", verdicts)
+	}
+}
+
+// A diagnosis that did not cover the set says nothing about all of it: the
+// table is information even when the part read detects nothing.
+func TestAcceptDoesNotFailDetectingOnAPartialDiagnosis(t *testing.T) {
+	f := healthyFixture()
+	f.diagnosis = func() map[string]any {
+		page := notDetectingPage(map[string]string{"54": "NOT_DETECTING", "55": "NOT_DETECTING"})
+		objectField(page, "page")["holds"] = false
+		return page
+	}
+	_, verdicts, result := acceptRunOf(t, f, "--window", "0")
+	if verdicts["diagnosis covers every strategy"] != verdictFail || verdicts["strategies detecting"] != verdictInfo {
+		t.Fatalf("verdicts %v", verdicts)
+	}
+	items, _ := objectField(result, "result")["items"].([]any)
+	for _, raw := range items {
+		if item := raw.(map[string]any); stringField(item, "item") == "strategies detecting" &&
+			!strings.HasPrefix(stringField(item, "detail"), "coverage does not hold") {
+			t.Fatalf("detail = %q, want it to say the read was partial", stringField(item, "detail"))
 		}
 	}
 }

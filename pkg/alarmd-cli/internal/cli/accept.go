@@ -680,7 +680,97 @@ func (run *acceptRun) checkDiagnosis() {
 			verdict = verdictPass
 		}
 		run.add("diagnosis covers every strategy", verdict, stringField(record, "summary"))
+		run.checkDetecting(diagnosis, verdict == verdictPass)
 	}
+}
+
+// acceptListedNotDetecting bounds how many strategies that are not detecting
+// the item's detail names; the record keeps every one.
+const acceptListedNotDetecting = 5
+
+// checkDetecting reads what the diagnosis says of each strategy, beside its
+// coverage: a diagnosis can cover every strategy of a set none of which
+// detects, and that passed as a healthy deployment. Every strategy not
+// DETECTING is listed with its reason and the refusals it carries - scope,
+// field path and the compiler's own words - so one read names every layer a
+// strategy stopped at rather than one release uncovering the next. A set
+// that lists strategies and detects none fails; otherwise the table is
+// information.
+//
+// On a diagnosis that did not cover every strategy the table is only what was
+// read: it is information, never a failure decided on part of the set.
+func (run *acceptRun) checkDetecting(diagnosis diagnosisRun, covered bool) {
+	total, detecting := 0, diagnosis.byVerdict["DETECTING"]
+	words := make([]string, 0, len(diagnosis.byVerdict))
+	for word, n := range diagnosis.byVerdict {
+		total += n
+		if n > 0 {
+			words = append(words, fmt.Sprintf("%s=%d", word, n))
+		}
+	}
+	sort.Strings(words)
+	type refusal struct {
+		Scope     string `json:"scope,omitempty"`
+		LevelID   any    `json:"level_id,omitempty"`
+		Reason    string `json:"reason,omitempty"`
+		FieldPath string `json:"field_path,omitempty"`
+		Detail    string `json:"detail,omitempty"`
+	}
+	type notDetecting struct {
+		StrategyID string    `json:"strategy_id"`
+		Verdict    string    `json:"verdict"`
+		Reason     string    `json:"reason,omitempty"`
+		Refusals   []refusal `json:"refusals,omitempty"`
+	}
+	var listed []notDetecting
+	for _, raw := range diagnosis.rows {
+		row, _ := raw.(map[string]any)
+		if stringField(row, "verdict") == "DETECTING" {
+			continue
+		}
+		entry := notDetecting{StrategyID: stringField(row, "strategy_id"), Verdict: stringField(row, "verdict"), Reason: stringField(row, "reason")}
+		dispositions, _ := row["dispositions"].([]any)
+		for _, rawDisposition := range dispositions {
+			disposition, _ := rawDisposition.(map[string]any)
+			if word := stringField(disposition, "disposition"); word == "ACCEPTED" || word == "CONFIG_NORMALIZED" {
+				continue
+			}
+			entry.Refusals = append(entry.Refusals, refusal{Scope: stringField(disposition, "scope"), LevelID: disposition["level_id"],
+				Reason: stringField(disposition, "reason"), FieldPath: stringField(disposition, "field_path"), Detail: stringField(disposition, "detail")})
+		}
+		listed = append(listed, entry)
+	}
+	run.answers["not_detecting"] = listed
+	var named []string
+	for _, entry := range listed {
+		if len(named) == acceptListedNotDetecting {
+			named = append(named, fmt.Sprintf("and %d more in the record", len(listed)-acceptListedNotDetecting))
+			break
+		}
+		line := entry.StrategyID + " " + entry.Verdict
+		if entry.Reason != "" {
+			line += " " + entry.Reason
+		}
+		for _, one := range entry.Refusals {
+			line += " [" + strings.TrimSpace(one.Scope+" "+one.Reason+" "+one.FieldPath) + "]"
+			if one.Detail != "" {
+				line += " " + one.Detail
+			}
+		}
+		named = append(named, line)
+	}
+	detail := fmt.Sprintf("%d of %d detecting; %s", detecting, total, listOrNone(words))
+	if len(named) > 0 {
+		detail += "; not detecting: " + strings.Join(named, "; ")
+	}
+	verdict := verdictInfo
+	switch {
+	case !covered:
+		detail = "coverage does not hold, so this is what was read, not the set: " + detail
+	case total > 0 && detecting == 0:
+		verdict = verdictFail
+	}
+	run.add("strategies detecting", verdict, detail)
 }
 
 // checkPublicSurface reads the public surface as anyone can, without a
