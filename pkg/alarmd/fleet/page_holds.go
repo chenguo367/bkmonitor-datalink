@@ -27,12 +27,14 @@ import (
 // decode with teeth up to 3.8 times their length alone, and are small.
 //
 // keptViewCharge is what a view kept past its page -- a diagnosis in its
-// cache -- is admitted as: the page read's peak less the decode, 4.22 less
-// 2.80, charged at 3/2. The snapshots are garbage once the view is built;
-// the view is what stays.
+// cache -- is admitted as: measured at 1.92 times the snapshots' stored
+// length once the snapshots were let go and collected, over twelve
+// replicas' snapshots of 2164 KB together, charged at 2. It is not the peak
+// less the decode: the view's rows share their strings and pointer fields
+// with the snapshots, and those stay with the view.
 const (
 	pageReadChargeNum, pageReadChargeDen = 17, 4
-	keptViewChargeNum, keptViewChargeDen = 3, 2
+	keptViewChargeNum, keptViewChargeDen = 2, 1
 )
 
 type pageHolds struct {
