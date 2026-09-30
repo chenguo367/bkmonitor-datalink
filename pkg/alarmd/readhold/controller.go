@@ -274,7 +274,12 @@ type Inspection struct {
 }
 
 func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspection {
-	state := controller.group(qg)
+	controller.mu.RLock()
+	state := controller.groups[qg]
+	controller.mu.RUnlock()
+	if state == nil {
+		return Inspection{}
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return Inspection{Record: clone(state.record), Loaded: state.loaded, Missing: state.loaded && len(state.raw) == 0}
@@ -471,7 +476,11 @@ func pruneTransitions(record *Record, readyWithoutHold int64) {
 func (controller *Controller) predecessorSnapshot(state *entry) (GroupSpec, map[execution.QueryGroupIdentity]Inspection) {
 	state.mu.Lock()
 	spec := state.spec
+	needed := !state.seeded && !inherited(state.record, spec)
 	state.mu.Unlock()
+	if !needed {
+		return spec, nil
+	}
 	predecessors := make(map[execution.QueryGroupIdentity]Inspection, len(spec.Previous))
 	for _, previous := range spec.Previous {
 		predecessors[previous.QueryGroup] = controller.Inspect(previous.QueryGroup)

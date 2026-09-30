@@ -761,3 +761,52 @@ func TestRestoreWithTheSameBaselinePreservesQuietEvidence(t *testing.T) {
 		t.Fatalf("unchanged readiness baseline reset persisted quiet evidence: %+v", got)
 	}
 }
+
+func TestAReleasedPredecessorStaysAbsentAfterSuccessfulInheritance(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	if inspection := c.Inspect("old"); inspection.Loaded || len(c.groups) != 0 {
+		t.Fatal("inspecting an absent group allocated control state")
+	}
+	prepare(t, c, groupSpec("old", 0))
+	observeEarly(t, c, "old", 180*time.Second, 30*time.Second, 0)
+	end := execution.EvaluationTime(90)
+	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "old", 60, &end), holdFence("old")); err != nil {
+		t.Fatal(err)
+	}
+	spec := groupSpec("new", 120*time.Second)
+	spec.Previous = []Previous{{QueryGroup: "old", ClosedAt: end}}
+	prepare(t, c, spec)
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 120, holdFence("new")); err != nil || got != 115*time.Second {
+		t.Fatalf("first inherited hold=%s err=%v", got, err)
+	}
+	c.Forget("old")
+	assertReleased := func() {
+		t.Helper()
+		if c.Inspect("old").Loaded || len(c.groups) != 1 {
+			t.Fatal("the released predecessor was recreated")
+		}
+	}
+	assertReleased()
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 180, holdFence("new")); err != nil || got != 55*time.Second {
+		t.Fatalf("seeded next hold=%s err=%v", got, err)
+	}
+	assertReleased()
+	// A new configuration and an owner restore both use the durable ACK,
+	// without reloading or retaining the old Query Group's record.
+	spec.SettlingWait = 10 * time.Second
+	if err := c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"new"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 240, holdFence("new")); err != nil || got != 50*time.Second {
+		t.Fatalf("restored ACK hold=%s err=%v", got, err)
+	}
+	assertReleased()
+	closed := execution.EvaluationTime(300)
+	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "new", end, &closed), holdFence("new")); err != nil {
+		t.Fatal(err)
+	}
+	assertReleased()
+}
