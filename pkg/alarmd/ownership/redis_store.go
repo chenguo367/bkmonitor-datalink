@@ -21,6 +21,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 )
 
 type RedisStoreOptions struct {
@@ -771,84 +772,37 @@ func (store *RedisStore) ReadControl(
 	return append([]byte(nil), value...), false, nil
 }
 
-// ControlRead is one entry of a batched control read. Raw is the value as
-// the reply holds it, to be read and not written. Err is this entry's own
-// failure -- Redis answering this key with an error -- where the others of
-// its batch still read; a batch whose transport failed fails as a whole.
-type ControlRead struct {
-	Raw     []byte
-	Missing bool
-	Err     error
-}
+// ControlRead is one entry of a batched control read: a
+// redisbatch.Value, whose Raw is the reply's own bytes, to be read and not
+// written, and whose Err is this entry's own failure while the others of
+// its batch still read.
+type ControlRead = redisbatch.Value
 
 // ControlReadBatch is how many Query Groups one pipeline of a batched
-// control read carries: one round trip reads that many records. It bounds
-// what one reply holds -- that many records, each a few kilobytes -- and
-// how much one pipeline asks of Redis at once; a longer read is several
-// pipelines, one after another. Readers that batch control reads size their
-// own batches by it, so each of their batches is one round trip.
-const ControlReadBatch = 512
+// control read carries (redisbatch.Batch): one round trip reads that many
+// records. Readers that batch control reads size their own batches by it,
+// so each of their batches is one round trip.
+const ControlReadBatch = redisbatch.Batch
 
 // ReadControlBatch reads one control namespace for many Query Groups in
 // pipelined batches: the same bytes ReadControl returns, one round trip per
-// batch instead of one per Query Group. Keys carry per-Query-Group hash
-// tags, so the reads are pipelined rather than sent as one MGET, which a
-// cluster would refuse across slots.
+// batch instead of one per Query Group.
 func (store *RedisStore) ReadControlBatch(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
 	namespace string,
 ) ([]ControlRead, error) {
-	if store == nil || store.client == nil || namespace == "" || strings.ContainsAny(namespace, "{} \t\r\n") {
-		return nil, errors.New("alarmd ownership: invalid control read")
+	keys, err := store.controlKeys(queryGroups, namespace)
+	if err != nil {
+		return nil, err
 	}
-	reads := make([]ControlRead, len(queryGroups))
-	for start := 0; start < len(queryGroups); start += ControlReadBatch {
-		end := start + ControlReadBatch
-		if end > len(queryGroups) {
-			end = len(queryGroups)
-		}
-		replies := make([]*redis.StringCmd, end-start)
-		if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for offset, queryGroup := range queryGroups[start:end] {
-				if queryGroup == "" {
-					return errors.New("alarmd ownership: invalid control read")
-				}
-				replies[offset] = pipe.Get(ctx, store.controlKey(queryGroup, namespace))
-			}
-			return nil
-		}); err != nil && !answered(err) {
-			return nil, err
-		}
-		for offset, reply := range replies {
-			// The reply's own bytes, not a copy: a copy held the batch twice
-			// until the replies were let go.
-			value, err := reply.Bytes()
-			switch {
-			case errors.Is(err, redis.Nil):
-				reads[start+offset] = ControlRead{Missing: true}
-			case err != nil && answered(err):
-				reads[start+offset] = ControlRead{Err: err}
-			case err != nil:
-				return nil, err
-			default:
-				reads[start+offset] = ControlRead{Raw: value}
-			}
-		}
-	}
-	return reads, nil
+	return redisbatch.Values(ctx, store.client, keys)
 }
 
 // ReadControlWithin is ReadControlBatch over the longest prefix of
 // queryGroups -- at most ControlReadBatch of them, one pipeline of lengths and
-// one of values -- whose values admit accepts, one value at a time in order,
-// and how many that was; the rest are left for another read. The values' lengths
-// are read first, in pipelined batches of their own, so what admit is asked
-// about is what the reply will hold: a batch's replies are held at once, and
-// a value may be a megabyte. admit decides what a refusal means -- a reader
-// under the observation memory line reads nothing once the line says no, a
-// detection reader keeps at least one. A value that grows between its length
-// and its read is read whole.
+// one of values -- whose values admit accepts, and how many that was
+// (redisbatch.Within); the rest are left for another read.
 func (store *RedisStore) ReadControlWithin(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
@@ -858,72 +812,27 @@ func (store *RedisStore) ReadControlWithin(
 	if len(queryGroups) > ControlReadBatch {
 		queryGroups = queryGroups[:ControlReadBatch]
 	}
-	sizes, err := store.controlSizes(ctx, queryGroups, namespace)
+	keys, err := store.controlKeys(queryGroups, namespace)
 	if err != nil {
 		return nil, 0, err
 	}
-	read := 0
-	for read < len(sizes) && admit(uint64(sizes[read])) {
-		read++
-	}
-	if read == 0 {
-		return nil, 0, nil
-	}
-	reads, err := store.ReadControlBatch(ctx, queryGroups[:read], namespace)
-	if err != nil {
-		return nil, 0, err
-	}
-	return reads, read, nil
+	return redisbatch.Within(ctx, store.client, keys, admit)
 }
 
-// controlSizes is the length of each Query Group's value in one control
-// namespace, zero for one that is missing, in pipelined batches the way
-// ReadControlBatch reads the values.
-func (store *RedisStore) controlSizes(
-	ctx context.Context,
-	queryGroups []execution.QueryGroupIdentity,
-	namespace string,
-) ([]int64, error) {
+// controlKeys is each Query Group's key in one control namespace, for a
+// batched read.
+func (store *RedisStore) controlKeys(queryGroups []execution.QueryGroupIdentity, namespace string) ([]string, error) {
 	if store == nil || store.client == nil || namespace == "" || strings.ContainsAny(namespace, "{} \t\r\n") {
 		return nil, errors.New("alarmd ownership: invalid control read")
 	}
-	sizes := make([]int64, len(queryGroups))
-	for start := 0; start < len(queryGroups); start += ControlReadBatch {
-		end := min(start+ControlReadBatch, len(queryGroups))
-		replies := make([]*redis.IntCmd, end-start)
-		if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for offset, queryGroup := range queryGroups[start:end] {
-				if queryGroup == "" {
-					return errors.New("alarmd ownership: invalid control read")
-				}
-				replies[offset] = pipe.StrLen(ctx, store.controlKey(queryGroup, namespace))
-			}
-			return nil
-		}); err != nil && !answered(err) {
-			return nil, err
+	keys := make([]string, len(queryGroups))
+	for index, queryGroup := range queryGroups {
+		if queryGroup == "" {
+			return nil, errors.New("alarmd ownership: invalid control read")
 		}
-		for offset, reply := range replies {
-			size, err := reply.Result()
-			switch {
-			case err != nil && answered(err):
-				// Redis answered this key with an error: its read will say so
-				// in its place, and takes nothing to hold.
-				sizes[start+offset] = 0
-			case err != nil:
-				return nil, err
-			default:
-				sizes[start+offset] = size
-			}
-		}
+		keys[index] = store.controlKey(queryGroup, namespace)
 	}
-	return sizes, nil
-}
-
-// answered reports whether err is Redis answering a command with an error,
-// rather than the command not reaching it or its answer not coming back.
-func answered(err error) bool {
-	var reply redis.Error
-	return errors.As(err, &reply)
+	return keys, nil
 }
 
 func (store *RedisStore) workerRegistryKey() string {
