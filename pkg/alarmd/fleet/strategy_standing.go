@@ -563,8 +563,12 @@ func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLo
 			return
 		}
 		var view *View
+		// Held on the memory line until this page's answer is written: the
+		// snapshots and the view built of them are garbage then.
+		pageCtx, release := withPageHolds(request.Context())
+		defer release()
 		if service != nil {
-			current := service.View(request.Context())
+			current := service.View(pageCtx)
 			Decide(&current, now(), stallAfter)
 			view = &current
 		}
@@ -637,7 +641,11 @@ func serveStrategyList(response http.ResponseWriter, request *http.Request, serv
 			limit = parsed
 		}
 	}
-	current := service.View(request.Context())
+	// Held on the memory line until this page's answer is written: the
+	// snapshots and the view built of them are garbage then.
+	pageCtx, release := withPageHolds(request.Context())
+	defer release()
+	current := service.View(pageCtx)
 	Decide(&current, now(), stallAfter)
 	all := StrategyLines(&current, now())
 	lines := FilterStrategyLines(all, state, action)

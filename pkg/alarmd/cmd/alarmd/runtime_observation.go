@@ -89,6 +89,12 @@ func observationAdmit(line *memoryline.Line, consumer memoryline.Consumer) func(
 	return func(bytes uint64) bool { return line.Admit(consumer, bytes) }
 }
 
+// observationHold is the line's Hold for one consumer: memory one piece of
+// work takes and releases when it is done.
+func observationHold(line *memoryline.Line, consumer memoryline.Consumer) func(bytes uint64) (func(), bool) {
+	return func(bytes uint64) (func(), bool) { return line.Hold(consumer, bytes) }
+}
+
 // observationCostTopN is how many rows each cost ranking keeps: what the
 // page shows of a ranking, not a memory share.
 const observationCostTopN = 20

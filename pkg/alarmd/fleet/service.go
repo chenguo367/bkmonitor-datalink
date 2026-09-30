@@ -129,6 +129,13 @@ type loaded struct {
 // first caller going away must not fail the others. It runs while anyone
 // waits for it and is stopped when the last of them has gone, and a caller
 // that comes after that starts a read of its own.
+//
+// What the read holds of the memory line it holds for every caller that
+// uses its answer (pageHolds): on a collector of its own, released once the
+// read has returned and each caller that took the answer has released its
+// own collector -- not with the first caller's, which may be done while the
+// others still build their views -- and at once for a caller that stopped
+// waiting.
 type sharedReads[T any] struct {
 	mu      sync.Mutex
 	flights map[string]*sharedFlight[T]
@@ -139,6 +146,10 @@ type sharedFlight[T any] struct {
 	stop    context.CancelFunc
 	waiters int
 	answer  T
+	// holds is what the read held, and users the read itself and every
+	// caller that has not yet let go of its answer.
+	holds *pageHolds
+	users int
 }
 
 // do is read's answer for key, shared with the callers that ask for key
@@ -151,7 +162,8 @@ func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(conte
 	flight := reads.flights[key]
 	if flight == nil {
 		readCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
-		flight = &sharedFlight[T]{done: make(chan struct{}), stop: stop}
+		flight = &sharedFlight[T]{done: make(chan struct{}), stop: stop, holds: &pageHolds{}, users: 1}
+		readCtx = flight.holds.in(readCtx)
 		reads.flights[key] = flight
 		go func() {
 			answer := read(readCtx)
@@ -163,12 +175,19 @@ func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(conte
 			reads.mu.Unlock()
 			stop()
 			close(flight.done)
+			reads.letGo(flight)
 		}()
 	}
 	flight.waiters++
+	flight.users++
 	reads.mu.Unlock()
 	select {
 	case <-flight.done:
+		if holds := pageHoldsOf(ctx); holds != nil {
+			holds.add(func() { reads.letGo(flight) }, flight.holds.storedBytes())
+		} else {
+			reads.letGo(flight)
+		}
 		return flight.answer
 	case <-ctx.Done():
 		reads.mu.Lock()
@@ -180,7 +199,20 @@ func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(conte
 			flight.stop()
 		}
 		reads.mu.Unlock()
+		reads.letGo(flight)
 		return gone(ctx.Err())
+	}
+}
+
+// letGo is one user of the flight's answer done with it; the last releases
+// what the read held.
+func (reads *sharedReads[T]) letGo(flight *sharedFlight[T]) {
+	reads.mu.Lock()
+	flight.users--
+	last := flight.users == 0
+	reads.mu.Unlock()
+	if last {
+		flight.holds.release()
 	}
 }
 
@@ -471,6 +503,18 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 	}
 	readFailed(&view, readErr, expectationErr)
 	return view, part
+}
+
+// admitKeptView asks the memory line for a view kept past the page that
+// read it, where the snapshots' reader can ask; otherwise it is kept.
+func (service *Service) admitKeptView(bytes uint64) bool {
+	if service == nil {
+		return true
+	}
+	if admitter, ok := service.snapshots.(interface{ admitKept(uint64) bool }); ok {
+		return admitter.admitKept(bytes)
+	}
+	return true
 }
 
 // loadForVerdict reads snapshots without asking the observation memory
