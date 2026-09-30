@@ -89,13 +89,15 @@ const (
 type ReadEarlySample struct {
 	EvaluationTime       execution.EvaluationTime `json:"evaluation_time"`
 	FirstReadAgeSeconds  int64                    `json:"first_read_age_seconds"`
+	FirstReadyAgeSeconds int64                    `json:"first_ready_age_seconds"`
 	CompletionAgeSeconds int64                    `json:"completion_age_seconds"`
 	Rung                 string                   `json:"rung"`
 	ChangedAgeSeconds    int64                    `json:"changed_age_seconds"`
 	Buckets              []int64                  `json:"buckets,omitempty"`
 	// PartialRevised is a sample some of whose series the first read had
 	// whole (ClassPartialRevised), in a run otherwise read early.
-	PartialRevised bool `json:"partial_revised,omitempty"`
+	PartialRevised  bool  `json:"partial_revised,omitempty"`
+	ReadHoldSeconds int64 `json:"read_hold_seconds,omitempty"`
 }
 
 // ReadEarlyReading is a Query Group whose window was read early in
@@ -173,10 +175,18 @@ func classOf(candidate *sample) (string, string) {
 func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.Time) {
 	class, reason := classOf(candidate)
 	engine.counts.classes[key2(candidate.source, class)]++
+	engine.recordReadHoldLocked(candidate)
+	if class == ClassPartialRevised {
+		engine.recordIgnoredLocked(candidate, ClassPartialRevised)
+	} else if class == ClassWindowReadEarly && !wholeWindowArrival(candidate) {
+		engine.recordIgnoredLocked(candidate, "noise")
+	}
 	switch class {
 	case ClassWindowReadEarly, ClassPartialRevised:
 		early := ReadEarlySample{EvaluationTime: candidate.evaluation,
+			ReadHoldSeconds:      candidate.contract.ReadHoldMillis / 1000,
 			FirstReadAgeSeconds:  int64(candidate.readAt.Sub(candidate.windowEnd) / time.Second),
+			FirstReadyAgeSeconds: int64(firstReadAge(candidate) / time.Second),
 			CompletionAgeSeconds: int64(candidate.completion / time.Second), PartialRevised: class == ClassPartialRevised}
 		if candidate.early != nil {
 			early.Rung, early.ChangedAgeSeconds, early.Buckets = candidate.early.Rung, candidate.early.ChangedAgeSeconds, candidate.early.Buckets
@@ -236,7 +246,7 @@ func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarly
 	step := int64(state.step / time.Second)
 	later := int64(0)
 	for _, sample := range run.samples {
-		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadAgeSeconds)
+		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadyAgeSeconds+sample.ReadHoldSeconds)
 	}
 	suggested := run.delaySeconds + later
 	if step > 0 {

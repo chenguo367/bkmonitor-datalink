@@ -10,6 +10,7 @@
 package lookback
 
 import (
+	"container/heap"
 	"context"
 	"sort"
 	"time"
@@ -115,6 +116,7 @@ type earlyRead struct {
 	// stopped for a formal query; running while a read is in flight, done
 	// once the read has its outcome.
 	tried, yielded, running, done bool
+	queued                        bool
 	outcome                       string
 	// readAt is when the read was made, crossed whether its supplement found
 	// series past the Slot, and late the series it found late, kept until
@@ -158,18 +160,36 @@ func (engine *Engine) planEarlyLocked(state *group, slot *directedSlot, now time
 		engine.fileEarlyLocked(state, slot, outcome)
 		return
 	}
-	offset := slot.readyAt.Sub(time.Unix(int64(slot.evaluation), 0))
-	slot.early.next = time.Unix(int64(slot.following), 0).Add(offset)
+	slot.early.next = engine.nextReadLocked(slot)
 	if !slot.early.next.Before(slot.readAt.Add(rungDelay(slot.rung, slot.step))) {
 		engine.fileEarlyLocked(state, slot, EarlyRungFirst)
 		return
 	}
 	slot.early.latest = slot.early.next.Add(-engine.leadLocked(state))
 	if now.After(slot.early.latest) {
-		engine.fileEarlyLocked(state, slot, EarlyAnchorPassed)
+		outcome := EarlyAnchorPassed
+		frozenNext := time.Unix(int64(slot.following), 0).Add(slot.readyAt.Sub(time.Unix(int64(slot.evaluation), 0)))
+		if slot.early.next.Before(frozenNext) {
+			outcome = EarlyOvertaken
+		}
+		engine.fileEarlyLocked(state, slot, outcome)
 		return
 	}
 	engine.earlyPending = append(engine.earlyPending, slot)
+}
+
+// ReadyAt already contains h_T. The next Slot uses its own effective h,
+// including a deterministic decrease transition, rather than adding h twice.
+func (engine *Engine) nextReadLocked(slot *directedSlot) time.Time {
+	frozen := time.Duration(slot.readHold) * time.Millisecond
+	hold := frozen
+	if engine.options.ReadHoldAt != nil {
+		hold = engine.options.ReadHoldAt(slot.queryGroup, slot.following)
+	} else if engine.options.CurrentReadHold != nil {
+		hold = engine.options.CurrentReadHold(slot.queryGroup)
+	}
+	offset := slot.readyAt.Sub(time.Unix(int64(slot.evaluation), 0)) - frozen + hold
+	return time.Unix(int64(slot.following), 0).Add(offset)
 }
 
 // fileEarlyLocked counts a directed Slot's early read's outcome.
@@ -232,13 +252,23 @@ func (engine *Engine) dueEarlyLocked(now time.Time, free int) ([]*directedSlot, 
 	took := map[*directedSlot]time.Duration{}
 	for _, slot := range engine.earlyPending {
 		state := engine.groups[slot.queryGroup]
+		if state != nil && !slot.early.done && !slot.early.running {
+			next := engine.nextReadLocked(slot)
+			previous := slot.early.next
+			slot.early.next, slot.early.latest = next, next.Add(-engine.leadLocked(state))
+			if next.Before(previous) && now.After(slot.early.latest) {
+				engine.fileEarlyLocked(state, slot, EarlyOvertaken)
+			} else if !next.Before(slot.readAt.Add(rungDelay(slot.rung, slot.step))) {
+				engine.fileEarlyLocked(state, slot, EarlyRungFirst)
+			}
+		}
 		switch {
 		case slot.early.done:
 			continue
 		case slot.dropped || state == nil:
 			engine.fileEarlyLocked(state, slot, EarlyOwnerLost)
 			continue
-		case slot.early.running:
+		case slot.early.running || slot.early.queued:
 			pending = append(pending, slot)
 			continue
 		case now.After(slot.early.latest):
@@ -314,11 +344,31 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 	}
 	now := engine.options.Now()
 	engine.mu.Lock()
-	due, _ := engine.dueEarlyLocked(now, free)
+	engine.earlyQueueLocked(now, free)
 	engine.mu.Unlock()
-	for index, slot := range due {
-		if !engine.options.Owns(slot.queryGroup) {
-			engine.Forget(slot.queryGroup)
+	for {
+		engine.mu.Lock()
+		if engine.earlyWork.Len() == 0 || now.Before(engine.earlyWork[0].at) {
+			engine.mu.Unlock()
+			return
+		}
+		work := heap.Pop(&engine.earlyWork).(earlyWork)
+		if work.trial != nil && (work.trial.done || work.trial.formal) || work.slot != nil && (work.slot.dropped || work.slot.early.done) {
+			engine.mu.Unlock()
+			continue
+		}
+		if work.slot != nil {
+			work.slot.early.queued = false
+		}
+		engine.mu.Unlock()
+		qg := execution.QueryGroupIdentity("")
+		if work.slot != nil {
+			qg = work.slot.queryGroup
+		} else {
+			qg = work.trial.query.Contract.Slot.QueryGroup
+		}
+		if !engine.options.Owns(qg) {
+			engine.Forget(qg)
 			continue
 		}
 		release, yield, refused := engine.options.Permit()
@@ -330,22 +380,46 @@ func (engine *Engine) StepEarly(ctx context.Context) {
 			engine.counts.refusals[refused]++
 			// None is free now: every read due tries again a read's time on,
 			// short of its latest start.
-			for _, waiting := range due[index:] {
-				state := engine.groups[waiting.queryGroup]
+			waiting := earlyHeap{work}
+			for engine.earlyWork.Len() > 0 && !now.Before(engine.earlyWork[0].at) {
+				waiting = append(waiting, heap.Pop(&engine.earlyWork).(earlyWork))
+			}
+			for _, item := range waiting {
+				if item.trial != nil {
+					if !item.trial.formal && !item.trial.done {
+						item.trial.done, item.trial.outcome = true, EarlierPermitRefused
+					}
+					continue
+				}
+				slot := item.slot
+				slot.early.queued = false
+				state := engine.groups[slot.queryGroup]
 				if state == nil {
 					continue
 				}
-				waiting.early.tried = true
+				slot.early.tried = true
 				retry := now.Add(state.took.longest() / time.Duration(free))
-				if retry.After(waiting.early.latest) {
-					retry = waiting.early.latest
+				if retry.After(slot.early.latest) {
+					retry = slot.early.latest
 				}
-				waiting.early.retryAt = retry
+				slot.early.retryAt = retry
 			}
 			engine.mu.Unlock()
 			return
 		}
 		engine.mu.Lock()
+		if trial := work.trial; trial != nil {
+			if trial.done || trial.formal {
+				engine.mu.Unlock()
+				release()
+				continue
+			}
+			trial.running = true
+			engine.mu.Unlock()
+			go engine.earlierRead(ctx, trial, release, yield)
+			continue
+		}
+		slot := work.slot
 		if slot.dropped || slot.early.done {
 			engine.mu.Unlock()
 			release()
@@ -370,8 +444,8 @@ func (engine *Engine) nextEarlyWake() time.Time {
 	now := engine.options.Now()
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	due, wake := engine.dueEarlyLocked(now, free)
-	if len(due) > 0 {
+	wake := engine.earlyQueueLocked(now, free)
+	if !wake.IsZero() && !now.Before(wake) {
 		return now
 	}
 	return wake
@@ -454,7 +528,7 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 			engine.mu.Lock()
 			defer engine.mu.Unlock()
 			current := engine.groups[slot.queryGroup]
-			return current != nil && current.lastSlot <= slot.evaluation
+			return current != nil && current.lastSlot <= slot.evaluation && engine.options.Now().Before(engine.nextReadLocked(slot))
 		}}
 	slot.running = true
 	engine.mu.Unlock()

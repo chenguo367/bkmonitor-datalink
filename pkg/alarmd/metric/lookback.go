@@ -65,6 +65,9 @@ type lookbackCollector struct {
 	earlyReads     *prometheus.Desc
 	earlyUndecided *prometheus.Desc
 	earlyBytes     *prometheus.Desc
+	earlierReads   *prometheus.Desc
+	earlierBytes   *prometheus.Desc
+	holdIgnored    *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -152,6 +155,10 @@ func newLookbackCollector() *lookbackCollector {
 		earlyBytes: desc("lookback_directed_early_read_bytes_total",
 			"Bytes the early reads delivered, by source: part of lookback_directed_read_bytes_total, the bytes reading "+
 				"early added.", "source"),
+		earlierReads: desc("lookback_earlier_reads_total",
+			"Candidate h/2 reads compared with the formal first read, by source and outcome. Only equal and different are observed.", "source", "outcome"),
+		earlierBytes: desc("lookback_earlier_read_bytes_total", "Bytes candidate h/2 reads delivered, by source.", "source"),
+		holdIgnored:  desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -211,7 +218,7 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -268,6 +275,13 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		counter(c.earlyUndecided, source.EarlyUndecided, name)
 		counter(c.earlyBytes, source.EarlyReadBytes, name)
+		for _, outcome := range lookback.EarlierReadOutcomes {
+			counter(c.earlierReads, source.EarlierReads[outcome], name, outcome)
+		}
+		counter(c.earlierBytes, source.EarlierReadBytes, name)
+		for _, reason := range lookback.ReadHoldIgnoredReasons {
+			counter(c.holdIgnored, source.ReadHoldIgnored[reason], name, reason)
+		}
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

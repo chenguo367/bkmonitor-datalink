@@ -124,33 +124,40 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 	seriesTerm := mix(series)
 	for index := 0; index < dataset.Len(); index++ {
 		record, _ := dataset.Record(index)
-		at := record.SourceTime()
-		bucket, known := summarizer.buckets[at]
-		if !known && len(summarizer.buckets) >= maxBucketsPerSample {
-			summarizer.fault()
+		summarizer.addRecord(record, series, seriesTerm)
+		if summarizer.faulted {
 			return
 		}
-		summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
-		bits := valueBits(summarizer.buffer)
-		point := pointHash(series, at, bits)
-		bucket.points++
-		bucket.series += seriesTerm
-		bucket.values += point
-		summarizer.buckets[at] = bucket
-		if summarizer.series == nil || at < summarizer.seriesFrom {
-			continue
-		}
-		sum, known := summarizer.series[series]
-		if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
-			continue
-		}
-		sum.points++
-		if !quietValue(summarizer.buffer, bits) {
-			sum.active++
-		}
-		sum.values += point
-		summarizer.series[series] = sum
 	}
+}
+
+func (summarizer *summarizer) addRecord(record execution.RecordView, series, seriesTerm uint64) {
+	at := record.SourceTime()
+	bucket, known := summarizer.buckets[at]
+	if !known && len(summarizer.buckets) >= maxBucketsPerSample {
+		summarizer.fault()
+		return
+	}
+	summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
+	bits := valueBits(summarizer.buffer)
+	point := pointHash(series, at, bits)
+	bucket.points++
+	bucket.series += seriesTerm
+	bucket.values += point
+	summarizer.buckets[at] = bucket
+	if summarizer.series == nil || at < summarizer.seriesFrom {
+		return
+	}
+	sum, known := summarizer.series[series]
+	if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
+		return
+	}
+	sum.points++
+	if !quietValue(summarizer.buffer, bits) {
+		sum.active++
+	}
+	sum.values += point
+	summarizer.series[series] = sum
 }
 
 // fault drops a read past every window's buckets.
