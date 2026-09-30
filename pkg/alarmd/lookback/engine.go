@@ -214,6 +214,12 @@ type Query struct {
 	Spec      execution.PhysicalQuerySpec
 	Operation execution.Operation
 	AttemptNo uint32
+	// ReadyAt is when the query was ready to read, its Slot's evaluation
+	// time plus its readiness offset; FollowingSlot is the Slot its frozen
+	// schedule has next, zero when unknown. Together they say when the
+	// Query Group's next Slot reads: FollowingSlot plus the same offset.
+	ReadyAt       time.Time
+	FollowingSlot execution.EvaluationTime
 }
 
 // Engine is the lookback of one process.

@@ -330,7 +330,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			break
 		}
 		kept := source.config.Lookback.Begin(lookback.Query{Contract: request.Contract, Spec: query.Spec,
-			Operation: request.Operation, AttemptNo: attempt.AttemptNo})
+			Operation: request.Operation, AttemptNo: attempt.AttemptNo, ReadyAt: time.UnixMilli(query.ReadyAtUnixMilli),
+			FollowingSlot: execution.FollowingSlotOf(ctx)})
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()

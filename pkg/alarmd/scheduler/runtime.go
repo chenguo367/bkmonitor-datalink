@@ -60,6 +60,10 @@ type FrozenSlot struct {
 	Dispatch                       SlotDispatchContext
 	ExpectedNextSlot               execution.EvaluationTime
 	Recovery                       SlotRecoveryFacts
+	// FollowingSlot is the Slot the frozen schedule has after this one, zero
+	// when the Segment it was frozen from ends first. Observation only: the
+	// lookback reads it to know when the Query Group reads next.
+	FollowingSlot execution.EvaluationTime
 }
 
 // SlotDispatchContext contains current, replaceable execution authority. It is
@@ -842,7 +846,8 @@ func (runner *Runner) runOneTracked(
 		defer releaseAdmission()
 	}
 	decision = "execute"
-	result, err := runner.executor.Execute(execution.ContextWithLeaseAuthority(ctx, runner.session), request)
+	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
+	result, err := runner.executor.Execute(executeCtx, request)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
 		// between the source's reads and here is refused by the same name:
