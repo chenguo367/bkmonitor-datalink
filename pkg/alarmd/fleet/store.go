@@ -362,6 +362,9 @@ func (store *RedisStore) load(ctx context.Context, replicas []string, admitted b
 			return held
 		}
 	case admitted && store.admitLoad != nil:
+		// No page reads without a collector: every one reads through the
+		// shared read, which brings its own. A reader that does not is
+		// admitted until the next collection, rather than read unasked.
 		admit = func(total uint64) bool { return store.admitLoad(total * snapshotDecodedCharge) }
 	}
 	bytes, err := store.read(ctx, replicas, store.snapshotKey, admit, func(index int, text string) error {

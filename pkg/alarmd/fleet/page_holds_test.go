@@ -257,3 +257,50 @@ func TestAHoldAddedAfterTheWorkIsDoneIsReleasedAtOnce(t *testing.T) {
 		t.Fatalf("%d held after a hold was added to finished work, want none", held)
 	}
 }
+
+// A diagnosis whose read panics after taking its hold still releases it,
+// answers the requests waiting on it, and is not kept.
+func TestADiagnosisReadThatPanicsReleasesItsHold(t *testing.T) {
+	line := &heldLine{}
+	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	func() {
+		defer func() { _ = recover() }()
+		cache.get(context.Background(), "d-1", now, func(ctx context.Context) *diagnosisEntry {
+			release, _ := line.hold(1000)
+			pageHoldsOf(ctx).add(release, 1000)
+			panic("the read failed")
+		})
+	}()
+	if held, holds := line.reading(); holds != 1 || held != 0 {
+		t.Fatalf("%d held from %d holds after the read panicked, want it released", held, holds)
+	}
+	if len(cache.entries) != 0 {
+		t.Fatalf("entries %v after a read that panicked, want none kept", cache.entries)
+	}
+}
+
+// The diagnosis warm-up holds what its read takes until it is done, as a
+// page does: it keeps only its timing.
+func TestTheDiagnosisWarmUpReleasesWhatItHeld(t *testing.T) {
+	_, _, line, _, service := pageRig(t)
+	lookup := func(string) StrategyLookupFacts { return StrategyLookupFacts{Available: true} }
+	warmer := NewDiagnosisWarmer(service, lookup, func(context.Context) ([]string, error) { return []string{"854"}, nil }, nil,
+		func() time.Time { return now }, time.Minute)
+	if warm := warmer.Warm(context.Background()); warm.Error != "" {
+		t.Fatalf("warm-up failed: %s", warm.Error)
+	}
+	if held, holds := line.reading(); holds != 1 || held != 0 {
+		t.Fatalf("%d held from %d holds after the warm-up, want one hold released", held, holds)
+	}
+}
+
+// Each charge covers what it was measured at: a page read's peak at 4.22
+// times the stored length, a kept view at 1.92.
+func TestTheChargesCoverTheirMeasurements(t *testing.T) {
+	if pageReadChargeNum*100 < 422*pageReadChargeDen {
+		t.Errorf("a page read is held at %d/%d, below its measured 4.22", pageReadChargeNum, pageReadChargeDen)
+	}
+	if keptViewChargeNum*100 < 192*keptViewChargeDen {
+		t.Errorf("a kept view is admitted at %d/%d, below its measured 1.92", keptViewChargeNum, keptViewChargeDen)
+	}
+}

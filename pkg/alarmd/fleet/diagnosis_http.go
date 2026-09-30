@@ -160,6 +160,10 @@ type diagnosisEntry struct {
 	ready chan struct{}
 }
 
+// diagnosisReadFailed is the read error of a diagnosis whose read did not
+// return, to the requests that waited on it.
+const diagnosisReadFailed = "DIAGNOSIS_READ_FAILED"
+
 // DiagnosisReadTimeout bounds one diagnosis's first read of the universe and
 // the fleet's snapshots, inside the channel's own request deadline.
 const DiagnosisReadTimeout = 2500 * time.Millisecond
@@ -213,11 +217,28 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	// own bound.
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DiagnosisReadTimeout)
 	holds := &pageHolds{}
+	// A read that never returns -- it panicked -- still releases what it
+	// held, answers the requests waiting on its placeholder, and is not kept.
+	defer holds.release()
+	filledIn := false
+	defer func() {
+		if filledIn {
+			return
+		}
+		placeholder.readError = diagnosisReadFailed
+		close(placeholder.ready)
+		cache.mu.Lock()
+		if cache.entries[id] == placeholder {
+			delete(cache.entries, id)
+		}
+		cache.mu.Unlock()
+	}()
 	filled := read(holds.in(readCtx))
 	cancel()
 	placeholder.universe, placeholder.digest, placeholder.readAt = filled.universe, filled.digest, filled.readAt
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
 	placeholder.universeTook, placeholder.viewTook = filled.universeTook, filled.viewTook
+	filledIn = true
 	close(placeholder.ready)
 	// What the read held is garbage now but the view, which stays with the
 	// entry: the hold is released first, and the view admitted as it is kept.
