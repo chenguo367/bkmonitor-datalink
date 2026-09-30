@@ -21,8 +21,10 @@ const (
 	// errorBodyRead is how much of an answer that was not 200 is read; the
 	// rest is left undrained with the connection.
 	errorBodyRead = 4096
-	// errorExcerptBytes is how much of it an excerpt keeps: a provider's
-	// reason fits, a request it echoes whole does not.
+	// errorExcerptBytes is how much of it an excerpt's body keeps: a
+	// provider's reason fits, a request it echoes whole does not. A body cut
+	// there is followed by "...", so an excerpt is at most this many bytes
+	// and the three of the marker.
 	errorExcerptBytes = 384
 )
 
@@ -41,8 +43,8 @@ var (
 
 // providerErrorExcerpt is the start of an error body, as an operator may
 // read it: valid UTF-8, whitespace folded, every URL, credential value and
-// address (IPv4, bracketed IPv6, host:port) replaced, cut to
-// errorExcerptBytes on a rune boundary.
+// address (IPv4, bracketed IPv6, host:port) replaced, its body cut to
+// errorExcerptBytes on a rune boundary and the cut marked "...".
 func providerErrorExcerpt(body []byte) string {
 	if len(body) == 0 {
 		return ""
