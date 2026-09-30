@@ -462,6 +462,17 @@ func pruneTransitions(record *Record, readyWithoutHold int64) {
 	record.Transitions = kept
 }
 
+func (controller *Controller) predecessorSnapshot(state *entry) (GroupSpec, map[execution.QueryGroupIdentity]Inspection) {
+	state.mu.Lock()
+	spec := state.spec
+	state.mu.Unlock()
+	predecessors := make(map[execution.QueryGroupIdentity]Inspection, len(spec.Previous))
+	for _, previous := range spec.Previous {
+		predecessors[previous.QueryGroup] = controller.Inspect(previous.QueryGroup)
+	}
+	return spec, predecessors
+}
+
 // SlotReadHold is called before a new Slot is frozen. An unfinished Slot
 // bypasses it and keeps its own contract's hold.
 func (controller *Controller) SlotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
@@ -472,13 +483,7 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	state := controller.group(qg)
 	// Snapshot predecessor records before locking this group. Cross-group
 	// migrations must not acquire two entry locks in opposite order.
-	state.mu.Lock()
-	spec := state.spec
-	state.mu.Unlock()
-	predecessors := make(map[execution.QueryGroupIdentity]Inspection, len(spec.Previous))
-	for _, previous := range spec.Previous {
-		predecessors[previous.QueryGroup] = controller.Inspect(previous.QueryGroup)
-	}
+	spec, predecessors := controller.predecessorSnapshot(state)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if err := ready(state); err != nil {
@@ -547,10 +552,14 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 		return errors.New("alarmd readhold: closed schedule required")
 	}
 	state := controller.group(schedule.Segment.QueryGroup)
+	spec, predecessors := controller.predecessorSnapshot(state)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if err := ready(state); err != nil {
 		return err
+	}
+	if !reflect.DeepEqual(spec, state.spec) {
+		return ErrConflict
 	}
 	next := clone(state.record)
 	if schedule.Segment.Start < next.SegmentStart {
@@ -565,14 +574,19 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 		}
 		return nil
 	}
+	next, err := controller.seed(state, predecessors)
+	if err != nil {
+		return err
+	}
 	closeRecord(&next, state.spec, schedule, controller.options.MaxHold.Milliseconds())
 	if len(state.raw) == 0 && current(next) == 0 && next.ArrivalAgeMillis == 0 && len(next.Transitions) == 0 {
 		// The caller establishes the absent zero predecessor using retained
 		// progress and its closed timeline; do not invent a durable zero h.
-		state.record = next
+		state.record, state.seeded = next, true
 		return nil
 	}
 	if reflect.DeepEqual(next, state.record) {
+		state.seeded = true
 		return nil
 	}
 	owner, err := controller.options.Owner(schedule.Segment.QueryGroup)
@@ -580,7 +594,11 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 		return err
 	}
 	owner.Fence = fence
-	return controller.persist(ctx, schedule.Segment.QueryGroup, state, next, &owner)
+	if err := controller.persist(ctx, schedule.Segment.QueryGroup, state, next, &owner); err != nil {
+		return err
+	}
+	state.seeded = true
+	return nil
 }
 
 func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryGroupSchedule, holdBound int64) {
@@ -598,12 +616,13 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 	for _, plan := range schedule.Plans {
 		last := int64(*schedule.Segment.End) - 1
 		last -= (last - int64(plan.Spec.Alignment)) % plan.Spec.EvaluationIntervalSeconds
-		if last < int64(schedule.Segment.Start) || !plan.Spec.IsAligned(execution.EvaluationTime(last)) {
-			continue
-		}
-		previousHold := holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait)
+		hasSlot := last >= int64(schedule.Segment.Start) && plan.Spec.IsAligned(execution.EvaluationTime(last))
+		previousHold, completionOffset := int64(0), int64(0)
 		unknown := false
-		if frozen, known := record.HoldAt(execution.EvaluationTime(last)); known {
+		if !hasSlot {
+			last = 0
+		} else if frozen, known := record.HoldAt(execution.EvaluationTime(last)); known {
+			previousHold = holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait)
 			if last == int64(record.SinceSlot) && record.SinceSlot > 1 {
 				// This Slot chose its frozen hold before a later observation
 				// could request a raise or a lowering for the next Slot.
@@ -618,7 +637,10 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 			// The two retained intervals no longer cover this slow Plan's
 			// final Slot. The configured bound protects its possible frozen
 			// hold without adding a historical hold state machine.
-			previousHold, unknown = max(previousHold, holdBound), true
+			previousHold, unknown = max(holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait), holdBound), true
+		}
+		if hasSlot {
+			completionOffset = plan.Spec.CompletionOffsetSeconds() * 1000
 		}
 		for _, ref := range refs {
 			if ref.Key != plan.Key() {
@@ -636,10 +658,16 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 				ClosedQueryGroup:    schedule.Segment.QueryGroup,
 				PreviousHoldUnknown: unknown,
 				PreviousHoldMillis:  previousHold, PreviousSlot: execution.EvaluationTime(last),
-				CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000}
+				CompletionOffsetMillis: completionOffset}
 			for _, existing := range record.Plans {
 				if existing.PlanRef == ref {
 					closed.InheritedQueryGroup, closed.InheritedClosedAt = existing.InheritedQueryGroup, existing.InheritedClosedAt
+					if !hasSlot && existing.PreviousSlot > 0 {
+						// An empty segment closes no new Slot, but cannot erase
+						// an earlier segment's still-protected completion fact.
+						closed.PreviousSlot, closed.PreviousHoldMillis = existing.PreviousSlot, existing.PreviousHoldMillis
+						closed.CompletionOffsetMillis, closed.PreviousHoldUnknown = existing.CompletionOffsetMillis, existing.PreviousHoldUnknown
+					}
 					break
 				}
 			}

@@ -636,3 +636,78 @@ func TestExpiredDepartedPlansAndSatisfiedTransitionsArePruned(t *testing.T) {
 		t.Fatal("a past completion deadline stayed in the active record")
 	}
 }
+
+func TestZeroSlotSegmentClosesItsBridgeWithoutErasingAnEarlierDeadline(t *testing.T) {
+	for _, earlier := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new group without any Slot", true: "earlier closed completion remains"}[earlier], func(t *testing.T) {
+			c, store, _ := controllerFixture(t)
+			if earlier {
+				record := Record{HoldMillis: 150_000, SinceSlot: 60, PreviousSinceSlot: 1, ArrivalAgeMillis: 180_000, SegmentStart: 60,
+					Plans: []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: 180_000, ClosedQueryGroup: "old", ClosedAt: 61,
+						PreviousSlot: 60, PreviousHoldMillis: 150_000, CompletionOffsetMillis: 55_000,
+						InheritedQueryGroup: "ancestor", InheritedClosedAt: 50}}}
+				store.values["old"], _ = json.Marshal(record)
+			}
+			prepare(t, c, groupSpec("old", 0))
+			end := execution.EvaluationTime(90)
+			old := scheduleFor(t, "old", 61, &end)
+			if _, found := old.FirstSlot(); found {
+				t.Fatal("fixture has a Slot in its supposedly empty segment")
+			}
+			if err := c.CloseSchedule(context.Background(), old, holdFence("old")); err != nil {
+				t.Fatal(err)
+			}
+			closed, _ := c.Reading("old")
+			if len(closed.Plans) != 1 || closed.Plans[0].ClosedAt != end || closed.Plans[0].ClosedQueryGroup != "old" {
+				t.Fatalf("empty segment never closed its Plan bridge: %+v", closed)
+			}
+			newSpec := groupSpec("new", 120*time.Second)
+			newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: end, Schedule: &old, ZeroConfirmed: !earlier}}
+			prepare(t, c, newSpec)
+			want := time.Duration(0)
+			if earlier {
+				want = 115 * time.Second
+				if plan := closed.Plans[0]; plan.PreviousSlot != 60 || plan.InheritedQueryGroup != "ancestor" || plan.InheritedClosedAt != 50 {
+					t.Fatalf("empty segment erased an earlier fact: %+v", plan)
+				}
+			} else if closed.Plans[0].PreviousSlot != 0 {
+				t.Fatal("empty segment invented a predecessor Slot")
+			}
+			if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 120, holdFence("new")); err != nil || got != want {
+				t.Fatalf("empty predecessor = %s %v; want %s", got, err, want)
+			}
+		})
+	}
+}
+
+func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("a", 0))
+	observeEarly(t, c, "a", 180*time.Second, 30*time.Second, 0)
+	first := execution.EvaluationTime(1201)
+	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "a", 60, &first), holdFence("a")); err != nil {
+		t.Fatal(err)
+	}
+	bSpec := groupSpec("b", 120*time.Second)
+	bSpec.Previous = []Previous{{QueryGroup: "a", ClosedAt: first}}
+	prepare(t, c, bSpec)
+	second := execution.EvaluationTime(1230)
+	bSchedule := scheduleFor(t, "b", first, &second)
+	// B closes without ever freezing a Slot or calling SlotReadHold.
+	if err := c.CloseSchedule(context.Background(), bSchedule, holdFence("b")); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := c.Reading("b")
+	if plan := b.Plans[0]; plan.ArrivalAgeMillis != 180_000 || plan.PreviousSlot != 1200 || plan.PreviousHoldMillis != 150_000 || plan.InheritedQueryGroup != "a" || plan.InheritedClosedAt != first {
+		t.Fatalf("empty middle group never inherited its bridge: %+v", plan)
+	}
+	cSpec := groupSpec("c", 300*time.Second)
+	cSpec.Previous = []Previous{{QueryGroup: "b", ClosedAt: second}}
+	prepare(t, c, cSpec)
+	for index, want := range []time.Duration{115 * time.Second, 55 * time.Second, 0} {
+		slot := execution.EvaluationTime(1260 + index*60)
+		if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "c", second, nil), slot, holdFence("c")); err != nil || got != want {
+			t.Fatalf("A-to-empty-B-to-C Slot %d = %s %v; want %s", slot, got, err, want)
+		}
+	}
+}
