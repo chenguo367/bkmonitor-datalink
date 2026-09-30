@@ -41,6 +41,15 @@ func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T
 		"dynamic_topology|OKEmpty|node_missing",
 		"dynamic_topology|OKEmpty|node_in_other_business",
 		"static|Unavailable|model_representation_unresolved",
+		"exclude|Unavailable|model_representation_unresolved",
+		"exclude|Unavailable|index_unavailable",
+		"exclude|Unavailable|index_incomplete",
+		"exclude|Unavailable|read_failed",
+		"exclude|Unavailable|stale",
+		"exclude|Unavailable|address_unresolved",
+		"exclude|Unavailable|address_ambiguous",
+		"exclude|OK|excluded_absent",
+		"exclude|OKEmpty|excluded_absent",
 	}
 	sort.Strings(want)
 	got := selectorCells(t, r)
@@ -76,6 +85,8 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 			StrategyID: "7", State: "Unavailable",
 			Selectors: []observability.TargetSelectorFacts{
 				{Kind: "static", State: "OK", Reason: "none", Kept: 2},
+				{Kind: "exclude", State: "Unavailable", Reason: "model_representation_unresolved", Dropped: 1},
+				{Kind: "exclude", State: "OK", Reason: "excluded_absent", Kept: 1, Dropped: 3},
 				{Kind: "dynamic_topology", State: "OKEmpty", Reason: "node_in_other_business", NodeForeign: true},
 				{Kind: "dynamic_group", State: "Unavailable", Reason: "key_missing"},
 				{Kind: "dynamic_group", State: "Unavailable", Reason: "key_missing"},
@@ -87,10 +98,12 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 	got := selectorCells(t, r)
 	for cell, want := range map[string]float64{
 		"static|OK|none": 1,
-		"dynamic_topology|OKEmpty|node_in_other_business": 1,
-		"dynamic_group|Unavailable|key_missing":           2,
-		"dynamic_group|Unavailable|other":                 1,
-		"dynamic_topology|OKEmpty|node_missing":           0,
+		"exclude|Unavailable|model_representation_unresolved": 1,
+		"exclude|OK|excluded_absent":                          1,
+		"dynamic_topology|OKEmpty|node_in_other_business":     1,
+		"dynamic_group|Unavailable|key_missing":               2,
+		"dynamic_group|Unavailable|other":                     1,
+		"dynamic_topology|OKEmpty|node_missing":               0,
 	} {
 		if got[cell] != want {
 			t.Fatalf("%s after one resolution = %v, want %v (all: %v)", cell, got[cell], want, got)
@@ -102,6 +115,9 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 	}
 	if states["Unavailable"] != 1 || states["Complete"] != 0 || states["Incomplete"] != 0 {
 		t.Fatalf("resolution states after one Unavailable resolution = %v", states)
+	}
+	if absent := gatherFamily(t, r, "bkmonitor_alarmd_target_excluded_absent_members_total")[0].GetCounter().GetValue(); absent != 3 {
+		t.Fatalf("absent members = %v, want 3 members rather than one selector", absent)
 	}
 }
 

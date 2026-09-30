@@ -218,6 +218,9 @@ type StrategyTargetPlanConfig struct {
 	ModelDimension     string   `json:"model_dimension,omitempty"`
 	StaticKeys         int      `json:"static_keys"`
 	StaticMembers      int      `json:"static_members"`
+	ExcludeKeys        int      `json:"exclude_keys"`
+	ExcludeMembers     int      `json:"exclude_members"`
+	ExcludeHosts       int      `json:"exclude_hosts"`
 	DynamicGroups      int      `json:"dynamic_groups"`
 	DynamicTopologies  int      `json:"dynamic_topologies"`
 	// StaticBusinesses is how many static targets carry a business a global
@@ -471,6 +474,7 @@ func strategyTargetConfigOf(scope *contract.TargetScopeV2, plan *contract.Target
 			SchemaVersion: plan.SchemaVersion, ModelID: plan.ModelID, Rule: string(plan.Rule),
 			IdentityDimensions: append([]string(nil), plan.Identity.Dimensions...), ModelDimension: plan.Identity.ModelDimension,
 			StaticKeys: len(plan.StaticKeys), StaticBusinesses: len(plan.StaticBusinesses), StaticMembers: len(plan.StaticMembers),
+			ExcludeKeys: len(plan.ExcludeKeys), ExcludeMembers: len(plan.ExcludeMembers), ExcludeHosts: len(plan.ExcludeHosts),
 			DynamicGroups: len(plan.DynamicGroups), DynamicTopologies: len(plan.DynamicTopologies),
 		}}
 	case scope != nil:

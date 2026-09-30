@@ -2247,9 +2247,11 @@ var SELECTOR_REASON = {
   json_invalid: '分组缓存的值不是合法 JSON',
   structure_invalid: '分组缓存的值结构不符合合同',
   model_mismatch: '分组成员的模型与计划不一致',
-  read_failed: '读分组缓存失败（Redis 读错误）',
-  stale: '分组缓存刷新失败，用的是保留的旧快照（超过 10 分钟即不可用）',
+  read_failed: '读目标缓存失败（Redis 读错误）',
+  stale: '目标缓存快照已超过允许年龄，不可用',
   index_unavailable: '主机索引不可用，拓扑节点无法核对',
+  index_incomplete: '主机索引记录拒收或身份不完整，排除不可用',
+  excluded_absent: '完整主机快照里排除成员已不存在，正常跳过',
   node_missing: '拓扑节点在主机索引里不存在',
   node_in_other_business: '拓扑节点下的主机只属于别的业务',
   members_dropped: '成员逐条校验有丢弃（模型、实例、汇总列出、host_id 规则）',
@@ -2262,6 +2264,7 @@ var SELECTOR_REASON = {
 };
 function targetResolutionWords(resolution) {
   var parts = [RESOLUTION_STATE[resolution.state] || resolution.state];
+  if (resolution.excluded_absent) parts.push('排除成员已不存在：' + resolution.excluded_absent + '（excluded_absent，正常跳过）');
   (resolution.failures || []).forEach(function (failure) {
     var words = failure.kind + ' ' + failure.id + '：' + (SELECTOR_REASON[failure.reason] || failure.reason);
     if (failure.dropped) words += '（丢弃 ' + failure.dropped + '，保留 ' + (failure.kept || 0) + '）';

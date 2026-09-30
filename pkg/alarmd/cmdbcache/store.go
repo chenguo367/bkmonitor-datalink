@@ -88,6 +88,14 @@ func (store *Store) Current() *Index {
 	return store.index
 }
 
+// targetIndex pins the held snapshot and the result of its latest refresh
+// together. Exclusions must not treat a failed read as an absent member.
+func (store *Store) targetIndex() (*Index, error) {
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	return store.index, store.lastError
+}
+
 // HostIndexResolved reports whether this store can answer about hosts at all.
 //
 // It is the same judgement Health makes, read for a different question. Health

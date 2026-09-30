@@ -173,6 +173,7 @@ func TestTheFrozenIPCloudPlanRefusesItsOwnDefects(t *testing.T) {
 			StaticKeys: []string{}, StaticHosts: []string{"501", "502"}, DynamicGroups: []string{"1"}}
 	}
 	plan := valid()
+	plan.ExcludeHosts = []string{"501"}
 	if err := plan.Validate(); err != nil {
 		t.Fatalf("valid ip_cloud plan refused: %v", err)
 	}
@@ -185,8 +186,16 @@ func TestTheFrozenIPCloudPlanRefusesItsOwnDefects(t *testing.T) {
 		"unsorted hosts":        func(p *TargetPlanV1) { p.StaticHosts = []string{"502", "501"} },
 		"host zero":             func(p *TargetPlanV1) { p.StaticHosts = []string{"0"} },
 		"host not a number":     func(p *TargetPlanV1) { p.StaticHosts = []string{"h501"} },
-		"dimensions changed":    func(p *TargetPlanV1) { p.Identity.Dimensions = []string{IPCloudIPDimension} },
-		"nothing named":         func(p *TargetPlanV1) { p.StaticHosts, p.DynamicGroups = nil, nil },
+		"excluded address keys": func(p *TargetPlanV1) { p.ExcludeKeys = []string{"192.0.2.1|0"} },
+		"unsorted exclusions":   func(p *TargetPlanV1) { p.ExcludeHosts = []string{"502", "501"} },
+		"excluded host zero":    func(p *TargetPlanV1) { p.ExcludeHosts = []string{"0"} },
+		"excluded host text":    func(p *TargetPlanV1) { p.ExcludeHosts = []string{"h501"} },
+		"host exclusions on another rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity, p.TenantID, p.StaticHosts = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, "", nil
+			p.StaticKeys, p.ExcludeHosts = []string{"501"}, []string{"501"}
+		},
+		"dimensions changed": func(p *TargetPlanV1) { p.Identity.Dimensions = []string{IPCloudIPDimension} },
+		"nothing named":      func(p *TargetPlanV1) { p.StaticHosts, p.DynamicGroups = nil, nil },
 		"address on host rule": func(p *TargetPlanV1) {
 			p.Rule, p.Identity = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true, Address: true}
 		},

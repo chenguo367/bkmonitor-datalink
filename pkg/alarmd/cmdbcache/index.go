@@ -98,9 +98,13 @@ type ServiceInstanceFacts struct {
 // Index is an immutable snapshot. Refreshes publish a new one; readers keep
 // using the one they hold, so a refresh never leaves a half-built view visible.
 type Index struct {
-	byIdentity       map[string]*HostFacts
-	hosts            int
-	serviceInstances map[string]*ServiceInstanceFacts
+	byIdentity map[string]*HostFacts
+	// byHostID is the canonical host presence table already used to deduplicate
+	// a load. An absent address is not evidence that the host was deleted.
+	byHostID          map[string]*HostFacts
+	hostIDsIncomplete bool
+	hosts             int
+	serviceInstances  map[string]*ServiceInstanceFacts
 	// byNode is the reverse of every host's topology links, keyed by
 	// "biz|obj|inst": the hosts a dynamic topology reference resolves to.
 	// Built once per load so a resolution is a lookup, never a scan.
@@ -609,14 +613,15 @@ type indexBuilder struct {
 }
 
 func newIndexBuilder(now time.Time) *indexBuilder {
+	seen := make(map[string]*HostFacts)
 	return &indexBuilder{
 		index: &Index{
-			byIdentity: make(map[string]*HostFacts), serviceInstances: make(map[string]*ServiceInstanceFacts),
+			byIdentity: make(map[string]*HostFacts), byHostID: seen, serviceInstances: make(map[string]*ServiceInstanceFacts),
 			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
 			byModelInstance: make(map[string]*HostFacts),
 			addressOf:       make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
 		},
-		seen: make(map[string]*HostFacts),
+		seen: seen,
 	}
 }
 
@@ -678,6 +683,9 @@ func (builder *indexBuilder) addFields(fields []string) {
 		// dropped, and the attributes alone were most of a refresh's
 		// allocation.
 		hostID := numberText(wire.HostID)
+		if parsed, err := strconv.ParseInt(hostID, 10, 64); err != nil || parsed <= 0 {
+			builder.index.hostIDsIncomplete = true
+		}
 		if hostID != "" {
 			if existing, found := builder.seen[hostID]; found {
 				builder.index.byIdentity[identity] = existing
@@ -854,7 +862,7 @@ func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
 		DisplayName: wire.DisplayName,
 		TopoNodes:   nodes,
 		Attributes:  scalarAttributes(payload),
-		ModelID:     wire.ModelID,
+		ModelID:     strings.TrimSpace(wire.ModelID),
 		ModelInstID: rawScalarText(wire.ModelInstID),
 	}
 	if facts.CloudID == "" {
