@@ -78,9 +78,10 @@ type GroupRead struct {
 // A missing key is not an error, it is an answer. A key Redis answers with
 // an error - LOADING or BUSY on every key while the instance restarts, a key
 // of another type - is not: it says nothing about its group, visit is not
-// called for it, and Read reads the rest and returns an error wrapping a
-// redisbatch.UnansweredError that counts those keys. A caller keeps what it
-// held for a group it was not handed.
+// called for it, and Read reads the rest and returns an
+// *UnansweredGroupsError naming those groups, which wraps the
+// redisbatch.UnansweredError that counts them. A caller keeps what it held
+// for a group it was not handed.
 //
 // Any other error is the transport's - a round trip failed - and a caller
 // keeps what it held for every group: a read that failed part way has
@@ -92,7 +93,7 @@ func (reader *GroupReader) Read(ctx context.Context, ids []string, bound int, vi
 		keys[index] = reader.key(id)
 	}
 	windows := redisbatch.NewWindows(reader.client, keys, bound)
-	var unanswered *redisbatch.UnansweredError
+	var unanswered *UnansweredGroupsError
 	for read := 0; read < len(keys); {
 		start, values, err := windows.Next(ctx)
 		var partial *redisbatch.UnansweredError
@@ -109,17 +110,37 @@ func (reader *GroupReader) Read(ctx context.Context, ids []string, bound int, vi
 		}
 		if partial != nil {
 			if unanswered == nil {
-				unanswered = &redisbatch.UnansweredError{First: partial.First}
+				unanswered = &UnansweredGroupsError{Groups: map[string]error{}, counted: redisbatch.UnansweredError{First: partial.First}}
 			}
-			unanswered.Keys += partial.Keys
+			unanswered.counted.Keys += partial.Keys
+			for offset, value := range values {
+				if value.Err != nil {
+					unanswered.Groups[ids[start+offset]] = value.Err
+				}
+			}
 		}
 		read += len(values)
 	}
 	if unanswered != nil {
-		return fmt.Errorf("alarmd cmdbcache: read dynamic groups: %w", unanswered)
+		return unanswered
 	}
 	return nil
 }
+
+// UnansweredGroupsError is a read of which Redis answered some groups' keys
+// with an error rather than their documents: each such group by id, with
+// the error its key was answered with. It wraps the
+// redisbatch.UnansweredError that counts them.
+type UnansweredGroupsError struct {
+	Groups  map[string]error
+	counted redisbatch.UnansweredError
+}
+
+func (err *UnansweredGroupsError) Error() string {
+	return "alarmd cmdbcache: read dynamic groups: " + err.counted.Error()
+}
+
+func (err *UnansweredGroupsError) Unwrap() error { return &err.counted }
 
 // GroupMember is one member as the cache carries it, after the checks that
 // do not depend on a plan: it names the group's model and an instance, and
@@ -310,6 +331,11 @@ type GroupStore struct {
 	// reads every refresh has had.
 	unanswered      int
 	unansweredReads uint64
+	// failing is, per group served past a refresh that could not read it,
+	// the first such refresh since the group was last read and what that
+	// refresh's read said: Redis's answer to its key, or the round trip's
+	// failure. A read of the group ends it.
+	failing map[string]groupFailure
 
 	// pending are the groups whose snapshot has members and whose reads have
 	// been empty since the time recorded; the snapshot before is served until
@@ -360,7 +386,8 @@ func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore,
 	}
 	return &GroupStore{reader: reader, interval: options.RefreshInterval, maxAge: options.MaxAge, readBound: options.ReadBound, now: now,
 		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]groupReference),
-		pending: make(map[string]time.Time), unconfirmed: make(map[string]time.Time), emptiedChanged: options.EmptiedChanged}, nil
+		pending: make(map[string]time.Time), unconfirmed: make(map[string]time.Time), failing: make(map[string]groupFailure),
+		emptiedChanged: options.EmptiedChanged}, nil
 }
 
 // MaxAge is the bound past which a held snapshot is not served.
@@ -373,6 +400,27 @@ func (store *GroupStore) MaxAge() time.Duration {
 
 // groupReference is one id's registration: when it was last asked for and
 // the longest evaluation interval among the Plans that asked.
+// groupFailure is one group's run of refreshes that could not read it.
+type groupFailure struct {
+	since  time.Time
+	reason string
+}
+
+// failedLocked records that the refresh at at could not read the group,
+// for why: a group without a snapshot serves nothing past it, and is left
+// out; a run already going keeps its start.
+func (store *GroupStore) failedLocked(id string, at time.Time, why error) {
+	if _, held := store.snapshots[id]; !held {
+		return
+	}
+	failure, running := store.failing[id]
+	if !running {
+		failure.since = at
+	}
+	failure.reason = why.Error()
+	store.failing[id] = failure
+}
+
 type groupReference struct {
 	askedAt  time.Time
 	interval time.Duration
@@ -537,6 +585,7 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 			delete(store.snapshots, id)
 			delete(store.pending, id)
 			delete(store.unconfirmed, id)
+			delete(store.failing, id)
 			continue
 		}
 		ids = append(ids, id)
@@ -553,11 +602,14 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	// A group Redis answered with an error has no read in next: it keeps its
 	// snapshot, served as past a failed refresh, and the refresh fails and
 	// counts it. Any other failure keeps every group's.
-	var unanswered *redisbatch.UnansweredError
+	var unanswered *UnansweredGroupsError
 	if readErr != nil && !errors.As(readErr, &unanswered) {
 		store.mu.Lock()
 		store.lastFailureAt, store.lastError = store.now(), readErr
 		store.failures++
+		for _, id := range ids {
+			store.failedLocked(id, store.lastFailureAt, readErr)
+		}
 		store.mu.Unlock()
 		return readErr
 	}
@@ -574,6 +626,7 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 		if !read {
 			continue
 		}
+		delete(store.failing, id)
 		if _, isPending := store.pending[id]; isPending {
 			if emptiedRead(current) {
 				continue
@@ -638,8 +691,11 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	if unanswered != nil {
 		store.lastFailureAt, store.lastError = at, readErr
 		store.failures++
-		store.unanswered = unanswered.Keys
-		store.unansweredReads += uint64(unanswered.Keys)
+		store.unanswered = len(unanswered.Groups)
+		store.unansweredReads += uint64(len(unanswered.Groups))
+		for id, why := range unanswered.Groups {
+			store.failedLocked(id, at, why)
+		}
 	}
 	store.refreshes++
 	changed := store.held != heldBefore
@@ -693,6 +749,17 @@ type GroupHealth struct {
 	// UnansweredReads is how many such reads every refresh has had.
 	Unanswered      int
 	UnansweredReads uint64
+	// Failing is each group served past a refresh that could not read it, by
+	// id: since the first such refresh after its last read, and what the
+	// latest said.
+	Failing []GroupFailure
+}
+
+// GroupFailure is one group served past refreshes that could not read it.
+type GroupFailure struct {
+	ID     string
+	Since  time.Time
+	Reason string
 }
 
 func (store *GroupStore) Health() GroupHealth {
@@ -705,6 +772,10 @@ func (store *GroupStore) Health() GroupHealth {
 		ConsecutiveErrors: store.failures, Refreshes: store.refreshes, SyncReads: store.syncReads,
 		EmptiedPending: len(store.pending) + len(store.unconfirmed), EmptiedHeld: store.held, EmptiedHolds: store.emptiedHolds,
 		Unanswered: store.unanswered, UnansweredReads: store.unansweredReads}
+	for id, failure := range store.failing {
+		health.Failing = append(health.Failing, GroupFailure{ID: id, Since: failure.since, Reason: failure.reason})
+	}
+	sort.Slice(health.Failing, func(i, j int) bool { return health.Failing[i].ID < health.Failing[j].ID })
 	for _, snapshot := range store.snapshots {
 		if snapshot.Unavailable != "" {
 			health.Unavailable++

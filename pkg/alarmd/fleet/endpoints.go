@@ -171,12 +171,27 @@ type WriterEvidence struct {
 	// State is the reader's own reading of the copy, in the reader's closed
 	// words, when it keeps one: never_loaded, index_stale, index_empty for the
 	// host cache; not_configured, authoritative and the like for the settings
-	// copy. Empty where the reader keeps no such state.
+	// copy; no_groups_referenced, loaded, emptied_held and refresh_failed for
+	// the target groups. Empty where the reader keeps no such state.
 	State string `json:"state,omitempty"`
 	// Refused is what the reader read of the writer's records and could not
 	// use, where it counts that: the host cache's. Absent elsewhere, and
 	// before the first load.
 	Refused *RefusedRecords `json:"refused,omitempty"`
+	// Failing is each copy the reader serves past reads of it that failed,
+	// where it keeps copies by name: the target group store's groups. Absent
+	// with none.
+	Failing []FailingCopy `json:"failing,omitempty"`
+}
+
+// FailingCopy is one copy served past reads of it that failed: its name,
+// how long ago the first failed read after its last read was, and what the
+// latest failed read said - Redis's answer to its key (LOADING, BUSY, a key
+// of another type), or the round trip's failure.
+type FailingCopy struct {
+	ID              string  `json:"id"`
+	SinceAgeSeconds float64 `json:"since_age_seconds"`
+	Reason          string  `json:"reason"`
 }
 
 // RefusedRecords is what the latest load of the CMDB caches read and could
