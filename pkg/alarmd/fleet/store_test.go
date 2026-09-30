@@ -913,11 +913,12 @@ func TestASummarizedReadOutlivesTheCallerThatStartedIt(t *testing.T) {
 	}
 }
 
-// A diagnosis over a view the memory line deferred, or whose snapshots
-// could not be read, is answered and not kept; one over a view read whole
-// is kept for the pages after it.
+// A diagnosis over a view the memory line deferred, or whose snapshots or
+// registry could not be read, is answered and not kept; one over a view
+// read whole is kept for the pages after it.
 func TestADiagnosisOverADeferredViewIsNotKept(t *testing.T) {
-	for name, gap := range map[string]GapKind{"deferred": GapSnapshotsDeferred, "unreadable": GapSnapshotsUnreadable, "read": ""} {
+	for name, gap := range map[string]GapKind{"deferred": GapSnapshotsDeferred, "unreadable": GapSnapshotsUnreadable,
+		"registry": GapRegistryUnavailable, "read": ""} {
 		deferred := gap != ""
 		cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
 		view := &View{}
