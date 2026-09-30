@@ -2047,7 +2047,8 @@ func compileTargetPlanDocument(source SourceStrategy) compiledTargetPlan {
 			continue
 		}
 		field := fmt.Sprintf("items[%d].target_plan", index)
-		plan, refusal := targetplan.Decode(item.TargetPlan, targetplan.Options{ObjectIdentities: objectIdentityPairs(item.QueryConfigs)})
+		plan, refusal := targetplan.Decode(item.TargetPlan, targetplan.Options{TenantID: source.Identity.TenantID,
+			ObjectIdentities: objectIdentityPairs(item.QueryConfigs)})
 		if refusal != nil {
 			if refusal.Path != "" {
 				field += "." + refusal.Path

@@ -6,6 +6,7 @@
 package admission
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -144,7 +145,7 @@ func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 		}
 		return Decision{Reason: outsideReason(target.Members)}
 	}
-	key, ok := target.Identity.Key(func(name string) string { return dimensionText(facts.Dimensions, name) })
+	key, ok := targetPlanRecordKey(target.Identity, facts.Dimensions)
 	if !ok {
 		return Decision{Reason: TargetPlanReasonKeyMissing}
 	}
@@ -152,4 +153,17 @@ func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 		return Decision{Admit: true}
 	}
 	return Decision{Reason: outsideReason(target.Members)}
+}
+
+// targetPlanRecordKey reads a record's key under the plan's identity: its
+// address, strictly and through the protocol's aliases, for an ip_cloud
+// target; its dimensions as text by name for the others.
+func targetPlanRecordKey(identity contract.TargetPlanIdentityV1, dimensions map[string]json.RawMessage) (string, bool) {
+	if identity.Address {
+		return contract.ReadIPCloudKey(func(name string) (json.RawMessage, bool) {
+			raw, present := dimensions[name]
+			return raw, present
+		})
+	}
+	return identity.Key(func(name string) string { return dimensionText(dimensions, name) })
 }

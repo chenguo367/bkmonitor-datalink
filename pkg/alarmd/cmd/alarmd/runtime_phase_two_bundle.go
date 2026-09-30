@@ -1827,7 +1827,7 @@ func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
 // namespace mappings, all answered from the one CMDB index lookup, so a host,
 // a cluster and a namespace are never attributed from two snapshots.
 func businessAttributionLookups(index *cmdbcache.HostBusinessLookup) admission.BusinessLookups {
-	return admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index}
+	return admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index, Addresses: index}
 }
 
 // controlLeaderSteppedDown is what losing the Control Leader authority takes

@@ -165,7 +165,10 @@ type GroupSnapshot struct {
 	// key_missing, json_invalid, structure_invalid. Empty when it can.
 	Unavailable string
 	ModelID     string
-	Members     []GroupMember
+	// TenantID is the tenant the writer says the group is, empty when it
+	// says none. An ip_cloud plan reads a group only of its own tenant.
+	TenantID string
+	Members  []GroupMember
 	// Dropped counts the members refused by the plan-independent checks.
 	Dropped int
 
@@ -201,9 +204,10 @@ func (snapshot *GroupSnapshot) Keys(plan *contract.TargetPlanV1) (map[string]str
 			continue
 		}
 		switch {
-		case plan.Rule == contract.TargetPlanRuleHostID || plan.Identity.HostIdentity:
-			// Held under the host id: the host_id rule's key, and the key of
-			// a model_inst_id plan read by host identity. A member the
+		case plan.Rule == contract.TargetPlanRuleHostID || plan.Identity.HostIdentity || plan.Rule == contract.TargetPlanRuleIPCloud:
+			// Held under the host id: the host_id rule's key, the key of a
+			// model_inst_id plan read by host identity, and what an ip_cloud
+			// resolution maps to an address once per Slot. A member the
 			// writer put no host id on cannot be placed and is dropped.
 			if member.HostID == "" {
 				built.dropped++
@@ -231,6 +235,7 @@ func decodeGroup(id string, payload []byte, readAt time.Time) *GroupSnapshot {
 	snapshot := &GroupSnapshot{ID: id, ReadAt: readAt}
 	var document struct {
 		ModelID      string            `json:"model_id"`
+		TenantID     string            `json:"bk_tenant_id"`
 		ModelInstIDs []json.RawMessage `json:"model_inst_ids"`
 		MemberList   *[]struct {
 			ModelID     string          `json:"model_id"`
@@ -249,6 +254,7 @@ func decodeGroup(id string, payload []byte, readAt time.Time) *GroupSnapshot {
 		return snapshot
 	}
 	snapshot.ModelID = document.ModelID
+	snapshot.TenantID = strings.TrimSpace(document.TenantID)
 	var listed map[string]struct{}
 	if document.ModelInstIDs != nil {
 		listed = make(map[string]struct{}, len(document.ModelInstIDs))

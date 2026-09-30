@@ -30,6 +30,12 @@ type NamespaceBusinessReader interface {
 	LookupNamespaceBusiness(clusterID, namespace string) (string, bool)
 }
 
+// AddressBusinessReader answers the business of the one host at an address
+// of a tenant, and false when no host or more than one is there.
+type AddressBusinessReader interface {
+	LookupAddressBusiness(tenantID, address string) (string, bool)
+}
+
 // BusinessLookups are the caches attribution reads, each at the moment it
 // is asked. Any may be nil: a nil host cache holds no host, and a nil
 // mapping maps nothing.
@@ -37,6 +43,7 @@ type BusinessLookups struct {
 	Hosts      HostBusinessReader
 	Clusters   ClusterBusinessReader
 	Namespaces NamespaceBusinessReader
+	Addresses  AddressBusinessReader
 }
 
 // BusinessAttribution is what a global business Plan's event is filed
@@ -79,7 +86,7 @@ func AttributeBusiness(
 	target *contract.TargetPlanV1, dimensionFields []string, planBusiness string,
 	dimensions map[string]json.RawMessage, lookups BusinessLookups,
 ) BusinessAttribution {
-	if business, found := targetBusiness(target, dimensions, lookups.Hosts); found {
+	if business, found := targetBusiness(target, dimensions, lookups); found {
 		return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionTarget}
 	}
 	if groupsBy(dimensionFields, contract.BusinessDimension) {
@@ -116,10 +123,27 @@ func clusterBusiness(clusters ClusterBusinessReader, cluster string) (string, bo
 	return canonicalBusiness(business)
 }
 
-func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.RawMessage, hosts HostBusinessReader) (string, bool) {
+func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.RawMessage, lookups BusinessLookups) (string, bool) {
 	if target == nil {
 		return "", false
 	}
+	if target.Identity.Address {
+		// The host at the record's address inside the plan's tenant, the
+		// one the resolution placed the member by.
+		if lookups.Addresses == nil {
+			return "", false
+		}
+		key, placed := targetPlanRecordKey(target.Identity, dimensions)
+		if !placed {
+			return "", false
+		}
+		business, held := lookups.Addresses.LookupAddressBusiness(target.TenantID, key)
+		if !held {
+			return "", false
+		}
+		return canonicalBusiness(business)
+	}
+	hosts := lookups.Hosts
 	if target.Identity.HostIdentity {
 		if hosts == nil {
 			return "", false

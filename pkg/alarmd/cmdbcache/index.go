@@ -27,6 +27,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 const (
@@ -117,8 +119,17 @@ type Index struct {
 	// read by host identity finds the host a static member names.
 	// modelledHosts counts them, so a cache the writer has not put the
 	// identity on can be told from a model the cache knows no host of.
-	byModelInstance   map[string]*HostFacts
-	modelledHosts     int
+	byModelInstance map[string]*HostFacts
+	modelledHosts   int
+	// addressOf is, by host id, the tenant and ip_cloud key of every host
+	// the writer put a whole target address on: how an ip_cloud target maps
+	// its hosts to the keys records are read by. hostsAt is, by
+	// "tenant|ip|cloud", the hosts at that address and how many: an address
+	// two hosts of one tenant share names neither of them. Both hold only
+	// such hosts, so a cache whose writer puts no target address on its
+	// hosts costs nothing here.
+	addressOf         map[string]hostAddress
+	hostsAt           map[string]addressHosts
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
 	// clusterBusiness is the business of each BCS cluster the writer
@@ -603,6 +614,7 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 			byIdentity: make(map[string]*HostFacts), serviceInstances: make(map[string]*ServiceInstanceFacts),
 			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
 			byModelInstance: make(map[string]*HostFacts),
+			addressOf:       make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
 		},
 		seen: make(map[string]*HostFacts),
 	}
@@ -684,7 +696,66 @@ func (builder *indexBuilder) addFields(fields []string) {
 			builder.index.modelledHosts++
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
 		}
+		builder.addAddress(wire, facts)
 	}
+}
+
+// addAddress records a host's tenant and target address, when the writer
+// put both on it whole: an address that does not read, like one missing
+// half, is no address, and the host cannot be an ip_cloud member.
+func (builder *indexBuilder) addAddress(wire wireHost, facts *HostFacts) {
+	tenant := strings.TrimSpace(wire.TenantID)
+	if wire.TargetAddress == nil || facts.HostID == "" || tenant == "" {
+		return
+	}
+	ip, ipRead := contract.CanonicalIPv4(wire.TargetAddress.IP)
+	cloud, cloudRead := contract.CanonicalCloudArea(wire.TargetAddress.CloudID)
+	if !ipRead || !cloudRead {
+		return
+	}
+	key := contract.IPCloudKey(ip, cloud)
+	builder.index.addressOf[facts.HostID] = hostAddress{tenant: tenant, key: key}
+	at := builder.index.hostsAt[tenant+"|"+key]
+	at.count++
+	at.host = facts
+	if at.count > 1 {
+		at.host = nil
+	}
+	builder.index.hostsAt[tenant+"|"+key] = at
+}
+
+// HostAddress is the tenant and ip_cloud key of the host the id names, and
+// false when the writer put no whole target address on it.
+func (index *Index) HostAddress(hostID string) (tenant, key string, found bool) {
+	if index == nil {
+		return "", "", false
+	}
+	address, found := index.addressOf[hostID]
+	return address.tenant, address.key, found
+}
+
+// AddressHost is the host at an address of a tenant, and how many hosts of
+// the tenant are at it: nil beside a count above one, which is an address
+// that names no one host.
+func (index *Index) AddressHost(tenant, key string) (*HostFacts, int) {
+	if index == nil {
+		return nil, 0
+	}
+	at := index.hostsAt[tenant+"|"+key]
+	return at.host, at.count
+}
+
+// hostAddress is one host's tenant and the ip_cloud key of its target
+// address.
+type hostAddress struct {
+	tenant, key string
+}
+
+// addressHosts is the host at one tenant's address, when there is exactly
+// one, and how many there are.
+type addressHosts struct {
+	host  *HostFacts
+	count int
 }
 
 type wireHost struct {
@@ -700,6 +771,16 @@ type wireHost struct {
 	// records by model and instance.
 	ModelID     string          `json:"model_id"`
 	ModelInstID json.RawMessage `json:"model_inst_id"`
+	// TenantID and TargetAddress are the host's tenant and its trusted IPv4
+	// address and cloud area, which the writer puts on a host only when its
+	// source carries both whole. An ip_cloud target reads hosts by them.
+	TenantID      string             `json:"bk_tenant_id"`
+	TargetAddress *wireTargetAddress `json:"target_address"`
+}
+
+type wireTargetAddress struct {
+	IP      json.RawMessage `json:"bk_target_ip"`
+	CloudID json.RawMessage `json:"bk_target_cloud_id"`
 }
 
 type wireServiceInstance struct {

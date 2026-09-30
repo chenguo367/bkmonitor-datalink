@@ -53,6 +53,9 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	if len(plan.StaticMembers) > 0 {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticMembers(plan))
 	}
+	if len(plan.StaticHosts) > 0 {
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticHosts(plan))
+	}
 	for _, id := range plan.DynamicGroups {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id, interval))
 	}
@@ -88,11 +91,30 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 	case snapshot.ModelID != plan.ModelID:
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelMismatch
 		return result
+	case plan.Rule == contract.TargetPlanRuleIPCloud && snapshot.TenantID != plan.TenantID:
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonGroupTenantMismatch
+		return result
 	}
 	if lookup.RefreshFailed {
 		result.StaleAge = lookup.Age
 	}
 	members, dropped := snapshot.Keys(plan)
+	if plan.Rule == contract.TargetPlanRuleIPCloud {
+		// The group's members are hosts by id; their keys are the addresses
+		// the host cache has for them now, so a readdressed member moves
+		// with the cache and not with the group.
+		index, current := resolver.currentIndex()
+		if !current {
+			result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
+			return result
+		}
+		hosts := make([]string, 0, len(members))
+		for host := range members {
+			hosts = append(hosts, host)
+		}
+		placed, unplaced, ambiguous := placeAddresses(index, plan, hosts)
+		return addressSelector(result, placed, snapshot.Dropped+dropped, unplaced, ambiguous)
+	}
 	result.Members, result.Kept, result.Dropped = members, len(members), snapshot.Dropped+dropped
 	switch {
 	case result.Dropped > 0:
@@ -152,6 +174,85 @@ func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1
 	return result
 }
 
+// resolveStaticHosts maps the static hosts of an ip_cloud plan, by id, to
+// the addresses the host cache has for them inside the plan's tenant.
+func (resolver *TargetResolver) resolveStaticHosts(plan *contract.TargetPlanV1) targetplan.SelectorResult {
+	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
+	if resolver == nil || resolver.hosts == nil {
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
+		return result
+	}
+	index, current := resolver.currentIndex()
+	if !current {
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
+		return result
+	}
+	placed, unplaced, ambiguous := placeAddresses(index, plan, plan.StaticHosts)
+	return addressSelector(result, placed, 0, unplaced, ambiguous)
+}
+
+// currentIndex is the host index a resolution reads, and false when there is
+// none, it holds no host, or it is older than the staleness bound.
+func (resolver *TargetResolver) currentIndex() (*Index, bool) {
+	index := resolver.hosts.Current()
+	if index == nil || index.Hosts() == 0 || resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge {
+		return nil, false
+	}
+	return index, true
+}
+
+// placeAddresses maps hosts, by id, to the ip_cloud keys of their target
+// addresses inside the plan's tenant. A host with no target address, or
+// another tenant's, is unplaced. A host at an address another host of the
+// tenant shares is ambiguous: the address names neither, and the host is
+// left out rather than matched against both.
+func placeAddresses(index *Index, plan *contract.TargetPlanV1, hosts []string) (map[string]struct{}, int, int) {
+	placed := make(map[string]struct{}, len(hosts))
+	unplaced, ambiguous := 0, 0
+	for _, host := range hosts {
+		tenant, key, found := index.HostAddress(host)
+		if !found || tenant != plan.TenantID {
+			unplaced++
+			continue
+		}
+		if _, sharing := index.AddressHost(tenant, key); sharing > 1 {
+			ambiguous++
+			continue
+		}
+		placed[key] = struct{}{}
+	}
+	return placed, unplaced, ambiguous
+}
+
+// addressSelector finishes an ip_cloud selector from what it placed. A
+// selector none of whose hosts could be placed is Unavailable by name -
+// ambiguous when every one shares its address, unresolved otherwise - and
+// not an empty target; one that dropped some is Incomplete, naming the
+// ambiguity when there was one.
+func addressSelector(result targetplan.SelectorResult, placed map[string]struct{}, dropped, unplaced, ambiguous int) targetplan.SelectorResult {
+	result.Dropped, result.Kept = dropped+unplaced+ambiguous, len(placed)
+	switch {
+	case len(placed) == 0 && unplaced == 0 && ambiguous > 0:
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonAddressAmbiguous
+		return result
+	case len(placed) == 0 && unplaced > 0:
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonAddressUnresolved
+		return result
+	}
+	result.Members = placed
+	switch {
+	case ambiguous > 0:
+		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonAddressAmbiguous
+	case result.Dropped > 0:
+		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonMembersDropped
+	case len(placed) == 0:
+		result.State = targetplan.SelectorOKEmpty
+	default:
+		result.State = targetplan.SelectorOK
+	}
+	return result
+}
+
 func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, node contract.TargetPlanTopologyV1) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindTopology, ID: node.Key(), Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
@@ -180,6 +281,19 @@ func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, nod
 		result.NodeForeign = true
 		result.State, result.Reason = targetplan.SelectorOKEmpty, targetplan.ReasonNodeForeign
 		return result
+	}
+	if plan.Rule == contract.TargetPlanRuleIPCloud {
+		hosts := make([]string, 0, len(answer.Hosts))
+		dropped := 0
+		for _, host := range answer.Hosts {
+			if host.HostID == "" {
+				dropped++
+				continue
+			}
+			hosts = append(hosts, host.HostID)
+		}
+		placed, unplaced, ambiguous := placeAddresses(index, plan, hosts)
+		return addressSelector(result, placed, dropped, unplaced, ambiguous)
 	}
 	members := make(map[string]struct{}, len(answer.Hosts))
 	for _, host := range answer.Hosts {
