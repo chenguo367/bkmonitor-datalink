@@ -216,6 +216,7 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	// would fail the others. It keeps the first request's values and its
 	// own bound.
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DiagnosisReadTimeout)
+	defer cancel()
 	holds := &pageHolds{}
 	// A read that never returns -- it panicked -- still releases what it
 	// held, answers the requests waiting on its placeholder, and is not kept.

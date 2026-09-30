@@ -279,6 +279,40 @@ func TestADiagnosisReadThatPanicsReleasesItsHold(t *testing.T) {
 	}
 }
 
+// A request waiting on a diagnosis whose read panics is not left waiting:
+// told the read failed, it reads for itself, as a request after a failed
+// read does.
+func TestARequestWaitingOnAReadThatPanicsIsAnswered(t *testing.T) {
+	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	reading, fail := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer func() { _ = recover() }()
+		cache.get(context.Background(), "d-1", now, func(context.Context) *diagnosisEntry {
+			close(reading)
+			<-fail
+			panic("the read failed")
+		})
+	}()
+	<-reading
+	waited := make(chan *diagnosisEntry, 1)
+	go func() {
+		entry, _ := cache.get(context.Background(), "d-1", now, func(context.Context) *diagnosisEntry {
+			return &diagnosisEntry{readError: "a second read"}
+		})
+		waited <- entry
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(fail)
+	select {
+	case entry := <-waited:
+		if entry.readError != "a second read" {
+			t.Fatalf("the waiting request got %q, want its own read after the failed one", entry.readError)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request waiting on a read that panicked was never answered")
+	}
+}
+
 // The diagnosis warm-up holds what its read takes until it is done, as a
 // page does: it keeps only its timing.
 func TestTheDiagnosisWarmUpReleasesWhatItHeld(t *testing.T) {
