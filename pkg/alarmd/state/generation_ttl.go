@@ -49,12 +49,12 @@ const GenerationScopedFloor = 24 * time.Hour
 // lives too long is a byte of waste, and one that expires too early restarts an
 // absence clock that was still running.
 func GenerationScopedTTL(
-	requirements []LevelRequirement, restartMargin, minimum, maximum time.Duration,
+	requirements []LevelRequirement, restartMargin, minimum, maximum time.Duration, readHoldBound ...time.Duration,
 ) (time.Duration, error) {
 	if len(requirements) == 0 {
 		return GenerationScopedFloor, nil
 	}
-	runtime, err := StateTTL(requirements, restartMargin, minimum, maximum)
+	runtime, err := StateTTL(requirements, restartMargin, minimum, maximum, readHoldBound...)
 	if errors.Is(err, ErrStateBudget) {
 		// A retention whose span is past the ceiling. The runtime state it
 		// describes is written for its horizon cap, and only when that cap
@@ -90,7 +90,7 @@ func GenerationScopedTTL(
 // marker for the Plan's own lifetime, so only a marker nothing evaluates
 // after -- a Plan deleted or retired next -- keeps the longer life.
 func generationWriteTTL(
-	retention execution.GenerationRetention, plan execution.PlanIdentity, restartMargin, minimum, maximum time.Duration,
+	retention execution.GenerationRetention, plan execution.PlanIdentity, restartMargin, minimum, maximum time.Duration, readHoldBound ...time.Duration,
 ) (time.Duration, error) {
 	if retention.Unknown {
 		return max(maximum, GenerationScopedFloor), nil
@@ -104,7 +104,7 @@ func generationWriteTTL(
 	for index, level := range levels {
 		requirements[index] = NewLevelRequirement(level, "", 0)
 	}
-	return GenerationScopedTTL(requirements, restartMargin, minimum, maximum)
+	return GenerationScopedTTL(requirements, restartMargin, minimum, maximum, readHoldBound...)
 }
 
 // GenerationScopedRenewalThreshold is the remaining life below which a loaded

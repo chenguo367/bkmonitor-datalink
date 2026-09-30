@@ -87,6 +87,9 @@ type ExecutionStoreOptions struct {
 	MinTTL        time.Duration
 	MaxTTL        time.Duration
 	RestartMargin time.Duration
+	// Bound on the scheduler's read hold. A reporting series must survive
+	// an immediate jump to this bound, even if the current Slot has no hold.
+	ReadHoldBound time.Duration
 	// FenceKeys locates the ownership lease that fenced Runtime State writes
 	// verify inside storage. It is optional: without it ApplyRuntimeFenced
 	// applies unfenced and the admission-time fence check stands alone.
@@ -150,7 +153,8 @@ const DefaultMaxNoDataGroups = 100000
 func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 	if options.Prefix == "" || options.Router == nil || options.MaxValueBytes <= 0 ||
 		options.MaxItemsPerCall <= 0 || options.MinTTL <= 0 || options.MaxTTL < options.MinTTL ||
-		options.RestartMargin < 0 || options.MaxNoDataGroups < 0 {
+		options.RestartMargin < 0 || options.MaxNoDataGroups < 0 || options.ReadHoldBound < 0 ||
+		options.ReadHoldBound.Milliseconds() > execution.MaxReadHoldMillis {
 		return nil, fmt.Errorf("state: invalid execution store options")
 	}
 	if options.MaxNoDataGroups == 0 {
@@ -192,11 +196,11 @@ func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequ
 		// and it must read exactly the retention the window was built from.
 		requirements[index] = NewLevelRequirement(level, "", 0)
 	}
-	ttl, err := StateTTL(requirements, store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+	ttl, err := StateTTL(requirements, store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.options.ReadHoldBound)
 	if horizonSeconds <= 0 {
 		return ttl, err
 	}
-	limit := horizonLimit(requirements, store.options.RestartMargin, store.options.MinTTL, time.Duration(horizonSeconds)*time.Second)
+	limit := horizonLimit(requirements, store.options.RestartMargin, store.options.MinTTL, time.Duration(horizonSeconds)*time.Second, store.options.ReadHoldBound)
 	if err != nil {
 		if !errors.Is(err, ErrStateBudget) {
 			return 0, err
@@ -213,18 +217,21 @@ func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequ
 
 // horizonLimit is the longest a series' runtime state lives under a horizon:
 // the horizon, floored at what a reporting series needs between two writes.
-func horizonLimit(requirements []LevelRequirement, restartMargin, minimum, horizon time.Duration) time.Duration {
-	return max(horizon, StateLifetimeFloor(requirements, restartMargin), minimum)
+func horizonLimit(requirements []LevelRequirement, restartMargin, minimum, horizon time.Duration, readHoldBound ...time.Duration) time.Duration {
+	return max(horizon, StateLifetimeFloor(requirements, restartMargin, readHoldBound...), minimum)
 }
 
 // StateLifetimeFloor is the shortest lifetime a series' runtime state can
 // have and still survive from one write to the next while the series keeps
 // reporting: the longest evaluation interval plus its lateness, and the
 // restart margin.
-func StateLifetimeFloor(requirements []LevelRequirement, restartMargin time.Duration) time.Duration {
+func StateLifetimeFloor(requirements []LevelRequirement, restartMargin time.Duration, readHoldBound ...time.Duration) time.Duration {
 	var floor time.Duration
 	for _, requirement := range requirements {
 		floor = max(floor, requirement.EvaluationInterval+requirement.LatenessTolerance)
+	}
+	if len(readHoldBound) > 0 {
+		floor += readHoldBound[0]
 	}
 	return floor + restartMargin
 }
@@ -584,7 +591,7 @@ func (store *ExecutionStore) readOneRenewing(
 		return nil, nil
 	}
 	if err := RenewGenerationKey(ctx, target, resolved, retention,
-		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals); err != nil {
+		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals, store.options.ReadHoldBound); err != nil {
 		return nil, err
 	}
 	return values[0], nil
@@ -653,7 +660,7 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 	lifetimes := make([]time.Duration, len(request.Items))
 	for index, mutation := range request.Items {
 		ttl, err := generationWriteTTL(request.Retention, mutation.Identity.Plan,
-			store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+			store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.options.ReadHoldBound)
 		if err != nil {
 			return execution.GapGuardApplyResult{}, fmt.Errorf("state: invalid gap apply request: %w", err)
 		}
