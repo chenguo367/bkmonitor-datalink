@@ -18,14 +18,18 @@
 // and each refusal is counted under the consumer it refused.
 //
 // A consumer asks in one of two ways, by what becomes of what it takes.
-// State that stays - a summary, a sample buffer, rounds kept per object -
-// is admitted (Admit) and never given back: it is in the live heap from the
-// next collection on, and the grant counts until then. A reader that takes
-// memory for one piece of work and drops it when the work is done - a page
-// that decodes the fleet's snapshots and builds a view of them, garbage once
-// the response is written - holds it (Hold) and releases it: what is
-// released is not in the live heap at the next collection, so counting it
-// until then would hold observation off with memory nothing keeps.
+// State that stays - a summary, a sample buffer, rounds kept per object, a
+// view kept in a cache - is admitted (Admit) and never given back: it is in
+// the live heap from the next collection on, and the grant counts until
+// then. A reader that takes memory for one piece of work and drops it when
+// the work is done - a page that decodes the fleet's snapshots and builds a
+// view of them, garbage once the response is written - holds it (Hold) and
+// releases it: what is released is not in the live heap at the next
+// collection, so counting it until then would hold observation off with
+// memory nothing keeps. Work whose result is then kept - a view put in a
+// cache - releases its hold and admits what it keeps as it keeps it: a hold
+// on something that stays would count it twice, in the live heap and held,
+// for as long as it stays.
 //
 // There is no ratio, no order among the consumers and no count they are held
 // to: a deployment far from its limit never refuses, and one near it refuses
@@ -241,10 +245,14 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 // Hold answers whether consumer may take bytes for one piece of work it
 // drops when done, by the same line as Admit. Held, the bytes count against
 // the line until release is called, and no longer: release once the memory
-// is no longer referred to - a page's response written, a cached view let
-// go. release is safe to call more than once, and to defer; a refused hold's
-// release does nothing. Refused, the consumer does not take the memory, and
-// the refusal is counted.
+// is no longer referred to - a page's response written. What is kept past
+// the work is not held but admitted as it is kept (see the package comment).
+// release is safe to call more than once, and to defer; a refused hold's
+// release does nothing. A hold never released is never given back: the
+// line counts it until the process ends, and observation_memory_held_bytes
+// stays above zero between pieces of work. Defer the release as soon as the
+// hold is taken. Refused, the consumer does not take the memory, and the
+// refusal is counted.
 func (line *Line) Hold(consumer Consumer, bytes uint64) (release func(), held bool) {
 	if line == nil {
 		return func() {}, true
