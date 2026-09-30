@@ -172,9 +172,14 @@ const DiagnosisCacheEntries = 4
 // diagnosisCache keeps each diagnosis's universe and view by its id. The
 // reads happen outside the lock; a failed universe read is not kept, so a
 // cancelled request does not answer "unreadable" to the pages after it.
+//
+// A kept view is observation state that stays: what its read held on the
+// memory line is released once the view is built, and the view is admitted
+// as it is kept (admitKept); refused, it is answered and not kept.
 type diagnosisCache struct {
-	mu      sync.Mutex
-	entries map[string]*diagnosisEntry
+	mu        sync.Mutex
+	entries   map[string]*diagnosisEntry
+	admitKept func(bytes uint64) bool
 }
 
 func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, read func(context.Context) *diagnosisEntry) (*diagnosisEntry, bool) {
@@ -207,18 +212,27 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	// would fail the others. It keeps the first request's values and its
 	// own bound.
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DiagnosisReadTimeout)
-	filled := read(readCtx)
+	holds := &pageHolds{}
+	filled := read(holds.in(readCtx))
 	cancel()
 	placeholder.universe, placeholder.digest, placeholder.readAt = filled.universe, filled.digest, filled.readAt
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
 	placeholder.universeTook, placeholder.viewTook = filled.universeTook, filled.viewTook
 	close(placeholder.ready)
+	// What the read held is garbage now but the view, which stays with the
+	// entry: the hold is released first, and the view admitted as it is kept.
+	stored := holds.storedBytes()
+	holds.release()
 	// A view this process did not read whole (viewUnread) -- the memory line
 	// deferred it, its snapshots or the registry could not be read, or this
 	// read's own bound was reached while it waited on a shared read -- is
 	// answered once and not kept: the next request asks again, and may be
-	// read.
-	if placeholder.readError != "" || (placeholder.view != nil && viewUnread(placeholder.view)) {
+	// read. So is one the memory line has no room to keep.
+	drop := placeholder.readError != "" || (placeholder.view != nil && viewUnread(placeholder.view))
+	if !drop && placeholder.view != nil && cache.admitKept != nil {
+		drop = !cache.admitKept(stored * keptViewChargeNum / keptViewChargeDen)
+	}
+	if drop {
 		cache.mu.Lock()
 		if cache.entries[id] == placeholder {
 			delete(cache.entries, id)
@@ -287,7 +301,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 	if now == nil {
 		now = time.Now
 	}
-	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}, admitKept: service.admitKeptView}
 	counted := &summaryCache{}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/diagnose" {
@@ -368,7 +382,10 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			// Read for this answer alone and kept out of the diagnoses'
 			// cache: a page asks on every refresh, and each ask kept there
 			// would push out a diagnosis somebody is paging through.
-			readCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), DiagnosisReadTimeout)
+			// Held until this answer is written, as any page's read.
+			pageCtx, releaseHolds := withPageHolds(request.Context())
+			defer releaseHolds()
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(pageCtx), DiagnosisReadTimeout)
 			entry = readDiagnosisEntry(readCtx, service, universe, at, stallAfter)
 			cancel()
 			entry.id = newDiagnosisID()

@@ -64,7 +64,10 @@ type RedisStore struct {
 	meter           StoreMeter
 	// admitLoad asks the observation memory line for what a load of
 	// snapshots will hold decoded (AdmitLoads); nil admits every load.
+	// holdLoad holds it instead, for a page that releases it when its answer
+	// is written (HoldLoads).
 	admitLoad func(bytes uint64) bool
+	holdLoad  func(bytes uint64) (release func(), held bool)
 }
 
 // ErrSnapshotsDeferred is a load of snapshots the observation memory line
@@ -86,6 +89,27 @@ func (store *RedisStore) AdmitLoads(admit func(bytes uint64) bool) {
 	if store != nil {
 		store.admitLoad = admit
 	}
+}
+
+// HoldLoads has a load a page reads under its collector of holds
+// (pageHolds) hold what the snapshots and the view built of them come to --
+// their lengths times pageReadCharge -- instead of being admitted, the hold
+// kept on the collector and released with it once the page's answer is
+// written. A load under no collector is admitted as AdmitLoads says; a view
+// kept past its page is admitted as it is kept (admitKept).
+func (store *RedisStore) HoldLoads(hold func(bytes uint64) (release func(), held bool)) {
+	if store != nil {
+		store.holdLoad = hold
+	}
+}
+
+// admitKept asks the memory line for a view kept past the page that read
+// it, as AdmitLoads's admit; nil admits it.
+func (store *RedisStore) admitKept(bytes uint64) bool {
+	if store == nil || store.admitLoad == nil {
+		return true
+	}
+	return store.admitLoad(bytes)
 }
 
 // StoreMeter is what the store reports its own Redis traffic to. A fleet
@@ -312,7 +336,7 @@ func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 // snapshot would shorten the anomaly list, which is the exact reading this
 // package exists to prevent.
 func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapshot, error) {
-	return store.load(ctx, replicas, store.admitLoad != nil)
+	return store.load(ctx, replicas, store.admitLoad != nil || store.holdLoad != nil)
 }
 
 // loadUnadmitted is Load without asking the memory line: the reads a
@@ -328,7 +352,16 @@ func (store *RedisStore) load(ctx context.Context, replicas []string, admitted b
 	snapshots := make([]Snapshot, 0, len(replicas))
 	var decodeErr error
 	var admit func(uint64) bool
-	if admitted {
+	switch holds := pageHoldsOf(ctx); {
+	case admitted && holds != nil && store.holdLoad != nil:
+		admit = func(total uint64) bool {
+			release, held := store.holdLoad(total * pageReadChargeNum / pageReadChargeDen)
+			if held {
+				holds.add(release, total)
+			}
+			return held
+		}
+	case admitted && store.admitLoad != nil:
 		admit = func(total uint64) bool { return store.admitLoad(total * snapshotDecodedCharge) }
 	}
 	bytes, err := store.read(ctx, replicas, store.snapshotKey, admit, func(index int, text string) error {

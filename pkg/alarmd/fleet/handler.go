@@ -1091,7 +1091,11 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	if order == "" {
 		order = OrderOldest
 	}
-	view := service.View(request.Context())
+	// Held on the memory line until this page's answer is written: the
+	// snapshots and the view built of them are garbage then.
+	pageCtx, release := withPageHolds(request.Context())
+	defer release()
+	view := service.View(pageCtx)
 	// Marked and settled before filtering, so a filtered response reports the
 	// same flag for the same object as an unfiltered one, and before a column
 	// is served, always on the anomaly list. Settling used to run after the
@@ -1284,7 +1288,11 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 		return
 	}
 	records, health, recordErr := objectRecords(request, queryGroup, diagnostics)
-	view := service.View(request.Context())
+	// Held on the memory line until this page's answer is written: the
+	// snapshots and the view built of them are garbage then.
+	pageCtx, release := withPageHolds(request.Context())
+	defer release()
+	view := service.View(pageCtx)
 	at := now()
 	Decide(&view, at, stallAfter)
 	body := DetailResponse{
