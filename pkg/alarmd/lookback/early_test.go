@@ -166,6 +166,70 @@ func TestTheReadAtTheRungSupplementsWhatArrivedAfterTheEarlyRead(t *testing.T) {
 	if reading := stats.Supplements[0]; reading.Windows[DirectedSupplemented] != 1 || reading.Series.Admitted != 2 {
 		t.Fatalf("reading %+v, want one window on both supplements", reading)
 	}
+	if source := stats.Sources[sourceLog]; source.EarlyReadBytes != 200 || source.DirectedReadBytes != 500 {
+		t.Fatalf("early bytes %d directed bytes %d, want the early read's 200 apart and within the 500 of both reads",
+			source.EarlyReadBytes, source.DirectedReadBytes)
+	}
+}
+
+// A Slot whose rung comes due in the pass that settles its early read -- a
+// loop woken past both -- is read at its rung by the next pass, once the
+// early read has its outcome: the window is filed on both reads.
+func TestTheReadAtTheRungWaitsForTheEarlyReadsOutcome(t *testing.T) {
+	f, supplement := earlyFixture(t, SupplementOutcome{Ran: true, Facts: execution.SupplementFacts{Candidates: 1, Admitted: 1}})
+	slot := f.clock.now().Unix()
+	readAt := f.earlyFirstRead(slot, time.Second)
+	f.clock.set(readAt.Add(rungDelay(0, minute)))
+	f.engine.Step(context.Background())
+	f.engine.mu.Lock()
+	directed := f.engine.groups["qg"].directed[execution.EvaluationTime(slot)]
+	running, early := directed.running, directed.early.outcome
+	f.engine.mu.Unlock()
+	if running || early != EarlyAnchorPassed {
+		t.Fatalf("rung read running %v early %q, want the early read settled and the rung read not begun in that pass", running, early)
+	}
+	f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+	f.engine.Step(context.Background())
+	stats := f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == 1 })
+	if len(supplement.taken()) != 1 || stats.Supplements[0].Early[EarlyAnchorPassed] != 1 {
+		t.Fatalf("jobs %+v reading %+v, want the rung's supplement after the early read filed", supplement.taken(), stats.Supplements[0])
+	}
+}
+
+// An early read that found late series whose supplement did not run, then
+// a read at the rung that found none, is not a Slot with nothing late: it
+// is filed as a supplement that did not run, by the early read's why.
+func TestARefusedEarlySupplementIsNotNothingLateWhenTheRungFindsNone(t *testing.T) {
+	for _, c := range []struct{ refused, early, window string }{
+		{DirectedFlightBusy, EarlyFlightBusy, DirectedFlightBusy},
+		{DirectedContractExpired, EarlyContractExpired, DirectedContractExpired},
+		{SupplementOvertaken, EarlyOvertaken, DirectedContractExpired},
+		{"other", EarlyFailed, DirectedFailed},
+	} {
+		t.Run(c.refused, func(t *testing.T) {
+			f, supplement := earlyFixture(t, SupplementOutcome{})
+			supplement.refuse = c.refused
+			slot := f.clock.now().Unix()
+			readAt := f.earlyFirstRead(slot, time.Second)
+			f.clock.set(readAt.Add(time.Minute - 2*time.Second))
+			f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+			f.engine.Step(context.Background())
+			f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].EarlyReads[c.early] == 1 })
+			f.clock.set(readAt.Add(rungDelay(0, minute)))
+			f.answers <- delivered(point(slot, "1"))
+			f.engine.Step(context.Background())
+			stats := f.waitFor(func(stats Stats) bool {
+				windows := stats.Sources[sourceLog].SupplementWindows
+				return windows[c.window]+windows[DirectedNothingLate] == 1
+			})
+			if windows := stats.Sources[sourceLog].SupplementWindows; windows[c.window] != 1 || windows[DirectedNothingLate] != 0 {
+				t.Fatalf("windows %v, want the Slot filed %s", windows, c.window)
+			}
+			if len(supplement.taken()) != 1 {
+				t.Fatalf("jobs %+v, want the early supplement alone", supplement.taken())
+			}
+		})
+	}
 }
 
 // A Slot whose next Slot reads after its rung -- a strategy that runs daily

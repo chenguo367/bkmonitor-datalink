@@ -405,6 +405,7 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 	cancel()
 	engine.mu.Lock()
 	engine.counts.directedBytes[slot.source] += sink.bytes
+	engine.counts.earlyBytes[slot.source] += sink.bytes
 	state := engine.groups[slot.queryGroup]
 	slot.early.running, slot.running = false, false
 	defer engine.poke()

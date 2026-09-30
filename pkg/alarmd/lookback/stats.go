@@ -50,6 +50,9 @@ type counters struct {
 	// which the read at the rung does not supplement again.
 	early          map[string]uint64
 	earlyUndecided map[string]uint64
+	// earlyBytes is, per source, what the early reads delivered: part of
+	// directedBytes, apart so the early read's own cost can be read.
+	earlyBytes map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -75,7 +78,7 @@ func newCounters(sources, refusals []string) counters {
 		directedWindows: map[string]uint64{}, directedUnobserved: map[string]uint64{}, supplementSeries: map[string]uint64{},
 		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{},
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
-		early: map[string]uint64{}, earlyUndecided: map[string]uint64{},
+		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -122,7 +125,7 @@ func newCounters(sources, refusals []string) counters {
 		for _, outcome := range EarlyOutcomes {
 			c.early[key2(source, outcome)] = 0
 		}
-		c.earlyUndecided[source] = 0
+		c.earlyUndecided[source], c.earlyBytes[source] = 0, 0
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
@@ -269,6 +272,9 @@ type SourceStats struct {
 	// supplements left undecided, which are not supplemented again.
 	EarlyReads     map[string]uint64 `json:"early_reads"`
 	EarlyUndecided uint64            `json:"early_undecided"`
+	// EarlyReadBytes is what the early reads delivered, part of
+	// DirectedReadBytes: the bytes reading early added.
+	EarlyReadBytes uint64 `json:"early_read_bytes"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -420,7 +426,8 @@ func (engine *Engine) Stats() Stats {
 			SupplementWindows: map[string]uint64{}, SupplementUnobserved: map[string]uint64{}, SupplementSeries: map[string]uint64{},
 			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source],
 			SupplementHold: map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds(),
-			EarlyReads: map[string]uint64{}, EarlyUndecided: engine.counts.earlyUndecided[source]}
+			EarlyReads: map[string]uint64{}, EarlyUndecided: engine.counts.earlyUndecided[source],
+			EarlyReadBytes: engine.counts.earlyBytes[source]}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]
 		}

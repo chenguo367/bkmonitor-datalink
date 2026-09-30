@@ -64,6 +64,7 @@ type lookbackCollector struct {
 	// The early reads of directed Slots, before their next Slot reads.
 	earlyReads     *prometheus.Desc
 	earlyUndecided *prometheus.Desc
+	earlyBytes     *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -145,6 +146,9 @@ func newLookbackCollector() *lookbackCollector {
 		earlyUndecided: desc("lookback_directed_early_undecided_total",
 			"(Plan, series) pairs early supplements left undecided -- withheld, input_incomplete, config_drift -- "+
 				"which the read at the rung does not supplement again, by source.", "source"),
+		earlyBytes: desc("lookback_directed_early_read_bytes_total",
+			"Bytes the early reads delivered, by source: part of lookback_directed_read_bytes_total, the bytes reading "+
+				"early added.", "source"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -204,7 +208,7 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -260,6 +264,7 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.earlyReads, source.EarlyReads[outcome], name, outcome)
 		}
 		counter(c.earlyUndecided, source.EarlyUndecided, name)
+		counter(c.earlyBytes, source.EarlyReadBytes, name)
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

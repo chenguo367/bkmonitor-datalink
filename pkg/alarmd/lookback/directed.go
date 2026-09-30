@@ -553,6 +553,21 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	}
 }
 
+// earlyRefusalWindow is the window outcome of an early read whose supplement
+// did not run: one the next Slot's read beat ran out of its time as one past
+// its deadline did. ok is false for an early read that came to anything else.
+func earlyRefusalWindow(early string) (outcome string, ok bool) {
+	switch early {
+	case EarlyFlightBusy:
+		return DirectedFlightBusy, true
+	case EarlyContractExpired, EarlyOvertaken:
+		return DirectedContractExpired, true
+	case EarlyFailed:
+		return DirectedFailed, true
+	}
+	return "", false
+}
+
 // rungRead is what a Slot's read at its rung came to, for filing it: the
 // late series it read, and its supplement's facts when one ran.
 type rungRead struct {
@@ -613,10 +628,18 @@ func (engine *Engine) fileWindowLocked(state *group, slot *directedSlot, outcome
 	}
 	slot.seenAge = age
 	var facts *execution.SupplementFacts
-	if slot.supplemented {
+	switch {
+	case slot.supplemented:
 		outcome, reason = DirectedSupplemented, ""
 		summed := slot.facts
 		facts = &summed
+	case outcome == DirectedNothingLate && len(earlyLate) > 0:
+		// The early read found late series and its supplement did not run,
+		// and the read at the rung found none: not a Slot with nothing late,
+		// but one whose supplement did not run, by the early read's why.
+		if refused, ok := earlyRefusalWindow(slot.early.outcome); ok {
+			outcome = refused
+		}
 	}
 	engine.noteDirectedLocked(state, slot, outcome, reason, facts)
 }
