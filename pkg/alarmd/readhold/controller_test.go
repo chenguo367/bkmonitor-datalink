@@ -487,3 +487,44 @@ func TestEvidenceWriteCannotBypassNewPlansPredecessorSeed(t *testing.T) {
 		t.Fatalf("incoming Plan did not extend first read to the old completion deadline: %s %v", got, err)
 	}
 }
+
+func TestCloseScheduleProtectsFinalFrozenHoldAndFuturePendingRaise(t *testing.T) {
+	for _, arm := range []struct {
+		name      string
+		since     execution.EvaluationTime
+		pending   int64
+		arrival   int64
+		closed    int64
+		firstHold time.Duration
+	}{
+		{name: "frozen final Slot before pending lowering", since: 1140, pending: 75_000, arrival: 105_000, closed: 150_000, firstHold: 115 * time.Second},
+		{name: "future final Slot after pending raise", since: 1080, pending: 300_000, arrival: 330_000, closed: 300_000, firstHold: 265 * time.Second},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			c, store, _ := controllerFixture(t)
+			pending := arm.pending
+			old := Record{HoldMillis: 150_000, SinceSlot: arm.since, PreviousHoldMillis: 150_000, PreviousSinceSlot: 60,
+				PendingHoldMillis: &pending, ArrivalAgeMillis: arm.arrival, SegmentStart: 60, Plans: []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: arm.arrival}}}
+			store.values["old"], _ = json.Marshal(old)
+			prepare(t, c, groupSpec("old", 0))
+			boundary := execution.EvaluationTime(1200)
+			if err := c.CloseSchedule(context.Background(), scheduleFor(t, "old", 60, &boundary), holdFence("old")); err != nil {
+				t.Fatal(err)
+			}
+			closed, _ := c.Reading("old")
+			if closed.Plans[0].PreviousHoldMillis != arm.closed {
+				t.Fatalf("closed hold = %d, want %d", closed.Plans[0].PreviousHoldMillis, arm.closed)
+			}
+			newSpec := groupSpec("new", 120*time.Second)
+			newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+			prepare(t, c, newSpec)
+			hold, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", boundary, nil), boundary, holdFence("new"))
+			if err != nil || hold != arm.firstHold {
+				t.Fatalf("new Slot hold = %s %v, want %s", hold, err, arm.firstHold)
+			}
+			if int64(boundary)*1000+30_000+hold.Milliseconds() < int64(1140)*1000+arm.closed+55_000 {
+				t.Fatal("new first read preceded the final old Slot's completion deadline")
+			}
+		})
+	}
+}

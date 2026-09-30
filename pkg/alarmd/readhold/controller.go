@@ -570,6 +570,19 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 		if last < int64(schedule.Segment.Start) || !plan.Spec.IsAligned(execution.EvaluationTime(last)) {
 			continue
 		}
+		previousHold := holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait)
+		if frozen, known := record.HoldAt(execution.EvaluationTime(last)); known {
+			if last == int64(record.SinceSlot) && record.SinceSlot > 1 {
+				// This Slot chose its frozen hold before a later observation
+				// could request a raise or a lowering for the next Slot.
+				previousHold = frozen
+			} else {
+				// SinceSlot names only hold changes, not every frozen Slot.
+				// If the final Slot may still be ahead, its pending raise and
+				// its already-frozen hold must both remain protected.
+				previousHold = max(previousHold, frozen, record.HoldMillis)
+			}
+		}
 		for _, ref := range refs {
 			if ref.Key != plan.Key() {
 				continue
@@ -584,7 +597,7 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 			mergePlan(record, PlanRecord{PlanRef: ref, ArrivalAgeMillis: record.ArrivalAgeMillis,
 				ClosedAt:           *schedule.Segment.End,
 				ClosedQueryGroup:   schedule.Segment.QueryGroup,
-				PreviousHoldMillis: holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait), PreviousSlot: execution.EvaluationTime(last),
+				PreviousHoldMillis: previousHold, PreviousSlot: execution.EvaluationTime(last),
 				CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000})
 		}
 	}
