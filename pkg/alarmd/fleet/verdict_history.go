@@ -82,7 +82,7 @@ func (service *Service) RecordSummarizedVerdict(view *View, part ReplicaPart, at
 }
 
 func (service *Service) recordVerdict(view *View, at time.Time, attribution AttributionTally) {
-	if service == nil || view == nil {
+	if service == nil || view == nil || viewUnread(view) {
 		return
 	}
 	history := &service.verdicts
@@ -174,4 +174,23 @@ func distinctGaps(gaps []Gap) []GapKind {
 	}
 	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
 	return kinds
+}
+
+// viewUnread reports whether a view is short of what its verdict is decided
+// from because this process did not read it: the registry of replicas, the
+// snapshots -- the whole read, a read its caller stopped waiting for, or one
+// replica's -- or the memory line deferred them. Such a view says UNKNOWN,
+// and the verdict exported from it says so and is alerted on, but it is no
+// verdict of the deployment: the record of the deployment's verdicts does
+// not take it, and a diagnosis over it is not kept. What the reads found --
+// a replica missing, a snapshot stale, the denominator unavailable -- is the
+// deployment's, and is recorded.
+func viewUnread(view *View) bool {
+	for _, gap := range view.Gaps {
+		switch gap.Kind {
+		case GapRegistryUnavailable, GapSnapshotsUnreadable, GapSnapshotsDeferred:
+			return true
+		}
+	}
+	return false
 }

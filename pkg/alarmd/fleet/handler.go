@@ -925,11 +925,7 @@ func NewHandler(
 			return
 		}
 		at := now()
-		// Nor is a registry that could not be read a verdict of the
-		// deployment: the view says so, and the record keeps what was decided.
-		if !hasGapKind(view.Gaps, GapRegistryUnavailable) {
-			service.RecordSummarizedVerdict(&view, part, at)
-		}
+		service.RecordSummarizedVerdict(&view, part, at)
 		history, since := service.VerdictHistory()
 		health := healthOf(&view, part, at)
 		health.StrategyLinkBase = strategyLinkBase

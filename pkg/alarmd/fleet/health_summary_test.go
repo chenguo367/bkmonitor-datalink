@@ -336,6 +336,42 @@ func TestAHealthReadItsCallerLeftRecordsNoVerdict(t *testing.T) {
 	}
 }
 
+// The verdict scrape records no verdict for a view it did not read -- the
+// registry or the snapshots unreadable, or the scrape's own deadline reached
+// -- while the verdict it exports stays UNKNOWN; a view whose reads found a
+// replica missing is the deployment's, and is recorded.
+func TestTheScrapeRecordsNoVerdictForAViewItDidNotRead(t *testing.T) {
+	expectation := stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, read := range map[string]func() (*Service, View){
+		"registry unreadable": func() (*Service, View) {
+			service := mustService(t, expectation, stubRegistry{err: errors.New("registry unreadable")}, stubSnapshots{})
+			return service, service.ViewAsPublished(context.Background(), time.Minute)
+		},
+		"snapshots unreadable": func() (*Service, View) {
+			service := mustService(t, expectation, stubRegistry{replicas: replicas()}, failingSnapshotsWithSummaries{})
+			return service, service.ViewAsPublished(context.Background(), time.Minute)
+		},
+		"deadline reached": func() (*Service, View) {
+			service := mustService(t, expectation, stubRegistry{replicas: replicas()}, &waitingSnapshots{release: make(chan struct{})})
+			return service, service.ViewAsPublished(expired, time.Minute)
+		},
+	} {
+		service, view := read()
+		service.RecordVerdict(&view, now)
+		if history, _ := service.VerdictHistory(); view.Health != HealthUnknown || len(history) != 0 {
+			t.Errorf("%s: view %s, history %+v; want UNKNOWN exported and nothing recorded", name, view.Health, history)
+		}
+	}
+	missing := mustService(t, expectation, stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: healthySnapshots()[:1]})
+	view := missing.ViewAsPublished(context.Background(), time.Minute)
+	missing.RecordVerdict(&view, now)
+	if history, _ := missing.VerdictHistory(); len(history) != 1 || history[0].To != HealthUnknown {
+		t.Fatalf("history %+v, want the missing replica's UNKNOWN recorded", history)
+	}
+}
+
 // blockingSnapshots holds every read until released, counting them.
 type blockingSnapshots struct {
 	mu        sync.Mutex
