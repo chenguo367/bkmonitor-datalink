@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +155,63 @@ func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T)
 	}
 	if health := fixture.store.Health(); health.RefreshFailed || health.Unanswered != 0 || health.UnansweredReads != 3 {
 		t.Fatalf("health after an answered refresh = %+v", health)
+	}
+}
+
+// The health names each group served past refreshes that could not read
+// it: since the first of them after its last read, which a second does not
+// move, and why the latest could not, in closed words - the code Redis
+// answered its key with, or transport. A group never read is not served past anything and is not
+// named; a read of the group, or its reference ageing out, ends its run.
+func TestTheHealthNamesEachGroupServedPastAFailedRefresh(t *testing.T) {
+	fixture := newGroupFixture(t, 2)
+	loading := answeredError("LOADING Redis is loading the dataset in memory")
+	// A group whose key Redis answers with an error throughout is never read.
+	fixture.client.values["p:dynamic_group:never"] = hostGroupOf(9)
+	answer := func(answered map[string]error) {
+		answered["p:dynamic_group:never"] = loading
+		fixture.client.answered = answered
+	}
+	answer(map[string]error{})
+	if lookup := fixture.store.Group(context.Background(), "never", time.Minute); lookup.ReadErr == nil {
+		t.Fatal("setup: a group never read was read")
+	}
+	answer(map[string]error{"p:dynamic_group:" + fixture.ids[0]: loading, "p:dynamic_group:" + fixture.ids[1]: loading})
+	fixture.now = fixture.now.Add(time.Minute)
+	started := fixture.now
+	_ = fixture.store.Refresh(context.Background())
+	failing := fixture.store.Health().Failing
+	if len(failing) != 2 || failing[0].ID != fixture.ids[0] || failing[1].ID != fixture.ids[1] || !failing[0].Since.Equal(started) ||
+		failing[0].Reason != "LOADING" {
+		t.Fatalf("failing after an unanswered refresh = %+v", failing)
+	}
+
+	answer(map[string]error{})
+	fixture.client.err = errors.New("connection refused")
+	fixture.now = fixture.now.Add(time.Minute)
+	_ = fixture.store.Refresh(context.Background())
+	failing = fixture.store.Health().Failing
+	if len(failing) != 2 || !failing[1].Since.Equal(started) || failing[1].Reason != "transport" {
+		t.Fatalf("failing after a refresh that failed at the transport = %+v, want the run's start kept and the latest reason", failing)
+	}
+
+	fixture.client.err = nil
+	answer(map[string]error{"p:dynamic_group:" + fixture.ids[1]: answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")})
+	fixture.now = fixture.now.Add(time.Minute)
+	_ = fixture.store.Refresh(context.Background())
+	if failing = fixture.store.Health().Failing; len(failing) != 1 || failing[0].ID != fixture.ids[1] || failing[0].Reason != "WRONGTYPE" {
+		t.Fatalf("failing after the first group read again = %+v, want only the second", failing)
+	}
+
+	// Nobody asks for the second group any more: past its horizon it leaves
+	// the refresh and the health, run and all.
+	for step := 0; step < 12; step++ {
+		fixture.now = fixture.now.Add(time.Minute)
+		_ = fixture.store.Refresh(context.Background())
+		fixture.store.Group(context.Background(), fixture.ids[0], time.Minute)
+	}
+	if failing = fixture.store.Health().Failing; len(failing) != 0 {
+		t.Fatalf("failing after the group aged out = %+v, want none", failing)
 	}
 }
 
@@ -654,5 +713,30 @@ func TestAGroupWhoseMembersWereAllRefusedIsNotAnEmptying(t *testing.T) {
 	}
 	if lookup := fixture.store.Group(context.Background(), fixture.ids[1], time.Minute); lookup.EmptiedHeld || lookup.Snapshot.Dropped != 1 || len(lookup.Snapshot.Members) != 0 {
 		t.Fatalf("the refused group = %+v, want its read published with the member dropped", lookup)
+	}
+}
+
+// Why a refresh could not read a group is said in closed words, never the
+// error's text: the code Redis answered with, redis_error for a reply that
+// leads with none, timed_out past a deadline or on a cancel, and transport
+// for the rest - a dial failure among them, whose text names the endpoint.
+func TestAGroupFailureIsNamedInClosedWords(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		Err: errors.New("connect: connection refused")}
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{err: answeredError("LOADING Redis is loading the dataset in memory"), want: "LOADING"},
+		{err: fmt.Errorf("p:dynamic_group:7: %w", answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")), want: "WRONGTYPE"},
+		{err: answeredError("something went wrong at 127.0.0.1:1"), want: "redis_error"},
+		{err: fmt.Errorf("alarmd cmdbcache: read dynamic groups: %w", context.DeadlineExceeded), want: "timed_out"},
+		{err: context.Canceled, want: "timed_out"},
+		{err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, want: "timed_out"},
+		{err: fmt.Errorf("alarmd cmdbcache: read dynamic groups: %w", dial), want: "transport"},
+	} {
+		if got := groupFailureReason(test.err); got != test.want {
+			t.Fatalf("%v = %q, want %q", test.err, got, test.want)
+		}
 	}
 }

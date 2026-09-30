@@ -687,6 +687,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	if groupStore != nil {
 		go groupStore.Run(cmdbIndexCtx)
+		recorder.SetTargetGroupSource(func() metric.TargetGroupReading {
+			return targetGroupReading(groupStore.Health(), external.Now())
+		})
 	}
 	// The close of alerts whose target left the strategy's scope hears the
 	// target filters' rejections from the query path below; the open set it
@@ -1380,9 +1383,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		leaderRound:      bundle.leaderRoundFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
-		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
+		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
-			linkd.Console, linkd.Location, external.Now),
+			linkd.Console, linkd.Location, external.Now), groupStore, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),

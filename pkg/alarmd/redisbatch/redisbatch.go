@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -59,6 +60,22 @@ func (err *UnansweredError) Error() string {
 }
 
 func (err *UnansweredError) Unwrap() error { return err.First }
+
+// AnsweredCode is the code Redis answered a command with - its reply's
+// leading word, such as LOADING, BUSY or WRONGTYPE - and whether err is
+// Redis answering at all. A reply that leads with no such word is
+// redis_error. Only the word is read, never the rest of the reply.
+func AnsweredCode(err error) (string, bool) {
+	var reply redis.Error
+	if !errors.As(err, &reply) {
+		return "", false
+	}
+	code, _, _ := strings.Cut(reply.Error(), " ")
+	if len(code) == 0 || len(code) > 32 || strings.Trim(code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_") != "" {
+		return "redis_error", true
+	}
+	return code, true
+}
 
 // Answered reports whether err is Redis answering a command with an error,
 // rather than the command not reaching it or its answer not coming back.
