@@ -12,6 +12,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -102,26 +103,85 @@ type Service struct {
 	// expectation is read rather than on every view.
 	expected SetDigest
 
-	// summaryFlight is the summarized read in progress, which a caller that
+	// summaries is the summarized read in progress, which a caller that
 	// comes while it runs waits for and shares instead of reading again;
-	// loadFlight is the same for the snapshots a page's view is built from.
-	summaryMu     sync.Mutex
-	summaryFlight *summaryFlight
-	loadMu        sync.Mutex
-	loadFlight    *loadFlight
+	// loads is the same for the snapshots a page's view is built from, by
+	// the replicas read.
+	summaries sharedReads[summarized]
+	loads     sharedReads[loaded]
 }
 
-type loadFlight struct {
-	done      chan struct{}
-	replicas  string
+type summarized struct {
+	view View
+	part ReplicaPart
+}
+
+type loaded struct {
 	snapshots []Snapshot
 	err       error
 }
 
-type summaryFlight struct {
-	done chan struct{}
-	view View
-	part ReplicaPart
+// sharedReads are reads that the callers asking for the same key while one
+// runs share: the first caller starts it, and every caller waits for it or
+// for its own context, whichever ends first.
+//
+// The read keeps the first caller's values but not its cancellation: the
+// first caller going away must not fail the others. It runs while anyone
+// waits for it and is stopped when the last of them has gone, and a caller
+// that comes after that starts a read of its own.
+type sharedReads[T any] struct {
+	mu      sync.Mutex
+	flights map[string]*sharedFlight[T]
+}
+
+type sharedFlight[T any] struct {
+	done    chan struct{}
+	stop    context.CancelFunc
+	waiters int
+	answer  T
+}
+
+// do is read's answer for key, shared with the callers that ask for key
+// while it runs; gone is the answer to a caller whose context ended first.
+func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(context.Context) T, gone func(error) T) T {
+	reads.mu.Lock()
+	if reads.flights == nil {
+		reads.flights = map[string]*sharedFlight[T]{}
+	}
+	flight := reads.flights[key]
+	if flight == nil {
+		readCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
+		flight = &sharedFlight[T]{done: make(chan struct{}), stop: stop}
+		reads.flights[key] = flight
+		go func() {
+			answer := read(readCtx)
+			reads.mu.Lock()
+			flight.answer = answer
+			if reads.flights[key] == flight {
+				delete(reads.flights, key)
+			}
+			reads.mu.Unlock()
+			stop()
+			close(flight.done)
+		}()
+	}
+	flight.waiters++
+	reads.mu.Unlock()
+	select {
+	case <-flight.done:
+		return flight.answer
+	case <-ctx.Done():
+		reads.mu.Lock()
+		flight.waiters--
+		if flight.waiters == 0 {
+			if reads.flights[key] == flight {
+				delete(reads.flights, key)
+			}
+			flight.stop()
+		}
+		reads.mu.Unlock()
+		return gone(ctx.Err())
+	}
 }
 
 // NewService wires the three sources. freshness is how old a snapshot may be
@@ -245,30 +305,17 @@ func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Dur
 }
 
 // loadShared is the snapshots' Load, shared by the callers that ask for the
-// same replicas while a read of them is in progress: pages that come
-// together cost one read, and one grant from the memory line. The snapshots
-// are only read from; each caller builds its own view of them.
+// same replicas, in any order, while a read of them is in progress: pages
+// that come together cost one read, and one grant from the memory line. The
+// snapshots are only read from; each caller builds its own view of them.
 func (service *Service) loadShared(ctx context.Context, replicas []string) ([]Snapshot, error) {
-	key := strings.Join(replicas, "\x00")
-	service.loadMu.Lock()
-	if flight := service.loadFlight; flight != nil && flight.replicas == key {
-		service.loadMu.Unlock()
-		<-flight.done
-		return flight.snapshots, flight.err
-	}
-	flight := &loadFlight{done: make(chan struct{}), replicas: key}
-	if service.loadFlight == nil {
-		service.loadFlight = flight
-	}
-	service.loadMu.Unlock()
-	flight.snapshots, flight.err = service.snapshots.Load(ctx, replicas)
-	service.loadMu.Lock()
-	if service.loadFlight == flight {
-		service.loadFlight = nil
-	}
-	service.loadMu.Unlock()
-	close(flight.done)
-	return flight.snapshots, flight.err
+	sorted := append([]string(nil), replicas...)
+	sort.Strings(sorted)
+	answer := service.loads.do(ctx, strings.Join(sorted, "\x00"), func(ctx context.Context) loaded {
+		snapshots, err := service.snapshots.Load(ctx, replicas)
+		return loaded{snapshots: snapshots, err: err}
+	}, func(err error) loaded { return loaded{err: err} })
+	return answer.snapshots, answer.err
 }
 
 // registryUnavailable is the view when the replicas that should have
@@ -331,23 +378,17 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 // its answer: a page's viewers then cost one read between them, with no
 // period of its own to keep answers for.
 func (service *Service) Summarized(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
-	service.summaryMu.Lock()
-	if flight := service.summaryFlight; flight != nil {
-		service.summaryMu.Unlock()
-		<-flight.done
-		return flight.view, flight.part
-	}
-	flight := &summaryFlight{done: make(chan struct{})}
-	service.summaryFlight = flight
-	service.summaryMu.Unlock()
-	defer func() {
-		service.summaryMu.Lock()
-		service.summaryFlight = nil
-		service.summaryMu.Unlock()
-		close(flight.done)
-	}()
-	flight.view, flight.part = service.summarize(ctx, stallAfter)
-	return flight.view, flight.part
+	answer := service.summaries.do(ctx, "", func(ctx context.Context) summarized {
+		view, part := service.summarize(ctx, stallAfter)
+		return summarized{view: view, part: part}
+	}, func(err error) summarized { return summarized{view: unreadView(err)} })
+	return answer.view, answer.part
+}
+
+// unreadView is the view to a caller that stopped waiting for the read.
+func unreadView(err error) View {
+	return View{Health: HealthUnknown, Gaps: []Gap{{Kind: GapSnapshotsUnreadable, Detail: gapDetail(err)}},
+		Anomalies: []Anomaly{}, Replicas: []string{}}
 }
 
 func (service *Service) summarize(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
