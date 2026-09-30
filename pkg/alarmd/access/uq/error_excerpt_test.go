@@ -63,7 +63,7 @@ func TestAnErrorExcerptIsBounded(t *testing.T) {
 	long := providerErrorExcerpt([]byte("a" + strings.Repeat("错", 400)))
 	if len(long) > errorExcerptBytes+len("...") || !strings.HasSuffix(long, "...") || !strings.HasPrefix(long, "a错") ||
 		!utf8.ValidString(long) {
-		t.Fatalf("excerpt of %d bytes, want at most %d and marked cut", len(long), errorExcerptBytes)
+		t.Fatalf("excerpt of %d bytes, want a body of at most %d bytes and the cut marked", len(long), errorExcerptBytes)
 	}
 	if got := providerErrorExcerpt([]byte{'a', 0xff, 'b'}); got != "a?b" {
 		t.Fatalf("excerpt %q, want the invalid byte replaced", got)
