@@ -61,6 +61,10 @@ type lookbackCollector struct {
 	directedBytes        *prometheus.Desc
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
+	// The early reads of directed Slots, before their next Slot reads.
+	earlyReads     *prometheus.Desc
+	earlyUndecided *prometheus.Desc
+	earlyBytes     *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -131,6 +135,20 @@ func newLookbackCollector() *lookbackCollector {
 				"and is not counted.", "source", "bucket"),
 		supplementHoldMax: desc("lookback_supplement_hold_max_seconds",
 			"The longest a supplement held its Query Group's flight in this process, by source.", "source"),
+		earlyReads: desc("lookback_directed_early_total",
+			"Directed Slots by what their early read -- once more before the Query Group's next Slot reads -- came "+
+				"to, by source. before_next is a supplement that ran with no later Slot of the group begun. Not "+
+				"attempted: nothing_late, rung_first (the next Slot reads after the rung), multi_query, "+
+				"first_read_incomplete, first_read_refused, owner_lost, anchor_unknown (no next Slot known). Attempted "+
+				"and not ahead: overtaken, older_slot_pending, yielded, permit_refused, anchor_passed, "+
+				"early_read_failed, early_memory_refused, flight_busy, contract_expired, failed. The mechanism works "+
+				"as far as before_next is of the attempted ones.", "source", "outcome"),
+		earlyUndecided: desc("lookback_directed_early_undecided_total",
+			"(Plan, series) pairs early supplements left undecided -- withheld, input_incomplete, config_drift -- "+
+				"which the read at the rung does not supplement again, by source.", "source"),
+		earlyBytes: desc("lookback_directed_early_read_bytes_total",
+			"Bytes the early reads delivered, by source: part of lookback_directed_read_bytes_total, the bytes reading "+
+				"early added.", "source"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -190,7 +208,7 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -242,6 +260,11 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.supplementHold, source.SupplementHold[bucket], name, bucket)
 		}
 		gauge(c.supplementHoldMax, source.SupplementHoldMaxSeconds, name)
+		for _, outcome := range lookback.EarlyOutcomes {
+			counter(c.earlyReads, source.EarlyReads[outcome], name, outcome)
+		}
+		counter(c.earlyUndecided, source.EarlyUndecided, name)
+		counter(c.earlyBytes, source.EarlyReadBytes, name)
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

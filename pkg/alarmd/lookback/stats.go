@@ -45,6 +45,14 @@ type counters struct {
 	// flight, and per source the longest.
 	supplementHold    map[string]uint64
 	supplementHoldMax map[string]time.Duration
+	// source|outcome: directed Slots by what their early read came to; per
+	// source the (Plan, series) pairs early supplements left undecided,
+	// which the read at the rung does not supplement again.
+	early          map[string]uint64
+	earlyUndecided map[string]uint64
+	// earlyBytes is, per source, what the early reads delivered: part of
+	// directedBytes, apart so the early read's own cost can be read.
+	earlyBytes map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -70,6 +78,7 @@ func newCounters(sources, refusals []string) counters {
 		directedWindows: map[string]uint64{}, directedUnobserved: map[string]uint64{}, supplementSeries: map[string]uint64{},
 		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{},
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
+		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -113,6 +122,10 @@ func newCounters(sources, refusals []string) counters {
 			c.supplementHold[key2(source, bucket)] = 0
 		}
 		c.supplementHoldMax[source] = 0
+		for _, outcome := range EarlyOutcomes {
+			c.early[key2(source, outcome)] = 0
+		}
+		c.earlyUndecided[source], c.earlyBytes[source] = 0, 0
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
@@ -254,6 +267,14 @@ type SourceStats struct {
 	// longest: what a Query Group's own Slot waited behind one.
 	SupplementHold           map[string]uint64 `json:"supplement_hold"`
 	SupplementHoldMaxSeconds float64           `json:"supplement_hold_max_seconds"`
+	// EarlyReads is its directed Slots by what their early read came to
+	// (EarlyOutcomes), and EarlyUndecided the (Plan, series) pairs early
+	// supplements left undecided, which are not supplemented again.
+	EarlyReads     map[string]uint64 `json:"early_reads"`
+	EarlyUndecided uint64            `json:"early_undecided"`
+	// EarlyReadBytes is what the early reads delivered, part of
+	// DirectedReadBytes: the bytes reading early added.
+	EarlyReadBytes uint64 `json:"early_read_bytes"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -371,7 +392,7 @@ func (engine *Engine) Stats() Stats {
 			entry.neverComplete = &NeverCompleteGroup{QueryGroup: queryGroup, Source: state.source,
 				IncompleteFirstReads: state.incompleteFirstReads}
 		}
-		if reading, directed := supplementReading(queryGroup, state); directed {
+		if reading, directed := engine.supplementReadingLocked(queryGroup, state); directed {
 			entry.supplement = &reading
 		}
 		for _, slot := range state.directed {
@@ -404,7 +425,12 @@ func (engine *Engine) Stats() Stats {
 			Classes: map[string]uint64{}, Unclassified: map[string]uint64{},
 			SupplementWindows: map[string]uint64{}, SupplementUnobserved: map[string]uint64{}, SupplementSeries: map[string]uint64{},
 			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source],
-			SupplementHold: map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds()}
+			SupplementHold: map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds(),
+			EarlyReads: map[string]uint64{}, EarlyUndecided: engine.counts.earlyUndecided[source],
+			EarlyReadBytes: engine.counts.earlyBytes[source]}
+		for _, outcome := range EarlyOutcomes {
+			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]
+		}
 		for _, bucket := range SupplementHoldBuckets {
 			entry.SupplementHold[bucket] = engine.counts.supplementHold[key2(source, bucket)]
 		}

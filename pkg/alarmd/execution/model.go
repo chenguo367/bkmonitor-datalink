@@ -245,6 +245,26 @@ type QueryExecutionRequest struct {
 	AttemptNo uint32
 }
 
+type followingSlotKey struct{}
+
+// WithFollowingSlot is ctx carrying the Slot the frozen schedule has after
+// the one executing, to the query layer, for the lookback: when the Query
+// Group reads next. Observation only. It rides on the context and on no
+// execution request: those carry no Slot after the one they execute, and
+// nothing that persists progress may read one.
+func WithFollowingSlot(ctx context.Context, slot EvaluationTime) context.Context {
+	if slot <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, followingSlotKey{}, slot)
+}
+
+// FollowingSlotOf is the FollowingSlot ctx carries, zero when none.
+func FollowingSlotOf(ctx context.Context) EvaluationTime {
+	slot, _ := ctx.Value(followingSlotKey{}).(EvaluationTime)
+	return slot
+}
+
 func (request QueryExecutionRequest) Validate() error {
 	if err := request.Contract.Validate(); err != nil {
 		return err

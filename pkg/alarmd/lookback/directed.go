@@ -103,7 +103,15 @@ type SupplementJob struct {
 	Series         []execution.SeriesIdentityDigest
 	Read           *KeptRead
 	Deadline       time.Time
+	// Guard, when set, is asked once the supplement holds its Query Group's
+	// flight: false means the group has moved on, and the supplement is
+	// refused as SupplementOvertaken having written nothing.
+	Guard func() bool
 }
+
+// SupplementOvertaken is a supplement refused because its guard said the
+// Query Group had moved on by the time it held the flight.
+const SupplementOvertaken = "overtaken"
 
 // SupplementOutcome is what became of a SupplementJob: the supplement's own
 // facts when it ran, or, when it did not, why - flight_busy,
@@ -206,6 +214,9 @@ type directedQuery struct {
 	first    *seriesSet
 	complete bool
 	finished bool
+	// slot is the Slot it is a read of, begunAt when it began.
+	slot    *directedSlot
+	begunAt time.Time
 }
 
 // directedSlot is one Slot of a directed Query Group, from its first read
@@ -225,8 +236,22 @@ type directedSlot struct {
 	// ends after they did still supplements its late series, and is not
 	// counted into the reports of the reads that came after.
 	period *seriesLateState
-	// late is how many series its directed read found late.
-	late int
+	// late is how many series its directed reads found late, both of them
+	// together, and seenAge how long after its first read the series that
+	// had crossed it were seen, at the latest: both set when it is filed.
+	late    int
+	seenAge time.Duration
+	// readyAt is when its first query was ready and following the Slot its
+	// schedule has next, which say when the next Slot reads; early is its
+	// early read (early.go), nil until its first read ends.
+	readyAt   time.Time
+	following execution.EvaluationTime
+	early     *earlyRead
+	// facts is what its supplements came to, both reads' summed, and
+	// supplemented whether any ran; filed once it has been counted.
+	facts        execution.SupplementFacts
+	supplemented bool
+	filed        bool
 }
 
 // supplementTally is what a directed Query Group's Slots came to since it
@@ -237,10 +262,11 @@ type supplementTally struct {
 	windows    map[string]uint64
 	unobserved map[string]uint64
 	facts      execution.SupplementFacts
+	early      map[string]uint64
 }
 
 func newSupplementTally(since time.Time) *supplementTally {
-	return &supplementTally{since: since, windows: map[string]uint64{}, unobserved: map[string]uint64{}}
+	return &supplementTally{since: since, windows: map[string]uint64{}, unobserved: map[string]uint64{}, early: map[string]uint64{}}
 }
 
 // captureDirectedLocked keeps a directed Query Group's first read of one of
@@ -257,18 +283,32 @@ func (engine *Engine) captureDirectedLocked(state *group, query Query, source st
 		engine.nextID++
 		slot = &directedSlot{id: engine.nextID, source: source, queryGroup: query.Contract.Slot.QueryGroup,
 			evaluation: query.Contract.Slot.EvaluationTime, step: step, readAt: now, rung: state.seriesLate.rung,
-			period: state.seriesLate}
+			period: state.seriesLate, readyAt: query.ReadyAt, following: query.FollowingSlot}
 		state.directed[query.Contract.Slot.EvaluationTime] = slot
 	}
-	captured := &directedQuery{spec: query.Spec, first: newSeriesSet(engine.options.Memory)}
+	captured := &directedQuery{spec: query.Spec, first: newSeriesSet(engine.options.Memory), slot: slot, begunAt: now}
 	slot.queries = append(slot.queries, captured)
+	if len(slot.queries) > 1 && slot.early != nil && !slot.early.running {
+		// A second physical query: its late series could not be read whole.
+		engine.fileEarlyLocked(state, slot, EarlyMultiQuery)
+	}
 	return captured
 }
 
-// completeDirectedLocked takes the end of a directed first read.
-func completeDirectedLocked(captured *directedQuery, completion execution.ProviderCompletion, err error) {
+// completeDirectedLocked takes the end of a directed first read: how long
+// the read took, among its Query Group's readings when it was whole, and
+// its Slot's early read.
+func (engine *Engine) completeDirectedLocked(captured *directedQuery, completion execution.ProviderCompletion, err error, now time.Time) {
 	captured.finished = true
 	captured.complete = err == nil && completion.Completeness == execution.CompletenessFull && !captured.first.refused
+	state := engine.groups[captured.slot.queryGroup]
+	if state == nil || captured.slot.dropped {
+		return
+	}
+	if captured.complete {
+		state.took.add(now.Sub(captured.begunAt))
+	}
+	engine.planEarlyLocked(state, captured.slot, now)
 }
 
 // dueDirectedLocked is the directed Slot of one Query Group to read now,
@@ -284,6 +324,10 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 	for evaluation, slot := range state.directed {
 		if slot.running {
 			running = true
+			continue
+		}
+		if slot.early != nil && !slot.early.done {
+			// Read at its rung once its early read has its outcome.
 			continue
 		}
 		at := slot.readAt.Add(rungDelay(slot.rung, slot.step))
@@ -303,7 +347,7 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 			}
 		}
 		if reason != "" {
-			engine.noteDirectedLocked(state, slot, DirectedUnobserved, reason, nil)
+			engine.fileWindowLocked(state, slot, DirectedUnobserved, reason, rungRead{})
 			delete(state.directed, evaluation)
 			continue
 		}
@@ -471,15 +515,14 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 		reason = UnobservedMemoryRefused
 	}
 	if reason != "" {
-		engine.noteDirectedLocked(state, slot, DirectedUnobserved, reason, nil)
+		engine.fileWindowLocked(state, slot, DirectedUnobserved, reason, rungRead{})
 		delete(state.directed, slot.evaluation)
 		engine.mu.Unlock()
 		return
 	}
 	read, series := sink.kept(captured.spec, completion)
-	slot.late = len(sink.series)
 	if len(series) == 0 {
-		engine.noteDirectedLocked(state, slot, DirectedNothingLate, "", nil)
+		engine.fileWindowLocked(state, slot, DirectedNothingLate, "", rungRead{})
 		delete(state.directed, slot.evaluation)
 		engine.mu.Unlock()
 		return
@@ -497,18 +540,108 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 		return
 	}
 	delete(state.directed, slot.evaluation)
-	if outcome.Held > 0 {
-		engine.counts.supplementHold[key2(slot.source, holdBucket(outcome.Held))]++
-		engine.counts.supplementHoldMax[slot.source] = max(engine.counts.supplementHoldMax[slot.source], outcome.Held)
-	}
+	engine.noteHoldLocked(state, slot.source, outcome.Held)
+	rung := rungRead{late: sink.series}
 	switch {
 	case outcome.Ran:
-		engine.noteDirectedLocked(state, slot, DirectedSupplemented, "", &outcome.Facts)
+		rung.facts = &outcome.Facts
+		engine.fileWindowLocked(state, slot, DirectedSupplemented, "", rung)
 	case outcome.Refused == DirectedFlightBusy || outcome.Refused == DirectedContractExpired:
-		engine.noteDirectedLocked(state, slot, outcome.Refused, "", nil)
+		engine.fileWindowLocked(state, slot, outcome.Refused, "", rung)
 	default:
-		engine.noteDirectedLocked(state, slot, DirectedFailed, "", nil)
+		engine.fileWindowLocked(state, slot, DirectedFailed, "", rung)
 	}
+}
+
+// earlyRefusalWindow is the window outcome of an early read whose supplement
+// did not run: one the next Slot's read beat ran out of its time as one past
+// its deadline did. ok is false for an early read that came to anything else.
+func earlyRefusalWindow(early string) (outcome string, ok bool) {
+	switch early {
+	case EarlyFlightBusy:
+		return DirectedFlightBusy, true
+	case EarlyContractExpired, EarlyOvertaken:
+		return DirectedContractExpired, true
+	case EarlyFailed:
+		return DirectedFailed, true
+	}
+	return "", false
+}
+
+// rungRead is what a Slot's read at its rung came to, for filing it: the
+// late series it read, and its supplement's facts when one ran.
+type rungRead struct {
+	late  map[execution.SeriesIdentityDigest]struct{}
+	facts *execution.SupplementFacts
+}
+
+// fileWindowLocked counts a directed Slot once, when both its reads have
+// their outcomes: outcome and reason are its read at the rung's. A Slot
+// either of whose supplements ran is supplemented, on both supplements'
+// facts; one read with nothing late by both reads is nothing_late; any
+// other is what its read at the rung came to. Its late count is both
+// reads' series together, and how long after its first read the series
+// that had crossed it were seen is the latest read that saw one, no later
+// than the next Slot's read: a series that crossed the Slot was in it.
+func (engine *Engine) fileWindowLocked(state *group, slot *directedSlot, outcome, reason string, rung rungRead) {
+	if slot.filed {
+		return
+	}
+	slot.filed = true
+	if slot.early == nil {
+		// Its first read never ended: there was nothing to read it early by.
+		engine.fileEarlyLocked(state, slot, EarlyFirstReadIncomplete)
+	}
+	if rung.facts != nil {
+		slot.facts = addFacts(slot.facts, *rung.facts)
+		slot.supplemented = true
+	}
+	var earlyLate map[uint64]struct{}
+	if slot.early.late != nil {
+		earlyLate = slot.early.late.set
+	}
+	late, unseen := len(earlyLate), false
+	for identity := range rung.late {
+		if _, seen := earlyLate[hashString(string(identity))]; !seen {
+			late++
+			unseen = true
+		}
+	}
+	slot.late = late
+	age, crossed := time.Duration(0), false
+	if slot.early.crossed {
+		age, crossed = slot.early.readAt.Sub(slot.readAt), true
+	}
+	if rung.facts != nil && rung.facts.CrossedT > 0 {
+		seen := rungDelay(slot.rung, slot.step)
+		if !unseen && !slot.early.readAt.IsZero() {
+			// Every series it supplemented the early read had seen already.
+			seen = slot.early.readAt.Sub(slot.readAt)
+		}
+		age, crossed = max(age, seen), true
+	}
+	if !crossed {
+		age = rungDelay(slot.rung, slot.step)
+	}
+	if !slot.early.next.IsZero() {
+		age = min(age, slot.early.next.Sub(slot.readAt))
+	}
+	slot.seenAge = age
+	var facts *execution.SupplementFacts
+	switch {
+	case slot.supplemented:
+		outcome, reason = DirectedSupplemented, ""
+		summed := slot.facts
+		facts = &summed
+	case outcome == DirectedNothingLate && len(earlyLate) > 0:
+		// The early read found late series and its supplement did not run,
+		// and the read at the rung found none: not a Slot with nothing late,
+		// but one whose supplement did not run, by the early read's why.
+		if refused, ok := earlyRefusalWindow(slot.early.outcome); ok {
+			outcome = refused
+		}
+	}
+	engine.noteDirectedLocked(state, slot, outcome, reason, facts)
 }
 
 // SupplementReading is one directed Query Group's standing: the rung it is
@@ -527,17 +660,35 @@ type SupplementReading struct {
 	Series     execution.SupplementFacts    `json:"series"`
 	Coverage   float64                      `json:"coverage"`
 	Pending    int                          `json:"pending"`
+	// Early is its Slots by what their early read came to (EarlyOutcomes).
+	// LeadSeconds is how long before its next Slot reads an early read of it
+	// starts at the latest now: TookMaxSeconds, the longest of its last
+	// TookReadings first reads, and HoldMaxSeconds, the longest of its last
+	// HoldReadings supplement holds, or of the process's while it has none.
+	Early          map[string]uint64 `json:"early"`
+	LeadSeconds    float64           `json:"lead_seconds"`
+	TookMaxSeconds float64           `json:"took_max_seconds"`
+	HoldMaxSeconds float64           `json:"hold_max_seconds"`
+	TookReadings   int               `json:"took_readings"`
+	HoldReadings   int               `json:"hold_readings"`
 }
 
-// supplementReading is a group's standing, or false for a group that is
-// not directed and never was.
-func supplementReading(queryGroup execution.QueryGroupIdentity, state *group) (SupplementReading, bool) {
+// supplementReadingLocked is a group's standing, or false for a group that
+// is not directed and never was.
+func (engine *Engine) supplementReadingLocked(queryGroup execution.QueryGroupIdentity, state *group) (SupplementReading, bool) {
 	tally := state.supplement
 	if tally == nil {
 		return SupplementReading{}, false
 	}
+	lead := engine.leadLocked(state)
+	hold := lead - state.took.longest()
 	reading := SupplementReading{QueryGroup: queryGroup, Source: state.source, Since: tally.since,
-		Windows: map[string]uint64{}, Unobserved: map[string]uint64{}, Series: tally.facts, Pending: len(state.directed)}
+		Windows: map[string]uint64{}, Unobserved: map[string]uint64{}, Series: tally.facts, Pending: len(state.directed),
+		Early: map[string]uint64{}, LeadSeconds: lead.Seconds(), TookMaxSeconds: state.took.longest().Seconds(),
+		HoldMaxSeconds: hold.Seconds(), TookReadings: state.took.count, HoldReadings: state.holds.count}
+	for _, outcome := range EarlyOutcomes {
+		reading.Early[outcome] = tally.early[outcome]
+	}
 	if state.seriesLate != nil {
 		reading.Rung = RungNames[state.seriesLate.rung]
 	}

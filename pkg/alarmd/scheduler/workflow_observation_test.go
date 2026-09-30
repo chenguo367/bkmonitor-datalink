@@ -104,7 +104,7 @@ func TestWorkflowRunnerActualExits(t *testing.T) {
 			expectedAttempted := false
 			switch name {
 			case "single_flight_busy":
-				release, _ := flights.tryAcquire("query-group-1")
+				release, _, _ := flights.tryAcquireAs("query-group-1", FlightHeldBySlot)
 				defer release()
 			case "ownership_rejected":
 				session.err = errors.New("owner changed")
@@ -179,7 +179,7 @@ func TestWorkflowRunnerPanicAndObserverIsolation(t *testing.T) {
 	if outcome != "panic" {
 		t.Fatalf("outcome=%s", outcome)
 	}
-	release, ok := flights.tryAcquire("query-group-1")
+	release, _, ok := flights.tryAcquireAs("query-group-1", FlightHeldBySlot)
 	if !ok {
 		t.Fatal("flight leaked")
 	}

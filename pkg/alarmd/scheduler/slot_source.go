@@ -548,6 +548,7 @@ func (source *ProductionSlotSource) Next(
 			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
+		FollowingSlot:    followingSlot(schedule, nextSlot),
 	}
 	if source.expiredRangeEnabled && load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
 		ctx.Value(rangeFlightContextKey{}) == queryGroup && recovery.Disposition == ReplayExpired {
@@ -689,6 +690,15 @@ func (source *ProductionSlotSource) cohortForSlot(ctx context.Context, slot exec
 	return shortPeriodCohort(schedule, slot)
 }
 
+// followingSlot is the Slot schedule has after at, zero when its Segment
+// ends first.
+func followingSlot(schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) execution.EvaluationTime {
+	if next, ok := schedule.NextSlotAfter(at); ok {
+		return next
+	}
+	return 0
+}
+
 // ShortPeriodCohortForInterval names the cohort of an evaluation interval as
 // the dispatcher labels its queue decisions: the three short cohorts by
 // name, "other" for any other interval, "unknown" for none.
@@ -827,6 +837,7 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
+		FollowingSlot:    followingSlot(schedule, nextSlot),
 	}
 	if err := slot.Validate(source.queryGroup); err != nil {
 		return FrozenSlot{}, false, &SourceBlockedError{Err: err}

@@ -45,6 +45,9 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_directed_read_bytes_total":         sources,
 		"lookback_supplement_hold_total":             sources * len(lookback.SupplementHoldBuckets),
 		"lookback_supplement_hold_max_seconds":       sources,
+		"lookback_directed_early_total":              sources * len(lookback.EarlyOutcomes),
+		"lookback_directed_early_undecided_total":    sources,
+		"lookback_directed_early_read_bytes_total":   sources,
 		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
 		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds":            sources,
@@ -94,6 +97,9 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	entry.RecheckBytes = 2048
 	entry.SupplementHold["le_5s"] = 11
 	entry.SupplementHoldMaxSeconds = 3.5
+	entry.EarlyReads[lookback.EarlyBeforeNext] = 12
+	entry.EarlyUndecided = 13
+	entry.EarlyReadBytes = 14
 	stats.Sources[logs] = entry
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
@@ -162,5 +168,14 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_supplement_hold_max_seconds", map[string]string{"source": logs}); got != 3.5 {
 		t.Fatalf("longest supplement hold = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_directed_early_total", map[string]string{"source": logs, "outcome": lookback.EarlyBeforeNext}); got != 12 {
+		t.Fatalf("early reads before the next Slot = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_directed_early_undecided_total", map[string]string{"source": logs}); got != 13 {
+		t.Fatalf("early undecided pairs = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_directed_early_read_bytes_total", map[string]string{"source": logs}); got != 14 {
+		t.Fatalf("early read bytes = %v", got)
 	}
 }

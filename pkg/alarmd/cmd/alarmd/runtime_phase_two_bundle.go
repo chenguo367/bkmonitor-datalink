@@ -1278,6 +1278,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	lookbackOwner.bind(bundle)
+	// A Slot a supplement or maintenance turned away from its flight runs as
+	// soon as the hold ends, not at its next turn.
+	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}

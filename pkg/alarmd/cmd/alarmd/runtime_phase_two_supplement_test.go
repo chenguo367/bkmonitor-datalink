@@ -44,6 +44,10 @@ func (runner *supplementingQueryGroup) Supplement(ctx context.Context, at execut
 	}
 	_, kept := access.KeptReadOf(ctx)
 	runner.read = append(runner.read, kept)
+	if guard := scheduler.SupplementGuardOf(ctx); guard != nil && !guard() {
+		runner.answers = runner.answers[1:]
+		return execution.SupplementFacts{}, scheduler.ErrSupplementOvertaken
+	}
 	err := runner.answers[0]
 	runner.answers = runner.answers[1:]
 	if err != nil {
@@ -112,6 +116,49 @@ func TestTheLookbacksSupplementsRunOnTheirQueryGroupsRunner(t *testing.T) {
 	if outcome := lookbackSupplement(supplementOwnership(runner), nil, func() time.Time { return now }, waitWithin)(
 		context.Background(), lookback.SupplementJob{QueryGroup: "qg-elsewhere"}); outcome.Ran || outcome.Refused != lookback.DirectedFailed {
 		t.Fatalf("not held: %+v", outcome)
+	}
+}
+
+// A supplement's guard reaches the Query Group's Runner, and a supplement
+// its guard turned back is refused as overtaken, its hold counted.
+func TestASupplementsGuardReachesItsRunner(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, proceed := range []bool{true, false} {
+		clock := now
+		runner := &supplementingQueryGroup{answers: []error{nil}, clock: &clock, took: 30 * time.Millisecond}
+		job := lookback.SupplementJob{QueryGroup: "qg-late", EvaluationTime: 120, Series: []execution.SeriesIdentityDigest{"a"},
+			Deadline: now.Add(time.Minute), Guard: func() bool { return proceed }}
+		outcome := lookbackSupplement(supplementOwnership(runner), nil, func() time.Time { return clock }, waitWithin)(context.Background(), job)
+		switch {
+		case proceed && !outcome.Ran:
+			t.Fatalf("a supplement its guard let through: %+v", outcome)
+		case !proceed && (outcome.Ran || outcome.Refused != lookback.SupplementOvertaken || outcome.Held != 30*time.Millisecond):
+			t.Fatalf("a supplement its guard turned back: %+v, want refused as overtaken with its hold", outcome)
+		}
+	}
+}
+
+// The permits an early read can count on are the budget less every permit
+// held, the lookback's own included.
+func TestFreeQueryPermitsLeaveOutTheLookbacksOwn(t *testing.T) {
+	flights, err := scheduler.NewFlightCoordinatorWithRecovery(scheduler.RecoveryLimits{
+		ProcessQueryPermits: 4, RecoveryQueryPermits: 1, ReadyQueueCapacity: 4, RecoveryQueueCapacity: 4,
+		MaxQueuedItemsPerQG: 1, MaxReplaySlots: 1, MaxReplayAge: time.Minute, RetryMinDelay: time.Second, RetryMaxDelay: time.Second,
+	}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := freeQueryPermits(flights)
+	if got := free(); got != 4 {
+		t.Fatalf("free permits %d with none held, want the budget", got)
+	}
+	permit, refused := flights.TryAcquireLookbackPermit()
+	if refused != "" {
+		t.Fatal(refused)
+	}
+	defer permit.Release()
+	if got := free(); got != 3 {
+		t.Fatalf("free permits %d with the lookback holding one, want one less", got)
 	}
 }
 
