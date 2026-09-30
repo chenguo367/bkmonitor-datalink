@@ -249,10 +249,14 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		// The body is drained and discarded on purpose: UQ error bodies can echo
 		// the request (table ids, conditions, dimension values) and must not be
 		// parsed for business state or copied into logs. The status code alone
-		// is the bounded diagnostic detail.
-		discarded, _ := io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		// is the bounded diagnostic detail. A diagnostic read -- an operator
+		// asking why the provider refused this query -- keeps the body's start,
+		// sanitized, for its own answer alone.
 		if scanned != nil {
-			scanned.Bytes = uint64(discarded)
+			body, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyRead))
+			scanned.Bytes, scanned.errorExcerpt = uint64(len(body)), providerErrorExcerpt(body)
+		} else {
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, errorBodyRead))
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
