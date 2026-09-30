@@ -18,7 +18,7 @@ tar -xzf alarmd-cli_<version>_<os>_<arch>.tar.gz
 
 ## 从零开始
 
-先打开已知环境的 OB CLI 授权页面，输入部署管理员密钥，确认后生成一次性授权码。alarmd 自己校验该密钥，授权范围为部署级运维取证。管理员密钥通过部署 Secret 配置为 `cli.admin_key`，只在页面当次授权时输入，不保存到 CLI 配置；CLI 只持有兑换后的短时会话和续期凭据。
+先打开已知环境的可观测取证通道（observability evidence channel，下文简称 OB）CLI 授权页面，输入部署管理员密钥，确认后生成一次性授权码。alarmd 自己校验该密钥，授权范围为部署级运维取证。管理员密钥通过部署 Secret 配置为 `cli.admin_key`，只在页面当次授权时输入，不保存到 CLI 配置；CLI 只持有兑换后的短时会话和续期凭据。
 
 授权码有两种交给 CLI 的方式。浏览器和 CLI 在同一台机器上时，页面会给出一条 `alarmd-cli auth listen --url <entry> --port <port> --state <state>` 命令，在 CLI 所在机器上运行它，页面把授权码交给本机 `127.0.0.1:<port>`，登录一次后命令退出。不在同一台机器上时，运行 `auth login` 后粘贴授权码，终端不回显；也支持从受保护 stdin 读取。授权码不接受普通命令行参数。
 
@@ -64,7 +64,7 @@ alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 1. `discover`：列出当前服务端提供的操作。只使用这里列出的操作名。不同部署、不同版本的操作目录可能不同，本文提到的操作也以 discover 为准。
 2. `describe <operation>`：读 schema（必填字段、类型、枚举、上下限）、limits、parameter_sources（每个参数取自哪一步的哪个字段）和 examples，按它填参数。ID 类参数（例如 `query_group`、`object_digest`）只从上一步的结果里取，不要自己构造。
 3. 把参数写进 JSON 文件，用 `--input @文件` 调用。参数来自上一步的 `next_call` 时，把其中的 `params` 原样存成文件。
-4. 读结果里的 `next_call`：它是服务端建议的下一步（`operation`、`params`、`reason`），客户端不会自动执行。需要继续时，照它的 `params` 发起下一次 invoke。
+4. 读结果里的 `next_call`：它是服务端建议的下一步列表，每项有 `operation`、`params`、`reason`，可能不止一项；客户端不会自动执行。需要继续时，按 `operation`（以及 `params` 里的区分字段，例如 `view`）选出要走的那一项，照它的 `params` 发起下一次 invoke。
 
 调用节奏：
 
@@ -95,25 +95,25 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 1. `alarmd-cli diagnose --env <environment_id>`：逐页读 `diagnose.environment` 并核对覆盖（退出码 3 表示覆盖不成立）。在 `result.strategies` 里找 `strategy_id` 为 `<strategy_id>` 的行，看 `verdict`、`action`、`reason` 和 `dispositions`（每条的 `scope`、`disposition`、`reason`、`field_path`、`detail`）。
 2. `invoke strategy.get`，输入 `{"strategy_id":"<strategy_id>"}`：看 `standing`、`dispositions` 和 `plans[]`（每个运行对象的 `query_group`）。
-3. `invoke object.get`：参数取 strategy.get 的 `next_call`。看 `anomaly`、`facts` 和 `records`（保留的生命周期记录）。
-4. `invoke slot.get`：参数取 object.get 的 `next_call`。它重建历史 Slot 的查询条件、关联保留记录，不请求查询服务。
-5. `invoke slot.query`：参数取 slot.get 的 `next_call`。它按保留条件现在重查一次，结果 `kind=requery_now`。看 `query.completion`（`completeness`、`data_state`、`route_details`，查询被拒时还有已脱敏的 `error_excerpt`）和 `query.series`。重查可能包含迟到数据，不等于当时 Slot 读到的输入。
+3. `invoke object.get`：参数取 strategy.get 的 `next_call` 里 `operation` 为 `object.get` 的那一项。看 `anomaly`、`facts`、`records_status` 和 `records`（保留的生命周期记录，只保留约一小时，没有时不出现）。
+4. `invoke slot.get`：输入 `query_group` 和 `evaluation_time`（Slot 的 Unix 秒）。object.get 只为它保留记录里的 Slot 给出 `slot.get` 的 `next_call`；没告警的策略常常没有保留记录，这时 `evaluation_time` 取第 1 步那一行的 `plans[].last_full_slot`（最近一轮读完整的 Slot，有的话）。它重建历史 Slot 的查询条件、关联保留记录，不请求查询服务。
+5. `invoke slot.query`：参数取 slot.get 的 `next_call`。它按保留条件现在重查一次，结果 `kind=requery_now`。看 `query.completion`（`completeness`、`data_state`、`route_details`，查询被拒时还有已脱敏的 `error_excerpt`）和 `query.series`。默认只返回部分序列，`query.truncated=true` 且 limitations 含 `output_truncated`，退出码为 3，这是正常的；要看更多序列按 describe 的上限传 `max_series`、`max_points`。重查可能包含迟到数据，不等于当时 Slot 读到的输入。
 
 **部署是否健康**
 
 1. `alarmd-cli accept --env <environment_id>`（可加 `--expect-build <build_prefix>`）：逐项给出 PASS、FAIL、INFO、READ_FAILED、NOT_BUILT 或 UNDECIDED，任何 FAIL 或 READ_FAILED 时退出码为 1。`column=governance` 的项是策略负责人要改的，不算部署失败。全部读数在 `meta.result_file`。
-2. `invoke fleet.get`：看 `healthy`、`expected` 与 `covered`、`unknown`、`anomalies_total`。
-3. `invoke k8s.pods`：看 Deployment 和各 Pod 的就绪、重启次数、上次退出原因。需要时再用 `k8s.events`（输入 `pod`）、`k8s.logs`（输入 `pod`、`previous`、`lines`），`lifecycle.get` 看各副本的启动与停止记录。
+2. `invoke fleet.get`：看 `health`（整体结论），再看对象计数 `expected`、`covered`、`healthy`、`unknown` 与 `anomalies_total`。
+3. `invoke k8s.pods`：看 Deployment 和各 Pod 的就绪、重启次数、上次退出原因。需要时再用 `k8s.events`（可选输入 `pod`）、`k8s.logs`（必填 `pod`；可选 `previous`、`lines`，按子串过滤用 `contains`，配 `since_seconds` 限定时间窗），`lifecycle.get` 看各副本的启动与停止记录。
 
 **策略配置为什么被拒或被改写**
 
 1. `invoke strategy.get`，输入 `{"strategy_id":"<strategy_id>"}`：看 `dispositions` 里每条的 `disposition`（例如 `CONFIG_REJECTED`、`UNSUPPORTED_PHASE2_CAPABILITY`、`CONFIG_NORMALIZED`）、`reason`、`field_path` 和 `detail`。
-2. `invoke strategy.config`，输入 `{"view":"source","strategy_id":"<strategy_id>"}`：读当前策略缓存里的配置（凭据类字段已省略，并记录省略了什么），按 `field_path` 对照被拒的字段。要读已发布的不可变对象时用 `view=published`，其余参数按 describe 的要求取自 strategy.get 的 `plans[]`。
+2. `invoke strategy.config`，输入 `{"view":"source","strategy_id":"<strategy_id>"}`：读当前策略缓存里的配置（`value`；凭据类字段已省略，省略了什么记在 `omitted`），按 `field_path` 对照被拒的字段。要读已发布的不可变对象时用 `view=published`：必填 `strategy_id`、`query_group`、`object_digest`，可选 `business`、`tenant`，都取自 strategy.get 的 `plans[]`；strategy.get 的 `next_call` 里 `view=published` 的那一项已经带齐，直接用它的 `params`。
 
 **数据是否迟到、首读是否读早**
 
 1. `invoke strategy.get` 取得 `plans[].query_group`。
-2. `invoke lookback.get`，输入 `{"owner_query_group":"<query_group>"}`：由持有该运行对象的副本回答。看各档复查的变化、到齐时刻分布、按事实分的样本类别，以及 `read_early`（当前有效的 time_delay 与建议值）。
+2. `invoke lookback.get`，输入 `{"owner_query_group":"<query_group>"}`：由持有该运行对象的副本回答（`meta.owner` 写明是哪个副本）。结果是这个副本的整体读数（`scope=answering_replica`），不只这一个 QG：在 `result.stats` 的列表里按 `query_group` 找它。看各档复查的变化、到齐时刻分布、按事实分的样本类别，以及 `result.stats.read_early`（连续整窗读早的 QG：当前有效的 time_delay 与建议值；为空表示没有）。
 
 ### 5. 安全边界
 
