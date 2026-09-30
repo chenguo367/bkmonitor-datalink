@@ -255,6 +255,8 @@ func resolveSlot(ctx context.Context, options SlotOptions, p Params) (SlotPlan, 
 
 func slotFailure(err error) *Failure {
 	switch {
+	case errors.Is(err, ErrHistoricalReadHoldUnknown):
+		return &Failure{Code: "historical_read_hold_unknown", Message: "The read hold this Slot was frozen with is no longer retained; its contract is not rebuilt with another."}
 	case errors.Is(err, ErrHistoricalContractUnavailable):
 		return &Failure{Code: "historical_contract_unavailable", Message: "Retained historical Segment, object or exact due plans are unavailable; current strategy is not substituted."}
 	case errors.Is(err, ErrSlotBudgetExceeded):

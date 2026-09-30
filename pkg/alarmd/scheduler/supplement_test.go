@@ -48,7 +48,7 @@ func TestASupplementFreezesItsSlotAsTheSlotWasFrozen(t *testing.T) {
 	catalog := &observedSlotCatalog{fakeSlotCatalog: &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}}
 	source := mustProductionSlotSource(t, &sequenceOwnerSession{fences: []execution.OwnerFence{testFence(7)}}, catalog,
 		&fakeProgressReader{result: foundProgress(180, 120), catalog: catalog.fakeSlotCatalog}, at.Add(time.Minute))
-	supplement, err := source.FreezeSupplement(context.Background(), 120)
+	supplement, err := source.FreezeSupplement(context.Background(), 120, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,22 +73,22 @@ func TestASupplementFreezesItsSlotAsTheSlotWasFrozen(t *testing.T) {
 func TestASupplementOfASlotNoLongerKeptIsExpired(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
-	kept, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120)
+	kept, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	past := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.UnixMilli(kept.KeepUntilUnixMilli))
-	if _, err := past.FreezeSupplement(context.Background(), 120); !errors.Is(err, ErrSupplementContractExpired) {
+	if _, err := past.FreezeSupplement(context.Background(), 120, 0); !errors.Is(err, ErrSupplementContractExpired) {
 		t.Fatalf("at the keep boundary: %v, want expired", err)
 	}
 	for _, gone := range []error{controlplane.ErrCatalogObjectUnavailable, controlplane.ErrScheduleUnavailable, controlplane.ErrSnapshotUnavailable} {
 		catalog.freezeErr = gone
-		if _, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120); !errors.Is(err, ErrSupplementContractExpired) {
+		if _, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120, 0); !errors.Is(err, ErrSupplementContractExpired) {
 			t.Fatalf("freeze failing with %v: %v, want expired", gone, err)
 		}
 	}
 	catalog.freezeErr = errors.New("redis: connection refused")
-	if _, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120); err == nil || errors.Is(err, ErrSupplementContractExpired) {
+	if _, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120, 0); err == nil || errors.Is(err, ErrSupplementContractExpired) {
 		t.Fatalf("a failed read: %v, want it returned as it came", err)
 	}
 }
@@ -101,7 +101,7 @@ type supplementSource struct {
 	frozen []execution.EvaluationTime
 }
 
-func (source *supplementSource) FreezeSupplement(_ context.Context, at execution.EvaluationTime) (FrozenSlot, error) {
+func (source *supplementSource) FreezeSupplement(_ context.Context, at execution.EvaluationTime, _ int64) (FrozenSlot, error) {
 	source.frozen = append(source.frozen, at)
 	return source.slot, source.err
 }
@@ -125,7 +125,7 @@ func supplementSlot(t *testing.T) FrozenSlot {
 	t.Helper()
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
-	slot, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120)
+	slot, err := newProductionSlotSourceForTest(t, catalog, foundProgress(180, 120), time.Unix(200, 0)).FreezeSupplement(context.Background(), 120, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestASupplementRunsUnderTheFlightWithTheSlotFrozenAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a", "b"}}
-	facts, err := runner.Supplement(context.Background(), 120, scope)
+	facts, err := runner.Supplement(context.Background(), 120, 0, scope)
 	if err != nil || facts != executor.facts {
 		t.Fatalf("facts %+v error %v", facts, err)
 	}
@@ -184,7 +184,7 @@ func TestASupplementDoesNotWaitForAnExecutingSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runner.Supplement(context.Background(), 120, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}}); !errors.Is(err, ErrSupplementFlightBusy) ||
+	if _, err := runner.Supplement(context.Background(), 120, 0, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}}); !errors.Is(err, ErrSupplementFlightBusy) ||
 		len(source.frozen) != 0 || len(executor.requests) != 0 {
 		t.Fatalf("error %v frozen %v requests %d", err, source.frozen, len(executor.requests))
 	}
@@ -207,7 +207,7 @@ func TestASupplementAsksItsGuardUnderTheFlight(t *testing.T) {
 			heldAtAsk, _ = flights.FlightHeld("query-group-1")
 			return proceed
 		})
-		_, err = runner.Supplement(ctx, 120, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
+		_, err = runner.Supplement(ctx, 120, 0, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
 		if heldAtAsk != FlightHeldBySupplement {
 			t.Fatalf("proceed %v: the guard was asked with the flight held by %q, want the supplement", proceed, heldAtAsk)
 		}
@@ -235,14 +235,14 @@ func TestASupplementIsRefusedAMovedFenceOrAnUnsupportedSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}}
-	if _, err := runner.Supplement(context.Background(), 120, scope); !errors.Is(err, ErrSlotOwnershipChanged) || len(executor.requests) != 0 {
+	if _, err := runner.Supplement(context.Background(), 120, 0, scope); !errors.Is(err, ErrSlotOwnershipChanged) || len(executor.requests) != 0 {
 		t.Fatalf("moved fence: error %v requests %d", err, len(executor.requests))
 	}
 	plain, err := NewRunner("query-group-1", &fakeSession{fence: testFence(7)}, &fakeSlotSource{}, executor, NewFlightCoordinator(), func() time.Time { return time.Unix(260, 0) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := plain.Supplement(context.Background(), 120, scope); !errors.Is(err, ErrSupplementUnsupported) {
+	if _, err := plain.Supplement(context.Background(), 120, 0, scope); !errors.Is(err, ErrSupplementUnsupported) {
 		t.Fatalf("unsupported source: %v", err)
 	}
 }
@@ -267,7 +267,7 @@ func TestASupplementRefusesAContractThatDriftedFromItsSegment(t *testing.T) {
 	catalog := driftingSlotCatalog{&fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}}
 	source := mustProductionSlotSource(t, &sequenceOwnerSession{fences: []execution.OwnerFence{testFence(7)}}, catalog,
 		&fakeProgressReader{result: foundProgress(180, 120), catalog: catalog.fakeSlotCatalog}, time.Unix(200, 0))
-	if _, err := source.FreezeSupplement(context.Background(), 120); !errors.Is(err, ErrSlotContractDrift) {
+	if _, err := source.FreezeSupplement(context.Background(), 120, 0); !errors.Is(err, ErrSlotContractDrift) {
 		t.Fatalf("drifted contract: %v, want ErrSlotContractDrift", err)
 	}
 }
@@ -300,7 +300,7 @@ func TestASupplementAndItsQueryGroupsSlotNeverRunAtOnce(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := runner.Supplement(context.Background(), 120, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
+		_, err := runner.Supplement(context.Background(), 120, 0, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
 		done <- err
 	}()
 	<-executor.started

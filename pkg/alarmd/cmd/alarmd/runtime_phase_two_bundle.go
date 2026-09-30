@@ -446,6 +446,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		QueryReserve:  cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(),
 		MaxReplayAge:  recoveryLimits.MaxReplayAge,
 		TerminalDelay: phaseTwoPostRecoveryTerminalDelay(cfg),
+		// A Query Group's read hold is bounded by the replay age: a Slot the
+		// scheduler already tolerates running that late (readhold design,
+		// bound (c)).
+		ReadHoldBound: recoveryLimits.MaxReplayAge,
 	}
 	if err := repository.ConfigureSegmentRetention(retention); err != nil {
 		return nil, err

@@ -22,7 +22,11 @@ func TestSlotIdentityContainsOnlyQueryGroupAndEvaluationTime(t *testing.T) {
 
 func TestFrozenContractKeepsScheduleAsProvenance(t *testing.T) {
 	fields := fieldNames(reflect.TypeOf(execution.FrozenExecutionContractRef{}))
-	want := []string{"Slot", "SnapshotRevision", "QueryRevision", "ScheduleRevision", "ScheduleSegmentStart", "DuePlanSetDigest"}
+	// The read hold says when the Slot is read and due, not which schedule
+	// it belongs to: the schedule stays provenance, the hold an input of the
+	// contract beside the evaluation time.
+	want := []string{"Slot", "SnapshotRevision", "QueryRevision", "ScheduleRevision", "ScheduleSegmentStart", "DuePlanSetDigest",
+		"ReadHoldMillis"}
 	if !reflect.DeepEqual(fields, want) {
 		t.Fatalf("FrozenExecutionContractRef fields = %v, want %v", fields, want)
 	}

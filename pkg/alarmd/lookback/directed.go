@@ -103,6 +103,10 @@ type SupplementJob struct {
 	Series         []execution.SeriesIdentityDigest
 	Read           *KeptRead
 	Deadline       time.Time
+	// ReadHoldMillis is the read hold the Slot was frozen with (its first
+	// read's contract): the supplement freezes it again with the same one,
+	// so it is the contract the Slot ran under, with the same deadlines.
+	ReadHoldMillis int64
 	// Guard, when set, is asked once the supplement holds its Query Group's
 	// flight: false means the group has moved on, and the supplement is
 	// refused as SupplementOvertaken having written nothing.
@@ -247,6 +251,9 @@ type directedSlot struct {
 	readyAt   time.Time
 	following execution.EvaluationTime
 	early     *earlyRead
+	// readHold is the read hold its first read's contract was frozen with,
+	// which its supplements freeze it with again.
+	readHold int64
 	// facts is what its supplements came to, both reads' summed, and
 	// supplemented whether any ran; filed once it has been counted.
 	facts        execution.SupplementFacts
@@ -283,7 +290,8 @@ func (engine *Engine) captureDirectedLocked(state *group, query Query, source st
 		engine.nextID++
 		slot = &directedSlot{id: engine.nextID, source: source, queryGroup: query.Contract.Slot.QueryGroup,
 			evaluation: query.Contract.Slot.EvaluationTime, step: step, readAt: now, rung: state.seriesLate.rung,
-			period: state.seriesLate, readyAt: query.ReadyAt, following: query.FollowingSlot}
+			period: state.seriesLate, readyAt: query.ReadyAt, following: query.FollowingSlot,
+			readHold: query.Contract.ReadHoldMillis}
 		state.directed[query.Contract.Slot.EvaluationTime] = slot
 	}
 	captured := &directedQuery{spec: query.Spec, first: newSeriesSet(engine.options.Memory), slot: slot, begunAt: now}
@@ -531,7 +539,8 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 	engine.mu.Unlock()
 
 	outcome := engine.options.Supplement(ctx, SupplementJob{QueryGroup: slot.queryGroup, EvaluationTime: slot.evaluation,
-		Series: series, Read: read, Deadline: deadline})
+		ReadHoldMillis: slot.readHold,
+		Series:         series, Read: read, Deadline: deadline})
 
 	engine.mu.Lock()
 	defer engine.mu.Unlock()

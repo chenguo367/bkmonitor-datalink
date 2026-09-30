@@ -37,7 +37,7 @@ type supplementingQueryGroup struct {
 	took  time.Duration
 }
 
-func (runner *supplementingQueryGroup) Supplement(ctx context.Context, at execution.EvaluationTime, scope execution.SupplementScope) (execution.SupplementFacts, error) {
+func (runner *supplementingQueryGroup) Supplement(ctx context.Context, at execution.EvaluationTime, _ int64, scope execution.SupplementScope) (execution.SupplementFacts, error) {
 	runner.calls, runner.scopes = append(runner.calls, at), append(runner.scopes, scope)
 	if runner.clock != nil && !errors.Is(runner.answers[0], scheduler.ErrSupplementFlightBusy) {
 		*runner.clock = runner.clock.Add(runner.took)
@@ -230,7 +230,7 @@ func (source *freezingSource) Next(context.Context, execution.QueryGroupIdentity
 	return scheduler.FrozenSlot{}, false, scheduler.SlotDueFacts{}, nil
 }
 
-func (source *freezingSource) FreezeSupplement(_ context.Context, at execution.EvaluationTime) (scheduler.FrozenSlot, error) {
+func (source *freezingSource) FreezeSupplement(_ context.Context, at execution.EvaluationTime, _ int64) (scheduler.FrozenSlot, error) {
 	source.frozen = append(source.frozen, at)
 	return scheduler.FrozenSlot{ExpectedNextSlot: at}, nil
 }
@@ -239,11 +239,11 @@ func (source *freezingSource) FreezeSupplement(_ context.Context, at execution.E
 // the source it wraps, and names a source that cannot.
 func TestTheObservedSlotSourcePassesASupplementsFreezeThrough(t *testing.T) {
 	next := &freezingSource{}
-	if slot, err := (observedProductionSlotSource{next: next}).FreezeSupplement(context.Background(), 120); err != nil ||
+	if slot, err := (observedProductionSlotSource{next: next}).FreezeSupplement(context.Background(), 120, 0); err != nil ||
 		slot.ExpectedNextSlot != 120 || len(next.frozen) != 1 {
 		t.Fatalf("slot %+v error %v frozen %v", slot, err, next.frozen)
 	}
-	if _, err := (observedProductionSlotSource{next: &fakeSlotSourceOnly{}}).FreezeSupplement(context.Background(), 120); !errors.Is(err, scheduler.ErrSupplementUnsupported) {
+	if _, err := (observedProductionSlotSource{next: &fakeSlotSourceOnly{}}).FreezeSupplement(context.Background(), 120, 0); !errors.Is(err, scheduler.ErrSupplementUnsupported) {
 		t.Fatalf("a source that cannot freeze completed Slots: %v", err)
 	}
 }

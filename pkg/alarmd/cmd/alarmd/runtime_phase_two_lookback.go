@@ -66,7 +66,7 @@ func (bundle *phaseTwoWorkerBundle) ownsQueryGroup(queryGroup execution.QueryGro
 // completed Slots. The production Query Group implements it, and must: a
 // supplement asked of a Query Group whose runtime does not is never run.
 type supplementRunner interface {
-	Supplement(context.Context, execution.EvaluationTime, execution.SupplementScope) (execution.SupplementFacts, error)
+	Supplement(context.Context, execution.EvaluationTime, int64, execution.SupplementScope) (execution.SupplementFacts, error)
 }
 
 var _ supplementRunner = (*productionPhaseTwoQueryGroup)(nil)
@@ -112,7 +112,7 @@ func lookbackSupplement(
 		scope := execution.SupplementScope{Series: job.Series}
 		for retried := false; ; retried = true {
 			started := now()
-			facts, err := runner.Supplement(ctx, job.EvaluationTime, scope)
+			facts, err := runner.Supplement(ctx, job.EvaluationTime, job.ReadHoldMillis, scope)
 			// A call that was not refused for the flight held it this long:
 			// the time the Query Group's own Slot waited behind it.
 			held := now().Sub(started)

@@ -2434,7 +2434,7 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
 		}
-		deadline, err := completionDeadline(request.EvaluationTime, plan.ScheduleSpec)
+		deadline, err := completionDeadline(request.EvaluationTime, request.ReadHoldMillis, plan.ScheduleSpec)
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 		}
@@ -2486,6 +2486,7 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 		Slot:             execution.SlotIdentity{QueryGroup: request.QueryGroup, EvaluationTime: request.EvaluationTime},
 		SnapshotRevision: schedule.Segment.Publication.SnapshotRevision, QueryRevision: schedule.Segment.QueryRevision,
 		ScheduleRevision: request.ScheduleRevision, ScheduleSegmentStart: request.ScheduleSegmentStart,
+		ReadHoldMillis: request.ReadHoldMillis,
 	}, DuePlans: duePlans, Requirements: requirements}, request)
 	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
@@ -2867,8 +2868,10 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 	return result, nil
 }
 
-func completionDeadline(at execution.EvaluationTime, spec execution.ScheduleSpec) (int64, error) {
-	deadline, ok := spec.CompletionDeadlineUnixMilli(at)
+// completionDeadline is a due Plan's deadline in a contract frozen with the
+// read hold readHoldMillis: its schedule's, that much later.
+func completionDeadline(at execution.EvaluationTime, readHoldMillis int64, spec execution.ScheduleSpec) (int64, error) {
+	deadline, ok := spec.HeldCompletionDeadlineUnixMilli(at, readHoldMillis)
 	if !ok {
 		return 0, errors.New("alarmd controlplane: invalid frozen Plan deadline")
 	}
