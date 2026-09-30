@@ -291,8 +291,12 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 // references still resolve against the host index.
 //
 // The group store reads its configured target group connection and refreshes the
-// referenced groups on the host index's cadence with its staleness bound.
-func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, logger *observability.Logger) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
+// referenced groups on the host index's cadence with its staleness bound. One
+// read holds at most readBound bytes of group documents at once: the
+// timeline cache's bound, derived from the container
+// (config.DeriveControlTimelineCache).
+func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, readBound int,
+	logger *observability.Logger) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
 	prefix, rendered := cfg.DynamicGroupKeyPrefix()
 	if !rendered {
 		return cmdbcache.NewTargetResolver(nil, hosts, time.Now), nil, nil
@@ -302,7 +306,7 @@ func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcac
 		return nil, nil, err
 	}
 	groups, err := cmdbcache.NewGroupStore(reader, cmdbcache.GroupStoreOptions{
-		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound,
+		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound, ReadBound: readBound,
 		EmptiedChanged: groupEmptiedLogger(logger),
 	})
 	if err != nil {

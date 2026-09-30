@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 )
 
 // A Schedule timeline is rewritten whole on every publication cutover, and
@@ -176,9 +177,9 @@ func (repository *RedisCatalogRepository) pruneTimelines(
 		// Batches of at most the timeline cache's bytes, and at least one
 		// record each: detection is never refused, and each batch is pruned
 		// before the next is read, so what is held at once is one batch.
-		bound := repository.progressReadBound()
+		bound := repository.cutoverReadBound()
 		for start := 0; start < len(identities); {
-			loads, errs, read := budgeted.LoadProgressWithin(ctx, identities[start:], firstThenWithin(bound))
+			loads, errs, read := budgeted.LoadProgressWithin(ctx, identities[start:], redisbatch.FirstThenWithin(bound))
 			if read <= 0 || len(loads) != read || len(errs) != read {
 				return errors.New("alarmd controlplane: batched Progress load returned the wrong shape")
 			}
@@ -205,24 +206,11 @@ func (repository *RedisCatalogRepository) pruneTimelines(
 	return pruneFromProgress(updates, candidates, loads, errs, facts)
 }
 
-// firstThenWithin admits the first record whatever its length, and after it
-// records while their lengths add up to at most bound.
-func firstThenWithin(bound int) func(uint64) bool {
-	admitted, spent := false, uint64(0)
-	return func(bytes uint64) bool {
-		if admitted && (bound <= 0 || spent+bytes > uint64(bound)) {
-			return false
-		}
-		admitted, spent = true, spent+bytes
-		return true
-	}
-}
-
-// progressReadBound is the most bytes of Progress one batch of a cutover
-// reads at once: the timeline cache's bound, derived from the container
-// (config.DeriveControlTimelineCache), which the timelines those records
-// prune already take.
-func (repository *RedisCatalogRepository) progressReadBound() int {
+// cutoverReadBound is the most bytes one batch of a cutover's reads holds at
+// once, of timelines or of Progress: the timeline cache's bound, derived
+// from the container (config.DeriveControlTimelineCache), which the
+// timelines the cutover reads already take.
+func (repository *RedisCatalogRepository) cutoverReadBound() int {
 	if repository.controlCache == nil {
 		return controlTimelineCacheDefaultMaxBytes
 	}
