@@ -12,6 +12,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -101,5 +102,30 @@ func TestARetiredTimelineIsNotVisited(t *testing.T) {
 		})
 	if err != nil || len(visited) != 1 || visited[0] != "qg-open" {
 		t.Fatalf("visited %v (%v), want only the open one", visited, err)
+	}
+}
+
+// A read of the open Segments that Redis answers every key of with an error,
+// as while it loads, fails as the dependency's and visits nothing: the
+// answer says nothing about the timelines.
+func TestOpenSegmentsRedisAnswersWithAnErrorVisitNothing(t *testing.T) {
+	groups := make([]execution.QueryGroupIdentity, 3)
+	for index := range groups {
+		groups[index] = execution.QueryGroupIdentity(fmt.Sprintf("qg-visit-%04d", index))
+	}
+	repository, client := timelineCacheFixture(t, groups, 2)
+	client.answered = map[string]error{}
+	for _, group := range groups {
+		client.answered[repository.scheduleTimelineKey(group)] = answeredError("LOADING Redis is loading the dataset in memory")
+	}
+	visited := 0
+	err := repository.readOpenSegments(context.Background(), groups, controlVersion{},
+		func(execution.QueryGroupIdentity, persistedScheduleSegment) error {
+			visited++
+			return nil
+		})
+	var dependency *ActivationDependencyIOError
+	if !errors.As(err, &dependency) || visited != 0 {
+		t.Fatalf("a read Redis answered with errors visited %d and returned %v, want none and the dependency's", visited, err)
 	}
 }

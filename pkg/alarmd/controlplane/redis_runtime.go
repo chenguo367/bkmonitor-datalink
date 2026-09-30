@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	alarmdprogress "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -494,7 +495,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	}
 	// keptWithoutRead is the Query Groups the manifest shows unchanged, whose
 	// open Segment is left as it is without a read. Every other one is read,
-	// and all of those are fetched before the walk, in pipelined batches: a
+	// in pipelined batches a window ahead of the walk (cutoverTimelines): a
 	// process's first cutover reads every open Segment, and one round trip
 	// each is what made it tens of seconds on a few thousand Query Groups.
 	keptWithoutRead := func(queryGroup execution.QueryGroupIdentity) bool {
@@ -512,10 +513,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			toRead = append(toRead, queryGroup)
 		}
 	}
-	prefetched, err := repository.prefetchTimelinesForUpdate(ctx, toRead)
-	if err != nil {
-		return err
-	}
+	timelines := repository.cutoverTimelines(toRead)
 	for _, queryGroup := range oldIdentities {
 		// Recorded before anything can fail on it: the cutover returns at its
 		// first failure, so this names the one that stopped it.
@@ -546,7 +544,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			cutover.decided(cutoverKept)
 			continue
 		}
-		timeline, raw, err := prefetched.timeline(queryGroup)
+		timeline, raw, err := timelines.timeline(ctx, queryGroup)
 		if errors.Is(err, ErrScheduleUnavailable) {
 			// The key is gone: evicted, or expired. This used to fail the whole
 			// cutover as a dependency that did not answer, on every publication,
@@ -816,57 +814,73 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	return nil
 }
 
-// prefetchedTimelines is the stored bytes of the timelines a cutover reads,
-// fetched together before it walks them. The walk decodes each as the one
-// read it used to make would have: absent is ErrScheduleUnavailable, bytes
-// that do not decode are a DeterministicScheduleError, and the bytes are
-// the expectation the write is fenced on.
-type prefetchedTimelines struct {
-	payloads map[execution.QueryGroupIdentity][]byte
+// cutoverTimelines is the stored bytes of the timelines a cutover reads, in
+// the order its walk reads them, a window at a time (redisbatch.Windows):
+// the timelines after the last whose lengths add up to at most the cutover's
+// read bound, or the one timeline larger than it, one pipeline of values,
+// with each timeline's length read once in pipelines of redisbatch.Batch.
+// The walk asks for the next timeline, and the next window is read when it
+// passes the last. A window is let go when the walk moves past it; the
+// bytes the walk keeps are the fences of the timelines it writes. Reading
+// them all before the walk held every open Segment of a process's first
+// cutover at once.
+//
+// Each is decoded as the one read the cutover used to make would have:
+// absent is ErrScheduleUnavailable, bytes that do not decode are a
+// DeterministicScheduleError, and the bytes are the expectation the write
+// is fenced on. A read that fails fails the cutover, as the single read it
+// replaces did, and so does a window Redis answered any key of with an
+// error (LOADING, BUSY, a key of another type; redisbatch.UnansweredError):
+// that says nothing about the timeline, and the cutover writes nothing.
+type cutoverTimelines struct {
+	identities []execution.QueryGroupIdentity
+	windows    *redisbatch.Windows
+	// window holds the values of identities[start:start+len(window)];
+	// next is the index of the one the walk asks for next.
+	window      []redisbatch.Value
+	start, next int
 }
 
-func (prefetched prefetchedTimelines) timeline(queryGroup execution.QueryGroupIdentity) (persistedScheduleTimeline, []byte, error) {
-	payload, ok := prefetched.payloads[queryGroup]
-	if !ok {
+func (repository *RedisCatalogRepository) cutoverTimelines(identities []execution.QueryGroupIdentity) *cutoverTimelines {
+	keys := make([]string, len(identities))
+	for index, identity := range identities {
+		keys[index] = repository.scheduleTimelineKey(identity)
+	}
+	return &cutoverTimelines{identities: identities,
+		windows: redisbatch.NewWindows(repository.client, keys, repository.cutoverReadBound())}
+}
+
+// timeline is the next Query Group's timeline; the walk asks for them in
+// the order it was given them.
+func (timelines *cutoverTimelines) timeline(ctx context.Context, queryGroup execution.QueryGroupIdentity) (
+	persistedScheduleTimeline, []byte, error,
+) {
+	if timelines.next >= len(timelines.identities) || timelines.identities[timelines.next] != queryGroup {
+		return persistedScheduleTimeline{}, nil, fmt.Errorf("alarmd controlplane: cutover read %s out of order", queryGroup)
+	}
+	if timelines.next >= timelines.start+len(timelines.window) {
+		// The window before is dropped before the next is read: only one is
+		// held at a time.
+		timelines.window = nil
+		start, window, err := timelines.windows.Next(ctx)
+		if err != nil {
+			return persistedScheduleTimeline{}, nil, activationDependencyIO(err)
+		}
+		if start != timelines.next || len(window) == 0 {
+			return persistedScheduleTimeline{}, nil, errors.New("alarmd controlplane: a cutover read returned the wrong shape")
+		}
+		timelines.window, timelines.start = window, start
+	}
+	value := timelines.window[timelines.next-timelines.start]
+	timelines.next++
+	if value.Missing {
 		return persistedScheduleTimeline{}, nil, ErrScheduleUnavailable
 	}
-	timeline, err := decodeScheduleTimeline(queryGroup, payload)
+	timeline, err := decodeScheduleTimeline(queryGroup, value.Raw)
 	if err != nil {
 		return persistedScheduleTimeline{}, nil, err
 	}
-	return timeline, payload, nil
-}
-
-// prefetchTimelinesForUpdate reads the timelines of the given Query Groups
-// live, in pipelined batches. A read that fails fails the cutover, as the
-// single read it replaces did; a key that is not there is left out.
-func (repository *RedisCatalogRepository) prefetchTimelinesForUpdate(
-	ctx context.Context, identities []execution.QueryGroupIdentity,
-) (prefetchedTimelines, error) {
-	result := prefetchedTimelines{payloads: make(map[execution.QueryGroupIdentity][]byte, len(identities))}
-	for start := 0; start < len(identities); start += openSegmentReadBatch {
-		batch := identities[start:min(start+openSegmentReadBatch, len(identities))]
-		replies := make([]*redis.StringCmd, len(batch))
-		if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for index, identity := range batch {
-				replies[index] = pipe.Get(ctx, repository.scheduleTimelineKey(identity))
-			}
-			return nil
-		}); err != nil && !errors.Is(err, redis.Nil) {
-			return prefetchedTimelines{}, activationDependencyIO(err)
-		}
-		for index, identity := range batch {
-			payload, err := replies[index].Bytes()
-			if errors.Is(err, redis.Nil) {
-				continue
-			}
-			if err != nil {
-				return prefetchedTimelines{}, activationDependencyIO(err)
-			}
-			result.payloads[identity] = payload
-		}
-	}
-	return result, nil
+	return timeline, value.Raw, nil
 }
 
 // CompareAndSetInitialScheduleActivation establishes zero or more first
