@@ -213,7 +213,9 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
 	placeholder.universeTook, placeholder.viewTook = filled.universeTook, filled.viewTook
 	close(placeholder.ready)
-	if placeholder.readError != "" {
+	// A view the memory line deferred is answered once and not kept: the
+	// next request asks again, and may be read.
+	if placeholder.readError != "" || (placeholder.view != nil && hasGapKind(placeholder.view.Gaps, GapSnapshotsDeferred)) {
 		cache.mu.Lock()
 		if cache.entries[id] == placeholder {
 			delete(cache.entries, id)
@@ -479,4 +481,14 @@ func newDiagnosisID() string {
 	var raw [8]byte
 	_, _ = rand.Read(raw[:])
 	return hex.EncodeToString(raw[:])
+}
+
+// hasGapKind reports whether gaps holds one of kind.
+func hasGapKind(gaps []Gap, kind GapKind) bool {
+	for _, gap := range gaps {
+		if gap.Kind == kind {
+			return true
+		}
+	}
+	return false
 }

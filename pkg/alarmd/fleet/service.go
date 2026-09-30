@@ -12,6 +12,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -57,9 +58,10 @@ type SnapshotReader interface {
 }
 
 // unadmittedReader is a SnapshotReader that can also read without asking
-// the observation memory line (RedisStore.LoadUnadmitted).
+// the observation memory line (RedisStore.loadUnadmitted): the reads a
+// verdict is decided from.
 type unadmittedReader interface {
-	LoadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
+	loadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
 }
 
 // SummaryReader reads what replicas publish beside their snapshots: their
@@ -101,9 +103,19 @@ type Service struct {
 	expected SetDigest
 
 	// summaryFlight is the summarized read in progress, which a caller that
-	// comes while it runs waits for and shares instead of reading again.
+	// comes while it runs waits for and shares instead of reading again;
+	// loadFlight is the same for the snapshots a page's view is built from.
 	summaryMu     sync.Mutex
 	summaryFlight *summaryFlight
+	loadMu        sync.Mutex
+	loadFlight    *loadFlight
+}
+
+type loadFlight struct {
+	done      chan struct{}
+	replicas  string
+	snapshots []Snapshot
+	err       error
 }
 
 type summaryFlight struct {
@@ -191,7 +203,7 @@ func (service *Service) View(ctx context.Context) View {
 		return registryUnavailable(expectation, replicasErr)
 	}
 
-	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
+	snapshots, snapshotsErr := service.loadShared(ctx, replicas)
 	if snapshotsErr != nil {
 		// Reading snapshots failed as a whole, so nothing can be said of any
 		// replica. Coverage is therefore zero, which is what the aggregation
@@ -219,11 +231,7 @@ func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Dur
 	if replicasErr != nil {
 		return registryUnavailable(expectation, replicasErr)
 	}
-	load := service.snapshots.Load
-	if unadmitted, ok := service.snapshots.(unadmittedReader); ok {
-		load = unadmitted.LoadUnadmitted
-	}
-	snapshots, snapshotsErr := load(ctx, replicas)
+	snapshots, snapshotsErr := service.loadForVerdict(ctx, replicas)
 	if snapshotsErr != nil {
 		snapshots = nil
 	}
@@ -234,6 +242,33 @@ func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Dur
 	view := aggregate(expectation, decided, replicas, at, service.freshness, &headFacts{rowsDecided: true})
 	readFailed(&view, snapshotsErr, expectationErr)
 	return view
+}
+
+// loadShared is the snapshots' Load, shared by the callers that ask for the
+// same replicas while a read of them is in progress: pages that come
+// together cost one read, and one grant from the memory line. The snapshots
+// are only read from; each caller builds its own view of them.
+func (service *Service) loadShared(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	key := strings.Join(replicas, "\x00")
+	service.loadMu.Lock()
+	if flight := service.loadFlight; flight != nil && flight.replicas == key {
+		service.loadMu.Unlock()
+		<-flight.done
+		return flight.snapshots, flight.err
+	}
+	flight := &loadFlight{done: make(chan struct{}), replicas: key}
+	if service.loadFlight == nil {
+		service.loadFlight = flight
+	}
+	service.loadMu.Unlock()
+	flight.snapshots, flight.err = service.snapshots.Load(ctx, replicas)
+	service.loadMu.Lock()
+	if service.loadFlight == flight {
+		service.loadFlight = nil
+	}
+	service.loadMu.Unlock()
+	close(flight.done)
+	return flight.snapshots, flight.err
 }
 
 // registryUnavailable is the view when the replicas that should have
@@ -262,7 +297,15 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 		if errors.Is(snapshotsErr, ErrSnapshotsDeferred) {
 			failed = Gap{Kind: GapSnapshotsDeferred}
 		}
-		view.Gaps = append(kept, failed)
+		// Nor is nothing read a shortfall of ownership: the replicas own
+		// what they own, and none was asked.
+		shortfall := kept[:0]
+		for _, gap := range kept {
+			if gap.Kind != GapOwnershipShortfall {
+				shortfall = append(shortfall, gap)
+			}
+		}
+		view.Gaps = append(shortfall, failed)
 		// Said here and not left to the aggregation: a view that read no
 		// snapshot cannot tell, whatever the aggregation made of an empty
 		// set. Today it produced a gap per expected replica and so was
@@ -329,9 +372,14 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 			missing = append(missing, replica)
 		}
 	}
+	// A replica that published no summary is read from its snapshot the
+	// way the verdict scrape reads, without asking the memory line: this
+	// route decides the verdict too, and records it. Its snapshot unread,
+	// that replica alone is unread; the others' summaries stand.
+	var fallbackErr error
 	if readErr == nil && len(missing) > 0 {
 		var snapshots []Snapshot
-		snapshots, readErr = service.snapshots.Load(ctx, missing)
+		snapshots, fallbackErr = service.loadForVerdict(ctx, missing)
 		for _, snapshot := range snapshots {
 			summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
 		}
@@ -369,8 +417,29 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 		return sets, whole
 	}
 	view, part := AggregateSummaries(expectation, expected, summaries, replicas, at, service.freshness, ownedSets)
+	if fallbackErr != nil {
+		unread := make(map[string]bool, len(missing))
+		for _, replica := range missing {
+			unread[replica] = true
+		}
+		for index, gap := range view.Gaps {
+			if gap.Kind == GapReplicaMissing && unread[gap.Replica] {
+				view.Gaps[index] = Gap{Kind: GapSnapshotsUnreadable, Replica: gap.Replica, Detail: gapDetail(fallbackErr)}
+			}
+		}
+	}
 	readFailed(&view, readErr, expectationErr)
 	return view, part
+}
+
+// loadForVerdict reads snapshots without asking the observation memory
+// line, where the reader can: a verdict decided from them must not turn
+// unknown because observation is short of memory.
+func (service *Service) loadForVerdict(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	if unadmitted, ok := service.snapshots.(unadmittedReader); ok {
+		return unadmitted.loadUnadmitted(ctx, replicas)
+	}
+	return service.snapshots.Load(ctx, replicas)
 }
 
 // gapDetail classifies a dependency failure instead of quoting it.

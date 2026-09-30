@@ -81,7 +81,7 @@ const snapshotDecodedCharge = 3
 // the snapshots will hold decoded -- their lengths, read first, times
 // snapshotDecodedCharge -- before any is read, and read none when it says
 // no (ErrSnapshotsDeferred). A view is read whole or not at all. The
-// verdict scrape's read does not ask (LoadUnadmitted).
+// verdict scrape's read does not ask (loadUnadmitted).
 func (store *RedisStore) AdmitLoads(admit func(bytes uint64) bool) {
 	if store != nil {
 		store.admitLoad = admit
@@ -315,11 +315,12 @@ func (store *RedisStore) Load(ctx context.Context, replicas []string) ([]Snapsho
 	return store.load(ctx, replicas, store.admitLoad != nil)
 }
 
-// LoadUnadmitted is Load without asking the memory line: the verdict
-// scrape's read. The verdict must not turn unknown because observation is
+// loadUnadmitted is Load without asking the memory line: the reads a
+// verdict is decided from (the scrape, and the health route's reads of
+// replicas that published no summary). The verdict must not turn unknown because observation is
 // short of memory -- which is when detection is busiest -- so it reads
 // whatever the line says, until it reads replicas' summaries instead.
-func (store *RedisStore) LoadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error) {
+func (store *RedisStore) loadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error) {
 	return store.load(ctx, replicas, false)
 }
 

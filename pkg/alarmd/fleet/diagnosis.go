@@ -172,6 +172,11 @@ func newDiagnosisContext(view *View, replica string, now time.Time) diagnosisCon
 		case GapSnapshotStale:
 			ctx.stale[gap.Replica] = true
 		case GapSnapshotsUnreadable:
+			if gap.Replica != "" {
+				// One replica's snapshot unread; the others stand.
+				ctx.unread[gap.Replica] = true
+				continue
+			}
 			ctx.unread[""], ctx.unreadAll = true, "fleet snapshots unreadable"
 		case GapSnapshotsDeferred:
 			ctx.unread[""], ctx.unreadAll = true, "fleet snapshots deferred: no room under the observation memory line"
