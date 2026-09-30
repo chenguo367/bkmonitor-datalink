@@ -343,18 +343,25 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 	// One read for all of them: the publish waits on one batch, not on a
 	// round trip per object. The read answers for a prefix of them -- as far
 	// as the memory line had room -- and an object it did not get to is no
-	// attempt spent: it is the next publish's.
+	// attempt spent: it is the next publish's. Nor is one whose record the
+	// read did not get -- Redis answering its key with an error, or the read
+	// not reaching Redis (errRestoreUnread): a Redis loading its dataset for
+	// three publishes would otherwise use up every object's attempts, and
+	// none would be restored in this term of ownership.
 	states, errs := publisher.restore(ctx, wanted)
 	for index, queryGroup := range wanted {
 		if index >= len(errs) || index >= len(states) {
 			break
 		}
-		publisher.restoreAttempts[queryGroup]++
-		if errs[index] != nil {
-			continue
+		var unread *errRestoreUnread
+		switch {
+		case errs[index] == nil:
+			publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
+			publisher.tracker.Restore(string(queryGroup), states[index], at, publisher.staleAfter)
+		case errors.As(errs[index], &unread):
+		default:
+			publisher.restoreAttempts[queryGroup]++
 		}
-		publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
-		publisher.tracker.Restore(string(queryGroup), states[index], at, publisher.staleAfter)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 )
 
 func TestFleetRestoreRetriesWithinBudgetAndReacquires(t *testing.T) {
@@ -297,10 +298,11 @@ func TestTheRestoreSourceReadsABatchInPlace(t *testing.T) {
 	record := execution.ScheduleProgress{LastCompletionKind: "FULL_COMPLETED", NextSlot: 1790720040, LastFullSlot: 1790719980}
 	everything := func(uint64) bool { return true }
 	source := progressRestoreSource(batchLoader{
-		results: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{"read": {Progress: &record},
-			"missing": {Status: execution.ProgressMissing}, "invalid": {Progress: &record}},
+		results: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{"read": {Status: execution.ProgressFound, Progress: &record},
+			"missing": {Status: execution.ProgressMissing}, "invalid": {Status: execution.ProgressFound, Progress: &record}},
 		// A record that decoded and did not validate comes with its error.
-		errs: map[execution.QueryGroupIdentity]error{"broken": errors.New("undecodable"), "invalid": errors.New("does not validate")},
+		errs: map[execution.QueryGroupIdentity]error{"broken": &progress.DeterministicInvalidError{Err: errors.New("undecodable")},
+			"invalid": errors.New("does not validate")},
 	}, everything)
 	states, errs := source(context.Background(), []execution.QueryGroupIdentity{"missing", "broken", "read", "invalid"})
 	if len(states) != 4 || len(errs) != 4 || errs[0] != nil || errs[1] == nil || errs[2] != nil || errs[3] == nil {
@@ -316,6 +318,85 @@ func TestTheRestoreSourceReadsABatchInPlace(t *testing.T) {
 	if progressRestoreSource(nil, everything) != nil {
 		t.Fatal("a replica with no Progress store restores")
 	}
+}
+
+// loadingReply is Redis answering a key with an error while it loads its
+// dataset.
+type loadingReply string
+
+func (reply loadingReply) Error() string { return string(reply) }
+func (loadingReply) RedisError()         {}
+
+// Only a record read and found unusable is a fact about it. Redis answering
+// its key with an error, or the read not reaching Redis, is unread: the
+// publisher spends no attempt on it.
+func TestTheRestoreSourceTellsARecordUnreadFromOneUnusable(t *testing.T) {
+	record := execution.ScheduleProgress{LastCompletionKind: "FULL_COMPLETED", NextSlot: 1790720040}
+	source := progressRestoreSource(batchLoader{
+		results: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{"invalid": {Status: execution.ProgressFound, Progress: &record}},
+		errs: map[execution.QueryGroupIdentity]error{
+			"loading":   loadingReply("LOADING Redis is loading the dataset in memory"),
+			"transport": errors.New("read tcp: connection reset by peer"),
+			"undecoded": &progress.DeterministicInvalidError{Err: errors.New("undecodable")},
+			"invalid":   errors.New("does not validate"),
+		},
+	}, func(uint64) bool { return true })
+	_, errs := source(context.Background(), []execution.QueryGroupIdentity{"loading", "transport", "undecoded", "invalid"})
+	var unread *errRestoreUnread
+	for index, want := range []bool{true, true, false, false} {
+		if errs[index] == nil || errors.As(errs[index], &unread) != want {
+			t.Errorf("error %d %v: unread %v, want %v", index, errs[index], !want, want)
+		}
+	}
+}
+
+// A Redis loading its dataset for three publishes in a row, then back,
+// spends none of the objects' attempts: each is restored once it answers.
+func TestARestoreThroughARedisStillLoadingRestoresOnceItAnswers(t *testing.T) {
+	at := time.Now()
+	record := execution.ScheduleProgress{LastCompletionKind: "FULL_COMPLETED", NextSlot: execution.EvaluationTime(at.Unix())}
+	loading := true
+	reads := 0
+	loader := loaderFunc(func(identities []execution.ProgressIdentity) ([]execution.ProgressLoadResult, []error, int) {
+		reads++
+		results, errs := make([]execution.ProgressLoadResult, len(identities)), make([]error, len(identities))
+		for index, identity := range identities {
+			if loading {
+				errs[index] = loadingReply("LOADING Redis is loading the dataset in memory")
+				continue
+			}
+			found := record
+			found.Identity = identity
+			results[index] = execution.ProgressLoadResult{Status: execution.ProgressFound, Progress: &found}
+		}
+		return results, errs, len(identities)
+	})
+	publisher := fleetPublisher{
+		tracker:       fleet.NewTracker(nil, "pod", func() time.Time { return at }),
+		owned:         func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"a", "b"} },
+		now:           func() time.Time { return at },
+		restoreBudget: 2, staleAfter: time.Minute,
+		restore: progressRestoreSource(loader, func(uint64) bool { return true }),
+	}
+	for publish := 0; publish < fleetRestoreMaxAttempts; publish++ {
+		publisher.snapshot(context.Background())
+	}
+	if publisher.tracker.Determined() != 0 || reads != fleetRestoreMaxAttempts {
+		t.Fatalf("determined %d after %d reads while Redis loaded, want nothing restored and a read each publish",
+			publisher.tracker.Determined(), reads)
+	}
+	loading = false
+	if got := publisher.snapshot(context.Background()).Determined; got != 2 || reads != fleetRestoreMaxAttempts+1 {
+		t.Fatalf("determined %d after %d reads once Redis answered, want both restored", got, reads)
+	}
+}
+
+// loaderFunc is a batched Progress read answered by a function.
+type loaderFunc func([]execution.ProgressIdentity) ([]execution.ProgressLoadResult, []error, int)
+
+func (loader loaderFunc) LoadProgressWithin(_ context.Context, identities []execution.ProgressIdentity, _ func(uint64) bool) (
+	[]execution.ProgressLoadResult, []error, int) {
+	return loader(identities)
 }
 
 // A read that answers for fewer objects than it was asked about restores
