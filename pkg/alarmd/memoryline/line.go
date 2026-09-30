@@ -17,6 +17,20 @@
 // limit. At the line every consumer stops taking more and keeps what it has,
 // and each refusal is counted under the consumer it refused.
 //
+// A consumer asks in one of two ways, by what becomes of what it takes.
+// State that stays - a summary, a sample buffer, rounds kept per object, a
+// view kept in a cache - is admitted (Admit) and never given back: it is in
+// the live heap from the next collection on, and the grant counts until
+// then. A reader that takes memory for one piece of work and drops it when
+// the work is done - a page that decodes the fleet's snapshots and builds a
+// view of them, garbage once the response is written - holds it (Hold) and
+// releases it: what is released is not in the live heap at the next
+// collection, so counting it until then would hold observation off with
+// memory nothing keeps. Work whose result is then kept - a view put in a
+// cache - releases its hold and admits what it keeps as it keeps it: a hold
+// on something that stays would count it twice, in the live heap and held,
+// for as long as it stays.
+//
 // There is no ratio, no order among the consumers and no count they are held
 // to: a deployment far from its limit never refuses, and one near it refuses
 // whichever consumer asks next.
@@ -111,6 +125,11 @@ type Line struct {
 	// about to take, before it has taken it.
 	cycle   uint64
 	granted uint64
+	// held is what the holds not yet released take (Hold). A collection
+	// does not end a hold: a hold that spans one is counted in the live
+	// heap it measured as well as here, until it is released, because the
+	// part of it not yet allocated when the collection ran is in neither.
+	held uint64
 	// reserved is the budgets' room as the collection ended, and grown the
 	// room they have grown by since (reservedLocked).
 	reserved uint64
@@ -218,21 +237,71 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 	index := consumerIndex(consumer)
 	reading := line.read()
 	line.mu.Lock()
-	reserved := line.reservedLocked(reading.cycles)
-	taken := saturatingAdd(saturatingAdd(reading.live, reserved), line.granted)
-	admitted := reading.limit > 0 && taken <= reading.limit && bytes <= reading.limit-taken
+	admitted := line.fitsLocked(reading, bytes)
 	if admitted {
 		line.granted = saturatingAdd(line.granted, bytes)
 	}
 	line.mu.Unlock()
-	if index >= 0 {
-		if admitted {
-			line.admitted[index].Add(bytes)
-		} else {
-			line.refused[index].Add(1)
-		}
-	}
+	line.count(index, admitted, bytes)
 	return admitted
+}
+
+// Hold answers whether consumer may take bytes for one piece of work it
+// drops when done, by the same line as Admit. Held, the bytes count against
+// the line until release is called, and no longer: release once the memory
+// is no longer referred to - a page's response written. What is kept past
+// the work is not held but admitted as it is kept (see the package comment).
+// release is safe to call more than once, and to defer; a refused hold's
+// release does nothing. A hold never released is never given back: the
+// line counts it until the process ends, and observation_memory_held_bytes
+// stays above zero between pieces of work. Defer the release as soon as the
+// hold is taken. Refused, the consumer does not take the memory, and the
+// refusal is counted.
+func (line *Line) Hold(consumer Consumer, bytes uint64) (release func(), held bool) {
+	if line == nil {
+		return func() {}, true
+	}
+	index := consumerIndex(consumer)
+	reading := line.read()
+	line.mu.Lock()
+	held = line.fitsLocked(reading, bytes)
+	if held {
+		line.held = saturatingAdd(line.held, bytes)
+	}
+	line.mu.Unlock()
+	line.count(index, held, bytes)
+	if !held {
+		return func() {}, false
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			line.mu.Lock()
+			line.held -= min(line.held, bytes)
+			line.mu.Unlock()
+		})
+	}, true
+}
+
+// fitsLocked answers whether bytes more fit under the line: the live heap
+// after the last collection, the detection budgets' room, what observation
+// was granted since and what it holds now, and bytes, within the limit.
+func (line *Line) fitsLocked(reading heap, bytes uint64) bool {
+	reserved := line.reservedLocked(reading.cycles)
+	taken := saturatingAdd(saturatingAdd(saturatingAdd(reading.live, reserved), line.granted), line.held)
+	return reading.limit > 0 && taken <= reading.limit && bytes <= reading.limit-taken
+}
+
+// count records an answer under consumer, a known one.
+func (line *Line) count(index int, admitted bool, bytes uint64) {
+	if index < 0 {
+		return
+	}
+	if admitted {
+		line.admitted[index].Add(bytes)
+	} else {
+		line.refused[index].Add(1)
+	}
 }
 
 // reservedLocked is the room left to detection at collection cycle: what
@@ -280,14 +349,15 @@ func (line *Line) reservedLocked(cycle uint64) uint64 {
 // Reading is the line as a reader sees it: the soft limit, the live heap
 // after the last collection, what the detection budgets may still take,
 // Headroom - the limit less the other two, negative past the line - and what
-// observation was granted since that collection, which admission also takes
-// out of the headroom.
+// observation was granted since that collection and what it holds now
+// (Hold), which admission also takes out of the headroom.
 type Reading struct {
 	LimitBytes     uint64
 	LiveBytes      uint64
 	ReservedBytes  uint64
 	HeadroomBytes  int64
 	GrantedBytes   uint64
+	HeldBytes      uint64
 	RefusedTotal   map[Consumer]uint64
 	AdmittedBytes  map[Consumer]uint64
 	LimitUnlimited bool
@@ -318,13 +388,14 @@ func (line *Line) Read() Reading {
 	heap := line.read()
 	line.mu.Lock()
 	reserved := line.reservedLocked(heap.cycles)
-	granted := line.granted
+	granted, held := line.granted, line.held
 	for index, budget := range line.budgets {
 		size, held := budget()
 		reading.Budgets = append(reading.Budgets, BudgetReading{Name: line.names[index], SizeBytes: size, HeldBytes: held})
 	}
 	line.mu.Unlock()
 	reading.LimitBytes, reading.LiveBytes, reading.ReservedBytes, reading.GrantedBytes = heap.limit, heap.live, reserved, granted
+	reading.HeldBytes = held
 	reading.LimitUnlimited = heap.limit == math.MaxInt64
 	reading.HeadroomBytes = signedDifference(heap.limit, saturatingAdd(heap.live, reserved))
 	for index, consumer := range Consumers {
