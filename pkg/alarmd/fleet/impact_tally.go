@@ -251,7 +251,12 @@ func MergeImpactTallies(tallies ...ImpactTally) ImpactTally {
 // Impact is the tally as the page reads it.
 func (tally ImpactTally) Impact() Impact {
 	column := func(part ImpactPart) ColumnImpact {
+		// A tally with no parts -- the part of a view nothing was read for --
+		// counts nothing in any column.
 		counted := tally.Parts[part]
+		if counted == nil {
+			counted = &ImpactPartTally{}
+		}
 		businesses := map[string]struct{}{}
 		for strategy := range counted.Strategies {
 			if strategy.BusinessID != "" {
