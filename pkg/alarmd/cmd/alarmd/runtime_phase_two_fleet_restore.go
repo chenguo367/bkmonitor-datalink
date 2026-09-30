@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -33,6 +34,13 @@ import (
 // as fleet_restore refusals that keep rising. An object
 // whose record is missing restores nothing and is not an error; one whose
 // record could not be read or decoded is an error of its own, in its place.
+//
+// Only a record read and found unusable -- it did not decode, named another
+// object, or decoded and did not validate -- is a fact about that record.
+// Redis answering its key with an error (LOADING while it loads a dataset,
+// BUSY behind a script) or the read not reaching Redis says nothing about
+// it, and comes back as errRestoreUnread: the publisher spends no attempt
+// on it and reads it again at the next publish.
 func progressRestoreSource(store progressBatchLoader, admit func(uint64) bool) func(context.Context, []execution.QueryGroupIdentity) (
 	[]fleet.RestoredState, []error) {
 	if store == nil {
@@ -48,12 +56,35 @@ func progressRestoreSource(store progressBatchLoader, admit func(uint64) bool) f
 		for index := 0; index < read; index++ {
 			// The error decides: a record that decoded and did not validate
 			// comes with its error, and restores nothing.
-			if errs[index] == nil && results[index].Progress != nil {
-				states[index] = restoredStateOf(*results[index].Progress)
+			switch {
+			case errs[index] == nil:
+				if results[index].Progress != nil {
+					states[index] = restoredStateOf(*results[index].Progress)
+				}
+			case !readAndUnusable(results[index], errs[index]):
+				errs[index] = &errRestoreUnread{err: errs[index]}
 			}
 		}
 		return states, errs[:read]
 	}
+}
+
+// errRestoreUnread is a record the restore read did not get: Redis answered
+// its key with an error, or the read did not reach Redis.
+type errRestoreUnread struct{ err error }
+
+func (err *errRestoreUnread) Error() string {
+	return "alarmd: restore record unread: " + err.err.Error()
+}
+func (err *errRestoreUnread) Unwrap() error { return err.err }
+
+// readAndUnusable reports whether a read's error is a fact about the record:
+// one that did not decode or named another object (a deterministic control
+// fact), or one that decoded and did not validate, which comes back found
+// with its error.
+func readAndUnusable(result execution.ProgressLoadResult, err error) bool {
+	var fact interface{ DeterministicControlFact() }
+	return errors.As(err, &fact) || result.Status == execution.ProgressFound
 }
 
 // restoredStateOf maps one Progress record onto what the tracker restores
