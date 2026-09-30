@@ -271,6 +271,7 @@ type Inspection struct {
 	Record  Record
 	Loaded  bool
 	Missing bool
+	Seeded  bool
 }
 
 func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspection {
@@ -282,7 +283,7 @@ func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspectio
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return Inspection{Record: clone(state.record), Loaded: state.loaded, Missing: state.loaded && len(state.raw) == 0}
+	return Inspection{Record: clone(state.record), Loaded: state.loaded, Missing: state.loaded && len(state.raw) == 0, Seeded: state.seeded}
 }
 
 func clone(record Record) Record {

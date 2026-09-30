@@ -143,9 +143,15 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 	last := execution.EvaluationTime(int64(start) + steps*spec.EvaluationIntervalSeconds)
 	// last is frozen here for the first time: with the Query Group's current
 	// read hold, as Next would freeze it.
+	hold, err := source.slotReadHoldMillis(ctx, schedule, nil, last, first.Dispatch.OwnerFence)
+	if err != nil || hold != first.Contract.ReadHoldMillis {
+		// The range arithmetic uses one hold. A transition is handled by
+		// the existing single-Slot path rather than sealing a false suffix.
+		return FrozenSlot{}, refusedRange(observability.RangeGateFreezeFailed), nil
+	}
 	freeze := execution.FreezeSlotContractRequest{QueryGroup: source.queryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
 		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: last, DuePlans: schedule.DuePlanRefs(last),
-		ReadHoldMillis: source.readHoldMillis(nil, last)}
+		ReadHoldMillis: hold}
 	fact, err := source.catalog.FreezeSlotContract(ctx, freeze)
 	if err != nil {
 		return FrozenSlot{}, refusedRange(observability.RangeGateFreezeFailed), nil

@@ -991,7 +991,10 @@ func frozenSlotContractFact(
 				break
 			}
 		}
-		deadline := (int64(request.EvaluationTime) + spec.EvaluationIntervalSeconds) * 1000
+		deadline, ok := spec.HeldCompletionDeadlineUnixMilli(request.EvaluationTime, request.ReadHoldMillis)
+		if !ok {
+			t.Fatal("invalid held fixture deadline")
+		}
 		plans[index] = execution.DuePlan{
 			Identity: ref.Identity, CompiledPlan: compiled, StateGeneration: "state-v1", StateApplyEpoch: 1,
 			ScheduleRevision: ref.ScheduleRevision, ScheduleSpec: spec, CompletionDeadlineUnixMilli: deadline,
@@ -1018,7 +1021,7 @@ func frozenSlotContractFact(
 			Slot:             execution.SlotIdentity{QueryGroup: request.QueryGroup, EvaluationTime: request.EvaluationTime},
 			SnapshotRevision: schedule.Segment.Publication.SnapshotRevision, QueryRevision: schedule.Segment.QueryRevision,
 			ScheduleRevision: request.ScheduleRevision, ScheduleSegmentStart: request.ScheduleSegmentStart,
-			DuePlanSetDigest: digest,
+			DuePlanSetDigest: digest, ReadHoldMillis: request.ReadHoldMillis,
 		},
 		DuePlans: plans, Requirements: requirements,
 	}

@@ -62,12 +62,14 @@ type lookbackCollector struct {
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
 	// The early reads of directed Slots, before their next Slot reads.
-	earlyReads     *prometheus.Desc
-	earlyUndecided *prometheus.Desc
-	earlyBytes     *prometheus.Desc
-	earlierReads   *prometheus.Desc
-	earlierBytes   *prometheus.Desc
-	holdIgnored    *prometheus.Desc
+	earlyReads         *prometheus.Desc
+	earlyUndecided     *prometheus.Desc
+	earlyBytes         *prometheus.Desc
+	earlierReads       *prometheus.Desc
+	earlierBytes       *prometheus.Desc
+	holdIgnored        *prometheus.Desc
+	readHoldTransition *prometheus.Desc
+	readHoldOvertaken  *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -75,6 +77,8 @@ func newLookbackCollector() *lookbackCollector {
 		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
 	}
 	return &lookbackCollector{
+		readHoldTransition: desc("read_hold_transition_total", "Slots whose first readiness preserves a preceding segment's completion deadline."),
+		readHoldOvertaken:  desc("read_hold_transition_overtaken_total", "Closed-segment attempts refused because newer state has already applied."),
 		firstReads: desc("lookback_first_reads_total",
 			"Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory "+
 				"labels its Query Groups, so every lookback family reads beside them: the denominator of the query "+
@@ -219,7 +223,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
+		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken} {
 		ch <- desc
 	}
 }
@@ -238,6 +242,8 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	gauge := func(desc *prometheus.Desc, value float64, labels ...string) {
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...)
 	}
+	counter(c.readHoldTransition, stats.ReadHoldTransitions)
+	counter(c.readHoldOvertaken, stats.ReadHoldTransitionOvertaken)
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {

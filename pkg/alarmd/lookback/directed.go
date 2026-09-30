@@ -682,6 +682,21 @@ type SupplementReading struct {
 	HoldReadings   int               `json:"hold_readings"`
 }
 
+// SupplementReading returns this owned group's cumulative directed evidence.
+// The HTTP pager selects groups; this read never issues a provider query.
+func (engine *Engine) SupplementReading(queryGroup execution.QueryGroupIdentity) (SupplementReading, bool) {
+	if !engine.options.Owns(queryGroup) {
+		return SupplementReading{}, false
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.groups[queryGroup]
+	if state == nil {
+		return SupplementReading{}, false
+	}
+	return engine.supplementReadingLocked(queryGroup, state)
+}
+
 // supplementReadingLocked is a group's standing, or false for a group that
 // is not directed and never was.
 func (engine *Engine) supplementReadingLocked(queryGroup execution.QueryGroupIdentity, state *group) (SupplementReading, bool) {

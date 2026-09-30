@@ -67,6 +67,7 @@ type cliControlBinding struct {
 	// run one, and LookbackStanding why; read by lookback.get.
 	Lookback         *lookback.Engine
 	LookbackStanding lookbackStanding
+	ReadHolds        *productionReadHolds
 	// Maintenance is the effective-time maintenance, bound once the loop is
 	// built; read by maintenance.get.
 	Maintenance *maintenanceSource
@@ -199,7 +200,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), store...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
-	ops = append(ops, cliLookbackOperation(control.Lookback, control.LookbackStanding))
+	ops = append(ops, cliLookbackOperation(control.Lookback, control.LookbackStanding, control.ReadHolds))
 	ops = append(ops, cliMaintenanceOperation(control.Maintenance))
 	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
 	ops = append(ops, workload...)

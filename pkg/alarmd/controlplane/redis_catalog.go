@@ -79,6 +79,14 @@ type SourceAuditState struct {
 type PlanActivationRecord struct {
 	Fact        execution.PlanActivationFact `json:"fact"`
 	Publication SnapshotPublicationRef       `json:"publication"`
+	// PreviousReadHold locates this Plan's lateness evidence after a query
+	// identity change. It is observational metadata, not activation identity.
+	PreviousReadHold *ReadHoldPredecessorRef `json:"previous_read_hold,omitempty"`
+}
+
+type ReadHoldPredecessorRef struct {
+	QueryGroup execution.QueryGroupIdentity `json:"query_group"`
+	ClosedAt   execution.EvaluationTime     `json:"closed_at"`
 }
 
 // Equal compares by content; the fact carries a pointer, see

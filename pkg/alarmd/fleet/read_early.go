@@ -58,6 +58,7 @@ type ReadEarlyFacts struct {
 	StepSeconds           int64 `json:"step_seconds"`
 	CurrentDelaySeconds   int64 `json:"current_time_delay_seconds"`
 	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds"`
+	ReadHoldMillis        int64 `json:"read_hold_ms,omitempty"`
 	// Since is when the samples in a row began, as this process saw them.
 	Since time.Time `json:"since"`
 	// Samples is the evidence, newest last: at most MaxReadEarlySamples,

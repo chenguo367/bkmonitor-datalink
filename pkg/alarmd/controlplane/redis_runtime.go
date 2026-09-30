@@ -433,6 +433,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	updates := make([]scheduleTimelineUpdate, 0, len(oldGroups)+len(newGroups))
 	candidates := make([]pruneCandidate, 0, len(oldGroups))
 	plans := make([]PlanActivationRecord, 0, len(candidate.Plans))
+	readHoldPrevious := make(map[execution.PlanKey]ReadHoldPredecessorRef)
 	oldIdentities := make([]execution.QueryGroupIdentity, 0, len(oldGroups))
 	for identity := range oldGroups {
 		oldIdentities = append(oldIdentities, identity)
@@ -702,6 +703,29 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		if err := closed.Validate(); err != nil {
 			return err
 		}
+		for _, plan := range closed.Plans {
+			last := int64(boundary) - 1
+			last -= (last - int64(plan.Spec.Alignment)) % plan.Spec.EvaluationIntervalSeconds
+			if last < int64(closed.Segment.Start) {
+				// An intermediate segment that never ran a Slot adds no new
+				// deadline. Keep the previous real segment's bridge directly.
+				var previous *ReadHoldPredecessorRef
+				for _, record := range open.Plans {
+					if record.Fact.Key() == plan.Key() {
+						previous = record.PreviousReadHold
+						break
+					}
+				}
+				if previous != nil {
+					readHoldPrevious[plan.Key()] = *previous
+					continue
+				}
+				if len(timeline.Segments) == 1 {
+					continue
+				}
+			}
+			readHoldPrevious[plan.Key()] = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary}
+		}
 		timeline.Segments[last].Schedule = closed
 		timeline.RecordRevision++
 		if remains {
@@ -759,6 +783,26 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		}
 		updates = append(updates, opened.update)
 		plans = append(plans, opened.records...)
+	}
+	// The link is written in the existing timeline/activation CAS. A new
+	// owner can find the previous QG without scanning state or relying on the
+	// shorter-lived draining projection. Kept links survive content changes.
+	for i := range updates {
+		for j := range updates[i].next.Segments {
+			segment := &updates[i].next.Segments[j]
+			if segment.Schedule.Segment.Start == boundary && segment.Schedule.Segment.End == nil {
+				carryReadHoldLinks(segment.Plans, segment.Schedule.Segment.QueryGroup, readHoldPrevious, carried)
+			}
+		}
+	}
+	groupsByPlan := make(map[execution.PlanKey]execution.QueryGroupIdentity)
+	for group := range activeGroups {
+		for _, key := range published.content.Groups[group].Plans {
+			groupsByPlan[key] = group
+		}
+	}
+	for i := range plans {
+		carryReadHoldLinks(plans[i:i+1], groupsByPlan[plans[i].Fact.Key()], readHoldPrevious, carried)
 	}
 	// Coverage is owed by everyone the cutover did not hold back. A blocked
 	// Query Group's carried records name what it ran, which may not be the

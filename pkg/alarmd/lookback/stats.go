@@ -159,7 +159,9 @@ func key3(a, b, c string) string { return a + "|" + b + "|" + c }
 
 // Stats is the lookback as it stands.
 type Stats struct {
-	Coverage Coverage `json:"coverage"`
+	ReadHoldTransitions         uint64   `json:"read_hold_transition"`
+	ReadHoldTransitionOvertaken uint64   `json:"read_hold_transition_overtaken"`
+	Coverage                    Coverage `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its

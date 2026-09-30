@@ -289,7 +289,8 @@ type StrategyPlanStanding struct {
 	// Config is the Plan's key configuration, redacted, read from the
 	// frozen object on request (include=config) and absent otherwise. See
 	// StrategyPlanConfigs for what it carries and what it refuses.
-	Config *StrategyPlanConfigs `json:"config,omitempty"`
+	Config   *StrategyPlanConfigs `json:"config,omitempty"`
+	ReadHold *ReadHoldFacts       `json:"read_hold,omitempty"`
 }
 
 // StrategyStandingOf composes the answer from the lookup and the fleet's
@@ -306,6 +307,10 @@ func StrategyStandingOf(strategyID, tenant, business, replica string, facts Stra
 		if view != nil {
 			entry.Existence = objectExistence(plan.QueryGroup, view.expectation)
 			entry.Replica = view.ownerOf[plan.QueryGroup]
+			if reading, known := view.readHolds[plan.QueryGroup]; known {
+				copy := reading
+				entry.ReadHold = &copy
+			}
 			walkObjectRows("", "", plan.QueryGroup, view, now, func(row Anomaly) {
 				if len(entry.Rows) < MaxPageSize {
 					entry.Rows = append(entry.Rows, row)

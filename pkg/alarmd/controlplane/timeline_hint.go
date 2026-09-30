@@ -34,9 +34,6 @@ func WithTimelineRevisionHint(ctx context.Context, revision uint64) context.Cont
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if revision == 0 {
-		return ctx
-	}
 	return context.WithValue(ctx, timelineRevisionHintKey{}, revision)
 }
 

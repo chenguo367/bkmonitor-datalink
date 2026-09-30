@@ -199,6 +199,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		}
 		return completeBudgetExhaustedQueries(execution.QueryExecutionCompletion{}, prepared.Queries, request.AttemptNo), nil
 	}
+	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
+		for _, query := range prepared.Queries {
+			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli))
+		}
+	}
 	if readyAt := sharedPendingReadiness(prepared.Queries, source.now()); !readyAt.IsZero() {
 		return execution.QueryExecutionCompletion{}, &ReadinessDeferredError{readyAt: readyAt}
 	}

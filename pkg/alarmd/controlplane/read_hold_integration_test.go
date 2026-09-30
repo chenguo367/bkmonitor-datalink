@@ -1,0 +1,80 @@
+package controlplane_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"testing"
+)
+
+func readHoldCatalog(t *testing.T, delay, threshold int) controlplane.Catalog {
+	t.Helper()
+	access := true
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", controlplane.LegacyQueryRuntimeFacts{AccessBKData: &access, BKDataCMDBLevelTables: []string{}, SystemDiskFilter: controlplane.LegacyRuntimeFilterFact{FieldName: "device_type", Values: []string{"iso9660"}}, SystemNetworkFilter: controlplane.LegacyRuntimeFilterFact{FieldName: "device_name", Values: []string{"lo"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := json.RawMessage(fmt.Sprintf(`{"id":101,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"fixture-query","expression":"a","unit":"","time_delay":%d,"query_configs":[{"data_source_label":"bk_monitor","data_type_label":"time_series","metric_field":"usage","alias":"a","agg_dimension":["host"],"agg_method":"MAX","agg_interval":60,"result_table_id":"system.cpu"}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gte","threshold":%d}]]}]}],"detects":[{"level":1,"priority":1,"connector":"and","trigger_config":{"count":1,"check_window":1}}]}`, delay, threshold))
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "101", Document: document, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, Planner: planner})
+	if err != nil || len(catalog.QueryGroups) != 1 {
+		t.Fatalf("catalog: %+v %v", catalog, err)
+	}
+	return catalog
+}
+
+func TestReadHoldLinkFollowsThePlanAcrossDelayGroupsAndEmptySegments(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:read-hold-links")
+	first := readHoldCatalog(t, 0, 80)
+	fixture.publish(t, first, 60)
+	var original execution.QueryGroupIdentity
+	var generation execution.StateGeneration
+	for _, qg := range first.QueryGroups {
+		if qg.Plans[0].Identity.BusinessID == "2" {
+			original = qg.Identity
+			generation = qg.Plans[0].StateGeneration
+		}
+	}
+	if original == "" {
+		t.Fatal("missing edited group")
+	}
+	var previous execution.QueryGroupIdentity = original
+	for index, delay := range []int{120, 180} {
+		catalog := readHoldCatalog(t, delay, 80)
+		boundary := int64(121 + index)
+		fixture.publish(t, catalog, boundary)
+		var next controlplane.QueryGroup
+		for _, qg := range catalog.QueryGroups {
+			if qg.Plans[0].Identity.BusinessID == "2" {
+				next = qg
+			}
+		}
+		if next.Identity == previous || next.Identity == original {
+			t.Fatal("delay edit kept query-group identity")
+		}
+		schedule, err := fixture.runtime.ReadFrozenSchedule(fixture.ctx, next.Identity, execution.EvaluationTime(boundary))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
+		if err != nil || len(refs) != 1 || refs[0].QueryGroup != original || refs[0].ClosedAt != 121 || len(refs[0].Plans) != 1 {
+			t.Fatalf("delay or empty intermediate lost predecessor: %+v %v", refs, err)
+		}
+		if next.Plans[0].StateGeneration != generation {
+			t.Fatal("delay changed state generation")
+		}
+		previous = next.Identity
+	}
+	// Output-context/threshold edits in the last QG keep the external bridge.
+	last := readHoldCatalog(t, 180, 90)
+	fixture.publish(t, last, 180)
+	schedule, err := fixture.runtime.ReadFrozenSchedule(fixture.ctx, previous, 180)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
+	if err != nil || len(refs) != 1 || refs[0].QueryGroup != original {
+		t.Fatalf("same group edit lost external bridge: %+v %v", refs, err)
+	}
+}

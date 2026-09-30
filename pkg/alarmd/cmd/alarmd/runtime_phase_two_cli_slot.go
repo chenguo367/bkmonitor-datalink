@@ -107,8 +107,8 @@ func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Co
 // Group's Progress when that still carries the Slot's contract - the round
 // it last completed, its unfinished Slot or range - and otherwise from its
 // read hold record, which keeps the current hold and the one before with
-// the first Slot of each. No record is no hold: every change is written. A
-// record that no longer reaches back to the Slot is
+// the first Slot of each. An absent or expired record is not proof of zero.
+// A record that no longer reaches back to the Slot is
 // obchannel.ErrHistoricalReadHoldUnknown.
 func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Config, slots progress.ContinuousSlotResolver, slot execution.SlotIdentity) (int64, error) {
 	control := cliControlReader{reader: reader, prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership")}
@@ -117,7 +117,11 @@ func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Confi
 	if err != nil {
 		return 0, obchannel.ErrHistoricalContractUnavailable
 	}
-	if loaded, err := store.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: slot.QueryGroup}); err == nil && loaded.Progress != nil {
+	loaded, err := store.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: slot.QueryGroup})
+	if err != nil {
+		return 0, cliSlotReadError(err, reader)
+	}
+	if loaded.Progress != nil {
 		if hold, found := progressReadHold(*loaded.Progress, slot.EvaluationTime); found {
 			return hold, nil
 		}
@@ -127,7 +131,7 @@ func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Confi
 		return 0, cliSlotReadError(err, reader)
 	}
 	if missing {
-		return 0, nil
+		return 0, obchannel.ErrHistoricalReadHoldUnknown
 	}
 	record, err := readhold.Decode(raw)
 	if err != nil {

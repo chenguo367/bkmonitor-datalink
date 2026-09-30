@@ -28,6 +28,8 @@ func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) +
 func lookbackSeriesUpperBounds() map[string]int {
 	sources, rungs := lookbackSources(), len(lookback.RungNames)
 	return map[string]int{
+		"read_hold_transition_total":                 1,
+		"read_hold_transition_overtaken_total":       1,
 		"lookback_first_reads_total":                 sources,
 		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
 		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),

@@ -225,6 +225,12 @@ type ReadHolds interface {
 	ReadHold(execution.QueryGroupIdentity) time.Duration
 }
 
+// SlotReadHolds persists the hold for a newly frozen Slot, including a
+// predecessor's completion deadline during a Plan's QG transition.
+type SlotReadHolds interface {
+	SlotReadHold(context.Context, execution.FrozenQueryGroupSchedule, execution.EvaluationTime, execution.OwnerFence) (time.Duration, error)
+}
+
 type ProductionSlotSourceOption func(*ProductionSlotSource) error
 
 // WithReadHolds lets the source freeze each new Slot with its Query Group's
@@ -250,6 +256,23 @@ func (source *ProductionSlotSource) readHoldMillis(progress *execution.ScheduleP
 	}
 	hold := source.readHolds.ReadHold(source.queryGroup).Milliseconds()
 	return min(max(hold, 0), execution.MaxReadHoldMillis)
+}
+
+func (source *ProductionSlotSource) slotReadHoldMillis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, progress *execution.ScheduleProgress, slot execution.EvaluationTime, fence execution.OwnerFence) (int64, error) {
+	if progress != nil && progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot {
+		return progress.UnfinishedSlot.Contract.ReadHoldMillis, nil
+	}
+	if holds, ok := source.readHolds.(SlotReadHolds); ok {
+		hold, err := holds.SlotReadHold(ctx, schedule, slot, fence)
+		if err != nil {
+			return 0, err
+		}
+		if hold < 0 || hold.Milliseconds() > execution.MaxReadHoldMillis {
+			return 0, ErrSlotContractDrift
+		}
+		return hold.Milliseconds(), nil
+	}
+	return source.readHoldMillis(progress, slot), nil
 }
 
 // WithTakeoverClock lets the source tell a Slot due before this process took
@@ -429,6 +452,9 @@ func (source *ProductionSlotSource) Next(
 			schedule, nextSlot, retired, err = source.firstAvailableSchedule(ctx, schedule)
 			if retired {
 				decision = "retired"
+				if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
+					return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
+				}
 				return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 			}
 		}
@@ -439,6 +465,9 @@ func (source *ProductionSlotSource) Next(
 		}
 		if retired {
 			decision = "retired"
+			if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
+				return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
+			}
 			return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 		}
 		schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, *load.Progress)
@@ -454,6 +483,9 @@ func (source *ProductionSlotSource) Next(
 				}
 				if retired {
 					decision = "retired"
+					if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
+						return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
+					}
 					return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 				}
 				schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, resumed)
@@ -465,6 +497,13 @@ func (source *ProductionSlotSource) Next(
 	}
 	if err := source.validateSchedule(schedule, nextSlot); err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
+	}
+	if holds, ok := source.readHolds.(interface {
+		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
+	}); ok {
+		if err := holds.PrepareSchedule(ctx, schedule, initialFence); err != nil {
+			return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
+		}
 	}
 	decision = "schedule_validated"
 	trace.EvaluationTime = int64(nextSlot)
@@ -494,7 +533,11 @@ func (source *ProductionSlotSource) Next(
 		decision = "future_slot"
 		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
 	}
-	hold := source.readHoldMillis(load.Progress, nextSlot)
+	decision = "read_hold"
+	hold, err := source.slotReadHoldMillis(ctx, schedule, load.Progress, nextSlot, initialFence)
+	if err != nil {
+		return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
+	}
 	request := execution.FreezeSlotContractRequest{
 		QueryGroup: source.queryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
 		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: nextSlot, DuePlans: duePlans,
@@ -1224,6 +1267,27 @@ func (source *ProductionSlotSource) replayDistance(
 		cursor = next
 	}
 	return distance, 0, nil
+}
+
+func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence) error {
+	holds, ok := source.readHolds.(interface {
+		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
+	})
+	if !ok {
+		return nil
+	}
+	boundary, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
+	if err != nil {
+		return err
+	}
+	if !retired {
+		return nil
+	}
+	schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, boundary-1)
+	if err != nil {
+		return err
+	}
+	return holds.PrepareSchedule(ctx, schedule, fence)
 }
 
 func (source *ProductionSlotSource) isRetiredBoundary(

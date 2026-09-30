@@ -180,6 +180,7 @@ type fleetPublisher struct {
 	// before their data was complete, by object. Nil on a process that runs
 	// no lookback, and the snapshot then carries no such line.
 	readEarly func() map[string]fleet.ReadEarlyFacts
+	readHolds func() map[string]fleet.ReadHoldFacts
 	// lateSeries is what the lookback's supplements could not recover, by
 	// kind; nil without a lookback.
 	lateSeries func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts)
@@ -592,6 +593,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// complete: rounds completing, from data that was not all there.
 	if publisher.readEarly != nil {
 		snapshot.ReadEarly = publisher.tracker.ReadEarly(publisher.readEarly())
+	}
+	if publisher.readHolds != nil {
+		snapshot.ReadHolds = publisher.readHolds()
 	}
 	// And the objects whose late series the lookback's supplements could
 	// not recover: past their round, or the tail of a window recovered in

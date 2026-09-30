@@ -71,6 +71,7 @@ func headOf(snapshot Snapshot) Snapshot {
 	head.Anomalies, head.Demoted, head.Undecidable, head.ByDesign = nil, nil, nil, nil
 	head.PrunedSkips, head.GapSkips = nil, nil
 	head.NoData, head.NoDataMemory, head.RetainedShare, head.ReadEarly, head.LateSeries = nil, nil, nil, nil, nil
+	head.ReadHolds = nil
 	return head
 }
 

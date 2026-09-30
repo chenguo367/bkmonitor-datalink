@@ -1,0 +1,177 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+type runtimeTestReadHoldControl struct {
+	values map[execution.QueryGroupIdentity][]byte
+	reads  [][]execution.QueryGroupIdentity
+	writes int
+}
+
+func (c *runtimeTestReadHoldControl) ReadControlBatch(_ context.Context, groups []execution.QueryGroupIdentity, _ string) ([]ownership.ControlRead, error) {
+	c.reads = append(c.reads, append([]execution.QueryGroupIdentity(nil), groups...))
+	result := make([]ownership.ControlRead, len(groups))
+	for i, qg := range groups {
+		raw, found := c.values[qg]
+		result[i] = ownership.ControlRead{Raw: append([]byte(nil), raw...), Missing: !found}
+	}
+	return result, nil
+}
+func (c *runtimeTestReadHoldControl) FencedCompareAndSet(_ context.Context, r ownership.FencedCASRequest) (ownership.FencedCASStatus, error) {
+	c.writes++
+	raw, found := c.values[r.Fence.QueryGroup]
+	if r.ExpectedMissing == found || !bytes.Equal(r.Expected, raw) {
+		return ownership.FencedCASConflict, nil
+	}
+	c.values[r.Fence.QueryGroup] = append([]byte(nil), r.Value...)
+	return ownership.FencedCASApplied, nil
+}
+func runtimeTestHolds(t *testing.T) (*productionReadHolds, *runtimeTestReadHoldControl, *time.Time) {
+	t.Helper()
+	at := time.Unix(1800, 0)
+	store := &runtimeTestReadHoldControl{values: map[execution.QueryGroupIdentity][]byte{}}
+	h := &productionReadHolds{now: func() time.Time { return at }, groups: map[execution.QueryGroupIdentity]*productionReadHoldGroup{}}
+	h.cfg.PhaseTwo.Worker.ID = "worker"
+	var err error
+	h.controller, err = readhold.NewController(readhold.Options{Control: store, Prefix: "schedule", MaxHold: 10 * time.Minute, Now: h.now, Owner: h.owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, store, &at
+}
+func runtimeTestHoldSchedule(t *testing.T, qg execution.QueryGroupIdentity) execution.FrozenQueryGroupSchedule {
+	t.Helper()
+	spec := execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Timezone: "UTC", CompletionDeadlineOffsetSeconds: 55}
+	rev, _ := execution.DerivePlanScheduleRevision(spec)
+	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "business", StrategyID: "strategy"}
+	plans := []execution.FrozenPlanSchedule{{Identity: plan, Spec: spec, ScheduleRevision: rev}}
+	groupRev, _ := execution.DeriveQueryGroupScheduleRevision(plans)
+	return execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{Publication: execution.SnapshotPublicationRef{PublicationEpoch: 1, SnapshotRevision: "snapshot"}, QueryGroup: qg, QueryRevision: "query", ScheduleRevision: groupRev, Start: 60}, Plans: plans}
+}
+func TestRuntimeOwnedRestoreIsolatesBadGroups(t *testing.T) {
+	h, c, _ := runtimeTestHolds(t)
+	raw, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 120000})
+	c.values["good"] = raw
+	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
+	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
+	if h.controller.Inspect("bad").Loaded || !h.controller.Inspect("good").Loaded || !h.controller.Inspect("zero").Loaded {
+		t.Fatal("a corrupt group invalidated good batch entries")
+	}
+	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
+	if len(c.reads) != 2 || len(c.reads[1]) != 1 || c.reads[1][0] != "bad" {
+		t.Fatalf("loaded siblings were reread: %+v", c.reads)
+	}
+}
+func TestRuntimePreparedZeroHoldDoesNotReadOrCreateKey(t *testing.T) {
+	h, c, at := runtimeTestHolds(t)
+	qg := execution.QueryGroupIdentity("zero")
+	schedule := runtimeTestHoldSchedule(t, qg)
+	session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.bind(qg, session)
+	h.groups[qg].prepared = schedule.Segment
+	spec := readhold.GroupSpec{QueryGroup: qg, Plans: []readhold.PlanRef{{Key: schedule.Plans[0].Key(), Route: "source/metric"}}, SettlingWait: 30 * time.Second, HoldLimit: 10 * time.Minute}
+	if err := h.controller.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	h.restore(context.Background(), []execution.QueryGroupIdentity{qg})
+	lease, _ := session.Current()
+	for _, slot := range []execution.EvaluationTime{1200, 1260, 1320} {
+		if got, err := h.SlotReadHold(context.Background(), schedule, slot, lease.Fence); err != nil || got != 0 {
+			t.Fatalf("prepared h0 read: %s %v", got, err)
+		}
+	}
+	if page := h.groupPage(nil, "", 200); len(page.Groups) != 1 || !page.Groups[0].HoldKnown || page.Groups[0].ReadHoldMillis != 0 {
+		t.Fatalf("successfully seeded h0 was not known: %+v", page)
+	}
+	if len(c.reads) != 1 || c.writes != 0 || len(c.values) != 0 {
+		t.Fatalf("h0 normal path made storage calls: reads=%d writes=%d keys=%d", len(c.reads), c.writes, len(c.values))
+	}
+	*at = at.Add(2 * time.Minute)
+	if _, err := h.owner(qg); !errors.Is(err, ownership.ErrStaleFence) {
+		t.Fatalf("expired owner still admitted: %v", err)
+	}
+	h.forget(qg)
+	if len(h.groups) != 0 || h.controller.Inspect(qg).Loaded {
+		t.Fatal("release kept the owner's controller record")
+	}
+}
+func TestRuntimeLookbackPagerUsesOnlyOwnedMemory(t *testing.T) {
+	h, c, at := runtimeTestHolds(t)
+	raw, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 120000})
+	c.values["good"] = raw
+	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
+	for _, qg := range []execution.QueryGroupIdentity{"bad", "good", "zero"} {
+		session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.bind(qg, session)
+	}
+	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
+	handler := withLookbackAPI(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }), nil, lookbackStanding{}, h, h.now)
+	request := func(method, path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(method, path, nil))
+		return w
+	}
+	first := request(http.MethodGet, "/api/lookback?limit=1")
+	if first.Code != 200 {
+		t.Fatalf("GET status %d", first.Code)
+	}
+	var page lookbackAPIReading
+	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 3 || page.Next != "bad" || len(page.Groups) != 1 || page.Groups[0].HoldKnown {
+		t.Fatalf("bad hold was reported as known: %+v", page)
+	}
+	second := request(http.MethodGet, "/api/lookback?limit=1&after=bad")
+	if err := json.Unmarshal(second.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Groups[0].QueryGroup != "good" || !page.Groups[0].HoldKnown || page.Groups[0].ReadHoldMillis != 120000 {
+		t.Fatalf("good page: %+v", page)
+	}
+	if len(c.reads) != 1 || c.writes != 0 {
+		t.Fatal("pager issued storage calls")
+	}
+	if request(http.MethodGet, "/api/lookback?after="+strings.Repeat("x", 257)).Code != 400 {
+		t.Fatal("unbounded cursor accepted")
+	}
+	op := cliLookbackOperation(nil, lookbackStanding{}, h)
+	outcome := op.Run(context.Background(), obchannel.Params{"limit": json.Number("1")})
+	if outcome.Complete || len(outcome.Next) != 1 {
+		t.Fatal("CLI truncated page gave no next call")
+	}
+	following := op.Run(context.Background(), outcome.Next[0].Params).Value.(cliLookbackReading)
+	if following.ReadHolds.Groups[0].QueryGroup != "good" {
+		t.Fatal("CLI cursor reread first page")
+	}
+	if page := h.groupPage(nil, "good", 200); len(page.Groups) != 1 || page.Groups[0].HoldKnown {
+		t.Fatalf("missing, unseeded h0 was reported as known: %+v", page)
+	}
+	*at = at.Add(2 * time.Minute)
+	if h.groupPage(nil, "", 200).Total != 0 || len(h.fleetFacts()) != 0 {
+		t.Fatal("expired owner reported a current hold")
+	}
+	if request(http.MethodPost, "/api/lookback").Code != 405 || request(http.MethodGet, "/api/lookback?limit=201").Code != 400 || request(http.MethodGet, "/other").Code != 418 {
+		t.Fatal("method, budget, or route forwarding changed")
+	}
+}

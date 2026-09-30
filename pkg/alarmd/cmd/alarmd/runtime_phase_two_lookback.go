@@ -11,8 +11,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -176,8 +178,13 @@ func buildLookback(
 	logger *observability.Logger,
 	now func() time.Time,
 	memory func(bytes uint64) bool,
+	holds ...*productionReadHolds,
 ) (*lookback.Engine, lookbackStanding, error) {
-	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now, memory))
+	options := lookbackOptions(recheck, flights, ownership, logger, now, memory)
+	if len(holds) > 0 && holds[0] != nil {
+		holds[0].bindLookback(&options)
+	}
+	engine, err := lookback.New(options)
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
@@ -235,7 +242,7 @@ func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
 // lookbackReadEarly is the lookback's report of the objects read before
 // their data was complete, as the fleet snapshot carries it; nil without a
 // lookback.
-func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarlyFacts {
+func lookbackReadEarly(engine *lookback.Engine, holds ...*productionReadHolds) func() map[string]fleet.ReadEarlyFacts {
 	if engine == nil {
 		return nil
 	}
@@ -248,6 +255,11 @@ func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarl
 			row := fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
 				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
 				Since: reading.Since}
+			if len(holds) > 0 && holds[0] != nil {
+				if _, err := holds[0].owner(reading.QueryGroup); err == nil && holds[0].controller.Inspect(reading.QueryGroup).Loaded {
+					row.ReadHoldMillis = holds[0].controller.ReadHold(reading.QueryGroup).Milliseconds()
+				}
+			}
 			for _, sample := range reading.Samples {
 				row.Samples = append(row.Samples, fleet.ReadEarlySample{EvaluationTime: int64(sample.EvaluationTime),
 					FirstReadAgeSeconds: sample.FirstReadAgeSeconds, CompletionAgeSeconds: sample.CompletionAgeSeconds,
@@ -271,24 +283,36 @@ type cliLookbackReading struct {
 	Scope  string    `json:"scope"`
 	ReadAt time.Time `json:"read_at"`
 	lookbackStanding
-	Stats *lookback.Stats `json:"stats,omitempty"`
+	Stats     *lookback.Stats    `json:"stats,omitempty"`
+	ReadHolds *lookbackGroupPage `json:"read_holds,omitempty"`
 }
 
 // cliLookbackOperation reads the answering process's lookback. Every replica
 // keeps its own; the operation is targetable so each can be read in turn.
-func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
+func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding, holds ...*productionReadHolds) obchannel.Operation {
+	one, maxLimit := int64(1), int64(200)
 	return obchannel.Operation{ID: "lookback.get",
 		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（覆盖数 ÷（拥有数 − 从未有过完整首读的组数），目标 100%；从未有过完整首读的组单列计数，并按查询组列出不完整首读的次数，最多 32 个）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；部分序列迟到的查询组逐个 Slot 定向复查并补充检测（supplements：每组的迟到档、窗口结局——已补、无迟到、Slot 在跑未补、合同已过期、失败、未观测按原因——补充里每对（Plan、序列）的结局与补上的点数、覆盖率＝已补/(已补＋未观测)；按来源的合计与定向复查字节）；到齐最晚的查询组与最近有变化的复查；可指定实例。",
-		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
+		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{
+			"after": {Type: "string", MaxLength: 256, Description: "下一页用 read_holds.next；查询组按 ID 排序。"},
+			"limit": {Type: "integer", Minimum: &one, Maximum: &maxLimit, Description: "每页查询组数，默认 32，最多 200。"},
+		},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},
-		Run: func(context.Context, obchannel.Params) obchannel.Outcome {
+		Run: func(_ context.Context, params obchannel.Params) obchannel.Outcome {
 			reading := cliLookbackReading{Scope: "answering_replica", ReadAt: time.Now().UTC(), lookbackStanding: standing}
+			if len(holds) > 0 && holds[0] != nil {
+				page := holds[0].groupPage(engine, params.String("after"), params.Int("limit", 32))
+				reading.ReadHolds = &page
+			}
 			if engine != nil {
 				stats := engine.Stats()
+				if len(holds) > 0 && holds[0] != nil {
+					stats = productionLookbackStats(engine, holds[0])
+				}
 				reading.Stats = &stats
 			}
-			return obchannel.Outcome{Value: reading, Complete: true, Limitations: []string{
+			outcome := obchannel.Outcome{Value: reading, Complete: true, Limitations: []string{
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
 				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
 				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's last 65 steps - the whole of a shorter window - from the query's own lookback before them.",
@@ -298,17 +322,32 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 				"A sample waiting for its deep recheck does not hold its group's next sample back: a punctual Query Group settles at 1 to 1.25 rechecks an hour, about a fifth of them deep (simulated: 1.23 at a ten-second step, 1.21 at a minute, 1.02 at five minutes - a group rests from its first rung, 1.5 steps after its read, and waits for its next first read).",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
 			}}
+			if reading.ReadHolds != nil && reading.ReadHolds.Next != "" {
+				outcome.Complete = false
+				outcome.Next = []obchannel.Call{{Operation: "lookback.get", Params: obchannel.Params{"after": reading.ReadHolds.Next, "limit": json.Number(strconv.Itoa(params.Int("limit", 32)))}, Reason: "read the next owned query groups"}}
+			}
+			return outcome
 		}}
 }
 
 // lookbackLateSeries is what the lookback's supplements could not recover,
 // as the fleet snapshot carries it. Nil without a lookback.
-func lookbackLateSeries(engine *lookback.Engine) func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
+func lookbackLateSeries(engine *lookback.Engine, holds ...*productionReadHolds) func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
 	if engine == nil {
 		return nil
 	}
 	return func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts) {
-		return lateSeriesFacts(engine.LatePastRound(), engine.ResidualMisses())
+		past, residual := lateSeriesFacts(engine.LatePastRound(), engine.ResidualMisses())
+		if len(holds) > 0 && holds[0] != nil {
+			for qg, reading := range past {
+				id := execution.QueryGroupIdentity(qg)
+				if _, err := holds[0].owner(id); err == nil && holds[0].controller.Inspect(id).Loaded {
+					reading.ReadHoldMillis = holds[0].controller.ReadHold(id).Milliseconds()
+					past[qg] = reading
+				}
+			}
+		}
+		return past, residual
 	}
 }
 
