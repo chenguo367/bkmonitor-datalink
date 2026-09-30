@@ -197,7 +197,8 @@ func lookbackOptions(
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
 		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights), Memory: memory,
-		Supplement: lookbackSupplement(ownership, logger, now, waitWithin),
+		FreePermits: freeQueryPermits(flights),
+		Supplement:  lookbackSupplement(ownership, logger, now, waitWithin),
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
 				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
@@ -208,6 +209,19 @@ func lookbackOptions(
 // lookbackPermit is the lookback's permit from the process's query budget:
 // granted only from a permit nobody is waiting for, and yielded the moment a
 // formal query has to wait for one.
+// freeQueryPermits is how many of the process's query permits are free now:
+// the budget less every permit held, the lookback's included.
+func freeQueryPermits(flights *scheduler.FlightCoordinator) func() int {
+	return func() int {
+		occupancy := flights.QueryPermitOccupancy()
+		held := occupancy.LookbackInflight
+		for _, count := range occupancy.Inflight {
+			held += count
+		}
+		return occupancy.Budget - held
+	}
+}
+
 func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
 	return func() (func(), <-chan struct{}, string) {
 		permit, refused := flights.TryAcquireLookbackPermit()

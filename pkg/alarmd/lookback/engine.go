@@ -205,6 +205,10 @@ type Options struct {
 	Supplement           func(context.Context, SupplementJob) SupplementOutcome
 	UnspreadFirstSamples bool
 	ProbeFirstSamples    bool
+	// FreePermits is how many of the process's query permits are free now,
+	// which early reads due at once start as many rounds early as they need
+	// of; nil reads one.
+	FreePermits func() int
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -235,6 +239,12 @@ type Engine struct {
 	counts counters
 	recent []Recent
 	nextID uint64
+	// earlyPending is the directed Slots waiting for their early read,
+	// holdMax the longest supplement hold this process has seen, and woken
+	// the loop's wake-up when a read ends (early.go).
+	earlyPending []*directedSlot
+	holdMax      time.Duration
+	woken        chan struct{}
 }
 
 // group is one Query Group: how it is rechecked, which it learns from its
@@ -273,9 +283,14 @@ type group struct {
 	// series_late, by evaluation time, and supplement what they came to.
 	directed   map[execution.EvaluationTime]*directedSlot
 	supplement *supplementTally
-	capturing  bool
-	sample     *sample
-	nextAt     time.Time
+	// took and holds are its last first reads and supplement holds, which
+	// its early reads' lead is the longest of; kept while it is read
+	// directed and after, so a group read directed again starts with them.
+	took      durations
+	holds     durations
+	capturing bool
+	sample    *sample
+	nextAt    time.Time
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
 	// fresh its measurement can be depends on how often it reads.
@@ -381,7 +396,7 @@ func New(options Options) (*Engine, error) {
 		options.Now = time.Now
 	}
 	engine := &Engine{options: options, groups: map[execution.QueryGroupIdentity]*group{},
-		firstReadBytes: map[string]*atomic.Uint64{}}
+		firstReadBytes: map[string]*atomic.Uint64{}, woken: make(chan struct{}, 1)}
 	for _, source := range Sources {
 		engine.firstReadBytes[source] = &atomic.Uint64{}
 	}
@@ -488,8 +503,9 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		return
 	}
 	if read.directed != nil {
+		now := read.engine.options.Now()
 		read.engine.mu.Lock()
-		completeDirectedLocked(read.directed, completion, err)
+		read.engine.completeDirectedLocked(read.directed, completion, err, now)
 		read.engine.mu.Unlock()
 	}
 	if read.summary == nil {
@@ -575,16 +591,37 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 
 // Run rechecks due samples until ctx ends. One goroutine: a recheck runs on
 // its own goroutine only once a permit is held, so the permits bound them.
+// Between its steps every tick it wakes for the early reads (early.go) --
+// when the next is due, or when a read ends that one may have waited on --
+// and touches only them.
 func (engine *Engine) Run(ctx context.Context, tick time.Duration) {
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
+	timer := time.NewTimer(tick)
+	defer timer.Stop()
+	nextStep := time.Now().Add(tick)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			engine.Step(ctx)
+		case <-timer.C:
+		case <-engine.woken:
 		}
+		if !time.Now().Before(nextStep) {
+			engine.Step(ctx)
+			nextStep = time.Now().Add(tick)
+		} else {
+			engine.StepEarly(ctx)
+		}
+		wait := time.Until(nextStep)
+		if at := engine.nextEarlyWake(); !at.IsZero() {
+			wait = min(wait, max(at.Sub(engine.options.Now()), time.Millisecond))
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(wait)
 	}
 }
 
@@ -680,6 +717,7 @@ func (engine *Engine) Step(ctx context.Context) {
 		engine.mu.Unlock()
 		go engine.recheck(ctx, candidate, release, yield)
 	}
+	engine.StepEarly(ctx)
 }
 
 // advanceLocked moves a sample to its next rung, and finishes it after its

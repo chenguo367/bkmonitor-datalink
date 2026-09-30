@@ -49,6 +49,15 @@ func settlingWaitWithinBudget(schedule execution.ScheduleSpec, configured, reser
 	return execution.SettlingWaitWithinQueryBudget(budget, configured)
 }
 
+// lookbackQuery is a physical query as the lookback sees it before it is
+// sent: its Slot, its frozen spec, the attempt, when it was ready, and the
+// Slot the frozen schedule has next, which the Runner put on ctx.
+func lookbackQuery(ctx context.Context, request execution.QueryExecutionRequest, spec execution.PhysicalQuerySpec,
+	attemptNo uint32, readyAtUnixMilli int64) lookback.Query {
+	return lookback.Query{Contract: request.Contract, Spec: spec, Operation: request.Operation, AttemptNo: attemptNo,
+		ReadyAt: time.UnixMilli(readyAtUnixMilli), FollowingSlot: execution.FollowingSlotOf(ctx)}
+}
+
 type ReadinessDeferredError struct{ readyAt time.Time }
 
 func (err *ReadinessDeferredError) Error() string { return "alarmd access: execution is not ready" }
@@ -329,9 +338,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			dispatchErr = err
 			break
 		}
-		kept := source.config.Lookback.Begin(lookback.Query{Contract: request.Contract, Spec: query.Spec,
-			Operation: request.Operation, AttemptNo: attempt.AttemptNo, ReadyAt: time.UnixMilli(query.ReadyAtUnixMilli),
-			FollowingSlot: execution.FollowingSlotOf(ctx)})
+		kept := source.config.Lookback.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli))
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()

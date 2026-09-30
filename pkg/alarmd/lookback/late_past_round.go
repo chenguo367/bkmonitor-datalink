@@ -149,7 +149,7 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 			run.delaySeconds = slot.queries[0].spec.PlanFacts.QueryDelaySeconds
 		}
 		run.samples = keepLast(append(run.samples, LatePastRoundSample{EvaluationTime: slot.evaluation,
-			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(rungDelay(slot.rung, slot.step) / time.Second),
+			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(slot.seenAgeOrRung() / time.Second),
 			OnTimeSeries: onTimeSeries(slot), LateSeries: slot.late, CrossedSeries: facts.CrossedT}), latePastRoundKept)
 	case facts.Admitted > 0:
 		state.latePastRound = nil
@@ -183,6 +183,16 @@ func everyLateSeriesCrossed(facts execution.SupplementFacts) bool {
 // into, when it is read directed no more. Caller holds engine.mu.
 func endLateSeries(state *group) {
 	state.seriesLate, state.latePastRound, state.residualMiss = nil, nil, nil
+}
+
+// seenAgeOrRung is how long after its first read the series that had crossed
+// the Slot were seen: as filed, or its rung's moment for a Slot filed
+// without one.
+func (slot *directedSlot) seenAgeOrRung() time.Duration {
+	if slot.seenAge > 0 {
+		return slot.seenAge
+	}
+	return rungDelay(slot.rung, slot.step)
 }
 
 // onTimeSeries is how many series the window's first read had: the ones on

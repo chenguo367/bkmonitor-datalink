@@ -138,6 +138,30 @@ func TestASupplementsGuardReachesItsRunner(t *testing.T) {
 	}
 }
 
+// The permits an early read can count on are the budget less every permit
+// held, the lookback's own included.
+func TestFreeQueryPermitsLeaveOutTheLookbacksOwn(t *testing.T) {
+	flights, err := scheduler.NewFlightCoordinatorWithRecovery(scheduler.RecoveryLimits{
+		ProcessQueryPermits: 4, RecoveryQueryPermits: 1, ReadyQueueCapacity: 4, RecoveryQueueCapacity: 4,
+		MaxQueuedItemsPerQG: 1, MaxReplaySlots: 1, MaxReplayAge: time.Minute, RetryMinDelay: time.Second, RetryMaxDelay: time.Second,
+	}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := freeQueryPermits(flights)
+	if got := free(); got != 4 {
+		t.Fatalf("free permits %d with none held, want the budget", got)
+	}
+	permit, refused := flights.TryAcquireLookbackPermit()
+	if refused != "" {
+		t.Fatal(refused)
+	}
+	defer permit.Release()
+	if got := free(); got != 3 {
+		t.Fatalf("free permits %d with the lookback holding one, want one less", got)
+	}
+}
+
 // The process's lookback hands its late series to supplements: without the
 // executor wired in, it reads no Query Group directed at all.
 func TestTheLookbackIsWiredToRunSupplements(t *testing.T) {
