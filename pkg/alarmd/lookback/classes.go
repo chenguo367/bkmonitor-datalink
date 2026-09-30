@@ -175,11 +175,14 @@ func classOf(candidate *sample) (string, string) {
 func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.Time) {
 	class, reason := classOf(candidate)
 	engine.counts.classes[key2(candidate.source, class)]++
+	state.reading.classes[wordIndex(SampleClasses, class)]++
 	engine.recordReadHoldLocked(candidate)
 	if class == ClassPartialRevised {
 		engine.recordIgnoredLocked(candidate, ClassPartialRevised)
+		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, ClassPartialRevised)]++
 	} else if class == ClassWindowReadEarly && !wholeWindowArrival(candidate) {
 		engine.recordIgnoredLocked(candidate, "noise")
+		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, "noise")]++
 	}
 	switch class {
 	case ClassWindowReadEarly, ClassPartialRevised:

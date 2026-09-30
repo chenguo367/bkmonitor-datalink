@@ -105,6 +105,7 @@ type earlierSample struct {
 	formal        bool
 	outcome       string
 	cancel        context.CancelFunc
+	group         *group
 }
 
 func (engine *Engine) groupLocked(query Query, now time.Time) *group {
@@ -112,6 +113,7 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 	state := engine.groups[qg]
 	if state == nil {
 		state = &group{depth: 1, rest: RungSteps[0], sinceProbe: probeEvery - 2}
+		state.reading.since = now
 		if engine.options.ProbeFirstSamples {
 			state.sinceProbe = probeEvery - 1
 		}
@@ -166,6 +168,7 @@ func (engine *Engine) Prepare(query Query) {
 				previous.cancel()
 			}
 			engine.counts.earlierReads[key2(previous.source, EarlierOvertaken)]++
+			previous.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOvertaken)]++
 		}
 		state.prepared = nil
 	}
@@ -181,6 +184,7 @@ func (engine *Engine) Prepare(query Query) {
 		start = baseline
 	}
 	state.prepared = &earlierSample{query: query, source: state.source, candidateHold: candidate,
+		group: state,
 		// Start within the existing recheck budget before the candidate
 		// readiness point. Data already whole here proves it whole at h/2;
 		// starting after that point cannot prove a decrease.
@@ -225,6 +229,7 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 		state.prepared = nil
 	}
 	engine.counts.earlierReads[key2(trial.source, outcome)]++
+	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, outcome)]++
 	engine.mu.Unlock()
 	engine.options.OnEarlierRead(EarlierReadEvidence{Contract: trial.query.Contract, CandidateHold: trial.candidateHold,
 		Observed: outcome == EarlierEqual || outcome == EarlierDifferent, Equal: outcome == EarlierEqual, Outcome: outcome})
@@ -349,6 +354,7 @@ func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, rel
 	cancel()
 	engine.mu.Lock()
 	engine.counts.earlierBytes[trial.source] += sink.bytes
+	trial.group.reading.earlierBytes += sink.bytes
 	trial.running, trial.cancel = false, nil
 	if !trial.done && !trial.formal {
 		trial.done = true

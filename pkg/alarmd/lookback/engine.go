@@ -320,6 +320,7 @@ type group struct {
 	// finding and not a gap in the coverage (Coverage.NeverCompleteFirstRead).
 	incompleteFirstReads uint64
 	completeFirstRead    bool
+	reading              groupCounts
 }
 
 type sample struct {
@@ -610,6 +611,7 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 		}
 		if !trial.formal {
 			engine.counts.earlierReads[key2(trial.source, EarlierOwnerLost)]++
+			trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOwnerLost)]++
 		}
 	}
 	for _, candidate := range [...]*sample{state.sample, state.probe} {
@@ -1008,6 +1010,13 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	}
 	candidate.seriesUnknown = candidate.seriesUnknown || seriesUnknown
 	engine.counts.rechecks[key3(candidate.source, rung, outcome)]++
+	if state := engine.groups[candidate.queryGroup]; state != nil && outcome == RecheckCompared {
+		hold := groupHoldClass(candidate.contract.ReadHoldMillis)
+		state.reading.compared[hold][candidate.rung]++
+		if len(changes) > 0 {
+			state.reading.changed[hold][candidate.rung]++
+		}
+	}
 	// A rung compared covers any rung before it that was not read: it is
 	// compared with the last read kept, not with the rung it follows.
 	candidate.unread = outcome != RecheckCompared
