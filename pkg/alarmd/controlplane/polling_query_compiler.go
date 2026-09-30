@@ -191,6 +191,14 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 		if c.TimeField == "" {
 			c.TimeField = "dtEventTimeStamp"
 		}
+		if c.MetricField == "" {
+			// A log query without a field counts documents, whatever method the
+			// strategy names: LogSearchTimeSeriesDataSource.init_by_query_config
+			// takes COUNT on _index when metric_field is empty, and the log
+			// source inherits it. Kept as the strategy's AVG, the provider is
+			// asked to average _index, which the log store refuses.
+			c.MetricField, c.AggMethod = "_index", "COUNT"
+		}
 	} else {
 		c.TimeField = "time"
 		for i, field := range c.AggDimensions {
