@@ -108,7 +108,7 @@ func lookbackSupplement(
 		if !found {
 			return lookback.SupplementOutcome{Refused: lookback.DirectedFailed}
 		}
-		ctx = access.WithKeptRead(ctx, job.Read)
+		ctx = scheduler.WithSupplementGuard(access.WithKeptRead(ctx, job.Read), job.Guard)
 		scope := execution.SupplementScope{Series: job.Series}
 		for retried := false; ; retried = true {
 			started := now()
@@ -126,6 +126,8 @@ func lookbackSupplement(
 				return lookback.SupplementOutcome{Refused: lookback.DirectedFlightBusy}
 			case errors.Is(err, scheduler.ErrSupplementContractExpired):
 				return lookback.SupplementOutcome{Refused: lookback.DirectedContractExpired, Held: held}
+			case errors.Is(err, scheduler.ErrSupplementOvertaken):
+				return lookback.SupplementOutcome{Refused: lookback.SupplementOvertaken, Held: held}
 			default:
 				if logger != nil {
 					logger.Warn("lookback", "supplement_failed", 0, 0, slog.String("query_group", string(job.QueryGroup)),

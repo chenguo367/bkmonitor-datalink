@@ -44,6 +44,10 @@ func (runner *supplementingQueryGroup) Supplement(ctx context.Context, at execut
 	}
 	_, kept := access.KeptReadOf(ctx)
 	runner.read = append(runner.read, kept)
+	if guard := scheduler.SupplementGuardOf(ctx); guard != nil && !guard() {
+		runner.answers = runner.answers[1:]
+		return execution.SupplementFacts{}, scheduler.ErrSupplementOvertaken
+	}
 	err := runner.answers[0]
 	runner.answers = runner.answers[1:]
 	if err != nil {
@@ -112,6 +116,25 @@ func TestTheLookbacksSupplementsRunOnTheirQueryGroupsRunner(t *testing.T) {
 	if outcome := lookbackSupplement(supplementOwnership(runner), nil, func() time.Time { return now }, waitWithin)(
 		context.Background(), lookback.SupplementJob{QueryGroup: "qg-elsewhere"}); outcome.Ran || outcome.Refused != lookback.DirectedFailed {
 		t.Fatalf("not held: %+v", outcome)
+	}
+}
+
+// A supplement's guard reaches the Query Group's Runner, and a supplement
+// its guard turned back is refused as overtaken, its hold counted.
+func TestASupplementsGuardReachesItsRunner(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, proceed := range []bool{true, false} {
+		clock := now
+		runner := &supplementingQueryGroup{answers: []error{nil}, clock: &clock, took: 30 * time.Millisecond}
+		job := lookback.SupplementJob{QueryGroup: "qg-late", EvaluationTime: 120, Series: []execution.SeriesIdentityDigest{"a"},
+			Deadline: now.Add(time.Minute), Guard: func() bool { return proceed }}
+		outcome := lookbackSupplement(supplementOwnership(runner), nil, func() time.Time { return clock }, waitWithin)(context.Background(), job)
+		switch {
+		case proceed && !outcome.Ran:
+			t.Fatalf("a supplement its guard let through: %+v", outcome)
+		case !proceed && (outcome.Ran || outcome.Refused != lookback.SupplementOvertaken || outcome.Held != 30*time.Millisecond):
+			t.Fatalf("a supplement its guard turned back: %+v, want refused as overtaken with its hold", outcome)
+		}
 	}
 }
 

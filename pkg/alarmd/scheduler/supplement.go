@@ -30,7 +30,32 @@ var (
 	// ErrSupplementUnsupported is a Runner whose Slot source cannot freeze a
 	// completed Slot again.
 	ErrSupplementUnsupported = errors.New("alarmd scheduler: the Slot source does not freeze completed Slots")
+	// ErrSupplementOvertaken is a supplement whose guard, asked once the
+	// flight was held, said the Query Group has moved past the moment the
+	// supplement was for (WithSupplementGuard): nothing was frozen or written.
+	ErrSupplementOvertaken = errors.New("alarmd scheduler: the Query Group moved on before the supplement held its flight")
 )
+
+type supplementGuardKey struct{}
+
+// WithSupplementGuard is ctx carrying a guard a supplement asks once it
+// holds its Query Group's flight and before it freezes anything: false
+// means the Query Group has moved past what the supplement was for, and it
+// gives the flight back having written nothing (ErrSupplementOvertaken).
+// Asked under the flight, the answer holds until the supplement ends: no
+// Slot of the group can start while it is held.
+func WithSupplementGuard(ctx context.Context, guard func() bool) context.Context {
+	if guard == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, supplementGuardKey{}, guard)
+}
+
+// SupplementGuardOf is the guard ctx carries, nil when none.
+func SupplementGuardOf(ctx context.Context) func() bool {
+	guard, _ := ctx.Value(supplementGuardKey{}).(func() bool)
+	return guard
+}
 
 // SupplementSlotSource freezes a completed Slot again, for a supplement.
 type SupplementSlotSource interface {
@@ -154,6 +179,9 @@ func (runner *Runner) Supplement(
 		return execution.SupplementFacts{}, ErrSupplementFlightBusy
 	}
 	defer release()
+	if guard := SupplementGuardOf(ctx); guard != nil && !guard() {
+		return execution.SupplementFacts{}, ErrSupplementOvertaken
+	}
 	slot, err := source.FreezeSupplement(ctx, at)
 	if err != nil {
 		return execution.SupplementFacts{}, err

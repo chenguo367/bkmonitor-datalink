@@ -190,6 +190,40 @@ func TestASupplementDoesNotWaitForAnExecutingSlot(t *testing.T) {
 	}
 }
 
+// A supplement's guard is asked once the supplement holds the flight, and
+// no earlier; told the Query Group moved on, the supplement gives the
+// flight back having frozen and executed nothing. Told it has not, it runs.
+func TestASupplementAsksItsGuardUnderTheFlight(t *testing.T) {
+	for _, proceed := range []bool{false, true} {
+		flights := NewFlightCoordinator()
+		source := &supplementSource{slot: supplementSlot(t)}
+		executor := &supplementExecutor{}
+		runner, err := NewRunner("query-group-1", &fakeSession{fence: testFence(7)}, source, executor, flights, func() time.Time { return time.Unix(260, 0) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		heldAtAsk := ""
+		ctx := WithSupplementGuard(context.Background(), func() bool {
+			heldAtAsk, _ = flights.FlightHeld("query-group-1")
+			return proceed
+		})
+		_, err = runner.Supplement(ctx, 120, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
+		if heldAtAsk != FlightHeldBySupplement {
+			t.Fatalf("proceed %v: the guard was asked with the flight held by %q, want the supplement", proceed, heldAtAsk)
+		}
+		if !proceed && (!errors.Is(err, ErrSupplementOvertaken) || len(source.frozen) != 0 || len(executor.requests) != 0) {
+			t.Fatalf("an overtaken supplement: error %v frozen %v requests %d, want refused with nothing done", err, source.frozen,
+				len(executor.requests))
+		}
+		if proceed && (err != nil || len(executor.requests) != 1) {
+			t.Fatalf("a supplement its guard let through: error %v requests %d", err, len(executor.requests))
+		}
+		if _, held := flights.FlightHeld("query-group-1"); held {
+			t.Fatalf("proceed %v: the flight is still held after the supplement", proceed)
+		}
+	}
+}
+
 // A fence that moved since the Slot was frozen again is refused before
 // anything is executed; a source that cannot freeze completed Slots is
 // refused by name.

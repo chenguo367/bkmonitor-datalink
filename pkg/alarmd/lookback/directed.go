@@ -103,7 +103,15 @@ type SupplementJob struct {
 	Series         []execution.SeriesIdentityDigest
 	Read           *KeptRead
 	Deadline       time.Time
+	// Guard, when set, is asked once the supplement holds its Query Group's
+	// flight: false means the group has moved on, and the supplement is
+	// refused as SupplementOvertaken having written nothing.
+	Guard func() bool
 }
+
+// SupplementOvertaken is a supplement refused because its guard said the
+// Query Group had moved on by the time it held the flight.
+const SupplementOvertaken = "overtaken"
 
 // SupplementOutcome is what became of a SupplementJob: the supplement's own
 // facts when it ran, or, when it did not, why - flight_busy,
