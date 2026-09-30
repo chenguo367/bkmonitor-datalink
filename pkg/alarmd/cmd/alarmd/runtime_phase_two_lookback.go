@@ -308,7 +308,7 @@ func lateSeriesFacts(pastRound []lookback.LatePastRoundReading, residual []lookb
 			SuggestedDelaySeconds: reading.SuggestedDelaySeconds, Since: reading.Since}
 		for _, sample := range reading.Samples {
 			row.Samples = append(row.Samples, fleet.LatePastRoundSample{EvaluationTime: int64(sample.EvaluationTime),
-				Rung: sample.Rung, SeenAgeSeconds: sample.SeenAgeSeconds, CrossedSeries: sample.CrossedSeries})
+				Rung: sample.Rung, SeenAgeSeconds: sample.SeenAgeSeconds, OnTimeSeries: sample.OnTimeSeries, CrossedSeries: sample.CrossedSeries})
 		}
 		past[string(reading.QueryGroup)] = row
 	}
@@ -317,7 +317,7 @@ func lateSeriesFacts(pastRound []lookback.LatePastRoundReading, residual []lookb
 		row := fleet.LateSeriesMissedFacts{Windows: reading.Windows, CrossedSeries: reading.CrossedSeries, Since: reading.Since}
 		for _, sample := range reading.Samples {
 			row.Samples = append(row.Samples, fleet.LateSeriesMissedSample{EvaluationTime: int64(sample.EvaluationTime),
-				AdmittedSeries: sample.AdmittedSeries, CrossedSeries: sample.CrossedSeries})
+				OnTimeSeries: sample.OnTimeSeries, AdmittedSeries: sample.AdmittedSeries, CrossedSeries: sample.CrossedSeries})
 		}
 		missed[string(reading.QueryGroup)] = row
 	}

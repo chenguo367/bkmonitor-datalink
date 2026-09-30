@@ -26,6 +26,7 @@ type LatePastRoundSample struct {
 	EvaluationTime int64  `json:"evaluation_time"`
 	Rung           string `json:"rung,omitempty"`
 	SeenAgeSeconds int64  `json:"seen_age_seconds"`
+	OnTimeSeries   int    `json:"on_time_series"`
 	CrossedSeries  int    `json:"crossed_series"`
 }
 
@@ -43,9 +44,11 @@ type LatePastRoundFacts struct {
 }
 
 // LateSeriesMissedSample is one supplemented window with series recovered
-// and series that had crossed their Slot: the Slot and how many of each.
+// and series that had crossed their Slot: the Slot, how many series its
+// first read had on time, and how many late ones were recovered and not.
 type LateSeriesMissedSample struct {
 	EvaluationTime int64 `json:"evaluation_time"`
+	OnTimeSeries   int   `json:"on_time_series"`
 	AdmittedSeries int   `json:"admitted_series"`
 	CrossedSeries  int   `json:"crossed_series"`
 }

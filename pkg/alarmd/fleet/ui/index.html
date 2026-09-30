@@ -923,8 +923,8 @@ var EVIDENCE = {
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
   QUERY_TARGET_MISSING:  '分组的后端回答（表/字段不存在的状态词）；策略引用的表与字段看行上策略链接，与元数据逐个核',
   READ_BEFORE_COMPLETE: '对象行"首读早于数据到齐"：当前有效的 time_delay（current_time_delay_seconds，按周期向上取整、日志关键字不配时取 60）、建议值（suggested_time_delay_seconds：当前值加上样本里数据比首读晚到齐的最大秒数，再按周期向上取整；到齐时刻取的是第一次读全的那一档复查，数据实际在它和前一档之间到达，所以建议值是上界）、从何时起连续出现（since）。依据的样本（每个样本的 Slot、首读年龄、到齐年龄、在哪一档复查时看到首读已有的序列变了或首读为空后数据才到、变化的桶）在属主副本的 lookback.get 里（read_early）。回看按事实分四类，只有"整窗读早"进这一行；只是后来多出新序列的归补充检测，序列表被内存安全线拒绝而分不出的记为未分类，都不在这一行',
-  LATE_PAST_ROUND: '对象行"迟到超过一轮"：当前有效的 time_delay（current_time_delay_seconds）、建议值（suggested_time_delay_seconds：当前值加上迟到序列在首读后多久被看到，按周期向上取整；序列在那一档复查和前一档之间到达，所以建议值是上界）、从何时起连续出现（since），以及依据的窗口（每个窗口的 Slot、看到迟到序列的那一档、距首读多久、有几条序列已经越过了自己的 Slot）。只有窗口里每一条迟到序列都越过了自己的 Slot 才算；同一窗口里有序列加载失败、读不全、配置已变或记为无数据的，这个窗口不算也不撤',
-  LATE_SERIES_MISSED: '对象行"补充补不回的迟到序列"：补充只补回一部分的窗口数（windows）、这些窗口里补不回的序列数（crossed_series）、从何时起（since），以及最近的几个窗口（每个窗口补回几条、补不回几条）。补回的由补充检测记在 lookback.get 的 supplements 里',
+  LATE_PAST_ROUND: '对象行"迟到超过一轮"：当前有效的 time_delay（current_time_delay_seconds）、建议值（suggested_time_delay_seconds：当前值加上迟到序列在首读后多久被看到，按周期向上取整；序列在那一档复查和前一档之间到达，所以建议值是上界）、从何时起连续出现（since），以及依据的窗口（每个窗口的 Slot、看到迟到序列的那一档、距首读多久、首读准时的序列数、有几条序列已经越过了自己的 Slot）。只有窗口里每一条迟到序列都越过了自己的 Slot 才算；同一窗口里有序列加载失败、读不全、配置已变或记为无数据的，这个窗口不算也不撤',
+  LATE_SERIES_MISSED: '对象行"补充补不回的迟到序列"：补充只补回一部分的窗口数（windows）、这些窗口里补不回的序列数（crossed_series）、从何时起（since），以及最近的几个窗口（每个窗口首读准时的序列数、补回几条、补不回几条，三个数并排；补不回的接近准时加补回的总数，就是接近整窗迟到）。补回的由补充检测记在 lookback.get 的 supplements 里',
   RETAINED_SHARE_APPROACHING: '对象行"逼近份额"：最近一个完成 Slot 的留存字节 retained_bytes、它被判的单对象份额 share_bytes、两者之比 percent_of_share、阈值 threshold_percent、从何时起一直在阈值以上（since），以及按相位拆开的 retained_input/state/output/gap_bytes；按策略分组，最满的在前。指标 state_retained_share_approaching_slots_total 数的是这样的完成 Slot'
 };
 
