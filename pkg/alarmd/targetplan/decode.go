@@ -38,6 +38,10 @@ const (
 	// dynamic reference. It would match nothing; refusing it puts it on the
 	// first screen where a strategy that can never alert belongs.
 	ReasonEmpty = "TARGET_PLAN_EMPTY"
+	// ReasonTenantMismatch is an ip_cloud plan whose tenant is not the
+	// strategy's: its hosts would be read as another tenant's, and an
+	// address is a host only inside one tenant.
+	ReasonTenantMismatch = "TARGET_PLAN_TENANT_MISMATCH"
 )
 
 // Error is one refusal: the bounded reason, the path inside target_plan of
@@ -69,6 +73,9 @@ const (
 
 // Options are the strategy facts the decoder needs beside the document.
 type Options struct {
+	// TenantID is the strategy's tenant, which an ip_cloud plan names too
+	// and must name the same.
+	TenantID string
 	// ObjectIdentities are the (model dimension, instance dimension) pairs
 	// the strategy's query configurations identify object-model records by,
 	// first occurrence first and the platform default last. They decide how
@@ -80,7 +87,7 @@ type Options struct {
 // to them, and DocumentKeys lists them.
 var (
 	planFields = []string{"schema_version", "model_id", "target_rule", "failure_policy",
-		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match"}
+		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match", "bk_tenant_id"}
 	dynamicGroupFields    = []string{"dynamic_group_id"}
 	dynamicTopologyFields = []string{"bk_biz_id", "bk_obj_id", "bk_inst_id"}
 	hostTargetFields      = []string{"bk_host_id"}
@@ -110,7 +117,7 @@ func DocumentKeys() []string {
 	add("static_targets", matchedTargetFields...)
 	add("static_targets", staticTargetBusinessField)
 	for _, rule := range contract.TargetPlanRules() {
-		if rule == contract.TargetPlanRuleHostID || rule == contract.TargetPlanRuleModelInstID {
+		if rule == contract.TargetPlanRuleHostID || rule == contract.TargetPlanRuleModelInstID || rule == contract.TargetPlanRuleIPCloud {
 			continue // decodeStaticTarget reads no match for these
 		}
 		dimensions, _ := contract.TargetPlanRuleDimensions(rule)
@@ -153,6 +160,25 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	}
 
 	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: modelID, Rule: rule, StaticKeys: []string{}}
+	// The tenant belongs to ip_cloud alone: its addresses are read inside
+	// one tenant, and that tenant is the strategy's.
+	tenantRaw, tenantNamed := fields["bk_tenant_id"]
+	if rule == contract.TargetPlanRuleIPCloud {
+		if modelID != contract.HostModelID {
+			return nil, unsupported("model_id", "rule %s names %s", rule, contract.HostModelID)
+		}
+		tenant, err := nonEmptyText(tenantRaw)
+		if err != nil {
+			return nil, unsupported("bk_tenant_id", "%s", err)
+		}
+		if tenant != options.TenantID {
+			return nil, &Error{Reason: ReasonTenantMismatch, Path: "bk_tenant_id",
+				Detail: fmt.Sprintf("the plan names tenant %q, the strategy is tenant %q's", tenant, options.TenantID)}
+		}
+		plan.TenantID = tenant
+	} else if tenantNamed {
+		return nil, unsupported("bk_tenant_id", "only %s carries a tenant", contract.TargetPlanRuleIPCloud)
+	}
 	identity, err2 := decodeIdentity(rule, ruleDimensions, fields["model_match"], options)
 	if err2 != nil {
 		return nil, err2
@@ -164,12 +190,18 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		return nil, unsupported("static_targets", "%s", err)
 	}
 	keys := make([]string, 0, len(statics))
+	var hosts []string
 	seenMembers := make(map[contract.TargetPlanMemberV1]struct{}, len(statics))
 	businesses := staticBusinesses{}
 	for index, element := range statics {
 		key, member, business, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("static_targets[%d]", index))
 		if err != nil {
 			return nil, err
+		}
+		if rule == contract.TargetPlanRuleIPCloud {
+			// A host id: its key is its address, which the worker reads.
+			hosts = append(hosts, key)
+			continue
 		}
 		if member != nil {
 			if _, duplicate := seenMembers[*member]; !duplicate {
@@ -182,6 +214,9 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		businesses.add(key, business)
 	}
 	plan.StaticKeys = contract.CanonicalTargetScopeKeys(keys)
+	if len(hosts) > 0 {
+		plan.StaticHosts = contract.CanonicalTargetScopeKeys(hosts)
+	}
 	plan.StaticBusinesses = businesses.frozen()
 	contract.SortTargetPlanMembers(plan.StaticMembers)
 
@@ -250,7 +285,8 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	}
 	contract.SortTargetPlanTopologies(plan.DynamicTopologies)
 
-	if len(plan.StaticKeys) == 0 && len(plan.StaticMembers) == 0 && len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
+	if len(plan.StaticKeys) == 0 && len(plan.StaticMembers) == 0 && len(plan.StaticHosts) == 0 &&
+		len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
 		return nil, &Error{Reason: ReasonEmpty, Detail: "the plan names no static target and no dynamic reference"}
 	}
 	if err := plan.Validate(); err != nil {
@@ -286,7 +322,8 @@ func decodeIdentity(
 		if len(modelMatch) != 0 {
 			return contract.TargetPlanIdentityV1{}, unsupported("model_match", "only %s carries a model match", contract.TargetPlanRuleModelInstID)
 		}
-		return contract.TargetPlanIdentityV1{Dimensions: ruleDimensions, HostIdentity: rule == contract.TargetPlanRuleHostID}, nil
+		return contract.TargetPlanIdentityV1{Dimensions: ruleDimensions, HostIdentity: rule == contract.TargetPlanRuleHostID,
+			Address: rule == contract.TargetPlanRuleIPCloud}, nil
 	}
 	pairs := options.ObjectIdentities
 	if len(pairs) == 0 {
@@ -337,7 +374,7 @@ func decodeStaticTarget(
 		return "", nil, "", unsupported(path, "%s", err)
 	}
 	switch rule {
-	case contract.TargetPlanRuleHostID:
+	case contract.TargetPlanRuleHostID, contract.TargetPlanRuleIPCloud:
 		if err := onlyKeys(fields, path, hostTargetFields...); err != nil {
 			return "", nil, "", err
 		}
@@ -491,7 +528,8 @@ func onlyKeys(fields map[string]json.RawMessage, path string, allowed ...string)
 		}
 	}
 	for _, name := range allowed {
-		if name == "model_match" {
+		if name == "model_match" || name == "bk_tenant_id" {
+			// Optional by key; the rule decides whether it must be there.
 			continue
 		}
 		if _, present := fields[name]; !present {

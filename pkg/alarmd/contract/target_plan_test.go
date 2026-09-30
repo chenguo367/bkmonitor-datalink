@@ -163,6 +163,68 @@ func TestTheFrozenTargetPlanRefusesItsOwnDefects(t *testing.T) {
 	}
 }
 
+// An ip_cloud plan names the host model, its tenant and its hosts by id,
+// and reads the record's address; everything else about it is a defect,
+// and the tenant and the hosts are its alone.
+func TestTheFrozenIPCloudPlanRefusesItsOwnDefects(t *testing.T) {
+	valid := func() TargetPlanV1 {
+		return TargetPlanV1{SchemaVersion: 1, ModelID: HostModelID, Rule: TargetPlanRuleIPCloud, TenantID: "tenant-a",
+			Identity:   TargetPlanIdentityV1{Dimensions: []string{IPCloudIPDimension, IPCloudCloudDimension}, Address: true},
+			StaticKeys: []string{}, StaticHosts: []string{"501", "502"}, DynamicGroups: []string{"1"}}
+	}
+	plan := valid()
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("valid ip_cloud plan refused: %v", err)
+	}
+	for name, edit := range map[string]func(*TargetPlanV1){
+		"no tenant":             func(p *TargetPlanV1) { p.TenantID = " " },
+		"another model":         func(p *TargetPlanV1) { p.ModelID = "cw-MySQL" },
+		"not read by address":   func(p *TargetPlanV1) { p.Identity.Address = false },
+		"read by host identity": func(p *TargetPlanV1) { p.Identity.HostIdentity = true },
+		"static keys":           func(p *TargetPlanV1) { p.StaticKeys = []string{"192.0.2.1|0"} },
+		"unsorted hosts":        func(p *TargetPlanV1) { p.StaticHosts = []string{"502", "501"} },
+		"host zero":             func(p *TargetPlanV1) { p.StaticHosts = []string{"0"} },
+		"host not a number":     func(p *TargetPlanV1) { p.StaticHosts = []string{"h501"} },
+		"dimensions changed":    func(p *TargetPlanV1) { p.Identity.Dimensions = []string{IPCloudIPDimension} },
+		"nothing named":         func(p *TargetPlanV1) { p.StaticHosts, p.DynamicGroups = nil, nil },
+		"address on host rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true, Address: true}
+		},
+		"tenant on host rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity, p.StaticHosts = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, nil
+		},
+		"hosts on host rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity, p.TenantID = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := valid()
+			edit(&plan)
+			if err := plan.Validate(); err == nil {
+				t.Fatalf("validated %+v", plan)
+			}
+		})
+	}
+}
+
+// An address reads only in its canonical form: a dotted IPv4 address with
+// no leading zeros and no space, and a cloud area as a non-negative decimal,
+// a JSON integer or a string of digits.
+func TestAnAddressReadsOnlyInItsCanonicalForm(t *testing.T) {
+	for raw, want := range map[string]string{`"192.0.2.1"`: "192.0.2.1", `"192.0.2.01"`: "", `" 192.0.2.1"`: "", `"::1"`: "",
+		`"2001:db8::1"`: "", `192`: "", `null`: ""} {
+		if got, read := CanonicalIPv4(json.RawMessage(raw)); got != want || read != (want != "") {
+			t.Fatalf("CanonicalIPv4(%s) = %q, %v; want %q", raw, got, read, want)
+		}
+	}
+	for raw, want := range map[string]string{`0`: "0", `"0"`: "0", `12`: "12", `"12"`: "12", `"012"`: "", `-1`: "", `"-1"`: "",
+		`0.5`: "", `1e2`: "", `true`: "", `null`: "", `" 1"`: ""} {
+		if got, read := CanonicalCloudArea(json.RawMessage(raw)); got != want || read != (want != "") {
+			t.Fatalf("CanonicalCloudArea(%s) = %q, %v; want %q", raw, got, read, want)
+		}
+	}
+}
+
 // A Plan without a target plan encodes exactly as before the field existed,
 // so every digest taken over a Plan before this change is unchanged; a Plan
 // with one round-trips it.

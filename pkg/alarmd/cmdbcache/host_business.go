@@ -43,6 +43,20 @@ func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, b
 	return facts.BusinessID, true
 }
 
+// LookupAddressBusiness returns the business of the one host at an ip_cloud
+// address of a tenant, and false when the index holds none there, or more
+// than one: an address two hosts share names neither's business.
+func (lookup *HostBusinessLookup) LookupAddressBusiness(tenantID, address string) (string, bool) {
+	if lookup == nil || lookup.store == nil {
+		return "", false
+	}
+	host, count := lookup.store.Current().AddressHost(tenantID, address)
+	if count != 1 || host == nil {
+		return "", false
+	}
+	return host.BusinessID, true
+}
+
 // LookupClusterBusiness returns the business the platform published for one
 // BCS cluster, from the current snapshot, and false when it published none.
 // It is asked when a global business Plan's event on Kubernetes data names

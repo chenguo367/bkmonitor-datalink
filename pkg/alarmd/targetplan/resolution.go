@@ -64,13 +64,27 @@ const (
 	// snapshot before is no longer served, and the group is not read as empty
 	// either.
 	ReasonEmptiedHeld = "emptied_held"
+	// ReasonGroupTenantMismatch is a dynamic group an ip_cloud plan references
+	// that is not the plan's tenant's, or names no tenant: its members would
+	// be read as addresses inside the wrong tenant.
+	ReasonGroupTenantMismatch = "tenant_mismatch"
+	// ReasonAddressUnresolved is an ip_cloud selector none of whose hosts
+	// has a target address inside the plan's tenant: the host cache carries
+	// none for them yet - its writer puts one on a host only once it has
+	// refreshed with the source's whole address - or they are another
+	// tenant's. Not an empty target.
+	ReasonAddressUnresolved = "address_unresolved"
+	// ReasonAddressAmbiguous is an ip_cloud member at an address another
+	// host of the tenant shares: the address names neither host, and the
+	// member is left out rather than matched against both.
+	ReasonAddressAmbiguous = "address_ambiguous"
 )
 
 // SelectorReasons is the closed list, for the metric.
 var SelectorReasons = []string{
 	ReasonNone, ReasonKeyMissing, ReasonJSONInvalid, ReasonStructureInvalid, ReasonModelMismatch, ReasonReadFailed,
 	ReasonStale, ReasonIndexUnavailable, ReasonNodeMissing, ReasonNodeForeign, ReasonMembersDropped, ReasonSourceUnwired,
-	ReasonModelUnresolved, ReasonEmptiedHeld,
+	ReasonModelUnresolved, ReasonEmptiedHeld, ReasonGroupTenantMismatch, ReasonAddressUnresolved, ReasonAddressAmbiguous,
 }
 
 // SelectorResult is one selector's answer: its members in the plan's key
@@ -201,7 +215,13 @@ func (resolution *Resolution) Compose() {
 			if resolution.State != ResolutionUnavailable {
 				resolution.State = ResolutionIncomplete
 			}
-			resolution.Failures = append(resolution.Failures, Failure{Kind: selector.Kind, ID: selector.ID, Reason: ReasonMembersDropped, Dropped: selector.Dropped, Kept: selector.Kept})
+			// Members were dropped; the selector says why when it knows more
+			// than that (an address two hosts share).
+			reason := selector.Reason
+			if reason == "" || reason == ReasonNone {
+				reason = ReasonMembersDropped
+			}
+			resolution.Failures = append(resolution.Failures, Failure{Kind: selector.Kind, ID: selector.ID, Reason: reason, Dropped: selector.Dropped, Kept: selector.Kept})
 		}
 		if selector.NodeMissing {
 			resolution.NodesMissing = append(resolution.NodesMissing, selector.ID)
