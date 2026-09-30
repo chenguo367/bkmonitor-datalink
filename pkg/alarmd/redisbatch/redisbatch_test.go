@@ -187,3 +187,24 @@ func TestWindowsAnswerEachKeyAndFailOnTheTransport(t *testing.T) {
 		t.Fatalf("a read whose transport failed = %d values, %v", len(values), err)
 	}
 }
+
+// A code is the word Redis's error reply leads with, and only that word; a
+// reply that leads with none is redis_error, and an error that is not Redis
+// answering has no code.
+func TestAnsweredCodeIsTheReplysLeadingWord(t *testing.T) {
+	for _, test := range []struct {
+		err      error
+		code     string
+		answered bool
+	}{
+		{err: answeredError("LOADING Redis is loading the dataset in memory"), code: "LOADING", answered: true},
+		{err: fmt.Errorf("k: %w", answeredError("BUSY Redis is busy running a script")), code: "BUSY", answered: true},
+		{err: answeredError("MASTERDOWN"), code: "MASTERDOWN", answered: true},
+		{err: answeredError("oops at 192.0.2.1:6379"), code: "redis_error", answered: true},
+		{err: errors.New("dial tcp 127.0.0.1:1: connect: connection refused")},
+	} {
+		if code, answered := AnsweredCode(test.err); code != test.code || answered != test.answered {
+			t.Fatalf("%v = %q, %v; want %q, %v", test.err, code, answered, test.code, test.answered)
+		}
+	}
+}

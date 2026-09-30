@@ -398,8 +398,6 @@ func (store *GroupStore) MaxAge() time.Duration {
 	return store.maxAge
 }
 
-// groupReference is one id's registration: when it was last asked for and
-// the longest evaluation interval among the Plans that asked.
 // groupFailure is one group's run of refreshes that could not read it.
 type groupFailure struct {
 	since  time.Time
@@ -417,10 +415,29 @@ func (store *GroupStore) failedLocked(id string, at time.Time, why error) {
 	if !running {
 		failure.since = at
 	}
-	failure.reason = why.Error()
+	failure.reason = groupFailureReason(why)
 	store.failing[id] = failure
 }
 
+// groupFailureReason is why a refresh could not read a group, in closed
+// words: the code Redis answered its key with (LOADING, BUSY, WRONGTYPE;
+// redisbatch.AnsweredCode), timed_out for a round trip that ran past its
+// deadline or was cancelled, transport for any other failure. Never the
+// error's text: a Redis client's names the endpoint it could not reach, and
+// the reason is published with the replica's dependencies.
+func groupFailureReason(err error) string {
+	if code, answered := redisbatch.AnsweredCode(err); answered {
+		return code
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &timeout) && timeout.Timeout()) {
+		return "timed_out"
+	}
+	return "transport"
+}
+
+// groupReference is one id's registration: when it was last asked for and
+// the longest evaluation interval among the Plans that asked.
 type groupReference struct {
 	askedAt  time.Time
 	interval time.Duration
@@ -750,8 +767,8 @@ type GroupHealth struct {
 	Unanswered      int
 	UnansweredReads uint64
 	// Failing is each group served past a refresh that could not read it, by
-	// id: since the first such refresh after its last read, and what the
-	// latest said.
+	// id: since the first such refresh after its last read, and why the
+	// latest could not, in closed words (groupFailureReason).
 	Failing []GroupFailure
 }
 

@@ -10,6 +10,7 @@
 package main
 
 import (
+	"sort"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
@@ -28,8 +29,9 @@ const (
 
 // withTargetGroups adds what this replica's dynamic group store reads of the
 // target group cache to its endpoint: the groups it holds, its own reading
-// of them, and each group served past refreshes that could not read it -
-// since when, and why. A replica serving a group from before Redis started
+// of them, and the groups served past refreshes that could not read them -
+// the longest-failing by name, since when and why, and all of them counted
+// by reason. A replica serving a group from before Redis started
 // answering its key with an error is read here in one step, not guessed
 // from a Plan's stale age. Without a store the endpoint is as it was.
 func withTargetGroups(endpoints func() []fleet.Endpoint, groups *cmdbcache.GroupStore, now func() time.Time) func() []fleet.Endpoint {
@@ -62,10 +64,26 @@ func targetGroupEvidence(health cmdbcache.GroupHealth, at time.Time) *fleet.Writ
 	default:
 		evidence.State = targetGroupLoaded
 	}
-	for _, failure := range health.Failing {
-		evidence.Failing = append(evidence.Failing, fleet.FailingCopy{
-			ID: failure.ID, SinceAgeSeconds: at.Sub(failure.Since).Seconds(), Reason: failure.Reason,
-		})
+	if len(health.Failing) == 0 {
+		return evidence
+	}
+	// The groups failing longest are named, and the rest counted: the list
+	// rides in every replica's head, and Redis loading fails every group.
+	failing := append([]cmdbcache.GroupFailure(nil), health.Failing...)
+	sort.Slice(failing, func(i, j int) bool {
+		if !failing[i].Since.Equal(failing[j].Since) {
+			return failing[i].Since.Before(failing[j].Since)
+		}
+		return failing[i].ID < failing[j].ID
+	})
+	evidence.FailingTotal, evidence.FailingReasons = len(failing), map[string]int{}
+	for index, failure := range failing {
+		evidence.FailingReasons[failure.Reason]++
+		if index < fleet.MaxFailingCopiesListed {
+			evidence.Failing = append(evidence.Failing, fleet.FailingCopy{
+				ID: failure.ID, SinceAgeSeconds: at.Sub(failure.Since).Seconds(), Reason: failure.Reason,
+			})
+		}
 	}
 	return evidence
 }
