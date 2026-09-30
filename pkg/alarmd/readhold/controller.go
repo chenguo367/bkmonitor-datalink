@@ -68,6 +68,9 @@ type PlanRecord struct {
 	ArrivalAgeMillis       int64                        `json:"arrival_age_ms,omitempty"`
 	ClosedAt               execution.EvaluationTime     `json:"closed_at,omitempty"`
 	ClosedQueryGroup       execution.QueryGroupIdentity `json:"closed_query_group,omitempty"`
+	InheritedQueryGroup    execution.QueryGroupIdentity `json:"inherited_query_group,omitempty"`
+	InheritedClosedAt      execution.EvaluationTime     `json:"inherited_closed_at,omitempty"`
+	PreviousHoldUnknown    bool                         `json:"previous_hold_unknown,omitempty"`
 	PreviousHoldMillis     int64                        `json:"previous_hold_ms,omitempty"`
 	PreviousSlot           execution.EvaluationTime     `json:"previous_slot,omitempty"`
 	CompletionOffsetMillis int64                        `json:"completion_offset_ms,omitempty"`
@@ -311,6 +314,7 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 	if owner.Fence.QueryGroup != qg {
 		return errors.New("alarmd readhold: owner differs from Query Group")
 	}
+	prunePlans(&next, state.spec.Plans, controller.options.Now().Unix()-int64(RecordTTL/time.Second))
 	next.RenewedAtMillis = controller.options.Now().UnixMilli()
 	raw, err := json.Marshal(next)
 	if err != nil {
@@ -347,7 +351,7 @@ func inherited(record Record, spec GroupSpec) bool {
 		for _, wanted := range previousPlans(spec, predecessor) {
 			found := false
 			for _, plan := range record.Plans {
-				found = found || (plan.PlanRef == wanted && plan.ClosedAt == predecessor.ClosedAt && plan.ClosedQueryGroup == predecessor.QueryGroup)
+				found = found || (plan.PlanRef == wanted && plan.InheritedClosedAt == predecessor.ClosedAt && plan.InheritedQueryGroup == predecessor.QueryGroup)
 			}
 			if !found {
 				return false
@@ -386,7 +390,7 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 				return Record{}, ErrPreviousHoldUnknown
 			}
 			previous = Record{SinceSlot: 1}
-			closeRecord(&previous, state.spec, *predecessor.Schedule)
+			closeRecord(&previous, state.spec, *predecessor.Schedule, controller.options.MaxHold.Milliseconds())
 		}
 		for _, wanted := range previousPlans(state.spec, predecessor) {
 			matched := false
@@ -399,6 +403,7 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 				}
 				matched = true
 				plan.ClosedQueryGroup = predecessor.QueryGroup
+				plan.InheritedQueryGroup, plan.InheritedClosedAt = predecessor.QueryGroup, predecessor.ClosedAt
 				next.ArrivalAgeMillis = max(next.ArrivalAgeMillis, plan.ArrivalAgeMillis)
 				mergePlan(&next, plan)
 				if plan.PreviousSlot > 0 {
@@ -430,6 +435,31 @@ func mergePlan(record *Record, plan PlanRecord) {
 		}
 	}
 	record.Plans = append(record.Plans, plan)
+}
+
+func prunePlans(record *Record, current []PlanRef, cutoff int64) {
+	active := make(map[PlanRef]struct{}, len(current))
+	for _, plan := range current {
+		active[plan] = struct{}{}
+	}
+	kept := record.Plans[:0]
+	for _, plan := range record.Plans {
+		_, configured := active[plan.PlanRef]
+		if configured || plan.ClosedAt == 0 || int64(plan.ClosedAt) > cutoff {
+			kept = append(kept, plan)
+		}
+	}
+	record.Plans = kept
+}
+
+func pruneTransitions(record *Record, readyWithoutHold int64) {
+	kept := record.Transitions[:0]
+	for _, transition := range record.Transitions {
+		if transition.DeadlineMillis > readyWithoutHold {
+			kept = append(kept, transition)
+		}
+	}
+	record.Transitions = kept
 }
 
 // SlotReadHold is called before a new Slot is frozen. An unfinished Slot
@@ -473,8 +503,9 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		next.SegmentStart, next.Closed = schedule.Segment.Start, false
 	}
 	if schedule.Segment.End != nil {
-		closeRecord(&next, state.spec, schedule)
+		closeRecord(&next, state.spec, schedule, controller.options.MaxHold.Milliseconds())
 	}
+	pruneTransitions(&next, int64(at)*1000+state.spec.SettlingWait.Milliseconds())
 	hold := holdAt(next, at, state.spec.SettlingWait)
 	if hold > min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds() {
 		return 0, errors.New("alarmd readhold: transition exceeds retention margin")
@@ -534,7 +565,7 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 		}
 		return nil
 	}
-	closeRecord(&next, state.spec, schedule)
+	closeRecord(&next, state.spec, schedule, controller.options.MaxHold.Milliseconds())
 	if len(state.raw) == 0 && current(next) == 0 && next.ArrivalAgeMillis == 0 && len(next.Transitions) == 0 {
 		// The caller establishes the absent zero predecessor using retained
 		// progress and its closed timeline; do not invent a durable zero h.
@@ -552,7 +583,7 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 	return controller.persist(ctx, schedule.Segment.QueryGroup, state, next, &owner)
 }
 
-func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryGroupSchedule) {
+func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryGroupSchedule, holdBound int64) {
 	record.SegmentStart, record.Closed = schedule.Segment.Start, true
 	refs := append([]PlanRef(nil), spec.Plans...)
 	for _, existing := range record.Plans {
@@ -571,6 +602,7 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 			continue
 		}
 		previousHold := holdAt(*record, execution.EvaluationTime(last), spec.SettlingWait)
+		unknown := false
 		if frozen, known := record.HoldAt(execution.EvaluationTime(last)); known {
 			if last == int64(record.SinceSlot) && record.SinceSlot > 1 {
 				// This Slot chose its frozen hold before a later observation
@@ -582,6 +614,11 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 				// its already-frozen hold must both remain protected.
 				previousHold = max(previousHold, frozen, record.HoldMillis)
 			}
+		} else {
+			// The two retained intervals no longer cover this slow Plan's
+			// final Slot. The configured bound protects its possible frozen
+			// hold without adding a historical hold state machine.
+			previousHold, unknown = max(previousHold, holdBound), true
 		}
 		for _, ref := range refs {
 			if ref.Key != plan.Key() {
@@ -594,11 +631,19 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 			if fixed {
 				continue
 			}
-			mergePlan(record, PlanRecord{PlanRef: ref, ArrivalAgeMillis: record.ArrivalAgeMillis,
-				ClosedAt:           *schedule.Segment.End,
-				ClosedQueryGroup:   schedule.Segment.QueryGroup,
-				PreviousHoldMillis: previousHold, PreviousSlot: execution.EvaluationTime(last),
-				CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000})
+			closed := PlanRecord{PlanRef: ref, ArrivalAgeMillis: record.ArrivalAgeMillis,
+				ClosedAt:            *schedule.Segment.End,
+				ClosedQueryGroup:    schedule.Segment.QueryGroup,
+				PreviousHoldUnknown: unknown,
+				PreviousHoldMillis:  previousHold, PreviousSlot: execution.EvaluationTime(last),
+				CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000}
+			for _, existing := range record.Plans {
+				if existing.PlanRef == ref {
+					closed.InheritedQueryGroup, closed.InheritedClosedAt = existing.InheritedQueryGroup, existing.InheritedClosedAt
+					break
+				}
+			}
+			mergePlan(record, closed)
 		}
 	}
 }

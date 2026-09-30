@@ -83,6 +83,9 @@ func Decode(raw []byte) (Record, error) {
 			plan.ClosedAt < 0 || (plan.ClosedAt > 0 && plan.PreviousSlot >= plan.ClosedAt) {
 			return Record{}, ErrRecordInvalid
 		}
+		if plan.InheritedClosedAt < 0 || (plan.InheritedClosedAt > 0 && plan.InheritedQueryGroup == "") {
+			return Record{}, ErrRecordInvalid
+		}
 	}
 	for _, transition := range record.Transitions {
 		if transition.Key.PlanIdentity.Validate() != nil || transition.DeadlineMillis <= 0 {

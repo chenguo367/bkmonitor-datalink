@@ -49,7 +49,7 @@ func (store *memoryControl) FencedCompareAndSet(_ context.Context, request owner
 
 func controllerFixture(t *testing.T) (*Controller, *memoryControl, *time.Time) {
 	t.Helper()
-	now := time.Unix(1_800_000, 0)
+	now := time.Unix(1800, 0)
 	store := &memoryControl{values: make(map[execution.QueryGroupIdentity][]byte), readErr: make(map[execution.QueryGroupIdentity]error)}
 	controller, err := NewController(Options{Control: store, Prefix: "schedule", MaxHold: 10 * time.Minute, Now: func() time.Time { return now }, Owner: func(qg execution.QueryGroupIdentity) (Owner, error) {
 		return Owner{Fence: holdFence(qg), ContentScope: "view"}, nil
@@ -526,5 +526,113 @@ func TestCloseScheduleProtectsFinalFrozenHoldAndFuturePendingRaise(t *testing.T)
 				t.Fatal("new first read preceded the final old Slot's completion deadline")
 			}
 		})
+	}
+}
+
+func TestInheritedAckSurvivesClosingAndReopeningTheSameGroup(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("a", 0))
+	observeEarly(t, c, "a", 180*time.Second, 30*time.Second, 0)
+	first := execution.EvaluationTime(1200)
+	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "a", 60, &first), holdFence("a")); err != nil {
+		t.Fatal(err)
+	}
+	spec := groupSpec("b", 120*time.Second)
+	spec.Previous = []Previous{{QueryGroup: "a", ClosedAt: first}}
+	prepare(t, c, spec)
+	if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "b", first, nil), first, holdFence("b")); err != nil {
+		t.Fatal(err)
+	}
+	second := execution.EvaluationTime(1500)
+	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "b", first, &second), holdFence("b")); err != nil {
+		t.Fatal(err)
+	}
+	reading, _ := c.Reading("b")
+	if plan := reading.Plans[0]; plan.ClosedQueryGroup != "b" || plan.ClosedAt != second || plan.InheritedQueryGroup != "a" || plan.InheritedClosedAt != first {
+		t.Fatalf("a closure overwrote the inherited acknowledgment: %+v", plan)
+	}
+	delete(store.values, "a")
+	c.Forget("a")
+	if err := c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second, holdFence("b")); err != nil || got != 30*time.Second {
+		t.Fatalf("reopening depended on the expired first predecessor: %s %v", got, err)
+	}
+	// The acknowledgment is durable; takeover does not need A's old record.
+	restored, _ := NewController(c.options)
+	if err := restored.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := restored.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second+60, holdFence("b")); err != nil || got != 30*time.Second {
+		t.Fatalf("restored acknowledgment = %s %v", got, err)
+	}
+}
+
+func TestUnknownSlowPlansFrozenHoldUsesTheConfiguredBound(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	fast, slow := planRef(), planRef()
+	slow.Key.StrategyID = "slow"
+	pending := int64(0)
+	record := Record{HoldMillis: 75_000, SinceSlot: 1080, PreviousHoldMillis: 150_000, PreviousSinceSlot: 960,
+		PendingHoldMillis: &pending, ArrivalAgeMillis: 30_000, SegmentStart: 60, Plans: []PlanRecord{{PlanRef: fast}, {PlanRef: slow}}}
+	store.values["old"], _ = json.Marshal(record)
+	spec := groupSpec("old", 0)
+	spec.Plans = []PlanRef{fast, slow}
+	prepare(t, c, spec)
+	boundary := execution.EvaluationTime(1200)
+	old := scheduleFor(t, "old", 60, &boundary)
+	slowPlan := old.Plans[0]
+	slowPlan.Identity = slow.Key.PlanIdentity
+	slowPlan.Spec.EvaluationIntervalSeconds, slowPlan.Spec.CompletionDeadlineOffsetSeconds = 600, 595
+	slowPlan.ScheduleRevision, _ = execution.DerivePlanScheduleRevision(slowPlan.Spec)
+	old.Plans = append(old.Plans, slowPlan)
+	old.Segment.ScheduleRevision, _ = execution.DeriveQueryGroupScheduleRevision(old.Plans)
+	if err := c.CloseSchedule(context.Background(), old, holdFence("old")); err != nil {
+		t.Fatal(err)
+	}
+	closed, _ := c.Reading("old")
+	if plan := closed.Plans[1]; !plan.PreviousHoldUnknown || plan.PreviousSlot != 600 || plan.PreviousHoldMillis != c.options.MaxHold.Milliseconds() {
+		t.Fatalf("unknown old hold was understated: %+v", plan)
+	}
+	newSpec := groupSpec("new", 0)
+	newSpec.Plans, newSpec.Previous = spec.Plans, []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+	prepare(t, c, newSpec)
+	newSchedule := old
+	newSchedule.Segment.QueryGroup, newSchedule.Segment.Start, newSchedule.Segment.End = "new", boundary, nil
+	if got, err := c.SlotReadHold(context.Background(), newSchedule, boundary, holdFence("new")); err != nil || got != 565*time.Second {
+		t.Fatalf("new read lost the conservative old deadline: %s %v", got, err)
+	}
+}
+
+func TestExpiredDepartedPlansAndSatisfiedTransitionsArePruned(t *testing.T) {
+	c, store, now := controllerFixture(t)
+	active, departed := planRef(), planRef()
+	departed.Key.StrategyID = "departed"
+	*now = now.Add(8 * 24 * time.Hour)
+	slot := execution.EvaluationTime(now.Unix() / 60 * 60)
+	record := Record{HoldMillis: 30_000, SinceSlot: 600, SegmentStart: 60, Plans: []PlanRecord{
+		{PlanRef: active, ClosedAt: 1200, ClosedQueryGroup: "previous", InheritedQueryGroup: "previous", InheritedClosedAt: 1200},
+		{PlanRef: departed, ClosedAt: 1500, ClosedQueryGroup: "qg"},
+	}, Transitions: []Transition{{Key: active.Key, DeadlineMillis: int64(slot-60)*1000 + 30_000}, {Key: active.Key, DeadlineMillis: int64(slot+120)*1000 + 30_000}}}
+	store.values["qg"], _ = json.Marshal(record)
+	prepare(t, c, groupSpec("qg", 0))
+	schedule := scheduleFor(t, "qg", 60, nil)
+	if got, err := c.SlotReadHold(context.Background(), schedule, slot, holdFence("qg")); err != nil || got != 2*time.Minute {
+		t.Fatalf("active transition = %s %v", got, err)
+	}
+	pruned, _ := c.Reading("qg")
+	if len(pruned.Plans) != 1 || pruned.Plans[0].InheritedQueryGroup != "previous" || pruned.Plans[0].InheritedClosedAt != 1200 || len(pruned.Transitions) != 1 {
+		t.Fatalf("pruning lost the active acknowledgment or kept retired entries: %+v", pruned)
+	}
+	if got, err := c.SlotReadHold(context.Background(), schedule, slot+180, holdFence("qg")); err != nil || got != 30*time.Second {
+		t.Fatalf("satisfied transition = %s %v", got, err)
+	}
+	pruned, _ = c.Reading("qg")
+	if len(pruned.Transitions) != 0 {
+		t.Fatal("a past completion deadline stayed in the active record")
 	}
 }
