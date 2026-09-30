@@ -18,7 +18,9 @@ tar -xzf alarmd-cli_<version>_<os>_<arch>.tar.gz
 
 ## 从零开始
 
-先打开已知环境的 OB CLI 授权页面，输入部署管理员密钥，确认后生成一次性授权码。alarmd 自己校验该密钥，授权范围为部署级运维取证。管理员密钥通过部署 Secret 配置为 `cli.admin_key`，只在页面当次授权时输入，不保存到 CLI 配置；CLI 仅持有兑换后的短时会话。运行下列命令后粘贴，终端不回显；也支持从受保护 stdin 读取，授权码不接受普通命令行参数。
+先打开已知环境的 OB CLI 授权页面，输入部署管理员密钥，确认后生成一次性授权码。alarmd 自己校验该密钥，授权范围为部署级运维取证。管理员密钥通过部署 Secret 配置为 `cli.admin_key`，只在页面当次授权时输入，不保存到 CLI 配置；CLI 只持有兑换后的短时会话和续期凭据。
+
+授权码有两种交给 CLI 的方式。浏览器和 CLI 在同一台机器上时，页面会给出一条 `alarmd-cli auth listen --url <entry> --port <port> --state <state>` 命令，在 CLI 所在机器上运行它，页面把授权码交给本机 `127.0.0.1:<port>`，登录一次后命令退出。不在同一台机器上时，运行 `auth login` 后粘贴授权码，终端不回显；也支持从受保护 stdin 读取。授权码不接受普通命令行参数。
 
 ```sh
 alarmd-cli auth login
@@ -33,6 +35,93 @@ alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 登录自动导入授权码中的稳定 `environment_id`、名称和入口；可选 `auth login --env <id>` 用于核对环境。其余远程命令必须显式传 `--env`。`profile use <id>` 仅记录人工偏好，不会给远程命令隐式选择环境。服务端更新操作目录后客户端无需升级；先读 discover 摘要，按需读 describe 中的 schema、limits、parameter_sources 和示例。
 
 每次 invoke 在本进程先 describe 一次，再携带当前 revision 调用一次。没有持久 schema 缓存、完整客户端 schema 校验器或自动重试。`catalog_changed` 说明合同变化，应重新查阅 describe 后决定是否再次调用。`next_call` 只是建议，客户端不会自行执行。
+
+## 给 Agent 的用法
+
+本节写给代人取证的 Agent，每一步都可以照着执行。操作名和参数一律以服务端返回为准，不要凭记忆或本文推测。
+
+### 1. 前提：登录由人完成
+
+- 登录只能由人完成：人在授权页输入管理员密钥，页面给出授权码或一条 `auth listen` 命令，由人执行或粘贴。Agent 不接触、也不索要管理员密钥和授权码。
+- Agent 拿到的是已经登录的环境。开始前确认：
+
+  ```sh
+  alarmd-cli profile list                         # 找到 environment_id，不显示凭据
+  alarmd-cli auth status --env <environment_id>   # 由服务端核对会话
+  ```
+
+- 任何命令返回 `error.code` 为 `credentials_expired` 时，停下来，把输出里的登录页地址和命令交给人，等人重新登录后再继续。
+- 每个远程命令都显式带 `--env <environment_id>`。`profile use` 只记录人的偏好，不会替命令选环境。
+
+### 2. 固定调用顺序：discover → describe → invoke
+
+```sh
+alarmd-cli discover --env <environment_id>
+alarmd-cli describe <operation> --env <environment_id>
+alarmd-cli invoke <operation> --env <environment_id> --input @input.json
+```
+
+1. `discover`：列出当前服务端提供的操作。只使用这里列出的操作名。不同部署、不同版本的操作目录可能不同，本文提到的操作也以 discover 为准。
+2. `describe <operation>`：读 schema（必填字段、类型、枚举、上下限）、limits、parameter_sources（每个参数取自哪一步的哪个字段）和 examples，按它填参数。ID 类参数（例如 `query_group`、`object_digest`）只从上一步的结果里取，不要自己构造。
+3. 把参数写进 JSON 文件，用 `--input @文件` 调用。参数来自上一步的 `next_call` 时，把其中的 `params` 原样存成文件。
+4. 读结果里的 `next_call`：它是服务端建议的下一步（`operation`、`params`、`reason`），客户端不会自动执行。需要继续时，照它的 `params` 发起下一次 invoke。
+
+调用节奏：
+
+- 一次只发一个调用，不要并发。服务端每个进程同一时刻只执行一个取证读取，忙时返回 `request_budget_exceeded`；每个会话每分钟最多 30 次 invoke，超出返回 `rate_limited`。遇到这两种，稍后重试同一个调用。
+- `catalog_changed`：操作目录在 describe 与 invoke 之间变了，这次调用没有执行。重新 describe 该操作，按新的 schema 核对参数后再 invoke。
+
+### 3. 读结果
+
+stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr。
+
+| 退出码 | 含义 | Agent 怎么做 |
+| --- | --- | --- |
+| 0 | 完整结果 | 读 `result` |
+| 3 | 部分证据 | 读 `evidence.limitations`，结论里写明依据不完整；按 limitations 和 `next_call` 补读 |
+| 1 | 调用、协议、配置或落盘失败；`accept` 有 FAIL 或 READ_FAILED 项时也是 1 | 读 `error.code` 和 `error.message`，按上一节处理；不要换参数盲试 |
+| 2 | 命令或输入无效 | 重新 describe，按 schema 改输入 |
+
+- 退出码只说明这次调用的结果，不说明业务是否健康。部署和策略的状态在 `result` 里。
+- stdout 最多 20 KiB。每次调用的完整脱敏响应都保存在 `meta.result_file`（绝对路径）。`result_omitted=true` 时直接读这个文件，不要为此再调用服务端。
+- `evidence.complete=false` 或 `evidence.limitations` 非空时，结论要带上这些限制。
+- 字段含义看 describe 返回的 summary 和输出 schema。
+
+### 4. 常用排障路径
+
+`diagnose` 和 `accept` 是 CLI 内置的组合命令，直接运行；其余都通过 `invoke <operation>` 调用。下面每条写成"问题 → 调用 → 看哪些字段"。
+
+**某条策略为什么没告警**
+
+1. `alarmd-cli diagnose --env <environment_id>`：逐页读 `diagnose.environment` 并核对覆盖（退出码 3 表示覆盖不成立）。在 `result.strategies` 里找 `strategy_id` 为 `<strategy_id>` 的行，看 `verdict`、`action`、`reason` 和 `dispositions`（每条的 `scope`、`disposition`、`reason`、`field_path`、`detail`）。
+2. `invoke strategy.get`，输入 `{"strategy_id":"<strategy_id>"}`：看 `standing`、`dispositions` 和 `plans[]`（每个运行对象的 `query_group`）。
+3. `invoke object.get`：参数取 strategy.get 的 `next_call`。看 `anomaly`、`facts` 和 `records`（保留的生命周期记录）。
+4. `invoke slot.get`：参数取 object.get 的 `next_call`。它重建历史 Slot 的查询条件、关联保留记录，不请求查询服务。
+5. `invoke slot.query`：参数取 slot.get 的 `next_call`。它按保留条件现在重查一次，结果 `kind=requery_now`。看 `query.completion`（`completeness`、`data_state`、`route_details`，查询被拒时还有已脱敏的 `error_excerpt`）和 `query.series`。重查可能包含迟到数据，不等于当时 Slot 读到的输入。
+
+**部署是否健康**
+
+1. `alarmd-cli accept --env <environment_id>`（可加 `--expect-build <build_prefix>`）：逐项给出 PASS、FAIL、INFO、READ_FAILED、NOT_BUILT 或 UNDECIDED，任何 FAIL 或 READ_FAILED 时退出码为 1。`column=governance` 的项是策略负责人要改的，不算部署失败。全部读数在 `meta.result_file`。
+2. `invoke fleet.get`：看 `healthy`、`expected` 与 `covered`、`unknown`、`anomalies_total`。
+3. `invoke k8s.pods`：看 Deployment 和各 Pod 的就绪、重启次数、上次退出原因。需要时再用 `k8s.events`（输入 `pod`）、`k8s.logs`（输入 `pod`、`previous`、`lines`），`lifecycle.get` 看各副本的启动与停止记录。
+
+**策略配置为什么被拒或被改写**
+
+1. `invoke strategy.get`，输入 `{"strategy_id":"<strategy_id>"}`：看 `dispositions` 里每条的 `disposition`（例如 `CONFIG_REJECTED`、`UNSUPPORTED_PHASE2_CAPABILITY`、`CONFIG_NORMALIZED`）、`reason`、`field_path` 和 `detail`。
+2. `invoke strategy.config`，输入 `{"view":"source","strategy_id":"<strategy_id>"}`：读当前策略缓存里的配置（凭据类字段已省略，并记录省略了什么），按 `field_path` 对照被拒的字段。要读已发布的不可变对象时用 `view=published`，其余参数按 describe 的要求取自 strategy.get 的 `plans[]`。
+
+**数据是否迟到、首读是否读早**
+
+1. `invoke strategy.get` 取得 `plans[].query_group`。
+2. `invoke lookback.get`，输入 `{"owner_query_group":"<query_group>"}`：由持有该运行对象的副本回答。看各档复查的变化、到齐时刻分布、按事实分的样本类别，以及 `read_early`（当前有效的 time_delay 与建议值）。
+
+### 5. 安全边界
+
+- 所有操作都是只读取证，不修改部署或策略。
+- 不要把凭据写进命令参数、对话、日志或证据。CLI 的输出不含凭据。
+- 配置目录（默认是用户配置目录下的 `alarmd-cli/`，可由 `ALARMD_CLI_CONFIG_DIR` 指定）里的 `profiles.json` 含会话和续期凭据，不要读取、复制或外传。
+- `results/` 下的结果文件是脱敏后的响应，但仍含策略、运行对象、查询条件等部署内部信息。只引用需要的片段，不要整目录外传或提交到公开仓库。
+- 取证只走 CLI 提供的操作，不要绕开它直接访问 K8s、Redis 或内部地址。
 
 ## Slot 取证
 
@@ -71,7 +160,7 @@ alarmd-cli auth logout --env <environment_id>
 alarmd-cli auth login --rebind
 ```
 
-只有实际 invoke 请求携带 `renew_if_due=true`，是否续期由服务端准入决定。discover、describe、status 不主动续期。没有 daemon、refresh token 或保活心跳。本地 `expires_at` 仅是提示：另一进程可能已经续期，服务端始终负责裁决。
+登录即完成一次配对：兑换得到短时会话和一个续期凭据，都存在 0600 的 profile 里。除 logout 外，每个远程命令发出前，如果会话已过期或离过期不到一分钟，先用续期凭据换一个新会话和下一个续期凭据。invoke 请求另外携带 `renew_if_due=true`，是否续期由服务端准入决定。配对连续 30 天未使用、被撤销或管理员密钥轮换后失效，此后每个命令都返回 `credentials_expired`，附登录页地址和 `auth login` 命令，需要人重新登录。没有 daemon 或保活心跳。本地 `expires_at` 仅是提示：另一进程可能已经续期，服务端始终负责裁决。
 
 logout 先请求远端撤销，再清理匹配的本地凭据。网络失败也会按会话 ID 与 token 摘要条件清理，同时明确 `remote_revocation_confirmed=false`、退出码 1。旧会话 A 的迟到响应或 logout 不能覆盖或删除新登录的 B；同一会话的并发 expiry 回写只保留较新期限。退出后保留无凭据的环境入口绑定及既有证据文件。
 
