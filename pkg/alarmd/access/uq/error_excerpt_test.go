@@ -34,6 +34,29 @@ func TestAnErrorExcerptKeepsTheReasonAndDropsCredentialsAndAddresses(t *testing.
 	}
 }
 
+// Credentials a provider echoes inside an escaped JSON string, keys that
+// only contain a credential word, bracketed IPv6 and host:port addresses,
+// and a value the read cut off are replaced too.
+func TestAnErrorExcerptReplacesEscapedAndPartialCredentials(t *testing.T) {
+	for name, body := range map[string]string{
+		"escaped json":    `{"error":"bad request {\"password\":\"p4ss\",\"bk_app_secret\":\"s3c\"}"}`,
+		"escaped header":  `{"error":"refused","X-Bkapi-Authorization":"{\"bk_app_code\":\"a\",\"bk_app_secret\":\"s3c\"}"}`,
+		"keys by word":    `refused api_key=k3y&secret_key=sk&access-token=t0k`,
+		"cut off":         `{"error":"bad","password":"p4ss`,
+		"ipv6 and a host": `backend [2001:db8::1]:8481 and vm-select.example.test:8481 did not answer`,
+	} {
+		excerpt := providerErrorExcerpt([]byte(body))
+		for _, gone := range []string{"p4ss", "s3c", "k3y", "sk&", "t0k", "2001:db8", "vm-select.example.test"} {
+			if strings.Contains(excerpt, gone) {
+				t.Errorf("%s: excerpt %q still has %q", name, excerpt, gone)
+			}
+		}
+	}
+	if got := providerErrorExcerpt([]byte(`backend [2001:db8::1]:8481 did not answer`)); got != "backend <address> did not answer" {
+		t.Fatalf("excerpt %q, want the address replaced and the reason kept", got)
+	}
+}
+
 // An excerpt is cut to its bound on a rune boundary, and a body that is not
 // valid text is still one.
 func TestAnErrorExcerptIsBounded(t *testing.T) {

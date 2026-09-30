@@ -27,18 +27,22 @@ const (
 )
 
 var (
-	// credentialPair is a key that names a credential, and the value after
-	// it, in JSON or form or header shape.
-	credentialPair = regexp.MustCompile(`(?i)("?(?:authorization|bk_app_secret|app_secret|secret|access_token|token|password|passwd|cookie|bk_token|bk_ticket)"?\s*[:=]\s*)("[^"]*"|'[^']*'|(?i:bearer|basic|token)\s+[^\s,;&}"]+|[^\s,;&}"]+)`)
-	// ipv4 is an address, which names where the provider's own dependencies
-	// are.
-	ipv4        = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b`)
+	// credentialPair is a key that names a credential -- any key containing
+	// secret, token, password, api key, cookie, ticket or authorization --
+	// and the value after it, in JSON, JSON escaped inside a JSON string,
+	// form or header shape; a value cut off by the read counts to the end.
+	credentialPair = regexp.MustCompile(`(?i)(\\?["']?[\w-]*(?:secret|token|passw(?:or)?d|api_?key|cookie|ticket|authorization)[\w-]*\\?["']?\s*[:=]\s*)` +
+		`(\\"(?:[^"\\]|\\[^"])*?\\"|"(?:[^"\\]|\\.)*"|'[^']*'|(?:bearer|basic|token)\s+[^\s,;&}"\\]+|"[^"]*$|[^\s,;&}"\\]+)`)
+	// address is where something runs: an IPv4 address, an IPv6 one in
+	// brackets, or a dotted host name with a port.
+	address     = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b|\[[0-9A-Fa-f:.]+\](?::\d+)?|\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+:\d{2,5}\b`)
 	whitespaces = regexp.MustCompile(`\s+`)
 )
 
 // providerErrorExcerpt is the start of an error body, as an operator may
 // read it: valid UTF-8, whitespace folded, every URL, credential value and
-// address replaced, cut to errorExcerptBytes on a rune boundary.
+// address (IPv4, bracketed IPv6, host:port) replaced, cut to
+// errorExcerptBytes on a rune boundary.
 func providerErrorExcerpt(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -46,7 +50,7 @@ func providerErrorExcerpt(body []byte) string {
 	text := strings.ToValidUTF8(string(body), "?")
 	text = whitespaces.ReplaceAllString(text, " ")
 	text = credentialPair.ReplaceAllString(text, "${1}<redacted>")
-	text = ipv4.ReplaceAllString(text, "<address>")
+	text = address.ReplaceAllString(text, "<address>")
 	text = strings.TrimSpace(observability.SanitizeErrorText(text))
 	if len(text) <= errorExcerptBytes {
 		return text
