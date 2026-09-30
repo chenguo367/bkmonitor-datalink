@@ -158,8 +158,10 @@ func exactDueRefsFact(t *testing.T) (execution.FrozenSlotContractFact, execution
 func TestScheduleContractsExcludeRuntimeSelectorsAndOwnership(t *testing.T) {
 	assertScheduleFields(t, reflect.TypeOf(execution.InitialScheduleActivationFact{}), []string{"Segment"})
 	assertScheduleFields(t, reflect.TypeOf(execution.ScheduleCutoverFact{}), []string{"OldSegment", "NewSegment"})
+	// ReadHoldMillis is the frozen hold the contract carries, not a runtime
+	// selector of which Plans run or who runs them.
 	assertScheduleFields(t, reflect.TypeOf(execution.FreezeSlotContractRequest{}),
-		[]string{"QueryGroup", "ScheduleRevision", "ScheduleSegmentStart", "EvaluationTime", "DuePlans"})
+		[]string{"QueryGroup", "ScheduleRevision", "ScheduleSegmentStart", "EvaluationTime", "DuePlans", "ReadHoldMillis"})
 }
 
 func assertScheduleFields(t *testing.T, contractType reflect.Type, want []string) {

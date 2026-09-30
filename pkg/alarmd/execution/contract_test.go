@@ -27,7 +27,12 @@ import (
 
 func TestFrozenExecutionContractRefContainsOnlyFrozenSemantics(t *testing.T) {
 	ref := frozenContract()
-	wantFields := []string{"Slot", "SnapshotRevision", "QueryRevision", "ScheduleRevision", "ScheduleSegmentStart", "DuePlanSetDigest"}
+	// ReadHoldMillis is frozen semantics too: it moves the due Plans'
+	// deadlines, which DuePlanSetDigest covers, and every freeze of the Slot
+	// passes it back. It is not a runtime selector: a Slot keeps the hold it
+	// was frozen with, whatever its Query Group's is later.
+	wantFields := []string{"Slot", "SnapshotRevision", "QueryRevision", "ScheduleRevision", "ScheduleSegmentStart", "DuePlanSetDigest",
+		"ReadHoldMillis"}
 	typeOfRef := reflect.TypeOf(ref)
 	if typeOfRef.NumField() != len(wantFields) {
 		t.Fatalf("FrozenExecutionContractRef fields=%d, want=%d", typeOfRef.NumField(), len(wantFields))

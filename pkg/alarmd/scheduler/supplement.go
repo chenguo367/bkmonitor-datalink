@@ -59,7 +59,7 @@ func SupplementGuardOf(ctx context.Context) func() bool {
 
 // SupplementSlotSource freezes a completed Slot again, for a supplement.
 type SupplementSlotSource interface {
-	FreezeSupplement(ctx context.Context, at execution.EvaluationTime) (FrozenSlot, error)
+	FreezeSupplement(ctx context.Context, at execution.EvaluationTime, readHoldMillis int64) (FrozenSlot, error)
 }
 
 // ObservedContractFreezer is the catalog read that freezes a Slot's
@@ -77,7 +77,11 @@ type ObservedContractFreezer interface {
 // fence it runs under now. The Slot need not be the next one - it is a
 // completed one - and it is not classified for recovery: a supplement is
 // not a replay of it.
-func (source *ProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime) (FrozenSlot, error) {
+//
+// readHoldMillis is the read hold the Slot was frozen with when it ran: the
+// contract is frozen with it again, so it is the contract the Slot ran under
+// and its keep-until the one that Slot had.
+func (source *ProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime, readHoldMillis int64) (FrozenSlot, error) {
 	if source == nil || at <= 0 {
 		return FrozenSlot{}, errors.New("alarmd scheduler: a supplement freezes one Slot of its Query Group")
 	}
@@ -100,6 +104,7 @@ func (source *ProductionSlotSource) FreezeSupplement(ctx context.Context, at exe
 	request := execution.FreezeSlotContractRequest{
 		QueryGroup: source.queryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
 		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: at, DuePlans: duePlans,
+		ReadHoldMillis: readHoldMillis,
 	}
 	freeze := source.catalog.FreezeSlotContract
 	if observed, ok := source.catalog.(ObservedContractFreezer); ok {
@@ -165,6 +170,7 @@ func supplementFreezeError(err error) error {
 func (runner *Runner) Supplement(
 	ctx context.Context,
 	at execution.EvaluationTime,
+	readHoldMillis int64,
 	scope execution.SupplementScope,
 ) (execution.SupplementFacts, error) {
 	if runner == nil {
@@ -182,7 +188,7 @@ func (runner *Runner) Supplement(
 	if guard := SupplementGuardOf(ctx); guard != nil && !guard() {
 		return execution.SupplementFacts{}, ErrSupplementOvertaken
 	}
-	slot, err := source.FreezeSupplement(ctx, at)
+	slot, err := source.FreezeSupplement(ctx, at, readHoldMillis)
 	if err != nil {
 		return execution.SupplementFacts{}, err
 	}

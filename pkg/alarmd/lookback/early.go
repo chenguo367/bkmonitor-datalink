@@ -448,7 +448,8 @@ func (engine *Engine) earlyRead(ctx context.Context, slot *directedSlot, release
 		engine.mu.Unlock()
 		return
 	}
-	job := SupplementJob{QueryGroup: slot.queryGroup, EvaluationTime: slot.evaluation, Series: series, Read: read,
+	job := SupplementJob{QueryGroup: slot.queryGroup, EvaluationTime: slot.evaluation, ReadHoldMillis: slot.readHold,
+		Series: series, Read: read,
 		Deadline: slot.early.next, Guard: func() bool {
 			engine.mu.Lock()
 			defer engine.mu.Unlock()

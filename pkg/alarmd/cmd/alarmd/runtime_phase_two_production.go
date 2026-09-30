@@ -254,7 +254,8 @@ func (source *productionFrozenExecution) resolveFrozenFact(
 	request := execution.FreezeSlotContractRequest{
 		QueryGroup: segment.QueryGroup, ScheduleRevision: segment.ScheduleRevision,
 		ScheduleSegmentStart: segment.Start, EvaluationTime: contractRef.Slot.EvaluationTime,
-		DuePlans: schedule.DuePlanRefs(contractRef.Slot.EvaluationTime),
+		DuePlans:       schedule.DuePlanRefs(contractRef.Slot.EvaluationTime),
+		ReadHoldMillis: contractRef.ReadHoldMillis,
 	}
 	fact, err := source.catalog.FreezeSlotContract(ctx, request)
 	if err != nil {
@@ -2673,12 +2674,12 @@ type observedProductionSlotSource struct {
 
 // FreezeSupplement is the wrapped source's, for a supplement of a completed
 // Slot.
-func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime) (scheduler.FrozenSlot, error) {
+func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime, readHoldMillis int64) (scheduler.FrozenSlot, error) {
 	next, ok := source.next.(scheduler.SupplementSlotSource)
 	if !ok {
 		return scheduler.FrozenSlot{}, scheduler.ErrSupplementUnsupported
 	}
-	return next.FreezeSupplement(ctx, at)
+	return next.FreezeSupplement(ctx, at, readHoldMillis)
 }
 
 // Supplement runs a supplement of one of this Query Group's completed Slots
@@ -2686,9 +2687,10 @@ func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context,
 func (runtime *productionPhaseTwoQueryGroup) Supplement(
 	ctx context.Context,
 	at execution.EvaluationTime,
+	readHoldMillis int64,
 	scope execution.SupplementScope,
 ) (execution.SupplementFacts, error) {
-	return runtime.runner.Supplement(ctx, at, scope)
+	return runtime.runner.Supplement(ctx, at, readHoldMillis, scope)
 }
 
 func (source observedProductionSlotSource) RangeCreationEnabled() bool {
@@ -2767,8 +2769,11 @@ func (executor observedProductionSlotExecutor) Execute(
 	result, err := executor.next.Execute(ctx, request)
 	var shortCompletion *observability.ShortPeriodCompletionFacts
 	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
+		// Lag from when the Slot was to be read: its evaluation time, read
+		// hold later. A read hold is not lag; it is the wait the Slot chose.
+		due := time.Unix(int64(request.Contract.Slot.EvaluationTime), 0).Add(time.Duration(request.Contract.ReadHoldMillis) * time.Millisecond)
 		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
-			LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds(), AttemptNo: request.AttemptNo}
+			LagSeconds: time.Since(due).Seconds(), AttemptNo: request.AttemptNo}
 	}
 	// What held the round before this one, on the completions where that is
 	// the question. Any cohort: it used to ride inside the short-period

@@ -31,7 +31,7 @@ func TestAQueryGroupTheDegradedPoolHoldsIsNotReplayedPastTheDistanceRule(t *test
 		source, _ := replayClassificationSource(t, 10, slot, 30*time.Second, testRecoveryLimits())
 		observer := &takeoverObserver{}
 		source.observer, source.takeovers = observer, NewTakeoverClock()
-		operation, facts, err := source.classifyRecovery(withQueryCooldownHeld(context.Background(), held), slot, deadline, reached, testFence(7))
+		operation, facts, err := source.classifyRecovery(withQueryCooldownHeld(context.Background(), held), slot, deadline, 0, reached, testFence(7))
 		if err != nil {
 			t.Fatalf("held %v: classifyRecovery() error = %v", held, err)
 		}
@@ -66,7 +66,7 @@ func TestASlotClassifiedAgainIsReportedOncePerOutcome(t *testing.T) {
 		return out
 	}
 	for i := 0; i < 3; i++ {
-		if operation, _, err := source.classifyRecovery(context.Background(), slot, deadline, reached.Add(time.Duration(i)*time.Second), testFence(7)); err != nil || operation != execution.OperationReplay {
+		if operation, _, err := source.classifyRecovery(context.Background(), slot, deadline, 0, reached.Add(time.Duration(i)*time.Second), testFence(7)); err != nil || operation != execution.OperationReplay {
 			t.Fatalf("classification %d = %s %v, want a replay", i, operation, err)
 		}
 	}
@@ -75,7 +75,7 @@ func TestASlotClassifiedAgainIsReportedOncePerOutcome(t *testing.T) {
 	}
 	aged := time.UnixMilli(deadline).Add(testRecoveryLimits().MaxReplayAge + time.Second)
 	for i := 0; i < 2; i++ {
-		if _, facts, err := source.classifyRecovery(context.Background(), slot, deadline, aged, testFence(7)); err != nil || facts.Reason != ReplayExpiredByAge {
+		if _, facts, err := source.classifyRecovery(context.Background(), slot, deadline, 0, aged, testFence(7)); err != nil || facts.Reason != ReplayExpiredByAge {
 			t.Fatalf("aged classification %d = %+v %v", i, facts, err)
 		}
 	}
@@ -83,7 +83,7 @@ func TestASlotClassifiedAgainIsReportedOncePerOutcome(t *testing.T) {
 		t.Fatalf("after the Slot aged out: %v, want it reported once more, as age_exceeded", got)
 	}
 	next := slot + 10
-	if _, _, err := source.classifyRecovery(context.Background(), next, int64(next)*1000+25_000, reached.Add(10*time.Second), testFence(7)); err != nil {
+	if _, _, err := source.classifyRecovery(context.Background(), next, int64(next)*1000+25_000, 0, reached.Add(10*time.Second), testFence(7)); err != nil {
 		t.Fatal(err)
 	}
 	if got := outcomes(); fmt.Sprint(got) != "[replayed age_exceeded replayed]" {
