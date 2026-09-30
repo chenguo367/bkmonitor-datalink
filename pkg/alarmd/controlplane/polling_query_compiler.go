@@ -159,7 +159,7 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 		if c.DataSourceLabel == "bk_data" && c.TimeField == "" {
 			c.TimeField = "dtEventTimeStamp"
 		}
-		clauses, err := compiler.compileLegacyQueryConfig(c)
+		clauses, err := compiler.compileLegacyQueryConfig(c, metricConditions)
 		if c.DataSourceLabel == "bk_data" {
 			for i := range clauses {
 				clauses[i].DataSource = "bkdata"
@@ -224,16 +224,11 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 		c.MetricField = "_index"
 	}
 	// Log operators differ from the time-series compatibility mapping.
-	conditions, err := compileLogConditions(c.AggConditions)
-	if err != nil {
-		return nil, queryConfigRejected("QUERY_CONDITION_INVALID", err)
-	}
-	clauses, err := compiler.compileLegacyQueryConfig(c)
+	clauses, err := compiler.compileLegacyQueryConfig(c, logConditions)
 	if err != nil {
 		return nil, err
 	}
 	for i := range clauses {
-		clauses[i].Conditions = conditions
 		clauses[i].KeepColumns = []string{}
 		clauses[i].DataSource = "bkapm"
 		if c.DataSourceLabel == "bk_log_search" {
@@ -264,21 +259,6 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 func scalarCondition(field, method, value string) legacyCondition {
 	raw, _ := json.Marshal([]string{value})
 	return legacyCondition{Key: field, Method: method, Value: raw, Connector: "and"}
-}
-
-func compileLogConditions(source []legacyCondition) (execution.QueryConditions, error) {
-	result, err := compileConditions(source)
-	if err != nil {
-		return result, err
-	}
-	mapping := map[string]string{"reg": "req", "regexp": "req", "is one of": "eq", "is not one of": "ne", "contains match phrase": "contains", "not contains match phrase": "ncontains", "=": "eq", "!=": "ne", "is": "eq", "is not": "ne", ">": "gt", ">=": "gte", "<": "lt", "<=": "lte", "nreg": "nreq", "neq": "ne", "exists": "existed", "nexists": "nexisted", "include": "contains", "exclude": "ncontains"}
-	for i, original := range source {
-		result.Fields[i].Operator = original.Method
-		if op := mapping[original.Method]; op != "" {
-			result.Fields[i].Operator = op
-		}
-	}
-	return result, nil
 }
 
 var logSearchSpecial = regexp.MustCompile(`[-+=&|><!(){}\[\]^"~*?:/]|AND|OR|TO|NOT`)
