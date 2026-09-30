@@ -369,7 +369,13 @@ type sample struct {
 	// have, first seen at rung seriesAddedRung. seriesUnknown is set once a
 	// rung changed and its series could not be compared, one side's table
 	// having been refused.
+	// existingSteady is how many series of the first read that rung read as
+	// they were and with a value, existingArrived how many it read changed
+	// and with a value: both more than none is a partial revision, not the
+	// window read early.
 	existingChanged bool
+	existingSteady  int
+	existingArrived int
 	early           *ReadEarlySample
 	seriesAdded     bool
 	seriesAddedRung int
@@ -975,6 +981,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	// stands, and a series that came and went was not late. The rung a
 	// change was first seen at is kept while the change holds.
 	if seriesCompared {
+		candidate.existingSteady, candidate.existingArrived = series.existingSteady, series.existingArrived
 		switch {
 		case series.existingChanged > 0 && !candidate.existingChanged:
 			candidate.existingChanged = true

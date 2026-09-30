@@ -103,8 +103,11 @@ func newLookbackCollector() *lookbackCollector {
 		classes: desc("lookback_sample_classes_total",
 			"Completed samples by what their rungs found against the first read, by source: window_read_early (the "+
 				"first read was empty and data came later, or a series it had came back changed or not at all - the "+
-				"strategy's time_delay moves the read), series_late (every series it had came back as it was, and "+
-				"others came later - supplementary detection fills them), complete.", "source", "class"),
+				"strategy's time_delay moves the read), partial_revised (some series it had came back changed with a "+
+				"value, and others with a value came back as they were: the series were late, not the window; a "+
+				"series zero or without a value in both reads decides nothing), series_late (every series it had came "+
+				"back as it was, and others came later - supplementary detection fills them), unclassified, complete.",
+			"source", "class"),
 		readEarly: desc("lookback_read_early_groups",
 			"The source's Query Groups whose window was read early in two completed samples in a row, each reported "+
 				"with the time_delay that would have read it complete (lookback.get read_early).", "source"),
