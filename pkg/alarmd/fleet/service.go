@@ -12,6 +12,8 @@ package fleet
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -57,9 +59,10 @@ type SnapshotReader interface {
 }
 
 // unadmittedReader is a SnapshotReader that can also read without asking
-// the observation memory line (RedisStore.LoadUnadmitted).
+// the observation memory line (RedisStore.loadUnadmitted): the reads a
+// verdict is decided from.
 type unadmittedReader interface {
-	LoadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
+	loadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
 }
 
 // SummaryReader reads what replicas publish beside their snapshots: their
@@ -100,16 +103,85 @@ type Service struct {
 	// expectation is read rather than on every view.
 	expected SetDigest
 
-	// summaryFlight is the summarized read in progress, which a caller that
-	// comes while it runs waits for and shares instead of reading again.
-	summaryMu     sync.Mutex
-	summaryFlight *summaryFlight
+	// summaries is the summarized read in progress, which a caller that
+	// comes while it runs waits for and shares instead of reading again;
+	// loads is the same for the snapshots a page's view is built from, by
+	// the replicas read.
+	summaries sharedReads[summarized]
+	loads     sharedReads[loaded]
 }
 
-type summaryFlight struct {
-	done chan struct{}
+type summarized struct {
 	view View
 	part ReplicaPart
+}
+
+type loaded struct {
+	snapshots []Snapshot
+	err       error
+}
+
+// sharedReads are reads that the callers asking for the same key while one
+// runs share: the first caller starts it, and every caller waits for it or
+// for its own context, whichever ends first.
+//
+// The read keeps the first caller's values but not its cancellation: the
+// first caller going away must not fail the others. It runs while anyone
+// waits for it and is stopped when the last of them has gone, and a caller
+// that comes after that starts a read of its own.
+type sharedReads[T any] struct {
+	mu      sync.Mutex
+	flights map[string]*sharedFlight[T]
+}
+
+type sharedFlight[T any] struct {
+	done    chan struct{}
+	stop    context.CancelFunc
+	waiters int
+	answer  T
+}
+
+// do is read's answer for key, shared with the callers that ask for key
+// while it runs; gone is the answer to a caller whose context ended first.
+func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(context.Context) T, gone func(error) T) T {
+	reads.mu.Lock()
+	if reads.flights == nil {
+		reads.flights = map[string]*sharedFlight[T]{}
+	}
+	flight := reads.flights[key]
+	if flight == nil {
+		readCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
+		flight = &sharedFlight[T]{done: make(chan struct{}), stop: stop}
+		reads.flights[key] = flight
+		go func() {
+			answer := read(readCtx)
+			reads.mu.Lock()
+			flight.answer = answer
+			if reads.flights[key] == flight {
+				delete(reads.flights, key)
+			}
+			reads.mu.Unlock()
+			stop()
+			close(flight.done)
+		}()
+	}
+	flight.waiters++
+	reads.mu.Unlock()
+	select {
+	case <-flight.done:
+		return flight.answer
+	case <-ctx.Done():
+		reads.mu.Lock()
+		flight.waiters--
+		if flight.waiters == 0 {
+			if reads.flights[key] == flight {
+				delete(reads.flights, key)
+			}
+			flight.stop()
+		}
+		reads.mu.Unlock()
+		return gone(ctx.Err())
+	}
 }
 
 // NewService wires the three sources. freshness is how old a snapshot may be
@@ -191,7 +263,7 @@ func (service *Service) View(ctx context.Context) View {
 		return registryUnavailable(expectation, replicasErr)
 	}
 
-	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
+	snapshots, snapshotsErr := service.loadShared(ctx, replicas)
 	if snapshotsErr != nil {
 		// Reading snapshots failed as a whole, so nothing can be said of any
 		// replica. Coverage is therefore zero, which is what the aggregation
@@ -219,11 +291,7 @@ func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Dur
 	if replicasErr != nil {
 		return registryUnavailable(expectation, replicasErr)
 	}
-	load := service.snapshots.Load
-	if unadmitted, ok := service.snapshots.(unadmittedReader); ok {
-		load = unadmitted.LoadUnadmitted
-	}
-	snapshots, snapshotsErr := load(ctx, replicas)
+	snapshots, snapshotsErr := service.loadForVerdict(ctx, replicas)
 	if snapshotsErr != nil {
 		snapshots = nil
 	}
@@ -234,6 +302,20 @@ func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Dur
 	view := aggregate(expectation, decided, replicas, at, service.freshness, &headFacts{rowsDecided: true})
 	readFailed(&view, snapshotsErr, expectationErr)
 	return view
+}
+
+// loadShared is the snapshots' Load, shared by the callers that ask for the
+// same replicas, in any order, while a read of them is in progress: pages
+// that come together cost one read, and one grant from the memory line. The
+// snapshots are only read from; each caller builds its own view of them.
+func (service *Service) loadShared(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	sorted := append([]string(nil), replicas...)
+	sort.Strings(sorted)
+	answer := service.loads.do(ctx, strings.Join(sorted, "\x00"), func(ctx context.Context) loaded {
+		snapshots, err := service.snapshots.Load(ctx, replicas)
+		return loaded{snapshots: snapshots, err: err}
+	}, func(err error) loaded { return loaded{err: err} })
+	return answer.snapshots, answer.err
 }
 
 // registryUnavailable is the view when the replicas that should have
@@ -262,7 +344,15 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 		if errors.Is(snapshotsErr, ErrSnapshotsDeferred) {
 			failed = Gap{Kind: GapSnapshotsDeferred}
 		}
-		view.Gaps = append(kept, failed)
+		// Nor is nothing read a shortfall of ownership: the replicas own
+		// what they own, and none was asked.
+		shortfall := kept[:0]
+		for _, gap := range kept {
+			if gap.Kind != GapOwnershipShortfall {
+				shortfall = append(shortfall, gap)
+			}
+		}
+		view.Gaps = append(shortfall, failed)
 		// Said here and not left to the aggregation: a view that read no
 		// snapshot cannot tell, whatever the aggregation made of an empty
 		// set. Today it produced a gap per expected replica and so was
@@ -288,23 +378,17 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 // its answer: a page's viewers then cost one read between them, with no
 // period of its own to keep answers for.
 func (service *Service) Summarized(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
-	service.summaryMu.Lock()
-	if flight := service.summaryFlight; flight != nil {
-		service.summaryMu.Unlock()
-		<-flight.done
-		return flight.view, flight.part
-	}
-	flight := &summaryFlight{done: make(chan struct{})}
-	service.summaryFlight = flight
-	service.summaryMu.Unlock()
-	defer func() {
-		service.summaryMu.Lock()
-		service.summaryFlight = nil
-		service.summaryMu.Unlock()
-		close(flight.done)
-	}()
-	flight.view, flight.part = service.summarize(ctx, stallAfter)
-	return flight.view, flight.part
+	answer := service.summaries.do(ctx, "", func(ctx context.Context) summarized {
+		view, part := service.summarize(ctx, stallAfter)
+		return summarized{view: view, part: part}
+	}, func(err error) summarized { return summarized{view: unreadView(err)} })
+	return answer.view, answer.part
+}
+
+// unreadView is the view to a caller that stopped waiting for the read.
+func unreadView(err error) View {
+	return View{Health: HealthUnknown, Gaps: []Gap{{Kind: GapSnapshotsUnreadable, Detail: gapDetail(err)}},
+		Anomalies: []Anomaly{}, Replicas: []string{}}
 }
 
 func (service *Service) summarize(ctx context.Context, stallAfter time.Duration) (View, ReplicaPart) {
@@ -329,9 +413,14 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 			missing = append(missing, replica)
 		}
 	}
+	// A replica that published no summary is read from its snapshot the
+	// way the verdict scrape reads, without asking the memory line: this
+	// route decides the verdict too, and records it. Its snapshot unread,
+	// that replica alone is unread; the others' summaries stand.
+	var fallbackErr error
 	if readErr == nil && len(missing) > 0 {
 		var snapshots []Snapshot
-		snapshots, readErr = service.snapshots.Load(ctx, missing)
+		snapshots, fallbackErr = service.loadForVerdict(ctx, missing)
 		for _, snapshot := range snapshots {
 			summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
 		}
@@ -369,8 +458,29 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 		return sets, whole
 	}
 	view, part := AggregateSummaries(expectation, expected, summaries, replicas, at, service.freshness, ownedSets)
+	if fallbackErr != nil {
+		unread := make(map[string]bool, len(missing))
+		for _, replica := range missing {
+			unread[replica] = true
+		}
+		for index, gap := range view.Gaps {
+			if gap.Kind == GapReplicaMissing && unread[gap.Replica] {
+				view.Gaps[index] = Gap{Kind: GapSnapshotsUnreadable, Replica: gap.Replica, Detail: gapDetail(fallbackErr)}
+			}
+		}
+	}
 	readFailed(&view, readErr, expectationErr)
 	return view, part
+}
+
+// loadForVerdict reads snapshots without asking the observation memory
+// line, where the reader can: a verdict decided from them must not turn
+// unknown because observation is short of memory.
+func (service *Service) loadForVerdict(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	if unadmitted, ok := service.snapshots.(unadmittedReader); ok {
+		return unadmitted.loadUnadmitted(ctx, replicas)
+	}
+	return service.snapshots.Load(ctx, replicas)
 }
 
 // gapDetail classifies a dependency failure instead of quoting it.

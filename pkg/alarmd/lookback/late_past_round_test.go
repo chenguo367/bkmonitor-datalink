@@ -350,3 +350,50 @@ func TestTwoDirectedSlotsWhoseLateSeriesCrossedReportTheGroup(t *testing.T) {
 		t.Fatalf("readings %+v, want the group reported from its two Slots", readings)
 	}
 }
+
+// A sample's on-time and late counts are series, each once, as its directed
+// read found them; what the supplement admitted and found crossed are
+// (Plan, series) pairs, and a query five Plans share makes five of each.
+func TestASamplesLateSeriesAreCountedAsTheReadFoundThem(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{Ran: true, Facts: execution.SupplementFacts{Candidates: 10, Admitted: 5, CrossedT: 5}})
+	slot := f.clock.now().Unix()
+	f.firstRead(slot, execution.CompletenessFull)
+	f.clock.set(f.clock.now().Add(rungDelay(0, minute)))
+	f.answers <- delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}), dataset("h3", map[int64]string{slot - 60: "6"}))
+	f.engine.Step(context.Background())
+	f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == 1 })
+	residual := f.engine.ResidualMisses()
+	if len(residual) != 1 || len(residual[0].Samples) != 1 {
+		t.Fatalf("residual %+v, want the one window", residual)
+	}
+	if sample := residual[0].Samples[0]; sample.OnTimeSeries != 1 || sample.LateSeries != 2 || sample.AdmittedSeries != 5 ||
+		sample.CrossedSeries != 5 {
+		t.Fatalf("sample %+v, want one series on time and two late, beside five pairs admitted and five crossed", sample)
+	}
+}
+
+// Each sample says how many series its window's first read had on time,
+// beside the late ones: a window whose late series outnumber its on-time
+// ones is read as late almost whole, without a proportion decided here.
+func TestASamplesWindowSaysHowManySeriesWereOnTime(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	onTime := func(evaluation int64, series int) *directedSlot {
+		slot := openWindow(f, evaluation, 1, 60)
+		slot.queries[0].first = newSeriesSet(nil)
+		for digest := 0; digest < series; digest++ {
+			slot.queries[0].first.set[uint64(digest)] = struct{}{}
+		}
+		return slot
+	}
+	endWindow(f, onTime(600, 4), DirectedSupplemented, mixed(4, 31))
+	endWindow(f, onTime(660, 5), DirectedSupplemented, crossed(2))
+	endWindow(f, onTime(720, 6), DirectedSupplemented, crossed(2))
+	residual, past := f.engine.ResidualMisses(), f.engine.LatePastRound()
+	if len(residual) != 1 || residual[0].Samples[0].OnTimeSeries != 4 || residual[0].Samples[0].AdmittedSeries != 4 ||
+		residual[0].Samples[0].CrossedSeries != 31 {
+		t.Fatalf("residual %+v, want the window's four on time beside four recovered and 31 not", residual)
+	}
+	if len(past) != 1 || past[0].Samples[0].OnTimeSeries != 5 || past[0].Samples[1].OnTimeSeries != 6 {
+		t.Fatalf("late past round %+v, want each window's own on-time count", past)
+	}
+}

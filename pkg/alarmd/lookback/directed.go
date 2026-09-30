@@ -225,6 +225,8 @@ type directedSlot struct {
 	// ends after they did still supplements its late series, and is not
 	// counted into the reports of the reads that came after.
 	period *seriesLateState
+	// late is how many series its directed read found late.
+	late int
 }
 
 // supplementTally is what a directed Query Group's Slots came to since it
@@ -475,6 +477,7 @@ func (engine *Engine) directedRead(ctx context.Context, slot *directedSlot, rele
 		return
 	}
 	read, series := sink.kept(captured.spec, completion)
+	slot.late = len(sink.series)
 	if len(series) == 0 {
 		engine.noteDirectedLocked(state, slot, DirectedNothingLate, "", nil)
 		delete(state.directed, slot.evaluation)

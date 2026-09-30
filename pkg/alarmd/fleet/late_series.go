@@ -21,11 +21,15 @@ const MaxLateSeriesSamples = 3
 
 // LatePastRoundSample is one supplemented window every late series of which
 // had crossed its Slot: the Slot, the rung its late series were read at and
-// how long after the first read, and how many had crossed.
+// how long after the first read, how many series the first read had and how
+// many were found late -- series, each once -- and how many (Plan, series)
+// pairs had crossed.
 type LatePastRoundSample struct {
 	EvaluationTime int64  `json:"evaluation_time"`
 	Rung           string `json:"rung,omitempty"`
 	SeenAgeSeconds int64  `json:"seen_age_seconds"`
+	OnTimeSeries   int    `json:"on_time_series"`
+	LateSeries     int    `json:"late_series"`
 	CrossedSeries  int    `json:"crossed_series"`
 }
 
@@ -43,9 +47,14 @@ type LatePastRoundFacts struct {
 }
 
 // LateSeriesMissedSample is one supplemented window with series recovered
-// and series that had crossed their Slot: the Slot and how many of each.
+// and series that had crossed their Slot: the Slot, how many series its
+// first read had on time and how many were found late -- series, each once
+// -- and how many (Plan, series) pairs of the late ones were recovered and
+// not.
 type LateSeriesMissedSample struct {
 	EvaluationTime int64 `json:"evaluation_time"`
+	OnTimeSeries   int   `json:"on_time_series"`
+	LateSeries     int   `json:"late_series"`
 	AdmittedSeries int   `json:"admitted_series"`
 	CrossedSeries  int   `json:"crossed_series"`
 }

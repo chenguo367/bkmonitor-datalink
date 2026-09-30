@@ -14,7 +14,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -450,9 +457,11 @@ func TestALoadAsksTheMemoryLineForWhatItsSnapshotsDecodeTo(t *testing.T) {
 	}
 }
 
-// A view whose load the memory line refused says so in its own gap, not as
-// replicas missing nor as a read that failed; nothing is counted and the
-// verdict is unknown.
+// A page's view whose load the memory line refused says so in its own gap,
+// not as replicas missing, a read that failed or a shortfall of ownership;
+// nothing is counted and the verdict is unknown. The health route decides
+// the verdict and records it, and reads a replica that published no summary
+// without asking: the line refusing, it reads the verdict the data says.
 func TestAViewTheMemoryLineRefusedIsOneGapAndNothingElse(t *testing.T) {
 	client := newFakeRedis()
 	store := mustStore(t, client, time.Minute, 0)
@@ -464,13 +473,15 @@ func TestAViewTheMemoryLineRefusedIsOneGapAndNothingElse(t *testing.T) {
 	store.AdmitLoads(func(uint64) bool { return false })
 	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}, stubRegistry{replicas: replicas()}, store)
 	view := service.View(context.Background())
+	if len(view.Gaps) != 1 || view.Gaps[0].Kind != GapSnapshotsDeferred || view.Health != HealthUnknown || view.AnomaliesTotal != 0 ||
+		view.Covered != 0 {
+		t.Errorf("page view: gaps %+v health %s anomalies %d covered %d, want the deferred gap alone and nothing counted",
+			view.Gaps, view.Health, view.AnomaliesTotal, view.Covered)
+	}
 	summarized, _ := service.Summarized(context.Background(), time.Minute)
-	for name, read := range map[string]View{"view": view, "summarized": summarized} {
-		if !hasGap(read, GapSnapshotsDeferred) || hasGap(read, GapReplicaMissing) || hasGap(read, GapSnapshotsUnreadable) ||
-			read.Health != HealthUnknown || read.AnomaliesTotal != 0 || read.Covered != 0 {
-			t.Errorf("%s: gaps %+v health %s anomalies %d covered %d, want the deferred gap, no replica missing, nothing counted",
-				name, read.Gaps, read.Health, read.AnomaliesTotal, read.Covered)
-		}
+	if len(summarized.Gaps) != 0 || summarized.AnomaliesTotal != 2 || summarized.Health != HealthDegraded {
+		t.Errorf("health route: gaps %+v health %s anomalies %d, want the data's verdict, the line not asked",
+			summarized.Gaps, summarized.Health, summarized.AnomaliesTotal)
 	}
 	if MetricGapKind(GapSnapshotsDeferred) != string(GapSnapshotsDeferred) {
 		t.Fatalf("the deferred gap folds to %q on the metric label", MetricGapKind(GapSnapshotsDeferred))
@@ -521,4 +532,410 @@ func TestTheVerdictScrapesReadNeverAsksTheMemoryLine(t *testing.T) {
 		t.Fatalf("the scrape's read asked the line %d times, gaps %+v; want it never asked", asked, scrape.Gaps)
 	}
 	sameJSON(t, "the scrape's view with the line refusing", scrape, withRoom)
+}
+
+// Pages that ask for a view together share one read of the snapshots, and
+// each builds its own view from it: deciding one does not decide the other.
+func TestPagesThatAskTogetherShareOneReadOfTheSnapshots(t *testing.T) {
+	reader := &blockingSnapshots{release: make(chan struct{}), snapshots: externalRows(2)}
+	reader.snapshots[1].Anomalies[0].FailingSince = now.Add(-time.Hour)
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{replicas: replicas()}, reader)
+	views := make(chan View, 2)
+	read := func(stallAfter time.Duration) {
+		view := service.View(context.Background())
+		Decide(&view, now, stallAfter)
+		views <- view
+	}
+	go read(time.Minute)
+	for deadline := time.Now().Add(2 * time.Second); reader.count() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	}
+	go read(0)
+	time.Sleep(100 * time.Millisecond)
+	close(reader.release)
+	first, second := <-views, <-views
+	if reader.count() != 1 {
+		t.Fatalf("%d reads for two pages that asked together, want one", reader.count())
+	}
+	stalled := OursCount(first.Anomalies) + OursCount(second.Anomalies)
+	if stalled != 1 || reader.snapshots[1].Anomalies[0].Stalled {
+		t.Fatalf("ours across the two views %d, snapshot row stalled %v: want one view deciding the row stalled and the shared snapshot untouched",
+			stalled, reader.snapshots[1].Anomalies[0].Stalled)
+	}
+}
+
+// A replica that published no summary and whose snapshot could not be read
+// is that replica unread; the other replicas' summaries stand.
+func TestAReplicaWhoseSnapshotCouldNotBeReadLeavesTheOthersSummaries(t *testing.T) {
+	summary := SummaryOf(snapshotsWithAnomalies(2)[1], nil, time.Minute)
+	summary.Head.TakenAt = now
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{replicas: replicas()}, failingSnapshotsWithSummaries{summaries: []ReplicaSummary{summary}})
+	view, part := service.Summarized(context.Background(), time.Minute)
+	if !hasGap(view, GapSnapshotsUnreadable) || part.Attribution.Ours != 2 || len(view.PerReplica) != 1 {
+		t.Fatalf("gaps %+v ours %d replicas %d, want pod-a unread and pod-b's summary counted", view.Gaps, part.Attribution.Ours,
+			len(view.PerReplica))
+	}
+	// Part read is not nothing read: the objects the read replica does not
+	// hold are still a shortfall.
+	if !hasGap(view, GapOwnershipShortfall) {
+		t.Fatalf("gaps %+v, want the ownership shortfall kept beside the replica unread", view.Gaps)
+	}
+	for _, gap := range view.Gaps {
+		if gap.Kind == GapSnapshotsUnreadable && gap.Replica != "pod-a" {
+			t.Fatalf("unread gap %+v, want it on pod-a alone", gap)
+		}
+	}
+}
+
+// failingSnapshotsWithSummaries has summaries for some replicas and cannot
+// read any snapshot.
+type failingSnapshotsWithSummaries struct{ summaries []ReplicaSummary }
+
+func (store failingSnapshotsWithSummaries) Load(context.Context, []string) ([]Snapshot, error) {
+	return nil, errors.New("snapshots unreadable")
+}
+func (store failingSnapshotsWithSummaries) LoadSummaries(context.Context, []string) ([]ReplicaSummary, error) {
+	return store.summaries, nil
+}
+func (store failingSnapshotsWithSummaries) LoadOwned(context.Context, []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
+// The unadmitted view is the verdict scrape's alone: one caller in the
+// production code. A page that read it would read past the memory line.
+func TestTheUnadmittedViewHasOneProductionCaller(t *testing.T) {
+	callers := []string{}
+	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, ".ViewAsPublished(") {
+				callers = append(callers, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callers) != 1 || !strings.HasSuffix(callers[0], filepath.Join("cmd", "alarmd", "runtime_phase_two_fleet.go")) {
+		t.Fatalf("ViewAsPublished called from %v, want the verdict scrape alone", callers)
+	}
+}
+
+// The reads past the memory line are reached by the verdict alone: the
+// unadmitted load from the verdict's load, that from the scrape's view and
+// the health route's summaries, and those two from the scrape and the
+// health route. Each call is placed by the function it is written in, one
+// entry a call, so a new caller of any of them fails here.
+func TestTheReadsPastTheMemoryLineAreReachedByTheVerdictAlone(t *testing.T) {
+	want := map[string][]string{
+		"loadUnadmitted":  {"fleet/service.go:loadForVerdict"},
+		"loadForVerdict":  {"fleet/service.go:ViewAsPublished", "fleet/service.go:summarize"},
+		"ViewAsPublished": {"cmd/alarmd/runtime_phase_two_fleet.go:fleetVerdictSource"},
+		"Summarized":      {"fleet/handler.go:NewHandler"}, // the /api/health route, its one call there
+	}
+	got := map[string][]string{}
+	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		relative := filepath.ToSlash(strings.TrimPrefix(path, ".."+string(filepath.Separator)))
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if _, watched := want[selector.Sel.Name]; watched {
+						got[selector.Sel.Name] = append(got[selector.Sel.Name], relative+":"+function.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, callers := range want {
+		sort.Strings(got[name])
+		if fmt.Sprint(got[name]) != fmt.Sprint(callers) {
+			t.Errorf("%s called from %v, want %v", name, got[name], callers)
+		}
+	}
+}
+
+// namedSnapshots holds its reads until released and answers each with a
+// snapshot for every replica asked about, counting the reads.
+type namedSnapshots struct {
+	mu      sync.Mutex
+	loads   int
+	release chan struct{}
+}
+
+func (reader *namedSnapshots) Load(_ context.Context, replicas []string) ([]Snapshot, error) {
+	reader.mu.Lock()
+	reader.loads++
+	reader.mu.Unlock()
+	<-reader.release
+	snapshots := make([]Snapshot, 0, len(replicas))
+	for _, replica := range replicas {
+		snapshots = append(snapshots, Snapshot{Replica: replica, TakenAt: now})
+	}
+	return snapshots, nil
+}
+
+// A read in progress is shared only with callers asking for the same
+// replicas: one asking for others reads them itself.
+func TestASharedReadIsSharedOnlyForTheSameReplicas(t *testing.T) {
+	reader := &namedSnapshots{release: make(chan struct{})}
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true}}, stubRegistry{replicas: replicas()}, reader)
+	type answer struct{ snapshots []Snapshot }
+	answers := make(chan answer, 2)
+	go func() {
+		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a"})
+		answers <- answer{snapshots}
+	}()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		reader.mu.Lock()
+		started := reader.loads
+		reader.mu.Unlock()
+		if started == 1 {
+			break
+		}
+	}
+	go func() {
+		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a", "pod-b"})
+		answers <- answer{snapshots}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(reader.release)
+	first, second := <-answers, <-answers
+	if len(first.snapshots)+len(second.snapshots) != 3 || reader.loads != 2 {
+		t.Fatalf("answers of %d and %d snapshots from %d reads, want each its own replicas from reads of their own",
+			len(first.snapshots), len(second.snapshots), reader.loads)
+	}
+}
+
+// The same replicas asked for in another order are the same read.
+func TestASharedReadIsSharedWhateverTheReplicasOrder(t *testing.T) {
+	reader := &namedSnapshots{release: make(chan struct{})}
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true}}, stubRegistry{replicas: replicas()}, reader)
+	answers := make(chan int, 2)
+	go func() {
+		snapshots, _ := service.loadShared(context.Background(), []string{"pod-a", "pod-b"})
+		answers <- len(snapshots)
+	}()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		reader.mu.Lock()
+		started := reader.loads
+		reader.mu.Unlock()
+		if started == 1 {
+			break
+		}
+	}
+	go func() {
+		snapshots, _ := service.loadShared(context.Background(), []string{"pod-b", "pod-a"})
+		answers <- len(snapshots)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(reader.release)
+	if first, second := <-answers, <-answers; first != 2 || second != 2 || reader.loads != 1 {
+		t.Fatalf("answers of %d and %d snapshots from %d reads, want one read of both replicas shared", first, second, reader.loads)
+	}
+}
+
+// waitingSnapshots holds its reads until released or until the read's own
+// context ends, and says how each read ended. A stopped read returns once
+// lingering is closed, when there is one.
+type waitingSnapshots struct {
+	mu        sync.Mutex
+	loads     int
+	stopped   int
+	release   chan struct{}
+	lingering chan struct{}
+}
+
+func (reader *waitingSnapshots) Load(ctx context.Context, replicas []string) ([]Snapshot, error) {
+	reader.mu.Lock()
+	reader.loads++
+	reader.mu.Unlock()
+	select {
+	case <-reader.release:
+	case <-ctx.Done():
+		reader.mu.Lock()
+		reader.stopped++
+		reader.mu.Unlock()
+		if reader.lingering != nil {
+			<-reader.lingering
+		}
+		return nil, ctx.Err()
+	}
+	snapshots := make([]Snapshot, 0, len(replicas))
+	for _, replica := range replicas {
+		snapshots = append(snapshots, Snapshot{Replica: replica, TakenAt: now})
+	}
+	return snapshots, nil
+}
+
+func (reader *waitingSnapshots) counts() (int, int) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	return reader.loads, reader.stopped
+}
+
+func (reader *waitingSnapshots) waitLoads(t *testing.T, want int) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if loads, _ := reader.counts(); loads >= want {
+			return
+		}
+	}
+	t.Fatalf("reads never reached %d", want)
+}
+
+// The caller that started a shared read going away does not fail the
+// callers waiting for it: they get the snapshots. Nor does a waiter wait
+// past its own context.
+func TestASharedReadOutlivesTheCallerThatStartedIt(t *testing.T) {
+	reader := &waitingSnapshots{release: make(chan struct{})}
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true}}, stubRegistry{replicas: replicas()}, reader)
+	type answer struct {
+		snapshots []Snapshot
+		err       error
+	}
+	first, second, third := make(chan answer, 1), make(chan answer, 1), make(chan answer, 1)
+	leading, leave := context.WithCancel(context.Background())
+	go func() {
+		snapshots, err := service.loadShared(leading, replicas())
+		first <- answer{snapshots, err}
+	}()
+	reader.waitLoads(t, 1)
+	go func() {
+		snapshots, err := service.loadShared(context.Background(), replicas())
+		second <- answer{snapshots, err}
+	}()
+	impatient, giveUp := context.WithCancel(context.Background())
+	go func() {
+		snapshots, err := service.loadShared(impatient, replicas())
+		third <- answer{snapshots, err}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	leave()
+	if got := <-first; !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("the caller that left got %v, want its own cancellation", got.err)
+	}
+	giveUp()
+	if got := <-third; !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("the waiter that gave up got %v, want its own cancellation while the read still runs", got.err)
+	}
+	close(reader.release)
+	got := <-second
+	if loads, stopped := reader.counts(); got.err != nil || len(got.snapshots) != 2 || loads != 1 || stopped != 0 {
+		t.Fatalf("the waiter got %d snapshots, err %v, from %d reads with %d stopped; want the one read's snapshots",
+			len(got.snapshots), got.err, loads, stopped)
+	}
+}
+
+// A shared read everyone stopped waiting for is stopped, and a caller that
+// comes after reads again rather than joining the stopped read, even while
+// the stopped read has not yet returned.
+func TestASharedReadNobodyWaitsForIsStopped(t *testing.T) {
+	reader := &waitingSnapshots{release: make(chan struct{}), lingering: make(chan struct{})}
+	defer close(reader.lingering)
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true}}, stubRegistry{replicas: replicas()}, reader)
+	leading, leave := context.WithCancel(context.Background())
+	left := make(chan error, 1)
+	go func() {
+		_, err := service.loadShared(leading, replicas())
+		left <- err
+	}()
+	reader.waitLoads(t, 1)
+	leave()
+	<-left
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if _, stopped := reader.counts(); stopped == 1 {
+			break
+		}
+	}
+	if _, stopped := reader.counts(); stopped != 1 {
+		t.Fatal("the read nobody waited for was not stopped")
+	}
+	close(reader.release)
+	bounded, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	snapshots, err := service.loadShared(bounded, replicas())
+	if loads, _ := reader.counts(); err != nil || len(snapshots) != 2 || loads != 2 {
+		t.Fatalf("the caller after got %d snapshots, err %v, after %d reads; want a read of its own", len(snapshots), err, loads)
+	}
+}
+
+// The health route's shared read outlives the caller that started it too.
+func TestASummarizedReadOutlivesTheCallerThatStartedIt(t *testing.T) {
+	reader := &waitingSnapshots{release: make(chan struct{})}
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true}}, stubRegistry{replicas: replicas()}, reader)
+	leading, leave := context.WithCancel(context.Background())
+	first, second := make(chan View, 1), make(chan View, 1)
+	go func() {
+		view, _ := service.Summarized(leading, time.Minute)
+		first <- view
+	}()
+	reader.waitLoads(t, 1)
+	go func() {
+		view, _ := service.Summarized(context.Background(), time.Minute)
+		second <- view
+	}()
+	time.Sleep(50 * time.Millisecond)
+	leave()
+	if view := <-first; !hasGap(view, GapSnapshotsUnreadable) || view.Health != HealthUnknown {
+		t.Fatalf("the caller that left read %s with gaps %+v, want unknown and unread", view.Health, view.Gaps)
+	}
+	close(reader.release)
+	if view := <-second; hasGap(view, GapSnapshotsUnreadable) || len(view.PerReplica) != 2 {
+		t.Fatalf("the waiter read gaps %+v over %d replicas, want both replicas read", view.Gaps, len(view.PerReplica))
+	}
+}
+
+// A diagnosis over a view the memory line deferred is answered and not
+// kept; one over a view read whole is kept for the pages after it.
+func TestADiagnosisOverADeferredViewIsNotKept(t *testing.T) {
+	for name, deferred := range map[string]bool{"deferred": true, "read": false} {
+		cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+		view := &View{}
+		if deferred {
+			view.Gaps = []Gap{{Kind: GapSnapshotsDeferred}}
+		}
+		entry, _ := cache.get(context.Background(), "", now, func(context.Context) *diagnosisEntry {
+			return &diagnosisEntry{view: view, readAt: now, expires: now.Add(DiagnosisCacheTTL)}
+		})
+		if _, kept := cache.entries[entry.id]; kept == deferred {
+			t.Errorf("%s: kept %v, want a deferred view answered and not kept", name, kept)
+		}
+	}
+}
+
+// One replica's snapshot unread is that replica's Plans unread; the other
+// replicas' Plans are observed.
+func TestOneReplicaUnreadLeavesTheOthersObserved(t *testing.T) {
+	ctx := newDiagnosisContext(&View{Gaps: []Gap{{Kind: GapSnapshotsUnreadable, Replica: "pod-a"}}}, "pod-a", now)
+	if !ctx.unread["pod-a"] || ctx.unread[""] || ctx.unread["pod-b"] {
+		t.Fatalf("unread %v, want pod-a alone", ctx.unread)
+	}
 }
