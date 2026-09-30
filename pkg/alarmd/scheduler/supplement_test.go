@@ -270,8 +270,13 @@ func TestASupplementAndItsQueryGroupsSlotNeverRunAtOnce(t *testing.T) {
 		done <- err
 	}()
 	<-executor.started
-	if _, _, err := runner.RunOne(context.Background()); !errors.Is(err, ErrSlotInFlight) || source.calls != 0 {
+	_, _, err = runner.RunOne(context.Background())
+	var inFlight *SlotInFlightError
+	if !errors.Is(err, ErrSlotInFlight) || source.calls != 0 {
 		t.Fatalf("a Slot ran beside the supplement: error %v, source calls %d", err, source.calls)
+	}
+	if !errors.As(err, &inFlight) || inFlight.HeldBy != FlightHeldBySupplement {
+		t.Fatalf("the Slot was told %v, want the supplement named as what held the flight", err)
 	}
 	close(executor.release)
 	if err := <-done; err != nil {

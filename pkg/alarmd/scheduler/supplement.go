@@ -149,7 +149,7 @@ func (runner *Runner) Supplement(
 	if !supported {
 		return execution.SupplementFacts{}, ErrSupplementUnsupported
 	}
-	release, acquired := runner.flights.TryMaintenance(runner.queryGroup)
+	release, acquired := runner.flights.TrySupplement(runner.queryGroup)
 	if !acquired {
 		return execution.SupplementFacts{}, ErrSupplementFlightBusy
 	}

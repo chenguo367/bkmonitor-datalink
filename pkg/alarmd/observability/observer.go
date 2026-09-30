@@ -361,6 +361,12 @@ const (
 	// ReasonInternalUnknown is chosen by a site that has looked at the failure
 	// and has nothing finer to say about it.
 	ReasonInternalUnknown ReasonCode = "internal_unknown"
+	// ReasonHeldBySupplement and ReasonHeldByMaintenance are a round turned
+	// away from its Query Group's flight while a supplement of a completed
+	// Slot, or a maintenance write, held it: a yield by design, the round run
+	// again the moment the hold ends.
+	ReasonHeldBySupplement  ReasonCode = "held_by_supplement"
+	ReasonHeldByMaintenance ReasonCode = "held_by_maintenance"
 	// ReasonNotReported is not chosen by anyone: it is what a failing
 	// observation gets when its emitting site reported no reason at all.
 	//

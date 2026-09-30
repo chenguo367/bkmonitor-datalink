@@ -703,6 +703,11 @@ type phaseTwoWorkerBundle struct {
 	cancelControl  context.CancelFunc
 	maintenanceWG  sync.WaitGroup
 	inflightWG     sync.WaitGroup
+	// flightReleased carries the Query Groups whose flight, held by a
+	// supplement or maintenance, turned a Slot away, once the hold ends
+	// (scheduler.FlightCoordinator.OnTurnedAwayReleased): the dispatcher runs
+	// the Slot then instead of at its next turn.
+	flightReleased chan execution.QueryGroupIdentity
 	shutdownOnce   sync.Once
 	shutdownErr    error
 	// dependencyDegraded is set while a control or Ownership Store call fails
@@ -831,6 +836,12 @@ type phaseTwoRunnerDispatcher struct {
 	lastQueued map[execution.QueryGroupIdentity]phaseTwoRunnerGeneration
 	queued     map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle
 	active     map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle
+	// turnedAway is each Query Group whose round a supplement or maintenance
+	// turned away from its flight, waiting for that hold to end; released
+	// each whose hold ended before its round's return was handled. Both are
+	// cleared at every generation, whose walk offers any round left.
+	turnedAway map[execution.QueryGroupIdentity]phaseTwoScheduledRunner
+	released   map[execution.QueryGroupIdentity]struct{}
 	normal     []phaseTwoQueuedRunner
 	delayed    []phaseTwoQueuedRunner
 	// queueSequence numbers queue entries in order of queueing; normalDirty
@@ -923,6 +934,20 @@ type phaseTwoRotationFacts struct {
 	generation uint64
 }
 
+// flightReleasedNotices is how many released holds wait for the dispatcher
+// at once. A notice that does not fit is dropped: the Slot it was for runs
+// at its next turn, one scheduler tick later, as it did before notices.
+const flightReleasedNotices = 256
+
+// noticeFlightReleased tells the dispatcher a Query Group's flight is free
+// again after it turned a Slot away. It never blocks.
+func (bundle *phaseTwoWorkerBundle) noticeFlightReleased(queryGroup execution.QueryGroupIdentity) {
+	select {
+	case bundle.flightReleased <- queryGroup:
+	default:
+	}
+}
+
 func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*phaseTwoWorkerBundle, error) {
 	if dependencies.Health == nil || dependencies.Control == nil || dependencies.Ownership == nil ||
 		dependencies.Observer == nil || dependencies.Now == nil {
@@ -932,9 +957,10 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		return nil, err
 	}
 	bundle := &phaseTwoWorkerBundle{dependencies: dependencies, outputSinkReady: true,
-		assigned: make(map[execution.QueryGroupIdentity]struct{}),
-		runners:  make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
-		liveness: newPhaseTwoLiveness(dependencies.Now, dependencies.Recorder)}
+		flightReleased: make(chan execution.QueryGroupIdentity, flightReleasedNotices),
+		assigned:       make(map[execution.QueryGroupIdentity]struct{}),
+		runners:        make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
+		liveness:       newPhaseTwoLiveness(dependencies.Now, dependencies.Recorder)}
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
@@ -1247,6 +1273,8 @@ func newPhaseTwoRunnerDispatcher(
 		lastQueued:    make(map[execution.QueryGroupIdentity]phaseTwoRunnerGeneration),
 		queued:        make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
 		active:        make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
+		turnedAway:    make(map[execution.QueryGroupIdentity]phaseTwoScheduledRunner),
+		released:      make(map[execution.QueryGroupIdentity]struct{}),
 		preferDelayed: true, oneShot: oneShot,
 	}
 }
@@ -1476,6 +1504,10 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 			if canceled == nil {
 				dispatcher.beginGeneration()
 			}
+		case queryGroup := <-dispatcher.bundle.flightReleased:
+			if canceled == nil {
+				dispatcher.flightReleased(queryGroup)
+			}
 		case <-retryReady:
 		case <-ctxDone:
 			canceled = ctx.Err()
@@ -1499,6 +1531,8 @@ func (dispatcher *phaseTwoRunnerDispatcher) beginGeneration() {
 		dispatcher.auditCursor = ""
 	}
 	dispatcher.generation++
+	clear(dispatcher.turnedAway)
+	clear(dispatcher.released)
 	// One header comparison for the whole replica, once per tick. It is here
 	// rather than per Query Group because the header is global: a publication
 	// stamps it regardless of which Query Groups it touched, so one reading
@@ -1983,13 +2017,26 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 			return
 		}
 		if !result.attempted {
+			var outcome observability.Result = observability.ResultFailed
+			reason := observability.ReasonInternalUnknown
+			yielded := heldByYield(result.err)
+			switch yielded {
+			case scheduler.FlightHeldBySupplement:
+				outcome, reason = observability.ResultSkipped, observability.ReasonHeldBySupplement
+			case scheduler.FlightHeldByMaintenance:
+				outcome, reason = observability.ResultSkipped, observability.ReasonHeldByMaintenance
+			}
 			observeRuntime(ctx, dispatcher.bundle.dependencies.Observer, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
-				Result: observability.ResultFailed, ReasonCode: observability.ReasonInternalUnknown,
+				Result: outcome, ReasonCode: reason,
 				Direction: observability.DirectionInternal,
 				Trace:     observability.TraceFields{QueryGroupKey: string(scheduled.queryGroup)},
 				Err:       result.err,
 			})
+			if yielded != "" && requeue {
+				dispatcher.turnedAwayByHold(scheduled)
+				return
+			}
 		}
 	}
 	if result.admissionDenied {
@@ -2034,6 +2081,61 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 	// ranked it behind every Slot with a deadline, and a ten-second Slot with
 	// five seconds left waited behind the minute's Slots with fifty-five.
 	dispatcher.delayed = append(dispatcher.delayed, dispatcher.queueEntry(scheduled, readyAt))
+	dispatcher.queued[scheduled.queryGroup] = scheduled.lifecycle
+}
+
+// heldByYield is what held the flight a round was turned away from, when
+// that is a supplement or maintenance -- a yield by design -- and empty
+// otherwise.
+func heldByYield(err error) string {
+	var inFlight *scheduler.SlotInFlightError
+	if !errors.As(err, &inFlight) {
+		return ""
+	}
+	switch inFlight.HeldBy {
+	case scheduler.FlightHeldBySupplement, scheduler.FlightHeldByMaintenance:
+		return inFlight.HeldBy
+	}
+	return ""
+}
+
+// turnedAwayByHold takes a round a supplement or maintenance turned away.
+// It is not queued again at once, as a deferred return is: its Runner still
+// says it is ready, and it would be turned away again for as long as the
+// hold lasts. It runs when the hold ends -- at once, if the end was heard
+// before this return -- or at its next turn.
+func (dispatcher *phaseTwoRunnerDispatcher) turnedAwayByHold(scheduled phaseTwoScheduledRunner) {
+	if _, ended := dispatcher.released[scheduled.queryGroup]; ended {
+		delete(dispatcher.released, scheduled.queryGroup)
+		dispatcher.queueNow(scheduled)
+		return
+	}
+	dispatcher.turnedAway[scheduled.queryGroup] = scheduled
+}
+
+// flightReleased takes the end of a hold that turned a round away: the round
+// is queued now, or, when its return has not been handled yet, the end is
+// kept for it.
+func (dispatcher *phaseTwoRunnerDispatcher) flightReleased(queryGroup execution.QueryGroupIdentity) {
+	scheduled, waiting := dispatcher.turnedAway[queryGroup]
+	if !waiting {
+		dispatcher.released[queryGroup] = struct{}{}
+		return
+	}
+	delete(dispatcher.turnedAway, queryGroup)
+	dispatcher.queueNow(scheduled)
+}
+
+// queueNow puts a round in the recovery queue ready now, unless its Runner
+// is no longer the current one, it is queued or running already, or the
+// queue is full; its next turn offers it then.
+func (dispatcher *phaseTwoRunnerDispatcher) queueNow(scheduled phaseTwoScheduledRunner) {
+	if !dispatcher.bundle.isCurrentScheduledRunner(scheduled) || dispatcher.queued[scheduled.queryGroup] != nil ||
+		dispatcher.active[scheduled.queryGroup] != nil ||
+		len(dispatcher.delayed) >= dispatcher.bundle.dependencies.Config.PhaseTwo.Scheduler.RecoveryQueueCapacity {
+		return
+	}
+	dispatcher.delayed = append(dispatcher.delayed, dispatcher.queueEntry(scheduled, dispatcher.bundle.schedulerNow()))
 	dispatcher.queued[scheduled.queryGroup] = scheduled.lifecycle
 }
 

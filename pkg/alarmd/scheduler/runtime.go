@@ -19,6 +19,16 @@ import (
 
 var ErrSlotInFlight = errors.New("alarmd scheduler: Query Group Slot is already in flight")
 
+// SlotInFlightError is a round turned away from its Query Group's flight,
+// and what held it (FlightHeldBy*). It is ErrSlotInFlight.
+type SlotInFlightError struct{ HeldBy string }
+
+func (err *SlotInFlightError) Error() string {
+	return ErrSlotInFlight.Error() + ", held by " + err.HeldBy
+}
+
+func (err *SlotInFlightError) Is(target error) bool { return target == ErrSlotInFlight }
+
 var errExecutionAdmissionDenied = errors.New("alarmd scheduler: execution admission denied")
 
 type SourceRetryError struct{ Err error }
@@ -228,8 +238,12 @@ type ExecutionAdmission func(execution.Operation) (release func(), admitted bool
 // FlightCoordinator is one process-wide gate keyed by Query Group. It keeps
 // query execution single-flight without introducing a Redis business lock.
 type FlightCoordinator struct {
-	mu                     sync.Mutex
-	active                 map[execution.QueryGroupIdentity]struct{}
+	mu sync.Mutex
+	// active is each Query Group's flight held now, by what; released is
+	// told of each Query Group whose hold turned a Slot away, once the hold
+	// ends (OnTurnedAwayReleased).
+	active                 map[execution.QueryGroupIdentity]flightHold
+	released               func(execution.QueryGroupIdentity)
 	recoveryEnabled        bool
 	limits                 RecoveryLimits
 	now                    func() time.Time
@@ -279,7 +293,7 @@ type heldPermit struct {
 }
 
 func NewFlightCoordinator() *FlightCoordinator {
-	return &FlightCoordinator{active: make(map[execution.QueryGroupIdentity]struct{}), now: time.Now}
+	return &FlightCoordinator{active: make(map[execution.QueryGroupIdentity]flightHold), now: time.Now}
 }
 
 func NewFlightCoordinatorWithRecovery(
@@ -290,7 +304,7 @@ func NewFlightCoordinatorWithRecovery(
 	if err := limits.Validate(); err != nil || now == nil {
 		return nil, ErrRecoveryLimitsInvalid
 	}
-	return &FlightCoordinator{active: make(map[execution.QueryGroupIdentity]struct{}), recoveryEnabled: true,
+	return &FlightCoordinator{active: make(map[execution.QueryGroupIdentity]flightHold), recoveryEnabled: true,
 		limits: limits, now: now, nextRecovery: true, observer: observability.Multi(observers...),
 		inflightByOp:      make(map[execution.Operation]int),
 		permitSecondsByOp: make(map[execution.Operation]float64),
@@ -384,27 +398,86 @@ func (coordinator *FlightCoordinator) QueryPermitOccupancy() QueryPermitOccupanc
 	return occupancy
 }
 
+// Flight holders, closed: what holds a Query Group's flight. A Slot turned
+// away from a flight held by anything but a Slot is told what held it, and
+// is not an unexplained failure.
+const (
+	FlightHeldBySlot        = "slot"
+	FlightHeldBySupplement  = "supplement"
+	FlightHeldByMaintenance = "maintenance"
+)
+
+// flightHold is one Query Group's flight held: by what, and whether it
+// turned a Slot away.
+type flightHold struct {
+	holder     string
+	turnedAway bool
+}
+
 // TryMaintenance shares the QG's existing flight exclusion with detection.
 // It never queues: maintenance yields to an executing Slot and retries later.
 func (coordinator *FlightCoordinator) TryMaintenance(queryGroup execution.QueryGroupIdentity) (func(), bool) {
-	return coordinator.tryAcquire(queryGroup)
+	release, _, acquired := coordinator.tryAcquireAs(queryGroup, FlightHeldByMaintenance)
+	return release, acquired
 }
 
-func (coordinator *FlightCoordinator) tryAcquire(queryGroup execution.QueryGroupIdentity) (func(), bool) {
+// TrySupplement is TryMaintenance for a supplement of a completed Slot.
+func (coordinator *FlightCoordinator) TrySupplement(queryGroup execution.QueryGroupIdentity) (func(), bool) {
+	release, _, acquired := coordinator.tryAcquireAs(queryGroup, FlightHeldBySupplement)
+	return release, acquired
+}
+
+// OnTurnedAwayReleased has told be called with each Query Group whose
+// flight, held by a supplement or maintenance, turned a Slot away, once
+// that hold ends: the Slot can run now, and need not wait for its next turn.
+// told is called outside the coordinator's lock and must not block.
+func (coordinator *FlightCoordinator) OnTurnedAwayReleased(told func(execution.QueryGroupIdentity)) {
 	if coordinator == nil {
-		return nil, false
+		return
+	}
+	coordinator.mu.Lock()
+	coordinator.released = told
+	coordinator.mu.Unlock()
+}
+
+// FlightHeld reports what holds the Query Group's flight now, if anything.
+func (coordinator *FlightCoordinator) FlightHeld(queryGroup execution.QueryGroupIdentity) (string, bool) {
+	if coordinator == nil {
+		return "", false
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	if _, exists := coordinator.active[queryGroup]; exists {
-		return nil, false
+	hold, held := coordinator.active[queryGroup]
+	return hold.holder, held
+}
+
+// tryAcquireAs takes the Query Group's flight for holder, or says what
+// holds it. A Slot turned away from a hold that is not a Slot's marks it,
+// and its end is told (OnTurnedAwayReleased).
+func (coordinator *FlightCoordinator) tryAcquireAs(queryGroup execution.QueryGroupIdentity, holder string) (func(), string, bool) {
+	if coordinator == nil {
+		return nil, "", false
 	}
-	coordinator.active[queryGroup] = struct{}{}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if hold, exists := coordinator.active[queryGroup]; exists {
+		if holder == FlightHeldBySlot && hold.holder != FlightHeldBySlot && !hold.turnedAway {
+			hold.turnedAway = true
+			coordinator.active[queryGroup] = hold
+		}
+		return nil, hold.holder, false
+	}
+	coordinator.active[queryGroup] = flightHold{holder: holder}
 	return func() {
 		coordinator.mu.Lock()
+		hold, held := coordinator.active[queryGroup]
 		delete(coordinator.active, queryGroup)
+		told := coordinator.released
 		coordinator.mu.Unlock()
-	}, true
+		if held && hold.turnedAway && told != nil {
+			told(queryGroup)
+		}
+	}, "", true
 }
 
 // Runner is bound to one owned Query Group. normal, retry, replay and probe use
@@ -721,10 +794,10 @@ func (runner *Runner) runOneTracked(
 		decision = "cancelled"
 		return execution.SlotExecutionResult{}, false, err
 	}
-	release, acquired := runner.flights.tryAcquire(runner.queryGroup)
+	release, heldBy, acquired := runner.flights.tryAcquireAs(runner.queryGroup, FlightHeldBySlot)
 	if !acquired {
 		decision = "single_flight_busy"
-		return execution.SlotExecutionResult{}, false, ErrSlotInFlight
+		return execution.SlotExecutionResult{}, false, &SlotInFlightError{HeldBy: heldBy}
 	}
 	defer release()
 	if source, ok := runner.source.(interface{ RangeCreationEnabled() bool }); ok && source.RangeCreationEnabled() {
