@@ -45,12 +45,16 @@ import (
 
 // LatePastRoundSample is one supplemented window every late series of which
 // had crossed its Slot: the Slot, the rung its late series were read at and
-// how long after the Slot's first read that was, and how many had crossed.
+// how long after the Slot's first read that was, how many series the first
+// read had and how many the read at the rung found late -- series, each
+// once -- and how many (Plan, series) pairs had crossed: a series of a
+// query several Plans share is a pair of each.
 type LatePastRoundSample struct {
 	EvaluationTime execution.EvaluationTime `json:"evaluation_time"`
 	Rung           string                   `json:"rung"`
 	SeenAgeSeconds int64                    `json:"seen_age_seconds"`
 	OnTimeSeries   int                      `json:"on_time_series"`
+	LateSeries     int                      `json:"late_series"`
 	CrossedSeries  int                      `json:"crossed_series"`
 }
 
@@ -71,11 +75,13 @@ type LatePastRoundReading struct {
 
 // ResidualMissSample is one supplemented window with series admitted and
 // series that had crossed their Slot: the Slot, how many series its first
-// read had on time, and how many late ones were admitted and had crossed --
-// the window whole, for the reader to see how much of it was late.
+// read had on time and how many were found late -- series, each once, the
+// window whole for the reader to see how much of it was late -- and how
+// many (Plan, series) pairs of the late ones were admitted and had crossed.
 type ResidualMissSample struct {
 	EvaluationTime execution.EvaluationTime `json:"evaluation_time"`
 	OnTimeSeries   int                      `json:"on_time_series"`
+	LateSeries     int                      `json:"late_series"`
 	AdmittedSeries int                      `json:"admitted_series"`
 	CrossedSeries  int                      `json:"crossed_series"`
 }
@@ -144,7 +150,7 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 		}
 		run.samples = keepLast(append(run.samples, LatePastRoundSample{EvaluationTime: slot.evaluation,
 			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(rungDelay(slot.rung, slot.step) / time.Second),
-			OnTimeSeries: onTimeSeries(slot), CrossedSeries: facts.CrossedT}), latePastRoundKept)
+			OnTimeSeries: onTimeSeries(slot), LateSeries: slot.late, CrossedSeries: facts.CrossedT}), latePastRoundKept)
 	case facts.Admitted > 0:
 		state.latePastRound = nil
 		if facts.CrossedT == 0 {
@@ -158,7 +164,8 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 		residual.windows++
 		residual.crossed += uint64(facts.CrossedT)
 		residual.samples = keepLast(append(residual.samples, ResidualMissSample{EvaluationTime: slot.evaluation,
-			OnTimeSeries: onTimeSeries(slot), AdmittedSeries: facts.Admitted, CrossedSeries: facts.CrossedT}), residualMissKept)
+			OnTimeSeries: onTimeSeries(slot), LateSeries: slot.late, AdmittedSeries: facts.Admitted, CrossedSeries: facts.CrossedT}),
+			residualMissKept)
 	default:
 		// Nothing admitted and not every series crossed: some were not late
 		// alone. It says nothing either way.
