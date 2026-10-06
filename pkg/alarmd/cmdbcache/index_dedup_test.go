@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,9 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 			continue
 		}
 		facts, refusedNodes := hostFactsOf(wire, payload)
+		if parsed, err := strconv.ParseInt(facts.HostID, 10, 64); err != nil || parsed <= 0 {
+			builder.index.hostIDsIncomplete = true
+		}
 		if facts.HostID != "" {
 			if existing, found := builder.seen[facts.HostID]; found {
 				builder.index.byIdentity[identity] = existing

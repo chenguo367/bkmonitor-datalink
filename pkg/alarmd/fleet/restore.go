@@ -79,6 +79,7 @@ type RestoredTargetResolution struct {
 	NodesMissing    []string                  `json:"nodes_missing,omitempty"`
 	NodesForeign    []string                  `json:"nodes_foreign,omitempty"`
 	StaleAgeSeconds int64                     `json:"stale_age_seconds,omitempty"`
+	ExcludedAbsent  int                       `json:"excluded_absent,omitempty"`
 }
 
 // RestoredSelectorFailure names one selector that did not answer whole.

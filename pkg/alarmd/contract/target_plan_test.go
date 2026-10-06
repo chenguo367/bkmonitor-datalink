@@ -101,6 +101,23 @@ func TestTheFrozenTargetPlanRefusesItsOwnDefects(t *testing.T) {
 	if err := plan.Validate(); err != nil {
 		t.Fatalf("valid plan refused: %v", err)
 	}
+	// The exclusion cases below differ from these by the one defect each names.
+	for name, edit := range map[string]func(*TargetPlanV1){
+		"static rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity = TargetPlanRuleK8sCluster, TargetPlanIdentityV1{Dimensions: []string{"bcs_cluster_id"}}
+			p.DynamicGroups, p.DynamicTopologies = nil, nil
+		},
+		"excluded members": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.ExcludeMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}, {ModelID: "cw-Host", ModelInstID: "102"}}
+		},
+	} {
+		plan := valid()
+		edit(&plan)
+		if err := plan.Validate(); err != nil {
+			t.Fatalf("valid %s plan refused: %v", name, err)
+		}
+	}
 	for name, edit := range map[string]func(*TargetPlanV1){
 		"unknown rule":                func(p *TargetPlanV1) { p.Rule = "service_instance" },
 		"rule dimensions changed":     func(p *TargetPlanV1) { p.Identity.Dimensions = []string{"ip"} },
@@ -146,6 +163,25 @@ func TestTheFrozenTargetPlanRefusesItsOwnDefects(t *testing.T) {
 			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
 			p.StaticMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "102"}, {ModelID: "cw-Host", ModelInstID: "101"}}
 		},
+		// A rule with no dynamic source has nothing an exclusion could take
+		// away from, so a frozen plan carrying one is not a plan the writer
+		// published.
+		"exclusions on a static rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity = TargetPlanRuleK8sCluster, TargetPlanIdentityV1{Dimensions: []string{"bcs_cluster_id"}}
+			p.DynamicGroups, p.DynamicTopologies, p.ExcludeKeys = nil, nil, []string{"101"}
+		},
+		"excluded member of another model": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.ExcludeMembers = []TargetPlanMemberV1{{ModelID: "cw-MySQL", ModelInstID: "101"}}
+		},
+		"unsorted excluded members": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.ExcludeMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "102"}, {ModelID: "cw-Host", ModelInstID: "101"}}
+		},
+		"duplicate excluded members": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.ExcludeMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}, {ModelID: "cw-Host", ModelInstID: "101"}}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			plan := valid()
@@ -173,6 +209,7 @@ func TestTheFrozenIPCloudPlanRefusesItsOwnDefects(t *testing.T) {
 			StaticKeys: []string{}, StaticHosts: []string{"501", "502"}, DynamicGroups: []string{"1"}}
 	}
 	plan := valid()
+	plan.ExcludeHosts = []string{"501"}
 	if err := plan.Validate(); err != nil {
 		t.Fatalf("valid ip_cloud plan refused: %v", err)
 	}
@@ -185,8 +222,16 @@ func TestTheFrozenIPCloudPlanRefusesItsOwnDefects(t *testing.T) {
 		"unsorted hosts":        func(p *TargetPlanV1) { p.StaticHosts = []string{"502", "501"} },
 		"host zero":             func(p *TargetPlanV1) { p.StaticHosts = []string{"0"} },
 		"host not a number":     func(p *TargetPlanV1) { p.StaticHosts = []string{"h501"} },
-		"dimensions changed":    func(p *TargetPlanV1) { p.Identity.Dimensions = []string{IPCloudIPDimension} },
-		"nothing named":         func(p *TargetPlanV1) { p.StaticHosts, p.DynamicGroups = nil, nil },
+		"excluded address keys": func(p *TargetPlanV1) { p.ExcludeKeys = []string{"192.0.2.1|0"} },
+		"unsorted exclusions":   func(p *TargetPlanV1) { p.ExcludeHosts = []string{"502", "501"} },
+		"excluded host zero":    func(p *TargetPlanV1) { p.ExcludeHosts = []string{"0"} },
+		"excluded host text":    func(p *TargetPlanV1) { p.ExcludeHosts = []string{"h501"} },
+		"host exclusions on another rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity, p.TenantID, p.StaticHosts = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, "", nil
+			p.StaticKeys, p.ExcludeHosts = []string{"501"}, []string{"501"}
+		},
+		"dimensions changed": func(p *TargetPlanV1) { p.Identity.Dimensions = []string{IPCloudIPDimension} },
+		"nothing named":      func(p *TargetPlanV1) { p.StaticHosts, p.DynamicGroups = nil, nil },
 		"address on host rule": func(p *TargetPlanV1) {
 			p.Rule, p.Identity = TargetPlanRuleHostID, TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true, Address: true}
 		},

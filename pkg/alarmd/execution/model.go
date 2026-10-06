@@ -4261,6 +4261,8 @@ type TargetResolutionSummary struct {
 	NodesMissing    []string                `json:"nodes_missing,omitempty"`
 	NodesForeign    []string                `json:"nodes_foreign,omitempty"`
 	StaleAgeSeconds int64                   `json:"stale_age_seconds,omitempty"`
+	// ExcludedAbsent counts normal no-op exclusions, outside the failure list.
+	ExcludedAbsent int `json:"excluded_absent,omitempty"`
 }
 
 // TargetSelectorFailure names one selector that did not answer whole.

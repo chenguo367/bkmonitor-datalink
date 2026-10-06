@@ -55,9 +55,10 @@ var memberPolicy = fields("model_id model_inst_id bk_host_id bk_biz_id bk_obj_id
 	// spells it; without it the target reads as a model and nothing else.
 	"match": fields("bcs_cluster_id namespace node workload_kind workload_name", nil),
 })
-var targetPolicy = fields("schema_version model_id target_rule failure_policy static_keys type selection_type target_type model_inst_ids bk_tenant_id static_hosts", map[string]*policy{
+var targetPolicy = fields("schema_version model_id target_rule failure_policy static_keys exclude_keys exclude_hosts type selection_type target_type model_inst_ids bk_tenant_id static_hosts", map[string]*policy{
 	"identity":       fields("dimensions model_dimension model_value host_identity address", nil),
 	"static_members": memberPolicy, "static_targets": memberPolicy, "dynamic_topologies": memberPolicy,
+	"exclude_members": memberPolicy, "exclude": memberPolicy,
 	"groups": fields("", map[string]*policy{"conditions": conditionPolicy}), "conditions": conditionPolicy,
 	"conditions_list": conditionPolicy, "nodes": memberPolicy, "hosts": memberPolicy,
 	"static_businesses": dictionary(leaf),

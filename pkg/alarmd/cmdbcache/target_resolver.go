@@ -47,32 +47,192 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 		return nil
 	}
 	resolution := &targetplan.Resolution{Static: make(map[string]struct{}, len(plan.StaticKeys))}
+	// Pin the host snapshot so included and excluded identities cannot map
+	// against different cache revisions within this Slot.
+	var index *Index
+	var readErr error
+	if resolver != nil && resolver.hosts != nil {
+		index, readErr = resolver.hosts.targetIndex()
+	}
 	for _, key := range plan.StaticKeys {
 		resolution.Static[key] = struct{}{}
 	}
 	if len(plan.StaticMembers) > 0 {
-		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticMembers(plan))
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticMembers(plan, index))
 	}
 	if len(plan.StaticHosts) > 0 {
-		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticHosts(plan))
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticHosts(plan, index))
+	}
+	var groupExclusions *excludedGroupFacts
+	if plan.Rule == contract.TargetPlanRuleModelInstID && plan.Identity.HostIdentity && len(plan.ExcludeMembers) > 0 {
+		groupExclusions = &excludedGroupFacts{hosts: make(map[contract.TargetPlanMemberV1]string, len(plan.ExcludeMembers))}
+		for _, member := range plan.ExcludeMembers {
+			groupExclusions.hosts[member] = ""
+		}
 	}
 	for _, id := range plan.DynamicGroups {
-		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id, interval))
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id, interval, index, groupExclusions))
 	}
 	for _, node := range plan.DynamicTopologies {
-		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node))
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node, index))
+	}
+	if plan.HasExclusions() {
+		exclusion := resolver.resolveExclusions(plan, index, readErr, groupExclusions)
+		resolution.Excluded = exclusion.Members
+		resolution.ExclusionUnavailable = exclusion.State == targetplan.SelectorUnavailable
+		// Exclusion evidence is not an inclusion source.
+		exclusion.Members = nil
+		resolution.Selectors = append(resolution.Selectors, exclusion)
 	}
 	resolution.Compose()
 	return resolution
 }
 
-func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract.TargetPlanV1, id string, interval time.Duration) targetplan.SelectorResult {
+// excludedGroupFacts holds only the plan's excluded canonical members, for
+// this Resolve. A group may publish a host before the pinned host index does.
+type excludedGroupFacts struct {
+	hosts  map[contract.TargetPlanMemberV1]string
+	reason string
+}
+
+func (facts *excludedGroupFacts) add(plan *contract.TargetPlanV1, lookup GroupLookup, result targetplan.SelectorResult) {
+	if facts == nil || facts.reason != "" {
+		return
+	}
+	switch {
+	case result.State != targetplan.SelectorOK && result.State != targetplan.SelectorOKEmpty:
+		facts.reason = result.Reason
+		return
+	case lookup.EmptiedHeld:
+		facts.reason = targetplan.ReasonEmptiedHeld
+		return
+	case lookup.RefreshFailed:
+		facts.reason = targetplan.ReasonReadFailed
+		return
+	}
+	for _, member := range lookup.Snapshot.Members {
+		identity := contract.TargetPlanMemberV1{ModelID: member.ModelID, ModelInstID: member.ModelInstID}
+		previous, excluded := facts.hosts[identity]
+		if !excluded {
+			continue
+		}
+		// Use only identities accepted by this group's existing Keys checks.
+		if _, kept := result.Members[plan.Identity.HostKey(member.HostID)]; !kept {
+			continue
+		}
+		if previous != "" && previous != member.HostID {
+			facts.reason = targetplan.ReasonModelUnresolved
+			return
+		}
+		facts.hosts[identity] = member.HostID
+	}
+}
+
+// resolveExclusions uses frozen keys directly, and checks the same host
+// snapshot and validated group facts as inclusion when an identity must be
+// mapped. A member absent from both is a normal no-op, not a failure.
+func (resolver *TargetResolver) resolveExclusions(plan *contract.TargetPlanV1, index *Index, readErr error, groupFacts *excludedGroupFacts) targetplan.SelectorResult {
+	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindExclude, ID: plan.ModelID,
+		State: targetplan.SelectorOK, Reason: targetplan.ReasonNone,
+		Members: make(map[string]struct{}, len(plan.ExcludeKeys)+len(plan.ExcludeMembers)+len(plan.ExcludeHosts))}
+	for _, key := range plan.ExcludeKeys {
+		result.Members[key] = struct{}{}
+	}
+	if len(plan.ExcludeMembers)+len(plan.ExcludeHosts) > 0 {
+		switch {
+		case resolver == nil || resolver.hosts == nil:
+			result.Reason = targetplan.ReasonSourceUnwired
+		case readErr != nil:
+			result.Reason = targetplan.ReasonReadFailed
+		case index == nil || index.Hosts() == 0:
+			// An empty or missing host hash has no published completeness
+			// marker; neither proves that every excluded host was deleted.
+			result.Reason = targetplan.ReasonIndexUnavailable
+		case resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge:
+			result.Reason = targetplan.ReasonStale
+		case !index.SourceRefreshedAt().IsZero() && resolver.now().Sub(index.SourceRefreshedAt()) > resolver.hosts.maxAge:
+			result.Reason = targetplan.ReasonStale
+		case index.Refused().Hosts > 0 || index.hostIDsIncomplete || len(index.byHostID) != index.Hosts():
+			result.Reason = targetplan.ReasonIndexIncomplete
+		case len(plan.ExcludeMembers) > 0 && (index.ModelledHosts() != index.Hosts() || len(index.byModelInstance) != index.Hosts()):
+			result.Reason = targetplan.ReasonModelUnresolved
+		case groupFacts != nil && groupFacts.reason != "":
+			result.Reason = groupFacts.reason
+		}
+		if result.Reason != targetplan.ReasonNone {
+			result.State = targetplan.SelectorUnavailable
+			return result
+		}
+	}
+	for _, member := range plan.ExcludeMembers {
+		host, found := index.LookupModelInstance(member.ModelID, member.ModelInstID)
+		hostID := ""
+		if found {
+			hostID = host.HostID
+		}
+		if groupFacts != nil {
+			if groupHost := groupFacts.hosts[member]; groupHost != "" {
+				if hostID != "" && hostID != groupHost {
+					result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelUnresolved
+					result.Dropped++
+					result.Kept = len(result.Members)
+					return result
+				}
+				hostID = groupHost
+			}
+		}
+		if hostID == "" {
+			// The host enumeration does not enumerate other object models.
+			if member.ModelID != contract.HostModelID {
+				result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelUnresolved
+				result.Dropped++
+				result.Kept = len(result.Members)
+				return result
+			}
+			result.Dropped++
+			continue
+		}
+		result.Members[plan.Identity.HostKey(hostID)] = struct{}{}
+	}
+	for _, host := range plan.ExcludeHosts {
+		if _, found := index.byHostID[host]; !found {
+			result.Dropped++
+			continue
+		}
+		tenant, key, found := index.HostAddress(host)
+		if !found || tenant != plan.TenantID {
+			result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonAddressUnresolved
+			result.Dropped++
+			result.Kept = len(result.Members)
+			return result
+		}
+		if _, sharing := index.AddressHost(tenant, key); sharing > 1 {
+			result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonAddressAmbiguous
+			result.Dropped++
+			result.Kept = len(result.Members)
+			return result
+		}
+		result.Members[key] = struct{}{}
+	}
+	result.Kept = len(result.Members)
+	if result.Kept == 0 {
+		result.State = targetplan.SelectorOKEmpty
+	}
+	if result.Dropped > 0 {
+		result.Reason = targetplan.ReasonExcludedAbsent
+	}
+	return result
+}
+
+func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract.TargetPlanV1, id string, interval time.Duration, index *Index, exclusions *excludedGroupFacts) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindGroup, ID: id, Reason: targetplan.ReasonNone}
+	var lookup GroupLookup
+	defer func() { exclusions.add(plan, lookup, result) }()
 	if resolver == nil || resolver.groups == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
 		return result
 	}
-	lookup := resolver.groups.Group(ctx, id, interval)
+	lookup = resolver.groups.Group(ctx, id, interval)
 	if lookup.ReadErr != nil || lookup.Snapshot == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonReadFailed
 		return result
@@ -103,8 +263,7 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 		// The group's members are hosts by id; their keys are the addresses
 		// the host cache has for them now, so a readdressed member moves
 		// with the cache and not with the group.
-		index, current := resolver.currentIndex()
-		if !current {
+		if !resolver.currentIndex(index) {
 			result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
 			return result
 		}
@@ -142,13 +301,12 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 // "these members cannot be placed against the data", and neither is an
 // empty target; reading them as one would stop the Plan's detection with
 // nothing on the page.
-func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1) targetplan.SelectorResult {
+func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1, index *Index) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
 		return result
 	}
-	index := resolver.hosts.Current()
 	if index == nil || index.Hosts() == 0 || resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
 		return result
@@ -176,14 +334,13 @@ func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1
 
 // resolveStaticHosts maps the static hosts of an ip_cloud plan, by id, to
 // the addresses the host cache has for them inside the plan's tenant.
-func (resolver *TargetResolver) resolveStaticHosts(plan *contract.TargetPlanV1) targetplan.SelectorResult {
+func (resolver *TargetResolver) resolveStaticHosts(plan *contract.TargetPlanV1, index *Index) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
 		return result
 	}
-	index, current := resolver.currentIndex()
-	if !current {
+	if !resolver.currentIndex(index) {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
 		return result
 	}
@@ -191,14 +348,11 @@ func (resolver *TargetResolver) resolveStaticHosts(plan *contract.TargetPlanV1) 
 	return addressSelector(result, placed, 0, unplaced, ambiguous)
 }
 
-// currentIndex is the host index a resolution reads, and false when there is
+// currentIndex reports whether the pinned host index is usable: false when there is
 // none, it holds no host, or it is older than the staleness bound.
-func (resolver *TargetResolver) currentIndex() (*Index, bool) {
-	index := resolver.hosts.Current()
-	if index == nil || index.Hosts() == 0 || resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge {
-		return nil, false
-	}
-	return index, true
+func (resolver *TargetResolver) currentIndex(index *Index) bool {
+	return resolver != nil && resolver.hosts != nil && index != nil && index.Hosts() > 0 &&
+		resolver.now().Sub(index.BuiltAt()) <= resolver.hosts.maxAge
 }
 
 // placeAddresses maps hosts, by id, to the ip_cloud keys of their target
@@ -253,13 +407,12 @@ func addressSelector(result targetplan.SelectorResult, placed map[string]struct{
 	return result
 }
 
-func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, node contract.TargetPlanTopologyV1) targetplan.SelectorResult {
+func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, node contract.TargetPlanTopologyV1, index *Index) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindTopology, ID: node.Key(), Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
 		return result
 	}
-	index := resolver.hosts.Current()
 	answer := index.Topology(node.BusinessID, node.ObjectID, node.InstanceID)
 	if !answer.Resolved || resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable

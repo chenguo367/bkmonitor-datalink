@@ -55,6 +55,13 @@ type TargetPlanV1 struct {
 	// only the cache knows it - so they live apart from StaticKeys, which is
 	// empty on such a plan.
 	StaticMembers []TargetPlanMemberV1 `json:"static_members,omitempty"`
+	// ExcludeKeys and ExcludeMembers use the same identity as the included
+	// static targets. Exclusions apply after all sources are resolved.
+	ExcludeKeys    []string             `json:"exclude_keys,omitempty"`
+	ExcludeMembers []TargetPlanMemberV1 `json:"exclude_members,omitempty"`
+	// ExcludeHosts are ip_cloud exclusions by host id, resolved to addresses
+	// from the same snapshot as the included hosts.
+	ExcludeHosts []string `json:"exclude_hosts,omitempty"`
 	// DynamicGroups are the dynamic group ids referenced, sorted and unique.
 	DynamicGroups []string `json:"dynamic_groups,omitempty"`
 	// DynamicTopologies are the topology node references, sorted and unique.
@@ -334,6 +341,15 @@ func (plan *TargetPlanV1) Validate() error {
 	if err := canonicalTargetPlanList("static keys", plan.StaticKeys); err != nil {
 		return err
 	}
+	if err := canonicalTargetPlanList("exclude keys", plan.ExcludeKeys); err != nil {
+		return err
+	}
+	if plan.HasExclusions() && !facts.Dynamic {
+		return fmt.Errorf("alarmd contract: rule %s carries no exclusions", plan.Rule)
+	}
+	if plan.Rule == TargetPlanRuleModelInstID && plan.Identity.HostIdentity && len(plan.ExcludeKeys) > 0 {
+		return errors.New("alarmd contract: model_inst_id exclusions read by host identity must name model members")
+	}
 	if (plan.Rule == TargetPlanRuleIPCloud) != plan.Identity.Address {
 		return fmt.Errorf("alarmd contract: rule %s and only it reads a record's address", TargetPlanRuleIPCloud)
 	}
@@ -341,7 +357,7 @@ func (plan *TargetPlanV1) Validate() error {
 		if plan.ModelID != HostModelID || strings.TrimSpace(plan.TenantID) == "" || plan.Identity.HostIdentity {
 			return fmt.Errorf("alarmd contract: an %s plan names %s, its tenant, and no host identity", TargetPlanRuleIPCloud, HostModelID)
 		}
-		if len(plan.StaticKeys) > 0 {
+		if len(plan.StaticKeys) > 0 || len(plan.ExcludeKeys) > 0 {
 			return fmt.Errorf("alarmd contract: an %s plan names its static targets by host, not by key", TargetPlanRuleIPCloud)
 		}
 		if err := canonicalTargetPlanList("static hosts", plan.StaticHosts); err != nil {
@@ -352,7 +368,15 @@ func (plan *TargetPlanV1) Validate() error {
 				return errors.New("alarmd contract: a static host is a positive decimal id")
 			}
 		}
-	} else if plan.TenantID != "" || len(plan.StaticHosts) > 0 {
+		if err := canonicalTargetPlanList("excluded hosts", plan.ExcludeHosts); err != nil {
+			return err
+		}
+		for _, host := range plan.ExcludeHosts {
+			if !canonicalDecimalPattern.MatchString(host) || host == "0" {
+				return errors.New("alarmd contract: an excluded host is a positive decimal id")
+			}
+		}
+	} else if plan.TenantID != "" || len(plan.StaticHosts) > 0 || len(plan.ExcludeHosts) > 0 {
 		return fmt.Errorf("alarmd contract: only %s carries a tenant and static hosts", TargetPlanRuleIPCloud)
 	}
 	if plan.Identity.HostIdentity {
@@ -398,6 +422,19 @@ func (plan *TargetPlanV1) Validate() error {
 			}
 		}
 	}
+	if len(plan.ExcludeMembers) > 0 {
+		if plan.Rule != TargetPlanRuleModelInstID || !plan.Identity.HostIdentity || len(plan.ExcludeKeys) > 0 {
+			return errors.New("alarmd contract: excluded members belong to a model_inst_id plan read by host identity")
+		}
+		for index, member := range plan.ExcludeMembers {
+			if member.ModelID != plan.ModelID || strings.TrimSpace(member.ModelInstID) == "" {
+				return errors.New("alarmd contract: an excluded member names the plan's model and a non-empty instance")
+			}
+			if index > 0 && !plan.ExcludeMembers[index-1].less(member) {
+				return errors.New("alarmd contract: excluded members must be canonically ordered and unique")
+			}
+		}
+	}
 	if err := canonicalTargetPlanList("dynamic groups", plan.DynamicGroups); err != nil {
 		return err
 	}
@@ -417,6 +454,11 @@ func (plan *TargetPlanV1) Validate() error {
 		return errors.New("alarmd contract: a target plan that names nothing matches nothing and is refused at compile time")
 	}
 	return nil
+}
+
+// HasExclusions reports whether an older object reader would widen this plan.
+func (plan *TargetPlanV1) HasExclusions() bool {
+	return plan != nil && (len(plan.ExcludeKeys) > 0 || len(plan.ExcludeMembers) > 0 || len(plan.ExcludeHosts) > 0)
 }
 
 func (member TargetPlanMemberV1) less(other TargetPlanMemberV1) bool {
