@@ -102,4 +102,18 @@ func TestTheScrapeExportsTheHandoverItsSummariesShow(t *testing.T) {
 			t.Errorf("%s: handover %v, want %d", name, verdict.HandoverObjects, want)
 		}
 	}
+	// The owned lists unread while the digests disagree: a handover may be
+	// going on, and how many objects it holds is unknown -- absent, not zero.
+	owned := map[string][]string{"pod-a": {"qg-a", "qg-moving"}, "pod-b": {"qg-b", "qg-moving"}}
+	summaries := []fleet.ReplicaSummary{}
+	for _, replica := range []string{"pod-a", "pod-b"} {
+		snapshot := fleet.Snapshot{Replica: replica, TakenAt: at, Owned: len(owned[replica]), Determined: len(owned[replica])}
+		summaries = append(summaries, fleet.SummaryOf(snapshot, owned[replica], time.Minute))
+	}
+	ids := []string{"qg-a", "qg-b", "qg-moving"}
+	view, part := fleet.AggregateSummaries(fleet.Expectation{QueryGroups: len(ids), Known: true, IDs: ids}, fleet.DigestOf(ids),
+		summaries, []string{"pod-a", "pod-b"}, at, time.Minute, func([]string) ([][]string, bool) { return nil, false })
+	if verdict := fleetVerdictOf(view, part, at); verdict.HandoverObjects != nil {
+		t.Fatalf("handover %d with the owned lists unread, want it absent", *verdict.HandoverObjects)
+	}
 }
