@@ -68,6 +68,28 @@ const (
 // ClampSources is the closed list of them.
 var ClampSources = []string{ClampKnown, ClampFallback}
 
+// A Slot whose group's hold could not be prepared or written is frozen with
+// the hold the group last read, by what failed: the group's route and delay
+// (spec_unreadable), its previous Segment's schedule (previous_unreadable),
+// its predecessor links (predecessors_unreadable), a spec the controller
+// refused (spec_rejected), closing a Segment (close_failed), a Slot of a
+// Segment older than the group's record (stale_segment), or the Slot's own
+// hold (hold_failed). Ownership and the group's record unread still refuse
+// the Slot; nothing else about the hold does.
+const (
+	DegradedSpecUnreadable         = "spec_unreadable"
+	DegradedPreviousUnreadable     = "previous_unreadable"
+	DegradedPredecessorsUnreadable = "predecessors_unreadable"
+	DegradedSpecRejected           = "spec_rejected"
+	DegradedCloseFailed            = "close_failed"
+	DegradedStaleSegment           = "stale_segment"
+	DegradedHoldFailed             = "hold_failed"
+)
+
+// DegradedReasons is the closed list of them.
+var DegradedReasons = []string{DegradedSpecUnreadable, DegradedPreviousUnreadable, DegradedPredecessorsUnreadable,
+	DegradedSpecRejected, DegradedCloseFailed, DegradedStaleSegment, DegradedHoldFailed}
+
 // Stats are the controller's counts since it started.
 type Stats struct {
 	Predecessors map[string]uint64

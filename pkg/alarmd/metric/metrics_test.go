@@ -537,6 +537,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_read_hold_record_corrupt_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_retire_close_failed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_close_previous_skipped_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_read_hold_degraded_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_lookback_empty_first_reads_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_empty_first_read_completion_total"] = "variableLabels: {source,age}"
 	expected["bkmonitor_alarmd_lookback_completion_max_seconds"] = "variableLabels: {source}"

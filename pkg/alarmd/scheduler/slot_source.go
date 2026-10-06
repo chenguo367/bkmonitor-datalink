@@ -231,6 +231,12 @@ type SlotReadHolds interface {
 	SlotReadHold(context.Context, execution.FrozenQueryGroupSchedule, execution.EvaluationTime, execution.OwnerFence) (time.Duration, error)
 }
 
+// ErrReadHoldDegraded marks a read hold its Query Group could not prepare
+// for a reason of the hold's own -- not ownership, not its record unread.
+// The source does not refuse the Slot for it: SlotReadHold freezes the Slot
+// with the hold the group last read, and the hold's owner counts it.
+var ErrReadHoldDegraded = errors.New("alarmd scheduler: read hold degraded")
+
 type ProductionSlotSourceOption func(*ProductionSlotSource) error
 
 // WithReadHolds lets the source freeze each new Slot with its Query Group's
@@ -495,7 +501,7 @@ func (source *ProductionSlotSource) Next(
 	if holds, ok := source.readHolds.(interface {
 		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
 	}); ok {
-		if err := holds.PrepareSchedule(ctx, schedule, initialFence); err != nil {
+		if err := holds.PrepareSchedule(ctx, schedule, initialFence); err != nil && !errors.Is(err, ErrReadHoldDegraded) {
 			return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
 		}
 	}

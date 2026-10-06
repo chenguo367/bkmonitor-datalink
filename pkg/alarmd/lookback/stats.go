@@ -175,8 +175,11 @@ type Stats struct {
 	// ReadHoldCloseSkipped is the previous Segments a prepare skipped
 	// closing because the record was already past them without their
 	// closing facts.
-	ReadHoldCloseSkipped uint64   `json:"read_hold_close_previous_skipped"`
-	Coverage             Coverage `json:"coverage"`
+	ReadHoldCloseSkipped uint64 `json:"read_hold_close_previous_skipped"`
+	// ReadHoldDegraded is the Slots frozen with the hold their group last
+	// read because its own could not be prepared or written, by what failed.
+	ReadHoldDegraded map[string]uint64 `json:"read_hold_degraded,omitempty"`
+	Coverage         Coverage          `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its

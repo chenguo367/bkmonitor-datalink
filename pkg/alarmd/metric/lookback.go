@@ -76,6 +76,7 @@ type lookbackCollector struct {
 	readHoldCorrupt     *prometheus.Desc
 	readHoldRetireClose *prometheus.Desc
 	readHoldCloseSkip   *prometheus.Desc
+	readHoldDegraded    *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -101,6 +102,11 @@ func newLookbackCollector() *lookbackCollector {
 			"Previous Segments a Query Group's prepare did not close because its read hold record was already past them "+
 				"without their closing facts -- a departed Plan's closure dropped after its lifetime while the Segment is still "+
 				"retained. The group goes on; a successor reads that boundary as open, which is the hold bound."),
+		readHoldDegraded: desc("read_hold_degraded_total",
+			"New Slots frozen with the hold their Query Group last read -- zero for a group without a record -- because "+
+				"its own could not be prepared or written, each freeze attempt once, by what failed: spec_unreadable, "+
+				"previous_unreadable, predecessors_unreadable, spec_rejected, close_failed, stale_segment, hold_failed. "+
+				"No Slot is refused for it; the group learns nothing until its hold prepares again.", "reason"),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
 				"unclosed record as the hold bound."),
@@ -249,7 +255,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip} {
+		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded} {
 		ch <- desc
 	}
 }
@@ -283,6 +289,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	counter(c.readHoldCorrupt, stats.ReadHoldOwnCorrupt)
 	counter(c.readHoldRetireClose, stats.ReadHoldRetireCloseFailed)
 	counter(c.readHoldCloseSkip, stats.ReadHoldCloseSkipped)
+	for _, reason := range readhold.DegradedReasons {
+		counter(c.readHoldDegraded, stats.ReadHoldDegraded[reason], reason)
+	}
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {

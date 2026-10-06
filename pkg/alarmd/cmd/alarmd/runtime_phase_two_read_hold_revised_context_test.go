@@ -70,4 +70,9 @@ func restartRevisedSegment(t *testing.T, expire bool) {
 		t.Fatal(err)
 	}
 	restartUntilFull(t, f, f.queryGroup)
+	// The hold itself was prepared, not stood in for: its route and delay
+	// are read from the Query Group object alone.
+	if counts := degradedCounts(f); len(counts) != 0 {
+		t.Fatalf("the hold was degraded instead of prepared: %v", counts)
+	}
 }
