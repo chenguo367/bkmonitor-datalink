@@ -65,6 +65,13 @@ type unadmittedReader interface {
 	loadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
 }
 
+// summarizingReader is a SnapshotReader that can read snapshots the way the
+// verdict reads them and keep only each one's summary as it is decoded
+// (RedisStore.summarizeUnadmitted).
+type summarizingReader interface {
+	summarizeUnadmitted(ctx context.Context, replicas []string, stallAfter time.Duration) ([]ReplicaSummary, error)
+}
+
 // SummaryReader reads what replicas publish beside their snapshots: their
 // summaries, and their owned lists, which are read only when the digests
 // disagree. A replica with nothing readable is absent from the result, as
@@ -310,32 +317,6 @@ func (service *Service) View(ctx context.Context) View {
 	return view
 }
 
-// ViewAsPublished is View with each replica's rows decided at the moment it
-// published them, as its summary decides them (publishedView): the view a
-// reader that counts rows reads to agree with the health route, which reads
-// the summaries. Its rows are decided already; no Decide follows. It is the
-// verdict scrape's, and reads without asking the observation memory line:
-// a verdict unknown for want of observation memory is an alert that follows
-// the load, not alarmd.
-func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Duration) View {
-	at := service.now()
-	replicas, replicasErr, expectation, expectationErr := service.sources(ctx, at)
-	if replicasErr != nil {
-		return registryUnavailable(expectation, replicasErr)
-	}
-	snapshots, snapshotsErr := service.loadForVerdict(ctx, replicas)
-	if snapshotsErr != nil {
-		snapshots = nil
-	}
-	decided := make([]Snapshot, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		decided = append(decided, decidedAsPublished(snapshot, stallAfter))
-	}
-	view := aggregate(expectation, decided, replicas, at, service.freshness, &headFacts{rowsDecided: true})
-	readFailed(&view, snapshotsErr, expectationErr)
-	return view
-}
-
 // loadShared is the snapshots' Load, shared by the callers that ask for the
 // same replicas, in any order, while a read of them is in progress: pages
 // that come together cost one read, and one grant from the memory line. The
@@ -402,9 +383,12 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 
 // Summarized is View read from the replicas' summaries instead of their
 // snapshots, with the part their rows add up to: what the health route and
-// the verdict are read from. A replica that published no summary -- an
-// older build during a rollout -- is summarized here from its snapshot, at
-// the snapshot's own TakenAt, so it reads as it would have published.
+// the verdict scrape are read from. A replica that published no summary,
+// or one without the scrape's counts -- an older build during a rollout --
+// is summarized here from its snapshot, at the snapshot's own TakenAt, so
+// it reads as it would have published. Neither read asks the observation
+// memory line: a verdict unknown for want of observation memory is an
+// alert that follows the load, not alarmd.
 //
 // A caller that comes while a read is in progress waits for it and shares
 // its answer: a page's viewers then cost one read between them, with no
@@ -435,9 +419,19 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 	published := make(map[string]bool, len(replicas))
 	if publishing {
 		summaries, readErr = reader.LoadSummaries(ctx, replicas)
+		// A summary without the scrape's counts is a build's from before
+		// them, and says nothing of those counts: read as none, so the
+		// replica is summarized from its snapshot rather than counted as
+		// having no rows.
+		kept := summaries[:0]
 		for _, summary := range summaries {
+			if summary.Part.Metrics == nil {
+				continue
+			}
 			published[summary.Head.Replica] = true
+			kept = append(kept, summary)
 		}
+		summaries = kept
 	}
 	missing := make([]string, 0, len(replicas)-len(published))
 	for _, replica := range replicas {
@@ -445,17 +439,15 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 			missing = append(missing, replica)
 		}
 	}
-	// A replica that published no summary is read from its snapshot the
-	// way the verdict scrape reads, without asking the memory line: this
-	// route decides the verdict too, and records it. Its snapshot unread,
-	// that replica alone is unread; the others' summaries stand.
+	// A replica that published no summary is read from its snapshot
+	// without asking the memory line: the verdict is decided from this
+	// read, and recorded. Its snapshot unread, that replica alone is
+	// unread; the others' summaries stand.
 	var fallbackErr error
 	if readErr == nil && len(missing) > 0 {
-		var snapshots []Snapshot
-		snapshots, fallbackErr = service.loadForVerdict(ctx, missing)
-		for _, snapshot := range snapshots {
-			summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
-		}
+		var fallback []ReplicaSummary
+		fallback, fallbackErr = service.summarizeFromSnapshots(ctx, missing, stallAfter)
+		summaries = append(summaries, fallback...)
 	}
 	if readErr != nil {
 		summaries = nil
@@ -515,6 +507,21 @@ func (service *Service) admitKeptView(bytes uint64) bool {
 		return admitter.admitKept(bytes)
 	}
 	return true
+}
+
+// summarizeFromSnapshots summarizes the named replicas from their
+// snapshots, read as loadForVerdict reads them; a reader that can keeps
+// only each summary as it decodes the snapshot.
+func (service *Service) summarizeFromSnapshots(ctx context.Context, replicas []string, stallAfter time.Duration) ([]ReplicaSummary, error) {
+	if summarizing, ok := service.snapshots.(summarizingReader); ok {
+		return summarizing.summarizeUnadmitted(ctx, replicas, stallAfter)
+	}
+	snapshots, err := service.loadForVerdict(ctx, replicas)
+	summaries := make([]ReplicaSummary, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
+	}
+	return summaries, err
 }
 
 // loadForVerdict reads snapshots without asking the observation memory

@@ -63,20 +63,12 @@ type verdictHistory struct {
 	full    bool
 }
 
-// RecordVerdict notes the verdict just decided on view, keeping it when it
-// differs from the last one noted. Callers call it after Decide on the
-// paths that decide the verdict for a reader: the health route and the
-// verdict metric's scrape.
-func (service *Service) RecordVerdict(view *View, at time.Time) {
-	if view == nil {
-		return
-	}
-	service.recordVerdict(view, at, AttributionTally{Ours: OursCount(view.Anomalies), Unknown: UnattributedCount(view.Anomalies)})
-}
-
-// RecordSummarizedVerdict is RecordVerdict for a view of replicas' summaries
-// (Summarized), whose rows stayed with the replicas: the counts are the
-// merged part's.
+// RecordSummarizedVerdict notes the verdict just decided on a view of the
+// replicas' summaries (Summarized), keeping it when it differs from the last
+// one noted. The rows stayed with the replicas, so what they count is the
+// merged part's. The paths that decide the verdict for a reader call it:
+// the health route and the verdict metric's scrape, which read the same
+// summaries.
 func (service *Service) RecordSummarizedVerdict(view *View, part ReplicaPart, at time.Time) {
 	service.recordVerdict(view, at, part.Attribution)
 }

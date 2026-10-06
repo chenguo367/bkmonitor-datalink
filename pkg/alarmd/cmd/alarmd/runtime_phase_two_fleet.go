@@ -745,8 +745,10 @@ const fleetVerdictScrapeCeiling = 5 * time.Second
 // it as a metric; computing it twice would let them drift, and the drift shows
 // up as "the page says fine, the alert is firing" at the worst possible moment.
 //
-// Cost is one control plane read per scrape -- the same read the object API
-// already performs, against a snapshot set the size of the replica count.
+// Cost is one read of the replicas' summaries per scrape -- the read the
+// health route makes, shared with it when both come together -- against a
+// summary set the size of the replica count. A replica that published no
+// summary, or one without the scrape's counts, is read from its snapshot.
 func fleetVerdictSource(
 	service *fleet.Service,
 	now func() time.Time,
@@ -756,91 +758,45 @@ func fleetVerdictSource(
 	return func() metric.FleetVerdict {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		// The replicas' summaries, each decided at the moment its replica
+		// published it -- the read the health route makes -- so the page and
+		// the alert rules read one verdict, and the breakdowns by kind,
+		// failure, line and loss are the parts' counts of the same rows it was
+		// settled on.
+		view, part := service.Summarized(ctx, stallAfter)
 		at := now()
-		// Rows decided as each replica published them -- every column, the
-		// rule the health route reads the summaries by -- so the page and the
-		// alert rules read one verdict, and the breakdowns by kind, failure,
-		// line and loss below are of the same rows it was settled on. It used
-		// to mark stalling on the anomaly list alone while the page marked
-		// every column.
-		view := service.ViewAsPublished(ctx, stallAfter)
 		// A scrape decides the verdict too, and it is the one that runs
 		// whether or not anybody is looking: it keeps the record current.
-		service.RecordVerdict(&view, at)
-		return fleetVerdictOf(view, at)
+		service.RecordSummarizedVerdict(&view, part, at)
+		return fleetVerdictOf(view, part, at)
 	}
 }
 
-func fleetVerdictOf(view fleet.View, at time.Time) metric.FleetVerdict {
+// fleetVerdictOf is the export of a view of the replicas' summaries and the
+// part their rows add up to. The verdict and what the replicas say of
+// themselves -- workers, gaps, degradations -- are the view's; what is
+// counted from rows is the part's, counted on each replica at the moment it
+// published (fleet.MetricRows). A part without those counts while replicas
+// were counted says nothing of the rows: their families are left out rather
+// than exported as none. With no replica counted there are no rows, and
+// they read as none.
+func fleetVerdictOf(view fleet.View, part fleet.ReplicaPart, at time.Time) metric.FleetVerdict {
 	verdict := metric.FleetVerdict{
 		Health: string(view.Health), Expected: view.Expected,
 		Covered: view.Covered, Determined: view.Determined, Unknown: view.Unknown,
 		Healthy: view.Healthy, Anomalous: view.AnomaliesTotal, Demoted: view.DemotedTotal,
 		Undecidable: view.UndecidableTotal, ByDesign: view.ByDesignTotal,
 	}
-	// Counted by closed label, never by object: a per-object series would put the
-	// Query Group identity into a label and break the cardinality budget that
-	// every other family here respects. The JSON API keeps reporting the real
-	// value -- a response has no budget and the reader deserves the true one.
-	kinds := newCountIndex()
-	failures := newCountIndex()
-	cooldown := 0
-	for _, anomaly := range view.Anomalies {
-		if anomaly.QueryCooldown != nil {
-			cooldown++
-		}
-		if anomaly.Stalled {
-			verdict.Stalled++
-		}
-		kinds.add(fleet.MetricKind(anomaly.Kind), at.Sub(anomaly.Since).Seconds())
-		// Objects whose last round failed before it could be classified are
-		// absent here rather than bucketed as "other": inventing a category for
-		// them would report a cause nobody established.
-		if anomaly.Failure != nil && anomaly.Failure.Category != "" {
-			failures.add(fleet.MetricFailureCategory(anomaly.Failure.Category), 0)
-		}
-	}
-	// An object holding a query cooldown is in the demoted list, not the
-	// anomaly list: the tracker places every object in exactly one of the two,
-	// and the cooldown is what decides which. Walking the anomaly list alone
-	// therefore read zero from any tracker of this build while the object page
-	// listed dozens of demoted objects. Both lists are walked, and the
-	// evidence is still required: a demoted object without a cooldown would be
-	// a defect in the tracker, not a cooldown object.
-	for _, demoted := range view.Demoted {
-		if demoted.QueryCooldown != nil {
-			cooldown++
-		}
-	}
-	verdict.Anomalies = kinds.counts()
-	if view.Covered > 0 {
-		verdict.QueryCooldown = &cooldown
-	}
-	verdict.Failures = failures.counts()
 	verdict.Workers = []metric.FleetCount{
 		{Value: "acked", Count: view.Workers.Acked},
 		{Value: "lagging", Count: view.Workers.Lagging},
 		{Value: "unknown", Count: view.Workers.Unknown},
 	}
-
 	gaps := newCountIndex()
 	for _, gap := range view.Gaps {
 		gaps.add(fleet.MetricGapKind(gap.Kind), 0)
 	}
 	verdict.Gaps = gaps.counts()
-
-	// The first screen's lines, by the same call the page makes, and the
-	// whole closed table rather than the lines that are up: a line that is
-	// down is exported at zero. Absent would read the same as a build
-	// without the family, and an alert on "this line is up" needs to see it
-	// go down.
-	lines := map[fleet.Check]int{}
-	for _, report := range fleet.Report(&view, at).Checks {
-		lines[report.Code] = report.LineCount()
-	}
-	for _, code := range fleet.Checks() {
-		verdict.Checks = append(verdict.Checks, metric.FleetCount{Value: string(code), Count: lines[code]})
-	}
 	replicas := map[fleet.DegradationKind]int{}
 	for _, degradation := range view.Degradations {
 		replicas[degradation.Kind]++
@@ -848,15 +804,75 @@ func fleetVerdictOf(view fleet.View, at time.Time) metric.FleetVerdict {
 	for _, kind := range fleet.DegradationKinds {
 		verdict.Degradations = append(verdict.Degradations, metric.FleetCount{Value: string(kind), Count: replicas[kind]})
 	}
-	// The retained records by what each is, the same walk the lines make,
-	// every kind at least at zero; and how many recent ones were judged
-	// against no restart anchor.
-	losses, graceUnknown := fleet.LossCensus(&view, at)
-	for _, loss := range fleet.Losses {
-		verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: string(loss), Count: losses[loss]})
+	if objects, known := fleet.HandoverObjects(&view); known {
+		verdict.HandoverObjects = &objects
 	}
-	verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: "GRACE_UNKNOWN", Count: graceUnknown})
+
+	rows := part.Metrics
+	if rows == nil {
+		if len(view.Replicas) > 0 {
+			verdict.RowsUnknown = true
+			return verdict
+		}
+		rows = &fleet.MetricRows{}
+	}
+	verdict.Stalled = rows.Stalled
+	// Counted by closed label, never by object: a per-object series would put the
+	// Query Group identity into a label and break the cardinality budget that
+	// every other family here respects. The JSON API keeps reporting the real
+	// value -- a response has no budget and the reader deserves the true one.
+	// The parts keep kinds and failure categories as the rows carry them; they
+	// are bounded to the closed labels here, as they were when this read the
+	// rows, and kinds that fold into one label add up and keep the earliest
+	// since. Read in a fixed order, so two scrapes of an unchanged deployment
+	// export the same series in the same order.
+	kinds := newCountIndex()
+	for _, kind := range sortedKeys(rows.Kinds) {
+		counted := rows.Kinds[kind]
+		kinds.addCount(fleet.MetricKind(kind), counted.Count, at.Sub(counted.Since).Seconds())
+	}
+	verdict.Anomalies = kinds.counts()
+	// Objects whose last round failed before it could be classified are
+	// absent here rather than bucketed as "other": inventing a category for
+	// them would report a cause nobody established.
+	failures := newCountIndex()
+	for _, category := range sortedKeys(rows.Failures) {
+		failures.addCount(fleet.MetricFailureCategory(category), rows.Failures[category], 0)
+	}
+	verdict.Failures = failures.counts()
+	// An object holding a query cooldown is in the demoted list, not the
+	// anomaly list: the tracker places every object in exactly one of the two,
+	// and the cooldown is what decides which. The parts count both lists.
+	if view.Covered > 0 {
+		cooldown := rows.Cooldown
+		verdict.QueryCooldown = &cooldown
+	}
+	// The first screen's lines, by the count the page's lines print, and the
+	// whole closed table rather than the lines that are up: a line that is
+	// down is exported at zero. Absent would read the same as a build
+	// without the family, and an alert on "this line is up" needs to see it
+	// go down.
+	lines := fleet.CheckLines(&view, part, at)
+	for _, code := range fleet.Checks() {
+		verdict.Checks = append(verdict.Checks, metric.FleetCount{Value: string(code), Count: lines[code]})
+	}
+	// The retained records by what each is, every kind at least at zero; and
+	// how many recent ones were judged against no restart anchor.
+	for _, loss := range fleet.Losses {
+		verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: string(loss), Count: rows.Losses[loss]})
+	}
+	verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: "GRACE_UNKNOWN", Count: rows.GraceUnknown})
 	return verdict
+}
+
+// sortedKeys is a map's keys in order.
+func sortedKeys[K ~string, V any](values map[K]V) []K {
+	keys := make([]K, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool { return keys[left] < keys[right] })
+	return keys
 }
 
 // countIndex keeps first-seen order so two scrapes of an unchanged deployment
@@ -871,13 +887,18 @@ func newCountIndex() *countIndex {
 }
 
 func (index *countIndex) add(value string, ageSeconds float64) {
+	index.addCount(value, 1, ageSeconds)
+}
+
+// addCount adds n members, the oldest of them ageSeconds old.
+func (index *countIndex) addCount(value string, n int, ageSeconds float64) {
 	count, seen := index.byValue[value]
 	if !seen {
 		count = &metric.FleetCount{Value: value}
 		index.byValue[value] = count
 		index.order = append(index.order, value)
 	}
-	count.Count++
+	count.Count += n
 	// The oldest member is what says how bad it is; the newest would hide the
 	// object that has been broken since this morning.
 	if ageSeconds > count.OldestAgeSeconds {

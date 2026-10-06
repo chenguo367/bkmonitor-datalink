@@ -71,6 +71,15 @@ func healthFromSnapshots(view View, at time.Time, stallAfter time.Duration) Heal
 func healthFromSummaries(t *testing.T, snapshots []Snapshot, expectation Expectation, names []string, at time.Time,
 	stallAfter time.Duration) HealthResponse {
 	t.Helper()
+	view, part := summariesRoundTrip(t, snapshots, expectation, names, at, stallAfter)
+	return healthOf(&view, part, at)
+}
+
+// summariesRoundTrip is the view and part a reader makes of the replicas'
+// summaries of snapshots, each written out and read back as published.
+func summariesRoundTrip(t *testing.T, snapshots []Snapshot, expectation Expectation, names []string, at time.Time,
+	stallAfter time.Duration) (View, ReplicaPart) {
+	t.Helper()
 	summaries := make([]ReplicaSummary, 0, len(snapshots))
 	owned := map[string][]string{}
 	for _, snapshot := range snapshots {
@@ -85,7 +94,7 @@ func healthFromSummaries(t *testing.T, snapshots []Snapshot, expectation Expecta
 		summaries = append(summaries, summary)
 		owned[snapshot.Replica] = snapshot.OwnedObjects
 	}
-	view, part := AggregateSummaries(expectation, DigestOf(expectation.IDs), summaries, names, at, freshness,
+	return AggregateSummaries(expectation, DigestOf(expectation.IDs), summaries, names, at, freshness,
 		func(replicas []string) ([][]string, bool) {
 			sets := make([][]string, 0, len(replicas))
 			for _, replica := range replicas {
@@ -93,7 +102,6 @@ func healthFromSummaries(t *testing.T, snapshots []Snapshot, expectation Expecta
 			}
 			return sets, true
 		})
-	return healthOf(&view, part, at)
 }
 
 // externalRows is snapshotsWithAnomalies with rows the backend's -- a
@@ -131,7 +139,30 @@ func ownedFixture(snapshots []Snapshot, prefix string) ([]Snapshot, []string) {
 func TestHealthFromSummariesIsHealthFromSnapshots(t *testing.T) {
 	const stallAfter = 10 * time.Minute
 	at := now
-	fixtures := map[string]func() ([]Snapshot, Expectation, []string){
+	fixtures := summaryFixtures(at)
+	for name, fixture := range fixtures {
+		snapshots, expectation, names := fixture()
+		for index := range snapshots {
+			if snapshots[index].TakenAt.After(at.Add(-freshness)) {
+				// Decided at the moment the replica publishes, which the whole
+				// view decides at the moment it is read: the same moment here.
+				snapshots[index].TakenAt = at
+			}
+		}
+		want := healthFromSnapshots(Aggregate(expectation, snapshots, names, at, freshness), at, stallAfter)
+		got := healthFromSummaries(t, snapshots, expectation, names, at, stallAfter)
+		sameJSON(t, name, got, want)
+		if reached := fixtureReaches[name]; !reached(want) {
+			t.Errorf("%s: the fixture does not reach what it is for: %+v", name, want)
+		}
+	}
+}
+
+// summaryFixtures are the snapshots the summaries are checked against:
+// every number rows give, cohorts, coverage that agrees and that does not,
+// a row about to stall, and a replica missing, one stale, a list cut.
+func summaryFixtures(at time.Time) map[string]func() ([]Snapshot, Expectation, []string) {
+	return map[string]func() ([]Snapshot, Expectation, []string){
 		"every row number": func() ([]Snapshot, Expectation, []string) {
 			snapshots := partReplicas()
 			names := []string{}
@@ -164,22 +195,6 @@ func TestHealthFromSummariesIsHealthFromSnapshots(t *testing.T) {
 			stale.Replica, stale.TakenAt = "pod-c", at.Add(-time.Hour)
 			return append(snapshots, stale), Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b", "pod-c", "pod-d"}
 		},
-	}
-	for name, fixture := range fixtures {
-		snapshots, expectation, names := fixture()
-		for index := range snapshots {
-			if snapshots[index].TakenAt.After(at.Add(-freshness)) {
-				// Decided at the moment the replica publishes, which the whole
-				// view decides at the moment it is read: the same moment here.
-				snapshots[index].TakenAt = at
-			}
-		}
-		want := healthFromSnapshots(Aggregate(expectation, snapshots, names, at, freshness), at, stallAfter)
-		got := healthFromSummaries(t, snapshots, expectation, names, at, stallAfter)
-		sameJSON(t, name, got, want)
-		if reached := fixtureReaches[name]; !reached(want) {
-			t.Errorf("%s: the fixture does not reach what it is for: %+v", name, want)
-		}
 	}
 }
 
@@ -339,34 +354,38 @@ func TestAHealthReadItsCallerLeftRecordsNoVerdict(t *testing.T) {
 // The verdict scrape records no verdict for a view it did not read -- the
 // registry or the snapshots unreadable, or the scrape's own deadline reached
 // -- while the verdict it exports stays UNKNOWN; a view whose reads found a
-// replica missing is the deployment's, and is recorded.
+// replica missing is the deployment's, and is recorded. The scrape reads the
+// summaries as the health route does (Summarized).
 func TestTheScrapeRecordsNoVerdictForAViewItDidNotRead(t *testing.T) {
 	expectation := stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	for name, read := range map[string]func() (*Service, View){
-		"registry unreadable": func() (*Service, View) {
+	for name, read := range map[string]func() (*Service, View, ReplicaPart){
+		"registry unreadable": func() (*Service, View, ReplicaPart) {
 			service := mustService(t, expectation, stubRegistry{err: errors.New("registry unreadable")}, stubSnapshots{})
-			return service, service.ViewAsPublished(context.Background(), time.Minute)
+			view, part := service.Summarized(context.Background(), time.Minute)
+			return service, view, part
 		},
-		"snapshots unreadable": func() (*Service, View) {
+		"snapshots unreadable": func() (*Service, View, ReplicaPart) {
 			service := mustService(t, expectation, stubRegistry{replicas: replicas()}, failingSnapshotsWithSummaries{})
-			return service, service.ViewAsPublished(context.Background(), time.Minute)
+			view, part := service.Summarized(context.Background(), time.Minute)
+			return service, view, part
 		},
-		"deadline reached": func() (*Service, View) {
+		"deadline reached": func() (*Service, View, ReplicaPart) {
 			service := mustService(t, expectation, stubRegistry{replicas: replicas()}, &waitingSnapshots{release: make(chan struct{})})
-			return service, service.ViewAsPublished(expired, time.Minute)
+			view, part := service.Summarized(expired, time.Minute)
+			return service, view, part
 		},
 	} {
-		service, view := read()
-		service.RecordVerdict(&view, now)
+		service, view, part := read()
+		service.RecordSummarizedVerdict(&view, part, now)
 		if history, _ := service.VerdictHistory(); view.Health != HealthUnknown || len(history) != 0 {
 			t.Errorf("%s: view %s, history %+v; want UNKNOWN exported and nothing recorded", name, view.Health, history)
 		}
 	}
 	missing := mustService(t, expectation, stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: healthySnapshots()[:1]})
-	view := missing.ViewAsPublished(context.Background(), time.Minute)
-	missing.RecordVerdict(&view, now)
+	view, part := missing.Summarized(context.Background(), time.Minute)
+	missing.RecordSummarizedVerdict(&view, part, now)
 	if history, _ := missing.VerdictHistory(); len(history) != 1 || history[0].To != HealthUnknown {
 		t.Fatalf("history %+v, want the missing replica's UNKNOWN recorded", history)
 	}
@@ -492,10 +511,10 @@ func TestRowsNobodyAttributedAloneLeaveTheVerdictHealthy(t *testing.T) {
 	}
 }
 
-// A view of rows decided as each replica published them reads the verdict
-// the summaries read -- the same rows decided at the same moments -- when
-// the replicas published at different moments and a row stalled between one
-// publish and the read.
+// The summaries read the verdict and the counts a view of rows decided as
+// each replica published them reads -- the same rows decided at the same
+// moments -- when the replicas published at different moments and a row
+// stalled between one publish and the read.
 func TestRowsDecidedAsPublishedReadTheSummariesVerdict(t *testing.T) {
 	const stallAfter = 10 * time.Minute
 	snapshots := externalRows(3)
@@ -508,7 +527,7 @@ func TestRowsDecidedAsPublishedReadTheSummariesVerdict(t *testing.T) {
 	snapshots[1].Anomalies[2].Wake = &WakeFacts{Known: true, IntervalSeconds: 10, DueAt: snapshots[1].TakenAt.Add(-5 * time.Second)}
 	expectation := Expectation{QueryGroups: 949, Known: true}
 	service := mustService(t, stubExpectations{expectation: expectation}, stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: snapshots})
-	rows := service.ViewAsPublished(context.Background(), stallAfter)
+	rows := rowsAsPublished(expectation, snapshots, replicas(), now, stallAfter)
 	summarized, part := service.Summarized(context.Background(), stallAfter)
 	whole := service.View(context.Background())
 	Decide(&whole, now, stallAfter)
@@ -522,9 +541,10 @@ func TestRowsDecidedAsPublishedReadTheSummariesVerdict(t *testing.T) {
 			stalled++
 		}
 	}
-	if rows.Health != summarized.Health || OursCount(rows.Anomalies) != part.Attribution.Ours || stalled != 1 {
-		t.Fatalf("rows as published: health %s ours %d stalled %d; summaries: health %s ours %d", rows.Health,
-			OursCount(rows.Anomalies), stalled, summarized.Health, part.Attribution.Ours)
+	if rows.Health != summarized.Health || OursCount(rows.Anomalies) != part.Attribution.Ours || stalled != 1 ||
+		part.Metrics == nil || part.Metrics.Stalled != stalled {
+		t.Fatalf("rows as published: health %s ours %d stalled %d; summaries: health %s ours %d counts %+v", rows.Health,
+			OursCount(rows.Anomalies), stalled, summarized.Health, part.Attribution.Ours, part.Metrics)
 	}
 	sameJSON(t, "each replica's split", rows.PerReplica, summarized.PerReplica)
 }

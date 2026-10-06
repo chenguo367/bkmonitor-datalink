@@ -350,6 +350,32 @@ func (store *RedisStore) loadUnadmitted(ctx context.Context, replicas []string) 
 
 func (store *RedisStore) load(ctx context.Context, replicas []string, admitted bool) ([]Snapshot, error) {
 	snapshots := make([]Snapshot, 0, len(replicas))
+	if err := store.loadEach(ctx, replicas, admitted, func(snapshot Snapshot) { snapshots = append(snapshots, snapshot) }); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+// summarizeUnadmitted reads the named replicas' snapshots as the verdict
+// reads them, without asking the memory line, and keeps of each only its
+// summary (summaryFromSnapshot): a snapshot is let go once it is
+// summarized, where reading them all first held every one decoded at once.
+// A replica with no readable snapshot is absent, as from Load.
+func (store *RedisStore) summarizeUnadmitted(ctx context.Context, replicas []string, stallAfter time.Duration) ([]ReplicaSummary, error) {
+	summaries := make([]ReplicaSummary, 0, len(replicas))
+	if err := store.loadEach(ctx, replicas, false, func(snapshot Snapshot) {
+		summaries = append(summaries, summaryFromSnapshot(snapshot, stallAfter))
+	}); err != nil {
+		return nil, err
+	}
+	return summaries, nil
+}
+
+// loadEach is load handing keep each snapshot as it is decoded, in order.
+// On an error keep may have been handed some of them; the caller drops
+// what it kept, as load does.
+func (store *RedisStore) loadEach(ctx context.Context, replicas []string, admitted bool, keep func(Snapshot)) error {
+	loaded := 0
 	var decodeErr error
 	var admit func(uint64) bool
 	switch holds := pageHoldsOf(ctx); {
@@ -377,24 +403,22 @@ func (store *RedisStore) load(ctx context.Context, replicas []string, admitted b
 			decodeErr = fmt.Errorf("alarmd fleet: snapshot for %s reports replica %q", replicas[index], snapshot.Replica)
 			return decodeErr
 		}
-		snapshots = append(snapshots, snapshot)
+		keep(snapshot)
+		loaded++
 		return nil
 	})
 	if errors.Is(err, ErrSnapshotsDeferred) {
-		return nil, err
+		return err
 	}
 	if err != nil && decodeErr == nil {
-		return nil, fmt.Errorf("alarmd fleet: read snapshots: %w", err)
+		return fmt.Errorf("alarmd fleet: read snapshots: %w", err)
 	}
 	// Counted whether or not what came back decoded: a read that decodes
 	// badly still cost the round trips and the bytes.
 	if store.meter != nil && len(replicas) > 0 {
-		store.meter.SnapshotsLoaded(len(snapshots), bytes)
+		store.meter.SnapshotsLoaded(loaded, bytes)
 	}
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
-	return snapshots, nil
+	return decodeErr
 }
 
 // LoadSummaries reads the named replicas' summaries. A replica with none
