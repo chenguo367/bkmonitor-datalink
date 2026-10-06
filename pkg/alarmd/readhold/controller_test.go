@@ -82,7 +82,7 @@ func linked(spec GroupSpec, qg execution.QueryGroupIdentity, closedAt, slot exec
 	}
 	links := make([]PlanLink, 0, len(plans))
 	for _, plan := range plans {
-		link := PlanLink{PlanRef: plan, SameRoute: true}
+		link := PlanLink{PlanRef: plan}
 		if slot > 0 {
 			link.PreviousSlot, link.CompletionOffsetMillis = slot, 55_000
 		}
@@ -257,7 +257,10 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 	if c.ReadHold("old") != 150*time.Second || oldReading.Plans[0].PreviousHoldMillis != 150_000 {
 		t.Fatal("a closed group raised or rewrote its transition hold")
 	}
-	for index, want := range []time.Duration{115 * time.Second, 55 * time.Second, 30 * time.Second} {
+	// The transition keeps the old group's last deadline; the old arrival
+	// age does not carry over, so after it the new group reads at zero until
+	// it learns its own.
+	for index, want := range []time.Duration{115 * time.Second, 55 * time.Second, 0} {
 		slot := boundary + execution.EvaluationTime(index*60)
 		got, err := c.SlotReadHold(ctx, newSchedule, slot, holdFence("new"))
 		if err != nil || got != want {
@@ -279,8 +282,9 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 	if err := next.RestoreBatch(ctx, []execution.QueryGroupIdentity{"new", "old"}); err != nil {
 		t.Fatal(err)
 	}
-	if next.ReadHoldAt("new", 1320) != 30*time.Second {
-		t.Fatal("takeover did not restore the hold")
+	if record := next.Inspect("new").Record; len(record.Plans) != 1 || record.Plans[0].InheritedQueryGroup != "old" ||
+		record.Plans[0].InheritedClosedAt != boundary || next.ReadHoldAt("new", 1320) != 0 {
+		t.Fatalf("takeover did not restore the bridge it would otherwise resolve again: %+v", record)
 	}
 	farSpec := groupSpec("far", 300*time.Second)
 	farSpec.Previous = []Previous{linked(farSpec, "old", boundary, 0)}
@@ -387,40 +391,42 @@ func TestSharedGroupReopensWhileMigratedPlanKeepsClosedHold(t *testing.T) {
 	}
 }
 
-// A predecessor with no record froze its last Slot at zero only once it has
-// frozen that Slot; until then it is read as the hold bound -- a later read
-// for the successor's first Slots, never a refusal. Its Progress still
-// carrying that Slot's contract gives the exact hold.
-func TestAMissingPredecessorIsReadAsTheBoundUntilItsZeroIsProven(t *testing.T) {
+// A successor reads only its predecessor's record. None is zero: a nonzero
+// hold always has one, so a group alarmd never held reads at once after an
+// edit. A record open, corrupt or unread is the hold bound -- a later read
+// for the successor's first Slots, never a refusal.
+func TestAPredecessorRecordGivesZeroOrTheBoundAndNeverAnError(t *testing.T) {
 	boundary := execution.EvaluationTime(1200)
-	frozen := int64(150_000)
 	for _, tc := range []struct {
 		name   string
-		link   func(*PlanLink)
+		store  func(*memoryControl)
 		want   time.Duration
 		reason string
 	}{
+		{"missing", func(*memoryControl) {}, 0, PredecessorZero},
 		// 1140 s + 600 s bound + 55 s offset, read at 1200 s + 30 s wait.
-		{"not yet past its last Slot", func(*PlanLink) {}, 565 * time.Second, PredecessorZeroUnproven},
-		{"past its last Slot", func(link *PlanLink) { link.MovedPast = true }, 0, PredecessorZeroProven},
-		{"its Progress still carries the Slot", func(link *PlanLink) { link.FrozenHoldMillis = &frozen }, 115 * time.Second, PredecessorFrozenContract},
+		{"open", func(store *memoryControl) {
+			store.values["old"], _ = json.Marshal(Record{SinceSlot: 1, HoldMillis: 150_000, SegmentStart: 60})
+		}, 565 * time.Second, PredecessorRecordOpen},
+		{"corrupt", func(store *memoryControl) { store.values["old"] = []byte("{not a record") }, 565 * time.Second, PredecessorRecordCorrupt},
+		{"unread", func(store *memoryControl) { store.readErr["old"] = errors.New("unanswered") }, 565 * time.Second, PredecessorUnreadable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, store, _ := controllerFixture(t)
-			prepare(t, c, groupSpec("missing", 0))
+			tc.store(store)
+			_ = c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"old"})
 			newSpec := groupSpec("new", 0)
-			newSpec.Previous = []Previous{linked(newSpec, "missing", boundary, 1140)}
-			tc.link(&newSpec.Previous[0].Links[0])
+			newSpec.Previous = []Previous{linked(newSpec, "old", boundary, 1140)}
 			prepare(t, c, newSpec)
 			schedule := scheduleFor(t, "new", boundary, nil)
 			if got, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); err != nil || got != tc.want {
-				t.Fatalf("first Slot after a missing predecessor = %s %v; want %s", got, err, tc.want)
+				t.Fatalf("first Slot after a %s predecessor record = %s %v; want %s", tc.name, got, err, tc.want)
 			}
 			if got := c.Stats().Predecessors; got[tc.reason] != 1 || len(got) != 1 {
 				t.Fatalf("counted %v, want one %s", got, tc.reason)
 			}
-			if _, exists := store.values["missing"]; exists {
-				t.Fatal("new owner wrote the old zero record")
+			if raw, written := store.values["old"]; tc.name != "corrupt" && tc.name != "open" && written {
+				t.Fatalf("new owner wrote the old record: %s", raw)
 			}
 		})
 	}
@@ -430,7 +436,6 @@ func TestAMissingPredecessorIsReadAsTheBoundUntilItsZeroIsProven(t *testing.T) {
 	prepare(t, c, groupSpec("missing", 0))
 	newSpec := groupSpec("new", 0)
 	newSpec.Previous = []Previous{linked(newSpec, "missing", boundary, 1140)}
-	newSpec.Previous[0].Links[0].MovedPast = true
 	existing := Record{HoldMillis: 150_000, SinceSlot: 60, SegmentStart: 60}
 	store.values["new"], _ = json.Marshal(existing)
 	prepare(t, c, newSpec)
@@ -553,7 +558,7 @@ func TestInheritedAckSurvivesClosingAndReopeningTheSameGroup(t *testing.T) {
 	if err := c.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second, holdFence("b")); err != nil || got != 30*time.Second {
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second, holdFence("b")); err != nil || got != 0 {
 		t.Fatalf("reopening depended on the expired first predecessor: %s %v", got, err)
 	}
 	// The acknowledgment is durable; takeover does not need A's old record.
@@ -564,8 +569,11 @@ func TestInheritedAckSurvivesClosingAndReopeningTheSameGroup(t *testing.T) {
 	if err := restored.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"b"}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := restored.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second+60, holdFence("b")); err != nil || got != 30*time.Second {
+	if got, err := restored.SlotReadHold(context.Background(), scheduleFor(t, "b", second, nil), second+60, holdFence("b")); err != nil || got != 0 {
 		t.Fatalf("restored acknowledgment = %s %v", got, err)
+	}
+	if got := restored.Stats().Predecessors; len(got) != 0 {
+		t.Fatalf("takeover read the first predecessor again: %v", got)
 	}
 }
 
@@ -696,7 +704,7 @@ func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := c.Reading("b")
-	if plan := b.Plans[0]; plan.ArrivalAgeMillis != 180_000 || plan.PreviousSlot != 1200 || plan.PreviousHoldMillis != 150_000 || plan.InheritedQueryGroup != "a" || plan.InheritedClosedAt != first {
+	if plan := b.Plans[0]; plan.PreviousSlot != 1200 || plan.PreviousHoldMillis != 150_000 || plan.InheritedQueryGroup != "a" || plan.InheritedClosedAt != first {
 		t.Fatalf("empty middle group never inherited its bridge: %+v", plan)
 	}
 	cSpec := groupSpec("c", 300*time.Second)
@@ -798,7 +806,8 @@ func TestAReleasedPredecessorStaysAbsentAfterSuccessfulInheritance(t *testing.T)
 	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"new"}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 240, holdFence("new")); err != nil || got != 50*time.Second {
+	// 60 s + 150 s + 55 s, read at 240 s + 10 s wait.
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 240, holdFence("new")); err != nil || got != 15*time.Second {
 		t.Fatalf("restored ACK hold=%s err=%v", got, err)
 	}
 	assertReleased()

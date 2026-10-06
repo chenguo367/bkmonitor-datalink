@@ -5,7 +5,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -16,28 +15,13 @@ import (
 // nothing.
 const ReadHoldLinkLifetime = 7 * 24 * time.Hour
 
-// ReadHoldRoute is a Query Group's source route for read holds: its query
-// facts without time_delay and the query revision. Two groups with one route
-// read the same data the same way, only later or earlier, so one's lateness
-// is the other's.
-func ReadHoldRoute(facts execution.QueryPlanFacts) (string, error) {
-	facts.QueryDelaySeconds, facts.QueryRevision = 0, ""
-	return contract.DeriveCanonicalDigestV2("alarmd-read-hold-route-v1", facts)
-}
-
 // readHoldOrigin is a moved Plan's link as the cutover finds it on the
 // Segment it closes, before it knows where the Plan goes: the state
-// generation and the route it leaves with decide, against where it goes,
-// whether it is linked at all and whether the old lateness carries over.
+// generation it leaves with decides, against where it goes, whether it is
+// linked at all.
 type readHoldOrigin struct {
 	ref        ReadHoldPredecessorRef
 	generation execution.StateGeneration
-	// route is the route of the content the Plan leaves, read only when the
-	// Plan does move, "" when it cannot be read; routeCarried is false when
-	// the link was carried across an empty Segment from a group of another
-	// route.
-	route        func() string
-	routeCarried bool
 }
 
 // readHoldLinker writes one cutover's links. A Plan that moves keeps the
@@ -47,11 +31,8 @@ type readHoldOrigin struct {
 // of the old one's last (h design section 5, M2): it is linked. A Plan whose
 // generation changed starts a state of its own and is not.
 type readHoldLinker struct {
-	origins map[execution.PlanKey]readHoldOrigin
-	carried map[execution.PlanKey]PlanActivationRecord
-	// routes is the route of a group the publication activates, "" when
-	// it cannot be derived.
-	routes        func(execution.QueryGroupIdentity) string
+	origins       map[execution.PlanKey]readHoldOrigin
+	carried       map[execution.PlanKey]PlanActivationRecord
 	expiredBefore execution.EvaluationTime
 	facts         *cutoverFacts
 }
@@ -74,17 +55,10 @@ func (linker *readHoldLinker) carry(records []PlanActivationRecord, group execut
 				continue
 			}
 			ref := origin.ref
-			if origin.routeCarried {
-				from := origin.route()
-				ref.SameRoute = from != "" && from == linker.routes(group)
-			}
-			switch {
-			case origin.generation == "" || generation == "":
+			if origin.generation == "" || generation == "" {
 				decided("linked_generation_unknown")
-			case ref.SameRoute:
-				decided("linked_same_route")
-			default:
-				decided("linked_route_changed")
+			} else {
+				decided("linked")
 			}
 			records[i].PreviousReadHold = &ref
 			continue
@@ -119,7 +93,6 @@ type ReadHoldLinkPlan struct {
 	Key                    execution.PlanKey
 	PreviousSlot           execution.EvaluationTime
 	CompletionOffsetMillis int64
-	SameRoute              bool
 }
 
 // ReadHoldPredecessors reads only this Segment's retained Plan links. A link
@@ -168,7 +141,7 @@ func (repository *RedisCatalogRepository) ReadHoldPredecessors(ctx context.Conte
 				links = append(links, ReadHoldPredecessor{QueryGroup: ref.QueryGroup, ClosedAt: ref.ClosedAt})
 			}
 			links[index].Plans = append(links[index].Plans, ReadHoldLinkPlan{Key: plan.Fact.Key(), PreviousSlot: ref.PreviousSlot,
-				CompletionOffsetMillis: ref.CompletionOffsetMillis, SameRoute: ref.SameRoute})
+				CompletionOffsetMillis: ref.CompletionOffsetMillis})
 		}
 		sort.Slice(links, func(i, j int) bool {
 			if links[i].QueryGroup != links[j].QueryGroup {

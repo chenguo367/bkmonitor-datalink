@@ -82,8 +82,8 @@ func TestAQueryEditedGroupWithItsOldContentKeepsRunning(t *testing.T) {
 // restartQueryEditedGroup edits strategy 1001's query, runs the group its
 // Plan moved to, optionally lets the old content expire, and restarts the
 // new group's owner; the group must complete a FULL Slot again. The edit
-// keeps the state generation, so the Plan is linked to keep ordering; the
-// route changed, so no lateness carries over.
+// keeps the state generation, so the Plan is linked to keep ordering; no
+// lateness carries over.
 func restartQueryEditedGroup(t *testing.T, deleteContent bool) {
 	ctx := context.Background()
 	f, old, next := movedPlanFixture(t, func(first map[string]any) {
@@ -98,8 +98,8 @@ func restartQueryEditedGroup(t *testing.T, deleteContent bool) {
 		t.Fatal(err)
 	}
 	links, _, err := f.repository.ReadHoldPredecessors(ctx, schedule)
-	if err != nil || len(links) != 1 || links[0].QueryGroup != old || len(links[0].Plans) != 1 || links[0].Plans[0].SameRoute {
-		t.Fatalf("a query edit that keeps the state is linked, as another route: %+v %v", links, err)
+	if err != nil || len(links) != 1 || links[0].QueryGroup != old || len(links[0].Plans) != 1 {
+		t.Fatalf("a query edit that keeps the state is not linked: %+v %v", links, err)
 	}
 	if deleteContent {
 		expireOldContent(t, f, oldSchedule)
@@ -109,7 +109,7 @@ func restartQueryEditedGroup(t *testing.T, deleteContent bool) {
 	}
 	restartUntilFull(t, f, next)
 	if record, _ := f.bundle.dependencies.ReadHolds.controller.Reading(next); record.ArrivalAgeMillis != 0 {
-		t.Fatalf("another route's lateness carried over: %+v", record)
+		t.Fatalf("the old group's lateness carried over: %+v", record)
 	}
 }
 
@@ -154,7 +154,7 @@ func holdRecordKey(f *cutoverStallFixture, qg execution.QueryGroupIdentity) stri
 }
 
 // delayEdited moves strategy 1001's Plan to a new group by a time_delay
-// edit: same state, same route.
+// edit, which keeps the state generation.
 func delayEdited(t *testing.T) (*cutoverStallFixture, execution.QueryGroupIdentity, execution.QueryGroupIdentity, controlplane.ReadHoldLinkPlan) {
 	t.Helper()
 	f, old, next := movedPlanFixture(t, func(first map[string]any) { first["items"].([]any)[0].(map[string]any)["time_delay"] = 120 })
@@ -163,17 +163,10 @@ func delayEdited(t *testing.T) (*cutoverStallFixture, execution.QueryGroupIdenti
 		t.Fatal(err)
 	}
 	links, _, err := f.repository.ReadHoldPredecessors(context.Background(), schedule)
-	if err != nil || len(links) != 1 || links[0].QueryGroup != old || len(links[0].Plans) != 1 || !links[0].Plans[0].SameRoute ||
-		links[0].Plans[0].PreviousSlot <= 0 {
-		t.Fatalf("a time_delay edit is linked by the same route, with the old last Slot: %+v %v", links, err)
+	if err != nil || len(links) != 1 || links[0].QueryGroup != old || len(links[0].Plans) != 1 || links[0].Plans[0].PreviousSlot <= 0 {
+		t.Fatalf("a time_delay edit is linked with the old last Slot: %+v %v", links, err)
 	}
 	return f, old, next, links[0].Plans[0]
-}
-
-// withoutPredecessorProgress makes the old group's Progress unreadable, so
-// its last Slot's contract cannot give the exact hold and the record decides.
-func withoutPredecessorProgress(f *cutoverStallFixture) {
-	f.bundle.dependencies.ReadHolds.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
 }
 
 func predecessorCount(f *cutoverStallFixture, reason string) uint64 {
@@ -204,26 +197,26 @@ func TestADelayEditedGroupKeepsRunningAfterTheOldSegmentAndContentAreGone(t *tes
 	restartUntilFull(t, f, next)
 }
 
-// (c) The old group, at zero and so without a record, has frozen its last
-// Slot of the Plan and gone on: the zero is proven and the group reads at
-// once.
-func TestAZeroPredecessorThatMovedOnIsProvenZero(t *testing.T) {
-	f, old, next, link := delayEdited(t)
+// (c) The old group, at zero and so without a record, is read as zero --
+// whether or not it has gone past its last Slot, and without reading its
+// Progress: a group alarmd never held reads at once after an edit.
+func TestAMissingPredecessorRecordIsZero(t *testing.T) {
+	f, old, next, _ := delayEdited(t)
 	if n, _ := f.redisClient.Exists(context.Background(), holdRecordKey(f, old)).Result(); n != 0 {
 		t.Fatal("a zero group kept a record; the fixture does not test a missing one")
 	}
-	moved := execution.ScheduleProgress{Identity: execution.ProgressIdentity{QueryGroup: old}, NextSlot: link.PreviousSlot + 120}
+	// An unreadable Progress must not matter: it is not read.
 	holds := f.bundle.dependencies.ReadHolds
-	holds.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{old: {Status: execution.ProgressFound, Progress: &moved}}}
+	holds.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
 	after := restartUntilFull(t, f, next)
-	if predecessorCount(f, readhold.PredecessorZeroProven) == 0 || after.LastCompletion == nil || after.LastCompletion.Contract.ReadHoldMillis != 0 {
-		t.Fatalf("a moved-on zero predecessor was not proven zero: %v %+v", holds.controller.Stats().Predecessors, after.LastCompletion)
+	if predecessorCount(f, readhold.PredecessorZero) == 0 || after.LastCompletion == nil || after.LastCompletion.Contract.ReadHoldMillis != 0 {
+		t.Fatalf("a missing predecessor record was not read as zero: %v %+v", holds.controller.Stats().Predecessors, after.LastCompletion)
 	}
 }
 
 // (e) The old group's record holds a nonzero hold and was never closed --
 // its owner did not come back. The group reads its first Slots as late as the
-// bound asks, never refused, and takes the old arrival age (same route).
+// bound asks, never refused, and learns its own arrival age.
 func TestAnOpenPredecessorRecordIsReadAsTheBound(t *testing.T) {
 	ctx := context.Background()
 	f, old, next, _ := delayEdited(t)
@@ -240,11 +233,10 @@ func TestAnOpenPredecessorRecordIsReadAsTheBound(t *testing.T) {
 	if err := f.redisClient.Set(ctx, holdRecordKey(f, old), raw, time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	withoutPredecessorProgress(f)
 	after := restartUntilFull(t, f, next)
 	record, _ := f.bundle.dependencies.ReadHolds.controller.Reading(next)
-	if predecessorCount(f, readhold.PredecessorRecordOpen) == 0 || record.ArrivalAgeMillis != 400_000 || after.LastCompletion.Contract.ReadHoldMillis <= 0 {
-		t.Fatalf("an open predecessor was not read as the bound with its arrival age: %v %+v %+v",
+	if predecessorCount(f, readhold.PredecessorRecordOpen) == 0 || record.ArrivalAgeMillis != 0 || after.LastCompletion.Contract.ReadHoldMillis <= 0 {
+		t.Fatalf("an open predecessor was not read as the bound: %v %+v %+v",
 			f.bundle.dependencies.ReadHolds.controller.Stats().Predecessors, record, after.LastCompletion)
 	}
 }
@@ -263,7 +255,6 @@ func TestCorruptRecordsNeverStopTheGroup(t *testing.T) {
 			if err := f.redisClient.Set(ctx, key, "{not a record", time.Hour).Err(); err != nil {
 				t.Fatal(err)
 			}
-			withoutPredecessorProgress(f)
 			restartUntilFull(t, f, next)
 			stats := f.bundle.dependencies.ReadHolds.controller.Stats()
 			if !own && stats.Predecessors[readhold.PredecessorRecordCorrupt] == 0 {

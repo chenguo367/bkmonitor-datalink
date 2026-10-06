@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
@@ -123,6 +124,11 @@ func (holds *productionReadHolds) restore(ctx context.Context, groups []executio
 	}
 }
 
+func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
+	facts.QueryDelaySeconds, facts.QueryRevision = 0, ""
+	return contract.DeriveCanonicalDigestV2("alarmd-read-hold-route-v1", facts)
+}
+
 // Cache only the immutable source route and delay, not another query body.
 func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (string, time.Duration, error) {
 	qg := schedule.Segment.QueryGroup
@@ -151,7 +157,7 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	if err != nil {
 		return "", 0, err
 	}
-	route, err = controlplane.ReadHoldRoute(group.QueryPlan)
+	route, err = readHoldRoute(group.QueryPlan)
 	if err != nil {
 		return "", 0, err
 	}
@@ -177,7 +183,6 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 		if len(spec.Plans) == 1 || step < spec.Step {
 			spec.Step = step
 		}
-		spec.MaxCompletionOffset = max(spec.MaxCompletionOffset, offset)
 		wait := execution.SettlingWaitWithinQueryBudget(offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
@@ -251,9 +256,10 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		return err
 	}
 	holds.countLinks(skipped)
-	// Nothing about a predecessor can stop this group: every fact it cannot
-	// read is read as the hold bound by the controller (previousHold), which
-	// costs this group's first few Slots a later read and no Slot.
+	// Nothing about a predecessor can stop this group: the controller reads
+	// only the old group's record (previousHold), and what it cannot read is
+	// the hold bound, which costs this group's first few Slots a later read
+	// and no Slot.
 	expired := execution.EvaluationTime(holds.now().Add(-controlplane.ReadHoldLinkLifetime).Unix())
 	record := holds.controller.Inspect(qg).Record
 	for _, link := range links {
@@ -271,9 +277,6 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		// A read that fails, or a record that does not decode, leaves the
 		// Inspection saying so; neither is this group's error.
 		holds.report("predecessor_unreadable", link.QueryGroup, holds.controller.RestoreBatch(ctx, []execution.QueryGroupIdentity{link.QueryGroup}))
-		if !closedFor(holds.controller.Inspect(link.QueryGroup), link.ClosedAt, wanted) {
-			holds.predecessorProgress(ctx, link.QueryGroup, wanted)
-		}
 		spec.Previous = append(spec.Previous, readhold.Previous{QueryGroup: link.QueryGroup, ClosedAt: link.ClosedAt, Links: wanted})
 	}
 	if err := holds.controller.Configure(spec); err != nil {
@@ -308,7 +311,7 @@ func (holds *productionReadHolds) linkedPlans(spec readhold.GroupSpec, link cont
 		for _, ref := range spec.Plans {
 			if ref.Key == plan.Key {
 				wanted = append(wanted, readhold.PlanLink{PlanRef: ref, PreviousSlot: plan.PreviousSlot,
-					CompletionOffsetMillis: plan.CompletionOffsetMillis, SameRoute: plan.SameRoute})
+					CompletionOffsetMillis: plan.CompletionOffsetMillis})
 			}
 		}
 	}
@@ -328,57 +331,6 @@ func inheritedLinks(record readhold.Record, link controlplane.ReadHoldPredecesso
 		}
 	}
 	return true
-}
-
-// closedFor is a predecessor's record holding the closing fact of every
-// one of the Plans at the boundary: the only case its Progress adds nothing.
-func closedFor(old readhold.Inspection, closedAt execution.EvaluationTime, wanted []readhold.PlanLink) bool {
-	if !old.Loaded || old.Corrupt || old.Missing {
-		return false
-	}
-	for _, want := range wanted {
-		found := false
-		for _, plan := range old.Record.Plans {
-			found = found || (plan.Key == want.Key && plan.ClosedAt == closedAt)
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-// predecessorProgress adds to each link what the predecessor's Progress says
-// of the link's last Slot: the hold it was frozen with, while the Progress
-// still carries its contract, and whether every Slot through it is frozen.
-// A Progress that cannot be read says neither, and the controller reads the
-// hold bound instead.
-func (holds *productionReadHolds) predecessorProgress(ctx context.Context, qg execution.QueryGroupIdentity, links []readhold.PlanLink) {
-	identity := execution.ProgressIdentity{QueryGroup: qg}
-	loaded, err := holds.progress.LoadProgress(ctx, identity)
-	if err != nil || loaded.Validate(identity) != nil || loaded.Progress == nil {
-		holds.report("predecessor_progress_unreadable", qg, err)
-		return
-	}
-	progress := loaded.Progress
-	for index := range links {
-		slot := links[index].PreviousSlot
-		if slot <= 0 {
-			continue
-		}
-		var frozen *execution.FrozenExecutionContractRef
-		switch {
-		case progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot:
-			frozen = &progress.UnfinishedSlot.Contract
-		case progress.LastCompletion != nil && progress.LastCompletion.Slot == slot:
-			frozen = &progress.LastCompletion.Contract
-		}
-		if frozen != nil {
-			hold := frozen.ReadHoldMillis
-			links[index].FrozenHoldMillis = &hold
-		}
-		links[index].MovedPast = progress.NextSlot > slot
-	}
 }
 
 func (holds *productionReadHolds) ReadHold(qg execution.QueryGroupIdentity) time.Duration {

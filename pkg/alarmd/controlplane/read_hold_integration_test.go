@@ -62,10 +62,9 @@ func TestReadHoldLinkFollowsThePlanAcrossDelayGroupsAndEmptySegments(t *testing.
 			t.Fatalf("delay or empty intermediate lost predecessor: %+v %v %v", refs, skipped, err)
 		}
 		// The link says where the original group's last Slot was and when
-		// it was due, and that only the delay changed, across the empty
-		// intermediate Segment too.
-		if link := refs[0].Plans[0]; link.PreviousSlot != 120 || link.CompletionOffsetMillis <= 0 || !link.SameRoute {
-			t.Fatalf("the link does not carry the original group's last Slot and route: %+v", link)
+		// it was due, across the empty intermediate Segment too.
+		if link := refs[0].Plans[0]; link.PreviousSlot != 120 || link.CompletionOffsetMillis <= 0 {
+			t.Fatalf("the link does not carry the original group's last Slot: %+v", link)
 		}
 		if next.Plans[0].StateGeneration != generation {
 			t.Fatal("delay changed state generation")

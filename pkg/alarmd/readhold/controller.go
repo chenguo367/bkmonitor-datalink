@@ -37,23 +37,19 @@ var (
 )
 
 // What a successor took each moved Plan's previous hold from
-// (previousHold): its predecessor's closed record, the frozen contract of
-// the predecessor's last Slot, the open record's hold at that Slot, a
-// proven zero -- or, for the rest, the hold bound, which no hold exceeds.
+// (previousHold): its predecessor's closed record, the record's absence --
+// zero -- or, for a record open, corrupt or unread, the hold bound, which no
+// hold exceeds.
 const (
-	PredecessorInherited      = "inherited"
-	PredecessorFrozenContract = "frozen_contract"
-	PredecessorOpenFrozen     = "open_frozen"
-	PredecessorRecordOpen     = "record_open"
-	PredecessorZeroProven     = "zero_proven"
-	PredecessorZeroUnproven   = "zero_unproven"
-	PredecessorRecordCorrupt  = "record_corrupt"
-	PredecessorUnreadable     = "record_unreadable"
+	PredecessorInherited     = "inherited"
+	PredecessorZero          = "zero"
+	PredecessorRecordOpen    = "record_open"
+	PredecessorRecordCorrupt = "record_corrupt"
+	PredecessorUnreadable    = "record_unreadable"
 )
 
 // PredecessorReasons is the closed list of them.
-var PredecessorReasons = []string{PredecessorInherited, PredecessorFrozenContract, PredecessorOpenFrozen, PredecessorRecordOpen,
-	PredecessorZeroProven, PredecessorZeroUnproven, PredecessorRecordCorrupt, PredecessorUnreadable}
+var PredecessorReasons = []string{PredecessorInherited, PredecessorZero, PredecessorRecordOpen, PredecessorRecordCorrupt, PredecessorUnreadable}
 
 // A Slot whose transition asked for more than the group's hold limit is
 // frozen at the limit (SlotReadHold): ClampKnown when the hold that asked
@@ -68,8 +64,8 @@ const (
 type Stats struct {
 	Predecessors map[string]uint64
 	Clamped      map[string]uint64
-	// OwnCorrupt is the groups whose own record did not decode and was
-	// replaced, the bound standing in for whatever it held.
+	// OwnCorrupt is the groups whose own record did not decode: read as
+	// missing, and replaced at the group's next write.
 	OwnCorrupt uint64
 }
 
@@ -132,9 +128,8 @@ type Previous struct {
 	Links []PlanLink
 }
 
-// PlanLink is one moved Plan: what its link says, from the cutover that
-// closed the old Segment, and what the predecessor's Progress says of the
-// link's last Slot. None of it requires the old group's timeline or content.
+// PlanLink is one moved Plan as its link says, from the cutover that closed
+// the old Segment: nothing of the old group's timeline or content is read.
 type PlanLink struct {
 	PlanRef
 	// PreviousSlot is the Plan's last legal Slot in the Segment it left and
@@ -142,15 +137,6 @@ type PlanLink struct {
 	// Segment held no Slot of it, and there is then no deadline to keep.
 	PreviousSlot           execution.EvaluationTime
 	CompletionOffsetMillis int64
-	// SameRoute is the old group reading the same source the same way: only
-	// then does its arrival age carry over. The deadline is kept either way.
-	SameRoute bool
-	// FrozenHoldMillis is the hold the predecessor froze PreviousSlot with,
-	// when its Progress still carries that Slot's contract.
-	FrozenHoldMillis *int64
-	// MovedPast is the predecessor's Progress having frozen every Slot
-	// through PreviousSlot, so no observation can raise that Slot's hold.
-	MovedPast bool
 }
 
 type GroupSpec struct {
@@ -162,12 +148,9 @@ type GroupSpec struct {
 	// Zero means no margin, not an unset limit.
 	HoldLimit time.Duration
 	// Step is the shortest evaluation interval of its Plans, below which a
-	// lowering goes to zero (execution.LoweredReadHold); MaxCompletionOffset
-	// the longest completion offset, which a replaced own record's bound
-	// covers.
-	Step                time.Duration
-	MaxCompletionOffset time.Duration
-	Previous            []Previous
+	// lowering goes to zero (execution.LoweredReadHold).
+	Step     time.Duration
+	Previous []Previous
 }
 
 type Evidence struct {
@@ -479,35 +462,35 @@ func inherited(record Record, spec GroupSpec) bool {
 
 // previousFact is what a successor takes from its predecessor for one moved
 // Plan: the Plan's last Slot there and its offset, the hold that Slot was
-// frozen with, what that hold was taken from, the old group's arrival age
-// where its record says one, and whether the hold is the bound standing in
-// for one nobody could read.
+// frozen with, what that hold was taken from, and whether it is the bound
+// standing in for one nobody could read.
 type previousFact struct {
-	slot    execution.EvaluationTime
-	offset  int64
-	hold    int64
-	reason  string
-	arrival int64
-	bound   bool
+	slot   execution.EvaluationTime
+	offset int64
+	hold   int64
+	reason string
+	bound  bool
 }
 
-// previousHold reads one moved Plan's previousFact. Never an error: what
-// cannot be read is the hold bound, which no group's hold exceeds, so a
-// deadline taken from it is never earlier than the real one (h design
-// section 5). The successor reads later, for its first few Slots at most; it
-// is never refused. The closed record says the Plan's last Slot and its
-// offset as the old owner fixed them; in every other case they are the
-// link's.
+// previousHold reads one moved Plan's previousFact from the old group's
+// record alone, and never fails: a group that waited on its predecessor's
+// facts could be stopped by them for good.
+//
+//   - Closed at this boundary: the hold the old owner fixed, exactly.
+//   - Missing: zero. A nonzero hold always has a record, so a group at zero
+//     -- one alarmd has never held -- reads at once after an edit.
+//   - Open, corrupt or unread: the hold bound. No hold exceeds it, so the
+//     deadline taken from it is never earlier than the real one (h design
+//     section 5); only a held or a faulty predecessor costs its successor's
+//     first Slots a later read, and no Slot is refused.
+//
+// Two residual risks are accepted and counted by overtaken: an old group at
+// zero that raises its hold after this read and before freezing its last
+// Slot (within one period of an edit), and a held group's record gone by its
+// TTL or by Redis evicting it, read as zero.
 func (controller *Controller) previousHold(old Inspection, predecessor Previous, link PlanLink) previousFact {
 	fact := previousFact{slot: link.PreviousSlot, offset: link.CompletionOffsetMillis}
-	frozen := func(reason string) previousFact {
-		fact.hold, fact.reason = *link.FrozenHoldMillis, reason
-		return fact
-	}
 	bounded := func(reason string) previousFact {
-		if link.FrozenHoldMillis != nil {
-			return frozen(PredecessorFrozenContract)
-		}
 		fact.hold, fact.reason, fact.bound = controller.options.MaxHold.Milliseconds(), reason, true
 		return fact
 	}
@@ -517,21 +500,8 @@ func (controller *Controller) previousHold(old Inspection, predecessor Previous,
 	case old.Corrupt:
 		return bounded(PredecessorRecordCorrupt)
 	case old.Missing:
-		if link.FrozenHoldMillis != nil {
-			return frozen(PredecessorFrozenContract)
-		}
-		// No record. A nonzero hold always has one, renewed daily and kept
-		// a week, so its absence once the old group has frozen the last Slot
-		// proves that Slot was frozen at zero -- while the Slot is recent
-		// enough that a record written for it would still be here, allowing
-		// two failed renewal days. It rests on Redis evicting no key that
-		// carries a TTL.
-		recent := controller.options.Now().Add(-(RecordTTL - 2*RenewInterval)).Unix()
-		if link.MovedPast && int64(link.PreviousSlot) > recent {
-			fact.reason = PredecessorZeroProven
-			return fact
-		}
-		return bounded(PredecessorZeroUnproven)
+		fact.reason = PredecessorZero
+		return fact
 	}
 	for _, plan := range old.Record.Plans {
 		// By key: a Plan whose route changed is the same Plan.
@@ -540,23 +510,12 @@ func (controller *Controller) previousHold(old Inspection, predecessor Previous,
 			// The old owner's own bound for a slow Plan's final Slot it no
 			// longer had a hold for stays marked as a bound.
 			return previousFact{slot: plan.PreviousSlot, offset: plan.CompletionOffsetMillis, hold: plan.PreviousHoldMillis,
-				reason: PredecessorInherited, arrival: plan.ArrivalAgeMillis, bound: plan.PreviousHoldUnknown}
+				reason: PredecessorInherited, bound: plan.PreviousHoldUnknown}
 		}
 	}
 	// Not closed at this boundary yet: its owner has not come back, or is
-	// stuck. A later observation can still raise the Slots it has not
-	// frozen, so its hold now says nothing of them -- unless the last one is
-	// frozen already.
-	fact.arrival = old.Record.ArrivalAgeMillis
-	if link.FrozenHoldMillis != nil {
-		return frozen(PredecessorFrozenContract)
-	}
-	if hold, known := old.Record.HoldAt(link.PreviousSlot); link.MovedPast && known {
-		// The base hold it was frozen with, and no less than any of the old
-		// group's own transitions could have made it.
-		fact.hold, fact.reason = max(hold, holdAt(old.Record, link.PreviousSlot, 0)), PredecessorOpenFrozen
-		return fact
-	}
+	// stuck, and a later observation can still raise the Slots it has not
+	// frozen.
 	return bounded(PredecessorRecordOpen)
 }
 
@@ -566,16 +525,12 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 		return next, nil
 	}
 	if state.corrupt {
-		// The stored record did not decode, so whatever deadline it kept is
-		// unknown: every Plan keeps the latest any could have been, for one
-		// bound from now, and then the group starts over from zero.
+		// The stored record did not decode: read as missing, the group
+		// relearns its hold, and its next write replaces the bytes. A
+		// deadline the record kept is lost with it, a risk overtaken counts.
 		controller.statsMu.Lock()
 		controller.ownCorrupt++
 		controller.statsMu.Unlock()
-		deadline := controller.options.Now().UnixMilli() + controller.options.MaxHold.Milliseconds() + state.spec.MaxCompletionOffset.Milliseconds()
-		for _, plan := range state.spec.Plans {
-			next.Transitions = append(next.Transitions, Transition{Key: plan.Key, DeadlineMillis: deadline, Fallback: true})
-		}
 	}
 	previous := state.spec.Previous
 	if inherited(next, state.spec) {
@@ -592,15 +547,12 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 			} else {
 				controller.counted(controller.predecessors, fact.reason)
 			}
-			plan := PlanRecord{PlanRef: link.PlanRef, ClosedAt: predecessor.ClosedAt, ClosedQueryGroup: predecessor.QueryGroup,
+			// The old group's arrival age does not carry over: the new group
+			// learns its own, a few windows read early at most.
+			mergePlan(&next, PlanRecord{PlanRef: link.PlanRef, ClosedAt: predecessor.ClosedAt, ClosedQueryGroup: predecessor.QueryGroup,
 				InheritedQueryGroup: predecessor.QueryGroup, InheritedClosedAt: predecessor.ClosedAt,
 				PreviousHoldUnknown: fact.bound, PreviousHoldMillis: fact.hold, PreviousSlot: fact.slot,
-				CompletionOffsetMillis: fact.offset}
-			if link.SameRoute {
-				plan.ArrivalAgeMillis = fact.arrival
-				next.ArrivalAgeMillis = max(next.ArrivalAgeMillis, fact.arrival)
-			}
-			mergePlan(&next, plan)
+				CompletionOffsetMillis: fact.offset})
 			if fact.slot > 0 {
 				next.Transitions = append(next.Transitions, Transition{Key: link.Key,
 					DeadlineMillis: int64(fact.slot)*1000 + fact.hold + fact.offset, Fallback: fact.bound})

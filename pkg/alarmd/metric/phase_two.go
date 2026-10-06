@@ -915,7 +915,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, decision := range observability.ScheduleCutoverDecisions {
 		metrics.scheduleCutoverQueryGroups.WithLabelValues(decision)
 	}
-	metrics.scheduleCutoverReadHoldLinks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_read_hold_links_total", Help: "Moved Plans' links to the Query Group they left, by what a publication cutover did with them: linked_same_route (the state generation and the route are unchanged: ordering is kept and the old lateness carries over), linked_route_changed (same state, another route: ordering only), linked_generation_unknown (a generation could not be read; linked to keep ordering), generation_changed (no state shared; no link), dropped_self (a carried link named the group it is in), dropped_expired (a carried link past its lifetime)."}, []string{"decision"})
+	metrics.scheduleCutoverReadHoldLinks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_read_hold_links_total", Help: "Moved Plans' links to the Query Group they left, by what a publication cutover did with them: linked (the state generation is unchanged, so the new group's first Slots keep the old group's last deadline), linked_generation_unknown (a generation could not be read; linked to keep ordering), generation_changed (no state shared; no link), dropped_self (a carried link named the group it is in), dropped_expired (a carried link past its lifetime)."}, []string{"decision"})
 	for _, decision := range observability.ScheduleCutoverReadHoldLinks {
 		metrics.scheduleCutoverReadHoldLinks.WithLabelValues(decision)
 	}

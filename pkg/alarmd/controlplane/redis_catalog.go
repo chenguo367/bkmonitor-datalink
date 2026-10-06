@@ -94,10 +94,6 @@ type ReadHoldPredecessorRef struct {
 	// Zero when that Segment held no Slot of the Plan.
 	PreviousSlot           execution.EvaluationTime `json:"previous_slot,omitempty"`
 	CompletionOffsetMillis int64                    `json:"completion_offset_ms,omitempty"`
-	// SameRoute is the two groups reading the same source the same way
-	// apart from time_delay (ReadHoldRoute): only then does the old group's
-	// lateness carry over. Ordering is owed either way.
-	SameRoute bool `json:"same_route,omitempty"`
 }
 
 // Equal compares by content; the fact carries a pointer, see

@@ -967,12 +967,11 @@ var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", 
 
 // ScheduleCutoverReadHoldLinks is the closed vocabulary of what a cutover
 // does with a Plan's link to the Query Group it left: linked (the state
-// generation is unchanged; by whether the route is too, or the generation
-// could not be read), generation_changed (no state shared, no link), and
-// the carried links it stops carrying because they name the group they are
-// in or are past their lifetime.
-var ScheduleCutoverReadHoldLinks = []string{"linked_same_route", "linked_route_changed", "linked_generation_unknown", "generation_changed",
-	"dropped_self", "dropped_expired"}
+// generation is unchanged), linked_generation_unknown (a generation could
+// not be read; linked to keep ordering), generation_changed (no state
+// shared, no link), and the carried links it stops carrying because they
+// name the group they are in or are past their lifetime.
+var ScheduleCutoverReadHoldLinks = []string{"linked", "linked_generation_unknown", "generation_changed", "dropped_self", "dropped_expired"}
 
 // ReplayExpiryFacts describe one Slot the scheduler gave up replaying.
 //
