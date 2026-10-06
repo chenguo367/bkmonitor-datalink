@@ -433,9 +433,28 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(400, "invalid_input", err.Error())
 		return
 	}
+	// The session's own budget, spent only by an invocation that would
+	// execute, here or on the replica it targets: a refused input, an
+	// unavailable operation or a missing route cost nothing and count for
+	// nothing. Spent before the slot, so a session over budget never contends
+	// for it, and before admission, so it never renews. The target executes
+	// without the session and spends none, so a read routed back to this
+	// replica is counted once. A target that answers unavailable has still
+	// been asked, and the read is counted.
+	overBudget := func() bool {
+		allowed, retryAfter := c.allowInvoke(session.ID)
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+			fail(429, "rate_limited", fmt.Sprintf("This session has spent its %d invocations for this minute; retry when the minute turns.", InvokesPerSessionPerMinute))
+		}
+		return !allowed
+	}
 	if target.Explicit() {
 		if c.options.Route == nil {
 			fail(503, "target_routing_unavailable", "Targeted evidence routing is not configured.")
+			return
+		}
+		if overBudget() {
 			return
 		}
 		// The external entry owns CLI admission and renewal exactly once. The
@@ -459,13 +478,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(503, "operation_unavailable", availability.Reason)
 		return
 	}
-	// The session's own budget, spent only by an invocation that would
-	// execute: a refused input or an unavailable operation cost nothing and
-	// counts for nothing. Spent before the slot, so a session over budget
-	// never contends for it, and before admission, so it never renews.
-	if allowed, retryAfter := c.allowInvoke(session.ID); !allowed {
-		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
-		fail(429, "rate_limited", fmt.Sprintf("This session has spent its %d invocations for this minute; retry when the minute turns.", InvokesPerSessionPerMinute))
+	if overBudget() {
 		return
 	}
 	select {
