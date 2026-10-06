@@ -28,7 +28,7 @@ type readHoldOrigin struct {
 // state it had when its state generation does not change -- a time_delay
 // edit, and also a change of method, filter, metric or table -- so the two
 // groups write one state and the new one's first Slots must not read ahead
-// of the old one's last (h design section 5, M2): it is linked. A Plan whose
+// of the old one's last (h design section 5): it is linked. A Plan whose
 // generation changed starts a state of its own and is not.
 type readHoldLinker struct {
 	origins       map[execution.PlanKey]readHoldOrigin
