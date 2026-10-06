@@ -833,6 +833,10 @@ func TestATransitionOverTheLimitIsFrozenAtTheLimitAndCounted(t *testing.T) {
 			ClosedQueryGroup: "old", PreviousSlot: 1140, PreviousHoldMillis: 590_000, CompletionOffsetMillis: 200_000}}}, ClampKnown},
 		// An open record is the 600 s bound: 1140 s + 600 s + 200 s.
 		{"fallback", &Record{SinceSlot: 1, HoldMillis: 1_000, SegmentStart: 60}, ClampFallback},
+		// The old owner closed with its own bound for a Slot its record no
+		// longer covered: still the bound, not a known hold.
+		{"inherited bound", &Record{SinceSlot: 1, SegmentStart: 60, Closed: true, Plans: []PlanRecord{{PlanRef: planRef(), ClosedAt: boundary,
+			ClosedQueryGroup: "old", PreviousSlot: 1140, PreviousHoldMillis: 600_000, PreviousHoldUnknown: true, CompletionOffsetMillis: 200_000}}}, ClampFallback},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, store, _ := controllerFixture(t)
@@ -1042,5 +1046,44 @@ func TestALinkWithoutALastSlotDecidesNothing(t *testing.T) {
 	}
 	if _, written := store.values["new"]; written {
 		t.Fatal("a slot-less link made the successor write a record")
+	}
+}
+
+// A Plan that left a group twice finds the group's record closed at the
+// first boundary while the second is still open: the earlier closure is not
+// this one. Read as closed, its long-past deadline would let the group's
+// held last Slot overtake the new group; read as open, it is the bound.
+func TestARecordClosedAtAnEarlierBoundaryIsOpenForALaterLink(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	store.values["old"], _ = json.Marshal(Record{SinceSlot: 1, HoldMillis: 150_000, SegmentStart: 660,
+		Plans: []PlanRecord{{PlanRef: planRef(), ClosedAt: 600, ClosedQueryGroup: "old", PreviousSlot: 540, PreviousHoldMillis: 150_000,
+			CompletionOffsetMillis: 55_000}}})
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"old"}); err != nil {
+		t.Fatal(err)
+	}
+	newSpec := groupSpec("new", 0)
+	newSpec.Previous = []Previous{linked(newSpec, "old", 1200, 1140)}
+	prepare(t, c, newSpec)
+	// 1140 s + 600 s bound + 55 s offset, read at 1200 s + 30 s wait.
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", 1200, nil), 1200, holdFence("new")); err != nil || got != 565*time.Second {
+		t.Fatalf("a link at a later boundary read the earlier closure: %s %v", got, err)
+	}
+	if got := c.Stats().Predecessors; got[PredecessorRecordOpen] != 1 || len(got) != 1 {
+		t.Fatalf("counted %v, want one %s", got, PredecessorRecordOpen)
+	}
+}
+
+// Each Segment's schedule is checked when the group first freezes a Slot of
+// it, not only the first Segment's.
+func TestEverySegmentsScheduleIsChecked(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 120, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	invalid := scheduleFor(t, "qg", 600, nil)
+	invalid.Segment.ScheduleRevision = "not-the-plans-revision"
+	if _, err := c.SlotReadHold(context.Background(), invalid, 600, holdFence("qg")); err == nil {
+		t.Fatal("a second Segment's invalid schedule was not checked")
 	}
 }
