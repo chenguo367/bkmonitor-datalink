@@ -212,3 +212,84 @@ func TestARecordReadWithoutAnAnswerStillRefuses(t *testing.T) {
 		t.Fatalf("an unanswered record read did not refuse as unrestored: %v", err)
 	}
 }
+
+// failingTimeline fails the read of one evaluation time of the group's own
+// timeline and passes every other through.
+type failingTimeline struct {
+	readHoldTimeline
+	at  execution.EvaluationTime
+	err error
+}
+
+func (timeline failingTimeline) ReadFrozenSchedule(ctx context.Context, qg execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
+	if at == timeline.at {
+		return execution.FrozenQueryGroupSchedule{}, timeline.err
+	}
+	return timeline.readHoldTimeline.ReadFrozenSchedule(ctx, qg, at)
+}
+
+// failingLinks fails the read of the group's predecessor links.
+type failingLinks struct {
+	readHoldCatalog
+	err error
+}
+
+func (links failingLinks) ReadHoldPredecessors(context.Context, execution.FrozenQueryGroupSchedule) ([]controlplane.ReadHoldPredecessor, map[string]int, error) {
+	return nil, nil, links.err
+}
+
+// Each place a prepare can fail for a reason of the hold's own degrades the
+// hold under its own reason, and the Slot is frozen with the record's hold;
+// a refusal at any one of them would stop the group as long as it lasts.
+func TestEachPrepareFailureOfTheHoldsOwnDegradesUnderItsReason(t *testing.T) {
+	failure := errors.New("read failed")
+	for _, tc := range []struct {
+		reason string
+		fail   func(*productionReadHolds, *productionReadHoldGroup, execution.FrozenQueryGroupSchedule)
+	}{
+		{readhold.DegradedPreviousUnreadable, func(holds *productionReadHolds, _ *productionReadHoldGroup, current execution.FrozenQueryGroupSchedule) {
+			holds.catalog = failingTimeline{readHoldTimeline: holds.catalog, at: current.Segment.Start - 1, err: failure}
+		}},
+		{readhold.DegradedPredecessorsUnreadable, func(holds *productionReadHolds, _ *productionReadHoldGroup, _ execution.FrozenQueryGroupSchedule) {
+			holds.repository = failingLinks{readHoldCatalog: holds.repository, err: failure}
+		}},
+		// The group already prepared a later Segment than the open one asked.
+		{readhold.DegradedStaleSegment, func(_ *productionReadHolds, group *productionReadHoldGroup, current execution.FrozenQueryGroupSchedule) {
+			later := current.Segment
+			later.Start += 3600
+			group.prepared = later
+		}},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			ctx := context.Background()
+			f := startCutoverFixture(t, nil)
+			_ = runOneSlotFull(t, f)
+			next := f.progress(ctx).NextSlot
+			current, err := f.production.dependencies.Catalog.ReadFrozenSchedule(ctx, f.queryGroup, next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeHoldRecord(t, f, f.queryGroup, readhold.Record{SinceSlot: 1, HoldMillis: 60_000, SegmentStart: current.Segment.Start})
+			holds := f.bundle.dependencies.ReadHolds
+			holds.mu.Lock()
+			group := holds.groups[f.queryGroup]
+			holds.mu.Unlock()
+			group.mu.Lock()
+			group.prepared = execution.ScheduleSegmentFact{}
+			group.mu.Unlock()
+			holds.controller.Forget(f.queryGroup)
+			tc.fail(holds, group, current)
+			lease, _ := group.session.Current()
+			var degradation *readHoldDegradation
+			if err := holds.PrepareSchedule(ctx, current, lease.Fence); !errors.As(err, &degradation) || degradation.reason != tc.reason {
+				t.Fatalf("the prepare was not degraded under %s: %v", tc.reason, err)
+			}
+			if hold, err := holds.SlotReadHold(ctx, current, next, lease.Fence); err != nil || hold != time.Minute {
+				t.Fatalf("the Slot was not held as the record says: %v %v", hold, err)
+			}
+			if counts := degradedCounts(f); counts[tc.reason] != 1 || len(counts) != 1 {
+				t.Fatalf("the degraded Slot was not counted once under %s: %v", tc.reason, counts)
+			}
+		})
+	}
+}

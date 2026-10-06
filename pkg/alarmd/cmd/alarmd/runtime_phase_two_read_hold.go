@@ -21,13 +21,26 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
+// readHoldTimeline is what the holds read of a group's own schedule
+// timeline.
+type readHoldTimeline interface {
+	ReadFrozenSchedule(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error)
+}
+
+// readHoldCatalog is what the holds read of the catalog: the group's object,
+// for its route and delay, and the links its moved Plans left.
+type readHoldCatalog interface {
+	LoadQueryGroupObject(context.Context, execution.ObjectDigest) (controlplane.QueryGroupObject, error)
+	ReadHoldPredecessors(context.Context, execution.FrozenQueryGroupSchedule) ([]controlplane.ReadHoldPredecessor, map[string]int, error)
+}
+
 // Read holds share the ownership store and schedule timeline. Nothing here
 // changes a Plan's state generation or the window its Slot reads.
 type productionReadHolds struct {
 	controller  *readhold.Controller
 	cfg         config.Config
-	repository  *controlplane.RedisCatalogRepository
-	catalog     *controlplane.RedisCatalogRuntime
+	repository  readHoldCatalog
+	catalog     readHoldTimeline
 	progress    productionPhaseTwoProgressReader
 	now         func() time.Time
 	logger      *observability.Logger
@@ -69,8 +82,8 @@ type readHoldDegradedLine struct {
 	reason string
 }
 
-func newProductionReadHolds(cfg config.Config, control readhold.Control, repository *controlplane.RedisCatalogRepository,
-	catalog *controlplane.RedisCatalogRuntime, progress productionPhaseTwoProgressReader, now func() time.Time,
+func newProductionReadHolds(cfg config.Config, control readhold.Control, repository readHoldCatalog,
+	catalog readHoldTimeline, progress productionPhaseTwoProgressReader, now func() time.Time,
 	logger *observability.Logger) (*productionReadHolds, error) {
 	holds := &productionReadHolds{cfg: cfg, repository: repository, catalog: catalog, progress: progress,
 		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup), links: make(map[string]uint64),
@@ -162,19 +175,14 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	if route != "" {
 		return route, delay, nil
 	}
+	// A Segment without the object -- one named by no digest, or pruned --
+	// gives no route: the hold is degraded (spec_unreadable), not stopped.
 	err := controlplane.ErrCatalogObjectUnavailable
 	var object controlplane.QueryGroupObject
 	if schedule.Segment.ObjectDigest != "" {
 		object, err = holds.repository.LoadQueryGroupObject(ctx, schedule.Segment.ObjectDigest)
 		if err == nil && object.Identity != qg {
 			err = errors.New("alarmd readhold: Query Group object belongs to another Query Group")
-		}
-	}
-	if errors.Is(err, controlplane.ErrCatalogObjectUnavailable) && schedule.Segment.End != nil {
-		// Only the query's identity is reused. The original schedule below still
-		// supplies the old Plans, their waits and full completion deadlines.
-		if successor, nextErr := holds.catalog.ReadSuccessorFrozenSchedule(ctx, qg, *schedule.Segment.End); nextErr == nil {
-			return holds.queryBasis(ctx, successor)
 		}
 	}
 	if err != nil {

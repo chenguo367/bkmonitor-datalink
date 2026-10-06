@@ -55,7 +55,6 @@ func restartRevisedSegment(t *testing.T, expire bool) {
 	for f.progress(ctx).NextSlot <= since {
 		_ = runOneSlotFull(t, f)
 	}
-	holds := f.bundle.dependencies.ReadHolds
 	if expire {
 		catalogPrefix := productionPhaseTwoPrefix(f.cfg.Redis.StatePrefix, "catalog")
 		keys := []string{catalogPrefix + ":manifest:" + string(segment.Publication.SnapshotRevision)}
@@ -66,7 +65,7 @@ func restartRevisedSegment(t *testing.T, expire bool) {
 			t.Fatalf("expired %d of %v: %v", removed, keys, err)
 		}
 	}
-	if err := holds.repository.ConfigureObjectCache(1, 1); err != nil {
+	if err := f.repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
 	restartUntilFull(t, f, f.queryGroup)
