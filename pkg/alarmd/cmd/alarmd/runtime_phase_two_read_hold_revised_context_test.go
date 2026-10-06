@@ -26,6 +26,22 @@ func TestARevisedSegmentWithItsFirstContextsKeepsRunning(t *testing.T) {
 }
 
 func restartRevisedSegment(t *testing.T, expire bool) {
+	f := revisedSegmentPastRetention(t, expire)
+	restartUntilFull(t, f, f.queryGroup)
+	// The hold itself was prepared, not stood in for: its route and delay
+	// are read from the Query Group object alone.
+	if counts := degradedCounts(f); len(counts) != 0 {
+		t.Fatalf("the hold was degraded instead of prepared: %v", counts)
+	}
+}
+
+// revisedSegmentPastRetention renames strategy 1001, which keeps its Segment
+// and revises its output context, completes every Slot that renders with
+// the first contexts, and, when expire is set, removes those contexts and
+// the manifest of the publication the Segment opened under. The process's
+// object cache is left too small to serve them from memory.
+func revisedSegmentPastRetention(t *testing.T, expire bool) *cutoverStallFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := startCutoverFixture(t, nil)
 	installEditedStrategies(t, ctx, f.redisClient, 1725000600, func(first map[string]any) {
@@ -68,10 +84,5 @@ func restartRevisedSegment(t *testing.T, expire bool) {
 	if err := f.repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
-	restartUntilFull(t, f, f.queryGroup)
-	// The hold itself was prepared, not stood in for: its route and delay
-	// are read from the Query Group object alone.
-	if counts := degradedCounts(f); len(counts) != 0 {
-		t.Fatalf("the hold was degraded instead of prepared: %v", counts)
-	}
+	return f
 }
