@@ -107,6 +107,53 @@ func (*serialActivationCASHook) AfterProcessPipeline(context.Context, []redis.Cm
 	return nil
 }
 
+// activationReadBarrier holds the first Lua call until want reads of the
+// activation record have been sent. Every reconciler it waits for has then
+// read the state it will compete to replace, so each reaches its own CAS:
+// without it, a reconciler scheduled after the first CAS committed reads the
+// migrated state and has nothing to replace, and a test that counts the CAS
+// calls counts one.
+type activationReadBarrier struct {
+	key   string
+	want  int64
+	reads atomic.Int64
+	evals atomic.Int64
+	ready chan struct{}
+}
+
+func newActivationReadBarrier(key string, want int64) *activationReadBarrier {
+	return &activationReadBarrier{key: key, want: want, ready: make(chan struct{})}
+}
+
+func (barrier *activationReadBarrier) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	switch cmd.Name() {
+	case "get":
+		if args := cmd.Args(); len(args) > 1 && args[1] == barrier.key && barrier.reads.Add(1) == barrier.want {
+			close(barrier.ready)
+		}
+	case "eval", "evalsha":
+		if barrier.evals.Add(1) != 1 {
+			return ctx, nil
+		}
+		select {
+		case <-barrier.ready:
+		case <-ctx.Done():
+			return ctx, ctx.Err()
+		case <-time.After(10 * time.Second):
+			return ctx, fmt.Errorf("activation read barrier: %d of %d reads before the first CAS", barrier.reads.Load(), barrier.want)
+		}
+	}
+	return ctx, nil
+}
+
+func (*activationReadBarrier) AfterProcess(context.Context, redis.Cmder) error { return nil }
+
+func (*activationReadBarrier) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (*activationReadBarrier) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
+
 type beforeEvalHook struct {
 	once sync.Once
 	run  func() error
@@ -2313,6 +2360,9 @@ func TestScheduleActivationReconcilerConcurrentLegacyMigrationReadsSingleWinner(
 	casHook := &serialActivationCASHook{firstDone: make(chan struct{}), afterFirst: func() error {
 		return auxiliary.PExpire(ctx, activeSetKey, 2*time.Second).Err()
 	}}
+	// Both reconcilers read the legacy record before either CAS runs; the
+	// migration allocates no boundary, so the clock cannot be the barrier.
+	client.AddHook(newActivationReadBarrier(prefix+":activation", 2))
 	client.AddHook(casHook)
 	first, _ := controlplane.NewScheduleActivationReconciler(repository, compiler, semantics, func() time.Time {
 		t.Fatal("legacy migration must not allocate a cutover boundary")
