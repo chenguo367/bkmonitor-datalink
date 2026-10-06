@@ -1677,6 +1677,35 @@ func TestQuietSeriesDoNotDecideAndSteadySeriesMakeAPartialRevision(t *testing.T)
 	}
 }
 
+// A series quiet in both reads decides nothing even when its points came or
+// went between them, and a quiet series that went had nothing to lose:
+// beside series the first read had whole, the sample is complete -- not a
+// window read early, which would feed read_early and the time_delay advice.
+func TestAQuietSeriesWhosePointsMovedDecidesNothing(t *testing.T) {
+	f := newFixture(t)
+	whole := func(index int) string { return fmt.Sprint(5 + index) }
+	quiet := func(prefix string, n int, slot int64, points int) []*execution.Dataset {
+		out := make([]*execution.Dataset, 0, n)
+		for index := 0; index < n; index++ {
+			values := map[int64]string{slot - 60: "0"}
+			if points > 1 {
+				values[slot-30] = "0"
+			}
+			out = append(out, dataset(fmt.Sprintf("%s%d", prefix, index), values))
+		}
+		return out
+	}
+	now := f.clock.now().Unix()
+	first := append(append(seriesAt("s", 90, now, whole), quiet("q", 5, now, 1)...), quiet("gone", 5, now, 1)...)
+	f.classSample(0, first, func(slot int64) []*execution.Dataset {
+		return append(seriesAt("s", 90, slot, whole), quiet("q", 5, slot, 2)...)
+	})
+	source := f.engine.Stats().Sources[sourceLog]
+	if source.Classes[ClassComplete] != 1 || source.Classes[ClassWindowReadEarly] != 0 || source.Classes[ClassPartialRevised] != 0 {
+		t.Fatalf("classes %v, want quiet series that gained points or went to leave the sample complete", source.Classes)
+	}
+}
+
 // The series table grows as the memory line admits it, asking first for
 // seriesAdmitFirst series and then for as many again as it holds, and has
 // no bound of its own: what it was admitted is never more than twice what

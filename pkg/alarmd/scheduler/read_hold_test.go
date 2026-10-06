@@ -15,6 +15,7 @@ type closingReadHolds struct {
 	testReadHolds
 	closed []execution.FrozenQueryGroupSchedule
 	err    error
+	failed []error
 }
 
 func (holds *closingReadHolds) PrepareSchedule(_ context.Context, schedule execution.FrozenQueryGroupSchedule, _ execution.OwnerFence) error {
@@ -24,21 +25,28 @@ func (holds *closingReadHolds) PrepareSchedule(_ context.Context, schedule execu
 	return holds.err
 }
 
-func TestRetirementClosesTheHoldBeforeReleasingTheOldGroup(t *testing.T) {
+func (holds *closingReadHolds) RetireCloseFailed(err error) { holds.failed = append(holds.failed, err) }
+
+// A retired group closes its hold at the last boundary, and retires whether
+// or not the closing succeeds: answering retry until it could close kept a
+// group whose closing could never succeed unretired, and its successor
+// waiting on it. A failed closing is counted; the successor reads the
+// unclosed record as the hold bound.
+func TestRetirementClosesTheHoldAndRetiresEvenWhenClosingFails(t *testing.T) {
 	end := execution.EvaluationTime(600)
 	schedule := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
-	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
-	holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}, err: errors.New("temporary close failure")}
-	source := newProductionSlotSourceForTest(t, catalog, foundProgress(600, 540), time.Unix(600, 0))
-	source.readHolds = holds
-	_, _, facts, err := source.Next(context.Background(), "query-group-1")
-	if err == nil || facts.Retired {
-		t.Fatal("retired before its hold bridge was saved")
-	}
-	holds.err = nil
-	_, due, facts, err := source.Next(context.Background(), "query-group-1")
-	if err != nil || due || !facts.Retired || len(holds.closed) != 2 || *holds.closed[1].Segment.End != end {
-		t.Fatalf("retirement=%+v closed=%+v err=%v", facts, holds.closed, err)
+	for _, closeErr := range []error{nil, errors.New("close failure")} {
+		catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
+		holds := &closingReadHolds{testReadHolds: testReadHolds{hold: 150 * time.Second}, err: closeErr}
+		source := newProductionSlotSourceForTest(t, catalog, foundProgress(600, 540), time.Unix(600, 0))
+		source.readHolds = holds
+		_, due, facts, err := source.Next(context.Background(), "query-group-1")
+		if err != nil || due || !facts.Retired || len(holds.closed) != 1 || *holds.closed[0].Segment.End != end {
+			t.Fatalf("close error %v: retirement=%+v closed=%+v err=%v", closeErr, facts, holds.closed, err)
+		}
+		if (closeErr == nil) != (len(holds.failed) == 0) {
+			t.Fatalf("close error %v: failures counted %v", closeErr, holds.failed)
+		}
 	}
 }
 
@@ -76,15 +84,27 @@ func TestUnfinishedSlotKeepsItsFrozenHoldAfterRestart(t *testing.T) {
 		Contract: slot.Contract, DuePlanTargets: slot.DuePlanTargets.Clone(),
 		EarliestQueryDeadlineUnixMilli: slot.EarliestQueryDeadlineUnixMilli, KeepUntilUnixMilli: slot.KeepUntilUnixMilli,
 	}
-	for _, freezeErr := range []error{nil, controlplane.ErrSnapshotUnavailable} {
-		catalog.freezeErr = freezeErr
-		restarted := newProductionSlotSourceForTest(t, catalog, load, time.Unix(160, 0))
-		restarted.readHolds = &testReadHolds{}
-		restored, due, _, err := restarted.Next(context.Background(), "query-group-1")
-		if err != nil || !due || restored.Contract != slot.Contract || restored.EarliestQueryDeadlineUnixMilli != slot.EarliestQueryDeadlineUnixMilli {
-			t.Fatalf("restart with current hold zero and freeze error %v: %+v %v %v", freezeErr, restored, due, err)
+	// The production holds freeze through SlotReadHold; the unfinished Slot
+	// keeps its contract's hold through either.
+	for _, holds := range []ReadHolds{&testReadHolds{}, &slotTestReadHolds{}} {
+		for _, freezeErr := range []error{nil, controlplane.ErrSnapshotUnavailable} {
+			catalog.freezeErr = freezeErr
+			restarted := newProductionSlotSourceForTest(t, catalog, load, time.Unix(160, 0))
+			restarted.readHolds = holds
+			restored, due, _, err := restarted.Next(context.Background(), "query-group-1")
+			if err != nil || !due || restored.Contract != slot.Contract || restored.EarliestQueryDeadlineUnixMilli != slot.EarliestQueryDeadlineUnixMilli {
+				t.Fatalf("restart through %T with current hold zero and freeze error %v: %+v %v %v", holds, freezeErr, restored, due, err)
+			}
 		}
 	}
+}
+
+// slotTestReadHolds freezes every new Slot at its hold through SlotReadHold,
+// as the production holds do.
+type slotTestReadHolds struct{ testReadHolds }
+
+func (holds *slotTestReadHolds) SlotReadHold(context.Context, execution.FrozenQueryGroupSchedule, execution.EvaluationTime, execution.OwnerFence) (time.Duration, error) {
+	return holds.hold, nil
 }
 
 func TestReadHoldShiftsReplayClockWithoutWideningSettlingBudget(t *testing.T) {

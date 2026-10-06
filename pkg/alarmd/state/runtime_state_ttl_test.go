@@ -653,3 +653,32 @@ func TestTheHalfStepOffsetSurvivesTheFloorAndTheCeiling(t *testing.T) {
 		}
 	})
 }
+
+// A retention that fits the ceiling without the read hold fits with it: the
+// hold only lengthens the key's life, and near the ceiling it gets what is
+// left below it. Refusing these refused, every round, a Plan that fits.
+func TestARetentionThatFitsWithoutTheReadHoldFitsWithIt(t *testing.T) {
+	const (
+		restartMargin = 10 * time.Minute
+		maximum       = 30 * 24 * time.Hour
+		hold          = 10 * time.Minute
+	)
+	fingerprint := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		interval    time.Duration
+		first, last uint32
+	}{{time.Minute, 43_180, 43_190}, {5 * time.Minute, 8_636, 8_638}} {
+		for points := tc.first; points <= tc.last; points++ {
+			requirement := NewLevelRequirement(execution.StateRetentionRequirement{LevelID: 1, RetentionPoints: points, EvaluationInterval: tc.interval},
+				fingerprint, 1)
+			without, err := StateTTL([]LevelRequirement{requirement}, restartMargin, time.Minute, maximum)
+			if err != nil {
+				t.Fatalf("%s x %d does not fit even without the hold: %v", tc.interval, points, err)
+			}
+			with, err := StateTTL([]LevelRequirement{requirement}, restartMargin, time.Minute, maximum, hold)
+			if err != nil || with != min(without+hold, maximum) {
+				t.Fatalf("%s x %d with the hold = %s %v; want %s", tc.interval, points, with, err, min(without+hold, maximum))
+			}
+		}
+	}
+}

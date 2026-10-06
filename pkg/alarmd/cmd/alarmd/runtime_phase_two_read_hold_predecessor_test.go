@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -275,13 +276,93 @@ func TestCorruptRecordsNeverStopTheGroup(t *testing.T) {
 // the group's last Slot completed with a partial gap - or mid-Slot - cannot
 // prove the zero, and the group can never complete another Slot to prove it.
 func TestADelayEditedGroupIsNotStoppedByAPartialLastCompletionPastTheRecordLifetime(t *testing.T) {
-	h, _, schedule, fence, _, p := runtimeExpiredZeroBridge(t)
-	p.LastDataSlot = p.LastCompletion.Slot
-	p.LastFullSlot = p.LastCompletion.Slot - 60
-	p.LastCompletionKind = execution.CompletionPartialGap
-	p.LastCompletion.Kind = execution.CompletionPartialGap
-	h.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{p.Identity.QueryGroup: {Status: execution.ProgressFound, Progress: &p}}}
-	if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
-		t.Fatalf("delay-edited group blocked for good after a partial last completion: %v", err)
+	for _, unfinished := range []bool{false, true} {
+		t.Run(map[bool]string{false: "partial last completion", true: "unfinished Slot"}[unfinished], func(t *testing.T) {
+			h, _, schedule, fence, _, p := runtimeExpiredZeroBridge(t)
+			p.LastDataSlot = p.LastCompletion.Slot
+			p.LastFullSlot = p.LastCompletion.Slot - 60
+			p.LastCompletionKind = execution.CompletionPartialGap
+			p.LastCompletion.Kind = execution.CompletionPartialGap
+			if unfinished {
+				// A takeover finds the group mid-Slot.
+				p.UnfinishedSlot = &execution.UnfinishedSlotProjection{Contract: p.LastCompletion.Contract}
+				p.UnfinishedSlot.Contract.Slot.EvaluationTime = p.NextSlot
+			}
+			h.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{p.Identity.QueryGroup: {Status: execution.ProgressFound, Progress: &p}}}
+			if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
+				t.Fatalf("delay-edited group blocked for good: %v", err)
+			}
+		})
+	}
+}
+
+// A predecessor that closed with a hold keeps its last deadline: the new
+// group's first Slot after it reads no earlier than the old group's last
+// Slot was due, so the two never write one state out of order.
+func TestAKnownPredecessorHoldKeepsTheOldDeadlineThroughTheRunner(t *testing.T) {
+	ctx := context.Background()
+	f, old, next, link := delayEdited(t)
+	holds := f.bundle.dependencies.ReadHolds
+	newSchedule, err := f.production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := holds.spec(ctx, newSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, _, err := f.repository.ReadHoldPredecessors(ctx, newSchedule)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("links %+v %v", links, err)
+	}
+	closed := readhold.Record{SinceSlot: 1, HoldMillis: 300_000, SegmentStart: f.initialSchedule.Segment.Start, Closed: true,
+		Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0], ClosedAt: links[0].ClosedAt, ClosedQueryGroup: old, PreviousSlot: link.PreviousSlot,
+			PreviousHoldMillis: 300_000, CompletionOffsetMillis: link.CompletionOffsetMillis}}}
+	raw, err := json.Marshal(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.redisClient.Set(ctx, holdRecordKey(f, old), raw, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	after := restartUntilFull(t, f, next)
+	deadline := int64(link.PreviousSlot)*1000 + 300_000 + link.CompletionOffsetMillis
+	read := int64(after.LastCompletion.Slot)*1000 + spec.SettlingWait.Milliseconds() + after.LastCompletion.Contract.ReadHoldMillis
+	if predecessorCount(f, readhold.PredecessorInherited) == 0 || read < deadline {
+		t.Fatalf("the new group read at %d ms, before the old last Slot was due at %d ms: %v", read, deadline, holds.controller.Stats().Predecessors)
+	}
+}
+
+// A Plan whose snapshot is kept for less than MaxHold past its deadline is
+// held to that margin: a hold past it would read a snapshot already gone. A
+// daily Plan five minutes short of the longest period the catalog keeps
+// content for has five minutes of margin.
+func TestTheHoldLimitIsTheSnapshotRetentionMargin(t *testing.T) {
+	ctx := context.Background()
+	f, _, next, _ := delayEdited(t)
+	holds := f.bundle.dependencies.ReadHolds
+	schedule, err := f.production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holds.cfg.Redis.MaxTTL = config.Duration(time.Hour)
+	holds.cfg.PhaseTwo.Control.CatalogTTL = config.Duration(time.Hour)
+	supported := phaseTwoMaxSupportedEvaluationInterval - holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
+	margin := 5 * time.Minute
+	if margin >= holds.cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration() {
+		t.Fatal("the margin must be under MaxHold for the case to mean anything")
+	}
+	daily := schedule
+	daily.Plans = append([]execution.FrozenPlanSchedule(nil), schedule.Plans...)
+	daily.Plans[0].Spec.EvaluationIntervalSeconds = int64(phaseTwoMaxSupportedEvaluationInterval / time.Second)
+	daily.Plans[0].Spec.CompletionDeadlineOffsetSeconds = int64((supported - margin) / time.Second)
+	offset := time.Duration(daily.Plans[0].Spec.CompletionOffsetSeconds()) * time.Second
+	want := phaseTwoObjectRetentionLimit(holds.cfg) - phaseTwoSnapshotMinimumRetention(holds.cfg, offset)
+	if want <= 0 || want >= holds.cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration() {
+		t.Fatalf("the fixture's margin %s is not between zero and MaxHold", want)
+	}
+	spec, err := holds.spec(ctx, daily)
+	if err != nil || spec.HoldLimit != want {
+		t.Fatalf("hold limit %s %v; want the %s retention margin", spec.HoldLimit, err, want)
 	}
 }

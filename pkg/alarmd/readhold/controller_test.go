@@ -817,3 +817,207 @@ func TestAReleasedPredecessorStaysAbsentAfterSuccessfulInheritance(t *testing.T)
 	}
 	assertReleased()
 }
+
+// A transition that asks for more than the group's hold limit is frozen at
+// the limit -- the same on every retry of the Slot, which used to be refused
+// on every retry -- and counted, a known hold apart from the bound.
+func TestATransitionOverTheLimitIsFrozenAtTheLimitAndCounted(t *testing.T) {
+	boundary := execution.EvaluationTime(1200)
+	for _, tc := range []struct {
+		name   string
+		record *Record
+		source string
+	}{
+		// 1140 s + 590 s + 200 s, read at 1200 s + 30 s wait: 700 s > 600 s.
+		{"known", &Record{SinceSlot: 1, SegmentStart: 60, Closed: true, Plans: []PlanRecord{{PlanRef: planRef(), ClosedAt: boundary,
+			ClosedQueryGroup: "old", PreviousSlot: 1140, PreviousHoldMillis: 590_000, CompletionOffsetMillis: 200_000}}}, ClampKnown},
+		// An open record is the 600 s bound: 1140 s + 600 s + 200 s.
+		{"fallback", &Record{SinceSlot: 1, HoldMillis: 1_000, SegmentStart: 60}, ClampFallback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, store, _ := controllerFixture(t)
+			store.values["old"], _ = json.Marshal(tc.record)
+			if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"old"}); err != nil {
+				t.Fatal(err)
+			}
+			newSpec := groupSpec("new", 0)
+			newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary, Links: []PlanLink{{PlanRef: planRef(), PreviousSlot: 1140, CompletionOffsetMillis: 200_000}}}}
+			prepare(t, c, newSpec)
+			schedule := scheduleFor(t, "new", boundary, nil)
+			for retry := 0; retry < 2; retry++ {
+				if got, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); err != nil || got != 10*time.Minute {
+					t.Fatalf("retry %d of an over-limit Slot = %s %v; want the 10 m limit", retry, got, err)
+				}
+			}
+			if got := c.Stats().Clamped; got[tc.source] == 0 || len(got) != 1 {
+				t.Fatalf("clamped %v, want %s only", got, tc.source)
+			}
+		})
+	}
+}
+
+// Below one step of the group's period a lowering goes to zero: the early
+// read tries zero, and the controller takes nothing else.
+func TestALoweringBelowOneStepGoesToZero(t *testing.T) {
+	c, _, now := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	spec.Step = time.Minute
+	prepare(t, c, spec)
+	observeEarly(t, c, "qg", 105*time.Second, 30*time.Second, 0)
+	if c.ReadHold("qg") != 75*time.Second {
+		t.Fatalf("raised to %s, want 75 s", c.ReadHold("qg"))
+	}
+	*now = now.Add(time.Hour)
+	earlier := func(slot execution.EvaluationTime, candidate time.Duration) {
+		t.Helper()
+		if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", slot, 75_000), CandidateHold: candidate, Observed: true, Equal: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Half of 75 s is less than a step: a read at 37.5 s is not the step.
+	for index := range 3 {
+		earlier(execution.EvaluationTime(180+index*60), 37500*time.Millisecond)
+	}
+	if c.ReadHold("qg") != 75*time.Second {
+		t.Fatal("a half-step candidate was taken")
+	}
+	for index := range 3 {
+		earlier(execution.EvaluationTime(360+index*60), 0)
+	}
+	if c.ReadHold("qg") != 0 {
+		t.Fatalf("lowering below one step kept %s", c.ReadHold("qg"))
+	}
+}
+
+// A group at zero that closes a Segment, or freezes a Slot of a closed one,
+// writes no record: a missing record is what tells its successor its hold
+// was zero.
+func TestAZeroGroupClosingASegmentWritesNoRecord(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	end := execution.EvaluationTime(300)
+	closed := scheduleFor(t, "qg", 60, &end)
+	if got, err := c.SlotReadHold(context.Background(), closed, 240, holdFence("qg")); err != nil || got != 0 {
+		t.Fatalf("a zero Slot of a closed Segment = %s %v", got, err)
+	}
+	if err := c.CloseSchedule(context.Background(), closed, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.requests) != 0 || len(store.values) != 0 {
+		t.Fatalf("a zero group wrote %d records", len(store.requests))
+	}
+}
+
+// A lowered hold stays lowered on a restore: the arrival age is lowered with
+// it, or the reseed raises the hold again on every takeover.
+func TestALoweredHoldStaysLoweredAfterRestore(t *testing.T) {
+	c, _, now := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	*now = now.Add(time.Hour)
+	for index := range 3 {
+		if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", execution.EvaluationTime(180+index*60), 150_000),
+			CandidateHold: 75 * time.Second, Observed: true, Equal: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.ReadHold("qg") != 75*time.Second {
+		t.Fatalf("not lowered: %s", c.ReadHold("qg"))
+	}
+	restored, err := NewController(c.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare(t, restored, groupSpec("qg", 0))
+	if got, err := restored.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 600, holdFence("qg")); err != nil || got != 75*time.Second {
+		t.Fatalf("a restore raised the lowered hold again: %s %v", got, err)
+	}
+}
+
+// A write that loses its CAS to a changed record leaves the group to be read
+// again, and the write after that lands: the conflict heals itself.
+func TestACASConflictIsReadAgainAndTheNextWriteLands(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	changed := Record{SinceSlot: 1, HoldMillis: 90_000, ArrivalAgeMillis: 120_000, SegmentStart: 60}
+	store.values["qg"], _ = json.Marshal(changed)
+	evidence := Evidence{Contract: holdContract("qg", 180, 0), ArrivalAge: 240 * time.Second, FirstReadAge: 30 * time.Second, Confirmed: true, WholeWindow: true}
+	if err := c.Observe(context.Background(), evidence); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a changed record did not conflict: %v", err)
+	}
+	if c.Inspect("qg").Loaded {
+		t.Fatal("a conflicted group stayed loaded with the stale record")
+	}
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"qg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Observe(context.Background(), evidence); err != nil {
+		t.Fatalf("the write after a reread still failed: %v", err)
+	}
+	if reading, _ := c.Reading("qg"); reading.ArrivalAgeMillis != 240_000 {
+		t.Fatalf("the write did not land on the reread record: %+v", reading)
+	}
+}
+
+// A record at zero is not renewed: it ages out, where renewing it kept a
+// zero key alive for good.
+func TestAZeroRecordIsNotRenewed(t *testing.T) {
+	c, store, now := controllerFixture(t)
+	store.values["qg"], _ = json.Marshal(Record{SinceSlot: 1, SegmentStart: 60, ArrivalAgeMillis: 30_000})
+	prepare(t, c, groupSpec("qg", 0))
+	*now = now.Add(2 * RenewInterval)
+	if err := c.RenewDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.requests) != 0 {
+		t.Fatal("a zero record was renewed")
+	}
+}
+
+// A group whose record could not be read freezes no Slot: at zero it could
+// drop the hold or the deadline its record keeps. Once read, the stored hold
+// is used.
+func TestAGroupWhoseRecordWasNotReadFreezesNoSlot(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	store.values["qg"], _ = json.Marshal(Record{SinceSlot: 1, HoldMillis: 150_000, SegmentStart: 60})
+	store.readErr["qg"] = errors.New("unanswered")
+	if err := c.Configure(groupSpec("qg", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"qg"}); err == nil {
+		t.Fatal("an unanswered read restored")
+	}
+	schedule := scheduleFor(t, "qg", 60, nil)
+	if _, err := c.SlotReadHold(context.Background(), schedule, 600, holdFence("qg")); !errors.Is(err, ErrNotRestored) {
+		t.Fatalf("an unread group froze a Slot: %v", err)
+	}
+	delete(store.readErr, "qg")
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"qg"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.SlotReadHold(context.Background(), schedule, 600, holdFence("qg")); err != nil || got != 150*time.Second {
+		t.Fatalf("the read group did not use its stored hold: %s %v", got, err)
+	}
+}
+
+// A frozen Segment's schedule is checked once, not for every Slot: the
+// zero-hold path a Slot takes allocates a few objects, where recomputing
+// the schedule's digests allocated about a hundred.
+func TestTheZeroHoldPathDoesNotCheckTheScheduleEverySlot(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	schedule := scheduleFor(t, "qg", 60, nil)
+	ctx := context.Background()
+	if _, err := c.SlotReadHold(ctx, schedule, 120, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	allocs := testing.AllocsPerRun(50, func() {
+		if _, err := c.SlotReadHold(ctx, schedule, 180, holdFence("qg")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs > 20 {
+		t.Fatalf("a zero-hold Slot allocates %.0f objects; the schedule is checked every Slot again", allocs)
+	}
+}

@@ -98,3 +98,31 @@ func TestExpiredRangeSourceStopsAtRetirementAndBlocksChangedTail(t *testing.T) {
 		t.Fatalf("changed tail due=%v err=%v", due, err)
 	}
 }
+
+// A range over held Slots is the unheld range a hold later: its head is
+// counted on the clock the hold shifts, as the replay distance is, so the
+// same moment plus the hold seals the same Slots, the hold frozen in.
+func TestAnExpiredRangeOverHeldSlotsSealsOnTheShiftedClock(t *testing.T) {
+	const hold = 60_000
+	for _, tc := range []struct {
+		at   int64
+		last execution.EvaluationTime
+	}{{954999 + hold, 240}, {955000 + hold, 300}, {955001 + hold, 300}} {
+		t.Run(time.UnixMilli(tc.at).String(), func(t *testing.T) {
+			schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
+			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
+			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.UnixMilli(tc.at), testRecoveryLimits())
+			source.expiredRangeEnabled = true
+			source.readHolds = &testReadHolds{hold: hold * time.Millisecond}
+			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
+			slot, due, _, err := source.Next(ctx, "query-group-1")
+			if err != nil || !due || slot.ExpiredRange == nil {
+				t.Fatalf("a range over held Slots was not sealed: %+v %v %v", slot, due, err)
+			}
+			p := slot.ExpiredRange
+			if p.Last.Contract.Slot.EvaluationTime != tc.last || p.Last.Contract.ReadHoldMillis != hold || p.Count != uint32((tc.last-120)/60+1) {
+				t.Fatalf("range=%+v, want it to end at %d with the hold frozen in", p, tc.last)
+			}
+		})
+	}
+}
