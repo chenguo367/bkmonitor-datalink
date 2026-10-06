@@ -75,6 +75,7 @@ type lookbackCollector struct {
 	readHoldClamped     *prometheus.Desc
 	readHoldCorrupt     *prometheus.Desc
 	readHoldRetireClose *prometheus.Desc
+	readHoldCloseSkip   *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -96,6 +97,10 @@ func newLookbackCollector() *lookbackCollector {
 		readHoldCorrupt: desc("read_hold_record_corrupt_total",
 			"Query Groups whose own read hold record did not decode: read as missing, the hold relearned, and the record "+
 				"replaced at the group's next write."),
+		readHoldCloseSkip: desc("read_hold_close_previous_skipped_total",
+			"Previous Segments a Query Group's prepare did not close because its read hold record was already past them "+
+				"without their closing facts -- a departed Plan's closure dropped after its lifetime while the Segment is still "+
+				"retained. The group goes on; a successor reads that boundary as open, which is the hold bound."),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
 				"unclosed record as the hold bound."),
@@ -244,7 +249,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose} {
+		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip} {
 		ch <- desc
 	}
 }
@@ -277,6 +282,7 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	counter(c.readHoldCorrupt, stats.ReadHoldOwnCorrupt)
 	counter(c.readHoldRetireClose, stats.ReadHoldRetireCloseFailed)
+	counter(c.readHoldCloseSkip, stats.ReadHoldCloseSkipped)
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {

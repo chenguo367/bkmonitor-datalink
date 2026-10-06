@@ -123,6 +123,7 @@ func restartUntilFull(t *testing.T, f *cutoverStallFixture, next execution.Query
 	holds := f.bundle.dependencies.ReadHolds
 	holds.mu.Lock()
 	holds.groups[next].prepared = execution.ScheduleSegmentFact{}
+	holds.groups[next].queryRoute, holds.groups[next].queryDelay = "", 0
 	holds.mu.Unlock()
 	holds.controller.Forget(next)
 	before := f.progress(ctx)

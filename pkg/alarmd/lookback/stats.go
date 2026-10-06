@@ -170,9 +170,13 @@ type Stats struct {
 	// ReadHoldOwnCorrupt is the groups whose own record did not decode and
 	// was replaced; ReadHoldRetireCloseFailed the retired groups whose
 	// closing failed and that retired all the same.
-	ReadHoldOwnCorrupt        uint64   `json:"read_hold_record_corrupt"`
-	ReadHoldRetireCloseFailed uint64   `json:"read_hold_retire_close_failed"`
-	Coverage                  Coverage `json:"coverage"`
+	ReadHoldOwnCorrupt        uint64 `json:"read_hold_record_corrupt"`
+	ReadHoldRetireCloseFailed uint64 `json:"read_hold_retire_close_failed"`
+	// ReadHoldCloseSkipped is the previous Segments a prepare skipped
+	// closing because the record was already past them without their
+	// closing facts.
+	ReadHoldCloseSkipped uint64   `json:"read_hold_close_previous_skipped"`
+	Coverage             Coverage `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its

@@ -40,6 +40,9 @@ type productionReadHolds struct {
 	linksMu           sync.Mutex
 	links             map[string]uint64
 	retireCloseFailed atomic.Uint64
+	// closeSkipped is the previous Segments a prepare could not close
+	// because the record is already past them without their closing facts.
+	closeSkipped atomic.Uint64
 }
 
 type productionReadHoldGroup struct {
@@ -215,6 +218,14 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 	if reflect.DeepEqual(group.prepared, schedule.Segment) {
 		return nil
 	}
+	// The route and delay are the Query Group's, whichever Segment: taken
+	// from this Segment first, they are cached for the previous one, whose
+	// content is then never read -- content past its retention or corrupt
+	// would otherwise pause the group until a content edit pruned it.
+	spec, err := holds.spec(ctx, schedule)
+	if err != nil {
+		return err
+	}
 	// Close our previous segment first, even when the QG still carries other
 	// Plans. A cutover may reach this path without a final old-Slot execution.
 	if schedule.Segment.Start > 1 && schedule.Segment.Start > group.prepared.Start {
@@ -227,7 +238,16 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 			if err := holds.controller.Configure(oldSpec); err != nil {
 				return err
 			}
-			if err := holds.controller.CloseSchedule(ctx, old, fence); err != nil {
+			if err := holds.controller.CloseSchedule(ctx, old, fence); errors.Is(err, readhold.ErrSegmentStale) {
+				// The record is past this Segment without its closing facts:
+				// a departed Plan's closure the record dropped after a week,
+				// while the Segment is still retained. Nothing can rebuild
+				// them, and waiting for them waited until a content edit
+				// pruned the Segment -- days. A successor reads that boundary
+				// as open, which is the hold bound; the group goes on.
+				holds.closeSkipped.Add(1)
+				holds.report("close_previous_stale", qg, err)
+			} else if err != nil {
 				return err
 			}
 		} else if err != nil && !errors.Is(err, controlplane.ErrScheduleUnavailable) {
@@ -241,10 +261,6 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 			return holds.controller.CloseSchedule(ctx, schedule, fence)
 		}
 		return readhold.ErrSegmentStale
-	}
-	spec, err := holds.spec(ctx, schedule)
-	if err != nil {
-		return err
 	}
 	links, skipped, err := holds.repository.ReadHoldPredecessors(ctx, schedule)
 	if err != nil {
