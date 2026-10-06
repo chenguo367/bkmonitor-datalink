@@ -2772,8 +2772,10 @@ type View struct {
 	GapSkips    map[string]SkippedSpan `json:"gap_skips,omitempty"`
 	NoData      []Anomaly              `json:"no_data,omitempty"`
 	// EmptyEveryRoundTotal is how many distinct objects in NoData are of
-	// KindEmptyEveryRound: the first screen's one number for the strategies
-	// whose every round is empty. Counted here rather than left to the page,
+	// KindEmptyEveryRound on EMPTY_EVERY_ROUND's line: the first screen's one
+	// number for the strategies whose every round is empty. A run the target
+	// emptied (cause OUTSIDE_TARGET) is on EMPTY_AFTER_TARGET's line and not
+	// in this number. Counted here rather than left to the page,
 	// so the number beside the line and the rows under it cannot disagree.
 	EmptyEveryRoundTotal int `json:"empty_every_round_total"`
 	// NoDataMemory is the objects whose absence memory the store refuses,

@@ -78,3 +78,16 @@ func TestOnlyAnEmptyPrimaryCanBeEmptiedByTheTarget(t *testing.T) {
 		}
 	}
 }
+
+// The number beside EMPTY_EVERY_ROUND counts the rows under that line: a run
+// the target emptied is on EMPTY_AFTER_TARGET's line and not in it.
+func TestTheEmptyEveryRoundTotalLeavesOutTheRunsTheTargetEmptied(t *testing.T) {
+	row := func(queryGroup, cause string) Anomaly {
+		return Anomaly{QueryGroup: queryGroup, Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Cause: cause}}
+	}
+	rows := []Anomaly{row("qg-unknown", EmptyEveryRoundCauseUnknown), row("qg-target", EmptyEveryRoundCauseOutsideTarget),
+		row("qg-unknown", EmptyEveryRoundCauseUnknown), {QueryGroup: "qg-stopped", Kind: KindNoData}}
+	if got := countEmptyEveryRound(rows); got != 1 {
+		t.Fatalf("empty_every_round_total = %d, want 1: only qg-unknown is on that line", got)
+	}
+}

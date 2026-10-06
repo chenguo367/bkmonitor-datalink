@@ -112,11 +112,14 @@ func emptyRunHole(gap, stride int64, inherited bool, window time.Duration) bool 
 }
 
 // countEmptyEveryRound is the distinct objects of KindEmptyEveryRound in the
-// no-data column: the first screen's one number for this line.
+// no-data column that are on this line: the first screen's one number for
+// it. A run whose cause is OUTSIDE_TARGET is on EMPTY_AFTER_TARGET's line and
+// is not counted, so the number and the rows under the line agree.
 func countEmptyEveryRound(rows []Anomaly) int {
 	seen := map[string]struct{}{}
 	for _, row := range rows {
-		if row.Kind == KindEmptyEveryRound {
+		if row.Kind == KindEmptyEveryRound &&
+			(row.EmptyEveryRound == nil || row.EmptyEveryRound.Cause != EmptyEveryRoundCauseOutsideTarget) {
 			seen[row.QueryGroup] = struct{}{}
 		}
 	}
