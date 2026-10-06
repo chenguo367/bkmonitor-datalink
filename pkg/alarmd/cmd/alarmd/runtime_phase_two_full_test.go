@@ -1487,7 +1487,7 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 		// Query enters UQ; R is enforced at this shared inner boundary.
 	case <-secondEntered:
 		t.Fatal("owned Query Groups used copied recovery permit budgets or bypassed recovery-aware SlotSource")
-	case <-time.After(time.Second):
+	case <-time.After(signalWaitBound):
 		t.Fatal("replay sibling did not reach the shared query-permit queue")
 	}
 	release()
