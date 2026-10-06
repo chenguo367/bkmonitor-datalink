@@ -702,8 +702,11 @@ type phaseTwoWorkerBundle struct {
 	maintenanceCtx context.Context
 	cancelMaintain context.CancelFunc
 	cancelControl  context.CancelFunc
-	maintenanceWG  sync.WaitGroup
-	inflightWG     sync.WaitGroup
+	// cancelViewClient stops this Worker's side of the view stream alone,
+	// under the maintenance context that Shutdown cancels with the rest.
+	cancelViewClient context.CancelFunc
+	maintenanceWG    sync.WaitGroup
+	inflightWG       sync.WaitGroup
 	// flightReleased carries the Query Groups whose flight, held by a
 	// supplement or maintenance, turned a Slot away, once the hold ends
 	// (scheduler.FlightCoordinator.OnTurnedAwayReleased): the dispatcher runs
@@ -2627,8 +2630,10 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 		go bundle.measureStores()
 	}
 	if bundle.dependencies.ViewClient != nil {
+		var viewCtx context.Context
+		viewCtx, bundle.cancelViewClient = context.WithCancel(bundle.maintenanceCtx)
 		bundle.maintenanceWG.Add(1)
-		go bundle.runViewClient()
+		go bundle.runViewClient(viewCtx)
 	}
 }
 
