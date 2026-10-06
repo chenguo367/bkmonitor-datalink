@@ -172,6 +172,93 @@ func TestASessionSpendsOnlyItsOwnInvocationBudget(t *testing.T) {
 	}
 }
 
+// A read that names a replica, or that its operation sends to the query
+// group's owner by default, spends the same minute's budget as a read run
+// here: whichever way the thirty-first goes it is refused before it is
+// admitted or routed, and the three ways share one count. A targeted read
+// that has no route to go by is refused without spending.
+func TestATargetedReadSpendsTheSessionsBudgetLikeALocalOne(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
+	local := Operation{ID: "process.read", Summary: "Read", Targetable: true, Fields: map[string]Field{"id": {Type: "string", MinLength: 1}}, Required: []string{"id"}}
+	owned := Operation{ID: "group.read", Summary: "Read", Targetable: true, DefaultOwnerParam: "query_group", Fields: map[string]Field{"query_group": {Type: "string", MinLength: 1}}, Required: []string{"query_group"}}
+	type counts struct{ runs, routes atomic.Int32 }
+	open := func(routed bool) (*Channel, *sessionAuth, *counts) {
+		a, n := &sessionAuth{}, &counts{}
+		local.Run = func(context.Context, Params) Outcome { n.runs.Add(1); return Outcome{Complete: true} }
+		owned.Run = func(context.Context, Params) Outcome { n.runs.Add(1); return Outcome{Complete: true} }
+		options := Options{Auth: a, EnvironmentID: "test", Replica: "worker-a", Build: "test", Operations: []Operation{local, owned}, Now: func() time.Time { return now }}
+		if routed {
+			options.Route = func(_ context.Context, inv Invocation) Response {
+				if inv.Target.Replica != "worker-b" && inv.Target.OwnerQueryGroup != "qg" {
+					t.Errorf("routed without the target it was asked for: %+v", inv.Target)
+				}
+				n.routes.Add(1)
+				return Response{Status: "ok", Evidence: Evidence{Complete: true}, Meta: Meta{Version: Version, EnvironmentID: "test", AnsweredBy: "worker-b"}}
+			}
+		}
+		c, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, a, n
+	}
+	ways := []struct {
+		name   string
+		op     string
+		params Params
+	}{
+		{"here", "process.read", Params{"id": "x"}},
+		{"replica", "process.read", Params{"id": "x", "replica": "worker-b"}},
+		{"default owner", "group.read", Params{"query_group": "qg"}},
+	}
+	refused := func(c *Channel, a *sessionAuth, n *counts, name, op string, params Params) {
+		t.Helper()
+		admitted, executed := a.calls.Load(), n.runs.Load()+n.routes.Load()
+		status, header, out := callAs(t, c, "s1", envelope(c, "invoke", op, params))
+		if status != 429 || out.Error == nil || out.Error.Code != "rate_limited" || header.Get("Retry-After") != "40" {
+			t.Fatalf("%s: over budget answered %d %s %+v", name, status, header.Get("Retry-After"), out)
+		}
+		if a.calls.Load() != admitted || n.runs.Load()+n.routes.Load() != executed {
+			t.Fatalf("%s: a read over budget was admitted or executed", name)
+		}
+	}
+	for _, way := range ways {
+		c, a, n := open(true)
+		for i := 0; i < InvokesPerSessionPerMinute; i++ {
+			if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", way.op, way.params)); status != 200 {
+				t.Fatalf("%s: read %d of the budget refused: %d %+v", way.name, i+1, status, out)
+			}
+		}
+		if way.name == "here" && (n.runs.Load() != int32(InvokesPerSessionPerMinute) || n.routes.Load() != 0) ||
+			way.name != "here" && (n.routes.Load() != int32(InvokesPerSessionPerMinute) || n.runs.Load() != 0) {
+			t.Fatalf("%s: went the wrong way: %d run here, %d routed", way.name, n.runs.Load(), n.routes.Load())
+		}
+		refused(c, a, n, way.name, way.op, way.params)
+	}
+	c, a, n := open(true)
+	for i := 0; i < InvokesPerSessionPerMinute; i++ {
+		way := ways[i%len(ways)]
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", way.op, way.params)); status != 200 {
+			t.Fatalf("mixed read %d (%s) refused: %d %+v", i+1, way.name, status, out)
+		}
+	}
+	for _, way := range ways {
+		refused(c, a, n, "mixed "+way.name, way.op, way.params)
+	}
+	c, a, n = open(false)
+	for i := 0; i < 5; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "process.read", Params{"id": "x", "replica": "worker-b"})); status != 503 {
+			t.Fatalf("targeted read with no route: %d %+v", status, out)
+		}
+	}
+	for i := 0; i < InvokesPerSessionPerMinute; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "process.read", Params{"id": "x"})); status != 200 {
+			t.Fatalf("read %d refused after targeted reads that had no route: %d %+v", i+1, status, out)
+		}
+	}
+	refused(c, a, n, "after no route", "process.read", Params{"id": "x"})
+}
+
 // The gate forgets sessions whose minute has passed once it holds more than
 // it needs to, and never forgets one still in its minute.
 func TestTheInvocationGateForgetsPastMinutes(t *testing.T) {
