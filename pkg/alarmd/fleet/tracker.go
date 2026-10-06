@@ -262,7 +262,10 @@ type queryGroupState struct {
 	// happens, and only the first is listed.
 	emptyRuns  int
 	emptySince time.Time
-	sawData    bool
+	// emptiedByTarget says the latest empty round's query returned data the
+	// monitoring target selected none of.
+	emptiedByTarget bool
+	sawData         bool
 	// emptySinceSlot and lastEmptySlot bound the run of empty completions on
 	// the source's own clock: the Slot of the first empty round of the run and
 	// of the latest. The "every round" line gates on their distance, Slot to
@@ -1391,6 +1394,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// completion is healthy for the equation and ends any anomaly run, and
 		// a round with records -- degraded or not -- ends the empty run.
 		if completion == "FULL_EMPTY_COMPLETED" {
+			state.emptiedByTarget = observation.PrimaryInput != nil && observation.PrimaryInput.EmptiedByTarget
 			if state.emptyRuns == 0 {
 				state.emptySince = at
 				state.emptySinceFrom = SinceSnapshotContinuity
@@ -2451,9 +2455,13 @@ func (tracker *Tracker) NoData() []Anomaly {
 			// object in such a run is on its own line, not on this one.
 			anomaly.Kind = KindEmptyEveryRound
 			anomaly.Since, anomaly.SinceFrom = time.Unix(state.emptySinceSlot, 0).UTC(), state.emptySlotFrom
+			cause := EmptyEveryRoundCauseUnknown
+			if state.emptiedByTarget {
+				cause = EmptyEveryRoundCauseOutsideTarget
+			}
 			anomaly.EmptyEveryRound = &EmptyEveryRoundFacts{
 				Rounds: state.emptyRuns, Since: anomaly.Since, NeverSawData: true, SinceIsLowerBound: true,
-				Cause: EmptyEveryRoundCauseUnknown,
+				Cause: cause,
 			}
 		default:
 			continue

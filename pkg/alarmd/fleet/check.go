@@ -123,7 +123,14 @@ const (
 	// Five strategies aggregating at fifteen seconds over a source that
 	// reports every thirty were HEALTHY on the page for a day for want of
 	// this line.
-	CheckEmptyEveryRound   Check = "EMPTY_EVERY_ROUND"
+	CheckEmptyEveryRound Check = "EMPTY_EVERY_ROUND"
+	// EmptyAfterTarget is the same run of empty rounds where the query did
+	// return series and the monitoring target selected none of them. The
+	// data is there, so the source is the wrong place to look: the strategy's
+	// owner checks the target. A strategy whose nine reporting hosts sat in
+	// one module while its target named another read EMPTY_EVERY_ROUND for a
+	// day.
+	CheckEmptyAfterTarget  Check = "EMPTY_AFTER_TARGET"
 	CheckSeriesChurning    Check = "SERIES_CHURNING"
 	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
 	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
@@ -304,6 +311,7 @@ var checkAnswers = map[Check]struct {
 	CheckSeriesSparse:     {OwnerData, GroupByStrategy},
 
 	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
+	CheckEmptyAfterTarget:   {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
@@ -372,6 +380,7 @@ var checkOrder = []Check{
 	CheckNoDataPersistent,
 	CheckSeriesSparse,
 	CheckEmptyEveryRound,
+	CheckEmptyAfterTarget,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
