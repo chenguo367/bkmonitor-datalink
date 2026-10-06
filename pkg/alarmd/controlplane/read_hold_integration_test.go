@@ -7,6 +7,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"testing"
+	"time"
 )
 
 func readHoldCatalog(t *testing.T, delay, threshold int) controlplane.Catalog {
@@ -102,5 +103,57 @@ func TestReadHoldLinkFollowsThePlanAcrossDelayGroupsAndEmptySegments(t *testing.
 	refs, skipped, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
 	if err != nil || len(skipped) != 0 || len(refs) != 0 {
 		t.Fatalf("a bridge was carried into a new state generation: %+v %v %v", refs, skipped, err)
+	}
+}
+
+// A stored link that names the group it is in, or that no cutover could
+// have written, is skipped and counted by why: it can only have come from a
+// fault, and refusing the whole group's links for it stopped the group.
+func TestAStoredSelfOrMalformedLinkIsSkippedAndCounted(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:read-hold-bad-links")
+	catalog := readHoldCatalog(t, 0, 80)
+	fixture.publish(t, catalog, 60)
+	group := catalog.QueryGroups[0].Identity
+	key := fixture.prefix + ":schedule_timeline:" + string(group)
+	raw, err := fixture.client.Get(fixture.ctx, key).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inject := func(link map[string]any) {
+		t.Helper()
+		var timeline map[string]any
+		if err := json.Unmarshal(raw, &timeline); err != nil {
+			t.Fatal(err)
+		}
+		segments := timeline["segments"].([]any)
+		plans := segments[len(segments)-1].(map[string]any)["plans"].([]any)
+		plans[0].(map[string]any)["previous_read_hold"] = link
+		encoded, err := json.Marshal(timeline)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.client.Set(fixture.ctx, key, encoded, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	schedule, err := fixture.runtime.ReadFrozenSchedule(fixture.ctx, group, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for reason, link := range map[string]map[string]any{
+		"self_link":    {"query_group": string(group), "closed_at": 60},
+		"invalid_link": {"query_group": "other", "closed_at": 60, "previous_slot": 60},
+	} {
+		inject(link)
+		// A fresh repository, as a process reading the stored timeline: the
+		// fixture's caches the timeline by the control version.
+		fresh, err := controlplane.NewRedisCatalogRepository(fixture.client, fixture.prefix, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs, skipped, err := fresh.ReadHoldPredecessors(fixture.ctx, schedule)
+		if err != nil || len(refs) != 0 || skipped[reason] != 1 {
+			t.Fatalf("%s: links %+v skipped %v err %v", reason, refs, skipped, err)
+		}
 	}
 }

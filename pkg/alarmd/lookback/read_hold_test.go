@@ -144,14 +144,14 @@ func TestEarlierRefusalOrIncompleteReadsSupplyNoDecreaseEvidence(t *testing.T) {
 func TestEarlierReadUsesTheBaseHoldDuringADecreaseTransition(t *testing.T) {
 	f := newFixture(t)
 	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
-	f.engine.options.CurrentReadHold = func(execution.QueryGroupIdentity) time.Duration { return 30 * time.Second }
+	f.engine.options.CurrentReadHold = func(execution.QueryGroupIdentity) time.Duration { return 130 * time.Second }
 	q := heldQuery(f)
-	q.Contract.ReadHoldMillis = 115_000
-	q.ReadyAt = f.clock.now().Add(175 * time.Second)
+	q.Contract.ReadHoldMillis = 300_000
+	q.ReadyAt = f.clock.now().Add(360 * time.Second)
 	f.engine.Prepare(q)
 	trial := f.group("qg").prepared
-	if trial.candidateHold != 15*time.Second || !trial.readyAt.Equal(f.clock.now().Add(75*time.Second)) {
-		t.Fatalf("transition trial %+v: want baseline60 + base30/2", trial)
+	if trial.candidateHold != 65*time.Second || !trial.readyAt.Equal(f.clock.now().Add(125*time.Second)) {
+		t.Fatalf("transition trial %+v: want baseline60 + base130/2, not half the frozen 300", trial)
 	}
 	other := q
 	other.Operation, other.AttemptNo = execution.OperationRetry, 2
@@ -219,9 +219,11 @@ func TestAnEarlierReadDoesNotStartBeforeReadinessWithoutTheHold(t *testing.T) {
 	q.ReadyAt = f.clock.now().Add(68 * time.Second)
 	f.engine.Prepare(q)
 	trial := f.group("qg").prepared
+	// Half of 8 s is less than a step: the trial tries no hold at all, at
+	// the readiness without h and no earlier.
 	baseline := q.ReadyAt.Add(-8 * time.Second)
-	if !trial.at.Equal(baseline) || trial.readyAt.Sub(trial.at) != 4*time.Second {
-		t.Fatalf("short hold trial %+v starts before the no-h readiness %v", trial, baseline)
+	if trial.candidateHold != 0 || !trial.at.Equal(baseline) || !trial.readyAt.Equal(baseline) {
+		t.Fatalf("short hold trial %+v does not try zero at the no-h readiness %v", trial, baseline)
 	}
 	f.clock.set(baseline.Add(-time.Millisecond))
 	f.engine.StepEarly(context.Background())
