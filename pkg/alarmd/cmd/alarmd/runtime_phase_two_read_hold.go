@@ -42,11 +42,6 @@ type productionReadHolds struct {
 	retireCloseFailed atomic.Uint64
 }
 
-// readHoldLinkReasons are the links a prepare skips before asking the
-// controller: one naming its own group or with a shape no cutover writes
-// (ReadHoldPredecessors), and one past its lifetime.
-var readHoldLinkReasons = []string{"self_link", "invalid_link", "expired"}
-
 type productionReadHoldGroup struct {
 	mu             sync.Mutex
 	session        *ownership.Session

@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 // lookbackCollector reads the late-data lookback at scrape time. A process
@@ -85,18 +86,16 @@ func newLookbackCollector() *lookbackCollector {
 		readHoldOvertaken:  desc("read_hold_transition_overtaken_total", "Closed-segment attempts refused because newer state has already applied."),
 		readHoldPredecessor: desc("read_hold_predecessor_total",
 			"Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the "+
-				"old group's closed record), frozen_contract (the old group's Progress still carried its last Slot's "+
-				"contract), open_frozen (the old record, not yet closed, still covered that Slot), zero_proven (no record "+
-				"once the old group had frozen that Slot), or -- each read as the hold bound, which costs the successor's "+
-				"first Slots a later read and never a Slot -- record_open, zero_unproven, record_corrupt, record_unreadable; "+
-				"and the links it skipped: self_link, invalid_link, expired.", "reason"),
+				"old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold "+
+				"bound, which costs the successor's first Slots a later read and never a Slot -- record_open, "+
+				"record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.", "reason"),
 		readHoldClamped: desc("read_hold_transition_clamped_total",
 			"Slots frozen at the group's hold limit because a transition asked for more, by source: known (a known "+
 				"previous hold asked for it; the old group's last Slot may overtake this one) or fallback (only the hold "+
 				"bound standing in for an unknown one did).", "source"),
 		readHoldCorrupt: desc("read_hold_record_corrupt_total",
-			"Query Groups whose own read hold record did not decode: replaced at the next write, every Plan kept to the "+
-				"hold bound from then."),
+			"Query Groups whose own read hold record did not decode: read as missing, the hold relearned, and the record "+
+				"replaced at the group's next write."),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
 				"unclosed record as the hold bound."),
@@ -266,11 +265,15 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	counter(c.readHoldTransition, stats.ReadHoldTransitions)
 	counter(c.readHoldOvertaken, stats.ReadHoldTransitionOvertaken)
-	for reason, count := range stats.ReadHoldPredecessors {
-		counter(c.readHoldPredecessor, count, reason)
+	// Every reason and source at zero, whatever the source filled in: an
+	// absent series reads as a build without it.
+	for _, reasons := range [][]string{readhold.PredecessorReasons, readhold.LinkSkipReasons} {
+		for _, reason := range reasons {
+			counter(c.readHoldPredecessor, stats.ReadHoldPredecessors[reason], reason)
+		}
 	}
-	for source, count := range stats.ReadHoldClamped {
-		counter(c.readHoldClamped, count, source)
+	for _, source := range readhold.ClampSources {
+		counter(c.readHoldClamped, stats.ReadHoldClamped[source], source)
 	}
 	counter(c.readHoldCorrupt, stats.ReadHoldOwnCorrupt)
 	counter(c.readHoldRetireClose, stats.ReadHoldRetireCloseFailed)

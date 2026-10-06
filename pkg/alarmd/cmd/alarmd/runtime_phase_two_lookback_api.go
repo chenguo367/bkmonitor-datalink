@@ -129,12 +129,12 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		// Every reason and source at zero: a series that is absent reads as
 		// a build without it.
 		controller := holds.controller.Stats()
-		stats.ReadHoldPredecessors = make(map[string]uint64, len(readhold.PredecessorReasons)+len(readHoldLinkReasons))
+		stats.ReadHoldPredecessors = make(map[string]uint64, len(readhold.PredecessorReasons)+len(readhold.LinkSkipReasons))
 		for _, reason := range readhold.PredecessorReasons {
 			stats.ReadHoldPredecessors[reason] = controller.Predecessors[reason]
 		}
 		holds.linksMu.Lock()
-		for _, reason := range readHoldLinkReasons {
+		for _, reason := range readhold.LinkSkipReasons {
 			stats.ReadHoldPredecessors[reason] = holds.links[reason]
 		}
 		holds.linksMu.Unlock()

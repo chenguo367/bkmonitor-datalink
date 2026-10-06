@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -30,6 +31,10 @@ func lookbackSeriesUpperBounds() map[string]int {
 	return map[string]int{
 		"read_hold_transition_total":                 1,
 		"read_hold_transition_overtaken_total":       1,
+		"read_hold_predecessor_total":                len(readhold.PredecessorReasons) + len(readhold.LinkSkipReasons),
+		"read_hold_transition_clamped_total":         len(readhold.ClampSources),
+		"read_hold_record_corrupt_total":             1,
+		"read_hold_retire_close_failed_total":        1,
 		"lookback_first_reads_total":                 sources,
 		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
 		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),

@@ -1021,3 +1021,26 @@ func TestTheZeroHoldPathDoesNotCheckTheScheduleEverySlot(t *testing.T) {
 		t.Fatalf("a zero-hold Slot allocates %.0f objects; the schedule is checked every Slot again", allocs)
 	}
 }
+
+// A link from a Segment that held no Slot of the Plan has no deadline to
+// keep: whatever its predecessor's record says decides nothing, is not
+// counted, and gives the successor nothing to write.
+func TestALinkWithoutALastSlotDecidesNothing(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	store.values["old"], _ = json.Marshal(Record{SinceSlot: 1, HoldMillis: 150_000, SegmentStart: 60})
+	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"old"}); err != nil {
+		t.Fatal(err)
+	}
+	newSpec := groupSpec("new", 0)
+	newSpec.Previous = []Previous{linked(newSpec, "old", 1200, 0)}
+	prepare(t, c, newSpec)
+	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", 1200, nil), 1200, holdFence("new")); err != nil || got != 0 {
+		t.Fatalf("a slot-less link held the successor: %s %v", got, err)
+	}
+	if got := c.Stats().Predecessors; len(got) != 0 {
+		t.Fatalf("a slot-less link was counted: %v", got)
+	}
+	if _, written := store.values["new"]; written {
+		t.Fatal("a slot-less link made the successor write a record")
+	}
+}

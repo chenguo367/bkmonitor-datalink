@@ -51,6 +51,11 @@ const (
 // PredecessorReasons is the closed list of them.
 var PredecessorReasons = []string{PredecessorInherited, PredecessorZero, PredecessorRecordOpen, PredecessorRecordCorrupt, PredecessorUnreadable}
 
+// LinkSkipReasons are the links a successor skips before reading any
+// predecessor, counted beside PredecessorReasons: one naming its own group,
+// one with a shape no cutover writes, and one past its lifetime.
+var LinkSkipReasons = []string{"self_link", "invalid_link", "expired"}
+
 // A Slot whose transition asked for more than the group's hold limit is
 // frozen at the limit (SlotReadHold): ClampKnown when the hold that asked
 // for it was known, the one ordering a successor could still lose;
@@ -59,6 +64,9 @@ const (
 	ClampKnown    = "known"
 	ClampFallback = "fallback"
 )
+
+// ClampSources is the closed list of them.
+var ClampSources = []string{ClampKnown, ClampFallback}
 
 // Stats are the controller's counts since it started.
 type Stats struct {
