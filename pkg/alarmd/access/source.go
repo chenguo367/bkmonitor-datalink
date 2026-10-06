@@ -199,6 +199,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		}
 		return completeBudgetExhaustedQueries(execution.QueryExecutionCompletion{}, prepared.Queries, request.AttemptNo), nil
 	}
+	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
+		for _, query := range prepared.Queries {
+			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli))
+		}
+	}
 	if readyAt := sharedPendingReadiness(prepared.Queries, source.now()); !readyAt.IsZero() {
 		return execution.QueryExecutionCompletion{}, &ReadinessDeferredError{readyAt: readyAt}
 	}
@@ -801,7 +806,17 @@ func frozenConsumerReadyAt(
 	// Source delay selects an older data window; it must not move the
 	// scheduler's global readiness boundary earlier by the same amount.
 	window.End += sourceDelaySeconds
-	return frozenRequirementReadyAt(requirement, window, settlingWaitWithinBudget(schedule, configuredDelay, reserve))
+	ready, err := frozenRequirementReadyAt(requirement, window, settlingWaitWithinBudget(schedule, configuredDelay, reserve))
+	if err != nil {
+		return 0, err
+	}
+	// The contract's read hold reads the Slot that much later, after the
+	// settling wait: the wait is still chosen within the schedule's own
+	// budget, which the hold does not widen, as the scheduler chooses it.
+	if contractRef.ReadHoldMillis < 0 || ready > math.MaxInt64-contractRef.ReadHoldMillis {
+		return 0, errors.New("alarmd access: read hold exceeds readiness range")
+	}
+	return ready + contractRef.ReadHoldMillis, nil
 }
 
 func frozenSchedules(frozen FrozenPlan) (map[execution.PlanIdentity]execution.ScheduleSpec, error) {

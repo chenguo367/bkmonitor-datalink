@@ -245,7 +245,7 @@ func (store *ExecutionStore) renewNoDataHash(
 	ctx context.Context, target StorageTarget, item execution.PlanNoDataLoadItem, key string,
 ) *execution.NoDataMemoryRenewal {
 	attempt, err := RenewGenerationKeyReporting(ctx, target, key, item.Retention,
-		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals)
+		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals, store.options.ReadHoldBound)
 	if !attempt.Asked && err == nil {
 		// The gate answered from what this process already knows. Reporting it
 		// would bury the attempts that reached the store under the ones that
@@ -368,7 +368,7 @@ func (store *ExecutionStore) ApplyNoData(
 	lifetimes := make([]time.Duration, len(request.Items))
 	for index, mutation := range request.Items {
 		ttl, err := generationWriteTTL(request.Retention, mutation.Identity.Plan,
-			store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+			store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.options.ReadHoldBound)
 		if err != nil {
 			return execution.NoDataApplyResult{}, fmt.Errorf("state: invalid no-data apply request: %w", err)
 		}

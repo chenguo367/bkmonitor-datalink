@@ -64,6 +64,31 @@ type FrozenExecutionContractRef struct {
 	ScheduleRevision     ScheduleRevision
 	ScheduleSegmentStart EvaluationTime
 	DuePlanSetDigest     DuePlanSetDigest
+	// ReadHoldMillis is how much later than its schedule says this Slot is
+	// read and due: its Query Group's read hold when the Slot was frozen. It
+	// is an input of the contract like the evaluation time - the due Plans'
+	// deadlines carry it, and so does DuePlanSetDigest - and every freeze of
+	// the same Slot passes it back from here. It changes neither which data
+	// the Slot reads nor its Plans, schedule or Query Group. Omitted when
+	// zero, so a contract without one encodes as it always has.
+	ReadHoldMillis int64 `json:",omitempty"`
+}
+
+// MaxReadHoldMillis bounds a contract's read hold: a day, far past any hold
+// a Query Group is given, and short of any arithmetic on deadlines.
+const MaxReadHoldMillis = int64(24 * time.Hour / time.Millisecond)
+
+// LoweredReadHold is the hold one lowering step tries from hold: half of it,
+// or none once half is less than a step of the group's period -- below a
+// step a hold no longer moves the read past another point, and halving to
+// zero would take a dozen quiet hours. The early read that tries the step and
+// the controller that takes it decide it by this one rule.
+func LoweredReadHold(hold, step time.Duration) time.Duration {
+	half := time.Duration(hold.Milliseconds()/2) * time.Millisecond
+	if half < step {
+		return 0
+	}
+	return half
 }
 
 func (ref FrozenExecutionContractRef) Validate() error {
@@ -82,6 +107,8 @@ func (ref FrozenExecutionContractRef) Validate() error {
 		return errors.New("alarmd execution: valid schedule segment start is required")
 	case ref.DuePlanSetDigest == "":
 		return errors.New("alarmd execution: due plan set digest is required")
+	case ref.ReadHoldMillis < 0 || ref.ReadHoldMillis > MaxReadHoldMillis:
+		return errors.New("alarmd execution: read hold is out of range")
 	default:
 		return nil
 	}

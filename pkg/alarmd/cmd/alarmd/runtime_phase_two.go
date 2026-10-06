@@ -577,7 +577,8 @@ type phaseTwoWorkerBundleDependencies struct {
 	// Lookback is the late-data lookback on the query path, nil when this
 	// process does not run it. The bundle runs its rechecks and drops the
 	// samples of a Query Group the moment it stops owning it.
-	Lookback *lookback.Engine
+	Lookback  *lookback.Engine
+	ReadHolds *productionReadHolds
 	// RefreshPlatformSettings reads the platform's dynamic configuration
 	// into the process copy and brings what evaluates by it up to date; run
 	// once at start and then once a minute.
@@ -967,7 +968,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		dependencies.Recorder.SetLeaderRoundSource(bundle.leaderRoundStats)
 		dependencies.Recorder.SetCatalogCompositionSource(bundle.catalogComposition)
 		if dependencies.Lookback != nil {
-			dependencies.Recorder.SetLookbackSource(dependencies.Lookback.Stats)
+			dependencies.Recorder.SetLookbackSource(func() lookback.Stats { return productionLookbackStats(dependencies.Lookback, dependencies.ReadHolds) })
 		}
 	}
 	return bundle, nil
@@ -2805,6 +2806,11 @@ func (bundle *phaseTwoWorkerBundle) maintainRegistration() {
 		case <-bundle.maintenanceCtx.Done():
 			return
 		case <-ticker.C:
+		}
+		if holds := bundle.dependencies.ReadHolds; holds != nil {
+			ctx, cancel := context.WithTimeout(bundle.maintenanceCtx, interval)
+			holds.renew(ctx)
+			cancel()
 		}
 		err := renewPhaseTwoWithinInterval(bundle.maintenanceCtx, interval, func(attemptCtx context.Context) error {
 			return bundle.register(attemptCtx, ownership.WorkerReady)

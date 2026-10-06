@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 // lookbackCollector reads the late-data lookback at scrape time. A process
@@ -62,9 +63,18 @@ type lookbackCollector struct {
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
 	// The early reads of directed Slots, before their next Slot reads.
-	earlyReads     *prometheus.Desc
-	earlyUndecided *prometheus.Desc
-	earlyBytes     *prometheus.Desc
+	earlyReads          *prometheus.Desc
+	earlyUndecided      *prometheus.Desc
+	earlyBytes          *prometheus.Desc
+	earlierReads        *prometheus.Desc
+	earlierBytes        *prometheus.Desc
+	holdIgnored         *prometheus.Desc
+	readHoldTransition  *prometheus.Desc
+	readHoldOvertaken   *prometheus.Desc
+	readHoldPredecessor *prometheus.Desc
+	readHoldClamped     *prometheus.Desc
+	readHoldCorrupt     *prometheus.Desc
+	readHoldRetireClose *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -72,6 +82,23 @@ func newLookbackCollector() *lookbackCollector {
 		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
 	}
 	return &lookbackCollector{
+		readHoldTransition: desc("read_hold_transition_total", "Slots whose first readiness preserves a preceding segment's completion deadline."),
+		readHoldOvertaken:  desc("read_hold_transition_overtaken_total", "Closed-segment attempts refused because newer state has already applied."),
+		readHoldPredecessor: desc("read_hold_predecessor_total",
+			"Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the "+
+				"old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold "+
+				"bound, which costs the successor's first Slots a later read and never a Slot -- record_open, "+
+				"record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.", "reason"),
+		readHoldClamped: desc("read_hold_transition_clamped_total",
+			"Slots frozen at the group's hold limit because a transition asked for more, by source: known (a known "+
+				"previous hold asked for it; the old group's last Slot may overtake this one) or fallback (only the hold "+
+				"bound standing in for an unknown one did).", "source"),
+		readHoldCorrupt: desc("read_hold_record_corrupt_total",
+			"Query Groups whose own read hold record did not decode: read as missing, the hold relearned, and the record "+
+				"replaced at the group's next write."),
+		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
+			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
+				"unclosed record as the hold bound."),
 		firstReads: desc("lookback_first_reads_total",
 			"Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory "+
 				"labels its Query Groups, so every lookback family reads beside them: the denominator of the query "+
@@ -103,8 +130,11 @@ func newLookbackCollector() *lookbackCollector {
 		classes: desc("lookback_sample_classes_total",
 			"Completed samples by what their rungs found against the first read, by source: window_read_early (the "+
 				"first read was empty and data came later, or a series it had came back changed or not at all - the "+
-				"strategy's time_delay moves the read), series_late (every series it had came back as it was, and "+
-				"others came later - supplementary detection fills them), complete.", "source", "class"),
+				"strategy's time_delay moves the read), partial_revised (some series it had came back changed with a "+
+				"value, and others with a value came back as they were: the series were late, not the window; a "+
+				"series zero or without a value in both reads decides nothing), series_late (every series it had came "+
+				"back as it was, and others came later - supplementary detection fills them), unclassified, complete.",
+			"source", "class"),
 		readEarly: desc("lookback_read_early_groups",
 			"The source's Query Groups whose window was read early in two completed samples in a row, each reported "+
 				"with the time_delay that would have read it complete (lookback.get read_early).", "source"),
@@ -149,6 +179,10 @@ func newLookbackCollector() *lookbackCollector {
 		earlyBytes: desc("lookback_directed_early_read_bytes_total",
 			"Bytes the early reads delivered, by source: part of lookback_directed_read_bytes_total, the bytes reading "+
 				"early added.", "source"),
+		earlierReads: desc("lookback_earlier_reads_total",
+			"Candidate h/2 reads compared with the formal first read, by source and outcome. Only equal and different are observed.", "source", "outcome"),
+		earlierBytes: desc("lookback_earlier_read_bytes_total", "Bytes candidate h/2 reads delivered, by source.", "source"),
+		holdIgnored:  desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -208,8 +242,9 @@ func newLookbackCollector() *lookbackCollector {
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken,
+		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose} {
 		ch <- desc
 	}
 }
@@ -228,6 +263,20 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	gauge := func(desc *prometheus.Desc, value float64, labels ...string) {
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, value, labels...)
 	}
+	counter(c.readHoldTransition, stats.ReadHoldTransitions)
+	counter(c.readHoldOvertaken, stats.ReadHoldTransitionOvertaken)
+	// Every reason and source at zero, whatever the source filled in: an
+	// absent series reads as a build without it.
+	for _, reasons := range [][]string{readhold.PredecessorReasons, readhold.LinkSkipReasons} {
+		for _, reason := range reasons {
+			counter(c.readHoldPredecessor, stats.ReadHoldPredecessors[reason], reason)
+		}
+	}
+	for _, source := range readhold.ClampSources {
+		counter(c.readHoldClamped, stats.ReadHoldClamped[source], source)
+	}
+	counter(c.readHoldCorrupt, stats.ReadHoldOwnCorrupt)
+	counter(c.readHoldRetireClose, stats.ReadHoldRetireCloseFailed)
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {
@@ -265,6 +314,13 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		counter(c.earlyUndecided, source.EarlyUndecided, name)
 		counter(c.earlyBytes, source.EarlyReadBytes, name)
+		for _, outcome := range lookback.EarlierReadOutcomes {
+			counter(c.earlierReads, source.EarlierReads[outcome], name, outcome)
+		}
+		counter(c.earlierBytes, source.EarlierReadBytes, name)
+		for _, reason := range lookback.ReadHoldIgnoredReasons {
+			counter(c.holdIgnored, source.ReadHoldIgnored[reason], name, reason)
+		}
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

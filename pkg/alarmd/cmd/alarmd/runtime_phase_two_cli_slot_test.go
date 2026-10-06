@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/go-redis/redis/v8"
@@ -24,10 +28,10 @@ import (
 type cliSlotSource struct{ document json.RawMessage }
 
 func (s cliSlotSource) ActiveStrategyIDs(context.Context) ([]string, error) {
-	return []string{"1001"}, nil
+	return []string{"101"}, nil
 }
 func (s cliSlotSource) Strategies(context.Context, []string) ([]controlplane.SourceStrategy, error) {
-	return []controlplane.SourceStrategy{{SourceID: "1001", Document: s.document, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, nil
+	return []controlplane.SourceStrategy{{SourceID: "101", Document: s.document, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, nil
 }
 
 func cliSlotFixture(t *testing.T) (config.Config, *redis.Client, execution.SlotIdentity, *controlplane.RedisCatalogRepository) {
@@ -54,7 +58,7 @@ func cliSlotFixture(t *testing.T) (config.Config, *redis.Client, execution.SlotI
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := cliSlotSource{document: json.RawMessage(`{"id":1001,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"fixture-query","expression":"a","unit":"","query_configs":[{"data_source_label":"bk_monitor","data_type_label":"time_series","metric_field":"usage","alias":"a","agg_dimension":["host"],"agg_method":"MAX","agg_interval":60,"result_table_id":"system.cpu"}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gte","threshold":80}]]}]}],"detects":[{"level":1,"priority":1,"connector":"and","trigger_config":{"count":1,"check_window":1}}]}`)}
+	source := cliSlotSource{document: json.RawMessage(`{"id":101,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"fixture-query","expression":"a","unit":"","query_configs":[{"data_source_label":"bk_monitor","data_type_label":"time_series","metric_field":"usage","alias":"a","agg_dimension":["host"],"agg_method":"MAX","agg_interval":60,"result_table_id":"system.cpu"}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gte","threshold":80}]]}]}],"detects":[{"level":1,"priority":1,"connector":"and","trigger_config":{"count":1,"check_window":1}}]}`)}
 	reconciler, err := controlplane.NewSourceReconciler(repo, compiler, semantics)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +98,13 @@ func cliSlotFixture(t *testing.T) (config.Config, *redis.Client, execution.SlotI
 	if _, err = cutover.Ensure(ctx, updated.Publication); err != nil {
 		t.Fatal(err)
 	}
-	return cfg, client, execution.SlotIdentity{QueryGroup: manifest.QueryGroups[0].QueryGroup, EvaluationTime: 60}, repo
+	qg := manifest.QueryGroups[0].QueryGroup
+	// Historical hold is a retained fact, never a default invented by CLI.
+	key := productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership") + ":{" + ownership.ControlHashTag(qg) + "}:" + productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule") + ":" + readhold.Namespace
+	if err := client.Set(ctx, key, `{"hold_ms":0,"since_slot":1}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	return cfg, client, execution.SlotIdentity{QueryGroup: qg, EvaluationTime: 60}, repo
 }
 
 type cliSlotCommandLog struct {
@@ -308,6 +318,17 @@ func TestCLISlotEvidenceMatchesSlotAndReadsSamplesWithNoSampler(t *testing.T) {
 func TestSlotGetThroughTheBuiltCLICarriesTheLatestPublication(t *testing.T) {
 	cfg, client, slot, repo := cliSlotFixture(t)
 	ctx := context.Background()
+	holdKey := productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership") + ":{" + ownership.ControlHashTag(slot.QueryGroup) + "}:" + productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule") + ":" + readhold.Namespace
+	if err := client.Set(ctx, holdKey, `{"hold_ms":60000,"since_slot":1}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := newCLISlotResolver(cfg, client)(ctx, slot)
+	if err != nil || actual.Contract.ReadHoldMillis != 60_000 {
+		t.Fatalf("actual held contract=%+v err=%v", actual.Contract, err)
+	}
+	if err := client.Set(ctx, holdKey, `{"hold_ms":0,"since_slot":180,"previous_hold_ms":60000,"previous_since_slot":1}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
 	latest, err := repo.LoadLatestPublication(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -338,5 +359,19 @@ func TestSlotGetThroughTheBuiltCLICarriesTheLatestPublication(t *testing.T) {
 	}
 	if view.Slot.SnapshotRevision == latest.SnapshotRevision || view.SnapshotNote == "" {
 		t.Fatalf("the historical Slot is not told apart from the latest: slot %s note %q", view.Slot.SnapshotRevision, view.SnapshotNote)
+	}
+	encoded, _ := json.Marshal(struct {
+		Contract     execution.FrozenExecutionContractRef
+		ObjectDigest execution.ObjectDigest
+	}{actual.Contract, actual.ObjectDigest})
+	digest := sha256.Sum256(encoded)
+	if view.Slot.ContractDigest != hex.EncodeToString(digest[:]) {
+		t.Fatalf("historical digest=%s; want %x", view.Slot.ContractDigest, digest)
+	}
+	if err := client.Del(ctx, holdKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newCLISlotResolver(cfg, client)(ctx, slot); !errors.Is(err, obchannel.ErrHistoricalReadHoldUnknown) {
+		t.Fatalf("absent historical hold became zero: %v", err)
 	}
 }

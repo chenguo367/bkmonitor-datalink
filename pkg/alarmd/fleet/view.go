@@ -1564,7 +1564,8 @@ type Snapshot struct {
 	// for the count: the list is bounded like the anomaly list, so a replica
 	// holding more than the budget publishes a short list beside a full count
 	// rather than a smaller count.
-	OwnedObjects []string `json:"owned_objects,omitempty"`
+	OwnedObjects []string                 `json:"owned_objects,omitempty"`
+	ReadHolds    map[string]ReadHoldFacts `json:"read_holds,omitempty"`
 	// StartedAt is when this replica's process started.
 	//
 	// It is the ceiling on every duration this replica reports. A run this
@@ -2849,6 +2850,7 @@ type View struct {
 	// the page: the page can only divide totals, which cannot recover which
 	// replica an anomaly came from.
 	PerReplica []ReplicaView `json:"per_replica"`
+	readHolds  map[string]ReadHoldFacts
 	// PublishedVersion is the Activation record revision the control plane
 	// published, the version the replicas' acked_version columns are read
 	// against; absent when it could not be read.
@@ -2969,6 +2971,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	counted := make([]Snapshot, 0, len(expectedReplicas))
 	ownedSets := make([][]string, 0, len(expectedReplicas))
 	setsComplete := true
+	readHoldAmbiguous := map[string]bool{}
 	var dependenciesTakenAt time.Time
 
 	byReplica := make(map[string]Snapshot, len(snapshots))
@@ -3011,10 +3014,22 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 				view.ownerOf = make(map[string]string, snapshot.Owned)
 			}
 			for _, object := range snapshot.OwnedObjects {
+				if previous, claimed := view.ownerOf[object]; claimed && previous != replica {
+					readHoldAmbiguous[object] = true
+				}
 				view.ownerOf[object] = replica
+				delete(view.readHolds, object)
 			}
 		}
 		view.Determined += snapshot.Determined
+		for qg, reading := range snapshot.ReadHolds {
+			if view.ownerOf[qg] == replica && !readHoldAmbiguous[qg] {
+				if view.readHolds == nil {
+					view.readHolds = make(map[string]ReadHoldFacts)
+				}
+				view.readHolds[qg] = reading
+			}
+		}
 		view.AwaitingFirstRound = view.AwaitingFirstRound.add(snapshot)
 		view.AnomaliesTotal += snapshot.TotalAnomalies
 		view.Anomalies = append(view.Anomalies, snapshot.Anomalies...)

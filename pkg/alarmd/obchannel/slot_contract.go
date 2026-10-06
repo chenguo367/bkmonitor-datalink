@@ -32,4 +32,8 @@ var (
 	ErrHistoricalContractUnavailable = errors.New("historical Slot contract unavailable")
 	ErrSlotBudgetExceeded            = errors.New("Slot evidence read budget exceeded")
 	ErrSlotDependencyUnavailable     = errors.New("Slot evidence dependency unavailable")
+	// ErrHistoricalReadHoldUnknown is a Slot whose read hold - which its
+	// contract carries - is no longer retained anywhere: its contract is not
+	// rebuilt with another hold, which would be a contract it never ran.
+	ErrHistoricalReadHoldUnknown = errors.New("historical Slot read hold unknown")
 )

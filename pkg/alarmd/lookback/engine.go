@@ -209,6 +209,17 @@ type Options struct {
 	// which early reads due at once start as many rounds early as they need
 	// of; nil reads one.
 	FreePermits func() int
+	// CurrentReadHold is the group's base hold for candidate h/2 reads.
+	// ReadHoldAt is a Slot's effective hold, including a decrease transition.
+	// With neither callback, directed reads keep the original frozen hold.
+	CurrentReadHold func(execution.QueryGroupIdentity) time.Duration
+	ReadHoldAt      func(execution.QueryGroupIdentity, execution.EvaluationTime) time.Duration
+	// Callbacks run outside the engine lock. Only confirmed whole-window
+	// arrival raises a hold; a decrease compares an earlier read with the
+	// formal first read, never with a later rung.
+	OnWholeWindowReadEarly func(ReadHoldEvidence)
+	OnEarlierRead          func(EarlierReadEvidence)
+	OnReadHoldIgnored      func(ReadHoldEvidence, string)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -242,9 +253,12 @@ type Engine struct {
 	// earlyPending is the directed Slots waiting for their early read,
 	// holdMax the longest supplement hold this process has seen, and woken
 	// the loop's wake-up when a read ends (early.go).
-	earlyPending []*directedSlot
-	holdMax      time.Duration
-	woken        chan struct{}
+	earlyPending    []*directedSlot
+	earlyWork       earlyHeap
+	holdMax         time.Duration
+	woken           chan struct{}
+	holdEvidence    []ReadHoldEvidence
+	ignoredEvidence []ignoredReadHold
 }
 
 // group is one Query Group: how it is rechecked, which it learns from its
@@ -289,6 +303,7 @@ type group struct {
 	took      durations
 	holds     durations
 	capturing bool
+	prepared  *earlierSample
 	sample    *sample
 	nextAt    time.Time
 	// period is the observed time between two of its Slots, lastSlot the
@@ -305,9 +320,11 @@ type group struct {
 	// finding and not a gap in the coverage (Coverage.NeverCompleteFirstRead).
 	incompleteFirstReads uint64
 	completeFirstRead    bool
+	reading              groupCounts
 }
 
 type sample struct {
+	contract   execution.FrozenExecutionContractRef
 	id         uint64
 	source     string
 	queryGroup execution.QueryGroupIdentity
@@ -316,6 +333,7 @@ type sample struct {
 	step       time.Duration
 	windowEnd  time.Time
 	readAt     time.Time
+	readyAt    time.Time
 	// lookback is how far before its first compared bucket a recheck reads,
 	// so that bucket is computed from the data the first read had.
 	lookback time.Duration
@@ -334,6 +352,7 @@ type sample struct {
 	// ones not read before it.
 	lastChange    int
 	lastChangeAge time.Duration
+	lastBuckets   []int64
 	unread        bool
 	running       bool
 	dropped       bool
@@ -354,6 +373,7 @@ type sample struct {
 	probeChanged bool
 	settles      bool
 	completion   time.Duration
+	holdReported bool
 	// emptyFirstRead is a first read complete with no point in it.
 	emptyFirstRead bool
 	// first is the first read's series over the kept tail, which every rung
@@ -369,7 +389,13 @@ type sample struct {
 	// have, first seen at rung seriesAddedRung. seriesUnknown is set once a
 	// rung changed and its series could not be compared, one side's table
 	// having been refused.
+	// existingSteady is how many series of the first read that rung read as
+	// they were and with a value, existingArrived how many it read changed
+	// and with a value: both more than none is a partial revision, not the
+	// window read early.
 	existingChanged bool
+	existingSteady  int
+	existingArrived int
 	early           *ReadEarlySample
 	seriesAdded     bool
 	seriesAddedRung int
@@ -424,22 +450,7 @@ func (engine *Engine) Begin(query Query) *Read {
 	if step <= 0 {
 		return read
 	}
-	state := engine.groups[slot.QueryGroup]
-	if state == nil {
-		// A group not seen before is probed at its first sample.
-		state = &group{depth: 1, rest: RungSteps[0], sinceProbe: probeEvery - 2}
-		if engine.options.ProbeFirstSamples {
-			state.sinceProbe = probeEvery - 1
-		}
-		if !engine.options.UnspreadFirstSamples {
-			// A process's Query Groups all read for the first time within a
-			// period of its start: spread their first samples over an hour,
-			// by the same hash as their rests, or their rechecks would all
-			// come due at once.
-			state.nextAt = now.Add(time.Duration(spreadFraction(slot.QueryGroup) * float64(restCap)))
-		}
-		engine.groups[slot.QueryGroup] = state
-	}
+	state := engine.groupLocked(query, now)
 	if slot.EvaluationTime > state.lastSlot {
 		if state.lastSlot > 0 {
 			state.period = time.Duration(slot.EvaluationTime-state.lastSlot) * time.Second
@@ -452,6 +463,19 @@ func (engine *Engine) Begin(query Query) *Read {
 	}
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
 		return read
+	}
+	if state.prepared != nil {
+		if state.prepared.query.Contract.Slot != slot || state.prepared.query.Spec.Digest != query.Spec.Digest {
+			return read
+		}
+		read.earlier = state.prepared
+		read.earlier.formal = true
+		if !read.earlier.done {
+			read.earlier.done, read.earlier.outcome = true, EarlierOvertaken
+			if read.earlier.cancel != nil {
+				read.earlier.cancel()
+			}
+		}
 	}
 	state.capturing = true
 	read.query, read.step, read.readAt, read.depth = query, step, now, state.depth
@@ -477,6 +501,7 @@ type Read struct {
 	// directed is this read kept as its Slot's first read for a directed
 	// read, on a directed Query Group; nil otherwise.
 	directed *directedQuery
+	earlier  *earlierSample
 }
 
 // Series counts one delivered series' bytes, and on a sample adds it to the
@@ -502,6 +527,7 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 	if read == nil {
 		return
 	}
+	defer read.completeEarlier(completion, err)
 	if read.directed != nil {
 		now := read.engine.options.Now()
 		read.engine.mu.Lock()
@@ -547,9 +573,11 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 	keptFrom := read.keptFrom
 	engine.nextID++
 	state.sample = &sample{id: engine.nextID, source: read.source, queryGroup: queryGroup,
+		contract:   read.query.Contract,
 		evaluation: read.query.Contract.Slot.EvaluationTime, spec: read.query.Spec, step: read.step,
 		windowEnd: time.Unix(read.query.Spec.LogicalWindow.End, 0), readAt: read.readAt, lookback: lookback,
-		last: trimSummary(read.summary.buckets, keptFrom), keptFrom: keptFrom, planned: read.depth, lastChange: -1,
+		readyAt: read.query.ReadyAt,
+		last:    trimSummary(read.summary.buckets, keptFrom), keptFrom: keptFrom, planned: read.depth, lastChange: -1,
 		probe: state.sinceProbe >= probeEvery-1, settles: state.settle, emptyFirstRead: len(read.summary.buckets) == 0,
 		first: read.summary.series, delaySeconds: read.query.Spec.PlanFacts.QueryDelaySeconds}
 	engine.counts.samples[key2(read.source, OutcomeCaptured)]++
@@ -575,6 +603,16 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 	state := engine.groups[queryGroup]
 	if state == nil {
 		return
+	}
+	if trial := state.prepared; trial != nil {
+		trial.done, trial.outcome, trial.summary = true, EarlierOwnerLost, nil
+		if trial.cancel != nil {
+			trial.cancel()
+		}
+		if !trial.formal {
+			engine.counts.earlierReads[key2(trial.source, EarlierOwnerLost)]++
+			trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOwnerLost)]++
+		}
 	}
 	for _, candidate := range [...]*sample{state.sample, state.probe} {
 		if candidate != nil && !candidate.dropped {
@@ -630,6 +668,7 @@ func (engine *Engine) Run(ctx context.Context, tick time.Duration) {
 // counted as yielded, the window as not read there, and the next rung
 // planned.
 func (engine *Engine) Step(ctx context.Context) {
+	defer engine.publishReadHold()
 	now := engine.options.Now()
 	engine.mu.Lock()
 	due := make([]*sample, 0)
@@ -792,6 +831,9 @@ func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Tim
 		}
 	}
 	state.nextAt = now.Add(time.Duration(min(state.rest*float64(state.step), float64(restCap)) * restSpread(candidate.queryGroup)))
+	if outcome == OutcomeCompleted {
+		engine.recordReadHoldLocked(candidate)
+	}
 	if outcome == OutcomeCompleted && candidate.probe && candidate.planned < len(RungSteps) && state.probe == nil {
 		// Its rungs have classed it already, and a clean deep recheck cannot
 		// add to that - a series that changes changes its buckets - so the
@@ -874,6 +916,7 @@ func recheckFrom(candidate *sample) int64 {
 }
 
 func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func(), yield <-chan struct{}) {
+	defer engine.publishReadHold()
 	readCtx, cancel := context.WithTimeout(ctx, RecheckTimeout)
 	// The watcher waits for the read to come back, not for the read's
 	// context: a read that honours neither the yield nor its deadline is
@@ -967,6 +1010,13 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	}
 	candidate.seriesUnknown = candidate.seriesUnknown || seriesUnknown
 	engine.counts.rechecks[key3(candidate.source, rung, outcome)]++
+	if state := engine.groups[candidate.queryGroup]; state != nil && outcome == RecheckCompared {
+		hold := groupHoldClass(candidate.contract.ReadHoldMillis)
+		state.reading.compared[hold][candidate.rung]++
+		if len(changes) > 0 {
+			state.reading.changed[hold][candidate.rung]++
+		}
+	}
 	// A rung compared covers any rung before it that was not read: it is
 	// compared with the last read kept, not with the rung it follows.
 	candidate.unread = outcome != RecheckCompared
@@ -975,6 +1025,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	// stands, and a series that came and went was not late. The rung a
 	// change was first seen at is kept while the change holds.
 	if seriesCompared {
+		candidate.existingSteady, candidate.existingArrived = series.existingSteady, series.existingArrived
 		switch {
 		case series.existingChanged > 0 && !candidate.existingChanged:
 			candidate.existingChanged = true
@@ -1003,6 +1054,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 			candidate.probeChanged = true
 		} else {
 			candidate.lastChange, candidate.lastChangeAge = candidate.rung, age
+			candidate.lastBuckets = buckets
 			if candidate.rung == candidate.planned-1 && candidate.planned < len(RungSteps) {
 				// Still arriving at the last planned rung: follow it one further.
 				candidate.planned++

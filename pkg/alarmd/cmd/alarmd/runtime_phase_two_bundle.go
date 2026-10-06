@@ -446,6 +446,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		QueryReserve:  cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(),
 		MaxReplayAge:  recoveryLimits.MaxReplayAge,
 		TerminalDelay: phaseTwoPostRecoveryTerminalDelay(cfg),
+		// A Query Group's read hold is bounded by the replay age: a Slot the
+		// scheduler already tolerates running that late (readhold design,
+		// bound (c)).
+		ReadHoldBound: recoveryLimits.MaxReplayAge,
 	}
 	if err := repository.ConfigureSegmentRetention(retention); err != nil {
 		return nil, err
@@ -608,6 +612,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// store built in config.StoreOptions.
 		MinTTL: cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
 		RestartMargin: cfg.Redis.RestartMargin.Duration(),
+		ReadHoldBound: recoveryLimits.MaxReplayAge,
 		// Runtime State writes verify the owner lease inside Redis; without the
 		// resolver the store would fall back to unfenced batched writes.
 		FenceKeys: ownershipStore,
@@ -698,8 +703,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// absent-strategy close does; see targetScopeCloseFor.
 	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
 	lookbackOwner := &lookbackOwnership{}
+	readHolds, err := newProductionReadHolds(cfg, ownershipStore, repository, catalog, progressStore, external.Now, logger)
+	if err != nil {
+		return nil, err
+	}
 	lookbackEngine, lookbackState, err := buildLookback(queryClient.Recheck, flights, lookbackOwner, logger,
-		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback))
+		external.Now, observationAdmit(observationMemory, memoryline.ConsumerLookback), readHolds)
 	if err != nil {
 		return nil, err
 	}
@@ -958,6 +967,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
+		ReadHolds:           readHolds,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
@@ -1195,6 +1205,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	var publisher fleetPublisher
 	maintenanceReadings := &maintenanceSource{}
+	fleetAPI = withLookbackAPI(fleetAPI, lookbackEngine, lookbackState, readHolds, external.Now)
 	fleetAPI, closeCLI, publicRestricted := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
 		if bundle == nil {
 			return nil
@@ -1203,7 +1214,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
 		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
 		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry,
-		Lookback:         lookbackEngine, LookbackStanding: lookbackState, Maintenance: maintenanceReadings})
+		Lookback:         lookbackEngine, LookbackStanding: lookbackState, ReadHolds: readHolds, Maintenance: maintenanceReadings})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()
@@ -1213,6 +1224,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	surface.warn(logger)
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Lookback:          lookbackEngine,
+		ReadHolds:         readHolds,
 		ActivationBlocked: repository.ActivationBlockedReading,
 		ActivationHeader:  repository.ActivationHeaderReading,
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
@@ -1359,8 +1371,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// cursor older than that describes an object that stopped rather than
 		// one between rounds.
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally),
-		readEarly: lookbackReadEarly(lookbackEngine), lateSeries: lookbackLateSeries(lookbackEngine),
-		applied: repository.AppliedActivationRevision,
+		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
+		readHolds: readHolds.fleetFacts,
+		applied:   repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.

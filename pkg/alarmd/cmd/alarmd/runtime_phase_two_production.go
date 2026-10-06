@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 type productionFrozenCatalog interface {
@@ -254,7 +255,8 @@ func (source *productionFrozenExecution) resolveFrozenFact(
 	request := execution.FreezeSlotContractRequest{
 		QueryGroup: segment.QueryGroup, ScheduleRevision: segment.ScheduleRevision,
 		ScheduleSegmentStart: segment.Start, EvaluationTime: contractRef.Slot.EvaluationTime,
-		DuePlans: schedule.DuePlanRefs(contractRef.Slot.EvaluationTime),
+		DuePlans:       schedule.DuePlanRefs(contractRef.Slot.EvaluationTime),
+		ReadHoldMillis: contractRef.ReadHoldMillis,
 	}
 	fact, err := source.catalog.FreezeSlotContract(ctx, request)
 	if err != nil {
@@ -1352,6 +1354,7 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
 	QueryCooldowns   scheduler.QueryCooldownStore
+	ReadHolds        *productionReadHolds
 	Store            productionPhaseTwoOwnershipStore
 	WorkerID         string
 	Catalog          productionPhaseTwoSlotCatalog
@@ -2377,7 +2380,12 @@ func (runtime *productionPhaseTwoOwnership) readAllAssignments(
 func (runtime *productionPhaseTwoOwnership) AssignedQueryGroups(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
-) ([]execution.QueryGroupIdentity, error) {
+) (assigned []execution.QueryGroupIdentity, resultErr error) {
+	defer func() {
+		if resultErr == nil && runtime != nil && runtime.dependencies.ReadHolds != nil {
+			runtime.dependencies.ReadHolds.restore(ctx, assigned)
+		}
+	}()
 	if runtime == nil {
 		return nil, errors.New("phase-two production Assignment reader is not initialized")
 	}
@@ -2472,7 +2480,7 @@ func (runtime *productionPhaseTwoOwnership) AssignedQueryGroups(
 		}
 	}
 	reader.owned = next
-	assigned := make([]execution.QueryGroupIdentity, 0, len(next))
+	assigned = make([]execution.QueryGroupIdentity, 0, len(next))
 	for queryGroup := range next {
 		assigned = append(assigned, queryGroup)
 	}
@@ -2572,6 +2580,10 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	var catalog productionPhaseTwoSlotCatalog = runtime.dependencies.Catalog
 	var executor scheduler.Executor = runtime.dependencies.Executor
 	release := func() {}
+	if holds := runtime.dependencies.ReadHolds; holds != nil {
+		holds.bind(queryGroup, session)
+		release = func() { holds.forget(queryGroup) }
+	}
 	if runtime.viewGate != nil {
 		// The early renewal the gate makes when the view is ahead of the
 		// lease: the same renewal the session's maintenance makes on its
@@ -2581,9 +2593,14 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		// Inside the observed executor, so a refusal at execution is a
 		// slot_completed line with the gate's word like any other outcome.
 		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session, renew: renew}
-		release = func() { runtime.viewGate.forget(queryGroup) }
+		previousRelease := release
+		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup) }
 	}
-	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer}
+	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds}
+	var readHolds scheduler.ReadHolds
+	if runtime.dependencies.ReadHolds != nil {
+		readHolds = runtime.dependencies.ReadHolds
+	}
 	source, err := scheduler.NewProductionSlotSource(
 		queryGroup, runtime.dependencies.WorkerID, session,
 		catalog, runtime.dependencies.Progress, runtime.dependencies.Now,
@@ -2595,8 +2612,10 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithExpiredRangeCreation(runtime.dependencies.ExpiredRangeEnabled),
 		scheduler.WithObserver(runtime.dependencies.Observer),
 		scheduler.WithTakeoverClock(runtime.takeovers),
+		scheduler.WithReadHolds(readHolds),
 	)
 	if err != nil {
+		release()
 		_ = session.Release(ctx)
 		return nil, err
 	}
@@ -2605,6 +2624,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		queryGroup, session, observedSource, executor, runtime.flights, runtime.dependencies.Now,
 	)
 	if err != nil {
+		release()
 		_ = session.Release(ctx)
 		return nil, err
 	}
@@ -2673,12 +2693,12 @@ type observedProductionSlotSource struct {
 
 // FreezeSupplement is the wrapped source's, for a supplement of a completed
 // Slot.
-func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime) (scheduler.FrozenSlot, error) {
+func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context, at execution.EvaluationTime, readHoldMillis int64) (scheduler.FrozenSlot, error) {
 	next, ok := source.next.(scheduler.SupplementSlotSource)
 	if !ok {
 		return scheduler.FrozenSlot{}, scheduler.ErrSupplementUnsupported
 	}
-	return next.FreezeSupplement(ctx, at)
+	return next.FreezeSupplement(ctx, at, readHoldMillis)
 }
 
 // Supplement runs a supplement of one of this Query Group's completed Slots
@@ -2686,9 +2706,10 @@ func (source observedProductionSlotSource) FreezeSupplement(ctx context.Context,
 func (runtime *productionPhaseTwoQueryGroup) Supplement(
 	ctx context.Context,
 	at execution.EvaluationTime,
+	readHoldMillis int64,
 	scope execution.SupplementScope,
 ) (execution.SupplementFacts, error) {
-	return runtime.runner.Supplement(ctx, at, scope)
+	return runtime.runner.Supplement(ctx, at, readHoldMillis, scope)
 }
 
 func (source observedProductionSlotSource) RangeCreationEnabled() bool {
@@ -2747,8 +2768,9 @@ func (source observedProductionSlotSource) Next(
 }
 
 type observedProductionSlotExecutor struct {
-	next     scheduler.Executor
-	observer observability.Observer
+	next      scheduler.Executor
+	observer  observability.Observer
+	readHolds *productionReadHolds
 }
 
 func (executor observedProductionSlotExecutor) Execute(
@@ -2765,10 +2787,18 @@ func (executor observedProductionSlotExecutor) Execute(
 	})
 	started := time.Now()
 	result, err := executor.next.Execute(ctx, request)
+	if executor.readHolds != nil {
+		if reason, known := worker.StateConflictReason(err); known && reason == execution.ReasonCode(contract.ReasonStateStaleVersion) {
+			executor.readHolds.observeOvertaken(request.Contract)
+		}
+	}
 	var shortCompletion *observability.ShortPeriodCompletionFacts
 	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
+		// Lag from when the Slot was to be read: its evaluation time, read
+		// hold later. A read hold is not lag; it is the wait the Slot chose.
+		due := time.Unix(int64(request.Contract.Slot.EvaluationTime), 0).Add(time.Duration(request.Contract.ReadHoldMillis) * time.Millisecond)
 		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
-			LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds(), AttemptNo: request.AttemptNo}
+			LagSeconds: time.Since(due).Seconds(), AttemptNo: request.AttemptNo}
 	}
 	// What held the round before this one, on the completions where that is
 	// the question. Any cohort: it used to ride inside the short-period

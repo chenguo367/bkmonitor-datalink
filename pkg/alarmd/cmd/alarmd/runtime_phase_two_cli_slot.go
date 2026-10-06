@@ -15,6 +15,9 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
@@ -67,9 +70,16 @@ func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Co
 		if schedule.Segment.ObjectDigest == "" {
 			return obchannel.SlotPlan{}, obchannel.ErrHistoricalContractUnavailable
 		}
+		// The contract the Slot ran under carries the read hold it was frozen
+		// with: rebuilt with another, it is a contract that never ran.
+		hold, err := cliSlotReadHold(ctx, reader, cfg, runtime, slot)
+		if err != nil {
+			return obchannel.SlotPlan{}, err
+		}
 		fact, err := runtime.FreezeObservedSlotContract(ctx, execution.FreezeSlotContractRequest{
 			QueryGroup: slot.QueryGroup, EvaluationTime: slot.EvaluationTime, ScheduleRevision: schedule.Segment.ScheduleRevision,
 			ScheduleSegmentStart: schedule.Segment.Start, DuePlans: schedule.DuePlanRefs(slot.EvaluationTime),
+			ReadHoldMillis: hold,
 		})
 		if err != nil {
 			return obchannel.SlotPlan{}, cliSlotReadError(err, reader)
@@ -91,6 +101,89 @@ func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Co
 		}
 		return obchannel.SlotPlan{Contract: fact.Contract, ObjectDigest: schedule.Segment.ObjectDigest, Prepared: prepared}, nil
 	}
+}
+
+// cliSlotReadHold is the read hold the Slot was frozen with: from its Query
+// Group's Progress when that still carries the Slot's contract - the round
+// it last completed, its unfinished Slot or range - and otherwise from its
+// read hold record, which keeps the current hold and the one before with
+// the first Slot of each. An absent or expired record is not proof of zero.
+// A record that no longer reaches back to the Slot is
+// obchannel.ErrHistoricalReadHoldUnknown.
+func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Config, slots progress.ContinuousSlotResolver, slot execution.SlotIdentity) (int64, error) {
+	control := cliControlReader{reader: reader, prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership")}
+	schedulePrefix := productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule")
+	store, err := progress.NewStore(progress.StoreOptions{Prefix: schedulePrefix, Control: control, Slots: slots, Now: time.Now})
+	if err != nil {
+		return 0, obchannel.ErrHistoricalContractUnavailable
+	}
+	loaded, err := store.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: slot.QueryGroup})
+	if err != nil {
+		return 0, cliSlotReadError(err, reader)
+	}
+	if loaded.Progress != nil {
+		if hold, found := progressReadHold(*loaded.Progress, slot.EvaluationTime); found {
+			return hold, nil
+		}
+	}
+	raw, missing, err := control.ReadControl(ctx, slot.QueryGroup, schedulePrefix+":"+readhold.Namespace)
+	if err != nil {
+		return 0, cliSlotReadError(err, reader)
+	}
+	if missing {
+		return 0, obchannel.ErrHistoricalReadHoldUnknown
+	}
+	record, err := readhold.Decode(raw)
+	if err != nil {
+		return 0, obchannel.ErrHistoricalReadHoldUnknown
+	}
+	if hold, found := record.HoldAt(slot.EvaluationTime); found {
+		return hold, nil
+	}
+	return 0, obchannel.ErrHistoricalReadHoldUnknown
+}
+
+// progressReadHold is the read hold of the Slot at at when Progress still
+// carries a contract of it.
+func progressReadHold(progress execution.ScheduleProgress, at execution.EvaluationTime) (int64, bool) {
+	refs := make([]execution.FrozenExecutionContractRef, 0, 4)
+	if progress.LastCompletion != nil {
+		refs = append(refs, progress.LastCompletion.Contract)
+	}
+	if progress.UnfinishedSlot != nil {
+		refs = append(refs, progress.UnfinishedSlot.Contract)
+	}
+	if progress.UnfinishedRange != nil {
+		refs = append(refs, progress.UnfinishedRange.First.Contract, progress.UnfinishedRange.Last.Contract)
+	}
+	for _, ref := range refs {
+		if ref.Slot.EvaluationTime == at {
+			return ref.ReadHoldMillis, true
+		}
+	}
+	return 0, false
+}
+
+// cliControlReader reads a Query Group's control records through the
+// diagnostic read budget, and writes none.
+type cliControlReader struct {
+	reader *cliSlotRedis
+	prefix string
+}
+
+func (control cliControlReader) ReadControl(ctx context.Context, queryGroup execution.QueryGroupIdentity, namespace string) ([]byte, bool, error) {
+	value, err := control.reader.Get(ctx, control.prefix+":{"+ownership.ControlHashTag(queryGroup)+"}:"+namespace).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return value, false, nil
+}
+
+func (cliControlReader) FencedCompareAndSet(context.Context, ownership.FencedCASRequest) (ownership.FencedCASStatus, error) {
+	return "", errors.New("alarmd: a diagnostic read writes no control record")
 }
 
 type cliObservedCatalog struct {

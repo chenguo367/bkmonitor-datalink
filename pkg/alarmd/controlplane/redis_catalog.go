@@ -79,6 +79,21 @@ type SourceAuditState struct {
 type PlanActivationRecord struct {
 	Fact        execution.PlanActivationFact `json:"fact"`
 	Publication SnapshotPublicationRef       `json:"publication"`
+	// PreviousReadHold locates this Plan's lateness evidence after a query
+	// identity change. It is observational metadata, not activation identity.
+	PreviousReadHold *ReadHoldPredecessorRef `json:"previous_read_hold,omitempty"`
+}
+
+type ReadHoldPredecessorRef struct {
+	QueryGroup execution.QueryGroupIdentity `json:"query_group"`
+	ClosedAt   execution.EvaluationTime     `json:"closed_at"`
+	// PreviousSlot is the Plan's last legal Slot in the Segment it left and
+	// CompletionOffsetMillis its completion offset there, both from the
+	// closed schedule: the deadline the new group's first Slots must not read
+	// ahead of, known without reading the old group's timeline or content.
+	// Zero when that Segment held no Slot of the Plan.
+	PreviousSlot           execution.EvaluationTime `json:"previous_slot,omitempty"`
+	CompletionOffsetMillis int64                    `json:"completion_offset_ms,omitempty"`
 }
 
 // Equal compares by content; the fact carries a pointer, see

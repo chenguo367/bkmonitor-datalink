@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -28,6 +29,12 @@ func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) +
 func lookbackSeriesUpperBounds() map[string]int {
 	sources, rungs := lookbackSources(), len(lookback.RungNames)
 	return map[string]int{
+		"read_hold_transition_total":                 1,
+		"read_hold_transition_overtaken_total":       1,
+		"read_hold_predecessor_total":                len(readhold.PredecessorReasons) + len(readhold.LinkSkipReasons),
+		"read_hold_transition_clamped_total":         len(readhold.ClampSources),
+		"read_hold_record_corrupt_total":             1,
+		"read_hold_retire_close_failed_total":        1,
 		"lookback_first_reads_total":                 sources,
 		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
 		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),
@@ -48,6 +55,9 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_directed_early_total":              sources * len(lookback.EarlyOutcomes),
 		"lookback_directed_early_undecided_total":    sources,
 		"lookback_directed_early_read_bytes_total":   sources,
+		"lookback_earlier_reads_total":               sources * len(lookback.EarlierReadOutcomes),
+		"lookback_earlier_read_bytes_total":          sources,
+		"lookback_read_hold_ignored_total":           sources * len(lookback.ReadHoldIgnoredReasons),
 		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
 		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds":            sources,

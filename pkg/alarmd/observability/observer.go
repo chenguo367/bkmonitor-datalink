@@ -956,11 +956,22 @@ type ScheduleCutoverFacts struct {
 	TimelinesRead   int
 	RevisionsFolded int
 	ContentSource   string
+	// ReadHoldLinks counts the moved Plans' links to the groups they left,
+	// by ScheduleCutoverReadHoldLinks.
+	ReadHoldLinks map[string]int
 }
 
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
 var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added", "blocked", "reopened", "retired_unwritten"}
+
+// ScheduleCutoverReadHoldLinks is the closed vocabulary of what a cutover
+// does with a Plan's link to the Query Group it left: linked (the state
+// generation is unchanged), linked_generation_unknown (a generation could
+// not be read; linked to keep ordering), generation_changed (no state
+// shared, no link), and the carried links it stops carrying because they
+// name the group they are in or are past their lifetime.
+var ScheduleCutoverReadHoldLinks = []string{"linked", "linked_generation_unknown", "generation_changed", "dropped_self", "dropped_expired"}
 
 // ReplayExpiryFacts describe one Slot the scheduler gave up replaying.
 //

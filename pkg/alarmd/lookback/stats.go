@@ -52,7 +52,10 @@ type counters struct {
 	earlyUndecided map[string]uint64
 	// earlyBytes is, per source, what the early reads delivered: part of
 	// directedBytes, apart so the early read's own cost can be read.
-	earlyBytes map[string]uint64
+	earlyBytes   map[string]uint64
+	earlierReads map[string]uint64
+	earlierBytes map[string]uint64
+	holdIgnored  map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -79,6 +82,7 @@ func newCounters(sources, refusals []string) counters {
 		supplementPoints: map[string]uint64{}, directedBytes: map[string]uint64{},
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
+		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -126,6 +130,13 @@ func newCounters(sources, refusals []string) counters {
 			c.early[key2(source, outcome)] = 0
 		}
 		c.earlyUndecided[source], c.earlyBytes[source] = 0, 0
+		for _, outcome := range EarlierReadOutcomes {
+			c.earlierReads[key2(source, outcome)] = 0
+		}
+		c.earlierBytes[source] = 0
+		for _, reason := range ReadHoldIgnoredReasons {
+			c.holdIgnored[key2(source, reason)] = 0
+		}
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
 		}
@@ -148,7 +159,20 @@ func key3(a, b, c string) string { return a + "|" + b + "|" + c }
 
 // Stats is the lookback as it stands.
 type Stats struct {
-	Coverage Coverage `json:"coverage"`
+	ReadHoldTransitions         uint64 `json:"read_hold_transition"`
+	ReadHoldTransitionOvertaken uint64 `json:"read_hold_transition_overtaken"`
+	// ReadHoldPredecessors is what a successor took each moved Plan's
+	// previous hold from, and the links it skipped, by reason.
+	ReadHoldPredecessors map[string]uint64 `json:"read_hold_predecessors,omitempty"`
+	// ReadHoldClamped is the Slots frozen at the hold limit because a
+	// transition asked for more: known or fallback.
+	ReadHoldClamped map[string]uint64 `json:"read_hold_transition_clamped,omitempty"`
+	// ReadHoldOwnCorrupt is the groups whose own record did not decode and
+	// was replaced; ReadHoldRetireCloseFailed the retired groups whose
+	// closing failed and that retired all the same.
+	ReadHoldOwnCorrupt        uint64   `json:"read_hold_record_corrupt"`
+	ReadHoldRetireCloseFailed uint64   `json:"read_hold_retire_close_failed"`
+	Coverage                  Coverage `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its
@@ -275,6 +299,10 @@ type SourceStats struct {
 	// EarlyReadBytes is what the early reads delivered, part of
 	// DirectedReadBytes: the bytes reading early added.
 	EarlyReadBytes uint64 `json:"early_read_bytes"`
+	// EarlierReads compares h/2 samples only with their formal first reads.
+	EarlierReads     map[string]uint64 `json:"earlier_reads"`
+	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
+	ReadHoldIgnored  map[string]uint64 `json:"read_hold_ignored"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -319,6 +347,96 @@ type GroupLateness struct {
 	MeasuredAt        time.Time                    `json:"measured_at"`
 }
 
+// GroupReadHoldClasses split comparisons by the hold frozen for the sample,
+// rather than the controller's hold when its later rungs happen to read.
+var GroupReadHoldClasses = []string{"h0", "h_positive"}
+
+// groupCounts has only the closed dimensions: two hold classes, six rungs,
+// five sample classes, two ignored reasons and nine earlier-read outcomes.
+// It belongs to the live group and is discarded by Forget, like supplements.
+type groupCounts struct {
+	since        time.Time
+	compared     [2][6]uint64
+	changed      [2][6]uint64
+	classes      [5]uint64
+	ignored      [2]uint64
+	earlier      [9]uint64
+	earlierBytes uint64
+}
+
+func groupHoldClass(holdMillis int64) int {
+	if holdMillis > 0 {
+		return 1
+	}
+	return 0
+}
+
+func wordIndex(words []string, wanted string) int {
+	for index, word := range words {
+		if word == wanted {
+			return index
+		}
+	}
+	panic("alarmd lookback: counter outside its closed set")
+}
+
+// GroupReading is one owned group's cumulative in-memory facts since this
+// engine first saw it. It is neither durable history nor a source aggregate.
+// Compared and ChangedWindows use hold class -> rung -> count; Classes count
+// only closed, classified samples. Refused earlier reads count as unobserved
+// outcomes, and their delivered bytes are counted even when comparison fails.
+type GroupReading struct {
+	QueryGroup       execution.QueryGroupIdentity `json:"query_group"`
+	Source           string                       `json:"source"`
+	Since            time.Time                    `json:"since"`
+	Compared         map[string]map[string]uint64 `json:"compared"`
+	ChangedWindows   map[string]map[string]uint64 `json:"changed_windows"`
+	Classes          map[string]uint64            `json:"classes"`
+	ReadHoldIgnored  map[string]uint64            `json:"read_hold_ignored"`
+	EarlierReads     map[string]uint64            `json:"earlier_reads"`
+	EarlierReadBytes uint64                       `json:"earlier_read_bytes"`
+}
+
+// GroupReading returns an independent snapshot. Ownership is asked outside
+// Engine.mu, because its answer may hold the Runner lock that calls Forget.
+func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (GroupReading, bool) {
+	if engine == nil {
+		return GroupReading{}, false
+	}
+	engine.mu.Lock()
+	state := engine.groups[queryGroup]
+	if state == nil {
+		engine.mu.Unlock()
+		return GroupReading{}, false
+	}
+	counts, source := state.reading, state.source
+	engine.mu.Unlock()
+	if !engine.options.Owns(queryGroup) {
+		return GroupReading{}, false
+	}
+	reading := GroupReading{QueryGroup: queryGroup, Source: source, Since: counts.since,
+		Compared: map[string]map[string]uint64{}, ChangedWindows: map[string]map[string]uint64{},
+		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{},
+		EarlierReadBytes: counts.earlierBytes}
+	for hold, name := range GroupReadHoldClasses {
+		reading.Compared[name], reading.ChangedWindows[name] = map[string]uint64{}, map[string]uint64{}
+		for rung, word := range RungNames {
+			reading.Compared[name][word] = counts.compared[hold][rung]
+			reading.ChangedWindows[name][word] = counts.changed[hold][rung]
+		}
+	}
+	for index, word := range SampleClasses {
+		reading.Classes[word] = counts.classes[index]
+	}
+	for index, word := range ReadHoldIgnoredReasons {
+		reading.ReadHoldIgnored[word] = counts.ignored[index]
+	}
+	for index, word := range EarlierReadOutcomes {
+		reading.EarlierReads[word] = counts.earlier[index]
+	}
+	return reading, true
+}
+
 // Stats reads the lookback now. Ownership is asked outside the engine's
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
@@ -350,6 +468,10 @@ func (engine *Engine) Stats() Stats {
 	engine.mu.Lock()
 	candidates := make([]candidate, 0, len(engine.groups))
 	for queryGroup, state := range engine.groups {
+		if trial := state.prepared; trial != nil {
+			stats.Pending++
+			stats.PendingBytes += trial.summary.bytes()
+		}
 		entry := candidate{queryGroup: queryGroup}
 		rest := min(time.Duration(state.rest*float64(state.step)), restCap)
 		switch {
@@ -427,7 +549,13 @@ func (engine *Engine) Stats() Stats {
 			SupplementPoints: engine.counts.supplementPoints[source], DirectedReadBytes: engine.counts.directedBytes[source],
 			SupplementHold: map[string]uint64{}, SupplementHoldMaxSeconds: engine.counts.supplementHoldMax[source].Seconds(),
 			EarlyReads: map[string]uint64{}, EarlyUndecided: engine.counts.earlyUndecided[source],
-			EarlyReadBytes: engine.counts.earlyBytes[source]}
+			EarlyReadBytes: engine.counts.earlyBytes[source], EarlierReads: map[string]uint64{}, EarlierReadBytes: engine.counts.earlierBytes[source], ReadHoldIgnored: map[string]uint64{}}
+		for _, reason := range ReadHoldIgnoredReasons {
+			entry.ReadHoldIgnored[reason] = engine.counts.holdIgnored[key2(source, reason)]
+		}
+		for _, outcome := range EarlierReadOutcomes {
+			entry.EarlierReads[outcome] = engine.counts.earlierReads[key2(source, outcome)]
+		}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]
 		}

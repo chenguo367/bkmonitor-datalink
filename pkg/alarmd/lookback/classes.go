@@ -27,6 +27,14 @@ import (
 //     not at all. The whole window was read before its data was complete;
 //     the strategy's time_delay is what moves the read, and a value revised
 //     after it was judged is evidence for that and is not judged again.
+//   - partial_revised: some series the first read had came back with other
+//     points or values and a value there, and others with a value came back
+//     as they were -- a series quiet in both is neither: the
+//     first read had those whole. Not the window read early -- the Query
+//     Group's read is not what was late -- and not series_late -- the series
+//     were there, so a supplement of new series does not reach them. Counted
+//     apart from the first version on; the time_delay run treats it as it
+//     treats window_read_early, as it did before the two were told apart.
 //   - series_late: every series the first read had came back as it was, and
 //     series it did not have came later: some series are late, which is the
 //     supplementary detection's to fill.
@@ -41,12 +49,13 @@ import (
 const (
 	ClassComplete        = "complete"
 	ClassWindowReadEarly = "window_read_early"
+	ClassPartialRevised  = "partial_revised"
 	ClassSeriesLate      = "series_late"
 	ClassUnclassified    = "unclassified"
 )
 
 // SampleClasses is every class.
-var SampleClasses = []string{ClassComplete, ClassWindowReadEarly, ClassSeriesLate, ClassUnclassified}
+var SampleClasses = []string{ClassComplete, ClassWindowReadEarly, ClassPartialRevised, ClassSeriesLate, ClassUnclassified}
 
 // Why a sample is unclassified: the process's memory line refused a series
 // table it needed, or the deepest rung still changed.
@@ -80,10 +89,15 @@ const (
 type ReadEarlySample struct {
 	EvaluationTime       execution.EvaluationTime `json:"evaluation_time"`
 	FirstReadAgeSeconds  int64                    `json:"first_read_age_seconds"`
+	FirstReadyAgeSeconds int64                    `json:"first_ready_age_seconds"`
 	CompletionAgeSeconds int64                    `json:"completion_age_seconds"`
 	Rung                 string                   `json:"rung"`
 	ChangedAgeSeconds    int64                    `json:"changed_age_seconds"`
 	Buckets              []int64                  `json:"buckets,omitempty"`
+	// PartialRevised is a sample some of whose series the first read had
+	// whole (ClassPartialRevised), in a run otherwise read early.
+	PartialRevised  bool  `json:"partial_revised,omitempty"`
+	ReadHoldSeconds int64 `json:"read_hold_seconds,omitempty"`
 }
 
 // ReadEarlyReading is a Query Group whose window was read early in
@@ -130,9 +144,20 @@ func classOf(candidate *sample) (string, string) {
 		// deepest rung, as a sample still changing at its last planned rung
 		// reads one further while there is one.
 		return ClassUnclassified, UnclassifiedUnsettled
-	case candidate.emptyFirstRead && changed && len(candidate.last) > 0, candidate.existingChanged:
+	case candidate.emptyFirstRead && changed && len(candidate.last) > 0:
 		// candidate.last is the read the data settled to: data that came
 		// to an empty first read and went again was not read early.
+		return ClassWindowReadEarly, ""
+	case candidate.existingChanged && candidate.existingSteady > 0 && candidate.existingArrived > 0:
+		// Some series came with other points or values and others with a
+		// value the first read had whole: the series were late, not the
+		// window. A series that went is not data that came late, and beside
+		// series that stood it is read as before.
+		return ClassPartialRevised, ""
+	case candidate.existingChanged:
+		// Every series with a value there changed: the whole window was
+		// read before its data was complete, however many series were
+		// quiet in it.
 		return ClassWindowReadEarly, ""
 	case candidate.seriesAdded:
 		return ClassSeriesLate, ""
@@ -150,11 +175,22 @@ func classOf(candidate *sample) (string, string) {
 func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.Time) {
 	class, reason := classOf(candidate)
 	engine.counts.classes[key2(candidate.source, class)]++
+	state.reading.classes[wordIndex(SampleClasses, class)]++
+	engine.recordReadHoldLocked(candidate)
+	if class == ClassPartialRevised {
+		engine.recordIgnoredLocked(candidate, ClassPartialRevised)
+		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, ClassPartialRevised)]++
+	} else if class == ClassWindowReadEarly && !wholeWindowArrival(candidate) {
+		engine.recordIgnoredLocked(candidate, IgnoredNoWholeWindowArrival)
+		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, IgnoredNoWholeWindowArrival)]++
+	}
 	switch class {
-	case ClassWindowReadEarly:
+	case ClassWindowReadEarly, ClassPartialRevised:
 		early := ReadEarlySample{EvaluationTime: candidate.evaluation,
+			ReadHoldSeconds:      candidate.contract.ReadHoldMillis / 1000,
 			FirstReadAgeSeconds:  int64(candidate.readAt.Sub(candidate.windowEnd) / time.Second),
-			CompletionAgeSeconds: int64(candidate.completion / time.Second)}
+			FirstReadyAgeSeconds: int64(firstReadAge(candidate) / time.Second),
+			CompletionAgeSeconds: int64(candidate.completion / time.Second), PartialRevised: class == ClassPartialRevised}
 		if candidate.early != nil {
 			early.Rung, early.ChangedAgeSeconds, early.Buckets = candidate.early.Rung, candidate.early.ChangedAgeSeconds, candidate.early.Buckets
 		}
@@ -213,7 +249,7 @@ func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarly
 	step := int64(state.step / time.Second)
 	later := int64(0)
 	for _, sample := range run.samples {
-		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadAgeSeconds)
+		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadyAgeSeconds+sample.ReadHoldSeconds)
 	}
 	suggested := run.delaySeconds + later
 	if step > 0 {

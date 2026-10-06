@@ -48,8 +48,14 @@ const maxBucketsPerSample = 1 << 17
 // seriesSummary is one series over the kept tail, summed the way a bucket is:
 // how many points it had there and the sum of their point hashes. Two reads of
 // the series that agree on it had the same points with the same values.
+// active is how many of its points had a value other than zero or none: a
+// series every read has at zero or without a value is quiet there, which a
+// source that fills its empty buckets with zero makes of every series with
+// nothing in them. points fits in 32 bits: a sample has at most
+// maxBucketsPerSample buckets.
 type seriesSummary struct {
-	points uint64
+	points uint32
+	active uint32
 	values uint64
 }
 
@@ -118,29 +124,40 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 	seriesTerm := mix(series)
 	for index := 0; index < dataset.Len(); index++ {
 		record, _ := dataset.Record(index)
-		at := record.SourceTime()
-		bucket, known := summarizer.buckets[at]
-		if !known && len(summarizer.buckets) >= maxBucketsPerSample {
-			summarizer.fault()
+		summarizer.addRecord(record, series, seriesTerm)
+		if summarizer.faulted {
 			return
 		}
-		summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
-		point := pointHash(series, at, valueBits(summarizer.buffer))
-		bucket.points++
-		bucket.series += seriesTerm
-		bucket.values += point
-		summarizer.buckets[at] = bucket
-		if summarizer.series == nil || at < summarizer.seriesFrom {
-			continue
-		}
-		sum, known := summarizer.series[series]
-		if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
-			continue
-		}
-		sum.points++
-		sum.values += point
-		summarizer.series[series] = sum
 	}
+}
+
+func (summarizer *summarizer) addRecord(record execution.RecordView, series, seriesTerm uint64) {
+	at := record.SourceTime()
+	bucket, known := summarizer.buckets[at]
+	if !known && len(summarizer.buckets) >= maxBucketsPerSample {
+		summarizer.fault()
+		return
+	}
+	summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
+	bits := valueBits(summarizer.buffer)
+	point := pointHash(series, at, bits)
+	bucket.points++
+	bucket.series += seriesTerm
+	bucket.values += point
+	summarizer.buckets[at] = bucket
+	if summarizer.series == nil || at < summarizer.seriesFrom {
+		return
+	}
+	sum, known := summarizer.series[series]
+	if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
+		return
+	}
+	sum.points++
+	if !quietValue(summarizer.buffer, bits) {
+		sum.active++
+	}
+	sum.values += point
+	summarizer.series[series] = sum
 }
 
 // fault drops a read past every window's buckets.
@@ -149,11 +166,26 @@ func (summarizer *summarizer) fault() {
 	summarizer.buckets, summarizer.series = nil, nil
 }
 
+// quietValue is whether a point's value is none -- absent or null -- or
+// zero: what a source that fills empty buckets gives a series with nothing
+// in them.
+func quietValue(text []byte, bits uint64) bool {
+	return len(text) == 0 || string(text) == "null" || bits == 0
+}
+
 // seriesChange is how a later read's series stand against the first read's:
 // how many of the first read's series it has with other points or values, or
-// has lost, and how many it has that the first read did not.
+// has lost, and how many it has that the first read did not. existingSteady
+// is how many of the first read's series it has as they were and with a
+// value there: series the first read already had whole. existingArrived is
+// how many of the changed ones it has with a value there: data that came
+// after the first read, as against a series that went. A series quiet in
+// both reads -- zero or no value at every point -- is neither steady nor
+// changed: it says nothing about whether the window was read early.
 type seriesChange struct {
 	existingChanged int
+	existingSteady  int
+	existingArrived int
 	added           int
 }
 
@@ -165,12 +197,22 @@ func compareSeries(first, later map[uint64]seriesSummary) seriesChange {
 		switch {
 		case !present:
 			change.added++
+		case before.active == 0 && after.active == 0:
+			// Quiet in both reads: its points may have come or gone, but
+			// with no value either time it says nothing of the window.
 		case before != after:
 			change.existingChanged++
+			if after.active > 0 {
+				change.existingArrived++
+			}
+		case after.active > 0:
+			change.existingSteady++
 		}
 	}
-	for series := range first {
-		if _, present := later[series]; !present {
+	for series, before := range first {
+		// A series that went counts, unless it was quiet: it had nothing
+		// to lose.
+		if _, present := later[series]; !present && before.active > 0 {
 			change.existingChanged++
 		}
 	}

@@ -94,7 +94,7 @@ func TestASlotDueBeforeATakeoverIsReplayedPastTheDistanceRule(t *testing.T) {
 		if tc.earlier != nil {
 			source.takeovers.Anchor(source.queryGroup, *tc.earlier, before)
 		}
-		operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, reached, tc.now)
+		operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, 0, reached, tc.now)
 		if err != nil {
 			t.Fatalf("%s: classifyRecovery() error = %v", name, err)
 		}
@@ -155,7 +155,7 @@ func TestASlotDueAtTheTakeoverIsNotDueBeforeIt(t *testing.T) {
 	observer := &takeoverObserver{}
 	source.observer, source.takeovers = observer, NewTakeoverClock()
 	source.takeovers.Anchor(source.queryGroup, testFence(7), time.Unix(int64(slot), 0))
-	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, time.Unix(int64(slot)+56, 0), testFence(7))
+	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, 0, time.Unix(int64(slot)+56, 0), testFence(7))
 	if err != nil || operation != execution.OperationNormal || facts.Reason != ReplayExpiredByDistance || len(observer.facts) != 0 {
 		t.Fatalf("a Slot due at the takeover: %s %+v %v, takeover facts %+v; want the distance rule", operation, facts, err, observer.facts)
 	}
@@ -175,7 +175,7 @@ func TestASlotDueBeforeATakeoverPastTheReplayAgeIsGivenUp(t *testing.T) {
 	observer := &takeoverObserver{}
 	source.observer, source.takeovers = observer, NewTakeoverClock()
 	reached := time.UnixMilli(deadline).Add(testRecoveryLimits().MaxReplayAge + time.Second)
-	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, reached, testFence(7))
+	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, 0, reached, testFence(7))
 	if err != nil || operation != execution.OperationNormal || facts.Reason != ReplayExpiredByAge {
 		t.Fatalf("classifyRecovery() = %s %+v %v, want given up on for age", operation, facts, err)
 	}

@@ -433,6 +433,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	updates := make([]scheduleTimelineUpdate, 0, len(oldGroups)+len(newGroups))
 	candidates := make([]pruneCandidate, 0, len(oldGroups))
 	plans := make([]PlanActivationRecord, 0, len(candidate.Plans))
+	readHoldPrevious := make(map[execution.PlanKey]readHoldOrigin)
 	oldIdentities := make([]execution.QueryGroupIdentity, 0, len(oldGroups))
 	for identity := range oldGroups {
 		oldIdentities = append(oldIdentities, identity)
@@ -702,6 +703,34 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		if err := closed.Validate(); err != nil {
 			return err
 		}
+		closedRecords := make(map[execution.PlanKey]PlanActivationRecord, len(open.Plans))
+		for _, record := range open.Plans {
+			closedRecords[record.Fact.Key()] = record
+		}
+		for _, plan := range closed.Plans {
+			record := closedRecords[plan.Key()]
+			origin := readHoldOrigin{generation: record.Fact.Selected.StateGeneration}
+			last := int64(boundary) - 1
+			last -= (last - int64(plan.Spec.Alignment)) % plan.Spec.EvaluationIntervalSeconds
+			// The same last legal Slot readhold's closeRecord fixes.
+			if last < int64(closed.Segment.Start) || !plan.Spec.IsAligned(execution.EvaluationTime(last)) {
+				// An intermediate segment that never ran a Slot adds no new
+				// deadline. Keep the previous real segment's bridge directly.
+				if previous := record.PreviousReadHold; previous != nil {
+					origin.ref = *previous
+					readHoldPrevious[plan.Key()] = origin
+					continue
+				}
+				if len(timeline.Segments) == 1 {
+					continue
+				}
+				origin.ref = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary}
+			} else {
+				origin.ref = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary, PreviousSlot: execution.EvaluationTime(last),
+					CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000}
+			}
+			readHoldPrevious[plan.Key()] = origin
+		}
 		timeline.Segments[last].Schedule = closed
 		timeline.RecordRevision++
 		if remains {
@@ -759,6 +788,29 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		}
 		updates = append(updates, opened.update)
 		plans = append(plans, opened.records...)
+	}
+	// The link is written in the existing timeline/activation CAS. A new
+	// owner can find the previous QG without scanning state or relying on the
+	// shorter-lived draining projection. Kept links survive content changes
+	// until their lifetime.
+	linker := readHoldLinker{origins: readHoldPrevious, carried: carried, facts: cutover,
+		expiredBefore: boundary - execution.EvaluationTime(ReadHoldLinkLifetime/time.Second)}
+	for i := range updates {
+		for j := range updates[i].next.Segments {
+			segment := &updates[i].next.Segments[j]
+			if segment.Schedule.Segment.Start == boundary && segment.Schedule.Segment.End == nil {
+				linker.carry(segment.Plans, segment.Schedule.Segment.QueryGroup, true)
+			}
+		}
+	}
+	groupsByPlan := make(map[execution.PlanKey]execution.QueryGroupIdentity)
+	for group := range activeGroups {
+		for _, key := range published.content.Groups[group].Plans {
+			groupsByPlan[key] = group
+		}
+	}
+	for i := range plans {
+		linker.carry(plans[i:i+1], groupsByPlan[plans[i].Fact.Key()], false)
 	}
 	// Coverage is owed by everyone the cutover did not hold back. A blocked
 	// Query Group's carried records name what it ran, which may not be the
@@ -2434,7 +2486,7 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
 		}
-		deadline, err := completionDeadline(request.EvaluationTime, plan.ScheduleSpec)
+		deadline, err := completionDeadline(request.EvaluationTime, request.ReadHoldMillis, plan.ScheduleSpec)
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 		}
@@ -2486,6 +2538,7 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 		Slot:             execution.SlotIdentity{QueryGroup: request.QueryGroup, EvaluationTime: request.EvaluationTime},
 		SnapshotRevision: schedule.Segment.Publication.SnapshotRevision, QueryRevision: schedule.Segment.QueryRevision,
 		ScheduleRevision: request.ScheduleRevision, ScheduleSegmentStart: request.ScheduleSegmentStart,
+		ReadHoldMillis: request.ReadHoldMillis,
 	}, DuePlans: duePlans, Requirements: requirements}, request)
 	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
@@ -2867,8 +2920,10 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 	return result, nil
 }
 
-func completionDeadline(at execution.EvaluationTime, spec execution.ScheduleSpec) (int64, error) {
-	deadline, ok := spec.CompletionDeadlineUnixMilli(at)
+// completionDeadline is a due Plan's deadline in a contract frozen with the
+// read hold readHoldMillis: its schedule's, that much later.
+func completionDeadline(at execution.EvaluationTime, readHoldMillis int64, spec execution.ScheduleSpec) (int64, error) {
+	deadline, ok := spec.HeldCompletionDeadlineUnixMilli(at, readHoldMillis)
 	if !ok {
 		return 0, errors.New("alarmd controlplane: invalid frozen Plan deadline")
 	}

@@ -321,6 +321,7 @@ func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 	// full count. The aggregate notices the shortfall and refuses to compare,
 	// rather than reporting set arithmetic done on half the objects.
 	snapshot.OwnedObjects = withinObjectBudget(snapshot.OwnedObjects, store.maxAnomalyBytes)
+	snapshot.ReadHolds = withinReadHoldBudget(snapshot.ReadHolds, store.maxAnomalyBytes)
 	snapshot.Anomalies = withinAnomalyBudget(snapshot.Anomalies, store.maxAnomalyBytes)
 	snapshot.Demoted = withinAnomalyBudget(snapshot.Demoted, store.maxAnomalyBytes)
 	snapshot.Undecidable = withinAnomalyBudget(snapshot.Undecidable, store.maxAnomalyBytes)
