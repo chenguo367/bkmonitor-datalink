@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
@@ -176,5 +177,30 @@ func TestRuntimeLookbackPagerUsesOnlyOwnedMemory(t *testing.T) {
 	}
 	if request(http.MethodPost, "/api/lookback").Code != 405 || request(http.MethodGet, "/api/lookback?limit=201").Code != 400 || request(http.MethodGet, "/other").Code != 418 {
 		t.Fatal("method, budget, or route forwarding changed")
+	}
+}
+
+// A retired group that retires without closing its hold is counted where
+// the read hold's counters are exported, and every predecessor reason and
+// clamp source is exported at zero beside it.
+func TestARetireCloseFailureIsExportedWithTheReadHoldCounters(t *testing.T) {
+	h, _, _ := runtimeTestHolds(t)
+	h.links = map[string]uint64{}
+	engine, err := lookback.New(lookback.Options{Now: h.now,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{}, nil
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.RetireCloseFailed(errors.New("closing failed"))
+	stats := productionLookbackStats(engine, h)
+	if stats.ReadHoldRetireCloseFailed != 1 {
+		t.Fatalf("retire close failures exported %d, want 1", stats.ReadHoldRetireCloseFailed)
+	}
+	if len(stats.ReadHoldPredecessors) != len(readhold.PredecessorReasons)+len(readhold.LinkSkipReasons) || len(stats.ReadHoldClamped) != len(readhold.ClampSources) {
+		t.Fatalf("not every reason and source exported: %v %v", stats.ReadHoldPredecessors, stats.ReadHoldClamped)
 	}
 }
