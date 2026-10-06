@@ -197,6 +197,9 @@ func compareSeries(first, later map[uint64]seriesSummary) seriesChange {
 		switch {
 		case !present:
 			change.added++
+		case before.active == 0 && after.active == 0:
+			// Quiet in both reads: its points may have come or gone, but
+			// with no value either time it says nothing of the window.
 		case before != after:
 			change.existingChanged++
 			if after.active > 0 {
@@ -206,8 +209,10 @@ func compareSeries(first, later map[uint64]seriesSummary) seriesChange {
 			change.existingSteady++
 		}
 	}
-	for series := range first {
-		if _, present := later[series]; !present {
+	for series, before := range first {
+		// A series that went counts, unless it was quiet: it had nothing
+		// to lose.
+		if _, present := later[series]; !present && before.active > 0 {
 			change.existingChanged++
 		}
 	}

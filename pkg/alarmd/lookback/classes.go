@@ -181,8 +181,8 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		engine.recordIgnoredLocked(candidate, ClassPartialRevised)
 		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, ClassPartialRevised)]++
 	} else if class == ClassWindowReadEarly && !wholeWindowArrival(candidate) {
-		engine.recordIgnoredLocked(candidate, "noise")
-		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, "noise")]++
+		engine.recordIgnoredLocked(candidate, IgnoredNoWholeWindowArrival)
+		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, IgnoredNoWholeWindowArrival)]++
 	}
 	switch class {
 	case ClassWindowReadEarly, ClassPartialRevised:

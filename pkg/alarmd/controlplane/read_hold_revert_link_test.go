@@ -66,7 +66,7 @@ func TestARevertedDelayEditLeavesNoLinkToItself(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the original group did not come back at %d: %v", arm.revert, err)
 			}
-			refs, err := repository.ReadHoldPredecessors(ctx, schedule)
+			refs, _, err := repository.ReadHoldPredecessors(ctx, schedule)
 			t.Logf("links of the returned group: %+v %v", refs, err)
 			if err != nil {
 				t.Fatalf("the returned group's links cannot be read, so it can never prepare a Slot: %v", err)

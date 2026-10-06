@@ -54,7 +54,13 @@ var EarlierReadOutcomes = []string{EarlierEqual, EarlierDifferent, EarlierPermit
 	EarlierReadFailed, EarlierFirstIncomplete, EarlierOwnerLost, EarlierOvertaken, EarlierMultiQuery}
 
 // ReadHoldIgnoredReasons count findings that cannot raise a whole-window hold.
-var ReadHoldIgnoredReasons = []string{ClassPartialRevised, "noise"}
+var ReadHoldIgnoredReasons = []string{ClassPartialRevised, IgnoredNoWholeWindowArrival}
+
+// IgnoredNoWholeWindowArrival is a sample classed window_read_early in which
+// no series arrived whole after the first read -- one went, or one changed
+// without arriving -- so no arrival age can be read from it. It is not two
+// later reads disagreeing.
+const IgnoredNoWholeWindowArrival = "no_whole_window_arrival"
 
 type ignoredReadHold struct {
 	evidence ReadHoldEvidence
@@ -176,7 +182,7 @@ func (engine *Engine) Prepare(query Query) {
 		engine.mu.Unlock()
 		return
 	}
-	candidate := time.Duration(base.Milliseconds()/2) * time.Millisecond
+	candidate := execution.LoweredReadHold(base, state.step)
 	baseline := query.ReadyAt.Add(-hold)
 	readyAt := baseline.Add(candidate)
 	start := readyAt.Add(-RecheckTimeout)
@@ -207,7 +213,7 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 	candidateCurrent := true
 	if engine.options.CurrentReadHold != nil {
 		hold := engine.options.CurrentReadHold(trial.query.Contract.Slot.QueryGroup)
-		candidateCurrent = hold > 0 && hold.Milliseconds()/2 == trial.candidateHold.Milliseconds()
+		candidateCurrent = hold > 0 && execution.LoweredReadHold(hold, trial.group.step) == trial.candidateHold
 	}
 	engine.mu.Lock()
 	outcome := trial.outcome

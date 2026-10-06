@@ -57,24 +57,51 @@ func TestReadHoldLinkFollowsThePlanAcrossDelayGroupsAndEmptySegments(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		refs, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
-		if err != nil || len(refs) != 1 || refs[0].QueryGroup != original || refs[0].ClosedAt != 121 || len(refs[0].Plans) != 1 {
-			t.Fatalf("delay or empty intermediate lost predecessor: %+v %v", refs, err)
+		refs, skipped, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
+		if err != nil || len(skipped) != 0 || len(refs) != 1 || refs[0].QueryGroup != original || refs[0].ClosedAt != 121 || len(refs[0].Plans) != 1 {
+			t.Fatalf("delay or empty intermediate lost predecessor: %+v %v %v", refs, skipped, err)
+		}
+		// The link says where the original group's last Slot was and when
+		// it was due, and that only the delay changed, across the empty
+		// intermediate Segment too.
+		if link := refs[0].Plans[0]; link.PreviousSlot != 120 || link.CompletionOffsetMillis <= 0 || !link.SameRoute {
+			t.Fatalf("the link does not carry the original group's last Slot and route: %+v", link)
 		}
 		if next.Plans[0].StateGeneration != generation {
 			t.Fatal("delay changed state generation")
 		}
+		for _, record := range fixture.activation(t).Plans {
+			if record.Fact.Plan.BusinessID == "2" && record.Fact.Selected.StateGeneration == "" {
+				t.Fatal("the activation names no state generation")
+			}
+		}
 		previous = next.Identity
 	}
-	// Output-context/threshold edits in the last QG keep the external bridge.
+	// A threshold edit in the last QG starts a state of its own -- the
+	// algorithm's configuration is in the state generation -- so the original
+	// group's Slots wrote a state this group no longer reads, there is no order
+	// to keep, and the bridge is not carried on.
+	activated := func() execution.StateGeneration {
+		for _, record := range fixture.activation(t).Plans {
+			if record.Fact.Plan.BusinessID == "2" {
+				return record.Fact.Selected.StateGeneration
+			}
+		}
+		t.Fatal("no activation for the edited Plan")
+		return ""
+	}
+	before := activated()
 	last := readHoldCatalog(t, 180, 90)
 	fixture.publish(t, last, 180)
+	if after := activated(); after == before || after == "" {
+		t.Fatalf("a threshold edit kept the state generation %q; this case no longer tests a generation change", after)
+	}
 	schedule, err := fixture.runtime.ReadFrozenSchedule(fixture.ctx, previous, 180)
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
-	if err != nil || len(refs) != 1 || refs[0].QueryGroup != original {
-		t.Fatalf("same group edit lost external bridge: %+v %v", refs, err)
+	refs, skipped, err := fixture.repository.ReadHoldPredecessors(fixture.ctx, schedule)
+	if err != nil || len(skipped) != 0 || len(refs) != 0 {
+		t.Fatalf("a bridge was carried into a new state generation: %+v %v %v", refs, skipped, err)
 	}
 }

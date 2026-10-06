@@ -68,12 +68,15 @@ func TestRuntimeOwnedRestoreIsolatesBadGroups(t *testing.T) {
 	c.values["good"] = raw
 	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
 	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
-	if h.controller.Inspect("bad").Loaded || !h.controller.Inspect("good").Loaded || !h.controller.Inspect("zero").Loaded {
-		t.Fatal("a corrupt group invalidated good batch entries")
+	// The corrupt record restores its group marked, so the next write
+	// replaces it -- it would otherwise keep the group unrestored for a week.
+	if bad := h.controller.Inspect("bad"); !bad.Loaded || !bad.Corrupt || !h.controller.Inspect("good").Loaded ||
+		h.controller.Inspect("good").Corrupt || !h.controller.Inspect("zero").Loaded {
+		t.Fatal("a corrupt group invalidated good batch entries, or was not restored marked")
 	}
 	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
-	if len(c.reads) != 2 || len(c.reads[1]) != 1 || c.reads[1][0] != "bad" {
-		t.Fatalf("loaded siblings were reread: %+v", c.reads)
+	if len(c.reads) != 1 {
+		t.Fatalf("restored groups were reread: %+v", c.reads)
 	}
 }
 func TestRuntimePreparedZeroHoldDoesNotReadOrCreateKey(t *testing.T) {

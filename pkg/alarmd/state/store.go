@@ -631,10 +631,11 @@ func StateTTL(requirements []LevelRequirement, restartMargin, minimum, maximum t
 			offset = required
 		}
 	}
-	if offset > maximum-hold {
-		return 0, fmt.Errorf("%w: TTL plus read hold exceeds maximum %s", ErrStateBudget, maximum)
-	}
-	return offset + hold, nil
+	// The read hold only lengthens the key's life past a horizon the offset
+	// already outlives; near the ceiling it gets what is left below it. The
+	// retention fits without it, and refusing it here refused, every round,
+	// a Plan that fits -- one that would then stop remembering.
+	return min(offset+hold, maximum), nil
 }
 
 // longestStep is the step the offset keeps the expiry away from: the longest

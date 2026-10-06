@@ -452,9 +452,7 @@ func (source *ProductionSlotSource) Next(
 			schedule, nextSlot, retired, err = source.firstAvailableSchedule(ctx, schedule)
 			if retired {
 				decision = "retired"
-				if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
-					return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
-				}
+				source.prepareRetiredReadHold(ctx, initialFence)
 				return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 			}
 		}
@@ -465,9 +463,7 @@ func (source *ProductionSlotSource) Next(
 		}
 		if retired {
 			decision = "retired"
-			if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
-				return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
-			}
+			source.prepareRetiredReadHold(ctx, initialFence)
 			return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 		}
 		schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, *load.Progress)
@@ -483,9 +479,7 @@ func (source *ProductionSlotSource) Next(
 				}
 				if retired {
 					decision = "retired"
-					if err := source.prepareRetiredReadHold(ctx, initialFence); err != nil {
-						return FrozenSlot{}, false, SlotDueFacts{}, &SourceRetryError{Err: err}
-					}
+					source.prepareRetiredReadHold(ctx, initialFence)
 					return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 				}
 				schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, resumed)
@@ -1269,25 +1263,32 @@ func (source *ProductionSlotSource) replayDistance(
 	return distance, 0, nil
 }
 
-func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence) error {
+// prepareRetiredReadHold closes a retired group's read hold at its last
+// boundary. It never holds the retirement up: answering retry until it could
+// close kept a group whose closing could not succeed unretired for good, and
+// its successor waiting on it. A group that cannot close retires all the
+// same, counted, and a successor reads its unclosed record as the hold bound.
+func (source *ProductionSlotSource) prepareRetiredReadHold(ctx context.Context, fence execution.OwnerFence) {
 	holds, ok := source.readHolds.(interface {
 		PrepareSchedule(context.Context, execution.FrozenQueryGroupSchedule, execution.OwnerFence) error
 	})
 	if !ok {
-		return nil
+		return
 	}
-	boundary, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
-	if err != nil {
-		return err
+	err := func() error {
+		boundary, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
+		if err != nil || !retired {
+			return err
+		}
+		schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, boundary-1)
+		if err != nil {
+			return err
+		}
+		return holds.PrepareSchedule(ctx, schedule, fence)
+	}()
+	if failed, counts := source.readHolds.(interface{ RetireCloseFailed(error) }); err != nil && counts {
+		failed.RetireCloseFailed(err)
 	}
-	if !retired {
-		return nil
-	}
-	schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, boundary-1)
-	if err != nil {
-		return err
-	}
-	return holds.PrepareSchedule(ctx, schedule, fence)
 }
 
 func (source *ProductionSlotSource) isRetiredBoundary(

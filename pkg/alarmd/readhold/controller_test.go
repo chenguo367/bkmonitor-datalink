@@ -72,6 +72,25 @@ func groupSpec(qg execution.QueryGroupIdentity, delay time.Duration) GroupSpec {
 	return GroupSpec{QueryGroup: qg, Plans: []PlanRef{planRef()}, Delay: delay, SettlingWait: 30 * time.Second, HoldLimit: 10 * time.Minute}
 }
 
+// linked is a cutover's link for Plans that left qg at closedAt, by a
+// delay-only edit: by default every Plan of spec. With slot the link says the
+// Plan's last Slot there and the fixture's 55 s offset; without, the old
+// group's closed record says them.
+func linked(spec GroupSpec, qg execution.QueryGroupIdentity, closedAt, slot execution.EvaluationTime, plans ...PlanRef) Previous {
+	if len(plans) == 0 {
+		plans = spec.Plans
+	}
+	links := make([]PlanLink, 0, len(plans))
+	for _, plan := range plans {
+		link := PlanLink{PlanRef: plan, SameRoute: true}
+		if slot > 0 {
+			link.PreviousSlot, link.CompletionOffsetMillis = slot, 55_000
+		}
+		links = append(links, link)
+	}
+	return Previous{QueryGroup: qg, ClosedAt: closedAt, Links: links}
+}
+
 func prepare(t *testing.T, controller *Controller, spec GroupSpec) {
 	t.Helper()
 	if err := controller.Configure(spec); err != nil {
@@ -222,12 +241,9 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 	ctx := context.Background()
 	boundary := execution.EvaluationTime(1200)
 	newSpec := groupSpec("new", 120*time.Second)
-	newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+	newSpec.Previous = []Previous{linked(newSpec, "old", boundary, 0)}
 	prepare(t, c, newSpec)
 	newSchedule := scheduleFor(t, "new", boundary, nil)
-	if _, err := c.SlotReadHold(ctx, newSchedule, boundary, holdFence("new")); !errors.Is(err, ErrPreviousOpen) {
-		t.Fatalf("unclosed predecessor = %v", err)
-	}
 	oldSchedule := scheduleFor(t, "old", 60, &boundary)
 	if err := c.CloseSchedule(ctx, oldSchedule, holdFence("old")); err != nil {
 		t.Fatal(err)
@@ -267,7 +283,7 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 		t.Fatal("takeover did not restore the hold")
 	}
 	farSpec := groupSpec("far", 300*time.Second)
-	farSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+	farSpec.Previous = []Previous{linked(farSpec, "old", boundary, 0)}
 	prepare(t, c, farSpec)
 	if got, err := c.SlotReadHold(ctx, scheduleFor(t, "far", 1500, nil), 1500, holdFence("far")); err != nil || got != 0 {
 		t.Fatalf("longer delay did not replace automatic hold: %s %v", got, err)
@@ -364,85 +380,67 @@ func TestSharedGroupReopensWhileMigratedPlanKeepsClosedHold(t *testing.T) {
 		t.Fatalf("old evidence altered a migrated Plan's fixed bridge: %+v", oldReading)
 	}
 	newSpec := groupSpec("new", 120*time.Second)
-	newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+	newSpec.Previous = []Previous{linked(newSpec, "old", boundary, 0)}
 	prepare(t, c, newSpec)
 	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", boundary, nil), boundary, holdFence("new")); err != nil || got != 115*time.Second {
 		t.Fatalf("migrated Plan used the reopened group's h: %s %v", got, err)
 	}
 }
 
-func TestMissingPredecessorRequiresIndependentZeroFact(t *testing.T) {
-	c, store, _ := controllerFixture(t)
+// A predecessor with no record froze its last Slot at zero only once it has
+// frozen that Slot; until then it is read as the hold bound -- a later read
+// for the successor's first Slots, never a refusal. Its Progress still
+// carrying that Slot's contract gives the exact hold.
+func TestAMissingPredecessorIsReadAsTheBoundUntilItsZeroIsProven(t *testing.T) {
 	boundary := execution.EvaluationTime(1200)
-	prepare(t, c, groupSpec("missing", 0))
-	newSpec := groupSpec("new", 0)
-	newSpec.Previous = []Previous{{QueryGroup: "missing", ClosedAt: boundary}}
-	prepare(t, c, newSpec)
-	schedule := scheduleFor(t, "new", boundary, nil)
-	if _, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); !errors.Is(err, ErrPreviousHoldUnknown) {
-		t.Fatalf("absence became a zero predecessor: %v", err)
-	}
-	newSpec.Previous[0].ZeroConfirmed = true
-	if err := c.Configure(newSpec); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); !errors.Is(err, ErrPreviousHoldUnknown) {
-		t.Fatalf("zero h without the old completion timeline became a complete bridge: %v", err)
-	}
-	old := scheduleFor(t, "missing", 60, &boundary)
-	newSpec.Previous[0].ZeroConfirmed, newSpec.Previous[0].Schedule = true, &old
-	if err := c.Configure(newSpec); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); err != nil || got != 0 {
-		t.Fatalf("confirmed zero = %s %v", got, err)
-	}
-	if _, exists := store.values["missing"]; exists {
-		t.Fatal("new owner wrote the old zero record")
+	frozen := int64(150_000)
+	for _, tc := range []struct {
+		name   string
+		link   func(*PlanLink)
+		want   time.Duration
+		reason string
+	}{
+		// 1140 s + 600 s bound + 55 s offset, read at 1200 s + 30 s wait.
+		{"not yet past its last Slot", func(*PlanLink) {}, 565 * time.Second, PredecessorZeroUnproven},
+		{"past its last Slot", func(link *PlanLink) { link.MovedPast = true }, 0, PredecessorZeroProven},
+		{"its Progress still carries the Slot", func(link *PlanLink) { link.FrozenHoldMillis = &frozen }, 115 * time.Second, PredecessorFrozenContract},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, store, _ := controllerFixture(t)
+			prepare(t, c, groupSpec("missing", 0))
+			newSpec := groupSpec("new", 0)
+			newSpec.Previous = []Previous{linked(newSpec, "missing", boundary, 1140)}
+			tc.link(&newSpec.Previous[0].Links[0])
+			prepare(t, c, newSpec)
+			schedule := scheduleFor(t, "new", boundary, nil)
+			if got, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); err != nil || got != tc.want {
+				t.Fatalf("first Slot after a missing predecessor = %s %v; want %s", got, err, tc.want)
+			}
+			if got := c.Stats().Predecessors; got[tc.reason] != 1 || len(got) != 1 {
+				t.Fatalf("counted %v, want one %s", got, tc.reason)
+			}
+			if _, exists := store.values["missing"]; exists {
+				t.Fatal("new owner wrote the old zero record")
+			}
+		})
 	}
 	// A reused Query Group record that predates this cutover must seed again;
 	// having any record does not establish this Plan's newest closed bridge.
+	c, store, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("missing", 0))
+	newSpec := groupSpec("new", 0)
+	newSpec.Previous = []Previous{linked(newSpec, "missing", boundary, 1140)}
+	newSpec.Previous[0].Links[0].MovedPast = true
 	existing := Record{HoldMillis: 150_000, SinceSlot: 60, SegmentStart: 60}
 	store.values["new"], _ = json.Marshal(existing)
-	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"new"}); err != nil {
-		t.Fatal(err)
-	}
+	prepare(t, c, newSpec)
+	schedule := scheduleFor(t, "new", boundary, nil)
 	if got, err := c.SlotReadHold(context.Background(), schedule, boundary, holdFence("new")); err != nil || got != 150*time.Second {
 		t.Fatalf("existing active h = %s %v", got, err)
 	}
 	reading, _ := c.Reading("new")
 	if len(reading.Plans) == 0 || reading.Plans[0].ClosedAt != boundary {
 		t.Fatal("the reused record skipped the newest bridge")
-	}
-}
-
-func TestSamePreviousGroupKeepsEachPlansClosedBoundary(t *testing.T) {
-	c, store, _ := controllerFixture(t)
-	a, b := planRef(), planRef()
-	b.Key.StrategyID = "second"
-	old := Record{HoldMillis: 300_000, SinceSlot: 1260, SegmentStart: 1500, Plans: []PlanRecord{
-		{PlanRef: a, ArrivalAgeMillis: 180_000, ClosedAt: 1200, PreviousHoldMillis: 150_000, PreviousSlot: 1140, CompletionOffsetMillis: 55_000},
-		{PlanRef: b, ArrivalAgeMillis: 330_000, ClosedAt: 1500, PreviousHoldMillis: 300_000, PreviousSlot: 1440, CompletionOffsetMillis: 55_000},
-	}}
-	store.values["old"], _ = json.Marshal(old)
-	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"old"}); err != nil {
-		t.Fatal(err)
-	}
-	spec := groupSpec("new", 120*time.Second)
-	spec.Plans = []PlanRef{a, b}
-	spec.Previous = []Previous{{QueryGroup: "old", ClosedAt: 1200, Plans: []PlanRef{a}}, {QueryGroup: "old", ClosedAt: 1500, Plans: []PlanRef{b}}}
-	prepare(t, c, spec)
-	schedule := scheduleFor(t, "new", 1500, nil)
-	second := schedule.Plans[0]
-	second.Identity = b.Key.PlanIdentity
-	schedule.Plans = append(schedule.Plans, second)
-	schedule.Segment.ScheduleRevision, _ = execution.DeriveQueryGroupScheduleRevision(schedule.Plans)
-	if got, err := c.SlotReadHold(context.Background(), schedule, 1500, holdFence("new")); err != nil || got != 265*time.Second {
-		t.Fatalf("two Plan bridges = %s %v; want later deadline 265s", got, err)
-	}
-	reading, _ := c.Reading("new")
-	if len(reading.Plans) != 2 || reading.Plans[0].ClosedAt != 1200 || reading.Plans[1].ClosedAt != 1500 {
-		t.Fatalf("one Query Group link overwrote another boundary: %+v", reading.Plans)
 	}
 }
 
@@ -457,7 +455,7 @@ func TestEvidenceWriteCannotBypassNewPlansPredecessorSeed(t *testing.T) {
 	}
 	spec := groupSpec("existing", 120*time.Second)
 	spec.Plans = []PlanRef{a, b}
-	spec.Previous = []Previous{{QueryGroup: "previous", ClosedAt: 1200, Plans: []PlanRef{b}}}
+	spec.Previous = []Previous{linked(spec, "previous", 1200, 0, b)}
 	if err := c.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
@@ -474,9 +472,8 @@ func TestEvidenceWriteCannotBypassNewPlansPredecessorSeed(t *testing.T) {
 	second.Identity = b.Key.PlanIdentity
 	schedule.Plans = append(schedule.Plans, second)
 	schedule.Segment.ScheduleRevision, _ = execution.DeriveQueryGroupScheduleRevision(schedule.Plans)
-	if _, err := c.SlotReadHold(context.Background(), schedule, 1200, holdFence("existing")); !errors.Is(err, ErrPreviousHoldUnknown) {
-		t.Fatalf("noise write bypassed the missing predecessor: %v", err)
-	}
+	// The predecessor's closed record arrives only now. Had the noise write
+	// acknowledged the bridge, the seed would skip it and read 30 s.
 	previous := Record{HoldMillis: 150_000, SinceSlot: 60, SegmentStart: 60, Closed: true, Plans: []PlanRecord{{PlanRef: b,
 		ArrivalAgeMillis: 180_000, ClosedAt: 1200, PreviousHoldMillis: 150_000, PreviousSlot: 1140, CompletionOffsetMillis: 55_000}}}
 	store.values["previous"], _ = json.Marshal(previous)
@@ -516,7 +513,7 @@ func TestCloseScheduleProtectsFinalFrozenHoldAndFuturePendingRaise(t *testing.T)
 				t.Fatalf("closed hold = %d, want %d", closed.Plans[0].PreviousHoldMillis, arm.closed)
 			}
 			newSpec := groupSpec("new", 120*time.Second)
-			newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+			newSpec.Previous = []Previous{linked(newSpec, "old", boundary, 0)}
 			prepare(t, c, newSpec)
 			hold, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", boundary, nil), boundary, holdFence("new"))
 			if err != nil || hold != arm.firstHold {
@@ -538,7 +535,7 @@ func TestInheritedAckSurvivesClosingAndReopeningTheSameGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := groupSpec("b", 120*time.Second)
-	spec.Previous = []Previous{{QueryGroup: "a", ClosedAt: first}}
+	spec.Previous = []Previous{linked(spec, "a", first, 0)}
 	prepare(t, c, spec)
 	if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "b", first, nil), first, holdFence("b")); err != nil {
 		t.Fatal(err)
@@ -599,7 +596,8 @@ func TestUnknownSlowPlansFrozenHoldUsesTheConfiguredBound(t *testing.T) {
 		t.Fatalf("unknown old hold was understated: %+v", plan)
 	}
 	newSpec := groupSpec("new", 0)
-	newSpec.Plans, newSpec.Previous = spec.Plans, []Previous{{QueryGroup: "old", ClosedAt: boundary}}
+	newSpec.Plans = spec.Plans
+	newSpec.Previous = []Previous{linked(newSpec, "old", boundary, 0)}
 	prepare(t, c, newSpec)
 	newSchedule := old
 	newSchedule.Segment.QueryGroup, newSchedule.Segment.Start, newSchedule.Segment.End = "new", boundary, nil
@@ -662,7 +660,7 @@ func TestZeroSlotSegmentClosesItsBridgeWithoutErasingAnEarlierDeadline(t *testin
 				t.Fatalf("empty segment never closed its Plan bridge: %+v", closed)
 			}
 			newSpec := groupSpec("new", 120*time.Second)
-			newSpec.Previous = []Previous{{QueryGroup: "old", ClosedAt: end, Schedule: &old, ZeroConfirmed: !earlier}}
+			newSpec.Previous = []Previous{linked(newSpec, "old", end, 0)}
 			prepare(t, c, newSpec)
 			want := time.Duration(0)
 			if earlier {
@@ -689,7 +687,7 @@ func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
 		t.Fatal(err)
 	}
 	bSpec := groupSpec("b", 120*time.Second)
-	bSpec.Previous = []Previous{{QueryGroup: "a", ClosedAt: first}}
+	bSpec.Previous = []Previous{linked(bSpec, "a", first, 0)}
 	prepare(t, c, bSpec)
 	second := execution.EvaluationTime(1230)
 	bSchedule := scheduleFor(t, "b", first, &second)
@@ -702,7 +700,7 @@ func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
 		t.Fatalf("empty middle group never inherited its bridge: %+v", plan)
 	}
 	cSpec := groupSpec("c", 300*time.Second)
-	cSpec.Previous = []Previous{{QueryGroup: "b", ClosedAt: second}}
+	cSpec.Previous = []Previous{linked(cSpec, "b", second, 0)}
 	prepare(t, c, cSpec)
 	for index, want := range []time.Duration{115 * time.Second, 55 * time.Second, 0} {
 		slot := execution.EvaluationTime(1260 + index*60)
@@ -720,7 +718,7 @@ func TestChangedReadinessBaselineReprojectsTheConfirmedArrivalAge(t *testing.T) 
 				SegmentStart: 60, QuietSinceMillis: 1000_000, EarlierMatches: 2}
 			spec := groupSpec("qg", 0)
 			if ack {
-				spec.Previous = []Previous{{QueryGroup: "old", ClosedAt: 60}}
+				spec.Previous = []Previous{linked(spec, "old", 60, 0)}
 				record.Plans = []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: 180_000,
 					InheritedQueryGroup: "old", InheritedClosedAt: 60}}
 			}
@@ -774,7 +772,7 @@ func TestAReleasedPredecessorStaysAbsentAfterSuccessfulInheritance(t *testing.T)
 		t.Fatal(err)
 	}
 	spec := groupSpec("new", 120*time.Second)
-	spec.Previous = []Previous{{QueryGroup: "old", ClosedAt: end}}
+	spec.Previous = []Previous{linked(spec, "old", end, 0)}
 	prepare(t, c, spec)
 	if got, err := c.SlotReadHold(context.Background(), scheduleFor(t, "new", end, nil), 120, holdFence("new")); err != nil || got != 115*time.Second {
 		t.Fatalf("first inherited hold=%s err=%v", got, err)

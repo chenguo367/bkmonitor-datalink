@@ -2,66 +2,181 @@ package controlplane
 
 import (
 	"context"
-	"errors"
 	"sort"
+	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-func carryReadHoldLinks(records []PlanActivationRecord, group execution.QueryGroupIdentity, previous map[execution.PlanKey]ReadHoldPredecessorRef, carried map[execution.PlanKey]PlanActivationRecord) {
+// ReadHoldLinkLifetime is how long a moved Plan's link to the Query Group it
+// left is carried and read: the read hold record's own lifetime
+// (readhold.RecordTTL). Past it the old group's record is gone and every
+// deadline the link protects has passed long since, so the link carries
+// nothing.
+const ReadHoldLinkLifetime = 7 * 24 * time.Hour
+
+// ReadHoldRoute is a Query Group's source route for read holds: its query
+// facts without time_delay and the query revision. Two groups with one route
+// read the same data the same way, only later or earlier, so one's lateness
+// is the other's.
+func ReadHoldRoute(facts execution.QueryPlanFacts) (string, error) {
+	facts.QueryDelaySeconds, facts.QueryRevision = 0, ""
+	return contract.DeriveCanonicalDigestV2("alarmd-read-hold-route-v1", facts)
+}
+
+// readHoldOrigin is a moved Plan's link as the cutover finds it on the
+// Segment it closes, before it knows where the Plan goes: the state
+// generation and the route it leaves with decide, against where it goes,
+// whether it is linked at all and whether the old lateness carries over.
+type readHoldOrigin struct {
+	ref        ReadHoldPredecessorRef
+	generation execution.StateGeneration
+	// route is the route of the content the Plan leaves, read only when the
+	// Plan does move, "" when it cannot be read; routeCarried is false when
+	// the link was carried across an empty Segment from a group of another
+	// route.
+	route        func() string
+	routeCarried bool
+}
+
+// readHoldLinker writes one cutover's links. A Plan that moves keeps the
+// state it had when its state generation does not change -- a time_delay
+// edit, and also a change of method, filter, metric or table -- so the two
+// groups write one state and the new one's first Slots must not read ahead
+// of the old one's last (h design section 5, M2): it is linked. A Plan whose
+// generation changed starts a state of its own and is not.
+type readHoldLinker struct {
+	origins map[execution.PlanKey]readHoldOrigin
+	carried map[execution.PlanKey]PlanActivationRecord
+	// routes is the route of a group the publication activates, "" when
+	// it cannot be derived.
+	routes        func(execution.QueryGroupIdentity) string
+	expiredBefore execution.EvaluationTime
+	facts         *cutoverFacts
+}
+
+// carry writes the links of records, which group now runs. count says the
+// decisions are counted: the same Plan is carried twice, once on its
+// timeline and once in the activation, and decided the same way both times.
+func (linker *readHoldLinker) carry(records []PlanActivationRecord, group execution.QueryGroupIdentity, count bool) {
+	decided := func(decision string) {
+		if count && linker.facts != nil {
+			linker.facts.readHoldLinks[decision]++
+		}
+	}
 	for i := range records {
 		key := records[i].Fact.Key()
-		if ref, ok := previous[key]; ok && ref.QueryGroup != group {
-			copy := ref
-			records[i].PreviousReadHold = &copy
-		} else if old := carried[key].PreviousReadHold; old != nil {
+		if origin, moved := linker.origins[key]; moved && origin.ref.QueryGroup != group {
+			generation := records[i].Fact.Selected.StateGeneration
+			if origin.generation != "" && generation != "" && origin.generation != generation {
+				decided("generation_changed")
+				continue
+			}
+			ref := origin.ref
+			if origin.routeCarried {
+				from := origin.route()
+				ref.SameRoute = from != "" && from == linker.routes(group)
+			}
+			switch {
+			case origin.generation == "" || generation == "":
+				decided("linked_generation_unknown")
+			case ref.SameRoute:
+				decided("linked_same_route")
+			default:
+				decided("linked_route_changed")
+			}
+			records[i].PreviousReadHold = &ref
+			continue
+		}
+		old := linker.carried[key].PreviousReadHold
+		switch {
+		case old == nil:
+		case old.QueryGroup == group:
+			// A Plan back in the group it left before the other group ran
+			// a Slot of it: its Slots are this group's own, in order.
+			decided("dropped_self")
+		case old.ClosedAt < linker.expiredBefore:
+			decided("dropped_expired")
+		default:
 			copy := *old
 			records[i].PreviousReadHold = &copy
 		}
 	}
 }
 
-// ReadHoldPredecessors reads only this Segment's retained Plan links. The
-// metadata does not participate in the frozen execution contract or QG ID.
+// ReadHoldPredecessor is one Query Group this Segment's Plans moved from, at
+// one boundary, with what each moved Plan's link says. The metadata does
+// not participate in the frozen execution contract or QG ID.
 type ReadHoldPredecessor struct {
-	ReadHoldPredecessorRef
-	Plans []execution.PlanKey
+	QueryGroup execution.QueryGroupIdentity
+	ClosedAt   execution.EvaluationTime
+	Plans      []ReadHoldLinkPlan
 }
 
-func (repository *RedisCatalogRepository) ReadHoldPredecessors(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) ([]ReadHoldPredecessor, error) {
+// ReadHoldLinkPlan is one moved Plan's link facts.
+type ReadHoldLinkPlan struct {
+	Key                    execution.PlanKey
+	PreviousSlot           execution.EvaluationTime
+	CompletionOffsetMillis int64
+	SameRoute              bool
+}
+
+// ReadHoldPredecessors reads only this Segment's retained Plan links. A link
+// that names this group, or that no cutover could have written, is skipped
+// and counted in skipped by why -- it can only ever have been written by a
+// fault, and refusing the whole group for it stopped the group for good.
+func (repository *RedisCatalogRepository) ReadHoldPredecessors(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (links []ReadHoldPredecessor, skipped map[string]int, err error) {
 	timeline, err := repository.loadScheduleTimelineHinted(ctx, schedule.Segment.QueryGroup)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, segment := range timeline.Segments {
 		if segment.Schedule.Segment.Start != schedule.Segment.Start {
 			continue
 		}
-		seen := map[ReadHoldPredecessorRef]int{}
-		var refs []ReadHoldPredecessor
+		type origin struct {
+			group    execution.QueryGroupIdentity
+			closedAt execution.EvaluationTime
+		}
+		seen := map[origin]int{}
 		for _, plan := range segment.Plans {
-			if plan.PreviousReadHold == nil {
+			ref := plan.PreviousReadHold
+			if ref == nil {
 				continue
 			}
-			ref := *plan.PreviousReadHold
-			if ref.QueryGroup == "" || ref.QueryGroup == schedule.Segment.QueryGroup || ref.ClosedAt <= 0 || ref.ClosedAt > schedule.Segment.Start {
-				return nil, errors.New("alarmd controlplane: invalid read hold predecessor")
+			reason := ""
+			switch {
+			case ref.QueryGroup == schedule.Segment.QueryGroup:
+				reason = "self_link"
+			case ref.QueryGroup == "" || ref.ClosedAt <= 0 || ref.ClosedAt > schedule.Segment.Start || ref.PreviousSlot >= ref.ClosedAt ||
+				ref.PreviousSlot < 0 || ref.CompletionOffsetMillis < 0:
+				reason = "invalid_link"
 			}
-			index, ok := seen[ref]
+			if reason != "" {
+				if skipped == nil {
+					skipped = map[string]int{}
+				}
+				skipped[reason]++
+				continue
+			}
+			key := origin{group: ref.QueryGroup, closedAt: ref.ClosedAt}
+			index, ok := seen[key]
 			if !ok {
-				index = len(refs)
-				seen[ref] = index
-				refs = append(refs, ReadHoldPredecessor{ReadHoldPredecessorRef: ref})
+				index = len(links)
+				seen[key] = index
+				links = append(links, ReadHoldPredecessor{QueryGroup: ref.QueryGroup, ClosedAt: ref.ClosedAt})
 			}
-			refs[index].Plans = append(refs[index].Plans, plan.Fact.Key())
+			links[index].Plans = append(links[index].Plans, ReadHoldLinkPlan{Key: plan.Fact.Key(), PreviousSlot: ref.PreviousSlot,
+				CompletionOffsetMillis: ref.CompletionOffsetMillis, SameRoute: ref.SameRoute})
 		}
-		sort.Slice(refs, func(i, j int) bool {
-			if refs[i].QueryGroup != refs[j].QueryGroup {
-				return refs[i].QueryGroup < refs[j].QueryGroup
+		sort.Slice(links, func(i, j int) bool {
+			if links[i].QueryGroup != links[j].QueryGroup {
+				return links[i].QueryGroup < links[j].QueryGroup
 			}
-			return refs[i].ClosedAt < refs[j].ClosedAt
+			return links[i].ClosedAt < links[j].ClosedAt
 		})
-		return refs, nil
+		return links, skipped, nil
 	}
-	return nil, ErrScheduleUnavailable
+	return nil, nil, ErrScheduleUnavailable
 }

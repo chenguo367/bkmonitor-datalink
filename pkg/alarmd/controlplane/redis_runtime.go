@@ -433,7 +433,23 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	updates := make([]scheduleTimelineUpdate, 0, len(oldGroups)+len(newGroups))
 	candidates := make([]pruneCandidate, 0, len(oldGroups))
 	plans := make([]PlanActivationRecord, 0, len(candidate.Plans))
-	readHoldPrevious := make(map[execution.PlanKey]ReadHoldPredecessorRef)
+	readHoldPrevious := make(map[execution.PlanKey]readHoldOrigin)
+	// A route is derived once per group, "" when it cannot be: a link then
+	// keeps ordering and carries no lateness over. The publication's groups
+	// carry their query; a group a Segment closes on is read from the content
+	// that Segment names -- the previous activation keeps membership only.
+	routes := make(map[execution.QueryGroupIdentity]string)
+	routeOf := func(identity execution.QueryGroupIdentity, load func() (QueryGroup, error)) string {
+		if route, known := routes[identity]; known {
+			return route
+		}
+		route := ""
+		if group, err := load(); err == nil {
+			route, _ = ReadHoldRoute(group.QueryPlan)
+		}
+		routes[identity] = route
+		return route
+	}
 	oldIdentities := make([]execution.QueryGroupIdentity, 0, len(oldGroups))
 	for identity := range oldGroups {
 		oldIdentities = append(oldIdentities, identity)
@@ -703,28 +719,39 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		if err := closed.Validate(); err != nil {
 			return err
 		}
+		closedRecords := make(map[execution.PlanKey]PlanActivationRecord, len(open.Plans))
+		for _, record := range open.Plans {
+			closedRecords[record.Fact.Key()] = record
+		}
+		closedSegment, closedGroup := open.Schedule.Segment, queryGroup
+		closedRoute := func() string {
+			return routeOf(closedGroup, func() (QueryGroup, error) {
+				return repository.LoadObservedSegmentQueryGroup(ctx, closedSegment, closedSegment.Start)
+			})
+		}
 		for _, plan := range closed.Plans {
+			record := closedRecords[plan.Key()]
+			origin := readHoldOrigin{generation: record.Fact.Selected.StateGeneration, route: closedRoute, routeCarried: true}
 			last := int64(boundary) - 1
 			last -= (last - int64(plan.Spec.Alignment)) % plan.Spec.EvaluationIntervalSeconds
-			if last < int64(closed.Segment.Start) {
+			// The same last legal Slot readhold's closeRecord fixes.
+			if last < int64(closed.Segment.Start) || !plan.Spec.IsAligned(execution.EvaluationTime(last)) {
 				// An intermediate segment that never ran a Slot adds no new
 				// deadline. Keep the previous real segment's bridge directly.
-				var previous *ReadHoldPredecessorRef
-				for _, record := range open.Plans {
-					if record.Fact.Key() == plan.Key() {
-						previous = record.PreviousReadHold
-						break
-					}
-				}
-				if previous != nil {
-					readHoldPrevious[plan.Key()] = *previous
+				if previous := record.PreviousReadHold; previous != nil {
+					origin.ref, origin.routeCarried = *previous, previous.SameRoute
+					readHoldPrevious[plan.Key()] = origin
 					continue
 				}
 				if len(timeline.Segments) == 1 {
 					continue
 				}
+				origin.ref = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary}
+			} else {
+				origin.ref = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary, PreviousSlot: execution.EvaluationTime(last),
+					CompletionOffsetMillis: plan.Spec.CompletionOffsetSeconds() * 1000}
 			}
-			readHoldPrevious[plan.Key()] = ReadHoldPredecessorRef{QueryGroup: queryGroup, ClosedAt: boundary}
+			readHoldPrevious[plan.Key()] = origin
 		}
 		timeline.Segments[last].Schedule = closed
 		timeline.RecordRevision++
@@ -786,12 +813,23 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	}
 	// The link is written in the existing timeline/activation CAS. A new
 	// owner can find the previous QG without scanning state or relying on the
-	// shorter-lived draining projection. Kept links survive content changes.
+	// shorter-lived draining projection. Kept links survive content changes
+	// until their lifetime.
+	linker := readHoldLinker{origins: readHoldPrevious, carried: carried, facts: cutover,
+		routes: func(identity execution.QueryGroupIdentity) string {
+			return routeOf(identity, func() (QueryGroup, error) {
+				if group, found := newGroups[identity]; found {
+					return group, nil
+				}
+				return QueryGroup{}, ErrCatalogObjectUnavailable
+			})
+		},
+		expiredBefore: boundary - execution.EvaluationTime(ReadHoldLinkLifetime/time.Second)}
 	for i := range updates {
 		for j := range updates[i].next.Segments {
 			segment := &updates[i].next.Segments[j]
 			if segment.Schedule.Segment.Start == boundary && segment.Schedule.Segment.End == nil {
-				carryReadHoldLinks(segment.Plans, segment.Schedule.Segment.QueryGroup, readHoldPrevious, carried)
+				linker.carry(segment.Plans, segment.Schedule.Segment.QueryGroup, true)
 			}
 		}
 	}
@@ -802,7 +840,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		}
 	}
 	for i := range plans {
-		carryReadHoldLinks(plans[i:i+1], groupsByPlan[plans[i].Fact.Key()], readHoldPrevious, carried)
+		linker.carry(plans[i:i+1], groupsByPlan[plans[i].Fact.Key()], false)
 	}
 	// Coverage is owed by everyone the cutover did not hold back. A blocked
 	// Query Group's carried records name what it ran, which may not be the

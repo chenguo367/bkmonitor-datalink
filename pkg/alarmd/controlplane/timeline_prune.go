@@ -265,6 +265,7 @@ type cutoverFacts struct {
 	payloadBytes    int
 	timelineBytes   []int
 	decisions       map[string]int
+	readHoldLinks   map[string]int
 	read            int
 	revisionsFolded int
 	contentSource   string
@@ -274,7 +275,7 @@ type cutoverFacts struct {
 }
 
 func newCutoverFacts() *cutoverFacts {
-	return &cutoverFacts{started: time.Now(), skipped: make(map[string]int), decisions: make(map[string]int)}
+	return &cutoverFacts{started: time.Now(), skipped: make(map[string]int), decisions: make(map[string]int), readHoldLinks: make(map[string]int)}
 }
 
 func (facts *cutoverFacts) decided(decision contentCutoverDecision) {
@@ -335,7 +336,7 @@ func (repository *RedisCatalogRepository) observeCutover(ctx context.Context, fa
 			Timelines: len(facts.timelineBytes), PayloadBytes: facts.payloadBytes,
 			MaxTimelineBytes: largest, TimelineBytes: facts.timelineBytes, SegmentsPruned: facts.pruned,
 			PrunesSkipped: facts.skipped, Duration: time.Since(facts.started),
-			QueryGroups: facts.decisions, TimelinesRead: facts.read, RevisionsFolded: facts.revisionsFolded,
+			QueryGroups: facts.decisions, ReadHoldLinks: facts.readHoldLinks, TimelinesRead: facts.read, RevisionsFolded: facts.revisionsFolded,
 			ContentSource: facts.contentSource,
 		},
 	})

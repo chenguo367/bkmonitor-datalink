@@ -104,6 +104,7 @@ type phaseTwoMetrics struct {
 	statePreflights                *prometheus.CounterVec
 	stateAdmissions                *prometheus.CounterVec
 	scheduleCutoverQueryGroups     *prometheus.CounterVec
+	scheduleCutoverReadHoldLinks   *prometheus.CounterVec
 	scheduleCutoverTimelinesRead   prometheus.Gauge
 	// The last successful cutover's exact duration, set with its payload and
 	// timelines read so the three describe one cutover; the first
@@ -913,6 +914,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.scheduleCutovers.WithLabelValues("success", "")
 	for _, decision := range observability.ScheduleCutoverDecisions {
 		metrics.scheduleCutoverQueryGroups.WithLabelValues(decision)
+	}
+	metrics.scheduleCutoverReadHoldLinks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_read_hold_links_total", Help: "Moved Plans' links to the Query Group they left, by what a publication cutover did with them: linked_same_route (the state generation and the route are unchanged: ordering is kept and the old lateness carries over), linked_route_changed (same state, another route: ordering only), linked_generation_unknown (a generation could not be read; linked to keep ordering), generation_changed (no state shared; no link), dropped_self (a carried link named the group it is in), dropped_expired (a carried link past its lifetime)."}, []string{"decision"})
+	for _, decision := range observability.ScheduleCutoverReadHoldLinks {
+		metrics.scheduleCutoverReadHoldLinks.WithLabelValues(decision)
 	}
 	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_expired_total",
@@ -1802,7 +1807,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
@@ -1996,6 +2001,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			}
 			for decision, count := range facts.QueryGroups {
 				m.scheduleCutoverQueryGroups.WithLabelValues(decision).Add(float64(count))
+			}
+			for decision, count := range facts.ReadHoldLinks {
+				m.scheduleCutoverReadHoldLinks.WithLabelValues(decision).Add(float64(count))
 			}
 		}
 	}

@@ -47,7 +47,9 @@ func (holds *productionReadHolds) groupPage(engine *lookback.Engine, after strin
 	end := min(start+limit, len(groups))
 	for _, qg := range groups[start:end] {
 		inspection := holds.controller.Inspect(qg)
-		record, known := inspection.Record, inspection.Loaded && (!inspection.Missing || inspection.Seeded)
+		// A record that did not decode says nothing until the group's next
+		// write replaces it.
+		record, known := inspection.Record, inspection.Loaded && !inspection.Corrupt && (!inspection.Missing || inspection.Seeded)
 		row := lookbackGroupReading{QueryGroup: qg, HoldKnown: known}
 		if known {
 			row.ReadHold = &record
@@ -124,6 +126,21 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 	stats := engine.Stats()
 	if holds != nil {
 		stats.ReadHoldTransitions, stats.ReadHoldTransitionOvertaken = holds.transitions.Load(), holds.overtaken.Load()
+		// Every reason and source at zero: a series that is absent reads as
+		// a build without it.
+		controller := holds.controller.Stats()
+		stats.ReadHoldPredecessors = make(map[string]uint64, len(readhold.PredecessorReasons)+len(readHoldLinkReasons))
+		for _, reason := range readhold.PredecessorReasons {
+			stats.ReadHoldPredecessors[reason] = controller.Predecessors[reason]
+		}
+		holds.linksMu.Lock()
+		for _, reason := range readHoldLinkReasons {
+			stats.ReadHoldPredecessors[reason] = holds.links[reason]
+		}
+		holds.linksMu.Unlock()
+		stats.ReadHoldClamped = map[string]uint64{readhold.ClampKnown: controller.Clamped[readhold.ClampKnown],
+			readhold.ClampFallback: controller.Clamped[readhold.ClampFallback]}
+		stats.ReadHoldOwnCorrupt, stats.ReadHoldRetireCloseFailed = controller.OwnCorrupt, holds.retireCloseFailed.Load()
 	}
 	return stats
 }
@@ -141,7 +158,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 			continue
 		}
 		inspection := holds.controller.Inspect(qg)
-		if !inspection.Loaded || inspection.Missing {
+		if !inspection.Loaded || inspection.Missing || inspection.Corrupt {
 			continue
 		}
 		record := inspection.Record
@@ -150,7 +167,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 			millis = *record.PendingHoldMillis
 		}
 		facts[string(qg)] = fleet.ReadHoldFacts{Millis: millis, ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
-			AtLimit: record.AtLimit, RaisedAfterLowering: record.RaisedAfterLowering, Noise: record.Noise, Rung: record.Rung,
+			AtLimit: record.AtLimit, RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
 			Buckets:    append([]int64(nil), record.Buckets[:min(len(record.Buckets), fleet.MaxReadEarlyBuckets)]...),
 			Annotation: "alarmd 当前自动推后 " + strconv.FormatFloat(float64(millis)/1000, 'f', -1, 64) + " 秒"}
 	}

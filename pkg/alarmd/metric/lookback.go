@@ -62,14 +62,18 @@ type lookbackCollector struct {
 	supplementHold       *prometheus.Desc
 	supplementHoldMax    *prometheus.Desc
 	// The early reads of directed Slots, before their next Slot reads.
-	earlyReads         *prometheus.Desc
-	earlyUndecided     *prometheus.Desc
-	earlyBytes         *prometheus.Desc
-	earlierReads       *prometheus.Desc
-	earlierBytes       *prometheus.Desc
-	holdIgnored        *prometheus.Desc
-	readHoldTransition *prometheus.Desc
-	readHoldOvertaken  *prometheus.Desc
+	earlyReads          *prometheus.Desc
+	earlyUndecided      *prometheus.Desc
+	earlyBytes          *prometheus.Desc
+	earlierReads        *prometheus.Desc
+	earlierBytes        *prometheus.Desc
+	holdIgnored         *prometheus.Desc
+	readHoldTransition  *prometheus.Desc
+	readHoldOvertaken   *prometheus.Desc
+	readHoldPredecessor *prometheus.Desc
+	readHoldClamped     *prometheus.Desc
+	readHoldCorrupt     *prometheus.Desc
+	readHoldRetireClose *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -79,6 +83,23 @@ func newLookbackCollector() *lookbackCollector {
 	return &lookbackCollector{
 		readHoldTransition: desc("read_hold_transition_total", "Slots whose first readiness preserves a preceding segment's completion deadline."),
 		readHoldOvertaken:  desc("read_hold_transition_overtaken_total", "Closed-segment attempts refused because newer state has already applied."),
+		readHoldPredecessor: desc("read_hold_predecessor_total",
+			"Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the "+
+				"old group's closed record), frozen_contract (the old group's Progress still carried its last Slot's "+
+				"contract), open_frozen (the old record, not yet closed, still covered that Slot), zero_proven (no record "+
+				"once the old group had frozen that Slot), or -- each read as the hold bound, which costs the successor's "+
+				"first Slots a later read and never a Slot -- record_open, zero_unproven, record_corrupt, record_unreadable; "+
+				"and the links it skipped: self_link, invalid_link, expired.", "reason"),
+		readHoldClamped: desc("read_hold_transition_clamped_total",
+			"Slots frozen at the group's hold limit because a transition asked for more, by source: known (a known "+
+				"previous hold asked for it; the old group's last Slot may overtake this one) or fallback (only the hold "+
+				"bound standing in for an unknown one did).", "source"),
+		readHoldCorrupt: desc("read_hold_record_corrupt_total",
+			"Query Groups whose own read hold record did not decode: replaced at the next write, every Plan kept to the "+
+				"hold bound from then."),
+		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
+			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
+				"unclosed record as the hold bound."),
 		firstReads: desc("lookback_first_reads_total",
 			"Formal first reads seen, by source - the data source the Query Group reads, labelled as the directory "+
 				"labels its Query Groups, so every lookback family reads beside them: the denominator of the query "+
@@ -223,7 +244,8 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken} {
+		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken,
+		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose} {
 		ch <- desc
 	}
 }
@@ -244,6 +266,14 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	counter(c.readHoldTransition, stats.ReadHoldTransitions)
 	counter(c.readHoldOvertaken, stats.ReadHoldTransitionOvertaken)
+	for reason, count := range stats.ReadHoldPredecessors {
+		counter(c.readHoldPredecessor, count, reason)
+	}
+	for source, count := range stats.ReadHoldClamped {
+		counter(c.readHoldClamped, count, source)
+	}
+	counter(c.readHoldCorrupt, stats.ReadHoldOwnCorrupt)
+	counter(c.readHoldRetireClose, stats.ReadHoldRetireCloseFailed)
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)
 		for _, outcome := range lookback.SampleOutcomes {

@@ -8,15 +8,17 @@ import (
 // ReadHoldFacts is a compact projection of the owner's fenced record. An
 // absent projection is unknown; it is never interpreted as a zero hold.
 type ReadHoldFacts struct {
-	Millis              int64   `json:"read_hold_ms"`
-	ArrivalAgeMillis    int64   `json:"arrival_age_ms"`
-	LimitMillis         int64   `json:"limit_ms"`
-	AtLimit             bool    `json:"at_limit"`
-	RaisedAfterLowering uint64  `json:"raised_after_lowering"`
-	Noise               uint64  `json:"noise"`
-	Rung                string  `json:"rung,omitempty"`
-	Buckets             []int64 `json:"buckets,omitempty"`
-	Annotation          string  `json:"annotation"`
+	Millis              int64  `json:"read_hold_ms"`
+	ArrivalAgeMillis    int64  `json:"arrival_age_ms"`
+	LimitMillis         int64  `json:"limit_ms"`
+	AtLimit             bool   `json:"at_limit"`
+	RaisedAfterLowering uint64 `json:"raised_after_lowering"`
+	// NoWholeWindowArrival is the samples classed window read early in
+	// which no series arrived whole after the first read.
+	NoWholeWindowArrival uint64  `json:"no_whole_window_arrival"`
+	Rung                 string  `json:"rung,omitempty"`
+	Buckets              []int64 `json:"buckets,omitempty"`
+	Annotation           string  `json:"annotation"`
 }
 
 func withinReadHoldBudget(facts map[string]ReadHoldFacts, budget int) map[string]ReadHoldFacts {

@@ -159,9 +159,20 @@ func key3(a, b, c string) string { return a + "|" + b + "|" + c }
 
 // Stats is the lookback as it stands.
 type Stats struct {
-	ReadHoldTransitions         uint64   `json:"read_hold_transition"`
-	ReadHoldTransitionOvertaken uint64   `json:"read_hold_transition_overtaken"`
-	Coverage                    Coverage `json:"coverage"`
+	ReadHoldTransitions         uint64 `json:"read_hold_transition"`
+	ReadHoldTransitionOvertaken uint64 `json:"read_hold_transition_overtaken"`
+	// ReadHoldPredecessors is what a successor took each moved Plan's
+	// previous hold from, and the links it skipped, by reason.
+	ReadHoldPredecessors map[string]uint64 `json:"read_hold_predecessors,omitempty"`
+	// ReadHoldClamped is the Slots frozen at the hold limit because a
+	// transition asked for more: known or fallback.
+	ReadHoldClamped map[string]uint64 `json:"read_hold_transition_clamped,omitempty"`
+	// ReadHoldOwnCorrupt is the groups whose own record did not decode and
+	// was replaced; ReadHoldRetireCloseFailed the retired groups whose
+	// closing failed and that retired all the same.
+	ReadHoldOwnCorrupt        uint64   `json:"read_hold_record_corrupt"`
+	ReadHoldRetireCloseFailed uint64   `json:"read_hold_retire_close_failed"`
+	Coverage                  Coverage `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its

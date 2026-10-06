@@ -292,7 +292,7 @@ func TestWholeWindowArrivalPublishesTheFirstConfirmedAgeBeforeTheDeepProbe(t *te
 
 func TestPartialRevisionAndVanishingValuesDoNotRaiseTheReadHold(t *testing.T) {
 	for _, partial := range []bool{true, false} {
-		t.Run(map[bool]string{true: ClassPartialRevised, false: "noise"}[partial], func(t *testing.T) {
+		t.Run(map[bool]string{true: ClassPartialRevised, false: IgnoredNoWholeWindowArrival}[partial], func(t *testing.T) {
 			f := newFixture(t)
 			arrived := make(chan ReadHoldEvidence, 1)
 			ignored := make(chan string, 1)
@@ -312,7 +312,7 @@ func TestPartialRevisionAndVanishingValuesDoNotRaiseTheReadHold(t *testing.T) {
 			if len(arrived) != 0 {
 				t.Fatal("a partial revision or disappearing value raised the whole-window hold")
 			}
-			reason := map[bool]string{true: ClassPartialRevised, false: "noise"}[partial]
+			reason := map[bool]string{true: ClassPartialRevised, false: IgnoredNoWholeWindowArrival}[partial]
 			select {
 			case got := <-ignored:
 				if got != reason || f.engine.Stats().Sources[sourceLog].ReadHoldIgnored[reason] != 1 {

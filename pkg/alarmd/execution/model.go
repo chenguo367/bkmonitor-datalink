@@ -78,6 +78,19 @@ type FrozenExecutionContractRef struct {
 // a Query Group is given, and short of any arithmetic on deadlines.
 const MaxReadHoldMillis = int64(24 * time.Hour / time.Millisecond)
 
+// LoweredReadHold is the hold one lowering step tries from hold: half of it,
+// or none once half is less than a step of the group's period -- below a
+// step a hold no longer moves the read past another point, and halving to
+// zero would take a dozen quiet hours. The early read that tries the step and
+// the controller that takes it decide it by this one rule.
+func LoweredReadHold(hold, step time.Duration) time.Duration {
+	half := time.Duration(hold.Milliseconds()/2) * time.Millisecond
+	if half < step {
+		return 0
+	}
+	return half
+}
+
 func (ref FrozenExecutionContractRef) Validate() error {
 	switch {
 	case ref.Slot.QueryGroup == "":

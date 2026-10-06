@@ -26,13 +26,52 @@ const (
 )
 
 var (
-	ErrNotRestored         = errors.New("alarmd readhold: Query Group not restored")
-	ErrNotConfigured       = errors.New("alarmd readhold: Query Group not configured")
-	ErrConflict            = errors.New("alarmd readhold: record changed")
-	ErrPreviousOpen        = errors.New("alarmd readhold: previous schedule not closed")
-	ErrPreviousHoldUnknown = errors.New("alarmd readhold: previous read hold unknown")
-	ErrSegmentStale        = errors.New("alarmd readhold: schedule segment already replaced")
+	ErrNotRestored   = errors.New("alarmd readhold: Query Group not restored")
+	ErrNotConfigured = errors.New("alarmd readhold: Query Group not configured")
+	ErrConflict      = errors.New("alarmd readhold: record changed")
+	ErrSegmentStale  = errors.New("alarmd readhold: schedule segment already replaced")
+	// ErrRecordCorrupt is a stored record that does not decode. The group
+	// it belongs to is still restored: its own is replaced at the next write
+	// (seed), a predecessor's is read as unknown (previousHold).
+	ErrRecordCorrupt = errors.New("alarmd readhold: stored record does not decode")
 )
+
+// What a successor took each moved Plan's previous hold from
+// (previousHold): its predecessor's closed record, the frozen contract of
+// the predecessor's last Slot, the open record's hold at that Slot, a
+// proven zero -- or, for the rest, the hold bound, which no hold exceeds.
+const (
+	PredecessorInherited      = "inherited"
+	PredecessorFrozenContract = "frozen_contract"
+	PredecessorOpenFrozen     = "open_frozen"
+	PredecessorRecordOpen     = "record_open"
+	PredecessorZeroProven     = "zero_proven"
+	PredecessorZeroUnproven   = "zero_unproven"
+	PredecessorRecordCorrupt  = "record_corrupt"
+	PredecessorUnreadable     = "record_unreadable"
+)
+
+// PredecessorReasons is the closed list of them.
+var PredecessorReasons = []string{PredecessorInherited, PredecessorFrozenContract, PredecessorOpenFrozen, PredecessorRecordOpen,
+	PredecessorZeroProven, PredecessorZeroUnproven, PredecessorRecordCorrupt, PredecessorUnreadable}
+
+// A Slot whose transition asked for more than the group's hold limit is
+// frozen at the limit (SlotReadHold): ClampKnown when the hold that asked
+// for it was known, the one ordering a successor could still lose;
+// ClampFallback when only a bound standing in for an unknown hold did.
+const (
+	ClampKnown    = "known"
+	ClampFallback = "fallback"
+)
+
+// Stats are the controller's counts since it started.
+type Stats struct {
+	Predecessors map[string]uint64
+	Clamped      map[string]uint64
+	// OwnCorrupt is the groups whose own record did not decode and was
+	// replaced, the bound standing in for whatever it held.
+	OwnCorrupt uint64
+}
 
 // Control uses the existing ownership store. A value and its Plan/route
 // evidence are one fenced CAS in the owning Query Group's Redis hash slot.
@@ -79,20 +118,39 @@ type PlanRecord struct {
 type Transition struct {
 	Key            execution.PlanKey `json:"key"`
 	DeadlineMillis int64             `json:"deadline_ms"`
+	// Fallback is a deadline taken from the hold bound in place of a
+	// predecessor hold nobody could read: it may ask for more than needed.
+	Fallback bool `json:"fallback,omitempty"`
 }
 
 type Previous struct {
 	QueryGroup execution.QueryGroupIdentity
 	ClosedAt   execution.EvaluationTime
-	// Plans identifies this activation's links. Different Plans can leave
-	// the same Query Group at different boundaries. Empty means spec.Plans.
-	Plans []PlanRef
-	// Schedule supplies the predecessor's last legal Slot when its hold was
-	// independently established as zero and no hold record ever existed.
-	Schedule *execution.FrozenQueryGroupSchedule
-	// Absence alone is not a historical hold. The caller may establish this
-	// fact for a predecessor that never had a nonzero hold.
-	ZeroConfirmed bool
+	// Links are this activation's Plans that left the group at ClosedAt.
+	// Different Plans can leave the same Query Group at different
+	// boundaries.
+	Links []PlanLink
+}
+
+// PlanLink is one moved Plan: what its link says, from the cutover that
+// closed the old Segment, and what the predecessor's Progress says of the
+// link's last Slot. None of it requires the old group's timeline or content.
+type PlanLink struct {
+	PlanRef
+	// PreviousSlot is the Plan's last legal Slot in the Segment it left and
+	// CompletionOffsetMillis its completion offset there; zero when that
+	// Segment held no Slot of it, and there is then no deadline to keep.
+	PreviousSlot           execution.EvaluationTime
+	CompletionOffsetMillis int64
+	// SameRoute is the old group reading the same source the same way: only
+	// then does its arrival age carry over. The deadline is kept either way.
+	SameRoute bool
+	// FrozenHoldMillis is the hold the predecessor froze PreviousSlot with,
+	// when its Progress still carries that Slot's contract.
+	FrozenHoldMillis *int64
+	// MovedPast is the predecessor's Progress having frozen every Slot
+	// through PreviousSlot, so no observation can raise that Slot's hold.
+	MovedPast bool
 }
 
 type GroupSpec struct {
@@ -103,7 +161,13 @@ type GroupSpec struct {
 	// HoldLimit is snapshot retention minus its existing minimum lifetime.
 	// Zero means no margin, not an unset limit.
 	HoldLimit time.Duration
-	Previous  []Previous
+	// Step is the shortest evaluation interval of its Plans, below which a
+	// lowering goes to zero (execution.LoweredReadHold); MaxCompletionOffset
+	// the longest completion offset, which a replaced own record's bound
+	// covers.
+	Step                time.Duration
+	MaxCompletionOffset time.Duration
+	Previous            []Previous
 }
 
 type Evidence struct {
@@ -130,12 +194,23 @@ type entry struct {
 	configured, loaded, seeded bool
 	record                     Record
 	raw                        []byte
+	// corrupt is a stored record that did not decode: raw is its bytes, so
+	// the next write replaces it, and record starts empty.
+	corrupt bool
+	// validated is the Segment whose schedule SlotReadHold last checked: a
+	// frozen schedule is checked once per Segment, not once per Slot.
+	validated execution.ScheduleSegmentFact
 }
 
 type Controller struct {
 	options Options
 	mu      sync.RWMutex
 	groups  map[execution.QueryGroupIdentity]*entry
+
+	statsMu      sync.Mutex
+	predecessors map[string]uint64
+	clamped      map[string]uint64
+	ownCorrupt   uint64
 }
 
 func NewController(options Options) (*Controller, error) {
@@ -146,7 +221,29 @@ func NewController(options Options) (*Controller, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry)}, nil
+	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
+		predecessors: make(map[string]uint64), clamped: make(map[string]uint64)}, nil
+}
+
+// Stats copies the counts.
+func (controller *Controller) Stats() Stats {
+	controller.statsMu.Lock()
+	defer controller.statsMu.Unlock()
+	stats := Stats{Predecessors: make(map[string]uint64, len(controller.predecessors)),
+		Clamped: make(map[string]uint64, len(controller.clamped)), OwnCorrupt: controller.ownCorrupt}
+	for reason, count := range controller.predecessors {
+		stats.Predecessors[reason] = count
+	}
+	for source, count := range controller.clamped {
+		stats.Clamped[source] = count
+	}
+	return stats
+}
+
+func (controller *Controller) counted(counts map[string]uint64, key string) {
+	controller.statsMu.Lock()
+	counts[key]++
+	controller.statsMu.Unlock()
 }
 
 func (controller *Controller) group(qg execution.QueryGroupIdentity) *entry {
@@ -169,15 +266,15 @@ func (controller *Controller) Configure(spec GroupSpec) error {
 		}
 	}
 	for _, previous := range spec.Previous {
-		if previous.QueryGroup == "" || previous.QueryGroup == spec.QueryGroup || previous.ClosedAt <= 0 {
+		if previous.QueryGroup == "" || previous.QueryGroup == spec.QueryGroup || previous.ClosedAt <= 0 || len(previous.Links) == 0 {
 			return errors.New("alarmd readhold: invalid predecessor")
 		}
-		for _, plan := range previous.Plans {
+		for _, link := range previous.Links {
 			found := false
 			for _, wanted := range spec.Plans {
-				found = found || wanted == plan
+				found = found || wanted == link.PlanRef
 			}
-			if !found {
+			if !found || link.PreviousSlot < 0 || link.PreviousSlot >= previous.ClosedAt || link.CompletionOffsetMillis < 0 {
 				return errors.New("alarmd readhold: predecessor Plan not configured")
 			}
 		}
@@ -185,7 +282,7 @@ func (controller *Controller) Configure(spec GroupSpec) error {
 	spec.Plans = append([]PlanRef(nil), spec.Plans...)
 	spec.Previous = append([]Previous(nil), spec.Previous...)
 	for index := range spec.Previous {
-		spec.Previous[index].Plans = append([]PlanRef(nil), spec.Previous[index].Plans...)
+		spec.Previous[index].Links = append([]PlanLink(nil), spec.Previous[index].Links...)
 	}
 	state := controller.group(spec.QueryGroup)
 	state.mu.Lock()
@@ -212,20 +309,30 @@ func (controller *Controller) RestoreBatch(ctx context.Context, groups []executi
 	}
 	var first error
 	for index, read := range reads {
-		decodeErr := read.Err
-		record := Record{SinceSlot: 1}
-		if !read.Missing && decodeErr == nil {
-			record, decodeErr = Decode(read.Raw)
-		}
-		if decodeErr != nil {
+		if read.Err != nil {
 			if first == nil {
-				first = fmt.Errorf("readhold %s: %w", groups[index], decodeErr)
+				first = fmt.Errorf("readhold %s: %w", groups[index], read.Err)
 			}
 			continue
 		}
+		record, corrupt := Record{SinceSlot: 1}, false
+		if !read.Missing {
+			decoded, err := Decode(read.Raw)
+			if err != nil {
+				// Restored all the same, empty and marked: a record that will
+				// never decode must not keep its group unrestored until it
+				// expires a week later.
+				corrupt = true
+				if first == nil {
+					first = fmt.Errorf("readhold %s: %w: %w", groups[index], ErrRecordCorrupt, err)
+				}
+			} else {
+				record = decoded
+			}
+		}
 		state := controller.group(groups[index])
 		state.mu.Lock()
-		state.record, state.raw, state.loaded, state.seeded = record, append([]byte(nil), read.Raw...), true, false
+		state.record, state.raw, state.loaded, state.seeded, state.corrupt = record, append([]byte(nil), read.Raw...), true, false, corrupt
 		state.mu.Unlock()
 	}
 	return first
@@ -272,6 +379,8 @@ type Inspection struct {
 	Loaded  bool
 	Missing bool
 	Seeded  bool
+	// Corrupt is a stored record that did not decode; Record is then empty.
+	Corrupt bool
 }
 
 func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspection {
@@ -283,7 +392,8 @@ func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspectio
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return Inspection{Record: clone(state.record), Loaded: state.loaded, Missing: state.loaded && len(state.raw) == 0, Seeded: state.seeded}
+	return Inspection{Record: clone(state.record), Loaded: state.loaded, Missing: state.loaded && len(state.raw) == 0, Seeded: state.seeded,
+		Corrupt: state.corrupt}
 }
 
 func clone(record Record) Record {
@@ -338,7 +448,7 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 	}
 	switch status {
 	case ownership.FencedCASApplied:
-		state.record, state.raw = next, raw
+		state.record, state.raw, state.corrupt = next, raw, false
 		return nil
 	case ownership.FencedCASConflict:
 		state.loaded = false
@@ -354,10 +464,10 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 
 func inherited(record Record, spec GroupSpec) bool {
 	for _, predecessor := range spec.Previous {
-		for _, wanted := range previousPlans(spec, predecessor) {
+		for _, link := range predecessor.Links {
 			found := false
 			for _, plan := range record.Plans {
-				found = found || (plan.PlanRef == wanted && plan.InheritedClosedAt == predecessor.ClosedAt && plan.InheritedQueryGroup == predecessor.QueryGroup)
+				found = found || (plan.PlanRef == link.PlanRef && plan.InheritedClosedAt == predecessor.ClosedAt && plan.InheritedQueryGroup == predecessor.QueryGroup)
 			}
 			if !found {
 				return false
@@ -367,11 +477,87 @@ func inherited(record Record, spec GroupSpec) bool {
 	return true
 }
 
-func previousPlans(spec GroupSpec, predecessor Previous) []PlanRef {
-	if len(predecessor.Plans) > 0 {
-		return predecessor.Plans
+// previousFact is what a successor takes from its predecessor for one moved
+// Plan: the Plan's last Slot there and its offset, the hold that Slot was
+// frozen with, what that hold was taken from, the old group's arrival age
+// where its record says one, and whether the hold is the bound standing in
+// for one nobody could read.
+type previousFact struct {
+	slot    execution.EvaluationTime
+	offset  int64
+	hold    int64
+	reason  string
+	arrival int64
+	bound   bool
+}
+
+// previousHold reads one moved Plan's previousFact. Never an error: what
+// cannot be read is the hold bound, which no group's hold exceeds, so a
+// deadline taken from it is never earlier than the real one (h design
+// section 5). The successor reads later, for its first few Slots at most; it
+// is never refused. The closed record says the Plan's last Slot and its
+// offset as the old owner fixed them; in every other case they are the
+// link's.
+func (controller *Controller) previousHold(old Inspection, predecessor Previous, link PlanLink) previousFact {
+	fact := previousFact{slot: link.PreviousSlot, offset: link.CompletionOffsetMillis}
+	frozen := func(reason string) previousFact {
+		fact.hold, fact.reason = *link.FrozenHoldMillis, reason
+		return fact
 	}
-	return spec.Plans
+	bounded := func(reason string) previousFact {
+		if link.FrozenHoldMillis != nil {
+			return frozen(PredecessorFrozenContract)
+		}
+		fact.hold, fact.reason, fact.bound = controller.options.MaxHold.Milliseconds(), reason, true
+		return fact
+	}
+	switch {
+	case !old.Loaded:
+		return bounded(PredecessorUnreadable)
+	case old.Corrupt:
+		return bounded(PredecessorRecordCorrupt)
+	case old.Missing:
+		if link.FrozenHoldMillis != nil {
+			return frozen(PredecessorFrozenContract)
+		}
+		// No record. A nonzero hold always has one, renewed daily and kept
+		// a week, so its absence once the old group has frozen the last Slot
+		// proves that Slot was frozen at zero -- while the Slot is recent
+		// enough that a record written for it would still be here, allowing
+		// two failed renewal days. It rests on Redis evicting no key that
+		// carries a TTL.
+		recent := controller.options.Now().Add(-(RecordTTL - 2*RenewInterval)).Unix()
+		if link.MovedPast && int64(link.PreviousSlot) > recent {
+			fact.reason = PredecessorZeroProven
+			return fact
+		}
+		return bounded(PredecessorZeroUnproven)
+	}
+	for _, plan := range old.Record.Plans {
+		// By key: a Plan whose route changed is the same Plan.
+		if plan.Key == link.Key && plan.ClosedAt == predecessor.ClosedAt &&
+			(plan.ClosedQueryGroup == "" || plan.ClosedQueryGroup == predecessor.QueryGroup) {
+			// The old owner's own bound for a slow Plan's final Slot it no
+			// longer had a hold for stays marked as a bound.
+			return previousFact{slot: plan.PreviousSlot, offset: plan.CompletionOffsetMillis, hold: plan.PreviousHoldMillis,
+				reason: PredecessorInherited, arrival: plan.ArrivalAgeMillis, bound: plan.PreviousHoldUnknown}
+		}
+	}
+	// Not closed at this boundary yet: its owner has not come back, or is
+	// stuck. A later observation can still raise the Slots it has not
+	// frozen, so its hold now says nothing of them -- unless the last one is
+	// frozen already.
+	fact.arrival = old.Record.ArrivalAgeMillis
+	if link.FrozenHoldMillis != nil {
+		return frozen(PredecessorFrozenContract)
+	}
+	if hold, known := old.Record.HoldAt(link.PreviousSlot); link.MovedPast && known {
+		// The base hold it was frozen with, and no less than any of the old
+		// group's own transitions could have made it.
+		fact.hold, fact.reason = max(hold, holdAt(old.Record, link.PreviousSlot, 0)), PredecessorOpenFrozen
+		return fact
+	}
+	return bounded(PredecessorRecordOpen)
 }
 
 func (controller *Controller) seed(state *entry, predecessors map[execution.QueryGroupIdentity]Inspection) (Record, error) {
@@ -379,50 +565,45 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 	if state.seeded {
 		return next, nil
 	}
+	if state.corrupt {
+		// The stored record did not decode, so whatever deadline it kept is
+		// unknown: every Plan keeps the latest any could have been, for one
+		// bound from now, and then the group starts over from zero.
+		controller.statsMu.Lock()
+		controller.ownCorrupt++
+		controller.statsMu.Unlock()
+		deadline := controller.options.Now().UnixMilli() + controller.options.MaxHold.Milliseconds() + state.spec.MaxCompletionOffset.Milliseconds()
+		for _, plan := range state.spec.Plans {
+			next.Transitions = append(next.Transitions, Transition{Key: plan.Key, DeadlineMillis: deadline, Fallback: true})
+		}
+	}
 	previous := state.spec.Previous
 	if inherited(next, state.spec) {
 		previous = nil
 	}
 	for _, predecessor := range previous {
 		old := predecessors[predecessor.QueryGroup]
-		previous := old.Record
-		if !old.Loaded {
-			return Record{}, ErrNotRestored
-		}
-		if old.Missing {
-			if !predecessor.ZeroConfirmed {
-				return Record{}, ErrPreviousHoldUnknown
+		for _, link := range predecessor.Links {
+			fact := controller.previousHold(old, predecessor, link)
+			if fact.slot == 0 {
+				// The Segment it left held no Slot of it: no deadline to
+				// keep, so its hold decides nothing and is not counted.
+				fact.hold, fact.bound = 0, false
+			} else {
+				controller.counted(controller.predecessors, fact.reason)
 			}
-			if predecessor.Schedule == nil {
-				return Record{}, ErrPreviousHoldUnknown
+			plan := PlanRecord{PlanRef: link.PlanRef, ClosedAt: predecessor.ClosedAt, ClosedQueryGroup: predecessor.QueryGroup,
+				InheritedQueryGroup: predecessor.QueryGroup, InheritedClosedAt: predecessor.ClosedAt,
+				PreviousHoldUnknown: fact.bound, PreviousHoldMillis: fact.hold, PreviousSlot: fact.slot,
+				CompletionOffsetMillis: fact.offset}
+			if link.SameRoute {
+				plan.ArrivalAgeMillis = fact.arrival
+				next.ArrivalAgeMillis = max(next.ArrivalAgeMillis, fact.arrival)
 			}
-			if predecessor.Schedule.Validate() != nil || predecessor.Schedule.Segment.End == nil || *predecessor.Schedule.Segment.End != predecessor.ClosedAt || predecessor.Schedule.Segment.QueryGroup != predecessor.QueryGroup {
-				return Record{}, ErrPreviousHoldUnknown
-			}
-			previous = Record{SinceSlot: 1}
-			closeRecord(&previous, state.spec, *predecessor.Schedule, controller.options.MaxHold.Milliseconds())
-		}
-		for _, wanted := range previousPlans(state.spec, predecessor) {
-			matched := false
-			for _, plan := range previous.Plans {
-				if plan.PlanRef != wanted {
-					continue
-				}
-				if plan.ClosedAt != predecessor.ClosedAt || (plan.ClosedQueryGroup != "" && plan.ClosedQueryGroup != predecessor.QueryGroup) {
-					return Record{}, ErrPreviousOpen
-				}
-				matched = true
-				plan.ClosedQueryGroup = predecessor.QueryGroup
-				plan.InheritedQueryGroup, plan.InheritedClosedAt = predecessor.QueryGroup, predecessor.ClosedAt
-				next.ArrivalAgeMillis = max(next.ArrivalAgeMillis, plan.ArrivalAgeMillis)
-				mergePlan(&next, plan)
-				if plan.PreviousSlot > 0 {
-					next.Transitions = append(next.Transitions, Transition{Key: plan.Key,
-						DeadlineMillis: int64(plan.PreviousSlot)*1000 + plan.PreviousHoldMillis + plan.CompletionOffsetMillis})
-				}
-			}
-			if !matched {
-				return Record{}, ErrPreviousOpen
+			mergePlan(&next, plan)
+			if fact.slot > 0 {
+				next.Transitions = append(next.Transitions, Transition{Key: link.Key,
+					DeadlineMillis: int64(fact.slot)*1000 + fact.hold + fact.offset, Fallback: fact.bound})
 			}
 		}
 	}
@@ -437,6 +618,20 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 		}
 	}
 	return next, nil
+}
+
+// carries is a record holding anything a successor or a restart needs: a
+// hold, an arrival age, a deadline, or a Plan's nonzero closing fact.
+func carries(record Record) bool {
+	if current(record) != 0 || record.HoldMillis != 0 || record.ArrivalAgeMillis != 0 || len(record.Transitions) != 0 {
+		return true
+	}
+	for _, plan := range record.Plans {
+		if plan.ArrivalAgeMillis != 0 || plan.PreviousHoldMillis != 0 || plan.PreviousHoldUnknown {
+			return true
+		}
+	}
+	return false
 }
 
 func mergePlan(record *Record, plan PlanRecord) {
@@ -492,7 +687,7 @@ func (controller *Controller) predecessorSnapshot(state *entry) (GroupSpec, map[
 // SlotReadHold is called before a new Slot is frozen. An unfinished Slot
 // bypasses it and keeps its own contract's hold.
 func (controller *Controller) SlotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
-	if schedule.Validate() != nil || !schedule.Segment.Contains(at) || len(schedule.DuePlanRefs(at)) == 0 {
+	if !schedule.Segment.Contains(at) || len(schedule.DuePlanRefs(at)) == 0 {
 		return 0, errors.New("alarmd readhold: invalid Slot schedule")
 	}
 	qg := schedule.Segment.QueryGroup
@@ -502,6 +697,14 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	spec, predecessors := controller.predecessorSnapshot(state)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if !reflect.DeepEqual(state.validated, schedule.Segment) {
+		// A frozen Segment's schedule does not change: checked once, not
+		// recomputing its digests for every Slot.
+		if schedule.Validate() != nil {
+			return 0, errors.New("alarmd readhold: invalid Slot schedule")
+		}
+		state.validated = schedule.Segment
+	}
 	if err := ready(state); err != nil {
 		return 0, err
 	}
@@ -528,8 +731,23 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	}
 	pruneTransitions(&next, int64(at)*1000+state.spec.SettlingWait.Milliseconds())
 	hold := holdAt(next, at, state.spec.SettlingWait)
-	if hold > min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds() {
-		return 0, errors.New("alarmd readhold: transition exceeds retention margin")
+	if limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds(); hold > limit {
+		// Refusing the Slot refused it on every retry, and the group stopped
+		// on it. Frozen at the limit, the old group's last Slot may overtake
+		// this one, which is counted, and known apart from a bound standing
+		// in for a hold nobody could read.
+		source := ClampFallback
+		known := current(next)
+		for _, transition := range next.Transitions {
+			if !transition.Fallback {
+				known = max(known, transition.DeadlineMillis-int64(at)*1000-state.spec.SettlingWait.Milliseconds())
+			}
+		}
+		if known > limit {
+			source = ClampKnown
+		}
+		controller.counted(controller.clamped, source)
+		hold = limit
 	}
 	if next.HoldMillis != hold || next.PendingHoldMillis != nil {
 		next.PreviousHoldMillis, next.PreviousSinceSlot = next.HoldMillis, next.SinceSlot
@@ -548,8 +766,10 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	}
 	if !reflect.DeepEqual(next, state.record) {
 		// A first zero hold has no durable value to protect. Remember the
-		// segment locally without creating a record for the full population.
-		if len(state.raw) == 0 && current(next) == 0 && len(next.Plans) == 0 && len(next.Transitions) == 0 {
+		// segment locally without creating a record for the full population
+		// -- nor for a group that closed a Segment at zero: a missing record
+		// is what tells its successor its hold was zero.
+		if len(state.raw) == 0 && !carries(next) {
 			state.record, state.seeded = next, true
 			return 0, nil
 		}
@@ -595,9 +815,10 @@ func (controller *Controller) CloseSchedule(ctx context.Context, schedule execut
 		return err
 	}
 	closeRecord(&next, state.spec, schedule, controller.options.MaxHold.Milliseconds())
-	if len(state.raw) == 0 && current(next) == 0 && next.ArrivalAgeMillis == 0 && len(next.Transitions) == 0 {
-		// The caller establishes the absent zero predecessor using retained
-		// progress and its closed timeline; do not invent a durable zero h.
+	if len(state.raw) == 0 && !carries(next) {
+		// A successor reads the missing record as a zero hold once this
+		// group has frozen its last Slot (previousHold); do not invent a
+		// durable zero h.
 		state.record, state.seeded = next, true
 		return nil
 	}
@@ -767,7 +988,8 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 		return nil
 	}
 	hold := current(state.record)
-	if !evidence.Observed || hold == 0 || evidence.CandidateHold.Milliseconds() != hold/2 || evidence.Contract.Slot.EvaluationTime <= state.record.LastEarlierSlot {
+	candidate := execution.LoweredReadHold(time.Duration(hold)*time.Millisecond, state.spec.Step).Milliseconds()
+	if !evidence.Observed || hold == 0 || evidence.CandidateHold.Milliseconds() != candidate || evidence.Contract.Slot.EvaluationTime <= state.record.LastEarlierSlot {
 		return nil
 	}
 	next := clone(state.record)
@@ -782,7 +1004,6 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 			quiet = SingleEventQuiet.Milliseconds()
 		}
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
-			candidate := hold / 2
 			next.PendingHoldMillis = &candidate
 			next.Lowered, next.EarlierMatches, next.QuietSinceMillis = true, 0, now
 			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate

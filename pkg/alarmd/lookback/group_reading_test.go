@@ -80,8 +80,8 @@ func TestGroupClassesAndIgnoredFindingsAreClosedAndIndependent(t *testing.T) {
 	}, func(int64) []*execution.Dataset { return nil })
 	a, _ := f.engine.GroupReading("qg")
 	b, _ := f.engine.GroupReading("qg-b")
-	if a.Classes[ClassPartialRevised] != 1 || a.ReadHoldIgnored[ClassPartialRevised] != 1 || a.ReadHoldIgnored["noise"] != 0 ||
-		b.Classes[ClassPartialRevised] != 0 || b.ReadHoldIgnored[ClassPartialRevised] != 0 || b.ReadHoldIgnored["noise"] != 1 {
+	if a.Classes[ClassPartialRevised] != 1 || a.ReadHoldIgnored[ClassPartialRevised] != 1 || a.ReadHoldIgnored[IgnoredNoWholeWindowArrival] != 0 ||
+		b.Classes[ClassPartialRevised] != 0 || b.ReadHoldIgnored[ClassPartialRevised] != 0 || b.ReadHoldIgnored[IgnoredNoWholeWindowArrival] != 1 {
 		t.Fatalf("closed classes/ignored findings leaked between groups: a=%+v b=%+v", a, b)
 	}
 	if len(a.Classes) != len(SampleClasses) || len(a.ReadHoldIgnored) != len(ReadHoldIgnoredReasons) || len(a.EarlierReads) != len(EarlierReadOutcomes) {

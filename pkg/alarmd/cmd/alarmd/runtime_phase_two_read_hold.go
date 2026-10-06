@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
@@ -34,7 +33,18 @@ type productionReadHolds struct {
 	nextRenew   time.Time
 	transitions atomic.Uint64
 	overtaken   atomic.Uint64
+	// links counts the predecessor links a prepare skipped, by why
+	// (self_link, invalid_link, expired); retireCloseFailed the retired
+	// groups whose closing failed and that retired all the same.
+	linksMu           sync.Mutex
+	links             map[string]uint64
+	retireCloseFailed atomic.Uint64
 }
+
+// readHoldLinkReasons are the links a prepare skips before asking the
+// controller: one naming its own group or with a shape no cutover writes
+// (ReadHoldPredecessors), and one past its lifetime.
+var readHoldLinkReasons = []string{"self_link", "invalid_link", "expired"}
 
 type productionReadHoldGroup struct {
 	mu             sync.Mutex
@@ -50,7 +60,7 @@ func newProductionReadHolds(cfg config.Config, control readhold.Control, reposit
 	catalog *controlplane.RedisCatalogRuntime, progress productionPhaseTwoProgressReader, now func() time.Time,
 	logger *observability.Logger) (*productionReadHolds, error) {
 	holds := &productionReadHolds{cfg: cfg, repository: repository, catalog: catalog, progress: progress,
-		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup)}
+		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup), links: make(map[string]uint64)}
 	var err error
 	holds.controller, err = readhold.NewController(readhold.Options{Control: control,
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), MaxHold: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
@@ -113,11 +123,6 @@ func (holds *productionReadHolds) restore(ctx context.Context, groups []executio
 	}
 }
 
-func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
-	facts.QueryDelaySeconds, facts.QueryRevision = 0, ""
-	return contract.DeriveCanonicalDigestV2("alarmd-read-hold-route-v1", facts)
-}
-
 // Cache only the immutable source route and delay, not another query body.
 func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (string, time.Duration, error) {
 	qg := schedule.Segment.QueryGroup
@@ -146,7 +151,7 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	if err != nil {
 		return "", 0, err
 	}
-	route, err = readHoldRoute(group.QueryPlan)
+	route, err = controlplane.ReadHoldRoute(group.QueryPlan)
 	if err != nil {
 		return "", 0, err
 	}
@@ -168,6 +173,11 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key(), Route: route})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
+		step := time.Duration(plan.Spec.EvaluationIntervalSeconds) * time.Second
+		if len(spec.Plans) == 1 || step < spec.Step {
+			spec.Step = step
+		}
+		spec.MaxCompletionOffset = max(spec.MaxCompletionOffset, offset)
 		wait := execution.SettlingWaitWithinQueryBudget(offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
@@ -236,73 +246,35 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 	if err != nil {
 		return err
 	}
-	links, err := holds.repository.ReadHoldPredecessors(ctx, schedule)
+	links, skipped, err := holds.repository.ReadHoldPredecessors(ctx, schedule)
 	if err != nil {
 		return err
 	}
+	holds.countLinks(skipped)
+	// Nothing about a predecessor can stop this group: every fact it cannot
+	// read is read as the hold bound by the controller (previousHold), which
+	// costs this group's first few Slots a later read and no Slot.
+	expired := execution.EvaluationTime(holds.now().Add(-controlplane.ReadHoldLinkLifetime).Unix())
+	record := holds.controller.Inspect(qg).Record
 	for _, link := range links {
-		// Once the fenced record carries this bridge, its old content may
-		// expire normally. A new owner restores the bridge, not the old QG.
-		record := holds.controller.Inspect(qg).Record
-		inherited := true
-		for _, key := range link.Plans {
-			found := false
-			for _, plan := range record.Plans {
-				found = found || (plan.Key == key && plan.InheritedQueryGroup == link.QueryGroup && plan.InheritedClosedAt == link.ClosedAt)
-			}
-			inherited = inherited && found
+		if link.ClosedAt < expired {
+			holds.countLinks(map[string]int{"expired": 1})
+			continue
 		}
-		if inherited {
+		wanted := holds.linkedPlans(spec, link)
+		if len(wanted) == 0 || inheritedLinks(record, link, wanted) {
+			// Once the fenced record carries this bridge, the old group's
+			// facts may expire normally. A new owner restores the bridge.
 			continue
 		}
 		group.predecessors = append(group.predecessors, link.QueryGroup)
-		if err := holds.controller.RestoreBatch(ctx, []execution.QueryGroupIdentity{link.QueryGroup}); err != nil {
-			return err
+		// A read that fails, or a record that does not decode, leaves the
+		// Inspection saying so; neither is this group's error.
+		holds.report("predecessor_unreadable", link.QueryGroup, holds.controller.RestoreBatch(ctx, []execution.QueryGroupIdentity{link.QueryGroup}))
+		if !closedFor(holds.controller.Inspect(link.QueryGroup), link.ClosedAt, wanted) {
+			holds.predecessorProgress(ctx, link.QueryGroup, wanted)
 		}
-		// A zero bridge is not renewed. After its lifetime, a recent FULL
-		// contract in this same segment proves that seeding already succeeded.
-		// Still-live predecessor facts must be restored, never inferred away.
-		if holds.controller.Inspect(qg).Missing && holds.controller.Inspect(link.QueryGroup).Missing &&
-			time.Unix(int64(link.ClosedAt), 0).Before(holds.now().Add(-readhold.RecordTTL)) {
-			zero, err := holds.recentZeroCompletion(ctx, schedule)
-			if err != nil {
-				return err
-			}
-			if zero {
-				continue
-			}
-		}
-		old, err := holds.catalog.ReadFrozenSchedule(controlplane.WithTimelineRevisionHint(ctx, 0), link.QueryGroup, link.ClosedAt-1)
-		if err != nil {
-			return err
-		}
-		if old.Segment.End == nil || *old.Segment.End != link.ClosedAt {
-			return readhold.ErrPreviousOpen
-		}
-		oldSpec, err := holds.spec(controlplane.WithTimelineRevisionHint(ctx, 0), old)
-		if err != nil {
-			return err
-		}
-		previous := readhold.Previous{QueryGroup: link.QueryGroup, ClosedAt: link.ClosedAt, Schedule: &old}
-		for _, key := range link.Plans {
-			for _, wanted := range spec.Plans {
-				for _, before := range oldSpec.Plans {
-					if wanted.Key == key && before == wanted {
-						previous.Plans = append(previous.Plans, wanted)
-					}
-				}
-			}
-		}
-		if len(previous.Plans) == 0 {
-			continue
-		} // A real source/metric change has no inherited A.
-		if holds.controller.Inspect(link.QueryGroup).Missing {
-			previous.ZeroConfirmed, err = holds.zeroPredecessor(ctx, old)
-			if err != nil {
-				return err
-			}
-		}
-		spec.Previous = append(spec.Previous, previous)
+		spec.Previous = append(spec.Previous, readhold.Previous{QueryGroup: link.QueryGroup, ClosedAt: link.ClosedAt, Links: wanted})
 	}
 	if err := holds.controller.Configure(spec); err != nil {
 		return err
@@ -317,78 +289,96 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 	return nil
 }
 
-func (holds *productionReadHolds) recentZeroCompletion(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (bool, error) {
-	identity := execution.ProgressIdentity{QueryGroup: schedule.Segment.QueryGroup}
-	loaded, err := holds.progress.LoadProgress(ctx, identity)
-	if err != nil {
-		return false, err
+func (holds *productionReadHolds) countLinks(skipped map[string]int) {
+	if len(skipped) == 0 {
+		return
 	}
-	if err := loaded.Validate(identity); err != nil {
-		return false, err
+	holds.linksMu.Lock()
+	for reason, count := range skipped {
+		holds.links[reason] += uint64(count)
 	}
-	p := loaded.Progress
-	if p == nil || p.LastCompletion == nil || p.UnfinishedSlot != nil || p.UnfinishedRange != nil {
-		return false, nil
-	}
-	last := p.LastCompletion
-	if p.NextSlot <= last.Slot || p.LastFullSlot != last.Slot || !schedule.Segment.Contains(last.Slot) {
-		return false, nil
-	}
-	switch last.Kind {
-	case execution.CompletionFull:
-		if p.LastDataSlot != last.Slot {
-			return false, nil
-		}
-	case execution.CompletionFullEmpty:
-		if p.EmptyRunSinceSlot <= 0 || p.EmptyRunSinceSlot > last.Slot {
-			return false, nil
-		}
-	default:
-		return false, nil
-	}
-	ref := last.Contract
-	if ref.Validate() != nil || ref.ReadHoldMillis != 0 || ref.Slot.QueryGroup != identity.QueryGroup || ref.Slot.EvaluationTime != last.Slot ||
-		ref.ScheduleSegmentStart != schedule.Segment.Start || ref.QueryRevision != schedule.Segment.QueryRevision || ref.ScheduleRevision != schedule.Segment.ScheduleRevision {
-		return false, nil
-	}
-	completed, err := time.Parse(time.RFC3339Nano, last.CompletedAt)
-	if err != nil {
-		return false, err
-	}
-	cutoff := holds.now().Add(-readhold.RecordTTL)
-	return completed.After(cutoff) && !completed.After(holds.now()) && time.Unix(int64(last.Slot), 0).After(cutoff), nil
+	holds.linksMu.Unlock()
 }
 
-func (holds *productionReadHolds) zeroPredecessor(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (bool, error) {
-	loaded, err := holds.progress.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: schedule.Segment.QueryGroup})
-	if err != nil {
-		return false, err
-	}
-	if err := loaded.Validate(execution.ProgressIdentity{QueryGroup: schedule.Segment.QueryGroup}); err != nil {
-		return false, err
-	}
-	if loaded.Progress == nil || loaded.Progress.LastCompletion == nil {
-		return false, nil
-	}
-	progress := loaded.Progress
-	if progress.UnfinishedSlot != nil || progress.UnfinishedRange != nil || progress.NextSlot < *schedule.Segment.End {
-		return false, nil
-	}
-	last := progress.LastCompletion
-	completed, err := time.Parse(time.RFC3339Nano, last.CompletedAt)
-	if err != nil {
-		return false, err
-	}
-	var final execution.EvaluationTime
-	for _, plan := range schedule.Plans {
-		at := int64(*schedule.Segment.End) - 1
-		at -= (at - int64(plan.Spec.Alignment)) % plan.Spec.EvaluationIntervalSeconds
-		if at >= int64(schedule.Segment.Start) && plan.Spec.IsAligned(execution.EvaluationTime(at)) {
-			final = max(final, execution.EvaluationTime(at))
+// linkedPlans is a link's Plans this Segment runs, with what the link says
+// of each. A link for a Plan the Segment no longer runs carries nothing.
+func (holds *productionReadHolds) linkedPlans(spec readhold.GroupSpec, link controlplane.ReadHoldPredecessor) []readhold.PlanLink {
+	var wanted []readhold.PlanLink
+	for _, plan := range link.Plans {
+		for _, ref := range spec.Plans {
+			if ref.Key == plan.Key {
+				wanted = append(wanted, readhold.PlanLink{PlanRef: ref, PreviousSlot: plan.PreviousSlot,
+					CompletionOffsetMillis: plan.CompletionOffsetMillis, SameRoute: plan.SameRoute})
+			}
 		}
 	}
-	return last.Contract.ReadHoldMillis == 0 && completed.After(holds.now().Add(-readhold.RecordTTL)) &&
-		last.Contract.ScheduleSegmentStart == schedule.Segment.Start && last.Slot == final, nil
+	return wanted
+}
+
+// inheritedLinks is the group's own record carrying the bridge of every
+// one of the link's Plans already.
+func inheritedLinks(record readhold.Record, link controlplane.ReadHoldPredecessor, wanted []readhold.PlanLink) bool {
+	for _, want := range wanted {
+		found := false
+		for _, plan := range record.Plans {
+			found = found || (plan.PlanRef == want.PlanRef && plan.InheritedQueryGroup == link.QueryGroup && plan.InheritedClosedAt == link.ClosedAt)
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// closedFor is a predecessor's record holding the closing fact of every
+// one of the Plans at the boundary: the only case its Progress adds nothing.
+func closedFor(old readhold.Inspection, closedAt execution.EvaluationTime, wanted []readhold.PlanLink) bool {
+	if !old.Loaded || old.Corrupt || old.Missing {
+		return false
+	}
+	for _, want := range wanted {
+		found := false
+		for _, plan := range old.Record.Plans {
+			found = found || (plan.Key == want.Key && plan.ClosedAt == closedAt)
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// predecessorProgress adds to each link what the predecessor's Progress says
+// of the link's last Slot: the hold it was frozen with, while the Progress
+// still carries its contract, and whether every Slot through it is frozen.
+// A Progress that cannot be read says neither, and the controller reads the
+// hold bound instead.
+func (holds *productionReadHolds) predecessorProgress(ctx context.Context, qg execution.QueryGroupIdentity, links []readhold.PlanLink) {
+	identity := execution.ProgressIdentity{QueryGroup: qg}
+	loaded, err := holds.progress.LoadProgress(ctx, identity)
+	if err != nil || loaded.Validate(identity) != nil || loaded.Progress == nil {
+		holds.report("predecessor_progress_unreadable", qg, err)
+		return
+	}
+	progress := loaded.Progress
+	for index := range links {
+		slot := links[index].PreviousSlot
+		if slot <= 0 {
+			continue
+		}
+		var frozen *execution.FrozenExecutionContractRef
+		switch {
+		case progress.UnfinishedSlot != nil && progress.UnfinishedSlot.Contract.Slot.EvaluationTime == slot:
+			frozen = &progress.UnfinishedSlot.Contract
+		case progress.LastCompletion != nil && progress.LastCompletion.Slot == slot:
+			frozen = &progress.LastCompletion.Contract
+		}
+		if frozen != nil {
+			hold := frozen.ReadHoldMillis
+			links[index].FrozenHoldMillis = &hold
+		}
+		links[index].MovedPast = progress.NextSlot > slot
+	}
 }
 
 func (holds *productionReadHolds) ReadHold(qg execution.QueryGroupIdentity) time.Duration {
@@ -421,7 +411,7 @@ func (holds *productionReadHolds) SlotReadHold(ctx context.Context, schedule exe
 			group.mu.Unlock()
 		}
 	}
-	if errors.Is(err, readhold.ErrPreviousOpen) || errors.Is(err, readhold.ErrPreviousHoldUnknown) || errors.Is(err, readhold.ErrNotRestored) {
+	if errors.Is(err, readhold.ErrNotRestored) {
 		holds.mu.Lock()
 		group := holds.groups[schedule.Segment.QueryGroup]
 		holds.mu.Unlock()
@@ -432,6 +422,12 @@ func (holds *productionReadHolds) SlotReadHold(ctx context.Context, schedule exe
 		}
 	}
 	return hold, err
+}
+
+// RetireCloseFailed counts a retired group that retired without closing.
+func (holds *productionReadHolds) RetireCloseFailed(err error) {
+	holds.retireCloseFailed.Add(1)
+	holds.report("retire_close_failed", "", err)
 }
 
 func (holds *productionReadHolds) report(reason string, qg execution.QueryGroupIdentity, err error) {
@@ -473,7 +469,7 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	}
 	options.OnReadHoldIgnored = func(e lookback.ReadHoldEvidence, reason string) {
 		inspection := holds.controller.Inspect(e.Contract.Slot.QueryGroup)
-		if reason != "noise" || !inspection.Loaded || inspection.Missing || holds.controller.ReadHold(e.Contract.Slot.QueryGroup) == 0 {
+		if reason != lookback.IgnoredNoWholeWindowArrival || !inspection.Loaded || inspection.Missing || holds.controller.ReadHold(e.Contract.Slot.QueryGroup) == 0 {
 			return
 		}
 		holds.observation(e.Contract, func(ctx context.Context) error {
