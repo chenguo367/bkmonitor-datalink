@@ -101,7 +101,9 @@ func TestExpiredRangeSourceStopsAtRetirementAndBlocksChangedTail(t *testing.T) {
 
 // A range over held Slots is the unheld range a hold later: its head is
 // counted on the clock the hold shifts, as the replay distance is, so the
-// same moment plus the hold seals the same Slots, the hold frozen in.
+// same moment plus the hold seals the same Slots, the hold frozen in. Both
+// branches: a range bounded by the replay age, and one given up on for
+// distance, where the head is what decides it.
 func TestAnExpiredRangeOverHeldSlotsSealsOnTheShiftedClock(t *testing.T) {
 	const hold = 60_000
 	for _, tc := range []struct {
@@ -125,4 +127,30 @@ func TestAnExpiredRangeOverHeldSlotsSealsOnTheShiftedClock(t *testing.T) {
 			}
 		})
 	}
+	t.Run("given up on for distance", func(t *testing.T) {
+		const interval, held = int64(15), int64(30_000)
+		const firstSlot = execution.EvaluationTime(600)
+		build := func(hold int64) *execution.ExpiredRangeProjectionV1 {
+			t.Helper()
+			at := time.UnixMilli((int64(firstSlot)+8*interval)*1000 + hold)
+			schedule := schedulerSchedule(t, interval, firstSlot, nil, "snapshot-1", 1)
+			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
+			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(firstSlot, firstSlot-execution.EvaluationTime(interval)), at, testRecoveryLimits())
+			source.expiredRangeEnabled = true
+			source.readHolds = &testReadHolds{hold: time.Duration(hold) * time.Millisecond}
+			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
+			slot, due, _, err := source.Next(ctx, "query-group-1")
+			if err != nil || !due || slot.ExpiredRange == nil || slot.ExpiredRange.EligibilityV2 == nil ||
+				slot.ExpiredRange.EligibilityV2.Reason != execution.RangeDistanceExpired {
+				t.Fatalf("hold %d: not a distance range: %+v %v %v", hold, slot, due, err)
+			}
+			return slot.ExpiredRange
+		}
+		unheld, heldRange := build(0), build(held)
+		if heldRange.Count != unheld.Count || heldRange.Last.Contract.Slot.EvaluationTime != unheld.Last.Contract.Slot.EvaluationTime ||
+			heldRange.Last.Contract.ReadHoldMillis != held {
+			t.Fatalf("held range %d Slots to %d, unheld %d Slots to %d: the head was not counted on the shifted clock",
+				heldRange.Count, heldRange.Last.Contract.Slot.EvaluationTime, unheld.Count, unheld.Last.Contract.Slot.EvaluationTime)
+		}
+	})
 }
