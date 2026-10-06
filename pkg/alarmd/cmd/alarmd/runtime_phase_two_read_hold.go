@@ -17,6 +17,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // Read holds share the ownership store and schedule timeline. Nothing here
@@ -43,6 +45,10 @@ type productionReadHolds struct {
 	// closeSkipped is the previous Segments a prepare could not close
 	// because the record is already past them without their closing facts.
 	closeSkipped atomic.Uint64
+	// degraded counts the Slots frozen with the hold their group last read,
+	// by what failed (readhold.DegradedReasons).
+	degradedMu sync.Mutex
+	degraded   map[string]uint64
 }
 
 type productionReadHoldGroup struct {
@@ -53,13 +59,22 @@ type productionReadHoldGroup struct {
 	predecessors   []execution.QueryGroupIdentity
 	queryRoute     string
 	queryDelay     time.Duration
+	degradedLogged readHoldDegradedLine
+}
+
+// readHoldDegradedLine is the Segment and reason a group's degraded hold was
+// last logged for.
+type readHoldDegradedLine struct {
+	start  execution.EvaluationTime
+	reason string
 }
 
 func newProductionReadHolds(cfg config.Config, control readhold.Control, repository *controlplane.RedisCatalogRepository,
 	catalog *controlplane.RedisCatalogRuntime, progress productionPhaseTwoProgressReader, now func() time.Time,
 	logger *observability.Logger) (*productionReadHolds, error) {
 	holds := &productionReadHolds{cfg: cfg, repository: repository, catalog: catalog, progress: progress,
-		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup), links: make(map[string]uint64)}
+		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup), links: make(map[string]uint64),
+		degraded: make(map[string]uint64)}
 	var err error
 	holds.controller, err = readhold.NewController(readhold.Options{Control: control,
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), MaxHold: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
@@ -110,16 +125,17 @@ func (holds *productionReadHolds) releasePredecessors(group *productionReadHoldG
 
 // Restore only new or invalidated entries. One bad answer leaves that group
 // retryable without discarding successfully loaded siblings.
-func (holds *productionReadHolds) restore(ctx context.Context, groups []execution.QueryGroupIdentity) {
+func (holds *productionReadHolds) restore(ctx context.Context, groups []execution.QueryGroupIdentity) error {
 	var missing []execution.QueryGroupIdentity
 	for _, qg := range groups {
 		if !holds.controller.Inspect(qg).Loaded {
 			missing = append(missing, qg)
 		}
 	}
-	if len(missing) > 0 {
-		holds.report("restore_failed", "", holds.controller.RestoreBatch(ctx, missing))
+	if len(missing) == 0 {
+		return nil
 	}
+	return holds.controller.RestoreBatch(ctx, missing)
 }
 
 func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
@@ -128,6 +144,11 @@ func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
 }
 
 // Cache only the immutable source route and delay, not another query body.
+// Both are in the Query Group object the Segment names, read alone: the
+// Plans' output contexts and the publication's manifest are what a Slot
+// renders with, and a Segment whose output contexts were revised outlives
+// its first contexts and its first manifest. Reading them here refused every
+// Slot of such a Segment once they had passed their retention.
 func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (string, time.Duration, error) {
 	qg := schedule.Segment.QueryGroup
 	holds.mu.Lock()
@@ -141,11 +162,15 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	if route != "" {
 		return route, delay, nil
 	}
-	group, err := holds.repository.LoadObservedSegmentQueryGroup(ctx, schedule.Segment, schedule.Segment.Start)
-	if errors.Is(err, controlplane.ErrCatalogObjectUnavailable) {
-		group, err = holds.repository.LoadQueryGroup(ctx, schedule.Segment.Publication.SnapshotRevision, qg)
+	err := controlplane.ErrCatalogObjectUnavailable
+	var object controlplane.QueryGroupObject
+	if schedule.Segment.ObjectDigest != "" {
+		object, err = holds.repository.LoadQueryGroupObject(ctx, schedule.Segment.ObjectDigest)
+		if err == nil && object.Identity != qg {
+			err = errors.New("alarmd readhold: Query Group object belongs to another Query Group")
+		}
 	}
-	if (errors.Is(err, controlplane.ErrSnapshotUnavailable) || errors.Is(err, controlplane.ErrCatalogObjectUnavailable)) && schedule.Segment.End != nil {
+	if errors.Is(err, controlplane.ErrCatalogObjectUnavailable) && schedule.Segment.End != nil {
 		// Only the query's identity is reused. The original schedule below still
 		// supplies the old Plans, their waits and full completion deadlines.
 		if successor, nextErr := holds.catalog.ReadSuccessorFrozenSchedule(ctx, qg, *schedule.Segment.End); nextErr == nil {
@@ -155,11 +180,11 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	if err != nil {
 		return "", 0, err
 	}
-	route, err = readHoldRoute(group.QueryPlan)
+	route, err = readHoldRoute(object.QueryPlan)
 	if err != nil {
 		return "", 0, err
 	}
-	delay = time.Duration(group.QueryPlan.QueryDelaySeconds) * time.Second
+	delay = time.Duration(object.QueryPlan.QueryDelaySeconds) * time.Second
 	holds.mu.Lock()
 	if owned != nil && holds.groups[qg] == owned {
 		owned.queryRoute, owned.queryDelay = route, delay
@@ -173,7 +198,7 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	if err != nil {
 		return readhold.GroupSpec{}, err
 	}
-	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration()}
+	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule)}
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key(), Route: route})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
@@ -185,14 +210,55 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
 		}
-		margin := phaseTwoObjectRetentionLimit(holds.cfg) - phaseTwoSnapshotMinimumRetention(holds.cfg, offset)
-		spec.HoldLimit = min(spec.HoldLimit, max(margin, 0))
 	}
 	return spec, nil
 }
 
+// holdLimit is the most a Slot of the schedule may be held: the replay age,
+// within what each Plan's Snapshot retention leaves. It reads nothing.
+func (holds *productionReadHolds) holdLimit(schedule execution.FrozenQueryGroupSchedule) time.Duration {
+	limit := holds.cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration()
+	for _, plan := range schedule.Plans {
+		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
+		margin := phaseTwoObjectRetentionLimit(holds.cfg) - phaseTwoSnapshotMinimumRetention(holds.cfg, offset)
+		limit = min(limit, max(margin, 0))
+	}
+	return limit
+}
+
+// readHoldDegradation is a hold its group could not prepare or write for a
+// reason of the hold's own. It is scheduler.ErrReadHoldDegraded, so the
+// Slot is not refused for it, and still the cause, so the retirement and
+// the lookback paths, which do not freeze a Slot, see what failed.
+type readHoldDegradation struct {
+	reason string
+	err    error
+}
+
+func (degradation *readHoldDegradation) Error() string {
+	return "alarmd readhold: degraded (" + degradation.reason + "): " + degradation.err.Error()
+}
+
+func (degradation *readHoldDegradation) Unwrap() []error {
+	return []error{scheduler.ErrReadHoldDegraded, degradation.err}
+}
+
+// degraded is err as a degradation of the hold for reason, unless it says
+// the group is not this worker's or its record is unread: those refuse the
+// Slot as before -- a lease lost, or one read of the record on the Redis the
+// Slot needs all the same, retried at the next Slot.
+func degraded(reason string, err error) error {
+	if err == nil || errors.Is(err, ownership.ErrStaleFence) || errors.Is(err, ownership.ErrContentScopeMoved) ||
+		errors.Is(err, readhold.ErrNotRestored) || errors.Is(err, scheduler.ErrReadHoldDegraded) {
+		return err
+	}
+	return &readHoldDegradation{reason: reason, err: err}
+}
+
 // PrepareSchedule is also called for unfinished Slots: their h is reused,
 // but a closed segment still must fix its Plan bridge before the successor.
+// What fails here for a reason of the hold's own is a degradation (degraded):
+// the Slot is frozen with the hold the group last read, never refused.
 func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, fence execution.OwnerFence) (prepareErr error) {
 	qg := schedule.Segment.QueryGroup
 	holds.mu.Lock()
@@ -211,8 +277,20 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 			holds.releasePredecessors(group)
 		}
 	}()
-	holds.restore(ctx, []execution.QueryGroupIdentity{qg})
+	restoreErr := holds.restore(ctx, []execution.QueryGroupIdentity{qg})
+	answered := redisbatch.Answered(restoreErr)
+	if !answered {
+		holds.report("restore_failed", qg, restoreErr)
+	}
 	if !holds.controller.Inspect(qg).Loaded {
+		if answered {
+			// Redis answered the group's record with an error of its own
+			// (WRONGTYPE, LOADING, ...), and answers every read of it so
+			// while that lasts: refused, the group stopped as long. The Slot
+			// goes on with the hold last read; the record is read again at
+			// the next Slot, and the degradation logs once (countDegraded).
+			return degraded(readhold.DegradedRecordUnreadable, restoreErr)
+		}
 		return readhold.ErrNotRestored
 	}
 	if reflect.DeepEqual(group.prepared, schedule.Segment) {
@@ -224,7 +302,7 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 	// would otherwise pause the group until a content edit pruned it.
 	spec, err := holds.spec(ctx, schedule)
 	if err != nil {
-		return err
+		return degraded(readhold.DegradedSpecUnreadable, err)
 	}
 	// Close our previous segment first, even when the QG still carries other
 	// Plans. A cutover may reach this path without a final old-Slot execution.
@@ -233,10 +311,10 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		if err == nil && old.Segment.End != nil {
 			oldSpec, err := holds.spec(ctx, old)
 			if err != nil {
-				return err
+				return degraded(readhold.DegradedSpecUnreadable, err)
 			}
 			if err := holds.controller.Configure(oldSpec); err != nil {
-				return err
+				return degraded(readhold.DegradedSpecRejected, err)
 			}
 			if err := holds.controller.CloseSchedule(ctx, old, fence); errors.Is(err, readhold.ErrSegmentStale) {
 				// The record is past this Segment without its closing facts:
@@ -248,23 +326,27 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 				holds.closeSkipped.Add(1)
 				holds.report("close_previous_stale", qg, err)
 			} else if err != nil {
-				return err
+				return degraded(readhold.DegradedCloseFailed, err)
 			}
 		} else if err != nil && !errors.Is(err, controlplane.ErrScheduleUnavailable) {
-			return err
+			return degraded(readhold.DegradedPreviousUnreadable, err)
 		}
 	}
 	// Late observations of an older closed segment cannot reconfigure a
 	// newer live group with the old segment's delay or Plans.
 	if schedule.Segment.Start < group.prepared.Start {
+		err := readhold.ErrSegmentStale
 		if schedule.Segment.End != nil {
-			return holds.controller.CloseSchedule(ctx, schedule, fence)
+			err = holds.controller.CloseSchedule(ctx, schedule, fence)
 		}
-		return readhold.ErrSegmentStale
+		if errors.Is(err, readhold.ErrSegmentStale) {
+			return degraded(readhold.DegradedStaleSegment, err)
+		}
+		return degraded(readhold.DegradedCloseFailed, err)
 	}
 	links, skipped, err := holds.repository.ReadHoldPredecessors(ctx, schedule)
 	if err != nil {
-		return err
+		return degraded(readhold.DegradedPredecessorsUnreadable, err)
 	}
 	holds.countLinks(skipped)
 	// Nothing about a predecessor can stop this group: the controller reads
@@ -291,11 +373,13 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		spec.Previous = append(spec.Previous, readhold.Previous{QueryGroup: link.QueryGroup, ClosedAt: link.ClosedAt, Links: wanted})
 	}
 	if err := holds.controller.Configure(spec); err != nil {
-		return err
+		return degraded(readhold.DegradedSpecRejected, err)
 	}
 	if schedule.Segment.End != nil {
-		if err := holds.controller.CloseSchedule(ctx, schedule, fence); err != nil {
-			return err
+		if err := holds.controller.CloseSchedule(ctx, schedule, fence); errors.Is(err, readhold.ErrSegmentStale) {
+			return degraded(readhold.DegradedStaleSegment, err)
+		} else if err != nil {
+			return degraded(readhold.DegradedCloseFailed, err)
 		}
 		holds.releasePredecessors(group)
 	}
@@ -348,10 +432,62 @@ func (holds *productionReadHolds) ReadHold(qg execution.QueryGroupIdentity) time
 	return holds.controller.ReadHold(qg)
 }
 
+// SlotReadHold is the hold a new Slot is frozen with. A hold its group could
+// not prepare or write is degraded, not refused: the Slot is frozen with the
+// hold the group last read (degradedHold), and counted by what failed.
 func (holds *productionReadHolds) SlotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
-	if err := holds.PrepareSchedule(ctx, schedule, fence); err != nil {
+	err := holds.PrepareSchedule(ctx, schedule, fence)
+	if err == nil {
+		var hold time.Duration
+		if hold, err = holds.slotReadHold(ctx, schedule, at, fence); err == nil {
+			return hold, nil
+		}
+		reason := readhold.DegradedHoldFailed
+		if errors.Is(err, readhold.ErrSegmentStale) {
+			reason = readhold.DegradedStaleSegment
+		}
+		err = degraded(reason, err)
+	}
+	var degradation *readHoldDegradation
+	if !errors.As(err, &degradation) {
 		return 0, err
 	}
+	holds.countDegraded(schedule.Segment, degradation)
+	return holds.degradedHold(schedule, at), nil
+}
+
+// degradedHold is the hold the group last read at the Slot, its transitions
+// included -- zero for a group without a record -- within the schedule's hold
+// limit. It reads nothing, so it cannot fail as the hold it stands in for did.
+func (holds *productionReadHolds) degradedHold(schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) time.Duration {
+	limit := min(holds.holdLimit(schedule), time.Duration(execution.MaxReadHoldMillis)*time.Millisecond)
+	return min(holds.controller.ReadHoldAt(schedule.Segment.QueryGroup, at), limit)
+}
+
+// countDegraded counts one degraded Slot under its reason, and says so in
+// the log once per group, Segment and reason: a group whose hold stays
+// degraded writes a line when it starts, not one per Slot.
+func (holds *productionReadHolds) countDegraded(segment execution.ScheduleSegmentFact, degradation *readHoldDegradation) {
+	holds.degradedMu.Lock()
+	holds.degraded[degradation.reason]++
+	holds.degradedMu.Unlock()
+	holds.mu.Lock()
+	group := holds.groups[segment.QueryGroup]
+	holds.mu.Unlock()
+	if group == nil {
+		return
+	}
+	logged := readHoldDegradedLine{start: segment.Start, reason: degradation.reason}
+	group.mu.Lock()
+	first := group.degradedLogged != logged
+	group.degradedLogged = logged
+	group.mu.Unlock()
+	if first {
+		holds.report("degraded_"+degradation.reason, segment.QueryGroup, degradation.err)
+	}
+}
+
+func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
 	hold, err := holds.controller.SlotReadHold(ctx, schedule, at, fence)
 	holds.mu.Lock()
 	currentGroup := holds.groups[schedule.Segment.QueryGroup]
@@ -412,6 +548,11 @@ func (holds *productionReadHolds) observation(contractRef execution.FrozenExecut
 		if err == nil {
 			err = apply(ctx)
 		}
+	}
+	if errors.Is(err, scheduler.ErrReadHoldDegraded) {
+		// The group learns nothing while its hold is degraded; its Slots
+		// count and log that (countDegraded), not each finding here.
+		return
 	}
 	holds.report("observation_failed", contractRef.Slot.QueryGroup, err)
 }

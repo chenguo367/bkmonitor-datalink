@@ -2383,7 +2383,8 @@ func (runtime *productionPhaseTwoOwnership) AssignedQueryGroups(
 ) (assigned []execution.QueryGroupIdentity, resultErr error) {
 	defer func() {
 		if resultErr == nil && runtime != nil && runtime.dependencies.ReadHolds != nil {
-			runtime.dependencies.ReadHolds.restore(ctx, assigned)
+			holds := runtime.dependencies.ReadHolds
+			holds.report("restore_failed", "", holds.restore(ctx, assigned))
 		}
 	}()
 	if runtime == nil {

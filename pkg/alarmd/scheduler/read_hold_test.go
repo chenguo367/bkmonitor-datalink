@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -46,6 +47,31 @@ func TestRetirementClosesTheHoldAndRetiresEvenWhenClosingFails(t *testing.T) {
 		}
 		if (closeErr == nil) != (len(holds.failed) == 0) {
 			t.Fatalf("close error %v: failures counted %v", closeErr, holds.failed)
+		}
+	}
+}
+
+// A hold its group could not prepare for a reason of the hold's own does not
+// refuse the Slot; any other preparing error still does.
+func TestADegradedReadHoldDoesNotRefuseTheSlot(t *testing.T) {
+	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
+	for _, tc := range []struct {
+		err     error
+		refused bool
+	}{
+		{fmt.Errorf("%w: route unreadable", ErrReadHoldDegraded), false},
+		{errors.New("owner fence is stale"), true},
+	} {
+		catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
+		source := newProductionSlotSourceForTest(t, catalog, missingProgress(), time.Unix(160, 0))
+		source.readHolds = &closingReadHolds{testReadHolds: testReadHolds{hold: time.Minute}, err: tc.err}
+		slot, due, _, err := source.Next(context.Background(), "query-group-1")
+		var retry *SourceRetryError
+		if refused := errors.As(err, &retry); refused != tc.refused {
+			t.Fatalf("prepare error %v: refused=%t, want %t (%v)", tc.err, refused, tc.refused, err)
+		}
+		if !tc.refused && (!due || slot.Contract.ReadHoldMillis != 60_000) {
+			t.Fatalf("prepare error %v: slot=%+v due=%t", tc.err, slot, due)
 		}
 	}
 }
