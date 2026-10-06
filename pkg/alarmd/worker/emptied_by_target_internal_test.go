@@ -34,6 +34,10 @@ func TestEveryPrimaryQueryHasToAgreeThatTheTargetEmptiedIt(t *testing.T) {
 		{"emptied by the target beside a query that returned nothing", []execution.PhysicalQueryCompletion{empty(2, 2), empty(0, 0)}, fullEmpty, true},
 		{"beside a query that withheld for another reason", []execution.PhysicalQueryCompletion{empty(2, 2), empty(1, 0)}, fullEmpty, false},
 		{"the other order", []execution.PhysicalQueryCompletion{empty(1, 0), empty(2, 2)}, fullEmpty, false},
+		// Only a query that itself came back empty was emptied by the
+		// target: one that kept data and withheld the rest was not.
+		{"a query that kept data", []execution.PhysicalQueryCompletion{
+			{Completeness: execution.CompletenessFull, DataState: execution.DataStateData, Withheld: 2, WithheldOutsideTarget: 2}, empty(0, 0)}, fullEmpty, false},
 		{"a primary that is not empty", []execution.PhysicalQueryCompletion{empty(2, 2)},
 			execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateData}, false},
 		{"a primary that is not full", []execution.PhysicalQueryCompletion{empty(2, 2)},

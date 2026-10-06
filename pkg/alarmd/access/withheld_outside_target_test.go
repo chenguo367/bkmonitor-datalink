@@ -102,3 +102,18 @@ func TestTheWithheldCountsReachTheQueryCompletion(t *testing.T) {
 		t.Fatalf("completion %+v, want EMPTY with both series withheld and none claimed outside", physical)
 	}
 }
+
+// Through the source with a host cache that resolves every host: the
+// target's refusals are its own answer, and both counts reach the physical
+// completion the worker reads. Without the second one the worker would read
+// every withheld series as withheld for another reason and never say the
+// target emptied the query.
+func TestTheOutsideTargetCountReachesTheQueryCompletion(t *testing.T) {
+	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, stateFuller{state: "running"}},
+		[]admission.Filter{admission.TargetScopeFilter{}})
+	completion, _, _ := executeScopedThrough(t, chain, hostScopeContract("192.0.2.10|0"), "192.0.2.98", "192.0.2.99")
+	physical := completion.PhysicalQueries[0]
+	if physical.DataState != execution.DataStateEmpty || physical.Withheld != 2 || physical.WithheldOutsideTarget != 2 {
+		t.Fatalf("completion %+v, want EMPTY with both series withheld as outside the target", physical)
+	}
+}

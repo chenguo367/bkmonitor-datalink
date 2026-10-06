@@ -66,6 +66,9 @@ func TestTheEmptyAfterTargetLineIsTheStrategysToEditAndNotDataAbsent(t *testing.
 	if !answered || words.Action != ActionStrategyEdit || words.State == StateDataAbsent {
 		t.Fatalf("EMPTY_AFTER_TARGET reads %+v, want STRATEGY_EDIT and a state other than DATA_ABSENT: the data arrived", words)
 	}
+	if answer := checkAnswers[CheckEmptyAfterTarget]; answer.Owner != OwnerStrategy {
+		t.Fatalf("EMPTY_AFTER_TARGET is owned by %v, want the strategy: the target is the strategy's", answer.Owner)
+	}
 }
 
 // A primary that was not empty carries no such claim, whatever it said.
