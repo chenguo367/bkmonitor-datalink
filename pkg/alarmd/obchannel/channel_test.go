@@ -259,6 +259,73 @@ func TestATargetedReadSpendsTheSessionsBudgetLikeALocalOne(t *testing.T) {
 	refused(c, a, n, "after no route", "process.read", Params{"id": "x"})
 }
 
+// An operation that is unavailable refuses the read before the budget is
+// spent: refused reads of it leave the whole minute's budget to the reads
+// that run once it is available again.
+func TestAnUnavailableOperationCostsNothing(t *testing.T) {
+	a := &sessionAuth{}
+	now := time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
+	up := false
+	op := Operation{ID: "read", Summary: "Read", Fields: map[string]Field{"id": {Type: "string", MinLength: 1}}, Required: []string{"id"},
+		Availability: func() Availability { return Availability{Available: up, Reason: "not ready"} },
+		Run:          func(context.Context, Params) Outcome { return Outcome{Complete: true} }}
+	c, err := New(Options{Auth: a, EnvironmentID: "test", Replica: "replica-1", Build: "test", Operations: []Operation{op},
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 503 || out.Error == nil || out.Error.Code != "operation_unavailable" {
+			t.Fatalf("unavailable read answered %d %+v", status, out)
+		}
+	}
+	up = true
+	for i := 0; i < InvokesPerSessionPerMinute; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 200 {
+			t.Fatalf("read %d refused after reads of an unavailable operation: %d %+v", i+1, status, out)
+		}
+	}
+	if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 429 || out.Error == nil || out.Error.Code != "rate_limited" {
+		t.Fatalf("over budget answered %d %+v", status, out)
+	}
+}
+
+// A session over its budget is refused as over budget even while another
+// session's read holds the execution slot: the budget is spent before the
+// slot is asked for, so the session never contends for it.
+func TestASessionOverBudgetNeverContendsForTheSlot(t *testing.T) {
+	a := &sessionAuth{}
+	now := time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
+	entered, release := make(chan struct{}), make(chan struct{})
+	op := Operation{ID: "read", Summary: "Read", Fields: map[string]Field{"id": {Type: "string", MinLength: 1}}, Required: []string{"id"},
+		Run: func(_ context.Context, params Params) Outcome {
+			if params.String("id") == "hold" {
+				close(entered)
+				<-release
+			}
+			return Outcome{Complete: true}
+		}}
+	c, err := New(Options{Auth: a, EnvironmentID: "test", Replica: "replica-1", Build: "test", Operations: []Operation{op},
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < InvokesPerSessionPerMinute; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 200 {
+			t.Fatalf("read %d of the budget refused: %d %+v", i+1, status, out)
+		}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); callAs(t, c, "s2", envelope(c, "invoke", "read", Params{"id": "hold"})) }()
+	<-entered
+	status, header, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"}))
+	close(release)
+	<-done
+	if status != 429 || out.Error == nil || out.Error.Code != "rate_limited" || header.Get("Retry-After") != "40" {
+		t.Fatalf("a session over budget was answered on the slot instead: %d %s %+v", status, header.Get("Retry-After"), out)
+	}
+}
+
 // The gate forgets sessions whose minute has passed once it holds more than
 // it needs to, and never forgets one still in its minute.
 func TestTheInvocationGateForgetsPastMinutes(t *testing.T) {
