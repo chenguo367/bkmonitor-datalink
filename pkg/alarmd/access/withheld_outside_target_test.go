@@ -78,9 +78,13 @@ func TestOutsideTheTargetIsEveryPlansAnswer(t *testing.T) {
 	if both.Withheld != 1 || both.WithheldOutsideTarget != 1 {
 		t.Fatalf("both Plans definitive: %+v, want withheld outside the target", both)
 	}
-	split := withheldCompletion(t, targetChain(), hostDims("202"), hostPlanContext(true), hostPlanContext(false))
-	if split.Withheld != 1 || split.WithheldOutsideTarget != 0 {
-		t.Fatalf("one Plan not definitive: %+v, want withheld but not claimed outside", split)
+	for _, contexts := range [][]admission.PlanContext{
+		{hostPlanContext(true), hostPlanContext(false)}, {hostPlanContext(false), hostPlanContext(true)},
+	} {
+		split := withheldCompletion(t, targetChain(), hostDims("202"), contexts...)
+		if split.Withheld != 1 || split.WithheldOutsideTarget != 0 {
+			t.Fatalf("one Plan not definitive: %+v, want withheld but not claimed outside, whichever Plan answers last", split)
+		}
 	}
 	admitted := withheldCompletion(t, targetChain(), hostDims("101"), hostPlanContext(true), hostPlanContext(true))
 	if admitted.DataState != execution.DataStateData || admitted.Withheld != 0 || admitted.WithheldOutsideTarget != 0 {
