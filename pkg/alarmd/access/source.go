@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
@@ -415,7 +416,7 @@ func appendQueryCompletion(
 		QueryRevision: query.Spec.PlanFacts.QueryRevision, Completeness: providerCompletion.Completeness,
 		DataState: providerCompletion.DataState, Delivery: providerCompletion.Delivery,
 		RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
-		Stats: providerCompletion.Stats,
+		Stats: providerCompletion.Stats, Withheld: providerCompletion.Withheld, WithheldOutsideTarget: providerCompletion.WithheldOutsideTarget,
 	})
 	// Every valid requirement receives a completion binding, also when the
 	// query delivered series. A Plan whose PRIMARY query returned no series
@@ -903,13 +904,17 @@ type seriesAdapter struct {
 	// undefined for the worker too - which is why this needs no lock.
 	forwarded execution.SeriesDelivery
 	withheld  uint64
+	// withheldOutside counts the withheld series every Plan refused as
+	// outside its monitoring target on facts that were all there: data that
+	// exists and that the target did not select.
+	withheldOutside uint64
 }
 
 func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
 	if batch.PhysicalQuery != adapter.query.Spec.Digest || batch.CompletionRef == "" || batch.Dataset == nil || batch.Dataset.Len() == 0 {
 		return errors.New("alarmd access: provider delivered an invalid series")
 	}
-	admitted := adapter.admittedPlans(batch)
+	admitted, outside := adapter.admittedPlans(batch)
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
@@ -922,6 +927,9 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 		// batch on would be rejected as incomplete, and there is nothing to
 		// evaluate: the series simply does not belong to any of them.
 		adapter.withheld++
+		if outside {
+			adapter.withheldOutside++
+		}
 		return nil
 	}
 	if err := adapter.consumer.ConsumeSeries(ctx, execution.SeriesExecutionBatch{PhysicalQuery: batch.PhysicalQuery,
@@ -956,6 +964,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 // including the ones whose series were admitted. Filtering therefore has to
 // subtract from the completion in the same layer that does the filtering.
 func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderCompletion) execution.ProviderCompletion {
+	completion.Withheld, completion.WithheldOutsideTarget = adapter.withheld, adapter.withheldOutside
 	if adapter.withheld == 0 || completion.DataState != execution.DataStateData {
 		return completion
 	}
@@ -972,12 +981,15 @@ func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderC
 }
 
 // admittedPlans enriches the series once and then decides for each plan it
-// could feed. A nil result means no filtering is installed and every plan is
+// could feed, and says whether every plan refused it as outside its
+// monitoring target, decided on facts that were all there. A nil result means
+// no filtering is installed and every plan is
 // admitted.
-func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) map[execution.PlanIdentity]bool {
+func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool) {
 	if adapter.admission == nil {
-		return nil
+		return nil, false
 	}
+	outside := true
 	facts := adapter.admission.Enrich(seriesDimensions(batch.Dataset))
 	decisions := make(map[execution.PlanIdentity]bool)
 	for _, requirement := range adapter.query.Requirements {
@@ -991,6 +1003,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 				// A plan whose scope was not indexed must not be filtered on a
 				// guess. It is admitted and the gap is visible in the counter.
 				decisions[identity] = true
+				outside = false
 				if adapter.observe != nil {
 					adapter.observe("target_scope", "admitted", "plan_not_indexed")
 				}
@@ -1001,6 +1014,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			if !admit {
 				adapter.reportScopeDrop(identity, plan, &facts, filter, reason)
 			}
+			outside = outside && !admit && admission.DefinitelyOutside(plan, &facts, filter, reason)
 			if adapter.observe != nil {
 				switch {
 				case !admit:
@@ -1021,7 +1035,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			}
 		}
 	}
-	return decisions
+	return decisions, outside && len(decisions) > 0
 }
 
 func dataBindings(

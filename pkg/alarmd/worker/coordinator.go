@@ -1616,6 +1616,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	if err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive PRIMARY input fact: %w", err)
 	}
+	primary.EmptiedByTarget = query.emptiedByTarget(primary)
 	completion := execution.SlotCompletion{Contract: request.Contract, Primary: &primary, TargetResolutions: targets}
 	// Observation only. The cause is deliberately not put on
 	// completion.ReasonCode, which is persisted and decides how consecutive gaps
@@ -2833,7 +2834,8 @@ func primaryInputFacts(primary *execution.PrimaryInputFact) *observability.Prima
 	if primary == nil {
 		return nil
 	}
-	return &observability.PrimaryInputFacts{Completeness: string(primary.Completeness), DataState: string(primary.DataState)}
+	return &observability.PrimaryInputFacts{Completeness: string(primary.Completeness), DataState: string(primary.DataState),
+		EmptiedByTarget: primary.EmptiedByTarget}
 }
 
 // configDriftCompletion builds the completion of a Slot whose activations moved

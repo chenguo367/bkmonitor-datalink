@@ -1402,15 +1402,19 @@ type recordingPorts struct {
 	// stateApplyAlreadyApplied makes every state write report that an earlier
 	// attempt had already written it, which is what a retry of a Slot whose
 	// first attempt got that far actually sees.
-	stateApplyAlreadyApplied        bool
-	degraded                        bool
-	completionCompleteness          execution.Completeness
-	wrongGapIdentity                bool
-	wrongStateAdmissionIdentity     bool
-	wrongStateApplyIdentity         bool
-	progressConflict                bool
-	reverseStateReceipts            bool
-	unboundEffectiveTimeFacts       bool
+	stateApplyAlreadyApplied    bool
+	degraded                    bool
+	completionCompleteness      execution.Completeness
+	wrongGapIdentity            bool
+	wrongStateAdmissionIdentity bool
+	wrongStateApplyIdentity     bool
+	progressConflict            bool
+	reverseStateReceipts        bool
+	unboundEffectiveTimeFacts   bool
+	// withheld, when set, makes the primary answer FULL and EMPTY with these
+	// two counts: the series the query returned that every Plan refused,
+	// and those it refused as outside the target.
+	withheld                        *[2]uint64
 	stateAdmissionDeterministic     bool
 	stateApplyDeterministic         bool
 	stateAdmissionDeterministicLast bool
@@ -1541,6 +1545,18 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 	}
 	if err := ports.fail("query"); err != nil {
 		return execution.QueryExecutionCompletion{}, err
+	}
+	if ports.withheld != nil {
+		binding := input.Inputs[0]
+		binding.Dataset = execution.NewDataset(nil)
+		binding.View, _ = execution.NewDatasetView(binding.Dataset, []uint32{})
+		binding.Completeness, binding.DataState, binding.Disposition = execution.CompletenessFull, execution.DataStateEmpty, execution.AccessAvailable
+		return execution.QueryExecutionCompletion{AllRequiredCompleted: true, CompletionBindings: []execution.NamedInputBinding{binding},
+			PhysicalQueries: []execution.PhysicalQueryCompletion{{
+				Ref: "provider-result-1", PhysicalQuery: "physical-query-1", QueryRevision: queryRevision,
+				Completeness: execution.CompletenessFull, DataState: execution.DataStateEmpty,
+				Withheld: ports.withheld[0], WithheldOutsideTarget: ports.withheld[1],
+			}}}, nil
 	}
 	if !ports.ready {
 		binding := input.Inputs[0]

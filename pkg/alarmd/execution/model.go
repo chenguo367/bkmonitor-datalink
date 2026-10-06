@@ -3748,6 +3748,11 @@ const (
 type PrimaryInputFact struct {
 	Completeness Completeness
 	DataState    DataState
+	// EmptiedByTarget says a FULL, EMPTY primary was empty because every
+	// series its queries returned was withheld as outside the monitoring
+	// target: the data was there, the target selected none of it. Set by
+	// the worker from the query completions; never part of a durable record.
+	EmptiedByTarget bool
 }
 
 func DerivePrimaryInputFact(input InternalExecution) (PrimaryInputFact, error) {

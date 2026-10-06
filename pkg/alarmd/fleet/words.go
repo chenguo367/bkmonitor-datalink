@@ -221,9 +221,11 @@ var checkWords = map[Check]wordPair{
 	CheckSeriesSparse:           {StateDataAbsent, ActionDataCheck},
 	CheckNoDataPersistent:       {StateDataAbsent, ActionDataCheck},
 	CheckEmptyEveryRound:        {StateDataAbsent, ActionStrategyEdit},
-	CheckSeriesChurning:         {StateResultUntrusted, ActionStrategyEdit},
-	CheckPlanUnevaluable:        {StateStrategyInvalid, ActionStrategyEdit},
-	CheckQueryTargetMissing:     {StateStrategyInvalid, ActionStrategyEdit},
+	// Not "data absent": the data arrived, outside the target.
+	CheckEmptyAfterTarget:   {StateNotDetecting, ActionStrategyEdit},
+	CheckSeriesChurning:     {StateResultUntrusted, ActionStrategyEdit},
+	CheckPlanUnevaluable:    {StateStrategyInvalid, ActionStrategyEdit},
+	CheckQueryTargetMissing: {StateStrategyInvalid, ActionStrategyEdit},
 	// Detecting: every round completes. The strategy's to act on before the
 	// share refuses it whole.
 	CheckRetainedShareApproaching: {StateDetecting, ActionStrategyEdit},

@@ -135,6 +135,9 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckSlotsOverdue, true, false
 	case anomaly.Kind == KindNoData:
 		return CheckNoDataPersistent, true, false
+	case anomaly.Kind == KindEmptyEveryRound && anomaly.EmptyEveryRound != nil &&
+		anomaly.EmptyEveryRound.Cause == EmptyEveryRoundCauseOutsideTarget:
+		return CheckEmptyAfterTarget, true, false
 	case anomaly.Kind == KindEmptyEveryRound:
 		return CheckEmptyEveryRound, true, false
 	case anomaly.Kind == KindNoDataMemoryRefused:

@@ -191,8 +191,13 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// tail of a window the supplement recovered in part is the data's, since
 	// a longer time_delay would slow the whole object for a few series
 	// (09-29 ruling).
-	if got := len(Checks()); got != 35 || len(checkAnswers) != 35 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 35: a new check has to "+
+	// Thirty-six: EMPTY_AFTER_TARGET is a rule over a dimension the rows did
+	// not carry before - the cause of an empty run, read from the round's
+	// primary - because a run whose query returned series the target
+	// selected none of has the data, and EMPTY_EVERY_ROUND's "data absent"
+	// sends its owner to the source instead of the target.
+	if got := len(Checks()); got != 36 || len(checkAnswers) != 36 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 36: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -260,6 +265,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckQueryTargetMissing:  {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}},
 		CheckNoDataPersistent:    {Kind: KindNoData},
 		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
+		CheckEmptyAfterTarget:    {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseOutsideTarget}},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
