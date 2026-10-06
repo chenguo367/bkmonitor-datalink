@@ -435,3 +435,41 @@ func TestIPCloudAbsentExclusionsStayUsableAndUnreadableAddressesDoNot(t *testing
 		})
 	}
 }
+
+// The host enumeration lists hosts, not the instances of another model, so
+// its silence about such an instance proves nothing. Only a group of this
+// Slot can place one; when none does, the exclusion cannot be applied and
+// the plan must not admit the hosts its groups name.
+func TestAnExcludedNonHostInstanceNoSnapshotPlacesBlocksThePlan(t *testing.T) {
+	now := time.Unix(1000, 0)
+	clock := func() time.Time { return now }
+	for _, test := range []struct {
+		name, excluded string
+		unavailable    bool
+	}{
+		{"a group places the instance on its host", "db-1", false},
+		{"no snapshot places the instance", "db-9", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hosts := hostStore(t, clock, []string{"501", hostUnderSet}, nil)
+			client := &groupClient{values: map[string]string{"cw:dynamic_group:g": `{"model_id":"cw-MySQL","model_inst_ids":["db-1"],"member_list":[{"model_id":"cw-MySQL","model_inst_id":"db-1","bk_host_id":501}]}`}}
+			reader, _ := NewGroupReader(client, "cw:")
+			groups, _ := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: testGroupReadBound, Now: clock})
+			plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-MySQL", Rule: contract.TargetPlanRuleModelInstID,
+				Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{},
+				DynamicGroups: []string{"g"}, ExcludeMembers: []contract.TargetPlanMemberV1{{ModelID: "cw-MySQL", ModelInstID: test.excluded}}}
+			got := NewTargetResolver(groups, hosts, clock).Resolve(context.Background(), plan, time.Minute)
+			if group := selector(got, targetplan.SelectorKindGroup, "g"); group.State != targetplan.SelectorOK {
+				t.Fatalf("the group must answer whole: %+v", group)
+			}
+			exclusion := selector(got, targetplan.SelectorKindExclude, "cw-MySQL")
+			if test.unavailable {
+				if got.State != targetplan.ResolutionUnavailable || !got.ExclusionUnavailable || exclusion.Reason != targetplan.ReasonModelUnresolved || got.Contains("501") || len(got.Members()) != 0 {
+					t.Fatalf("an unplaced non-host exclusion was read as absent: %+v exclusion %+v", got, exclusion)
+				}
+			} else if got.State != targetplan.ResolutionComplete || got.ExclusionUnavailable || exclusion.Reason != targetplan.ReasonNone || exclusion.Kept != 1 || got.Contains("501") || len(got.Members()) != 0 {
+				t.Fatalf("the group-placed exclusion was not subtracted: %+v exclusion %+v", got, exclusion)
+			}
+		})
+	}
+}
