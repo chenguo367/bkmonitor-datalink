@@ -54,17 +54,6 @@ func publishedView(snapshot Snapshot, stallAfter time.Duration) View {
 	return view
 }
 
-// decidedAsPublished is the snapshot with its rows as publishedView decides
-// them.
-func decidedAsPublished(snapshot Snapshot, stallAfter time.Duration) Snapshot {
-	view := publishedView(snapshot, stallAfter)
-	decided := snapshot
-	decided.Anomalies, decided.Demoted, decided.Undecidable, decided.ByDesign = view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign
-	decided.NoData, decided.NoDataMemory, decided.RetainedShare = view.NoData, view.NoDataMemory, view.RetainedShare
-	decided.ReadEarly, decided.LateSeries = view.ReadEarly, view.LateSeries
-	return decided
-}
-
 // summaryFromSnapshot is the summary a reader makes for a replica that
 // published none -- an older build during a rollout -- from its snapshot,
 // keeping the owned list the snapshot carries for coverage.

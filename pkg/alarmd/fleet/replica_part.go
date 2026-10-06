@@ -39,9 +39,10 @@ import (
 // which is the read this exists to stop.
 //
 // A replica publishes its part beside its snapshot (ReplicaSummary), with
-// the fields the health route reads. CheckRows and TodoRows are not
-// published yet: the routes that draw the check lines and the to-do still
-// read rows, and a part read back has neither.
+// the fields the health route and the verdict scrape read. CheckRows and
+// TodoRows are not published yet: the routes that draw the check lines and
+// the to-do still read rows, and a part read back has neither -- the scrape
+// reads the lines' counts from Metrics.
 type ReplicaPart struct {
 	Replica string `json:"replica"`
 	// Attribution counts the anomaly column's rows by who they are
@@ -84,6 +85,11 @@ type ReplicaPart struct {
 	CheckRows checkTallies `json:"-"`
 	// TodoRows is the rows' half of the first screen's to-do (todoRowsOf).
 	TodoRows Todo `json:"-"`
+	// Metrics is what the verdict scrape counts from rows. Nil on a part a
+	// build before it published, which says nothing of those counts: such a
+	// summary is read as none, and the replica is summarized from its
+	// snapshot (Service.summarize).
+	Metrics *MetricRows `json:"metrics,omitempty"`
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -114,7 +120,9 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
-	part.Loss = lossOfView(&view, now)
+	loss, census, graceUnknown := lossesOfView(&view, now)
+	part.Loss = loss
+	part.Metrics = metricRowsOf(&view, part.CheckRows, census, graceUnknown)
 	pruned, retained, readEarly := prunedSkipList(view.PrunedSkips), retainedShareList(view.RetainedShare), readEarlyList(view.ReadEarly)
 	part.PrunedSkips, part.PrunedSkipsTotal = firstScreenList(pruned), len(pruned)
 	part.RetainedShare, part.RetainedShareTotal = firstScreenList(retained), len(retained)
@@ -132,7 +140,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
-	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}}
+	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}, Metrics: &MetricRows{}}
 	tallies := make([]ImpactTally, 0, len(parts))
 	for _, part := range parts {
 		merged.Attribution.Ours += part.Attribution.Ours
@@ -151,6 +159,13 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.Truncated |= part.Truncated
 		mergeCheckTallies(merged.CheckRows, part.CheckRows)
 		mergeTodoRows(&merged.TodoRows, part.TodoRows)
+		// One part without the counts leaves the merged counts unknown,
+		// never short by that replica's rows.
+		if part.Metrics == nil {
+			merged.Metrics = nil
+		} else if merged.Metrics != nil {
+			mergeMetricRows(merged.Metrics, part.Metrics)
+		}
 		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
 		merged.RetainedShare = append(merged.RetainedShare, part.RetainedShare...)
 		merged.RetainedShareTotal += part.RetainedShareTotal

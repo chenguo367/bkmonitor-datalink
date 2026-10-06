@@ -302,9 +302,19 @@ func backlogOf(census *ScheduleCensus) LoadBacklog {
 // when not demoted and within the window; the demoted objects' recent
 // skips apart.
 func lossOfView(view *View, now time.Time) LoadLoss {
-	reading := LoadLoss{State: LossNone, WindowSeconds: int(RecentSkipWindow / time.Second),
+	reading, _, _ := lossesOfView(view, now)
+	return reading
+}
+
+// lossesOfView is lossOfView and LossCensus from one walk of the records.
+func lossesOfView(view *View, now time.Time) (reading LoadLoss, byLoss map[Loss]int, graceUnknown int) {
+	reading = LoadLoss{State: LossNone, WindowSeconds: int(RecentSkipWindow / time.Second),
 		RestartGraceSeconds: int(RestartCatchUpGrace / time.Second)}
-	lossRecords(view, now, func(_ string, _, _ Check, _ string, skip SkippedSpan, loss Loss, _ bool) {
+	byLoss = make(map[Loss]int, len(Losses))
+	for _, loss := range Losses {
+		byLoss[loss] = 0
+	}
+	lossRecords(view, now, func(_ string, check, _ Check, _ string, skip SkippedSpan, loss Loss, unknown bool) {
 		switch loss {
 		case LossOngoing:
 			reading.Ongoing++
@@ -317,8 +327,15 @@ func lossOfView(view *View, now time.Time) LoadLoss {
 				reading.WhileDemotedRecent++
 			}
 		}
+		if check == CheckBookkeepingAbandoned {
+			return
+		}
+		byLoss[loss]++
+		if unknown && now.Sub(skip.At) <= RecentSkipWindow {
+			graceUnknown++
+		}
 	})
-	return reading.settled()
+	return reading.settled(), byLoss, graceUnknown
 }
 
 // settled names the loss's state from its counts.

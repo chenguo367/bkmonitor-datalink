@@ -504,36 +504,6 @@ func TestADiagnosisOverADeferredViewSaysItWasDeferred(t *testing.T) {
 	}
 }
 
-// The verdict scrape's read never asks the memory line: with the line
-// refusing everything, pages read the deferred gap and the scrape's view is
-// the one it reads with room, the line never asked on its path.
-func TestTheVerdictScrapesReadNeverAsksTheMemoryLine(t *testing.T) {
-	client := newFakeRedis()
-	store := mustStore(t, client, time.Minute, 0)
-	for _, snapshot := range snapshotsWithAnomalies(2) {
-		snapshot.TakenAt = now
-		encoded, _ := json.Marshal(snapshot)
-		client.values[store.snapshotKey(snapshot.Replica)] = string(encoded)
-	}
-	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}, stubRegistry{replicas: replicas()}, store)
-	store.AdmitLoads(func(uint64) bool { return true })
-	withRoom := service.ViewAsPublished(context.Background(), time.Minute)
-	asked := 0
-	store.AdmitLoads(func(uint64) bool {
-		asked++
-		return false
-	})
-	if page := service.View(context.Background()); !hasGap(page, GapSnapshotsDeferred) || asked != 1 {
-		t.Fatalf("page read gaps %+v after %d asks, want the deferred gap from one ask", page.Gaps, asked)
-	}
-	asked = 0
-	scrape := service.ViewAsPublished(context.Background(), time.Minute)
-	if asked != 0 || hasGap(scrape, GapSnapshotsDeferred) {
-		t.Fatalf("the scrape's read asked the line %d times, gaps %+v; want it never asked", asked, scrape.Gaps)
-	}
-	sameJSON(t, "the scrape's view with the line refusing", scrape, withRoom)
-}
-
 // Pages that ask for a view together share one read of the snapshots, and
 // each builds its own view from it: deciding one does not decide the other.
 func TestPagesThatAskTogetherShareOneReadOfTheSnapshots(t *testing.T) {
@@ -602,44 +572,20 @@ func (store failingSnapshotsWithSummaries) LoadOwned(context.Context, []string) 
 	return map[string][]string{}, nil
 }
 
-// The unadmitted view is the verdict scrape's alone: one caller in the
-// production code. A page that read it would read past the memory line.
-func TestTheUnadmittedViewHasOneProductionCaller(t *testing.T) {
-	callers := []string{}
-	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.Contains(line, ".ViewAsPublished(") {
-				callers = append(callers, path)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(callers) != 1 || !strings.HasSuffix(callers[0], filepath.Join("cmd", "alarmd", "runtime_phase_two_fleet.go")) {
-		t.Fatalf("ViewAsPublished called from %v, want the verdict scrape alone", callers)
-	}
-}
-
 // The reads past the memory line are reached by the verdict alone: the
-// unadmitted load from the verdict's load, that from the scrape's view and
-// the health route's summaries, and those two from the scrape and the
-// health route. Each call is placed by the function it is written in, one
-// entry a call, so a new caller of any of them fails here.
+// snapshot reads for replicas whose summaries carry no counts -- one
+// snapshot at a time from Redis, all at once from any other reader -- from
+// the summaries' read, and that from the health route and the verdict
+// scrape. Each call is placed by the function it is written in, one entry a
+// call, so a new caller of any of them fails here.
 func TestTheReadsPastTheMemoryLineAreReachedByTheVerdictAlone(t *testing.T) {
 	want := map[string][]string{
-		"loadUnadmitted":  {"fleet/service.go:loadForVerdict"},
-		"loadForVerdict":  {"fleet/service.go:ViewAsPublished", "fleet/service.go:summarize"},
-		"ViewAsPublished": {"cmd/alarmd/runtime_phase_two_fleet.go:fleetVerdictSource"},
-		"Summarized":      {"fleet/handler.go:NewHandler"}, // the /api/health route, its one call there
+		"loadUnadmitted":         {"fleet/service.go:loadForVerdict"},
+		"loadForVerdict":         {"fleet/service.go:summarizeFromSnapshots"},
+		"summarizeUnadmitted":    {"fleet/service.go:summarizeFromSnapshots"},
+		"summarizeFromSnapshots": {"fleet/service.go:summarize"},
+		// the /api/health route, its one call there, and the scrape
+		"Summarized": {"cmd/alarmd/runtime_phase_two_fleet.go:fleetVerdictSource", "fleet/handler.go:NewHandler"},
 	}
 	got := map[string][]string{}
 	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, err error) error {

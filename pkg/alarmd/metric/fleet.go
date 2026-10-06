@@ -101,6 +101,16 @@ type FleetVerdict struct {
 	// or a loss in progress: the kind was only on the group name, which no
 	// series carried.
 	Losses []FleetCount
+	// HandoverObjects is how many objects more than one replica holds at
+	// once, nil when that is unknown -- some replica's owned set was not read
+	// whole. The counts read from the replicas' parts can count each of these
+	// objects once per holder.
+	HandoverObjects *int
+	// RowsUnknown says the counts read from rows -- stalled, anomalies by
+	// kind, failures, query cooldown, check lines and losses -- are not
+	// known for this judgment, and their families are left out rather than
+	// exported as none.
+	RowsUnknown bool
 }
 
 // FleetVerdictSource returns the current judgment. Reading it costs one control
@@ -123,6 +133,7 @@ type fleetCollector struct {
 	checks       *prometheus.Desc
 	degradations *prometheus.Desc
 	losses       *prometheus.Desc
+	handover     *prometheus.Desc
 }
 
 func newFleetCollector(source FleetVerdictSource) *fleetCollector {
@@ -203,10 +214,11 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"the line is down, so > 0 is exactly 'this line is on the first screen' and an absent series "+
 				"is a build without this family, not a clear line. Records of past loss retained under "+
 				"DETECTION_ABANDONED and TIMELINE_PRUNED are not current and are not counted; the JSON todo "+
-				"carries those. Written by every replica from the same shared snapshots, each read at that "+
-				"replica's own scrape instant: a code that changes from round to round can differ between "+
-				"replicas within one scrape interval, and for those the comparison is within one replica over "+
-				"time. Aggregate with max, not sum.",
+				"carries those. Each replica counts its own objects at the moment it publishes its summary, "+
+				"and every replica's scrape adds the same summaries up: a code that changes from round to "+
+				"round can differ between replicas within one scrape interval, and for those the comparison "+
+				"is within one replica over time. While an object is handed over, both holders count it "+
+				"(fleet_handover_objects). Aggregate with max, not sum.",
 			[]string{"code"}),
 		losses: descriptor("fleet_losses",
 			"Retained skip records by what each is: WHILE_DEMOTED (the object is in the cooldown pool now; "+
@@ -218,7 +230,7 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"publisher sent neither its process start nor its first sight of the object; they are counted "+
 				"under ONGOING as well, so this says how much of ONGOING was not actually judged. Every kind "+
 				"is emitted, zero when none. fleet_checks{code=\"DETECTION_ABANDONED\"} is the line's current "+
-				"count and cannot tell these apart. Same shared snapshots as the rest of the family; "+
+				"count and cannot tell these apart. Same shared summaries as the rest of the family; "+
 				"aggregate with max.",
 			[]string{"loss"}),
 		degradations: descriptor("fleet_degradations",
@@ -227,6 +239,13 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"anomalous objects reads DEGRADED whether or not a standing is up. Every kind is emitted, zero "+
 				"when no replica is under it. Aggregate with max.",
 			[]string{"kind"}),
+		handover: descriptor("fleet_handover_objects",
+			"Objects more than one replica holds at once: a handover in progress. The counts read from the "+
+				"replicas' summaries -- fleet_anomalies, fleet_checks, fleet_losses and the rest counted from "+
+				"objects -- can count each of these once per holder, so read them alongside this. Zero is "+
+				"emitted as zero; absent when some replica's owned set was not read whole, which says a "+
+				"handover may be happening without saying how much. Aggregate with max.",
+			nil),
 	}
 }
 
@@ -244,6 +263,7 @@ func (c *fleetCollector) Describe(descriptions chan<- *prometheus.Desc) {
 	descriptions <- c.checks
 	descriptions <- c.degradations
 	descriptions <- c.losses
+	descriptions <- c.handover
 }
 
 func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
@@ -278,6 +298,32 @@ func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
 	} {
 		metrics <- prometheus.MustNewConstMetric(c.partition, prometheus.GaugeValue, float64(count), column)
 	}
+	if verdict.HandoverObjects != nil {
+		metrics <- prometheus.MustNewConstMetric(c.handover, prometheus.GaugeValue, float64(*verdict.HandoverObjects))
+	}
+	for _, count := range verdict.Workers {
+		if count.Value == "" {
+			continue
+		}
+		metrics <- prometheus.MustNewConstMetric(c.workers, prometheus.GaugeValue, float64(count.Count), count.Value)
+	}
+	for _, count := range verdict.Gaps {
+		if count.Value == "" {
+			continue
+		}
+		metrics <- prometheus.MustNewConstMetric(c.gaps, prometheus.GaugeValue, float64(count.Count), count.Value)
+	}
+	for _, count := range verdict.Degradations {
+		if count.Value == "" {
+			continue
+		}
+		metrics <- prometheus.MustNewConstMetric(c.degradations, prometheus.GaugeValue, float64(count.Count), count.Value)
+	}
+	if verdict.RowsUnknown {
+		// What is counted from rows is not known for this judgment: none of
+		// it is exported, where zeros would say there is nothing.
+		return
+	}
 	metrics <- prometheus.MustNewConstMetric(c.stalled, prometheus.GaugeValue, float64(verdict.Stalled))
 	for _, count := range verdict.Anomalies {
 		if count.Value == "" {
@@ -288,23 +334,11 @@ func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
 			metrics <- prometheus.MustNewConstMetric(c.anomalyAge, prometheus.GaugeValue, count.OldestAgeSeconds, count.Value)
 		}
 	}
-	for _, count := range verdict.Gaps {
-		if count.Value == "" {
-			continue
-		}
-		metrics <- prometheus.MustNewConstMetric(c.gaps, prometheus.GaugeValue, float64(count.Count), count.Value)
-	}
 	for _, count := range verdict.Failures {
 		if count.Value == "" {
 			continue
 		}
 		metrics <- prometheus.MustNewConstMetric(c.failures, prometheus.GaugeValue, float64(count.Count), count.Value)
-	}
-	for _, count := range verdict.Workers {
-		if count.Value == "" {
-			continue
-		}
-		metrics <- prometheus.MustNewConstMetric(c.workers, prometheus.GaugeValue, float64(count.Count), count.Value)
 	}
 	// Zero is emitted as zero for both: the producer fills the whole closed
 	// table, and a line that is down has to read as down, not as gone.
@@ -313,12 +347,6 @@ func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
 			continue
 		}
 		metrics <- prometheus.MustNewConstMetric(c.checks, prometheus.GaugeValue, float64(count.Count), count.Value)
-	}
-	for _, count := range verdict.Degradations {
-		if count.Value == "" {
-			continue
-		}
-		metrics <- prometheus.MustNewConstMetric(c.degradations, prometheus.GaugeValue, float64(count.Count), count.Value)
 	}
 	for _, count := range verdict.Losses {
 		if count.Value == "" {
