@@ -73,9 +73,10 @@ var ClampSources = []string{ClampKnown, ClampFallback}
 // (spec_unreadable), its previous Segment's schedule (previous_unreadable),
 // its predecessor links (predecessors_unreadable), a spec the controller
 // refused (spec_rejected), closing a Segment (close_failed), a Slot of a
-// Segment older than the group's record (stale_segment), or the Slot's own
-// hold (hold_failed). Ownership and the group's record unread still refuse
-// the Slot; nothing else about the hold does.
+// Segment older than the group's record (stale_segment), the Slot's own hold
+// (hold_failed), or the group's record answered by Redis with an error of
+// its own (record_unreadable). Ownership and the group's record unread for
+// want of an answer still refuse the Slot; nothing else about the hold does.
 const (
 	DegradedSpecUnreadable         = "spec_unreadable"
 	DegradedPreviousUnreadable     = "previous_unreadable"
@@ -84,11 +85,12 @@ const (
 	DegradedCloseFailed            = "close_failed"
 	DegradedStaleSegment           = "stale_segment"
 	DegradedHoldFailed             = "hold_failed"
+	DegradedRecordUnreadable       = "record_unreadable"
 )
 
 // DegradedReasons is the closed list of them.
 var DegradedReasons = []string{DegradedSpecUnreadable, DegradedPreviousUnreadable, DegradedPredecessorsUnreadable,
-	DegradedSpecRejected, DegradedCloseFailed, DegradedStaleSegment, DegradedHoldFailed}
+	DegradedSpecRejected, DegradedCloseFailed, DegradedStaleSegment, DegradedHoldFailed, DegradedRecordUnreadable}
 
 // Stats are the controller's counts since it started.
 type Stats struct {

@@ -105,7 +105,8 @@ func newLookbackCollector() *lookbackCollector {
 		readHoldDegraded: desc("read_hold_degraded_total",
 			"New Slots frozen with the hold their Query Group last read -- zero for a group without a record -- because "+
 				"its own could not be prepared or written, each freeze attempt once, by what failed: spec_unreadable, "+
-				"previous_unreadable, predecessors_unreadable, spec_rejected, close_failed, stale_segment, hold_failed. "+
+				"previous_unreadable, predecessors_unreadable, spec_rejected, close_failed, stale_segment, hold_failed, "+
+				"record_unreadable. "+
 				"No Slot is refused for it; the group learns nothing until its hold prepares again.", "reason"),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+

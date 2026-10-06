@@ -156,3 +156,59 @@ func TestAnObjectOfAnotherGroupIsNoRoute(t *testing.T) {
 		t.Fatalf("another group's object was taken for this group's route: %v", err)
 	}
 }
+
+// A group whose record Redis answers with an error of its own -- here the
+// key holds a list, so every read of it is WRONGTYPE -- runs on with hold 0,
+// counted, instead of being refused as unrestored for as long as the key
+// answers so; and restores at the next Slot once it reads again.
+func TestAGroupWhoseRecordRedisAnswersWithAnErrorRunsAtTheHoldItLastRead(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	key := holdRecordKey(f, f.queryGroup)
+	if err := f.redisClient.RPush(ctx, key, "not a record").Err(); err != nil {
+		t.Fatal(err)
+	}
+	after := restartUntilFull(t, f, f.queryGroup)
+	if counts := degradedCounts(f); counts[readhold.DegradedRecordUnreadable] == 0 {
+		t.Fatalf("the unreadable record was not counted: %v", counts)
+	}
+	if after.LastCompletion == nil || after.LastCompletion.Contract.ReadHoldMillis != 0 {
+		t.Fatalf("the Slot was not frozen with the hold the group last read: %+v", after.LastCompletion)
+	}
+	if err := f.redisClient.Del(ctx, key).Err(); err != nil {
+		t.Fatal(err)
+	}
+	before := degradedCounts(f)[readhold.DegradedRecordUnreadable]
+	_ = runOneSlotFull(t, f)
+	if got := degradedCounts(f)[readhold.DegradedRecordUnreadable]; got != before || !f.bundle.dependencies.ReadHolds.controller.Inspect(f.queryGroup).Loaded {
+		t.Fatalf("the record readable again was not restored: counted %d -> %d", before, got)
+	}
+}
+
+// A read of the record that gets no answer at all is the Redis the Slot
+// needs anyway: it still refuses, to be retried, and is not taken for a
+// record Redis answered with an error.
+func TestARecordReadWithoutAnAnswerStillRefuses(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	current, err := f.production.dependencies.Catalog.ReadFrozenSchedule(ctx, f.queryGroup, f.progress(ctx).NextSlot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holds := f.bundle.dependencies.ReadHolds
+	holds.mu.Lock()
+	group := holds.groups[f.queryGroup]
+	holds.mu.Unlock()
+	group.mu.Lock()
+	group.prepared = execution.ScheduleSegmentFact{}
+	group.mu.Unlock()
+	holds.controller.Forget(f.queryGroup)
+	lease, _ := group.session.Current()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := holds.PrepareSchedule(canceled, current, lease.Fence); !errors.Is(err, readhold.ErrNotRestored) || errors.Is(err, scheduler.ErrReadHoldDegraded) {
+		t.Fatalf("an unanswered record read did not refuse as unrestored: %v", err)
+	}
+}

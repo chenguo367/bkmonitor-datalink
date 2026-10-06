@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisbatch"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -124,16 +125,17 @@ func (holds *productionReadHolds) releasePredecessors(group *productionReadHoldG
 
 // Restore only new or invalidated entries. One bad answer leaves that group
 // retryable without discarding successfully loaded siblings.
-func (holds *productionReadHolds) restore(ctx context.Context, groups []execution.QueryGroupIdentity) {
+func (holds *productionReadHolds) restore(ctx context.Context, groups []execution.QueryGroupIdentity) error {
 	var missing []execution.QueryGroupIdentity
 	for _, qg := range groups {
 		if !holds.controller.Inspect(qg).Loaded {
 			missing = append(missing, qg)
 		}
 	}
-	if len(missing) > 0 {
-		holds.report("restore_failed", "", holds.controller.RestoreBatch(ctx, missing))
+	if len(missing) == 0 {
+		return nil
 	}
+	return holds.controller.RestoreBatch(ctx, missing)
 }
 
 func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
@@ -275,8 +277,20 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 			holds.releasePredecessors(group)
 		}
 	}()
-	holds.restore(ctx, []execution.QueryGroupIdentity{qg})
+	restoreErr := holds.restore(ctx, []execution.QueryGroupIdentity{qg})
+	answered := redisbatch.Answered(restoreErr)
+	if !answered {
+		holds.report("restore_failed", qg, restoreErr)
+	}
 	if !holds.controller.Inspect(qg).Loaded {
+		if answered {
+			// Redis answered the group's record with an error of its own
+			// (WRONGTYPE, LOADING, ...), and answers every read of it so
+			// while that lasts: refused, the group stopped as long. The Slot
+			// goes on with the hold last read; the record is read again at
+			// the next Slot, and the degradation logs once (countDegraded).
+			return degraded(readhold.DegradedRecordUnreadable, restoreErr)
+		}
 		return readhold.ErrNotRestored
 	}
 	if reflect.DeepEqual(group.prepared, schedule.Segment) {
