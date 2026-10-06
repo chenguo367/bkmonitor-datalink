@@ -28,6 +28,7 @@ func TestExclusionsUseTheIncludedIdentityAndRejectInvalidShapes(t *testing.T) {
 		{name: "explicit empty", rule: "host_id", model: "cw-Host", exclude: `[]`},
 		{name: "host sorted unique", rule: "host_id", model: "cw-Host", exclude: `[{"bk_host_id":102},{"bk_host_id":"101"},{"bk_host_id":101}]`, keys: []string{"101", "102"}},
 		{name: "host mapping", rule: "model_inst_id", model: "cw-Host", exclude: `[{"model_id":"cw-Host","model_inst_id":"101"}]`, members: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}}},
+		{name: "host mapping sorted unique", rule: "model_inst_id", model: "cw-Host", exclude: `[{"model_id":"cw-Host","model_inst_id":"102"},{"model_id":"cw-Host","model_inst_id":"101"},{"model_id":"cw-Host","model_inst_id":"102"}]`, members: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}, {ModelID: "cw-Host", ModelInstID: "102"}}},
 		{name: "ip_cloud host ids", rule: "ip_cloud", model: "cw-Host", exclude: `[{"bk_host_id":102},{"bk_host_id":"101"},{"bk_host_id":101}]`, options: targetplan.Options{TenantID: "tenant-a"}, hosts: []string{"101", "102"}},
 		{name: "ip_cloud empty", rule: "ip_cloud", model: "cw-Host", exclude: `[]`, options: targetplan.Options{TenantID: "tenant-a"}},
 		{name: "ip_cloud rejects address shape", rule: "ip_cloud", model: "cw-Host", exclude: `[{"bk_target_ip":"192.0.2.1","bk_target_cloud_id":0}]`, options: targetplan.Options{TenantID: "tenant-a"}, bad: true},
