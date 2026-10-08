@@ -73,11 +73,11 @@ func TestStateWriteReusePublishesEveryClassBeforeAnyObservation(t *testing.T) {
 // a full measurement round to discover, because the code looks correct.
 func TestStateWriteReuseCountsReachTheScrape(t *testing.T) {
 	facts := observability.StateWriteReuseFacts{}
-	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteChangeNone, observability.StateWriteReuseStoredReady)
-	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteChangeNone, observability.StateWriteReuseStoredReady)
-	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteChangeNone, observability.StateWriteReuseStoredWarming)
-	facts.Record(observability.StateWriteReuseChanged, observability.StateWriteChangeProcessedTime, observability.StateWriteReuseStoredReady)
-	facts.Record(observability.StateWriteReuseUnobserved, observability.StateWriteChangeNone, observability.StateWriteReuseStoredMissing)
+	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteReuseStoredReady)
+	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteReuseStoredReady)
+	facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteReuseStoredWarming)
+	facts.Record(observability.StateWriteReuseChanged, observability.StateWriteReuseStoredReady)
+	facts.Record(observability.StateWriteReuseUnobserved, observability.StateWriteReuseStoredMissing)
 
 	gathered := gatherStateWriteReuse(t, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
@@ -104,10 +104,10 @@ func TestStateWriteReuseCountsReachTheScrape(t *testing.T) {
 func TestStateWriteReuseKeepsTheTwoSteadyStatesApart(t *testing.T) {
 	facts := observability.StateWriteReuseFacts{}
 	for i := 0; i < 7; i++ {
-		facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteChangeNone, observability.StateWriteReuseStoredReady)
+		facts.Record(observability.StateWriteReuseDecisionStable, observability.StateWriteReuseStoredReady)
 	}
 	for i := 0; i < 3; i++ {
-		facts.Record(observability.StateWriteReuseChanged, observability.StateWriteChangeProcessedTime, observability.StateWriteReuseStoredWarming)
+		facts.Record(observability.StateWriteReuseChanged, observability.StateWriteReuseStoredWarming)
 	}
 	gathered := gatherStateWriteReuse(t, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
@@ -129,7 +129,7 @@ func TestStateWriteReuseKeepsTheTwoSteadyStatesApart(t *testing.T) {
 // into a cardinality incident on the largest deployment first.
 func TestStateWriteReuseBoundsItsLabelSet(t *testing.T) {
 	facts := observability.StateWriteReuseFacts{}
-	facts.Record(observability.StateWriteReuseClass("invented"), observability.StateWriteChangeReason("invented"), observability.StateWriteReuseStored("also-invented"))
+	facts.Record(observability.StateWriteReuseClass("invented"), observability.StateWriteReuseStored("also-invented"))
 	gathered := gatherStateWriteReuse(t, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
 		Result: observability.ResultSuccess, StateWriteReuse: &facts,
