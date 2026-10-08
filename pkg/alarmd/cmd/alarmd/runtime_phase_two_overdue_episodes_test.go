@@ -346,3 +346,44 @@ func TestAnObjectWithNoPeriodKeepsWhenItWasFirstSeenUntilItsPeriodArrives(t *tes
 		t.Fatalf("named %+v, want qg-unread new since now", objects)
 	}
 }
+
+// With more objects without a period than are published, every one is dated
+// when first counted: when one of those published gets its period, the next
+// one is published with when it was first counted, not with that moment.
+func TestAnObjectPastThePublishedNamesIsDatedWhenFirstCounted(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	start := clock.now()
+	wakesAt := func(skip string) []fleet.OverdueWake {
+		var wakes []fleet.OverdueWake
+		for index := 0; index < fleet.MaxPeriodUnknownObjects+5; index++ {
+			if name := fmt.Sprintf("qg-%02d", index); name != skip {
+				wakes = append(wakes, fleet.OverdueWake{QueryGroup: name, WakeAt: clock.now().Add(-time.Second)})
+			}
+		}
+		return wakes
+	}
+	wakes := &stubWakeSource{wakes: wakesAt(""), total: fleet.MaxPeriodUnknownObjects + 5}
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now,
+		owned:   func() []execution.QueryGroupIdentity { return nil },
+		overdue: wakes,
+	}
+	first := publisher.snapshot(context.Background()).Overdue
+	if first == nil || first.Truncated || first.PeriodUnknown != fleet.MaxPeriodUnknownObjects+5 || len(first.PeriodUnknownObjects) != fleet.MaxPeriodUnknownObjects {
+		t.Fatalf("overdue %+v, want every one counted, the list whole and %d named", first, fleet.MaxPeriodUnknownObjects)
+	}
+	clock.at = clock.at.Add(10 * time.Minute)
+	wakes.wakes, wakes.total = wakesAt("qg-00"), fleet.MaxPeriodUnknownObjects+4
+	later := publisher.snapshot(context.Background()).Overdue
+	since := map[string]time.Time{}
+	for _, object := range later.PeriodUnknownObjects {
+		since[object.QueryGroup] = object.Since
+	}
+	if len(later.PeriodUnknownObjects) != fleet.MaxPeriodUnknownObjects || !since["qg-20"].Equal(start) {
+		t.Fatalf("named %+v, want qg-20 published with when it was first counted, %v", later.PeriodUnknownObjects, start)
+	}
+	if _, named := since["qg-00"]; named || len(publisher.periodUnknownSince) != fleet.MaxPeriodUnknownObjects+4 {
+		t.Fatalf("qg-00 named %t, remembered %d, want it forgotten and the other %d remembered",
+			named, len(publisher.periodUnknownSince), fleet.MaxPeriodUnknownObjects+4)
+	}
+}

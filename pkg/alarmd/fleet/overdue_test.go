@@ -168,10 +168,10 @@ func TestTheOverdueKindIsInTheClosedLabelSet(t *testing.T) {
 	}
 }
 
-// The objects without a period are named beside their count, the oldest wake
-// first and at most MaxPeriodUnknownObjects of them; the count stays the
-// whole number. Across replicas the names are the longest without a period
-// first, at most the same bound.
+// The objects without a period are named beside their count, every one the
+// index returned, oldest wake first, for the publisher to date; published,
+// the MaxPeriodUnknownObjects longest without a period, longest first, and
+// the count stays the whole number. Across replicas the same.
 func TestTheObjectsWithNoPeriodAreNamedBesideTheirCount(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	var wakes []OverdueWake
@@ -179,9 +179,17 @@ func TestTheObjectsWithNoPeriodAreNamedBesideTheirCount(t *testing.T) {
 		wakes = append(wakes, OverdueWake{QueryGroup: fmt.Sprintf("qg-%02d", index), WakeAt: now.Add(-time.Duration(30-index) * time.Second)})
 	}
 	_, facts := OverdueAnomalies(wakes, len(wakes), now, "pod-a", nil)
-	if facts.PeriodUnknown != MaxPeriodUnknownObjects+5 || len(facts.PeriodUnknownObjects) != MaxPeriodUnknownObjects ||
-		facts.PeriodUnknownObjects[0].QueryGroup != "qg-00" {
-		t.Fatalf("facts %+v, want every one counted and the first %d named, oldest first", facts, MaxPeriodUnknownObjects)
+	if facts.PeriodUnknown != MaxPeriodUnknownObjects+5 || len(facts.PeriodUnknownObjects) != MaxPeriodUnknownObjects+5 ||
+		facts.PeriodUnknownObjects[0].QueryGroup != "qg-00" || facts.PeriodUnknownObjects[MaxPeriodUnknownObjects+4].QueryGroup != "qg-24" {
+		t.Fatalf("facts %+v, want every one counted and named, oldest first", facts)
+	}
+	for index := range facts.PeriodUnknownObjects {
+		facts.PeriodUnknownObjects[index].Since = now.Add(-time.Duration(index%7) * time.Minute)
+	}
+	longest := LongestWithoutPeriod(facts.PeriodUnknownObjects)
+	if len(longest) != MaxPeriodUnknownObjects || !longest[0].Since.Equal(now.Add(-6*time.Minute)) || longest[0].QueryGroup != "qg-06" ||
+		!longest[MaxPeriodUnknownObjects-1].Since.Before(longest[0].Since.Add(6*time.Minute)) {
+		t.Fatalf("longest %+v, want the %d longest without a period, longest first", longest, MaxPeriodUnknownObjects)
 	}
 	at := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	named := func(replica string, count int, since time.Time) *OverdueFacts {
