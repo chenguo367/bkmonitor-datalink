@@ -966,7 +966,7 @@ func TestAnAdmissionRefusalCarriesItsPlanItsRuleAndItsSentence(t *testing.T) {
 	fixture := newFixtureWithObserver(t, true, "", observer)
 	fixture.ports.stateAdmissionDeterministic = true
 	fixture.ports.stateAdmissionRule = "lifetime_past_ceiling"
-	fixture.ports.stateAdmissionText = "required TTL 840h0m0s exceeds maximum 720h0m0s at http://store.internal/key"
+	fixture.ports.stateAdmissionText = "required TTL 840h0m0s exceeds maximum 720h0m0s at http://store.example.test/key"
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err != nil || !result.Completed || result.Result != observability.ResultTerminal {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
@@ -983,7 +983,7 @@ func TestAnAdmissionRefusalCarriesItsPlanItsRuleAndItsSentence(t *testing.T) {
 		!reflect.DeepEqual(chunk.RefusalRules, []string{"lifetime_past_ceiling"}) {
 		t.Fatalf("admission = %+v, want terminal under the store's rule", admission.observation)
 	}
-	if !strings.Contains(chunk.RefusalText, "required TTL 840h0m0s exceeds maximum 720h0m0s") || strings.Contains(chunk.RefusalText, "store.internal") {
+	if !strings.Contains(chunk.RefusalText, "required TTL 840h0m0s exceeds maximum 720h0m0s") || strings.Contains(chunk.RefusalText, "store.example.test") {
 		t.Fatalf("refusal text = %q, want the store's sentence with its numbers and without the address", chunk.RefusalText)
 	}
 }
