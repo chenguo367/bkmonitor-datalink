@@ -2433,8 +2433,9 @@ const (
 	// DegradationActivationBlocked: the last cutover held one or more Query
 	// Groups back - a precondition only a write outside the cutover could
 	// break failed on each - and they run what they ran before it. The rest
-	// of the publication is active. The repair subcommand, or finding what
-	// wrote the timeline, is what clears it.
+	// of the publication is active. Deleting the held-back Query Group's
+	// timeline key, which the next cutover opens again as for a new Query
+	// Group, or finding what wrote the timeline, is what clears it.
 	DegradationActivationBlocked DegradationKind = "ACTIVATION_BLOCKED"
 	// DegradationViewStreamNoSessions: the Leader has had Workers expected
 	// and none holding a stream past the bound: its view reaches nobody.

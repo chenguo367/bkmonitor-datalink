@@ -44,6 +44,10 @@ var removedFamilies = []string{
 	// The open alert set's mode: the index copy has one state, so the gauge
 	// was 1 on self_maintained for good and said nothing.
 	"open_alert_set_mode",
+	// The one-time upgrade of a v1 activation body, which no release wrote;
+	// such a body is refused now, not upgraded.
+	"legacy_active_qg_migration_total", "legacy_active_qg_migration_scan_keys",
+	"legacy_active_qg_migration_duration_seconds",
 }
 
 // A removed family is registered nowhere, bound or not.

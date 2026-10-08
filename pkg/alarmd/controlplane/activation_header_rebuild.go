@@ -198,10 +198,7 @@ return 1
 // publication behind - a cutover commits the whole move in one script - so a
 // header this build wrote named none, and the body of such an activation
 // names none either; one that does came from a writer this build does not
-// know and is refused rather than guessed. A cutover a later build left
-// unfinished in pieces is on the body (CutoverProgress), not on the header,
-// so the header written back is the one it had, and the next activation
-// round finishes it as it would have.
+// know and is refused rather than guessed.
 //
 // With the header and the body both gone there is nothing to describe: that
 // is the first activation's case, as it always was.

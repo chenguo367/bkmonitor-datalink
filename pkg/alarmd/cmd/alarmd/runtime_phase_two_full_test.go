@@ -283,28 +283,8 @@ func TestProductionPhaseTwoBundleRebuildsExpiredSnapshotReferencedByPersistentAc
 	if groups, loadErr := firstControl.LoadActive(ctx); loadErr != nil || len(groups.QueryGroups) != 1 {
 		t.Fatalf("v2 follower LoadActive()=(%+v,%v)", groups, loadErr)
 	}
-	originalActivation, err := redisClient.Get(ctx, activationKey).Bytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyActivation := oldActivation
-	legacyActivation.SchemaVersion = "alarmd-control-activation-v1"
-	legacyActivation.ActiveQGSetRef = controlplane.ActiveQueryGroupSetRef{}
-	legacyPayload, err := json.Marshal(legacyActivation)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := redisClient.Set(ctx, activationKey, legacyPayload, 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if groups, loadErr := firstControl.LoadActive(ctx); loadErr != nil || len(groups.QueryGroups) != 1 {
-		t.Fatalf("v1 follower LoadActive()=(%+v,%v)", groups, loadErr)
-	}
 	if got := scanHook.count.Load(); got != 0 {
-		t.Fatalf("v1/v2 follower LoadActive SCAN calls=%d, want 0", got)
-	}
-	if err := redisClient.Set(ctx, activationKey, originalActivation, 0).Err(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("v2 follower LoadActive SCAN calls=%d, want 0", got)
 	}
 	if err := first.Shutdown(ctx); err != nil {
 		t.Fatalf("first Shutdown() error = %v", err)

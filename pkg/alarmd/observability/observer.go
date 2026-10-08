@@ -73,7 +73,6 @@ const (
 	StageStateCarryDecided      = "state_carry_decided"
 	StageStateCarried           = "state_carried"
 	StageScheduleCutover        = "schedule_cutover"
-	StageLegacyQGMigration      = "legacy_active_qg_migration"
 	StageDrainingQGReconciled   = "draining_query_groups"
 	StageAssignmentAcquired     = "assignment_acquired"
 	StageAssignmentLost         = "assignment_lost"
@@ -933,7 +932,7 @@ type ScheduleCutoverFacts struct {
 
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
-var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added", "blocked", "reopened", "retired_unwritten"}
+var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "retired", "added", "blocked", "reopened", "retired_unwritten"}
 
 // ScheduleCutoverReadHoldLinks is the closed vocabulary of what a cutover
 // does with a Plan's link to the Query Group it left: linked (the state
@@ -1375,13 +1374,6 @@ type ActivationHoldFacts struct {
 // MaxActivationHoldSamples bounds the Query Group identities an activation
 // hold observation carries.
 const MaxActivationHoldSamples = 12
-
-type LegacyQGMigrationFacts struct {
-	Result      string
-	ReasonClass string
-	ScanKeys    int
-	Duration    time.Duration
-}
 
 const (
 	MaxDrainingQGLogSamples          = 12
@@ -2409,7 +2401,6 @@ type Observation struct {
 	StateGenerationSkew  *StateGenerationSkewFacts
 	StateCarry           *StateCarryFacts
 	ActivationHold       *ActivationHoldFacts
-	LegacyMigration      *LegacyQGMigrationFacts
 	DrainingQG           *DrainingQGFacts
 	Rebalance            *RebalanceFacts
 	ControlReads         *ControlReadFacts
@@ -2556,7 +2547,6 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.StateGenerationSkew = normalizeStateGenerationSkewFacts(observation.StateGenerationSkew)
 	observation.StateCarry = normalizeStateCarryFacts(observation.StateCarry)
 	observation.ActivationHold = normalizeActivationHoldFacts(observation.ActivationHold)
-	observation.LegacyMigration = normalizeLegacyQGMigrationFacts(observation.LegacyMigration)
 	observation.DrainingQG = normalizeDrainingQGFacts(observation.DrainingQG)
 	observation.Rebalance = normalizeRebalanceFacts(observation.Rebalance)
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
@@ -3093,30 +3083,6 @@ func normalizeActiveQGSetFacts(facts *ActiveQGSetFacts) *ActiveQGSetFacts {
 	return &normalized
 }
 
-func normalizeLegacyQGMigrationFacts(facts *LegacyQGMigrationFacts) *LegacyQGMigrationFacts {
-	if facts == nil {
-		return nil
-	}
-	normalized := *facts
-	switch normalized.Result {
-	case "success", "fail_closed", "canceled":
-	default:
-		normalized.Result = "fail_closed"
-	}
-	switch normalized.ReasonClass {
-	case "none", "config", "unsupported", "ownership", "dependency", "data_quality", "capacity", "state_progress", "output", "validation", "contract":
-	default:
-		normalized.ReasonClass = "contract"
-	}
-	if normalized.ScanKeys < 0 {
-		normalized.ScanKeys = 0
-	}
-	if normalized.Duration < 0 {
-		normalized.Duration = 0
-	}
-	return &normalized
-}
-
 // normalizeSourceWithheldFacts drops a record that does not say what happened.
 // A reason with no disposition is half a sentence, and the half it is missing
 // is the one that says whether the object is running.
@@ -3491,7 +3457,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	// schedule_cutover_total) were counting them all along.
 	{ComponentControlPlane, StageObjectCatalog}, {ComponentControlPlane, StageObjectRead},
 	{ComponentControlPlane, StageScheduleCutover},
-	{ComponentControlPlane, StageActiveQGSet}, {ComponentControlPlane, StageLegacyQGMigration},
+	{ComponentControlPlane, StageActiveQGSet},
 	{ComponentControlPlane, StageDrainingQGReconciled},
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},
 	{ComponentControlPlane, StageStateCarryDecided}, {ComponentState, StageStateCarried},

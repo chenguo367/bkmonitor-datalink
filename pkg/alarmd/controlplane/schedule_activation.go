@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -159,23 +160,9 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	}
 	if previous.SchemaVersion != activationSchemaVersion {
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
-		upgraded, upgradeErr := reconciler.upgradeLegacyActivation(ctx, previous)
-		if upgradeErr != nil {
-			return ActivationState{}, upgradeErr
-		}
-		if upgraded.Current == publication {
-			return upgraded, nil
-		}
-		return reconciler.Ensure(ctx, publication)
+		return ActivationState{}, fmt.Errorf("alarmd controlplane: activation schema %q is not one this build activates from", previous.SchemaVersion)
 	}
-	// A cutover a later build committed in pieces and did not finish leaves
-	// the current publication named while the Query Groups past its cursor
-	// still run the one before. That is not "already active": it is finished
-	// here, as one cutover to the same publication, on the first tick rather
-	// than whenever the source next changes - a Query Group not yet added
-	// would detect nothing until then.
-	finishing := previous.CutoverProgress != nil && previous.Current == publication
-	if previous.Current == publication && !finishing {
+	if previous.Current == publication {
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
 		if _, loadErr := reconciler.repository.LoadActiveQueryGroupSet(ctx, previous.ActiveQGSetRef); loadErr != nil {
 			return ActivationState{}, loadErr
@@ -189,7 +176,7 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	if publication.PublicationEpoch < previous.Current.PublicationEpoch {
 		return previous, nil
 	}
-	if publication.PublicationEpoch == previous.Current.PublicationEpoch && !finishing {
+	if publication.PublicationEpoch == previous.Current.PublicationEpoch {
 		return ActivationState{}, ErrActivationEpochCollision
 	}
 	failureStage, failureClass = ActivationFailureStageCandidateLoad, ActivationFailureClassDependencyIO
@@ -349,79 +336,6 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		return ActivationState{}, applyErr
 	}
 	failureStage, failureClass = ActivationFailureStagePersist, ActivationFailureClassDependencyIO
-	return reconciler.repository.LoadActivation(ctx)
-}
-
-func (reconciler *ScheduleActivationReconciler) upgradeLegacyActivation(
-	ctx context.Context,
-	previous ActivationState,
-) (state ActivationState, err error) {
-	failureStage := ActivationFailureStageCurrentRecovery
-	failureClass := ActivationFailureClassProjectionConflict
-	defer func() { err = wrapActivationFailure(failureStage, failureClass, err) }()
-
-	published, err := reconciler.repository.loadPublishedGroups(ctx, previous.Current)
-	var groups map[execution.QueryGroupIdentity]QueryGroup
-	if errors.Is(err, ErrSnapshotUnavailable) {
-		groups, err = reconciler.repository.loadActivatedGroupsFromScheduleScan(ctx, previous)
-	} else if err == nil {
-		groups = published.groups
-	}
-	if err != nil {
-		return ActivationState{}, err
-	}
-	identities := make([]execution.QueryGroupIdentity, 0, len(groups))
-	covered := make(map[execution.PlanKey]struct{}, len(previous.Plans))
-	for identity := range groups {
-		timeline, loadErr := reconciler.repository.loadScheduleTimeline(ctx, identity)
-		if loadErr != nil {
-			return ActivationState{}, loadErr
-		}
-		if timeline.RetiredAt != nil || len(timeline.Segments) == 0 {
-			return ActivationState{}, ErrSnapshotUnavailable
-		}
-		open := timeline.Segments[len(timeline.Segments)-1]
-		if open.Schedule.Segment.End != nil {
-			return ActivationState{}, ErrSnapshotUnavailable
-		}
-		if err := validateOpenSegmentActivation(previous, open); err != nil {
-			failureClass = ActivationFailureClassCoverageConflict
-			return ActivationState{}, err
-		}
-		for _, record := range open.Plans {
-			if _, duplicate := covered[record.Fact.Key()]; duplicate {
-				failureClass = ActivationFailureClassCoverageConflict
-				return ActivationState{}, ErrSnapshotUnavailable
-			}
-			covered[record.Fact.Key()] = struct{}{}
-		}
-		identities = append(identities, identity)
-	}
-	if len(covered) != len(previous.Plans) {
-		failureClass = ActivationFailureClassCoverageConflict
-		return ActivationState{}, ErrSnapshotUnavailable
-	}
-	next := previous
-	next.RecordRevision++
-	next.SchemaVersion = activationSchemaVersion
-	expected := ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
-	// persistCutoverActivation with no timeline updates performs the v1->v2
-	// same-publication CAS and leaves Current/Pending/Schedule unchanged.
-	failureStage, failureClass = ActivationFailureStagePersist, ActivationFailureClassProjectionConflict
-	ref, payload, err := reconciler.repository.persistAndVerifyActiveQGSet(ctx, identities)
-	if err != nil {
-		return ActivationState{}, err
-	}
-	next.ActiveQGSetRef = ref
-	if err := reconciler.repository.persistActivationRefUpgrade(ctx, expected, next, payload); err != nil {
-		winner, loadErr := reconciler.repository.LoadActivation(ctx)
-		if loadErr == nil && winner.SchemaVersion == activationSchemaVersion {
-			return winner, nil
-		}
-		failureClass = ActivationFailureClassCASConflict
-		return ActivationState{}, err
-	}
-	failureClass = ActivationFailureClassDependencyIO
 	return reconciler.repository.LoadActivation(ctx)
 }
 

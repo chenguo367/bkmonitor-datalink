@@ -35,7 +35,7 @@ UQ responses carrying a top-level status code, by that code and what this deploy
 
 Labels: `reason`
 
-Query Groups the Control Leader's last cutover held back, by reason. A held-back Query Group keeps the records it had and runs what its open Segment names; the rest of the publication was activated. It is judged again at every cutover; the repair subcommand fixes what a write outside the cutover broke. Zero on a deployment nothing outside the control plane writes to.
+Query Groups the Control Leader's last cutover held back, by reason. A held-back Query Group keeps the records it had and runs what its open Segment names; the rest of the publication was activated. It is judged again at every cutover; deleting its timeline key lets the next cutover open it again. Zero on a deployment nothing outside the control plane writes to.
 
 ## bkmonitor_alarmd_activation_blocked_set_total
 
@@ -787,22 +787,6 @@ Labels: `result`
 
 Reconcile rounds the control leader ran in this process, by result: completed, or failed in one of its stages. Emitted by a process once it has led a round, both results from then on.
 
-## bkmonitor_alarmd_legacy_active_qg_migration_duration_seconds
-
-Labels: `result`
-
-One-time legacy Active QG migration duration.
-
-## bkmonitor_alarmd_legacy_active_qg_migration_scan_keys
-
-Redis keys scanned by one-time legacy Active QG migration.
-
-## bkmonitor_alarmd_legacy_active_qg_migration_total
-
-Labels: `result`, `reason_class`
-
-One-time legacy Active QG migration outcomes.
-
 ## bkmonitor_alarmd_legacy_pod_cache_total
 
 Labels: `result`
@@ -1473,7 +1457,7 @@ Bytes the Control Leader sent in the last publication cutover compare-and-set ca
 
 Labels: `decision`
 
-Query Groups by what a publication cutover did with them: kept (content and contexts unchanged, no write), revised (contexts changed, one output context revision appended), cut (content changed, Segment closed and reopened), legacy_cut (Segment named no content and was cut once), retired, added, blocked (a precondition only a write outside the cutover could break failed; this Query Group keeps its records and is judged again at the next cutover, the rest of the publication goes ahead), reopened (the timeline key was gone; a new one was opened), retired_unwritten (left the publication with a timeline that failed a precondition; retired without writing it).
+Query Groups by what a publication cutover did with them: kept (content and contexts unchanged, no write), revised (contexts changed, one output context revision appended), cut (content changed, Segment closed and reopened), retired, added, blocked (a precondition only a write outside the cutover could break failed; this Query Group keeps its records and is judged again at the next cutover, the rest of the publication goes ahead), reopened (the timeline key was gone; a new one was opened), retired_unwritten (left the publication with a timeline that failed a precondition; retired without writing it).
 
 ## bkmonitor_alarmd_schedule_cutover_read_hold_links_total
 

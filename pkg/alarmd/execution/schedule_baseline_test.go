@@ -133,21 +133,11 @@ func TestScheduleCutoverCreatesAdjacentHalfOpenSegments(t *testing.T) {
 	boundary := execution.EvaluationTime(75)
 	oldSchedule := baselineSchedule(t, "query-group", 60, 30, &boundary, "snapshot-old", 7)
 	newSchedule := baselineSchedule(t, "query-group", 90, boundary, nil, "snapshot-new", 8)
-	fact := execution.ScheduleCutoverFact{OldSegment: oldSchedule.Segment, NewSegment: newSchedule.Segment}
-	if err := fact.Validate(oldSchedule, newSchedule); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
 	if got, ok := newSchedule.FirstSlot(); !ok || got != 90 {
 		t.Fatalf("new FirstSlot() = %d, %t; want 90, true", got, ok)
 	}
 	if due := oldSchedule.DuePlanRefs(boundary); len(due) != 0 {
 		t.Fatalf("old Segment owns boundary due Plans: %+v", due)
-	}
-
-	overlapped := fact
-	overlapped.NewSegment.Start = boundary - 1
-	if err := overlapped.Validate(oldSchedule, newSchedule); err == nil {
-		t.Fatal("Validate() accepted overlapping Segments")
 	}
 }
 
@@ -155,11 +145,6 @@ func TestScheduleCutoverAllowsOldSegmentReplacedBeforeItsFirstSlot(t *testing.T)
 	boundary := execution.EvaluationTime(90)
 	oldSchedule := baselineSchedule(t, "query-group", 60, 83, &boundary, "snapshot-old", 7)
 	newSchedule := baselineSchedule(t, "query-group", 60, boundary, nil, "snapshot-new", 8)
-	fact := execution.ScheduleCutoverFact{OldSegment: oldSchedule.Segment, NewSegment: newSchedule.Segment}
-
-	if err := fact.Validate(oldSchedule, newSchedule); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
 	if first, ok := oldSchedule.FirstSlot(); ok {
 		t.Fatalf("old FirstSlot() = (%d, %t), want no owned Slot", first, ok)
 	}

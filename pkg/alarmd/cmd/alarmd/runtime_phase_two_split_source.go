@@ -75,20 +75,11 @@ func (source *catalogSplitCensusSource) SplitCandidatePlans(
 		return nil, err
 	}
 	revision := string(state.Current.SnapshotRevision)
-	if state.CutoverProgress != nil {
-		// While a cutover is in progress a Query Group's Plans are the ones
-		// its open Segment runs, not necessarily the manifest's; the memo
-		// keeps them apart from the finished publication's.
-		revision += "|in-progress"
-	}
 	if plans, ok := source.memoized(revision, queryGroup); ok {
 		return plans, nil
 	}
 	content, err := source.source.LoadPublishedContent(ctx, state.Current)
 	if err != nil {
-		return nil, err
-	}
-	if content.Groups, err = source.source.ApplyCutoverProgress(ctx, state, content.Groups); err != nil {
 		return nil, err
 	}
 	if _, published := content.Groups[queryGroup]; !published {

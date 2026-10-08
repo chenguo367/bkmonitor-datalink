@@ -209,13 +209,11 @@ func TestAlgorithmFactCatalogHasExactPerMetricFamilySeriesBounds(t *testing.T) {
 	}
 }
 
-func TestNormalizeObservationBoundsActiveSetAndMigrationFacts(t *testing.T) {
+func TestNormalizeObservationBoundsActiveSetFacts(t *testing.T) {
 	got := NormalizeObservation(Observation{Component: ComponentControlPlane, Stage: StageActiveQGSet,
-		Result: ResultSuccess, ActiveQGSet: &ActiveQGSetFacts{Operation: "identity", Result: "dynamic", QueryGroups: -1, ObjectBytes: -1},
-		LegacyMigration: &LegacyQGMigrationFacts{Result: "dynamic", ReasonClass: "query-group-id", ScanKeys: -1}})
+		Result: ResultSuccess, ActiveQGSet: &ActiveQGSetFacts{Operation: "identity", Result: "dynamic", QueryGroups: -1, ObjectBytes: -1}})
 	if got.Component != ComponentControlPlane || got.Stage != StageActiveQGSet || got.ActiveQGSet.Operation != "" ||
-		got.ActiveQGSet.Result != "failure" || got.ActiveQGSet.QueryGroups != 0 || got.ActiveQGSet.ObjectBytes != 0 ||
-		got.LegacyMigration.Result != "fail_closed" || got.LegacyMigration.ReasonClass != "contract" || got.LegacyMigration.ScanKeys != 0 {
+		got.ActiveQGSet.Result != "failure" || got.ActiveQGSet.QueryGroups != 0 || got.ActiveQGSet.ObjectBytes != 0 {
 		t.Fatalf("normalized control metric facts=%#v", got)
 	}
 }

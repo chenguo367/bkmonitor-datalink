@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -182,6 +181,45 @@ func TestTheRunningContentGivesAHeldBackQueryGroupItsOpenSegment(t *testing.T) {
 	}
 	if running[edited.Identity].Digest != published.Groups[edited.Identity].Digest {
 		t.Fatal("a Query Group that was not held back does not run the manifest's content")
+	}
+}
+
+// Deleting a held-back Query Group's timeline key is what clears the block
+// by hand: the next cutover opens it again as for a new Query Group, on the
+// records it was held with, and nothing is held back any more.
+func TestDeletingAHeldBackQueryGroupsTimelineOpensItAgainAndClearsTheBlock(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-unblock-by-delete")
+	first := cutoverCatalog(t, 80, nil)
+	second := cutoverCatalog(t, 90, nil)
+	edited, untouched := splitEdited(t, first, second)
+	fixture.publish(t, first, 60)
+	records := recordsOf(fixture.activation(t), untouched)
+	fixture.rewriteOpenDigest(t, untouched.Identity, digestOf(t, edited))
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatal(err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 1 || blocked[0].QueryGroup != untouched.Identity {
+		t.Fatalf("the rewritten Query Group was not held back: %+v", blocked)
+	}
+
+	if err := fixture.client.Del(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(untouched.Identity)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.publishNoEnsure(t, cutoverCatalog(t, 95, nil), 180); err != nil {
+		t.Fatalf("the publication after the delete: %v", err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 0 {
+		t.Fatalf("the Query Group whose timeline was deleted is still held back: %+v", blocked)
+	}
+	if state := fixture.activation(t); state.BlockedCount != 0 || state.BlockedDigest != "" {
+		t.Fatalf("the activation still counts a held-back set: %+v", state)
+	}
+	opened := fixture.openSegment(t, untouched.Identity, 180)
+	if opened.Start != 180 || opened.End != nil || opened.ObjectDigest != digestOf(t, untouched) {
+		t.Fatalf("the Query Group was not opened again at the boundary on its own content: %+v", opened)
+	}
+	if got := recordsOf(fixture.activation(t), untouched); !reflect.DeepEqual(sortedRecords(got), sortedRecords(records)) {
+		t.Fatalf("the reopened Query Group's records changed:\n before=%+v\n after=%+v", records, got)
 	}
 }
 
@@ -619,38 +657,6 @@ func TestAHeldReactivationKeepsTheHeldBackSet(t *testing.T) {
 	}
 	if reactivated.BlockedCount != 1 || reactivated.BlockedDigest != controlplane.BlockedDigestForTest(set) {
 		t.Fatalf("the held reactivation dropped the body's count: %d %q", reactivated.BlockedCount, reactivated.BlockedDigest)
-	}
-}
-
-// The ref upgrade writes through the cutover script too, with no timeline
-// and the held-back set left as it is. It used to pass the layout of the
-// script before the set existed, which wrote the header, the body and the
-// delta and then failed on the missing argument - a write that happened and
-// reported an error.
-func TestTheActivationRefUpgradeWritesWholeAndKeepsTheHeldBackSet(t *testing.T) {
-	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-ref-upgrade")
-	fixture.publish(t, cutoverCatalog(t, 80, nil), 60)
-	previous := fixture.activation(t)
-	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":activation_blocked", "kept as it is", 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	active, err := fixture.client.Get(fixture.ctx, fixture.prefix+":active_qg_set:"+previous.ActiveQGSetRef.Digest).Bytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	next := previous
-	next.RecordRevision++
-	expected := controlplane.ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
-	// The script is handed the set's length, not the set (N15).
-	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, []byte(strconv.Itoa(len(active)))); err != nil {
-		t.Fatalf("the ref upgrade failed: %v", err)
-	}
-	fixture.repository.ForgetActivationCacheForTest()
-	if after := fixture.activation(t); after.RecordRevision != previous.RecordRevision+1 {
-		t.Fatalf("record revision = %d, want %d", after.RecordRevision, previous.RecordRevision+1)
-	}
-	if got, err := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_blocked").Result(); err != nil || got != "kept as it is" {
-		t.Fatalf("the ref upgrade changed the held-back set: %q, %v", got, err)
 	}
 }
 

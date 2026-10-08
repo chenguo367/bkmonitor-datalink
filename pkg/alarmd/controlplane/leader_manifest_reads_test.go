@@ -56,9 +56,7 @@ func TestALeaderRoundOnAnUnchangedPublicationReadsNoManifest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := repository.ApplyCutoverProgress(ctx, state, controlplane.ApplyBlockedToContent(published.Groups, blocked)); err != nil {
-			t.Fatal(err)
-		}
+		_ = controlplane.ApplyBlockedToContent(published.Groups, blocked)
 		// And the refresh round's renewal.
 		if err := repository.RenewCurrentActivationObjects(ctx); err != nil {
 			t.Fatal(err)
@@ -99,45 +97,6 @@ func TestALeaderRoundOnAnUnchangedPublicationReadsNoManifest(t *testing.T) {
 	if got := gets.count("manifest"); got != rounds {
 		t.Fatalf("the uncached read counted %d manifest GETs over %d calls, want one each: the hook does not "+
 			"see what this test says it sees", got, rounds)
-	}
-}
-
-// While a cutover is in progress, the rounds that read what each Query Group
-// runs take the publication's Query Groups from the manifest. They read it
-// once per revision, not on every round: the view and the content scopes
-// both read the running content every few seconds for as long as the
-// cutover lasts.
-func TestRoundsDuringACutoverReadTheManifestOnce(t *testing.T) {
-	fixture := newCutoverFixture(t, "alarmd:control:cutover-manifest-reads")
-	_, second, state := unfinishedCutover(t, fixture)
-	repository, err := controlplane.NewRedisCatalogRepository(fixture.client, fixture.prefix, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gets := newControlGetCountingHook()
-	fixture.client.AddHook(gets)
-	published, err := repository.LoadPublishedContent(fixture.ctx, second.Publication)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := repository.ApplyCutoverProgress(fixture.ctx, state, published.Groups)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gets.reset()
-	const rounds = 5
-	for index := 0; index < rounds; index++ {
-		running, err := repository.ApplyCutoverProgress(fixture.ctx, state, published.Groups)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(running) != len(first) {
-			t.Fatalf("round %d ran %d Query Groups, the first %d: the remembered manifest changed the answer",
-				index, len(running), len(first))
-		}
-	}
-	if got := gets.count("manifest"); got != 0 {
-		t.Fatalf("%d rounds during a cutover read the manifest %d times, want 0 after the first", rounds, got)
 	}
 }
 

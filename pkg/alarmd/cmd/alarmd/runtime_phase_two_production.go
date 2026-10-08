@@ -1199,9 +1199,8 @@ func (runtime *productionPhaseTwoControl) loadCurrentActiveQueryGroups(
 	if state.ActiveQGSetRef.Digest != "" {
 		queryGroups, err = runtime.dependencies.Repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
 	} else {
-		// Followers never migrate legacy Activation state. They may read its
-		// current immutable Snapshot while the Control Leader performs the
-		// one-time v1-to-v2 upgrade.
+		// An activation without an active set reference reads its population
+		// from its current immutable Snapshot.
 		var content controlplane.PublishedContent
 		content, err = runtime.dependencies.Repository.LoadPublishedContent(ctx, state.Current)
 		if err == nil {
