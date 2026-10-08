@@ -38,7 +38,8 @@ func TestARecordAnswersTheHoldOfTheSlotsItReaches(t *testing.T) {
 	if hold, known := begun.HoldAt(60); hold != 0 || !known {
 		t.Fatalf("HoldAt(60) = %d %v, want no hold before a record begun from none", hold, known)
 	}
-	for _, raw := range []string{`{"hold_ms":-1,"since_slot":600}`, `{"hold_ms":60000}`, `{"hold_ms":1,"since_slot":60,"previous_since_slot":120}`, `[]`} {
+	for _, raw := range []string{`{"hold_ms":-1,"since_slot":600}`, `{"hold_ms":60000}`, `{"hold_ms":1,"since_slot":60,"previous_since_slot":120}`, `[]`,
+		`{"since_slot":1,"plans":[{"key":{"TenantID":"tenant","BusinessID":"business"}}]}`} {
 		if _, err := Decode([]byte(raw)); err == nil {
 			t.Fatalf("Decode(%s) accepted", raw)
 		}

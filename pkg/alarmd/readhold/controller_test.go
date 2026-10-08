@@ -607,6 +607,81 @@ func TestUnknownSlowPlansFrozenHoldUsesTheConfiguredBound(t *testing.T) {
 	}
 }
 
+// A group with no stored record never held: a nonzero hold is always
+// written. Restarted inside its Segment and closed before a slow Plan's next
+// Slot, that Plan's final Slot is before the restart, and its hold there is
+// still known -- zero -- because the restart's record starts from the first
+// Slot, not from the restart. The close writes nothing, which is what tells
+// the successor the hold was zero.
+func TestARestartedGroupThatNeverHeldClosesAtAKnownZero(t *testing.T) {
+	c, store, _ := controllerFixture(t)
+	fast, slow := planRef(), planRef()
+	slow.Key.StrategyID = "slow"
+	spec := groupSpec("old", 0)
+	spec.Plans = []PlanRef{fast, slow}
+	prepare(t, c, spec)
+	boundary := execution.EvaluationTime(1200)
+	old := scheduleFor(t, "old", 60, &boundary)
+	slowPlan := old.Plans[0]
+	slowPlan.Identity = slow.Key.PlanIdentity
+	slowPlan.Spec.EvaluationIntervalSeconds, slowPlan.Spec.CompletionDeadlineOffsetSeconds = 600, 595
+	slowPlan.ScheduleRevision, _ = execution.DerivePlanScheduleRevision(slowPlan.Spec)
+	old.Plans = append(old.Plans, slowPlan)
+	old.Segment.ScheduleRevision, _ = execution.DeriveQueryGroupScheduleRevision(old.Plans)
+	open := old
+	open.Segment.End = nil
+	if got, err := c.SlotReadHold(context.Background(), open, 1140, holdFence("old")); err != nil || got != 0 {
+		t.Fatalf("restart read = %s %v, want a zero hold", got, err)
+	}
+	if err := c.CloseSchedule(context.Background(), old, holdFence("old")); err != nil {
+		t.Fatal(err)
+	}
+	if _, written := store.values["old"]; written {
+		t.Fatal("a group that never held wrote a record at its close")
+	}
+	closed, _ := c.Reading("old")
+	for _, plan := range closed.Plans {
+		if plan.Key == slow.Key && (plan.PreviousHoldUnknown || plan.PreviousHoldMillis != 0 || plan.PreviousSlot != 600) {
+			t.Fatalf("slow Plan closed as %+v, want its final Slot 600 at a known zero", plan)
+		}
+	}
+}
+
+// A fresh record is written when it carries anything a successor or a
+// restart needs, a Plan's closing fact included. No path today closes a
+// Plan with a nonzero or unknown fact on a record never written -- the test
+// above is why -- so the rule is held here directly: dropping a Plan's
+// unknown or nonzero fact would have a successor read the missing record as
+// zero, the early direction.
+func TestARecordCarriesAPlansClosingFact(t *testing.T) {
+	for name, record := range map[string]Record{
+		"unknown": {SinceSlot: 1, Plans: []PlanRecord{{PlanRef: planRef(), PreviousHoldUnknown: true}}},
+		"nonzero": {SinceSlot: 1, Plans: []PlanRecord{{PlanRef: planRef(), PreviousHoldMillis: 30_000}}},
+	} {
+		if !carries(record) {
+			t.Errorf("%s: a record whose only fact is a Plan's closing hold is not carried", name)
+		}
+	}
+	if carries(Record{SinceSlot: 1, Plans: []PlanRecord{{PlanRef: planRef(), PreviousSlot: 600}}}) {
+		t.Error("a record with nothing but a zero closing hold is carried")
+	}
+}
+
+// Configure refuses a Plan without a complete identity, and Observe refuses
+// a negative arrival age: neither is a value the hold can be computed from.
+func TestAnIncompletePlanAndANegativeArrivalAreRefused(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	spec.Plans[0].Key.StrategyID = ""
+	if err := c.Configure(spec); err == nil {
+		t.Fatal("a Plan without a strategy was configured")
+	}
+	prepare(t, c, groupSpec("qg", 0))
+	if err := c.Observe(context.Background(), Evidence{Contract: holdContract("qg", 120, 0), ArrivalAge: -time.Second}); err == nil {
+		t.Fatal("a negative arrival age was observed")
+	}
+}
+
 func TestExpiredDepartedPlansAndSatisfiedTransitionsArePruned(t *testing.T) {
 	c, store, now := controllerFixture(t)
 	active, departed := planRef(), planRef()
