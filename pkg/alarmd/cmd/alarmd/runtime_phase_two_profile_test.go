@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,11 @@ func TestPhaseTwoCPURecordsPinnedLibraryDecisionWithoutRawEnvironment(t *testing
 		source, err := configurePhaseTwoCPUWith(func(log func(string, ...interface{})) error { log(format, "secret"); return nil })
 		if err != nil || source != want {
 			t.Fatalf("source=%q want=%q err=%v", source, want, err)
+		}
+		// And it is a source the capacity metric's closed label set names,
+		// rather than one it would fold into "other".
+		if !slices.Contains(observability.CPUSources, source) {
+			t.Fatalf("source %q is not among the CPU sources %v", source, observability.CPUSources)
 		}
 	}
 	// The process resolves its CPU budget once, so exercise the pinned

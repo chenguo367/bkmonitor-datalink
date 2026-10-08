@@ -85,15 +85,15 @@ func applyPhaseTwoGoRuntime(derived config.DerivedGoRuntime, setters goRuntimeBu
 // Match the pinned library's diagnostic formats without retaining raw values
 // from environment variables in startup evidence.
 func configurePhaseTwoCPUWith(set func(func(string, ...interface{})) error) (string, error) {
-	source := "runtime_default"
+	source := observability.CPUSourceRuntimeDefault
 	err := set(func(format string, _ ...interface{}) {
 		switch {
 		case strings.Contains(format, "Honoring GOMAXPROCS"):
-			source = "environment_override"
+			source = observability.CPUSourceEnvironmentOverride
 		case strings.Contains(format, "determined from CPU quota"):
-			source = "cpu_quota"
+			source = observability.CPUSourceQuota
 		case strings.Contains(format, "using minimum allowed GOMAXPROCS"):
-			source = "cpu_quota_minimum"
+			source = observability.CPUSourceQuotaMinimum
 		}
 	})
 	if err != nil {
