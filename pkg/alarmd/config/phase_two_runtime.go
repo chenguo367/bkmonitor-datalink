@@ -20,9 +20,9 @@ import (
 const PhaseTwoWorkerIDEnvironment = "ALARMD_PHASE_TWO_WORKER_ID"
 
 type PhaseTwoWorkerConfig struct {
-	ID                        string `yaml:"id"`
-	RegistrationTTL           Duration
-	RegistrationRenewInterval Duration
+	ID                        string   `yaml:"id"`
+	RegistrationTTL           Duration `yaml:"-"`
+	RegistrationRenewInterval Duration `yaml:"-"`
 }
 
 // DefaultTimezone is the platform's evaluation timezone, the constant Python
@@ -37,10 +37,10 @@ type PhaseTwoControlConfig struct {
 	StrategyCachePrefix string `yaml:"strategy_cache_prefix"`
 	ProviderRoute       string `yaml:"provider_route"`
 	// Timezone defaults to DefaultTimezone.
-	Timezone          string `yaml:"timezone"`
-	RefreshInterval   Duration
-	ReconcileInterval Duration
-	CatalogTTL        Duration
+	Timezone          string   `yaml:"timezone"`
+	RefreshInterval   Duration `yaml:"-"`
+	ReconcileInterval Duration `yaml:"-"`
+	CatalogTTL        Duration `yaml:"-"`
 }
 
 // PhaseTwoPlatformSettingsConfig is alarmd's deployment layer of the
@@ -111,19 +111,19 @@ type PhaseTwoSchedulerConfig struct {
 	// from the container's CPU budget alongside the permits below, and there is
 	// no unlimited setting: zero was one until production showed it produced
 	// parked executions rather than query throughput.
-	ActiveExecutionLimit int
-	TickInterval         Duration
+	ActiveExecutionLimit int      `yaml:"-"`
+	TickInterval         Duration `yaml:"-"`
 	// Admission and queue depth are derived from the container's CPU budget.
-	ProcessQueryPermits      int
-	RecoveryQueryPermits     int
-	ReadyQueueCapacity       int
-	RecoveryQueueCapacity    int
-	MaxQueuedItemsPerQG      int
-	MaxReplaySlots           uint32
-	MaxReplayAge             Duration
-	RetryMinDelay            Duration
-	RetryMaxDelay            Duration
-	QueryUnavailableCooldown bool `yaml:"query_unavailable_cooldown"`
+	ProcessQueryPermits      int      `yaml:"-"`
+	RecoveryQueryPermits     int      `yaml:"-"`
+	ReadyQueueCapacity       int      `yaml:"-"`
+	RecoveryQueueCapacity    int      `yaml:"-"`
+	MaxQueuedItemsPerQG      int      `yaml:"-"`
+	MaxReplaySlots           uint32   `yaml:"-"`
+	MaxReplayAge             Duration `yaml:"-"`
+	RetryMinDelay            Duration `yaml:"-"`
+	RetryMaxDelay            Duration `yaml:"-"`
+	QueryUnavailableCooldown bool     `yaml:"query_unavailable_cooldown"`
 }
 
 func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits {
@@ -164,9 +164,9 @@ type PhaseTwoAccessConfig struct {
 	// search box. Empty means the references render as they did before, as
 	// plain labels, so a new environment still gets every other part of the page
 	// with no configuration at all.
-	MonitorWebBaseURL          string `yaml:"monitor_web_base_url"`
-	MinReadyDelay              Duration
-	DownstreamExecutionReserve Duration
+	MonitorWebBaseURL          string   `yaml:"monitor_web_base_url"`
+	MinReadyDelay              Duration `yaml:"-"`
+	DownstreamExecutionReserve Duration `yaml:"-"`
 }
 
 type PhaseTwoCoordinatorConfig struct {
@@ -296,9 +296,6 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 		// only place that knows the chunked Store apply budget they are held
 		// against.
 		Scheduler: PhaseTwoSchedulerConfig{
-			// Expired-range finalization is the product's behaviour; the key
-			// stays as the rollback switch decision-002 keeps for a version
-			// that cannot read the range proof.
 			TickInterval:        Duration(time.Second),
 			MaxQueuedItemsPerQG: 16, MaxReplaySlots: 3, MaxReplayAge: Duration(10 * time.Minute),
 			RetryMinDelay: Duration(time.Second), RetryMaxDelay: Duration(30 * time.Second),

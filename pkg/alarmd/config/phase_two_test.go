@@ -328,13 +328,13 @@ func TestRestartMarginCoversTheReplayWindow(t *testing.T) {
 	// The message is read by whoever is holding a deployment that will not
 	// start. It has to carry both durations, because neither is visible from
 	// the values file alone, and it has to say which half is fixed: without
-	// that the obvious move is to edit max_replay_age, which a values file
-	// cannot set.
+	// that the obvious move is to look for a replay window key, and there is
+	// none.
 	for _, want := range []string{
 		narrowed.Redis.RestartMargin.Duration().String(),
 		narrowed.PhaseTwo.Scheduler.MaxReplayAge.Duration().String(),
-		"fixed replay window",
-		"cannot set",
+		"replay window is fixed",
+		"no values key sets it",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the rejection does not tell the operator %q: %v", want, err)

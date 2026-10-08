@@ -799,14 +799,13 @@ func (c Config) validateGoAccessRuntime() error {
 		// The only reader of this message is whoever is holding the deployment
 		// that will not start, and the two halves are not symmetric: the margin
 		// is theirs to set - how long a restart takes is a property of their
-		// cluster - while max_replay_age is a fixed property of the replay
-		// algorithm that a values file cannot set. Naming both values and
-		// saying which half moves is the difference between a message that can
-		// be acted on and one that invites editing the half that is not
-		// editable.
+		// cluster - while the replay window is a fixed property of the replay
+		// algorithm that no values key sets. Naming both values and saying
+		// which half moves is the difference between a message that can be
+		// acted on and one that invites looking for a key that does not exist.
 		return fmt.Errorf(
-			"redis.restart_margin (%s) must cover phase_two.scheduler.max_replay_age (%s): "+
-				"max_replay_age is a fixed replay window that a values file cannot set, "+
+			"redis.restart_margin (%s) must cover the replay window (%s): "+
+				"the replay window is fixed by the program and no values key sets it, "+
 				"so raise restart_margin to at least %s",
 			c.Redis.RestartMargin.Duration(),
 			c.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
