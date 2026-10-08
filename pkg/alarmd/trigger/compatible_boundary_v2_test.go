@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
@@ -83,5 +84,42 @@ func TestASteppedCompatiblePlanSendsOnlyItsBoundaryDetections(t *testing.T) {
 	}
 	if native.TriggerEvent == nil || native.WithoutMessageFormat != "" {
 		t.Fatalf("a standard Plan's detection between boundaries: event %+v format %q, want it sent", native.TriggerEvent, native.WithoutMessageFormat)
+	}
+}
+
+// A Plan detected every minute over a day, compiled where queries lay their
+// buckets in UTC+8: the detection at the local midnight is the one the
+// compatibility protocol carries, and the one at the UTC midnight is decided
+// and not built.
+func TestADayLongCompatiblePlanSendsItsLocalMidnightDetection(t *testing.T) {
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	levels := []contract.LevelIRV2{levelV2(5, 9, 3, 2, 2, nil)}
+	plan := compilePlanV2WithOutput(t, levels, func(p *contract.EvaluationPlanV2) {
+		p.StrategyIR.ExecutionSemantics.AggregationInterval = 86400
+		p.WireFormat = contract.WireFormatPythonCompatible
+		p.LegacyOutput = &contract.LegacyOutputContext{
+			Strategy:        json.RawMessage(`{"id":1001,"bk_biz_id":2,"update_time":1756684800}`),
+			DimensionFields: []string{"host"}, ItemID: "1",
+		}
+	}, strategy.WithBoundaryLocation(shanghai))
+	const utcMidnight, localMidnight = 1_700_092_800, 1_700_150_400
+	for _, test := range []struct {
+		source int64
+		built  bool
+	}{{localMidnight, true}, {utcMidnight, false}} {
+		result, err := EvaluateV2(anomalousRequestV2(t, plan, test.source,
+			map[int64]bool{test.source - 120: true, test.source - 60: true, test.source: true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.RecordResult != contract.LevelResultAbnormal || (result.TriggerEvent != nil) != test.built {
+			t.Fatalf("at %d: record %q event %+v, want the anomaly built %t", test.source, result.RecordResult, result.TriggerEvent, test.built)
+		}
+		if test.built && !reflect.DeepEqual(result.TriggerEvent.LegacyOutput.AnomalyTimestamps, []int64{localMidnight}) {
+			t.Fatalf("anomaly timestamps %v, want only the local midnight", result.TriggerEvent.LegacyOutput.AnomalyTimestamps)
+		}
 	}
 }

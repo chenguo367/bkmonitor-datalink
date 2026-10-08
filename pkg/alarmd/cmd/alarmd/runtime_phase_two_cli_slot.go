@@ -53,7 +53,7 @@ func newCLISlotResolverAt(cfg config.Config, client redis.Cmdable, now func() ti
 		if err != nil {
 			return obchannel.SlotPlan{}, obchannel.ErrHistoricalContractUnavailable
 		}
-		compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), cfg.CompilerLimits())
+		compiler, err := newPlanCompiler(cfg)
 		if err != nil {
 			return obchannel.SlotPlan{}, obchannel.ErrHistoricalContractUnavailable
 		}

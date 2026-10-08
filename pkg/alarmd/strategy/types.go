@@ -586,16 +586,19 @@ type CompiledPlan struct {
 	legacyOutput        *contract.FrozenLegacyOutput
 	projection          contract.InputProjectionV2
 	evaluationSemantics contract.ExecutionSemanticsV2
-	levels              []CompiledLevel
-	normalizers         map[string]NumericNormalizerSpec
-	fingerprints        PlanFingerprints
-	resourceEstimate    ResourceEstimate
-	datasetDigest       string
-	targetScope         *contract.TargetScopeV2
-	targetPlan          *contract.TargetPlanV1
-	noData              *contract.NoDataConfigV1
-	noDataLevel         *CompiledLevel
-	globalBusiness      bool
+	// boundaryLocation is the compiler's (WithBoundaryLocation); nil lays the
+	// aggregation grid in UTC.
+	boundaryLocation *time.Location
+	levels           []CompiledLevel
+	normalizers      map[string]NumericNormalizerSpec
+	fingerprints     PlanFingerprints
+	resourceEstimate ResourceEstimate
+	datasetDigest    string
+	targetScope      *contract.TargetScopeV2
+	targetPlan       *contract.TargetPlanV1
+	noData           *contract.NoDataConfigV1
+	noDataLevel      *CompiledLevel
+	globalBusiness   bool
 }
 
 // NoData is the strategy's no-data configuration, frozen with the Plan. Nil
@@ -703,7 +706,7 @@ func (p *CompiledPlan) CompatibleOffBoundary(sourceTime int64) bool {
 	if p == nil {
 		return false
 	}
-	return contract.CompatibleOffBoundary(p.evaluationSemantics, sourceTime)
+	return contract.CompatibleOffBoundary(p.evaluationSemantics, p.boundaryLocation, sourceTime)
 }
 
 // PublishesCompatibleProtocol reports whether this Plan's events go out as the

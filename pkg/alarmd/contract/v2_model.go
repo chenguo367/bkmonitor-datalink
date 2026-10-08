@@ -9,7 +9,10 @@
 
 package contract
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	ExecutionEnvelopeSchemaV2 = "execution-envelope"
@@ -621,12 +624,23 @@ func NoMessageFor(format, eventKind string, compatibilityContext bool) bool {
 // intervals, and would read one window several times over - so the protocol
 // has no message for such a record of any kind. A Plan detected once an
 // aggregation interval has none.
-func CompatibleOffBoundary(semantics ExecutionSemanticsV2, sourceTime int64) bool {
+//
+// The grid is laid in location, the time zone the Plan's query is laid in, as
+// the query service lays an aligned query's buckets: a boundary is a time
+// whose wall clock there is a whole number of aggregation intervals from the
+// epoch, so that a day's boundary is the local midnight. A nil location is
+// UTC.
+func CompatibleOffBoundary(semantics ExecutionSemanticsV2, location *time.Location, sourceTime int64) bool {
 	step, aggregation := int64(semantics.EvaluationInterval), int64(semantics.AggregationInterval)
 	if step <= 0 || aggregation <= 0 || step == aggregation {
 		return false
 	}
-	return sourceTime%aggregation != 0
+	local := sourceTime
+	if location != nil {
+		_, offset := time.Unix(sourceTime, 0).In(location).Zone()
+		local += int64(offset)
+	}
+	return local%aggregation != 0
 }
 
 // EventHasMessageAt is EventHasMessage for a record that may lie between two

@@ -246,7 +246,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
 	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary, retainedPeaks)
 	observer = phaseTwoRuntimeObserver(observer)
-	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), cfg.CompilerLimits())
+	compiler, err := newPlanCompiler(cfg)
 	if err != nil {
 		return nil, err
 	}
