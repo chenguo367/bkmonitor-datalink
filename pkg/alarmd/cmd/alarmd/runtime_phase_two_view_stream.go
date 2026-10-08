@@ -188,16 +188,11 @@ type viewSource interface {
 	// ActivationBlocked is the Query Groups a cutover held back: the view
 	// gives each the content its open Segment names, not the manifest's.
 	ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error)
-	// ApplyCutoverProgress is the content the Query Groups run while a
-	// cutover is in progress: what each open Segment names. Without
-	// progress it returns the content as given.
-	ApplyCutoverProgress(context.Context, controlplane.ActivationState, map[execution.QueryGroupIdentity]controlplane.ContentEntry) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error)
 }
 
 // runningViewContent is what each Query Group of the activation runs, which
 // is what the view gives it: the published content, a held-back Query Group
-// on its open Segment instead, and every Query Group on its open Segment
-// while a cutover is in progress.
+// on its open Segment instead.
 func runningViewContent(
 	ctx context.Context, source viewSource, state controlplane.ActivationState,
 ) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
@@ -209,11 +204,7 @@ func runningViewContent(
 	if err != nil {
 		return nil, fmt.Errorf("read held-back Query Groups: %w", err)
 	}
-	running := controlplane.ApplyBlockedToContent(published.Groups, blocked)
-	if running, err = source.ApplyCutoverProgress(ctx, state, running); err != nil {
-		return nil, fmt.Errorf("read the content a cutover in progress runs: %w", err)
-	}
-	return running, nil
+	return controlplane.ApplyBlockedToContent(published.Groups, blocked), nil
 }
 
 // costLedgerSink hands each heartbeat's costs to the Leader's ledger: the

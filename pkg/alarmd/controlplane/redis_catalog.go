@@ -123,11 +123,6 @@ type ActivationState struct {
 	// key of its own. A reader that does not know them ignores them.
 	BlockedCount  int    `json:"blocked_count,omitempty"`
 	BlockedDigest string `json:"blocked_digest,omitempty"`
-	// CutoverProgress is a publication cutover committed in pieces that has
-	// not finished (N15): the Query Groups after its cursor still run the
-	// content they ran before it. Nil everywhere else, and omitted, so a body
-	// without it serializes exactly as before. See activation_head.go.
-	CutoverProgress *CutoverProgress `json:"cutover_progress,omitempty"`
 }
 
 type ActivationExpectation struct {
@@ -904,9 +899,6 @@ func validateActivationState(state ActivationState) error {
 	}
 	if state.RecordRevision == 0 || state.Current.validate() != nil {
 		return errors.New("alarmd controlplane: incomplete activation state")
-	}
-	if err := state.CutoverProgress.validate(state.Current); err != nil {
-		return err
 	}
 	if state.Pending != nil && state.Pending.validate() != nil {
 		return errors.New("alarmd controlplane: invalid pending snapshot reference")

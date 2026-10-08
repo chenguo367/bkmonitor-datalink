@@ -139,25 +139,6 @@ func TestARenewalUnderAMovedHeaderIsAConflictByName(t *testing.T) {
 	}
 }
 
-// A cutover a later build left unfinished is on the body, not on the header:
-// with the header lost mid-cutover, the header is written back as it was and
-// the first activation round finishes the cutover as it would have.
-func TestAHeaderLostMidCutoverIsWrittenBackAndTheCutoverFinishes(t *testing.T) {
-	fixture := newCutoverFixture(t, "alarmd:control:header-lost-mid-cutover")
-	_, second, state := unfinishedCutover(t, fixture)
-	if err := fixture.client.Del(fixture.ctx, fixture.prefix+":activation_header").Err(); err != nil {
-		t.Fatal(err)
-	}
-	*fixture.now = time.Unix(180, 0)
-	finished, err := fixture.reconciler.Ensure(fixture.ctx, second.Publication)
-	if err != nil {
-		t.Fatalf("finishing the cutover with the header lost: %v", err)
-	}
-	if finished.CutoverProgress != nil || finished.Current != second.Publication || finished.RecordRevision != state.RecordRevision+1 {
-		t.Fatalf("finished activation = %+v", finished)
-	}
-}
-
 // Only the Control Leader writes the header back, from its activation and its
 // renewal. Every reader keeps reading the body, and reading never writes.
 func TestReadingAnActivationWithoutItsHeaderWritesNothing(t *testing.T) {

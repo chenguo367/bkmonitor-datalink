@@ -30,9 +30,6 @@ type contentScopeSource interface {
 	// ActivationBlocked is the Query Groups a cutover held back; their scope
 	// is what their open Segment names, not what the manifest names.
 	ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error)
-	// ApplyCutoverProgress is what each Query Group runs while a cutover is
-	// in progress; see viewSource.
-	ApplyCutoverProgress(context.Context, controlplane.ActivationState, map[execution.QueryGroupIdentity]controlplane.ContentEntry) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error)
 }
 
 // currentContentScopes reads the content each Query Group is published with
@@ -51,19 +48,6 @@ func currentContentScopes(source contentScopeSource) func(context.Context) (map[
 		state, err := source.LoadActivationHead(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("phase-two content scopes: read activation: %w", err)
-		}
-		if state.CutoverProgress != nil {
-			// The manifest names content the Query Groups past the cursor are
-			// not running yet; each open Segment names what it runs.
-			running, err := source.ApplyCutoverProgress(ctx, state, nil)
-			if err != nil {
-				return nil, fmt.Errorf("phase-two content scopes: read the content a cutover in progress runs: %w", err)
-			}
-			digests := make(map[execution.QueryGroupIdentity]string, len(running))
-			for identity, entry := range running {
-				digests[identity] = string(entry.Digest)
-			}
-			return digests, nil
 		}
 		published, err := source.LoadPublishedContent(ctx, state.Current)
 		if err != nil {
