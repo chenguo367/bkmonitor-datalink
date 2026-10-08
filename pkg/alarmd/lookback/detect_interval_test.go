@@ -131,3 +131,15 @@ func TestASteppedGroupsAdviceIsRoundedToItsDelaysUnit(t *testing.T) {
 		t.Fatalf("late-past-round advice %+v (reported %t), want 30 + 10 rounded to 45", reading, ok)
 	}
 }
+
+// A held group's first read waited its hold: how much later than its
+// time_delay the data was whole is how much later than that read, plus the
+// hold. Left without the hold, the advice falls short by it.
+func TestAHeldGroupsReadEarlyAdviceCountsTheHold(t *testing.T) {
+	early := ReadEarlySample{FirstReadyAgeSeconds: 50, CompletionAgeSeconds: 70, ReadHoldSeconds: 20}
+	state := &group{source: sourceTimeSeries, step: time.Minute, delayUnit: 15 * time.Second,
+		readEarly: &readEarlyState{delaySeconds: 30, recent: []readEarlyEntry{{early: true, sample: early}, {early: true, sample: early}}}}
+	if reading, ok := readingOf("qg", state); !ok || reading.SuggestedDelaySeconds != 75 {
+		t.Fatalf("read-early advice %+v (reported %t), want 30 + 20 + 20 rounded to 75", reading, ok)
+	}
+}
