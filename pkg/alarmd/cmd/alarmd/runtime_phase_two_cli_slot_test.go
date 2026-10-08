@@ -414,3 +414,20 @@ func TestAPastSlotOfAGroupWithNoReadHoldRecordReadsWithNoHold(t *testing.T) {
 		t.Fatalf("a held record: plan %+v basis %q err %v, want 60 s read from the record", plan.Contract, plan.ReadHoldBasis, err)
 	}
 }
+
+// A Slot its Query Group's Progress still carries is read with the hold its
+// contract was frozen with, and says it was read from Progress.
+func TestASlotProgressStillCarriesIsReadFromProgress(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	last := f.progress(ctx).LastCompletion
+	if last == nil {
+		t.Fatal("the fixture completed no Slot")
+	}
+	plan, err := newCLISlotResolverAt(f.cfg, f.redisClient, f.now)(ctx, last.Contract.Slot)
+	if err != nil || plan.ReadHoldBasis != obchannel.ReadHoldFromProgress || plan.Contract.ReadHoldMillis != last.Contract.ReadHoldMillis {
+		t.Fatalf("plan %+v basis %q err %v, want the completed contract's hold %d read from Progress",
+			plan.Contract, plan.ReadHoldBasis, err, last.Contract.ReadHoldMillis)
+	}
+}
