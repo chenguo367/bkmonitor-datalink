@@ -23,7 +23,6 @@ const ()
 
 type Evaluator struct {
 	registry *Registry
-	observer Observer
 }
 
 // boundPlan is a compiled Plan with its detectors and algorithms resolved.
@@ -55,11 +54,11 @@ type boundAlgorithm struct {
 	named    namedInputDetector
 }
 
-func NewEvaluator(registry *Registry, observer Observer) (*Evaluator, error) {
+func NewEvaluator(registry *Registry) (*Evaluator, error) {
 	if registry == nil || len(registry.detectors) == 0 {
 		return nil, errors.New("alarmd detect: detector registry is required")
 	}
-	return &Evaluator{registry: registry, observer: observer}, nil
+	return &Evaluator{registry: registry}, nil
 }
 
 type projectionKey struct {

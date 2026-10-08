@@ -65,13 +65,13 @@ func TestReplicaImpactTalliesAddUpToTheWholeViews(t *testing.T) {
 		Decide(&view, now, 10*time.Minute)
 		return view
 	}
-	want := ImpactOf(decided(snapshots), now)
+	want := ImpactTallyOf(decided(snapshots), now).Impact()
 	tallies := make([]ImpactTally, 0, len(snapshots))
 	summed := 0
 	for _, snapshot := range snapshots {
 		one := decided([]Snapshot{snapshot})
 		tallies = append(tallies, ImpactTallyOf(one, now))
-		summed += ImpactOf(one, now).Blind.Strategies
+		summed += ImpactTallyOf(one, now).Impact().Blind.Strategies
 	}
 	got := MergeImpactTallies(tallies...).Impact()
 	if got != want {

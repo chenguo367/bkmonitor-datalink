@@ -31,7 +31,8 @@ type MetricRows struct {
 	// Checks is the rows' half of each check line's current count
 	// (checkTally.current); the line's count adds the view's half (CheckLines).
 	Checks map[Check]int `json:"checks,omitempty"`
-	// Losses and GraceUnknown are LossCensus of the replica's records.
+	// Losses and GraceUnknown are the loss census of the replica's records
+	// (lossesOfView).
 	Losses       map[Loss]int `json:"losses,omitempty"`
 	GraceUnknown int          `json:"grace_unknown,omitempty"`
 }

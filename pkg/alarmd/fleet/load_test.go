@@ -192,7 +192,7 @@ func TestLoadIsTheFourReadingsWithTheirLimits(t *testing.T) {
 			"qg-stopped": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-time.Hour), Replica: "pod-a"},
 		},
 	}
-	load := LoadOf(view, at)
+	load := ReplicaPartOf(*view, at).Load(view)
 	if load.OnTime.State != OnTimeKeepingUp || load.Backlog.State != BacklogNone {
 		t.Errorf("on time = %s, backlog = %s, want KEEPING_UP and NONE", load.OnTime.State, load.Backlog.State)
 	}
@@ -213,7 +213,7 @@ func TestLoadIsTheFourReadingsWithTheirLimits(t *testing.T) {
 		t.Errorf("limits = %v, want no headroom estimate, counters since start, and the half-hour trend span", load.Limits)
 	}
 	// Nothing to read from: every reading says so, and the limits name it.
-	bare := LoadOf(&View{}, at)
+	bare := ReplicaPartOf(View{}, at).Load(&View{})
 	if bare.OnTime.State != OnTimeUnknown || bare.Backlog.State != BacklogUnknown || bare.Bottleneck.Resource != BottleneckUnknown || bare.Loss.State != LossNone {
 		t.Errorf("bare load = %+v, want unknown on time, backlog and bottleneck, no loss", bare)
 	}

@@ -781,8 +781,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	health := fixture["health"].(fleet.HealthResponse)
 	earlier := 0
 	health.Schedule.OverdueAgo, health.Schedule.OverdueAgoSeconds = &earlier, 1800
-	health.Load = fleet.LoadOf(&fleet.View{Schedule: health.Schedule, Capacity: health.Capacity,
-		Demoted: demoted, GapSkips: retained.GapSkips, PerReplica: retained.PerReplica, Rebalance: rebalance}, at)
+	view := fleet.View{Schedule: health.Schedule, Capacity: health.Capacity,
+		Demoted: demoted, GapSkips: retained.GapSkips, PerReplica: retained.PerReplica, Rebalance: rebalance}
+	health.Load = fleet.ReplicaPartOf(view, at).Load(&view)
 	fixture["health"] = health
 	encoded, err := json.Marshal(fixture)
 	if err != nil {

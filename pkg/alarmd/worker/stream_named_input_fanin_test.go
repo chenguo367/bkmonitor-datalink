@@ -289,7 +289,7 @@ func workerG4CoordinatorWith(
 	evidence *memoryEvidenceStore,
 ) (*recordingPorts, *recordingEvaluator, *worker.SlotExecutionCoordinator) {
 	t.Helper()
-	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry(), nil)
+	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

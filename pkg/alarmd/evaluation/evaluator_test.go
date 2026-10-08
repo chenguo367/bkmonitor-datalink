@@ -608,7 +608,7 @@ func TestEvaluatorWarmingAndGappedNeverEmitNormalAndGateRecoveryOnEvidence(t *te
 }
 
 func newEvaluator(t testing.TB) *Evaluator {
-	d, err := detect.NewEvaluator(detect.NewDefaultRegistry(), nil)
+	d, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

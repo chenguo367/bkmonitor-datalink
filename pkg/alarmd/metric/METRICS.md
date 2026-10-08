@@ -1111,54 +1111,6 @@ Labels: `component`, `stage`, `result`, `reason_code`
 
 Bounded alarmd observations by pipeline stage and result.
 
-## bkmonitor_alarmd_observed_bytes_total
-
-Labels: `stage`, `direction`, `result`
-
-Total bytes reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_events_total
-
-Labels: `stage`, `direction`, `result`
-
-Total events reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_keys_total
-
-Labels: `stage`, `direction`, `result`
-
-Total keys reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_levels_total
-
-Labels: `stage`, `direction`, `result`
-
-Total levels reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_messages_total
-
-Labels: `stage`, `direction`, `result`
-
-Total messages reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_plans_total
-
-Labels: `stage`, `direction`, `result`
-
-Total plans reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_records_total
-
-Labels: `stage`, `direction`, `result`
-
-Total records reported through bounded alarmd observations.
-
-## bkmonitor_alarmd_observed_state_bytes_total
-
-Labels: `stage`, `direction`, `result`
-
-Total state_bytes reported through bounded alarmd observations.
-
 ## bkmonitor_alarmd_observer_panics_total
 
 Labels: `observer`

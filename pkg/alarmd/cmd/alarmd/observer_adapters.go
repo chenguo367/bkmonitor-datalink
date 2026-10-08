@@ -12,30 +12,8 @@ package main
 import (
 	"context"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/detect"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
-
-func detectObserver(observer observability.Observer) detect.Observer {
-	return detect.ObserverFunc(func(ctx context.Context, source detect.Observation) {
-		result := observability.Result(observability.ResultSuccess)
-		switch source.Result {
-		case detect.ObservationTerminal:
-			result = observability.ResultTerminal
-		case detect.ObservationFailed:
-			result = observability.Result(observability.ResultFailed)
-		}
-		observeRuntime(ctx, observer, observability.Observation{
-			Component: observability.ComponentDetect, Stage: observability.StageDetectCompleted,
-			Result: result, Direction: observability.DirectionInternal,
-			ReasonCode: observability.ReasonCode(source.ReasonCode), Duration: source.Duration,
-			Counts: observability.Counts{
-				Records: int64(source.Counts.EvaluatedRecords), Plans: int64(source.Counts.Plans),
-				Levels: int64(source.Counts.CompiledLevels), Bytes: int64(source.Counts.EstimatedResultBytes),
-			},
-		})
-	})
-}
 
 // observeRuntime hands one observation to the runtime's observer. A panic
 // is recovered and counted: inside the fan-out under the member that raised

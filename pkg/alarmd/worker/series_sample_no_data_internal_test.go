@@ -55,7 +55,7 @@ func CheckSeriesSampleNoDataWorkerRegression(t *testing.T, off, on *state.Execut
 func runNoDataSampleRounds(t *testing.T, due execution.DuePlan, store *state.ExecutionStore, sampler *observability.SeriesSampler) []noDataSampleRound {
 	t.Helper()
 	ctx := context.Background()
-	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry(), nil)
+	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

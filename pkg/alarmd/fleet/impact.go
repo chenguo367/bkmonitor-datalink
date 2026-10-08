@@ -9,8 +9,6 @@
 
 package fleet
 
-import "time"
-
 // The verdict panel answers "is alarmd well" and nothing else, and that is not
 // the question an operator opens it with.
 //
@@ -87,19 +85,6 @@ type Impact struct {
 	// affected" and means "we cannot say what is affected", and those are
 	// opposite instructions.
 	NoStrategies int `json:"no_strategies"`
-}
-
-// ImpactOf expresses the whole view in strategies and businesses.
-//
-// Counted from the lists the replicas published rather than from the totals,
-// because a strategy count has no other source -- and the difference between
-// the two is reported as Partial rather than hidden, since the deployment bad
-// enough to truncate is the one being read during an incident. Two columns are
-// counted together as one population, not added: a strategy with objects in
-// both is one strategy, and adding overstates the number a reader acts on --
-// by most when the deployment is worst (ImpactTally).
-func ImpactOf(view View, now time.Time) Impact {
-	return ImpactTallyOf(view, now).Impact()
 }
 
 // distinctObjects is the set of objects in a list: an object under two

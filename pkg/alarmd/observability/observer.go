@@ -40,23 +40,17 @@ type ActivationFailureStage string
 type ActivationFailureClass string
 
 const (
-	ComponentRuntime        = "runtime"
-	ComponentControlPlane   = "source"
-	ComponentOwnership      = "router"
-	ComponentScheduler      = "scheduler"
-	ComponentConsumer       = "consumer"
-	ComponentAdapter        = "adapter"
-	ComponentCompiler       = "compiler"
-	ComponentAccess         = "access"
-	ComponentEvaluation     = "evaluation"
-	ComponentState          = "state"
-	ComponentProgress       = "progress"
-	ComponentDetect         = "detect"
-	ComponentOutput         = "output"
-	ComponentCoverage       = "coverage"
-	ComponentResource       = "resource"
-	ComponentPythonProducer = "python_producer"
-	ComponentOther          = "_other"
+	ComponentRuntime      = "runtime"
+	ComponentControlPlane = "source"
+	ComponentOwnership    = "router"
+	ComponentScheduler    = "scheduler"
+	ComponentAccess       = "access"
+	ComponentEvaluation   = "evaluation"
+	ComponentState        = "state"
+	ComponentProgress     = "progress"
+	ComponentOutput       = "output"
+	ComponentResource     = "resource"
+	ComponentOther        = "_other"
 
 	StageConfigLoaded             = "config_loaded"
 	StageEffectiveTimeMaintenance = "effective_time_maintenance"
@@ -118,17 +112,8 @@ const (
 	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
-	StageRestartRecovered       = "restart_recovered"
 	StageFleetSnapshotPublish   = "fleet_snapshot_publish"
 	StageObservationWindow      = "observation_window"
-	StageKafkaAssigned          = "kafka_assigned"
-	StageExecutionReceived      = "execution_received"
-	StageOffsetGap              = "offset_gap"
-	StageOffsetMarked           = "offset_marked"
-	StageMessageDecoded         = "message_decoded"
-	StageRecordBatchReady       = "record_batch_ready"
-	StageRejected               = "rejected"
-	StagePlanCompiled           = "plan_compiled"
 	StageQueryCompleted         = "query_completed"
 	StageQueryBudgetResolved    = "query_budget_resolved"
 	StageSlotReadinessArrival   = "slot_readiness_arrival"
@@ -221,22 +206,7 @@ const (
 	// not, so without this a deployment where every such write fails looks
 	// exactly like one where none was ever needed.
 	StageExecutionEvidenceWritten = "execution_evidence_written"
-	StageDependencyLoaded         = "dependency_loaded"
-	StageStateCommitted           = "state_committed"
-	StageDetectCompleted          = "detect_completed"
-	StageTriggerCompleted         = "trigger_completed"
-	StageOutputACKed              = "output_acked"
-	StageCoverageCompleted        = "coverage_completed"
-	StageCoverageGap              = "coverage_gap"
-	StageResourceSoft             = "resource_soft"
 	StageResourceHard             = "resource_hard"
-	StageResourceResumed          = "resource_resumed"
-	StagePythonSource             = "source"
-	StagePythonBuilt              = "built"
-	StagePythonEnqueued           = "enqueued"
-	StagePythonPublished          = "published"
-	StagePythonACKed              = "acked"
-	StagePythonDropped            = "dropped"
 	StageOther                    = "_other"
 
 	ResultTerminal = "terminal"
@@ -3481,7 +3451,6 @@ var metricComponentStages = []ComponentStage{
 	{ComponentRuntime, StageStartup}, {ComponentRuntime, StageConfigLoaded},
 	{ComponentRuntime, StageEffectiveTimeMaintenance},
 	{ComponentRuntime, StageShutdown}, {ComponentRuntime, StageFatal},
-	{ComponentRuntime, StageRestartRecovered},
 	// Registered on the generic catalog rather than the phase-two one because
 	// this has to be answerable from metrics alone: when the snapshot channel
 	// itself is broken, the aggregated view can only report that a replica is
@@ -3492,21 +3461,9 @@ var metricComponentStages = []ComponentStage{
 	// learn from metrics whether it was applied, and log collection is
 	// configured per environment while metrics are always there.
 	{ComponentRuntime, StageObservationWindow},
-	{ComponentConsumer, StageKafkaAssigned}, {ComponentConsumer, StageExecutionReceived},
-	{ComponentConsumer, StageOffsetGap}, {ComponentConsumer, StageOffsetMarked},
-	{ComponentAdapter, StageMessageDecoded}, {ComponentAdapter, StageRecordBatchReady},
-	{ComponentAdapter, StageRejected},
-	{ComponentCompiler, StagePlanCompiled},
-	{ComponentState, StageDependencyLoaded}, {ComponentState, StageStateCommitted},
-	{ComponentDetect, StageDetectCompleted},
-	{ComponentTrigger, StageTriggerCompleted},
-	{ComponentOutput, StageOutputACKed},
-	{ComponentCoverage, StageCoverageCompleted}, {ComponentCoverage, StageCoverageGap},
-	{ComponentResource, StageResourceSoft}, {ComponentResource, StageResourceHard},
-	{ComponentResource, StageResourceResumed},
-	{ComponentPythonProducer, StagePythonSource}, {ComponentPythonProducer, StagePythonBuilt},
-	{ComponentPythonProducer, StagePythonEnqueued}, {ComponentPythonProducer, StagePythonPublished},
-	{ComponentPythonProducer, StagePythonACKed}, {ComponentPythonProducer, StagePythonDropped},
+	// A Worker refusing work for capacity: the one resource stage still
+	// emitted.
+	{ComponentResource, StageResourceHard},
 	{ComponentOther, StageOther},
 }
 

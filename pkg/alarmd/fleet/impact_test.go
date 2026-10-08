@@ -39,7 +39,7 @@ func TestBlindImpactIsTheUnionOfTheTwoColumnsNotTheirSum(t *testing.T) {
 		},
 		DemotedTotal: 2,
 	}
-	impact := ImpactOf(view, now)
+	impact := ImpactTallyOf(view, now).Impact()
 	if impact.Anomalies.Strategies != 2 || impact.Demoted.Strategies != 2 {
 		t.Fatalf("columns = %d and %d strategies, want 2 and 2 -- the union below would be"+
 			" comparing against the wrong thing", impact.Anomalies.Strategies, impact.Demoted.Strategies)
@@ -70,7 +70,7 @@ func TestObjectsThatNameNoStrategyAreReportedRatherThanCountedAsZero(t *testing.
 		Anomalies:      []Anomaly{blocked, withStrategies("qg-a", StrategyRef{StrategyID: "100"})},
 		AnomaliesTotal: 2,
 	}
-	impact := ImpactOf(view, now)
+	impact := ImpactTallyOf(view, now).Impact()
 	if impact.NoStrategies != 1 {
 		t.Errorf("no_strategies = %d, want 1", impact.NoStrategies)
 	}
@@ -86,7 +86,7 @@ func TestImpactSaysWhenItsListWasCutBeforeItCounted(t *testing.T) {
 		Anomalies:      []Anomaly{withStrategies("qg-a", StrategyRef{StrategyID: "100"})},
 		AnomaliesTotal: 900,
 	}
-	impact := ImpactOf(view, now)
+	impact := ImpactTallyOf(view, now).Impact()
 	if !impact.Anomalies.Partial {
 		t.Error("the column does not report that its list was cut: 1 strategy off 900 objects" +
 			" renders as the whole answer")
@@ -138,7 +138,7 @@ func TestImpactCutsEveryColumnByWhoActs(t *testing.T) {
 			"qg-stopped": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-time.Hour), Replica: "pod-a", Strategies: ref("6", "9")},
 		}}
 
-	impact := ImpactOf(view, at)
+	impact := ImpactTallyOf(view, at).Impact()
 
 	if impact.Alarmd.Objects != 2 || impact.Alarmd.Strategies != 2 || impact.Alarmd.Businesses != 2 {
 		t.Errorf("alarmd = %+v, want the overdue object and the one losing rounds now: 2 objects, strategies 1 and 5, businesses 7 and 9", impact.Alarmd)
@@ -160,7 +160,7 @@ func TestImpactCutsEveryColumnByWhoActs(t *testing.T) {
 	}
 	// A cut column makes every part a lower bound: a line draws from all four.
 	view.DemotedTotal = 50
-	cut := ImpactOf(view, at)
+	cut := ImpactTallyOf(view, at).Impact()
 	if !cut.Alarmd.Partial || !cut.Undetermined.Partial || !cut.Strategy.Partial || !cut.Data.Partial {
 		t.Errorf("with the demoted column cut, parts read %v/%v/%v/%v partial, want all four",
 			cut.Alarmd.Partial, cut.Undetermined.Partial, cut.Strategy.Partial, cut.Data.Partial)

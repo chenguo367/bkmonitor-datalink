@@ -33,7 +33,7 @@ func CheckASupplementLeavesARaisedNoDataAlertStanding(t *testing.T, store *state
 	t.Helper()
 	ctx := context.Background()
 	due := noDataWiredPlan(t)
-	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry(), nil)
+	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

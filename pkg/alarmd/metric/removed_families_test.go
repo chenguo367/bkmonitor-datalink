@@ -36,6 +36,10 @@ var removedFamilies = []string{
 	"health_ready", "health_state", "health_reason", "health_assigned_claims", "health_inflight_messages",
 	"health_worker_queue_depth", "health_worker_queue_bytes", "health_consumer_lag_records",
 	"health_last_progress_timestamp_seconds", "health_last_recovery_timestamp_seconds",
+	// What the generic observations said they moved, by stage: only the
+	// phase-one stages reported a volume, and none of them is emitted.
+	"observed_messages_total", "observed_records_total", "observed_plans_total", "observed_levels_total",
+	"observed_events_total", "observed_bytes_total", "observed_keys_total", "observed_state_bytes_total",
 }
 
 // A removed family is registered nowhere, bound or not.

@@ -1086,7 +1086,7 @@ func TestARecordInTheRestartGraceIsTheRestartsCatchUp(t *testing.T) {
 	view.GapSkips = map[string]SkippedSpan{"qg-catching-up": view.GapSkips["qg-catching-up"]}
 	view.Capacity = &CapacityView{PermitAcquires: 1000, PermitWaits: 800}
 	view.Schedule = &ScheduleCensus{Completed1h: 100, OnTime1h: 100}
-	load := LoadOf(view, at)
+	load := ReplicaPartOf(*view, at).Load(view)
 	if load.Loss.State != LossInProgress || load.Loss.AfterRestart != 1 || load.Loss.Ongoing != 0 || load.Bottleneck.Resource != BottleneckNone {
 		t.Fatalf("load = %+v, want the restart's loss in progress and no bottleneck asked", load)
 	}

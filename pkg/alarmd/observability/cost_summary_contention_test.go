@@ -77,7 +77,6 @@ func TestObservationsAreCountedWhilePublishRanks(t *testing.T) {
 		finishes(t, release, "an observation", func() { c.Observe(ctx, o) })
 	}
 	finishes(t, release, "a snapshot read", func() { _ = c.Snapshot() })
-	finishes(t, release, "the peak read", func() { _ = c.RetainedPeaks() })
 	finishes(t, release, "a reconciliation", func() { c.Reconcile([]CostGroup{g, other}, true) })
 	release()
 

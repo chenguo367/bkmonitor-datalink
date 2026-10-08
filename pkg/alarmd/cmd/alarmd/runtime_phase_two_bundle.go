@@ -718,7 +718,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry(), detectObserver(observer))
+	detector, err := detect.NewEvaluator(detect.NewDefaultRegistry())
 	if err != nil {
 		return nil, err
 	}
