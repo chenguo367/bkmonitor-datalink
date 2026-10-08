@@ -12,8 +12,6 @@ package state
 import (
 	"fmt"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -71,38 +69,6 @@ func RuntimeStateSemantics() (StateSemantics, error) {
 		SourceTimeSemanticsVersion:  SourceTimeSemanticsVersion,
 		HistoryCellSemanticsVersion: HistoryCellSemanticsVersion,
 	}, nil
-}
-
-// Key returns a bounded Redis String key. Business and strategy IDs remain
-// explicit for isolation and diagnosis; all other unbounded fields are
-// represented by fixed-size digests.
-func (identity RuntimeIdentity) Key(prefix string) (string, error) {
-	if strings.TrimSpace(prefix) == "" || !utf8.ValidString(prefix) {
-		return "", fmt.Errorf("state: key prefix must be non-empty UTF-8")
-	}
-	if identity.TenantID == "" || !utf8.ValidString(identity.TenantID) {
-		return "", fmt.Errorf("state: tenant_id must be non-empty UTF-8")
-	}
-	if !isCanonicalSignedInt64(identity.BusinessID) {
-		return "", fmt.Errorf("state: business_id must use canonical signed int64 form")
-	}
-	if !isCanonicalUint64(identity.StrategyID) {
-		return "", fmt.Errorf("state: strategy_id must use canonical unsigned uint64 form")
-	}
-	if !isSHA256Hex(identity.StateCompatibilityHash) {
-		return "", fmt.Errorf("state: state_compatibility_hash must be 64 lowercase hexadecimal characters")
-	}
-	if !isSHA256Hex(identity.DimensionIdentityDigest) {
-		return "", fmt.Errorf("state: dimension_identity_digest must be 64 lowercase hexadecimal characters")
-	}
-	tenantDigest, err := contract.DeriveCanonicalDigestV2("runtime-state-tenant-v1", identity.TenantID)
-	if err != nil {
-		return "", fmt.Errorf("state: derive tenant digest: %w", err)
-	}
-	return strings.Join([]string{
-		prefix, "runtime", "v1", "w", tenantDigest[:32], identity.BusinessID, identity.StrategyID,
-		identity.StateCompatibilityHash[:32], identity.DimensionIdentityDigest[:32],
-	}, ":"), nil
 }
 
 func isCanonicalSignedInt64(value string) bool {

@@ -22,10 +22,8 @@ import (
 )
 
 const (
-	SchemaVersion           = "detection-outcome/1.0"
-	schemaMajor             = 1
-	detectionOutcomeSchema  = "detection-outcome"
-	triggerStrategyIRSchema = "trigger-strategy-ir"
+	SchemaVersion = "detection-outcome/1.0"
+	schemaMajor   = 1
 
 	maxContractInt = 1<<31 - 1
 )

@@ -15,10 +15,8 @@ import (
 )
 
 const (
-	ExecutionEnvelopeSchemaV2 = "execution-envelope"
-	StrategyIRSchemaV2        = "alarmd-strategy-ir"
-	TriggerEventSchemaV1      = "trigger-event"
-	ExecutionSummarySchemaV1  = "execution-summary"
+	StrategyIRSchemaV2   = "alarmd-strategy-ir"
+	TriggerEventSchemaV1 = "trigger-event"
 
 	QueryCompletenessFull        = "FULL"
 	QueryCompletenessPartial     = "PARTIAL"
@@ -31,13 +29,6 @@ const (
 
 	LevelConnectorAND = "AND"
 	LevelConnectorOR  = "OR"
-
-	SelectorKindRanges = "RANGES"
-	SelectorKindBitmap = "BITMAP"
-
-	ValidationScopePlan   ValidationScope = "PLAN"
-	ValidationScopeLevel  ValidationScope = "LEVEL"
-	ValidationScopeRecord ValidationScope = "RECORD"
 
 	ReasonMalformedJSON              = "MALFORMED_JSON"
 	ReasonSchemaMajorUnsupported     = "SCHEMA_MAJOR_UNSUPPORTED"
@@ -793,32 +784,12 @@ type ReaderLimitsV2 struct {
 	MaxValidationIssues  int
 }
 
-type ValidationScope string
-
-type ValidationIssue struct {
-	Scope                 ValidationScope             `json:"scope"`
-	ReasonCode            string                      `json:"reason_code"`
-	FieldPath             string                      `json:"field_path"`
-	PlanOrdinal           *uint32                     `json:"plan_ordinal,omitempty"`
-	PlanID                string                      `json:"plan_id,omitempty"`
-	PlanIdentityUntrusted bool                        `json:"plan_identity_untrusted,omitempty"`
-	LevelID               *uint32                     `json:"level_id,omitempty"`
-	RecordOrdinal         *uint32                     `json:"record_ordinal,omitempty"`
-	RecordID              string                      `json:"record_id,omitempty"`
-	UnverifiedTail        *ValidationUnverifiedTailV2 `json:"unverified_tail,omitempty"`
-}
-
 // ValidationUnverifiedTailV2 is present only on VALIDATION_BUDGET_EXCEEDED.
 // Every object at or after a non-nil ordinal was not fully validated and must
 // be terminalized by the consumer; it must never be treated as valid.
 type ValidationUnverifiedTailV2 struct {
 	PlanFromOrdinal   *uint32 `json:"plan_from_ordinal,omitempty"`
 	RecordFromOrdinal *uint32 `json:"record_from_ordinal,omitempty"`
-}
-
-type FramedExecutionEnvelopeV2 struct {
-	Envelope   ExecutionEnvelopeV2
-	RawPayload json.RawMessage
 }
 
 // StateCompatibilityInputV1 contains only whole-key interpretation semantics.
@@ -1011,30 +982,4 @@ type TriggerEventBuildInputV1 struct {
 type TriggerEventReaderLimitsV1 struct {
 	MaxPayloadBytes  int
 	MaxEvidenceBytes int
-}
-
-type CountSetV1 struct {
-	Messages uint64 `json:"messages"`
-	Records  uint64 `json:"records"`
-	Bytes    uint64 `json:"bytes"`
-}
-
-type ReasonCountV1 struct {
-	ReasonCode string `json:"reason_code"`
-	Count      uint64 `json:"count"`
-}
-
-type ExecutionSummaryV1 struct {
-	Schema           Schema          `json:"schema"`
-	RequiredFeatures []string        `json:"required_features"`
-	SummaryID        string          `json:"summary_id"`
-	ExecutionID      string          `json:"execution_id"`
-	TenantID         string          `json:"tenant_id"`
-	QueryGroupKey    string          `json:"query_group_key"`
-	SourceWindow     SourceWindowV2  `json:"source_window"`
-	PlanSetDigest    string          `json:"plan_set_digest"`
-	Source           CountSetV1      `json:"source"`
-	Published        CountSetV1      `json:"published"`
-	Dropped          CountSetV1      `json:"dropped"`
-	ReasonCounts     []ReasonCountV1 `json:"reason_counts"`
 }

@@ -97,9 +97,3 @@ func (function ObserverFunc) ObserveState(ctx context.Context, observation Obser
 		function(ctx, observation)
 	}
 }
-
-func observeState(ctx context.Context, observer Observer, observation Observation) {
-	if observer != nil {
-		observer.ObserveState(ctx, observation)
-	}
-}

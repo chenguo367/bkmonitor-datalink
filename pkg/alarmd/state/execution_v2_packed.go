@@ -273,12 +273,6 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 	return fingerprints, nil
 }
 
-// encodeRuntimePacked writes the framed record.
-func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]byte, error) {
-	encoded, _, err := encodeRuntimePackedCounted(mutation, revision)
-	return encoded, err
-}
-
 // encodeRuntimePackedCounted also reports how many of the record's points
 // carried an id the derivation could not rebuild, which is how the deployment
 // learns how much such state it holds and which objects hold it.
