@@ -202,7 +202,13 @@ func TestDeletingAHeldBackQueryGroupsTimelineOpensItAgainAndClearsTheBlock(t *te
 		t.Fatalf("the rewritten Query Group was not held back: %+v", blocked)
 	}
 
-	if err := fixture.client.Del(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(untouched.Identity)).Err(); err != nil {
+	// The key deleted is the one the reading names for the page, so the
+	// page's instruction is the one that works.
+	reading := fixture.repository.ActivationBlockedReading()
+	if len(reading.Keys) != 1 || len(reading.Samples) != 1 || reading.Keys[0] != fixture.prefix+":schedule_timeline:"+string(untouched.Identity) {
+		t.Fatalf("the held-back Query Group's key = %v beside %v, want its timeline key", reading.Keys, reading.Samples)
+	}
+	if err := fixture.client.Del(fixture.ctx, reading.Keys[0]).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.publishNoEnsure(t, cutoverCatalog(t, 95, nil), 180); err != nil {

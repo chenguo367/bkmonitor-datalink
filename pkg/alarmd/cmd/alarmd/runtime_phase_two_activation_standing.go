@@ -155,6 +155,7 @@ func (bundle *phaseTwoWorkerBundle) activationFleetFacts() *fleet.ActivationFact
 			sort.Strings(reasons)
 			facts.BlockedReasons = strings.Join(reasons, ",")
 			facts.BlockedSamples = strings.Join(reading.Samples, ",")
+			facts.BlockedKeys = strings.Join(reading.Keys, ",")
 		}
 	}
 	if !state.failingSince.IsZero() {

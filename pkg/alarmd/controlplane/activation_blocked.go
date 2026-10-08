@@ -200,6 +200,7 @@ type blockedCounts struct {
 	mu         sync.Mutex
 	byReason   map[string]int
 	samples    []string
+	keys       []string
 	accounting map[BlockedSetAccounting]uint64
 	reopened   uint64
 }
@@ -207,15 +208,17 @@ type blockedCounts struct {
 // blockedSampleMax bounds the Query Groups named beside the counts.
 const blockedSampleMax = 8
 
-func (counts *blockedCounts) record(groups []BlockedQueryGroup, accounting BlockedSetAccounting, reopened int) {
+func (counts *blockedCounts) record(groups []BlockedQueryGroup, accounting BlockedSetAccounting, reopened int,
+	timelineKey func(execution.QueryGroupIdentity) string) {
 	counts.mu.Lock()
 	defer counts.mu.Unlock()
 	counts.byReason = make(map[string]int)
-	counts.samples = counts.samples[:0]
+	counts.samples, counts.keys = counts.samples[:0], counts.keys[:0]
 	for _, group := range groups {
 		counts.byReason[group.Reason]++
 		if len(counts.samples) < blockedSampleMax {
 			counts.samples = append(counts.samples, string(group.QueryGroup)+":"+group.Reason)
+			counts.keys = append(counts.keys, timelineKey(group.QueryGroup))
 		}
 	}
 	if counts.accounting == nil {
@@ -231,9 +234,12 @@ func (counts *blockedCounts) record(groups []BlockedQueryGroup, accounting Block
 // Query Groups go.
 type ActivationBlockedReading struct {
 	// ByReason is the Query Groups held back at the last cutover, by reason;
-	// Samples names up to eight of them as query_group:reason.
+	// Samples names up to eight of them as query_group:reason, and Keys each
+	// one's timeline key, in the same order: the key whose deletion lets the
+	// next cutover open the Query Group again, as for a new one.
 	ByReason map[string]int
 	Samples  []string
+	Keys     []string
 	// Accounting counts cutovers by how the persisted set compared with the
 	// activation body; Reopened counts timelines opened again because their
 	// key was gone.
@@ -248,6 +254,7 @@ func (repository *RedisCatalogRepository) ActivationBlockedReading() ActivationB
 	if repository != nil {
 		repository.blocked.mu.Lock()
 		reading.Samples = append([]string(nil), repository.blocked.samples...)
+		reading.Keys = append([]string(nil), repository.blocked.keys...)
 		repository.blocked.mu.Unlock()
 	}
 	return reading

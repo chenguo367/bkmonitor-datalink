@@ -2054,11 +2054,13 @@ type ActivationFacts struct {
 	// BlockedQueryGroups is how many Query Groups the last cutover held back:
 	// each keeps what it ran and the rest of the publication went ahead.
 	// BlockedReasons says why as reason=count pairs, sorted; BlockedSamples
-	// which, as query_group:reason, at most eight. Strings so the facts stay
-	// comparable.
+	// which, as query_group:reason, at most eight; BlockedKeys their timeline
+	// keys in the same order, the keys to delete for the next cutover to open
+	// them again. Strings so the facts stay comparable.
 	BlockedQueryGroups int    `json:"blocked_query_groups,omitempty"`
 	BlockedReasons     string `json:"blocked_reasons,omitempty"`
 	BlockedSamples     string `json:"blocked_samples,omitempty"`
+	BlockedKeys        string `json:"blocked_keys,omitempty"`
 }
 
 // ActivationHeaderFacts is a missing activation header as the control leader
@@ -3207,8 +3209,8 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 			if snapshot.Activation.BlockedQueryGroups > 0 {
 				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBlocked, Replica: replica,
-					Text: fmt.Sprintf("%d held back (%s): %s", snapshot.Activation.BlockedQueryGroups,
-						snapshot.Activation.BlockedReasons, snapshot.Activation.BlockedSamples)})
+					Text: fmt.Sprintf("%d held back (%s): %s; timeline keys to delete: %s", snapshot.Activation.BlockedQueryGroups,
+						snapshot.Activation.BlockedReasons, snapshot.Activation.BlockedSamples, snapshot.Activation.BlockedKeys)})
 			}
 		}
 		if header := snapshot.ActivationHeader; header != nil {
