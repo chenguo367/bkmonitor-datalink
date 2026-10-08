@@ -131,13 +131,13 @@ func TestOverdueAddsUpAndKeepsTheWorstWait(t *testing.T) {
 	at := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	view := Aggregate(Expectation{QueryGroups: 40, Known: true}, []Snapshot{
 		{Replica: "pod-a", TakenAt: at, Owned: 20, Determined: 20,
-			Overdue: &OverdueFacts{Total: 2, OldestSeconds: 30}},
+			Overdue: &OverdueFacts{Total: 2, OldestSeconds: 30, PeriodUnknown: 1}},
 		{Replica: "pod-b", TakenAt: at, Owned: 20, Determined: 20,
-			Overdue: &OverdueFacts{Total: 3, OldestSeconds: 900, Truncated: true}},
+			Overdue: &OverdueFacts{Total: 3, OldestSeconds: 900, Truncated: true, PeriodUnknown: 2}},
 	}, []string{"pod-a", "pod-b"}, at, time.Minute)
 
-	if view.Overdue.Total != 5 || view.Overdue.OldestSeconds != 900 || !view.Overdue.Truncated {
-		t.Fatalf("overdue = %+v, want 5 objects, the 900s worst case, and the truncation kept", view.Overdue)
+	if view.Overdue.Total != 5 || view.Overdue.OldestSeconds != 900 || !view.Overdue.Truncated || view.Overdue.PeriodUnknown != 3 {
+		t.Fatalf("overdue = %+v, want 5 objects, the 900s worst case, the truncation kept and 3 periods unknown", view.Overdue)
 	}
 }
 
