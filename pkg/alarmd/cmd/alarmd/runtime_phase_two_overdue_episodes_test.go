@@ -34,8 +34,8 @@ func TestTheFleetPublisherKeepsOverdueEpisodesWithTheirHold(t *testing.T) {
 	}
 	at := clock.now()
 	overdue := []fleet.OverdueObject{{QueryGroup: "qg-held", IntervalSeconds: 60}, {QueryGroup: "qg-unread"}}
-	publisher.noteOverdue(overdue, at)
-	publisher.noteOverdue(overdue, at.Add(time.Minute))
+	publisher.noteOverdue(overdue, nil, at)
+	publisher.noteOverdue(overdue, nil, at.Add(time.Minute))
 	if len(events) != 2 || !events[0].began || !events[1].began {
 		t.Fatalf("events %+v, want two beginnings and nothing for still overdue", events)
 	}
@@ -49,7 +49,7 @@ func TestTheFleetPublisherKeepsOverdueEpisodesWithTheirHold(t *testing.T) {
 	if unread := began["qg-unread"]; unread.HoldClass() != "unknown" {
 		t.Fatalf("unread episode %+v, want its hold unknown", unread)
 	}
-	publisher.noteOverdue(overdue[:1], at.Add(2*time.Minute))
+	publisher.noteOverdue(overdue[:1], nil, at.Add(2*time.Minute))
 	if len(events) != 3 || events[2].began || events[2].episode.QueryGroup != "qg-unread" || !events[2].episode.Clear.Equal(at.Add(2*time.Minute)) {
 		t.Fatalf("events %+v, want qg-unread ended at its clear", events)
 	}
@@ -58,8 +58,8 @@ func TestTheFleetPublisherKeepsOverdueEpisodesWithTheirHold(t *testing.T) {
 	}
 	for i := 0; i < fleet.MaxOverdueEpisodes+5; i++ {
 		object := []fleet.OverdueObject{{QueryGroup: fmt.Sprintf("qg-%d", i)}}
-		publisher.noteOverdue(append(object, overdue[0]), at.Add(time.Duration(3+2*i)*time.Minute))
-		publisher.noteOverdue(overdue[:1], at.Add(time.Duration(4+2*i)*time.Minute))
+		publisher.noteOverdue(append(object, overdue[0]), nil, at.Add(time.Duration(3+2*i)*time.Minute))
+		publisher.noteOverdue(overdue[:1], nil, at.Add(time.Duration(4+2*i)*time.Minute))
 	}
 	kept := publisher.overdueEpisodes
 	if len(kept) != fleet.MaxOverdueEpisodes || kept[len(kept)-1].QueryGroup != fmt.Sprintf("qg-%d", fleet.MaxOverdueEpisodes+4) {
@@ -125,5 +125,103 @@ func TestTheFleetPublisherSaysWhichStrategiesEvaluate(t *testing.T) {
 	snapshot := publisher.snapshot(context.Background())
 	if !snapshot.EvaluatingStrategiesKnown || len(snapshot.EvaluatingStrategies) != 1 || snapshot.EvaluatingStrategies[0].StrategyID != "4101" {
 		t.Fatalf("snapshot strategies %+v (known %t)", snapshot.EvaluatingStrategies, snapshot.EvaluatingStrategiesKnown)
+	}
+}
+
+// The rows may leave out an object still overdue only when they were cut:
+// any object when a row column was cut to its budget; when the due index
+// listed only its oldest wakes, an object whose wake the index holds a
+// whole period late -- not one within its period, nor one it no longer
+// holds. Rows not cut leave nothing out.
+func TestTheRowsHideAnOverdueObjectOnlyWhenCut(t *testing.T) {
+	at := time.Unix(1_791_400_000, 0)
+	publisher := fleetPublisher{schedule: scriptedSchedule{
+		"qg-late":     {Known: true, DueAt: at.Add(-2 * time.Minute), IntervalSeconds: 60},
+		"qg-recent":   {Known: true, DueAt: at.Add(-30 * time.Second), IntervalSeconds: 60},
+		"qg-noperiod": {Known: true, DueAt: at.Add(-time.Second)},
+	}}
+	whole := fleet.Snapshot{TakenAt: at, Overdue: &fleet.OverdueFacts{Total: 3}}
+	if hidden := publisher.overdueHidden(whole, fleet.ReplicaPart{}); hidden != nil {
+		t.Fatal("whole rows said an object may be hidden")
+	}
+	if hidden := publisher.overdueHidden(fleet.Snapshot{TakenAt: at}, fleet.ReplicaPart{}); hidden != nil {
+		t.Fatal("rows without a due index said an object may be hidden")
+	}
+	if hidden := publisher.overdueHidden(whole, fleet.ReplicaPart{Truncated: 1}); hidden == nil || !hidden("qg-gone") || !hidden("qg-recent") {
+		t.Fatal("rows with a column cut did not leave every object possibly hidden")
+	}
+	cut := whole
+	cut.Overdue = &fleet.OverdueFacts{Total: 3, Truncated: true}
+	hidden := publisher.overdueHidden(cut, fleet.ReplicaPart{})
+	if hidden == nil {
+		t.Fatal("rows from a cut list said nothing may be hidden")
+	}
+	for queryGroup, want := range map[string]bool{"qg-late": true, "qg-noperiod": true, "qg-recent": false, "qg-gone": false} {
+		if got := hidden(queryGroup); got != want {
+			t.Errorf("%s hidden %t, want %t", queryGroup, got, want)
+		}
+	}
+	publisher.schedule = nil
+	if hidden := publisher.overdueHidden(cut, fleet.ReplicaPart{}); hidden == nil || !hidden("qg-gone") {
+		t.Fatal("a cut list with no index to ask did not leave every object possibly hidden")
+	}
+}
+
+// Published, an object pushed off a cut overdue list while the index holds
+// it overdue keeps its episode, and back on the list it is not counted
+// again; one handed over meanwhile ends; a list whole again ends what is
+// off it.
+func TestAPublishFromACutOverdueListEndsOnlyWhatIsOverdueNoMore(t *testing.T) {
+	_, client := startPhaseTwoRedis(t)
+	store, err := fleet.NewRedisStore(client, "alarmd-overdue-cut", time.Minute, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	at := clock.now()
+	wake := func(queryGroup string, ago time.Duration) fleet.OverdueWake {
+		return fleet.OverdueWake{QueryGroup: queryGroup, WakeAt: at.Add(-ago), IntervalSeconds: 60}
+	}
+	facts := func(ago time.Duration) fleet.WakeFacts {
+		return fleet.WakeFacts{Known: true, DueAt: at.Add(-ago), IntervalSeconds: 60}
+	}
+	wakes := &stubWakeSource{wakes: []fleet.OverdueWake{wake("qg-a", 5*time.Minute), wake("qg-b", 4*time.Minute)}, total: 2}
+	schedule := scriptedSchedule{"qg-a": facts(5 * time.Minute), "qg-b": facts(4 * time.Minute),
+		"qg-c": facts(6 * time.Minute)}
+	var began, ended []string
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now, store: store,
+		owned: func() []execution.QueryGroupIdentity {
+			return []execution.QueryGroupIdentity{"qg-a", "qg-b", "qg-c"}
+		},
+		overdue: wakes, schedule: schedule, staleAfter: 10 * time.Minute,
+		onOverdue: func(episode fleet.OverdueEpisode, begun bool) {
+			if begun {
+				began = append(began, episode.QueryGroup)
+			} else {
+				ended = append(ended, episode.QueryGroup)
+			}
+		},
+	}
+	publisher.publishOnce(context.Background())
+	if fmt.Sprint(began) != "[qg-a qg-b]" || len(ended) != 0 {
+		t.Fatalf("began %v ended %v, want qg-a and qg-b begun", began, ended)
+	}
+	// qg-c, older, takes the head of a list cut to one; qg-a is handed over.
+	wakes.wakes, wakes.total = []fleet.OverdueWake{wake("qg-c", 6*time.Minute)}, 3
+	delete(schedule, "qg-a")
+	publisher.publishOnce(context.Background())
+	if fmt.Sprint(began) != "[qg-a qg-b qg-c]" || fmt.Sprint(ended) != "[qg-a]" {
+		t.Fatalf("began %v ended %v, want qg-c begun and only qg-a ended", began, ended)
+	}
+	wakes.wakes, wakes.total = []fleet.OverdueWake{wake("qg-c", 6*time.Minute), wake("qg-b", 4*time.Minute)}, 2
+	publisher.publishOnce(context.Background())
+	if fmt.Sprint(began) != "[qg-a qg-b qg-c]" || fmt.Sprint(ended) != "[qg-a]" {
+		t.Fatalf("began %v ended %v, want qg-b back on the list and not begun again", began, ended)
+	}
+	wakes.wakes, wakes.total = []fleet.OverdueWake{wake("qg-c", 6*time.Minute)}, 1
+	publisher.publishOnce(context.Background())
+	if fmt.Sprint(ended) != "[qg-a qg-b]" {
+		t.Fatalf("ended %v, want qg-b ended once the list is whole", ended)
 	}
 }

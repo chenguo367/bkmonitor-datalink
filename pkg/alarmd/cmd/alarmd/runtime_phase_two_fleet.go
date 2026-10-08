@@ -387,7 +387,7 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 	// same bound the readers decide by.
 	summary, err := publisher.store.PublishSummarized(ctx, snapshot, publisher.staleAfter)
 	if err == nil {
-		publisher.noteOverdue(summary.Part.Overdue, snapshot.TakenAt)
+		publisher.noteOverdue(summary.Part.Overdue, publisher.overdueHidden(snapshot, summary.Part), snapshot.TakenAt)
 	}
 	if publisher.observe != nil {
 		publisher.observe(err)
@@ -398,7 +398,10 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 // at the last begins an episode, with its read hold now; one overdue at the
 // last and not now ends its episode, kept for the next snapshots. An object
 // handed to another replica is no longer on this one's rows and ends here.
-func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, at time.Time) {
+// One the rows may have left out while it is still overdue (hidden) is not
+// overdue no more, and its episode stays open: ended, it would begin and be
+// counted again when it is back on them.
+func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, hidden func(string) bool, at time.Time) {
 	current := make(map[string]bool, len(objects))
 	for _, object := range objects {
 		current[object.QueryGroup] = true
@@ -418,7 +421,7 @@ func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, at t
 		}
 	}
 	for queryGroup, episode := range publisher.overdueOpen {
-		if current[queryGroup] {
+		if current[queryGroup] || (hidden != nil && hidden(queryGroup)) {
 			continue
 		}
 		delete(publisher.overdueOpen, queryGroup)
@@ -430,6 +433,29 @@ func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, at t
 		if publisher.onOverdue != nil {
 			publisher.onOverdue(episode, false)
 		}
+	}
+}
+
+// overdueHidden says which objects a publish's rows may have left out while
+// they are still overdue; nil when the rows are whole. A row column cut to
+// its budget may have left out any of them. The due index lists only its
+// oldest wakes, and counts every wake passed, the rounds out and not yet
+// back with them; past that list, an object is still overdue when the index
+// holds its wake a whole period late. Asked only of the objects with an
+// episode open and not on the rows, one index read each.
+func (publisher *fleetPublisher) overdueHidden(snapshot fleet.Snapshot, part fleet.ReplicaPart) func(string) bool {
+	switch {
+	case part.Truncated != 0:
+		return func(string) bool { return true }
+	case snapshot.Overdue == nil || !snapshot.Overdue.Truncated:
+		return nil
+	case publisher.schedule == nil:
+		return func(string) bool { return true }
+	}
+	at := snapshot.TakenAt
+	return func(queryGroup string) bool {
+		wake := publisher.schedule.WakeOf(queryGroup)
+		return wake.Known && fleet.OverdueWake{QueryGroup: queryGroup, WakeAt: wake.DueAt, IntervalSeconds: wake.IntervalSeconds}.LateAt(at)
 	}
 }
 
