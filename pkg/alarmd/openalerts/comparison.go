@@ -111,10 +111,9 @@ func samplePrefix(value string) string {
 	return value[:comparisonPrefix]
 }
 
-// Comparison is the side-by-side view. Nil on a copy that does not read the
-// index, where there is no link state to compare against.
+// Comparison is the side-by-side view.
 func (cache *Cache) Comparison() *Comparison {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return nil
 	}
 	cache.mu.Lock()

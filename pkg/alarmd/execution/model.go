@@ -3861,8 +3861,13 @@ type CompletionScope struct {
 	PhysicalQuery PhysicalQueryDigest
 }
 
-// DeriveCompletionAttribution is DeriveCompletionDetail with the scope the
-// cause was found in, from the same traversal.
+// DeriveCompletionAttribution reports the kind together with why it was
+// unavailable: the cause, the reason that belongs to it, and the scope it was
+// found in.
+//
+// All of it comes from one traversal on purpose: derived separately they
+// would be functions that must agree about the same Slot, and the first time
+// they disagreed the page would explain a completion that did not happen.
 func DeriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
 	return deriveCompletionAttribution(input, result)
 }

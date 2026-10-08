@@ -2855,9 +2855,9 @@ func primaryInputFacts(primary *execution.PrimaryInputFact) *observability.Prima
 // a fix to the first does not reach. Two places that must agree about an
 // invariant will eventually stop agreeing.
 // The cause is returned beside the kind rather than derived by the caller for
-// the reason DeriveCompletion gives: two functions that must agree about the
-// same Slot will eventually disagree, and then the page explains a completion
-// that did not happen. Here the two answers come from the one fact this
+// the reason DeriveCompletionAttribution derives both in one traversal: two
+// functions that must agree about the same Slot will eventually disagree, and
+// then the page explains a completion that did not happen. Here the two answers come from the one fact this
 // constructor already reads.
 //
 // With a usable primary the Slot completes as COMPLETED_WITH_PARTIAL_GAP and

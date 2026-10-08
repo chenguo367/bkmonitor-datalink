@@ -118,24 +118,3 @@ func TestTheLocalBoundIsCountedOnBothRecords(t *testing.T) {
 		t.Fatalf("own_open %d refused %d, want 3 kept and 2 refused", stats.OwnOpen, stats.OwnOpenRefusals)
 	}
 }
-
-// Without the index protocol there is no own-open record: its fields say
-// they are unknown, and the refresh's pruning is still counted.
-func TestWithoutTheIndexOwnOpenIsUnknownAndPruningIsCounted(t *testing.T) {
-	c := &clock{at: time.Unix(1_700_000_000, 0)}
-	source := &fakeSource{publication: Publication{Heartbeat: fresh(c, time.Minute)}}
-	cache := newCache(t, source, c, PolicySelfMaintain)
-	cache.Track(keyA)
-	cache.Refresh(context.Background())
-	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "f1")})
-	c.advance(LocalRetentionCycles*time.Minute + time.Second)
-	source.publication.Heartbeat = fresh(c, time.Minute)
-	cache.Refresh(context.Background())
-	stats := cache.Stats()
-	if stats.OwnOpenKnown || stats.OwnOpenDepartures != nil {
-		t.Fatalf("own_open claimed without the index: %+v", stats)
-	}
-	if stats.SentDepartures[DepartureNotResent] != 1 || len(stats.SentDepartures) != len(SentDepartures) {
-		t.Fatalf("sent departures = %v, want one not_resent and every path present", stats.SentDepartures)
-	}
-}

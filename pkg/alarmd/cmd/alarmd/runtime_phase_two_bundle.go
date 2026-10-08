@@ -1720,15 +1720,6 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 		age := at.Sub(stats.LoadedAt).Seconds()
 		facts.AuthoritativeAgeSeconds = &age
 	}
-	// The publisher's heartbeat as last read, by its own clock. A copy
-	// that never read one carries none: a zero would read as a cycle
-	// completed at the epoch.
-	if !stats.Heartbeat.PublishedAt.IsZero() {
-		age := at.Sub(stats.Heartbeat.PublishedAt).Seconds()
-		facts.HeartbeatAgeSeconds = &age
-		facts.CycleSeconds = int64(stats.Heartbeat.Cycle / time.Second)
-		facts.FingerprintVersion = stats.Heartbeat.FingerprintVersion
-	}
 	// Every answer word, zero included: a word missing from the map
 	// cannot be told from one never given.
 	facts.Lookups = make(map[string]uint64, len(openalerts.Answers))

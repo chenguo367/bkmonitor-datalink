@@ -55,11 +55,8 @@ func (cache *Cache) leaveSent(m member, path string) {
 }
 
 // leaveOpen removes m from index.opened and counts why. Called with the lock
-// held; a no-op outside the index protocol.
+// held.
 func (cache *Cache) leaveOpen(m member, path string) {
-	if cache.index == nil {
-		return
-	}
 	if _, ok := cache.index.opened[m]; !ok {
 		return
 	}
@@ -75,9 +72,6 @@ func (cache *Cache) departureStats(stats *Stats) {
 	stats.SentDepartures = make(map[string]uint64, len(SentDepartures))
 	for _, path := range SentDepartures {
 		stats.SentDepartures[path] = cache.sentDepartures[path]
-	}
-	if cache.index == nil {
-		return
 	}
 	stats.OwnOpenKnown = true
 	stats.OwnOpen = len(cache.index.opened)
