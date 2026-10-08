@@ -1570,6 +1570,9 @@ type Snapshot struct {
 	// rather than a smaller count.
 	OwnedObjects []string                 `json:"owned_objects,omitempty"`
 	ReadHolds    map[string]ReadHoldFacts `json:"read_holds,omitempty"`
+	// ReadHoldsCut says ReadHolds was cut to its budget, so a group it does
+	// not list may hold one (ReadHoldFacts).
+	ReadHoldsCut bool `json:"read_holds_cut,omitempty"`
 	// StartedAt is when this replica's process started.
 	//
 	// It is the ceiling on every duration this replica reports. A run this
@@ -2882,6 +2885,11 @@ type View struct {
 	// replica an anomaly came from.
 	PerReplica []ReplicaView `json:"per_replica"`
 	readHolds  map[string]ReadHoldFacts
+	// readHoldsWhole is the replicas whose read hold list was not cut, and
+	// readHoldAmbiguous the objects more than one replica claimed: what
+	// readHoldOf tells "holds nothing" from "not known" by.
+	readHoldsWhole    map[string]bool
+	readHoldAmbiguous map[string]bool
 	// PublishedVersion is the Activation record revision the control plane
 	// published, the version the replicas' acked_version columns are read
 	// against; absent when it could not be read.
@@ -3003,6 +3011,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	ownedSets := make([][]string, 0, len(expectedReplicas))
 	setsComplete := true
 	readHoldAmbiguous := map[string]bool{}
+	view.readHoldAmbiguous = readHoldAmbiguous
 	var dependenciesTakenAt time.Time
 
 	byReplica := make(map[string]Snapshot, len(snapshots))
@@ -3053,6 +3062,12 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 		}
 		view.Determined += snapshot.Determined
+		if !snapshot.ReadHoldsCut {
+			if view.readHoldsWhole == nil {
+				view.readHoldsWhole = map[string]bool{}
+			}
+			view.readHoldsWhole[replica] = true
+		}
 		for qg, reading := range snapshot.ReadHolds {
 			if view.ownerOf[qg] == replica && !readHoldAmbiguous[qg] {
 				if view.readHolds == nil {
