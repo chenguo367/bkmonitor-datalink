@@ -10,11 +10,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -250,87 +248,6 @@ func (c PhaseTwoOutputConfig) protocol() string {
 	return c.Protocol
 }
 
-// PhaseTwoCanonicalConfig selects how the shared canonical encoder runs. It
-// existed to roll the replacement of that encoder out in stages a deployment
-// chose, because only the operator of a cluster knew whether the new form had
-// been proven on that cluster's own traffic.
-//
-// That proof is in: both directions were compared on production traffic, over
-// a hundred million calls, with zero divergence in all three classes and the
-// covered call-site count flat. The comparison has done its job, so the
-// default is the single-pass encoder with nothing comparing, and the keys
-// below are the way back and the way to compare again, not a position a new
-// deployment has to choose.
-//
-// Retirement: the keys, the established encoder and the mode machinery come
-// out together once the single-pass default has been through one release
-// without a rollback. A comparison a deployment wants after that is a
-// one-off measurement with a dense stride, not a standing guard.
-//
-// Everything else about the encoder stays derived. There is no tuning here.
-type PhaseTwoCanonicalConfig struct {
-	// Mode is one of established, shadow, stream_shadow, stream. Empty means
-	// stream: the proven single-pass encoder, nothing comparing.
-	Mode string `yaml:"mode,omitempty"`
-	// ShadowSampleStride compares one call in every stride. Running both forms
-	// on all traffic doubles the work the replacement exists to remove, so a
-	// mode that compares needs a stride, and the default is derived rather
-	// than asked for.
-	ShadowSampleStride uint64 `yaml:"shadow_sample_stride,omitempty"`
-}
-
-// defaultCanonicalShadowStride is derived from what the comparison costs, not
-// chosen for feeling about right.
-//
-// The comparison runs the other form once every stride calls. Measured, the
-// established form costs about five times the single-pass one, so with the
-// single-pass form answering, the comparison adds 5/stride of one canonical
-// call. Holding that under a thousandth of the canonical path gives
-// stride > 5000/5 = 1000, and 1024 is the next power of two.
-//
-// Only the cost sets the bound; detection does not push back. A systematic
-// divergence recurs, so at the observed 52,000 canonical calls a second, one
-// affecting even a hundredth of one per cent of calls is seen within minutes.
-// The thing sparse sampling cannot do is a census -- stride 64 missed six call
-// site types that stride 1 found -- and a census is not what this is for.
-//
-// A window that wants dense sampling says so explicitly; this is the value a
-// comparing mode gets when it names no stride.
-const defaultCanonicalShadowStride = 1024
-
-// The default is the single-pass encoder with nothing comparing. It was the
-// established encoder until every deployment had proven the new form on its
-// own traffic, and briefly the comparing form after that; the comparison is
-// concluded, so a deployment that says nothing pays for one encoder. The
-// established form stays selectable as the way back until the mechanism
-// retires.
-//
-// Deployments are named by role rather than by environment: this file is
-// public.
-func (c PhaseTwoCanonicalConfig) mode() string {
-	if c.Mode == "" {
-		return contract.CanonicalModeStream
-	}
-	return c.Mode
-}
-
-// Stride is zero for a mode that does not compare, so that a leftover setting
-// cannot quietly keep paying for a comparison nobody is reading.
-func (c PhaseTwoCanonicalConfig) Stride() uint64 {
-	switch c.mode() {
-	case contract.CanonicalModeShadow, contract.CanonicalModeStreamShadow:
-	default:
-		return 0
-	}
-	if c.ShadowSampleStride == 0 {
-		return defaultCanonicalShadowStride
-	}
-	return c.ShadowSampleStride
-}
-
-// Mode reports the rollout position this deployment asked for.
-func (c PhaseTwoCanonicalConfig) SelectedMode() string { return c.mode() }
-
 type PhaseTwoRuntimeConfig struct {
 	Linkd            LinkdConfig                    `yaml:"linkd"`
 	Worker           PhaseTwoWorkerConfig           `yaml:"worker"`
@@ -340,7 +257,6 @@ type PhaseTwoRuntimeConfig struct {
 	Scheduler        PhaseTwoSchedulerConfig        `yaml:"scheduler"`
 	Access           PhaseTwoAccessConfig           `yaml:"access"`
 	Coordinator      PhaseTwoCoordinatorConfig      `yaml:"-"`
-	Canonical        PhaseTwoCanonicalConfig        `yaml:"canonical"`
 	PlatformSettings PhaseTwoPlatformSettingsConfig `yaml:"platform_settings"`
 	Observation      PhaseTwoObservationConfig      `yaml:"observation"`
 	NoData           PhaseTwoNoDataConfig           `yaml:"no_data"`
@@ -543,10 +459,6 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 	// no longer configuration at all.
 	if !canonicalText(c.Worker.ID) {
 		return errors.New("phase_two worker identity must be canonical text")
-	}
-	if !slices.Contains(contract.CanonicalModeNames(), c.Canonical.mode()) {
-		return fmt.Errorf("phase_two.canonical.mode %q must be one of %s",
-			c.Canonical.Mode, strings.Join(contract.CanonicalModeNames(), ", "))
 	}
 	switch c.Output.protocol() {
 	case OutputProtocolAuto, OutputProtocolLegacy, OutputProtocolNative:

@@ -28,8 +28,35 @@ import (
 // CanonicalJSONV2 produces the shared digest representation: sorted object
 // keys, preserved array order and number tokens, no insignificant whitespace,
 // no HTML escaping and no trailing newline.
-func CanonicalJSONV2(value any) (result []byte, err error) {
-	var raw []byte
+func CanonicalJSONV2(value any) ([]byte, error) {
+	raw, closed, final, err := canonicalInputV2(value)
+	if err != nil || final != nil {
+		return final, err
+	}
+	// The single-pass form answers. It refuses everything the strict walk
+	// refuses -- duplicate fields, a non-string key, a non-finite number, a
+	// trailing value, anything malformed -- and declines rather than
+	// reporting an error, so the established path then runs exactly as it
+	// always did: a decline costs time, and the rejection an input receives
+	// is still the one the established path writes.
+	//
+	// No line separator restoration on the single-pass output. That pass
+	// undoes the encoder's escaping of U+2028 and U+2029; emitting from
+	// decoded runes never escapes them, and the only way those six
+	// characters reach this output is as an escaped backslash followed by
+	// text, which the pass leaves alone anyway.
+	if out, ok := canonicalStreamV2(make([]byte, 0, len(raw)), raw); ok {
+		canonicalStreamServed.Add(1)
+		return out, nil
+	}
+	canonicalStreamDeclined.Add(1)
+	return canonicalEstablishedV2(raw, closed)
+}
+
+// canonicalInputV2 is what either form is handed: the value's JSON, checked,
+// and whether its type is closed. A value no form needs to touch comes back
+// as final instead.
+func canonicalInputV2(value any) (raw []byte, closed bool, final []byte, err error) {
 	switch typed := value.(type) {
 	case json.RawMessage:
 		raw = bytes.Clone(typed)
@@ -40,18 +67,18 @@ func CanonicalJSONV2(value any) (result []byte, err error) {
 		encoder := json.NewEncoder(&buffer)
 		encoder.SetEscapeHTML(false)
 		if err := encoder.Encode(value); err != nil {
-			return nil, invalid("canonical_json", err.Error())
+			return nil, false, nil, invalid("canonical_json", err.Error())
 		}
 		raw = bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})
 	}
 	if len(raw) == 0 || !utf8.Valid(raw) || bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
-		return nil, invalid("canonical_json", "must contain non-empty UTF-8 JSON without BOM")
+		return nil, false, nil, invalid("canonical_json", "must contain non-empty UTF-8 JSON without BOM")
 	}
 	if err := validateJSONSurrogateEscapes(raw); err != nil {
-		return nil, err
+		return nil, false, nil, err
 	}
 	valueType := reflect.TypeOf(value)
-	closed := canonicalClosedTypeCached(valueType)
+	closed = canonicalClosedTypeCached(valueType)
 
 	// A closed string of valid UTF-8 has nothing left to canonicalize: no object
 	// keys to sort and no number tokens to preserve, and the decode and
@@ -66,62 +93,9 @@ func CanonicalJSONV2(value any) (result []byte, err error) {
 	// turns into that character and the re-encode then writes literally. Such a
 	// string keeps the long path, which is what defines its canonical form.
 	if closed && valueType.Kind() == reflect.String && utf8.ValidString(reflect.ValueOf(value).String()) {
-		return restoreJSONLineSeparatorsV2(raw), nil
+		return raw, closed, restoreJSONLineSeparatorsV2(raw), nil
 	}
-
-	mode := loadCanonicalMode()
-	goType := "nil"
-	if valueType != nil {
-		goType = valueType.String()
-	}
-
-	// The single-pass form is tried before the strict walk, not after it. It
-	// already refuses everything the walk refuses -- duplicate fields, a
-	// non-string key, a non-finite number, a trailing value, anything
-	// malformed -- so running the walk first would leave the saving on the
-	// table: the walk is a full decode of its own, and measured that way the
-	// two paths together were only 28% faster than the old one alone.
-	//
-	// It declines rather than reporting an error, and the established path then
-	// runs exactly as it did. So a decline can only cost time, and the rejection
-	// an input receives is still the one the established path writes.
-	if mode.servesStream() {
-		if out, ok := canonicalStreamV2(make([]byte, 0, len(raw)), raw); ok {
-			canonicalStreamServed.Add(1)
-			if mode.compares() && shouldSampleCanonicalShadow() {
-				// Reverse: the single-pass form is answering, so the established
-				// one is the shadow. This is a different claim from the forward
-				// direction and has to be proven on its own, because what the
-				// callers send changes once their stored digests come from here.
-				established, establishedErr := canonicalEstablishedV2(raw, closed)
-				compareCanonicalShadow(canonicalShadowInput{
-					GoType: goType, Direction: "reverse", Raw: raw,
-					Served: out, ServedErr: nil,
-					Compared: established, ComparedErr: establishedErr,
-				})
-			}
-			// No line separator restoration. That pass undoes the encoder's
-			// escaping of U+2028 and U+2029; emitting from decoded runes never
-			// escapes them, and the only way those six characters reach this
-			// output is as an escaped backslash followed by text, which the
-			// pass leaves alone anyway.
-			return out, nil
-		}
-		canonicalStreamDeclined.Add(1)
-	}
-
-	result, err = canonicalEstablishedV2(raw, closed)
-	if mode.compares() && !mode.servesStream() && shouldSampleCanonicalShadow() {
-		// Forward: the established form is answering and the single-pass one is
-		// the shadow.
-		out, ok := canonicalStreamV2(make([]byte, 0, len(raw)), raw)
-		compareCanonicalShadow(canonicalShadowInput{
-			GoType: goType, Direction: "forward", Raw: raw,
-			Served: result, ServedErr: err,
-			Compared: out, ComparedErr: nil, ComparedDeclined: !ok,
-		})
-	}
-	return result, err
+	return raw, closed, nil, nil
 }
 
 // canonicalEstablishedV2 is the path this package has always taken: a strict

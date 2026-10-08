@@ -155,41 +155,11 @@ Labels: `outcome`
 
 Canonical encodings by what the single-pass form did with them: served, or declined back to the established path.
 
-## bkmonitor_alarmd_canonical_encoding_covered_call_sites
-
-Distinct Go types that have actually been compared. A comparison total says how much was checked; only this says how widely. A million comparisons from one caller prove one caller.
-
-## bkmonitor_alarmd_canonical_encoding_distinct_findings
-
-Distinct divergence fingerprints held in memory, deduplicated by class, direction, Go type, container shape and offset kind, and capped. At the cap the count stops rising while the totals keep climbing, so the two together say whether new shapes are still appearing.
-
-## bkmonitor_alarmd_canonical_encoding_identity_part_total
-
-Labels: `source`
-
-Series delivery digests assembled from a series' shared parts, by where the canonical encoding of the series' dimension identity came from: the identity's own encoding, made once when the identity digest was derived (identity_encoding), or encoded again for the delivery digest (encoded). The provider hands every series its identity's encoding, so encoded rising there means the encoding is being made twice.
-
-## bkmonitor_alarmd_canonical_encoding_mode
-
-Labels: `mode`
-
-Rollout position of the shared canonical encoder, as 1 on the active mode and 0 on the others: established, shadow, stream_shadow or stream.
-
 ## bkmonitor_alarmd_canonical_encoding_records_shadow_total
 
 Labels: `outcome`
 
 Series delivery digests assembled from a series' shared parts that were checked against the generic canonical digest, by result: agreed, or differed. A difference returns the generic digest, so it is a finding and not a wrong answer; one in 4096 assemblies is checked.
-
-## bkmonitor_alarmd_canonical_encoding_shadow_sample_stride
-
-One call in this many is compared against the other form. Zero means no comparison is running, which is the reading that separates 'nothing diverged' from 'nothing was checked'.
-
-## bkmonitor_alarmd_canonical_encoding_shadow_total
-
-Labels: `outcome`
-
-Shadow comparisons by result: agreed, declined by the shadow, or one of the three divergence classes.
 
 ## bkmonitor_alarmd_capacity_budget
 

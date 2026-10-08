@@ -117,28 +117,24 @@ func TestTheIdentityEncodingDerivesTheSameDigest(t *testing.T) {
 // The identity part is the encoding's own every time, so the corpus is the
 // path that takes it.
 func TestASeriesDigestWithItsIdentityEncodingIsTheCanonicalOne(t *testing.T) {
-	for _, mode := range []string{CanonicalModeEstablished, CanonicalModeStream} {
-		withCanonicalMode(t, mode, func() {
-			random := rand.New(rand.NewSource(20260929))
-			for index := 0; index < 600; index++ {
-				records, identity := identitySeries(t, random, 1+random.Intn(60))
-				want, err := DeriveCanonicalDigestV2(recordsTestDomain, records)
-				if err != nil {
-					t.Fatalf("%s case %d: canonical digest refused: %v", mode, index, err)
-				}
-				part, err := dimensionIdentityPart(records[0].DimensionIdentity, identity)
-				wantPart, wantErr := CanonicalJSONV2(records[0].DimensionIdentity)
-				if err != nil || wantErr != nil || string(part) != string(wantPart) {
-					t.Fatalf("%s case %d: identity part %s (%v), canonical %s (%v)", mode, index, part, err, wantPart, wantErr)
-				}
-				if !identityPartIsTheEncodings(records[0].DimensionIdentity, identity) {
-					t.Fatalf("%s case %d: the identity part was not taken from the encoding", mode, index)
-				}
-				if got, err := DeriveSeriesRecordsDigestV2(recordsTestDomain, records, identity); err != nil || got != want {
-					t.Fatalf("%s case %d: series digest %s (%v), canonical %s", mode, index, got, err, want)
-				}
-			}
-		})
+	random := rand.New(rand.NewSource(20260929))
+	for index := 0; index < 600; index++ {
+		records, identity := identitySeries(t, random, 1+random.Intn(60))
+		want, err := DeriveCanonicalDigestV2(recordsTestDomain, records)
+		if err != nil {
+			t.Fatalf("case %d: canonical digest refused: %v", index, err)
+		}
+		part, err := dimensionIdentityPart(records[0].DimensionIdentity, identity)
+		wantPart, wantErr := CanonicalJSONV2(records[0].DimensionIdentity)
+		if err != nil || wantErr != nil || string(part) != string(wantPart) {
+			t.Fatalf("case %d: identity part %s (%v), canonical %s (%v)", index, part, err, wantPart, wantErr)
+		}
+		if !identityPartIsTheEncodings(records[0].DimensionIdentity, identity) {
+			t.Fatalf("case %d: the identity part was not taken from the encoding", index)
+		}
+		if got, err := DeriveSeriesRecordsDigestV2(recordsTestDomain, records, identity); err != nil || got != want {
+			t.Fatalf("case %d: series digest %s (%v), canonical %s", index, got, err, want)
+		}
 	}
 }
 
@@ -178,7 +174,6 @@ func TestAnIdentityEncodingAnswersOnlyForItsOwnIdentity(t *testing.T) {
 		if identityPartIsTheEncodings(series.records[0].DimensionIdentity, series.identity) && name != "a rewritten digest" {
 			t.Fatalf("%s: the fixture takes the encoding's part; it is meant not to", name)
 		}
-		reused, encoded := ReadIdentityPartCounts()
 		part, err := dimensionIdentityPart(series.records[0].DimensionIdentity, series.identity)
 		wantPart, wantErr := CanonicalJSONV2(series.records[0].DimensionIdentity)
 		if err != nil || wantErr != nil || string(part) != string(wantPart) {
@@ -188,11 +183,6 @@ func TestAnIdentityEncodingAnswersOnlyForItsOwnIdentity(t *testing.T) {
 		got, err := DeriveSeriesRecordsDigestV2(recordsTestDomain, series.records, series.identity)
 		if got != want || (err == nil) != (wantErr == nil) {
 			t.Fatalf("%s: series digest %s (%v), canonical %s (%v)", name, got, err, want, wantErr)
-		}
-		// Encoded here both times -- the part asked for directly, and the
-		// series' digest -- and never counted as the encoding's.
-		if nowReused, nowEncoded := ReadIdentityPartCounts(); nowReused != reused || nowEncoded != encoded+2 {
-			t.Fatalf("%s: reused %d -> %d, encoded %d -> %d; want none reused, two encoded", name, reused, nowReused, encoded, nowEncoded)
 		}
 	}
 	if got, err := DeriveRecordsDigestV2(recordsTestDomain, records); err != nil ||

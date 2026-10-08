@@ -219,18 +219,6 @@ func runPhaseTwoApplicationWithDependencies(
 		slog.Int64("go_memory_limit_bytes", profile.Capacity.GoMemoryLimitBytes),
 		slog.Int("go_gc_percent", profile.Capacity.GoGCPercent),
 		slog.String("memory_source", profile.MemorySource))
-	// The canonical encoder's rollout position is applied before anything can
-	// derive a digest, and it is logged, because a process that silently ran
-	// in a different position than the one asked for would produce digests
-	// nobody could account for afterwards. Validation has already rejected an
-	// unknown name, so the error here cannot fire; it is returned rather than
-	// dropped so that stays true if validation ever moves.
-	if _, err := contract.SetCanonicalMode(cfg.PhaseTwo.Canonical.SelectedMode()); err != nil {
-		return err
-	}
-	contract.SetCanonicalShadowStride(cfg.PhaseTwo.Canonical.Stride())
-	logger.Info("canonical_encoder", contract.CanonicalMode(), 0, 0,
-		slog.Uint64("shadow_sample_stride", cfg.PhaseTwo.Canonical.Stride()))
 	// A series delivery digest assembled from its shared parts that differed
 	// from the generic one: counted on canonical_encoding_records_shadow_total
 	// and said here at most once a minute. The generic digest was returned.
