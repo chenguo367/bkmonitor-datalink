@@ -36,7 +36,7 @@ func TestAbsentListReadsThePageAndSaysWhatItCannot(t *testing.T) {
 		strings.Join(op.Fields["execution"].Enum, ",") != strings.Join(fleet.AbsentExecutions, ",") {
 		t.Fatalf("the filters are not the page's words: %+v", op.Fields)
 	}
-	for _, limit := range []string{"拆分前的旧策略表", "约 40 分钟", "source_now=document 只说明文档键还在", "table.at 早于 last_round.at"} {
+	for _, limit := range []string{"拆分前的旧策略表", "⌈候选数/8⌉ 轮 × 5 分钟", "source_now=document 只说明文档键还在", "table.at 早于 last_round.at"} {
 		if !strings.Contains(op.Summary, limit) {
 			t.Fatalf("the description does not say %q: %s", limit, op.Summary)
 		}

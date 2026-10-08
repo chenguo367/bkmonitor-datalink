@@ -123,6 +123,10 @@ const (
 	AbsentUnreadUnsupported = "unsupported"
 	// AbsentUnreadFailed: the existence check failed or ran out of time.
 	AbsentUnreadFailed = "read_failed"
+	// AbsentUnreadIDNotCanonical: the link keys the strategy by an id that
+	// is not a canonical positive integer, which the source names no
+	// document by. The other rows of the page are checked all the same.
+	AbsentUnreadIDNotCanonical = "id_not_canonical"
 )
 
 // AbsentCandidatesResponse is GET /api/absent.

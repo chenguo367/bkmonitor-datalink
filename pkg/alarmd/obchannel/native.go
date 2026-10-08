@@ -107,7 +107,7 @@ func NativeOperations(handler http.Handler) []Operation {
 		makeOp("absent.list", "列出 leader 最近一轮缺失关闭的候选策略：link 名册成员数、本轮决定与时刻、最近一次关闭找到的告警归属（自己/别人/不明）、身份来源与业务和版本、源里现在有没有它。"+
 			"表只记循环每轮已做的事，读页面不调 link；每页对快照不列的行做一次文档是否存在的检查。"+
 			"局限：alarmd 分不出策略是被删了，还是这个 ID 只在拆分前的旧策略表里存在过，要拿 ID 和业务去 SaaS 策略表查；"+
-			"执行事实只对本任期被决定过关闭的候选才有，重启后约 40 分钟（宽限加每轮至多 8 条）才填满；source_now=document 只说明文档键还在，不说明写方为什么不列它；"+
+			"执行事实只对本任期被决定过关闭的候选才有，重启后要宽限加 ⌈候选数/8⌉ 轮 × 5 分钟才填满；source_now=document 只说明文档键还在，不说明写方为什么不列它；"+
 			"被拒绝的轮次不动表，table.at 早于 last_round.at 时行是旧的。", map[string]Field{
 			"limit":       integer("返回行上限；默认50。", 1, int64(fleet.AbsentPageRows)),
 			"cursor":      text("上一页的 next_cursor。", "absent.list next_cursor"),

@@ -212,8 +212,7 @@ func (source *LegacyRedisStrategySource) StrategyDocumentsPresent(ctx context.Co
 		return []bool{}, nil
 	}
 	for _, id := range ids {
-		parsed, err := strconv.ParseUint(id, 10, 64)
-		if err != nil || parsed == 0 || strconv.FormatUint(parsed, 10) != id {
+		if !CanonicalStrategyID(id) {
 			return nil, ErrActiveStrategyIDInvalid
 		}
 	}
@@ -239,6 +238,13 @@ func (source *LegacyRedisStrategySource) StrategyDocumentsPresent(ctx context.Co
 		present[index] = n > 0
 	}
 	return present, nil
+}
+
+// CanonicalStrategyID is an id the layout names a document by: a positive
+// integer written without sign, padding or leading zeros.
+func CanonicalStrategyID(id string) bool {
+	parsed, err := strconv.ParseUint(id, 10, 64)
+	return err == nil && parsed != 0 && strconv.FormatUint(parsed, 10) == id
 }
 
 // legacyStrategyOf is one strategy document as the source read it, or the

@@ -550,3 +550,31 @@ func TestTheCandidatePagesHopIsRecorded(t *testing.T) {
 		t.Fatalf("route %q is not among %v", absentForwardRoute, metric.LeaderForwardRoutes)
 	}
 }
+
+// The link may key a strategy by an id the source names no document by - a
+// leading zero, letters. Such a row says so by itself, and the page's other
+// unlisted rows are still checked: one such id used to refuse the whole
+// check, and every unlisted row of the page read as a source that cannot
+// check at all.
+func TestAnIDTheSourceCannotNameLeavesTheOtherRowsTheirAnswer(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
+	fixture.link.pages[1].Rows = append(fixture.link.pages[1].Rows,
+		openalerts.RosterRow{TenantID: "system", StrategyID: "0123", Members: members(1)},
+		openalerts.RosterRow{TenantID: "system", StrategyID: "abc", Members: members(1)},
+		openalerts.RosterRow{TenantID: "system", StrategyID: "0", Members: members(1)})
+	fixture.mature(context.Background())
+	stub := &presenceStub{stored: map[string]bool{"10": true}}
+	fixture.loop.documents = stub
+	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
+	if row := absentRowOf(t, page, "10"); row.SourceNow != fleet.AbsentSourceDocument {
+		t.Fatalf("a row the source can name lost its answer to the others: %+v", row)
+	}
+	for _, id := range []string{"0123", "abc", "0"} {
+		if row := absentRowOf(t, page, id); row.SourceNow != fleet.AbsentSourceUnread || row.SourceNowReason != fleet.AbsentUnreadIDNotCanonical {
+			t.Fatalf("an id the source cannot name is not said to be one: %+v", row)
+		}
+	}
+	if len(stub.asked) != 1 || len(stub.asked[0]) != 1 || stub.asked[0][0] != "10" {
+		t.Fatalf("the check was not sent for exactly the ids the source can name: %+v", stub.asked)
+	}
+}

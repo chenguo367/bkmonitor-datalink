@@ -713,6 +713,22 @@ func TestEvaluationRejectsWrongUnknownReasonAfterLoadedSeriesWarmingCompletes(t 
 	}
 }
 
+// EFFECTIVE_TIME_INACTIVE beside a guard is the effective time's word only
+// when its fact says so: the same round inside the Level's hours, under a
+// guard that has not completed, has to carry the guard's reason.
+func TestAnOutOfHoursReasonInsideTheLevelsHoursKeepsTheGuardsRule(t *testing.T) {
+	result, request := loadedSeriesWarmingCompletionWithin(t, "00:00", "23:59", strategy.EffectiveTimeActive)
+	mutation := result.Plans[0].StateResults[0].Mutation
+	mutation.Levels = append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
+	mutation.Levels[0].HistoryCompleteness = execution.HistoryWarming
+	mutation.Levels[0].GapReasonCode = execution.ReasonCode(contract.ReasonHistoryWarming)
+	mutation.MutationDigest = ""
+	result.Plans[0].StateResults[0].Mutation = mustStateMutation(mutation)
+	if err := result.Validate(request); err == nil || !strings.Contains(err.Error(), "active guard reason") {
+		t.Fatalf("an out-of-hours reason inside the Level's hours left its guard's reason: %v", err)
+	}
+}
+
 // Under a guard that has not completed, an UNKNOWN outcome carries the
 // guard's reason - except a Level its effective time suppressed on whole
 // inputs, which says it was out of its hours: that is why it was not
@@ -953,10 +969,21 @@ func loadedSeriesWarmingInactiveCompletion(
 	t testing.TB,
 ) (execution.EvaluationResult, execution.EvaluationRequest) {
 	t.Helper()
+	return loadedSeriesWarmingCompletionWithin(t, "00:00", "00:01", strategy.EffectiveTimeInactive)
+}
+
+// loadedSeriesWarmingCompletionWithin is the loaded-WARMING round whose one
+// Level is UNKNOWN for EFFECTIVE_TIME_INACTIVE, under a schedule active
+// between start and end; status is what that schedule resolves to at the
+// round's Slot.
+func loadedSeriesWarmingCompletionWithin(
+	t testing.TB, start, end, status string,
+) (execution.EvaluationResult, execution.EvaluationRequest) {
+	t.Helper()
 	input := validInternalExecution()
 	compiled := compiledPlanWithTriggerConfig(t, json.RawMessage(`{
 		"window_size":1,"required_anomalies":1,"step_seconds":60,"timezone_ref":"BUSINESS_LOCAL",
-		"uptime":{"time_ranges":[{"start":"00:00","end":"00:01"}]}
+		"uptime":{"time_ranges":[{"start":"`+start+`","end":"`+end+`"}]}
 	}`))
 	input.DuePlans[0].CompiledPlan = compiled
 	provider := strategy.NewStaticScheduleProvider(strategy.TimezoneResolverFunc(
@@ -966,8 +993,8 @@ func loadedSeriesWarmingInactiveCompletion(
 		TenantID: "tenant", BusinessID: "2", EvaluationTime: int64(input.Contract.Slot.EvaluationTime),
 		Requirement: compiled.Levels().At(0).EffectiveTimeRequirement(),
 	}})
-	if err != nil || len(facts) != 1 || facts[0].Status() != strategy.EffectiveTimeInactive {
-		t.Fatalf("inactive EffectiveTime fact = %+v, %v", facts, err)
+	if err != nil || len(facts) != 1 || facts[0].Status() != status {
+		t.Fatalf("EffectiveTime fact = %+v, %v, want %s", facts, err, status)
 	}
 	input.EffectiveTimeFacts[0].Fact = facts[0]
 
