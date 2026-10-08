@@ -55,8 +55,16 @@ func TestAHeldStrategyIsDetectingWithItsHoldAndTheTimeDelayThatNeedsNone(t *test
 	if len(view.ReadHeld) != 1 || view.ReadHeld[0].ReadHold == nil || view.ReadHeld[0].ReadHold.Buckets != nil {
 		t.Fatalf("held rows %+v, want one for qg-held without the buckets the hold list carries", view.ReadHeld)
 	}
-	if row := view.ReadHeld[0]; !row.Since.Equal(time.Unix(hold.HeldSince, 0)) || row.SinceFrom != SinceBusinessState {
-		t.Fatalf("held row since %v (%s), want the first Slot frozen with the hold, from the record", row.Since, row.SinceFrom)
+	if row := view.ReadHeld[0]; !row.Since.Equal(time.Unix(hold.HeldSince, 0)) || row.SinceFrom != SinceBusinessState || row.Blocked != nil {
+		t.Fatalf("held row since %v (%s) blocked %+v, want the first Slot frozen with the hold, from the record, and not stuck",
+			row.Since, row.SinceFrom, row.Blocked)
+	}
+	counted := false
+	for _, report := range ReportChecks(nil, nil, &view, now) {
+		counted = counted || (report.Code == CheckReadHeld && report.LineCount() == 1)
+	}
+	if !counted {
+		t.Fatalf("checks %+v, want a READ_HELD line of the one object", ReportChecks(nil, nil, &view, now))
 	}
 	want := TimeDelayAdvice{CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180, ReadHoldSeconds: 99, Object: "qg-held", Objects: 1,
 		Since: time.Unix(hold.HeldSince, 0)}
@@ -157,5 +165,25 @@ func TestTheLargestSuggestionWinsBetweenAReadEarlyRowAndAHold(t *testing.T) {
 	advice := (*TimeDelayAdvice)(nil).with(held(240)).with(early(300))
 	if advice.SuggestedDelaySeconds != 300 || advice.Object != "qg-early" || advice.ReadHoldSeconds != 99 || advice.Samples != 1 {
 		t.Fatalf("advice %+v, want the read-early 300 with the hold still said", advice)
+	}
+}
+
+// The held row is the last line over objects: any other row of the strategy
+// decides its words, and the hold and its suggestion ride beside them.
+func TestAnyOtherRowOfAHeldStrategyDecidesIt(t *testing.T) {
+	now := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
+	view, lookup := heldView(t, now, measuredHold(now))
+	view.NoData = append(view.NoData, Anomaly{QueryGroup: "qg-held", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-a",
+		Since: now.Add(-2 * time.Hour), Strategies: []StrategyRef{{StrategyID: "4101", BusinessID: "2"}}})
+	Attribute(view.NoData, now)
+	row := diagnoseStrategy("4101", lookup, newDiagnosisContext(&view, "pod-a", now))
+	if row.Check != CheckNoDataPersistent || row.TimeDelayAdvice == nil || row.TimeDelayAdvice.ReadHoldSeconds != 99 ||
+		row.TimeDelayAdvice.SuggestedDelaySeconds != 180 {
+		t.Fatalf("diagnosis under %s with advice %+v, want the no-data words and the hold beside them", row.Check, row.TimeDelayAdvice)
+	}
+	for _, line := range StrategyLines(&view, now) {
+		if line.StrategyID == "4101" && (line.Standing.Check != CheckNoDataPersistent || line.TimeDelayAdvice == nil || line.TimeDelayAdvice.ReadHoldSeconds != 99) {
+			t.Fatalf("line %+v, want the no-data words with the hold beside them", line)
+		}
 	}
 }
