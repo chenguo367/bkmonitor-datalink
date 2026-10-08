@@ -1135,3 +1135,22 @@ func TestOnlyASuppressedLevelOnWholeInputsMayLeaveItsGuardsReason(t *testing.T) 
 		t.Fatal("an out-of-hours outcome on inputs that carry no data left its guard's reason")
 	}
 }
+
+// Out of its hours on inputs that carry no data, a guarded Level keeps the
+// guard's reason: its history cannot advance on them, so the round is the
+// guard's like any other UNKNOWN, and the contract accepts nothing else.
+func TestASuppressedLevelOnInputsWithoutDataKeepsItsGuardsReason(t *testing.T) {
+	request := gappedGuardRequest(t, true)
+	request.Inputs[0].Inputs[0].DataState = execution.DataStateEmpty
+	evaluated, err := newEvaluator(t).Evaluate(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Evaluate()=%v", err)
+	}
+	if err := evaluated.Validate(request); err != nil {
+		t.Fatalf("the contract refused: %v", err)
+	}
+	if outcome := evaluated.Plans[0].LevelOutcomes[0]; outcome.Outcome != execution.LevelOutcomeUnknown ||
+		outcome.ReasonCode != execution.ReasonCode(contract.ReasonHistoryGapped) {
+		t.Fatalf("outcome = %+v, want UNKNOWN for the guard's HISTORY_GAPPED", outcome)
+	}
+}
