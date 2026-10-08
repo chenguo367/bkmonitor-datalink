@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
@@ -93,8 +96,8 @@ func stamp(at time.Time) string { return at.UTC().Format(time.RFC3339) }
 // Reading it asks the link nothing.
 func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{
-		nativeAlert("mine", "0123456789abcdef0123456789abcdef"),
 		{AlertID: "theirs", EventSourceID: "another-source", Fingerprint: "1123456789abcdef0123456789abcdef"},
+		nativeAlert("mine", "0123456789abcdef0123456789abcdef"),
 		{AlertID: "nameless", Fingerprint: "2123456789abcdef0123456789abcdef"},
 	})
 	fixture.link.pages[1].Rows[0].Members = members(3)
@@ -164,8 +167,20 @@ func TestTheIdentityOfARowSaysWhereItCameFrom(t *testing.T) {
 		t.Fatalf("a strategy with nothing of ours to close is not said so, or a record was read for it: %+v reads=%d", execution, foreign.link.reads)
 	}
 
+	partial := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
+	partial.control.departed = []controlplane.DepartedStrategy{{TenantID: "system", StrategyID: "10", BusinessID: 5}}
+	record := partial.link.records["mine"]
+	record.Revision = 0
+	partial.link.records["mine"] = record
+	partial.mature(context.Background())
+	execution = absentRowOf(t, readAbsentPage(t, partial.loop, fleet.AbsentCandidateQuery{}), "10").Execution
+	if execution == nil || execution.Word != absentalerts.OutcomeRevisionUnknown || execution.Identity == nil ||
+		execution.Identity.Source != fleet.AbsentIdentityCatalog || execution.Identity.Business != 5 || execution.Identity.RecordsRead != 1 {
+		t.Fatalf("a business only the catalog had is not named as the catalog's: %+v", execution)
+	}
+
 	unknown := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
-	record := unknown.link.records["mine"]
+	record = unknown.link.records["mine"]
 	record.BusinessID, record.Revision = 0, 0
 	unknown.link.records["mine"] = record
 	unknown.mature(context.Background())
@@ -282,6 +297,9 @@ func TestAStrategyWhoseSetCouldNotBeReadIsListedWithoutMembers(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
 	fixture.link.pages[1].Rows = append(fixture.link.pages[1].Rows, openalerts.RosterRow{TenantID: "system", StrategyID: "live-7"})
 	fixture.mature(context.Background())
+	if all := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{}); len(all.Rows) != 2 || all.Rows[0].StrategyID != "10" {
+		t.Fatalf("the unreadable strategy is not in its place among the candidates: %+v", all.Rows)
+	}
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{Outcome: absentalerts.OutcomeIndexUnreadable})
 	if len(page.Rows) != 1 || page.Table.RosterUnreadable != 1 {
 		t.Fatalf("the unreadable strategies on the page are not the header's count: %+v %+v", page.Rows, page.Table)
@@ -448,7 +466,11 @@ func TestTheStrategySourceChecksDocumentsOneKeyAtATime(t *testing.T) {
 	if _, err := source.StrategyDocumentsPresent(ctx, []string{"10", "0x"}); err == nil {
 		t.Fatal("an id the layout cannot name was checked")
 	}
-	if _, err := source.StrategyDocumentsPresent(ctx, make([]string, controlplane.MaxStrategyDocumentChecks+1)); err == nil {
+	tooMany := make([]string, controlplane.MaxStrategyDocumentChecks+1)
+	for i := range tooMany {
+		tooMany[i] = strconv.Itoa(i + 1)
+	}
+	if _, err := source.StrategyDocumentsPresent(ctx, tooMany); err == nil {
 		t.Fatal("a check beyond its bound was sent")
 	}
 }
@@ -497,5 +519,34 @@ func TestThePageIsAnsweredWhereTheLoopLeads(t *testing.T) {
 	if answer = get(handler, "replica-b"); answer.Code != http.StatusServiceUnavailable || forwards != 1 ||
 		!strings.Contains(answer.Body.String(), "NOT_LEADER") {
 		t.Fatalf("a forwarded page was forwarded again: %d %s", answer.Code, answer.Body.String())
+	}
+}
+
+// Many unreadable strategies are listed in key order however the link
+// returned them, so that the page's cursor can find its place among them.
+func TestUnreadableStrategiesAreListedInKeyOrder(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
+	for i := 20; i > 0; i-- {
+		fixture.link.pages[1].Rows = append(fixture.link.pages[1].Rows, openalerts.RosterRow{TenantID: "system", StrategyID: "9" + strconv.Itoa(i)})
+	}
+	fixture.loop.step(context.Background())
+	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{Limit: 200})
+	if len(page.Rows) != 21 {
+		t.Fatalf("not every strategy is on the page: %+v", page.Rows)
+	}
+	for i := 1; i < len(page.Rows); i++ {
+		previous := absentalerts.Key{TenantID: page.Rows[i-1].TenantID, StrategyID: page.Rows[i-1].StrategyID}
+		current := absentalerts.Key{TenantID: page.Rows[i].TenantID, StrategyID: page.Rows[i].StrategyID}
+		if !absentalerts.LessKey(previous, current) {
+			t.Fatalf("the rows are not in key order at %d: %+v", i, page.Rows)
+		}
+	}
+}
+
+// A hop to the Leader for this page is recorded under its own route: a route
+// outside the metric's closed list is not recorded at all.
+func TestTheCandidatePagesHopIsRecorded(t *testing.T) {
+	if !slices.Contains(metric.LeaderForwardRoutes, absentForwardRoute) {
+		t.Fatalf("route %q is not among %v", absentForwardRoute, metric.LeaderForwardRoutes)
 	}
 }

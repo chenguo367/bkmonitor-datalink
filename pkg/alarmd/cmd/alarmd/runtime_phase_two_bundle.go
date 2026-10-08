@@ -1189,7 +1189,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// is no loop and the page says not_configured.
 	absentPage := &absentCandidatePage{}
 	fleetAPI = fleet.WithAbsentCandidates(fleetAPI, absentPage.source,
-		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, "absent", recorder.ObserveLeaderForward),
+		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, absentForwardRoute, recorder.ObserveLeaderForward),
 		cfg.PhaseTwo.Worker.ID)
 	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, directoryForward, windowStore, diagnostics, seriesSampler, external.Now)
 	observationRefresh := &observationRefresh{cost: costSummary, now: external.Now,

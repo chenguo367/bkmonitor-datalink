@@ -25,6 +25,9 @@ const absentCandidateDocumentTimeout = time.Second
 // memory read and its one existence check, inside the channel's deadline.
 const absentForwardTimeout = 2500 * time.Millisecond
 
+// absentForwardRoute is the route the page's hops are recorded under.
+const absentForwardRoute = "absent"
+
 // absentCandidatePage is the page's way to the loop, which the bundle makes
 // after the handler. Until it is bound, and on a deployment without the
 // alert link's Console, there is no loop and the page says not_configured.
