@@ -1157,10 +1157,10 @@ func TestProductionPhaseTwoControlKeepsCurrentActivationWhileCandidateIsPending(
 	if repository.renewCalls != 2 {
 		t.Fatalf("pending refresh renew calls=%d, want 2", repository.renewCalls)
 	}
-	// The active set of a legacy activation is read from the publication's
-	// content description, never from the snapshot body.
-	if repository.contentLoads != 2 {
-		t.Fatalf("pending legacy refresh content reads=%d, want only the two execution reads", repository.contentLoads)
+	// The active set is read from the set, never from the publication's
+	// content or the snapshot body.
+	if repository.contentLoads != 0 || repository.activeSetLoads != 2 {
+		t.Fatalf("pending refresh content reads=%d active set reads=%d, want 0 and one per round", repository.contentLoads, repository.activeSetLoads)
 	}
 	pending := sourceRefreshObservations(observations, observability.SourceRefreshPending)
 	// A pending round reports the size of the active set. It used to report a
@@ -1285,63 +1285,23 @@ func TestProductionPhaseTwoControlReportsUnchangedRefreshWithoutChangingActiveSe
 	}
 }
 
-func TestProductionPhaseTwoControlLegacyUnchangedRefreshAddsNoDiagnosticSnapshotRead(t *testing.T) {
-	publication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-current", PublicationEpoch: 2}
-	activation := controlplane.ActivationState{RecordRevision: 2, Current: publication}
-	repository := &fakeProductionCatalogRepository{
-		activation: activation,
-		snapshot: controlplane.PublishedSnapshot{Publication: publication,
-			QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-1"}}},
-	}
-	var observations []observability.Observation
-	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
-		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{},
-		Reconciler: &fakeSourceReconciler{results: []controlplane.SourceRefreshResult{
-			{Status: controlplane.SourceRefreshUnchanged, Observation: "observation-current", Publication: publication},
-			{Status: controlplane.SourceRefreshUnchanged, Observation: "observation-current", Publication: publication},
-		}},
-		Activator: &fakeInitialScheduleActivator{state: activation}, Repository: repository,
-		Schedules: &fakeScheduleProjection{}, Progress: &fakeProductionProgressReader{},
-		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-			observations = append(observations, observation)
-		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index := 0; index < 2; index++ {
-		result, refreshErr := control.Refresh(context.Background())
-		if refreshErr != nil {
-			t.Fatalf("legacy Refresh(%d)=(%#v,%v)", index, result, refreshErr)
-		}
-	}
-	unchanged := sourceRefreshObservations(observations, observability.SourceRefreshUnchanged)
-	if len(unchanged) != 2 || !unchanged[0].SourceRefresh.CountsKnown ||
-		unchanged[0].SourceRefresh.OldQueryGroups != 1 || unchanged[0].SourceRefresh.NewQueryGroups != 1 {
-		t.Fatalf("legacy unchanged source observations=%#v", unchanged)
-	}
-	if repository.contentLoads != 2 {
-		t.Fatalf("unchanged legacy refresh content reads=%d, want only the two execution reads", repository.contentLoads)
-	}
-}
-
 func TestProductionPhaseTwoControlSourceRefreshFactsUseExactChangedSetsAndKeepReadFailureDiagnostic(t *testing.T) {
 	previousPublication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-1", PublicationEpoch: 1}
 	currentPublication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-2", PublicationEpoch: 2}
 	currentRef := controlplane.ActiveQueryGroupSetRef{
 		SchemaVersion: "alarmd-active-qg-set-v1", Digest: strings.Repeat("b", 64), QGCount: 2,
 	}
+	previousRef := controlplane.ActiveQueryGroupSetRef{
+		SchemaVersion: "alarmd-active-qg-set-v1", Digest: strings.Repeat("a", 64), QGCount: 2,
+	}
 	repository := &fakeProductionCatalogRepository{
-		activeGroups: []execution.QueryGroupIdentity{"query-group-b", "query-group-c"},
-		snapshots: map[controlplane.SnapshotPublicationRef]controlplane.PublishedSnapshot{
-			previousPublication: {Publication: previousPublication, QueryGroups: []controlplane.QueryGroup{
-				{Identity: "query-group-a"}, {Identity: "query-group-b"},
-			}},
+		activeSets: map[string][]execution.QueryGroupIdentity{
+			previousRef.Digest: {"query-group-a", "query-group-b"},
+			currentRef.Digest:  {"query-group-b", "query-group-c"},
 		},
 	}
 	runtime := &productionPhaseTwoControl{dependencies: productionPhaseTwoControlDependencies{Repository: repository}}
-	previous := controlplane.ActivationState{RecordRevision: 1, Current: previousPublication}
+	previous := controlplane.ActivationState{RecordRevision: 1, Current: previousPublication, ActiveQGSetRef: previousRef}
 	current := controlplane.ActivationState{RecordRevision: 2, Current: currentPublication, ActiveQGSetRef: currentRef}
 
 	refresh := controlplane.SourceRefreshResult{
@@ -1624,7 +1584,7 @@ func TestProductionPhaseTwoControlPreservesPrimaryRefreshClassificationWithoutLa
 					activation: controlplane.ActivationState{RecordRevision: 2, Current: publication},
 					snapshot: controlplane.PublishedSnapshot{Publication: publication,
 						QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-healthy"}}},
-					snapshotErr: test.snapshotErr,
+					snapshotErr: test.snapshotErr, activeSetErr: test.snapshotErr,
 				},
 				Schedules: &fakeScheduleProjection{}, Progress: &fakeProductionProgressReader{},
 				RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
@@ -1764,6 +1724,7 @@ type fakeProductionCatalogRepository struct {
 	contentLoads   int
 	snapshots      map[controlplane.SnapshotPublicationRef]controlplane.PublishedSnapshot
 	activeGroups   []execution.QueryGroupIdentity
+	activeSets     map[string][]execution.QueryGroupIdentity
 	activeSetErr   error
 	activeSetLoads int
 	renewErr       error
@@ -1810,11 +1771,29 @@ func (repository *fakeProductionCatalogRepository) RenewCurrentActivationObjects
 	return repository.renewErr
 }
 
+// LoadActiveQueryGroupSet is activeGroups when a test sets it. Unset, it is
+// the Query Groups the activation was cut over to, which is what a cutover
+// writes the set as: those of the activation's current publication, or of
+// the one publication the fake holds when the activation is the activator's.
 func (repository *fakeProductionCatalogRepository) LoadActiveQueryGroupSet(
-	context.Context,
-	controlplane.ActiveQueryGroupSetRef,
+	_ context.Context,
+	ref controlplane.ActiveQueryGroupSetRef,
 ) ([]execution.QueryGroupIdentity, error) {
 	repository.activeSetLoads++
+	if groups, ok := repository.activeSets[ref.Digest]; ok && repository.activeSetErr == nil {
+		return append([]execution.QueryGroupIdentity{}, groups...), nil
+	}
+	if repository.activeGroups == nil && repository.activeSetErr == nil {
+		snapshot, ok := repository.snapshots[repository.activation.Current]
+		if !ok {
+			snapshot = repository.snapshot
+		}
+		groups := make([]execution.QueryGroupIdentity, 0, len(snapshot.QueryGroups))
+		for _, group := range snapshot.QueryGroups {
+			groups = append(groups, group.Identity)
+		}
+		return groups, nil
+	}
 	return append([]execution.QueryGroupIdentity{}, repository.activeGroups...), repository.activeSetErr
 }
 

@@ -19,13 +19,12 @@ import (
 
 // ReadHoldEvidence says when a confirmed whole window first held its final
 // values, measured from the original window end, including source delay.
-// Contract carries the hold frozen for the formal first read. FirstReadAge
-// includes that hold and the readiness baseline, so no delay is added twice.
+// Contract carries the hold frozen for the formal first read.
 type ReadHoldEvidence struct {
-	Contract                 execution.FrozenExecutionContractRef
-	ArrivalAge, FirstReadAge time.Duration
-	Rung                     string
-	Buckets                  []int64
+	Contract   execution.FrozenExecutionContractRef
+	ArrivalAge time.Duration
+	Rung       string
+	Buckets    []int64
 }
 
 // EarlierReadEvidence compares a candidate h/2 read with the formal first
@@ -79,7 +78,7 @@ func (engine *Engine) recordIgnoredLocked(candidate *sample, reason string) {
 	engine.counts.holdIgnored[key2(candidate.source, reason)]++
 	if engine.options.OnReadHoldIgnored != nil {
 		engine.ignoredEvidence = append(engine.ignoredEvidence, ignoredReadHold{reason: reason, evidence: ReadHoldEvidence{
-			Contract: candidate.contract, ArrivalAge: candidate.completion, FirstReadAge: firstReadAge(candidate)}})
+			Contract: candidate.contract, ArrivalAge: candidate.completion}})
 	}
 }
 
@@ -94,8 +93,7 @@ func (engine *Engine) recordReadHoldLocked(candidate *sample) {
 	}
 	candidate.holdReported = true
 	engine.holdEvidence = append(engine.holdEvidence, ReadHoldEvidence{Contract: candidate.contract,
-		ArrivalAge: candidate.completion, FirstReadAge: firstReadAge(candidate),
-		Rung: RungNames[candidate.lastChange], Buckets: append([]int64(nil), candidate.lastBuckets...)})
+		ArrivalAge: candidate.completion, Rung: RungNames[candidate.lastChange], Buckets: append([]int64(nil), candidate.lastBuckets...)})
 }
 
 type earlierSample struct {

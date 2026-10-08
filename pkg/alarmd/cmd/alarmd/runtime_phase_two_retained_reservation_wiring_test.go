@@ -48,9 +48,9 @@ func TestProductionBundleReportsTheRetainedReservation(t *testing.T) {
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: time.Now, HTTPClient: http.DefaultClient,
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {

@@ -69,9 +69,9 @@ func TestProductionBundleReportsFleetSnapshotPublishOutcome(t *testing.T) {
 				defer mu.Unlock()
 				observations = append(observations, observation)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {

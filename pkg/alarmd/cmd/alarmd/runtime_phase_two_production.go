@@ -1194,25 +1194,7 @@ func (runtime *productionPhaseTwoControl) loadCurrentActiveQueryGroups(
 	ctx context.Context,
 	state controlplane.ActivationState,
 ) ([]execution.QueryGroupIdentity, error) {
-	var queryGroups []execution.QueryGroupIdentity
-	var err error
-	if state.ActiveQGSetRef.Digest != "" {
-		queryGroups, err = runtime.dependencies.Repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
-	} else {
-		// An activation without an active set reference reads its population
-		// from its current immutable Snapshot.
-		var content controlplane.PublishedContent
-		content, err = runtime.dependencies.Repository.LoadPublishedContent(ctx, state.Current)
-		if err == nil {
-			queryGroups = make([]execution.QueryGroupIdentity, 0, len(content.Groups))
-			for identity := range content.Groups {
-				if identity == "" {
-					return nil, errors.New("phase-two active Snapshot contains an empty Query Group")
-				}
-				queryGroups = append(queryGroups, identity)
-			}
-		}
-	}
+	queryGroups, err := runtime.dependencies.Repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
 	if err != nil {
 		return nil, err
 	}

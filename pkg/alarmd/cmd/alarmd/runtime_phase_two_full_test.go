@@ -99,9 +99,9 @@ func TestProductionPhaseTwoBundleKeepsThePlatformCacheApartFromItsOwnStore(t *te
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: time.Now, HTTPClient: uqServer.Client(),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -169,9 +169,9 @@ func TestProductionPhaseTwoBundleStartsIdleWithEmptyCatalogThenActivatesQueryGro
 				defer observationsMu.Unlock()
 				observations = append(observations, observation)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -256,9 +256,9 @@ func TestProductionPhaseTwoBundleRebuildsExpiredSnapshotReferencedByPersistentAc
 			},
 			phaseTwoProductionExternalDependencies{
 				Now: time.Now, HTTPClient: uqServer.Client(),
-				OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+				PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 					return &recordingPhaseTwoEventSink{}, nil
-				},
+				}),
 			},
 		)
 		if openErr != nil {
@@ -508,9 +508,9 @@ func testProductionPhaseTwoStrandedLatest(
 			},
 			phaseTwoProductionExternalDependencies{
 				Now: func() time.Time { return time.Unix(nowUnix.Load(), 0) }, HTTPClient: uqServer.Client(),
-				OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+				PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 					return &recordingPhaseTwoEventSink{}, nil
-				},
+				}),
 			},
 		)
 		if openErr != nil {
@@ -760,9 +760,9 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: additionalObserver,
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return events, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -963,9 +963,9 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingEventACKIsRetr
 				defer observationsMu.Unlock()
 				observations = append(observations, observation)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return events, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -1102,7 +1102,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 		},
 	)
 	if err != nil {
@@ -1243,9 +1243,9 @@ func TestProductionPhaseTwoBundleDrainsExpiredRetiredBacklogWithoutProjection(t 
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -1420,9 +1420,9 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 					}
 				}
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -1527,9 +1527,9 @@ func TestProductionPhaseTwoBundleCommitsBudgetExhaustedRecoveryCompletionWithout
 				defer observationsMu.Unlock()
 				observations = append(observations, observation)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -1664,9 +1664,9 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 				defer observationsMu.Unlock()
 				observations = append(observations, observation)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {
@@ -1807,7 +1807,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 					fatal.Store(true)
 				}
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 		},
 	)
 	if err != nil {
@@ -2205,7 +2205,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 		},
 	)
 	if err != nil {

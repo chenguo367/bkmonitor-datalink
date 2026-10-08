@@ -277,7 +277,7 @@ func TestWholeWindowArrivalPublishesTheFirstConfirmedAgeBeforeTheDeepProbe(t *te
 	f.recheck(sourceLog, readAt, 1, minute, full(point(slot, "3")), RecheckCompared)
 	select {
 	case item := <-evidence:
-		if item.Contract != q.Contract || item.FirstReadAge != 90*time.Second || item.ArrivalAge != 210*time.Second || item.Rung != RungNames[0] || !reflect.DeepEqual(item.Buckets, []int64{slot - 60}) {
+		if item.Contract != q.Contract || item.ArrivalAge != 210*time.Second || item.Rung != RungNames[0] || !reflect.DeepEqual(item.Buckets, []int64{slot - 60}) {
 			t.Fatalf("whole-window evidence %+v", item)
 		}
 	case <-time.After(time.Second):

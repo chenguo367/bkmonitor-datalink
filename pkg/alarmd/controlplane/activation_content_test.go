@@ -65,13 +65,54 @@ func TestAV1ActivationBodyIsRefusedByName(t *testing.T) {
 		t.Fatalf("a reader of a v1 body = %v, want it refused as corrupt naming %s", err, v1)
 	}
 	reconciler, _ := controlplane.NewScheduleActivationReconciler(repository, compiler, semantics, func() time.Time { return time.Unix(180, 0) })
-	if _, err := reconciler.Ensure(ctx, newSnapshot.Publication); err == nil || !strings.Contains(err.Error(), v1) {
+	_, err = reconciler.Ensure(ctx, newSnapshot.Publication)
+	if err == nil || !strings.Contains(err.Error(), v1) {
 		t.Fatalf("the Control Leader's round over a v1 body = %v, want it refused naming %s", err, v1)
+	}
+	if failure, ok := controlplane.ActivationFailureFromError(err); !ok || failure.Class != controlplane.ActivationFailureClassCorrupt {
+		t.Fatalf("the refusal is classed %+v (%t), want corrupt: a body no writer of this build can fix is not a retry", failure, ok)
 	}
 	activation, _ := client.Get(ctx, prefix+":activation").Bytes()
 	schedule, _ := client.Get(ctx, scheduleKey).Bytes()
 	if !bytes.Equal(activation, legacyPayload) || !bytes.Equal(schedule, scheduleBefore) {
 		t.Fatal("the refused round wrote the activation or the timeline")
+	}
+}
+
+// A head body carries no records, so the active set reference is what names
+// its population: a head without one is refused as corrupt, not read as an
+// activation of nothing.
+func TestAHeadWithoutItsActiveSetReferenceIsRefused(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	prefix := "alarmd:control:head-without-set"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := repository.PublishCatalog(ctx, catalogWithSchedule(t, validCatalog(t, 80), 60, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, semantics := runtimePlanCompiler(t)
+	initial, _ := controlplane.NewInitialScheduleActivator(repository, compiler, semantics, func() time.Time { return time.Unix(83, 0) })
+	state, err := initial.Ensure(ctx, snapshot.Publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := state
+	head.SchemaVersion, head.Plans, head.ActiveQGSetRef = "alarmd-control-activation-v3", nil, controlplane.ActiveQueryGroupSetRef{}
+	payload, _ := json.Marshal(head)
+	if err := client.Set(ctx, prefix+":activation", payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corrupt *controlplane.PersistedActivationCorruptError
+	if _, err := reader.LoadActivationHead(ctx); !errors.As(err, &corrupt) || !strings.Contains(err.Error(), "active Query Group set reference") {
+		t.Fatalf("a head without its set reference read as %v, want it refused as corrupt naming the reference", err)
 	}
 }
 

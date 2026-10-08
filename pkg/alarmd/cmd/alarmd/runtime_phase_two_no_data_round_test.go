@@ -425,7 +425,7 @@ func startNoDataFixtureOn(t *testing.T, protocol string) *noDataFixture {
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 			AdditionalObserver: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 				if observation.Stage != observability.StageEventACKed {
 					return

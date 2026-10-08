@@ -142,7 +142,7 @@ func TestProductionPhaseTwoBundleReRunsChunkedSlotIdempotently(t *testing.T) {
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: observer,
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 		},
 	)
 	if err != nil {
