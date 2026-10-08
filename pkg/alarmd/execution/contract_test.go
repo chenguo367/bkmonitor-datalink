@@ -713,6 +713,11 @@ func TestEvaluationRejectsWrongUnknownReasonAfterLoadedSeriesWarmingCompletes(t 
 	}
 }
 
+// Under a guard that has not completed, an UNKNOWN outcome carries the
+// guard's reason - except a Level its effective time suppressed on whole
+// inputs, which says it was out of its hours: that is why it was not
+// evaluated, and the guard stays on its state where the exact-guard rules
+// read it. Every other reason is still refused.
 func TestEvaluationRejectsUnknownWhenLoadedSeriesWarmingIsNotCompleted(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -775,6 +780,13 @@ func TestEvaluationRejectsUnknownWhenLoadedSeriesWarmingIsNotCompleted(t *testin
 		t.Run(test.name, func(t *testing.T) {
 			result, request := loadedSeriesWarmingInactiveCompletion(t)
 			test.mutate(&result, &request)
+			if err := result.Validate(request); err != nil {
+				t.Fatalf("an out-of-hours outcome on whole inputs under an incomplete guard was refused: %v", err)
+			}
+			result, request = loadedSeriesWarmingInactiveCompletion(t)
+			test.mutate(&result, &request)
+			other := execution.ReasonCode(contract.ReasonQueryEmpty)
+			result.ReasonCode, result.Plans[0].ReasonCode, result.Plans[0].LevelOutcomes[0].ReasonCode = other, other, other
 			if err := result.Validate(request); err == nil || !strings.Contains(err.Error(), "active guard reason") {
 				t.Fatalf("incomplete loaded WARMING proof must preserve its active reason, got %v", err)
 			}

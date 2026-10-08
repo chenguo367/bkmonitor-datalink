@@ -253,8 +253,12 @@ func validateLevelOutcome(
 				// the exact-guard rule wanted the final marker's, which is the
 				// new one. The Plan failed to evaluate on every Slot for as
 				// long as the input stayed incomplete.
+				//
+				// A Level its effective time suppressed, on whole inputs, says
+				// so instead: it was not evaluated for that reason, and the
+				// guard stays on its state, where the exact-guard rules read it.
 				if _, ok := guardReasons[outcome.ReasonCode]; !ok && disposition != PlanRetryPending &&
-					!finalGapGuardsOutcome(finalMarkers, outcome) {
+					!finalGapGuardsOutcome(finalMarkers, outcome) && !effectiveTimeSuppressed(input, outcome) {
 					return resultContractViolation(codeOutcomeUnknownDropsGuardReason, "UNKNOWN Level outcome does not preserve its active guard reason")
 				}
 				constrained = true
@@ -728,6 +732,19 @@ func containsStateLevelFact(facts []StateLevelFact, fact StateLevelFact) bool {
 		}
 	}
 	return false
+}
+
+// effectiveTimeSuppressed is an UNKNOWN outcome whose Level its effective
+// time suppressed, on inputs whole enough for its history to advance: the
+// one UNKNOWN that is not a gap, read by every rule that would otherwise ask
+// it for a guard's reason.
+func effectiveTimeSuppressed(input InternalExecution, outcome LevelOutcome) bool {
+	if outcome.Outcome != LevelOutcomeUnknown || outcome.ReasonCode != ReasonCode(contract.ReasonEffectiveTimeInactive) ||
+		!stateInputAllowsAdvance(input, outcome) {
+		return false
+	}
+	effective, found := findEffectiveTimeFact(input, outcome.Plan, outcome.LevelID, outcome.SeriesIdentityDigest)
+	return found && effective.Fact.Status() == strategy.EffectiveTimeInactive
 }
 
 func stateUnknownMayAdvance(input InternalExecution, mutation StateMutation, outcome LevelOutcome) bool {

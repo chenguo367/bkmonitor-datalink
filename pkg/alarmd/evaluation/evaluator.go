@@ -414,10 +414,24 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				reason = execution.ReasonCode(o.SuppressedReason)
 			}
 			// The result contract requires an UNKNOWN outcome under an active
-			// guard to carry that guard's reason, whether the trigger, a missing
-			// dependency point or the EffectiveTime made it UNKNOWN. Only a
-			// record that converges the guard keeps its own local reason.
-			if guarded, found := durableGuardReasons[o.LevelID]; found && guardStaysActive(o, historyCompleteness[o.LevelID]) {
+			// guard to carry that guard's reason, whether the trigger or a
+			// missing dependency point made it UNKNOWN. Only a record that
+			// converges the guard keeps its own local reason.
+			//
+			// And a Level its effective time suppressed: it was not evaluated
+			// because it was outside its hours, and that is what its outcome
+			// says, guard or no guard, as long as its inputs were whole - the
+			// contract's own predicate, so the two read one round alike. Its
+			// history still advances and keeps its completeness, and the guard
+			// its reason, on the Level's state. Taking the guard's reason here
+			// made every out-of-hours round of a gapped history read as a gap,
+			// and a window of nothing but such rounds read as data that did
+			// not arrive.
+			suppressed := o.UnavailableReason == "" && o.SuppressedReason == contract.ReasonEffectiveTimeInactive &&
+				execution.InputAllowsStateAdvance(evaluationBindings(request), execution.LevelOutcome{
+					Plan: due.Identity, LevelID: o.LevelID, SeriesIdentityDigest: series,
+					Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind})
+			if guarded, found := durableGuardReasons[o.LevelID]; found && !suppressed && guardStaysActive(o, historyCompleteness[o.LevelID]) {
 				reason, guardTail = guarded, unknownOnlyForItsHistory(o)
 				// Unless this round has incomplete inputs of its own for the
 				// Level. Then the guard that ends up covering this outcome is
