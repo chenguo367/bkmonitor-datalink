@@ -59,6 +59,9 @@ func TestAHeldStrategyIsDetectingWithItsHoldAndTheTimeDelayThatNeedsNone(t *test
 		t.Fatalf("held row since %v (%s) blocked %+v, want the first Slot frozen with the hold, from the record, and not stuck",
 			row.Since, row.SinceFrom, row.Blocked)
 	}
+	if todo := ReplicaPartOf(view, now).TodoRows; todo.GovernanceObjects != 1 || todo.Objects != 0 {
+		t.Fatalf("to-do %+v, want the held object the strategy's to act on and none of ours", todo)
+	}
 	counted := false
 	for _, report := range ReportChecks(nil, nil, &view, now) {
 		counted = counted || (report.Code == CheckReadHeld && report.LineCount() == 1)
@@ -185,5 +188,23 @@ func TestAnyOtherRowOfAHeldStrategyDecidesIt(t *testing.T) {
 		if line.StrategyID == "4101" && (line.Standing.Check != CheckNoDataPersistent || line.TimeDelayAdvice == nil || line.TimeDelayAdvice.ReadHoldSeconds != 99) {
 			t.Fatalf("line %+v, want the no-data words with the hold beside them", line)
 		}
+	}
+}
+
+// The object list sends the column it is asked for: the held rows, like the
+// other lists beside the columns, are not shipped with it.
+func TestTheObjectListDoesNotShipTheHeldRows(t *testing.T) {
+	snapshots := healthySnapshots()
+	hold := measuredHold(now)
+	snapshots[0].ReadHolds = map[string]ReadHoldFacts{"qg-held": hold}
+	snapshots[0].ReadHeld = []Anomaly{{QueryGroup: "qg-held", Kind: KindReadHeld, Replica: snapshots[0].Replica, ReadHold: &hold,
+		Strategies: []StrategyRef{{StrategyID: "4101", BusinessID: "2"}}}}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+	status, body := get(t, handler, "/api/objects")
+	if status != 200 {
+		t.Fatalf("status %d", status)
+	}
+	if rows, _ := body["read_held"].([]any); len(rows) != 0 {
+		t.Fatalf("the object list shipped %d held rows it was not asked for", len(rows))
 	}
 }
