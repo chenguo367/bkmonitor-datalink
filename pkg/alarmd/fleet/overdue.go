@@ -94,11 +94,12 @@ type OverdueFacts struct {
 	// is never overdue and never listed; counted here instead, and a count
 	// that stays up is its own finding: a schedule that is not being read.
 	PeriodUnknown int `json:"period_unknown,omitempty"`
-	// PeriodUnknownObjects names them, oldest first and at most
-	// MaxPeriodUnknownObjects, each with when this replica first saw it
-	// without a period (set by the publisher, which remembers it until the
-	// period arrives): a count says some schedule is not being read, the
-	// names say which.
+	// PeriodUnknownObjects names them, each with when this replica first saw
+	// it without a period: a count says some schedule is not being read, the
+	// names say which. OverdueAnomalies names every one the index returned;
+	// the publisher dates them all, remembering each until its period
+	// arrives, and publishes the MaxPeriodUnknownObjects longest without one
+	// (LongestWithoutPeriod).
 	PeriodUnknownObjects []PeriodUnknownObject `json:"period_unknown_objects,omitempty"`
 }
 
@@ -149,9 +150,7 @@ func OverdueAnomalies(
 		}
 		if wake.IntervalSeconds <= 0 {
 			facts.PeriodUnknown++
-			if len(facts.PeriodUnknownObjects) < MaxPeriodUnknownObjects {
-				facts.PeriodUnknownObjects = append(facts.PeriodUnknownObjects, PeriodUnknownObject{QueryGroup: wake.QueryGroup})
-			}
+			facts.PeriodUnknownObjects = append(facts.PeriodUnknownObjects, PeriodUnknownObject{QueryGroup: wake.QueryGroup})
 			continue
 		}
 		if !wake.LateAt(now) {
@@ -211,18 +210,29 @@ func aggregateOverdue(view *View, snapshots []Snapshot) {
 			overdue.OldestSeconds = facts.OldestSeconds
 		}
 	}
-	if overdue != nil && len(overdue.PeriodUnknownObjects) > 0 {
-		// The longest without a period first, across replicas.
-		sort.SliceStable(overdue.PeriodUnknownObjects, func(left, right int) bool {
-			l, r := overdue.PeriodUnknownObjects[left], overdue.PeriodUnknownObjects[right]
-			if !l.Since.Equal(r.Since) {
-				return l.Since.Before(r.Since)
-			}
-			return l.QueryGroup < r.QueryGroup
-		})
-		if len(overdue.PeriodUnknownObjects) > MaxPeriodUnknownObjects {
-			overdue.PeriodUnknownObjects = overdue.PeriodUnknownObjects[:MaxPeriodUnknownObjects]
-		}
+	if overdue != nil {
+		overdue.PeriodUnknownObjects = LongestWithoutPeriod(overdue.PeriodUnknownObjects)
 	}
 	view.Overdue = overdue
+}
+
+// LongestWithoutPeriod is the MaxPeriodUnknownObjects of the objects that
+// have gone longest without a period, longest first, and among equal ones in
+// the order given and then by name; a replica's list or the replicas' merged.
+func LongestWithoutPeriod(objects []PeriodUnknownObject) []PeriodUnknownObject {
+	if len(objects) == 0 {
+		return objects
+	}
+	sorted := append([]PeriodUnknownObject(nil), objects...)
+	sort.SliceStable(sorted, func(left, right int) bool {
+		l, r := sorted[left], sorted[right]
+		if !l.Since.Equal(r.Since) {
+			return l.Since.Before(r.Since)
+		}
+		return false
+	})
+	if len(sorted) > MaxPeriodUnknownObjects {
+		sorted = sorted[:MaxPeriodUnknownObjects]
+	}
+	return sorted
 }

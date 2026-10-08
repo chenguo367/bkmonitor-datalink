@@ -464,10 +464,12 @@ func (publisher *fleetPublisher) overdueHidden(snapshot fleet.Snapshot, part fle
 
 // notePeriodUnknown dates the objects the overdue facts name without a
 // period: each one first seen now is since now, and one named before keeps
-// when it was first seen. One no longer named is forgotten -- its period
-// arrived, or the index no longer holds it -- unless the index's list was
-// cut and the index still holds it without a period: past the list, it is
-// not named and still has none.
+// when it was first seen. Every one the index returned is dated, then the
+// facts keep the longest without a period (fleet.LongestWithoutPeriod), so
+// one past that cut is still dated when it is first counted. One no longer
+// named is forgotten -- its period arrived, or the index no longer holds it
+// -- unless the index's list was cut and the index still holds it without a
+// period: past the list, it is not named and still has none.
 func (publisher *fleetPublisher) notePeriodUnknown(facts *fleet.OverdueFacts, at time.Time) {
 	if facts == nil {
 		publisher.periodUnknownSince = nil
@@ -486,6 +488,7 @@ func (publisher *fleetPublisher) notePeriodUnknown(facts *fleet.OverdueFacts, at
 		}
 		object.Since, named[object.QueryGroup] = since, true
 	}
+	facts.PeriodUnknownObjects = fleet.LongestWithoutPeriod(facts.PeriodUnknownObjects)
 	for queryGroup := range publisher.periodUnknownSince {
 		if named[queryGroup] {
 			continue
