@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -500,5 +501,52 @@ func TestAStatementReadBeforeAPublicationDoesNotCoverWhatItChanged(t *testing.T)
 	// The next round reads that publication's own statement with its signal.
 	if next := refresh(nil); !next.HoldsLastGood || len(next.Strategies) != 1 {
 		t.Fatalf("ObservedSnapshot() of the next round = %+v, want the statement about the list it read", next)
+	}
+}
+
+// The refresh says, beside its observation, how the writer's statement
+// stands with it: held, with the statement as read and the digests of the
+// bytes it names and of the bytes the round read; and when it is not held,
+// why. A round that reuses the observation says what the read that made it
+// said. A list rewritten after the statement is a digest mismatch; a source
+// that cannot name its bytes leaves it unnamed; a source with no change
+// signal has no statement to say anything of.
+func TestTheRefreshSaysHowTheWritersStatementStandsWithItsObservation(t *testing.T) {
+	harness := newChangeGateHarness(t)
+	signalled := harness.signalled()
+	harness.state(signalled, harnessStrategyIDs)
+	stated := sha256.Sum256([]byte(harnessStrategyIDs))
+	statedHex := hex.EncodeToString(stated[:])
+	result := harness.settle()
+	statement := result.WriterStatement
+	if statement == nil || !statement.Held || statement.Reason != "" || statement.SetSHA256 != statedHex || statement.ReadSHA256 != statedHex ||
+		statement.LastUpdated != strconv.FormatInt(signalled, 10) || !strings.Contains(statement.Raw, statedHex) {
+		t.Fatalf("WriterStatement = %+v, want it held, as read, under the digest of the bytes read", statement)
+	}
+	reused := harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0)
+	if reused.WriterStatement == nil || *reused.WriterStatement != *statement {
+		t.Fatalf("WriterStatement of a round reusing the observation = %+v, want the read's %+v", reused.WriterStatement, statement)
+	}
+
+	harness.setActiveSet(`[1001]`)
+	rewritten := harness.settleAfter(controlplane.SourceReadChanged).WriterStatement
+	read := sha256.Sum256([]byte(`[1001]`))
+	if rewritten == nil || rewritten.Held || rewritten.Reason != controlplane.StatementDigestMismatch ||
+		rewritten.SetSHA256 != statedHex || rewritten.ReadSHA256 != hex.EncodeToString(read[:]) {
+		t.Fatalf("WriterStatement of a list rewritten in place = %+v, want a digest mismatch naming both", rewritten)
+	}
+
+	// A new publication, with its statement, read by a source that cannot
+	// name the bytes it read.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.publish(harness.clock, `[1001]`)
+	unnamed, err := harness.reconciler.Refresh(harness.ctx, unnamedActiveSetSource{strategySourceOnly{harness.source}}, harness.planner)
+	if err != nil || unnamed.ReadMode != controlplane.SourceReadFull || unnamed.WriterStatement == nil || unnamed.WriterStatement.Held ||
+		unnamed.WriterStatement.Reason != controlplane.StatementSetUnnamed || unnamed.WriterStatement.ReadSHA256 != "" {
+		t.Fatalf("WriterStatement of a source that cannot name its bytes = %+v (%v), want its set unnamed", unnamed.WriterStatement, err)
+	}
+	silent, err := harness.reconciler.Refresh(harness.ctx, strategySourceOnly{harness.source}, harness.planner)
+	if err != nil || silent.WriterStatement != nil {
+		t.Fatalf("WriterStatement of a source with no change signal = %+v (%v), want none", silent.WriterStatement, err)
 	}
 }

@@ -29,7 +29,7 @@ func TestLegacyRedisStrategySourceReadsTheChangeSignalAsWritten(t *testing.T) {
 	ctx := context.Background()
 	client := newControlplaneRedis(t)
 	source := newRedisStrategySource(t, client)
-	if signal, err := source.ChangeSignal(ctx); err != nil || signal != (controlplane.SourceChangeSignal{}) {
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signalAbsent(signal, "") {
 		t.Fatalf("ChangeSignal() without the key = (%+v, %v), want absent", signal, err)
 	}
 	if err := client.Set(ctx, "bkmonitor.cache.last_updated", "1700000000", 0).Err(); err != nil {
@@ -46,10 +46,18 @@ func TestLegacyRedisStrategySourceReadsTheChangeSignalAsWritten(t *testing.T) {
 		if err := client.Set(ctx, "bkmonitor.cache.last_updated", unreadable, 0).Err(); err != nil {
 			t.Fatal(err)
 		}
-		if signal, err := source.ChangeSignal(ctx); err != nil || signal.Present {
+		if signal, err := source.ChangeSignal(ctx); err != nil || !signalAbsent(signal, unreadable) {
 			t.Fatalf("ChangeSignal() with %q = (%+v, %v), want absent", unreadable, signal, err)
 		}
 	}
+}
+
+// signalAbsent is a signal reported as absent: not present, no statement
+// taken, and the statement not read for want of the signal it would be made
+// for, with the stored value it could not read.
+func signalAbsent(signal controlplane.SourceChangeSignal, stored string) bool {
+	return !signal.Present && signal.Value == "" && signal.HoldsLastGoodFor == "" && signal.Statement != nil &&
+		*signal.Statement == (controlplane.SourceStatement{LastUpdated: stored, Reason: controlplane.StatementSignalAbsent})
 }
 
 // writerStrategyIDs and writerStatement are a publication as the writer
@@ -78,36 +86,56 @@ func TestLegacyRedisStrategySourceTakesTheWritersStatementOnlyForItsOwnSignal(t 
 	if err := client.Set(ctx, publicationStatement, writerStatement, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if signal, err := source.ChangeSignal(ctx); err != nil || signal != (controlplane.SourceChangeSignal{}) {
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signalAbsent(signal, "") {
 		t.Fatalf("ChangeSignal() with a statement and no last_updated = (%+v, %v), want absent", signal, err)
 	}
 	if err := client.Set(ctx, "bkmonitor.cache.last_updated", writerLastUpdated, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != writerIDsDigest {
-		t.Fatalf("ChangeSignal() with the statement for this signal = (%+v, %v), want the digest it names", signal, err)
+	signal, err := source.ChangeSignal(ctx)
+	if err != nil || !signal.Present || signal.HoldsLastGoodFor != writerIDsDigest || signal.Statement == nil ||
+		*signal.Statement != (controlplane.SourceStatement{Raw: writerStatement, LastUpdated: writerLastUpdated, SetSHA256: writerIDsDigest}) {
+		t.Fatalf("ChangeSignal() with the statement for this signal = (%+v %+v, %v), want the digest it names, read as stored", signal, signal.Statement, err)
 	}
-	for name, statement := range map[string]string{
-		"written for an earlier signal":  `{"hold_last_good":true,"last_updated":1788868799,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`,
-		"another version":                `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":2}`,
-		"saying false":                   `{"hold_last_good":false,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`,
-		"without a version":              `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `"}`,
-		"without a digest":               `{"hold_last_good":true,"last_updated":1788868800,"version":1}`,
-		"with an empty digest":           `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"","version":1}`,
-		"with an uppercase digest":       `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + strings.ToUpper(writerIDsDigest) + `","version":1}`,
-		"with a short digest":            `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest[:63] + `","version":1}`,
-		"with a digest that is no hex":   `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest[:63] + `g","version":1}`,
-		"with a digest that is a number": `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":972,"version":1}`,
-		"with last_updated as a string":  `{"hold_last_good":true,"last_updated":"1788868800","strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`,
-		"not JSON":                       `hold_last_good`,
-		"empty":                          ``,
+	// Each statement that is not taken says why, by the first check it
+	// fails: one that fails two -- another version, saying false -- names
+	// the earlier.
+	for name, tc := range map[string]struct{ statement, reason string }{
+		"written for an earlier signal":    {`{"hold_last_good":true,"last_updated":1788868799,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`, controlplane.StatementLastUpdatedMismatch},
+		"another version":                  {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":2}`, controlplane.StatementVersion},
+		"saying false":                     {`{"hold_last_good":false,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`, controlplane.StatementDeclined},
+		"another version and saying false": {`{"hold_last_good":false,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":2}`, controlplane.StatementVersion},
+		"saying false for an earlier one":  {`{"hold_last_good":false,"last_updated":1788868799,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`, controlplane.StatementDeclined},
+		"without a version":                {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `"}`, controlplane.StatementVersion},
+		"without a digest":                 {`{"hold_last_good":true,"last_updated":1788868800,"version":1}`, controlplane.StatementDigestMissing},
+		"with an empty digest":             {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"","version":1}`, controlplane.StatementDigestMissing},
+		"with an uppercase digest":         {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + strings.ToUpper(writerIDsDigest) + `","version":1}`, controlplane.StatementShape},
+		"with a short digest":              {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest[:63] + `","version":1}`, controlplane.StatementShape},
+		"with a digest that is no hex":     {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest[:63] + `g","version":1}`, controlplane.StatementShape},
+		"with a digest that is a number":   {`{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":972,"version":1}`, controlplane.StatementShape},
+		"with last_updated as a string":    {`{"hold_last_good":true,"last_updated":"1788868800","strategy_ids_sha256":"` + writerIDsDigest + `","version":1}`, controlplane.StatementShape},
+		"not JSON":                         {`hold_last_good`, controlplane.StatementShape},
+		"empty":                            {``, controlplane.StatementShape},
 	} {
-		if err := client.Set(ctx, publicationStatement, statement, 0).Err(); err != nil {
+		if err := client.Set(ctx, publicationStatement, tc.statement, 0).Err(); err != nil {
 			t.Fatal(err)
 		}
-		if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != "" {
-			t.Fatalf("ChangeSignal() with a statement %s = (%+v, %v), want the signal without it", name, signal, err)
+		signal, err := source.ChangeSignal(ctx)
+		if err != nil || !signal.Present || signal.HoldsLastGoodFor != "" || signal.Statement == nil ||
+			signal.Statement.Reason != tc.reason || signal.Statement.Raw != tc.statement || signal.Statement.LastUpdated != writerLastUpdated {
+			t.Fatalf("ChangeSignal() with a statement %s = (%+v %+v, %v), want the signal without it, read as stored, for %s",
+				name, signal, signal.Statement, err, tc.reason)
 		}
+	}
+	// A statement longer than any the writer makes is reported cut, and
+	// taken on what it says.
+	long := `{"hold_last_good":true,"last_updated":1788868800,"strategy_ids_sha256":"` + writerIDsDigest + `","version":1,"note":"` + strings.Repeat("x", 400) + `"}`
+	if err := client.Set(ctx, publicationStatement, long, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if signal, err := source.ChangeSignal(ctx); err != nil || signal.HoldsLastGoodFor != writerIDsDigest || signal.Statement == nil ||
+		len(signal.Statement.Raw) > 260 || !strings.HasSuffix(signal.Statement.Raw, "...") || !strings.HasPrefix(long, strings.TrimSuffix(signal.Statement.Raw, "...")) {
+		t.Fatalf("ChangeSignal() with a long statement = (%+v %+v, %v), want it taken and reported cut", signal, signal.Statement, err)
 	}
 	// A statement that cannot be read is no statement, and does not fail the
 	// signal: the round goes on with every guard in place.
@@ -117,14 +145,16 @@ func TestLegacyRedisStrategySourceTakesTheWritersStatementOnlyForItsOwnSignal(t 
 	if err := client.HSet(ctx, publicationStatement, "hold_last_good", "true").Err(); err != nil {
 		t.Fatal(err)
 	}
-	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != "" {
-		t.Fatalf("ChangeSignal() with an unreadable statement = (%+v, %v), want the signal without it", signal, err)
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != "" ||
+		signal.Statement == nil || *signal.Statement != (controlplane.SourceStatement{LastUpdated: writerLastUpdated, Reason: controlplane.StatementUnreadable}) {
+		t.Fatalf("ChangeSignal() with an unreadable statement = (%+v %+v, %v), want the signal without it, unreadable", signal, signal.Statement, err)
 	}
 	if err := client.Del(ctx, publicationStatement).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != "" {
-		t.Fatalf("ChangeSignal() after the statement expired = (%+v, %v), want the signal without it", signal, err)
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGoodFor != "" ||
+		signal.Statement == nil || *signal.Statement != (controlplane.SourceStatement{LastUpdated: writerLastUpdated, Reason: controlplane.StatementAbsent}) {
+		t.Fatalf("ChangeSignal() after the statement expired = (%+v %+v, %v), want the signal without it, absent", signal, signal.Statement, err)
 	}
 }
 
