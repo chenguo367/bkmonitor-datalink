@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"net"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -65,32 +63,10 @@ func (log *commandLog) assertBounded(t *testing.T) {
 
 func redisForTest(t *testing.T) *redis.Client {
 	t.Helper()
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	_, port, _ := net.SplitHostPort(address)
-	cmd := exec.Command(executable, "--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no", "--dir", t.TempDir(), "--loglevel", "warning")
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	client := redis.NewClient(&redis.Options{Addr: address, DB: 5, MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
-	t.Cleanup(func() { _ = client.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if client.Ping(context.Background()).Err() == nil {
-			return client
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("redis failed to start")
-	return nil
+	server := redistest.Start(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr, DB: 5, MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
 }
 func binding(client redis.Cmdable, role, prefix string) RedisBinding {
 	return RedisBinding{Client: client, Location: Location{Role: role, Address: "fixture", Mode: "standalone", DB: 5, Prefix: prefix}}

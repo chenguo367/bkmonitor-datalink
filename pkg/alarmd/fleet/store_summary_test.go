@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"net"
-	"os/exec"
 	"reflect"
 	"strings"
 	"sync"
@@ -30,35 +29,10 @@ import (
 // a client of it.
 func realRedis(t *testing.T) (string, *redis.Client) {
 	t.Helper()
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	_, port, _ := net.SplitHostPort(address)
-	command := exec.Command(executable, "--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-	})
-	client := redis.NewClient(&redis.Options{Addr: address, DialTimeout: time.Second, ReadTimeout: 5 * time.Second})
+	server := redistest.Start(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr, DialTimeout: time.Second, ReadTimeout: 5 * time.Second})
 	t.Cleanup(func() { _ = client.Close() })
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if client.Ping(context.Background()).Err() == nil {
-			return address, client
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("redis-server did not become ready: %s", output.String())
-		}
-	}
+	return server.Addr, client
 }
 
 // summarizedSnapshot is a replica's snapshot with rows, and more owned

@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -173,38 +172,14 @@ func TestARefusedRedisDialIsNamedThroughTheHook(t *testing.T) {
 // NOSCRIPT is not a failure however it arrives, and a server that goes away
 // is named as a connection that closed or was refused, never as other.
 func TestRealRedisFailuresAreNamedThroughTheHook(t *testing.T) {
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	_, port, _ := net.SplitHostPort(address)
-	server := exec.Command(executable, "--port", port, "--bind", "127.0.0.1", "--save", "", "--appendonly", "no")
-	if err := server.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stopped := false
-	stop := func() {
-		if !stopped {
-			stopped = true
-			_ = server.Process.Kill()
-			_ = server.Wait()
-		}
-	}
-	defer stop()
+	// Answering before Start returns; stopped below, mid-test, to be read as
+	// gone.
+	server := redistest.Start(t)
+	stop := server.Stop
 	r := NewRecorder(BuildInfo{})
-	client := redis.NewClient(&redis.Options{Addr: address, MaxRetries: -1, PoolSize: 1, DialTimeout: time.Second})
+	client := redis.NewClient(&redis.Options{Addr: server.Addr, MaxRetries: -1, PoolSize: 1, DialTimeout: time.Second})
 	defer client.Close()
 	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
-	for client.Ping(ctx).Err() != nil {
-		if time.Now().After(deadline) {
-			t.Fatal("redis-server did not answer")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 	client.AddHook(r.RedisHook("runtime"))
 
 	if err := client.Set(ctx, "string", "v", 0).Err(); err != nil {

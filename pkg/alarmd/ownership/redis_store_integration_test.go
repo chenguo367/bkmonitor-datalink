@@ -10,9 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"os/exec"
-	"strconv"
 	"testing"
 	"time"
 
@@ -357,32 +354,18 @@ func TestRedisStoreCheckFenceCarriesTheAssignmentItAlreadyRead(t *testing.T) {
 
 func newIntegrationStore(t *testing.T) *RedisStore {
 	t.Helper()
-	executable := redistest.Server(t)
-	address := reserveAddress(t)
-	server := startRedis(t, executable, address)
+	server := redistest.Start(t)
 	store, err := NewRedisStore(RedisStoreOptions{
-		Address: address, Prefix: "alarmd-ownership-test", DialTimeout: time.Second,
+		Address: server.Addr, Prefix: "alarmd-ownership-test", DialTimeout: time.Second,
 		ReadTimeout: time.Second, WriteTimeout: time.Second, PoolSize: 2,
 	})
 	if err != nil {
 		t.Fatalf("NewRedisStore() error = %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-		if server.ProcessState == nil || !server.ProcessState.Exited() {
-			_ = server.Process.Kill()
-			_ = server.Wait()
-		}
-	})
-	// The wait is generous on purpose. Three seconds encoded an assumption about
-	// machine load rather than about redis: under `go test ./...` dozens of
-	// packages start their own server at the same moment, and a window that is
-	// ample on an idle machine is not on a loaded one - which turned a whole-tree
-	// "all green" into a function of load rather than of the code. A healthy
-	// server answers Ping in milliseconds, so a longer budget costs the normal
-	// path nothing; it only matters when the server genuinely cannot start, and
-	// that case is meant to be read from the server's own output.
-	deadline := time.Now().Add(30 * time.Second)
+	t.Cleanup(func() { _ = store.Close() })
+	// The server answered before Start returned; what is left is the store's
+	// own connection, under the same bound.
+	deadline := time.Now().Add(redistest.ReadyWithin)
 	for time.Now().Before(deadline) {
 		if err := store.Ping(context.Background()); err == nil {
 			return store
@@ -391,41 +374,6 @@ func newIntegrationStore(t *testing.T) *RedisStore {
 	}
 	t.Fatal("redis-server did not become ready")
 	return nil
-}
-
-func reserveAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("listener.Close() error = %v", err)
-	}
-	return address
-}
-
-func startRedis(t *testing.T, executable, address string) *exec.Cmd {
-	t.Helper()
-	_, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatalf("SplitHostPort() error = %v", err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		t.Fatalf("Atoi(port) error = %v", err)
-	}
-	command := exec.Command(executable,
-		"--bind", "127.0.0.1", "--port", strconv.Itoa(port), "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning",
-	)
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("redis-server start error = %v", err)
-	}
-	return command
 }
 
 // ReadControlBatch answers exactly what ReadControl answers for each Query

@@ -1,10 +1,7 @@
 package obevidence
 
 import (
-	"bytes"
 	"context"
-	"net"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -19,31 +16,7 @@ import (
 // for a second, as a network or a proxy does to a pool's idle connection.
 func idleCuttingRedis(t *testing.T) string {
 	t.Helper()
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	_, port, _ := net.SplitHostPort(address)
-	cmd := exec.Command(executable, "--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--loglevel", "warning", "--timeout", "1")
-	var output bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &output, &output
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	probe := redis.NewClient(&redis.Options{Addr: address})
-	defer probe.Close()
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if probe.Ping(context.Background()).Err() == nil {
-			return address
-		}
-	}
-	t.Fatal("redis failed to start")
-	return ""
+	return redistest.Start(t, "--timeout", "1").Addr
 }
 
 // A read on a pooled connection the server closed while it sat idle is

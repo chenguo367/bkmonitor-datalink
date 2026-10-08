@@ -12,12 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -2171,111 +2168,17 @@ func assertObservedOrder(t *testing.T, got, want []observability.Stage) {
 }
 
 // startPhaseTwoRedis starts a redis-server for this test and hands back a
-// client that has been checked to be talking to that server and no other.
-//
-// The port is picked by asking the kernel for a free one and closing the
-// socket, so between that close and redis-server's bind anything else on the
-// machine may take the port: another package's fixture under `go test ./...`,
-// or a second checkout running the same suite. When that happens redis-server
-// exits with "Address already in use" while Ping on the port keeps succeeding,
-// answered by whoever does hold it - and the fixture used to hand that foreign
-// server back without a word. The test then ran against a Redis another test
-// was also writing to, under the key prefixes this suite fixes per test and
-// which therefore collide exactly. Asking the server which directory it was
-// started in turns that into a retry on a fresh port, and into a named failure
-// if it keeps happening, instead of into a result somewhere else in the test.
+// client of it. redistest.Start checks the server on the port is the one it
+// started - between finding a port free and redis-server binding it, another
+// fixture on the machine may take it - and tries another port when it is not.
 func startPhaseTwoRedis(t *testing.T) (string, *redis.Client) {
 	t.Helper()
-	executable := redistest.Server(t)
-	var refusals []string
-	for attempt := 0; attempt < 5; attempt++ {
-		address, client, refused := startOwnPhaseTwoRedis(t, executable, "")
-		if refused == "" {
-			return address, client
-		}
-		refusals = append(refusals, refused)
-	}
-	t.Fatalf("redis-server never came up on a port of its own: %v", refusals)
-	return "", nil
-}
-
-// startOwnPhaseTwoRedis makes one attempt. It returns an empty refusal when the
-// server on the port is the one it just started.
-func startOwnPhaseTwoRedis(t *testing.T, executable string, port string) (string, *redis.Client, string) {
-	t.Helper()
-	if port == "" {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, chosen, err := net.SplitHostPort(listener.Addr().String()); err == nil {
-			port = chosen
-		} else {
-			t.Fatal(err)
-		}
-		if err := listener.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	address := net.JoinHostPort("127.0.0.1", port)
-	// The directory is this attempt's name for its own server. t.TempDir() is a
-	// fresh directory per call, and redis reports it back resolved, so it tells
-	// one server on this port apart from any other.
-	directory := t.TempDir()
-	resolved, err := filepath.EvalSymlinks(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "--bind", "127.0.0.1", "--port", port,
-		"--save", "", "--appendonly", "no", "--dir", directory, "--daemonize", "no", "--loglevel", "warning")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
+	server := redistest.Start(t)
 	client := redis.NewClient(&redis.Options{
-		Addr: address, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
+		Addr: server.Addr, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
 	})
-	stop := func() {
-		_ = client.Close()
-		if command.ProcessState == nil || !command.ProcessState.Exited() {
-			_ = command.Process.Kill()
-		}
-		_ = command.Wait()
-	}
-	// The wait is generous on purpose. Three seconds encoded an assumption about
-	// machine load rather than about redis: under `go test ./...` dozens of
-	// packages start their own server at the same moment, and a window that is
-	// ample on an idle machine is not on a loaded one - which turned a whole-tree
-	// "all green" into a function of load rather than of the code. A healthy
-	// server answers Ping in milliseconds, so a longer budget costs the normal
-	// path nothing; it only matters when the server genuinely cannot start, and
-	// that case is meant to be read from the server's own output.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if client.Ping(context.Background()).Err() == nil {
-			if serving := phaseTwoRedisDirectory(client); serving != resolved {
-				stop()
-				return "", nil, fmt.Sprintf("port %s is served from %q, not this attempt's %q", port, serving, resolved)
-			}
-			t.Cleanup(stop)
-			return address, client, ""
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	stop()
-	return "", nil, fmt.Sprintf("port %s never answered: %s", port, output.String())
-}
-
-// phaseTwoRedisDirectory reports the directory the server on this client was
-// started in, or "" when it cannot be read.
-func phaseTwoRedisDirectory(client *redis.Client) string {
-	values, err := client.ConfigGet(context.Background(), "dir").Result()
-	if err != nil || len(values) != 2 {
-		return ""
-	}
-	directory, _ := values[1].(string)
-	return directory
+	t.Cleanup(func() { _ = client.Close() })
+	return server.Addr, client
 }
 
 // The Snapshot body is transferred once per revision by a complete verified
@@ -2525,36 +2428,6 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	reentry, _, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
 	if err != nil || reentry.Completed || reentry.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotRetryPending) || uqCalls.Load() != beforeDeferredCalls {
 		t.Fatalf("deferred reentry result=%+v error=%v clock=%v", reentry, err, now())
-	}
-}
-
-// TestPhaseTwoRedisFixtureRefusesAServerItDidNotStart pins the check that the
-// fixture hands back its own server.
-//
-// It is written as a forced collision because the real one cannot be scheduled:
-// the fixture asks the kernel for a free port and closes the socket, and
-// whether anything grabs that port in the gap depends on what else is running
-// on the machine. Forcing the port reproduces the same end state - redis-server
-// cannot bind, exits, and Ping on the port is answered by the process that does
-// hold it - which is the state in which the fixture used to hand the foreign
-// server to the test.
-func TestPhaseTwoRedisFixtureRefusesAServerItDidNotStart(t *testing.T) {
-	executable := redistest.Server(t)
-	occupiedAddress, occupied := startPhaseTwoRedis(t)
-	_, port, err := net.SplitHostPort(occupiedAddress)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := occupied.Set(context.Background(), "phase-two-fixture-marker", "occupant", 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	address, client, refused := startOwnPhaseTwoRedis(t, executable, port)
-	if refused == "" {
-		marker, markerErr := client.Get(context.Background(), "phase-two-fixture-marker").Result()
-		t.Fatalf("fixture accepted a server it did not start at %s: marker=%q error=%v", address, marker, markerErr)
-	}
-	if !strings.Contains(refused, port) {
-		t.Fatalf("refusal %q does not name the port it was refused on", refused)
 	}
 }
 

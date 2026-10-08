@@ -7,8 +7,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	"github.com/go-redis/redis/v8"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"testing"
@@ -148,26 +146,8 @@ func TestServiceSnapshotWritesEveryStrategyWithPythonTTL(t *testing.T) {
 
 func startSnapshotRedis(t *testing.T) *redis.Client {
 	t.Helper()
-	binary := redistest.Server(t)
-	dir, err := os.MkdirTemp("/tmp", "als-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "redis.sock")
-	command := exec.Command(binary, "--port", "0", "--unixsocket", socket, "--save", "", "--appendonly", "no")
-	if err = command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { command.Process.Kill(); command.Wait() })
-	client := redis.NewClient(&redis.Options{Network: "unix", Addr: socket})
+	server := redistest.Start(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr})
 	t.Cleanup(func() { client.Close() })
-	for i := 0; i < 100; i++ {
-		if client.Ping(context.Background()).Err() == nil {
-			return client
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("redis-server did not start")
-	return nil
+	return client
 }
