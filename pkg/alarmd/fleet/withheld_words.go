@@ -11,7 +11,6 @@ package fleet
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -226,17 +225,6 @@ func WithheldWordsOf(reason string) WithheldReasonWords {
 	return WithheldReasonWords{Kind: WithheldUnknownReason,
 		What: "原因 " + reason + "：本构建的页面还没有这个原因的说明",
 		Next: "按原因词查该构建的变更说明；别按别的原因的处理办法改参数"}
-}
-
-// KnownWithheldReasons lists the reasons this table explains, sorted, for
-// the test that holds it to what the control plane produces.
-func KnownWithheldReasons() []string {
-	reasons := make([]string, 0, len(withheldReasonWords))
-	for reason := range withheldReasonWords {
-		reasons = append(reasons, reason)
-	}
-	sort.Strings(reasons)
-	return reasons
 }
 
 // capabilityLine is the sentence for the line of strategies this

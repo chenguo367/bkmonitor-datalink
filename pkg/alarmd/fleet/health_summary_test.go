@@ -37,8 +37,8 @@ func healthFromSnapshots(view View, at time.Time, stallAfter time.Duration) Heal
 		AnomaliesTotal: view.AnomaliesTotal, DemotedTotal: view.DemotedTotal,
 		UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
 		EmptyEveryRoundTotal: view.EmptyEveryRoundTotal,
-		Ours:                 OursCount(view.Anomalies), Unattributed: UnattributedCount(view.Anomalies),
-		Impact:     ImpactOf(view, at),
+		Ours:                 attributed(view.Anomalies, AttributionOurs), Unattributed: attributed(view.Anomalies, AttributionUnknown),
+		Impact:     ImpactTallyOf(view, at).Impact(),
 		DemotedDue: view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 		DemotionEntries: view.DemotionEntries, DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
 		DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
@@ -61,7 +61,7 @@ func healthFromSnapshots(view View, at time.Time, stallAfter time.Duration) Heal
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
 		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, Gaps: view.Gaps, Capacity: view.Capacity,
-		Load: LoadOf(&view, at),
+		Load: ReplicaPartOf(view, at).Load(&view),
 	}
 }
 
@@ -531,9 +531,9 @@ func TestRowsDecidedAsPublishedReadTheSummariesVerdict(t *testing.T) {
 	summarized, part := service.Summarized(context.Background(), stallAfter)
 	whole := service.View(context.Background())
 	Decide(&whole, now, stallAfter)
-	if OursCount(whole.Anomalies) != 3 || part.Attribution.Ours != 1 {
+	if attributed(whole.Anomalies, AttributionOurs) != 3 || part.Attribution.Ours != 1 {
 		t.Fatalf("whole view ours %d, summaries %d: the fixture has to separate rows stalled and overdue by the read from one "+
-			"stalled by the publish", OursCount(whole.Anomalies), part.Attribution.Ours)
+			"stalled by the publish", attributed(whole.Anomalies, AttributionOurs), part.Attribution.Ours)
 	}
 	stalled := 0
 	for _, row := range rows.Anomalies {
@@ -541,10 +541,10 @@ func TestRowsDecidedAsPublishedReadTheSummariesVerdict(t *testing.T) {
 			stalled++
 		}
 	}
-	if rows.Health != summarized.Health || OursCount(rows.Anomalies) != part.Attribution.Ours || stalled != 1 ||
+	if rows.Health != summarized.Health || attributed(rows.Anomalies, AttributionOurs) != part.Attribution.Ours || stalled != 1 ||
 		part.Metrics == nil || part.Metrics.Stalled != stalled {
 		t.Fatalf("rows as published: health %s ours %d stalled %d; summaries: health %s ours %d counts %+v", rows.Health,
-			OursCount(rows.Anomalies), stalled, summarized.Health, part.Attribution.Ours, part.Metrics)
+			attributed(rows.Anomalies, AttributionOurs), stalled, summarized.Health, part.Attribution.Ours, part.Metrics)
 	}
 	sameJSON(t, "each replica's split", rows.PerReplica, summarized.PerReplica)
 }

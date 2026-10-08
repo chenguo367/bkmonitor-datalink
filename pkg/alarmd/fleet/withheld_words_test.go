@@ -110,7 +110,7 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 			t.Errorf("the control plane withholds under %q and the page has no words for it: it would read as unknown", reason)
 		}
 	}
-	for _, reason := range KnownWithheldReasons() {
+	for reason := range withheldReasonWords {
 		if !produced[reason] {
 			t.Errorf("words for %q, which nothing in the control plane produces", reason)
 		}

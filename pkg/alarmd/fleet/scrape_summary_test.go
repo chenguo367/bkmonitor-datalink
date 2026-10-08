@@ -215,7 +215,7 @@ func TestTheScrapesLossesAreJudgedAtTheReplicasPublish(t *testing.T) {
 		t.Fatalf("losses %+v, want the skip in progress as of the publish", part.Metrics)
 	}
 	whole := Aggregate(expectation, snapshots, replicas(), read, freshness)
-	if byLoss, _ := LossCensus(&whole, read); byLoss[LossOngoing] != 0 || byLoss[LossHistorical] != 1 {
+	if byLoss, _ := lossCensus(&whole, read); byLoss[LossOngoing] != 0 || byLoss[LossHistorical] != 1 {
 		t.Fatalf("read at the scrape's moment the skip is %+v; the fixture has to cross the window between publish and read", byLoss)
 	}
 }

@@ -209,11 +209,6 @@ const (
 	permitWaitShareBottleneck = 0.5
 )
 
-// LoadOf decides the judgment from the view.
-func LoadOf(view *View, now time.Time) Load {
-	return loadOf(view, lossOfView(view, now))
-}
-
 // loadOf decides the judgment from the view's replica facts and the loss
 // its records were counted into, which replicas' parts add up to
 // (ReplicaPart.Loss).
@@ -298,15 +293,15 @@ func backlogOf(census *ScheduleCensus) LoadBacklog {
 	return reading
 }
 
-// lossOfView counts the records the way the first screen does: in progress
-// when not demoted and within the window; the demoted objects' recent
-// skips apart.
-func lossOfView(view *View, now time.Time) LoadLoss {
-	reading, _, _ := lossesOfView(view, now)
-	return reading
-}
-
-// lossesOfView is lossOfView and LossCensus from one walk of the records.
+// lossesOfView walks the view's records once for two readings. reading is
+// the load's loss, counted the way the first screen counts: in progress when
+// not demoted and within the window; the demoted objects' recent skips apart.
+// byLoss is the census: the retained records by what each is, every kind
+// present at zero, and graceUnknown how many could not be judged against a
+// restart for want of an anchor. Distinct records, one per object per record
+// kind, the same walk the lines make -- so the family a scrape exports and
+// the counts the page prints come from one reading. Bookkeeping records are
+// not losses of detection and are left out, as the lines leave them out.
 func lossesOfView(view *View, now time.Time) (reading LoadLoss, byLoss map[Loss]int, graceUnknown int) {
 	reading = LoadLoss{State: LossNone, WindowSeconds: int(RecentSkipWindow / time.Second),
 		RestartGraceSeconds: int(RestartCatchUpGrace / time.Second)}

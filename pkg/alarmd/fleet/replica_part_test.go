@@ -199,9 +199,9 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	if merged.Attribution.Unknown+merged.Attribution.Other != unattributed {
 		t.Errorf("merged unattributed %+v, the replicas' split adds up to %d", merged.Attribution, unattributed)
 	}
-	if merged.Attribution.Ours != OursCount(whole.Anomalies) || merged.Attribution.Unknown != UnattributedCount(whole.Anomalies) {
+	if merged.Attribution.Ours != attributed(whole.Anomalies, AttributionOurs) || merged.Attribution.Unknown != attributed(whole.Anomalies, AttributionUnknown) {
 		t.Errorf("merged attribution %+v, whole view ours %d unattributed %d", merged.Attribution,
-			OursCount(whole.Anomalies), UnattributedCount(whole.Anomalies))
+			attributed(whole.Anomalies, AttributionOurs), attributed(whole.Anomalies, AttributionUnknown))
 	}
 	if merged.EmptyEveryRound != whole.EmptyEveryRoundTotal {
 		t.Errorf("empty every round %d, whole view %d", merged.EmptyEveryRound, whole.EmptyEveryRoundTotal)
@@ -210,18 +210,18 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 		t.Errorf("pooled due %d oldest %ds, whole view %d oldest %ds", merged.DemotedDue, merged.DemotedDueOldestSeconds(now),
 			whole.DemotedDue, whole.DemotedDueOldestSeconds)
 	}
-	if merged.Impact.Impact() != ImpactOf(whole, now) {
-		t.Errorf("impact %+v, whole view %+v", merged.Impact.Impact(), ImpactOf(whole, now))
+	if merged.Impact.Impact() != ImpactTallyOf(whole, now).Impact() {
+		t.Errorf("impact %+v, whole view %+v", merged.Impact.Impact(), ImpactTallyOf(whole, now).Impact())
 	}
 	// Both paths count businesses with the same code, so the count itself is
 	// pinned: businesses 2 and 3 and not the strategy that names none.
-	if businesses := ImpactOf(whole, now).Blind.Businesses; businesses != 2 {
+	if businesses := ImpactTallyOf(whole, now).Impact().Blind.Businesses; businesses != 2 {
 		t.Errorf("blind businesses %d, want 2: a strategy naming no business is not one", businesses)
 	}
 	columns := viewColumns(&whole)
 	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))
 	sameJSON(t, "cooling", merged.CoolingAt(whole.Schedule, now), Cooling(&whole, columns, now))
-	sameJSON(t, "load", merged.Load(&whole), LoadOf(&whole, now))
+	sameJSON(t, "load", merged.Load(&whole), ReplicaPartOf(whole, now).Load(&whole))
 	screen := Report(&whole, now)
 	sameJSON(t, "check lines", merged.Checks(&whole, now), screen.Checks)
 	sameJSON(t, "check lines read again", merged.Checks(&whole, now), screen.Checks)
@@ -243,7 +243,7 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	if len(pruned) != 21 || len(merged.PrunedSkips) != FirstScreenListBound {
 		t.Fatalf("fixture lists: %d pruned, %d carried", len(pruned), len(merged.PrunedSkips))
 	}
-	if loss := LoadOf(&whole, now).Loss; loss.Ongoing+loss.AfterRestart == 0 {
+	if loss := ReplicaPartOf(whole, now).Load(&whole).Loss; loss.Ongoing+loss.AfterRestart == 0 {
 		t.Fatalf("fixture loss %+v, want the skip counted as in progress", loss)
 	}
 	// The pooled rows carry no period and make a cohort of their own at 0.
@@ -258,9 +258,9 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	// zeros: several due with different waits, several empty rows, and rows
 	// on each side of the verdict.
 	if whole.DemotedDue != 3 || whole.DemotedDueOldestSeconds != 21*60 || whole.EmptyEveryRoundTotal != 10 ||
-		OursCount(whole.Anomalies) == 0 || OursCount(whole.Anomalies) == len(whole.Anomalies) {
+		attributed(whole.Anomalies, AttributionOurs) == 0 || attributed(whole.Anomalies, AttributionOurs) == len(whole.Anomalies) {
 		t.Fatalf("fixture: due %d oldest %ds, empty %d, ours %d of %d", whole.DemotedDue, whole.DemotedDueOldestSeconds,
-			whole.EmptyEveryRoundTotal, OursCount(whole.Anomalies), len(whole.Anomalies))
+			whole.EmptyEveryRoundTotal, attributed(whole.Anomalies, AttributionOurs), len(whole.Anomalies))
 	}
 }
 

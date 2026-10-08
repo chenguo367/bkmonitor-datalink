@@ -527,7 +527,7 @@ func TestPagesThatAskTogetherShareOneReadOfTheSnapshots(t *testing.T) {
 	if reader.count() != 1 {
 		t.Fatalf("%d reads for two pages that asked together, want one", reader.count())
 	}
-	stalled := OursCount(first.Anomalies) + OursCount(second.Anomalies)
+	stalled := attributed(first.Anomalies, AttributionOurs) + attributed(second.Anomalies, AttributionOurs)
 	if stalled != 1 || reader.snapshots[1].Anomalies[0].Stalled {
 		t.Fatalf("ours across the two views %d, snapshot row stalled %v: want one view deciding the row stalled and the shared snapshot untouched",
 			stalled, reader.snapshots[1].Anomalies[0].Stalled)

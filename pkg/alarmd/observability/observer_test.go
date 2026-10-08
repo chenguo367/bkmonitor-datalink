@@ -398,7 +398,7 @@ func TestObservationLoggerUsesBoundedEnvelope(t *testing.T) {
 	loggingObserver := NewLoggingObserver(logger, policy)
 	loggingObserver.Observe(context.Background(), Observation{
 		Component:  ComponentResource,
-		Stage:      StageResourceSoft,
+		Stage:      StageResourceHard,
 		Result:     ResultTerminal,
 		Operation:  OperationTransition,
 		Direction:  DirectionOutput,
@@ -421,7 +421,7 @@ func TestObservationLoggerUsesBoundedEnvelope(t *testing.T) {
 	}
 	for field, want := range map[string]any{
 		"component":      string(ComponentResource),
-		"stage":          string(StageResourceSoft),
+		"stage":          string(StageResourceHard),
 		"result":         string(ResultTerminal),
 		"operation":      string(OperationTransition),
 		"direction":      string(DirectionOutput),
@@ -469,7 +469,7 @@ func TestReasonNormalizationConsumesM0ObservationCatalog(t *testing.T) {
 		default:
 			t.Fatalf("M0 reason %q has unknown class %q", definition.Code, definition.Class)
 		}
-		if got := NormalizeMetricReason(ComponentAdapter, reason, ResultTerminal); got != want {
+		if got := NormalizeMetricReason(ComponentAccess, reason, ResultTerminal); got != want {
 			t.Fatalf("metric reason %q = %q, want %q", reason, got, want)
 		}
 	}
@@ -493,7 +493,7 @@ func TestReasonNormalizationConsumesM0ObservationCatalog(t *testing.T) {
 	if got := NormalizeReason(ReasonInternalUnknown, ResultFailed); got != ReasonInternalUnknown {
 		t.Fatalf("a site that says it does not know = %q, want it kept as %q", got, ReasonInternalUnknown)
 	}
-	if got := NormalizeMetricReason(ComponentAdapter, ReasonNone, ResultFailed); got != ReasonNotReported {
+	if got := NormalizeMetricReason(ComponentAccess, ReasonNone, ResultFailed); got != ReasonNotReported {
 		t.Fatalf("metric reason for an unreported failure = %q, want %q", got, ReasonNotReported)
 	}
 	if got := NormalizeReason(ReasonNone, ResultSuccess); got != ReasonNone {
@@ -513,25 +513,28 @@ func TestBoundedLogPolicyRequiresExplicitExceptionalLimiter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScopedBoundedLogPolicy() error = %v", err)
 	}
-	if policy.ShouldLog(Observation{Component: ComponentDetect, Stage: StageDetectCompleted, Result: ResultSuccess}) {
+	publish := func(result Result) Observation {
+		return Observation{Component: ComponentRuntime, Stage: StageFleetSnapshotPublish, Result: result}
+	}
+	if policy.ShouldLog(publish(ResultSuccess)) {
 		t.Fatal("routine success was logged")
 	}
 	if !policy.ShouldLog(Observation{Component: ComponentRuntime, Stage: StageStartup, Result: ResultStarted}) {
 		t.Fatal("one-time startup was not logged")
 	}
 	for index := 0; index < 2; index++ {
-		if !policy.ShouldLog(Observation{Component: ComponentConsumer, Stage: StageOffsetGap, Result: ResultFailed}) {
-			t.Fatalf("bounded offset gap %d was not logged", index)
+		if !policy.ShouldLog(publish(ResultFailed)) {
+			t.Fatalf("bounded publish failure %d was not logged", index)
 		}
 	}
-	if policy.ShouldLog(Observation{Component: ComponentConsumer, Stage: StageOffsetGap, Result: ResultFailed}) {
-		t.Fatal("repeated offset gap exceeded its stage bound")
+	if policy.ShouldLog(publish(ResultFailed)) {
+		t.Fatal("repeated publish failure exceeded its stage bound")
 	}
 	if !policy.ShouldLog(Observation{Component: ComponentResource, Stage: StageResourceHard, Result: ResultPaused}) {
-		t.Fatal("reason-empty offset traffic suppressed the independent resource stage")
+		t.Fatal("reason-empty publish traffic suppressed the independent resource stage")
 	}
 	now = now.Add(time.Minute)
-	if !policy.ShouldLog(Observation{Component: ComponentRuntime, Stage: StageRestartRecovered, Result: ResultResumed}) {
+	if !policy.ShouldLog(publish(ResultResumed)) {
 		t.Fatal("recovery was not logged after the window reset")
 	}
 }

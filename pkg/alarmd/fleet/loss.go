@@ -242,14 +242,3 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies, IntervalSeconds: pruned.IntervalSeconds})
 	}
 }
-
-// LossCensus counts the view's retained records by what each is, every kind
-// present at zero, and how many could not be judged against a restart for
-// want of an anchor. Distinct records, one per object per record kind, the
-// same walk the lines make -- so the family a scrape exports and the counts
-// the page prints come from one reading. Bookkeeping records are not losses
-// of detection and are left out, as the lines leave them out.
-func LossCensus(view *View, now time.Time) (byLoss map[Loss]int, graceUnknown int) {
-	_, byLoss, graceUnknown = lossesOfView(view, now)
-	return byLoss, graceUnknown
-}

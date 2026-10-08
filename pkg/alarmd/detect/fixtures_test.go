@@ -102,7 +102,7 @@ func compilerLimits() strategy.Limits {
 
 func newTestEvaluator(t testing.TB) *Evaluator {
 	t.Helper()
-	evaluator, err := NewEvaluator(NewDefaultRegistry(), nil)
+	evaluator, err := NewEvaluator(NewDefaultRegistry())
 	if err != nil {
 		t.Fatalf("NewEvaluator() error = %v", err)
 	}

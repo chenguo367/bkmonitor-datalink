@@ -103,7 +103,7 @@ type ReplicaPart struct {
 // AttributionTally is the anomaly column's rows by attribution: Ours and
 // External as attributed, Unknown with no evidence either way, and Other
 // with the field not set at all -- which the per-replica split counts as
-// unattributed and the verdict does not (Settle, UnattributedCount).
+// unattributed and the verdict does not (Settle).
 type AttributionTally struct {
 	Ours     int `json:"ours"`
 	External int `json:"external"`

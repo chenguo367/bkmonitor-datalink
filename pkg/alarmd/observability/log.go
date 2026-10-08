@@ -1231,7 +1231,7 @@ func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {
 
 func mandatoryLogStage(stage Stage) bool {
 	switch stage {
-	case StageStartup, StageConfigLoaded, StageKafkaAssigned, StageShutdown, StageFatal:
+	case StageStartup, StageConfigLoaded, StageShutdown, StageFatal:
 		return true
 	case StageSnapshotRefreshed, StageSnapshotUnavailable, StageAssignmentAcquired, StageAssignmentLost,
 		StageTakeoverStarted, StageTakeoverCompleted:
@@ -1264,7 +1264,7 @@ func mandatoryLogStage(stage Stage) bool {
 
 func repeatedLogObservation(observation Observation) bool {
 	switch observation.Stage {
-	case StageOffsetGap, StageResourceSoft, StageResourceHard, StageResourceResumed, StageRestartRecovered:
+	case StageResourceHard:
 		return true
 	default:
 		return isPhaseTwoWorkflowStage(observation.Stage) || observation.Result == ResultResumed || exceptionalLogResult(observation.Result)

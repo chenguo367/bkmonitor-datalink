@@ -160,7 +160,15 @@ func (part *ImpactPartTally) add(rows ...[]Anomaly) int {
 }
 
 // ImpactTallyOf tallies a view's rows; a view of one replica's snapshot
-// gives that replica's part.
+// gives that replica's part, and Impact expresses it in strategies and
+// businesses. Counted from the lists the replicas published rather than from
+// the totals, because a strategy count has no other source -- and the
+// difference between the two is reported as Partial rather than hidden,
+// since the deployment bad enough to truncate is the one being read during
+// an incident. Two columns are counted together as one population, not
+// added: a strategy with objects in both is one strategy, and adding
+// overstates the number a reader acts on -- by most when the deployment is
+// worst.
 func ImpactTallyOf(view View, now time.Time) ImpactTally {
 	tally := newImpactTally()
 	for _, column := range []struct {

@@ -73,24 +73,20 @@ func TestUnknownLabelValuesCollapseToOther(t *testing.T) {
 	}
 }
 
-func TestObservationRejectsNegativeDurationAndCounts(t *testing.T) {
+func TestObservationRejectsANegativeDuration(t *testing.T) {
 	t.Parallel()
 
 	recorder := NewRecorder(BuildInfo{})
 	recorder.Observe(context.Background(), observability.Observation{
-		Component: observability.ComponentDetect,
-		Stage:     observability.StageDetectCompleted,
+		Component: observability.ComponentRuntime,
+		Stage:     observability.StageFleetSnapshotPublish,
 		Result:    observability.ResultSuccess,
 		Direction: observability.DirectionInternal,
 		Duration:  -time.Second,
-		Counts:    observability.Counts{Messages: -1},
 	})
 	got := scrape(t, recorder)
 	if strings.Contains(got, "bkmonitor_alarmd_observation_duration_seconds") {
 		t.Fatalf("negative duration created a histogram:\n%s", got)
-	}
-	if strings.Contains(got, "bkmonitor_alarmd_observed_messages_total") {
-		t.Fatalf("negative count created a counter:\n%s", got)
 	}
 }
 
@@ -99,7 +95,7 @@ func TestKnownM0ReasonMapsToBoundedMetricValue(t *testing.T) {
 
 	recorder := NewRecorder(BuildInfo{})
 	recorder.Observe(context.Background(), observability.Observation{
-		Component: observability.ComponentAdapter, Stage: observability.StageRejected,
+		Component: observability.ComponentRuntime, Stage: observability.StageFleetSnapshotPublish,
 		Result: observability.ResultTerminal, Direction: observability.DirectionInternal,
 		ReasonCode: observability.ReasonCode(contract.ReasonRecordIdentityConflict),
 	})
@@ -112,36 +108,34 @@ func TestKnownM0ReasonMapsToBoundedMetricValue(t *testing.T) {
 	}
 }
 
-func TestObservationCountsRemainSeparatedByStageDirectionAndResult(t *testing.T) {
+func TestObservationsAreCountedByStageAndResult(t *testing.T) {
 	t.Parallel()
 
 	recorder := NewRecorder(BuildInfo{})
 	for _, observation := range []observability.Observation{
 		{
-			Component: observability.ComponentDetect,
-			Stage:     observability.StageDetectCompleted,
+			Component: observability.ComponentRuntime,
+			Stage:     observability.StageFleetSnapshotPublish,
 			Result:    observability.ResultSuccess,
 			Direction: observability.DirectionInternal,
-			Counts:    observability.Counts{Records: 2},
 			Duration:  time.Second,
 		},
 		{
-			Component: observability.ComponentTrigger,
-			Stage:     observability.StageTriggerCompleted,
-			Result:    observability.ResultTerminal,
-			Direction: observability.DirectionOutput,
-			Counts:    observability.Counts{Records: 3},
+			Component: observability.ComponentResource,
+			Stage:     observability.StageResourceHard,
+			Result:    observability.ResultPaused,
+			Direction: observability.DirectionInternal,
 		},
 	} {
 		recorder.Observe(context.Background(), observation)
 	}
 	got := scrape(t, recorder)
 	for _, want := range []string{
-		`bkmonitor_alarmd_observed_records_total{direction="internal",result="success",stage="detect_completed"} 2`,
-		`bkmonitor_alarmd_observed_records_total{direction="output",result="terminal",stage="trigger_completed"} 3`,
+		`result="success",stage="fleet_snapshot_publish"} 1`,
+		`result="paused",stage="resource_hard"} 1`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("stage count is missing %q:\n%s", want, got)
+			t.Fatalf("observation_total is missing %q:\n%s", want, got)
 		}
 	}
 	// The same scrape covers the exported base families after Observe.
@@ -196,7 +190,7 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 	}
 
 	for family, want := range map[string]int{
-		"bkmonitor_alarmd_observation_duration_seconds": 2970,
+		"bkmonitor_alarmd_observation_duration_seconds": 810,
 	} {
 		if got := bounds[family]; got != want {
 			t.Errorf("histogram family %s theoretical maximum = %d, want buckets/+Inf/sum/count total %d", family, got, want)
@@ -240,14 +234,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_observation_total":                            "variableLabels: {component,stage,result,reason_code}",
 		"bkmonitor_alarmd_operation_total":                              "variableLabels: {operation,result,reason_code}",
 		"bkmonitor_alarmd_observation_duration_seconds":                 "variableLabels: {component,stage,result}",
-		"bkmonitor_alarmd_observed_messages_total":                      "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_records_total":                       "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_plans_total":                         "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_levels_total":                        "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_events_total":                        "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_bytes_total":                         "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_keys_total":                          "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_observed_state_bytes_total":                   "variableLabels: {stage,direction,result}",
 		"bkmonitor_alarmd_worker_work_total":                            "variableLabels: {work_kind}",
 		"bkmonitor_alarmd_worker_busy_seconds_total":                    "variableLabels: {stage}",
 		"bkmonitor_alarmd_last_progress_timestamp_seconds":              "variableLabels: {kind}",
@@ -707,22 +693,9 @@ func populateAllCustomLabelCombinations(recorder *Recorder) {
 		for _, result := range observability.AllResults() {
 			for _, reason := range observability.AllMetricReasons() {
 				recorder.Observe(context.Background(), observability.Observation{
-					Component: observability.ComponentResource, Stage: observability.StageResourceSoft,
+					Component: observability.ComponentResource, Stage: observability.StageResourceHard,
 					Result: result, Operation: operation, Direction: observability.DirectionOther,
 					ReasonCode: metricInputReason(reason),
-				})
-			}
-		}
-	}
-	for _, pair := range observability.AllMetricComponentStages() {
-		for _, direction := range observability.AllDirections() {
-			for _, result := range observability.AllResults() {
-				recorder.Observe(context.Background(), observability.Observation{
-					Component: pair.Component, Stage: pair.Stage, Result: result, Direction: direction,
-					Counts: observability.Counts{
-						Messages: 1, Records: 1, Plans: 1, Levels: 1,
-						Events: 1, Bytes: 1, Keys: 1, StateBytes: 1,
-					},
 				})
 			}
 		}
@@ -775,8 +748,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 			observationTotal += metricReasonSeries(pair.Component, result)
 		}
 	}
-	observationCount := len(observability.AllMetricStages()) * len(observability.AllDirections()) *
-		len(observability.AllResults())
 
 	bounds := map[string]int{
 		fqName("build_info"): 1,
@@ -1227,11 +1198,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("platform_settings_refresh_total")] = 2
 	bounds[fqName("platform_settings_unavailable_total")] = len(platformsettings.UnavailableReasons)
 	bounds[fqName("platform_settings_change_total")] = len(platformsettings.Fields)
-	for _, name := range []string{
-		"messages", "records", "plans", "levels", "events", "bytes", "keys", "state_bytes",
-	} {
-		bounds[fqName("observed_"+name+"_total")] = observationCount
-	}
 	return bounds
 }
 

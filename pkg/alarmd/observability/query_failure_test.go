@@ -85,7 +85,7 @@ func TestQueryFailureCodesFollowBoundedGrammarInsteadOfWhitelist(t *testing.T) {
 			}
 		})
 	}
-	if got := normalizeQueryFailure(ComponentDetect, StageDetectCompleted, &QueryFailureFacts{Stage: "execute"}); got != nil {
+	if got := normalizeQueryFailure(ComponentRuntime, StageStartup, &QueryFailureFacts{Stage: "execute"}); got != nil {
 		t.Fatalf("facts outside the Access query boundary were kept: %+v", got)
 	}
 }

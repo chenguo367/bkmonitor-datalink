@@ -649,7 +649,7 @@ type CostSnapshot struct {
 // retained. Reconcile and Publish belong to existing control/report ticks.
 //
 // Observe takes one lock, the account of the group it counts for, and
-// nothing that Reconcile, Publish, Snapshot or RetainedPeaks does in
+// nothing that Reconcile, Publish or Snapshot does in
 // proportion to the roster happens under it: Reconcile builds the next
 // roster aside and stores it whole, Publish copies each group's windows
 // under that group's account and ranks the copy, and Snapshot reads a
@@ -1419,45 +1419,4 @@ type CostRetainedPeak struct {
 	// numerator is short by an unknown amount, and a rate that is quietly low
 	// is the one that leaves an object where it is.
 	ComputeWallUnknown uint64
-}
-
-// RetainedPeaks is every observed group's retained-byte peak over the window.
-//
-// The same number Publish sums into Retained.PeakSumBytes, taken the same way
-// -- the larger of the two windows, because the window the reading is for is
-// the one that has not finished rotating. Exposed per group so the Worker's
-// heartbeat reports what the read-only column shows, from one derivation
-// rather than two: a second accumulator over the same observations would
-// answer the same question with a different number, and the difference would
-// be invisible on both pages.
-//
-// Read-only. It does not rotate the windows, so calling it between Publish
-// ticks neither advances nor disturbs them. Each group's windows are read
-// under its own account, one group at a time, and the list is sorted with
-// none held.
-func (c *CostSummary) RetainedPeaks() []CostRetainedPeak {
-	if c == nil || !c.enabled {
-		return nil
-	}
-	scope := c.scope.Load()
-	if scope == nil {
-		return []CostRetainedPeak{}
-	}
-	peaks := make([]CostRetainedPeak, 0, len(scope.groups))
-	for key, g := range scope.groups {
-		g.account.mu.Lock()
-		w := g.account.windows
-		g.account.mu.Unlock()
-		reading := CostRetainedPeak{QueryGroupKey: key,
-			RetainedBytesPeak: max(w.current.RetainedBytesPeak, w.previous.RetainedBytesPeak)}
-		for _, s := range [2]CostScalars{w.current, w.previous} {
-			reading.ComputeWallNS += s.EvaluationWall.ObservedNS + s.StateWall.ObservedNS
-			reading.ComputeWallUnknown += s.EvaluationWall.Unknown + s.StateWall.Unknown
-		}
-		if reading.RetainedBytesPeak > 0 || reading.ComputeWallNS > 0 {
-			peaks = append(peaks, reading)
-		}
-	}
-	sort.Slice(peaks, func(i, j int) bool { return peaks[i].QueryGroupKey < peaks[j].QueryGroupKey })
-	return peaks
 }
