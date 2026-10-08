@@ -22,7 +22,7 @@ import (
 // held snapshot.
 func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 	client := &hashClient{hashes: map[string][]string{
-		"bk_monitorv3.ce.cache.cmdb.host": {"10.0.0.7|0", disabledByAddressHost},
+		"bk_monitorv3.ce.cache.cmdb.host": {"192.0.2.7|0", disabledByAddressHost},
 		"bk_monitorv3.ce.cache.cmdb.bcs_cluster_business": {
 			"BCS-K8S-00001", "11", "BCS-K8S-00002", " 12 ",
 			"BCS-K8S-00003", "0", "BCS-K8S-00004", "-3", "BCS-K8S-00005", "biz", " ", "13",
@@ -61,7 +61,7 @@ func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 // cluster is mapped.
 func TestAnAbsentClusterMappingMapsNoCluster(t *testing.T) {
 	client := &hashClient{hashes: map[string][]string{
-		"bk_monitorv3.ce.cache.cmdb.host": {"10.0.0.7|0", disabledByAddressHost},
+		"bk_monitorv3.ce.cache.cmdb.host": {"192.0.2.7|0", disabledByAddressHost},
 	}}
 	reader, _ := NewReader(client, "bk_monitorv3.ce")
 	at := time.Unix(1700000000, 0).UTC()
@@ -125,7 +125,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 	const clusterKey = "bk_monitorv3.ce.cache.cmdb.bcs_cluster_business"
 	at := time.Unix(1700000000, 0).UTC()
 	good := &hashClient{hashes: map[string][]string{
-		"bk_monitorv3.ce.cache.cmdb.host": {"10.0.0.7|0", disabledByAddressHost},
+		"bk_monitorv3.ce.cache.cmdb.host": {"192.0.2.7|0", disabledByAddressHost},
 		clusterKey:                        {"BCS-K8S-00001", "11"},
 	}}
 	reader, _ := NewReader(good, "bk_monitorv3.ce")
@@ -140,7 +140,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 	wrongType := errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 	failing := &failingHashClient{
 		hashClient: &hashClient{hashes: map[string][]string{
-			"bk_monitorv3.ce.cache.cmdb.host": {"10.0.0.7|0", disabledByAddressHost, "10.0.0.8|0", disabledByAddressHost},
+			"bk_monitorv3.ce.cache.cmdb.host": {"192.0.2.7|0", disabledByAddressHost, "192.0.2.8|0", disabledByAddressHost},
 			clusterKey:                        {"BCS-K8S-00002", "12"},
 		}},
 		fail: map[string]error{clusterKey: wrongType},
@@ -153,7 +153,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 	if health.Refreshes != 2 || health.ConsecutiveErrors != 0 || health.Degraded {
 		t.Fatalf("health = %+v, want the second refresh taken, no store failure, nothing degraded", health)
 	}
-	if _, found := store.Current().Lookup("10.0.0.8|0"); !found {
+	if _, found := store.Current().Lookup("192.0.2.8|0"); !found {
 		t.Fatal("the host index of the refresh whose mapping could not be read was not taken")
 	}
 	if !health.ClusterBusinessMapping.ReadFailed || health.ClusterBusinessMapping.Held != 1 {
@@ -181,7 +181,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 func TestAFirstLoadWithAnUnreadableMappingMapsNoCluster(t *testing.T) {
 	const clusterKey = "bk_monitorv3.ce.cache.cmdb.bcs_cluster_business"
 	client := &failingHashClient{
-		hashClient: &hashClient{hashes: map[string][]string{"bk_monitorv3.ce.cache.cmdb.host": {"10.0.0.7|0", disabledByAddressHost}}},
+		hashClient: &hashClient{hashes: map[string][]string{"bk_monitorv3.ce.cache.cmdb.host": {"192.0.2.7|0", disabledByAddressHost}}},
 		fail:       map[string]error{clusterKey: errors.New("i/o timeout")},
 	}
 	reader, _ := NewReader(client, "bk_monitorv3.ce")
@@ -202,7 +202,7 @@ func TestTheNamespaceMappingIsReadBesideTheClusterMapping(t *testing.T) {
 	const namespaceKey = "bk_monitorv3.ce.cache.cmdb.bcs_namespace_business"
 	at := time.Unix(1700000000, 0).UTC()
 	good := &hashClient{hashes: map[string][]string{
-		"bk_monitorv3.ce.cache.cmdb.host":                 {"10.0.0.7|0", disabledByAddressHost},
+		"bk_monitorv3.ce.cache.cmdb.host":                 {"192.0.2.7|0", disabledByAddressHost},
 		"bk_monitorv3.ce.cache.cmdb.bcs_cluster_business": {"BCS-K8S-00001", "11"},
 		namespaceKey: {"BCS-K8S-00001|prod", "21", "BCS-K8S-00001|dev", "0"},
 	}}
