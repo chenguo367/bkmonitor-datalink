@@ -94,6 +94,11 @@ const (
 	// not all there. The strategy's time_delay moves the read; the row
 	// carries the value that would have read those samples complete.
 	CheckReadBeforeComplete Check = "READ_BEFORE_COMPLETE"
+	// ReadHeld is an object alarmd holds the reads of, because its measured
+	// arrival age is past what its time_delay waits: its rounds read the
+	// data whole, later than the time_delay says. The strategy's owner sets
+	// the time_delay that needs no hold; the row carries it.
+	CheckReadHeld Check = "READ_HELD"
 	// LatePastRound is the objects whose late series had crossed their
 	// Slots in two supplemented windows in a row: the supplement recovered
 	// none, the rounds were decided without them, and only a longer
@@ -320,6 +325,7 @@ var checkAnswers = map[Check]struct {
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
 	// The strategy's: its time_delay decides when its window is read.
 	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},
+	CheckReadHeld:           {OwnerStrategy, GroupByStrategy},
 	CheckLatePastRound:      {OwnerStrategy, GroupByStrategy},
 	// The data's: its late tail is past what a supplement reaches.
 	CheckLateSeriesMissed: {OwnerData, GroupByStrategy},
@@ -394,6 +400,10 @@ var checkOrder = []Check{
 	// Below every line that stops detection: this one only says a line that
 	// would is near.
 	CheckRetainedShareApproaching,
+	// The last line over objects: the strategy runs and reads its data
+	// whole, only later than its time_delay says. Any other row of the
+	// strategy decides it.
+	CheckReadHeld,
 	// Last: the strategy runs. A reader who starts at the top meets every
 	// line that stops detection before the one that only widens it.
 	CheckConfigNormalized,
@@ -584,7 +594,7 @@ func resultOf(anomaly Anomaly) Result {
 	case anomaly.Kind == KindNoData, anomaly.Kind == KindEmptyEveryRound:
 		return ResultNoData
 	case anomaly.Kind == KindNoDataMemoryRefused, anomaly.Kind == KindRetainedShareApproaching, anomaly.Kind == KindReadBeforeComplete,
-		anomaly.Kind == KindLatePastRound, anomaly.Kind == KindLateSeriesMissed:
+		anomaly.Kind == KindReadHeld, anomaly.Kind == KindLatePastRound, anomaly.Kind == KindLateSeriesMissed:
 		// The round completed; what was refused was the memory beside it,
 		// or nothing yet.
 		return ResultCompleted
@@ -1139,7 +1149,7 @@ func checkRowsOf(columns [][]Anomaly, view *View, now time.Time) checkTallies {
 		for check, consequence := range consequences {
 			ensure(check).skipped = consequence
 		}
-		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.LateSeries} {
+		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.ReadHeld, view.LateSeries} {
 			for index := range list {
 				row := &list[index]
 				if row.Finding.Check == "" {
@@ -1537,6 +1547,7 @@ func todoRowsOf(columns [][]Anomaly, view *View, now time.Time) Todo {
 		count(view.NoDataMemory)
 		count(view.RetainedShare)
 		count(view.ReadEarly)
+		count(view.ReadHeld)
 		count(view.LateSeries)
 	}
 	if view != nil {
@@ -1705,7 +1716,7 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 		}
 	}
 	demoted := demotedObjects(&selected)
-	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.LateSeries} {
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory, view.RetainedShare, view.ReadEarly, view.ReadHeld, view.LateSeries} {
 		for _, anomaly := range column {
 			if queryGroup != "" && anomaly.QueryGroup != queryGroup {
 				continue

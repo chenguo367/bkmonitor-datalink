@@ -8,6 +8,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // An object overdue at one publish and not at the last begins an episode
@@ -223,5 +224,35 @@ func TestAPublishFromACutOverdueListEndsOnlyWhatIsOverdueNoMore(t *testing.T) {
 	publisher.publishOnce(context.Background())
 	if fmt.Sprint(ended) != "[qg-a qg-b]" {
 		t.Fatalf("ended %v, want qg-b ended once the list is whole", ended)
+	}
+}
+
+// The snapshot lists, beside the read holds, a row for each object held on a
+// measured arrival age, with its wake facts like every listed row; a hold
+// that rests on no measurement is in the holds and has no row.
+func TestTheFleetPublisherListsTheObjectsItHoldsTheReadsOf(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	tracker := fleet.NewTracker(nil, "replica-1", clock.now)
+	for _, name := range []string{"qg-held", "qg-bound"} {
+		tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED",
+			Trace: observability.TraceFields{QueryGroupKey: name, StrategyID: "4101", BusinessID: "2", EvaluationTime: 1_791_399_940}})
+	}
+	holds := map[string]fleet.ReadHoldFacts{
+		"qg-held":  {Millis: 99_000, ArrivalAgeMillis: 189_000, HeldSince: 1_791_396_000, DelaySeconds: 60, SuggestedDelaySeconds: 180},
+		"qg-bound": {Millis: 600_000, HeldSince: 1_791_396_000, DelaySeconds: 60},
+	}
+	publisher := fleetPublisher{
+		tracker: tracker, replica: "replica-1", now: clock.now,
+		owned:     func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-held", "qg-bound"} },
+		readHolds: func() map[string]fleet.ReadHoldFacts { return holds },
+		schedule:  scriptedSchedule{"qg-held": {Known: true, DueAt: clock.now().Add(time.Minute), IntervalSeconds: 60}},
+	}
+	snapshot := publisher.snapshot(context.Background())
+	if len(snapshot.ReadHolds) != 2 || len(snapshot.ReadHeld) != 1 {
+		t.Fatalf("holds %+v rows %+v, want both holds and one row", snapshot.ReadHolds, snapshot.ReadHeld)
+	}
+	row := snapshot.ReadHeld[0]
+	if row.QueryGroup != "qg-held" || row.Kind != fleet.KindReadHeld || row.Wake == nil || !row.Wake.Known || len(row.Strategies) != 1 {
+		t.Fatalf("row %+v, want qg-held under its strategy with its wake facts", row)
 	}
 }

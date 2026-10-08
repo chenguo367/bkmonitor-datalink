@@ -256,6 +256,9 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 	var bestWords Standing
 	var advice *TimeDelayAdvice
 	for _, plan := range standing.Plans {
+		// A hold says it holds whether or not it has a row: one that rests on
+		// no measurement has none, and is still the owner's to know of.
+		advice = advice.withHold(plan.QueryGroup, plan.ReadHold)
 		for _, anomaly := range plan.Rows {
 			advice = advice.with(anomaly)
 			words, given := standingForStrategy(anomaly, StrategyRef{StrategyID: id, BusinessID: plan.Business})

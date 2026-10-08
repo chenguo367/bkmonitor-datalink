@@ -196,8 +196,14 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// primary - because a run whose query returned series the target
 	// selected none of has the data, and EMPTY_EVERY_ROUND's "data absent"
 	// sends its owner to the source instead of the target.
-	if got := len(Checks()); got != 36 || len(checkAnswers) != 36 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 36: a new check has to "+
+	// Thirty-seven: READ_HELD is a rule over a dimension the rows did not
+	// carry before - the read hold alarmd keeps for an object on its
+	// measured arrival age - because such an object's rounds read its data
+	// whole, later than its time_delay says, and the time_delay that would
+	// need no hold stays the strategy owner's to set (user, 09-30: the
+	// advice stays with the owner while alarmd holds the read).
+	if got := len(Checks()); got != 37 || len(checkAnswers) != 37 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 37: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -271,6 +277,8 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
 		CheckReadBeforeComplete: {Kind: KindReadBeforeComplete,
 			ReadEarly: &ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180}},
+		CheckReadHeld: {Kind: KindReadHeld,
+			ReadHold: &ReadHoldFacts{Millis: 99_000, ArrivalAgeMillis: 160_000, HeldSince: 1_790_000_000, DelaySeconds: 60, SuggestedDelaySeconds: 180}},
 		CheckLatePastRound: {Kind: KindLatePastRound,
 			LatePastRound: &LatePastRoundFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 300}},
 		CheckLateSeriesMissed: {Kind: KindLateSeriesMissed, LateSeriesMissed: &LateSeriesMissedFacts{Windows: 2, CrossedSeries: 3}},

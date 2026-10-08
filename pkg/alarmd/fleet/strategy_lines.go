@@ -243,6 +243,9 @@ func strategyLineOf(line StrategyLine, deciding Anomaly) string {
 // its holes fall. Other checks supply none in this batch; the slot stays
 // empty rather than filled from prose.
 func evidenceClause(row Anomaly) string {
+	if row.Kind == KindReadHeld {
+		return readHeldClause(row.ReadHold)
+	}
 	coverage := row.Coverage
 	if coverage == nil || coverage.Short == 0 {
 		return ""

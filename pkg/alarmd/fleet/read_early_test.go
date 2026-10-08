@@ -214,5 +214,5 @@ func sameAdvice(left, right TimeDelayAdvice) bool {
 	left.objects, right.objects = nil, nil
 	return left.CurrentDelaySeconds == right.CurrentDelaySeconds && left.SuggestedDelaySeconds == right.SuggestedDelaySeconds &&
 		left.Object == right.Object && left.Objects == right.Objects && left.Since.Equal(right.Since) &&
-		left.Samples == right.Samples && left.PartialRevised == right.PartialRevised
+		left.Samples == right.Samples && left.PartialRevised == right.PartialRevised && left.ReadHoldSeconds == right.ReadHoldSeconds
 }

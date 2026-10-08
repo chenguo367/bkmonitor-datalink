@@ -19,6 +19,19 @@ type ReadHoldFacts struct {
 	Rung                 string  `json:"rung,omitempty"`
 	Buckets              []int64 `json:"buckets,omitempty"`
 	Annotation           string  `json:"annotation"`
+	// HeldSince is the first Slot frozen with the group's hold in force, Unix
+	// seconds; zero while it holds none, or has only chosen one.
+	HeldSince int64 `json:"held_since,omitempty"`
+	// DelaySeconds is the time_delay the group's query runs under, as
+	// compiled, and SuggestedDelaySeconds the one at which its measured
+	// arrival age needs no hold: the arrival age less the settling wait,
+	// aligned up to the data step as the lookback's suggestion is. An upper
+	// bound, as the arrival age only rises with the evidence until a
+	// lowering, itself three matching earlier reads, sets it lower. Zero
+	// while the group holds nothing, its arrival age was never measured --
+	// a hold that is a predecessor's bound -- or its query is not known yet.
+	DelaySeconds          int64 `json:"time_delay_seconds,omitempty"`
+	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds,omitempty"`
 }
 
 func withinReadHoldBudget(facts map[string]ReadHoldFacts, budget int) map[string]ReadHoldFacts {

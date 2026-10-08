@@ -175,11 +175,19 @@ function renderColumns(list) {
       var advice = line.time_delay_advice;
       if (advice) {
         // Beside the sentence, whatever decided it: the owner's setting that
-        // reads this strategy's data whole.
-        li.appendChild(text('span', '另：建议把 time_delay 从 ' + advice.current_time_delay_seconds + ' 秒调到 ' +
-          advice.suggested_time_delay_seconds + ' 秒（首读后数据还在变' +
-          (advice.partial_revised ? '，其中 ' + advice.partial_revised + '/' + advice.samples + ' 次只有部分序列被修订，调大会让整条查询都晚读' : '') +
-          '）', 'advice'));
+        // reads this strategy's data whole. Under a hold the first read
+        // already comes after the data, so it says what alarmd holds instead
+        // of data still changing; a hold with no measured arrival suggests
+        // nothing.
+        var said = [];
+        if (advice.read_hold_seconds) said.push('alarmd 当前自动推后 ' + advice.read_hold_seconds + ' 秒');
+        if (advice.suggested_time_delay_seconds) {
+          said.push('建议把 time_delay 从 ' + advice.current_time_delay_seconds + ' 秒调到 ' + advice.suggested_time_delay_seconds + ' 秒' +
+            (advice.samples ? '（首读后数据还在变' +
+              (advice.partial_revised ? '，其中 ' + advice.partial_revised + '/' + advice.samples + ' 次只有部分序列被修订，调大会让整条查询都晚读' : '') +
+              '）' : ''));
+        }
+        if (said.length) li.appendChild(text('span', '另：' + said.join('，'), 'advice'));
       }
       ul.appendChild(li);
     });

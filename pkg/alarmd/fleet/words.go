@@ -232,6 +232,9 @@ var checkWords = map[Check]wordPair{
 	// Detecting, from data read before it was all there: its results cannot
 	// be taken as they stand, and the strategy's owner moves the read.
 	CheckReadBeforeComplete: {StateResultUntrusted, ActionStrategyEdit},
+	// Detecting, and from data read whole: alarmd holds the read for the
+	// strategy until its owner moves the time_delay.
+	CheckReadHeld: {StateDetecting, ActionStrategyEdit},
 	// The same pair for data later still: decided without it, and the read
 	// moved by the strategy's owner.
 	CheckLatePastRound: {StateResultUntrusted, ActionStrategyEdit},

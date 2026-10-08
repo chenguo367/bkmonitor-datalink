@@ -72,6 +72,13 @@ type productionReadHoldGroup struct {
 	predecessors   []execution.QueryGroupIdentity
 	queryRoute     string
 	queryDelay     time.Duration
+	// queryStep is the query's data step, the one the lookback aligns its
+	// suggestion to, and settlingWait the spec's, cached with the delay for
+	// the time_delay a measured hold suggests (fleetFacts); settled says the
+	// spec was built.
+	queryStep      time.Duration
+	settlingWait   time.Duration
+	settled        bool
 	degradedLogged readHoldDegradedLine
 }
 
@@ -196,6 +203,7 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	holds.mu.Lock()
 	if owned != nil && holds.groups[qg] == owned {
 		owned.queryRoute, owned.queryDelay = route, delay
+		owned.queryStep = time.Duration(object.QueryPlan.StepMillis) * time.Millisecond
 	}
 	holds.mu.Unlock()
 	return route, delay, nil
@@ -219,6 +227,11 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 			spec.SettlingWait = wait
 		}
 	}
+	holds.mu.Lock()
+	if owned := holds.groups[spec.QueryGroup]; owned != nil {
+		owned.settlingWait, owned.settled = spec.SettlingWait, true
+	}
+	holds.mu.Unlock()
 	return spec, nil
 }
 
