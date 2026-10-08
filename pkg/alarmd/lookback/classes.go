@@ -68,10 +68,13 @@ const (
 var UnclassifiedReasons = []string{UnclassifiedMemoryRefused, UnclassifiedUnsettled}
 
 const (
-	// readEarlyRepeat is how many completed samples of a Query Group in a
-	// row must find its window read early before it is reported: once may
-	// be an upstream hiccup, twice in a row is the configuration.
+	// readEarlyRepeat is how many of a Query Group's latest readEarlyWindow
+	// classified samples must find its window read early - read early or
+	// partially revised - for it to be reported: once may be an upstream
+	// hiccup, twice is the configuration. A window read late on most samples
+	// is reported though a sample between them read it whole.
 	readEarlyRepeat = 2
+	readEarlyWindow = 3
 	// readEarlyKept is how many of those samples a report carries, and
 	// maxEvidenceBuckets how many changed buckets each names.
 	readEarlyKept      = 3
@@ -101,7 +104,8 @@ type ReadEarlySample struct {
 }
 
 // ReadEarlyReading is a Query Group whose window was read early in
-// readEarlyRepeat completed samples in a row: the time_delay its query runs
+// readEarlyRepeat of its latest readEarlyWindow classified samples: the
+// time_delay its query runs
 // under, the one that would have read its samples complete - the most any
 // of them completed past its first read's age, added and aligned up to the
 // step, as a strategy's time_delay is aligned when it is compiled - and the
@@ -118,12 +122,31 @@ type ReadEarlyReading struct {
 	Samples               []ReadEarlySample            `json:"samples"`
 }
 
-// readEarlyState is a Query Group's run of window_read_early samples.
+// readEarlyState is a Query Group's latest readEarlyWindow classified
+// samples while one of them found its window read early, oldest first, and
+// since when it has been reported; zero while it is not.
 type readEarlyState struct {
-	consecutive  int
+	recent       []readEarlyEntry
 	since        time.Time
 	delaySeconds int64
-	samples      []ReadEarlySample
+}
+
+// readEarlyEntry is one classified sample of the window: one that found it
+// read early, with its evidence, or one that did not.
+type readEarlyEntry struct {
+	early  bool
+	sample ReadEarlySample
+}
+
+// reported is the window found read early in readEarlyRepeat of its samples.
+func (run *readEarlyState) reported() bool {
+	early := 0
+	for _, entry := range run.recent {
+		if entry.early {
+			early++
+		}
+	}
+	return early >= readEarlyRepeat
 }
 
 // seriesLateState is a Query Group some of whose series were seen late: the
@@ -184,42 +207,11 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 		engine.recordIgnoredLocked(candidate, IgnoredNoWholeWindowArrival)
 		state.reading.ignored[wordIndex(ReadHoldIgnoredReasons, IgnoredNoWholeWindowArrival)]++
 	}
-	switch class {
-	case ClassWindowReadEarly, ClassPartialRevised:
-		early := ReadEarlySample{EvaluationTime: candidate.evaluation,
-			ReadHoldSeconds:      candidate.contract.ReadHoldMillis / 1000,
-			FirstReadAgeSeconds:  int64(candidate.readAt.Sub(candidate.windowEnd) / time.Second),
-			FirstReadyAgeSeconds: int64(firstReadAge(candidate) / time.Second),
-			CompletionAgeSeconds: int64(candidate.completion / time.Second), PartialRevised: class == ClassPartialRevised}
-		if candidate.early != nil {
-			early.Rung, early.ChangedAgeSeconds, early.Buckets = candidate.early.Rung, candidate.early.ChangedAgeSeconds, candidate.early.Buckets
-		}
-		if state.readEarly == nil {
-			state.readEarly = &readEarlyState{since: now}
-		}
-		run := state.readEarly
-		run.consecutive++
-		run.delaySeconds = candidate.delaySeconds
-		run.samples = append(run.samples, early)
-		if len(run.samples) > readEarlyKept {
-			run.samples = append([]ReadEarlySample(nil), run.samples[len(run.samples)-readEarlyKept:]...)
-		}
-		// While its window is read early the group rests no longer than its
-		// deepest rung, however long it rested before: the row it is reported
-		// on goes when a sample reads the data whole again, and that sample
-		// is captured one such rest after this one, not up to restCap later.
-		if floor := RungSteps[state.depth-1]; state.rest > floor {
-			state.rest = floor
-			next := now.Add(time.Duration(floor * float64(state.step) * restSpread(candidate.queryGroup)))
-			if next.Before(state.nextAt) {
-				state.nextAt = next
-			}
-		}
-	case ClassUnclassified:
-		// Not known either way: it neither adds to a run nor ends one.
+	if class == ClassUnclassified {
+		// Not known either way: it is not one of the window's samples.
 		engine.counts.unclassified[key2(candidate.source, reason)]++
-	default:
-		state.readEarly = nil
+	} else {
+		engine.noteReadEarlyLocked(state, candidate, class, now)
 	}
 	switch class {
 	case ClassSeriesLate:
@@ -240,15 +232,85 @@ func (engine *Engine) noteClassLocked(state *group, candidate *sample, now time.
 	}
 }
 
-// readingOf is the group's report when its run is long enough.
+// noteReadEarlyLocked adds a classified sample to its group's window. A
+// group is reported while readEarlyRepeat of the window's samples found it
+// read early; withdrawn, what it was reported on goes with it, so a later
+// report rests on, and dates from, samples after the withdrawal only.
+func (engine *Engine) noteReadEarlyLocked(state *group, candidate *sample, class string, now time.Time) {
+	entry := readEarlyEntry{early: class == ClassWindowReadEarly || class == ClassPartialRevised}
+	run := state.readEarly
+	if run == nil && !entry.early {
+		return
+	}
+	if run == nil {
+		run = &readEarlyState{}
+		state.readEarly = run
+	}
+	if entry.early {
+		entry.sample = ReadEarlySample{EvaluationTime: candidate.evaluation,
+			ReadHoldSeconds:      candidate.contract.ReadHoldMillis / 1000,
+			FirstReadAgeSeconds:  int64(candidate.readAt.Sub(candidate.windowEnd) / time.Second),
+			FirstReadyAgeSeconds: int64(firstReadAge(candidate) / time.Second),
+			CompletionAgeSeconds: int64(candidate.completion / time.Second), PartialRevised: class == ClassPartialRevised}
+		if candidate.early != nil {
+			entry.sample.Rung, entry.sample.ChangedAgeSeconds, entry.sample.Buckets = candidate.early.Rung, candidate.early.ChangedAgeSeconds, candidate.early.Buckets
+		}
+		run.delaySeconds = candidate.delaySeconds
+	}
+	run.recent = append(run.recent, entry)
+	if len(run.recent) > readEarlyWindow {
+		run.recent = append([]readEarlyEntry(nil), run.recent[len(run.recent)-readEarlyWindow:]...)
+	}
+	reported := run.reported()
+	switch {
+	case reported && run.since.IsZero():
+		run.since = now
+	case !reported && !run.since.IsZero():
+		state.readEarly = nil
+		return
+	case !reported && !entry.early:
+		early := false
+		for _, kept := range run.recent {
+			early = early || kept.early
+		}
+		if !early {
+			state.readEarly = nil
+		}
+		return
+	}
+	// After a sample that read it early, and while it is reported whatever a
+	// sample read, the group rests no longer than its deepest rung, however
+	// long it rested before: the sample that can confirm the report, or
+	// withdraw it, is captured one such rest after this one, not up to
+	// restCap later.
+	if floor := RungSteps[state.depth-1]; state.rest > floor {
+		state.rest = floor
+		next := now.Add(time.Duration(floor * float64(state.step) * restSpread(candidate.queryGroup)))
+		if next.Before(state.nextAt) {
+			state.nextAt = next
+		}
+	}
+}
+
+// readingOf is the group's report while it is reported: the suggestion and
+// its evidence from the window's samples that found it read early.
 func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarlyReading, bool) {
 	run := state.readEarly
-	if run == nil || run.consecutive < readEarlyRepeat {
+	if run == nil || !run.reported() {
 		return ReadEarlyReading{}, false
+	}
+	var samples []ReadEarlySample
+	for _, entry := range run.recent {
+		if entry.early {
+			samples = append(samples, entry.sample)
+		}
+	}
+	if len(samples) > readEarlyKept {
+		samples = samples[len(samples)-readEarlyKept:]
 	}
 	step := int64(state.step / time.Second)
 	later := int64(0)
-	for _, sample := range run.samples {
+	for _, sample := range samples {
 		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadyAgeSeconds+sample.ReadHoldSeconds)
 	}
 	suggested := run.delaySeconds + later
@@ -257,11 +319,12 @@ func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarly
 	}
 	return ReadEarlyReading{QueryGroup: queryGroup, Source: state.source, StepSeconds: step,
 		CurrentDelaySeconds: run.delaySeconds, SuggestedDelaySeconds: suggested, Since: run.since,
-		Samples: append([]ReadEarlySample(nil), run.samples...)}, true
+		Samples: samples}, true
 }
 
 // ReadEarly is every Query Group this process owns whose window was read
-// early in readEarlyRepeat completed samples in a row, by Query Group.
+// early in readEarlyRepeat of its latest readEarlyWindow classified samples,
+// by Query Group.
 // Ownership is asked outside the engine's lock, as Stats asks it.
 func (engine *Engine) ReadEarly() []ReadEarlyReading {
 	if engine == nil {
