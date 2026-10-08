@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -185,20 +183,5 @@ func TestTheProjectionIsSizedByTheRankingsItPublishes(t *testing.T) {
 	if o := observationCostOptions("process", time.Now, func(uint64) bool { return true }); o.TopN != observationCostTopN || o.Admit == nil ||
 		o.GroupCapacity != 0 || o.PlanCapacity != 0 || o.MetadataBytes != 0 {
 		t.Fatalf("cost options = %+v, want sized by the roster through admission", o)
-	}
-}
-
-// A memory_percent older values still carry is read, said once at startup
-// to be unused, and changes nothing; none set says nothing.
-func TestAMemoryPercentStillSetIsLoggedAsUnused(t *testing.T) {
-	var logged bytes.Buffer
-	warnObservationMemoryPercent(observability.New(observability.ComponentRuntime, &logged), config.PhaseTwoObservationConfig{MemoryPercent: 5})
-	if !strings.Contains(logged.String(), "OBSERVATION_MEMORY_PERCENT_IGNORED") || !strings.Contains(logged.String(), `"memory_percent":5`) {
-		t.Fatalf("logged %q, want the key named as unused with its value", logged.String())
-	}
-	logged.Reset()
-	warnObservationMemoryPercent(observability.New(observability.ComponentRuntime, &logged), config.PhaseTwoObservationConfig{})
-	if logged.Len() != 0 {
-		t.Fatalf("logged %q with no memory_percent set, want nothing", logged.String())
 	}
 }

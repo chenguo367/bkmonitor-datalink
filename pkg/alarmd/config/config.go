@@ -186,16 +186,7 @@ type KafkaOutputConfig struct {
 type KafkaConfig struct {
 	LegacyAdapter LegacyAdapterConfig `yaml:"legacy_adapter"`
 	Brokers       []string            `yaml:"brokers"`
-	InputTopic    string              `yaml:"input_topic"`
 	TriggerEvent  KafkaOutputConfig   `yaml:"trigger_event"`
-	// Deprecated: accepted and ignored. It required every output topic to be
-	// repeated in a list, which protected nothing the topics themselves did not
-	// already state, and turned "add an output topic" into a startup failure
-	// when the second place was forgotten. The field stays only so a rendered
-	// configuration that still carries it keeps loading; it is removed once no
-	// deployment states it.
-	AllowedOutputTopics []string `yaml:"allowed_output_topics"`
-	GroupID             string   `yaml:"group_id"`
 	// ClientID and BrokerVersion identify this producer to the broker and fix
 	// the protocol it speaks. Neither is something a deployment knows better
 	// than the product: the identity is the product's name and the version is
@@ -204,7 +195,6 @@ type KafkaConfig struct {
 	// the standard RawEvent).
 	ClientID      string `yaml:"-"`
 	BrokerVersion string `yaml:"-"`
-	InitialOffset string `yaml:"initial_offset"`
 }
 
 func (c KafkaConfig) TriggerEventCoordinates() enginekafka.DecisionSinkConfig {
@@ -649,9 +639,6 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.CLI.resolveAdminKeySecret()
-	if err := cfg.PhaseTwo.migratePlatformSettings(); err != nil {
-		return Config{}, err
-	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -768,9 +755,6 @@ func (c Config) validateCommon() error {
 func (c Config) validateGoAccessRuntime() error {
 	if err := c.PhaseTwo.Linkd.Validate(); err != nil {
 		return err
-	}
-	if c.Kafka.InputTopic != "" || c.Kafka.GroupID != "" || c.Kafka.InitialOffset != "" {
-		return errors.New("phase-two Go Access must not configure phase-one Kafka input coordinates")
 	}
 	if err := validatePhaseTwoKafkaOutput(c.Kafka); err != nil {
 		return fmt.Errorf("trigger event configuration: %w", err)

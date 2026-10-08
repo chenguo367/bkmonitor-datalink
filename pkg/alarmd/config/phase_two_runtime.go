@@ -37,32 +37,10 @@ type PhaseTwoControlConfig struct {
 	StrategyCachePrefix string `yaml:"strategy_cache_prefix"`
 	ProviderRoute       string `yaml:"provider_route"`
 	// Timezone defaults to DefaultTimezone.
-	Timezone                   string `yaml:"timezone"`
-	RefreshInterval            Duration
-	ReconcileInterval          Duration
-	CatalogTTL                 Duration
-	LegacyMigrationMaxScanKeys int
-	LegacyMigrationTimeout     Duration
-	LegacyQueryRuntime         PhaseTwoLegacyQueryRuntimeConfig `yaml:"legacy_query_runtime"`
-}
-
-type PhaseTwoRuntimeFilterConfig struct {
-	FieldName string   `yaml:"field_name"`
-	Values    []string `yaml:"values"`
-}
-
-type PhaseTwoLegacyQueryRuntimeConfig struct {
-	// Deprecated: the four keys below are the platform's own settings and
-	// live under phase_two.platform_settings, which the platform's dynamic
-	// configuration distribution overrides at run time. They are still
-	// accepted here for one release: a value given here is carried into the
-	// new group, a value given in both places must agree, and the network
-	// filter, which the platform has never made a setting, must be the
-	// constant it always was. Remove once no deployment states them.
-	AccessBKData          *bool                       `yaml:"access_bk_data"`
-	BKDataCMDBLevelTables []string                    `yaml:"bkdata_cmdb_level_tables"`
-	SystemDiskFilter      PhaseTwoRuntimeFilterConfig `yaml:"system_disk_filter"`
-	SystemNetworkFilter   PhaseTwoRuntimeFilterConfig `yaml:"system_network_filter"`
+	Timezone          string `yaml:"timezone"`
+	RefreshInterval   Duration
+	ReconcileInterval Duration
+	CatalogTTL        Duration
 }
 
 // PhaseTwoPlatformSettingsConfig is alarmd's deployment layer of the
@@ -188,24 +166,7 @@ type PhaseTwoAccessConfig struct {
 	// search box. Empty means the references render as they did before, as
 	// plain labels, so a new environment still gets every other part of the page
 	// with no configuration at all.
-	MonitorWebBaseURL string `yaml:"monitor_web_base_url"`
-	// HostDisableMonitorStates mirrors the platform's HOST_DISABLE_MONITOR_STATES
-	// global config: a host whose CMDB bk_state contains any of these is not
-	// monitored, and Python's access chain drops its records before they can
-	// alert.
-	//
-	// It is stated here rather than derived because the program cannot derive
-	// it: it is an operator-editable platform setting living in the platform's
-	// own database, and this environment's value is not the shipped default.
-	// Absent means the filter is not installed, which is the behaviour alarmd
-	// had before it existed; it never falls back to the default, because a
-	// wrong list silently changes which alerts are produced.
-	//
-	// Deprecated: the exit stated above has arrived. The value lives under
-	// phase_two.platform_settings.host_disable_monitor_states and the
-	// platform's distribution overrides it at run time; a value given here
-	// is carried there for one release, and must agree with one given there.
-	HostDisableMonitorStates   []string `yaml:"host_disable_monitor_states"`
+	MonitorWebBaseURL          string `yaml:"monitor_web_base_url"`
 	MinReadyDelay              Duration
 	DownstreamExecutionReserve Duration
 }
@@ -258,7 +219,6 @@ type PhaseTwoRuntimeConfig struct {
 	Access           PhaseTwoAccessConfig           `yaml:"access"`
 	Coordinator      PhaseTwoCoordinatorConfig      `yaml:"-"`
 	PlatformSettings PhaseTwoPlatformSettingsConfig `yaml:"platform_settings"`
-	Observation      PhaseTwoObservationConfig      `yaml:"observation"`
 	NoData           PhaseTwoNoDataConfig           `yaml:"no_data"`
 }
 
@@ -290,19 +250,6 @@ type PhaseTwoNoDataConfig struct {
 	// indefinitely"; it is withdrawn in favour of the contract, which gives
 	// every group a finite horizon by default.
 	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
-}
-
-// PhaseTwoObservationConfig is what older values carry for the diagnostics
-// that read the control plane and write the diagnostic store beyond what
-// detection needs: the cost candidates, the criterion samples, the late-data
-// lookback's series tables.
-//
-// MemoryPercent was their share of the container's memory. It is read and
-// not used: observation memory takes no share of its own and grows while the
-// process stays within its soft memory limit with room left for detection's
-// budgets (package memoryline). A value still set is logged once at startup.
-type PhaseTwoObservationConfig struct {
-	MemoryPercent int `yaml:"memory_percent"`
 }
 
 func (c PhaseTwoNoDataConfig) validate() error {
@@ -340,8 +287,7 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			// top is a design item alarmd does not carry yet.
 			Timezone:        DefaultTimezone,
 			RefreshInterval: Duration(30 * time.Second), ReconcileInterval: Duration(5 * time.Second),
-			CatalogTTL: Duration(24 * time.Hour), LegacyMigrationMaxScanKeys: 50000,
-			LegacyMigrationTimeout: Duration(30 * time.Second),
+			CatalogTTL: Duration(24 * time.Hour),
 		},
 		Ownership: PhaseTwoOwnershipConfig{
 			ControlLeaderTTL: Duration(30 * time.Second), ControlLeaderRenewInterval: Duration(10 * time.Second),
@@ -369,79 +315,6 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 		},
 		PlatformSettings: PhaseTwoPlatformSettingsConfig{RedisKeyPrefix: platformsettings.DefaultKeyPrefix},
 	}
-}
-
-// migratePlatformSettings carries the deprecated keys into the new group.
-// A value stated in both places must agree: a deployment that says two
-// things about one setting is not one that can be read either way. The
-// constants are checked rather than ignored, so that a deployment which
-// changed one expecting an effect is told there is none.
-func (c *PhaseTwoRuntimeConfig) migratePlatformSettings() error {
-	group := &c.PlatformSettings
-	legacy := &c.Control.LegacyQueryRuntime
-	if states := c.Access.HostDisableMonitorStates; len(states) > 0 {
-		if err := carryList("access.host_disable_monitor_states", states, &group.HostDisableMonitorStates); err != nil {
-			return err
-		}
-	}
-	if legacy.AccessBKData != nil {
-		if group.IsAccessBKData != nil && *group.IsAccessBKData != *legacy.AccessBKData {
-			return errors.New("phase_two control legacy_query_runtime.access_bk_data and platform_settings.is_access_bk_data disagree")
-		}
-		value := *legacy.AccessBKData
-		group.IsAccessBKData = &value
-	}
-	if legacy.BKDataCMDBLevelTables != nil {
-		if err := carryList("control.legacy_query_runtime.bkdata_cmdb_level_tables", legacy.BKDataCMDBLevelTables, &group.BKDataCMDBLevelTables); err != nil {
-			return err
-		}
-	}
-	if legacy.SystemDiskFilter.FieldName != "" && legacy.SystemDiskFilter.FieldName != SystemDiskFilterField {
-		return fmt.Errorf("phase_two control legacy_query_runtime.system_disk_filter.field_name is the constant %q", SystemDiskFilterField)
-	}
-	if legacy.SystemDiskFilter.Values != nil {
-		if err := carryList("control.legacy_query_runtime.system_disk_filter.values", legacy.SystemDiskFilter.Values, &group.FileSystemTypeIgnore); err != nil {
-			return err
-		}
-	}
-	network := legacy.SystemNetworkFilter
-	if (network.FieldName != "" && network.FieldName != SystemNetworkFilterField) ||
-		(network.Values != nil && !equalStringLists(network.Values, SystemNetworkFilterValues())) {
-		return fmt.Errorf("phase_two control legacy_query_runtime.system_network_filter is the constant %s=%v and not a setting",
-			SystemNetworkFilterField, SystemNetworkFilterValues())
-	}
-	// One source from here on: the deprecated keys are read, carried, and
-	// then hold nothing a later reader could take for the value in force.
-	c.Access.HostDisableMonitorStates = nil
-	legacy.AccessBKData = nil
-	legacy.BKDataCMDBLevelTables = nil
-	legacy.SystemDiskFilter = PhaseTwoRuntimeFilterConfig{}
-	legacy.SystemNetworkFilter = PhaseTwoRuntimeFilterConfig{}
-	return nil
-}
-
-func carryList(oldKey string, values []string, into **[]string) error {
-	if *into != nil {
-		if !equalStringLists(**into, values) {
-			return fmt.Errorf("phase_two %s and its platform_settings key disagree", oldKey)
-		}
-		return nil
-	}
-	copied := append([]string{}, values...)
-	*into = &copied
-	return nil
-}
-
-func equalStringLists(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *Config) resolvePhaseTwoWorkerIDFromEnvironment() {
@@ -494,8 +367,7 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 		}
 	}
 	if c.Control.RefreshInterval.Duration() <= 0 || c.Control.ReconcileInterval.Duration() <= 0 ||
-		c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() ||
-		c.Control.LegacyMigrationMaxScanKeys <= 0 || c.Control.LegacyMigrationTimeout.Duration() <= 0 {
+		c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() {
 		return errors.New("phase_two control refresh, reconcile and catalog TTL are invalid")
 	}
 	if !ttlExceedsRenew(c.Ownership.ControlLeaderTTL, c.Ownership.ControlLeaderRenewInterval) ||

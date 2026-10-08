@@ -2730,15 +2730,6 @@ func schedulerFailureObservations(observations []observability.Observation) []ob
 // already run, because the snapshot destination is never what is under test.
 func withCompatibilityOutput(cfg *config.Config, address string) {
 	const topic = "alarmd_0bkmonitor_backend_event"
-	present := false
-	for _, allowed := range cfg.Kafka.AllowedOutputTopics {
-		if allowed == topic {
-			present = true
-		}
-	}
-	if !present {
-		cfg.Kafka.AllowedOutputTopics = append(cfg.Kafka.AllowedOutputTopics, topic)
-	}
 	cfg.Kafka.LegacyAdapter.Topic = topic
 	cfg.Kafka.LegacyAdapter.SnapshotPrefix = "alarmd-compatibility-test"
 	connection := cfg.Redis.Connection()
@@ -2755,10 +2746,8 @@ func validGoAccessRuntimeConfig() config.Config {
 	// settled-run helper serves the control stream there when a case runs
 	// Slots, since batch 4b executes only from an installed view.
 	cfg.HTTP.Listen = reserveBundleAddress()
-	accessBKData := false
 	cfg.Kafka.Brokers = []string{"127.0.0.1:9092"}
 	cfg.Kafka.TriggerEvent.Topic = "alarmd-trigger-event"
-	cfg.Kafka.AllowedOutputTopics = []string{"alarmd-trigger-event", "alarmd_0bkmonitor_backend_event"}
 	// Every deployment carries the compatibility output: a strategy without a
 	// frozen revision selects that protocol, and its snapshot is written before
 	// the event is published. Tests that open a bundle point the service Redis
@@ -2778,10 +2767,6 @@ func validGoAccessRuntimeConfig() config.Config {
 	cfg.PhaseTwo.Control.StrategyCachePrefix = "alarm-config"
 	cfg.PhaseTwo.Control.ProviderRoute = "unify-query-primary"
 	cfg.PhaseTwo.Control.Timezone = "Asia/Shanghai"
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.AccessBKData = &accessBKData
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.BKDataCMDBLevelTables = []string{}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemDiskFilter = config.PhaseTwoRuntimeFilterConfig{FieldName: "device_type", Values: []string{}}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemNetworkFilter = config.PhaseTwoRuntimeFilterConfig{FieldName: "device_name", Values: []string{}}
 	cfg.PhaseTwo.Access.UQEndpoint = "http://unify-query.service"
 	cfg.PhaseTwo.Access.QuerySource = "alarmd"
 	return cfg

@@ -85,21 +85,12 @@ func TestDefaultPhaseTwoRuntimeHasBoundedLifecycleBudgets(t *testing.T) {
 // completePhaseTwoProductionConfig fills in the coordinates only a deployment
 // knows, leaving everything the process decides at its derived value.
 func completePhaseTwoProductionConfig(cfg Config) Config {
-	accessBKData := false
 	cfg.PhaseTwo.Worker.ID = "alarmd-worker-0"
 	cfg.PhaseTwo.Control.StrategyCachePrefix = "alarm-config"
 	cfg.PhaseTwo.Access.UQEndpoint = "http://unify-query.service"
 	cfg.PhaseTwo.Access.QuerySource = "alarmd"
 	cfg.PhaseTwo.Control.ProviderRoute = "unify-query-primary"
 	cfg.PhaseTwo.Control.Timezone = "Asia/Shanghai"
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.AccessBKData = &accessBKData
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.BKDataCMDBLevelTables = []string{}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemDiskFilter = PhaseTwoRuntimeFilterConfig{
-		FieldName: "device_type", Values: []string{},
-	}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemNetworkFilter = PhaseTwoRuntimeFilterConfig{
-		FieldName: "device_name", Values: []string{},
-	}
 	return cfg
 }
 
@@ -298,7 +289,6 @@ kafka:
   brokers: [127.0.0.1:9092]
   trigger_event:
     topic: alarmd-trigger-event
-  allowed_output_topics: [alarmd-trigger-event, alarmd_0bkmonitor_backend_event]
   legacy_adapter:
     topic: alarmd_0bkmonitor_backend_event
     snapshot_prefix: alarmd-test
@@ -314,12 +304,6 @@ phase_two:
   control:
     strategy_cache_prefix: alarm-config
     timezone: Asia/Shanghai
-    legacy_query_runtime:
-      access_bk_data: false
-      bkdata_cmdb_level_tables: []
-      system_disk_filter:
-        field_name: device_type
-        values: []
   access:
     uq_endpoint: http://unify-query.service
     query_source: alarmd
