@@ -20,11 +20,11 @@ import (
 func refreshEvent(t *testing.T, facts *SourceRefreshFacts) map[string]any {
 	t.Helper()
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

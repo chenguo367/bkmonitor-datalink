@@ -12,14 +12,15 @@ package observability
 import (
 	"container/list"
 	"errors"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-type WindowLogLimiterConfig struct {
+// PacingLogBudget is how many lines a routine-pacing reason keeps per
+// window in each of its buckets.
+type PacingLogBudget struct {
 	Window    time.Duration
 	MaxEvents int
 }
@@ -56,26 +57,15 @@ type LogAdmission struct {
 // lines cannot, silence being what a dead emitter also produces. The bound
 // is fixed here and not a deployment parameter: the operator does not know
 // better than the program how often a pacing word needs to be seen.
-var pacingLogSamples = map[ReasonCode]WindowLogLimiterConfig{
+var pacingLogSamples = map[ReasonCode]PacingLogBudget{
 	ReasonCode(contract.ReasonQueryNotReady): {Window: time.Hour, MaxEvents: 1},
 }
 
 // PacingLogSample is the sample budget for a reason, if the reason is routine
 // pacing; every other reason is bounded by the policy's shared window.
-func PacingLogSample(reason ReasonCode) (WindowLogLimiterConfig, bool) {
+func PacingLogSample(reason ReasonCode) (PacingLogBudget, bool) {
 	sample, sampled := pacingLogSamples[reason]
 	return sample, sampled
-}
-
-// PacingLogSampledReasons lists the reasons under a sample, sorted, for the
-// test that holds them to the vocabulary.
-func PacingLogSampledReasons() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(pacingLogSamples))
-	for reason := range pacingLogSamples {
-		reasons = append(reasons, reason)
-	}
-	sort.Slice(reasons, func(i, j int) bool { return reasons[i] < reasons[j] })
-	return reasons
 }
 
 // RepeatedLogLimiter is the admission contract BoundedLogPolicy uses for
@@ -84,82 +74,9 @@ type RepeatedLogLimiter interface {
 	Admit(Observation) LogAdmission
 }
 
-// WindowLogLimiter is a concurrency-safe, constant-memory fixed-window
-// limiter. Its window and capacity must be supplied by the caller; M8 does not
-// define production defaults before G3 calibration.
-type WindowLogLimiter struct {
-	mu sync.Mutex
-
-	window    time.Duration
-	maxEvents int
-	now       func() time.Time
-	buckets   map[logBucketKey]windowLogBucket
-}
-
 type logBucketKey struct {
 	reason ReasonCode
 	stage  Stage
-}
-
-type windowLogBucket struct {
-	windowStart time.Time
-	used        int
-}
-
-func NewWindowLogLimiter(config WindowLogLimiterConfig) (*WindowLogLimiter, error) {
-	return newWindowLogLimiter(config, time.Now)
-}
-
-func newWindowLogLimiter(config WindowLogLimiterConfig, now func() time.Time) (*WindowLogLimiter, error) {
-	if config.Window <= 0 {
-		return nil, errors.New("observability: log limiter window must be positive")
-	}
-	if config.MaxEvents <= 0 {
-		return nil, errors.New("observability: log limiter capacity must be positive")
-	}
-	if now == nil {
-		return nil, errors.New("observability: log limiter clock is required")
-	}
-	buckets := make(map[logBucketKey]windowLogBucket, len(AllLogReasons())+len(AllStages()))
-	for _, reason := range AllLogReasons() {
-		buckets[logBucketKey{reason: reason}] = windowLogBucket{}
-	}
-	for _, stage := range AllStages() {
-		buckets[logBucketKey{reason: ReasonNone, stage: stage}] = windowLogBucket{}
-	}
-	return &WindowLogLimiter{window: config.Window, maxEvents: config.MaxEvents, now: now, buckets: buckets}, nil
-}
-
-func (l *WindowLogLimiter) Allow(observation Observation) bool {
-	if l == nil {
-		return false
-	}
-	observation = NormalizeObservation(observation)
-	key := limiterBucketKey(observation)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	// Sample in admission order so delayed callers cannot look like a clock rollback.
-	now := l.now()
-	bucket, ok := l.buckets[key]
-	if !ok {
-		return false
-	}
-	if bucket.windowStart.IsZero() || now.Before(bucket.windowStart) || now.Sub(bucket.windowStart) >= l.window {
-		bucket.windowStart = now
-		bucket.used = 0
-	}
-	if bucket.used >= l.maxEvents {
-		return false
-	}
-	bucket.used++
-	l.buckets[key] = bucket
-	return true
-}
-
-// Admit keeps the phase-one behaviour: fixed reason/stage buckets and no
-// suppressed-count reporting.
-func (l *WindowLogLimiter) Admit(observation Observation) LogAdmission {
-	return LogAdmission{Allowed: l.Allow(observation)}
 }
 
 func limiterBucketKey(observation Observation) logBucketKey {

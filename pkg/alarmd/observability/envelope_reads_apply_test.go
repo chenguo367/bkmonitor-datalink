@@ -25,11 +25,11 @@ import (
 // line, so the two consumers of the envelope stay two readings.
 func TestTheStateAppliedLineCarriesTheApplyEnvelopeCount(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 10, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -23,11 +23,11 @@ import (
 // enough that anything it governs is suppressed after one line.
 func withheldObserver(t *testing.T, output *bytes.Buffer) Observer {
 	t.Helper()
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,11 +173,11 @@ func TestANoDataSlotWritesItsCensusAndItsOutcome(t *testing.T) {
 	// budget. That these two lines share one limiter bucket -- same reason, no
 	// query group -- is real and worth knowing, but at two Slots a minute it is
 	// nowhere near the budget in production.
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 100})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 100, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

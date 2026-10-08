@@ -18,10 +18,7 @@ import (
 
 func evaluatorSampler(t testing.TB, req execution.EvaluationRequest) (*observability.SeriesSampler, observability.SeriesSampleSelection) {
 	t.Helper()
-	s, err := observability.NewSeriesSampler(observability.SeriesSampleLimits{RecordsPerMinute: 8, BytesPerMinute: 8 * observability.SeriesSampleMaxBytes, QueueCapacity: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := observability.NewAdmittedSeriesSampler(func(uint64) bool { return true })
 	due := req.Header.DuePlans[0]
 	now := time.Now()
 	v := observability.SeriesSampleSelection{QueryGroup: string(req.Header.Contract.Slot.QueryGroup), WindowID: "test-window", OpenedAt: now, ExpiresAt: now.Add(time.Minute), TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, StrategyID: due.Identity.StrategyID, StateGeneration: string(due.StateGeneration), PlanScheduleRevision: string(due.ScheduleRevision), SeriesDigest: string(req.Inputs[0].SeriesIdentity), SeriesKind: string(req.Inputs[0].Kind)}

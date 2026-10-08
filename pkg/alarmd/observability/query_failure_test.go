@@ -11,8 +11,8 @@ import (
 )
 
 func newQueryFailureTestObserver(output *bytes.Buffer) *LoggingObserver {
-	l, _ := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
-	p, _ := NewBoundedLogPolicy(l)
+	l, _ := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 10, MaxScopes: 1024})
+	p, _ := NewScopedBoundedLogPolicy(l)
 	return NewLoggingObserver(New("alarmd", output), p)
 }
 

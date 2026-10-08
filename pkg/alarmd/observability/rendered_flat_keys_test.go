@@ -26,13 +26,13 @@ import (
 func renderObservation(t *testing.T, observation Observation) map[string]any {
 	t.Helper()
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1000})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1000, MaxScopes: 1024})
 	if err != nil {
-		t.Fatalf("NewWindowLogLimiter() error = %v", err)
+		t.Fatalf("NewScopedLogLimiter() error = %v", err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
-		t.Fatalf("NewBoundedLogPolicy() error = %v", err)
+		t.Fatalf("NewScopedBoundedLogPolicy() error = %v", err)
 	}
 	NewLoggingObserver(New(ComponentScheduler, &output), policy).Observe(context.Background(), observation)
 	if output.Len() == 0 {

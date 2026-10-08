@@ -11,11 +11,11 @@ import (
 
 func refusalLogObserver(output *bytes.Buffer, t *testing.T) *LoggingObserver {
 	t.Helper()
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 100})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 100, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

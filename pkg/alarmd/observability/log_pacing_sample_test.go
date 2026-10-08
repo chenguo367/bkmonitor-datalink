@@ -145,7 +145,10 @@ func TestEverySampledReasonIsInTheLogVocabulary(t *testing.T) {
 	for _, reason := range AllLogReasons() {
 		known[reason] = true
 	}
-	sampled := PacingLogSampledReasons()
+	sampled := make([]ReasonCode, 0, len(pacingLogSamples))
+	for reason := range pacingLogSamples {
+		sampled = append(sampled, reason)
+	}
 	if len(sampled) == 0 {
 		t.Fatal("no reason is sampled: the pacing word writes every line again")
 	}
