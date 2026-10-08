@@ -5,6 +5,25 @@
 
 package observability
 
+// Where the process's CPU budget (GOMAXPROCS) was resolved from: what
+// RuntimeConfigFacts.CPUSource and container_cpu_cores{source} say. The
+// resolver writes these and the metric's closed label set is built from
+// them, so the two cannot name a source differently.
+const (
+	// CPUSourceQuota is the container's CPU quota.
+	CPUSourceQuota = "cpu_quota"
+	// CPUSourceQuotaMinimum is a quota below one CPU, raised to the minimum.
+	CPUSourceQuotaMinimum = "cpu_quota_minimum"
+	// CPUSourceEnvironmentOverride is GOMAXPROCS set in the environment.
+	CPUSourceEnvironmentOverride = "environment_override"
+	// CPUSourceRuntimeDefault is no quota at all: the Go runtime's own
+	// default, the host's CPUs rather than the container's.
+	CPUSourceRuntimeDefault = "runtime_default"
+)
+
+// CPUSources is every source the CPU budget can be resolved from.
+var CPUSources = []string{CPUSourceQuota, CPUSourceQuotaMinimum, CPUSourceEnvironmentOverride, CPUSourceRuntimeDefault}
+
 // RuntimeConfigFacts is a fixed, credential-free startup evidence surface.
 // It is not a WorkerCompatibility or business identity contract.
 type RuntimeConfigFacts struct {

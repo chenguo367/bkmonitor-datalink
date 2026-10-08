@@ -178,7 +178,7 @@ func runPhaseTwoApplicationWithDependencies(
 	if err != nil {
 		return err
 	}
-	cpuSource := "runtime_default"
+	cpuSource := observability.CPUSourceRuntimeDefault
 	if dependencies.configureCPU != nil {
 		cpuSource, err = dependencies.configureCPU()
 		if err != nil {

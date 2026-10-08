@@ -58,6 +58,11 @@ type Instance struct {
 // takes: no snapshot, no append-only file, its own directory, warnings only.
 //
 // Which redis-server, and whether a missing one skips or fails, is Server's.
+//
+// The readiness check asks without credentials, so a server started with
+// --requirepass or an ACL never reads as ready here and the test waits out
+// ReadyWithin. Start it open and set the password with CONFIG SET once it
+// answers, as the startup-wait test does.
 func Start(tb testing.TB, extra ...string) *Instance {
 	tb.Helper()
 	executable := Server(tb)
