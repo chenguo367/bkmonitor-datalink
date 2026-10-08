@@ -583,7 +583,7 @@ func runtimeClosureG4Plan(t *testing.T, strategyID, businessID string, levels ..
 		}
 		config, err := compileAlgorithmConfig(
 			legacyAlgorithm{Level: level.levelID, Type: level.kind, Config: rawConfig}, "percent", level.levelID,
-			projection, runtimeClosureDatasetContract().IdentityFields, 60, inputs,
+			projection, runtimeClosureDatasetContract().IdentityFields, 60, 60, inputs,
 		)
 		if err != nil {
 			t.Fatal(err)

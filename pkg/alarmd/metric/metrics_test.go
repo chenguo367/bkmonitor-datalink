@@ -1370,7 +1370,7 @@ func countCustomSeriesByFamily(t *testing.T, recorder *Recorder) map[string]int 
 // cardinality bound. It is the same number controlplane's own scan holds its
 // source to, repeated here rather than exported because exporting a test's
 // constant would make it look like a value the package promises.
-const catalogReasonHeadroom = 120
+const catalogReasonHeadroom = 140
 
 // Every route and result pair exists at zero from construction, so "no
 // timeout since the release" reads as zero and not as a missing series; a

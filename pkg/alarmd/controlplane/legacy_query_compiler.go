@@ -305,7 +305,22 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 	if err != nil {
 		return execution.QueryPlanFacts{}, queryConfigRejected("QUERY_NORMALIZATION_INVALID", err)
 	}
-	delay, err := pollingQueryDelay(source, configs, stepSeconds)
+	delayUnit := stepSeconds
+	sliding := source.DetectStepSeconds > 0
+	if sliding {
+		delayUnit = queryDelayUnit(source.DetectStepSeconds, stepSeconds)
+		// A detection every step reads the aggregation window ending at its
+		// own time, which is on no aggregation grid: the query must start
+		// its bucket where the request starts, and label it there.
+		for index := range queryList {
+			offset, forward, err := slidingClauseOffset(queryList[index].Offset, queryList[index].OffsetForward == "true", stepSeconds)
+			if err != nil {
+				return execution.QueryPlanFacts{}, queryConfigRejected("QUERY_TIME_SHIFT_INVALID", err)
+			}
+			queryList[index].Offset, queryList[index].OffsetForward = offset, strconv.FormatBool(forward)
+		}
+	}
+	delay, err := pollingQueryDelay(source, configs, delayUnit)
 	if err != nil {
 		return execution.QueryPlanFacts{}, err
 	}
@@ -338,7 +353,7 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		AlignmentMillis:  stepSeconds * 1000,
 		DownSampleRange:  execution.DownSampleNone,
 		Timezone:         compiler.timezone,
-		NotTimeAlign:     false,
+		NotTimeAlign:     sliding,
 		Normalization:    normalization,
 	})
 	if err != nil {

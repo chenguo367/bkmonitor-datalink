@@ -143,7 +143,7 @@ func traditionalCompileFixture(t *testing.T, kind string, params TraditionalComp
 	config["input_projection"] = projection
 	config["requirements"] = requirements
 	payload, _ = json.Marshal(config)
-	ctx := AlgorithmCompileContext{Projection: contract.InputProjectionV2{ValueFields: projection.ValueFields}, IdentityFields: projection.IdentityFields, ExecutionSemantics: contract.ExecutionSemanticsV2{AggregationInterval: 60}, Limits: Limits{MaxRequiredHistoryPoints: 4096}}
+	ctx := AlgorithmCompileContext{Projection: contract.InputProjectionV2{ValueFields: projection.ValueFields}, IdentityFields: projection.IdentityFields, ExecutionSemantics: contract.ExecutionSemanticsV2{AggregationInterval: 60, EvaluationInterval: 60}, Limits: Limits{MaxRequiredHistoryPoints: 4096}}
 	return ctx, contract.AlgorithmIRV2{Type: kind, Version: 1, Config: payload}
 }
 
