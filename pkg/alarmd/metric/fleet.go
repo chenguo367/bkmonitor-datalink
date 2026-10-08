@@ -261,7 +261,8 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"A replica knows a strategy evaluates on an object from the object's rounds since the replica started: "+
 				"after a restart a strategy is counted once one of its objects has run a round, so the count climbs back "+
 				"over the longest period, and a strategy that has left an object the replica still holds stays counted "+
-				"until the replica restarts or hands the object over. Every replica exports the same counts, merged "+
+				"until the replica restarts or hands the object over. An object records at most 32 strategies; past that, a "+
+				"strategy with no row on it is not counted. Every replica exports the same counts, merged "+
 				"from all the summaries: aggregate with max.",
 			[]string{"state"}),
 	}
