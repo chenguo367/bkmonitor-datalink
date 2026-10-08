@@ -115,7 +115,7 @@ func newViewClientCollector() *viewClientCollector {
 				"stream); DISCOVERY_FAILED a registry that could not be read.", []string{"reason"}, nil),
 		executed: prometheus.NewDesc(name("view_executed_query_groups"),
 			"Query Groups this Worker runs, by the latest outcome of the executable-view check made at each Slot "+
-				"read (decision-016 batch 4): executable (the view carries it, the renewal's content scope and "+
+				"read: executable (the view carries it, the renewal's content scope and "+
 				"timeline revision are the entry's, and the read skipped the activation header), not_in_view, "+
 				"no_content (in the view but with nothing to execute - draining, or a Segment without an object - "+
 				"never executed from the view), scope_mismatch (the renewal's scope is not the entry's), "+
@@ -126,7 +126,7 @@ func newViewClientCollector() *viewClientCollector {
 			[]string{"outcome"}, nil),
 		renewals: prometheus.NewDesc(name("view_gate_lease_renewal_total"),
 			"Leases the executable-view check renewed ahead of their interval because the view named a newer timeline "+
-				"revision than the lease had brought (decision-016 batch 4b: the record moved, the lease had not "+
+				"revision than the lease had brought (the record moved, the lease had not "+
 				"caught up), by result: settled (the record agreed with the view and the read went through), "+
 				"unsettled (renewed, and the view was ahead of the record too: refused timeline_stale), failed "+
 				"(the renewal itself returned an error, which says nothing about the view: refused as it stood). "+

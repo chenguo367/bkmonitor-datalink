@@ -251,7 +251,9 @@ func newServer(recorder *metric.Recorder, source lifecycle.Source, options ...Op
 			option(server)
 		}
 	}
-	metrics := promhttp.HandlerFor(recorder.Gatherer(), promhttp.HandlerOpts{})
+	// A scrape carries each family's first sentence; metric/METRICS.md and the
+	// CLI's metrics.list carry the whole Help.
+	metrics := promhttp.HandlerFor(recorder.ScrapeGatherer(), promhttp.HandlerOpts{})
 	internal := http.NewServeMux()
 	internal.HandleFunc("/healthz", server.health)
 	internal.HandleFunc("/readyz", server.readiness)
