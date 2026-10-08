@@ -264,17 +264,20 @@ func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (Sour
 	}
 	payload, err := source.client.Get(ctx, source.lastUpdatedKey).Result()
 	if errors.Is(err, redis.Nil) {
-		return SourceChangeSignal{}, nil
+		return SourceChangeSignal{Statement: &SourceStatement{Reason: StatementSignalAbsent}}, nil
 	}
 	if err != nil {
 		return SourceChangeSignal{}, fmt.Errorf("alarmd controlplane: read legacy strategy change signal: %w", err)
 	}
 	seconds, parseErr := strconv.ParseInt(strings.TrimSpace(payload), 10, 64)
 	if parseErr != nil || seconds <= 0 {
-		return SourceChangeSignal{}, nil
+		return SourceChangeSignal{Statement: &SourceStatement{LastUpdated: boundedStatementText(payload, statementSignalBound),
+			Reason: StatementSignalAbsent}}, nil
 	}
+	holds, statement := source.holdsLastGoodFor(ctx, seconds)
+	statement.LastUpdated = boundedStatementText(payload, statementSignalBound)
 	return SourceChangeSignal{Present: true, Value: payload, WrittenAt: time.Unix(seconds, 0),
-		HoldsLastGoodFor: source.holdsLastGoodFor(ctx, seconds)}, nil
+		HoldsLastGoodFor: holds, Statement: &statement}, nil
 }
 
 // holdsLastGoodFor reads the writer's publication statement and returns the
@@ -292,22 +295,41 @@ func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (Sour
 // strategy_ids in place without moving last_updated, and the reconciler
 // compares the digest with the set its own read returned (observe).
 //
+// What was read is returned beside it, with the first check that failed, so a
+// reader can tell which of these it was.
+//
 // One GET of about a hundred bytes per change-signal read, on the control
 // leader only.
-func (source *LegacyRedisStrategySource) holdsLastGoodFor(ctx context.Context, lastUpdated int64) string {
+func (source *LegacyRedisStrategySource) holdsLastGoodFor(ctx context.Context, lastUpdated int64) (string, SourceStatement) {
 	payload, err := source.client.Get(ctx, source.publicationSemanticsKey).Bytes()
-	if err != nil {
-		return ""
+	switch {
+	case errors.Is(err, redis.Nil):
+		return "", SourceStatement{Reason: StatementAbsent}
+	case err != nil:
+		return "", SourceStatement{Reason: StatementUnreadable}
 	}
+	read := SourceStatement{Raw: boundedStatementText(string(payload), statementTextBound)}
 	var statement publicationSemantics
 	if json.Unmarshal(payload, &statement) != nil {
-		return ""
+		read.Reason = StatementShape
+		return "", read
 	}
-	if statement.Version != 1 || !statement.HoldLastGood || statement.LastUpdated != lastUpdated ||
-		!lowercaseSHA256Hex(statement.StrategyIDsSHA256) {
-		return ""
+	read.SetSHA256 = boundedStatementText(statement.StrategyIDsSHA256, 2*sha256.Size+statementSignalBound)
+	switch {
+	case statement.Version != 1:
+		read.Reason = StatementVersion
+	case !statement.HoldLastGood:
+		read.Reason = StatementDeclined
+	case statement.LastUpdated != lastUpdated:
+		read.Reason = StatementLastUpdatedMismatch
+	case statement.StrategyIDsSHA256 == "":
+		read.Reason = StatementDigestMissing
+	case !lowercaseSHA256Hex(statement.StrategyIDsSHA256):
+		read.Reason = StatementShape
+	default:
+		return statement.StrategyIDsSHA256, read
 	}
-	return statement.StrategyIDsSHA256
+	return "", read
 }
 
 // lowercaseSHA256Hex is whether text is a SHA-256 the way the statement has
