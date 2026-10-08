@@ -152,7 +152,7 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 			run.delaySeconds = slot.queries[0].spec.PlanFacts.QueryDelaySeconds
 		}
 		run.samples = keepLast(append(run.samples, LatePastRoundSample{EvaluationTime: slot.evaluation,
-			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(slot.seenAgeOrRung() / time.Second), ReadHoldSeconds: slot.readHold / 1000,
+			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(slot.seenAgeOrRung() / time.Second), ReadHoldSeconds: holdSeconds(slot.readHold),
 			OnTimeSeries: onTimeSeries(slot), LateSeries: slot.late, CrossedSeries: facts.CrossedT}), latePastRoundKept)
 	case facts.Admitted > 0:
 		state.latePastRound = nil
@@ -208,6 +208,13 @@ func onTimeSeries(slot *directedSlot) int {
 		}
 	}
 	return onTime
+}
+
+// holdSeconds is a read hold in the whole seconds a sample states it in,
+// rounded up: a part of a second counts as the second it reaches into, so
+// the advice it goes into is never short of what the data needed.
+func holdSeconds(millis int64) int64 {
+	return (millis + 999) / 1000
 }
 
 // keepLast is the last n of a list, in a slice of its own.

@@ -28,7 +28,7 @@ func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) +
 // lookbackSeriesUpperBounds is each lookback family's series count once
 // bound, by the family's short name.
 func lookbackSeriesUpperBounds() map[string]int {
-	sources, rungs := lookbackSources(), len(lookback.RungNames)
+	sources := lookbackSources()
 	return map[string]int{
 		"read_hold_transition_total":                 1,
 		"read_hold_transition_overtaken_total":       1,
@@ -42,9 +42,9 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"read_hold_max_seconds":                      len(lookback.Sources),
 		"lookback_first_reads_total":                 sources,
 		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
-		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),
-		"lookback_changed_windows_total":             sources * rungs,
-		"lookback_changes_total":                     sources * rungs * len(lookback.Changes),
+		"lookback_rechecks_total":                    sources * len(lookback.RecheckOutcomes),
+		"lookback_changed_windows_total":             sources,
+		"lookback_changes_total":                     sources * len(lookback.Changes),
 		"lookback_completion_total":                  sources * len(lookback.AgeBuckets),
 		"lookback_probes_total":                      sources * len(lookback.ProbeOutcomes),
 		"lookback_sample_classes_total":              sources * len(lookback.SampleClasses),
@@ -57,12 +57,12 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_directed_read_bytes_total":         sources,
 		"lookback_supplement_hold_total":             sources * len(lookback.SupplementHoldBuckets),
 		"lookback_supplement_hold_max_seconds":       sources,
-		"lookback_directed_early_total":              sources * len(lookback.EarlyOutcomes),
+		"lookback_directed_early_total":              sources * len(lookback.EarlyGroups),
 		"lookback_directed_early_undecided_total":    sources,
 		"lookback_directed_early_read_bytes_total":   sources,
 		"lookback_earlier_reads_total":               sources * len(lookback.EarlierReadOutcomes),
 		"lookback_earlier_read_bytes_total":          sources,
-		"lookback_read_hold_ignored_total":           sources * len(lookback.ReadHoldIgnoredReasons),
+		"lookback_read_hold_ignored_total":           sources * (len(lookback.ReadHoldIgnoredReasons) - 1),
 		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
 		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
 		"lookback_completion_max_seconds":            sources,
@@ -73,7 +73,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_unknown_lookback_total":            sources,
 		"lookback_coverage":                          3,
 		"lookback_pending":                           2,
-		"lookback_preemptions_total":                 sources * rungs,
+		"lookback_preemptions_total":                 sources,
 		"lookback_yield_releases_total":              sources,
 		"lookback_yield_release_seconds_total":       sources,
 		"lookback_yield_release_max_seconds":         sources,
@@ -103,8 +103,14 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	logs := controlplane.SupportedSourceSemantics[1]
 	stats.Sources[logs].Samples[lookback.OutcomeCaptured] = 4
 	stats.Sources[logs].Changes[lookback.RungNames[1]][lookback.ChangePointsAdded] = 7
+	stats.Sources[logs].Changes[lookback.RungNames[3]][lookback.ChangePointsAdded] = 2
+	stats.Sources[logs].Rechecks[lookback.RungNames[1]][lookback.RecheckOutcomes[0]] = 4
+	stats.Sources[logs].Rechecks[lookback.RungNames[2]][lookback.RecheckOutcomes[0]] = 6
+	stats.Sources[logs].ChangedWindows[lookback.RungNames[0]] = 1
+	stats.Sources[logs].ChangedWindows[lookback.RungNames[4]] = 2
 	stats.Sources[logs].Completion["le_300s"] = 2
 	stats.Sources[logs].Preempted[lookback.RungNames[0]] = 5
+	stats.Sources[logs].Preempted[lookback.RungNames[2]] = 1
 	stats.Sources[logs].Probes[lookback.ProbeChanged] = 6
 	stats.Sources[logs].EmptyFirstReads[lookback.EmptyArrived] = 8
 	stats.Sources[logs].EmptyFirstReadCompletion["le_600s"] = 3
@@ -113,6 +119,11 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	entry.SupplementHold["le_5s"] = 11
 	entry.SupplementHoldMaxSeconds = 3.5
 	entry.EarlyReads[lookback.EarlyBeforeNext] = 12
+	entry.EarlyReads[lookback.EarlyOvertaken] = 3
+	entry.EarlyReads[lookback.EarlyFailed] = 1
+	entry.EarlyReads[lookback.EarlyNothingLate] = 2
+	entry.ReadHoldIgnored[lookback.ClassPartialRevised] = 5
+	entry.ReadHoldIgnored[lookback.IgnoredNoWholeWindowArrival] = 7
 	entry.EarlyUndecided = 13
 	entry.EarlyReadBytes = 14
 	stats.Sources[logs] = entry
@@ -149,8 +160,15 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	if got := value("bkmonitor_alarmd_lookback_samples_total", map[string]string{"source": logs, "outcome": lookback.OutcomeCaptured}); got != 4 {
 		t.Fatalf("captured = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_changes_total", map[string]string{"source": logs, "rung": lookback.RungNames[1], "class": lookback.ChangePointsAdded}); got != 7 {
-		t.Fatalf("points added = %v", got)
+	// The rungs add up: each rung's counts are /api/lookback's.
+	if got := value("bkmonitor_alarmd_lookback_changes_total", map[string]string{"source": logs, "class": lookback.ChangePointsAdded}); got != 9 {
+		t.Fatalf("points added over the rungs = %v, want 9", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_rechecks_total", map[string]string{"source": logs, "outcome": lookback.RecheckOutcomes[0]}); got != 10 {
+		t.Fatalf("%s rechecks over the rungs = %v, want 10", lookback.RecheckOutcomes[0], got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_changed_windows_total", map[string]string{"source": logs}); got != 3 {
+		t.Fatalf("changed windows over the rungs = %v, want 3", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_completion_total", map[string]string{"source": logs, "age": "le_300s"}); got != 2 {
 		t.Fatalf("completion = %v", got)
@@ -167,8 +185,8 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": logs, "rung": lookback.RungNames[0]}); got != 5 {
-		t.Fatalf("preemptions = %v", got)
+	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": logs}); got != 6 {
+		t.Fatalf("preemptions over the rungs = %v, want 6", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_permit_refusals_total", map[string]string{"reason": scheduler.LookbackRefusedWaiting}); got != 9 {
 		t.Fatalf("refusals = %v", got)
@@ -188,8 +206,22 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	if got := value("bkmonitor_alarmd_lookback_supplement_hold_max_seconds", map[string]string{"source": logs}); got != 3.5 {
 		t.Fatalf("longest supplement hold = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_directed_early_total", map[string]string{"source": logs, "outcome": lookback.EarlyBeforeNext}); got != 12 {
-		t.Fatalf("early reads before the next Slot = %v", got)
+	// The early reads by what the mechanism is read by: before_next over
+	// before_next and not_ahead.
+	for group, want := range map[string]float64{lookback.EarlyGroupBeforeNext: 12, lookback.EarlyGroupNotAhead: 4, lookback.EarlyGroupOutside: 2} {
+		if got := value("bkmonitor_alarmd_lookback_directed_early_total", map[string]string{"source": logs, "group": group}); got != want {
+			t.Fatalf("early reads %s = %v, want %v", group, got, want)
+		}
+	}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_lookback_read_hold_ignored_total") {
+		for _, label := range m.GetLabel() {
+			if label.GetName() == "reason" && label.GetValue() == lookback.ClassPartialRevised {
+				t.Fatal("partial_revised is counted twice: here and in lookback_sample_classes_total")
+			}
+		}
+	}
+	if got := value("bkmonitor_alarmd_lookback_read_hold_ignored_total", map[string]string{"source": logs, "reason": lookback.IgnoredNoWholeWindowArrival}); got != 7 {
+		t.Fatalf("no whole-window arrival = %v, want 7", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_directed_early_undecided_total", map[string]string{"source": logs}); got != 13 {
 		t.Fatalf("early undecided pairs = %v", got)

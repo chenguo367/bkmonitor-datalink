@@ -227,3 +227,13 @@ func TestGroupSourcesNamesTheGroupsSeen(t *testing.T) {
 		t.Fatalf("a process without a lookback named %v", got)
 	}
 }
+
+// A sample's hold of a part of a second counts as the whole second it
+// reaches into, so the advice it goes into is never short.
+func TestASamplesHoldIsCountedInWholeSecondsRoundedUp(t *testing.T) {
+	for millis, want := range map[int64]int64{0: 0, 1: 1, 999: 1, 1000: 1, 45_000: 45, 45_500: 46} {
+		if got := holdSeconds(millis); got != want {
+			t.Errorf("holdSeconds(%d) = %d, want %d", millis, got, want)
+		}
+	}
+}

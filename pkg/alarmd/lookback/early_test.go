@@ -554,3 +554,24 @@ func TestTheLeadIsTheLongestOfTheLastReadings(t *testing.T) {
 		t.Fatalf("lead %v, want the group's own hold once it has one", lead)
 	}
 }
+
+// The metric groups the early read's outcomes by what its working is read
+// by: before_next, the rest of its attempts, and the outcomes outside it.
+// Every outcome falls in one group, the design's denominator unchanged.
+func TestEveryEarlyOutcomeFallsInTheGroupItsMechanismIsReadBy(t *testing.T) {
+	counts := map[string]int{}
+	for _, outcome := range EarlyOutcomes {
+		group := EarlyGroupOf(outcome)
+		counts[group]++
+		switch {
+		case outcome == EarlyBeforeNext && group != EarlyGroupBeforeNext,
+			EarlyOutsideMechanism[outcome] && group != EarlyGroupOutside,
+			outcome != EarlyBeforeNext && !EarlyOutsideMechanism[outcome] && group != EarlyGroupNotAhead:
+			t.Fatalf("%s is counted under %s", outcome, group)
+		}
+	}
+	if counts[EarlyGroupBeforeNext] != 1 || counts[EarlyGroupOutside] != len(EarlyOutsideMechanism) ||
+		counts[EarlyGroupNotAhead] != len(EarlyOutcomes)-1-len(EarlyOutsideMechanism) {
+		t.Fatalf("groups %v do not cover the outcomes as the mechanism reads them", counts)
+	}
+}
