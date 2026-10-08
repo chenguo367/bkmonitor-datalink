@@ -370,6 +370,10 @@ type phaseTwoControlRefreshResult struct {
 	// fleet can say how old the writer's content is beside what it withheld.
 	ChangeSignalPresent    bool
 	ChangeSignalAgeSeconds int64
+	// WriterStatement is the publisher's statement as it applies to the
+	// observation the round holds (controlplane.WriterStatement), delivered
+	// with the composition; nil from a source with none.
+	WriterStatement *controlplane.WriterStatement
 	// SourceRefreshStatus is the source refresh's own answer on a round
 	// that got one: PENDING_CONFIRMATION, PUBLISHED, UNCHANGED or
 	// PUBLICATION_CONFLICT. Empty on a round that got none -- a failure, a

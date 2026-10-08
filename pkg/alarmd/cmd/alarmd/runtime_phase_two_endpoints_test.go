@@ -238,8 +238,16 @@ func TestSourceFactsOfCarriesTheCompositionAndTheMarker(t *testing.T) {
 		t.Errorf("withheld = %+v", facts.Withheld)
 	}
 	without := sourceFactsOf(phaseTwoControlRefreshResult{Composition: composition}, at)
-	if without.ChangeSignalPresent || without.ChangeSignalAgeSeconds != nil {
-		t.Errorf("a round without a marker carries an age: %+v", without)
+	if without.ChangeSignalPresent || without.ChangeSignalAgeSeconds != nil || without.WriterStatement != nil {
+		t.Errorf("a round without a marker carries an age or a statement: %+v", without)
+	}
+	// The writer's statement travels as the round used it, field for field.
+	stated := sourceFactsOf(phaseTwoControlRefreshResult{Composition: composition, WriterStatement: &controlplane.WriterStatement{
+		SourceStatement: controlplane.SourceStatement{Raw: `{"version":1}`, LastUpdated: "1788868800", SetSHA256: "aa", Reason: controlplane.StatementDigestMismatch},
+		ReadSHA256:      "bb"}}, at)
+	if statement := stated.WriterStatement; statement == nil || statement.Held || statement.Reason != controlplane.StatementDigestMismatch ||
+		statement.Statement != `{"version":1}` || statement.LastUpdated != "1788868800" || statement.StatementSHA256 != "aa" || statement.ReadSHA256 != "bb" {
+		t.Errorf("writer statement = %+v, want the round's, field for field", statement)
 	}
 }
 

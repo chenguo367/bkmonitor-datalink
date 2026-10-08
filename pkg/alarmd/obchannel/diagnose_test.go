@@ -25,7 +25,8 @@ func diagnoseNative(t *testing.T, page map[string]any) http.Handler {
 			_ = json.NewEncoder(w).Encode(page)
 		case "/api/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"health": "DEGRADED", "expected": 83, "determined": 83,
-				"dependencies": []any{}, "per_replica": []any{"not kept"}})
+				"dependencies": []any{}, "per_replica": []any{"not kept"},
+				"source_standing": map[string]any{"kind": "ACCEPTING", "writer_statement": map[string]any{"held": false, "reason": "absent"}}})
 		default:
 			w.WriteHeader(404)
 		}
@@ -82,6 +83,12 @@ func TestDiagnoseEnvironmentAddsTheDeploymentToTheFirstPage(t *testing.T) {
 	fleetFacts := deployment["fleet"].(map[string]any)
 	if fleetFacts["health"] != "DEGRADED" || fleetFacts["per_replica"] != nil {
 		t.Errorf("fleet = %v, want the kept keys only", fleetFacts)
+	}
+	// The source's standing comes whole, with the writer's statement as the
+	// round used it: the one step a reader takes to see why it is not held.
+	if standing, _ := fleetFacts["source_standing"].(map[string]any); standing == nil ||
+		standing["writer_statement"].(map[string]any)["reason"] != "absent" {
+		t.Errorf("source_standing = %v, want it with the writer's statement", fleetFacts["source_standing"])
 	}
 	if replicas := deployment["replicas"].(map[string]any); replicas["reason"] != "service_account_not_mounted" {
 		t.Errorf("replicas = %v", replicas)

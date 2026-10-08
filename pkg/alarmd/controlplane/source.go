@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -46,6 +48,86 @@ type SourceChangeSignal struct {
 	Value            string
 	WrittenAt        time.Time
 	HoldsLastGoodFor string
+	// Statement is what the source read of the statement, as stored, and why
+	// it does not hold for this signal; nil from a source whose publisher has
+	// no statement to make.
+	Statement *SourceStatement
+}
+
+// Why a publisher's statement does not hold for an observation: the source's
+// checks, then the reconciler's, made in the order they are declared here and
+// named by the first that fails, so one statement always reads one reason.
+const (
+	// StatementSignalAbsent: the change signal itself was missing or not a
+	// positive integer, so the statement it would be made for was not read.
+	StatementSignalAbsent = "signal_absent"
+	// StatementAbsent: no statement stored; StatementUnreadable: the read of
+	// it failed.
+	StatementAbsent     = "absent"
+	StatementUnreadable = "unreadable"
+	// StatementShape: it does not decode, or names the set it is about with
+	// something other than a lowercase SHA-256.
+	StatementShape = "shape"
+	// StatementVersion: a version this build does not read.
+	StatementVersion = "version"
+	// StatementDeclined: it says the publisher does not hold the last good
+	// document.
+	StatementDeclined = "declined"
+	// StatementLastUpdatedMismatch: it was made for another change signal.
+	StatementLastUpdatedMismatch = "last_updated_mismatch"
+	// StatementDigestMissing: it names no set at all, as a publisher from
+	// before the statement named its set writes it; a newer publisher is
+	// the remedy, not a repaired statement.
+	StatementDigestMissing = "digest_missing"
+	// StatementSetUnnamed: the observation could not name the bytes of the
+	// active set it read, so no statement can be matched to it.
+	StatementSetUnnamed = "set_unnamed"
+	// StatementDigestMismatch: it names other bytes than the active set the
+	// observation read: the set was rewritten after the statement was made.
+	StatementDigestMismatch = "digest_mismatch"
+)
+
+// SourceStatement is a source's read of its publisher's statement: the bytes
+// as stored and the change signal as stored, both bounded; the active set
+// the statement names, as it names it; and Reason, empty when the statement
+// holds for the signal it was read with.
+type SourceStatement struct {
+	Raw         string
+	LastUpdated string
+	SetSHA256   string
+	Reason      string
+}
+
+// WriterStatement is the statement as it applies to one observation: Held
+// when it holds for the observation's change signal and names the very
+// bytes of the active set the observation read, ReadSHA256 those bytes'
+// digest, and Reason, when not held, the first check it failed.
+type WriterStatement struct {
+	SourceStatement
+	Held       bool
+	ReadSHA256 string
+}
+
+// statementTextBound and statementSignalBound bound what a statement and a
+// change signal are reported with: a statement is about a hundred bytes and
+// a signal an integer, so more is a store holding something else.
+const (
+	statementTextBound   = 256
+	statementSignalBound = 32
+)
+
+// boundedStatementText is text cut to at most limit bytes on a character
+// boundary, invalid bytes replaced, with a mark where it was cut.
+func boundedStatementText(text string, limit int) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
 }
 
 // ChangeSignalSource is a StrategySource whose publisher leaves a

@@ -157,7 +157,7 @@ func TestTheRowsHideAnOverdueObjectOnlyWhenCut(t *testing.T) {
 	if hidden == nil {
 		t.Fatal("rows from a cut list said nothing may be hidden")
 	}
-	for queryGroup, want := range map[string]bool{"qg-late": true, "qg-noperiod": true, "qg-recent": false, "qg-gone": false} {
+	for queryGroup, want := range map[string]bool{"qg-late": true, "qg-noperiod": false, "qg-recent": false, "qg-gone": false} {
 		if got := hidden(queryGroup); got != want {
 			t.Errorf("%s hidden %t, want %t", queryGroup, got, want)
 		}
@@ -254,5 +254,42 @@ func TestTheFleetPublisherListsTheObjectsItHoldsTheReadsOf(t *testing.T) {
 	row := snapshot.ReadHeld[0]
 	if row.QueryGroup != "qg-held" || row.Kind != fleet.KindReadHeld || row.Wake == nil || !row.Wake.Known || len(row.Strategies) != 1 {
 		t.Fatalf("row %+v, want qg-held under its strategy with its wake facts", row)
+	}
+}
+
+// A wake whose schedule was not read -- no period -- opens no overdue episode
+// however late it is, and is counted as period unknown; the same object once
+// its period is read and a whole period late opens one as any other.
+func TestAWakeWithNoPeriodOpensNoOverdueEpisode(t *testing.T) {
+	_, client := startPhaseTwoRedis(t)
+	store, err := fleet.NewRedisStore(client, "alarmd-overdue-period", time.Minute, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	at := clock.now()
+	wakes := &stubWakeSource{wakes: []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: at.Add(-time.Hour)}}, total: 1}
+	var began []string
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now, store: store,
+		owned:   func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-unread"} },
+		overdue: wakes, staleAfter: 10 * time.Minute,
+		onOverdue: func(episode fleet.OverdueEpisode, begun bool) {
+			if begun {
+				began = append(began, episode.QueryGroup)
+			}
+		},
+	}
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Overdue == nil || snapshot.Overdue.PeriodUnknown != 1 || snapshot.Overdue.Total != 0 {
+		t.Fatalf("overdue facts %+v, want the wake counted as period unknown and none overdue", snapshot.Overdue)
+	}
+	publisher.publishOnce(context.Background())
+	if len(began) != 0 {
+		t.Fatalf("began %v, want no episode for a wake with no period", began)
+	}
+	wakes.wakes = []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: at.Add(-time.Hour), IntervalSeconds: 60}}
+	publisher.publishOnce(context.Background())
+	if fmt.Sprint(began) != "[qg-unread]" {
+		t.Fatalf("began %v, want the episode once the period is read", began)
 	}
 }
