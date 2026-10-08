@@ -25,8 +25,8 @@ import (
 // stage outside the closed list counts as _other.
 func TestTheLogObserverCountsItsLinesByStage(t *testing.T) {
 	var output bytes.Buffer
-	limiter, _ := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 2})
-	policy, _ := NewBoundedLogPolicy(limiter)
+	limiter, _ := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 2, MaxScopes: 1024})
+	policy, _ := NewScopedBoundedLogPolicy(limiter)
 	observer := NewLoggingObserver(New("alarmd", &output), policy)
 	ctx := context.Background()
 	if counts := observer.LineCounts(); len(counts.Written) != len(logStages) || len(counts.Limited) != len(logStages) ||

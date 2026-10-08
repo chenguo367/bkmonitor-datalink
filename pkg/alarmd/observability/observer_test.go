@@ -283,11 +283,11 @@ func TestAllStagesIsCompleteUniqueLabelCatalog(t *testing.T) {
 
 func TestOwnershipLifecycleLogCarriesExactOperationalIdentity(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,11 +315,11 @@ func TestOwnershipLifecycleLogCarriesExactOperationalIdentity(t *testing.T) {
 
 func TestDrainingQueryGroupLogCarriesBoundedDiagnosticFacts(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,11 +358,11 @@ func TestRebalancePlanLogNamesEveryMove(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,13 +387,13 @@ func TestObservationLoggerUsesBoundedEnvelope(t *testing.T) {
 
 	var output bytes.Buffer
 	logger := New("", &output)
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Minute, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Minute, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
-		t.Fatalf("NewWindowLogLimiter() error = %v", err)
+		t.Fatalf("NewScopedLogLimiter() error = %v", err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
-		t.Fatalf("NewBoundedLogPolicy() error = %v", err)
+		t.Fatalf("NewScopedBoundedLogPolicy() error = %v", err)
 	}
 	loggingObserver := NewLoggingObserver(logger, policy)
 	loggingObserver.Observe(context.Background(), Observation{
@@ -505,13 +505,13 @@ func TestBoundedLogPolicyRequiresExplicitExceptionalLimiter(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(100, 0)
-	limiter, err := newWindowLogLimiter(WindowLogLimiterConfig{Window: time.Minute, MaxEvents: 2}, func() time.Time { return now })
+	limiter, err := newScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Minute, MaxEvents: 2, MaxScopes: 1024}, func() time.Time { return now })
 	if err != nil {
-		t.Fatalf("newWindowLogLimiter() error = %v", err)
+		t.Fatalf("newScopedLogLimiter() error = %v", err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
-		t.Fatalf("NewBoundedLogPolicy() error = %v", err)
+		t.Fatalf("NewScopedBoundedLogPolicy() error = %v", err)
 	}
 	if policy.ShouldLog(Observation{Component: ComponentDetect, Stage: StageDetectCompleted, Result: ResultSuccess}) {
 		t.Fatal("routine success was logged")
@@ -598,11 +598,11 @@ func TestMultiObserverSkipsNilObservers(t *testing.T) {
 
 func TestPhaseTwoSuccessLogsAreBoundedAndCarryTraceID(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

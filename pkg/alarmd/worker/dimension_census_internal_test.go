@@ -202,11 +202,11 @@ func (store *recordingCensusStore) WriteCensus(
 
 func censusStream(t *testing.T, store execution.PlanCensusStore, output *bytes.Buffer) *streamedExecution {
 	t.Helper()
-	limiter, err := observability.NewWindowLogLimiter(observability.WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
+	limiter, err := observability.NewScopedLogLimiter(observability.ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 10, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := observability.NewBoundedLogPolicy(limiter)
+	policy, err := observability.NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}

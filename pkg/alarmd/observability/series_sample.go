@@ -22,9 +22,11 @@ const SeriesSampleMaxLevels = 2
 // the 4 KiB payload. This is a schema bound, not a deployment budget.
 const SeriesSampleEncodingScratchBytes = 128 << 10
 
-// SeriesSampleLimits is an explicit allocation from the process observation
-// budget. The runtime derives it from effective resources; zero disables it.
-// Lifecycle diagnostics keep their existing allocation separately.
+// SeriesSampleLimits is what the sampler holds beside the lifecycle
+// diagnostics' own allocation, as the sample window route reports it:
+// QueueCapacity is the encode buffers allocated for the windows opened so
+// far. The sampler has no rate of its own (a window pins one series and
+// records at most once a Slot), so the per-minute fields are zero.
 type SeriesSampleLimits struct {
 	RecordsPerMinute int `json:"records_per_minute"`
 	BytesPerMinute   int `json:"bytes_per_minute"`
@@ -134,13 +136,12 @@ type SeriesSampleLevel struct {
 }
 
 type SeriesSampleHealth struct {
-	Scope         string `json:"scope"`
-	Selected      uint64 `json:"selected"`
-	Recorded      uint64 `json:"recorded"`
-	BudgetDropped uint64 `json:"budget_dropped"`
-	QueueDropped  uint64 `json:"queue_dropped"`
-	Oversize      uint64 `json:"oversize"`
-	Expired       uint64 `json:"expired"`
+	Scope        string `json:"scope"`
+	Selected     uint64 `json:"selected"`
+	Recorded     uint64 `json:"recorded"`
+	QueueDropped uint64 `json:"queue_dropped"`
+	Oversize     uint64 `json:"oversize"`
+	Expired      uint64 `json:"expired"`
 }
 
 type sampleSelection struct {
@@ -152,16 +153,14 @@ type sampleSelection struct {
 type sampleSelections map[string]*sampleSelection
 
 type SeriesSampler struct {
-	limits                                                                  SeriesSampleLimits
-	selected                                                                atomic.Pointer[sampleSelections]
-	mu                                                                      sync.Mutex // short budget/selection bookkeeping only; never encoding or I/O
-	start                                                                   time.Time
-	records, bytes                                                          int
-	pool                                                                    chan *SeriesSampleReservation
-	queue                                                                   chan *SeriesSampleReservation
-	now                                                                     func() time.Time
-	process                                                                 string
-	selectedCount, recorded, budgetDropped, queueDropped, oversize, expired atomic.Uint64
+	limits                                                   SeriesSampleLimits
+	selected                                                 atomic.Pointer[sampleSelections]
+	mu                                                       sync.Mutex // short selection bookkeeping only; never encoding or I/O
+	pool                                                     chan *SeriesSampleReservation
+	queue                                                    chan *SeriesSampleReservation
+	now                                                      func() time.Time
+	process                                                  string
+	selectedCount, recorded, queueDropped, oversize, expired atomic.Uint64
 	// admit, set by NewAdmittedSeriesSampler, is asked for the buffers of
 	// the windows a selection adds; allocated is how many buffers exist.
 	admit     func(bytes uint64) bool
@@ -172,21 +171,6 @@ type SeriesSampler struct {
 // both queue pointer slots. Allocator/runtime overhead is covered conservatively.
 func SeriesSampleBufferBytes() int {
 	return int(unsafe.Sizeof(SeriesSampleReservation{})) + SeriesSampleEncodingScratchBytes + 256
-}
-
-func NewSeriesSampler(limits SeriesSampleLimits) (*SeriesSampler, error) {
-	if limits.RecordsPerMinute <= 0 || limits.BytesPerMinute < SeriesSampleMaxBytes || limits.QueueCapacity <= 0 {
-		return nil, errors.New("series sample: positive resource-derived record, byte and queue budgets are required")
-	}
-	if limits.QueueCapacity > limits.RecordsPerMinute {
-		return nil, errors.New("series sample: queue allocation exceeds record budget")
-	}
-	s := &SeriesSampler{limits: limits, pool: make(chan *SeriesSampleReservation, limits.QueueCapacity), queue: make(chan *SeriesSampleReservation, limits.QueueCapacity), now: time.Now, process: newProcessIdentity()}
-	for i := 0; i < limits.QueueCapacity; i++ {
-		s.pool <- &SeriesSampleReservation{sampler: s}
-	}
-	s.allocated = limits.QueueCapacity
-	return s, nil
 }
 
 // NewAdmittedSeriesSampler is a sampler sized by the windows open on it
@@ -269,16 +253,6 @@ func (s *SeriesSampler) TryReserve(ctx context.Context, c SeriesSampleCandidate)
 		s.mu.Unlock()
 		return nil
 	}
-	if s.start.IsZero() || now.Sub(s.start) >= time.Minute || now.Before(s.start) {
-		s.start = now
-		s.records = 0
-		s.bytes = 0
-	}
-	if s.admit == nil && (s.records >= s.limits.RecordsPerMinute || s.bytes > s.limits.BytesPerMinute-SeriesSampleMaxBytes) {
-		s.budgetDropped.Add(1)
-		s.mu.Unlock()
-		return nil
-	}
 	var r *SeriesSampleReservation
 	select {
 	case r = <-s.pool:
@@ -287,12 +261,9 @@ func (s *SeriesSampler) TryReserve(ctx context.Context, c SeriesSampleCandidate)
 		s.mu.Unlock()
 		return nil
 	}
-	s.records++
-	s.bytes += SeriesSampleMaxBytes
 	v.pinnedDigest = c.SeriesDigest
 	v.lastSlot = c.Slot
 	v.hasSlot = true
-	r.period = s.start
 	r.levelID = v.LevelID
 	s.mu.Unlock()
 	r.Sample = SeriesSample{Kind: "series_sample", WindowID: v.WindowID, OpenedAt: v.OpenedAt.UnixMilli(), ProcessID: s.process, QueryGroup: c.QueryGroup, TenantID: c.TenantID, BusinessID: c.BusinessID, StrategyID: c.StrategyID, StateGeneration: c.StateGeneration, PlanScheduleRevision: c.PlanScheduleRevision, Slot: c.Slot, SeriesDigest: c.SeriesDigest, SeriesKind: c.SeriesKind, Provisional: true, Coverage: "explicit_series_first_record"}
@@ -314,7 +285,6 @@ type SeriesSampleReservation struct {
 	Sample     SeriesSample
 	levels     [SeriesSampleMaxLevels]SeriesSampleLevel
 	sampler    *SeriesSampler
-	period     time.Time
 	levelID    uint32
 	wire       [SeriesSampleMaxBytes]byte
 	size       int
@@ -363,14 +333,6 @@ func (r *SeriesSampleReservation) Commit() {
 	}
 	if err := json.NewEncoder(r).Encode(&r.Sample); err != nil {
 		r.sampler.oversize.Add(1)
-		// Encoding already spent CPU. Keep the attempt's record token while
-		// refunding bytes that will never be written; otherwise repeated
-		// oversize records could bypass the CPU-derived attempt allowance.
-		r.sampler.mu.Lock()
-		if r.period == r.sampler.start {
-			r.sampler.bytes -= SeriesSampleMaxBytes
-		}
-		r.sampler.mu.Unlock()
 		r.Release()
 		return
 	}
@@ -407,13 +369,6 @@ func (r *SeriesSampleReservation) Cancel() {
 	if r == nil {
 		return
 	}
-	s := r.sampler
-	s.mu.Lock()
-	if r.period == s.start {
-		s.records--
-		s.bytes -= SeriesSampleMaxBytes
-	}
-	s.mu.Unlock()
 	r.Release()
 }
 func (r *SeriesSampleReservation) QueryGroup() string { return r.queryGroup }
@@ -446,5 +401,5 @@ func (s *SeriesSampler) Health() SeriesSampleHealth {
 	if s == nil {
 		return SeriesSampleHealth{Scope: "process_cumulative"}
 	}
-	return SeriesSampleHealth{Scope: "process_cumulative", Selected: s.selectedCount.Load(), Recorded: s.recorded.Load(), BudgetDropped: s.budgetDropped.Load(), QueueDropped: s.queueDropped.Load(), Oversize: s.oversize.Load(), Expired: s.expired.Load()}
+	return SeriesSampleHealth{Scope: "process_cumulative", Selected: s.selectedCount.Load(), Recorded: s.recorded.Load(), QueueDropped: s.queueDropped.Load(), Oversize: s.oversize.Load(), Expired: s.expired.Load()}
 }

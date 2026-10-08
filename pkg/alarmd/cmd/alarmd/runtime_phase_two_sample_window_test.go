@@ -74,10 +74,7 @@ func newSampleReplica(t *testing.T, client redis.Cmdable, directory sampleDirect
 	if err != nil {
 		t.Fatal(err)
 	}
-	sampler, err := observability.NewSeriesSampler(observability.SeriesSampleLimits{RecordsPerMinute: 8, BytesPerMinute: 8 * observability.SeriesSampleMaxBytes, QueueCapacity: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	sampler := observability.NewAdmittedSeriesSampler(func(uint64) bool { return true })
 	flow, err := observability.NewTargetFlow(observability.New(observability.ComponentRuntime, io.Discard))
 	if err != nil {
 		t.Fatal(err)

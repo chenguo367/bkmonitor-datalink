@@ -33,12 +33,7 @@ func CheckSeriesSampleNoDataWorkerRegression(t *testing.T, off, on *state.Execut
 	t.Helper()
 	due := noDataWiredPlan(t)
 	due.CompiledPlan = noDataPreflightPlan(t, "7", &contract.NoDataConfigV1{Continuous: 3, Level: 2})
-	sampler, err := observability.NewSeriesSampler(observability.SeriesSampleLimits{
-		RecordsPerMinute: 8, BytesPerMinute: 8 * observability.SeriesSampleMaxBytes, QueueCapacity: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	sampler := observability.NewAdmittedSeriesSampler(func(uint64) bool { return true })
 	now := time.Now()
 	if err := sampler.Select([]observability.SeriesSampleSelection{{
 		QueryGroup: "query-group", WindowID: "no-data-window", OpenedAt: now, ExpiresAt: now.Add(time.Minute),

@@ -58,19 +58,11 @@ type Logger struct {
 
 // BoundedLogPolicy always records one-time lifecycle transitions. Routine
 // success is omitted. Repeated transitions, recovery and exceptional results
-// use a concrete limiter: phase one buckets by reason or reason-empty stage,
-// phase two additionally buckets by Query Group scope and reports suppressed
-// counts. M8 does not hard-code a sampling rate or time window before G3
-// calibration.
+// go through the scoped limiter: by reason or reason-empty stage, and by
+// Query Group where the observation names one, with suppressed counts on the
+// next admitted line.
 type BoundedLogPolicy struct {
 	repeated RepeatedLogLimiter
-}
-
-func NewBoundedLogPolicy(limiter *WindowLogLimiter) (*BoundedLogPolicy, error) {
-	if limiter == nil {
-		return nil, errors.New("observability: bounded log policy requires a window limiter")
-	}
-	return &BoundedLogPolicy{repeated: limiter}, nil
 }
 
 // NewScopedBoundedLogPolicy builds the phase-two policy that limits repeated

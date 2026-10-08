@@ -41,11 +41,11 @@ func TestLoggingObserverWritesStateApplyChunkAttributes(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err := NewBoundedLogPolicy(limiter)
+	policy, err := NewScopedBoundedLogPolicy(limiter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ func TestTheAdmissionLineCarriesTheRefusalRulesAndSentence(t *testing.T) {
 	logged := func(facts *StateApplyChunkFacts, result Result) map[string]any {
 		t.Helper()
 		var output bytes.Buffer
-		limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+		limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 		if err != nil {
 			t.Fatal(err)
 		}
-		policy, err := NewBoundedLogPolicy(limiter)
+		policy, err := NewScopedBoundedLogPolicy(limiter)
 		if err != nil {
 			t.Fatal(err)
 		}
