@@ -483,6 +483,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
 	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_log_lines_total"] = "variableLabels: {stage,admission}"
+	expected["bkmonitor_alarmd_observer_panics_total"] = "variableLabels: {observer}"
 	expected["bkmonitor_alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_difference"] = "variableLabels: {side}"
@@ -1137,6 +1138,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
 	// Every stage of the closed list, _other among them, written and limited.
 	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
+	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
@@ -1552,5 +1554,37 @@ func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 		if values[cell] != value {
 			t.Fatalf("gauge = %v, want %v", values, want)
 		}
+	}
+}
+
+// observer_panics_total names every observer of the closed list from the
+// first scrape, and a panic a fan-out recovered moves its observer's series.
+func TestObserverPanicsAreExportedForEveryObserver(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	read := func() map[string]float64 {
+		t.Helper()
+		families, err := recorder.Gatherer().Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		values := map[string]float64{}
+		for _, family := range families {
+			if family.GetName() != "bkmonitor_alarmd_observer_panics_total" {
+				continue
+			}
+			for _, m := range family.GetMetric() {
+				values[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+			}
+		}
+		return values
+	}
+	before := read()
+	if len(before) != len(observability.ObserverNames) {
+		t.Fatalf("observer_panics_total names %d observers, want %d", len(before), len(observability.ObserverNames))
+	}
+	observability.Multi(observability.Named(observability.ObserverCostSummary, observability.ObserverFunc(
+		func(context.Context, observability.Observation) { panic("observer defect") }))).Observe(context.Background(), observability.Observation{})
+	if after := read(); after[observability.ObserverCostSummary] != before[observability.ObserverCostSummary]+1 {
+		t.Fatalf("a recovered panic did not move its observer's series: %v -> %v", before, after)
 	}
 }

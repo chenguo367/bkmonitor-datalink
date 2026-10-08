@@ -37,10 +37,14 @@ func detectObserver(observer observability.Observer) detect.Observer {
 	})
 }
 
+// observeRuntime hands one observation to the runtime's observer. A panic
+// is recovered and counted: inside the fan-out under the member that raised
+// it, and anywhere before it - normalization, an observer handed over
+// directly - under the entry.
 func observeRuntime(ctx context.Context, observer observability.Observer, observation observability.Observation) {
 	if observer == nil {
 		return
 	}
-	defer func() { _ = recover() }()
+	defer observability.RecoverObserverPanic(observability.ObserverEntry)
 	observer.Observe(ctx, observation)
 }
