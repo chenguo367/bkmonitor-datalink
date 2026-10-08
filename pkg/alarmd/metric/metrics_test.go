@@ -25,7 +25,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lifecycle"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -171,10 +170,7 @@ const metricFamilySeriesDevelopmentLimit = 50000
 
 func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
-	if err := recorder.BindLifecycle(&mutableLifecycleSource{snapshot: lifecycleBudgetSnapshot()}); err != nil {
-		t.Fatalf("BindLifecycle() error = %v", err)
-	}
-	bindBudgetHealthAndResources(t, recorder)
+	bindBudgetSources(t, recorder)
 	populateAllCustomLabelCombinations(recorder)
 
 	bounds := customMetricFamilySeriesUpperBounds()
@@ -205,10 +201,6 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		if got := bounds[family]; got != want {
 			t.Errorf("histogram family %s theoretical maximum = %d, want buckets/+Inf/sum/count total %d", family, got, want)
 		}
-	}
-	if got, want := bounds["bkmonitor_alarmd_health_last_progress_timestamp_seconds"],
-		len(observability.AllStages()); got != want {
-		t.Errorf("health last-progress stage maximum = %d, want complete legal stage catalog %d", got, want)
 	}
 	for family, want := range map[string]int{
 		"bkmonitor_alarmd_worker_query_permits_held":         4,
@@ -243,9 +235,6 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 
 func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
-	if err := recorder.BindLifecycle(&mutableLifecycleSource{snapshot: lifecycleBudgetSnapshot()}); err != nil {
-		t.Fatalf("BindLifecycle() error = %v", err)
-	}
 	expected := map[string]string{
 		"bkmonitor_alarmd_build_info":                                   "variableLabels: {version,commit,schema_version}",
 		"bkmonitor_alarmd_observation_total":                            "variableLabels: {component,stage,result,reason_code}",
@@ -459,13 +448,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_schedule_cursor_advance_total":                "variableLabels: {result,refusal}",
 		"bkmonitor_alarmd_activation_held_query_groups":                 "variableLabels: {}",
 		"bkmonitor_alarmd_activation_held_age_seconds_max":              "variableLabels: {}",
-		"bkmonitor_alarmd_ready":                                        "variableLabels: {}",
-		"bkmonitor_alarmd_assigned_claims":                              "variableLabels: {}",
-		"bkmonitor_alarmd_fatal_total":                                  "variableLabels: {}",
-		"bkmonitor_alarmd_draining":                                     "variableLabels: {}",
-		"bkmonitor_alarmd_drain_total":                                  "variableLabels: {result}",
-		"bkmonitor_alarmd_inflight_records":                             "variableLabels: {}",
-		"bkmonitor_alarmd_consumer_lag_records":                         "variableLabels: {}",
 	}
 	expected["bkmonitor_alarmd_algorithm_evaluation_total"] = "variableLabels: {algorithm_family,result}"
 	expected["bkmonitor_alarmd_algorithm_input_total"] = "variableLabels: {algorithm_family,input_name,dependency_point,result}"
@@ -637,27 +619,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	}
 }
 
-func lifecycleBudgetSnapshot() lifecycle.Snapshot {
-	return lifecycle.Snapshot{ConsumerLagKnown: true}
-}
-
-func bindBudgetHealthAndResources(t *testing.T, recorder *Recorder) {
+func bindBudgetSources(t *testing.T, recorder *Recorder) {
 	t.Helper()
-	health := observability.NewHealthTracker(observability.HealthSnapshot{
-		State: observability.HealthReady, ConfigLoaded: true, SchemaReady: true,
-		AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true,
-	})
-	if err := recorder.BindHealth(health); err != nil {
-		t.Fatalf("BindHealth() error = %v", err)
-	}
-	resources, err := observability.NewResourceGovernor(observability.ResourceGovernorConfig{})
-	if err != nil {
-		t.Fatalf("NewResourceGovernor() error = %v", err)
-	}
-	resources.Observe(observability.ResourceSnapshot{})
-	if err := recorder.BindResources(resources); err != nil {
-		t.Fatalf("BindResources() error = %v", err)
-	}
 	if err := recorder.BindCapacityLoad(func() CapacityLoad { return fullCapacityLoad() }); err != nil {
 		t.Fatalf("BindCapacityLoad() error = %v", err)
 	}
@@ -1082,24 +1045,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("schedule_cursor_advance_total"):   len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals),
 		fqName("activation_held_query_groups"):    1,
 		fqName("activation_held_age_seconds_max"): 1,
-		fqName("ready"):                                  1,
-		fqName("assigned_claims"):                        1,
-		fqName("fatal_total"):                            1,
-		fqName("draining"):                               1,
-		fqName("drain_total"):                            int(lifecycle.DrainResultCount),
-		fqName("inflight_records"):                       1,
-		fqName("consumer_lag_records"):                   1,
-		fqName("health_ready"):                           1,
-		fqName("health_state"):                           len(observability.AllHealthStates()),
-		fqName("health_reason"):                          len(observability.AllReasons(observability.ComponentResource)),
-		fqName("health_assigned_claims"):                 1,
-		fqName("health_inflight_messages"):               1,
-		fqName("health_worker_queue_depth"):              1,
-		fqName("health_worker_queue_bytes"):              1,
-		fqName("health_consumer_lag_records"):            1,
-		fqName("health_last_progress_timestamp_seconds"): len(observability.AllStages()),
-		fqName("health_last_recovery_timestamp_seconds"): 1,
-		fqName("resource_state"):                         len(observability.AllResourceStates()),
 	}
 	bounds[fqName("algorithm_evaluation_total")] = 25
 	bounds[fqName("algorithm_input_total")] = 160
@@ -1286,12 +1231,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		"messages", "records", "plans", "levels", "events", "bytes", "keys", "state_bytes",
 	} {
 		bounds[fqName("observed_"+name+"_total")] = observationCount
-	}
-	for _, name := range []string{
-		"cpu_cores", "rss_bytes", "heap_bytes", "gc_pause_seconds", "worker_queue_depth",
-		"worker_queue_bytes", "inflight_messages", "inflight_bytes", "consumer_lag_records", "state_bytes",
-	} {
-		bounds[fqName("resource_"+name)] = 1
 	}
 	return bounds
 }

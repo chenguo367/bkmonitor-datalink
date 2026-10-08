@@ -3637,7 +3637,6 @@ type phaseTwoReadiness struct {
 	AssignmentReady   bool
 	RuntimeStateReady bool
 	OutputSinkReady   bool
-	ResourceState     observability.ResourceState
 	LastRecoveryAt    time.Time
 }
 
@@ -3659,8 +3658,7 @@ func (h *phaseTwoApplicationHealth) Update(readiness phaseTwoReadiness) {
 		State: readiness.State, Reasons: append([]observability.ReasonCode(nil), readiness.Reasons...),
 		ConfigLoaded: true, SchemaReady: true, PhaseTwo: true, SnapshotReady: readiness.SnapshotReady,
 		AssignmentReady: readiness.AssignmentReady, RuntimeStateReady: readiness.RuntimeStateReady,
-		OutputSinkReady: readiness.OutputSinkReady, ResourceState: readiness.ResourceState,
-		LastRecoveryAt: readiness.LastRecoveryAt,
+		OutputSinkReady: readiness.OutputSinkReady, LastRecoveryAt: readiness.LastRecoveryAt,
 	})
 }
 
@@ -3668,13 +3666,7 @@ func (h *phaseTwoApplicationHealth) HealthSnapshot() observability.HealthSnapsho
 	if h == nil || h.tracker == nil {
 		return observability.NormalizeHealthSnapshot(observability.HealthSnapshot{PhaseTwo: true})
 	}
-	snapshot := h.tracker.HealthSnapshot()
-	// Kafka input claims and lag belong only to phase-one compatibility. Keep
-	// them structurally absent from the phase-two readiness source.
-	snapshot.AssignedClaims = 0
-	snapshot.ConsumerLagRecords = 0
-	snapshot.ConsumerLagKnown = false
-	return observability.NormalizeHealthSnapshot(snapshot)
+	return observability.NormalizeHealthSnapshot(h.tracker.HealthSnapshot())
 }
 
 func diagnosticTimeMS(t time.Time) int64 {

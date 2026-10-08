@@ -3879,38 +3879,6 @@ func sortedUniqueReasons(reasons []ReasonCode) []ReasonCode {
 	return result
 }
 
-func NormalizeMetricReasons(component Component, reasons []ReasonCode) []ReasonCode {
-	if len(reasons) == 0 {
-		return nil
-	}
-	mapped := make([]ReasonCode, 0, len(reasons))
-	for _, reason := range reasons {
-		mapped = append(mapped, NormalizeMetricReason(component, reason, ResultDegraded))
-	}
-	return sortedUniqueReasons(mapped)
-}
-
-// NormalizeHealthMetricReasons maps health reasons to the fixed Prometheus
-// catalog. Health is a cross-component snapshot, not the Resource component.
-func NormalizeHealthMetricReasons(reasons []ReasonCode) []ReasonCode {
-	if len(reasons) == 0 {
-		return nil
-	}
-	mapped := make([]ReasonCode, 0, len(reasons))
-	known := makeReasonSet(allResourceReasons)
-	for _, reason := range reasons {
-		reason = NormalizeReason(reason, ResultDegraded)
-		if metricReason, ok := contractObservationMetricReasonByCode[string(reason)]; ok {
-			reason = metricReason
-		}
-		if _, ok := known[reason]; !ok {
-			reason = ReasonOther
-		}
-		mapped = append(mapped, reason)
-	}
-	return sortedUniqueReasons(mapped)
-}
-
 // ObserveSlotWait reports one blocking wait inside a Slot attempt. The wait
 // name must be one of SlotWaits.
 //

@@ -31,6 +31,11 @@ var removedFamilies = []string{
 	"active_qg_set_encode_duration_seconds", "run_one_attempted_total", "schedule_cutover_last_duration_seconds",
 	"schedule_cutover_payload_size_bytes", "state_write_change_reason_total",
 	"platform_setting_enabled", "platform_setting_entries", "platform_setting_source",
+	// The health snapshot's own families: the deployment's health is
+	// fleet_health and /api/health, and a replica's readiness is /readyz.
+	"health_ready", "health_state", "health_reason", "health_assigned_claims", "health_inflight_messages",
+	"health_worker_queue_depth", "health_worker_queue_bytes", "health_consumer_lag_records",
+	"health_last_progress_timestamp_seconds", "health_last_recovery_timestamp_seconds",
 }
 
 // A removed family is registered nowhere, bound or not.
@@ -55,13 +60,17 @@ func TestARemovedFamilyIsNotRegistered(t *testing.T) {
 
 // No code, page, operation or test of alarmd or its CLI names a removed
 // family: a reader that still asked for one would read nothing and take it
-// for zero.
+// for zero. A removed family whose bare name is also a label of a family
+// still registered (health_state is fleet_health's) is looked for by its
+// full name only: the label is not a reader of the family.
 func TestNoSourceNamesARemovedFamily(t *testing.T) {
-	short := make([]string, len(removedFamilies))
-	for i, name := range removedFamilies {
-		short[i] = regexp.QuoteMeta(name)
+	labels := map[string]bool{}
+	for _, family := range alarmdFamilies(t, describedRecorder(t)) {
+		for _, label := range family.labels {
+			labels[label] = true
+		}
 	}
-	pattern := regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:bkmonitor_alarmd_)?(` + strings.Join(short, "|") + `)(?:_bucket|_sum|_count)?(?:[^A-Za-z0-9_]|$)`)
+	pattern := removedFamilyPattern(removedFamilies, labels)
 	self, err := filepath.Abs("removed_families_test.go")
 	if err != nil {
 		t.Fatal(err)
@@ -84,12 +93,54 @@ func TestNoSourceNamesARemovedFamily(t *testing.T) {
 				return err
 			}
 			if match := pattern.FindSubmatch(body); match != nil {
-				t.Errorf("%s names the removed family %s", path, match[1])
+				for _, name := range match[1:] {
+					if len(name) > 0 {
+						t.Errorf("%s names the removed family %s", path, name)
+					}
+				}
 			}
 			return nil
 		})
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
+		}
+	}
+}
+
+// removedFamilyPattern finds a removed family's name as a word, bare or
+// with the namespace, and only with the namespace when the bare name is one
+// of labels.
+func removedFamilyPattern(removed []string, labels map[string]bool) *regexp.Regexp {
+	var bare, prefixed []string
+	for _, name := range removed {
+		if labels[name] {
+			prefixed = append(prefixed, regexp.QuoteMeta(name))
+		} else {
+			bare = append(bare, regexp.QuoteMeta(name))
+		}
+	}
+	var names []string
+	if len(bare) > 0 {
+		names = append(names, `(?:bkmonitor_alarmd_)?(`+strings.Join(bare, "|")+`)`)
+	}
+	if len(prefixed) > 0 {
+		names = append(names, `bkmonitor_alarmd_(`+strings.Join(prefixed, "|")+`)`)
+	}
+	return regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:` + strings.Join(names, "|") + `)(?:_bucket|_sum|_count)?(?:[^A-Za-z0-9_]|$)`)
+}
+
+func TestARemovedNameIsFoundBareUnlessItIsALabel(t *testing.T) {
+	pattern := removedFamilyPattern([]string{"gone_total", "kind"}, map[string]bool{"kind": true})
+	for text, found := range map[string]bool{
+		"rate(gone_total[5m])":                  true,
+		"bkmonitor_alarmd_gone_total_bucket":    true,
+		"sum by (kind) (bkmonitor_alarmd_kind)": true,
+		`[]string{"kind"}`:                      false,
+		"still_gone_total":                      false,
+		"gone_totals":                           false,
+	} {
+		if got := pattern.MatchString(text); got != found {
+			t.Errorf("%q: found %v, want %v", text, got, found)
 		}
 	}
 }

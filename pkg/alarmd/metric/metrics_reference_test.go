@@ -22,22 +22,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lifecycle"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 const metricsReferencePath = "METRICS.md"
-
-// describeOnlySources are the sources whose type is an interface, which a
-// test cannot make from the type alone. Each is a value of the interface
-// whose methods are never called: describing a collector does not read its
-// source.
-var describeOnlySources = map[reflect.Type]reflect.Value{
-	reflect.TypeOf((*observability.HealthSource)(nil)).Elem():   reflect.ValueOf(struct{ observability.HealthSource }{}),
-	reflect.TypeOf((*observability.ResourceSource)(nil)).Elem(): reflect.ValueOf(struct{ observability.ResourceSource }{}),
-	reflect.TypeOf((*lifecycle.Source)(nil)).Elem():             reflect.ValueOf(struct{ lifecycle.Source }{}),
-}
 
 // describedRecorder is a recorder with every collector a running process
 // registers: NewRecorder's, and the one each Bind method registers with its
@@ -45,7 +32,7 @@ var describeOnlySources = map[reflect.Type]reflect.Value{
 // and a collector describes itself without its source.) A source that is a
 // function panics if called; any other argument is its zero value. A Bind
 // method added later is called the same way, and one whose source is an
-// interface fails here until it is put in describeOnlySources.
+// interface fails here until it is given one.
 func describedRecorder(t *testing.T) *Recorder {
 	t.Helper()
 	recorder := NewRecorder(BuildInfo{})
@@ -64,10 +51,10 @@ func describedRecorder(t *testing.T) *Recorder {
 				args = append(args, reflect.MakeFunc(param, func([]reflect.Value) []reflect.Value {
 					panic(name + "'s source is read while describing")
 				}))
-			case param.Kind() == reflect.Interface && describeOnlySources[param].IsValid():
-				args = append(args, describeOnlySources[param])
 			case param.Kind() == reflect.Interface:
-				t.Fatalf("%s takes a %s, which describeOnlySources does not have", method.Name, param)
+				// A test cannot make a value of an interface from its type
+				// alone: give this one a describe-only value here.
+				t.Fatalf("%s takes a %s, which this test cannot make", method.Name, param)
 			default:
 				// A word list or a setting beside the source: describing
 				// does not read it either.
