@@ -298,18 +298,6 @@ func DeriveCanonicalDigestV2OverCanonical(domain string, canonical []byte) (stri
 	return deriveLengthPrefixedSHA256("canonical_digest", domain, canonical)
 }
 
-func digestJSONObjectWithoutV2(field, domain string, payload []byte, omitted string) (string, error) {
-	var object map[string]json.RawMessage
-	if err := decodeJSONObject(payload, &object); err != nil {
-		return "", invalid(field, err.Error())
-	}
-	if object == nil {
-		return "", invalid(field, "must be a JSON object")
-	}
-	delete(object, omitted)
-	return digestCanonicalV2(field, domain, object)
-}
-
 // isCanonicalScalarJSONV2 answers the only question this loop asks of a
 // dimension value - is it a scalar - while refusing everything the canonical
 // form refused.
@@ -498,24 +486,6 @@ func DeriveQueryGroupKafkaKeyV2(tenantID, queryGroupKey string) ([]byte, error) 
 		return nil, err
 	}
 	return hex.DecodeString(digest)
-}
-
-func DerivePlanSetDigestV2(planSet PlanSetV2) (string, error) {
-	planSet.PlanSetDigest = ""
-	payload, err := CanonicalJSONV2(planSet)
-	if err != nil {
-		return "", err
-	}
-	return digestJSONObjectWithoutV2("plan_set.plan_set_digest", "plan-set-v2", payload, "plan_set_digest")
-}
-
-func DeriveExecutionEnvelopePayloadDigestV2(envelope ExecutionEnvelopeV2) (string, error) {
-	envelope.PayloadDigest = ""
-	payload, err := CanonicalJSONV2(envelope)
-	if err != nil {
-		return "", err
-	}
-	return digestJSONObjectWithoutV2("execution_envelope.payload_digest", "execution-envelope-payload-v2", payload, "payload_digest")
 }
 
 func DeriveStateCompatibilityHashV1(input StateCompatibilityInputV1) (string, error) {

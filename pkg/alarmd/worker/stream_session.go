@@ -262,11 +262,6 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.
 	stream.resolveTargetPlans(ctx)
-	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-		if c.Prepared != nil {
-			c.Prepared(header, effective)
-		}
-	})
 	return nil
 }
 
@@ -1604,11 +1599,6 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		if err := stream.mergeProvisional(ctx, resumed, 0); err != nil {
 			return err
 		}
-		execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-			if c.PriorStateApplied != nil {
-				c.PriorStateApplied()
-			}
-		})
 		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared,
 			stream.request.Operation, time.Now(), observability.ResultSuccess,
 			observability.ReasonStateAlreadyAppliedBeforeEvaluation, nil)

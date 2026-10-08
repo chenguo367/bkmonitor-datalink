@@ -45,31 +45,6 @@ func (*scanCountingHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cm
 
 func (*scanCountingHook) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
 
-type snapshotReadCountingHook struct {
-	mget atomic.Int64
-	get  atomic.Int64
-}
-
-func (hook *snapshotReadCountingHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
-	switch strings.ToLower(cmd.Name()) {
-	case "mget":
-		hook.mget.Add(1)
-	case "get":
-		hook.get.Add(1)
-	}
-	return ctx, nil
-}
-
-func (*snapshotReadCountingHook) AfterProcess(context.Context, redis.Cmder) error { return nil }
-
-func (*snapshotReadCountingHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
-	return ctx, nil
-}
-
-func (*snapshotReadCountingHook) AfterProcessPipeline(context.Context, []redis.Cmder) error {
-	return nil
-}
-
 type serialActivationCASHook struct {
 	evals      atomic.Int64
 	completed  atomic.Bool

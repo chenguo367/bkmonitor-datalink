@@ -2288,10 +2288,6 @@ func validLevelOutcome(kind execution.LevelOutcomeKind, reason execution.ReasonC
 	return outcome
 }
 
-func validTriggerEvent() contract.TriggerEventV1 {
-	return validTriggerEventFor(derivedTestRecordID(), strings.Repeat("c", 64))
-}
-
 func validTriggerEventFor(recordID, seriesDigest string) contract.TriggerEventV1 {
 	compiled := compiledPlanForTest(nil)
 	fingerprints := compiled.Fingerprints()

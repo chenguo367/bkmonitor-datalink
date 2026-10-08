@@ -195,21 +195,10 @@ func TestBeginSlotSupersedesUnfinishedSlotOnNewerSegmentAtSameTime(t *testing.T)
 	store := mustStoreWithSlots(t, fake, mappedSlotResolver{60: 120, 120: 180})
 	superseding := newerSegmentProjectionAt(120)
 
-	priorUnfinished := -1
-	ctx := execution.WithSlotCoverageCapture(context.Background(), &execution.SlotCoverageCapture{
-		BeginCommitted: func(prior bool) {
-			priorUnfinished = 0
-			if prior {
-				priorUnfinished = 1
-			}
-		},
-	})
+	ctx := context.Background()
 	result, err := store.BeginSlot(ctx, execution.ProgressBeginRequest{Identity: identity, OwnerFence: fence, Projection: superseding})
 	if err != nil || result.Status != execution.ProgressCommitted {
 		t.Fatalf("BeginSlot(superseding same Slot) = (%+v, %v), want committed", result, err)
-	}
-	if priorUnfinished != 1 {
-		t.Fatalf("BeginCommitted prior unfinished = %d, want the replaced projection reported as prior", priorUnfinished)
 	}
 	loaded, err := store.LoadProgress(context.Background(), identity)
 	if err != nil || loaded.Progress == nil || loaded.Progress.NextSlot != 120 || loaded.Progress.LastFullSlot != 60 ||
@@ -266,15 +255,7 @@ func TestBeginSlotSupersedesUnfinishedSlotOnNewerSegmentAtLaterTime(t *testing.T
 			fake := &controlFake{value: append([]byte(nil), raw...)}
 			store := mustStoreWithSlots(t, fake, mappedSlotResolver{60: 120, 90: 120, 120: 180})
 			superseding := newerSegmentProjectionAt(test.requested)
-			priorUnfinished := -1
-			ctx := execution.WithSlotCoverageCapture(context.Background(), &execution.SlotCoverageCapture{
-				BeginCommitted: func(prior bool) {
-					priorUnfinished = 0
-					if prior {
-						priorUnfinished = 1
-					}
-				},
-			})
+			ctx := context.Background()
 			result, err := store.BeginSlot(ctx, execution.ProgressBeginRequest{Identity: identity, OwnerFence: fence, Projection: superseding})
 			if test.conflict {
 				if err != nil || result.Status != execution.ProgressConflict || string(fake.value) != string(raw) {
@@ -282,8 +263,8 @@ func TestBeginSlotSupersedesUnfinishedSlotOnNewerSegmentAtLaterTime(t *testing.T
 				}
 				return
 			}
-			if err != nil || result.Status != execution.ProgressCommitted || priorUnfinished != 0 {
-				t.Fatalf("BeginSlot(superseding later Slot) = (%+v, %v) prior=%d, want committed as a fresh Slot", result, err, priorUnfinished)
+			if err != nil || result.Status != execution.ProgressCommitted {
+				t.Fatalf("BeginSlot(superseding later Slot) = (%+v, %v), want committed", result, err)
 			}
 			loaded, err := store.LoadProgress(context.Background(), identity)
 			if err != nil || loaded.Progress == nil || loaded.Progress.NextSlot != test.requested ||
@@ -326,18 +307,10 @@ func TestBeginSlotSupersedesUnfinishedSlotOnNewerSegmentAtEarlierTime(t *testing
 	fake := &controlFake{value: append([]byte(nil), raw...)}
 	store := mustStoreWithSlots(t, fake, mappedSlotResolver{60: abandoned - 30, abandoned - 30: abandoned, abandoned: abandoned + 30})
 	earlier := segmentProjectionAt(abandoned-30, newSegmentStart)
-	priorUnfinished := -1
-	ctx := execution.WithSlotCoverageCapture(context.Background(), &execution.SlotCoverageCapture{
-		BeginCommitted: func(prior bool) {
-			priorUnfinished = 0
-			if prior {
-				priorUnfinished = 1
-			}
-		},
-	})
+	ctx := context.Background()
 	result, err := store.BeginSlot(ctx, execution.ProgressBeginRequest{Identity: identity, OwnerFence: fence, Projection: earlier})
-	if err != nil || result.Status != execution.ProgressCommitted || priorUnfinished != 0 {
-		t.Fatalf("BeginSlot(earlier successor) = (%+v, %v) prior=%d, want committed as a fresh Slot", result, err, priorUnfinished)
+	if err != nil || result.Status != execution.ProgressCommitted {
+		t.Fatalf("BeginSlot(earlier successor) = (%+v, %v), want committed", result, err)
 	}
 	loaded, err := store.LoadProgress(context.Background(), identity)
 	if err != nil || loaded.Progress == nil || loaded.Progress.NextSlot != abandoned-30 || loaded.Progress.LastFullSlot != 60 ||
@@ -401,18 +374,10 @@ func TestBeginSlotSupersedesDifferingProjectionOnSameSegment(t *testing.T) {
 			}))
 			superseding := twoPlanProjectionAt(120)
 			test.change(&superseding)
-			priorUnfinished := -1
-			ctx := execution.WithSlotCoverageCapture(context.Background(), &execution.SlotCoverageCapture{
-				BeginCommitted: func(prior bool) {
-					priorUnfinished = 0
-					if prior {
-						priorUnfinished = 1
-					}
-				},
-			})
+			ctx := context.Background()
 			result, err := store.BeginSlot(ctx, execution.ProgressBeginRequest{Identity: identity, OwnerFence: fence, Projection: superseding})
-			if err != nil || result.Status != execution.ProgressCommitted || priorUnfinished != 1 {
-				t.Fatalf("BeginSlot(superseding same Segment) = (%+v, %v) prior=%d, want committed over the prior projection", result, err, priorUnfinished)
+			if err != nil || result.Status != execution.ProgressCommitted {
+				t.Fatalf("BeginSlot(superseding same Segment) = (%+v, %v), want committed over the prior projection", result, err)
 			}
 			loaded, err := store.LoadProgress(context.Background(), identity)
 			if err != nil || loaded.Progress == nil || loaded.Progress.NextSlot != 120 || loaded.Progress.LastFullSlot != 60 ||

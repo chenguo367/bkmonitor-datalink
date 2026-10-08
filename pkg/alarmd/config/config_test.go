@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
 func TestRedisConnectionSupportsStandaloneAndSentinel(t *testing.T) {
@@ -318,16 +317,6 @@ func TestDurationRejectsInvalidText(t *testing.T) {
 	if got := duration.Duration(); got != 3*time.Second {
 		t.Fatalf("Duration() = %s, want 3s", got)
 	}
-}
-
-type staticRouter struct{}
-
-func (staticRouter) Route(_, _ string) (state.StorageTarget, error) {
-	return state.StorageTarget{Name: "primary", Backend: nil}, nil
-}
-
-func (staticRouter) Targets() []state.StorageTarget {
-	return []state.StorageTarget{{Name: "primary", Backend: nil}}
 }
 
 // withCompatibilityServiceRedis gives a configuration the service Redis the

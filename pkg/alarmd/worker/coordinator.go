@@ -455,11 +455,6 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		// day was a state read of ours timing out, with the query fine.
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
 	}
-	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-		if c.InputCompleted != nil {
-			c.InputCompleted(completion)
-		}
-	})
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
 	// The census of what this Slot saw, before the round's own writes: it is
@@ -1402,11 +1397,6 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			case execution.StateAlreadyApplied:
 				alreadyApplied.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateAlreadyAppliedKind(classified.AlreadyApplied),
 					string(stateResult.Mutation.Identity.SeriesIdentityDigest), stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision)
-				execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-					if c.PriorStateApplied != nil {
-						c.PriorStateApplied()
-					}
-				})
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 				continue
 			case execution.StateStaleVersion, execution.StateVersionConflict:
@@ -1761,11 +1751,6 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		observationResult = observability.ResultDegraded
 		observationReason = completion.ReasonCode
 	}
-	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-		if c.ProgressCommitted != nil {
-			c.ProgressCommitted(progressRequest, progress)
-		}
-	})
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
 		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionScopeFacts(completionCause),
 		completionCause.Coverage, completion.Evidence, completion.Primary)
@@ -1880,11 +1865,6 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 	ctx, outputWrite := observability.ContextWithOutputWriteReport(ctx)
 	started := time.Now()
 	err := coordinator.ports.Events.WriteBatch(ctx, events)
-	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-		if c.OutputWritten != nil {
-			c.OutputWritten(events, err)
-		}
-	})
 	reason := execution.ReasonCode(observability.ReasonNone)
 	var rejection *observability.OutputRejectionFacts
 	if err != nil {
