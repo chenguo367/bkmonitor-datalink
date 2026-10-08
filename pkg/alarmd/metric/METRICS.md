@@ -109,10 +109,6 @@ Labels: `algorithm_family`, `input_name`, `dependency_point`, `result`
 
 Named algorithm input completion by fixed source family, input, dependency point and result.
 
-## bkmonitor_alarmd_assigned_claims
-
-Current claims in this alarmd assignment.
-
 ## bkmonitor_alarmd_assignment_index_confirm_total
 
 Labels: `result`
@@ -321,10 +317,6 @@ What the latest CMDB index load read and could not use, set on every refresh: ho
 
 Service instances in the in-memory CMDB index the target filter decides on; zero while a series names an instance is an instance cache nobody writes, and such series are admitted with the gap named.
 
-## bkmonitor_alarmd_consumer_lag_records
-
-Known local high-water minus processed and marked offset across claims; this is not broker committed-group lag.
-
 ## bkmonitor_alarmd_container_cpu_cores
 
 Labels: `source`
@@ -507,16 +499,6 @@ Labels: `result`
 
 Turns the walk gave to an object, by what came of the turn. offered counts every object the walk reached and is the denominator for the others, which do not sum to it because an object can also be passed over as not due. deferred_queue_full is the ready queue having no place, and the walk stops there, so every object behind that one goes unoffered on the same pass -- more room changes it. deferred_not_better is the recovery queue being full of objects all due sooner than this one, which is an ordering and not a lack of room -- more room changes nothing. Summing the two hides the only difference that decides whether there is anything to do. The two are expected to behave differently, and neither zero means the same thing. deferred_not_better is not a measure of queue pressure at all -- it is an invariant guard, and reading it as a load signal will send whoever does that looking for a load explanation that does not exist. The recovery queue's capacity is at least the number of objects this Worker owns, it holds at most one entry per object, and the one caller that fills it drops the stale entries immediately before doing so, so its occupancy cannot reach its capacity. Zero means that chain holds. Non-zero means exactly one thing: either the stale entries were not dropped before the queue was filled, or the capacity floor was changed -- somebody edited one of those two places. deferred_queue_full has no such bound. The ready queue's capacity is derived from the CPU budget while what fills it is the owned count, and the two are unrelated, so a Worker owning more objects than that capacity reaches it every tick and the walk stops there each time. Read it as a rate over a window rather than as a total: on a cumulative counter, "ever non-zero" is true for ever once it happens once.
 
-## bkmonitor_alarmd_drain_total
-
-Labels: `result`
-
-alarmd consumer drain results.
-
-## bkmonitor_alarmd_draining
-
-Whether the alarmd consumer lifecycle is draining.
-
 ## bkmonitor_alarmd_draining_cursor_pruned_query_groups
 
 Replicated per-Pod view of draining Query Groups whose Progress cursor lies before the earliest Slot their Schedule timeline still holds. Such a Query Group can never find the Slot its cursor asks for, so it cannot drain by itself; the count is reported before anything acts on it. Aggregate replicas with max, not sum.
@@ -592,10 +574,6 @@ Expired range operation returns, not logical Slot completions.
 Labels: `reason`
 
 Logical age-expired Slots finalized by a new successful range commit.
-
-## bkmonitor_alarmd_fatal_total
-
-Process-level fatal lifecycle events.
 
 ## bkmonitor_alarmd_fleet_anomalies
 
@@ -745,52 +723,6 @@ Labels: `state`
 
 Replicas the fleet view counted, by whether they have applied the Activation the control plane published: acked, lagging or unknown. Unknown is a replica that reported no version or a published version that could not be read; it is never folded into acked. The three sum to the counted replicas. Written by every replica from the same shared facts, so aggregate with max, not sum.
 
-## bkmonitor_alarmd_health_assigned_claims
-
-Assigned claims in the current health snapshot.
-
-## bkmonitor_alarmd_health_consumer_lag_records
-
-Known aggregate high-water minus processed and marked offset; this is not broker committed-group lag.
-
-## bkmonitor_alarmd_health_inflight_messages
-
-Inflight messages in the current health snapshot.
-
-## bkmonitor_alarmd_health_last_progress_timestamp_seconds
-
-Labels: `stage`
-
-Unix timestamp of the last pipeline progress.
-
-## bkmonitor_alarmd_health_last_recovery_timestamp_seconds
-
-Unix timestamp of the last dependency or restart recovery.
-
-## bkmonitor_alarmd_health_ready
-
-Whether the alarmd health snapshot permits new work.
-
-## bkmonitor_alarmd_health_reason
-
-Labels: `reason_code`
-
-Current bounded alarmd health reasons.
-
-## bkmonitor_alarmd_health_state
-
-Labels: `health_state`
-
-Current bounded alarmd health state.
-
-## bkmonitor_alarmd_health_worker_queue_bytes
-
-Worker queue bytes in the current health snapshot.
-
-## bkmonitor_alarmd_health_worker_queue_depth
-
-Worker queue depth in the current health snapshot.
-
 ## bkmonitor_alarmd_heap_inuse_live_bytes
 
 Live heap the runtime marked in the collection forced before the profile was read, so the two describe the same cycle.
@@ -830,10 +762,6 @@ Series a run produced Level outcomes for without summarising a detection window,
 ## bkmonitor_alarmd_host_disable_monitor_states
 
 Host states the access path treats as not monitored; zero means the filter is not installed.
-
-## bkmonitor_alarmd_inflight_records
-
-Records currently being processed by the alarmd consumer.
 
 ## bkmonitor_alarmd_last_progress_timestamp_seconds
 
@@ -1471,10 +1399,6 @@ Closed-segment attempts refused because newer state has already applied.
 
 Slots whose first readiness preserves a preceding segment's completion deadline.
 
-## bkmonitor_alarmd_ready
-
-Whether the alarmd consumer lifecycle is ready.
-
 ## bkmonitor_alarmd_rebalance_gap
 
 Owned Query Groups on the most loaded ready worker minus those on the least loaded, as the latest rebalance round on this Control Leader saw them. Zero is even; a gap that stays above five percent of the even share across rounds is a writer that is not moving. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
@@ -1560,52 +1484,6 @@ Slots the scheduler gave up replaying, by reason. REPLAY_AGE_EXCEEDED and REPLAY
 Labels: `outcome`
 
 Slots evaluated before this process took their Query Group over from another owner, by outcome, counted once per Slot and outcome however often it is classified, and not for a Query Group the degraded pool holds, whose Slots are given up on for distance as before: replayed, because nobody here could have run them and they are within the replay age; age_exceeded, given up on like any Slot that old. The distance rule, which gives up on Slots a Query Group fell behind on while it held them, does not apply to these. A rollout's handover is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero while a handover takes less than the replay age. Compared on the Slot's evaluation time, not on when it became ready: one evaluated just before the takeover and ready after it counts too.
-
-## bkmonitor_alarmd_resource_consumer_lag_records
-
-Observed aggregate high-water minus processed and marked offset; it is not broker committed-group lag and does not trigger resource actions.
-
-## bkmonitor_alarmd_resource_cpu_cores
-
-Observed alarmd process CPU cores.
-
-## bkmonitor_alarmd_resource_gc_pause_seconds
-
-Observed alarmd GC pause seconds.
-
-## bkmonitor_alarmd_resource_heap_bytes
-
-Observed alarmd Go heap bytes.
-
-## bkmonitor_alarmd_resource_inflight_bytes
-
-Observed inflight bytes.
-
-## bkmonitor_alarmd_resource_inflight_messages
-
-Observed inflight messages.
-
-## bkmonitor_alarmd_resource_rss_bytes
-
-Observed alarmd process RSS bytes.
-
-## bkmonitor_alarmd_resource_state
-
-Labels: `resource_state`
-
-Observe-only resource signal state.
-
-## bkmonitor_alarmd_resource_state_bytes
-
-Observed runtime state bytes touched by alarmd.
-
-## bkmonitor_alarmd_resource_worker_queue_bytes
-
-Observed worker queue bytes.
-
-## bkmonitor_alarmd_resource_worker_queue_depth
-
-Observed worker queue depth.
 
 ## bkmonitor_alarmd_retained_peak_census_groups
 

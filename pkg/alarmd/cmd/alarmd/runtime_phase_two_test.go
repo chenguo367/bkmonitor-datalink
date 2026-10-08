@@ -33,7 +33,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
-func TestPhaseTwoApplicationHealthUsesWorkerReadinessWithoutKafkaInputState(t *testing.T) {
+func TestPhaseTwoApplicationHealthUsesWorkerReadiness(t *testing.T) {
 	health := newPhaseTwoApplicationHealth()
 	health.Update(phaseTwoReadiness{
 		State: observability.HealthReady, SnapshotReady: true, AssignmentReady: true,
@@ -43,9 +43,6 @@ func TestPhaseTwoApplicationHealthUsesWorkerReadinessWithoutKafkaInputState(t *t
 	snapshot := health.HealthSnapshot()
 	if !snapshot.PhaseTwo || !snapshot.Ready {
 		t.Fatalf("phase-two health = %+v, want ready phase-two worker", snapshot)
-	}
-	if snapshot.AssignedClaims != 0 || snapshot.ConsumerLagKnown || snapshot.ConsumerLagRecords != 0 {
-		t.Fatalf("phase-two health leaked Kafka input claim/lag state: %+v", snapshot)
 	}
 }
 

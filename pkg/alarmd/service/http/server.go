@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet/ui"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lifecycle"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/publicsurface"
@@ -59,7 +58,6 @@ type Server struct {
 	internalAddress string
 	restricted      atomic.Bool
 	ready           atomic.Bool
-	source          lifecycle.Source
 	healthSource    observability.HealthSource
 	liveness        atomic.Pointer[livenessHolder]
 	// adminKeySecret is what the login page says about where the
@@ -213,20 +211,7 @@ func (s *Server) serveAPI(response http.ResponseWriter, request *http.Request) {
 }
 
 func New(recorder *metric.Recorder, options ...Option) *Server {
-	return newServer(recorder, nil, options...)
-}
-
-func NewWithLifecycle(recorder *metric.Recorder, source lifecycle.Source, options ...Option) (*Server, error) {
-	if recorder == nil {
-		return nil, errors.New("HTTP service: metric recorder is required")
-	}
-	if source == nil {
-		return nil, errors.New("HTTP service: lifecycle source is required")
-	}
-	if err := recorder.BindLifecycle(source); err != nil {
-		return nil, err
-	}
-	return newServer(recorder, source, options...), nil
+	return newServer(recorder, options...)
 }
 
 func NewWithHealth(recorder *metric.Recorder, source observability.HealthSource, options ...Option) (*Server, error) {
@@ -236,16 +221,13 @@ func NewWithHealth(recorder *metric.Recorder, source observability.HealthSource,
 	if source == nil {
 		return nil, errors.New("HTTP service: health source is required")
 	}
-	if err := recorder.BindHealth(source); err != nil {
-		return nil, err
-	}
-	server := newServer(recorder, nil, options...)
+	server := newServer(recorder, options...)
 	server.healthSource = source
 	return server, nil
 }
 
-func newServer(recorder *metric.Recorder, source lifecycle.Source, options ...Option) *Server {
-	server := &Server{source: source}
+func newServer(recorder *metric.Recorder, options ...Option) *Server {
+	server := &Server{}
 	for _, option := range options {
 		if option != nil {
 			option(server)
@@ -515,9 +497,6 @@ func (s *Server) readiness(response http.ResponseWriter, _ *http.Request) {
 			return
 		}
 		return
-	}
-	if s.source != nil {
-		ready = s.source.LifecycleSnapshot().Ready
 	}
 	if !ready {
 		response.WriteHeader(http.StatusServiceUnavailable)
