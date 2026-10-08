@@ -61,6 +61,10 @@ type SlotContext struct {
 	ObjectDigest     execution.ObjectDigest       `json:"object_digest"`
 	DuePlanSetDigest execution.DuePlanSetDigest   `json:"due_plan_set_digest"`
 	ContractDigest   string                       `json:"contract_digest"`
+	// ReadHoldMillis is the read hold the Slot was frozen with, and
+	// ReadHoldBasis where it was read from (ReadHoldFromProgress, ...).
+	ReadHoldMillis int64  `json:"read_hold_ms"`
+	ReadHoldBasis  string `json:"read_hold_basis,omitempty"`
 }
 
 type SlotQueryInput struct {
@@ -133,6 +137,9 @@ func SlotOperations(options SlotOptions) []Operation {
 		}
 		result := SlotGetResult{Kind: "reconstructed_from_contract", Slot: slotContext(plan), Queries: []SlotQueryPlan{}, Retained: SlotEvidence{Records: []json.RawMessage{}, Samples: []json.RawMessage{}}}
 		out := Outcome{Complete: true, Limitations: []string{slotBoundary}}
+		if plan.ReadHoldBasis == ReadHoldNoRecord {
+			out.Limitations = append(out.Limitations, slotNoHoldRecord)
+		}
 		for _, query := range plan.Prepared.Queries {
 			preview, err := options.UQ.Preview(query.Spec)
 			if err != nil {
@@ -253,10 +260,14 @@ func resolveSlot(ctx context.Context, options SlotOptions, p Params) (SlotPlan, 
 	return plan, nil
 }
 
+// slotNoHoldRecord says what a read hold of zero read from no record rests
+// on.
+const slotNoHoldRecord = "slot.read_hold_ms is 0 because its Query Group keeps no read hold record: one whose hold has only ever been zero keeps none, and a record lowered to zero lasts 7 days. A record evicted from Redis reads the same; evicted_keys on the state Redis says whether any were."
+
 func slotFailure(err error) *Failure {
 	switch {
 	case errors.Is(err, ErrHistoricalReadHoldUnknown):
-		return &Failure{Code: "historical_read_hold_unknown", Message: "The read hold this Slot was frozen with is no longer retained; its contract is not rebuilt with another."}
+		return &Failure{Code: "historical_read_hold_unknown", Message: "The read hold this Slot was frozen with is not known: its record did not decode or no longer reaches back to it, or there is none and the Slot is older than a record's 7-day lifetime; its contract is not rebuilt with another."}
 	case errors.Is(err, ErrHistoricalContractUnavailable):
 		return &Failure{Code: "historical_contract_unavailable", Message: "Retained historical Segment, object or exact due plans are unavailable; current strategy is not substituted."}
 	case errors.Is(err, ErrSlotBudgetExceeded):
@@ -275,7 +286,8 @@ func slotContext(plan SlotPlan) SlotContext {
 		ObjectDigest execution.ObjectDigest
 	}{ref, plan.ObjectDigest})
 	digest := sha256.Sum256(raw)
-	return SlotContext{ref.Slot.QueryGroup, ref.Slot.EvaluationTime, ref.SnapshotRevision, ref.QueryRevision, ref.ScheduleRevision, ref.ScheduleSegmentStart, plan.ObjectDigest, ref.DuePlanSetDigest, hex.EncodeToString(digest[:])}
+	return SlotContext{ref.Slot.QueryGroup, ref.Slot.EvaluationTime, ref.SnapshotRevision, ref.QueryRevision, ref.ScheduleRevision, ref.ScheduleSegmentStart, plan.ObjectDigest, ref.DuePlanSetDigest, hex.EncodeToString(digest[:]),
+		ref.ReadHoldMillis, plan.ReadHoldBasis}
 }
 
 func slotParams(slot SlotContext) Params {

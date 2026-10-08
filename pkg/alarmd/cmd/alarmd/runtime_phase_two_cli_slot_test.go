@@ -371,7 +371,63 @@ func TestSlotGetThroughTheBuiltCLICarriesTheLatestPublication(t *testing.T) {
 	if err := client.Del(ctx, holdKey).Err(); err != nil {
 		t.Fatal(err)
 	}
+	// The fixture's Slot is older than a record's lifetime: with no record,
+	// it may predate a lowering whose record has expired.
 	if _, err := newCLISlotResolver(cfg, client)(ctx, slot); !errors.Is(err, obchannel.ErrHistoricalReadHoldUnknown) {
-		t.Fatalf("absent historical hold became zero: %v", err)
+		t.Fatalf("absent hold of a Slot older than a record's lifetime became zero: %v", err)
+	}
+}
+
+// A Query Group with no read hold record held none: a past Slot of it within
+// a record's lifetime reads with a hold of zero, and says it was read from no
+// record. One older than that, or a record that does not decode, is not
+// known; a record that reaches back to the Slot says it was read from it.
+func TestAPastSlotOfAGroupWithNoReadHoldRecordReadsWithNoHold(t *testing.T) {
+	cfg, client, slot, _ := cliSlotFixture(t)
+	ctx := context.Background()
+	holdKey := productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership") + ":{" + ownership.ControlHashTag(slot.QueryGroup) + "}:" + productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule") + ":" + readhold.Namespace
+	at := time.Unix(int64(slot.EvaluationTime), 0)
+	resolve := func(now time.Time) (obchannel.SlotPlan, error) {
+		return newCLISlotResolverAt(cfg, client, func() time.Time { return now })(ctx, slot)
+	}
+	if err := client.Del(ctx, holdKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolve(at.Add(time.Hour))
+	if err != nil || plan.Contract.ReadHoldMillis != 0 || plan.ReadHoldBasis != obchannel.ReadHoldNoRecord {
+		t.Fatalf("a Slot of a group with no record: plan %+v basis %q err %v, want hold 0 read from no record", plan.Contract, plan.ReadHoldBasis, err)
+	}
+	if _, err := resolve(at.Add(readhold.RecordTTL + time.Hour)); !errors.Is(err, obchannel.ErrHistoricalReadHoldUnknown) {
+		t.Fatalf("a Slot older than a record's lifetime with no record: %v, want unknown", err)
+	}
+	if err := client.Set(ctx, holdKey, `{"hold_ms":-1,"since_slot":1}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolve(at.Add(time.Hour)); !errors.Is(err, obchannel.ErrHistoricalReadHoldUnknown) {
+		t.Fatalf("a record that does not decode: %v, want unknown", err)
+	}
+	if err := client.Set(ctx, holdKey, `{"hold_ms":60000,"since_slot":1}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = resolve(at.Add(time.Hour))
+	if err != nil || plan.Contract.ReadHoldMillis != 60_000 || plan.ReadHoldBasis != obchannel.ReadHoldFromRecord {
+		t.Fatalf("a held record: plan %+v basis %q err %v, want 60 s read from the record", plan.Contract, plan.ReadHoldBasis, err)
+	}
+}
+
+// A Slot its Query Group's Progress still carries is read with the hold its
+// contract was frozen with, and says it was read from Progress.
+func TestASlotProgressStillCarriesIsReadFromProgress(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	last := f.progress(ctx).LastCompletion
+	if last == nil {
+		t.Fatal("the fixture completed no Slot")
+	}
+	plan, err := newCLISlotResolverAt(f.cfg, f.redisClient, f.now)(ctx, last.Contract.Slot)
+	if err != nil || plan.ReadHoldBasis != obchannel.ReadHoldFromProgress || plan.Contract.ReadHoldMillis != last.Contract.ReadHoldMillis {
+		t.Fatalf("plan %+v basis %q err %v, want the completed contract's hold %d read from Progress",
+			plan.Contract, plan.ReadHoldBasis, err, last.Contract.ReadHoldMillis)
 	}
 }

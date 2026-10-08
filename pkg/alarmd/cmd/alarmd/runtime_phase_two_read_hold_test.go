@@ -169,8 +169,10 @@ func TestRuntimeLookbackPagerUsesOnlyOwnedMemory(t *testing.T) {
 	if following.ReadHolds.Groups[0].QueryGroup != "good" {
 		t.Fatal("CLI cursor reread first page")
 	}
-	if page := h.groupPage(nil, "good", 200); len(page.Groups) != 1 || page.Groups[0].HoldKnown {
-		t.Fatalf("missing, unseeded h0 was reported as known: %+v", page)
+	// A group with no record holds nothing, whether or not a Slot of it was
+	// prepared yet: one whose hold has only ever been zero keeps none.
+	if page := h.groupPage(nil, "good", 200); len(page.Groups) != 1 || !page.Groups[0].HoldKnown || page.Groups[0].ReadHoldMillis != 0 {
+		t.Fatalf("missing, unseeded h0 was not reported as a known zero: %+v", page)
 	}
 	*at = at.Add(2 * time.Minute)
 	if h.groupPage(nil, "", 200).Total != 0 || len(h.fleetFacts()) != 0 {
@@ -230,7 +232,9 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	}
 	h.restore(context.Background(), groups)
 	counts := h.groupsBySource(nil)
-	want := map[string]lookback.ReadHoldGroups{lookback.SourceOther: {Held: 3, AtLimit: 1, Unknown: 2, MaxMillis: 600000, MaxKnown: true}}
+	// Unknown is the record that did not decode; the group with none holds
+	// nothing.
+	want := map[string]lookback.ReadHoldGroups{lookback.SourceOther: {Held: 3, AtLimit: 1, Unknown: 1, MaxMillis: 600000, MaxKnown: true}}
 	if !reflect.DeepEqual(counts, want) {
 		t.Fatalf("counts %+v, want %+v", counts, want)
 	}
@@ -244,11 +248,20 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	if entry := counts[lookback.SourceOther]; len(page.Groups)-known != entry.Unknown {
 		t.Fatalf("counts %+v disagree with the group page %+v", entry, page)
 	}
+	// Published, the record that did not decode is listed unknown, and the
+	// group with none is left out: holding nothing.
+	facts := h.fleetFacts()
+	if bad, listed := facts["bad"]; !listed || !bad.Unknown || bad.Millis != 0 {
+		t.Fatalf("the undecodable record published %+v (listed %t), want it unknown", bad, listed)
+	}
+	if zero, listed := facts["zero"]; listed {
+		t.Fatalf("the group with no record published %+v, want it left out", zero)
+	}
 	// One group's hold, as an overdue episode reads it, by the same rule.
 	for qg, want := range map[string]struct {
 		millis int64
 		known  bool
-	}{"good": {120000, true}, "limited": {600000, true}, "raised": {90000, true}, "bad": {0, false}, "zero": {0, false}} {
+	}{"good": {120000, true}, "limited": {600000, true}, "raised": {90000, true}, "bad": {0, false}, "zero": {0, true}} {
 		if millis, known := h.holdOf(qg); millis != want.millis || known != want.known {
 			t.Fatalf("hold of %s %d %t, want %d %t", qg, millis, known, want.millis, want.known)
 		}
@@ -317,7 +330,12 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 		"unprepared": {99_000, 1_790_000_000, 0, 0},
 	} {
 		got, found := facts[qg]
-		if !found || got.Millis != want.millis || got.HeldSince != want.since || got.DelaySeconds != want.delay || got.SuggestedDelaySeconds != want.suggested {
+		settling := int64(30)
+		if qg == "unprepared" {
+			settling = 0
+		}
+		if !found || got.Millis != want.millis || got.HeldSince != want.since || got.DelaySeconds != want.delay || got.SuggestedDelaySeconds != want.suggested ||
+			got.SettlingWaitSeconds != settling {
 			t.Errorf("%s: facts %+v (found %t), want hold %d since %d delay %d suggested %d", qg, got, found, want.millis, want.since, want.delay, want.suggested)
 		}
 	}

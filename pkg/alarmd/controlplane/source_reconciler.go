@@ -152,6 +152,10 @@ type sourceRoundMemory struct {
 	signal SourceChangeSignal
 	cycle  observedCycle
 	readAt time.Time
+	// holdsLastGood is the publisher's statement as it applies to this
+	// observation: made for the change signal read with it, and about the
+	// exact active set the cycle read (holdsLastGoodFor).
+	holdsLastGood bool
 	// steady marks that the round which last used this observation ended
 	// UNCHANGED. Only a steady observation is reused: confirmation takes two
 	// independent reads, and a round that failed proves nothing for the next.
@@ -639,9 +643,23 @@ func (reconciler *SourceReconciler) observe(ctx context.Context, source Strategy
 	if err != nil {
 		return observedCycle{}, sourceRead{}, err
 	}
-	reconciler.memory = &sourceRoundMemory{signal: signal, cycle: cycle, readAt: now}
+	reconciler.memory = &sourceRoundMemory{signal: signal, cycle: cycle, readAt: now,
+		holdsLastGood: holdsLastGoodFor(signal, cycle)}
 	read.mode, read.reason, read.strategies = SourceReadFull, reason, len(cycle.strategies)
 	return cycle, read, nil
+}
+
+// holdsLastGoodFor is whether the publisher's statement, read with this
+// round's change signal, is about the active set this round's cycle read:
+// the digest it names against the digest of the bytes the cycle's own read
+// of the set returned. The statement is read before the cycle, so the two can
+// come from different publications; when they do and the set differs, the
+// digests differ and the statement is not taken. When they do and the set is
+// byte for byte the one the statement names, the statement is true of the
+// list this observation holds, which is all it is used for. A source that
+// cannot name its bytes, or a statement without a digest, never matches.
+func holdsLastGoodFor(signal SourceChangeSignal, cycle observedCycle) bool {
+	return signal.HoldsLastGoodFor != "" && signal.HoldsLastGoodFor == cycle.activeSet
 }
 
 // fullReadReason names the condition that makes this round read every
