@@ -1373,7 +1373,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
 		readHolds: readHolds.fleetFacts,
-		applied:   repository.AppliedActivationRevision,
+		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
+		applied: repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.

@@ -86,7 +86,7 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 	meter := &storeMeterRecord{}
 	store.Meter(meter)
 	snapshot := summarizedSnapshot("pod-a", 40)
-	if err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute); err != nil {
+	if _, err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	written, err := store.Load(context.Background(), []string{"pod-a"})
@@ -212,7 +212,7 @@ func cutBeforeExec(client net.Conn, target string) bool {
 func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	address, client := realRedis(t)
 	before := mustStore(t, client, time.Minute, 0)
-	if err := before.PublishSummarized(context.Background(), summarizedSnapshot("pod-a", 3), 10*time.Minute); err != nil {
+	if _, err := before.PublishSummarized(context.Background(), summarizedSnapshot("pod-a", 3), 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	keys := []string{before.snapshotKey("pod-a"), before.summaryKey("pod-a"), before.ownedKey("pod-a")}
@@ -223,7 +223,7 @@ func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	t.Cleanup(func() { _ = cut.Close() })
 	next := summarizedSnapshot("pod-a", 5)
 	next.TakenAt = now.Add(time.Minute)
-	if err := mustStore(t, cut, time.Minute, 0).PublishSummarized(context.Background(), next, 10*time.Minute); err == nil {
+	if _, err := mustStore(t, cut, time.Minute, 0).PublishSummarized(context.Background(), next, 10*time.Minute); err == nil {
 		t.Fatal("a publish whose EXEC never arrived reported success")
 	}
 	_ = cut.Close()
@@ -238,7 +238,7 @@ func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	}
 	// The same publish straight to Redis replaces all three: the cut is what
 	// kept them.
-	if err := before.PublishSummarized(context.Background(), next, 10*time.Minute); err != nil {
+	if _, err := before.PublishSummarized(context.Background(), next, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	for index, value := range client.MGet(context.Background(), keys...).Val() {
@@ -258,7 +258,7 @@ func TestTheServiceSummarizesAReplicaThatPublishedNoSummaryFromItsSnapshot(t *te
 	meter := &storeMeterRecord{}
 	store.Meter(meter)
 	current, older := summarizedSnapshot("pod-a", 3), summarizedSnapshot("pod-b", 2)
-	if err := store.PublishSummarized(context.Background(), current, 10*time.Minute); err != nil {
+	if _, err := store.PublishSummarized(context.Background(), current, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Publish(context.Background(), older); err != nil {
@@ -319,7 +319,7 @@ func TestASummaryReadsBackAsWritten(t *testing.T) {
 func TestEveryListOfASnapshotIsEitherRowsOrKeptInItsHead(t *testing.T) {
 	rows := map[string]bool{"OwnedObjects": true, "Anomalies": true, "Demoted": true, "Undecidable": true, "ByDesign": true,
 		"PrunedSkips": true, "GapSkips": true, "NoData": true, "NoDataMemory": true, "RetainedShare": true, "ReadEarly": true,
-		"LateSeries": true, "ReadHolds": true}
+		"LateSeries": true, "ReadHolds": true, "OverdueEpisodes": true}
 	kept := map[string]bool{"AwaitingFirstRound": true, "Recovered": true, "Dependencies": true}
 	var full Snapshot
 	fill(reflect.ValueOf(&full).Elem(), 0)

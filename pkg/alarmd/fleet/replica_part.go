@@ -85,6 +85,10 @@ type ReplicaPart struct {
 	CheckRows checkTallies `json:"-"`
 	// TodoRows is the rows' half of the first screen's to-do (todoRowsOf).
 	TodoRows Todo `json:"-"`
+	// Overdue is the objects of the rows under SLOTS_OVERDUE, for the replica
+	// that publishes the part to keep its overdue episodes by; not published,
+	// as a reader of summaries has no use for which.
+	Overdue []OverdueObject `json:"-"`
 	// Metrics is what the verdict scrape counts from rows. Nil on a part a
 	// build before it published, which says nothing of those counts: such a
 	// summary is read as none, and the replica is summarized from its
@@ -117,6 +121,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	columns := viewColumns(&view)
 	part.Truncated = truncatedColumns(columnsTruncated(&view))
 	part.CheckRows = checkRowsOf(columns, &view, now)
+	part.Overdue = overdueObjectsOf(columns)
 	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)

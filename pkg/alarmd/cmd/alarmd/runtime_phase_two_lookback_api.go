@@ -203,6 +203,20 @@ func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[st
 	return counts
 }
 
+// holdOf is one Query Group's read hold as the lookback's group page knows
+// it: unknown while its record is unread, corrupt, or missing and not yet
+// seeded.
+func (holds *productionReadHolds) holdOf(queryGroup string) (int64, bool) {
+	inspection := holds.controller.Inspect(execution.QueryGroupIdentity(queryGroup))
+	if !inspection.Loaded || inspection.Corrupt || (inspection.Missing && !inspection.Seeded) {
+		return 0, false
+	}
+	if inspection.Record.PendingHoldMillis != nil {
+		return *inspection.Record.PendingHoldMillis, true
+	}
+	return inspection.Record.HoldMillis, true
+}
+
 func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 	holds.mu.Lock()
 	groups := make([]execution.QueryGroupIdentity, 0, len(holds.groups))

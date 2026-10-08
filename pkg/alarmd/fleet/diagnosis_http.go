@@ -108,6 +108,10 @@ type DiagnosisSummaryResponse struct {
 	Verdicts   []StateWord       `json:"verdicts"`
 	Words      Words             `json:"words"`
 	Timing     DiagnosisTiming   `json:"timing_ms"`
+	// OverdueEpisodes is the replicas' latest objects found overdue and
+	// overdue no more, read from their snapshots with the view the
+	// diagnosis is decided on; absent when none was kept.
+	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
 }
 
 // DiagnosisSummaryFreshFor is how long one first-screen count answers every
@@ -452,6 +456,9 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		if summaryOnly {
 			summary := DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica, Universe: body.Universe,
 				Verdicts: body.Verdicts, Words: ProductWords(), Timing: body.Timing}
+			if entry.view != nil {
+				summary.OverdueEpisodes = entry.view.OverdueEpisodes
+			}
 			summary.Summary = summarizeDiagnosis(entry.universe, entry.view, func(id string) DiagnosisRow {
 				return diagnoseStrategy(id, lookup(id), ctx)
 			})

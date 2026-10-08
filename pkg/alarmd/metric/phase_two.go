@@ -6,6 +6,7 @@
 package metric
 
 import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"math"
 	"slices"
 	"strings"
@@ -105,6 +106,7 @@ type phaseTwoMetrics struct {
 	stateAdmissions                *prometheus.CounterVec
 	scheduleCutoverQueryGroups     *prometheus.CounterVec
 	scheduleCutoverReadHoldLinks   *prometheus.CounterVec
+	fleetOverdueEpisodes           *prometheus.CounterVec
 	scheduleCutoverTimelinesRead   prometheus.Gauge
 	// The last successful cutover's exact duration, set with its payload and
 	// timelines read so the three describe one cutover; the first
@@ -918,6 +920,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.scheduleCutoverReadHoldLinks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_read_hold_links_total", Help: "Moved Plans' links to the Query Group they left, by what a publication cutover did with them: linked (the state generation is unchanged, so the new group's first Slots keep the old group's last deadline), linked_generation_unknown (a generation could not be read; linked to keep ordering), generation_changed (no state shared; no link), dropped_self (a carried link named the group it is in), dropped_expired (a carried link past its lifetime)."}, []string{"decision"})
 	for _, decision := range observability.ScheduleCutoverReadHoldLinks {
 		metrics.scheduleCutoverReadHoldLinks.WithLabelValues(decision)
+	}
+	metrics.fleetOverdueEpisodes = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_overdue_episodes_total", Help: "Objects this replica's rows found overdue, each time one began to be, by its read hold then: zero, positive (its Slots were held), unknown. Each replica counts its own objects; the deployment's is the sum. Which objects they were is in the diagnosis's overdue_episodes."}, []string{"hold"})
+	for _, hold := range fleet.OverdueHoldClasses {
+		metrics.fleetOverdueEpisodes.WithLabelValues(hold)
 	}
 	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_expired_total",
@@ -1807,7 +1813,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
@@ -2626,6 +2632,15 @@ func (gauge *loadedGauge) Collect(ch chan<- prometheus.Metric) {
 // The per-replica gauges are not here: a replica reports its own view of
 // draining Query Groups, its own index staleness, whether it leads or not,
 // and those readings stay true.
+// FleetOverdueEpisodeBegan counts one object this replica's rows began to
+// find overdue, under its read hold then (fleet.OverdueEpisode.HoldClass).
+func (r *Recorder) FleetOverdueEpisodeBegan(hold string) {
+	if r == nil || r.phaseTwo.fleetOverdueEpisodes == nil {
+		return
+	}
+	r.phaseTwo.fleetOverdueEpisodes.WithLabelValues(hold).Inc()
+}
+
 func (r *Recorder) ControlLeaderStepDown() {
 	if r == nil {
 		return

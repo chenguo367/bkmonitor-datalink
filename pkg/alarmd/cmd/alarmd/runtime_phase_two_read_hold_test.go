@@ -241,6 +241,15 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	if entry := counts[lookback.SourceOther]; len(page.Groups)-known != entry.Unknown {
 		t.Fatalf("counts %+v disagree with the group page %+v", entry, page)
 	}
+	// One group's hold, as an overdue episode reads it, by the same rule.
+	for qg, want := range map[string]struct {
+		millis int64
+		known  bool
+	}{"good": {120000, true}, "limited": {600000, true}, "bad": {0, false}, "zero": {0, false}} {
+		if millis, known := h.holdOf(qg); millis != want.millis || known != want.known {
+			t.Fatalf("hold of %s %d %t, want %d %t", qg, millis, known, want.millis, want.known)
+		}
+	}
 	*at = at.Add(2 * time.Minute)
 	if counts := h.groupsBySource(nil); counts != nil {
 		t.Fatalf("groups no longer held were counted: %+v", counts)

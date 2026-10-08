@@ -1668,10 +1668,15 @@ type Snapshot struct {
 	// place it can be seen coming.
 	RetainedShare []Anomaly `json:"retained_share,omitempty"`
 	// ReadEarly is the objects the late-data lookback found read before
-	// their data was complete in two samples in a row. In no column -- the
-	// rounds complete -- and listed because their results are read from data
-	// that was not all there, which only the strategy's time_delay changes.
+	// their data was complete in two of their latest three samples. In no
+	// column -- the rounds complete -- and listed because their results are
+	// read from data that was not all there, which only the strategy's
+	// time_delay changes.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// OverdueEpisodes is this replica's latest objects found overdue and
+	// overdue no more, at most MaxOverdueEpisodes. Not in the summary: read
+	// only by a reader that reads snapshots, a diagnosis.
+	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
 	// LateSeries is the objects whose late series the lookback's supplements
 	// could not recover, of KindLatePastRound and KindLateSeriesMissed. In no
 	// column -- the rounds complete -- and listed because those series were
@@ -2789,6 +2794,9 @@ type View struct {
 	// ReadEarly is the objects read before their data was complete, from
 	// every counted replica. In no column and in no total, like NoData.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// OverdueEpisodes is the counted replicas' latest overdue episodes, the
+	// latest-cleared first, at most MaxOverdueEpisodes.
+	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
 	// LateSeries is the objects whose late series were not recovered, from
 	// every counted replica, the same way.
 	LateSeries []Anomaly `json:"late_series,omitempty"`
@@ -3070,6 +3078,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
 		view.RetainedShare = append(view.RetainedShare, snapshot.RetainedShare...)
 		view.ReadEarly = append(view.ReadEarly, snapshot.ReadEarly...)
+		view.OverdueEpisodes = latestOverdueEpisodes(append(view.OverdueEpisodes, snapshot.OverdueEpisodes...))
 		view.LateSeries = append(view.LateSeries, snapshot.LateSeries...)
 		mergeRecovered(&view, snapshot.Recovered)
 		if facts := snapshot.BookkeepingAbandoned; facts != nil && facts.Slots > 0 {
