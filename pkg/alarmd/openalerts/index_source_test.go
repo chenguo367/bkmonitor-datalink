@@ -26,6 +26,30 @@ func indexRedis(t *testing.T) *redis.Client {
 	return client
 }
 
+func reserveTCPAddress(t *testing.T) string {
+	t.Helper()
+	return redistest.FreeAddress(t)
+}
+
+func startRedisServer(t *testing.T, _ string, address string) {
+	t.Helper()
+	redistest.StartAt(t, address)
+}
+
+func waitRedisReady(t *testing.T, client *redis.Client) {
+	t.Helper()
+	// The server answered before StartAt returned; what is left is this
+	// client's own connection, under the same bound.
+	deadline := time.Now().Add(redistest.ReadyWithin)
+	for time.Now().Before(deadline) {
+		if err := client.Ping(context.Background()).Err(); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("redis-server did not become ready")
+}
+
 func TestSetSourceReadsWithoutHeartbeatAndBoundsPayload(t *testing.T) {
 	client := indexRedis(t)
 	ctx := context.Background()

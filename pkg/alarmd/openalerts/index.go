@@ -72,11 +72,8 @@ type indexState struct {
 }
 
 // noteOpened records the first ABNORMAL of an alert. Called with the lock
-// held; a no-op outside the index protocol.
+// held.
 func (cache *Cache) noteOpened(m member, now time.Time) {
-	if cache.index == nil {
-		return
-	}
 	if _, ok := cache.index.opened[m]; ok {
 		return
 	}
@@ -118,10 +115,6 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 // and reacquisition; no external generation or second owner is introduced.
 func (cache *Cache) SetTracked(keys []StrategyKey) error {
 	if cache == nil {
-		return nil
-	}
-	if cache.index == nil {
-		cache.Track(keys...)
 		return nil
 	}
 	unique := make(map[StrategyKey]struct{}, min(len(keys), cache.index.options.MaxStrategies))
@@ -214,10 +207,6 @@ func (cache *Cache) TrackOwned(keys ...StrategyKey) error {
 	if cache == nil {
 		return nil
 	}
-	if cache.index == nil {
-		cache.Track(keys...)
-		return nil
-	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	newKeys := make(map[StrategyKey]struct{}, min(len(keys), cache.index.options.MaxStrategies))
@@ -256,18 +245,12 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	for _, key := range keys {
-		if cache.index != nil {
-			if entry := cache.index.entries[key]; entry != nil {
-				c, b := entrySize(key, entry)
-				cache.index.members -= c
-				cache.index.bytes -= b
-			}
-			delete(cache.index.entries, key)
-		} else {
-			delete(cache.tracked, key)
-			delete(cache.loaded, key)
-			delete(cache.sets, key)
+		if entry := cache.index.entries[key]; entry != nil {
+			c, b := entrySize(key, entry)
+			cache.index.members -= c
+			cache.index.bytes -= b
 		}
+		delete(cache.index.entries, key)
 		for m := range cache.added {
 			if m.key == key {
 				cache.leaveSent(m, DepartureUntracked)
@@ -278,27 +261,23 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 				delete(cache.removed, m)
 			}
 		}
-		if cache.index != nil {
-			for m := range cache.index.opened {
-				if m.key == key {
-					cache.leaveOpen(m, DepartureUntracked)
-				}
+		for m := range cache.index.opened {
+			if m.key == key {
+				cache.leaveOpen(m, DepartureUntracked)
 			}
 		}
 	}
-	if cache.index != nil {
-		order := cache.index.order[:0]
-		for _, key := range cache.index.order {
-			if cache.index.entries[key] != nil {
-				order = append(order, key)
-			}
+	order := cache.index.order[:0]
+	for _, key := range cache.index.order {
+		if cache.index.entries[key] != nil {
+			order = append(order, key)
 		}
-		cache.index.order = order
 	}
+	cache.index.order = order
 }
 
 func (cache *Cache) RequestReconcile(key StrategyKey) {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return
 	}
 	cache.mu.Lock()
@@ -348,7 +327,7 @@ func (cache *Cache) indexChanged(key StrategyKey) {
 }
 
 func (cache *Cache) Run(ctx context.Context) error {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return errors.New("alarmd openalerts: index cache is required")
 	}
 	cache.mu.Lock()
@@ -745,7 +724,7 @@ func (cache *Cache) removalHides(entry *indexEntry, removed stamped, now time.Ti
 }
 
 func (cache *Cache) Snapshot(key StrategyKey) StrategySnapshot {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return StrategySnapshot{}
 	}
 	cache.mu.Lock()
@@ -770,17 +749,7 @@ func (cache *Cache) Members(key StrategyKey) []string {
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if cache.index != nil {
-		return cache.indexMembers(key)
-	}
-	result := make([]string, 0, len(cache.sets[key]))
-	for value := range cache.sets[key] {
-		if cache.selfMaintainedOpen(member{key: key, fingerprint: value}) {
-			result = append(result, value)
-		}
-	}
-	sort.Strings(result)
-	return result
+	return cache.indexMembers(key)
 }
 
 func (cache *Cache) indexMembers(key StrategyKey) []string {
@@ -818,7 +787,7 @@ func (cache *Cache) indexMembers(key StrategyKey) []string {
 // calibration. A caller that acts on "not a member" must not act on an
 // unjudged answer.
 func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged bool) {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return false, false
 	}
 	cache.mu.Lock()
@@ -838,7 +807,7 @@ func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged boo
 // A fingerprint this process sent and the set has not read yet is not
 // counted; the next read of the set carries it.
 func (cache *Cache) MemberCount(key StrategyKey) (count int, judged bool) {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return 0, false
 	}
 	cache.mu.Lock()
@@ -853,7 +822,7 @@ func (cache *Cache) MemberCount(key StrategyKey) (count int, judged bool) {
 // Disjoint is whether the sets were last found to carry none of this
 // process's own alerts (see DisjointMinimum), read without the full stats.
 func (cache *Cache) Disjoint() bool {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return false
 	}
 	cache.mu.Lock()
@@ -865,7 +834,7 @@ func (cache *Cache) Disjoint() bool {
 // calibration named it; empty until one has. An alert of another source is
 // not this deployment's to close.
 func (cache *Cache) OwnEventSourceID() string {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return ""
 	}
 	cache.mu.Lock()
@@ -874,7 +843,7 @@ func (cache *Cache) OwnEventSourceID() string {
 }
 
 func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
-	if cache == nil || cache.index == nil {
+	if cache == nil {
 		return nil
 	}
 	cache.mu.Lock()

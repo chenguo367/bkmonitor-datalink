@@ -100,19 +100,11 @@ func TestTheGateSaysWhichHeldLookupsWereItsOwnAlerts(t *testing.T) {
 	}
 }
 
-// Both copies say since when the own split counts: it starts with the
-// process, whichever copy the deployment runs.
-func TestBothCopiesSaySinceWhenTheOwnSplitCounts(t *testing.T) {
+// The copy says since when the own split counts: it starts with the process.
+func TestTheCopySaysSinceWhenTheOwnSplitCounts(t *testing.T) {
 	c := &clock{at: time.Unix(1700000000, 0)}
-	plain, err := New(Options{Source: &fakeSource{}, Now: c.now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := plain.Stats().GateSince; !got.Equal(c.at) {
-		t.Fatalf("plain copy gate since %v, want its start %v", got, c.at)
-	}
 	indexed := mustIndex(t, indexOptions(c))
 	if got := indexed.Stats().GateSince; !got.Equal(c.at) {
-		t.Fatalf("index copy gate since %v, want its start %v", got, c.at)
+		t.Fatalf("gate since %v, want the copy's start %v", got, c.at)
 	}
 }
