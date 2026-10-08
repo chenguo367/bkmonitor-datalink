@@ -50,12 +50,27 @@ type legacyRedisCommands interface {
 
 // LegacyRedisStrategySource adapts only the Python StrategyCacheManager String
 // contract: <prefix>.strategy_ids, <prefix>.strategy_<id> and, as its change
-// signal, <prefix>.last_updated. Legacy DTOs do not escape this adapter.
+// signal, <prefix>.last_updated. A writer that holds a strategy's last good
+// document instead of dropping it also leaves <prefix>.publication_semantics
+// (see ChangeSignal). Legacy DTOs do not escape this adapter.
 type LegacyRedisStrategySource struct {
-	client          legacyRedisCommands
-	strategyIDsKey  string
-	strategyKeyStem string
-	lastUpdatedKey  string
+	client                  legacyRedisCommands
+	strategyIDsKey          string
+	strategyKeyStem         string
+	lastUpdatedKey          string
+	publicationSemanticsKey string
+}
+
+// publicationSemantics is the writer's statement under
+// <prefix>.publication_semantics. Version 1 says one thing: the writer never
+// takes a strategy out of strategy_ids because the strategy failed to publish;
+// it keeps publishing the last good document, and a strategy leaves the set
+// only when it is disabled or deleted. LastUpdated names the change signal the
+// statement was written with.
+type publicationSemantics struct {
+	HoldLastGood bool  `json:"hold_last_good"`
+	LastUpdated  int64 `json:"last_updated"`
+	Version      int   `json:"version"`
 }
 
 func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*LegacyRedisStrategySource, error) {
@@ -64,8 +79,9 @@ func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*Le
 	}
 	return &LegacyRedisStrategySource{
 		client: client, strategyIDsKey: cachePrefix + ".strategy_ids",
-		strategyKeyStem: cachePrefix + ".strategy_",
-		lastUpdatedKey:  cachePrefix + ".last_updated",
+		strategyKeyStem:         cachePrefix + ".strategy_",
+		lastUpdatedKey:          cachePrefix + ".last_updated",
+		publicationSemanticsKey: cachePrefix + ".publication_semantics",
 	}, nil
 }
 
@@ -231,7 +247,32 @@ func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (Sour
 	if parseErr != nil || seconds <= 0 {
 		return SourceChangeSignal{}, nil
 	}
-	return SourceChangeSignal{Present: true, Value: payload, WrittenAt: time.Unix(seconds, 0)}, nil
+	return SourceChangeSignal{Present: true, Value: payload, WrittenAt: time.Unix(seconds, 0),
+		HoldsLastGood: source.holdsLastGood(ctx, seconds)}, nil
+}
+
+// holdsLastGood reads the writer's publication statement and reports whether
+// it holds for this change signal. Every way the statement can be missing or
+// unreadable - no key, a failed read, a payload that does not decode, another
+// version, or one written with a different last_updated - reads as "the
+// writer did not say so", which keeps every guard that exists because a
+// strategy can leave the set by mistake. The last_updated check is what makes
+// a writer that stopped making the statement read as one that never made it:
+// an older writer that publishes a change moves last_updated and leaves the
+// statement behind, and one that only renews lets it expire.
+//
+// One GET of a few dozen bytes per change-signal read, on the control leader
+// only.
+func (source *LegacyRedisStrategySource) holdsLastGood(ctx context.Context, lastUpdated int64) bool {
+	payload, err := source.client.Get(ctx, source.publicationSemanticsKey).Bytes()
+	if err != nil {
+		return false
+	}
+	var statement publicationSemantics
+	if json.Unmarshal(payload, &statement) != nil {
+		return false
+	}
+	return statement.Version == 1 && statement.HoldLastGood && statement.LastUpdated == lastUpdated
 }
 
 // missingIdentityFieldPath names the identity field or fields a document did

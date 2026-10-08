@@ -27,10 +27,18 @@ type StrategySource interface {
 // from one round to the next. WrittenAt is what the marker says about when
 // the publisher wrote it, for reporting its age, and is zero when it says
 // nothing. Present false means the source had no marker to read this round.
+//
+// HoldsLastGood is the publisher's own statement, made for this very signal,
+// that a strategy leaves the active set only when it is disabled or deleted:
+// one that fails to publish keeps its last good document. With it, a strategy
+// missing from the set is a deletion. Without it - an older publisher, or one
+// that says nothing - a missing strategy may be one the publisher dropped by
+// mistake.
 type SourceChangeSignal struct {
-	Present   bool
-	Value     string
-	WrittenAt time.Time
+	Present       bool
+	Value         string
+	WrittenAt     time.Time
+	HoldsLastGood bool
 }
 
 // ChangeSignalSource is a StrategySource whose publisher leaves a

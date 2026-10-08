@@ -372,6 +372,34 @@ func TestASnapshotThatShrankRefusesTheRoundByName(t *testing.T) {
 	}
 }
 
+// The same shrink from a writer that stated, with that snapshot, that it never
+// drops a strategy on failure is a set of deletions: the round decides, and
+// the side says which way the gate went.
+func TestASnapshotThatShrankFromAWriterThatHoldsFailuresIsDecidedOn(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	ctx := context.Background()
+	fixture.loop.step(ctx)
+	if fixture.loop.Difference()["writer_holds_last_good"] != 0 {
+		t.Fatalf("a snapshot without the statement was reported as having it: %+v", fixture.loop.Difference())
+	}
+	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 40)
+	fixture.control.snapshot.HoldsLastGood = true
+	for i := range fixture.link.pages {
+		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+	}
+	fixture.loop.step(ctx)
+	if fixture.loop.Rounds()[absentalerts.RefusalSnapshotShrunk] != 0 || fixture.loop.Rounds()[absentalerts.RefusalNone] != 2 {
+		t.Fatalf("a shrink the writer stated is deletions was refused: %+v", fixture.loop.Rounds())
+	}
+	if fixture.loop.Difference()["writer_holds_last_good"] != 1 {
+		t.Fatalf("the waived gate was not reported: %+v", fixture.loop.Difference())
+	}
+	if fixture.loop.Stats()[absentalerts.OutcomeClosed] != 1 {
+		t.Fatalf("the absent strategy was not decided after its grace: %+v", fixture.loop.Stats())
+	}
+}
+
 func TestAnUnreadableAlertListIsReported(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
 	fixture.link.alertsErr = errors.New("reconcile failed")

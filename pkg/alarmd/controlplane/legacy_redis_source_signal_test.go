@@ -35,6 +35,9 @@ func TestLegacyRedisStrategySourceReadsTheChangeSignalAsWritten(t *testing.T) {
 	if err != nil || !signal.Present || signal.Value != "1700000000" || !signal.WrittenAt.Equal(time.Unix(1_700_000_000, 0)) {
 		t.Fatalf("ChangeSignal() = (%+v, %v), want the written second", signal, err)
 	}
+	if signal.HoldsLastGood {
+		t.Fatalf("ChangeSignal() without the writer's statement = %+v, want no statement", signal)
+	}
 	for _, unreadable := range []string{"", "not-a-second", "-5", "0", "1700000000.5"} {
 		if err := client.Set(ctx, "bkmonitor.cache.last_updated", unreadable, 0).Err(); err != nil {
 			t.Fatal(err)
@@ -42,5 +45,49 @@ func TestLegacyRedisStrategySourceReadsTheChangeSignalAsWritten(t *testing.T) {
 		if signal, err := source.ChangeSignal(ctx); err != nil || signal.Present {
 			t.Fatalf("ChangeSignal() with %q = (%+v, %v), want absent", unreadable, signal, err)
 		}
+	}
+}
+
+// The writer's publication statement counts only as written for this very
+// change signal. A statement left behind by a later last_updated - an older
+// writer that published after it - or one that is unreadable, of another
+// version, or says false, is no statement.
+func TestLegacyRedisStrategySourceTakesTheWritersStatementOnlyForItsOwnSignal(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	source := newRedisStrategySource(t, client)
+	const statementKey = "bkmonitor.cache.publication_semantics"
+	if err := client.Set(ctx, statementKey, `{"hold_last_good":true,"last_updated":1700000000,"version":1}`, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if signal, err := source.ChangeSignal(ctx); err != nil || signal != (controlplane.SourceChangeSignal{}) {
+		t.Fatalf("ChangeSignal() with a statement and no last_updated = (%+v, %v), want absent", signal, err)
+	}
+	if err := client.Set(ctx, "bkmonitor.cache.last_updated", "1700000000", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || !signal.HoldsLastGood {
+		t.Fatalf("ChangeSignal() with the statement for this signal = (%+v, %v), want it held", signal, err)
+	}
+	for name, statement := range map[string]string{
+		"written for an earlier signal": `{"hold_last_good":true,"last_updated":1699999999,"version":1}`,
+		"another version":               `{"hold_last_good":true,"last_updated":1700000000,"version":2}`,
+		"saying false":                  `{"hold_last_good":false,"last_updated":1700000000,"version":1}`,
+		"without a version":             `{"hold_last_good":true,"last_updated":1700000000}`,
+		"not JSON":                      `hold_last_good`,
+		"empty":                         ``,
+	} {
+		if err := client.Set(ctx, statementKey, statement, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGood {
+			t.Fatalf("ChangeSignal() with a statement %s = (%+v, %v), want the signal without it", name, signal, err)
+		}
+	}
+	if err := client.Del(ctx, statementKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if signal, err := source.ChangeSignal(ctx); err != nil || !signal.Present || signal.HoldsLastGood {
+		t.Fatalf("ChangeSignal() after the statement expired = (%+v, %v), want the signal without it", signal, err)
 	}
 }

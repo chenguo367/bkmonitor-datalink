@@ -269,3 +269,44 @@ func TestSourceRefreshConfirmsOnlyWhatItReadTwice(t *testing.T) {
 		t.Fatalf("published %s, want the twice-read observation %s", third.Observation, second.Observation)
 	}
 }
+
+// The observation carries the writer's statement as it was read with the
+// observation's own change signal. A writer that later publishes a change
+// without restating it - an older writer after a rollback - leaves an
+// observation that no longer carries it.
+func TestTheObservedSnapshotCarriesTheWritersStatementReadWithIt(t *testing.T) {
+	harness := newChangeGateHarness(t)
+	state := func(lastUpdated int64) {
+		t.Helper()
+		statement := `{"hold_last_good":true,"last_updated":` + strconv.FormatInt(lastUpdated, 10) + `,"version":1}`
+		if err := harness.client.Set(harness.ctx, "bkmonitor.cache.publication_semantics", statement, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	signalled, err := harness.client.Get(harness.ctx, "bkmonitor.cache.last_updated").Int64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state(signalled)
+	harness.settle()
+	if observed, ok := harness.reconciler.ObservedSnapshot(); !ok || !observed.HoldsLastGood {
+		t.Fatalf("ObservedSnapshot() = (%+v, %v), want the statement read with its signal", observed, ok)
+	}
+
+	// An older writer publishes a change: the signal moves, the statement stays behind.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.signal(harness.clock)
+	harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadChanged, 1)
+	if observed, ok := harness.reconciler.ObservedSnapshot(); !ok || observed.HoldsLastGood {
+		t.Fatalf("ObservedSnapshot() after a change without the statement = (%+v, %v), want no statement", observed, ok)
+	}
+
+	// The writer restates it for the new signal; the next read carries it again.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.signal(harness.clock)
+	state(harness.clock.Unix())
+	harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadChanged, 1)
+	if observed, ok := harness.reconciler.ObservedSnapshot(); !ok || !observed.HoldsLastGood {
+		t.Fatalf("ObservedSnapshot() after the statement was restated = (%+v, %v), want it", observed, ok)
+	}
+}
