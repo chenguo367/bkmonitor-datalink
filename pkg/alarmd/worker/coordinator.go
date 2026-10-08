@@ -1389,10 +1389,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			classified := execution.ClassifyStateMutationDetail(view, stateResult.Mutation)
 			switch classified.Disposition {
 			case execution.StateProceed:
-				reuseClass, reuseReason := execution.ClassifyStateWriteReuse(view, stateResult.Mutation)
 				writeReuse.Record(
-					observability.StateWriteReuseClass(reuseClass),
-					observability.StateWriteChangeReason(reuseReason),
+					observability.StateWriteReuseClass(execution.ClassifyStateWriteReuse(view, stateResult.Mutation)),
 					storedStateLabel(view.Status),
 				)
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
