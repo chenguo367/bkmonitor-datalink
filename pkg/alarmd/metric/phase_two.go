@@ -45,7 +45,6 @@ type phaseTwoMetrics struct {
 	lastProgress                   *prometheus.GaugeVec
 	capacity                       *prometheus.CounterVec
 	stateWriteReuse                *prometheus.CounterVec
-	stateWriteChange               *prometheus.CounterVec
 	stateAlreadyApplied            *prometheus.CounterVec
 	stateVersionConflict           *prometheus.CounterVec
 	ownershipRefusals              *prometheus.CounterVec
@@ -87,7 +86,6 @@ type phaseTwoMetrics struct {
 	sourceWithheldLines            *prometheus.CounterVec
 	activeQGSetCount               prometheus.Gauge
 	activeQGSetBytes               prometheus.Gauge
-	activeQGSetEncode              *prometheus.HistogramVec
 	activeQGSetRedis               *prometheus.HistogramVec
 	scheduleCutoverPayload         prometheus.Gauge
 	scheduleCutoverTimelineMax     prometheus.Gauge
@@ -113,10 +111,8 @@ type phaseTwoMetrics struct {
 	// successful cutover of this process, which reads every timeline, kept
 	// apart and never overwritten; every successful cutover's payload as a
 	// distribution. See observeScheduleCutover.
-	scheduleCutoverLastDuration   prometheus.Gauge
 	scheduleCutoverFirstDuration  prometheus.Gauge
 	scheduleCutoverFirstTimelines prometheus.Gauge
-	scheduleCutoverPayloadSize    prometheus.Histogram
 	// scheduleCutoverFirstSeen is a pointer: the metrics are passed by value,
 	// and a flag copied with them would never stay set.
 	scheduleCutoverFirstSeen        *atomic.Bool
@@ -234,10 +230,6 @@ var activeQGSetDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1
 // seconds between 5 and 30: a leader's first cutover reads every timeline
 // and lands there, and "under 30 seconds" could not tell a change of it.
 var scheduleCutoverDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 20, 30}
-
-// scheduleCutoverPayloadBuckets run from 1 KiB to 16 MiB by fours: a cutover
-// writing only heads is kilobytes, one writing every timeline megabytes.
-var scheduleCutoverPayloadBuckets = prometheus.ExponentialBuckets(1024, 4, 8)
 
 // leaderForwardBuckets resolve the forward's own bounds: two seconds for a
 // strategy's standing, two and a half for a diagnosis page.
@@ -384,15 +376,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"them and each points at a different fix. Every pair is published at zero so absent and zero " +
 				"read apart. Population is mutations, not Redis commands.",
 		}, []string{"site", "kind"}),
-		stateWriteChange: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_write_change_reason_total",
-			Help: "For State writes whose stored decision state differed, which field differed first, in a " +
-				"fixed comparison order. The class alone cannot be acted on: changed covers a decision that " +
-				"really moved, which would end the case for skipping the write, and a field that should never " +
-				"have counted as part of the decision, which would mean the predicate is wrong rather than " +
-				"the idea, and those point at opposite actions. Counts are first differences, not how many " +
-				"fields differ, so they are read as a breakdown of the changed class and nowhere else.",
-		}, []string{"reason", "stored"}),
 		sourceObservations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "source_observation_total",
 			Help: "Phase-two source health episode transitions by bounded source, result and reason class.",
@@ -726,7 +709,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.workflow = newWorkflowMetrics()
 	metrics.activeQGSetCount = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_query_groups", Help: "Query groups in the current immutable Active Set."})
 	metrics.activeQGSetBytes = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_object_bytes", Help: "Encoded bytes in the current immutable Active Set."})
-	metrics.activeQGSetEncode = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_encode_duration_seconds", Help: "Active Set canonical encoding duration.", Buckets: activeQGSetDurationBuckets}, []string{"result"})
 	metrics.activeQGSetRedis = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_redis_duration_seconds", Help: "Active Set Redis operation duration.", Buckets: activeQGSetDurationBuckets}, []string{"operation", "result"})
 	metrics.scheduleCutoverPayload = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_payload_bytes", Help: "Bytes the Control Leader sent in the last publication cutover compare-and-set call."})
 	metrics.scheduleCutoverTimelineMax = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_timeline_bytes_max", Help: "Largest Schedule timeline written by the last publication cutover. Rising across cutovers means some timeline is never pruned."})
@@ -783,14 +765,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: scheduleCutoverDurationBuckets}, []string{"result"})
 	metrics.scheduleCutoverFirstSeen = new(atomic.Bool)
-	metrics.scheduleCutoverLastDuration = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_last_duration_seconds",
-		Help: "Exact duration of the last successful publication cutover, set together with schedule_cutover_payload_bytes and schedule_cutover_timelines_read so the three describe the same cutover."})
 	metrics.scheduleCutoverFirstDuration = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_first_duration_seconds",
 		Help: "Exact duration of this process's first successful publication cutover, which reads every timeline: the full read is decided once per process and not again when leadership is lost and regained, so a later term's first cutover does not read everything and is not this one. Set once and never overwritten; see schedule_cutover_first_timelines_read for whether it has run."})
 	metrics.scheduleCutoverFirstTimelines = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_first_timelines_read",
 		Help: "Timelines this process's first successful publication cutover read; set once with schedule_cutover_first_duration_seconds. Zero means this process has not completed a cutover yet: a successful one reads at least one timeline."})
-	metrics.scheduleCutoverPayloadSize = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_payload_size_bytes",
-		Help: "Bytes each successful publication cutover sent, as a distribution since the process started; schedule_cutover_payload_bytes is the last one only.", Buckets: scheduleCutoverPayloadBuckets})
 	for _, reason := range observability.SchedulePruneSkipReasons {
 		metrics.schedulePruneSkipped.WithLabelValues(reason)
 	}
@@ -1639,11 +1617,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateWriteReuse.WithLabelValues(string(class), string(stored))
 		}
 	}
-	for _, reason := range observability.AllStateWriteChangeReasons() {
-		for _, stored := range observability.AllStateWriteReuseStored() {
-			metrics.stateWriteChange.WithLabelValues(string(reason), string(stored))
-		}
-	}
 	for _, site := range observability.AllStateAlreadyAppliedSites() {
 		for _, kind := range observability.AllStateAlreadyAppliedKinds() {
 			metrics.stateAlreadyApplied.WithLabelValues(string(site), string(kind))
@@ -1809,17 +1782,17 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
-		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
+		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
-		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
+		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1945,9 +1918,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.activationHeldAgeSecondsMax.Set(float64(facts.MaxAgeSeconds))
 	}
 	if facts := observation.ActiveQGSet; facts != nil {
-		if facts.Operation == "encode" {
-			m.activeQGSetEncode.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
-		} else if facts.Operation == "read" || facts.Operation == "write" || facts.Operation == "renew" {
+		if facts.Operation == "read" || facts.Operation == "write" || facts.Operation == "renew" {
 			m.activeQGSetRedis.WithLabelValues(facts.Operation, facts.Result).Observe(facts.Duration.Seconds())
 			if facts.Operation == "renew" && facts.Result == "success" {
 				m.activeQGSetCount.Set(float64(facts.QueryGroups))
@@ -2004,8 +1975,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			m.scheduleCutoverPayload.Set(float64(facts.PayloadBytes))
 			m.scheduleCutoverTimelineMax.Set(float64(facts.MaxTimelineBytes))
 			m.scheduleCutoverTimelinesRead.Set(float64(facts.TimelinesRead))
-			m.scheduleCutoverLastDuration.Set(facts.Duration.Seconds())
-			m.scheduleCutoverPayloadSize.Observe(float64(facts.PayloadBytes))
 			if m.scheduleCutoverFirstSeen.CompareAndSwap(false, true) {
 				m.scheduleCutoverFirstDuration.Set(facts.Duration.Seconds())
 				m.scheduleCutoverFirstTimelines.Set(float64(facts.TimelinesRead))
@@ -2237,9 +2206,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.StateWriteReuse; facts != nil && !facts.Empty() {
 		for key, count := range facts.Counts {
 			m.stateWriteReuse.WithLabelValues(string(key.Class), string(key.Stored)).Add(float64(count))
-		}
-		for key, count := range facts.ChangeReasons {
-			m.stateWriteChange.WithLabelValues(string(key.Reason), string(key.Stored)).Add(float64(count))
 		}
 	}
 	if facts := observation.StateAlreadyApplied; facts != nil && !facts.Empty() {

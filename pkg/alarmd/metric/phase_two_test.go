@@ -229,9 +229,6 @@ func TestPhaseTwoActiveSetAndLegacyMigrationMetricsUseOnlyFixedLabels(t *testing
 	if got := testutil.ToFloat64(recorder.phaseTwo.activeQGSetBytes); got != 321 {
 		t.Fatalf("active set bytes=%v", got)
 	}
-	if got := testutil.CollectAndCount(recorder.phaseTwo.activeQGSetEncode); got != 1 {
-		t.Fatalf("encode metric families=%d", got)
-	}
 	if got := testutil.CollectAndCount(recorder.phaseTwo.activeQGSetRedis); got != 1 {
 		t.Fatalf("redis metric families=%d", got)
 	}

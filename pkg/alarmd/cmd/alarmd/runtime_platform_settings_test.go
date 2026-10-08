@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
@@ -61,6 +62,27 @@ func TestPlatformSettingsWithoutADistributionAreTheDeploymentLayer(t *testing.T)
 	fleetFacts := platformSettingsFactsSource(cache, func() time.Time { return now })()
 	if fleetFacts.Mode != "not_configured" || fleetFacts.StaleBeyondBound || fleetFacts.AuthoritativeAgeSeconds != nil {
 		t.Fatalf("fleet facts = %+v, want not_configured with no age and no staleness", fleetFacts)
+	}
+	// Each setting's value and the layer it came from, as the health route
+	// carries them: a boolean as enabled, a list as how many entries.
+	fields := map[string]fleet.PlatformSettingField{}
+	for _, field := range fleetFacts.Fields {
+		fields[field.Field] = field
+	}
+	if len(fields) != len(platformsettings.Fields) {
+		t.Fatalf("fields %+v, want every setting", fleetFacts.Fields)
+	}
+	if got := fields[string(platformsettings.FieldIsAccessBKData)]; got.Enabled == nil || !*got.Enabled || got.Entries != nil ||
+		got.Source != string(platformsettings.HorizonSourceValues) {
+		t.Fatalf("is_access_bk_data = %+v, want enabled from the deployment's layer", got)
+	}
+	if got := fields[string(platformsettings.FieldHostDisableMonitorStates)]; got.Entries == nil || *got.Entries != 7 ||
+		got.Enabled != nil || got.Source != string(platformsettings.HorizonSourceValues) {
+		t.Fatalf("host_disable_monitor_states = %+v, want the deployment's 7 entries", got)
+	}
+	if got := fields[string(platformsettings.FieldFileSystemTypeIgnore)]; got.Entries == nil ||
+		*got.Entries != len(platformsettings.CodeDefaults().FileSystemTypeIgnore) || got.Source != string(platformsettings.HorizonSourceDefault) {
+		t.Fatalf("file_system_type_ignore = %+v, want the code default's entries", got)
 	}
 	// The refresher on a copy with no source changes nothing and reports the
 	// filter in force.

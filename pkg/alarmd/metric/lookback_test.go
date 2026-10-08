@@ -30,53 +30,41 @@ func lookbackSources() int { return len(controlplane.SupportedSourceSemantics) +
 func lookbackSeriesUpperBounds() map[string]int {
 	sources := lookbackSources()
 	return map[string]int{
-		"read_hold_transition_total":                 1,
-		"read_hold_transition_overtaken_total":       1,
-		"read_hold_predecessor_total":                len(readhold.PredecessorReasons) + len(readhold.LinkSkipReasons),
-		"read_hold_transition_clamped_total":         len(readhold.ClampSources),
-		"read_hold_record_corrupt_total":             1,
-		"read_hold_retire_close_failed_total":        1,
-		"read_hold_close_previous_skipped_total":     1,
-		"read_hold_degraded_total":                   len(readhold.DegradedReasons),
-		"read_hold_groups":                           len(lookback.Sources) * 3,
-		"read_hold_max_seconds":                      len(lookback.Sources),
-		"lookback_first_reads_total":                 sources,
-		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
-		"lookback_rechecks_total":                    sources * len(lookback.RecheckOutcomes),
-		"lookback_changed_windows_total":             sources,
-		"lookback_changes_total":                     sources * len(lookback.Changes),
-		"lookback_completion_total":                  sources * len(lookback.AgeBuckets),
-		"lookback_probes_total":                      sources * len(lookback.ProbeOutcomes),
-		"lookback_sample_classes_total":              sources * len(lookback.SampleClasses),
-		"lookback_read_early_groups":                 sources,
-		"lookback_series_late_groups":                sources,
-		"lookback_supplement_windows_total":          sources * len(lookback.DirectedOutcomes),
-		"lookback_supplement_unobserved_total":       sources * len(lookback.DirectedUnobservedReasons),
-		"lookback_supplement_series_total":           sources * len(lookback.SupplementSeriesOutcomes),
-		"lookback_supplement_points_total":           sources,
-		"lookback_directed_read_bytes_total":         sources,
-		"lookback_supplement_hold_total":             sources * len(lookback.SupplementHoldBuckets),
-		"lookback_supplement_hold_max_seconds":       sources,
-		"lookback_directed_early_total":              sources * len(lookback.EarlyGroups),
-		"lookback_directed_early_undecided_total":    sources,
-		"lookback_directed_early_read_bytes_total":   sources,
-		"lookback_earlier_reads_total":               sources * len(lookback.EarlierReadOutcomes),
-		"lookback_earlier_read_bytes_total":          sources,
-		"lookback_read_hold_ignored_total":           sources * (len(lookback.ReadHoldIgnoredReasons) - 1),
-		"lookback_empty_first_reads_total":           sources * len(lookback.EmptyFirstReadOutcomes),
-		"lookback_empty_first_read_completion_total": sources * len(lookback.AgeBuckets),
-		"lookback_completion_max_seconds":            sources,
-		"lookback_groups":                            sources * len(lookback.DepthLabels),
-		"lookback_rest_seconds":                      sources,
-		"lookback_first_read_bytes_total":            sources,
-		"lookback_recheck_bytes_total":               sources,
-		"lookback_unknown_lookback_total":            sources,
-		"lookback_coverage":                          3,
-		"lookback_pending":                           2,
-		"lookback_preemptions_total":                 sources,
-		"lookback_yield_releases_total":              sources,
-		"lookback_yield_release_seconds_total":       sources,
-		"lookback_yield_release_max_seconds":         sources,
+		"read_hold_transition_total":               1,
+		"read_hold_transition_overtaken_total":     1,
+		"read_hold_predecessor_total":              len(readhold.PredecessorReasons) + len(readhold.LinkSkipReasons),
+		"read_hold_transition_clamped_total":       len(readhold.ClampSources),
+		"read_hold_record_corrupt_total":           1,
+		"read_hold_retire_close_failed_total":      1,
+		"read_hold_close_previous_skipped_total":   1,
+		"read_hold_degraded_total":                 len(readhold.DegradedReasons),
+		"read_hold_groups":                         len(lookback.Sources) * 3,
+		"read_hold_max_seconds":                    len(lookback.Sources),
+		"lookback_first_reads_total":               sources,
+		"lookback_rechecks_total":                  sources * len(lookback.RecheckOutcomes),
+		"lookback_changed_windows_total":           sources,
+		"lookback_changes_total":                   sources * len(lookback.Changes),
+		"lookback_sample_classes_total":            sources * len(lookback.SampleClasses),
+		"lookback_read_early_groups":               sources,
+		"lookback_series_late_groups":              sources,
+		"lookback_supplement_windows_total":        sources * len(lookback.DirectedOutcomes),
+		"lookback_supplement_unobserved_total":     sources * len(lookback.DirectedUnobservedReasons),
+		"lookback_supplement_series_total":         sources * len(lookback.SupplementSeriesOutcomes),
+		"lookback_supplement_points_total":         sources,
+		"lookback_directed_read_bytes_total":       sources,
+		"lookback_supplement_hold_total":           sources * len(lookback.SupplementHoldBuckets),
+		"lookback_supplement_hold_max_seconds":     sources,
+		"lookback_directed_early_total":            sources * len(lookback.EarlyGroups),
+		"lookback_directed_early_undecided_total":  sources,
+		"lookback_directed_early_read_bytes_total": sources,
+		"lookback_earlier_read_bytes_total":        sources,
+		"lookback_read_hold_ignored_total":         sources * (len(lookback.ReadHoldIgnoredReasons) - 1),
+		"lookback_first_read_bytes_total":          sources,
+		"lookback_recheck_bytes_total":             sources,
+		"lookback_unknown_lookback_total":          sources,
+		"lookback_coverage":                        3,
+		"lookback_pending":                         2,
+		"lookback_preemptions_total":               sources,
 		// Every reason the scheduler refuses with, and other.
 		"lookback_permit_refusals_total": len(scheduler.LookbackRefusals) + 1,
 		"lookback_faults_total":          len(lookback.Faults),
@@ -87,7 +75,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 // engine's counts, zero included, and each count under its own words.
 func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	if series := gatherFamily(t, r, "bkmonitor_alarmd_lookback_samples_total"); len(series) != 0 {
+	if series := gatherFamily(t, r, "bkmonitor_alarmd_lookback_first_reads_total"); len(series) != 0 {
 		t.Fatalf("a process not running the lookback emitted %v", series)
 	}
 	engine, err := lookback.New(lookback.Options{Refusals: scheduler.LookbackRefusals,
@@ -157,9 +145,6 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 		t.Fatalf("%s has no series %v", family, want)
 		return 0
 	}
-	if got := value("bkmonitor_alarmd_lookback_samples_total", map[string]string{"source": logs, "outcome": lookback.OutcomeCaptured}); got != 4 {
-		t.Fatalf("captured = %v", got)
-	}
 	// The rungs add up: each rung's counts are /api/lookback's.
 	if got := value("bkmonitor_alarmd_lookback_changes_total", map[string]string{"source": logs, "class": lookback.ChangePointsAdded}); got != 9 {
 		t.Fatalf("points added over the rungs = %v, want 9", got)
@@ -169,18 +154,6 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_changed_windows_total", map[string]string{"source": logs}); got != 3 {
 		t.Fatalf("changed windows over the rungs = %v, want 3", got)
-	}
-	if got := value("bkmonitor_alarmd_lookback_completion_total", map[string]string{"source": logs, "age": "le_300s"}); got != 2 {
-		t.Fatalf("completion = %v", got)
-	}
-	if got := value("bkmonitor_alarmd_lookback_probes_total", map[string]string{"source": logs, "outcome": lookback.ProbeChanged}); got != 6 {
-		t.Fatalf("deep rechecks changed = %v", got)
-	}
-	if got := value("bkmonitor_alarmd_lookback_empty_first_reads_total", map[string]string{"source": logs, "outcome": lookback.EmptyArrived}); got != 8 {
-		t.Fatalf("empty first reads arrived = %v", got)
-	}
-	if got := value("bkmonitor_alarmd_lookback_empty_first_read_completion_total", map[string]string{"source": logs, "age": "le_600s"}); got != 3 {
-		t.Fatalf("empty first read completion = %v", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)
@@ -193,9 +166,6 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_coverage", map[string]string{"what": "owned"}); got != 7 {
 		t.Fatalf("owned = %v", got)
-	}
-	if got := value("bkmonitor_alarmd_lookback_groups", map[string]string{"source": logs, "depth": "1"}); got != 0 {
-		t.Fatalf("groups at depth 1 = %v", got)
 	}
 	if got := value("bkmonitor_alarmd_lookback_recheck_bytes_total", map[string]string{"source": logs}); got != 2048 {
 		t.Fatalf("recheck bytes = %v", got)

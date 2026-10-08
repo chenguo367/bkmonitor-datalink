@@ -174,6 +174,22 @@ func platformSettingsFactsSource(cache *platformsettings.Cache, now func() time.
 			age := now().Sub(stats.LoadedAt).Seconds()
 			facts.AuthoritativeAgeSeconds = &age
 		}
+		entries := map[platformsettings.Field]int{
+			platformsettings.FieldHostDisableMonitorStates: len(stats.Settings.HostDisableMonitorStates),
+			platformsettings.FieldBKDataCMDBLevelTables:    len(stats.Settings.BKDataCMDBLevelTables),
+			platformsettings.FieldFileSystemTypeIgnore:     len(stats.Settings.FileSystemTypeIgnore),
+		}
+		for _, field := range platformsettings.Fields {
+			row := fleet.PlatformSettingField{Field: string(field), Source: string(stats.Sources[field])}
+			if field == platformsettings.FieldIsAccessBKData {
+				enabled := stats.Settings.IsAccessBKData
+				row.Enabled = &enabled
+			}
+			if n, isList := entries[field]; isList {
+				row.Entries = &n
+			}
+			facts.Fields = append(facts.Fields, row)
+		}
 		return facts
 	}
 }

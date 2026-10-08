@@ -282,6 +282,10 @@ type HealthResponse struct {
 	// states none has frozen, and which layer set it (DEFAULT, VALUES or
 	// DYNAMIC). A Plan with its own says STRATEGY on its tracking row.
 	NoDataHorizon *NoDataHorizonFacts `json:"no_data_horizon,omitempty"`
+	// PlatformSettingFields is every platform setting's effective value and
+	// the layer it came from (DYNAMIC, VALUES, DEFAULT), as a named replica
+	// resolves them, and the first replica that resolved other values.
+	PlatformSettingFields *PlatformSettingFieldsFacts `json:"platform_setting_fields,omitempty"`
 	// Load is the operating judgment the capacity panel opens with: on
 	// time, backlog, loss, bottleneck, with the numbers each was read from
 	// and the limits it holds under. Decided here, once, from the same view
@@ -966,8 +970,8 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		OutputPath:      OutputPathOf(view),
 		Degradations:    degradationList(view.Degradations),
 		Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
-		NoDataHorizon: view.NoDataHorizon,
-		Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
+		NoDataHorizon: view.NoDataHorizon, PlatformSettingFields: view.PlatformSettingFields,
+		Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 		AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 		AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
 		LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
