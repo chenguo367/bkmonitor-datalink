@@ -560,7 +560,8 @@ func TestAnIDTheSourceCannotNameLeavesTheOtherRowsTheirAnswer(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
 	fixture.link.pages[1].Rows = append(fixture.link.pages[1].Rows,
 		openalerts.RosterRow{TenantID: "system", StrategyID: "0123", Members: members(1)},
-		openalerts.RosterRow{TenantID: "system", StrategyID: "abc", Members: members(1)})
+		openalerts.RosterRow{TenantID: "system", StrategyID: "abc", Members: members(1)},
+		openalerts.RosterRow{TenantID: "system", StrategyID: "0", Members: members(1)})
 	fixture.mature(context.Background())
 	stub := &presenceStub{stored: map[string]bool{"10": true}}
 	fixture.loop.documents = stub
@@ -568,7 +569,7 @@ func TestAnIDTheSourceCannotNameLeavesTheOtherRowsTheirAnswer(t *testing.T) {
 	if row := absentRowOf(t, page, "10"); row.SourceNow != fleet.AbsentSourceDocument {
 		t.Fatalf("a row the source can name lost its answer to the others: %+v", row)
 	}
-	for _, id := range []string{"0123", "abc"} {
+	for _, id := range []string{"0123", "abc", "0"} {
 		if row := absentRowOf(t, page, id); row.SourceNow != fleet.AbsentSourceUnread || row.SourceNowReason != fleet.AbsentUnreadIDNotCanonical {
 			t.Fatalf("an id the source cannot name is not said to be one: %+v", row)
 		}
