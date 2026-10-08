@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,10 +20,13 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/go-redis/redis/v8"
 )
 
 // configuringPhaseTwoEventSink records the converters it was configured
@@ -374,6 +378,23 @@ func TestPrepareTriggerEventSinkRefusesBadCoordinatesWithoutDialing(t *testing.T
 	// hook with only the connection stood in.
 	if _, err := preparedEvents(nil)(coordinates); err == nil {
 		t.Fatal("the tests' hook prepared a sink from coordinates production refuses")
+	}
+}
+
+// Production always sets the output hook. A bundle assembled without one is
+// refused before anything is read or opened, not left to fail at its first
+// write.
+func TestABundleWithoutTheOutputHookIsRefusedAtAssembly(t *testing.T) {
+	external := defaultPhaseTwoProductionExternalDependencies()
+	external.PrepareEvents = nil
+	_, err := openProductionPhaseTwoBundleWithDependencies(context.Background(), validGoAccessRuntimeConfig(),
+		metric.NewRecorder(metric.BuildInfo{}), observability.New("test", io.Discard), newPhaseTwoApplicationHealth(),
+		func(redis.Cmdable, string) (controlplane.StrategySource, error) {
+			t.Fatal("a bundle without its output hook read the strategy source")
+			return nil, nil
+		}, external)
+	if err == nil || !strings.Contains(err.Error(), "dependencies are incomplete") {
+		t.Fatalf("assembly without PrepareEvents = %v, want it refused as incomplete", err)
 	}
 }
 
