@@ -307,10 +307,7 @@ func StrategyStandingOf(strategyID, tenant, business, replica string, facts Stra
 		if view != nil {
 			entry.Existence = objectExistence(plan.QueryGroup, view.expectation)
 			entry.Replica = view.ownerOf[plan.QueryGroup]
-			if reading, known := view.readHolds[plan.QueryGroup]; known {
-				copy := reading
-				entry.ReadHold = &copy
-			}
+			entry.ReadHold = view.readHoldOf(plan.QueryGroup)
 			walkObjectRows("", "", plan.QueryGroup, view, now, func(row Anomaly) {
 				if len(entry.Rows) < MaxPageSize {
 					entry.Rows = append(entry.Rows, row)

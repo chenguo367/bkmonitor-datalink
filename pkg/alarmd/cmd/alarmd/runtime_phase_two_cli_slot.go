@@ -33,6 +33,12 @@ const (
 // Every invocation owns its repository, compiler and read budget. No diagnostic
 // request warms, invalidates or reports the production Worker's installed view.
 func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Context, execution.SlotIdentity) (obchannel.SlotPlan, error) {
+	return newCLISlotResolverAt(cfg, client, time.Now)
+}
+
+// newCLISlotResolverAt is newCLISlotResolver on the given clock, which a
+// Slot's age is reckoned by.
+func newCLISlotResolverAt(cfg config.Config, client redis.Cmdable, now func() time.Time) func(context.Context, execution.SlotIdentity) (obchannel.SlotPlan, error) {
 	return func(ctx context.Context, slot execution.SlotIdentity) (obchannel.SlotPlan, error) {
 		ctx, cancel := context.WithTimeout(ctx, obchannel.RequestTimeout)
 		defer cancel()
@@ -72,7 +78,7 @@ func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Co
 		}
 		// The contract the Slot ran under carries the read hold it was frozen
 		// with: rebuilt with another, it is a contract that never ran.
-		hold, err := cliSlotReadHold(ctx, reader, cfg, runtime, slot)
+		hold, basis, err := cliSlotReadHold(ctx, reader, cfg, runtime, slot, now())
 		if err != nil {
 			return obchannel.SlotPlan{}, err
 		}
@@ -99,48 +105,58 @@ func newCLISlotResolver(cfg config.Config, client redis.Cmdable) func(context.Co
 		if err := ctx.Err(); err != nil {
 			return obchannel.SlotPlan{}, obchannel.ErrSlotDependencyUnavailable
 		}
-		return obchannel.SlotPlan{Contract: fact.Contract, ObjectDigest: schedule.Segment.ObjectDigest, Prepared: prepared}, nil
+		return obchannel.SlotPlan{Contract: fact.Contract, ObjectDigest: schedule.Segment.ObjectDigest, Prepared: prepared, ReadHoldBasis: basis}, nil
 	}
 }
 
-// cliSlotReadHold is the read hold the Slot was frozen with: from its Query
-// Group's Progress when that still carries the Slot's contract - the round
-// it last completed, its unfinished Slot or range - and otherwise from its
-// read hold record, which keeps the current hold and the one before with
-// the first Slot of each. An absent or expired record is not proof of zero.
-// A record that no longer reaches back to the Slot is
-// obchannel.ErrHistoricalReadHoldUnknown.
-func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Config, slots progress.ContinuousSlotResolver, slot execution.SlotIdentity) (int64, error) {
+// cliSlotReadHold is the read hold the Slot was frozen with, and where it
+// was read from: from its Query Group's Progress when that still carries the
+// Slot's contract - the round it last completed, its unfinished Slot or
+// range - and otherwise from its read hold record, which keeps the current
+// hold and the one before with the first Slot of each.
+//
+// No record is zero for a Slot within a record's lifetime of now: a group
+// whose hold has only ever been zero keeps none, and a record is renewed
+// while it holds and lasts readhold.RecordTTL after its last write, so with
+// none now every Slot since then ran with no hold. An older Slot may predate
+// a lowering whose record has since expired, and a record that did not
+// decode or no longer reaches back to the Slot says nothing of it: both are
+// obchannel.ErrHistoricalReadHoldUnknown. A record evicted from Redis reads
+// as none, which the basis leaves visible.
+func cliSlotReadHold(ctx context.Context, reader *cliSlotRedis, cfg config.Config, slots progress.ContinuousSlotResolver, slot execution.SlotIdentity, now time.Time) (int64, string, error) {
 	control := cliControlReader{reader: reader, prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership")}
 	schedulePrefix := productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule")
 	store, err := progress.NewStore(progress.StoreOptions{Prefix: schedulePrefix, Control: control, Slots: slots, Now: time.Now})
 	if err != nil {
-		return 0, obchannel.ErrHistoricalContractUnavailable
+		return 0, "", obchannel.ErrHistoricalContractUnavailable
 	}
 	loaded, err := store.LoadProgress(ctx, execution.ProgressIdentity{QueryGroup: slot.QueryGroup})
 	if err != nil {
-		return 0, cliSlotReadError(err, reader)
+		return 0, "", cliSlotReadError(err, reader)
 	}
 	if loaded.Progress != nil {
 		if hold, found := progressReadHold(*loaded.Progress, slot.EvaluationTime); found {
-			return hold, nil
+			return hold, obchannel.ReadHoldFromProgress, nil
 		}
 	}
 	raw, missing, err := control.ReadControl(ctx, slot.QueryGroup, schedulePrefix+":"+readhold.Namespace)
 	if err != nil {
-		return 0, cliSlotReadError(err, reader)
+		return 0, "", cliSlotReadError(err, reader)
 	}
 	if missing {
-		return 0, obchannel.ErrHistoricalReadHoldUnknown
+		if time.Unix(int64(slot.EvaluationTime), 0).Before(now.Add(-readhold.RecordTTL)) {
+			return 0, "", obchannel.ErrHistoricalReadHoldUnknown
+		}
+		return 0, obchannel.ReadHoldNoRecord, nil
 	}
 	record, err := readhold.Decode(raw)
 	if err != nil {
-		return 0, obchannel.ErrHistoricalReadHoldUnknown
+		return 0, "", obchannel.ErrHistoricalReadHoldUnknown
 	}
 	if hold, found := record.HoldAt(slot.EvaluationTime); found {
-		return hold, nil
+		return hold, obchannel.ReadHoldFromRecord, nil
 	}
-	return 0, obchannel.ErrHistoricalReadHoldUnknown
+	return 0, "", obchannel.ErrHistoricalReadHoldUnknown
 }
 
 // progressReadHold is the read hold of the Slot at at when Progress still

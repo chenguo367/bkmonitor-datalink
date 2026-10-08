@@ -49,7 +49,7 @@ func (holds *productionReadHolds) groupPage(engine *lookback.Engine, after strin
 		inspection := holds.controller.Inspect(qg)
 		// A record that did not decode says nothing until the group's next
 		// write replaces it.
-		record, known := inspection.Record, inspection.Loaded && !inspection.Corrupt && (!inspection.Missing || inspection.Seeded)
+		record, known := inspection.Record, holdKnown(inspection)
 		row := lookbackGroupReading{QueryGroup: qg, HoldKnown: known}
 		if known {
 			row.ReadHold = &record
@@ -180,7 +180,7 @@ func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[st
 		}
 		entry := counts[source]
 		inspection := holds.controller.Inspect(qg)
-		if !inspection.Loaded || inspection.Corrupt || (inspection.Missing && !inspection.Seeded) {
+		if !holdKnown(inspection) {
 			entry.Unknown++
 			counts[source] = entry
 			continue
@@ -204,11 +204,10 @@ func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[st
 }
 
 // holdOf is one Query Group's read hold as the lookback's group page knows
-// it: unknown while its record is unread, corrupt, or missing and not yet
-// seeded.
+// it: unknown while its record is unread or corrupt.
 func (holds *productionReadHolds) holdOf(queryGroup string) (int64, bool) {
 	inspection := holds.controller.Inspect(execution.QueryGroupIdentity(queryGroup))
-	if !inspection.Loaded || inspection.Corrupt || (inspection.Missing && !inspection.Seeded) {
+	if !holdKnown(inspection) {
 		return 0, false
 	}
 	if inspection.Record.PendingHoldMillis != nil {
@@ -233,7 +232,15 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 			continue
 		}
 		inspection := holds.controller.Inspect(qg)
-		if !inspection.Loaded || inspection.Missing || inspection.Corrupt {
+		if !holdKnown(inspection) {
+			// Listed as such: left out, the group would read as holding
+			// nothing (fleet.ReadHoldFacts).
+			facts[string(qg)] = fleet.ReadHoldFacts{Unknown: true, Annotation: "alarmd 当前的推后未知"}
+			continue
+		}
+		if inspection.Missing {
+			// No record: the group holds nothing, which is what leaving it out
+			// says.
 			continue
 		}
 		record := inspection.Record
@@ -287,4 +294,16 @@ func (basis readHoldBasis) suggestion(record readhold.Record) int64 {
 		seconds = (seconds + step - 1) / step * step
 	}
 	return seconds
+}
+
+// holdKnown is whether a Query Group's read hold is known from its record:
+// one that was read and decoded, or none at all -- a group whose hold has
+// only ever been zero keeps none, and the controller reads a missing record
+// as zero. Unknown is a record not read yet, or one that did not decode.
+//
+// One group reads zero here and may not be: a group never prepared, whose
+// Plan moved from a group that held, can be held by the transition its first
+// prepare seeds; until that first Slot it reads zero.
+func holdKnown(inspection readhold.Inspection) bool {
+	return inspection.Loaded && !inspection.Corrupt
 }
