@@ -222,7 +222,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 	bases := make(map[execution.QueryGroupIdentity]readHoldBasis, len(holds.groups))
 	for qg, owned := range holds.groups {
 		groups = append(groups, qg)
-		bases[qg] = readHoldBasis{delay: owned.queryDelay, step: owned.queryStep, settlingWait: owned.settlingWait,
+		bases[qg] = readHoldBasis{delay: owned.queryDelay, step: owned.queryStep, unit: owned.delayUnit, settlingWait: owned.settlingWait,
 			known: owned.settled && owned.queryRoute != ""}
 	}
 	holds.mu.Unlock()
@@ -272,7 +272,10 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 // hold is reckoned beyond.
 type readHoldBasis struct {
 	delay, step, settlingWait time.Duration
-	known                     bool
+	// unit is what the delay was rounded to and the suggestion is: the data
+	// step, or a shorter schedule step for a query read unaligned.
+	unit  time.Duration
+	known bool
 }
 
 // suggestion is the time_delay at which the record's arrival age needs no
@@ -291,7 +294,11 @@ func (basis readHoldBasis) suggestion(record readhold.Record) int64 {
 		return 0
 	}
 	seconds := (need + 999) / 1000
-	if step := int64(basis.step / time.Second); step > 0 {
+	unit := basis.unit
+	if unit <= 0 {
+		unit = basis.step
+	}
+	if step := int64(unit / time.Second); step > 0 {
 		seconds = (seconds + step - 1) / step * step
 	}
 	return seconds

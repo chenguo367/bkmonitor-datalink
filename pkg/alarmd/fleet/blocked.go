@@ -327,7 +327,10 @@ var failureFacets = map[string]facets{
 	"QUERY_UNAVAILABLE": {StageQuery, ClassUnavailable, ""},
 	// Answered and refused: the table or field does not route in the space.
 	"QUERY_TARGET_MISSING": {StageQuery, ClassRefused, ""},
-	"QUERY_PARTIAL":        {StageQuery, ClassUnavailable, ""},
+	// The answer came back bucketed on the aggregation grid, which a Plan
+	// detected every step cannot use: refused for the strategy's step.
+	"DETECT_INTERVAL_STORAGE_NOT_SLIDING": {StageQuery, ClassRefused, ""},
+	"QUERY_PARTIAL":                       {StageQuery, ClassUnavailable, ""},
 	// The backend answered, completely, with nothing: the dependency data is
 	// not there. Not unavailable -- the query succeeded -- and where the data
 	// went is not this deployment's to say.

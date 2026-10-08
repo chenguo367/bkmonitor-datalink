@@ -55,14 +55,19 @@ type SourceStrategy struct {
 
 type PrimaryQuerySource struct {
 	TimeDelaySeconds int64
-	Identity         SourceIdentity
-	StrategyID       string
-	ItemID           string
-	QueryMD5         string
-	Expression       string
-	IdentityFields   []string
-	Functions        []json.RawMessage
-	QueryConfigs     []json.RawMessage
+	// DetectStepSeconds is a configured detection step (itemDetectStep),
+	// zero when the item runs at its aggregation interval. A non-zero step
+	// has the query read windows that start where its request starts, and
+	// rounds the delay to the step.
+	DetectStepSeconds int64
+	Identity          SourceIdentity
+	StrategyID        string
+	ItemID            string
+	QueryMD5          string
+	Expression        string
+	IdentityFields    []string
+	Functions         []json.RawMessage
+	QueryConfigs      []json.RawMessage
 }
 
 type PrimaryQueryCompiler interface {
@@ -1219,6 +1224,13 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		TimeDelaySeconds: item.TimeDelay, QueryMD5: item.QueryMD5, Expression: primaryExpression, IdentityFields: identityFields,
 		Functions: functions, QueryConfigs: append([]json.RawMessage(nil), item.QueryConfigs...),
 	}
+	// The step decides how the query reads; compilePlan reads it again and
+	// is where a step that cannot run is refused and a warned one noted.
+	if aggregation, _, err := itemInterval(item); err == nil {
+		if step, err := itemDetectStep(item, aggregation); err == nil && step.Configured {
+			querySource.DetectStepSeconds = step.Seconds
+		}
+	}
 	facts, err := planner.CompilePrimaryQuery(ctx, querySource)
 	if err != nil {
 		var compileFailure *QueryPlanCompileError
@@ -1606,13 +1618,19 @@ type legacyStrategy struct {
 	Detects               []legacyDetect  `json:"detects"`
 }
 type legacyItem struct {
-	TimeDelay    int64             `json:"time_delay"`
-	ID           int64             `json:"id"`
-	QueryMD5     string            `json:"query_md5"`
-	Expression   string            `json:"expression"`
-	Functions    []json.RawMessage `json:"functions"`
-	QueryConfigs []json.RawMessage `json:"query_configs"`
-	Algorithms   []legacyAlgorithm `json:"algorithms"`
+	TimeDelay int64 `json:"time_delay"`
+	// DetectInterval is the item's detection step in seconds, absent for
+	// the aggregation interval (itemDetectStep). Raw and omitted when absent:
+	// a strategy without update_time takes its revision from a digest of
+	// this struct, and a field that encoded itself when absent would move
+	// every such revision.
+	DetectInterval json.RawMessage   `json:"detect_interval,omitempty"`
+	ID             int64             `json:"id"`
+	QueryMD5       string            `json:"query_md5"`
+	Expression     string            `json:"expression"`
+	Functions      []json.RawMessage `json:"functions"`
+	QueryConfigs   []json.RawMessage `json:"query_configs"`
+	Algorithms     []legacyAlgorithm `json:"algorithms"`
 	// Unit is deliberately absent from this struct. The strategy cache has no
 	// unit on an item: Python's Item.unit is a derived property that walks
 	// query_configs and takes the first non-empty one, so reading a "unit" key
@@ -2111,6 +2129,16 @@ func compilePlan(
 	if err != nil {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, err
 	}
+	// interval is the aggregation interval: the query window and every
+	// window an algorithm reads. step is how often the item is detected:
+	// the schedule, the trigger's step and the offset of the previous
+	// detection. The two are one number unless the item configures a
+	// detect_interval this build can run.
+	step, err := itemDetectStep(item, interval)
+	if err != nil {
+		return contract.EvaluationPlanV2{}, planCompileFacts{}, []ObjectDisposition{{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigRejected,
+			Reason: ReasonDetectIntervalInvalid, FieldPath: "items[0].detect_interval", Detail: dispositionDetail(err.Error())}}, fmt.Errorf("alarmd controlplane: %s", ReasonDetectIntervalInvalid)
+	}
 	strategyID := strconv.FormatInt(source.ID, 10)
 	revision := source.UpdateTime.String()
 	if revision != "" {
@@ -2171,6 +2199,9 @@ func compilePlan(
 			Reason: ReasonAggIntervalDefaulted, FieldPath: "items[0].query_configs[*].agg_interval",
 			Detail: fmt.Sprintf("agg_interval=%d", pythonDefaultAggInterval)})
 	}
+	if warning := step.warningDisposition(sourceID, interval); warning != nil {
+		dispositions = append(dispositions, *warning)
+	}
 	for _, rawLevel := range levelIDs {
 		levelID := uint32(rawLevel)
 		detect, ok := detectByLevel[levelID]
@@ -2208,7 +2239,7 @@ func compilePlan(
 				invalid = true
 				break
 			}
-			config, err := compileAlgorithmConfig(raw, unit, levelID, projection, dataset.IdentityFields, interval, &levelInputs)
+			config, err := compileAlgorithmConfig(raw, unit, levelID, projection, dataset.IdentityFields, interval, step.Seconds, &levelInputs)
 			if err != nil {
 				reason := "ALGORITHM_CONFIG_INVALID"
 				if raw.Type == strategy.DetectorKindThreshold {
@@ -2250,7 +2281,7 @@ func compilePlan(
 				Detail: detail})
 			continue
 		}
-		triggerFields := map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": interval, "window_size": detect.Trigger.CheckWindow}
+		triggerFields := map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": step.Seconds, "window_size": detect.Trigger.CheckWindow}
 		if len(detect.Trigger.Uptime) > 0 && string(detect.Trigger.Uptime) != "null" {
 			triggerFields["uptime"] = detect.Trigger.Uptime
 			triggerFields["timezone_ref"] = "BUSINESS_LOCAL"
@@ -2277,7 +2308,7 @@ func compilePlan(
 	if len(levels) == 0 {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, dispositions, errors.New("alarmd controlplane: no executable level")
 	}
-	semantics := contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: uint32(interval), AggregationInterval: uint32(interval), EvaluationInterval: uint32(interval), LatenessTolerance: uint32(interval * 2)}
+	semantics := contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: uint32(interval), AggregationInterval: uint32(interval), EvaluationInterval: uint32(step.Seconds), LatenessTolerance: uint32(step.Seconds * 2)}
 	ir := contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref, ExecutionSemantics: semantics, InputProjection: projection, Levels: levels}
 	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: ref, InputProjection: projection, SourceCompatibility: &contract.SourceCompatibilityV2{ItemID: strconv.FormatInt(item.ID, 10)}, StrategyIR: ir}
 	plan.TargetScope = targetScope
@@ -2316,7 +2347,7 @@ func compilePlan(
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
 	}
-	scheduleSpec, refusal, err := planScheduleSpec(sourceID, plan, interval)
+	scheduleSpec, refusal, err := planScheduleSpec(sourceID, plan, step.Seconds)
 	if err != nil {
 		if refusal != nil {
 			dispositions = append(dispositions, *refusal)
@@ -2382,6 +2413,7 @@ func compileAlgorithmConfig(
 	projection contract.InputProjectionV2,
 	identityFields []string,
 	interval int64,
+	step int64,
 	inputs *compiledPlanInputs,
 ) (json.RawMessage, error) {
 	if raw.Type == strategy.DetectorKindThreshold {
@@ -2395,7 +2427,7 @@ func compileAlgorithmConfig(
 		DimensionFields: append([]string(nil), projection.DimensionFields...),
 		IdentityFields:  append([]string(nil), identityFields...),
 	}
-	requirements, err := inputs.buildRequirements(raw.Type, levelID, interval, inputProjection)
+	requirements, err := inputs.buildRequirements(raw.Type, levelID, interval, step, inputProjection)
 	if err != nil {
 		return nil, err
 	}
@@ -2404,7 +2436,7 @@ func compileAlgorithmConfig(
 		if err := json.Unmarshal(raw.Config, &parameters); err != nil {
 			return nil, err
 		}
-		offsets, err := strategy.TraditionalHistoryOffsets(raw.Type, parameters, interval)
+		offsets, err := strategy.TraditionalHistoryOffsets(raw.Type, parameters, step)
 		if err != nil {
 			return nil, err
 		}
@@ -2558,6 +2590,7 @@ func (inputs *compiledPlanInputs) buildRequirements(
 	kind string,
 	levelID uint32,
 	interval int64,
+	step int64,
 	projection execution.InputProjection,
 ) ([]execution.DataRequirementTemplate, error) {
 	if err := inputs.primary.Validate(); err != nil {
@@ -2584,11 +2617,13 @@ func (inputs *compiledPlanInputs) buildRequirements(
 		dependency, err := execution.BuildDataRequirementTemplate(execution.DataRequirementTemplate{
 			DatasetName: "previous", Role: execution.InputRoleAlgorithmDependency, ConsumerLevelID: levelID,
 			LogicalQueryRef: primaryRef,
-			RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -inputs.primary.QueryDelaySeconds - 2*interval, EndOffsetSeconds: -inputs.primary.QueryDelaySeconds - interval, HalfOpen: true},
-			StepMillis:      inputs.primary.StepMillis, AlignmentMillis: inputs.primary.AlignmentMillis,
+			// The previous point is the previous detection, a step back, read
+			// over a whole aggregation window.
+			RelativeWindow: execution.RelativeQueryWindow{StartOffsetSeconds: -inputs.primary.QueryDelaySeconds - step - interval, EndOffsetSeconds: -inputs.primary.QueryDelaySeconds - step, HalfOpen: true},
+			StepMillis:     inputs.primary.StepMillis, AlignmentMillis: inputs.primary.AlignmentMillis,
 			ResultWindowPolicy: execution.ResultWindowExactHalfOpen, ReadinessClass: execution.ReadinessFinalizedRequired,
-			InputProjection: projection, PointOffsetsSeconds: []int64{interval},
-			NamedPoints: []execution.NamedInputPoint{{Name: "previous", OffsetSeconds: interval}},
+			InputProjection: projection, PointOffsetsSeconds: []int64{step},
+			NamedPoints: []execution.NamedInputPoint{{Name: "previous", OffsetSeconds: step}},
 		})
 		if err != nil {
 			return nil, err
@@ -2606,9 +2641,9 @@ func (inputs *compiledPlanInputs) buildRequirements(
 			RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -inputs.primary.QueryDelaySeconds - (1500 + interval), EndOffsetSeconds: -inputs.primary.QueryDelaySeconds, HalfOpen: true},
 			StepMillis:      inputs.osRestartHistory.StepMillis, AlignmentMillis: inputs.osRestartHistory.AlignmentMillis,
 			ResultWindowPolicy: execution.ResultWindowExactHalfOpen, ReadinessClass: execution.ReadinessFinalizedRequired,
-			InputProjection: projection, PointOffsetsSeconds: []int64{interval, 600, 1500},
+			InputProjection: projection, PointOffsetsSeconds: []int64{step, 600, 1500},
 			NamedPoints: []execution.NamedInputPoint{
-				{Name: "previous", OffsetSeconds: interval}, {Name: "previous_10m", OffsetSeconds: 600},
+				{Name: "previous", OffsetSeconds: step}, {Name: "previous_10m", OffsetSeconds: 600},
 				{Name: "previous_25m", OffsetSeconds: 1500},
 			},
 		})

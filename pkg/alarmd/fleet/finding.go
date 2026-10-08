@@ -769,7 +769,11 @@ var codeChecks = map[string]verdict{
 	// not route in its space: the strategy's, the same line the refusal's
 	// detail files it under.
 	"QUERY_TARGET_MISSING": lands(CheckQueryTargetMissing),
-	"QUERY_PARTIAL":        lands(CheckBackendNotAnswering),
+	// A Plan detected more often than it aggregates over a table whose
+	// storage buckets on the aggregation grid: the definition cannot be
+	// evaluated as written here, and its owner removes the detect_interval.
+	"DETECT_INTERVAL_STORAGE_NOT_SLIDING": lands(CheckPlanUnevaluable),
+	"QUERY_PARTIAL":                       lands(CheckBackendNotAnswering),
 	// The backend answered and the dependency holds no rows: the data the
 	// algorithm compares against is missing, the same reading a series with
 	// no history point gets.

@@ -51,26 +51,29 @@ import (
 // The clock is left at base+60 with the unfinished projection still on the
 // initial Segment's contract.
 type cutoverStallFixture struct {
-	t                *testing.T
-	cfg              config.Config
-	redisClient      *redis.Client
-	bundle           *phaseTwoWorkerBundle
-	production       *productionPhaseTwoOwnership
-	repository       *controlplane.RedisCatalogRepository
-	runner           phaseTwoQueryGroupRuntime
-	session          *ownership.Session
-	progressStore    *progress.Store
-	queryGroup       execution.QueryGroupIdentity
-	initialSchedule  execution.FrozenQueryGroupSchedule
-	openSchedule     execution.FrozenQueryGroupSchedule
-	base             int64
-	boundary         execution.EvaluationTime
-	firstNewSlot     execution.EvaluationTime
-	inFlight         execution.ScheduleProgress
-	oldProjection    execution.UnfinishedSlotProjection
-	clock            *atomic.Int64
-	now              func() time.Time
-	uqCalls          *atomic.Int64
+	t               *testing.T
+	cfg             config.Config
+	redisClient     *redis.Client
+	bundle          *phaseTwoWorkerBundle
+	production      *productionPhaseTwoOwnership
+	repository      *controlplane.RedisCatalogRepository
+	runner          phaseTwoQueryGroupRuntime
+	session         *ownership.Session
+	progressStore   *progress.Store
+	queryGroup      execution.QueryGroupIdentity
+	initialSchedule execution.FrozenQueryGroupSchedule
+	openSchedule    execution.FrozenQueryGroupSchedule
+	base            int64
+	boundary        execution.EvaluationTime
+	firstNewSlot    execution.EvaluationTime
+	inFlight        execution.ScheduleProgress
+	oldProjection   execution.UnfinishedSlotProjection
+	clock           *atomic.Int64
+	now             func() time.Time
+	uqCalls         *atomic.Int64
+	// unalignedCalls counts the requests read from where they start: the
+	// queries of a Plan detected more often than it aggregates.
+	unalignedCalls   *atomic.Int64
 	uqCallsAtCutover int64
 	// uqHosts selects the series the UQ stub returns for a query ending at
 	// the given Unix second; nil serves one constant series.
@@ -140,14 +143,16 @@ func startCutoverFixtureOpened(
 	// It fails on some runs and not others, which is worse than always.
 	base := time.Now().Unix()
 	base += 60 - base%60
-	fixture := &cutoverStallFixture{t: t, redisClient: redisClient, base: base, clock: &atomic.Int64{}, uqCalls: &atomic.Int64{}}
+	fixture := &cutoverStallFixture{t: t, redisClient: redisClient, base: base, clock: &atomic.Int64{}, uqCalls: &atomic.Int64{}, unalignedCalls: &atomic.Int64{}}
 	fixture.clock.Store(base * 1000)
 	fixture.now = func() time.Time { return time.UnixMilli(fixture.clock.Load()) }
 
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		fixture.uqCalls.Add(1)
 		var payload struct {
-			EndTime string `json:"end_time"`
+			StartTime    string `json:"start_time"`
+			EndTime      string `json:"end_time"`
+			NotTimeAlign bool   `json:"not_time_align"`
 		}
 		_ = json.NewDecoder(request.Body).Decode(&payload)
 		end, err := strconv.ParseInt(payload.EndTime, 10, 64)
@@ -157,6 +162,20 @@ func startCutoverFixtureOpened(
 		if end > 1_000_000_000_000 {
 			end /= 1000
 		}
+		// The point of the window's bucket. An unaligned request - a Plan
+		// detected more often than it aggregates - gets its bucket where the
+		// request starts, as the query service's PromQL path answers it; an
+		// aligned one, as before, a point inside the window.
+		at := end - 1
+		if payload.NotTimeAlign {
+			if start, startErr := strconv.ParseInt(payload.StartTime, 10, 64); startErr == nil && start > 0 {
+				if start > 1_000_000_000_000 {
+					start /= 1000
+				}
+				at = start
+			}
+			fixture.unalignedCalls.Add(1)
+		}
 		hosts := []string{"127.0.0.1"}
 		if fixture.uqHosts != nil {
 			hosts = fixture.uqHosts(end)
@@ -164,7 +183,7 @@ func startCutoverFixtureOpened(
 		series := make([]string, 0, len(hosts))
 		for _, host := range hosts {
 			series = append(series, `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":["host"],"group_values":["`+host+`"],"values":[[`+
-				strconv.FormatInt((end-1)*1000, 10)+`,5]]}`)
+				strconv.FormatInt(at*1000, 10)+`,5]]}`)
 		}
 		partial := "false"
 		if fixture.uqPartial != nil && fixture.uqPartial(end) {

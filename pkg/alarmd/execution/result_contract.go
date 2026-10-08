@@ -1338,9 +1338,19 @@ func validateEventOutcomes(input InternalExecution, result PlanEvaluationResult,
 	// check - that is what not keeping it means - so what is checked is that
 	// the protocol really has no message for it: a kept identity in place of
 	// an event the consumer would have received is a lost event.
+	// The Plan says, from its own intervals, whether a record lies between two
+	// aggregation boundaries; the trigger asked the same question of the same
+	// Plan before it left the event unbuilt.
+	var plan *strategy.CompiledPlan
+	for _, due := range input.DuePlans {
+		if due.Identity == result.Plan {
+			plan = input.fullPlanOf(due)
+			break
+		}
+	}
 	for _, state := range result.StateResults {
 		for _, dropped := range state.WithoutMessage {
-			if contract.EventHasMessage(dropped.Format, dropped.EventKind) {
+			if contract.EventHasMessageAt(dropped.Format, dropped.EventKind, plan.CompatibleOffBoundary(dropped.Record.SourceTime)) {
 				return resultContractViolation(codeEventKindMismatch, "an event its protocol has a message for was not kept")
 			}
 			record := recordIdentity{Series: state.Mutation.Identity.SeriesIdentityDigest, Record: dropped.Record}
