@@ -2103,6 +2103,31 @@ type PlatformSettingsFacts struct {
 	// DEFAULT, VALUES or DYNAMIC.
 	NoDataTrackingHorizonSeconds int64  `json:"no_data_tracking_horizon_seconds,omitempty"`
 	NoDataTrackingHorizonSource  string `json:"no_data_tracking_horizon_source,omitempty"`
+	// Fields is every setting's effective value as this copy resolves it and
+	// the layer it came from - DYNAMIC (the platform's publication), VALUES
+	// (the deployment's own layer) or DEFAULT (the code default) - a boolean
+	// as Enabled and a list as how many Entries it has.
+	Fields []PlatformSettingField `json:"fields,omitempty"`
+}
+
+// PlatformSettingField is one setting of the platform's settings as a
+// replica's copy resolves it.
+type PlatformSettingField struct {
+	Field   string `json:"field"`
+	Source  string `json:"source"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	Entries *int   `json:"entries,omitempty"`
+}
+
+// PlatformSettingFieldsFacts is the platform's settings as the deployment
+// resolves them: the first counted replica that reports them speaks for it,
+// named, as for the no-data horizon. Every replica resolves them from the
+// same layers; Differing names the first one whose copy resolved other
+// values, which a replica that has not read the latest publication yet does.
+type PlatformSettingFieldsFacts struct {
+	Replica   string                 `json:"replica"`
+	Fields    []PlatformSettingField `json:"fields"`
+	Differing string                 `json:"differing,omitempty"`
 }
 
 // NoDataHorizonFacts is the platform no-data horizon as the deployment
@@ -2920,6 +2945,10 @@ type View struct {
 	// from, as a counted replica resolves it. Absent when no replica reports
 	// one.
 	NoDataHorizon *NoDataHorizonFacts `json:"no_data_horizon,omitempty"`
+	// PlatformSettingFields is every platform setting's effective value and
+	// layer as a counted replica resolves it. Absent when no replica reports
+	// them.
+	PlatformSettingFields *PlatformSettingFieldsFacts `json:"platform_setting_fields,omitempty"`
 	// Rebalance is the newest rebalance planning round any counted replica
 	// published, and RebalanceReplica which one. Newest rather than "the one
 	// that has it": a replica that stopped being the leader keeps its last
@@ -3161,6 +3190,14 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if facts := snapshot.PlatformSettings; facts != nil && facts.NoDataTrackingHorizonSeconds > 0 && view.NoDataHorizon == nil {
 			view.NoDataHorizon = &NoDataHorizonFacts{Seconds: facts.NoDataTrackingHorizonSeconds,
 				Source: facts.NoDataTrackingHorizonSource, Replica: replica}
+		}
+		if facts := snapshot.PlatformSettings; facts != nil && len(facts.Fields) > 0 {
+			switch {
+			case view.PlatformSettingFields == nil:
+				view.PlatformSettingFields = &PlatformSettingFieldsFacts{Replica: replica, Fields: facts.Fields}
+			case view.PlatformSettingFields.Differing == "" && !samePlatformSettingFields(view.PlatformSettingFields.Fields, facts.Fields):
+				view.PlatformSettingFields.Differing = replica
+			}
 		}
 		if snapshot.ControlSource != nil {
 			if snapshot.ControlSource.StaleBeyondBound {
@@ -4016,4 +4053,23 @@ func (skip PrunedSkip) Spanning() time.Duration {
 		return 0
 	}
 	return time.Duration(skip.To-skip.From) * time.Second
+}
+
+// samePlatformSettingFields is whether two replicas resolved every setting
+// to the same value from the same layer.
+func samePlatformSettingFields(a, b []PlatformSettingField) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Field != b[i].Field || a[i].Source != b[i].Source || !sameIntPtr(a[i].Entries, b[i].Entries) ||
+			(a[i].Enabled == nil) != (b[i].Enabled == nil) || (a[i].Enabled != nil && *a[i].Enabled != *b[i].Enabled) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameIntPtr(a, b *int) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
 }

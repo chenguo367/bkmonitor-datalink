@@ -10,7 +10,6 @@ type workflowMetrics struct {
 	ranges, expiredSlots   *prometheus.CounterVec
 	run, execute, progress *prometheus.CounterVec
 	progressCauses         *prometheus.CounterVec
-	attempted              prometheus.Counter
 	active, ready, delayed prometheus.Gauge
 	permitWait             *prometheus.HistogramVec
 }
@@ -35,7 +34,6 @@ func newWorkflowMetrics() workflowMetrics {
 				"which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, " +
 				"completion_level, completion_query). NONE is a completion that carried no cause."},
 			[]string{"completion_kind", "cause", "reason"}),
-		attempted:  prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "run_one_attempted_total", Help: "Returned attempted=true, including source retries without Execute."}),
 		active:     gauge("scheduler_active_executions", "Worker task occupancy, including preparation and execution, excluding pending result delivery."),
 		ready:      gauge("scheduler_ready_runners", "Runners in the outer ready queue."),
 		delayed:    gauge("scheduler_delayed_runners", "Runners in the outer delayed queue."),
@@ -43,7 +41,7 @@ func newWorkflowMetrics() workflowMetrics {
 	}
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.attempted, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots}
+	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots}
 }
 func (m workflowMetrics) observe(o observability.Observation) {
 	switch {
@@ -65,9 +63,6 @@ func (m workflowMetrics) observe(o observability.Observation) {
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageRunnerReturned:
 		if observability.ValidRunOutcome(o.RunOutcome) {
 			m.run.WithLabelValues(o.RunOutcome).Inc()
-			if o.Attempted {
-				m.attempted.Inc()
-			}
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageSlotCompleted:
 		// A round's outcome; a supplement completes no Slot and is counted by

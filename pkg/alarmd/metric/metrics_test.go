@@ -267,7 +267,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_state_envelope_apply_items_total":             "variableLabels: {}",
 		"bkmonitor_alarmd_state_retained_share_approaching_slots_total": "variableLabels: {}",
 		"bkmonitor_alarmd_state_write_reuse_total":                      "variableLabels: {class,stored}",
-		"bkmonitor_alarmd_state_write_change_reason_total":              "variableLabels: {reason,stored}",
 		"bkmonitor_alarmd_state_already_applied_total":                  "variableLabels: {site,kind}",
 		"bkmonitor_alarmd_state_version_conflict_total":                 "variableLabels: {site,kind}",
 		"bkmonitor_alarmd_worker_owned_query_groups":                    "variableLabels: {worker_role}",
@@ -343,7 +342,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_execute_return_total":                         "variableLabels: {outcome}",
 		"bkmonitor_alarmd_progress_completed_total":                     "variableLabels: {kind}",
 		"bkmonitor_alarmd_progress_completion_causes_total":             "variableLabels: {completion_kind,cause,reason}",
-		"bkmonitor_alarmd_run_one_attempted_total":                      "variableLabels: {}",
 		"bkmonitor_alarmd_scheduler_active_executions":                  "variableLabels: {}",
 		"bkmonitor_alarmd_scheduler_ready_runners":                      "variableLabels: {}",
 		"bkmonitor_alarmd_scheduler_delayed_runners":                    "variableLabels: {}",
@@ -351,7 +349,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_slot_operation_duration_seconds":              "variableLabels: {stage}",
 		"bkmonitor_alarmd_active_qg_set_query_groups":                   "variableLabels: {}",
 		"bkmonitor_alarmd_active_qg_set_object_bytes":                   "variableLabels: {}",
-		"bkmonitor_alarmd_active_qg_set_encode_duration_seconds":        "variableLabels: {result}",
 		"bkmonitor_alarmd_active_qg_set_redis_duration_seconds":         "variableLabels: {operation,result}",
 		"bkmonitor_alarmd_schedule_cutover_payload_bytes":               "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_timeline_bytes_max":                  "variableLabels: {}",
@@ -390,10 +387,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_schedule_cutover_read_hold_links_total":       "variableLabels: {decision}",
 		"bkmonitor_alarmd_fleet_overdue_episodes_total":                 "variableLabels: {hold}",
 		"bkmonitor_alarmd_schedule_cutover_timelines_read":              "variableLabels: {}",
-		"bkmonitor_alarmd_schedule_cutover_last_duration_seconds":       "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_cutover_first_duration_seconds":      "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_cutover_first_timelines_read":        "variableLabels: {}",
-		"bkmonitor_alarmd_schedule_cutover_payload_size_bytes":          "variableLabels: {}",
 		"bkmonitor_alarmd_query_failure_total":                          "variableLabels: {stage,category}",
 		"bkmonitor_alarmd_schedule_cutover_duration_seconds":            "variableLabels: {result}",
 		"bkmonitor_alarmd_object_catalog_objects_total":                 "variableLabels: {operation,outcome}",
@@ -510,12 +505,9 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_diagnostic_redis_dial_retries_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_lookback_first_reads_total"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_samples_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_changed_windows_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_changes_total"] = "variableLabels: {source,class}"
-	expected["bkmonitor_alarmd_lookback_completion_total"] = "variableLabels: {source,age}"
-	expected["bkmonitor_alarmd_lookback_probes_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_sample_classes_total"] = "variableLabels: {source,class}"
 	expected["bkmonitor_alarmd_lookback_read_early_groups"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_series_late_groups"] = "variableLabels: {source}"
@@ -529,7 +521,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_directed_early_total"] = "variableLabels: {source,group}"
 	expected["bkmonitor_alarmd_lookback_directed_early_undecided_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_directed_early_read_bytes_total"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_earlier_reads_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_earlier_read_bytes_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_read_hold_ignored_total"] = "variableLabels: {source,reason}"
 	expected["bkmonitor_alarmd_read_hold_transition_total"] = "variableLabels: {}"
@@ -542,20 +533,12 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_read_hold_degraded_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_read_hold_groups"] = "variableLabels: {source,kind}"
 	expected["bkmonitor_alarmd_read_hold_max_seconds"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_empty_first_reads_total"] = "variableLabels: {source,outcome}"
-	expected["bkmonitor_alarmd_lookback_empty_first_read_completion_total"] = "variableLabels: {source,age}"
-	expected["bkmonitor_alarmd_lookback_completion_max_seconds"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_groups"] = "variableLabels: {source,depth}"
-	expected["bkmonitor_alarmd_lookback_rest_seconds"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_first_read_bytes_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_recheck_bytes_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_unknown_lookback_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_coverage"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_lookback_preemptions_total"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_yield_releases_total"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_yield_release_seconds_total"] = "variableLabels: {source}"
-	expected["bkmonitor_alarmd_lookback_yield_release_max_seconds"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
@@ -614,9 +597,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_platform_settings_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_platform_settings_unavailable_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_platform_settings_change_total"] = "variableLabels: {field}"
-	expected["bkmonitor_alarmd_platform_setting_source"] = "variableLabels: {field,source}"
-	expected["bkmonitor_alarmd_platform_setting_enabled"] = "variableLabels: {field}"
-	expected["bkmonitor_alarmd_platform_setting_entries"] = "variableLabels: {field}"
 
 	descriptions := make(chan string)
 	go func() {
@@ -854,7 +834,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("state_envelope_apply_items_total"):             1,
 		fqName("state_retained_share_approaching_slots_total"): 1,
 		fqName("state_write_reuse_total"):                      len(observability.AllStateWriteReuseClasses()) * len(observability.AllStateWriteReuseStored()),
-		fqName("state_write_change_reason_total"):              len(observability.AllStateWriteChangeReasons()) * len(observability.AllStateWriteReuseStored()),
 		fqName("state_already_applied_total"):                  len(observability.AllStateAlreadyAppliedSites()) * len(observability.AllStateAlreadyAppliedKinds()),
 		fqName("state_version_conflict_total"):                 len(observability.AllStateAlreadyAppliedSites()) * len(observability.AllStateVersionConflictKinds()),
 		fqName("source_observation_total"):                     len(observability.AllSourceKinds()) * len(phaseTwoSourceResults) * len(observability.AllReasons(observability.ComponentControlPlane)),
@@ -959,7 +938,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("execute_return_total"):                         6,
 		fqName("progress_completed_total"):                     7,
 		fqName("progress_completion_causes_total"):             2 * (len(observability.ProgressCompletionCauses) + 2) * observability.NormalizedReasonCount(),
-		fqName("run_one_attempted_total"):                      1,
 		fqName("scheduler_active_executions"):                  1,
 		fqName("scheduler_ready_runners"):                      1,
 		fqName("scheduler_delayed_runners"):                    1,
@@ -967,7 +945,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("slot_operation_duration_seconds"):              55,
 		fqName("active_qg_set_query_groups"):                   1,
 		fqName("active_qg_set_object_bytes"):                   1,
-		fqName("active_qg_set_encode_duration_seconds"):        histogramSeries(2, len(activeQGSetDurationBuckets)),
 		fqName("active_qg_set_redis_duration_seconds"):         histogramSeries(3*2, len(activeQGSetDurationBuckets)),
 		fqName("schedule_cutover_payload_bytes"):               1,
 		fqName("schedule_timeline_bytes_max"):                  1,
@@ -1021,10 +998,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("schedule_cutover_read_hold_links_total"):  len(observability.ScheduleCutoverReadHoldLinks),
 		fqName("fleet_overdue_episodes_total"):            len(fleet.OverdueHoldClasses),
 		fqName("schedule_cutover_timelines_read"):         1,
-		fqName("schedule_cutover_last_duration_seconds"):  1,
 		fqName("schedule_cutover_first_duration_seconds"): 1,
 		fqName("schedule_cutover_first_timelines_read"):   1,
-		fqName("schedule_cutover_payload_size_bytes"):     histogramSeries(1, len(scheduleCutoverPayloadBuckets)),
 		fqName("query_failure_total"):                     len(observability.QueryFailureStages) * len(observability.QueryFailureCategories),
 		fqName("schedule_cutover_duration_seconds"):       histogramSeries(2, len(scheduleCutoverDurationBuckets)),
 		// Two operations (write, renew) by three outcomes (written, present,
@@ -1307,9 +1282,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("platform_settings_refresh_total")] = 2
 	bounds[fqName("platform_settings_unavailable_total")] = len(platformsettings.UnavailableReasons)
 	bounds[fqName("platform_settings_change_total")] = len(platformsettings.Fields)
-	bounds[fqName("platform_setting_source")] = len(platformsettings.Fields) * len(platformsettings.HorizonSources)
-	bounds[fqName("platform_setting_enabled")] = 1
-	bounds[fqName("platform_setting_entries")] = len(platformsettings.Fields)
 	for _, name := range []string{
 		"messages", "records", "plans", "levels", "events", "bytes", "keys", "state_bytes",
 	} {
