@@ -192,6 +192,9 @@ type fleetPublisher struct {
 	// which the next snapshot carries. Only publishOnce touches them.
 	overdueOpen     map[string]fleet.OverdueEpisode
 	overdueEpisodes []fleet.OverdueEpisode
+	// periodUnknownSince is when each object the overdue facts name without
+	// a period was first seen so, kept while it is (notePeriodUnknown).
+	periodUnknownSince map[string]time.Time
 	// lateSeries is what the lookback's supplements could not recover, by
 	// kind; nil without a lookback.
 	lateSeries func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts)
@@ -459,6 +462,43 @@ func (publisher *fleetPublisher) overdueHidden(snapshot fleet.Snapshot, part fle
 	}
 }
 
+// notePeriodUnknown dates the objects the overdue facts name without a
+// period: each one first seen now is since now, and one named before keeps
+// when it was first seen. One no longer named is forgotten -- its period
+// arrived, or the index no longer holds it -- unless the index's list was
+// cut and the index still holds it without a period: past the list, it is
+// not named and still has none.
+func (publisher *fleetPublisher) notePeriodUnknown(facts *fleet.OverdueFacts, at time.Time) {
+	if facts == nil {
+		publisher.periodUnknownSince = nil
+		return
+	}
+	named := make(map[string]bool, len(facts.PeriodUnknownObjects))
+	for index := range facts.PeriodUnknownObjects {
+		object := &facts.PeriodUnknownObjects[index]
+		since, known := publisher.periodUnknownSince[object.QueryGroup]
+		if !known {
+			if publisher.periodUnknownSince == nil {
+				publisher.periodUnknownSince = map[string]time.Time{}
+			}
+			since = at
+			publisher.periodUnknownSince[object.QueryGroup] = since
+		}
+		object.Since, named[object.QueryGroup] = since, true
+	}
+	for queryGroup := range publisher.periodUnknownSince {
+		if named[queryGroup] {
+			continue
+		}
+		if facts.Truncated && publisher.schedule != nil {
+			if wake := publisher.schedule.WakeOf(queryGroup); wake.Known && wake.IntervalSeconds <= 0 {
+				continue
+			}
+		}
+		delete(publisher.periodUnknownSince, queryGroup)
+	}
+}
+
 // evaluatingStrategies is every strategy seen evaluating on the given
 // objects, once each, in order.
 func evaluatingStrategies(owned []execution.QueryGroupIdentity, strategies func(string) []fleet.StrategyRef) []fleet.StrategyRef {
@@ -584,6 +624,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// The count of overdue objects is unaffected -- it travels in its own facts,
 	// which is why that number does not depend on this list at all.
 	parked, overdue := publisherOverdue(publisher.overdue, at, publisher.replica, publisher.strategies)
+	publisher.notePeriodUnknown(overdue, at)
 	anomalies = append(anomalies, onlyUnlisted(parked, anomalies, demoted)...)
 	awaiting, awaitingTotal := publisher.awaitingFirstRound(owned, at)
 	snapshot := fleet.Snapshot{

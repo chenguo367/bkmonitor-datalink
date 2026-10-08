@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -164,5 +165,40 @@ func TestTheOverdueKindIsInTheClosedLabelSet(t *testing.T) {
 	if got := MetricKind(KindOverdueWake); got != KindOverdueWake {
 		t.Fatalf("MetricKind(%q) = %q, want the kind itself rather than the OTHER bucket",
 			KindOverdueWake, got)
+	}
+}
+
+// The objects without a period are named beside their count, the oldest wake
+// first and at most MaxPeriodUnknownObjects of them; the count stays the
+// whole number. Across replicas the names are the longest without a period
+// first, at most the same bound.
+func TestTheObjectsWithNoPeriodAreNamedBesideTheirCount(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	var wakes []OverdueWake
+	for index := 0; index < MaxPeriodUnknownObjects+5; index++ {
+		wakes = append(wakes, OverdueWake{QueryGroup: fmt.Sprintf("qg-%02d", index), WakeAt: now.Add(-time.Duration(30-index) * time.Second)})
+	}
+	_, facts := OverdueAnomalies(wakes, len(wakes), now, "pod-a", nil)
+	if facts.PeriodUnknown != MaxPeriodUnknownObjects+5 || len(facts.PeriodUnknownObjects) != MaxPeriodUnknownObjects ||
+		facts.PeriodUnknownObjects[0].QueryGroup != "qg-00" {
+		t.Fatalf("facts %+v, want every one counted and the first %d named, oldest first", facts, MaxPeriodUnknownObjects)
+	}
+	at := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	named := func(replica string, count int, since time.Time) *OverdueFacts {
+		facts := &OverdueFacts{PeriodUnknown: count}
+		for index := 0; index < count; index++ {
+			facts.PeriodUnknownObjects = append(facts.PeriodUnknownObjects,
+				PeriodUnknownObject{QueryGroup: fmt.Sprintf("%s-%02d", replica, index), Since: since.Add(time.Duration(index) * time.Second)})
+		}
+		return facts
+	}
+	view := Aggregate(Expectation{QueryGroups: 40, Known: true}, []Snapshot{
+		{Replica: "pod-a", TakenAt: at, Owned: 20, Determined: 20, Overdue: named("pod-a", 15, at.Add(-time.Minute))},
+		{Replica: "pod-b", TakenAt: at, Owned: 20, Determined: 20, Overdue: named("pod-b", 15, at.Add(-time.Hour))},
+	}, []string{"pod-a", "pod-b"}, at, time.Minute)
+	objects := view.Overdue.PeriodUnknownObjects
+	if view.Overdue.PeriodUnknown != 30 || len(objects) != MaxPeriodUnknownObjects || objects[0].QueryGroup != "pod-b-00" ||
+		objects[14].QueryGroup != "pod-b-14" || objects[15].QueryGroup != "pod-a-00" {
+		t.Fatalf("aggregated %d named %+v, want 30 counted and the longest without a period named first", view.Overdue.PeriodUnknown, objects)
 	}
 }
