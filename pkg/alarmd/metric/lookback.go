@@ -132,15 +132,16 @@ func newLookbackCollector() *lookbackCollector {
 				"completed enters lookback_completion_total.",
 			"source", "outcome"),
 		checks: desc("lookback_rechecks_total",
-			"Rechecks by source, rung (its moment in the Query Group's data steps) and outcome. Only compared is a "+
+			"Rechecks by source and outcome, over every rung; each rung's are in /api/lookback. Only compared is a "+
 				"window observed; yielded, recheck_failed, partial and owner_lost are windows not observed.",
-			"source", "rung", "outcome"),
+			"source", "outcome"),
 		changed: desc("lookback_changed_windows_total",
-			"Compared windows that changed since the read before, by source and rung: over the compared rechecks "+
-				"of that rung, the share of windows whose data was still arriving.", "source", "rung"),
+			"Compared windows that changed since the read before, by source, over every rung: over the compared "+
+				"rechecks, the share of windows whose data was still arriving. Each rung's are in /api/lookback.", "source"),
 		changes: desc("lookback_changes_total",
-			"Buckets of compared windows by how they changed since the read before: points_added, points_removed, "+
-				"series_changed (as many points from other series), values_changed.", "source", "rung", "class"),
+			"Buckets of compared windows by how they changed since the read before, over every rung: points_added, "+
+				"points_removed, series_changed (as many points from other series), values_changed. Each rung's are in "+
+				"/api/lookback.", "source", "class"),
 		completion: desc("lookback_completion_total",
 			"Finished samples by when their window's data was complete, as its age past the window's end: the last "+
 				"rung that changed, or the first read when none did.", "source", "age"),
@@ -189,12 +190,10 @@ func newLookbackCollector() *lookbackCollector {
 			"The longest a supplement held its Query Group's flight in this process, by source.", "source"),
 		earlyReads: desc("lookback_directed_early_total",
 			"Directed Slots by what their early read -- once more before the Query Group's next Slot reads -- came "+
-				"to, by source. before_next is a supplement that ran with no later Slot of the group begun. Not "+
-				"attempted: nothing_late, rung_first (the next Slot reads after the rung), multi_query, "+
-				"first_read_incomplete, first_read_refused, owner_lost, anchor_unknown (no next Slot known). Attempted "+
-				"and not ahead: overtaken, older_slot_pending, yielded, permit_refused, anchor_passed, "+
-				"early_read_failed, early_memory_refused, flight_busy, contract_expired, failed. The mechanism works "+
-				"as far as before_next is of the attempted ones.", "source", "outcome"),
+				"to, by source and group: before_next, a supplement that ran with no later Slot of the group begun; "+
+				"not_ahead, attempted and not ahead; outside_mechanism, not attempted. The mechanism works as far as "+
+				"before_next is of before_next and not_ahead. Each outcome is in /api/lookback's early_reads.",
+			"source", "group"),
 		earlyUndecided: desc("lookback_directed_early_undecided_total",
 			"(Plan, series) pairs early supplements left undecided -- withheld, input_incomplete, config_drift -- "+
 				"which the read at the rung does not supplement again, by source.", "source"),
@@ -239,9 +238,10 @@ func newLookbackCollector() *lookbackCollector {
 			"Samples in flight - one at most per owned Query Group, and one waiting for its deep recheck - and the "+
 				"bytes their summaries hold.", "what"),
 		yields: desc("lookback_preemptions_total",
-			"Recheck reads stopped because a formal query had to wait for a query permit, by source and rung. "+
-				"The rung is tried again within its window and counted in lookback_rechecks_total by what it comes to.",
-			"source", "rung"),
+			"Recheck reads stopped because a formal query had to wait for a query permit, by source, over every rung; "+
+				"each rung's are in /api/lookback. The rung is tried again within its window and counted in "+
+				"lookback_rechecks_total by what it comes to.",
+			"source"),
 		refused: desc("lookback_permit_refusals_total",
 			"Lookback query permits refused, by reason: waiters (a formal query is waiting), full (every process "+
 				"permit is held), disabled. A refused rung keeps its window.",
@@ -348,8 +348,12 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			counter(c.supplementHold, source.SupplementHold[bucket], name, bucket)
 		}
 		gauge(c.supplementHoldMax, source.SupplementHoldMaxSeconds, name)
+		early := make(map[string]uint64, len(lookback.EarlyGroups))
 		for _, outcome := range lookback.EarlyOutcomes {
-			counter(c.earlyReads, source.EarlyReads[outcome], name, outcome)
+			early[lookback.EarlyGroupOf(outcome)] += source.EarlyReads[outcome]
+		}
+		for _, group := range lookback.EarlyGroups {
+			counter(c.earlyReads, early[group], name, group)
 		}
 		counter(c.earlyUndecided, source.EarlyUndecided, name)
 		counter(c.earlyBytes, source.EarlyReadBytes, name)
@@ -358,21 +362,38 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		counter(c.earlierBytes, source.EarlierReadBytes, name)
 		for _, reason := range lookback.ReadHoldIgnoredReasons {
+			if reason == lookback.ClassPartialRevised {
+				// Every one of these is a partial_revised sample, counted in
+				// lookback_sample_classes_total already.
+				continue
+			}
 			counter(c.holdIgnored, source.ReadHoldIgnored[reason], name, reason)
 		}
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}
+		// Over every rung: each rung's counts are /api/lookback's.
+		var changed, preempted uint64
+		checks := make(map[string]uint64, len(lookback.RecheckOutcomes))
+		changes := make(map[string]uint64, len(lookback.Changes))
 		for _, rung := range lookback.RungNames {
 			for _, outcome := range lookback.RecheckOutcomes {
-				counter(c.checks, source.Rechecks[rung][outcome], name, rung, outcome)
+				checks[outcome] += source.Rechecks[rung][outcome]
 			}
-			counter(c.changed, source.ChangedWindows[rung], name, rung)
+			changed += source.ChangedWindows[rung]
 			for _, class := range lookback.Changes {
-				counter(c.changes, source.Changes[rung][class], name, rung, class)
+				changes[class] += source.Changes[rung][class]
 			}
-			counter(c.yields, source.Preempted[rung], name, rung)
+			preempted += source.Preempted[rung]
 		}
+		for _, outcome := range lookback.RecheckOutcomes {
+			counter(c.checks, checks[outcome], name, outcome)
+		}
+		counter(c.changed, changed, name)
+		for _, class := range lookback.Changes {
+			counter(c.changes, changes[class], name, class)
+		}
+		counter(c.yields, preempted, name)
 		gauge(c.latest, float64(source.MaxCompletionSeconds), name)
 		for _, depth := range lookback.DepthLabels {
 			gauge(c.groups, float64(source.DepthGroups[depth]), name, depth)

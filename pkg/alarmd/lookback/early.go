@@ -78,6 +78,30 @@ var EarlyOutcomes = []string{EarlyBeforeNext, EarlyNothingLate, EarlyRungFirst, 
 var EarlyOutsideMechanism = map[string]bool{EarlyNothingLate: true, EarlyRungFirst: true, EarlyMultiQuery: true,
 	EarlyFirstReadIncomplete: true, EarlyFirstReadRefused: true, EarlyOwnerLost: true, EarlyAnchorUnknown: true}
 
+// The early read's outcomes as the metric groups them: what its working is
+// read by, before_next over before_next and not_ahead, and the outcomes
+// outside it. Each outcome is in /api/lookback's early_reads.
+const (
+	EarlyGroupBeforeNext = "before_next"
+	EarlyGroupNotAhead   = "not_ahead"
+	EarlyGroupOutside    = "outside_mechanism"
+)
+
+// EarlyGroups is every group EarlyGroupOf returns.
+var EarlyGroups = []string{EarlyGroupBeforeNext, EarlyGroupNotAhead, EarlyGroupOutside}
+
+// EarlyGroupOf is the group an early read's outcome is counted under.
+func EarlyGroupOf(outcome string) string {
+	switch {
+	case outcome == EarlyBeforeNext:
+		return EarlyGroupBeforeNext
+	case EarlyOutsideMechanism[outcome]:
+		return EarlyGroupOutside
+	default:
+		return EarlyGroupNotAhead
+	}
+}
+
 // readingsKept is how many of a Query Group's first reads and supplement
 // holds its lead is the longest of: when readings can be exchanged, the next
 // is longer than the longest of sixteen one time in seventeen.
