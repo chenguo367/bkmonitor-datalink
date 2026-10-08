@@ -610,14 +610,6 @@ func (c *Config) resolveCompatibilityServiceTimeouts() {
 	}
 }
 
-func (c Config) StateStoreOptions(codec *state.Codec, router state.StorageRouter, observer state.Observer) state.StoreOptions {
-	return state.StoreOptions{
-		Prefix: c.Redis.StatePrefix, Codec: codec, Router: router, Limits: c.StoreLimits(),
-		MinTTL: c.Redis.MinTTL.Duration(), MaxTTL: c.Redis.MaxTTL.Duration(),
-		RestartMargin: c.Redis.RestartMargin.Duration(), Observer: observer,
-	}
-}
-
 func Load(path string) (Config, error) {
 	cfg := Default().WithContainerCapacity()
 	if path == "" {

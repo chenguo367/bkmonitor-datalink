@@ -305,20 +305,20 @@ func TestApplyVersionMustMatchFrozenSlotAndPlan(t *testing.T) {
 func TestCompletionKindFoldsInputAndPlanFacts(t *testing.T) {
 	input := validInternalExecution()
 	result := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{Plan: input.DuePlans[0].Identity, Disposition: execution.PlanDecided}}}
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionFull {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionFull {
 		t.Fatalf("FULL+DATA completion=%q error=%v", got, err)
 	}
 	result.Plans[0].Disposition = execution.PlanUnavailable
 	result.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{{}}
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
 		t.Fatalf("UNAVAILABLE completion=%q error=%v", got, err)
 	}
 	result.Plans[0].Disposition = execution.PlanTerminal
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionTerminal {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionTerminal {
 		t.Fatalf("TERMINAL completion=%q error=%v", got, err)
 	}
 	result.Plans[0].Disposition = execution.PlanReadinessGap
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
 		t.Fatalf("READINESS_GAP completion=%q error=%v", got, err)
 	}
 }
@@ -379,7 +379,7 @@ func TestDependencyCompletenessDoesNotReplacePrimaryCompletionFact(t *testing.T)
 		t.Fatalf("PRIMARY fact=%+v error=%v", primary, err)
 	}
 	result := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{Plan: input.DuePlans[0].Identity, Disposition: execution.PlanDecided}}}
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionFull {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionFull {
 		t.Fatalf("completion=%q error=%v", got, err)
 	}
 }
@@ -441,7 +441,7 @@ func TestCompletionFoldDoesNotGuessLoadedGuardFacts(t *testing.T) {
 	result := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
 		Plan: input.DuePlans[0].Identity, Disposition: execution.PlanUnavailable,
 	}}}
-	if got, err := execution.DeriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
+	if got, err := deriveCompletionKind(input, result); err != nil || got != execution.CompletionUnavailable {
 		t.Fatalf("completion=%q error=%v", got, err)
 	}
 }

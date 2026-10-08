@@ -101,128 +101,10 @@ func (batch SeriesExecutionBatch) Validate(header InternalExecutionHeader) error
 	return nil
 }
 
-// buildSeriesInternalExecution binds one immutable series batch to the static
-// header for package-local validation. It derives Runtime State identities;
-// Access never supplies Redis keys or apply versions.
-func buildSeriesInternalExecution(header InternalExecutionHeader, batch SeriesExecutionBatch) (InternalExecution, error) {
-	if err := batch.Validate(header); err != nil {
-		return InternalExecution{}, err
-	}
-	plansByID := make(map[PlanIdentity]DuePlan, len(header.DuePlans))
-	selectedPlans := make(map[PlanIdentity]struct{})
-	for _, due := range header.DuePlans {
-		plansByID[due.Identity] = due
-	}
-	for _, binding := range batch.Inputs {
-		selectedPlans[binding.Consumer.Plan] = struct{}{}
-	}
-	input := InternalExecution{Contract: header.Contract, Inputs: append([]NamedInputBinding(nil), batch.Inputs...)}
-	for _, due := range header.DuePlans {
-		if _, selected := selectedPlans[due.Identity]; selected {
-			input.DuePlans = append(input.DuePlans, due)
-		}
-	}
-	for _, requirement := range header.Requirements {
-		filtered := requirement
-		filtered.Consumers = nil
-		for _, consumer := range requirement.Consumers {
-			if _, selected := selectedPlans[consumer.Consumer.Plan]; selected {
-				filtered.Consumers = append(filtered.Consumers, consumer)
-			}
-		}
-		if len(filtered.Consumers) > 0 {
-			input.Requirements = append(input.Requirements, filtered)
-		}
-	}
-	series := make(map[StateKeyIdentity]struct{})
-	for _, binding := range batch.Inputs {
-		due, found := plansByID[binding.Consumer.Plan]
-		if !found || binding.Role != InputRolePrimary {
-			continue
-		}
-		for index := 0; index < binding.View.Len(); index++ {
-			record, ok := binding.View.Record(index)
-			if !ok || record.DimensionIdentityDigest() == "" {
-				return InternalExecution{}, errors.New("alarmd execution: series batch lacks stable series identity")
-			}
-			series[StateKeyIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration,
-				SeriesIdentityDigest: SeriesIdentityDigest(record.DimensionIdentityDigest())}] = struct{}{}
-		}
-		for _, fact := range binding.QualityFacts {
-			if fact.ImpactScope == ImpactSeries {
-				series[StateKeyIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration,
-					SeriesIdentityDigest: fact.SeriesIdentity}] = struct{}{}
-			}
-		}
-		for _, terminal := range binding.Terminals {
-			if terminal.ImpactScope == ImpactSeries {
-				series[StateKeyIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration,
-					SeriesIdentityDigest: terminal.SeriesIdentity}] = struct{}{}
-			}
-		}
-	}
-	for identity := range series {
-		due := plansByID[identity.Plan]
-		version, err := BuildApplyVersion(header.Contract, due.StateApplyEpoch)
-		if err != nil {
-			return InternalExecution{}, err
-		}
-		input.StatePreflight = append(input.StatePreflight, StatePreflightItem{Identity: identity, ApplyVersion: version})
-	}
-	for _, fact := range header.EffectiveTimeFacts {
-		if _, selected := series[StateKeyIdentity{Plan: fact.Consumer.Plan,
-			StateGeneration: plansByID[fact.Consumer.Plan].StateGeneration, SeriesIdentityDigest: fact.SeriesIdentity}]; selected {
-			input.EffectiveTimeFacts = append(input.EffectiveTimeFacts, fact)
-		}
-	}
-	for _, due := range input.DuePlans {
-		version, err := BuildApplyVersion(header.Contract, due.StateApplyEpoch)
-		if err != nil {
-			return InternalExecution{}, err
-		}
-		input.GapPreflight = append(input.GapPreflight, PlanGapLoadItem{
-			Identity:     due.GapIdentity(),
-			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision,
-		})
-	}
-	return input, nil
-}
-
-// DeriveSeriesStatePreflight exposes only the State identities required by the
-// Coordinator. InternalExecution remains an execution-package validation
-// detail and is not the phase-two streaming hand-off model.
-func DeriveSeriesStatePreflight(header InternalExecutionHeader, batch SeriesExecutionBatch) ([]StatePreflightItem, error) {
-	input, err := buildSeriesInternalExecution(header, batch)
-	if err != nil {
-		return nil, err
-	}
-	return input.StatePreflight, nil
-}
-
 func DeriveStreamingPrimaryInputFact(header InternalExecutionHeader, bindings []NamedInputBinding) (PrimaryInputFact, error) {
 	return DerivePrimaryInputFact(InternalExecution{
 		Contract: header.Contract, DuePlans: header.DuePlans, Requirements: header.Requirements, Inputs: bindings,
 	})
-}
-
-func DeriveStreamingCompletionKind(
-	header InternalExecutionHeader,
-	bindings []NamedInputBinding,
-	result EvaluationResult,
-) (CompletionKind, error) {
-	kind, _, err := DeriveStreamingCompletion(header, bindings, result)
-	return kind, err
-}
-
-// DeriveStreamingCompletion reports the kind together with why the Slot was
-// unavailable, from the one traversal that decides the kind.
-func DeriveStreamingCompletion(
-	header InternalExecutionHeader,
-	bindings []NamedInputBinding,
-	result EvaluationResult,
-) (CompletionKind, CompletionCause, error) {
-	kind, cause, _, err := DeriveStreamingCompletionDetail(header, bindings, result)
-	return kind, cause, err
 }
 
 // DeriveStreamingCompletionDetail adds the reason belonging to the cause, which
@@ -237,16 +119,6 @@ func DeriveStreamingCompletionAttribution(
 	result EvaluationResult,
 ) (CompletionKind, CompletionAttribution, error) {
 	return DeriveCompletionAttribution(InternalExecution{
-		Contract: header.Contract, DuePlans: header.DuePlans, Requirements: header.Requirements, Inputs: bindings,
-	}, result)
-}
-
-func DeriveStreamingCompletionDetail(
-	header InternalExecutionHeader,
-	bindings []NamedInputBinding,
-	result EvaluationResult,
-) (CompletionKind, CompletionCause, ReasonCode, error) {
-	return DeriveCompletionDetail(InternalExecution{
 		Contract: header.Contract, DuePlans: header.DuePlans, Requirements: header.Requirements, Inputs: bindings,
 	}, result)
 }

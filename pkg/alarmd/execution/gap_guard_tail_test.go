@@ -91,7 +91,7 @@ func TestAGuardTailIsItsOwnCauseAndAnythingOfThisRoundOutranksIt(t *testing.T) {
 			cause: execution.CauseDataNotReady},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			kind, cause, reason, err := execution.DeriveCompletionDetail(input, execution.EvaluationResult{Plans: testCase.plans})
+			kind, cause, reason, err := deriveCompletionDetail(input, execution.EvaluationResult{Plans: testCase.plans})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -127,7 +127,7 @@ func BenchmarkACompletionUnderAWarmingGuard(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, cause, _, err := execution.DeriveCompletionDetail(input, result); err != nil || cause != execution.CauseGapGuardWarming {
+				if _, cause, _, err := deriveCompletionDetail(input, result); err != nil || cause != execution.CauseGapGuardWarming {
 					b.Fatalf("cause = %s, err = %v", cause, err)
 				}
 			}

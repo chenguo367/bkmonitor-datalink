@@ -8,7 +8,6 @@ package controlplane
 import (
 	"context"
 	"errors"
-	"sort"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -97,23 +96,6 @@ func (repository *RedisCatalogRepository) outputContextRevisionSince(segment exe
 type segmentContent struct {
 	digest execution.ObjectDigest
 	refs   []execution.OutputContextRef
-}
-
-func contentOf(group QueryGroup) (segmentContent, error) {
-	digest, err := DeriveQueryGroupObjectDigest(group)
-	if err != nil {
-		return segmentContent{}, err
-	}
-	refs := make([]execution.OutputContextRef, 0, len(group.Plans))
-	for _, plan := range group.Plans {
-		contextDigest, err := DeriveOutputContextDigest(plan)
-		if err != nil {
-			return segmentContent{}, err
-		}
-		refs = append(refs, execution.OutputContextRef{Plan: plan.Identity, Digest: contextDigest})
-	}
-	sort.Slice(refs, func(i, j int) bool { return lessPlanIdentity(refs[i].Plan, refs[j].Plan) })
-	return segmentContent{digest: digest, refs: refs}, nil
 }
 
 // activatedContent is the population the current activation runs, with the

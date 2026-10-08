@@ -464,24 +464,6 @@ func (store *ExecutionStore) ApplyRuntime(ctx context.Context, request execution
 	return store.applyRuntime(ctx, request, nil)
 }
 
-// encodeRuntime writes the JSON envelope: what every binary before the framed
-// record wrote under the runtime key. No production path writes it any more;
-// it stays so a test can seed the key an earlier binary would have left, and
-// so the baseline that records what the envelope costs keeps measuring the
-// real thing.
-func encodeRuntime(mutation execution.StateMutation, revision uint64) ([]byte, error) {
-	levels := append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
-	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })
-	last := int64(0)
-	for _, level := range levels {
-		if level.LastProcessedEventTime > last {
-			last = level.LastProcessedEventTime
-		}
-	}
-	return json.Marshal(runtimeEnvelope{executionStateSchemaV2, mutation.Identity, revision, mutation.ApplyVersion,
-		mutation.MutationDigest, last, mutation.SeriesGuard, levels, mutation.Points})
-}
-
 // decodeRuntime reads a stored record in whichever representation it was
 // written and classifies it against the candidate the caller is about to
 // apply. The shape is read from the bytes, not from the key they came from:

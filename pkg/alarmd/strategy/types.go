@@ -11,7 +11,6 @@ package strategy
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -974,8 +973,4 @@ func (n predicateNode) wire() predicateWire {
 		}
 	}
 	return wire
-}
-
-func cloneRawMessage(raw json.RawMessage) json.RawMessage {
-	return append(json.RawMessage(nil), raw...)
 }

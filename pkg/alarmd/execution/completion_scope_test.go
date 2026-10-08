@@ -91,7 +91,7 @@ func TestACompletionCauseNamesTheQueryLevelOrPlanItWasFoundIn(t *testing.T) {
 	}
 
 	// The detail derivation says the same cause and reason.
-	kindDetail, cause, reason, err := execution.DeriveCompletionDetail(unavailable, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{decided}})
+	kindDetail, cause, reason, err := deriveCompletionDetail(unavailable, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{decided}})
 	if err != nil || kindDetail != execution.CompletionUnavailable || cause != execution.CausePrimaryInputUnavailable || reason != contract.ReasonQueryUnavailable {
 		t.Fatalf("detail = %s %s %s %v, want the attribution's", kindDetail, cause, reason, err)
 	}

@@ -52,18 +52,6 @@ type catalogIndexEntry struct {
 	ScheduleRevision execution.ScheduleRevision
 }
 
-func (entry catalogIndexEntry) samePlans(plans []execution.PlanKey) bool {
-	if len(entry.Plans) != len(plans) {
-		return false
-	}
-	for index := range plans {
-		if entry.Plans[index] != plans[index] {
-			return false
-		}
-	}
-	return true
-}
-
 type catalogIndex struct {
 	mu       sync.Mutex
 	revision execution.SnapshotRevision

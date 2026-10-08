@@ -1625,20 +1625,6 @@ func scheduleSegmentForGroup(
 	}, nil
 }
 
-func queryGroupMap(groups []QueryGroup) (map[execution.QueryGroupIdentity]QueryGroup, error) {
-	result := make(map[execution.QueryGroupIdentity]QueryGroup, len(groups))
-	for _, group := range groups {
-		if group.Identity == "" {
-			return nil, errors.New("alarmd controlplane: Snapshot contains an empty Query Group")
-		}
-		if _, duplicate := result[group.Identity]; duplicate {
-			return nil, errors.New("alarmd controlplane: Snapshot contains a duplicate Query Group")
-		}
-		result[group.Identity] = group
-	}
-	return result, nil
-}
-
 // loadActivatedGroupsFromOpenSchedules recovers only the old group facts
 // needed to close an activation boundary. It is intentionally limited to
 // Query Groups also present in the new publication: every active Plan must be

@@ -829,11 +829,6 @@ func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.Ru
 	return view
 }
 
-// IsStateReadTimeout is isReadTimeout for callers outside this package, so the
-// worker names a failed preflight with the same test the store classifies one
-// with rather than a second opinion about what a timeout looks like.
-func IsStateReadTimeout(err error) bool { return isReadTimeout(err) }
-
 // isCallDeadline reports whether a read ended because a deadline on the call
 // expired. It is checked before isReadTimeout, which accepts both shapes: a
 // context deadline surfaces as a net error marked Timeout on some paths, so

@@ -3823,27 +3823,6 @@ const (
 	CausePlanNotActive CompletionCause = "PLAN_NOT_ACTIVE"
 )
 
-// DeriveCompletionKind reports the completion kind alone, which is what the
-// contract and every persisted structure use.
-func DeriveCompletionKind(input InternalExecution, result EvaluationResult) (CompletionKind, error) {
-	kind, _, err := deriveCompletion(input, result)
-	return kind, err
-}
-
-// DeriveCompletion reports the kind together with why it was unavailable.
-//
-// The two come from one traversal on purpose: derived separately they would be
-// two functions that must agree about the same Slot, and the first time they
-// disagreed the page would explain a completion that did not happen.
-func DeriveCompletion(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionCause, error) {
-	return deriveCompletion(input, result)
-}
-
-func deriveCompletion(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionCause, error) {
-	kind, cause, _, err := deriveCompletionDetail(input, result)
-	return kind, cause, err
-}
-
 // CompletionAttribution is why a Slot completed the way it did: the condition
 // that folded into the kind, and that condition's own reason.
 //
@@ -3882,26 +3861,10 @@ type CompletionScope struct {
 	PhysicalQuery PhysicalQueryDigest
 }
 
-// DeriveCompletionDetail adds the reason that belongs to the reported cause.
-//
-// Separate from DeriveCompletion so the existing callers keep their signature,
-// and one traversal still decides all three: derived apart they would be
-// functions that must agree about the same Slot.
-func DeriveCompletionDetail(input InternalExecution, result EvaluationResult) (
-	CompletionKind, CompletionCause, ReasonCode, error) {
-	return deriveCompletionDetail(input, result)
-}
-
 // DeriveCompletionAttribution is DeriveCompletionDetail with the scope the
 // cause was found in, from the same traversal.
 func DeriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {
 	return deriveCompletionAttribution(input, result)
-}
-
-func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
-	CompletionKind, CompletionCause, ReasonCode, error) {
-	kind, attribution, err := deriveCompletionAttribution(input, result)
-	return kind, attribution.Cause, attribution.Reason, err
 }
 
 func deriveCompletionAttribution(input InternalExecution, result EvaluationResult) (CompletionKind, CompletionAttribution, error) {

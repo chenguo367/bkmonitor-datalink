@@ -84,22 +84,6 @@ func (err *EvaluationInputContractError) Error() string {
 
 func (err *EvaluationInputContractError) Unwrap() error { return err.err }
 
-// BuildSeriesEvaluationInputRequest derives the expected exact set from the
-// frozen header. The caller supplies only completed consumer bindings.
-func BuildSeriesEvaluationInputRequest(
-	header InternalExecutionHeader,
-	consumer ConsumerRef,
-	series SeriesIdentityDigest,
-	bindings []NamedInputBinding,
-	completions []PhysicalQueryCompletion,
-) (SeriesEvaluationInputRequest, error) {
-	builder, err := PrepareSeriesEvaluationInputBuilder(header)
-	if err != nil {
-		return SeriesEvaluationInputRequest{}, scopedEvaluationInputError(consumer, series, err)
-	}
-	return builder.Build(consumer, series, bindings, completions)
-}
-
 // PrepareSeriesEvaluationInputBuilder validates and indexes the frozen header
 // once for one Slot-local streamed execution.
 func PrepareSeriesEvaluationInputBuilder(header InternalExecutionHeader) (*SeriesEvaluationInputBuilder, error) {

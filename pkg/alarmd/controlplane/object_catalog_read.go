@@ -665,9 +665,3 @@ func (repository *RedisCatalogRepository) observeAssembledBytes(
 		},
 	})
 }
-
-// constantDomain is the digest domain of an object whose contract has one
-// version.
-func constantDomain(version string) func([]byte) (string, error) {
-	return func([]byte) (string, error) { return version, nil }
-}
