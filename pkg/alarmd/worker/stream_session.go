@@ -695,22 +695,6 @@ func dispositionRank(disposition execution.PlanDisposition) int {
 	}
 }
 
-func appendUniqueGapMutations(current, next []execution.PlanGapMutation) []execution.PlanGapMutation {
-	for _, candidate := range next {
-		duplicate := false
-		for _, existing := range current {
-			if existing.Identity == candidate.Identity && existing.MutationDigest == candidate.MutationDigest {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			current = append(current, candidate)
-		}
-	}
-	return current
-}
-
 func (stream *streamedExecution) complete(ctx context.Context, completion execution.QueryExecutionCompletion) error {
 	if !stream.began {
 		return completionContractError(codeCompletionBeforeBegin, "alarmd worker: QueryExecutionSource returned completion before Begin")

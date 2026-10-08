@@ -2696,30 +2696,6 @@ func decodeLegacyRecovery(raw json.RawMessage) (legacyRecovery, bool, error) {
 	return recovery, true, nil
 }
 
-func hasJSONValue(raw json.RawMessage) bool {
-	value := strings.TrimSpace(string(raw))
-	return value != "" && value != "null" && value != "0" && value != `""`
-}
-
-func isAlwaysActiveUptime(raw json.RawMessage) bool {
-	if !hasJSONValue(raw) {
-		return true
-	}
-	var uptime struct {
-		Calendars       []json.RawMessage             `json:"calendars"`
-		ActiveCalendars []json.RawMessage             `json:"active_calendars"`
-		TimeRanges      []struct{ Start, End string } `json:"time_ranges"`
-	}
-	if json.Unmarshal(raw, &uptime) != nil || len(uptime.Calendars) > 0 || len(uptime.ActiveCalendars) > 0 {
-		return false
-	}
-	if len(uptime.TimeRanges) == 0 {
-		return true
-	}
-	return len(uptime.TimeRanges) == 1 && ((uptime.TimeRanges[0].Start == "00:00" && uptime.TimeRanges[0].End == "23:59") ||
-		(uptime.TimeRanges[0].Start == "00:00:00" && uptime.TimeRanges[0].End == "23:59:59"))
-}
-
 // pythonDefaultAggInterval is the 60 seconds Python reads a missing or zero
 // aggregation interval as (CONST_MINUTES).
 const pythonDefaultAggInterval = 60

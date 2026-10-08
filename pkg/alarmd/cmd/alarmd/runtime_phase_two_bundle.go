@@ -163,20 +163,6 @@ func openProductionPhaseTwoBundle(
 	)
 }
 
-func openProductionPhaseTwoBundleWithStrategySource(
-	ctx context.Context,
-	cfg config.Config,
-	recorder *metric.Recorder,
-	logger *observability.Logger,
-	health *phaseTwoApplicationHealth,
-	newStrategySource productionStrategySourceFactory,
-) (_ *phaseTwoWorkerBundle, resultErr error) {
-	return openProductionPhaseTwoBundleWithDependencies(
-		ctx, cfg, recorder, logger, health, newStrategySource,
-		defaultPhaseTwoProductionExternalDependencies(),
-	)
-}
-
 func openProductionPhaseTwoBundleWithDependencies(
 	ctx context.Context,
 	cfg config.Config,
