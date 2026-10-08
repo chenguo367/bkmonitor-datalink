@@ -274,6 +274,7 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 		"limited":    {SinceSlot: 1_790_000_000, HoldMillis: 600_000, ArrivalAgeMillis: 990_000, AtLimit: true, LimitMillis: 600_000},
 		"lowered":    {SinceSlot: 1_790_000_000, HoldMillis: 40_000, ArrivalAgeMillis: 130_000, Lowered: true},
 		"fallback":   {SinceSlot: 1_790_000_000, HoldMillis: 600_000},
+		"inherited":  {SinceSlot: 1_790_000_000, HoldMillis: 120_000, ArrivalAgeMillis: 80_000},
 		"chosen":     {SinceSlot: 1_790_000_000, PendingHoldMillis: &chosen, ArrivalAgeMillis: 189_000},
 		"idle":       {SinceSlot: 1_790_000_000, ArrivalAgeMillis: 50_000},
 		"unprepared": {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
@@ -304,10 +305,13 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 	for qg, want := range map[string]struct {
 		millis, since, delay, suggested int64
 	}{
-		"measured":   {99_000, 1_790_000_000, 60, 180},
-		"limited":    {600_000, 1_790_000_000, 60, 960},
-		"lowered":    {40_000, 1_790_000_000, 60, 120},
-		"fallback":   {600_000, 1_790_000_000, 60, 0},
+		"measured": {99_000, 1_790_000_000, 60, 180},
+		"limited":  {600_000, 1_790_000_000, 60, 960},
+		"lowered":  {40_000, 1_790_000_000, 60, 120},
+		"fallback": {600_000, 1_790_000_000, 60, 0},
+		// A hold not from this arrival age -- an inherited bound -- beside
+		// one that needs no more than the delay: nothing to move it to.
+		"inherited":  {120_000, 1_790_000_000, 60, 0},
 		"chosen":     {99_000, 0, 60, 180},
 		"idle":       {0, 0, 60, 0},
 		"unprepared": {99_000, 1_790_000_000, 0, 0},

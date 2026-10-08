@@ -87,7 +87,7 @@ func TestAHeldStrategyIsDetectingWithItsHoldAndTheTimeDelayThatNeedsNone(t *test
 	if line == nil || line.Standing.State != StateDetecting || line.TimeDelayAdvice == nil || !sameAdvice(*line.TimeDelayAdvice, want) {
 		t.Fatalf("line %+v, want a detecting line with the advice", line)
 	}
-	for _, words := range []string{"约 189 秒到齐", "自动推后 99 秒", "time_delay 改为 180 秒"} {
+	for _, words := range []string{"最晚约在窗口结束后 189 秒到齐", "自动推后 99 秒", "time_delay 改为 180 秒"} {
 		if !strings.Contains(line.Line, words) {
 			t.Fatalf("line %q, want it to say %q", line.Line, words)
 		}
