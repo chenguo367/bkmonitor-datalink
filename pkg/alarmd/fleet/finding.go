@@ -12,6 +12,7 @@ package fleet
 import (
 	"strings"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	// Aliased: a test helper in this package is named execution.
 	routedetail "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -97,6 +98,14 @@ type Finding struct {
 // reason than the word does; and only then are the codes read.
 func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, unclassified bool) {
 	check, under, unclassified = checkOnCounts(anomaly, schedule)
+	// A window short only at minutes the strategy was outside its own active
+	// hours is the configuration doing what it was written to do, however the
+	// row got to a window line -- its own reason, or a guard raised for
+	// another and held because those rounds cannot fill it. It reads as a
+	// round outside its hours does (EFFECTIVE_TIME_INACTIVE): under no line.
+	if outOfHoursLine(check) && outOfHoursEvidence(anomaly.Coverage) {
+		return "", false, false
+	}
 	// A window line whose every short window is short only by minutes the
 	// query answered whole without the series is the data's, however the row
 	// got to the window line -- its own reason, a guard it is held under, or
@@ -439,6 +448,34 @@ func sparseEvidence(coverage *HistoryCoverage) bool {
 	// reading "more short windows than named" as undecided filed three hosts
 	// that miss whole minutes as this side's to fix.
 	return uint32(len(coverage.Windows)) == coverage.Short || coverage.UnlistedHolesAnswered
+}
+
+// outOfHoursLine is a line a short window can bring a row to: the window
+// lines, and the configuration's line a guard's stored reason files it
+// under.
+func outOfHoursLine(check Check) bool {
+	return check == CheckWindowUndecided || check == CheckSeriesDataMissing || check == CheckSeriesSparse || check == CheckConfigUnresolved
+}
+
+// outOfHoursEvidence says every short window is named and short only at
+// minutes whose round was outside the strategy's active hours. A short
+// window not named, a hole not named, or any hole at another minute says
+// nothing of it, and the row keeps the line it was on.
+func outOfHoursEvidence(coverage *HistoryCoverage) bool {
+	if coverage == nil || coverage.Short == 0 || uint32(len(coverage.Windows)) != coverage.Short {
+		return false
+	}
+	for _, window := range coverage.Windows {
+		if len(window.Holes) == 0 || uint32(len(window.Holes)) != window.MissingTotal+window.UnusableTotal {
+			return false
+		}
+		for _, hole := range window.Holes {
+			if hole.Reason != contract.ReasonEffectiveTimeInactive {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // answeredWindow says a named short window is short only at minutes the query
