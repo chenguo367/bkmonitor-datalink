@@ -47,8 +47,8 @@ func TestEveryDepartureFromWhatWasSentIsCountedByItsPath(t *testing.T) {
 	f.cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyB, "ours-b")})
 
 	stats := f.cache.Stats()
-	if !stats.OwnOpenKnown || stats.OwnOpen != 5 || stats.Added != 5 {
-		t.Fatalf("after five sends own_open=%d (known %t) added=%d, want 5 and 5", stats.OwnOpen, stats.OwnOpenKnown, stats.Added)
+	if stats.OwnOpen != 5 || stats.Added != 5 {
+		t.Fatalf("after five sends own_open=%d added=%d, want 5 and 5", stats.OwnOpen, stats.Added)
 	}
 
 	// A RECOVERY the broker took leaves both records.

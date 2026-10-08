@@ -18,40 +18,12 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-// Mode is which of the three states the copy is in. The set is closed: a
-// metric label is made of it. The index protocol reports self_maintained
-// throughout; never_loaded and authoritative were the heartbeat protocol's
-// states and stay as label values for the readers that pre-create them.
-type Mode string
-
-const (
-	// ModeNeverLoaded: no publication has been read since the process
-	// started. Distinct from self-maintained so that a publisher that has
-	// not been deployed reads as absent, not as lost.
-	ModeNeverLoaded Mode = "never_loaded"
-	// ModeAuthoritative: the last read was fresh and the copy answers from it.
-	ModeAuthoritative Mode = "authoritative"
-	// ModeSelfMaintained: a publication was read once, and the latest read
-	// found it missing, stale, unreadable or under another algorithm; the
-	// copy answers from the last one it read plus what this process sent.
-	ModeSelfMaintained Mode = "self_maintained"
-)
-
-// Modes lists every Mode, for the metric that pre-creates all of them.
-var Modes = []Mode{ModeNeverLoaded, ModeAuthoritative, ModeSelfMaintained}
-
 // UnavailableReason is why the latest read did not yield an authoritative
-// publication. Closed: a metric label. The index protocol gives read_error
-// and members_disjoint; the heartbeat and fingerprint reasons were the
-// heartbeat protocol's and stay as label values.
+// publication. Closed: a metric label.
 type UnavailableReason string
 
 const (
-	UnavailableReadError           UnavailableReason = "read_error"
-	UnavailableHeartbeatMissing    UnavailableReason = "heartbeat_missing"
-	UnavailableHeartbeatUnreadable UnavailableReason = "heartbeat_unreadable"
-	UnavailableHeartbeatStale      UnavailableReason = "heartbeat_stale"
-	UnavailableFingerprintVersion  UnavailableReason = "fingerprint_version"
+	UnavailableReadError UnavailableReason = "read_error"
 	// UnavailableMembersDisjoint: the consumer's sets hold members, or were
 	// read, but none of the alerts this process sent ABNORMAL for is in
 	// them once the consumer has had time to open it. The sets are then not
@@ -62,10 +34,7 @@ const (
 
 // UnavailableReasons lists every reason, for the metric that pre-creates
 // them all: a reason at zero has to be readable as "never happened".
-var UnavailableReasons = []UnavailableReason{
-	UnavailableReadError, UnavailableHeartbeatMissing, UnavailableHeartbeatUnreadable,
-	UnavailableHeartbeatStale, UnavailableFingerprintVersion, UnavailableMembersDisjoint,
-}
+var UnavailableReasons = []UnavailableReason{UnavailableReadError, UnavailableMembersDisjoint}
 
 // SentConfirmAfter is how long after this process first sent an alert's
 // ABNORMAL a read of the consumer's set is expected to carry it. The
@@ -93,29 +62,17 @@ const SentConfirmAfter = 5 * time.Minute
 // still carry none of ours.
 const DisjointMinimum = 1
 
-// Answer is how a lookup was answered. Closed: a metric label. The first
-// three are authoritative answers; the rest say the copy answered on its
-// own and why, so that a gate working from the copy's own knowledge shows
-// up as such and not as the consumer's word. The index protocol answers
-// index_member, index_absent, recently_sent, self_maintained and
-// passed_through; authoritative_member, authoritative_absent and
-// not_yet_loaded were the heartbeat protocol's and stay as label values.
+// Answer is how a lookup was answered. Closed: a metric label. The index
+// members and absences are the consumer's word; the rest say the copy
+// answered on its own and why, so that a gate working from the copy's own
+// knowledge shows up as such and not as the consumer's word.
 type Answer string
 
 const (
-	// AnswerMember: the publication carries the fingerprint.
-	AnswerMember Answer = "authoritative_member"
-	// AnswerAbsent: the publication is fresh, covers the strategy, and does
-	// not carry the fingerprint; nor did this process send it recently.
-	AnswerAbsent Answer = "authoritative_absent"
 	// AnswerRecentlySent: the publication does not carry the fingerprint but
 	// this process sent its ABNORMAL within the publisher's lag. Counted apart
 	// from member because it is the copy's word, not the consumer's.
 	AnswerRecentlySent Answer = "recently_sent"
-	// AnswerNotYetLoaded: the publication is fresh but the strategy was first
-	// asked about after the last read, so nothing is known about it until the
-	// next; answered by the unavailable policy for this one cycle.
-	AnswerNotYetLoaded Answer = "not_yet_loaded"
 	// AnswerSelfMaintained: the publication is unavailable and the copy
 	// answered from what it last read plus what this process sent.
 	AnswerSelfMaintained Answer = "self_maintained"
@@ -127,7 +84,7 @@ const (
 )
 
 // Answers lists every Answer, for the metric that pre-creates them all.
-var Answers = []Answer{AnswerMember, AnswerAbsent, AnswerRecentlySent, AnswerNotYetLoaded, AnswerSelfMaintained, AnswerPassedThrough, AnswerIndexMember, AnswerIndexAbsent}
+var Answers = []Answer{AnswerRecentlySent, AnswerSelfMaintained, AnswerPassedThrough, AnswerIndexMember, AnswerIndexAbsent}
 
 // UnavailablePolicy is what the copy answers while the publication is
 // unavailable. It is one decision point on purpose, because the two answers
@@ -152,7 +109,6 @@ const (
 
 // Stats is the copy's state and cumulative counts, read for metrics.
 type Stats struct {
-	Mode              Mode
 	Available         bool
 	UnavailableReason UnavailableReason
 	// LoadedAt is the oldest calibration among the tracked sets; zero if none
@@ -173,7 +129,6 @@ type Stats struct {
 	OldestPendingAt                 time.Time
 	SubscriptionReady               bool
 	MemberBytes                     int
-	IndexProtocol                   bool
 	// CalibrationConfigured says a reconciler is bound: without one the
 	// index knows members but never their severity, so no close is ever
 	// sent, and a deployment has to be able to read that as "off" rather
@@ -207,10 +162,7 @@ type Stats struct {
 	// alerts left that record; OwnOpenRefusals how many times a first
 	// ABNORMAL found the record full -- a count of refusals, not of alerts:
 	// an alert still firing is refused again every round it is sent.
-	// The own-open fields are known only under the index protocol, which
-	// OwnOpenKnown says.
 	SentDepartures    map[string]uint64
-	OwnOpenKnown      bool
 	OwnOpen           int
 	OwnOpenDepartures map[string]uint64
 	OwnOpenRefusals   uint64

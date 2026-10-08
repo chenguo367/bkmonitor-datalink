@@ -36,12 +36,11 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	facts := openAlertSetFactsSource(cache, now)()
-	if facts == nil || facts.Mode != string(openalerts.ModeSelfMaintained) || !facts.IndexProtocol || facts.StaleBeyondBound ||
-		facts.IndexReadAgeSeconds != nil || facts.AuthoritativeAgeSeconds != nil {
-		t.Fatalf("facts before any read = %+v, want the index protocol, not stale, no age", facts)
+	if facts == nil || facts.StaleBeyondBound || facts.IndexReadAgeSeconds != nil || facts.AuthoritativeAgeSeconds != nil {
+		t.Fatalf("facts before any read = %+v, want not stale, no age", facts)
 	}
-	if facts.Available || facts.ReaderFingerprintVersion != openalerts.FingerprintVersion || facts.TrackedSets != 0 || facts.Members != 0 {
-		t.Fatalf("account before any read = %+v, want nothing read and the reader's own version", facts)
+	if facts.Available || facts.TrackedSets != 0 || facts.Members != 0 {
+		t.Fatalf("account before any read = %+v, want nothing read", facts)
 	}
 	for _, answer := range openalerts.Answers {
 		if count, present := facts.Lookups[string(answer)]; !present || count != 0 {
@@ -133,8 +132,7 @@ func TestAnIndexCopyPublishesItsComparison(t *testing.T) {
 // under their own names, and so the fleet verdict: the copy saying so is
 // not enough if the replica does not pass it on.
 func TestTheDisjointStateIsPublishedWithTheSentCounts(t *testing.T) {
-	stats := openalerts.Stats{Mode: openalerts.ModeSelfMaintained, IndexProtocol: true,
-		SentInSet: 0, SentNotInSet: 103, Disjoint: true, UnavailableReason: openalerts.UnavailableMembersDisjoint}
+	stats := openalerts.Stats{SentInSet: 0, SentNotInSet: 103, Disjoint: true, UnavailableReason: openalerts.UnavailableMembersDisjoint}
 	facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0))
 	if !facts.Disjoint || facts.SentInSet != 0 || facts.SentNotInSet != 103 || facts.UnavailableReason != "members_disjoint" {
 		t.Fatalf("facts = %+v, want disjoint with 0 of 103 found and the reason named", facts)
@@ -164,12 +162,11 @@ func TestTheGatesOwnHeldLookupsReachTheFacts(t *testing.T) {
 }
 
 // The departures reach the facts with every path word, and own_open is
-// carried as a number when the copy knows it -- zero included, which is an
-// answer -- and absent when it does not read the index.
+// carried as a number, zero included, which is an answer.
 func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 	at := time.Date(2026, 9, 28, 4, 0, 0, 0, time.UTC)
 	facts := openAlertSetFacts(openalerts.Stats{SentDepartures: map[string]uint64{openalerts.DepartureNotResent: 3},
-		OwnOpenKnown: true, OwnOpen: 0, OwnOpenDepartures: map[string]uint64{openalerts.DepartureRecoveryAcked: 1}, OwnOpenRefusals: 2}, false, at)
+		OwnOpen: 0, OwnOpenDepartures: map[string]uint64{openalerts.DepartureRecoveryAcked: 1}, OwnOpenRefusals: 2}, false, at)
 	if facts.SentDepartures["not_resent"] != 3 || len(facts.SentDepartures) != len(openalerts.SentDepartures) {
 		t.Fatalf("sent departures %v", facts.SentDepartures)
 	}
@@ -183,10 +180,6 @@ func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"own_open":0`) {
 		t.Fatalf("a known zero own_open was dropped: %s", encoded)
-	}
-	unknown := openAlertSetFacts(openalerts.Stats{SentDepartures: map[string]uint64{}}, false, at)
-	if unknown.OwnOpen != nil || unknown.OwnOpenDepartures != nil || len(unknown.SentDepartures) != len(openalerts.SentDepartures) {
-		t.Fatalf("a copy without the index claims own_open: %+v", unknown)
 	}
 }
 

@@ -30,9 +30,8 @@ func TestAStaleOpenAlertSetDegradesTheVerdictOnItsOwn(t *testing.T) {
 		want  Health
 	}{
 		{name: "no facts (a build without the gate)", facts: nil, want: HealthHealthy},
-		{name: "never loaded", facts: &OpenAlertSetFacts{Mode: "never_loaded"}, want: HealthHealthy},
-		{name: "self-maintained inside the bound", facts: &OpenAlertSetFacts{Mode: "self_maintained"}, want: HealthHealthy},
-		{name: "self-maintained past the bound", facts: &OpenAlertSetFacts{Mode: "self_maintained", StaleBeyondBound: true}, want: HealthDegraded},
+		{name: "never calibrated or inside the bound", facts: &OpenAlertSetFacts{}, want: HealthHealthy},
+		{name: "calibration past the bound", facts: &OpenAlertSetFacts{StaleBeyondBound: true}, want: HealthDegraded},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			snapshots := healthySnapshots()
@@ -59,7 +58,7 @@ func TestAStaleOpenAlertSetDegradesTheVerdictOnItsOwn(t *testing.T) {
 // does show are not the whole story, and neither is this.
 func TestAStaleOpenAlertSetDoesNotOutrankAGap(t *testing.T) {
 	snapshots := healthySnapshots()
-	snapshots[1].OpenAlertSet = &OpenAlertSetFacts{Mode: "self_maintained", StaleBeyondBound: true}
+	snapshots[1].OpenAlertSet = &OpenAlertSetFacts{StaleBeyondBound: true}
 	view := Aggregate(Expectation{QueryGroups: 949, Known: true}, snapshots[:1], replicas(), now, freshness)
 	if view.Health != HealthUnknown {
 		t.Fatalf("health = %s, want UNKNOWN with a replica missing", view.Health)
@@ -69,22 +68,22 @@ func TestAStaleOpenAlertSetDoesNotOutrankAGap(t *testing.T) {
 // The facts and the degradation reach the page's JSON under their own names,
 // and an absent age is absent rather than zero.
 func TestOpenAlertSetFactsEncodeWithoutInventingAnAge(t *testing.T) {
-	encoded, err := json.Marshal(Snapshot{Replica: "pod-a", OpenAlertSet: &OpenAlertSetFacts{Mode: "never_loaded"}})
+	encoded, err := json.Marshal(Snapshot{Replica: "pod-a", OpenAlertSet: &OpenAlertSetFacts{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The mode and the stale flag under their names; the ages absent, not
+	// The stale flag under its name; the ages absent, not
 	// zero; the counts present at zero, since a count of nothing is an
 	// answer and an absent count is not; whether calibration is configured
 	// present at false, since "off" is a reading a deployment has to be
 	// able to make.
-	if !strings.Contains(string(encoded), `"open_alert_set":{"calibration_configured":false,"mode":"never_loaded","stale_beyond_bound":false,"available":false,"reader_fingerprint_version":"","tracked_sets":0,"loaded_sets":0,"members":0,"sent_in_set":0,"sent_not_in_set":0,"disjoint":false,"recoveries_resent":0}`) ||
+	if !strings.Contains(string(encoded), `"open_alert_set":{"calibration_configured":false,"stale_beyond_bound":false,"available":false,"tracked_sets":0,"loaded_sets":0,"members":0,"sent_in_set":0,"sent_not_in_set":0,"disjoint":false,"recoveries_resent":0}`) ||
 		strings.Contains(string(encoded), "authoritative_age_seconds") || strings.Contains(string(encoded), "heartbeat_age_seconds") {
 		t.Fatalf("encoded = %s", encoded)
 	}
 	view := Aggregate(Expectation{QueryGroups: 949, Known: true}, func() []Snapshot {
 		s := healthySnapshots()
-		s[0].OpenAlertSet = &OpenAlertSetFacts{Mode: "self_maintained", StaleBeyondBound: true}
+		s[0].OpenAlertSet = &OpenAlertSetFacts{StaleBeyondBound: true}
 		return s
 	}(), replicas(), now, freshness)
 	encoded, err = json.Marshal(view)
@@ -106,8 +105,8 @@ func TestSetsCarryingNoneOfOurAlertsDegradeTheVerdictByName(t *testing.T) {
 		facts *OpenAlertSetFacts
 		want  Health
 	}{
-		{name: "some of ours missing, one found", facts: &OpenAlertSetFacts{Mode: "self_maintained", SentInSet: 1, SentNotInSet: 5}, want: HealthHealthy},
-		{name: "disjoint", facts: &OpenAlertSetFacts{Mode: "self_maintained", SentNotInSet: 103, Disjoint: true}, want: HealthDegraded},
+		{name: "some of ours missing, one found", facts: &OpenAlertSetFacts{SentInSet: 1, SentNotInSet: 5}, want: HealthHealthy},
+		{name: "disjoint", facts: &OpenAlertSetFacts{SentNotInSet: 103, Disjoint: true}, want: HealthDegraded},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			snapshots := healthySnapshots()

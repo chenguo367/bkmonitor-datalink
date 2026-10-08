@@ -1119,7 +1119,7 @@ Panics an observer raised and the fan-out recovered, by observer; every other ob
 
 ## bkmonitor_alarmd_open_alert_set_authoritative_age_seconds
 
-Seconds since the last authoritative publication was read. Absent until there has been one. Past open_alert_set_staleness_cycles times the publisher's cycle the copy is stale and fleet health degrades; that bound is also how long a recovery this process sent but the consumer never received stays held before the publication corrects the copy.
+Seconds since the oldest calibration among the tracked strategies' sets completed: a full read of the consumer's open alerts for a strategy, reconciled against its index. Absent until one has.
 
 ## bkmonitor_alarmd_open_alert_set_disjoint
 
@@ -1133,19 +1133,13 @@ What the copy holds: member is fingerprints from the last publication, sent_open
 
 ## bkmonitor_alarmd_open_alert_set_evictions_total
 
-Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest first. In self_maintained mode each one is an alert whose recovery now waits for the publication.
+Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest first.
 
 ## bkmonitor_alarmd_open_alert_set_lookup_total
 
 Labels: `answer`
 
-Lookups by how they were answered. authoritative_member and authoritative_absent are the publication's word; recently_sent is a fingerprint this process sent ABNORMAL for inside the publisher's lag; not_yet_loaded is a strategy first asked about after the last read; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force.
-
-## bkmonitor_alarmd_open_alert_set_mode
-
-Labels: `mode`
-
-Which state the process copy of the consumer's open alert set is in, 1 on the current one and 0 on the others. authoritative: the consumer's publication was read and is fresh. self_maintained: it was read once and the latest read found it missing, stale, unreadable, under another fingerprint algorithm, or failed; the copy answers from the last publication plus what this process sent. never_loaded: nothing read since the process started, which is the state before the publisher is deployed and is not a fault on its own. Moving in and out of self_maintained without anyone noticing is the failure this gauge exists for.
+Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force.
 
 ## bkmonitor_alarmd_open_alert_set_recovery_resent_total
 
@@ -1155,7 +1149,7 @@ RECOVERY events the broker took for an alert whose earlier RECOVERY this process
 
 Labels: `result`
 
-Refreshes by result: authoritative or unavailable. One per publisher cycle; a flat line is the refresh loop not running.
+Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), unavailable (either failed). A flat line is the refresh loop not running.
 
 ## bkmonitor_alarmd_open_alert_set_sent_alerts
 
@@ -1171,7 +1165,7 @@ Strategies the copy reads on each refresh: those evaluated by this worker within
 
 Labels: `reason`
 
-Refreshes that did not yield an authoritative publication, by why: read_error (the read failed), heartbeat_missing (no heartbeat key), heartbeat_unreadable (a heartbeat field missing or malformed), heartbeat_stale (older than the staleness bound), fingerprint_version (the publisher computes fingerprints under another algorithm; every lookup would miss, so it is not read as empty), members_disjoint (counted once on entering the state open_alert_set_disjoint reports).
+Refreshes of a tracked set that failed, by why: read_error (an index read or a calibration failed), members_disjoint (counted once on entering the state open_alert_set_disjoint reports).
 
 ## bkmonitor_alarmd_operation_total
 
@@ -1793,7 +1787,7 @@ Selectors of target plans resolved, once per selector per Plan per Slot, by kind
 
 Labels: `outcome`
 
-RECOVERY records, by what the consumer's open alert set decided: passed (an open alert on the series; the envelope went), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against open_alert_set_mode, because in self_maintained mode the set is this process's own knowledge.
+RECOVERY records, by what the consumer's open alert set decided: passed (an open alert on the series; the envelope went), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against open_alert_set_lookup_total, whose self_maintained and passed_through answers are this process's own knowledge, not the consumer's.
 
 ## bkmonitor_alarmd_trigger_recovery_beside_level_total
 

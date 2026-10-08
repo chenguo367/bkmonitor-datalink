@@ -157,7 +157,7 @@ func TestTheTargetScopeCloseFactsAreCarriedFieldForField(t *testing.T) {
 	zero("target_scope_close", reflect.ValueOf(facts))
 
 	closer := scopeclose.New(scopeclose.Options{})
-	source := withTargetScopeClose(func() *fleet.OpenAlertSetFacts { return &fleet.OpenAlertSetFacts{Mode: "authoritative"} }, closer)
+	source := withTargetScopeClose(func() *fleet.OpenAlertSetFacts { return &fleet.OpenAlertSetFacts{} }, closer)
 	carried := source()
 	if carried.TargetScopeClose == nil || len(carried.TargetScopeClose.Outcomes) != len(scopeclose.Outcomes) {
 		t.Fatalf("open set facts = %+v, want the close beside them with every outcome", carried)

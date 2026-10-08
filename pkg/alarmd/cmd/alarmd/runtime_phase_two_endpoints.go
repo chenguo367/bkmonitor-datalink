@@ -262,22 +262,9 @@ func endpointFactsSource(
 			case fleet.EndpointOpenAlertSet:
 				if openAlerts != nil {
 					if facts := openAlerts(); facts != nil {
-						// The short form every reading role has: present once
-						// a publication was read, the members as the count,
-						// the publisher's own heartbeat as the age, the mode
-						// -- or why it is unavailable -- as the state. The
-						// full account rides beside it.
-						writer := &fleet.WriterEvidence{Present: facts.AuthoritativeAgeSeconds != nil, Count: facts.Members,
-							AgeSeconds: facts.HeartbeatAgeSeconds, State: facts.Mode}
-						if facts.UnavailableReason != "" {
-							writer.State = facts.Mode + ":" + facts.UnavailableReason
-						}
-						entry.Writer = writer
-						// A successful read is not evidence of a recent writer.
-						// The index protocol has no publisher heartbeat.
-						if facts.IndexProtocol {
-							entry.Writer = nil
-						}
+						// No writer row: the consumer publishes no heartbeat,
+						// and a successful read is not evidence of a recent
+						// writer. The full account rides beside the row.
 						entry.OpenAlertSet = facts
 					}
 				}

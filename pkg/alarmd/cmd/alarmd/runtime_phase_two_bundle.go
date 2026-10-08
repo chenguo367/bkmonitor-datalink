@@ -1705,12 +1705,11 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 
 // openAlertSetFacts is the copy's stats as the replica publishes them.
 func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Time) *fleet.OpenAlertSetFacts {
-	facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: staleBeyondBound,
-		IndexProtocol: stats.IndexProtocol, CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
+	facts := &fleet.OpenAlertSetFacts{StaleBeyondBound: staleBeyondBound,
+		CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
 		PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
 		Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
-		ReaderFingerprintVersion: openalerts.FingerprintVersion,
-		TrackedSets:              stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members,
+		TrackedSets: stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members,
 		SentInSet: stats.SentInSet, SentNotInSet: stats.SentNotInSet, Disjoint: stats.Disjoint}
 	if !stats.IndexReadAt.IsZero() {
 		age := at.Sub(stats.IndexReadAt).Seconds()
@@ -1734,14 +1733,12 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 	for _, path := range openalerts.SentDepartures {
 		facts.SentDepartures[path] = stats.SentDepartures[path]
 	}
-	if stats.OwnOpenKnown {
-		open := stats.OwnOpen
-		facts.OwnOpen = &open
-		facts.OwnOpenRefusals = stats.OwnOpenRefusals
-		facts.OwnOpenDepartures = make(map[string]uint64, len(openalerts.OwnOpenDepartures))
-		for _, path := range openalerts.OwnOpenDepartures {
-			facts.OwnOpenDepartures[path] = stats.OwnOpenDepartures[path]
-		}
+	open := stats.OwnOpen
+	facts.OwnOpen = &open
+	facts.OwnOpenRefusals = stats.OwnOpenRefusals
+	facts.OwnOpenDepartures = make(map[string]uint64, len(openalerts.OwnOpenDepartures))
+	for _, path := range openalerts.OwnOpenDepartures {
+		facts.OwnOpenDepartures[path] = stats.OwnOpenDepartures[path]
 	}
 	if !stats.GateSince.IsZero() {
 		since := stats.GateSince
