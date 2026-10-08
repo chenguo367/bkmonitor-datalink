@@ -800,7 +800,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	if err := repository.persistCutoverActivation(ctx, expected, next, updates, cutover, blockedPayload); err != nil {
 		return err
 	}
-	repository.blocked.record(blockedNow, previousContent.accounting, reopened)
+	repository.blocked.record(blockedNow, previousContent.accounting, reopened, repository.scheduleTimelineKey)
 	if readAll {
 		repository.contentCutoverVerified.Store(true)
 	}
