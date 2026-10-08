@@ -179,7 +179,10 @@ type Stats struct {
 	// ReadHoldDegraded is the Slots frozen with the hold their group last
 	// read because its own could not be prepared or written, by what failed.
 	ReadHoldDegraded map[string]uint64 `json:"read_hold_degraded,omitempty"`
-	Coverage         Coverage          `json:"coverage"`
+	// ReadHoldGroups is the Query Groups this process holds, by source and
+	// read hold; nil when it holds none, which says nothing of the hold.
+	ReadHoldGroups map[string]ReadHoldGroups `json:"read_hold_groups,omitempty"`
+	Coverage       Coverage                  `json:"coverage"`
 	// Sources: every source label, the data sources and mixed and other.
 	Sources map[string]SourceStats `json:"sources"`
 	// PermitRefusals: reason -> permits refused. A refused rung keeps its
@@ -403,6 +406,35 @@ type GroupReading struct {
 	ReadHoldIgnored  map[string]uint64            `json:"read_hold_ignored"`
 	EarlierReads     map[string]uint64            `json:"earlier_reads"`
 	EarlierReadBytes uint64                       `json:"earlier_read_bytes"`
+}
+
+// ReadHoldGroups is one source's Query Groups this process holds by their
+// read hold: how many hold more than none, how many are at their limit, and
+// how many have a hold not yet known; MaxMillis is the largest known hold,
+// MaxKnown whether any is known.
+type ReadHoldGroups struct {
+	Held      int   `json:"held"`
+	AtLimit   int   `json:"at_limit"`
+	Unknown   int   `json:"unknown"`
+	MaxMillis int64 `json:"max_ms"`
+	MaxKnown  bool  `json:"max_known"`
+}
+
+// GroupSources is the source label of each given Query Group the lookback
+// has seen, read under one lock; a group it has not seen is left out.
+func (engine *Engine) GroupSources(queryGroups []execution.QueryGroupIdentity) map[execution.QueryGroupIdentity]string {
+	sources := make(map[execution.QueryGroupIdentity]string, len(queryGroups))
+	if engine == nil {
+		return sources
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	for _, queryGroup := range queryGroups {
+		if state := engine.groups[queryGroup]; state != nil && state.source != "" {
+			sources[queryGroup] = state.source
+		}
+	}
+	return sources
 }
 
 // GroupReading returns an independent snapshot. Ownership is asked outside

@@ -142,6 +142,7 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 			readhold.ClampFallback: controller.Clamped[readhold.ClampFallback]}
 		stats.ReadHoldOwnCorrupt, stats.ReadHoldRetireCloseFailed = controller.OwnCorrupt, holds.retireCloseFailed.Load()
 		stats.ReadHoldCloseSkipped = holds.closeSkipped.Load()
+		stats.ReadHoldGroups = holds.groupsBySource(engine)
 		stats.ReadHoldDegraded = make(map[string]uint64, len(readhold.DegradedReasons))
 		holds.degradedMu.Lock()
 		for _, reason := range readhold.DegradedReasons {
@@ -150,6 +151,56 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		holds.degradedMu.Unlock()
 	}
 	return stats
+}
+
+// groupsBySource counts the Query Groups this process holds by their
+// source and read hold, from the same state the lookback's group page reads,
+// with the hold known as that page knows it. A group the lookback has not
+// seen yet is under other. Nil when it holds none.
+func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[string]lookback.ReadHoldGroups {
+	holds.mu.Lock()
+	groups := make([]execution.QueryGroupIdentity, 0, len(holds.groups))
+	for qg := range holds.groups {
+		groups = append(groups, qg)
+	}
+	holds.mu.Unlock()
+	groups = slices.DeleteFunc(groups, func(qg execution.QueryGroupIdentity) bool {
+		_, err := holds.owner(qg)
+		return err != nil
+	})
+	if len(groups) == 0 {
+		return nil
+	}
+	sources := engine.GroupSources(groups)
+	counts := make(map[string]lookback.ReadHoldGroups)
+	for _, qg := range groups {
+		source := sources[qg]
+		if source == "" {
+			source = lookback.SourceOther
+		}
+		entry := counts[source]
+		inspection := holds.controller.Inspect(qg)
+		if !inspection.Loaded || inspection.Corrupt || (inspection.Missing && !inspection.Seeded) {
+			entry.Unknown++
+			counts[source] = entry
+			continue
+		}
+		hold := inspection.Record.HoldMillis
+		if inspection.Record.PendingHoldMillis != nil {
+			hold = *inspection.Record.PendingHoldMillis
+		}
+		if hold > 0 {
+			entry.Held++
+		}
+		if inspection.Record.AtLimit {
+			entry.AtLimit++
+		}
+		if !entry.MaxKnown || hold > entry.MaxMillis {
+			entry.MaxMillis, entry.MaxKnown = hold, true
+		}
+		counts[source] = entry
+	}
+	return counts
 }
 
 func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {

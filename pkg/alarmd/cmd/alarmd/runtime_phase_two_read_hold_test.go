@@ -12,6 +12,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -202,5 +203,46 @@ func TestARetireCloseFailureIsExportedWithTheReadHoldCounters(t *testing.T) {
 	}
 	if len(stats.ReadHoldPredecessors) != len(readhold.PredecessorReasons)+len(readhold.LinkSkipReasons) || len(stats.ReadHoldClamped) != len(readhold.ClampSources) {
 		t.Fatalf("not every reason and source exported: %v %v", stats.ReadHoldPredecessors, stats.ReadHoldClamped)
+	}
+}
+
+// The read hold counts by source are the group page's own facts: a corrupt
+// or unseeded record is a hold not yet known, a known one is counted held
+// when more than none and at its limit when marked so, and the largest
+// known one is kept. A group the lookback has not seen is under other; a
+// group this process no longer holds is not counted.
+func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
+	h, c, at := runtimeTestHolds(t)
+	held, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 120000})
+	limited, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000})
+	c.values["good"], c.values["limited"] = held, limited
+	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
+	groups := []execution.QueryGroupIdentity{"bad", "good", "limited", "zero"}
+	for _, qg := range groups {
+		session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.bind(qg, session)
+	}
+	h.restore(context.Background(), groups)
+	counts := h.groupsBySource(nil)
+	want := map[string]lookback.ReadHoldGroups{lookback.SourceOther: {Held: 2, AtLimit: 1, Unknown: 2, MaxMillis: 600000, MaxKnown: true}}
+	if !reflect.DeepEqual(counts, want) {
+		t.Fatalf("counts %+v, want %+v", counts, want)
+	}
+	page := h.groupPage(nil, "", 200)
+	known := 0
+	for _, row := range page.Groups {
+		if row.HoldKnown {
+			known++
+		}
+	}
+	if entry := counts[lookback.SourceOther]; len(page.Groups)-known != entry.Unknown {
+		t.Fatalf("counts %+v disagree with the group page %+v", entry, page)
+	}
+	*at = at.Add(2 * time.Minute)
+	if counts := h.groupsBySource(nil); counts != nil {
+		t.Fatalf("groups no longer held were counted: %+v", counts)
 	}
 }
