@@ -272,15 +272,6 @@ func (err *triggerEventDependencyError) Unwrap() error {
 
 func (err *triggerEventDependencyError) RetryableOutputDependency() {}
 
-// OpenTriggerEventSink prepares and opens the sink in one call.
-func OpenTriggerEventSink(coordinates DecisionSinkConfig) (*TriggerEventSink, error) {
-	opener, err := PrepareTriggerEventSink(coordinates)
-	if err != nil {
-		return nil, err
-	}
-	return opener.Open()
-}
-
 // TriggerEventSinkOpener is the half of opening the sink that needs the
 // network. The other half -- reading and validating the coordinates -- has
 // already run when one of these exists, so an error from Open is the broker

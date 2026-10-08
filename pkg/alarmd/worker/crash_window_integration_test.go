@@ -129,11 +129,15 @@ func TestG3ACrashWindowChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventSink, err := enginekafka.OpenTriggerEventSink(enginekafka.DecisionSinkConfig{
+	eventOpener, err := enginekafka.PrepareTriggerEventSink(enginekafka.DecisionSinkConfig{
 		Brokers: []string{os.Getenv(g3aChildKafkaBroker)}, OutputTopic: os.Getenv(g3aChildKafkaTopic),
 		ClientID:      "alarmd-g3a-crash-child",
 		BrokerVersion: "2.1.0", MaxMessageBytes: 512 << 10,
 	})
+	if err != nil {
+		t.Fatalf("prepare real TriggerEvent sink: %v", err)
+	}
+	eventSink, err := eventOpener.Open()
 	if err != nil {
 		t.Fatalf("open real TriggerEvent sink: %v", err)
 	}

@@ -207,17 +207,6 @@ type KafkaConfig struct {
 	InitialOffset string `yaml:"initial_offset"`
 }
 
-func (c KafkaConfig) ConsumerCoordinates() enginekafka.Config {
-	return enginekafka.Config{
-		Brokers:       append([]string(nil), c.Brokers...),
-		Topic:         c.InputTopic,
-		GroupID:       c.GroupID,
-		ClientID:      c.ClientID,
-		BrokerVersion: c.BrokerVersion,
-		InitialOffset: c.InitialOffset,
-	}
-}
-
 func (c KafkaConfig) TriggerEventCoordinates() enginekafka.DecisionSinkConfig {
 	return c.outputCoordinates(c.TriggerEvent)
 }
@@ -225,7 +214,6 @@ func (c KafkaConfig) TriggerEventCoordinates() enginekafka.DecisionSinkConfig {
 func (c KafkaConfig) outputCoordinates(output KafkaOutputConfig) enginekafka.DecisionSinkConfig {
 	return enginekafka.DecisionSinkConfig{
 		Brokers:         append([]string(nil), c.Brokers...),
-		InputTopic:      c.InputTopic,
 		OutputTopic:     output.Topic,
 		ClientID:        c.ClientID,
 		BrokerVersion:   c.BrokerVersion,

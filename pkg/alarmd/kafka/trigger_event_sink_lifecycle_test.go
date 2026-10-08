@@ -13,7 +13,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,118 +24,10 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-func TestOpenDecisionSinkPrimesOnlyOutputTopicWithoutTransactionalHandshake(t *testing.T) {
-	broker := sarama.NewMockBroker(t, 1)
-	defer broker.Close()
-
-	coordinates := validDecisionSinkConfig()
-	coordinates.Brokers = []string{broker.Addr()}
-	broker.SetHandlerByMap(map[string]sarama.MockResponse{
-		"MetadataRequest": sarama.NewMockMetadataResponse(t).
-			SetBroker(broker.Addr(), broker.BrokerID()).
-			SetLeader(coordinates.OutputTopic, 0, broker.BrokerID()),
-	})
-
-	sink, err := OpenDecisionSink(coordinates)
-	if err != nil {
-		t.Fatalf("OpenDecisionSink() error = %v", err)
-	}
-	if err := sink.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-
-	history := broker.History()
-	if len(history) < 1 {
-		t.Fatal("broker did not receive output topic metadata request")
-	}
-	metadata, ok := history[0].Request.(*sarama.MetadataRequest)
-	if !ok {
-		t.Fatalf("first broker request = %T, want *sarama.MetadataRequest", history[0].Request)
-	}
-	if len(metadata.Topics) != 1 || metadata.Topics[0] != coordinates.OutputTopic {
-		t.Fatalf("metadata topics = %v, want only %q", metadata.Topics, coordinates.OutputTopic)
-	}
-	for _, request := range history {
-		if _, ok := request.Request.(*sarama.InitProducerIDRequest); ok {
-			t.Fatal("Shadow producer must not require InitProducerID")
-		}
-	}
-}
-
-func TestDecisionSinkWritesOneOfficiallyEncodedRecordAfterAcknowledgement(t *testing.T) {
+func TestTriggerEventSinkCancellationUsesBrokerResultBoundary(t *testing.T) {
 	t.Parallel()
 
-	batch := validDecisionBatch(t, 1)
-	wantPayload, err := contract.EncodeTriggerDecisionBatch(batch)
-	if err != nil {
-		t.Fatalf("EncodeTriggerDecisionBatch() error = %v", err)
-	}
-	wantKey, err := batch.PartitionKey()
-	if err != nil {
-		t.Fatalf("PartitionKey() error = %v", err)
-	}
-	started := make(chan *sarama.ProducerMessage, 1)
-	release := make(chan error, 1)
-	producer := &fakeSyncProducer{send: func(message *sarama.ProducerMessage) (int32, int64, error) {
-		started <- message
-		return 2, 17, <-release
-	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
-
-	done := make(chan error, 1)
-	go func() { done <- sink.WriteBatch(context.Background(), batch) }()
-	message := <-started
-	select {
-	case err := <-done:
-		t.Fatalf("WriteBatch() returned before broker acknowledgement: %v", err)
-	default:
-	}
-	key, err := message.Key.Encode()
-	if err != nil {
-		t.Fatalf("message key Encode() error = %v", err)
-	}
-	value, err := message.Value.Encode()
-	if err != nil {
-		t.Fatalf("message value Encode() error = %v", err)
-	}
-	if message.Topic != validDecisionSinkConfig().OutputTopic || !bytes.Equal(key, wantKey) || !bytes.Equal(value, wantPayload) {
-		t.Fatalf("message = topic=%q key=%x value=%s", message.Topic, key, value)
-	}
-	release <- nil
-	if err := <-done; err != nil {
-		t.Fatalf("WriteBatch() error = %v", err)
-	}
-}
-
-func TestDecisionSinkRejectsInvalidBatchBeforeProducer(t *testing.T) {
-	t.Parallel()
-
-	var sends atomic.Int32
-	producer := &fakeSyncProducer{send: func(*sarama.ProducerMessage) (int32, int64, error) {
-		sends.Add(1)
-		return 0, 0, nil
-	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
-
-	invalid := validDecisionBatch(t, 1)
-	invalid.Decisions[0].DecisionID = strings.Repeat("f", 64)
-	if err := sink.WriteBatch(context.Background(), invalid); err == nil {
-		t.Fatal("WriteBatch() accepted invalid batch")
-	}
-	oversized := validDecisionBatch(t, 1)
-	oversized.BatchID += strings.Repeat("x", contract.MaxTriggerDecisionBytesV1)
-	if err := sink.WriteBatch(context.Background(), oversized); err == nil {
-		t.Fatal("WriteBatch() accepted oversized batch")
-	}
-	if sends.Load() != 0 {
-		t.Fatalf("producer sends = %d, want 0", sends.Load())
-	}
-}
-
-func TestDecisionSinkCancellationUsesBrokerResultBoundary(t *testing.T) {
-	t.Parallel()
-
-	batch := validDecisionBatch(t, 1)
+	batch := []contract.TriggerEventV1{triggerEventGolden(t)}
 	preCanceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	var sends atomic.Int32
@@ -144,7 +35,7 @@ func TestDecisionSinkCancellationUsesBrokerResultBoundary(t *testing.T) {
 		sends.Add(1)
 		return 0, 0, nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
+	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
 	if err := sink.WriteBatch(preCanceled, batch); !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-canceled WriteBatch() error = %v", err)
 	}
@@ -192,10 +83,10 @@ func TestDecisionSinkCancellationUsesBrokerResultBoundary(t *testing.T) {
 	}
 }
 
-func TestDecisionSinkFailureIsReplaySafeButNotExactlyOnce(t *testing.T) {
+func TestTriggerEventSinkFailureIsReplaySafeButNotExactlyOnce(t *testing.T) {
 	t.Parallel()
 
-	batch := validDecisionBatch(t, 1)
+	batch := []contract.TriggerEventV1{triggerEventGolden(t)}
 	uncertain := errors.New("producer response unavailable")
 	var mu sync.Mutex
 	var messages []*sarama.ProducerMessage
@@ -209,7 +100,7 @@ func TestDecisionSinkFailureIsReplaySafeButNotExactlyOnce(t *testing.T) {
 		}
 		return 1, 2, nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
+	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
 	if err := sink.WriteBatch(context.Background(), batch); !errors.Is(err, uncertain) {
 		t.Fatalf("first WriteBatch() error = %v", err)
 	}
@@ -223,10 +114,10 @@ func TestDecisionSinkFailureIsReplaySafeButNotExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestDecisionSinkCloseWaitsForInflightAndClosesOwnedResourcesOnce(t *testing.T) {
+func TestTriggerEventSinkCloseWaitsForInflightAndClosesOwnedResourcesOnce(t *testing.T) {
 	t.Parallel()
 
-	batch := validDecisionBatch(t, 1)
+	batch := []contract.TriggerEventV1{triggerEventGolden(t)}
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var closeOrderMu sync.Mutex
@@ -250,13 +141,13 @@ func TestDecisionSinkCloseWaitsForInflightAndClosesOwnedResourcesOnce(t *testing
 		closeOrderMu.Unlock()
 		return nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- sink.WriteBatch(context.Background(), batch) }()
 	<-started
 	closeDone := make(chan error, 2)
 	go func() { closeDone <- sink.Close() }()
-	waitForDecisionSinkClosing(t, sink)
+	waitForTriggerEventSinkClosing(t, sink)
 	if err := sink.WriteBatch(context.Background(), batch); !errors.Is(err, ErrDecisionSinkClosed) {
 		t.Fatalf("WriteBatch() after closing error = %v", err)
 	}
@@ -283,10 +174,10 @@ func TestDecisionSinkCloseWaitsForInflightAndClosesOwnedResourcesOnce(t *testing
 	}
 }
 
-func TestDecisionSinkShutdownDeadlineStartsClientCloseAttempt(t *testing.T) {
+func TestTriggerEventSinkShutdownDeadlineStartsClientCloseAttempt(t *testing.T) {
 	t.Parallel()
 
-	batch := validDecisionBatch(t, 1)
+	batch := []contract.TriggerEventV1{triggerEventGolden(t)}
 	sendStarted := make(chan struct{})
 	clientClosed := make(chan struct{})
 	var closeOrderMu sync.Mutex
@@ -311,7 +202,7 @@ func TestDecisionSinkShutdownDeadlineStartsClientCloseAttempt(t *testing.T) {
 		close(clientClosed)
 		return nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- sink.WriteBatch(context.Background(), batch) }()
 	select {
@@ -349,7 +240,7 @@ func TestDecisionSinkShutdownDeadlineStartsClientCloseAttempt(t *testing.T) {
 	}
 }
 
-func TestDecisionSinkShutdownDeadlineBoundsBlockedClientClose(t *testing.T) {
+func TestTriggerEventSinkShutdownDeadlineBoundsBlockedClientClose(t *testing.T) {
 	t.Parallel()
 
 	clientCloseStarted := make(chan struct{})
@@ -362,7 +253,7 @@ func TestDecisionSinkShutdownDeadlineBoundsBlockedClientClose(t *testing.T) {
 		<-releaseClientClose
 		return nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancelShutdown()
 	started := time.Now()
@@ -378,7 +269,7 @@ func TestDecisionSinkShutdownDeadlineBoundsBlockedClientClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("client close did not start")
 	}
-	if err := sink.WriteBatch(context.Background(), validDecisionBatch(t, 1)); !errors.Is(err, ErrDecisionSinkClosed) {
+	if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{triggerEventGolden(t)}); !errors.Is(err, ErrDecisionSinkClosed) {
 		t.Fatalf("WriteBatch() after shutdown error = %v, want closed sink", err)
 	}
 	close(releaseClientClose)
@@ -387,7 +278,7 @@ func TestDecisionSinkShutdownDeadlineBoundsBlockedClientClose(t *testing.T) {
 	}
 }
 
-func TestDecisionSinkForcedShutdownDoesNotHideProducerCloseFailure(t *testing.T) {
+func TestTriggerEventSinkForcedShutdownDoesNotHideProducerCloseFailure(t *testing.T) {
 	t.Parallel()
 
 	want := errors.New("producer close failed")
@@ -405,9 +296,11 @@ func TestDecisionSinkForcedShutdownDoesNotHideProducerCloseFailure(t *testing.T)
 		close(clientClosed)
 		return nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	writeDone := make(chan error, 1)
-	go func() { writeDone <- sink.WriteBatch(context.Background(), validDecisionBatch(t, 1)) }()
+	go func() {
+		writeDone <- sink.WriteBatch(context.Background(), []contract.TriggerEventV1{triggerEventGolden(t)})
+	}()
 	select {
 	case <-sendStarted:
 	case <-time.After(time.Second):
@@ -428,20 +321,20 @@ func TestDecisionSinkForcedShutdownDoesNotHideProducerCloseFailure(t *testing.T)
 	}
 }
 
-func TestDecisionSinkPreCanceledShutdownStillClosesResources(t *testing.T) {
+func TestTriggerEventSinkPreCanceledShutdownStillClosesResources(t *testing.T) {
 	t.Parallel()
 
 	producer := &fakeSyncProducer{
 		send: func(*sarama.ProducerMessage) (int32, int64, error) { return 0, 0, nil },
 	}
 	client := &fakeCloser{}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	shutdownContext, cancelShutdown := context.WithCancel(context.Background())
 	cancelShutdown()
 	if err := sink.Shutdown(shutdownContext); !errors.Is(err, ErrDecisionSinkShutdownTimeout) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Shutdown() error = %v, want shutdown timeout and context cancellation", err)
 	}
-	if err := sink.WriteBatch(context.Background(), validDecisionBatch(t, 1)); !errors.Is(err, ErrDecisionSinkClosed) {
+	if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{triggerEventGolden(t)}); !errors.Is(err, ErrDecisionSinkClosed) {
 		t.Fatalf("WriteBatch() after pre-canceled shutdown error = %v, want closed sink", err)
 	}
 	if err := sink.Close(); err != nil {
@@ -458,14 +351,14 @@ func TestDecisionSinkPreCanceledShutdownStillClosesResources(t *testing.T) {
 	}
 }
 
-func TestDecisionSinkCompletedShutdownWinsOverCanceledContext(t *testing.T) {
+func TestTriggerEventSinkCompletedShutdownWinsOverCanceledContext(t *testing.T) {
 	t.Parallel()
 
 	producer := &fakeSyncProducer{
 		send: func(*sarama.ProducerMessage) (int32, int64, error) { return 0, 0, nil },
 	}
 	client := &fakeCloser{}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 	if err := sink.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -475,12 +368,12 @@ func TestDecisionSinkCompletedShutdownWinsOverCanceledContext(t *testing.T) {
 	if err := sink.Shutdown(shutdownContext); err != nil {
 		t.Fatalf("Shutdown() after completed close error = %v, want completed result", err)
 	}
-	if sink.forced.Load() {
+	if sink.core.forced.Load() {
 		t.Fatal("completed shutdown started the forced close path")
 	}
 }
 
-func TestDecisionSinkSupportsConcurrentClaims(t *testing.T) {
+func TestTriggerEventSinkSupportsConcurrentClaims(t *testing.T) {
 	t.Parallel()
 
 	const claims = 16
@@ -495,13 +388,13 @@ func TestDecisionSinkSupportsConcurrentClaims(t *testing.T) {
 		active.Add(-1)
 		return 0, 0, nil
 	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
+	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
 	var workers sync.WaitGroup
 	workers.Add(claims)
 	for index := 0; index < claims; index++ {
 		go func() {
 			defer workers.Done()
-			if err := sink.WriteBatch(context.Background(), validDecisionBatch(t, 1)); err != nil {
+			if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{triggerEventGolden(t)}); err != nil {
 				t.Errorf("WriteBatch() error = %v", err)
 			}
 		}()
@@ -519,25 +412,7 @@ func TestDecisionSinkSupportsConcurrentClaims(t *testing.T) {
 	workers.Wait()
 }
 
-func TestDecisionSinkKeepsMaximumDecisionBatchInOneRecord(t *testing.T) {
-	t.Parallel()
-
-	batch := validDecisionBatch(t, contract.MaxTriggerDecisionItemsV1)
-	var sends atomic.Int32
-	producer := &fakeSyncProducer{send: func(*sarama.ProducerMessage) (int32, int64, error) {
-		sends.Add(1)
-		return 0, 0, nil
-	}}
-	sink := newDecisionSinkForTest(t, producer, &fakeCloser{})
-	if err := sink.WriteBatch(context.Background(), batch); err != nil {
-		t.Fatalf("WriteBatch() error = %v", err)
-	}
-	if sends.Load() != 1 {
-		t.Fatalf("producer sends = %d, want one record", sends.Load())
-	}
-}
-
-func TestDecisionSinkConcurrentCloseSharesOneResult(t *testing.T) {
+func TestTriggerEventSinkConcurrentCloseSharesOneResult(t *testing.T) {
 	t.Parallel()
 
 	producerErr := errors.New("producer close")
@@ -546,7 +421,7 @@ func TestDecisionSinkConcurrentCloseSharesOneResult(t *testing.T) {
 		return 0, 0, nil
 	}, close: func() error { return producerErr }}
 	client := &fakeCloser{close: func() error { return clientErr }}
-	sink := newDecisionSinkForTest(t, producer, client)
+	sink := newTriggerEventSinkForTest(t, producer, client)
 
 	const callers = 8
 	errorsSeen := make(chan error, callers)
@@ -618,34 +493,6 @@ func (c *fakeCloser) Close() error {
 	return nil
 }
 
-func newDecisionSinkForTest(t *testing.T, producer syncMessageProducer, client closeableClient) *DecisionSink {
-	t.Helper()
-	sink, err := newDecisionSink(validDecisionSinkConfig().OutputTopic, producer, client)
-	if err != nil {
-		t.Fatalf("newDecisionSink() error = %v", err)
-	}
-	return sink
-}
-
-func waitForDecisionSinkClosing(t *testing.T, sink *DecisionSink) {
-	t.Helper()
-	deadline := time.After(time.Second)
-	for {
-		sink.mu.Lock()
-		closing := sink.closing
-		sink.mu.Unlock()
-		if closing {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("sink did not enter closing state")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-}
-
 func producerMessagesEqual(t *testing.T, first, second *sarama.ProducerMessage) bool {
 	t.Helper()
 	firstKey, firstKeyErr := first.Key.Encode()
@@ -658,54 +505,30 @@ func producerMessagesEqual(t *testing.T, first, second *sarama.ProducerMessage) 
 	return first.Topic == second.Topic && bytes.Equal(firstKey, secondKey) && bytes.Equal(firstValue, secondValue)
 }
 
-func validDecisionBatch(t *testing.T, count int) *contract.TriggerDecisionBatch {
+func newTriggerEventSinkForTest(t *testing.T, producer syncMessageProducer, client closeableClient) *TriggerEventSink {
 	t.Helper()
-	strategyRef := contract.StrategyRef{
-		StrategyID:    "101",
-		ItemID:        "202",
-		Generation:    "generation-1",
-		ContentSHA256: strings.Repeat("a", 64),
+	sink, err := newTriggerEventSink(validDecisionSinkConfig().OutputTopic, producer, client)
+	if err != nil {
+		t.Fatalf("newTriggerEventSink() error = %v", err)
 	}
-	decisions := make([]contract.TriggerDecision, 0, count)
-	for index := 0; index < count; index++ {
-		recordID := strings.Repeat("b", 32) + "." + strconv.Itoa(index+1)
-		inputID, err := contract.DeriveInputID(contract.InputIdentity{
-			TenantID:              "tenant-1",
-			Purpose:               contract.PurposeDetect,
-			StrategyID:            strategyRef.StrategyID,
-			ItemID:                strategyRef.ItemID,
-			StrategyContentSHA256: strategyRef.ContentSHA256,
-			RecordID:              recordID,
-		})
-		if err != nil {
-			t.Fatalf("DeriveInputID() error = %v", err)
+	return sink
+}
+
+func waitForTriggerEventSinkClosing(t *testing.T, sink *TriggerEventSink) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		sink.core.mu.Lock()
+		closing := sink.core.closing
+		sink.core.mu.Unlock()
+		if closing {
+			return
 		}
-		decisionID, err := contract.DeriveTriggerDecisionID(inputID)
-		if err != nil {
-			t.Fatalf("DeriveTriggerDecisionID() error = %v", err)
+		select {
+		case <-deadline:
+			t.Fatal("sink did not enter closing state")
+		default:
+			time.Sleep(time.Millisecond)
 		}
-		decisions = append(decisions, contract.TriggerDecision{
-			DecisionID:        decisionID,
-			InputID:           inputID,
-			RecordID:          recordID,
-			Outcome:           contract.DecisionOutcomeNoTrigger,
-			ReasonCode:        contract.DecisionReasonInputNormal,
-			AnomalyTimestamps: []int64{},
-		})
 	}
-	batch := &contract.TriggerDecisionBatch{
-		Schema:               contract.Schema{Name: "trigger-decision-batch", Major: 1, Minor: 0},
-		RequiredFeatures:     []string{},
-		PartitionHashVersion: contract.PartitionHashVersionV1,
-		BatchID:              "batch-1",
-		TenantID:             "tenant-1",
-		Purpose:              contract.PurposeDetect,
-		StrategyRef:          strategyRef,
-		DecisionAlgorithm:    contract.DecisionAlgorithmV1,
-		Decisions:            decisions,
-	}
-	if err := batch.Validate(); err != nil {
-		t.Fatalf("valid decision batch: %v", err)
-	}
-	return batch
 }

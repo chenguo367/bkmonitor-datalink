@@ -101,12 +101,3 @@ func (evaluator *Evaluator) EvaluatePreparedRecord(ctx context.Context, prepared
 	}
 	return facts, values, evaluations, nil
 }
-
-var _ RecordValueView = recordValueMap(nil)
-
-type recordValueMap map[string]json.RawMessage
-
-func (m recordValueMap) Value(name string) (json.RawMessage, bool) {
-	value, ok := m[name]
-	return value, ok
-}
