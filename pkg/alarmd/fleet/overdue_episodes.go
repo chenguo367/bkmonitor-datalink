@@ -16,7 +16,12 @@ import (
 
 // MaxOverdueEpisodes bounds the overdue episodes a replica keeps and a
 // reader lists: the latest, which at a few a day reach back days, past the
-// logs that would otherwise be the only record of them.
+// logs that would otherwise be the only record of them -- while the replica
+// lives. They are kept in its memory, so a restart or a rollout starts them
+// empty, and an object handed over ends on one replica and begins on the
+// next. Each is about 400 bytes encoded with one strategy and 48 more for
+// each further one, at most the tracker's 32: a full list adds about 25 KB
+// to every snapshot the replica writes, and at most about 120 KB.
 const MaxOverdueEpisodes = 64
 
 // OverdueObject is an object of a replica's rows whose schedule the replica

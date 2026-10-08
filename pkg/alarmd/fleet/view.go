@@ -1674,8 +1674,8 @@ type Snapshot struct {
 	// time_delay changes.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
 	// OverdueEpisodes is this replica's latest objects found overdue and
-	// overdue no more, at most MaxOverdueEpisodes. Not in the summary: read
-	// only by a reader that reads snapshots, a diagnosis.
+	// overdue no more since it started, at most MaxOverdueEpisodes. Not in
+	// the summary: read only by a reader that reads snapshots, a diagnosis.
 	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
 	// EvaluatingStrategies is the strategies this replica has seen evaluate
 	// on the objects it holds, and EvaluatingStrategiesKnown that it says

@@ -6,7 +6,6 @@
 package metric
 
 import (
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"math"
 	"slices"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -921,7 +921,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, decision := range observability.ScheduleCutoverReadHoldLinks {
 		metrics.scheduleCutoverReadHoldLinks.WithLabelValues(decision)
 	}
-	metrics.fleetOverdueEpisodes = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_overdue_episodes_total", Help: "Objects this replica's rows found overdue, each time one began to be, by its read hold then: zero, positive (its Slots were held), unknown. Each replica counts its own objects; the deployment's is the sum. Which objects they were is in the diagnosis's overdue_episodes."}, []string{"hold"})
+	metrics.fleetOverdueEpisodes = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_overdue_episodes_total", Help: "Objects this replica's rows found overdue, each time one began to be, by its read hold then: zero, positive (its Slots were held), unknown. " +
+		"Counted among the objects the rows list: the due index lists only its oldest overdue wakes, and an object past that list is counted when it reaches it, so in a mass overdue the count runs late and low. " +
+		"Each replica counts its own objects, and an object handed over begins again on the replica it moves to; the deployment's is the sum. " +
+		"Which objects they were is in the diagnosis's overdue_episodes, kept in the replica's memory: a restart or a rollout starts it empty."}, []string{"hold"})
 	for _, hold := range fleet.OverdueHoldClasses {
 		metrics.fleetOverdueEpisodes.WithLabelValues(hold)
 	}
