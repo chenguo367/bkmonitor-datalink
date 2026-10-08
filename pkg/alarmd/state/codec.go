@@ -51,9 +51,9 @@ type pointState struct {
 // RuntimeEnvelopeUpperBoundV2 is the shape-only upper bound for the persisted
 // Runtime State record, the JSON envelope execution v2 actually writes.
 //
-// It exists beside PackedEncodedUpperBoundV1 because the two representations
-// are not within a constant factor of each other and only one of them is what
-// the store holds. The packed blob spends 19 bytes on a point; the JSON record
+// It is computed on the JSON record rather than on the packed blob because
+// the two representations are not within a constant factor of each other and
+// only the JSON record is what the store holds. The packed blob spends 19 bytes on a point; the JSON record
 // spends about 234 for one Level and 353 for two, because it repeats per point
 // what the packed form hoists: a 64-character record id whose first 16 bytes
 // are all anyone reads, and a 64-character detect fingerprint that is compared
