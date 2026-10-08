@@ -348,11 +348,6 @@ func (fixture *noDataFixture) runSlot(ctx context.Context, round int64) {
 	}
 }
 
-func startNoDataFixture(t *testing.T) *noDataFixture {
-	t.Helper()
-	return startNoDataFixtureOn(t, "")
-}
-
 // startNoDataFixtureOn is the same fixture on a stated output protocol. The
 // two are different questions: on the native protocol the record's own
 // identity digest is what pairs an alert with its recovery, and on the

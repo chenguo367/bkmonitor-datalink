@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -741,56 +740,6 @@ func g3aEventsAtBroker(t *testing.T, broker *sarama.MockBroker) int {
 func startG3ARedis(t *testing.T) string {
 	t.Helper()
 	return redistest.Start(t, "--protected-mode", "no").Addr
-}
-
-type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (buffer *lockedBuffer) Write(value []byte) (int, error) {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	return buffer.buffer.Write(value)
-}
-
-func (buffer *lockedBuffer) String() string {
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
-	return buffer.buffer.String()
-}
-
-type g3aProcess struct {
-	command  *exec.Cmd
-	output   *lockedBuffer
-	stopOnce sync.Once
-}
-
-func startG3AProcess(t *testing.T, executable string, environment []string, arguments ...string) *g3aProcess {
-	t.Helper()
-	command := exec.Command(executable, arguments...)
-	if environment != nil {
-		command.Env = environment
-	}
-	output := &lockedBuffer{}
-	command.Stdout = output
-	command.Stderr = output
-	if err := command.Start(); err != nil {
-		t.Fatalf("start %s: %v", executable, err)
-	}
-	process := &g3aProcess{command: command, output: output}
-	t.Cleanup(process.Stop)
-	return process
-}
-
-func (process *g3aProcess) Stop() {
-	if process == nil || process.command == nil || process.command.Process == nil {
-		return
-	}
-	process.stopOnce.Do(func() {
-		_ = process.command.Process.Kill()
-		_ = process.command.Wait()
-	})
 }
 
 var _ execution.EventSink = (*g3aCrashEventSink)(nil)

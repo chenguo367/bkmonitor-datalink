@@ -3348,14 +3348,6 @@ func AllStages() []Stage {
 	return stages
 }
 
-func AllMetricStages() []Stage {
-	stages := make([]Stage, 0, len(metricComponentStages))
-	for _, pair := range metricComponentStages {
-		stages = append(stages, pair.Stage)
-	}
-	return stages
-}
-
 func AllResults() []Result {
 	return append([]Result(nil), allResults...)
 }
@@ -3378,10 +3370,6 @@ func AllLogReasons() []ReasonCode {
 	return reasons
 }
 
-func AllOperations() []Operation {
-	return append([]Operation(nil), allOperations...)
-}
-
 func AllMetricOperations() []Operation {
 	return append([]Operation(nil), metricOperations...)
 }
@@ -3394,10 +3382,6 @@ func NormalizeMetricOperation(operation Operation) Operation {
 		return operation
 	}
 	return OperationOther
-}
-
-func AllDirections() []Direction {
-	return append([]Direction(nil), allDirections...)
 }
 
 func normalizeCounts(counts Counts) Counts {

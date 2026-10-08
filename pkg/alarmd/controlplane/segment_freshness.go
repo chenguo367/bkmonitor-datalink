@@ -11,7 +11,6 @@ package controlplane
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sort"
 
@@ -169,41 +168,6 @@ func ObserveSegmentContentFreshnessForTest(
 	repository *RedisCatalogRepository, ctx context.Context, segment execution.ScheduleSegmentFact,
 ) {
 	repository.observeSegmentContentFreshness(ctx, segment)
-}
-
-// SetOpenSegmentObjectDigestForTest puts a Query Group's open Segment on the
-// given object digest.
-//
-// It exists to reproduce the state production reached and nothing else can
-// construct: a Segment naming content that neither the activation nor any
-// publication names. That state was produced by a Segment being cut from a
-// group an assembly had quietly changed -- a path the code no longer has, and
-// which therefore cannot be reached by publishing.
-func SetOpenSegmentObjectDigestForTest(
-	ctx context.Context, repository *RedisCatalogRepository,
-	group execution.QueryGroupIdentity, digest execution.ObjectDigest,
-	refs ...execution.OutputContextRef,
-) error {
-	timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, group)
-	if err != nil {
-		return err
-	}
-	last := len(timeline.Segments) - 1
-	if last < 0 {
-		return errors.New("alarmd controlplane: the Query Group has no Segment to put on a digest")
-	}
-	timeline.Segments[last].Schedule.Segment.ObjectDigest = digest
-	if len(refs) > 0 {
-		timeline.Segments[last].Schedule.Segment.OutputContextRefs = refs
-		timeline.Segments[last].Schedule.Segment.OutputContextRevisions = nil
-	}
-	timeline.RecordRevision++
-	payload, err := json.Marshal(timeline)
-	if err != nil {
-		return err
-	}
-	_ = raw
-	return repository.client.Set(ctx, repository.scheduleTimelineKey(group), payload, 0).Err()
 }
 
 // OpenSegmentObjectDigestForTest reads the open Segment's object digest
