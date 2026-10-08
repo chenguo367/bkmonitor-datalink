@@ -210,3 +210,26 @@ func TestTheObjectsWithNoPeriodAreNamedBesideTheirCount(t *testing.T) {
 		t.Fatalf("aggregated %d named %+v, want 30 counted and the longest without a period named first", view.Overdue.PeriodUnknown, objects)
 	}
 }
+
+// Among objects first seen at the same moment -- right after a start, all of
+// them -- the ones named are the first given, oldest wake first, not the
+// first by name.
+func TestObjectsWithoutAPeriodSinceTheSameMomentKeepTheOrderGiven(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	_, facts := OverdueAnomalies([]OverdueWake{
+		{QueryGroup: "qg-09", WakeAt: now.Add(-2 * time.Minute)},
+		{QueryGroup: "qg-01", WakeAt: now.Add(-time.Minute)},
+	}, 2, now, "pod-a", nil)
+	var objects []PeriodUnknownObject
+	for index := 0; index < MaxPeriodUnknownObjects; index++ {
+		objects = append(objects, PeriodUnknownObject{QueryGroup: fmt.Sprintf("qg-%02d", 20+index), Since: now.Add(-time.Hour)})
+	}
+	for _, object := range facts.PeriodUnknownObjects {
+		objects = append(objects, PeriodUnknownObject{QueryGroup: object.QueryGroup, Since: now})
+	}
+	// Room for one of the two tied at now: the twenty an hour old take the rest.
+	longest := LongestWithoutPeriod(append(objects[:MaxPeriodUnknownObjects-1:MaxPeriodUnknownObjects-1], objects[MaxPeriodUnknownObjects:]...))
+	if len(longest) != MaxPeriodUnknownObjects || longest[MaxPeriodUnknownObjects-1].QueryGroup != "qg-09" {
+		t.Fatalf("longest %+v, want qg-09, the older wake, named before qg-01", longest)
+	}
+}

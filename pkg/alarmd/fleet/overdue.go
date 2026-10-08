@@ -218,7 +218,8 @@ func aggregateOverdue(view *View, snapshots []Snapshot) {
 
 // LongestWithoutPeriod is the MaxPeriodUnknownObjects of the objects that
 // have gone longest without a period, longest first, and among equal ones in
-// the order given and then by name; a replica's list or the replicas' merged.
+// the order given: a replica's list comes oldest wake first, and the replicas'
+// merged in the order the replicas are expected in.
 func LongestWithoutPeriod(objects []PeriodUnknownObject) []PeriodUnknownObject {
 	if len(objects) == 0 {
 		return objects
