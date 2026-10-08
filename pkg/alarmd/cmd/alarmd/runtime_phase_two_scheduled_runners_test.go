@@ -309,8 +309,9 @@ func oneShotWalkDispatcher(
 }
 
 // TestOneShotRunKeepsTheReturningRunnerOutOfTheQueueToo covers the mode that
-// looks like it needs an exception. A one-shot run is driven by a single wake,
-// so it has one generation and no next turn to wait for. It still does not let
+// looks like it needs an exception. A one-shot run is driven by a single wake
+// and issues a later generation itself only for a target a full queue turned
+// away, so a returning Runner has no next turn of its own. It still does not let
 // a returning Runner take a place: within one generation the walk visits each
 // Query Group exactly once, and a Query Group can only be active after the walk
 // has queued it, so no Query Group is ever passed over as active and none is

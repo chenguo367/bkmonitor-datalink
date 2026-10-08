@@ -1230,6 +1230,22 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 	return errors.Join(runErr, shutdownErr)
 }
 
+// oneShotTargetsUnqueued says no target of a one-shot run is waiting in a
+// queue or running: what is left will not run in this generation.
+func (dispatcher *phaseTwoRunnerDispatcher) oneShotTargetsUnqueued() bool {
+	for queryGroup, lifecycle := range dispatcher.oneShotTargets {
+		if dispatcher.queued[queryGroup] == lifecycle || dispatcher.active[queryGroup] == lifecycle {
+			return false
+		}
+	}
+	return true
+}
+
+// oneShotGenerationLimit bounds the ticks a one-shot run issues itself: a
+// target still not dispatched after this many is one the dispatcher never
+// reaches, which the run reports rather than waits on.
+const oneShotGenerationLimit = 16
+
 func (bundle *phaseTwoWorkerBundle) runScheduledOnce(ctx context.Context) error {
 	wake := make(chan struct{}, 1)
 	wake <- struct{}{}
@@ -1431,6 +1447,19 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 		if dispatcher.oneShot && dispatcher.generation > 0 && len(dispatcher.oneShotTargets) == 0 &&
 			len(dispatcher.active) == 0 {
 			return nil
+		}
+		if dispatcher.oneShot && dispatcher.generation > 0 && len(dispatcher.active) == 0 && len(dispatcher.normal) == 0 &&
+			dispatcher.walkGeneration == dispatcher.generation && dispatcher.walked >= dispatcher.walkSize &&
+			dispatcher.oneShotTargetsUnqueued() {
+			// Targets left neither queued nor running were turned away this
+			// generation, by a full queue that evicted them as it does in
+			// production, and production gives them their turn at the next
+			// tick: the one-shot run issues that tick itself.
+			if dispatcher.generation >= oneShotGenerationLimit {
+				return errors.New("phase-two one-shot dispatch: a target was never dispatched")
+			}
+			dispatcher.beginGeneration()
+			continue
 		}
 
 		// Consume completed work before admitting another normal item. This
@@ -1821,9 +1850,6 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				if dispatcher.queued[evicted.scheduled.queryGroup] == evicted.scheduled.lifecycle {
 					delete(dispatcher.queued, evicted.scheduled.queryGroup)
 				}
-				if dispatcher.oneShot {
-					delete(dispatcher.lastQueued, evicted.scheduled.queryGroup)
-				}
 				dispatcher.normal[latest] = queued
 			} else {
 				dispatcher.normal = append(dispatcher.normal, queued)
@@ -1854,9 +1880,6 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				dispatcher.dueIndex.MarkHeldBack(evicted.queryGroup)
 				if dispatcher.queued[evicted.queryGroup] == evicted.lifecycle {
 					delete(dispatcher.queued, evicted.queryGroup)
-				}
-				if dispatcher.oneShot {
-					delete(dispatcher.lastQueued, evicted.queryGroup)
 				}
 				dispatcher.delayed[latest] = queued
 			} else {
