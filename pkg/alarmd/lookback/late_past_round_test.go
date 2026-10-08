@@ -417,3 +417,17 @@ func TestAHeldGroupsSuggestionCountsTheHoldItsFirstReadWaited(t *testing.T) {
 		t.Fatalf("readings %+v, want the suggestion %d with the 45 second hold in it", readings, want)
 	}
 }
+
+// A hold of a part of a second counts as the whole second it reaches into:
+// the advice it goes into is never short of what the data needed.
+func TestAHoldOfPartOfASecondCountsTheWholeSecond(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	for _, evaluation := range []int64{600, 660} {
+		slot := openWindow(f, evaluation, 2, 60)
+		slot.readHold = 45_500
+		endWindow(f, slot, DirectedSupplemented, crossed(2))
+	}
+	if readings := f.engine.LatePastRound(); len(readings) != 1 || readings[0].Samples[1].ReadHoldSeconds != 46 {
+		t.Fatalf("readings %+v, want the 45.5 second hold counted as 46", readings)
+	}
+}

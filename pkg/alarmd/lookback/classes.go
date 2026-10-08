@@ -248,7 +248,7 @@ func (engine *Engine) noteReadEarlyLocked(state *group, candidate *sample, class
 	}
 	if entry.early {
 		entry.sample = ReadEarlySample{EvaluationTime: candidate.evaluation,
-			ReadHoldSeconds:      candidate.contract.ReadHoldMillis / 1000,
+			ReadHoldSeconds:      holdSeconds(candidate.contract.ReadHoldMillis),
 			FirstReadAgeSeconds:  int64(candidate.readAt.Sub(candidate.windowEnd) / time.Second),
 			FirstReadyAgeSeconds: int64(firstReadAge(candidate) / time.Second),
 			CompletionAgeSeconds: int64(candidate.completion / time.Second), PartialRevised: class == ClassPartialRevised}
