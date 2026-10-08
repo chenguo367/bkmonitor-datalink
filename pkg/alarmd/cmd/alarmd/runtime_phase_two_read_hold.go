@@ -73,9 +73,9 @@ type productionReadHoldGroup struct {
 	queryRoute     string
 	queryDelay     time.Duration
 	// queryStep is the query's data step, the one the lookback aligns its
-	// suggestion to, and settlingWait the spec's, cached with the delay for
-	// the time_delay a measured hold suggests (fleetFacts); settled says the
-	// spec was built.
+	// suggestion to, and settlingWait the newest prepared Segment's spec's,
+	// cached with the delay for the time_delay a measured hold suggests
+	// (fleetFacts); settled says a Segment was prepared.
 	queryStep      time.Duration
 	settlingWait   time.Duration
 	settled        bool
@@ -227,11 +227,6 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 			spec.SettlingWait = wait
 		}
 	}
-	holds.mu.Lock()
-	if owned := holds.groups[spec.QueryGroup]; owned != nil {
-		owned.settlingWait, owned.settled = spec.SettlingWait, true
-	}
-	holds.mu.Unlock()
 	return spec, nil
 }
 
@@ -405,6 +400,13 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 		holds.releasePredecessors(group)
 	}
 	group.prepared = schedule.Segment
+	// The settling wait its time_delay suggestion is reckoned beyond is this
+	// Segment's, the newest prepared: the previous one closed above was
+	// specified too, with Plans of its own, and an older one is refused
+	// before here.
+	holds.mu.Lock()
+	group.settlingWait, group.settled = spec.SettlingWait, true
+	holds.mu.Unlock()
 	return nil
 }
 

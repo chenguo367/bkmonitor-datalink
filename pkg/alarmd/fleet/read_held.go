@@ -96,12 +96,13 @@ func heldSeconds(millis int64) int64 {
 }
 
 // readHeldClause is the sentence a READ_HELD row adds to its strategy's
-// line: when the data arrives, what alarmd holds, and the time_delay that
-// would need no hold.
+// line: how late the data has been seen to arrive -- the arrival age is the
+// latest seen, not a typical one -- what alarmd holds, and the time_delay
+// that would need no hold.
 func readHeldClause(facts *ReadHoldFacts) string {
 	if facts == nil {
 		return ""
 	}
-	return fmt.Sprintf("数据通常在窗口结束后约 %d 秒到齐，alarmd 当前自动推后 %d 秒；建议把 time_delay 改为 %d 秒",
+	return fmt.Sprintf("数据最晚约在窗口结束后 %d 秒到齐，alarmd 当前自动推后 %d 秒；建议把 time_delay 改为 %d 秒",
 		heldSeconds(facts.ArrivalAgeMillis), heldSeconds(facts.Millis), facts.SuggestedDelaySeconds)
 }
