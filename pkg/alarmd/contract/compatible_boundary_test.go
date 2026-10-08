@@ -9,7 +9,10 @@
 
 package contract
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A Plan detected every minute over four-minute windows has a record on the
 // aggregation grid once in four; the others are between boundaries, and the
@@ -27,7 +30,7 @@ func TestOnlyTheDetectionsOnTheAggregationGridHaveACompatibleMessage(t *testing.
 		{stepped, 240, false}, {stepped, 300, true}, {stepped, 420, true}, {stepped, 480, false},
 		{once, 300, false}, {ExecutionSemanticsV2{}, 300, false},
 	} {
-		if got := CompatibleOffBoundary(test.semantics, test.source); got != test.off {
+		if got := CompatibleOffBoundary(test.semantics, nil, test.source); got != test.off {
 			t.Fatalf("%+v at %d: off boundary %t, want %t", test.semantics, test.source, got, test.off)
 		}
 	}
@@ -40,5 +43,30 @@ func TestOnlyTheDetectionsOnTheAggregationGridHaveACompatibleMessage(t *testing.
 	}
 	if !NoMessageForAt(WireFormatPythonCompatible, TriggerEventAbnormal, true, true) || NoMessageForAt(WireFormatPythonCompatible, TriggerEventAbnormal, false, true) {
 		t.Fatal("an anomaly between boundaries is left without a message only where the compatibility context is carried")
+	}
+}
+
+// The aggregation grid is laid in the query's time zone, as the query
+// service lays an aligned query's buckets: a day detected every minute under
+// UTC+8 has its boundary at the local midnight, 16:00 UTC, and the UTC
+// midnight is one of the detections between two boundaries.
+func TestADaysBoundaryIsTheLocalMidnightOfTheQuerysTimeZone(t *testing.T) {
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := ExecutionSemanticsV2{AggregationInterval: 86400, EvaluationInterval: 60}
+	const utcMidnight, localMidnight = 1_700_092_800, 1_700_150_400
+	for _, test := range []struct {
+		location *time.Location
+		source   int64
+		off      bool
+	}{
+		{shanghai, localMidnight, false}, {shanghai, utcMidnight, true}, {shanghai, localMidnight + 60, true},
+		{nil, utcMidnight, false}, {nil, localMidnight, true},
+	} {
+		if got := CompatibleOffBoundary(day, test.location, test.source); got != test.off {
+			t.Fatalf("%v at %d: off boundary %t, want %t", test.location, test.source, got, test.off)
+		}
 	}
 }

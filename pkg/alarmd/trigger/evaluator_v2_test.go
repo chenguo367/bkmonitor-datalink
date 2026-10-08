@@ -861,7 +861,7 @@ func compilePlanV2(t testing.TB, levels []contract.LevelIRV2) *strategy.Compiled
 	return compilePlanV2WithOutput(t, levels, nil)
 }
 
-func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape func(*contract.EvaluationPlanV2)) *strategy.CompiledPlan {
+func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape func(*contract.EvaluationPlanV2), options ...strategy.CompilerOption) *strategy.CompiledPlan {
 	t.Helper()
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
@@ -869,7 +869,7 @@ func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape fu
 		MaxTriggerWindowSize: 4096, MaxRecoveryConsecutiveWindows: 4096, MaxTriggerComputeCost: 1 << 20,
 		MaxCompiledPlanBytes: 64 << 10, MaxCacheEntries: 64, MaxCacheBytes: 4 << 20,
 		NegativeCacheTTL: time.Minute, BudgetRevision: "trigger-test-v1",
-	})
+	}, options...)
 	if err != nil {
 		t.Fatal(err)
 	}

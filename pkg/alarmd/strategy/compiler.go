@@ -39,7 +39,24 @@ type PlanCompiler struct {
 	capabilityDigest string
 	budgetDigest     string
 	keys             compileKeyMemo
+	boundaryLocation *time.Location
 }
+
+// CompilerOption sets what a compiler compiles every Plan with beside its
+// budgets.
+type CompilerOption func(*PlanCompiler)
+
+// WithBoundaryLocation lays the aggregation boundaries of every Plan detected
+// more often than it aggregates in location: the time zone the deployment's
+// queries are laid in, where the query service starts an aligned query's
+// buckets. One deployment lays every query in one zone, so the zone is the
+// compiler's and no Plan carries it; without the option it is UTC.
+func WithBoundaryLocation(location *time.Location) CompilerOption {
+	return func(compiler *PlanCompiler) { compiler.boundaryLocation = location }
+}
+
+// BoundaryLocation is the location WithBoundaryLocation set, nil without it.
+func (c *PlanCompiler) BoundaryLocation() *time.Location { return c.boundaryLocation }
 
 // compileKeyMemoEntries bounds how many content keys the compiler remembers
 // a cache key for. A replica freezes the Slots of the Query Groups it owns --
@@ -63,7 +80,7 @@ type compileKeyMemoKey struct {
 	state   StateSemantics
 }
 
-func NewCompiler(registry *AlgorithmCompilerRegistry, limits Limits) (*PlanCompiler, error) {
+func NewCompiler(registry *AlgorithmCompilerRegistry, limits Limits, options ...CompilerOption) (*PlanCompiler, error) {
 	if registry == nil || len(registry.compilers) == 0 {
 		return nil, errors.New("strategy: algorithm registry is empty")
 	}
@@ -96,11 +113,15 @@ func NewCompiler(registry *AlgorithmCompilerRegistry, limits Limits) (*PlanCompi
 	if err != nil {
 		return nil, fmt.Errorf("strategy: derive compiler budget digest: %w", err)
 	}
-	return &PlanCompiler{
+	compiler := &PlanCompiler{
 		registry: registry, limits: limits,
 		cache:            newCompileCache(limits.MaxCacheEntries, limits.MaxCacheBytes, limits.NegativeCacheTTL),
 		capabilityDigest: registry.CapabilityDigest(), budgetDigest: budgetDigest,
-	}, nil
+	}
+	for _, option := range options {
+		option(compiler)
+	}
+	return compiler, nil
 }
 
 func (c *PlanCompiler) Compile(ctx context.Context, request CompileRequest) (CompileResult, error) {
@@ -157,6 +178,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		},
 		projection:          cloneProjection(request.Plan.InputProjection),
 		evaluationSemantics: request.Plan.StrategyIR.ExecutionSemantics,
+		boundaryLocation:    c.boundaryLocation,
 		normalizers:         make(map[string]NumericNormalizerSpec),
 		datasetDigest:       datasetDigest,
 		targetScope:         request.Plan.TargetScope,
