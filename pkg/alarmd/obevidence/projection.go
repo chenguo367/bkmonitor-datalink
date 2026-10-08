@@ -100,7 +100,7 @@ var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name
 // or the object naming a host, instance, node or group the compiler reads.
 var targetValuePolicy = scalarOr(fields("bk_cloud_id bk_host_id bk_inst_id bk_obj_id bk_target_cloud_id bk_target_ip bk_target_service_instance_id dynamic_group_id ip service_instance_id cw_object_model_id cw_object_model_inst_id", nil))
 var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strategy name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
-	"items": fields("id name query_md5 expression time_delay unit", map[string]*policy{
+	"items": fields("id name query_md5 expression time_delay detect_interval unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
 		"target":      namedValues(fields("condition key field method type model_id target_type", map[string]*policy{"value": targetValuePolicy, "conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,

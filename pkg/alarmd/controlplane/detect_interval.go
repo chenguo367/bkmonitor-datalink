@@ -57,9 +57,11 @@ const (
 	// aggregation interval, as if the field were absent.
 	ReasonDetectIntervalSourceNotSliding = "SOURCE_NOT_SLIDING"
 	// ReasonDetectIntervalAlgorithmNotSliding names an item a Level of which
-	// detects with an algorithm that needs history points a step apart,
-	// which windows an aggregation interval long cannot place: it runs at
-	// the aggregation interval, as if the field were absent.
+	// detects with an algorithm that cannot run at the step: AdvancedRingRatio
+	// needs history points a step apart, which windows an aggregation
+	// interval long cannot place, and OsRestart compares with points 10 and
+	// 25 minutes back that a step of 10 minutes or more would put out of
+	// order. It runs at the aggregation interval, as if the field were absent.
 	ReasonDetectIntervalAlgorithmNotSliding = "ALGORITHM_NOT_SLIDING"
 )
 
@@ -119,7 +121,7 @@ func itemDetectStep(item legacyItem, aggregation int64) (detectStep, error) {
 	if step.Seconds == aggregation {
 		return step, nil
 	}
-	if reason, detail := notSliding(item); reason != "" {
+	if reason, detail := notSliding(item, step.Seconds); reason != "" {
 		return detectStep{Seconds: aggregation, Written: written, Warning: reason, Detail: detail}, nil
 	}
 	if step.Warning == "" {
@@ -134,9 +136,13 @@ func itemDetectStep(item legacyItem, aggregation int64) (detectStep, error) {
 	return step, nil
 }
 
-// notSliding names why an item cannot run at a step other than its
+// osRestartFixedOffsetSeconds is the nearer of the two fixed history points
+// OsRestart compares with; its previous detection has to be nearer still.
+const osRestartFixedOffsetSeconds = 600
+
+// notSliding names why an item cannot run at step, a step other than its
 // aggregation interval, the empty reason when it can.
-func notSliding(item legacyItem) (string, string) {
+func notSliding(item legacyItem, step int64) (string, string) {
 	for _, raw := range item.QueryConfigs {
 		var query struct {
 			DataSourceLabel string `json:"data_source_label"`
@@ -151,7 +157,8 @@ func notSliding(item legacyItem) (string, string) {
 		}
 	}
 	for _, algorithm := range item.Algorithms {
-		if algorithm.Type == strategy.DetectorKindAdvancedRingRatio {
+		if algorithm.Type == strategy.DetectorKindAdvancedRingRatio ||
+			algorithm.Type == strategy.DetectorKindOsRestart && step >= osRestartFixedOffsetSeconds {
 			return ReasonDetectIntervalAlgorithmNotSliding, "algorithm=" + algorithm.Type
 		}
 	}

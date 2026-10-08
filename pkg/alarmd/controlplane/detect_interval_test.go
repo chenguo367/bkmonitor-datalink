@@ -227,3 +227,32 @@ func TestTheWritersProjectedItemRunsItsDeclaredStep(t *testing.T) {
 			plan.ScheduleSpec.EvaluationIntervalSeconds, without.QueryGroups[0].Plans[0].ScheduleSpec.EvaluationIntervalSeconds)
 	}
 }
+
+// OsRestart compares with its previous detection and with points 10 and 25
+// minutes back, in that order. A step under 10 minutes keeps the order and
+// runs; a step of 10 minutes or more would put the previous detection at or
+// past the fixed points, and the item runs at its aggregation interval,
+// byte for byte as without the field, naming the algorithm.
+func TestAnOsRestartStepRunsOnlyWhileItsPreviousDetectionIsTheNearestPoint(t *testing.T) {
+	document := g4LegacyStrategyDocument(t, 300, strategy.DetectorKindOsRestart, "uptime", "system.env", []string{"bk_target_ip"}, map[string]any{})
+	plan := detectIntervalCatalog(t, withItemField(t, document, "detect_interval", 30)).QueryGroups[0].Plans[0]
+	found := false
+	for _, requirement := range plan.RequirementTemplates {
+		if requirement.DatasetName == "uptime_history" {
+			found = reflect.DeepEqual(requirement.PointOffsetsSeconds, []int64{30, 600, 1500})
+		}
+	}
+	if plan.ScheduleSpec.EvaluationIntervalSeconds != 30 || !found {
+		t.Fatalf("schedule %+v requirements %+v, want a 30 s step comparing 30 s, 10 and 25 minutes back", plan.ScheduleSpec, plan.RequirementTemplates)
+	}
+	without := detectIntervalCatalog(t, document)
+	for _, step := range []int{600, 900, 3600} {
+		with := detectIntervalCatalog(t, withItemField(t, document, "detect_interval", step))
+		if got, want := executionBytes(t, with), executionBytes(t, without); !bytes.Equal(got, want) {
+			t.Fatalf("step %d changed what executes", step)
+		}
+		if got := warningsOf(with); !reflect.DeepEqual(got, []string{controlplane.ReasonDetectIntervalAlgorithmNotSliding}) {
+			t.Fatalf("step %d: warnings %v, want the algorithm named", step, got)
+		}
+	}
+}

@@ -19,10 +19,10 @@ import (
 // unalignedFacts is the query of a Plan detected more often than it
 // aggregates: read from where its request starts, each clause shifted a
 // step less a millisecond forward so its buckets are labelled at their start.
-func unalignedFacts(t *testing.T) execution.QueryPlanFacts {
+func unalignedFacts(t *testing.T, functions ...execution.QueryFunction) execution.QueryPlanFacts {
 	t.Helper()
 	built := facts(t, minute, "", execution.QueryClause{TimeAggregation: execution.QueryFunction{Method: "avg_over_time", Window: "60s"},
-		Offset: "59999ms", OffsetForward: "true"})
+		Functions: functions, Offset: "59999ms", OffsetForward: "true"})
 	built.NotTimeAlign, built.QueryRevision = true, ""
 	rebuilt, err := execution.BuildQueryPlanFacts(built)
 	if err != nil {
@@ -60,9 +60,19 @@ func TestAForwardOffsetShortensATailReadsLookback(t *testing.T) {
 // where nothing arrives late the samples complete with nothing changed.
 func TestAnUnalignedQuerysRechecksReadTheFirstReadsBuckets(t *testing.T) {
 	// A whole second off the minute grid, as a Slot every fifteen seconds is.
+	for name, query := range map[string]execution.QueryPlanFacts{
+		"a window": unalignedFacts(t),
+		// A lookback of a minute and a half past the forward shift: half a
+		// step off unless rounded up to whole steps.
+		"a function window of ninety seconds": unalignedFacts(t, execution.QueryFunction{Method: "moving_avg", Window: "90s"}),
+	} {
+		t.Run(name, func(t *testing.T) { unalignedRechecksReadTheFirstReadsBuckets(t, query) })
+	}
+}
+
+func unalignedRechecksReadTheFirstReadsBuckets(t *testing.T, query execution.QueryPlanFacts) {
 	w := &windowed{clock: &clock{at: time.Unix(1_700_006_015, 0)}, step: 60, probeFirst: true}
 	engine := w.engine(t)
-	query := unalignedFacts(t)
 	for range 3 {
 		w.run(t, engine, 2*time.Hour, query)
 	}

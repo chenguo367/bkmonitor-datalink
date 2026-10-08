@@ -2635,17 +2635,10 @@ func (inputs *compiledPlanInputs) buildRequirements(
 			return nil, errors.New("alarmd controlplane: OsRestart history query facts are missing")
 		}
 		historyRef := execution.LogicalQueryRef(inputs.osRestartHistory.QueryRevision)
-		// The window reaches the oldest point it names. With no detect_interval
-		// that is 25 minutes back, as it always was; a configured step longer
-		// than that reaches back a step.
-		reach := int64(1500)
-		if step != interval && step > reach {
-			reach = step
-		}
 		dependency, err := execution.BuildDataRequirementTemplate(execution.DataRequirementTemplate{
 			DatasetName: "uptime_history", Role: execution.InputRoleAlgorithmDependency, ConsumerLevelID: levelID,
 			LogicalQueryRef: historyRef,
-			RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -inputs.primary.QueryDelaySeconds - (reach + interval), EndOffsetSeconds: -inputs.primary.QueryDelaySeconds, HalfOpen: true},
+			RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -inputs.primary.QueryDelaySeconds - (1500 + interval), EndOffsetSeconds: -inputs.primary.QueryDelaySeconds, HalfOpen: true},
 			StepMillis:      inputs.osRestartHistory.StepMillis, AlignmentMillis: inputs.osRestartHistory.AlignmentMillis,
 			ResultWindowPolicy: execution.ResultWindowExactHalfOpen, ReadinessClass: execution.ReadinessFinalizedRequired,
 			InputProjection: projection, PointOffsetsSeconds: []int64{step, 600, 1500},
