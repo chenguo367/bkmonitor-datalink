@@ -112,3 +112,22 @@ func TestASuggestedDelayIsRoundedAsTheDelayWas(t *testing.T) {
 		}
 	}
 }
+
+// A group read unaligned every fifteen seconds over one-minute windows had its
+// delay rounded to fifteen seconds, and so are the delays it is advised: the
+// read-early advice and the late-past-round advice alike. Rounded to the data
+// step, both would advise a delay a whole minute longer than the one that
+// reads the window whole.
+func TestASteppedGroupsAdviceIsRoundedToItsDelaysUnit(t *testing.T) {
+	early := ReadEarlySample{CompletionAgeSeconds: 40}
+	state := &group{source: sourceTimeSeries, step: time.Minute, delayUnit: 15 * time.Second,
+		readEarly:     &readEarlyState{delaySeconds: 30, recent: []readEarlyEntry{{early: true, sample: early}, {early: true, sample: early}}},
+		latePastRound: &latePastRoundState{consecutive: latePastRoundRepeat, delaySeconds: 30, samples: []LatePastRoundSample{{SeenAgeSeconds: 10}}},
+		seriesLate:    &seriesLateState{}}
+	if reading, ok := readingOf("qg", state); !ok || reading.SuggestedDelaySeconds != 75 {
+		t.Fatalf("read-early advice %+v (reported %t), want 30 + 40 rounded to 75", reading, ok)
+	}
+	if reading, ok := latePastRoundOf("qg", state); !ok || reading.SuggestedDelaySeconds != 45 {
+		t.Fatalf("late-past-round advice %+v (reported %t), want 30 + 10 rounded to 45", reading, ok)
+	}
+}

@@ -143,6 +143,15 @@ func TestRuntimeAConfiguredAndAnUnconfiguredStrategyRunInOnePublication(t *testi
 		t.Fatal("the configured strategy's Slots completed without an unaligned query")
 	}
 	afterStepped := applied()
+	// The delay each group's advice is rounded to is the one its delay was:
+	// fifteen seconds for the group read unaligned, the minute for the other.
+	holds := fixture.bundle.dependencies.ReadHolds
+	holds.mu.Lock()
+	steppedUnit, baseUnit := holds.groups[stepped].delayUnit, holds.groups[fixture.queryGroup].delayUnit
+	holds.mu.Unlock()
+	if steppedUnit != 15*time.Second || baseUnit != time.Minute {
+		t.Fatalf("advice rounded to %v and %v, want 15s for the stepped group and a minute for the other", steppedUnit, baseUnit)
+	}
 	_ = runOneSlotFull(t, fixture)
 	afterBase := applied()
 	if afterStepped-before < len(slots) || afterBase == afterStepped {
