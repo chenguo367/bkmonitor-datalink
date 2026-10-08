@@ -116,7 +116,7 @@ func newCatalogCompositionCollector() *catalogCompositionCollector {
 		requiredPoints: descriptor("catalog_required_history_points",
 			"History points the Levels of the Catalog the leader last built require, summed over every "+
 				"accepted Level including the no-data one. The denominator of the retention measurement: read "+
-				"catalog_retained_history_points over this one for what decision-022 R5's recovery slack costs "+
+				"catalog_retained_history_points over this one for what the recovery slack in the retained history costs "+
 				"the deployment. Both are points and not bytes -- bytes are what the retention pool is budgeted "+
 				"in, and are read from the store's own retained-bytes metric across a release; points are their "+
 				"proxy and the only one the leader can publish without reading the store. Reported by the leader only."),
