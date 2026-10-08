@@ -153,7 +153,6 @@ func newZeroSeriesGapFixture(t *testing.T) *cutoverStallFixture {
 	cutoverStallTriggerWindow = 3
 	t.Cleanup(func() { cutoverStallTriggerWindow = previousWindow })
 	return newCutoverStalledFixture(t, func(cfg *config.Config) {
-		cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled = true
 	})
 }
 

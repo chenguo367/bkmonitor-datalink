@@ -107,8 +107,6 @@ type PhaseTwoOwnershipConfig struct {
 }
 
 type PhaseTwoSchedulerConfig struct {
-	// Disabling creation never disables recovery of an existing pending range.
-	ExpiredRangeEnabled bool `yaml:"expired_range_enabled"`
 	// ActiveExecutionLimit bounds outstanding Runner invocations. It is derived
 	// from the container's CPU budget alongside the permits below, and there is
 	// no unlimited setting: zero was one until production showed it produced
@@ -301,7 +299,6 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			// Expired-range finalization is the product's behaviour; the key
 			// stays as the rollback switch decision-002 keeps for a version
 			// that cannot read the range proof.
-			ExpiredRangeEnabled: true,
 			TickInterval:        Duration(time.Second),
 			MaxQueuedItemsPerQG: 16, MaxReplaySlots: 3, MaxReplayAge: Duration(10 * time.Minute),
 			RetryMinDelay: Duration(time.Second), RetryMaxDelay: Duration(30 * time.Second),

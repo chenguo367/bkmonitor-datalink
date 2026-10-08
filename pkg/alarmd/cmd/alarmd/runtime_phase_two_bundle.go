@@ -943,7 +943,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
-		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,

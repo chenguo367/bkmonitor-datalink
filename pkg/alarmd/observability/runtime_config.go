@@ -139,7 +139,6 @@ type RuntimeStorageFacts struct {
 }
 
 type RuntimeCapacityFacts struct {
-	ExpiredRangeEnabled      bool `json:"expired_range_enabled"`
 	QueryUnavailableCooldown bool `json:"query_unavailable_cooldown"`
 	// The two execution-limit fields are the derivation and what the dispatcher
 	// actually runs with, and they differ only when the ready queue clamps the

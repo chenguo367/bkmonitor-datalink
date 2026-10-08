@@ -224,7 +224,6 @@ func newExpiredRangeProductionBundle(t *testing.T, response http.HandlerFunc, ob
 	cfg.Redis.Address = address
 	withCompatibilityOutput(&cfg, address)
 	cfg.Redis.StatePrefix = "alarmd-expired-range-integration"
-	cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled = true
 	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Millisecond)
 	cfg.PhaseTwo.Access.UQEndpoint = server.URL
 	// The public fixture uses one-second Slots; its reserve must leave a

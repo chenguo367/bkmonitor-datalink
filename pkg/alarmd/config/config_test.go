@@ -332,6 +332,7 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 		{"kafka:\n  group_id: \"\"\n", "group_id"},
 		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
 		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
+		{"phase_two:\n  scheduler:\n    expired_range_enabled: false\n", "expired_range_enabled"},
 	} {
 		_, err := Load(writeConfig(t, retired.yaml))
 		if err == nil || !strings.Contains(err.Error(), "field "+retired.name+" not found") {
