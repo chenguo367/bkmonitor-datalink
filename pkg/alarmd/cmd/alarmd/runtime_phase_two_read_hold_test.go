@@ -215,9 +215,12 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	h, c, at := runtimeTestHolds(t)
 	held, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 120000})
 	limited, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 600000, AtLimit: true, LimitMillis: 600000})
-	c.values["good"], c.values["limited"] = held, limited
+	// A change chosen and not yet frozen: the hold the next Slot is frozen with.
+	pending := int64(90000)
+	raised, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 0, PendingHoldMillis: &pending})
+	c.values["good"], c.values["limited"], c.values["raised"] = held, limited, raised
 	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
-	groups := []execution.QueryGroupIdentity{"bad", "good", "limited", "zero"}
+	groups := []execution.QueryGroupIdentity{"bad", "good", "limited", "raised", "zero"}
 	for _, qg := range groups {
 		session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
 		if err != nil {
@@ -227,7 +230,7 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	}
 	h.restore(context.Background(), groups)
 	counts := h.groupsBySource(nil)
-	want := map[string]lookback.ReadHoldGroups{lookback.SourceOther: {Held: 2, AtLimit: 1, Unknown: 2, MaxMillis: 600000, MaxKnown: true}}
+	want := map[string]lookback.ReadHoldGroups{lookback.SourceOther: {Held: 3, AtLimit: 1, Unknown: 2, MaxMillis: 600000, MaxKnown: true}}
 	if !reflect.DeepEqual(counts, want) {
 		t.Fatalf("counts %+v, want %+v", counts, want)
 	}
@@ -245,7 +248,7 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 	for qg, want := range map[string]struct {
 		millis int64
 		known  bool
-	}{"good": {120000, true}, "limited": {600000, true}, "bad": {0, false}, "zero": {0, false}} {
+	}{"good": {120000, true}, "limited": {600000, true}, "raised": {90000, true}, "bad": {0, false}, "zero": {0, false}} {
 		if millis, known := h.holdOf(qg); millis != want.millis || known != want.known {
 			t.Fatalf("hold of %s %d %t, want %d %t", qg, millis, known, want.millis, want.known)
 		}
