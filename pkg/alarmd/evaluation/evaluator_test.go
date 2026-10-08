@@ -1126,13 +1126,21 @@ func TestOnlyASuppressedLevelOnWholeInputsMayLeaveItsGuardsReason(t *testing.T) 
 	}
 
 	outOfHours := gappedGuardRequest(t, true)
+	outOfHours.Inputs[0].Inputs[0].DataState = execution.DataStateEmpty
 	evaluated, err = newEvaluator(t).Evaluate(context.Background(), outOfHours)
 	if err != nil {
 		t.Fatalf("Evaluate()=%v", err)
 	}
-	outOfHours.Inputs[0].Inputs[0].DataState = execution.DataStateEmpty
-	if err := evaluated.Validate(outOfHours); err == nil {
-		t.Fatal("an out-of-hours outcome on inputs that carry no data left its guard's reason")
+	off, guards := execution.ReasonCode(contract.ReasonEffectiveTimeInactive), evaluated.Plans[0].LevelOutcomes[0].ReasonCode
+	evaluated.Plans[0].LevelOutcomes[0].ReasonCode = off
+	if evaluated.Plans[0].ReasonCode == guards {
+		evaluated.Plans[0].ReasonCode = off
+	}
+	if evaluated.ReasonCode == guards {
+		evaluated.ReasonCode = off
+	}
+	if err := evaluated.Validate(outOfHours); err == nil || !strings.Contains(err.Error(), "active guard reason") {
+		t.Fatalf("an out-of-hours outcome on inputs that carry no data left its guard's reason: %v", err)
 	}
 }
 
