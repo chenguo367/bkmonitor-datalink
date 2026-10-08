@@ -277,13 +277,12 @@ func (engine *Engine) noteReadEarlyLocked(state *group, candidate *sample, class
 			state.readEarly = nil
 		}
 		return
-	case !reported:
-		return
 	}
-	// While it is reported the group rests no longer than its deepest rung,
-	// however long it rested before, whatever this sample read: the sample
-	// that can withdraw the report is captured one such rest after this one,
-	// not up to restCap later.
+	// After a sample that read it early, and while it is reported whatever a
+	// sample read, the group rests no longer than its deepest rung, however
+	// long it rested before: the sample that can confirm the report, or
+	// withdraw it, is captured one such rest after this one, not up to
+	// restCap later.
 	if floor := RungSteps[state.depth-1]; state.rest > floor {
 		state.rest = floor
 		next := now.Add(time.Duration(floor * float64(state.step) * restSpread(candidate.queryGroup)))
