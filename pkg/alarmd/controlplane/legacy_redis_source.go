@@ -177,6 +177,70 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 	return strategies, nil
 }
 
+// MaxStrategyDocumentChecks bounds one StrategyDocumentsPresent call: one
+// page of the absent close's candidates.
+const MaxStrategyDocumentChecks = 200
+
+// ErrStrategyDocumentPresenceUnsupported is a client that cannot pipeline,
+// so one call would cost a round trip per id.
+var ErrStrategyDocumentPresenceUnsupported = errors.New("alarmd controlplane: strategy document presence needs a pipelining client")
+
+// StrategyDocumentPresence is a source that can say whether a strategy's
+// document is stored, whatever its active set says.
+type StrategyDocumentPresence interface {
+	StrategyDocumentsPresent(context.Context, []string) ([]bool, error)
+}
+
+type legacyRedisPipeliner interface {
+	Pipelined(context.Context, func(redis.Pipeliner) error) ([]redis.Cmder, error)
+}
+
+// StrategyDocumentsPresent says, for each id, whether <prefix>.strategy_<id>
+// is stored: one round trip, one single-key EXISTS per id. Not a multi-key
+// EXISTS, which answers one count for all of them and is refused across
+// slots on a cluster; not MGET, which would return whole documents to answer
+// a yes or no. Every id must be the canonical positive integer the layout
+// names documents by.
+func (source *LegacyRedisStrategySource) StrategyDocumentsPresent(ctx context.Context, ids []string) ([]bool, error) {
+	if source == nil || source.client == nil {
+		return nil, errors.New("alarmd controlplane: legacy Redis strategy source is required")
+	}
+	if len(ids) > MaxStrategyDocumentChecks {
+		return nil, fmt.Errorf("alarmd controlplane: %d strategy document checks asked, at most %d", len(ids), MaxStrategyDocumentChecks)
+	}
+	if len(ids) == 0 {
+		return []bool{}, nil
+	}
+	for _, id := range ids {
+		parsed, err := strconv.ParseUint(id, 10, 64)
+		if err != nil || parsed == 0 || strconv.FormatUint(parsed, 10) != id {
+			return nil, ErrActiveStrategyIDInvalid
+		}
+	}
+	pipeliner, ok := source.client.(legacyRedisPipeliner)
+	if !ok {
+		return nil, ErrStrategyDocumentPresenceUnsupported
+	}
+	checks := make([]*redis.IntCmd, len(ids))
+	if _, err := pipeliner.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for index, id := range ids {
+			checks[index] = pipe.Exists(ctx, source.strategyKeyStem+id)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: check legacy strategy documents: %w", err)
+	}
+	present := make([]bool, len(ids))
+	for index, check := range checks {
+		n, err := check.Result()
+		if err != nil {
+			return nil, fmt.Errorf("alarmd controlplane: check legacy strategy documents: %w", err)
+		}
+		present[index] = n > 0
+	}
+	return present, nil
+}
+
 // legacyStrategyOf is one strategy document as the source read it, or the
 // disposition that says why it cannot be used. The document is the copy
 // legacyRedisBytes made of the reply, so the reply is not kept.
