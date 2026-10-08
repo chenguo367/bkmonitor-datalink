@@ -38,7 +38,9 @@ type ReplicaSummary struct {
 // the budget -- with owned the whole owned set before the cut. The rows are
 // decided at the snapshot's TakenAt by the rule the health route decides a
 // view by, so a summary the replica makes and one the reader makes from the
-// same snapshot are the same.
+// same snapshot are the same, but for the running strategies: only the
+// replica's own snapshot says which strategies evaluate, as that list is not
+// written (Snapshot.EvaluatingStrategies).
 func SummaryOf(snapshot Snapshot, owned []string, stallAfter time.Duration) ReplicaSummary {
 	view := publishedView(snapshot, stallAfter)
 	part := ReplicaPartOf(view, snapshot.TakenAt)

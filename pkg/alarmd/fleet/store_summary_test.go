@@ -16,6 +16,7 @@ import (
 	"net"
 	"os/exec"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,6 +115,34 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 	if len(meter.summaries) != 1 || meter.summaries[0] != len(summary) || len(meter.summaryLoads) != 1 ||
 		meter.summaryLoads[0] != [2]int{1, len(summary)} || len(meter.ownedLoads) != 1 || meter.ownedLoads[0][0] != 1 {
 		t.Fatalf("meter %+v, want the summary's bytes written and each read counted", meter)
+	}
+}
+
+// The strategies a replica's objects evaluate are counted into the summary
+// it writes and are not written with its snapshot: no reader of a stored
+// snapshot needs them, and they would grow every write by one entry per
+// strategy.
+func TestASummarizedPublishCountsTheEvaluatingStrategiesWithoutWritingThem(t *testing.T) {
+	_, client := realRedis(t)
+	store := mustStore(t, client, time.Minute, 0)
+	snapshot := summarizedSnapshot("pod-a", 2)
+	snapshot.EvaluatingStrategies = []StrategyRef{{StrategyID: "854", BusinessID: "2"}, {StrategyID: "900", BusinessID: "2"}}
+	snapshot.EvaluatingStrategiesKnown = true
+	summary, err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute)
+	if err != nil || summary.Part.RunningStrategies == nil {
+		t.Fatalf("summary %+v error %v, want the running strategies counted", summary.Part, err)
+	}
+	raw := client.Get(context.Background(), store.snapshotKey("pod-a")).Val()
+	if raw == "" || strings.Contains(raw, "evaluating_strategies") {
+		t.Fatalf("snapshot written as %s, want it without the strategies list", raw)
+	}
+	stored := client.Get(context.Background(), store.summaryKey("pod-a")).Val()
+	if !strings.Contains(stored, `"running_strategies"`) {
+		t.Fatalf("summary written as %s, want the running strategies in it", stored)
+	}
+	written, err := store.Load(context.Background(), []string{"pod-a"})
+	if err != nil || len(written) != 1 || written[0].EvaluatingStrategiesKnown || written[0].EvaluatingStrategies != nil {
+		t.Fatalf("snapshot read back %+v error %v, want it saying nothing of its strategies", written, err)
 	}
 }
 

@@ -1679,10 +1679,13 @@ type Snapshot struct {
 	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
 	// EvaluatingStrategies is the strategies this replica has seen evaluate
 	// on the objects it holds, and EvaluatingStrategiesKnown that it says
-	// which: a snapshot without it, from a build before it, says nothing of
-	// them. Read only into the replica's summary, its running strategies.
-	EvaluatingStrategies      []StrategyRef `json:"evaluating_strategies,omitempty"`
-	EvaluatingStrategiesKnown bool          `json:"evaluating_strategies_known,omitempty"`
+	// which. Read only into the replica's summary, its running strategies,
+	// by the publish that makes it, and so not written: an entry per
+	// strategy rewritten on every publish, which no reader of the stored
+	// snapshot needs. A snapshot read back says nothing of them, and a
+	// summary a reader makes from one counts none.
+	EvaluatingStrategies      []StrategyRef `json:"-"`
+	EvaluatingStrategiesKnown bool          `json:"-"`
 	// LateSeries is the objects whose late series the lookback's supplements
 	// could not recover, of KindLatePastRound and KindLateSeriesMissed. In no
 	// column -- the rounds complete -- and listed because those series were
