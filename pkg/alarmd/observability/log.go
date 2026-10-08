@@ -558,6 +558,23 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			)
 		}
 	}
+	if facts := observation.RangeDistance; facts != nil {
+		// The numbers that sized a range given up on for distance: how far
+		// behind the head and past its own deadline, which of the two bounds
+		// held, how wide it was built and from which Slot. They were on the
+		// facts and on no line, so the line said the range was skipped and
+		// nothing a reader could check that by.
+		attributes = append(attributes,
+			slog.String("range_bound_by", facts.BoundBy),
+			slog.Int64("range_head_steps", facts.HeadSteps),
+			slog.Int64("range_deadline_steps", facts.DeadlineSteps),
+			slog.Int64("range_steps", facts.Steps),
+			slog.Uint64("range_slot_count", uint64(facts.SlotCount)),
+			slog.Int64("range_first_evaluation_time", facts.FirstEvaluationTime),
+			slog.Int64("range_interval_seconds", facts.IntervalSeconds),
+			slog.Uint64("range_max_replay_slots", uint64(facts.MaxReplaySlots)),
+		)
+	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		// The reason on every expiry, and the two compared instants on the one
 		// that reports a defect. A Slot that says only that it was skipped

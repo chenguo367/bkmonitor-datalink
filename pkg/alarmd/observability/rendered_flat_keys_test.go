@@ -71,6 +71,34 @@ func TestTheRangeGateBoundsAreOnTheRenderedLine(t *testing.T) {
 	}
 }
 
+// A range given up on for distance says what sized it: how far behind the
+// head and past its own deadline, which bound held, how wide it was built,
+// from which Slot and at what interval, against how many Slots a replay may
+// cover. Each value is distinct so a key rendered from the wrong field shows.
+func TestTheRangeDistanceFactsAreOnTheRenderedLine(t *testing.T) {
+	event := renderObservation(t, Observation{
+		Component: ComponentScheduler, Stage: StageRangeDistanceExpired, Result: ResultDegraded,
+		RangeDistance: &RangeDistanceFacts{
+			HeadSteps: 41, DeadlineSteps: 3, Steps: 5, SlotCount: 6, FirstEvaluationTime: 1700000060,
+			IntervalSeconds: 15, MaxReplaySlots: 7, BoundBy: RangeBoundByDeadline,
+		},
+	})
+	for key, want := range map[string]any{
+		"range_bound_by":              RangeBoundByDeadline,
+		"range_head_steps":            float64(41),
+		"range_deadline_steps":        float64(3),
+		"range_steps":                 float64(5),
+		"range_slot_count":            float64(6),
+		"range_first_evaluation_time": float64(1700000060),
+		"range_interval_seconds":      float64(15),
+		"range_max_replay_slots":      float64(7),
+	} {
+		if event[key] != want {
+			t.Errorf("line[%q] = %#v, want %#v; line=%#v", key, event[key], want, event)
+		}
+	}
+}
+
 // A refusal that never computed the bounds does not print them.
 //
 // Zeroes here would be two numbers that do not exist, and a reader dividing
