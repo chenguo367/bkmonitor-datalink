@@ -599,11 +599,6 @@ func (source *Source) executeWithPermit(
 ) (execution.ProviderCompletion, error) {
 	defer permit.Release()
 	observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "query_running"})
-	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-		if c.QueryCalled != nil {
-			c.QueryCalled(attempt)
-		}
-	})
 	completion, err := source.provider.Execute(ctx, attempt, adapter)
 	if err == nil && completion.Stats.NullIdentityFields > 0 {
 		// Bounded diagnostics marker: at least one declared identity dimension

@@ -300,7 +300,6 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 			current.NextSlot = currentNext
 		}
 	}
-	priorUnfinished := current.UnfinishedSlot != nil
 	projection := request.Projection
 	current.UnfinishedSlot = &projection
 	encoded, err := encode(current)
@@ -313,11 +312,6 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 	})
 	switch status {
 	case ownership.FencedCASApplied:
-		execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
-			if c.BeginCommitted != nil {
-				c.BeginCommitted(priorUnfinished)
-			}
-		})
 		return execution.ProgressBeginResult{Status: execution.ProgressCommitted}, nil
 	case ownership.FencedCASConflict:
 		return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
