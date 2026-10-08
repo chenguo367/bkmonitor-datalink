@@ -238,7 +238,10 @@ func (repository *RedisCatalogRepository) activeOpenSegmentsAt(
 		return err
 	}
 	if state.CutoverProgress != nil {
-		manifest, err := repository.LoadCatalogManifest(ctx, state.Current.SnapshotRevision)
+		// Every view and content round reads this while a cutover is in
+		// progress; the manifest's Query Groups are read once per revision,
+		// and the store is asked each time only whether it still holds it.
+		manifest, err := repository.retainedCatalogManifest(ctx, state.Current.SnapshotRevision)
 		if err != nil {
 			return err
 		}

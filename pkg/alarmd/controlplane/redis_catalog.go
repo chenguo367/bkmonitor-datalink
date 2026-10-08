@@ -284,7 +284,11 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 	if err != nil {
 		return err
 	}
-	if _, err := repository.LoadCatalogManifest(ctx, state.Current.SnapshotRevision); err != nil {
+	// Decoded once per revision and asked of the store on every round with
+	// an existence check: the whole manifest, most of a megabyte on a few
+	// thousand Query Groups, was read here on every refresh round only to be
+	// dropped.
+	if _, err := repository.retainedCatalogManifest(ctx, state.Current.SnapshotRevision); err != nil {
 		if errors.Is(err, ErrCatalogManifestUnavailable) {
 			return ErrSnapshotUnavailable
 		}

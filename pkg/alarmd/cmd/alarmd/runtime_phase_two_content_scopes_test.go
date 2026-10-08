@@ -108,9 +108,21 @@ func (source *fakeContentScopeSource) ActivationBlocked(context.Context) ([]cont
 	return source.blocked, nil
 }
 
-func (source *fakeContentScopeSource) LoadCatalogManifest(_ context.Context, revision execution.SnapshotRevision) (controlplane.CatalogManifest, error) {
-	source.asked = append(source.asked, revision)
-	return source.manifest, source.err
+// LoadPublishedContent gives the manifest's entries as the publication's
+// content, as the repository does, recording which revision was asked for.
+func (source *fakeContentScopeSource) LoadPublishedContent(
+	_ context.Context, publication controlplane.SnapshotPublicationRef,
+) (controlplane.PublishedContent, error) {
+	source.asked = append(source.asked, publication.SnapshotRevision)
+	if source.err != nil {
+		return controlplane.PublishedContent{}, source.err
+	}
+	content := controlplane.PublishedContent{Publication: publication,
+		Groups: make(map[execution.QueryGroupIdentity]controlplane.ContentEntry, len(source.manifest.QueryGroups))}
+	for _, entry := range source.manifest.QueryGroups {
+		content.Groups[entry.QueryGroup] = controlplane.ContentEntry{Digest: entry.ObjectDigest}
+	}
+	return content, nil
 }
 
 // The content a Query Group is published with is the ObjectDigest the

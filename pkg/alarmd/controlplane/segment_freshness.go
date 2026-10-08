@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -123,14 +124,11 @@ func (repository *RedisCatalogRepository) compareSegmentWithPublished(
 		}
 		return SegmentContentUnknown, ""
 	}
-	for _, group := range manifest.QueryGroups {
-		if group.QueryGroup != segment.QueryGroup {
-			continue
+	if published, found := manifestObjectDigest(manifest, segment.QueryGroup); found {
+		if published == segment.ObjectDigest {
+			return SegmentContentCurrent, published
 		}
-		if group.ObjectDigest == segment.ObjectDigest {
-			return SegmentContentCurrent, group.ObjectDigest
-		}
-		return SegmentContentStale, group.ObjectDigest
+		return SegmentContentStale, published
 	}
 	// The latest publication does not contain this Query Group at all. That is
 	// its own answer - the Segment is executing something the control plane no
@@ -138,6 +136,28 @@ func (repository *RedisCatalogRepository) compareSegmentWithPublished(
 	// and calling it stale would hide a Query Group that has been retired and
 	// is still running.
 	return SegmentContentUnknown, ""
+}
+
+// manifestObjectDigest is the object a manifest names for one Query Group.
+//
+// It runs once per frozen Slot, against a manifest of every Query Group of
+// the publication, so it is not a walk: the writer stores the entries in
+// Query Group order (objectCatalogContent), and the entry is found by
+// halving. A miss walks the entries before it answers, so a manifest that is
+// not in that order still answers as the walk always did; a miss is a Query
+// Group the publication no longer names, which is the rare case.
+func manifestObjectDigest(manifest CatalogManifest, queryGroup execution.QueryGroupIdentity) (execution.ObjectDigest, bool) {
+	groups := manifest.QueryGroups
+	at := sort.Search(len(groups), func(index int) bool { return groups[index].QueryGroup >= queryGroup })
+	if at < len(groups) && groups[at].QueryGroup == queryGroup {
+		return groups[at].ObjectDigest, true
+	}
+	for _, group := range groups {
+		if group.QueryGroup == queryGroup {
+			return group.ObjectDigest, true
+		}
+	}
+	return "", false
 }
 
 // ObserveSegmentContentFreshnessForTest drives the freshness comparison for a
