@@ -190,7 +190,7 @@ func startShortPeriodFixture(t *testing.T) *shortPeriodFixture {
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: fixture.now, HTTPClient: uqServer.Client(), AdditionalObserver: additionalObserver,
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil },
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) { return events, nil }),
 		},
 	)
 	if err != nil {

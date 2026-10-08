@@ -243,9 +243,9 @@ func newExpiredRangeProductionBundle(t *testing.T, response http.HandlerFunc, ob
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
 		},
-		phaseTwoProductionExternalDependencies{Now: func() time.Time { return time.UnixMilli(clock.Load()) }, HTTPClient: server.Client(), AdditionalObserver: observer, OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+		phaseTwoProductionExternalDependencies{Now: func() time.Time { return time.UnixMilli(clock.Load()) }, HTTPClient: server.Client(), AdditionalObserver: observer, PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 			return events, nil
-		}})
+		})})
 	if err != nil {
 		t.Fatal(err)
 	}

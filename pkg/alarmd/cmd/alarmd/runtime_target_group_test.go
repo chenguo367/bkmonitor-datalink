@@ -69,9 +69,9 @@ func TestTargetGroupProductionConnection(t *testing.T) {
 					}
 					return controlplane.NewLegacyRedisStrategySource(client, prefix)
 				}, phaseTwoProductionExternalDependencies{Now: time.Now, HTTPClient: http.DefaultClient,
-					OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+					PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 						return &recordingPhaseTwoEventSink{}, nil
-					},
+					}),
 				})
 			if mode == "initialization_failure" {
 				if err == nil || !strings.Contains(err.Error(), "injected source initialization failure") {

@@ -362,12 +362,31 @@ func TestPrepareTriggerEventSinkRefusesBadCoordinatesWithoutDialing(t *testing.T
 		t.Fatalf("PrepareTriggerEventSink(bad version) error = %v, want a broker_version refusal", err)
 	}
 	external := defaultPhaseTwoProductionExternalDependencies()
-	if _, err := external.prepareEvents(coordinates); err == nil {
+	if _, err := external.PrepareEvents(coordinates); err == nil {
 		t.Fatal("the production hook prepared a sink from coordinates the client configuration refuses")
 	}
 	// Good coordinates prepare without touching the network; only Open does.
 	good := validGoAccessRuntimeConfig().Kafka.TriggerEventCoordinates()
-	if _, err := external.prepareEvents(good); err != nil {
-		t.Fatalf("prepareEvents(good) error = %v", err)
+	if _, err := external.PrepareEvents(good); err != nil {
+		t.Fatalf("PrepareEvents(good) error = %v", err)
+	}
+	// The tests' hook refuses the same coordinates: it is the production
+	// hook with only the connection stood in.
+	if _, err := preparedEvents(nil)(coordinates); err == nil {
+		t.Fatal("the tests' hook prepared a sink from coordinates production refuses")
+	}
+}
+
+// preparedEvents is the production PrepareEvents hook with the connection
+// stood in: the coordinates are prepared as production prepares them, and
+// the opener returns open's sink instead of dialling the brokers.
+func preparedEvents(
+	open func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error),
+) func(enginekafka.DecisionSinkConfig) (outputSinkOpener, error) {
+	return func(coordinates enginekafka.DecisionSinkConfig) (outputSinkOpener, error) {
+		if _, err := enginekafka.PrepareTriggerEventSink(coordinates); err != nil {
+			return nil, err
+		}
+		return outputSinkOpenerFunc(func() (productionPhaseTwoEventSink, error) { return open(coordinates) }), nil
 	}
 }

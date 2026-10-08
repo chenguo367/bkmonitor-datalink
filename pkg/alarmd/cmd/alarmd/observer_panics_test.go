@@ -59,9 +59,9 @@ func TestTheProductionFanOutCountsAPanickingObserverByName(t *testing.T) {
 			AdditionalObserver: observability.ObserverFunc(func(context.Context, observability.Observation) {
 				panic("observer defect")
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {

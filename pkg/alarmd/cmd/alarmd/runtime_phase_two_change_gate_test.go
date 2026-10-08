@@ -80,9 +80,9 @@ func TestProductionPhaseTwoRefreshReusesItsObservationWhileTheSourceSignalsNoCha
 				defer refreshMu.Unlock()
 				refreshes = append(refreshes, *observation.SourceRefresh)
 			}),
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 	if err != nil {

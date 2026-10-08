@@ -93,9 +93,9 @@ func (f *startupWaitFixture) open(ctx context.Context) (*phaseTwoWorkerBundle, e
 		},
 		phaseTwoProductionExternalDependencies{
 			Now: time.Now, HTTPClient: f.uq.Client(), StartupWaitInitial: 20 * time.Millisecond,
-			OpenEvents: func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
+			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return &recordingPhaseTwoEventSink{}, nil
-			},
+			}),
 		},
 	)
 }
