@@ -117,7 +117,7 @@ func TestIndexPartialAndLocalAcknowledgements(t *testing.T) {
 	cache := mustIndex(t, options)
 	_ = cache.SetTracked([]StrategyKey{keyA})
 	cache.Refresh(context.Background())
-	if !cache.Contains(tenant, keyA.StrategyID, "fp") || cache.Stats().Calibrated != 0 || cache.Stats().Mode != ModeSelfMaintained {
+	if !cache.Contains(tenant, keyA.StrategyID, "fp") || cache.Stats().Calibrated != 0 {
 		t.Fatal("uncalibrated index claimed authoritative")
 	}
 	readFail = true

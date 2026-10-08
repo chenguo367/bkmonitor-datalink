@@ -576,10 +576,9 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 	cfg.Redis.DB = 8
 	cfg.Redis.StatePrefix = "alarmd:phase2:g2:runtime:v1"
 	sharing := endpointSharing{runtimeIsSource: false}
-	heartbeat, members := 42.0, 517
-	account := &fleet.OpenAlertSetFacts{Mode: "self_maintained", Available: false, UnavailableReason: "heartbeat_stale",
-		HeartbeatAgeSeconds: &heartbeat, CycleSeconds: 60, FingerprintVersion: "md5_v1", ReaderFingerprintVersion: "md5_v1",
-		TrackedSets: 6, LoadedSets: 6, Members: members, Lookups: map[string]uint64{"authoritative_member": 3, "self_maintained": 1}}
+	members := 517
+	account := &fleet.OpenAlertSetFacts{Available: false, UnavailableReason: "read_error",
+		TrackedSets: 6, LoadedSets: 6, Members: members, Lookups: map[string]uint64{"index_member": 3, "self_maintained": 1}}
 	loaded := 300.0
 	account.AuthoritativeAgeSeconds = &loaded
 	facts := endpointFactsSource(cfg, sharing, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil,
@@ -600,19 +599,10 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 	if row.Prefix == cfg.Redis.StatePrefix || strings.HasPrefix(row.Prefix, cfg.Redis.StatePrefix) {
 		t.Fatalf("prefix %q is derived from the state prefix; the contract's prefix is fixed so the writer need not learn this deployment's configuration", row.Prefix)
 	}
-	if row.Writer == nil || !row.Writer.Present || row.Writer.Count != members || row.Writer.AgeSeconds == nil || *row.Writer.AgeSeconds != heartbeat ||
-		row.Writer.State != "self_maintained:heartbeat_stale" {
-		t.Fatalf("writer = %+v, want present, %d members, the publisher's heartbeat %.0f s old, the mode with why it is unavailable", row.Writer, members, heartbeat)
-	}
-	if row.OpenAlertSet != account {
-		t.Fatalf("the full account is not on the row: %+v", row.OpenAlertSet)
-	}
-	never := &fleet.OpenAlertSetFacts{Mode: "never_loaded", ReaderFingerprintVersion: "md5_v1", Lookups: map[string]uint64{"passed_through": 9}}
-	for _, entry := range endpointFactsSource(cfg, sharing, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil,
-		func() *fleet.OpenAlertSetFacts { return never }, time.Now)() {
-		if entry.Role == fleet.EndpointOpenAlertSet && (entry.Writer == nil || entry.Writer.Present || entry.Writer.AgeSeconds != nil || entry.Writer.State != "never_loaded") {
-			t.Fatalf("a copy that never loaded = %+v, want absent, no age, the mode as the state", entry.Writer)
-		}
+	// No writer row: the consumer publishes no heartbeat, and a read is not
+	// evidence of a recent writer. The account rides on the row whole.
+	if row.Writer != nil || row.OpenAlertSet != account {
+		t.Fatalf("row writer %+v account %+v, want no writer and the full account", row.Writer, row.OpenAlertSet)
 	}
 	for _, entry := range endpointFactsSource(cfg, sharing, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil, nil, time.Now)() {
 		if entry.Role == fleet.EndpointOpenAlertSet && (entry.Writer != nil || entry.OpenAlertSet != nil || !entry.Configured) {
@@ -624,7 +614,7 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 func TestOpenAlertIndexReadDoesNotBecomeWriterHeartbeat(t *testing.T) {
 	cfg := config.Default()
 	age := 2.0
-	account := &fleet.OpenAlertSetFacts{IndexProtocol: true, IndexReadAgeSeconds: &age, SubscriptionReady: true, Members: 3}
+	account := &fleet.OpenAlertSetFacts{IndexReadAgeSeconds: &age, SubscriptionReady: true, Members: 3}
 	rows := endpointFactsSource(cfg, endpointSharing{}, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil, func() *fleet.OpenAlertSetFacts { return account }, time.Now)()
 	for _, row := range rows {
 		if row.Role == fleet.EndpointOpenAlertSet {

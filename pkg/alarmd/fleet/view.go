@@ -2178,20 +2178,18 @@ type ControlSourceFacts struct {
 
 // OpenAlertSetFacts is what a replica says about its copy of the consumer's
 // open alert set -- the fingerprints of the series the consumer holds an
-// open alert on, published by the consumer under a fixed key contract and
-// read by every replica to decide whether a recovery has anything to
-// recover. Mode is one of never_loaded, authoritative and self_maintained.
-// StaleBeyondBound is the one fact the verdict reads: the copy had the
-// consumer's publication and has been without it for longer than the
-// staleness bound, so the gate has been working from the replica's own
-// knowledge past the exposure it was designed for. A copy that never loaded
-// is not stale -- the publisher may not be deployed -- and the mode says so
-// without degrading anything.
+// open alert on, kept in the consumer's index and read by every replica to
+// decide whether a recovery has anything to recover. StaleBeyondBound is the
+// one fact the verdict reads: a set calibrated once has gone without a
+// calibration for longer than the bound, so the gate has been working from
+// the replica's own knowledge past the exposure it was designed for. A set
+// never calibrated is not stale -- the reconciler may not be bound, which
+// CalibrationConfigured says -- and degrades nothing.
 //
-// The rest is the reader's account of the publisher, for the dependency
-// table: a deployment whose dependency list named every Redis and Kafka it
-// touched had no row for this one, so whether the consumer's publication was
-// there at all -- and whether the gate was passing recoveries on the
+// The rest is the reader's account of the consumer's sets, for the
+// dependency table: a deployment whose dependency list named every Redis and
+// Kafka it touched had no row for this one, so whether the consumer's sets
+// were there at all -- and whether the gate was passing recoveries on the
 // consumer's word or on its own -- could not be read anywhere.
 // GateLookupFact is one recovery-gate lookup as the replica kept it: the
 // key it was asked, its answer and decision, whether it was the replica's
@@ -2209,7 +2207,6 @@ type GateLookupFact struct {
 }
 
 type OpenAlertSetFacts struct {
-	IndexProtocol bool `json:"index_protocol,omitempty"`
 	// CalibrationConfigured is whether a reconciler is bound; false is a
 	// reading, not an absence: with the index protocol and no calibration,
 	// membership is known and no close is ever sent.
@@ -2220,27 +2217,16 @@ type OpenAlertSetFacts struct {
 	PendingReads          int      `json:"pending_reads,omitempty"`
 	PendingReconciles     int      `json:"pending_reconciles,omitempty"`
 	MemberBytes           int      `json:"member_bytes,omitempty"`
-	Mode                  string   `json:"mode"`
 	StaleBeyondBound      bool     `json:"stale_beyond_bound"`
-	// AuthoritativeAgeSeconds is how long ago the last publication was read.
-	// Absent until there has been one; a zero here would read as "just now".
+	// AuthoritativeAgeSeconds is how long ago the oldest calibration among
+	// the tracked sets completed. Absent until one has; a zero here would
+	// read as "just now".
 	AuthoritativeAgeSeconds *float64 `json:"authoritative_age_seconds,omitempty"`
-	// Available says the copy is answering from a fresh publication now;
+	// Available says the copy is answering from the consumer's sets now;
 	// UnavailableReason why not, in the reader's closed words (read_error,
-	// heartbeat_missing, heartbeat_unreadable, heartbeat_stale,
-	// fingerprint_version), empty while available or never loaded.
+	// members_disjoint), empty while available.
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
-	// The publisher's heartbeat as last read: how old its last cycle is by
-	// its own clock, its cycle length, and the fingerprint version it
-	// computed the members under -- beside the version this reader computes
-	// under, because the two disagreeing is a publication every lookup
-	// misses, which reads exactly like "no open alert". Absent until a
-	// heartbeat has been read.
-	HeartbeatAgeSeconds      *float64 `json:"heartbeat_age_seconds,omitempty"`
-	CycleSeconds             int64    `json:"cycle_seconds,omitempty"`
-	FingerprintVersion       string   `json:"fingerprint_version,omitempty"`
-	ReaderFingerprintVersion string   `json:"reader_fingerprint_version"`
 	// TrackedSets is how many strategies this replica asks the publication
 	// about, LoadedSets how many of those the last publication covered, and
 	// Members the fingerprints held across them.

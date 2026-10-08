@@ -1326,8 +1326,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"message: the set was not asked and the envelope is not built; output_events_without_message_total " +
 			"counts it). " +
 			"It counts records per evaluation, not alerts. Which of passed and held_no_open_alert " +
-			"dominates says nothing on its own; read it against open_alert_set_mode, because in " +
-			"self_maintained mode the set is this process's own knowledge.",
+			"dominates says nothing on its own; read it against open_alert_set_lookup_total, whose " +
+			"self_maintained and passed_through answers are this process's own knowledge, not the consumer's.",
 	}, []string{"outcome"})
 	for _, outcome := range observability.OpenAlertGateOutcomes {
 		metrics.openAlertGate.WithLabelValues(string(outcome))

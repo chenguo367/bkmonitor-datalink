@@ -21,7 +21,7 @@ import (
 // off a missing series.
 func TestOurAlertsAgainstTheSetsAreScrapedAsTwoCountsAndAState(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	stats := openalerts.Stats{Mode: openalerts.ModeSelfMaintained}
+	stats := openalerts.Stats{}
 	r.SetOpenAlertSetSource(func() openalerts.Stats { return stats })
 	read := func() (map[string]float64, float64) {
 		sent := map[string]float64{}

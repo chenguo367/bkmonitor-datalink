@@ -73,7 +73,6 @@ func (cache *Cache) departureStats(stats *Stats) {
 	for _, path := range SentDepartures {
 		stats.SentDepartures[path] = cache.sentDepartures[path]
 	}
-	stats.OwnOpenKnown = true
 	stats.OwnOpen = len(cache.index.opened)
 	stats.OwnOpenRefusals = cache.openRefusals
 	stats.OwnOpenDepartures = make(map[string]uint64, len(OwnOpenDepartures))

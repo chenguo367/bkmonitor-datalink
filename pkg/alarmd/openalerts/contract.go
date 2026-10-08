@@ -20,19 +20,10 @@
 // DisjointMinimum), and the gate answers by the UnavailablePolicy instead.
 package openalerts
 
-import (
-	"time"
+import "time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
-)
-
-const (
-	// FingerprintVersion is the algorithm this reader computes fingerprints
-	// under, published beside the copy's facts.
-	FingerprintVersion = contract.MonitorDedupeMD5Version
-	// RefreshInterval is how often the runtime runs Refresh.
-	RefreshInterval = time.Minute
-)
+// RefreshInterval is how often the runtime runs Refresh.
+const RefreshInterval = time.Minute
 
 // StrategyKey identifies one strategy's set.
 type StrategyKey struct {
