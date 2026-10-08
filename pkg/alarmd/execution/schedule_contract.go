@@ -498,35 +498,6 @@ func (fact InitialScheduleActivationFact) Validate(schedule FrozenQueryGroupSche
 	return nil
 }
 
-// ScheduleCutoverFact atomically closes OldSegment and opens NewSegment at one
-// boundary. It records immutable facts and does not introduce a state machine.
-type ScheduleCutoverFact struct {
-	OldSegment ScheduleSegmentFact
-	NewSegment ScheduleSegmentFact
-}
-
-func (fact ScheduleCutoverFact) Validate(oldSchedule, newSchedule FrozenQueryGroupSchedule) error {
-	if err := oldSchedule.Validate(); err != nil {
-		return err
-	}
-	if err := newSchedule.Validate(); err != nil {
-		return err
-	}
-	if !sameScheduleSegment(fact.OldSegment, oldSchedule.Segment) ||
-		!sameScheduleSegment(fact.NewSegment, newSchedule.Segment) {
-		return errors.New("alarmd execution: cutover Segments do not match frozen schedules")
-	}
-	if fact.OldSegment.QueryGroup != fact.NewSegment.QueryGroup || fact.OldSegment.End == nil ||
-		*fact.OldSegment.End != fact.NewSegment.Start || fact.NewSegment.End != nil {
-		return errors.New("alarmd execution: cutover requires adjacent half-open Segments on one Query Group timeline")
-	}
-	if fact.NewSegment.Publication.PublicationEpoch <= fact.OldSegment.Publication.PublicationEpoch ||
-		fact.NewSegment.Publication.SnapshotRevision == fact.OldSegment.Publication.SnapshotRevision {
-		return errors.New("alarmd execution: cutover publication must advance content and epoch")
-	}
-	return nil
-}
-
 // FreezeSlotContractRequest is the exact Scheduler-to-Catalog request. It has
 // no latest selector, local time, ownership, assignment or execution identity.
 type FreezeSlotContractRequest struct {

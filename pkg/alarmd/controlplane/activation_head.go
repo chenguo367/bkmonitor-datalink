@@ -144,16 +144,6 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 	return nil
 }
 
-// openSegmentRefs is the output context refs in force on a Segment: the
-// last revision's when it has any, else the ones it opened with.
-func openSegmentRefs(segment persistedScheduleSegment) []execution.OutputContextRef {
-	refs := segment.Schedule.Segment.OutputContextRefs
-	if count := len(segment.Schedule.Segment.OutputContextRevisions); count > 0 {
-		refs = segment.Schedule.Segment.OutputContextRevisions[count-1].Refs
-	}
-	return refs
-}
-
 // activeOpenSegmentsAt reads the open Segments of the activation's active
 // set, under a header the caller already read. A draining Query Group has
 // retired its timeline and has no open Segment, so it is not asked about.

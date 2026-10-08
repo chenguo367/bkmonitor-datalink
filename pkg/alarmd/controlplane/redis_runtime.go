@@ -1399,11 +1399,6 @@ func activationRecordsForSchedule(state ActivationState, schedule execution.Froz
 	return records, nil
 }
 
-func openVersion(segment execution.ScheduleSegmentFact) execution.ScheduleSegmentFact {
-	segment.End = nil
-	return segment
-}
-
 // scheduleSegmentForGroup opens the Segment a Query Group runs under from
 // start, naming the execution content and the per-Plan output contexts it
 // was activated with so a Worker can read them by content.
@@ -1736,12 +1731,6 @@ func (repository *RedisCatalogRepository) queryGroupDrained(
 		}
 	}
 	return true, nil
-}
-
-func sameFrozenSchedule(left, right execution.FrozenQueryGroupSchedule) bool {
-	leftPayload, leftErr := json.Marshal(left)
-	rightPayload, rightErr := json.Marshal(right)
-	return leftErr == nil && rightErr == nil && string(leftPayload) == string(rightPayload)
 }
 
 func validateScheduleTimeline(timeline persistedScheduleTimeline) error {
