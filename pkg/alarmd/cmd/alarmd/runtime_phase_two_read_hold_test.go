@@ -352,3 +352,54 @@ func TestRuntimeAPreparedGroupKeepsWhatItsSuggestionIsReckonedBy(t *testing.T) {
 			kept.queryDelay, kept.queryStep, kept.settlingWait, kept.settled, spec.Delay, spec.SettlingWait, object.QueryPlan.StepMillis)
 	}
 }
+
+// A Plan detected more often than its query aggregates has a schedule
+// shorter than its data step. Its hold is still lowered by the data step:
+// the early read computes its candidate by that step, and the controller
+// drops evidence whose candidate differs from its own, so a controller
+// lowering by the schedule would never lower such a group's hold.
+func TestRuntimeAHoldIsLoweredByTheQuerysDataStepNotTheSchedules(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	holds := f.bundle.dependencies.ReadHolds
+	object, err := f.repository.LoadQueryGroupObject(ctx, f.initialSchedule.Segment.ObjectDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataStep := time.Duration(object.QueryPlan.StepMillis) * time.Millisecond
+	faster := f.initialSchedule
+	faster.Plans = append([]execution.FrozenPlanSchedule(nil), faster.Plans...)
+	for index := range faster.Plans {
+		faster.Plans[index].Spec.EvaluationIntervalSeconds = int64(dataStep/time.Second) / 4
+	}
+	spec, err := holds.spec(ctx, faster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dataStep <= 0 || spec.Step != dataStep {
+		t.Fatalf("lowering step %v for Plans every %ds, want the query's data step %v", spec.Step, faster.Plans[0].Spec.EvaluationIntervalSeconds, dataStep)
+	}
+	hold := 4 * dataStep
+	if early, controller := execution.LoweredReadHold(hold, dataStep), execution.LoweredReadHold(hold, spec.Step); early != controller {
+		t.Fatalf("the early read lowers %v to %v and the controller to %v", hold, early, controller)
+	}
+}
+
+// A held group's suggested time_delay is rounded as its delay was: to the
+// data step, or for a query read unaligned to the shorter schedule step its
+// delay was rounded to. Rounded to the data step, a group detected every
+// fifteen seconds would be told a delay its read-early advice does not give,
+// and the larger of the two wins.
+func TestRuntimeAHeldGroupsSuggestionIsRoundedAsItsDelayWas(t *testing.T) {
+	record := readhold.Record{ArrivalAgeMillis: 40_000}
+	for _, test := range []struct {
+		unit time.Duration
+		want int64
+	}{{unit: 0, want: 60}, {unit: time.Minute, want: 60}, {unit: 15 * time.Second, want: 45}} {
+		basis := readHoldBasis{delay: 30 * time.Second, step: time.Minute, unit: test.unit}
+		if got := basis.suggestion(record); got != test.want {
+			t.Fatalf("unit %v: suggestion %d, want %d", test.unit, got, test.want)
+		}
+	}
+}

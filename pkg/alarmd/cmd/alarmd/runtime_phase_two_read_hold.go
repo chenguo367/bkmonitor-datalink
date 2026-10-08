@@ -76,7 +76,13 @@ type productionReadHoldGroup struct {
 	// suggestion to, and settlingWait the newest prepared Segment's spec's,
 	// cached with the delay for the time_delay a measured hold suggests
 	// (fleetFacts); settled says a Segment was prepared.
-	queryStep      time.Duration
+	queryStep time.Duration
+	// queryUnaligned is a query read from where its request starts, a Plan
+	// detected more often than it aggregates; delayUnit is what its delay
+	// was rounded to, the data step or, for such a query, its Plans'
+	// shortest step when shorter.
+	queryUnaligned bool
+	delayUnit      time.Duration
 	settlingWait   time.Duration
 	settled        bool
 	degradedLogged readHoldDegradedLine
@@ -169,18 +175,18 @@ func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {
 // renders with, and a Segment whose output contexts were revised outlives
 // its first contexts and its first manifest. Reading them here refused every
 // Slot of such a Segment once they had passed their retention.
-func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (string, time.Duration, error) {
+func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (string, time.Duration, time.Duration, error) {
 	qg := schedule.Segment.QueryGroup
 	holds.mu.Lock()
 	owned := holds.groups[qg]
 	var route string
-	var delay time.Duration
+	var delay, step time.Duration
 	if owned != nil {
-		route, delay = owned.queryRoute, owned.queryDelay
+		route, delay, step = owned.queryRoute, owned.queryDelay, owned.queryStep
 	}
 	holds.mu.Unlock()
 	if route != "" {
-		return route, delay, nil
+		return route, delay, step, nil
 	}
 	// A Segment without the object -- one named by no digest, or pruned --
 	// gives no route: the hold is degraded (spec_unreadable), not stopped.
@@ -193,35 +199,37 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 		}
 	}
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	route, err = readHoldRoute(object.QueryPlan)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	delay = time.Duration(object.QueryPlan.QueryDelaySeconds) * time.Second
+	step = time.Duration(object.QueryPlan.StepMillis) * time.Millisecond
 	holds.mu.Lock()
 	if owned != nil && holds.groups[qg] == owned {
-		owned.queryRoute, owned.queryDelay = route, delay
-		owned.queryStep = time.Duration(object.QueryPlan.StepMillis) * time.Millisecond
+		owned.queryRoute, owned.queryDelay, owned.queryStep = route, delay, step
+		owned.queryUnaligned = object.QueryPlan.NotTimeAlign
 	}
 	holds.mu.Unlock()
-	return route, delay, nil
+	return route, delay, step, nil
 }
 
 func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (readhold.GroupSpec, error) {
-	route, delay, err := holds.queryBasis(ctx, schedule)
+	route, delay, step, err := holds.queryBasis(ctx, schedule)
 	if err != nil {
 		return readhold.GroupSpec{}, err
 	}
-	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule)}
+	// The step a hold is lowered by is the query's data step, the one the
+	// early read lowers by: the two compare their candidates and drop the
+	// evidence when they differ, so a Plan detected more often than it
+	// aggregates, whose schedule is shorter than its data step, would never
+	// have its hold lowered if this were the schedule's.
+	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule), Step: step}
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key(), Route: route})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
-		step := time.Duration(plan.Spec.EvaluationIntervalSeconds) * time.Second
-		if len(spec.Plans) == 1 || step < spec.Step {
-			spec.Step = step
-		}
 		wait := execution.SettlingWaitWithinQueryBudget(offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
@@ -406,6 +414,12 @@ func (holds *productionReadHolds) PrepareSchedule(ctx context.Context, schedule 
 	// before here.
 	holds.mu.Lock()
 	group.settlingWait, group.settled = spec.SettlingWait, true
+	group.delayUnit = group.queryStep
+	if group.queryUnaligned {
+		for _, plan := range schedule.Plans {
+			group.delayUnit = min(group.delayUnit, time.Duration(plan.Spec.EvaluationIntervalSeconds)*time.Second)
+		}
+	}
 	holds.mu.Unlock()
 	return nil
 }

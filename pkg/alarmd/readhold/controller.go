@@ -179,8 +179,8 @@ type GroupSpec struct {
 	// HoldLimit is snapshot retention minus its existing minimum lifetime.
 	// Zero means no margin, not an unset limit.
 	HoldLimit time.Duration
-	// Step is the shortest evaluation interval of its Plans, below which a
-	// lowering goes to zero (execution.LoweredReadHold).
+	// Step is the query's data step, below which a lowering goes to zero
+	// (execution.LoweredReadHold): the step the early read lowers by too.
 	Step     time.Duration
 	Previous []Previous
 }

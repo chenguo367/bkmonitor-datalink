@@ -103,6 +103,12 @@ func queryLookback(facts execution.QueryPlanFacts) (time.Duration, bool) {
 		if !ok {
 			return 0, false
 		}
+		// A backward offset reads further back; a forward one - the shift a
+		// Plan detected more often than it aggregates labels its buckets
+		// with - reads later data for the same bucket, so less far back.
+		if clause.OffsetForward == "true" {
+			offset = -offset
+		}
 		longest = max(longest, window+functions+offset)
 	}
 	return longest, true

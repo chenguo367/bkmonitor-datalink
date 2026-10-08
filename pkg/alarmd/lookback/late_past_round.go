@@ -228,8 +228,8 @@ func latePastRoundOf(queryGroup execution.QueryGroupIdentity, state *group) (Lat
 		later = max(later, sample.SeenAgeSeconds)
 	}
 	suggested := run.delaySeconds + later
-	if step > 0 {
-		suggested = (suggested + step - 1) / step * step
+	if unit := int64(state.delayUnit / time.Second); unit > 0 {
+		suggested = (suggested + unit - 1) / unit * unit
 	}
 	return LatePastRoundReading{QueryGroup: queryGroup, Source: state.source, StepSeconds: step,
 		CurrentDelaySeconds: run.delaySeconds, SuggestedDelaySeconds: suggested, Since: run.since,

@@ -268,6 +268,11 @@ type Engine struct {
 type group struct {
 	source string
 	step   time.Duration
+	// delayUnit is what the query's delay was rounded up to, and what a
+	// suggested delay is rounded to: the data step, or for a query read
+	// unaligned - a Plan detected more often than it aggregates - its
+	// schedule's step when that is shorter (controlplane queryDelayUnit).
+	delayUnit time.Duration
 	// depth is how many rungs its sample reads, rest how long it rests
 	// between two samples, in its steps, clean its samples in a row that
 	// needed less than depth and cleanNeed the most any of them needed.
@@ -458,6 +463,7 @@ func (engine *Engine) Begin(query Query) *Read {
 		state.lastSlot = slot.EvaluationTime
 	}
 	state.source, state.step = source, step
+	state.delayUnit = delayUnitOf(facts, step, slot.EvaluationTime, query.FollowingSlot)
 	if state.seriesLate != nil && engine.options.Supplement != nil {
 		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
 	}
@@ -569,6 +575,14 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		// where a window reaches further back than that.
 		engine.counts.unknownLookback[read.source]++
 		lookback = read.step
+	}
+	if read.query.Spec.PlanFacts.NotTimeAlign && read.step > 0 {
+		// An unaligned query buckets from where its request starts, so a
+		// tail read that starts anywhere but a whole number of data steps
+		// before the kept tail reads every bucket at another phase than the
+		// first read did, and every one of them reads as changed. An aligned
+		// query is aligned by the query service and does not need it.
+		lookback = (lookback + read.step - 1) / read.step * read.step
 	}
 	keptFrom := read.keptFrom
 	engine.nextID++
@@ -1122,4 +1136,16 @@ func (sink *recheckSink) ConsumeProviderSeries(_ context.Context, batch executio
 	sink.bytes += batch.Delivery.Bytes
 	sink.summary.add(batch.Dataset)
 	return nil
+}
+
+// delayUnitOf is the unit a Query Group's delay is rounded to. An aligned
+// query rounds to its data step. An unaligned one is a Plan detected every
+// schedule step over windows a data step long, and rounds to the schedule's
+// step when that is the shorter, which the next Slot of its frozen schedule
+// says without another read.
+func delayUnitOf(facts execution.QueryPlanFacts, step time.Duration, slot, following execution.EvaluationTime) time.Duration {
+	if !facts.NotTimeAlign || following <= slot {
+		return step
+	}
+	return min(step, time.Duration(following-slot)*time.Second)
 }

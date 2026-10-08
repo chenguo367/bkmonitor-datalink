@@ -314,8 +314,8 @@ func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarly
 		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadyAgeSeconds+sample.ReadHoldSeconds)
 	}
 	suggested := run.delaySeconds + later
-	if step > 0 {
-		suggested = (suggested + step - 1) / step * step
+	if unit := int64(state.delayUnit / time.Second); unit > 0 {
+		suggested = (suggested + unit - 1) / unit * unit
 	}
 	return ReadEarlyReading{QueryGroup: queryGroup, Source: state.source, StepSeconds: step,
 		CurrentDelaySeconds: run.delaySeconds, SuggestedDelaySeconds: suggested, Since: run.since,
