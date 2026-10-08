@@ -40,6 +40,10 @@ var removedFamilies = []string{
 	// phase-one stages reported a volume, and none of them is emitted.
 	"observed_messages_total", "observed_records_total", "observed_plans_total", "observed_levels_total",
 	"observed_events_total", "observed_bytes_total", "observed_keys_total", "observed_state_bytes_total",
+	// The one-time upgrade of a v1 activation body, which no release wrote;
+	// such a body is refused now, not upgraded.
+	"legacy_active_qg_migration_total", "legacy_active_qg_migration_scan_keys",
+	"legacy_active_qg_migration_duration_seconds",
 }
 
 // A removed family is registered nowhere, bound or not.
