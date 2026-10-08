@@ -213,3 +213,31 @@ func TestSlotGetSetsTheLatestPublicationBesideTheSlotsOwn(t *testing.T) {
 		t.Fatalf("a latest publication was claimed with no reader: %+v", view)
 	}
 }
+
+// slot.get says the read hold the Slot was frozen with and where it was read
+// from; a zero read from no record says what it rests on, and one from a
+// record does not.
+func TestSlotGetSaysTheReadHoldAndWhereItWasReadFrom(t *testing.T) {
+	plan := slotFixture(t)
+	client, err := uq.NewDiagnosticClient("http://127.0.0.1:1", "fixture", http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		basis  string
+		hold   int64
+		caveat bool
+	}{{ReadHoldNoRecord, 0, true}, {ReadHoldFromRecord, 60_000, false}, {ReadHoldFromProgress, 0, false}} {
+		plan.ReadHoldBasis, plan.Contract.ReadHoldMillis = tc.basis, tc.hold
+		get := SlotOperations(SlotOptions{Resolve: func(context.Context, execution.SlotIdentity) (SlotPlan, error) { return plan, nil }, UQ: client})[0]
+		out := get.Run(context.Background(), jsonParams(t, slotParams(slotContext(plan))))
+		view := out.Value.(SlotGetResult)
+		if view.Slot.ReadHoldMillis != tc.hold || view.Slot.ReadHoldBasis != tc.basis {
+			t.Fatalf("%s: slot %+v, want hold %d read from %s", tc.basis, view.Slot, tc.hold, tc.basis)
+		}
+		said := strings.Contains(strings.Join(out.Limitations, "\n"), "keeps no read hold record")
+		if said != tc.caveat {
+			t.Fatalf("%s: limitations %v, want the no-record caveat %t", tc.basis, out.Limitations, tc.caveat)
+		}
+	}
+}
