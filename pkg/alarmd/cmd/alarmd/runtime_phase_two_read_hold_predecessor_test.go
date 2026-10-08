@@ -207,9 +207,7 @@ func TestAMissingPredecessorRecordIsZero(t *testing.T) {
 	if n, _ := f.redisClient.Exists(context.Background(), holdRecordKey(f, old)).Result(); n != 0 {
 		t.Fatal("a zero group kept a record; the fixture does not test a missing one")
 	}
-	// An unreadable Progress must not matter: it is not read.
 	holds := f.bundle.dependencies.ReadHolds
-	holds.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
 	after := restartUntilFull(t, f, next)
 	if predecessorCount(f, readhold.PredecessorZero) == 0 || after.LastCompletion == nil || after.LastCompletion.Contract.ReadHoldMillis != 0 {
 		t.Fatalf("a missing predecessor record was not read as zero: %v %+v", holds.controller.Stats().Predecessors, after.LastCompletion)
@@ -227,7 +225,7 @@ func TestAnOpenPredecessorRecordIsReadAsTheBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	open := readhold.Record{SinceSlot: 1, HoldMillis: 150_000, ArrivalAgeMillis: 400_000, SegmentStart: f.initialSchedule.Segment.Start,
-		Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0], ArrivalAgeMillis: 400_000}}}
+		Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0]}}}
 	raw, err := json.Marshal(open)
 	if err != nil {
 		t.Fatal(err)
@@ -267,31 +265,6 @@ func TestCorruptRecordsNeverStopTheGroup(t *testing.T) {
 				if _, decodeErr := readhold.Decode(raw); stats.OwnCorrupt == 0 || err != nil || decodeErr != nil {
 					t.Fatalf("the group's corrupt record was not replaced: corrupt %d, %v %v", stats.OwnCorrupt, err, decodeErr)
 				}
-			}
-		})
-	}
-}
-
-// A time_delay change seven days back: the new group's zero bridge has
-// expired, and so has every fact about the old group. A restart that finds
-// the group's last Slot completed with a partial gap - or mid-Slot - cannot
-// prove the zero, and the group can never complete another Slot to prove it.
-func TestADelayEditedGroupIsNotStoppedByAPartialLastCompletionPastTheRecordLifetime(t *testing.T) {
-	for _, unfinished := range []bool{false, true} {
-		t.Run(map[bool]string{false: "partial last completion", true: "unfinished Slot"}[unfinished], func(t *testing.T) {
-			h, _, schedule, fence, _, p := runtimeExpiredZeroBridge(t)
-			p.LastDataSlot = p.LastCompletion.Slot
-			p.LastFullSlot = p.LastCompletion.Slot - 60
-			p.LastCompletionKind = execution.CompletionPartialGap
-			p.LastCompletion.Kind = execution.CompletionPartialGap
-			if unfinished {
-				// A takeover finds the group mid-Slot.
-				p.UnfinishedSlot = &execution.UnfinishedSlotProjection{Contract: p.LastCompletion.Contract}
-				p.UnfinishedSlot.Contract.Slot.EvaluationTime = p.NextSlot
-			}
-			h.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{p.Identity.QueryGroup: {Status: execution.ProgressFound, Progress: &p}}}
-			if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
-				t.Fatalf("delay-edited group blocked for good: %v", err)
 			}
 		})
 	}

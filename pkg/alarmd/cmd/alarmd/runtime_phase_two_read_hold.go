@@ -41,7 +41,6 @@ type productionReadHolds struct {
 	cfg         config.Config
 	repository  readHoldCatalog
 	catalog     readHoldTimeline
-	progress    productionPhaseTwoProgressReader
 	now         func() time.Time
 	logger      *observability.Logger
 	mu          sync.Mutex
@@ -96,9 +95,9 @@ type readHoldDegradedLine struct {
 }
 
 func newProductionReadHolds(cfg config.Config, control readhold.Control, repository readHoldCatalog,
-	catalog readHoldTimeline, progress productionPhaseTwoProgressReader, now func() time.Time,
+	catalog readHoldTimeline, now func() time.Time,
 	logger *observability.Logger) (*productionReadHolds, error) {
-	holds := &productionReadHolds{cfg: cfg, repository: repository, catalog: catalog, progress: progress,
+	holds := &productionReadHolds{cfg: cfg, repository: repository, catalog: catalog,
 		now: now, logger: logger, groups: make(map[execution.QueryGroupIdentity]*productionReadHoldGroup), links: make(map[string]uint64),
 		degraded: make(map[string]uint64)}
 	var err error
@@ -217,7 +216,7 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 }
 
 func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (readhold.GroupSpec, error) {
-	route, delay, step, err := holds.queryBasis(ctx, schedule)
+	_, delay, step, err := holds.queryBasis(ctx, schedule)
 	if err != nil {
 		return readhold.GroupSpec{}, err
 	}
@@ -228,7 +227,7 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	// have its hold lowered if this were the schedule's.
 	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule), Step: step}
 	for _, plan := range schedule.Plans {
-		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key(), Route: route})
+		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key()})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
 		wait := execution.SettlingWaitWithinQueryBudget(offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
@@ -598,8 +597,8 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.CurrentReadHold, options.ReadHoldAt = holds.controller.ReadHold, holds.controller.ReadHoldAt
 	options.OnWholeWindowReadEarly = func(e lookback.ReadHoldEvidence) {
 		holds.observation(e.Contract, func(ctx context.Context) error {
-			return holds.controller.Observe(ctx, readhold.Evidence{Contract: e.Contract, ArrivalAge: e.ArrivalAge, FirstReadAge: e.FirstReadAge,
-				Confirmed: true, WholeWindow: true, Rung: e.Rung, Buckets: e.Buckets})
+			return holds.controller.Observe(ctx, readhold.Evidence{Contract: e.Contract, ArrivalAge: e.ArrivalAge,
+				Rung: e.Rung, Buckets: e.Buckets})
 		})
 	}
 	options.OnEarlierRead = func(e lookback.EarlierReadEvidence) {

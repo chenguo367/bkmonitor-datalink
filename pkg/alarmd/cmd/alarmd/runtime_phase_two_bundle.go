@@ -696,7 +696,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// absent-strategy close does; see targetScopeCloseFor.
 	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
 	lookbackOwner := &lookbackOwnership{}
-	readHolds, err := newProductionReadHolds(cfg, ownershipStore, repository, catalog, progressStore, external.Now, logger)
+	readHolds, err := newProductionReadHolds(cfg, ownershipStore, repository, catalog, external.Now, logger)
 	if err != nil {
 		return nil, err
 	}

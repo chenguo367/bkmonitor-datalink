@@ -65,7 +65,7 @@ func holdFence(qg execution.QueryGroupIdentity) execution.OwnerFence {
 }
 
 func planRef() PlanRef {
-	return PlanRef{Key: execution.PlanKey{PlanIdentity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "business", StrategyID: "strategy"}}, Route: "source/metric"}
+	return PlanRef{Key: execution.PlanKey{PlanIdentity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "business", StrategyID: "strategy"}}}
 }
 
 func groupSpec(qg execution.QueryGroupIdentity, delay time.Duration) GroupSpec {
@@ -120,14 +120,14 @@ func holdContract(qg execution.QueryGroupIdentity, slot execution.EvaluationTime
 	return execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: qg, EvaluationTime: slot}, SnapshotRevision: "snapshot", QueryRevision: "query", ScheduleRevision: "schedule", ScheduleSegmentStart: 60, DuePlanSetDigest: "due", ReadHoldMillis: hold}
 }
 
-func observeEarly(t *testing.T, c *Controller, qg execution.QueryGroupIdentity, arrival, first time.Duration, hold int64) {
+func observeEarly(t *testing.T, c *Controller, qg execution.QueryGroupIdentity, arrival time.Duration, hold int64) {
 	t.Helper()
-	if err := c.Observe(context.Background(), Evidence{Contract: holdContract(qg, 120, hold), ArrivalAge: arrival, FirstReadAge: first, WholeWindow: true, Confirmed: true, Rung: "rung", Buckets: []int64{120}}); err != nil {
+	if err := c.Observe(context.Background(), Evidence{Contract: holdContract(qg, 120, hold), ArrivalAge: arrival, Rung: "rung", Buckets: []int64{120}}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestWholeWindowRaisesButNoiseAndPartialDoNot(t *testing.T) {
+func TestWholeWindowRaisesButNoiseDoesNot(t *testing.T) {
 	c, store, _ := controllerFixture(t)
 	prepare(t, c, groupSpec("qg", 0))
 	ctx := context.Background()
@@ -137,19 +137,12 @@ func TestWholeWindowRaisesButNoiseAndPartialDoNot(t *testing.T) {
 	if len(store.requests) != 0 {
 		t.Fatal("an initial zero hold wrote Redis")
 	}
-	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 180*time.Second, 0)
 	if c.ReadHold("qg") != 150*time.Second {
 		t.Fatal("arrival age was not translated from the window end")
 	}
-	prepare(t, c, groupSpec("queued", 0))
-	observeEarly(t, c, "queued", 180*time.Second, 40*time.Second, 0)
-	if c.ReadHold("queued") != 150*time.Second {
-		t.Fatal("permit delay in the first read was subtracted from the next round's hold")
-	}
 	before, _ := c.Reading("qg")
 	for _, e := range []Evidence{
-		{Contract: holdContract("qg", 120, 0), ArrivalAge: 900 * time.Second, FirstReadAge: 30 * time.Second, Confirmed: true},
-		{Contract: holdContract("qg", 120, 0), ArrivalAge: 900 * time.Second, FirstReadAge: 30 * time.Second, WholeWindow: true},
 		{Contract: holdContract("qg", 120, 0), Noise: true},
 	} {
 		if err := c.Observe(ctx, e); err != nil {
@@ -158,14 +151,14 @@ func TestWholeWindowRaisesButNoiseAndPartialDoNot(t *testing.T) {
 	}
 	after, _ := c.Reading("qg")
 	if c.ReadHold("qg") != 150*time.Second || after.Noise != before.Noise+1 {
-		t.Fatalf("noise or partial raised hold: %+v", after)
+		t.Fatalf("noise raised hold: %+v", after)
 	}
 	spec := groupSpec("qg", 0)
 	spec.HoldLimit = 200 * time.Second
 	if err := c.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
-	observeEarly(t, c, "qg", 900*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 900*time.Second, 0)
 	after, _ = c.Reading("qg")
 	if c.ReadHold("qg") != 200*time.Second || !after.AtLimit {
 		t.Fatalf("retention margin not enforced: %+v", after)
@@ -174,7 +167,7 @@ func TestWholeWindowRaisesButNoiseAndPartialDoNot(t *testing.T) {
 	if err := c.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
-	observeEarly(t, c, "qg", 900*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 900*time.Second, 0)
 	if c.ReadHold("qg") != 10*time.Minute {
 		t.Fatal("MaxReplayAge hold bound not enforced")
 	}
@@ -183,7 +176,7 @@ func TestWholeWindowRaisesButNoiseAndPartialDoNot(t *testing.T) {
 func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 	c, _, now := controllerFixture(t)
 	prepare(t, c, groupSpec("qg", 0))
-	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 180*time.Second, 0)
 	ctx := context.Background()
 	earlier := func(slot execution.EvaluationTime, observed, equal bool) {
 		t.Helper()
@@ -214,13 +207,13 @@ func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 	if c.ReadHold("qg") != 75*time.Second {
 		t.Fatal("three matches after quiet did not halve the hold")
 	}
-	observeEarly(t, c, "qg", 180*time.Second, 105*time.Second, 75_000)
+	observeEarly(t, c, "qg", 180*time.Second, 75_000)
 	reading, _ := c.Reading("qg")
 	if c.ReadHold("qg") != 150*time.Second || reading.RaisedAfterLowering != 1 {
 		t.Fatalf("raise after lowering was not counted: %+v", reading)
 	}
 	*now = now.Add(2 * time.Hour)
-	observeEarly(t, c, "qg", 180*time.Second, 180*time.Second, 150_000)
+	observeEarly(t, c, "qg", 180*time.Second, 150_000)
 	reading, _ = c.Reading("qg")
 	if reading.MaxEarlyIntervalMillis != 2*time.Hour.Milliseconds() {
 		t.Fatalf("event interval %+v", reading)
@@ -237,7 +230,7 @@ func TestLoweringNeedsQuietAndThreeObservedEarlierReads(t *testing.T) {
 func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 	c, store, _ := controllerFixture(t)
 	prepare(t, c, groupSpec("old", 0))
-	observeEarly(t, c, "old", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "old", 180*time.Second, 0)
 	ctx := context.Background()
 	boundary := execution.EvaluationTime(1200)
 	newSpec := groupSpec("new", 120*time.Second)
@@ -252,7 +245,7 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 	if oldReading.Plans[0].PreviousSlot != 1140 || oldReading.Plans[0].PreviousHoldMillis != 150_000 {
 		t.Fatalf("closed record %+v", oldReading)
 	}
-	observeEarly(t, c, "old", 600*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "old", 600*time.Second, 0)
 	oldReading, _ = c.Reading("old")
 	if c.ReadHold("old") != 150*time.Second || oldReading.Plans[0].PreviousHoldMillis != 150_000 {
 		t.Fatal("a closed group raised or rewrote its transition hold")
@@ -300,10 +293,10 @@ func TestTransitionUsesClosedSchedulesLastSlotAndSurvivesRestore(t *testing.T) {
 func TestFencedRefusalChangesNoMemoryAndRenewalIsDaily(t *testing.T) {
 	c, store, now := controllerFixture(t)
 	prepare(t, c, groupSpec("qg", 0))
-	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 180*time.Second, 0)
 	before, _ := c.Reading("qg")
 	store.refused = ownership.FencedCASStaleOwner
-	if err := c.Observe(context.Background(), Evidence{Contract: holdContract("qg", 180, 0), ArrivalAge: 240 * time.Second, FirstReadAge: 30 * time.Second, Confirmed: true, WholeWindow: true}); !errors.Is(err, ownership.ErrStaleFence) {
+	if err := c.Observe(context.Background(), Evidence{Contract: holdContract("qg", 180, 0), ArrivalAge: 240 * time.Second}); !errors.Is(err, ownership.ErrStaleFence) {
 		t.Fatalf("stale fence=%v", err)
 	}
 	after, _ := c.Reading("qg")
@@ -342,7 +335,7 @@ func TestSharedGroupReopensWhileMigratedPlanKeepsClosedHold(t *testing.T) {
 	oldSpec := groupSpec("old", 0)
 	oldSpec.Plans = []PlanRef{a, b}
 	prepare(t, c, oldSpec)
-	observeEarly(t, c, "old", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "old", 180*time.Second, 0)
 	boundary := execution.EvaluationTime(1200)
 	oldSchedule := scheduleFor(t, "old", 60, &boundary)
 	retainedPlan := oldSchedule.Plans[0]
@@ -372,13 +365,13 @@ func TestSharedGroupReopensWhileMigratedPlanKeepsClosedHold(t *testing.T) {
 	}
 	newContract := holdContract("old", 1260, 150_000)
 	newContract.ScheduleSegmentStart = boundary
-	if err := c.Observe(context.Background(), Evidence{Contract: newContract, ArrivalAge: 330 * time.Second, FirstReadAge: 180 * time.Second, Confirmed: true, WholeWindow: true}); err != nil {
+	if err := c.Observe(context.Background(), Evidence{Contract: newContract, ArrivalAge: 330 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	if c.ReadHold("old") != 300*time.Second {
 		t.Fatal("retained Plan could not raise h after the shared group reopened")
 	}
-	observeEarly(t, c, "old", 600*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "old", 600*time.Second, 0)
 	oldReading, _ := c.Reading("old")
 	if oldReading.Closed || oldReading.SegmentStart != boundary || oldReading.Plans[0] != fixed || c.ReadHold("old") != 300*time.Second {
 		t.Fatalf("old evidence altered a migrated Plan's fixed bridge: %+v", oldReading)
@@ -454,7 +447,7 @@ func TestEvidenceWriteCannotBypassNewPlansPredecessorSeed(t *testing.T) {
 	a, b := planRef(), planRef()
 	b.Key.StrategyID = "incoming"
 	prepare(t, c, groupSpec("existing", 120*time.Second))
-	observeEarly(t, c, "existing", 180*time.Second, 150*time.Second, 0)
+	observeEarly(t, c, "existing", 180*time.Second, 0)
 	if c.ReadHold("existing") != 30*time.Second {
 		t.Fatal("existing group's learned base")
 	}
@@ -480,7 +473,7 @@ func TestEvidenceWriteCannotBypassNewPlansPredecessorSeed(t *testing.T) {
 	// The predecessor's closed record arrives only now. Had the noise write
 	// acknowledged the bridge, the seed would skip it and read 30 s.
 	previous := Record{HoldMillis: 150_000, SinceSlot: 60, SegmentStart: 60, Closed: true, Plans: []PlanRecord{{PlanRef: b,
-		ArrivalAgeMillis: 180_000, ClosedAt: 1200, PreviousHoldMillis: 150_000, PreviousSlot: 1140, CompletionOffsetMillis: 55_000}}}
+		ClosedAt: 1200, PreviousHoldMillis: 150_000, PreviousSlot: 1140, CompletionOffsetMillis: 55_000}}}
 	store.values["previous"], _ = json.Marshal(previous)
 	if err := c.RestoreBatch(context.Background(), []execution.QueryGroupIdentity{"previous"}); err != nil {
 		t.Fatal(err)
@@ -506,7 +499,7 @@ func TestCloseScheduleProtectsFinalFrozenHoldAndFuturePendingRaise(t *testing.T)
 			c, store, _ := controllerFixture(t)
 			pending := arm.pending
 			old := Record{HoldMillis: 150_000, SinceSlot: arm.since, PreviousHoldMillis: 150_000, PreviousSinceSlot: 60,
-				PendingHoldMillis: &pending, ArrivalAgeMillis: arm.arrival, SegmentStart: 60, Plans: []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: arm.arrival}}}
+				PendingHoldMillis: &pending, ArrivalAgeMillis: arm.arrival, SegmentStart: 60, Plans: []PlanRecord{{PlanRef: planRef()}}}
 			store.values["old"], _ = json.Marshal(old)
 			prepare(t, c, groupSpec("old", 0))
 			boundary := execution.EvaluationTime(1200)
@@ -534,7 +527,7 @@ func TestCloseScheduleProtectsFinalFrozenHoldAndFuturePendingRaise(t *testing.T)
 func TestInheritedAckSurvivesClosingAndReopeningTheSameGroup(t *testing.T) {
 	c, store, _ := controllerFixture(t)
 	prepare(t, c, groupSpec("a", 0))
-	observeEarly(t, c, "a", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "a", 180*time.Second, 0)
 	first := execution.EvaluationTime(1200)
 	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "a", 60, &first), holdFence("a")); err != nil {
 		t.Fatal(err)
@@ -649,7 +642,7 @@ func TestZeroSlotSegmentClosesItsBridgeWithoutErasingAnEarlierDeadline(t *testin
 			c, store, _ := controllerFixture(t)
 			if earlier {
 				record := Record{HoldMillis: 150_000, SinceSlot: 60, PreviousSinceSlot: 1, ArrivalAgeMillis: 180_000, SegmentStart: 60,
-					Plans: []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: 180_000, ClosedQueryGroup: "old", ClosedAt: 61,
+					Plans: []PlanRecord{{PlanRef: planRef(), ClosedQueryGroup: "old", ClosedAt: 61,
 						PreviousSlot: 60, PreviousHoldMillis: 150_000, CompletionOffsetMillis: 55_000,
 						InheritedQueryGroup: "ancestor", InheritedClosedAt: 50}}}
 				store.values["old"], _ = json.Marshal(record)
@@ -689,7 +682,7 @@ func TestZeroSlotSegmentClosesItsBridgeWithoutErasingAnEarlierDeadline(t *testin
 func TestClosingAnUnseededEmptyMiddleGroupInheritsItsPredecessor(t *testing.T) {
 	c, _, _ := controllerFixture(t)
 	prepare(t, c, groupSpec("a", 0))
-	observeEarly(t, c, "a", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "a", 180*time.Second, 0)
 	first := execution.EvaluationTime(1201)
 	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "a", 60, &first), holdFence("a")); err != nil {
 		t.Fatal(err)
@@ -727,7 +720,7 @@ func TestChangedReadinessBaselineReprojectsTheConfirmedArrivalAge(t *testing.T) 
 			spec := groupSpec("qg", 0)
 			if ack {
 				spec.Previous = []Previous{linked(spec, "old", 60, 0)}
-				record.Plans = []PlanRecord{{PlanRef: planRef(), ArrivalAgeMillis: 180_000,
+				record.Plans = []PlanRecord{{PlanRef: planRef(),
 					InheritedQueryGroup: "old", InheritedClosedAt: 60}}
 			}
 			store.values["qg"], _ = json.Marshal(record)
@@ -774,7 +767,7 @@ func TestAReleasedPredecessorStaysAbsentAfterSuccessfulInheritance(t *testing.T)
 		t.Fatal("inspecting an absent group allocated control state")
 	}
 	prepare(t, c, groupSpec("old", 0))
-	observeEarly(t, c, "old", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "old", 180*time.Second, 0)
 	end := execution.EvaluationTime(90)
 	if err := c.CloseSchedule(context.Background(), scheduleFor(t, "old", 60, &end), holdFence("old")); err != nil {
 		t.Fatal(err)
@@ -867,7 +860,7 @@ func TestALoweringBelowOneStepGoesToZero(t *testing.T) {
 	spec := groupSpec("qg", 0)
 	spec.Step = time.Minute
 	prepare(t, c, spec)
-	observeEarly(t, c, "qg", 105*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 105*time.Second, 0)
 	if c.ReadHold("qg") != 75*time.Second {
 		t.Fatalf("raised to %s, want 75 s", c.ReadHold("qg"))
 	}
@@ -917,7 +910,7 @@ func TestAZeroGroupClosingASegmentWritesNoRecord(t *testing.T) {
 func TestALoweredHoldStaysLoweredAfterRestore(t *testing.T) {
 	c, _, now := controllerFixture(t)
 	prepare(t, c, groupSpec("qg", 0))
-	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 180*time.Second, 0)
 	*now = now.Add(time.Hour)
 	for index := range 3 {
 		if err := c.EarlierRead(context.Background(), EarlierEvidence{Contract: holdContract("qg", execution.EvaluationTime(180+index*60), 150_000),
@@ -943,10 +936,10 @@ func TestALoweredHoldStaysLoweredAfterRestore(t *testing.T) {
 func TestACASConflictIsReadAgainAndTheNextWriteLands(t *testing.T) {
 	c, store, _ := controllerFixture(t)
 	prepare(t, c, groupSpec("qg", 0))
-	observeEarly(t, c, "qg", 180*time.Second, 30*time.Second, 0)
+	observeEarly(t, c, "qg", 180*time.Second, 0)
 	changed := Record{SinceSlot: 1, HoldMillis: 90_000, ArrivalAgeMillis: 120_000, SegmentStart: 60}
 	store.values["qg"], _ = json.Marshal(changed)
-	evidence := Evidence{Contract: holdContract("qg", 180, 0), ArrivalAge: 240 * time.Second, FirstReadAge: 30 * time.Second, Confirmed: true, WholeWindow: true}
+	evidence := Evidence{Contract: holdContract("qg", 180, 0), ArrivalAge: 240 * time.Second}
 	if err := c.Observe(context.Background(), evidence); !errors.Is(err, ErrConflict) {
 		t.Fatalf("a changed record did not conflict: %v", err)
 	}
