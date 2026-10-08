@@ -45,41 +45,29 @@ func TestHowLateIsLateIsMeasuredInTheObjectsOwnPeriod(t *testing.T) {
 	}
 }
 
-// An object with no period stated still has to be reported once its wake time
-// has passed. Dropping it would turn a missing field into silence about the
-// object, and silence here is what health looks like.
-// It is also counted separately. No ordinary path produces an entry without a
-// period -- an object with no due Plans never gets a wake time written at all --
-// so one arriving means the writer is broken, and the defensive default that
-// keeps the object visible would otherwise make that indistinguishable from
-// ordinary reporting.
-func TestAnObjectWithNoStatedPeriodIsStillReportedAndCounted(t *testing.T) {
+// A wake that carries no period -- the due index's word for a round that
+// could not read the object's schedule -- is not overdue however late it is:
+// there is no period to be late by. It is not listed and is counted apart,
+// as period unknown. The same object once its period is read, and a whole
+// period late, is listed as any other.
+func TestAWakeWithNoPeriodIsCountedAndNeverOverdue(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
-	anomalies, facts := OverdueAnomalies([]OverdueWake{
-		{QueryGroup: "unknown-period", WakeAt: now.Add(-time.Second)},
-	}, 1, now, "pod-a", nil)
-
-	if len(anomalies) != 1 {
-		t.Fatalf("anomalies = %+v, want the object kept rather than silently dropped", anomalies)
+	for _, late := range []time.Duration{time.Second, time.Hour, 24 * time.Hour} {
+		anomalies, facts := OverdueAnomalies([]OverdueWake{{QueryGroup: "unread", WakeAt: now.Add(-late)}}, 1, now, "pod-a", nil)
+		if len(anomalies) != 0 || facts.PeriodUnknown != 1 || facts.Total != 0 || facts.OldestSeconds != 0 {
+			t.Fatalf("%v late with no period: anomalies %+v facts %+v, want none listed and one period unknown", late, anomalies, facts)
+		}
 	}
-	if facts.MissingPeriod != 1 {
-		t.Fatalf("missing_period = %d, want the defect counted rather than absorbed", facts.MissingPeriod)
-	}
-
-	// And it stays zero on the ordinary path, or it says nothing.
-	_, healthy := OverdueAnomalies([]OverdueWake{
-		{QueryGroup: "normal", WakeAt: now.Add(-time.Hour), IntervalSeconds: 60},
-	}, 1, now, "pod-a", nil)
-	if healthy.MissingPeriod != 0 {
-		t.Fatalf("missing_period = %d on a well-formed entry", healthy.MissingPeriod)
+	anomalies, facts := OverdueAnomalies([]OverdueWake{{QueryGroup: "unread", WakeAt: now.Add(-time.Hour), IntervalSeconds: 60}}, 1, now, "pod-a", nil)
+	if len(anomalies) != 1 || anomalies[0].QueryGroup != "unread" || facts.PeriodUnknown != 0 || facts.Total != 1 {
+		t.Fatalf("the same object with its period read: anomalies %+v facts %+v, want it listed overdue", anomalies, facts)
 	}
 }
 
-// A wake is late past a whole period of its own, or, with none stated, once
-// it has passed at all; a wake not written is not late, and neither is one
-// with no period still ahead. Both the wake list and an object asked after
+// A wake is late past a whole period of its own; one with no period is never
+// late, nor is a wake not written. Both the wake list and an object asked after
 // alone are judged by this.
-func TestAWakeIsLateByItsOwnPeriodOrOnceItHasPassed(t *testing.T) {
+func TestAWakeIsLateByItsOwnPeriodOnly(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	for name, want := range map[string]struct {
 		wake OverdueWake
@@ -87,7 +75,7 @@ func TestAWakeIsLateByItsOwnPeriodOrOnceItHasPassed(t *testing.T) {
 	}{
 		"within its period":  {OverdueWake{WakeAt: now.Add(-30 * time.Second), IntervalSeconds: 60}, false},
 		"past its period":    {OverdueWake{WakeAt: now.Add(-61 * time.Second), IntervalSeconds: 60}, true},
-		"no period, passed":  {OverdueWake{WakeAt: now.Add(-time.Second)}, true},
+		"no period, passed":  {OverdueWake{WakeAt: now.Add(-time.Hour)}, false},
 		"no period, ahead":   {OverdueWake{WakeAt: now.Add(time.Second)}, false},
 		"no wake written":    {OverdueWake{IntervalSeconds: 60}, false},
 		"no wake, no period": {OverdueWake{}, false},
