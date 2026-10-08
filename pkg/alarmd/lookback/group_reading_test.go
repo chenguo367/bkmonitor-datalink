@@ -210,3 +210,20 @@ func TestGroupReadingOwnershipCanReenterStatsAndForget(t *testing.T) {
 		t.Fatal("GroupReading held the engine lock across its ownership callback")
 	}
 }
+
+// GroupSources names the source of each group the lookback has seen, and
+// leaves out one it has not.
+func TestGroupSourcesNamesTheGroupsSeen(t *testing.T) {
+	f := newFixture(t)
+	f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, func(slot int64) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "1")}
+	})
+	sources := f.engine.GroupSources([]execution.QueryGroupIdentity{"qg", "unseen"})
+	if len(sources) != 1 || sources["qg"] != sourceLog {
+		t.Fatalf("sources %v, want qg under %s and nothing for the group never seen", sources, sourceLog)
+	}
+	var none *Engine
+	if got := none.GroupSources([]execution.QueryGroupIdentity{"qg"}); len(got) != 0 {
+		t.Fatalf("a process without a lookback named %v", got)
+	}
+}

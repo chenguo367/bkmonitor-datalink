@@ -77,6 +77,8 @@ type lookbackCollector struct {
 	readHoldRetireClose *prometheus.Desc
 	readHoldCloseSkip   *prometheus.Desc
 	readHoldDegraded    *prometheus.Desc
+	readHoldGroups      *prometheus.Desc
+	readHoldMax         *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -108,6 +110,14 @@ func newLookbackCollector() *lookbackCollector {
 				"previous_unreadable, predecessors_unreadable, spec_rejected, close_failed, stale_segment, hold_failed, "+
 				"record_unreadable. "+
 				"No Slot is refused for it; the group learns nothing until its hold prepares again.", "reason"),
+		readHoldGroups: desc("read_hold_groups",
+			"Query Groups this replica holds, by the source they read and their read hold: held (a hold of more than "+
+				"none), at_limit (held at the group's limit), unknown (its hold not yet known - not counted under the "+
+				"other two). Each replica counts only its own groups: the deployment's is the sum. Absent while the "+
+				"replica holds none.", "source", "kind"),
+		readHoldMax: desc("read_hold_max_seconds",
+			"The largest known read hold among the Query Groups this replica holds that read the source; the "+
+				"deployment's is the max. Absent for a source none of whose groups here has a known hold.", "source"),
 		readHoldRetireClose: desc("read_hold_retire_close_failed_total",
 			"Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the "+
 				"unclosed record as the hold bound."),
@@ -256,7 +266,8 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 		c.probes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierReads, c.earlierBytes, c.holdIgnored, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded} {
+		c.readHoldPredecessor, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
+		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
 	}
 }
@@ -292,6 +303,18 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	counter(c.readHoldCloseSkip, stats.ReadHoldCloseSkipped)
 	for _, reason := range readhold.DegradedReasons {
 		counter(c.readHoldDegraded, stats.ReadHoldDegraded[reason], reason)
+	}
+	for _, source := range lookback.Sources {
+		groups, held := stats.ReadHoldGroups[source]
+		if !held {
+			continue
+		}
+		gauge(c.readHoldGroups, float64(groups.Held), source, "held")
+		gauge(c.readHoldGroups, float64(groups.AtLimit), source, "at_limit")
+		gauge(c.readHoldGroups, float64(groups.Unknown), source, "unknown")
+		if groups.MaxKnown {
+			gauge(c.readHoldMax, float64(groups.MaxMillis)/1000, source)
+		}
 	}
 	for name, source := range stats.Sources {
 		counter(c.firstReads, source.FirstReads, name)

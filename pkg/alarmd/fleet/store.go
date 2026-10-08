@@ -249,32 +249,33 @@ func (store *RedisStore) Publish(ctx context.Context, snapshot Snapshot) error {
 }
 
 // PublishSummarized writes this replica's snapshot as Publish does, and
-// beside it its summary and its whole owned list, in one MULTI/EXEC: a
+// beside it its summary and its whole owned list, in one MULTI/EXEC, and
+// returns the summary it wrote: a
 // reader finds the three from one publish, or the three from the one before
 // until they expire -- never a summary of one snapshot beside another. The
 // summary is of the snapshot as written, its rows decided at stallAfter; its
 // owned digest and list are the whole set, before the snapshot's list is cut.
-func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapshot, stallAfter time.Duration) error {
+func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapshot, stallAfter time.Duration) (ReplicaSummary, error) {
 	owned := snapshot.OwnedObjects
 	snapshot, err := store.written(snapshot)
 	if err != nil {
-		return err
+		return ReplicaSummary{}, err
 	}
 	summary := SummaryOf(snapshot, owned, stallAfter)
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
-		return fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
+		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: encode snapshot: %w", err)
 	}
 	summaryPayload, err := json.Marshal(summary)
 	if err != nil {
-		return fmt.Errorf("alarmd fleet: encode summary: %w", err)
+		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: encode summary: %w", err)
 	}
 	if owned == nil {
 		owned = []string{}
 	}
 	ownedPayload, err := json.Marshal(owned)
 	if err != nil {
-		return fmt.Errorf("alarmd fleet: encode owned objects: %w", err)
+		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: encode owned objects: %w", err)
 	}
 	if _, err := store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Set(ctx, store.snapshotKey(snapshot.Replica), payload, store.ttl)
@@ -282,13 +283,13 @@ func (store *RedisStore) PublishSummarized(ctx context.Context, snapshot Snapsho
 		pipe.Set(ctx, store.ownedKey(snapshot.Replica), ownedPayload, store.ttl)
 		return nil
 	}); err != nil {
-		return fmt.Errorf("alarmd fleet: publish snapshot and summary: %w", err)
+		return ReplicaSummary{}, fmt.Errorf("alarmd fleet: publish snapshot and summary: %w", err)
 	}
 	if store.meter != nil {
 		store.meter.SnapshotPublished(len(payload))
 		store.meter.SummaryPublished(len(summaryPayload))
 	}
-	return nil
+	return summary, nil
 }
 
 // written is the snapshot as it is written: checked, its totals at least

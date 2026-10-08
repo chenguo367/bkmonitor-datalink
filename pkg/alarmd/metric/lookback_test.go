@@ -11,6 +11,7 @@ package metric
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -37,6 +38,8 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"read_hold_retire_close_failed_total":        1,
 		"read_hold_close_previous_skipped_total":     1,
 		"read_hold_degraded_total":                   len(readhold.DegradedReasons),
+		"read_hold_groups":                           len(lookback.Sources) * 3,
+		"read_hold_max_seconds":                      len(lookback.Sources),
 		"lookback_first_reads_total":                 sources,
 		"lookback_samples_total":                     sources * len(lookback.SampleOutcomes),
 		"lookback_rechecks_total":                    sources * rungs * len(lookback.RecheckOutcomes),
@@ -115,6 +118,10 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	stats.Sources[logs] = entry
 	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	stats.Pending, stats.PendingBytes = 3, 4096
+	stats.ReadHoldGroups = map[string]lookback.ReadHoldGroups{}
+	for _, source := range lookback.Sources {
+		stats.ReadHoldGroups[source] = lookback.ReadHoldGroups{Held: 1, MaxMillis: 2000, MaxKnown: true}
+	}
 	r.SetLookbackSource(func() lookback.Stats { return stats })
 	for name, n := range lookbackSeriesUpperBounds() {
 		if got := len(gatherFamily(t, r, "bkmonitor_alarmd_"+name)); got != n {
@@ -189,5 +196,41 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_directed_early_read_bytes_total", map[string]string{"source": logs}); got != 14 {
 		t.Fatalf("early read bytes = %v", got)
+	}
+}
+
+// The read hold gauges say what a replica holds and nothing else: none held,
+// no series; a source whose groups' holds are all unknown, its counts and
+// no largest hold; and each count under its own kind, the hold in seconds.
+func TestTheReadHoldGaugesAreAbsentWhereNothingIsKnown(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	stats := lookback.Stats{}
+	r.SetLookbackSource(func() lookback.Stats { return stats })
+	for _, family := range []string{"bkmonitor_alarmd_read_hold_groups", "bkmonitor_alarmd_read_hold_max_seconds"} {
+		if series := gatherFamily(t, r, family); len(series) != 0 {
+			t.Fatalf("a replica holding no group emitted %s %v", family, series)
+		}
+	}
+	logs := controlplane.SupportedSourceSemantics[1]
+	stats.ReadHoldGroups = map[string]lookback.ReadHoldGroups{
+		lookback.SourceOther: {Unknown: 4},
+		logs:                 {Held: 2, AtLimit: 1, Unknown: 1, MaxMillis: 308_500, MaxKnown: true},
+	}
+	groups := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_read_hold_groups") {
+		labels := map[string]string{}
+		for _, label := range m.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		groups[labels["source"]+"/"+labels["kind"]] = m.GetGauge().GetValue()
+	}
+	want := map[string]float64{lookback.SourceOther + "/held": 0, lookback.SourceOther + "/at_limit": 0, lookback.SourceOther + "/unknown": 4,
+		logs + "/held": 2, logs + "/at_limit": 1, logs + "/unknown": 1}
+	if !reflect.DeepEqual(groups, want) {
+		t.Fatalf("groups %v, want %v", groups, want)
+	}
+	maxima := gatherFamily(t, r, "bkmonitor_alarmd_read_hold_max_seconds")
+	if len(maxima) != 1 || maxima[0].GetGauge().GetValue() != 308.5 || maxima[0].GetLabel()[0].GetValue() != logs {
+		t.Fatalf("maxima %v, want only %s at 308.5 s", maxima, logs)
 	}
 }

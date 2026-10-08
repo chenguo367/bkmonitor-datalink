@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func (rig *diagnosisRig) summary(t *testing.T, query string) (int, DiagnosisSummaryResponse) {
@@ -161,5 +162,24 @@ func TestAFirstScreenCountIsReadOnceWhileFresh(t *testing.T) {
 	rig.universeErr = nil
 	if _, body := rig.summary(t, "summary=1"); rig.universeReads != 4 || body.Universe.Status != "ok" {
 		t.Fatalf("after an unreadable count: %d reads, universe %+v; want it read again and answered", rig.universeReads, body.Universe)
+	}
+}
+
+// The first-screen count carries the replicas' latest overdue episodes, read
+// from their snapshots with the view the diagnosis is decided on, the
+// latest-ended first.
+func TestTheFirstScreenCountCarriesTheOverdueEpisodes(t *testing.T) {
+	snapshots := healthySnapshots()
+	ended := func(queryGroup string, clear time.Duration, hold int64) OverdueEpisode {
+		return OverdueEpisode{OverdueObject: OverdueObject{QueryGroup: queryGroup, IntervalSeconds: 60}, Replica: snapshots[0].Replica,
+			Onset: now.Add(clear - time.Minute), Clear: now.Add(clear), ReadHoldMillis: hold, ReadHoldKnown: true}
+	}
+	snapshots[0].OverdueEpisodes = []OverdueEpisode{ended("qg-old", -2*time.Hour, 0), ended("qg-held", -time.Hour, 308_000)}
+	rig := newDiagnosisRigFrom(t, diagnosisFacts(), nil, snapshots)
+	rig.universe = []string{"4101"}
+	code, body := rig.summary(t, "summary=1")
+	if code != http.StatusOK || len(body.OverdueEpisodes) != 2 || body.OverdueEpisodes[0].QueryGroup != "qg-held" ||
+		body.OverdueEpisodes[0].HoldClass() != "positive" {
+		t.Fatalf("status %d episodes %+v, want qg-held (held) then qg-old", code, body.OverdueEpisodes)
 	}
 }

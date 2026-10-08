@@ -16,6 +16,7 @@ import (
 	"net"
 	"os/exec"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 	meter := &storeMeterRecord{}
 	store.Meter(meter)
 	snapshot := summarizedSnapshot("pod-a", 40)
-	if err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute); err != nil {
+	if _, err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	written, err := store.Load(context.Background(), []string{"pod-a"})
@@ -114,6 +115,34 @@ func TestASummarizedPublishWritesTheSnapshotItsSummaryAndItsWholeOwnedList(t *te
 	if len(meter.summaries) != 1 || meter.summaries[0] != len(summary) || len(meter.summaryLoads) != 1 ||
 		meter.summaryLoads[0] != [2]int{1, len(summary)} || len(meter.ownedLoads) != 1 || meter.ownedLoads[0][0] != 1 {
 		t.Fatalf("meter %+v, want the summary's bytes written and each read counted", meter)
+	}
+}
+
+// The strategies a replica's objects evaluate are counted into the summary
+// it writes and are not written with its snapshot: no reader of a stored
+// snapshot needs them, and they would grow every write by one entry per
+// strategy.
+func TestASummarizedPublishCountsTheEvaluatingStrategiesWithoutWritingThem(t *testing.T) {
+	_, client := realRedis(t)
+	store := mustStore(t, client, time.Minute, 0)
+	snapshot := summarizedSnapshot("pod-a", 2)
+	snapshot.EvaluatingStrategies = []StrategyRef{{StrategyID: "854", BusinessID: "2"}, {StrategyID: "900", BusinessID: "2"}}
+	snapshot.EvaluatingStrategiesKnown = true
+	summary, err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute)
+	if err != nil || summary.Part.RunningStrategies == nil {
+		t.Fatalf("summary %+v error %v, want the running strategies counted", summary.Part, err)
+	}
+	raw := client.Get(context.Background(), store.snapshotKey("pod-a")).Val()
+	if raw == "" || strings.Contains(raw, "evaluating_strategies") {
+		t.Fatalf("snapshot written as %s, want it without the strategies list", raw)
+	}
+	stored := client.Get(context.Background(), store.summaryKey("pod-a")).Val()
+	if !strings.Contains(stored, `"running_strategies"`) {
+		t.Fatalf("summary written as %s, want the running strategies in it", stored)
+	}
+	written, err := store.Load(context.Background(), []string{"pod-a"})
+	if err != nil || len(written) != 1 || written[0].EvaluatingStrategiesKnown || written[0].EvaluatingStrategies != nil {
+		t.Fatalf("snapshot read back %+v error %v, want it saying nothing of its strategies", written, err)
 	}
 }
 
@@ -212,7 +241,7 @@ func cutBeforeExec(client net.Conn, target string) bool {
 func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	address, client := realRedis(t)
 	before := mustStore(t, client, time.Minute, 0)
-	if err := before.PublishSummarized(context.Background(), summarizedSnapshot("pod-a", 3), 10*time.Minute); err != nil {
+	if _, err := before.PublishSummarized(context.Background(), summarizedSnapshot("pod-a", 3), 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	keys := []string{before.snapshotKey("pod-a"), before.summaryKey("pod-a"), before.ownedKey("pod-a")}
@@ -223,7 +252,7 @@ func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	t.Cleanup(func() { _ = cut.Close() })
 	next := summarizedSnapshot("pod-a", 5)
 	next.TakenAt = now.Add(time.Minute)
-	if err := mustStore(t, cut, time.Minute, 0).PublishSummarized(context.Background(), next, 10*time.Minute); err == nil {
+	if _, err := mustStore(t, cut, time.Minute, 0).PublishSummarized(context.Background(), next, 10*time.Minute); err == nil {
 		t.Fatal("a publish whose EXEC never arrived reported success")
 	}
 	_ = cut.Close()
@@ -238,7 +267,7 @@ func TestASummarizedPublishCutBeforeExecLeavesAllThreeAsTheyWere(t *testing.T) {
 	}
 	// The same publish straight to Redis replaces all three: the cut is what
 	// kept them.
-	if err := before.PublishSummarized(context.Background(), next, 10*time.Minute); err != nil {
+	if _, err := before.PublishSummarized(context.Background(), next, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	for index, value := range client.MGet(context.Background(), keys...).Val() {
@@ -258,7 +287,7 @@ func TestTheServiceSummarizesAReplicaThatPublishedNoSummaryFromItsSnapshot(t *te
 	meter := &storeMeterRecord{}
 	store.Meter(meter)
 	current, older := summarizedSnapshot("pod-a", 3), summarizedSnapshot("pod-b", 2)
-	if err := store.PublishSummarized(context.Background(), current, 10*time.Minute); err != nil {
+	if _, err := store.PublishSummarized(context.Background(), current, 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Publish(context.Background(), older); err != nil {
@@ -319,7 +348,7 @@ func TestASummaryReadsBackAsWritten(t *testing.T) {
 func TestEveryListOfASnapshotIsEitherRowsOrKeptInItsHead(t *testing.T) {
 	rows := map[string]bool{"OwnedObjects": true, "Anomalies": true, "Demoted": true, "Undecidable": true, "ByDesign": true,
 		"PrunedSkips": true, "GapSkips": true, "NoData": true, "NoDataMemory": true, "RetainedShare": true, "ReadEarly": true,
-		"LateSeries": true, "ReadHolds": true}
+		"LateSeries": true, "ReadHolds": true, "OverdueEpisodes": true, "EvaluatingStrategies": true}
 	kept := map[string]bool{"AwaitingFirstRound": true, "Recovered": true, "Dependencies": true}
 	var full Snapshot
 	fill(reflect.ValueOf(&full).Elem(), 0)

@@ -292,3 +292,20 @@ func TestFleetHandoverAndUnknownRowsAreExportedAsTheyAre(t *testing.T) {
 		t.Fatalf("judgment or workers lost with the rows unknown: %v", rows)
 	}
 }
+
+// The running strategies are emitted, every state, when the verdict carries
+// them, and absent when it does not: a view not read whole says nothing of
+// them, and must not read as none running.
+func TestFleetRunningStrategiesAreAbsentUnlessKnown(t *testing.T) {
+	known := gatherFleet(t, FleetVerdict{Health: "HEALTHY", RunningStrategies: []FleetCount{{Value: "DETECTING", Count: 120}, {Value: "DATA_ABSENT", Count: 0}}})
+	running := known["bkmonitor_alarmd_fleet_running_strategies"]
+	if running["DETECTING"] != 120 || len(running) != 2 {
+		t.Fatalf("running %v, want DETECTING 120 and DATA_ABSENT 0", running)
+	}
+	if value, ok := running["DATA_ABSENT"]; !ok || value != 0 {
+		t.Fatalf("a state at zero was left out: %v", running)
+	}
+	if unknown := gatherFleet(t, FleetVerdict{Health: "HEALTHY"}); len(unknown["bkmonitor_alarmd_fleet_running_strategies"]) != 0 {
+		t.Fatalf("running strategies emitted while unknown: %v", unknown["bkmonitor_alarmd_fleet_running_strategies"])
+	}
+}

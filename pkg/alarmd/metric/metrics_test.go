@@ -388,6 +388,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_schedule_prune_skipped_total":                 "variableLabels: {reason}",
 		"bkmonitor_alarmd_schedule_cutover_query_groups_total":          "variableLabels: {decision}",
 		"bkmonitor_alarmd_schedule_cutover_read_hold_links_total":       "variableLabels: {decision}",
+		"bkmonitor_alarmd_fleet_overdue_episodes_total":                 "variableLabels: {hold}",
 		"bkmonitor_alarmd_schedule_cutover_timelines_read":              "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_cutover_last_duration_seconds":       "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_cutover_first_duration_seconds":      "variableLabels: {}",
@@ -538,6 +539,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_read_hold_retire_close_failed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_close_previous_skipped_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_degraded_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_read_hold_groups"] = "variableLabels: {source,kind}"
+	expected["bkmonitor_alarmd_read_hold_max_seconds"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_empty_first_reads_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_empty_first_read_completion_total"] = "variableLabels: {source,age}"
 	expected["bkmonitor_alarmd_lookback_completion_max_seconds"] = "variableLabels: {source}"
@@ -1015,6 +1018,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("schedule_prune_skipped_total"):            len(observability.SchedulePruneSkipReasons),
 		fqName("schedule_cutover_query_groups_total"):     len(observability.ScheduleCutoverDecisions),
 		fqName("schedule_cutover_read_hold_links_total"):  len(observability.ScheduleCutoverReadHoldLinks),
+		fqName("fleet_overdue_episodes_total"):            len(fleet.OverdueHoldClasses),
 		fqName("schedule_cutover_timelines_read"):         1,
 		fqName("schedule_cutover_last_duration_seconds"):  1,
 		fqName("schedule_cutover_first_duration_seconds"): 1,

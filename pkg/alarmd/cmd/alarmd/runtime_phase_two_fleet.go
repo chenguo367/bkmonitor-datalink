@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -181,6 +182,16 @@ type fleetPublisher struct {
 	// no lookback, and the snapshot then carries no such line.
 	readEarly func() map[string]fleet.ReadEarlyFacts
 	readHolds func() map[string]fleet.ReadHoldFacts
+	// holdOf is a Query Group's read hold as the lookback's group page knows
+	// it, for the overdue episodes; nil without read holds, and an episode's
+	// hold is then unknown. onOverdue hears an episode begin (began) and end.
+	holdOf    func(string) (int64, bool)
+	onOverdue func(episode fleet.OverdueEpisode, began bool)
+	// overdueOpen is the episodes begun and not ended, by object;
+	// overdueEpisodes the latest ended ones, at most fleet.MaxOverdueEpisodes,
+	// which the next snapshot carries. Only publishOnce touches them.
+	overdueOpen     map[string]fleet.OverdueEpisode
+	overdueEpisodes []fleet.OverdueEpisode
 	// lateSeries is what the lookback's supplements could not recover, by
 	// kind; nil without a lookback.
 	lateSeries func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts)
@@ -374,9 +385,120 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 	// With its summary and owned list, which the health route and the
 	// verdict read instead of every snapshot; the rows are decided by the
 	// same bound the readers decide by.
-	err := publisher.store.PublishSummarized(ctx, snapshot, publisher.staleAfter)
+	summary, err := publisher.store.PublishSummarized(ctx, snapshot, publisher.staleAfter)
+	if err == nil {
+		publisher.noteOverdue(summary.Part.Overdue, publisher.overdueHidden(snapshot, summary.Part), snapshot.TakenAt)
+	}
 	if publisher.observe != nil {
 		publisher.observe(err)
+	}
+}
+
+// noteOverdue takes the objects this publish found overdue: one not overdue
+// at the last begins an episode, with its read hold now; one overdue at the
+// last and not now ends its episode, kept for the next snapshots. An object
+// handed to another replica is no longer on this one's rows and ends here.
+// One the rows may have left out while it is still overdue (hidden) is not
+// overdue no more, and its episode stays open: ended, it would begin and be
+// counted again when it is back on them.
+func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, hidden func(string) bool, at time.Time) {
+	current := make(map[string]bool, len(objects))
+	for _, object := range objects {
+		current[object.QueryGroup] = true
+		if _, open := publisher.overdueOpen[object.QueryGroup]; open {
+			continue
+		}
+		episode := fleet.OverdueEpisode{OverdueObject: object, Replica: publisher.replica, Onset: at}
+		if publisher.holdOf != nil {
+			episode.ReadHoldMillis, episode.ReadHoldKnown = publisher.holdOf(object.QueryGroup)
+		}
+		if publisher.overdueOpen == nil {
+			publisher.overdueOpen = map[string]fleet.OverdueEpisode{}
+		}
+		publisher.overdueOpen[object.QueryGroup] = episode
+		if publisher.onOverdue != nil {
+			publisher.onOverdue(episode, true)
+		}
+	}
+	for queryGroup, episode := range publisher.overdueOpen {
+		if current[queryGroup] || (hidden != nil && hidden(queryGroup)) {
+			continue
+		}
+		delete(publisher.overdueOpen, queryGroup)
+		episode.Clear = at
+		publisher.overdueEpisodes = append(publisher.overdueEpisodes, episode)
+		if extra := len(publisher.overdueEpisodes) - fleet.MaxOverdueEpisodes; extra > 0 {
+			publisher.overdueEpisodes = append([]fleet.OverdueEpisode(nil), publisher.overdueEpisodes[extra:]...)
+		}
+		if publisher.onOverdue != nil {
+			publisher.onOverdue(episode, false)
+		}
+	}
+}
+
+// overdueHidden says which objects a publish's rows may have left out while
+// they are still overdue; nil when the rows are whole. A row column cut to
+// its budget may have left out any of them. The due index lists only its
+// oldest wakes, and counts every wake passed, the rounds out and not yet
+// back with them; past that list, an object is still overdue when the index
+// holds its wake a whole period late. Asked only of the objects with an
+// episode open and not on the rows, one index read each.
+func (publisher *fleetPublisher) overdueHidden(snapshot fleet.Snapshot, part fleet.ReplicaPart) func(string) bool {
+	switch {
+	case part.Truncated != 0:
+		return func(string) bool { return true }
+	case snapshot.Overdue == nil || !snapshot.Overdue.Truncated:
+		return nil
+	case publisher.schedule == nil:
+		return func(string) bool { return true }
+	}
+	at := snapshot.TakenAt
+	return func(queryGroup string) bool {
+		wake := publisher.schedule.WakeOf(queryGroup)
+		return wake.Known && fleet.OverdueWake{QueryGroup: queryGroup, WakeAt: wake.DueAt, IntervalSeconds: wake.IntervalSeconds}.LateAt(at)
+	}
+}
+
+// evaluatingStrategies is every strategy seen evaluating on the given
+// objects, once each, in order.
+func evaluatingStrategies(owned []execution.QueryGroupIdentity, strategies func(string) []fleet.StrategyRef) []fleet.StrategyRef {
+	seen := map[fleet.StrategyRef]bool{}
+	list := []fleet.StrategyRef{}
+	for _, queryGroup := range owned {
+		for _, ref := range strategies(string(queryGroup)) {
+			if !seen[ref] {
+				seen[ref] = true
+				list = append(list, ref)
+			}
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].StrategyID != list[j].StrategyID {
+			return list[i].StrategyID < list[j].StrategyID
+		}
+		return list[i].BusinessID < list[j].BusinessID
+	})
+	return list
+}
+
+// overdueEpisodeObserver logs an overdue episode's beginning and end with the
+// object and its hold, and counts each beginning by its hold.
+func overdueEpisodeObserver(logger *observability.Logger, recorder *metric.Recorder) func(fleet.OverdueEpisode, bool) {
+	return func(episode fleet.OverdueEpisode, began bool) {
+		if began {
+			recorder.FleetOverdueEpisodeBegan(episode.HoldClass())
+		}
+		if logger == nil {
+			return
+		}
+		result := "ended"
+		if began {
+			result = "began"
+		}
+		logger.Warn("fleet_overdue_episode", result, 0, 0, slog.String("query_group", episode.QueryGroup),
+			slog.String("hold", episode.HoldClass()), slog.Int64("read_hold_ms", episode.ReadHoldMillis),
+			slog.Time("due_at", episode.DueAt), slog.Int64("interval_seconds", episode.IntervalSeconds),
+			slog.Time("onset", episode.Onset), slog.Int("strategies", len(episode.Strategies)))
 	}
 }
 
@@ -597,6 +719,13 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.readHolds != nil {
 		snapshot.ReadHolds = publisher.readHolds()
 	}
+	snapshot.OverdueEpisodes = append([]fleet.OverdueEpisode(nil), publisher.overdueEpisodes...)
+	// Which strategies evaluate on the objects this replica holds, for its
+	// summary to count the running ones by: a strategy on no row of its is
+	// running here.
+	if publisher.strategies != nil {
+		snapshot.EvaluatingStrategies, snapshot.EvaluatingStrategiesKnown = evaluatingStrategies(owned, publisher.strategies), true
+	}
 	// And the objects whose late series the lookback's supplements could
 	// not recover: past their round, or the tail of a window recovered in
 	// part.
@@ -812,6 +941,11 @@ func fleetVerdictOf(view fleet.View, part fleet.ReplicaPart, at time.Time) metri
 		verdict.HandoverObjects = &objects
 	}
 
+	if running, known := fleet.RunningStrategiesOf(&view, part); known {
+		for _, word := range fleet.StateWords {
+			verdict.RunningStrategies = append(verdict.RunningStrategies, metric.FleetCount{Value: string(word), Count: running[word]})
+		}
+	}
 	rows := part.Metrics
 	if rows == nil {
 		if len(view.Replicas) > 0 {

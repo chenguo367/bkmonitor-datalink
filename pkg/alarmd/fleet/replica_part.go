@@ -85,6 +85,14 @@ type ReplicaPart struct {
 	CheckRows checkTallies `json:"-"`
 	// TodoRows is the rows' half of the first screen's to-do (todoRowsOf).
 	TodoRows Todo `json:"-"`
+	// Overdue is the objects of the rows under SLOTS_OVERDUE, for the replica
+	// that publishes the part to keep its overdue episodes by; not published,
+	// as a reader of summaries has no use for which.
+	Overdue []OverdueObject `json:"-"`
+	// RunningStrategies is the replica's running strategies by state
+	// (runningStrategiesOf); nil from a snapshot that does not say which
+	// strategies evaluate on its objects, and nil merged when any part is.
+	RunningStrategies map[StateWord]int `json:"running_strategies,omitempty"`
 	// Metrics is what the verdict scrape counts from rows. Nil on a part a
 	// build before it published, which says nothing of those counts: such a
 	// summary is read as none, and the replica is summarized from its
@@ -117,6 +125,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	columns := viewColumns(&view)
 	part.Truncated = truncatedColumns(columnsTruncated(&view))
 	part.CheckRows = checkRowsOf(columns, &view, now)
+	part.Overdue = overdueObjectsOf(columns)
 	part.TodoRows = todoRowsOf(columns, &view, now)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
@@ -141,6 +150,8 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}, Metrics: &MetricRows{}}
+	running := len(parts) > 0
+	merged.RunningStrategies = map[StateWord]int{}
 	tallies := make([]ImpactTally, 0, len(parts))
 	for _, part := range parts {
 		merged.Attribution.Ours += part.Attribution.Ours
@@ -159,6 +170,10 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.Truncated |= part.Truncated
 		mergeCheckTallies(merged.CheckRows, part.CheckRows)
 		mergeTodoRows(&merged.TodoRows, part.TodoRows)
+		running = running && part.RunningStrategies != nil
+		for word, count := range part.RunningStrategies {
+			merged.RunningStrategies[word] += count
+		}
 		// One part without the counts leaves the merged counts unknown,
 		// never short by that replica's rows.
 		if part.Metrics == nil {
@@ -170,6 +185,9 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.RetainedShare = append(merged.RetainedShare, part.RetainedShare...)
 		merged.RetainedShareTotal += part.RetainedShareTotal
 		merged.ReadEarly, merged.ReadEarlyTotal = append(merged.ReadEarly, part.ReadEarly...), merged.ReadEarlyTotal+part.ReadEarlyTotal
+	}
+	if !running {
+		merged.RunningStrategies = nil
 	}
 	merged.Loss = merged.Loss.settled()
 	merged.PrunedSkips = latestPerObject(merged.PrunedSkips, func(ref PrunedSkipRef) (string, time.Time) { return ref.QueryGroup, ref.At }, prunedSkipBefore)
