@@ -299,14 +299,29 @@ func (loop *absentStrategyClose) readSourceNow(ctx context.Context, rows []fleet
 		}
 		return
 	}
-	listed := strategyIDsOf(observed)
+	// The page's ids, at most a page of them, looked up in one walk over the
+	// observation: no set the size of the source is built for a page.
+	listed := make(map[string]bool, len(rows))
+	for index := range rows {
+		listed[rows[index].StrategyID] = false
+	}
+	for _, strategy := range observed.Strategies {
+		if _, onPage := listed[strategy.StrategyID]; onPage {
+			listed[strategy.StrategyID] = true
+		}
+	}
 	unlisted := make([]int, 0, len(rows))
 	for index := range rows {
-		if _, ok := listed[rows[index].StrategyID]; ok {
+		switch {
+		case listed[rows[index].StrategyID]:
 			rows[index].SourceNow = fleet.AbsentSourceListed
-			continue
+		case !controlplane.CanonicalStrategyID(rows[index].StrategyID):
+			// Checked apart, so that one such id leaves the rest of the
+			// page's rows their answer.
+			rows[index].SourceNow, rows[index].SourceNowReason = fleet.AbsentSourceUnread, fleet.AbsentUnreadIDNotCanonical
+		default:
+			unlisted = append(unlisted, index)
 		}
-		unlisted = append(unlisted, index)
 	}
 	if len(unlisted) == 0 {
 		return
@@ -328,7 +343,7 @@ func (loop *absentStrategyClose) readSourceNow(ctx context.Context, rows []fleet
 	defer cancel()
 	present, err := loop.documents.StrategyDocumentsPresent(checkCtx, ids)
 	switch {
-	case errors.Is(err, controlplane.ErrStrategyDocumentPresenceUnsupported) || errors.Is(err, controlplane.ErrActiveStrategyIDInvalid):
+	case errors.Is(err, controlplane.ErrStrategyDocumentPresenceUnsupported):
 		unread(fleet.AbsentUnreadUnsupported)
 		return
 	case err != nil || len(present) != len(ids):
@@ -341,14 +356,6 @@ func (loop *absentStrategyClose) readSourceNow(ctx context.Context, rows []fleet
 			rows[index].SourceNow = fleet.AbsentSourceDocument
 		}
 	}
-}
-
-func strategyIDsOf(observed controlplane.ObservedSnapshot) map[string]struct{} {
-	ids := make(map[string]struct{}, len(observed.Strategies))
-	for _, strategy := range observed.Strategies {
-		ids[strategy.StrategyID] = struct{}{}
-	}
-	return ids
 }
 
 func absentRowFacts(row absentCandidateRow) fleet.AbsentCandidateRow {
