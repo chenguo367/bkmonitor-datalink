@@ -758,3 +758,74 @@ func TestAWindowLineIsTheDatasOnlyWhenEveryWindowIsSparse(t *testing.T) {
 		t.Errorf("SERIES_SPARSE is owned by %s, want the data owner and no action item for this deployment", answers.Owner)
 	}
 }
+
+// A window short only at minutes the strategy was outside its active hours
+// is under no line, as a round outside its hours is, whichever window line
+// the row reached: its own reason's counts, a guard it is held under, or the
+// configuration's line a guard's stored CONFIG_DRIFT files it under. A hole
+// at another minute, a hole not named, or a short window not named, and the
+// row keeps its line.
+func TestAWindowShortOnlyOutsideActiveHoursIsUnderNoLine(t *testing.T) {
+	window := func(by WindowHoleCounts, verdict WindowVerdict, reasons ...string) WindowRow {
+		row := WindowRow{Verdict: verdict, HolesBy: by,
+			MissingTotal: by.AnsweredWithoutSeries + by.AnsweredEmpty + by.InputIncomplete + by.PrimaryUnrecorded + by.NotInMemory}
+		for _, reason := range reasons {
+			row.Holes = append(row.Holes, WindowHole{Reason: reason})
+		}
+		return row
+	}
+	off := contract.ReasonEffectiveTimeInactive
+	answered := func(reasons ...string) WindowRow {
+		return window(WindowHoleCounts{AnsweredWithoutSeries: uint32(len(reasons))}, VerdictDataAbsentWhenQueried, reasons...)
+	}
+	incomplete := func(reasons ...string) WindowRow {
+		return window(WindowHoleCounts{InputIncomplete: uint32(len(reasons))}, VerdictInputIncomplete, reasons...)
+	}
+	coverage := func(guarded uint32, windows ...WindowRow) *HistoryCoverage {
+		return &HistoryCoverage{Levels: 4, Short: uint32(len(windows)), WorstValid: 3, WorstRequired: 5, ShortRounds: 9, Guarded: guarded, Windows: windows}
+	}
+	drift := func(windows ...WindowRow) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "CONFIG_DRIFT", Coverage: coverage(uint32(len(windows)), windows...)}
+	}
+	gapped := func(windows ...WindowRow) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", Coverage: coverage(0, windows...)}
+	}
+	guarded := func(windows ...WindowRow) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", Cause: "GAP_GUARD_WARMING", CauseReason: "GAP_GUARD_WARMING",
+			Coverage: coverage(uint32(len(windows)), windows...)}
+	}
+	uncounted := func(windows ...WindowRow) Anomaly {
+		row := drift(windows...)
+		row.Coverage.Levels = 0
+		return row
+	}
+	for name, tc := range map[string]struct {
+		outside, kept Anomaly
+		line          Check
+	}{
+		"SERIES_SPARSE: a guard's CONFIG_DRIFT, the series answered without": {
+			drift(answered(off, off), answered(off)), drift(answered(off, "LEVEL_OUTCOME_UNKNOWN"), answered(off)), CheckSeriesSparse},
+		"SERIES_DATA_MISSING: gapped, a window incomplete": {
+			gapped(answered(off, off), incomplete(off)), gapped(answered(off, off), incomplete("")), CheckSeriesDataMissing},
+		"WINDOW_UNDECIDED: held under a gap guard": {
+			guarded(incomplete(off, off), incomplete(off)), guarded(incomplete(off, off), incomplete("FULL_COMPLETED")), CheckWindowUndecided},
+		"CONFIG_UNRESOLVED: a guard's CONFIG_DRIFT without counts": {
+			uncounted(answered(off), answered(off)), uncounted(answered(off), answered("")), CheckConfigUnresolved},
+	} {
+		if check, under, _ := checkOf(tc.kept, ScheduleOnTime); check != tc.line || !under {
+			t.Fatalf("%s: with an in-hours hole the row is under %s (%v), want %s", name, check, under, tc.line)
+		}
+		if check, under, _ := checkOf(tc.outside, ScheduleOnTime); check != "" || under {
+			t.Fatalf("%s: outside its active hours the row is under %s, want no line", name, check)
+		}
+	}
+	unnamedHole := drift(answered(off, off), answered(off))
+	unnamedHole.Coverage.Windows[0].MissingTotal++
+	unnamedWindow := drift(answered(off, off), answered(off))
+	unnamedWindow.Coverage.Short++
+	for name, row := range map[string]Anomaly{"a hole not named": unnamedHole, "a short window not named": unnamedWindow} {
+		if check, under, _ := checkOf(row, ScheduleOnTime); check == "" || !under {
+			t.Fatalf("%s: the row left its line on what it did not name", name)
+		}
+	}
+}

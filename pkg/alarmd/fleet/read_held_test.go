@@ -22,7 +22,7 @@ import (
 // that would need 180 s to read it whole without the hold.
 func measuredHold(now time.Time) ReadHoldFacts {
 	return ReadHoldFacts{Millis: 99_000, ArrivalAgeMillis: 189_000, HeldSince: now.Add(-time.Hour).Unix(),
-		DelaySeconds: 60, SuggestedDelaySeconds: 180, Buckets: []int64{1, 2}}
+		DelaySeconds: 60, SuggestedDelaySeconds: 180, SettlingWaitSeconds: 30, Buckets: []int64{1, 2}}
 }
 
 // heldView is one replica's view of qg-held under strategy 4101, its rounds
@@ -87,7 +87,7 @@ func TestAHeldStrategyIsDetectingWithItsHoldAndTheTimeDelayThatNeedsNone(t *test
 	if line == nil || line.Standing.State != StateDetecting || line.TimeDelayAdvice == nil || !sameAdvice(*line.TimeDelayAdvice, want) {
 		t.Fatalf("line %+v, want a detecting line with the advice", line)
 	}
-	for _, words := range []string{"最晚约在窗口结束后 189 秒到齐", "自动推后 99 秒", "time_delay 改为 180 秒"} {
+	for _, words := range []string{"最晚约在窗口结束后 189 秒到齐", "自动推后 99 秒", "time_delay 改为 180 秒（alarmd 另有约 30 秒就绪等待）"} {
 		if !strings.Contains(line.Line, words) {
 			t.Fatalf("line %q, want it to say %q", line.Line, words)
 		}
@@ -206,5 +206,19 @@ func TestTheObjectListDoesNotShipTheHeldRows(t *testing.T) {
 	}
 	if rows, _ := body["read_held"].([]any); len(rows) != 0 {
 		t.Fatalf("the object list shipped %d held rows it was not asked for", len(rows))
+	}
+}
+
+// The held line says the settling wait alarmd adds after the time_delay when
+// there is one, which is why the time_delay it suggests can read as less
+// than when the data arrives; with none it says nothing of it.
+func TestTheHeldLineSaysTheSettlingWaitOnlyWhenThereIsOne(t *testing.T) {
+	facts := ReadHoldFacts{Millis: 23_000, ArrivalAgeMillis: 33_000, SuggestedDelaySeconds: 30, SettlingWaitSeconds: 10}
+	if clause := readHeldClause(&facts); !strings.HasSuffix(clause, "建议把 time_delay 改为 30 秒（alarmd 另有约 10 秒就绪等待）") {
+		t.Fatalf("clause %q, want the suggestion with the settling wait beside it", clause)
+	}
+	facts.SettlingWaitSeconds = 0
+	if clause := readHeldClause(&facts); !strings.HasSuffix(clause, "建议把 time_delay 改为 30 秒") || strings.Contains(clause, "就绪等待") {
+		t.Fatalf("clause %q, want no settling wait said where there is none", clause)
 	}
 }

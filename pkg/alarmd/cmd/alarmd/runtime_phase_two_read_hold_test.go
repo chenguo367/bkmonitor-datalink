@@ -330,7 +330,12 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 		"unprepared": {99_000, 1_790_000_000, 0, 0},
 	} {
 		got, found := facts[qg]
-		if !found || got.Millis != want.millis || got.HeldSince != want.since || got.DelaySeconds != want.delay || got.SuggestedDelaySeconds != want.suggested {
+		settling := int64(30)
+		if qg == "unprepared" {
+			settling = 0
+		}
+		if !found || got.Millis != want.millis || got.HeldSince != want.since || got.DelaySeconds != want.delay || got.SuggestedDelaySeconds != want.suggested ||
+			got.SettlingWaitSeconds != settling {
 			t.Errorf("%s: facts %+v (found %t), want hold %d since %d delay %d suggested %d", qg, got, found, want.millis, want.since, want.delay, want.suggested)
 		}
 	}
