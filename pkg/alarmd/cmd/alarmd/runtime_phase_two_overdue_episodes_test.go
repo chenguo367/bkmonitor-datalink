@@ -293,3 +293,56 @@ func TestAWakeWithNoPeriodOpensNoOverdueEpisode(t *testing.T) {
 		t.Fatalf("began %v, want the episode once the period is read", began)
 	}
 }
+
+// An object named without a period keeps when it was first seen so for as
+// long as it is named, and while the index's list is cut and the index still
+// holds it without one; once its period arrives it is forgotten, and named
+// again it is new.
+func TestAnObjectWithNoPeriodKeepsWhenItWasFirstSeenUntilItsPeriodArrives(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	start := clock.now()
+	schedule := scriptedSchedule{"qg-unread": {Known: true, DueAt: start}}
+	wakes := &stubWakeSource{wakes: []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: start}}, total: 1}
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now,
+		owned:   func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-unread"} },
+		overdue: wakes, schedule: schedule,
+	}
+	named := func() []fleet.PeriodUnknownObject {
+		snapshot := publisher.snapshot(context.Background())
+		if snapshot.Overdue == nil {
+			t.Fatal("no overdue facts")
+		}
+		return snapshot.Overdue.PeriodUnknownObjects
+	}
+	if objects := named(); len(objects) != 1 || objects[0].QueryGroup != "qg-unread" || !objects[0].Since.Equal(start) {
+		t.Fatalf("named %+v, want qg-unread since now", objects)
+	}
+	clock.at = clock.at.Add(10 * time.Minute)
+	wakes.wakes = []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: clock.now()}}
+	if objects := named(); len(objects) != 1 || !objects[0].Since.Equal(start) {
+		t.Fatalf("named %+v, want qg-unread still since it was first seen", objects)
+	}
+	// Past a cut list, still without a period by the index: kept, not named.
+	clock.at = clock.at.Add(time.Minute)
+	wakes.wakes, wakes.total = nil, 60
+	if objects := named(); len(objects) != 0 || !publisher.periodUnknownSince["qg-unread"].Equal(start) {
+		t.Fatalf("named %+v remembered %v, want it kept past a cut list", objects, publisher.periodUnknownSince)
+	}
+	wakes.wakes, wakes.total = []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: clock.now()}}, 1
+	if objects := named(); len(objects) != 1 || !objects[0].Since.Equal(start) {
+		t.Fatalf("named %+v, want qg-unread back since it was first seen", objects)
+	}
+	// Its period arrives: forgotten; named again later, it is new.
+	clock.at = clock.at.Add(time.Minute)
+	schedule["qg-unread"] = fleet.WakeFacts{Known: true, DueAt: clock.now().Add(time.Minute), IntervalSeconds: 60}
+	wakes.wakes, wakes.total = nil, 0
+	if objects := named(); len(objects) != 0 || len(publisher.periodUnknownSince) != 0 {
+		t.Fatalf("named %+v remembered %v, want it forgotten once its period arrived", objects, publisher.periodUnknownSince)
+	}
+	clock.at = clock.at.Add(time.Minute)
+	wakes.wakes, wakes.total = []fleet.OverdueWake{{QueryGroup: "qg-unread", WakeAt: clock.now()}}, 1
+	if objects := named(); len(objects) != 1 || !objects[0].Since.Equal(clock.now()) {
+		t.Fatalf("named %+v, want qg-unread new since now", objects)
+	}
+}

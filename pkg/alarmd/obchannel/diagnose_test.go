@@ -26,7 +26,8 @@ func diagnoseNative(t *testing.T, page map[string]any) http.Handler {
 		case "/api/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"health": "DEGRADED", "expected": 83, "determined": 83,
 				"dependencies": []any{}, "per_replica": []any{"not kept"},
-				"source_standing": map[string]any{"kind": "ACCEPTING", "writer_statement": map[string]any{"held": false, "reason": "absent"}}})
+				"source_standing": map[string]any{"kind": "ACCEPTING", "writer_statement": map[string]any{"held": false, "reason": "absent"}},
+				"overdue":         map[string]any{"total": 0, "period_unknown": 1, "period_unknown_objects": []any{map[string]any{"query_group": "qg-unread"}}}})
 		default:
 			w.WriteHeader(404)
 		}
@@ -89,6 +90,10 @@ func TestDiagnoseEnvironmentAddsTheDeploymentToTheFirstPage(t *testing.T) {
 	if standing, _ := fleetFacts["source_standing"].(map[string]any); standing == nil ||
 		standing["writer_statement"].(map[string]any)["reason"] != "absent" {
 		t.Errorf("source_standing = %v, want it with the writer's statement", fleetFacts["source_standing"])
+	}
+	// And the overdue facts, which name the objects without a period.
+	if overdue, _ := fleetFacts["overdue"].(map[string]any); overdue == nil || overdue["period_unknown"] != 1.0 {
+		t.Errorf("overdue = %v, want the overdue facts with the objects without a period", fleetFacts["overdue"])
 	}
 	if replicas := deployment["replicas"].(map[string]any); replicas["reason"] != "service_account_not_mounted" {
 		t.Errorf("replicas = %v", replicas)
