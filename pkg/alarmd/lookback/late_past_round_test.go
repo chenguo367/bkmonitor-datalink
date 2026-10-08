@@ -397,3 +397,23 @@ func TestASamplesWindowSaysHowManySeriesWereOnTime(t *testing.T) {
 		t.Fatalf("late past round %+v, want each window's own on-time count", past)
 	}
 }
+
+// A held group's first read waited its hold, and its late series were seen
+// that long after it: the time_delay that reads them is the one it runs
+// under, plus the hold, plus how long after the first read they came. Left
+// without the hold, a held group was advised a time_delay that still needed
+// it.
+func TestAHeldGroupsSuggestionCountsTheHoldItsFirstReadWaited(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	for _, evaluation := range []int64{600, 660} {
+		slot := openWindow(f, evaluation, 2, 60)
+		slot.readHold = 45_000
+		endWindow(f, slot, DirectedSupplemented, crossed(2))
+	}
+	readings := f.engine.LatePastRound()
+	want := int64(60) + 45 + int64(rungDelay(2, minute).Seconds())
+	want = (want + 59) / 60 * 60
+	if len(readings) != 1 || readings[0].SuggestedDelaySeconds != want || readings[0].Samples[1].ReadHoldSeconds != 45 {
+		t.Fatalf("readings %+v, want the suggestion %d with the 45 second hold in it", readings, want)
+	}
+}

@@ -187,3 +187,26 @@ func TestRuntimeALivePredecessorRecordIsNotReadPastTheLinksLifetime(t *testing.T
 		t.Fatal("the old group was read past the link's lifetime")
 	}
 }
+
+// A row states the hold of a group this replica owns as the group page does:
+// a record not read yet is unknown, not zero, until the group's first
+// prepare reads it; a group it does not own is no row's.
+func TestARowStatesAnUnreadHoldAsUnknownAsTheGroupPageDoes(t *testing.T) {
+	h, _, schedule, fence, _, _ := runtimeExpiredZeroBridge(t)
+	qg := schedule.Segment.QueryGroup
+	if millis, unknown, owned := h.rowHold(qg); !owned || !unknown || millis != 0 {
+		t.Fatalf("an unread record reads (%d, unknown %v, owned %v), want unknown", millis, unknown, owned)
+	}
+	if _, known := h.holdOf(string(qg)); known {
+		t.Fatal("the group page knows a hold the row does not")
+	}
+	if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
+		t.Fatal(err)
+	}
+	if millis, unknown, owned := h.rowHold(qg); !owned || unknown || millis != 0 {
+		t.Fatalf("a prepared group with no hold reads (%d, unknown %v, owned %v), want a known zero", millis, unknown, owned)
+	}
+	if _, _, owned := h.rowHold("another-group"); owned {
+		t.Fatal("a group this replica does not own was stated")
+	}
+}

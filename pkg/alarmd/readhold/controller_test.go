@@ -1087,3 +1087,25 @@ func TestEverySegmentsScheduleIsChecked(t *testing.T) {
 		t.Fatal("a second Segment's invalid schedule was not checked")
 	}
 }
+
+// The hold a reader states is the pending one while a change is pending,
+// the current one otherwise; a record not read yet, or one that did not
+// decode, is not known; none at all is a known zero.
+func TestTheHoldReadersStateIsPendingFirstAndUnknownWhenUnread(t *testing.T) {
+	pending := int64(30_000)
+	for name, tc := range map[string]struct {
+		inspection Inspection
+		hold       int64
+		known      bool
+	}{
+		"current":   {Inspection{Loaded: true, Record: Record{HoldMillis: 20_000}}, 20_000, true},
+		"pending":   {Inspection{Loaded: true, Record: Record{HoldMillis: 20_000, PendingHoldMillis: &pending}}, 30_000, true},
+		"no record": {Inspection{Loaded: true, Missing: true}, 0, true},
+		"not read":  {Inspection{}, 0, false},
+		"corrupt":   {Inspection{Loaded: true, Corrupt: true, Record: Record{HoldMillis: 20_000}}, 0, false},
+	} {
+		if hold, known := tc.inspection.Hold(); hold != tc.hold || known != tc.known {
+			t.Errorf("%s: (%d, %v), want (%d, %v)", name, hold, known, tc.hold, tc.known)
+		}
+	}
+}

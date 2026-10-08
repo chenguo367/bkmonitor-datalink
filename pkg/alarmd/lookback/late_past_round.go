@@ -53,9 +53,12 @@ type LatePastRoundSample struct {
 	EvaluationTime execution.EvaluationTime `json:"evaluation_time"`
 	Rung           string                   `json:"rung"`
 	SeenAgeSeconds int64                    `json:"seen_age_seconds"`
-	OnTimeSeries   int                      `json:"on_time_series"`
-	LateSeries     int                      `json:"late_series"`
-	CrossedSeries  int                      `json:"crossed_series"`
+	// ReadHoldSeconds is the hold the window's first read waited, which the
+	// seen age is counted after.
+	ReadHoldSeconds int64 `json:"read_hold_seconds,omitempty"`
+	OnTimeSeries    int   `json:"on_time_series"`
+	LateSeries      int   `json:"late_series"`
+	CrossedSeries   int   `json:"crossed_series"`
 }
 
 // LatePastRoundReading is a Query Group whose late series crossed their
@@ -149,7 +152,7 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 			run.delaySeconds = slot.queries[0].spec.PlanFacts.QueryDelaySeconds
 		}
 		run.samples = keepLast(append(run.samples, LatePastRoundSample{EvaluationTime: slot.evaluation,
-			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(slot.seenAgeOrRung() / time.Second),
+			Rung: RungNames[slot.rung], SeenAgeSeconds: int64(slot.seenAgeOrRung() / time.Second), ReadHoldSeconds: slot.readHold / 1000,
 			OnTimeSeries: onTimeSeries(slot), LateSeries: slot.late, CrossedSeries: facts.CrossedT}), latePastRoundKept)
 	case facts.Admitted > 0:
 		state.latePastRound = nil
@@ -223,14 +226,15 @@ func latePastRoundOf(queryGroup execution.QueryGroupIdentity, state *group) (Lat
 		return LatePastRoundReading{}, false
 	}
 	step := int64(state.step / time.Second)
+	// How much later than the time_delay the late series came: after the
+	// first read, which waited its hold, plus that hold. Without the hold a
+	// held group was advised a time_delay that still needed it.
 	later := int64(0)
 	for _, sample := range run.samples {
-		later = max(later, sample.SeenAgeSeconds)
+		later = max(later, sample.SeenAgeSeconds+sample.ReadHoldSeconds)
 	}
-	suggested := run.delaySeconds + later
-	if unit := int64(state.delayUnit / time.Second); unit > 0 {
-		suggested = (suggested + unit - 1) / unit * unit
-	}
+	suggested := execution.SuggestedTimeDelaySeconds(time.Duration(run.delaySeconds+later)*time.Second,
+		time.Duration(run.delaySeconds)*time.Second, state.delayUnit)
 	return LatePastRoundReading{QueryGroup: queryGroup, Source: state.source, StepSeconds: step,
 		CurrentDelaySeconds: run.delaySeconds, SuggestedDelaySeconds: suggested, Since: run.since,
 		Samples: append([]LatePastRoundSample(nil), run.samples...)}, true
