@@ -12,6 +12,7 @@ package obchannel
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -301,7 +302,7 @@ func TestTheProductionRegistryIsListedWhole(t *testing.T) {
 			want[name] = true
 		}
 	}
-	listed, err := listMetrics(gatherer, "")
+	listed, err := listMetrics(gatherer, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +320,71 @@ func TestTheProductionRegistryIsListedWhole(t *testing.T) {
 		t.Fatalf("described %d alarmd families, listing misses %d: %v", len(want), len(missing), missing)
 	}
 	if listed.Truncated {
-		t.Fatalf("the production registry (%d families) no longer fits MaxListedFamilies (%d)", listed.Matched, MaxListedFamilies)
+		t.Fatalf("the production registry (%d families) no longer fits one page of %d bytes", listed.Matched, MaxListedPageBytes)
+	}
+}
+
+// A registry larger than one page is listed whole across pages: each page
+// as many families as its bytes hold, in name order, the next one from the
+// last name of the one before, none listed twice; a page that leaves
+// families out says so in its summary and points at the next page with the
+// same filter, and the last page says it is complete.
+func TestMetricsListPagesARegistryLargerThanAPage(t *testing.T) {
+	registry := metricsRegistry(t)
+	help := strings.Repeat("h", MaxListedHelpBytes)
+	const extra = 900
+	for i := 0; i < extra; i++ {
+		registry.MustRegister(prometheus.NewCounter(prometheus.CounterOpts{
+			Name: fmt.Sprintf("bkmonitor_alarmd_paged_%04d_total", i), Help: help}))
+	}
+	c := testChannel(t, &testAuth{}, MetricsOperations(registry)...)
+	seen := map[string]bool{}
+	previous := ""
+	params := Params{"contains": "paged"}
+	pages := 0
+	for {
+		pages++
+		if pages > 10 {
+			t.Fatal("paging did not end")
+		}
+		status, out := call(t, c, envelope(c, "invoke", "metrics.list", params))
+		if status != 200 {
+			t.Fatalf("metrics.list = %d %+v", status, out)
+		}
+		encoded, _ := json.Marshal(out.Result)
+		var page MetricsListResult
+		if err := json.Unmarshal(encoded, &page); err != nil {
+			t.Fatal(err)
+		}
+		families, _ := json.Marshal(page.Families)
+		if len(page.Families) == 0 || len(families) > MaxListedPageBytes+2 || page.Matched != extra {
+			t.Fatalf("page %d: %d families in %d bytes, matched %d", pages, len(page.Families), len(families), page.Matched)
+		}
+		for _, family := range page.Families {
+			if seen[family.Name] || family.Name <= previous {
+				t.Fatalf("page %d listed %s twice or out of order", pages, family.Name)
+			}
+			seen[family.Name], previous = true, family.Name
+		}
+		if !page.Truncated {
+			if out.Status != "ok" || page.NextCursor != "" || len(out.Next) != 0 {
+				t.Fatalf("the last page does not say it is complete: %s %q %+v", out.Status, page.NextCursor, out.Next)
+			}
+			break
+		}
+		if out.Status == "ok" || page.NextCursor != page.Families[len(page.Families)-1].Name ||
+			!strings.Contains(out.Summary, fmt.Sprintf("本页列出 %d 个", len(page.Families))) ||
+			len(out.Next) != 1 || out.Next[0].Params["cursor"] != page.NextCursor || out.Next[0].Params["contains"] != "paged" {
+			t.Fatalf("a partial page does not name what it left out and where it goes on: %s %q %+v", out.Status, out.Summary, out.Next)
+		}
+		params = Params{"contains": "paged", "cursor": page.NextCursor}
+	}
+	if len(seen) != extra || pages < 2 {
+		t.Fatalf("listed %d of %d families over %d pages", len(seen), extra, pages)
+	}
+	for _, bad := range []Params{{"cursor": "go_goroutines"}, {"cursor": ""}} {
+		if err := validate(c.ops["metrics.list"], bad); err == nil {
+			t.Fatalf("cursor %v accepted", bad)
+		}
 	}
 }

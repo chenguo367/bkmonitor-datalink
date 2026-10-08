@@ -11,6 +11,7 @@ package obchannel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -51,9 +52,12 @@ var MetricNamePattern = regexp.MustCompile(`^bkmonitor_alarmd_[a-z0-9_]+$`)
 // MaxMetricNames bounds one read's names, MaxMetricSeries each family's
 // series and MaxMetricLabelFilters the label filter.
 const (
-	// MaxListedFamilies bounds metrics.list, and MaxListedHelpBytes each
-	// family's help text in it.
-	MaxListedFamilies  = 400
+	// MaxListedPageBytes bounds one metrics.list page: its families as they
+	// are encoded, which is what the bound is for. A count would be a guess
+	// at it that a longer help or a growing registry outruns; the families
+	// past one page are on the next, from next_cursor. MaxListedHelpBytes
+	// bounds each family's help text in it.
+	MaxListedPageBytes = 256 << 10
 	MaxListedHelpBytes = 320
 
 	MaxMetricNames        = 20
@@ -112,8 +116,10 @@ type MetricFamilyEntry struct {
 	Series int    `json:"series"`
 }
 
-// MetricsListResult is the families the answering process registers, in
-// name order. Truncated says more matched than MaxListedFamilies.
+// MetricsListResult is one page of the families the answering process
+// registers, in name order. Matched is every family that matches, on this
+// page and the others; Truncated says more follow this page, from
+// NextCursor.
 type MetricsListResult struct {
 	// Described is false when the registry could not describe itself and
 	// only families that have series are listed.
@@ -121,6 +127,7 @@ type MetricsListResult struct {
 	Families    []MetricFamilyEntry `json:"families"`
 	Matched     int                 `json:"matched"`
 	Truncated   bool                `json:"truncated,omitempty"`
+	NextCursor  string              `json:"next_cursor,omitempty"`
 	GatherError string              `json:"gather_error,omitempty"`
 }
 
@@ -148,16 +155,18 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 		Fields: map[string]Field{
 			"contains": {Type: "string", MinLength: 1, MaxLength: 64, Pattern: `^[A-Za-z0-9_ ]+$`,
 				Description: "可选：只列名字或说明里含这段文字的族（不区分大小写），例如 recovery、cooldown。"},
+			"cursor": {Type: "string", MinLength: 1, MaxLength: 200, Pattern: MetricNamePattern.String(),
+				Description: "可选：上一页的 next_cursor，从它之后的族接着列。", Source: "metrics.list next_cursor"},
 		},
 		OutputSchema: SchemaOf(MetricsListResult{}),
-		Limits:       map[string]any{"families": MaxListedFamilies, "help_bytes": MaxListedHelpBytes, "scope": "answering_replica"},
+		Limits:       map[string]any{"page_bytes": MaxListedPageBytes, "help_bytes": MaxListedHelpBytes, "scope": "answering_replica"},
 		Examples:     []Params{{}, {"contains": "recovery"}},
 		Availability: available,
 		Run: func(ctx context.Context, p Params) Outcome {
 			if gatherer == nil {
 				return Outcome{Error: &Failure{Code: "metrics_not_wired", Message: "This process has no metrics registry wired to the channel."}}
 			}
-			result, err := listMetrics(gatherer, p.String("contains"))
+			result, err := listMetrics(gatherer, p.String("contains"), p.String("cursor"))
 			if err != nil {
 				return Outcome{Error: &Failure{Code: "metrics_unreadable", Message: "The metrics registry could not be gathered."}}
 			}
@@ -165,7 +174,13 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 				Summary:     fmt.Sprintf("应答进程注册了 %d 个匹配的 alarmd 指标族", result.Matched),
 				Limitations: []string{"Families are this process's registry; another replica is read by targeting it. A family a failed collector owns is listed with no series; see gather_error."}}
 			if result.Truncated {
-				out.Limitations = append(out.Limitations, "More families match than are listed; narrow with contains.")
+				out.Summary += fmt.Sprintf("；本页列出 %d 个，到 %s 为止，其余从 next_cursor 接着读", len(result.Families), result.NextCursor)
+				out.Limitations = append(out.Limitations, "This page holds part of the matching families; the rest follow from next_cursor.")
+				next := Params{"cursor": result.NextCursor}
+				if contains := p.String("contains"); contains != "" {
+					next["contains"] = contains
+				}
+				out.Next = append(out.Next, Call{Operation: "metrics.list", Params: next, Reason: "本页没列完匹配的指标族；接着读下一页。"})
 			}
 			if !result.Described {
 				out.Complete = false
@@ -231,8 +246,10 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 	}}
 }
 
-// listMetrics names the registered alarmd families, filtered by contains.
-func listMetrics(gatherer prometheus.Gatherer, contains string) (MetricsListResult, error) {
+// listMetrics names the registered alarmd families, filtered by contains:
+// one page of them, those after the cursor in name order, as many as fit in
+// MaxListedPageBytes encoded and always at least one.
+func listMetrics(gatherer prometheus.Gatherer, contains, cursor string) (MetricsListResult, error) {
 	families, err := gatherer.Gather()
 	if err != nil && len(families) == 0 {
 		return MetricsListResult{}, err
@@ -273,10 +290,23 @@ func listMetrics(gatherer prometheus.Gatherer, contains string) (MetricsListResu
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	result.Matched = len(entries)
-	if len(entries) > MaxListedFamilies {
-		entries, result.Truncated = entries[:MaxListedFamilies], true
+	start := sort.Search(len(entries), func(i int) bool { return entries[i].Name > cursor })
+	if cursor == "" {
+		start = 0
 	}
-	result.Families = entries
+	used := 0
+	for _, entry := range entries[start:] {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return MetricsListResult{}, err
+		}
+		if len(result.Families) > 0 && used+len(encoded)+1 > MaxListedPageBytes {
+			result.Truncated, result.NextCursor = true, result.Families[len(result.Families)-1].Name
+			break
+		}
+		used += len(encoded) + 1
+		result.Families = append(result.Families, entry)
+	}
 	return result, nil
 }
 
