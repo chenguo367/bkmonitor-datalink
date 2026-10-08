@@ -183,26 +183,17 @@ func (repository *RedisCatalogRepository) loadPublicationContent(ctx context.Con
 	if !errors.Is(err, ErrCatalogManifestUnavailable) {
 		return activatedContent{}, err
 	}
-	var groups map[execution.QueryGroupIdentity]QueryGroup
-	digests := map[execution.QueryGroupIdentity]execution.ObjectDigest{}
-	if activation.SchemaVersion == activationSchemaVersion {
-		identities, err := repository.LoadActiveQueryGroupSet(ctx, activation.ActiveQGSetRef)
-		if err != nil {
-			return activatedContent{}, err
-		}
-		candidates := make(map[execution.QueryGroupIdentity]QueryGroup, len(identities))
-		for _, identity := range identities {
-			candidates[identity] = QueryGroup{Identity: identity}
-		}
-		groups, digests, err = repository.loadActivatedGroupsFromOpenSchedules(ctx, activation, candidates)
-		if err != nil {
-			return activatedContent{}, err
-		}
-	} else {
-		groups, err = repository.loadActivatedGroupsFromScheduleScan(ctx, activation)
-		if err != nil {
-			return activatedContent{}, err
-		}
+	identities, err := repository.LoadActiveQueryGroupSet(ctx, activation.ActiveQGSetRef)
+	if err != nil {
+		return activatedContent{}, err
+	}
+	candidates := make(map[execution.QueryGroupIdentity]QueryGroup, len(identities))
+	for _, identity := range identities {
+		candidates[identity] = QueryGroup{Identity: identity}
+	}
+	groups, digests, err := repository.loadActivatedGroupsFromOpenSchedules(ctx, activation, candidates)
+	if err != nil {
+		return activatedContent{}, err
 	}
 	// Open Segments name the execution content but not the output contexts
 	// in a form that can be compared per Plan without reading them again, so
@@ -218,12 +209,11 @@ func (repository *RedisCatalogRepository) loadPublicationContent(ctx context.Con
 type contentCutoverDecision string
 
 const (
-	cutoverKept      contentCutoverDecision = "kept"
-	cutoverRevised   contentCutoverDecision = "revised"
-	cutoverCut       contentCutoverDecision = "cut"
-	cutoverLegacyCut contentCutoverDecision = "legacy_cut"
-	cutoverRetired   contentCutoverDecision = "retired"
-	cutoverAdded     contentCutoverDecision = "added"
+	cutoverKept    contentCutoverDecision = "kept"
+	cutoverRevised contentCutoverDecision = "revised"
+	cutoverCut     contentCutoverDecision = "cut"
+	cutoverRetired contentCutoverDecision = "retired"
+	cutoverAdded   contentCutoverDecision = "added"
 	// cutoverBlocked: a precondition only a write outside the cutover could
 	// break failed on this Query Group; it keeps its records and is judged
 	// again at the next cutover.

@@ -23,7 +23,6 @@ import (
 var ActivationBlockedReasons = []string{
 	controlplane.CutoverReasonActivationRecordMissing, controlplane.CutoverReasonTimelineMissing,
 	controlplane.CutoverReasonOpenSegmentClosed, controlplane.CutoverReasonOpenDigestMismatch,
-	controlplane.CutoverReasonLegacyRevisionMismatch,
 }
 
 // activationBlockedCollector reads the Control Leader's last cutover at

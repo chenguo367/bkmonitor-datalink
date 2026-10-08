@@ -208,7 +208,7 @@ func TestPhaseTwoSourceRefreshMetricUsesOnlyFixedStatus(t *testing.T) {
 	}
 }
 
-func TestPhaseTwoActiveSetAndLegacyMigrationMetricsUseOnlyFixedLabels(t *testing.T) {
+func TestPhaseTwoActiveSetMetricsUseOnlyFixedLabels(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	recorder.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
 		Stage: observability.StageActiveQGSet, Result: observability.ResultSuccess,
@@ -220,9 +220,6 @@ func TestPhaseTwoActiveSetAndLegacyMigrationMetricsUseOnlyFixedLabels(t *testing
 	recorder.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
 		Stage: observability.StageActiveQGSet, Result: observability.ResultSuccess,
 		ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: "success", QueryGroups: 7, ObjectBytes: 321, Duration: time.Second}})
-	recorder.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
-		Stage: observability.StageLegacyQGMigration, Result: observability.ResultFailed,
-		LegacyMigration: &observability.LegacyQGMigrationFacts{Result: "fail_closed", ReasonClass: "contract", ScanKeys: 12, Duration: time.Second}})
 	if got := testutil.ToFloat64(recorder.phaseTwo.activeQGSetCount); got != 7 {
 		t.Fatalf("active QG count=%v", got)
 	}
@@ -231,9 +228,6 @@ func TestPhaseTwoActiveSetAndLegacyMigrationMetricsUseOnlyFixedLabels(t *testing
 	}
 	if got := testutil.CollectAndCount(recorder.phaseTwo.activeQGSetRedis); got != 1 {
 		t.Fatalf("redis metric families=%d", got)
-	}
-	if got := testutil.ToFloat64(recorder.phaseTwo.legacyMigration.WithLabelValues("fail_closed", "contract")); got != 1 {
-		t.Fatalf("migration total=%v", got)
 	}
 }
 

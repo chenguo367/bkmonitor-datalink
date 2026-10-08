@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	snapshotSchemaVersion         = "alarmd-control-snapshot-v1"
-	activationSchemaVersion       = "alarmd-control-activation-v2"
-	legacyActivationSchemaVersion = "alarmd-control-activation-v1"
+	snapshotSchemaVersion   = "alarmd-control-snapshot-v1"
+	activationSchemaVersion = "alarmd-control-activation-v2"
 )
 
 var (
@@ -155,20 +154,18 @@ type RedisCatalogRepository struct {
 	localView localView
 	// manifestCache and latestPublication bound the two reads the per-Slot
 	// Segment freshness check makes. See segment_freshness_cache.go.
-	manifestCache              catalogManifestCache
-	manifestFlights            catalogManifestFlights
-	latestPublication          latestPublicationMemo
-	freshnessClock             func() time.Time
-	controlCache               *controlReadCache
-	controlReads               controlReadCounters
-	activationBodyBytes        atomic.Int64
-	written                    writtenActivation
-	activeSets                 activeSetCache
-	adoptMu                    sync.Mutex
-	legacyMigrationMaxScanKeys int
-	legacyMigrationTimeout     time.Duration
-	drainingRetireAfter        time.Duration
-	segmentRetention           execution.SlotRetention
+	manifestCache       catalogManifestCache
+	manifestFlights     catalogManifestFlights
+	latestPublication   latestPublicationMemo
+	freshnessClock      func() time.Time
+	controlCache        *controlReadCache
+	controlReads        controlReadCounters
+	activationBodyBytes atomic.Int64
+	written             writtenActivation
+	activeSets          activeSetCache
+	adoptMu             sync.Mutex
+	drainingRetireAfter time.Duration
+	segmentRetention    execution.SlotRetention
 	// contentCutoverVerified is set once this process has read every open
 	// Segment in one cutover and found each naming the content its manifest
 	// names; later cutovers then read only the Query Groups whose content
@@ -216,14 +213,6 @@ func NewRedisCatalogRepository(client redis.Cmdable, prefix string, ttl time.Dur
 	return &RedisCatalogRepository{client: client, prefix: prefix, ttl: ttl,
 		controlCache: newControlReadCache(
 			controlTimelineCacheDefaultMaxEntries, controlTimelineCacheDefaultMaxBytes)}, nil
-}
-
-func (repository *RedisCatalogRepository) ConfigureLegacyMigration(maxScanKeys int, timeout time.Duration) error {
-	if repository == nil || maxScanKeys <= 0 || timeout <= 0 {
-		return errors.New("alarmd controlplane: invalid legacy migration bounds")
-	}
-	repository.legacyMigrationMaxScanKeys, repository.legacyMigrationTimeout = maxScanKeys, timeout
-	return nil
 }
 
 func (repository *RedisCatalogRepository) Ping(ctx context.Context) error {
@@ -883,9 +872,11 @@ func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, r
 
 func validateActivationState(state ActivationState) error {
 	switch state.SchemaVersion {
-	case "", activationSchemaVersion, legacyActivationSchemaVersion, activationHeadSchemaVersion:
+	case "", activationSchemaVersion, activationHeadSchemaVersion:
 	default:
-		return errors.New("alarmd controlplane: unsupported activation schema")
+		// The v1 body a development build wrote before the first release is
+		// among these: no release wrote one, and none is upgraded.
+		return fmt.Errorf("alarmd controlplane: unsupported activation schema %q", state.SchemaVersion)
 	}
 	if state.SchemaVersion == activationSchemaVersion || state.SchemaVersion == activationHeadSchemaVersion {
 		if err := state.ActiveQGSetRef.validate(); err != nil {

@@ -124,9 +124,6 @@ type phaseTwoMetrics struct {
 	objectReads                     *prometheus.CounterVec
 	stateGenerationSkew             *prometheus.CounterVec
 	stateCarry                      *prometheus.CounterVec
-	legacyMigration                 *prometheus.CounterVec
-	legacyMigrationScan             prometheus.Histogram
-	legacyMigrationTime             *prometheus.HistogramVec
 	undrainedDrainingQueryGroups    *loadedGauge
 	drainingCursorPrunedQueryGroups *loadedGauge
 	rebalancePlannedMoves           *loadedGauge
@@ -261,7 +258,6 @@ var ControlReadKinds = []string{"assignment", "registry"}
 // Timeline sizes from one Segment (about a kilobyte) up past the sizes that
 // made a publication cutover exceed the Redis write timeout.
 var scheduleTimelineBytesBuckets = []float64{1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216}
-var legacyMigrationScanBuckets = []float64{1, 10, 100, 500, 1000, 5000, 10000, 25000, 50000}
 
 var phaseTwoBusyStages = []string{"query", "evaluation", "event", "state", "progress", "other"}
 var phaseTwoWorkKinds = []string{
@@ -772,7 +768,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, reason := range observability.SchedulePruneSkipReasons {
 		metrics.schedulePruneSkipped.WithLabelValues(reason)
 	}
-	metrics.scheduleCutoverQueryGroups = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_query_groups_total", Help: "Query Groups by what a publication cutover did with them: kept (content and contexts unchanged, no write), revised (contexts changed, one output context revision appended), cut (content changed, Segment closed and reopened), legacy_cut (Segment named no content and was cut once), retired, added, blocked (a precondition only a write outside the cutover could break failed; this Query Group keeps its records and is judged again at the next cutover, the rest of the publication goes ahead), reopened (the timeline key was gone; a new one was opened), retired_unwritten (left the publication with a timeline that failed a precondition; retired without writing it)."}, []string{"decision"})
+	metrics.scheduleCutoverQueryGroups = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_query_groups_total", Help: "Query Groups by what a publication cutover did with them: kept (content and contexts unchanged, no write), revised (contexts changed, one output context revision appended), cut (content changed, Segment closed and reopened), retired, added, blocked (a precondition only a write outside the cutover could break failed; this Query Group keeps its records and is judged again at the next cutover, the rest of the publication goes ahead), reopened (the timeline key was gone; a new one was opened), retired_unwritten (left the publication with a timeline that failed a precondition; retired without writing it)."}, []string{"decision"})
 	metrics.scheduleCutovers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_total",
 		Help: "Publication cutovers by result and, when they failed, why. The cutover is what moves the " +
@@ -1036,9 +1032,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, build := range observability.SourceRefreshBuilds {
 		metrics.sourceRefreshBuilds.WithLabelValues(string(build))
 	}
-	metrics.legacyMigration = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_active_qg_migration_total", Help: "One-time legacy Active QG migration outcomes."}, []string{"result", "reason_class"})
-	metrics.legacyMigrationScan = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_active_qg_migration_scan_keys", Help: "Redis keys scanned by one-time legacy Active QG migration.", Buckets: legacyMigrationScanBuckets})
-	metrics.legacyMigrationTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_active_qg_migration_duration_seconds", Help: "One-time legacy Active QG migration duration.", Buckets: activeQGSetDurationBuckets}, []string{"result"})
 	metrics.drainingCursorPrunedQueryGroups = newLoadedGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "draining_cursor_pruned_query_groups", Help: "Replicated per-Pod view of draining Query Groups whose Progress cursor lies before the earliest Slot their Schedule timeline still holds. Such a Query Group can never find the Slot its cursor asks for, so it cannot drain by itself; the count is reported before anything acts on it. Aggregate replicas with max, not sum."})
 	metrics.rebalancePlannedMoves = newLoadedGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "rebalance_planned_moves", Help: "Assignments the latest rebalance round on this Control Leader planned to move from the most to the least loaded ready worker. Read beside assignment_moves_total: planned and not published for more than one stabilisation window is a ready set that keeps changing. Meaningful on the Control Leader only; aggregate replicas with max, not sum."})
 	metrics.shardUnawareReadyReplicas = newLoadedGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "shard_unaware_ready_replicas",
@@ -1795,7 +1788,6 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
-		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
@@ -2019,11 +2011,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.StateCarry; facts != nil && facts.Count > 0 {
 		m.stateCarry.WithLabelValues(facts.Scope, facts.Result).Add(float64(facts.Count))
-	}
-	if facts := observation.LegacyMigration; facts != nil {
-		m.legacyMigration.WithLabelValues(facts.Result, facts.ReasonClass).Inc()
-		m.legacyMigrationScan.Observe(float64(facts.ScanKeys))
-		m.legacyMigrationTime.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
 	}
 	for _, fact := range observation.AlgorithmEvaluations {
 		m.algorithmEvaluations.WithLabelValues(

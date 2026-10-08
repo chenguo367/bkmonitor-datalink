@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -658,38 +657,6 @@ func TestAHeldReactivationKeepsTheHeldBackSet(t *testing.T) {
 	}
 	if reactivated.BlockedCount != 1 || reactivated.BlockedDigest != controlplane.BlockedDigestForTest(set) {
 		t.Fatalf("the held reactivation dropped the body's count: %d %q", reactivated.BlockedCount, reactivated.BlockedDigest)
-	}
-}
-
-// The ref upgrade writes through the cutover script too, with no timeline
-// and the held-back set left as it is. It used to pass the layout of the
-// script before the set existed, which wrote the header, the body and the
-// delta and then failed on the missing argument - a write that happened and
-// reported an error.
-func TestTheActivationRefUpgradeWritesWholeAndKeepsTheHeldBackSet(t *testing.T) {
-	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-ref-upgrade")
-	fixture.publish(t, cutoverCatalog(t, 80, nil), 60)
-	previous := fixture.activation(t)
-	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":activation_blocked", "kept as it is", 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	active, err := fixture.client.Get(fixture.ctx, fixture.prefix+":active_qg_set:"+previous.ActiveQGSetRef.Digest).Bytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	next := previous
-	next.RecordRevision++
-	expected := controlplane.ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
-	// The script is handed the set's length, not the set (N15).
-	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, []byte(strconv.Itoa(len(active)))); err != nil {
-		t.Fatalf("the ref upgrade failed: %v", err)
-	}
-	fixture.repository.ForgetActivationCacheForTest()
-	if after := fixture.activation(t); after.RecordRevision != previous.RecordRevision+1 {
-		t.Fatalf("record revision = %d, want %d", after.RecordRevision, previous.RecordRevision+1)
-	}
-	if got, err := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_blocked").Result(); err != nil || got != "kept as it is" {
-		t.Fatalf("the ref upgrade changed the held-back set: %q, %v", got, err)
 	}
 }
 
