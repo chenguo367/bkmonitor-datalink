@@ -9,6 +9,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -57,6 +58,23 @@ func TestStartingOnAnAddressAnotherServerHoldsIsRefused(t *testing.T) {
 	}
 	if err := holder.Client().Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("the holder stopped answering after the refused start: %v", err)
+	}
+}
+
+// A server that exits before it answers is reported at once, with what it
+// wrote, rather than after ReadyWithin: a bad argument is the server's own
+// complaint, not a slow start.
+func TestAServerThatExitsBeforeAnsweringIsReportedAtOnce(t *testing.T) {
+	started := time.Now()
+	instance, reason := TryStartAt(t, FreeAddress(t), "--no-such-option", "x")
+	if instance != nil || reason == "" {
+		t.Fatalf("TryStartAt with a bad option = %v, %q; want refused", instance, reason)
+	}
+	if elapsed := time.Since(started); elapsed > ReadyWithin/3 {
+		t.Fatalf("the refusal took %s, want it as soon as the server exits", elapsed)
+	}
+	if !strings.Contains(reason, "exited before it answered") || !strings.Contains(strings.ToLower(reason), "no-such-option") {
+		t.Fatalf("refusal %q does not carry the server's own output", reason)
 	}
 }
 
