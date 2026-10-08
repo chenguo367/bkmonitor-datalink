@@ -4336,42 +4336,36 @@ func TestRedisCatalogRuntimeCutoverUsesOneHalfOpenTimelineAndNewGrid(t *testing.
 		t.Fatal(err)
 	}
 
-	newCatalog := catalogWithSchedule(t, oldCatalog, 120, 30)
+	// Same interval, new alignment: a grid of 30+60k from the boundary on.
+	newCatalog := catalogWithSchedule(t, oldCatalog, 60, 30)
 	newSnapshot, _, err := repository.PublishCatalog(context.Background(), newCatalog)
 	if err != nil {
 		t.Fatal(err)
 	}
 	boundary := execution.EvaluationTime(180)
-	oldClosed := frozenSchedule(t, oldSnapshot.Publication, oldCatalog.QueryGroups[0], 60, &boundary)
-	newOpen := frozenSchedule(t, newSnapshot.Publication, newCatalog.QueryGroups[0], boundary, nil)
-	newActivation := activationState(t, 2, newSnapshot, newOpen, nil)
-	cutover := execution.ScheduleCutoverFact{OldSegment: oldClosed.Segment, NewSegment: newOpen.Segment}
-	if err := repository.CompareAndSetScheduleCutover(context.Background(), controlplane.ActivationExpectation{
-		RecordRevision: oldActivation.RecordRevision, Current: oldActivation.Current,
-	}, newActivation, []execution.ScheduleCutoverFact{cutover}); err != nil {
-		t.Fatal(err)
-	}
+	cutOverAt(t, repository, newSnapshot, boundary)
+	queryGroup := oldCatalog.QueryGroups[0].Identity
 
 	compiler, stateSemantics := runtimePlanCompiler(t)
 	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldLoaded, err := runtime.ReadFrozenSchedule(context.Background(), oldClosed.Segment.QueryGroup, 120)
+	oldLoaded, err := runtime.ReadFrozenSchedule(context.Background(), queryGroup, 120)
 	if err != nil || oldLoaded.Segment.End == nil || *oldLoaded.Segment.End != boundary {
 		t.Fatalf("old schedule=(%#v, %v)", oldLoaded, err)
 	}
-	newLoaded, err := runtime.ReadFrozenSchedule(context.Background(), newOpen.Segment.QueryGroup, boundary)
+	newLoaded, err := runtime.ReadFrozenSchedule(context.Background(), queryGroup, boundary)
 	if err != nil || newLoaded.Segment.Start != boundary {
 		t.Fatalf("new schedule=(%#v, %v)", newLoaded, err)
 	}
 	first, ok := newLoaded.FirstSlot()
-	if !ok || first != 270 {
-		t.Fatalf("new first Slot=(%d, %t), want 270", first, ok)
+	if !ok || first != 210 {
+		t.Fatalf("new first Slot=(%d, %t), want 210", first, ok)
 	}
-	next, err := runtime.NextSlotAfter(context.Background(), oldClosed.Segment.QueryGroup, 120)
-	if err != nil || next != 270 {
-		t.Fatalf("next across cutover=(%d, %v), want 270", next, err)
+	next, err := runtime.NextSlotAfter(context.Background(), queryGroup, 120)
+	if err != nil || next != 210 {
+		t.Fatalf("next across cutover=(%d, %v), want 210", next, err)
 	}
 }
 
@@ -4400,50 +4394,19 @@ func TestRedisCatalogRepositoryRejectsInitialActivationWithoutScheduleForEveryPl
 	}
 }
 
-func TestRedisCatalogRepositoryRejectsCutoverChangingPlanOutsideAffectedQueryGroup(t *testing.T) {
-	client := newControlplaneRedis(t)
-	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:cutover-coverage", time.Hour)
+// cutOverAt runs the cutover to snapshot the way production does, through
+// the reconciler a control-plane Leader runs, at boundary.
+func cutOverAt(t *testing.T, repository *controlplane.RedisCatalogRepository, snapshot controlplane.PublishedSnapshot, boundary execution.EvaluationTime) {
+	t.Helper()
+	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
+	compiler, semantics := runtimePlanCompiler(t)
+	reconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(repository, compiler, semantics, progress,
+		func() time.Time { return time.Unix(int64(boundary), 0) })
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldCatalog := twoQueryGroupCatalog(t)
-	oldSnapshot, _, err := repository.PublishCatalog(context.Background(), oldCatalog)
-	if err != nil {
+	if _, err := reconciler.Ensure(context.Background(), snapshot.Publication); err != nil {
 		t.Fatal(err)
-	}
-	oldSchedules := []execution.FrozenQueryGroupSchedule{
-		frozenSchedule(t, oldSnapshot.Publication, oldCatalog.QueryGroups[0], 60, nil),
-		frozenSchedule(t, oldSnapshot.Publication, oldCatalog.QueryGroups[1], 60, nil),
-	}
-	oldActivation := activationState(t, 1, oldSnapshot, oldSchedules[0], nil, oldSchedules[1:]...)
-	initial := []execution.InitialScheduleActivationFact{{Segment: oldSchedules[0].Segment}, {Segment: oldSchedules[1].Segment}}
-	if err := repository.CompareAndSetInitialScheduleActivation(context.Background(), controlplane.ActivationExpectation{}, oldActivation, initial); err != nil {
-		t.Fatal(err)
-	}
-
-	newCatalog := catalogWithSchedule(t, oldCatalog, 120, 30)
-	newSnapshot, _, err := repository.PublishCatalog(context.Background(), newCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	boundary := execution.EvaluationTime(180)
-	oldClosed := frozenSchedule(t, oldSnapshot.Publication, oldCatalog.QueryGroups[0], 60, &boundary)
-	newOpen := frozenSchedule(t, newSnapshot.Publication, newCatalog.QueryGroups[0], boundary, nil)
-	newGroupActivation := activationState(t, 2, newSnapshot, newOpen, nil)
-	newActivation := oldActivation
-	newActivation.RecordRevision = 2
-	newActivation.Pending = &newSnapshot.Publication
-	newGroupActivation.Plans[0].Fact.Selection = execution.ActivationPending
-	newActivation.Plans[0] = newGroupActivation.Plans[0]
-	// This valid-looking mutation belongs to the other Query Group and must not
-	// be smuggled into the same CAS without its own persisted Segment fact.
-	newActivation.Plans[1].Fact.Selected.StateApplyEpoch++
-
-	err = repository.CompareAndSetScheduleCutover(context.Background(), controlplane.ActivationExpectation{
-		RecordRevision: oldActivation.RecordRevision, Current: oldActivation.Current,
-	}, newActivation, []execution.ScheduleCutoverFact{{OldSegment: oldClosed.Segment, NewSegment: newOpen.Segment}})
-	if err == nil || !strings.Contains(err.Error(), "outside affected Query Groups") {
-		t.Fatalf("unrelated activation mutation error=%v", err)
 	}
 }
 

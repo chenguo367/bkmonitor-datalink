@@ -1189,88 +1189,6 @@ func (repository *RedisCatalogRepository) CompareAndSetInitialScheduleActivation
 	return repository.persistInitialActivation(ctx, expected, next, timelines)
 }
 
-// CompareAndSetScheduleCutover atomically closes each old Segment, opens its
-// adjacent successor and advances the shared Plan activation record.
-func (repository *RedisCatalogRepository) CompareAndSetScheduleCutover(
-	ctx context.Context,
-	expected ActivationExpectation,
-	next ActivationState,
-	facts []execution.ScheduleCutoverFact,
-) error {
-	if repository == nil || repository.client == nil || len(facts) == 0 {
-		return errors.New("alarmd controlplane: schedule cutover is required")
-	}
-	if err := validateActivationTransition(expected, next); err != nil {
-		return err
-	}
-	if expected.RecordRevision == 0 {
-		return errors.New("alarmd controlplane: schedule cutover requires an existing activation")
-	}
-	previous, err := repository.LoadActivation(ctx)
-	if err != nil {
-		return err
-	}
-	if !activationMatchesExpectation(previous, expected) {
-		return ErrActivationConflict
-	}
-	next.SchemaVersion = activationSchemaVersion
-	updates := make([]scheduleTimelineUpdate, 0, len(facts))
-	seen := make(map[execution.QueryGroupIdentity]struct{}, len(facts))
-	affectedPlans := make(map[execution.PlanKey]struct{})
-	for _, fact := range facts {
-		if _, duplicate := seen[fact.NewSegment.QueryGroup]; duplicate {
-			return errors.New("alarmd controlplane: duplicate Query Group cutover")
-		}
-		seen[fact.NewSegment.QueryGroup] = struct{}{}
-		oldSchedule, err := repository.materializeSchedule(ctx, fact.OldSegment)
-		if err != nil {
-			return err
-		}
-		newSchedule, err := repository.materializeSchedule(ctx, fact.NewSegment)
-		if err != nil {
-			return err
-		}
-		if err := fact.Validate(oldSchedule, newSchedule); err != nil {
-			return err
-		}
-		for _, plan := range oldSchedule.Plans {
-			affectedPlans[plan.Key()] = struct{}{}
-		}
-		for _, plan := range newSchedule.Plans {
-			affectedPlans[plan.Key()] = struct{}{}
-		}
-		timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, fact.OldSegment.QueryGroup)
-		if err != nil {
-			return err
-		}
-		last := len(timeline.Segments) - 1
-		if last < 0 || !sameFrozenSchedule(timeline.Segments[last].Schedule, execution.FrozenQueryGroupSchedule{
-			Segment: openVersion(fact.OldSegment), Plans: oldSchedule.Plans,
-		}) {
-			return ErrScheduleConflict
-		}
-		if err := validateOpenSegmentActivation(previous, timeline.Segments[last]); err != nil {
-			return err
-		}
-		timeline.Segments[last].Schedule = oldSchedule
-		records, err := activationRecordsForSchedule(next, newSchedule)
-		if err != nil {
-			return err
-		}
-		timeline.Segments = append(timeline.Segments, persistedScheduleSegment{Schedule: newSchedule, Plans: records})
-		timeline.RecordRevision++
-		if err := validateScheduleTimeline(timeline); err != nil {
-			return err
-		}
-		updates = append(updates, scheduleTimelineUpdate{expected: raw, next: timeline})
-	}
-	if err := validateUnchangedActivationRecords(previous, next, affectedPlans); err != nil {
-		return err
-	}
-	next.BlockedCount, next.BlockedDigest = previous.BlockedCount, previous.BlockedDigest
-	return repository.persistCutoverActivation(ctx, expected, next, updates, nil, blockedSetUnchanged)
-}
-
 func validateInitialActivationCoverage(state ActivationState, timelines []persistedScheduleTimeline) error {
 	wanted, err := activationRecordMap(state.Plans)
 	if err != nil {
@@ -1314,34 +1232,6 @@ func validateOpenSegmentActivation(state ActivationState, segment persistedSched
 	for _, record := range segment.Plans {
 		if !current[record.Fact.Key()].Equal(record) {
 			return errors.New("alarmd controlplane: open Schedule Segment differs from current Plan activation")
-		}
-	}
-	return nil
-}
-
-func validateUnchangedActivationRecords(previous, next ActivationState, affected map[execution.PlanKey]struct{}) error {
-	before, err := activationRecordMap(previous.Plans)
-	if err != nil {
-		return err
-	}
-	after, err := activationRecordMap(next.Plans)
-	if err != nil {
-		return err
-	}
-	for identity, record := range before {
-		if _, changed := affected[identity]; changed {
-			continue
-		}
-		if !after[identity].Equal(record) {
-			return errors.New("alarmd controlplane: activation changed outside affected Query Groups")
-		}
-	}
-	for identity, record := range after {
-		if _, changed := affected[identity]; changed {
-			continue
-		}
-		if !before[identity].Equal(record) {
-			return errors.New("alarmd controlplane: activation changed outside affected Query Groups")
 		}
 	}
 	return nil
