@@ -302,7 +302,7 @@ func (opener *TriggerEventSinkOpener) Open() (*TriggerEventSink, error) {
 	if opener == nil || opener.config == nil {
 		return nil, errors.New("kafka trigger event sink: opener is not prepared")
 	}
-	negotiation, err := NegotiateProtocol(opener.coordinates.Brokers, opener.config)
+	negotiation, err := NegotiateProtocol(opener.coordinates.Brokers, opener.coordinates.OutputTopic, opener.config)
 	if err != nil {
 		return nil, &ProtocolNegotiationError{Negotiation: negotiation, Err: err}
 	}

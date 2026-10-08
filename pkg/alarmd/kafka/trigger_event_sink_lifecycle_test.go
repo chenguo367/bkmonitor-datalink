@@ -505,6 +505,50 @@ func producerMessagesEqual(t *testing.T, first, second *sarama.ProducerMessage) 
 	return first.Topic == second.Topic && bytes.Equal(firstKey, secondKey) && bytes.Equal(firstValue, secondValue)
 }
 
+// The opener primes metadata for the output topic alone, and the producer it
+// opens never asks the broker for a transactional producer id.
+func TestTriggerEventSinkOpenPrimesOnlyOutputTopicWithoutTransactionalHandshake(t *testing.T) {
+	broker := sarama.NewMockBroker(t, 1)
+	defer broker.Close()
+
+	coordinates := validDecisionSinkConfig()
+	coordinates.Brokers = []string{broker.Addr()}
+	broker.SetHandlerByMap(map[string]sarama.MockResponse{
+		"MetadataRequest": sarama.NewMockMetadataResponse(t).
+			SetBroker(broker.Addr(), broker.BrokerID()).
+			SetLeader(coordinates.OutputTopic, 0, broker.BrokerID()),
+		"ApiVersionsRequest": sarama.NewMockWrapper(&sarama.ApiVersionsResponse{ApiVersions: []*sarama.ApiVersionsResponseBlock{{ApiKey: 0, MinVersion: 0, MaxVersion: 3}}}),
+	})
+
+	opener, err := PrepareTriggerEventSink(coordinates)
+	if err != nil {
+		t.Fatalf("PrepareTriggerEventSink() error = %v", err)
+	}
+	sink, err := opener.Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	metadataRequests := 0
+	for _, request := range broker.History() {
+		switch typed := request.Request.(type) {
+		case *sarama.MetadataRequest:
+			metadataRequests++
+			if len(typed.Topics) != 1 || typed.Topics[0] != coordinates.OutputTopic {
+				t.Fatalf("metadata topics = %v, want only %q", typed.Topics, coordinates.OutputTopic)
+			}
+		case *sarama.InitProducerIDRequest:
+			t.Fatal("the producer must not require InitProducerID")
+		}
+	}
+	if metadataRequests == 0 {
+		t.Fatal("broker did not receive an output topic metadata request")
+	}
+}
+
 func newTriggerEventSinkForTest(t *testing.T, producer syncMessageProducer, client closeableClient) *TriggerEventSink {
 	t.Helper()
 	sink, err := newTriggerEventSink(validDecisionSinkConfig().OutputTopic, producer, client)
