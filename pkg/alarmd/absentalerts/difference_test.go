@@ -65,7 +65,11 @@ func roundFor(roster map[Key]struct{}, absences map[Key]Absence) Round {
 	for i := 0; i < 5; i++ {
 		roster[key("live-"+itoa(i))] = struct{}{}
 	}
-	return Round{LinkRead: true, Roster: roster, RosterComplete: true, LinkLastSuccess: testNow.Add(-time.Minute),
+	members := make(map[Key]int, len(roster))
+	for k := range roster {
+		members[k] = 1
+	}
+	return Round{LinkRead: true, Roster: members, RosterComplete: true, LinkLastSuccess: testNow.Add(-time.Minute),
 		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
 		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
 }
@@ -418,5 +422,64 @@ func TestTheWalkStartsPastTheLastDecidedStrategy(t *testing.T) {
 		if k.Key.StrategyID != want[i] {
 			t.Fatalf("the second round did not start past the first one's last: %+v", second.Close)
 		}
+	}
+}
+
+// Every candidate gets one decision, in the candidates' key order whatever
+// the walk's, and each outcome's count is how many decisions carry it: the
+// page that lists them and the counters that count them cannot disagree.
+func TestEveryCandidateIsDecidedOnceInKeyOrder(t *testing.T) {
+	young, unconfirmed, first, second, third := key("14"), key("12"), key("10"), key("11"), key("13")
+	absences := ripe(first, second, third)
+	absences[young] = Absence{Since: testNow.Add(-time.Minute), Observation: "observation-before"}
+	absences[unconfirmed] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-now"}
+	untracked := key("15")
+	round := roundFor(set(young, unconfirmed, first, second, third, untracked), absences)
+	round.After = first
+	bounds := testBounds()
+	bounds.MaxCloseStrategies = 1
+	result := Compute(round, bounds)
+	if len(result.Decisions) != result.Counts.Candidates || result.Counts.Candidates != 6 {
+		t.Fatalf("not one decision per candidate: %d decisions, %+v", len(result.Decisions), result.Counts)
+	}
+	want := map[Key]string{young: OutcomeWithinGrace, untracked: OutcomeWithinGrace, unconfirmed: OutcomeUnconfirmed,
+		second: OutcomeClosed, third: OutcomeDeferred, first: OutcomeDeferred}
+	tally := map[string]int{}
+	for i, decision := range result.Decisions {
+		if i > 0 && !LessKey(result.Decisions[i-1].Key, decision.Key) {
+			t.Fatalf("decisions are not in key order: %+v", result.Decisions)
+		}
+		if decision.Outcome != want[decision.Key] {
+			t.Fatalf("%s decided %s, want %s", decision.Key.StrategyID, decision.Outcome, want[decision.Key])
+		}
+		tally[decision.Outcome]++
+	}
+	if tally[OutcomeWithinGrace] != result.Counts.WithinGrace || tally[OutcomeUnconfirmed] != result.Counts.Unconfirmed ||
+		tally[OutcomeDeferred] != result.Counts.Deferred || tally[OutcomeClosed] != result.Counts.Closed {
+		t.Fatalf("the decisions and the counts disagree: %+v %+v", tally, result.Counts)
+	}
+	for _, decision := range result.Decisions {
+		switch decision.Key {
+		case untracked:
+			if !decision.AbsentSince.IsZero() {
+				t.Fatalf("a candidate the memory does not hold was given a first absence: %+v", decision)
+			}
+		case young:
+			if !decision.AbsentSince.Equal(testNow.Add(-time.Minute)) {
+				t.Fatalf("a candidate's first absence is not the memory's: %+v", decision)
+			}
+		}
+	}
+	if len(result.Close) != 1 || result.Close[0].Key != second {
+		t.Fatalf("the walk did not start after the last strategy closed: %+v", result.Close)
+	}
+}
+
+// A refused round decides about no one.
+func TestARefusedRoundHasNoDecisions(t *testing.T) {
+	round := roundFor(set(key("10")), ripe(key("10")))
+	round.LinkRead = false
+	if result := Compute(round, testBounds()); result.Refusal != RefusalLinkUnavailable || len(result.Decisions) != 0 {
+		t.Fatalf("a refused round decided: %+v", result)
 	}
 }

@@ -73,8 +73,8 @@ type Round struct {
 	// there is no difference to take.
 	LinkRead bool
 	// Roster is every strategy the link listed with at least one member in
-	// its open alert set.
-	Roster map[Key]struct{}
+	// its open alert set, with how many members the link read in it.
+	Roster map[Key]int
 	// RosterUnreadable is how many listed strategies the link could not read
 	// the set of. Not in Roster, because not read is not empty.
 	RosterUnreadable int
@@ -114,6 +114,16 @@ type Round struct {
 	// round's walk over the candidates starts just past it.
 	After Key
 	Now   time.Time
+}
+
+// Decision is what a round decided about one candidate: one of the four
+// per-candidate outcomes OutcomeWithinGrace, OutcomeUnconfirmed,
+// OutcomeDeferred and OutcomeClosed. AbsentSince is zero when the memory did
+// not hold the candidate, which keeps it within the grace on every round.
+type Decision struct {
+	Key         Key
+	Outcome     string
+	AbsentSince time.Time
 }
 
 // Absent is one strategy the round decided to close.
@@ -289,9 +299,13 @@ type Bounds struct {
 // caller's, and the two are counted apart so that a deployment can read
 // what the difference would do before it does it.
 type Result struct {
-	Close   []Absent
-	Counts  Counts
-	Refusal string
+	Close []Absent
+	// Decisions is every candidate's decision, in the candidates' order
+	// (lessKey) rather than the walk's, so that a reader can page them by
+	// key. Each outcome's count in Counts is how many of these carry it.
+	Decisions []Decision
+	Counts    Counts
+	Refusal   string
 }
 
 // Candidates is the first half of the difference: the strategies with
@@ -362,38 +376,50 @@ func Compute(round Round, bounds Bounds) Result {
 	if refusal != RefusalNone {
 		return Result{Counts: counts, Refusal: refusal}
 	}
-	result := Result{Counts: counts, Refusal: RefusalNone}
-	for _, key := range rotate(candidates, round.After) {
+	result := Result{Counts: counts, Refusal: RefusalNone, Decisions: make([]Decision, len(candidates))}
+	start := rotation(candidates, round.After)
+	for step := range candidates {
+		at := (start + step) % len(candidates)
+		key := candidates[at]
 		absence, tracked := round.FirstAbsent[key]
-		if !tracked || round.Now.Sub(absence.Since) < bounds.Grace {
+		decision := Decision{Key: key}
+		if tracked {
+			decision.AbsentSince = absence.Since
+		}
+		switch {
+		case !tracked || round.Now.Sub(absence.Since) < bounds.Grace:
+			decision.Outcome = OutcomeWithinGrace
 			result.Counts.WithinGrace++
-			continue
-		}
-		if absence.Observation == round.SnapshotObservation {
+		case absence.Observation == round.SnapshotObservation:
+			decision.Outcome = OutcomeUnconfirmed
 			result.Counts.Unconfirmed++
-			continue
-		}
-		if bounds.MaxCloseStrategies > 0 && len(result.Close) >= bounds.MaxCloseStrategies {
+		case bounds.MaxCloseStrategies > 0 && len(result.Close) >= bounds.MaxCloseStrategies:
+			decision.Outcome = OutcomeDeferred
 			result.Counts.Deferred++
-			continue
+		default:
+			decision.Outcome = OutcomeClosed
+			result.Close = append(result.Close, Absent{Key: key, Identity: round.Identities[key], AbsentSince: absence.Since})
+			result.Counts.Closed++
 		}
-		result.Close = append(result.Close, Absent{Key: key, Identity: round.Identities[key], AbsentSince: absence.Since})
-		result.Counts.Closed++
+		result.Decisions[at] = decision
 	}
 	return result
 }
 
-// rotate starts the walk over the candidates just after the last strategy a
-// previous round closed, so that a strategy which never yields a close -
-// every alert another producer's, no identity to be found - cannot hold the
-// front of the order and spend the bound on every round.
-func rotate(candidates []Key, after Key) []Key {
-	if after == (Key{}) {
-		return candidates
+// rotation is where the walk over the candidates starts: just after the
+// last strategy a previous round closed, so that a strategy which never
+// yields a close - every alert another producer's, no identity to be found -
+// cannot hold the front of the order and spend the bound on every round.
+func rotation(candidates []Key, after Key) int {
+	if after == (Key{}) || len(candidates) == 0 {
+		return 0
 	}
-	start := sort.Search(len(candidates), func(i int) bool { return lessKey(after, candidates[i]) })
-	return append(append(make([]Key, 0, len(candidates)), candidates[start:]...), candidates[:start]...)
+	return sort.Search(len(candidates), func(i int) bool { return lessKey(after, candidates[i]) }) % len(candidates)
 }
+
+// LessKey is the order candidates are listed, remembered and walked in:
+// tenant, then strategy id, both compared as strings ("100" before "20").
+func LessKey(a, b Key) bool { return lessKey(a, b) }
 
 func lessKey(a, b Key) bool {
 	if a.TenantID != b.TenantID {

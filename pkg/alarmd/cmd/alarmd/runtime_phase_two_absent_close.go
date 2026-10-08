@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -80,6 +82,11 @@ type absentStrategyClose struct {
 	counts    map[string]uint64
 	// last is the last round's denominators, which the gauge reports.
 	last absentRoundSizes
+	// table is the last deciding round, strategy by strategy, for the
+	// candidate page; documents is the source's existence check that page
+	// reads source_now with, nil where the source has none.
+	table     *absentCandidateTable
+	documents controlplane.StrategyDocumentPresence
 }
 
 // absentRoundSizes is what the last round read, beside what it decided on.
@@ -141,6 +148,7 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseCon
 			MaxCloseStrategies: 8,
 		},
 		counts: make(map[string]uint64),
+		table:  newAbsentCandidateTable(controlplane.MaxDepartedStrategies),
 	}
 }
 
@@ -239,6 +247,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 			// that becomes leader again cannot close on an absence it
 			// observed under a term it no longer holds.
 			loop.tracker.Forget()
+			loop.table.forget()
 			loop.previousSnapshot = 0
 		}
 		loop.wasLeader = false
@@ -263,7 +272,8 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 		sizes.snapshotAge = int(round.SnapshotAgeSeconds)
 	}
 	var health openalerts.LinkHealth
-	health, sizes.rosterPages = loop.readRoster(ctx, &round)
+	var unreadable []absentalerts.Key
+	health, unreadable, sizes.rosterPages = loop.readRoster(ctx, &round)
 	sizes.rosterComplete, sizes.linkPending = round.RosterComplete, health.PendingCount
 	if !health.LastSuccess.IsZero() {
 		sizes.linkAge = int(now.Sub(health.LastSuccess) / time.Second)
@@ -277,11 +287,15 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	}
 	sizes.counts = result.Counts
 	loop.record(ctx, result, sizes)
+	loop.table.noteRound(now, result.Refusal)
+	if result.Refusal == absentalerts.RefusalNone {
+		loop.table.rebuild(now, result, round.Roster, unreadable)
+	}
 	for _, absent := range result.Close {
 		if ctx.Err() != nil {
 			return
 		}
-		loop.closeStrategy(ctx, absent, now)
+		loop.table.executed(absent.Key, loop.closeStrategy(ctx, absent, now))
 	}
 }
 
@@ -289,9 +303,10 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 // says whether the link could be read at all and carries the link's own
 // health; a failure after it leaves the walk incomplete, which the round
 // reports and decides on anyway, since a smaller roster can only cost
-// closes.
-func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, int) {
-	round.Roster = make(map[absentalerts.Key]struct{})
+// closes. The strategies the link listed and could not read come back in
+// key order, for the candidate page to name.
+func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, []absentalerts.Key, int) {
+	round.Roster = make(map[absentalerts.Key]int)
 	unreadable := make(map[absentalerts.Key]struct{})
 	if reader, ok := loop.link.(eventSourceReader); ok {
 		_, _ = reader.EventSource(ctx)
@@ -318,7 +333,7 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 			case row.Members == nil:
 				unreadable[key] = struct{}{}
 			case *row.Members > 0:
-				round.Roster[key] = struct{}{}
+				round.Roster[key] = *row.Members
 			}
 		}
 		if page.Next == "" {
@@ -332,18 +347,27 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 		delete(unreadable, key)
 	}
 	round.RosterUnreadable = len(unreadable)
-	return health, pages
+	keys := make([]absentalerts.Key, 0, len(unreadable))
+	for key := range unreadable {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return absentalerts.LessKey(keys[i], keys[j]) })
+	return health, keys, pages
 }
 
 // closeStrategy reads the strategy's active alerts from the link and closes
-// the ones this deployment produced.
-func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absentalerts.Absent, now time.Time) {
+// the ones this deployment produced, and returns what it found and did, for
+// the candidate page.
+func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absentalerts.Absent, now time.Time) absentExecution {
+	execution := absentExecution{decidedAt: now}
 	key := openalerts.StrategyKey{TenantID: absent.Key.TenantID, StrategyID: absent.Key.StrategyID}
 	reconciliation, err := loop.link.Reconcile(ctx, key)
 	if err != nil {
 		loop.observe(ctx, absentalerts.OutcomeEvidenceUnavailable, err, 1)
-		return
+		execution.word = absentalerts.OutcomeEvidenceUnavailable
+		return execution
 	}
+	execution.alertsRead = true
 	own := make([]openalerts.Alert, 0, len(reconciliation.Alerts))
 	foreign, unknown := 0, 0
 	for _, alert := range reconciliation.Alerts {
@@ -356,20 +380,38 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 			foreign++
 		}
 	}
+	execution.own, execution.foreign, execution.unknown = len(own), foreign, unknown
+	switch {
+	case len(own) > 0:
+		execution.sampleAlertID = boundedAlertID(own[0].AlertID)
+	case len(reconciliation.Alerts) > 0:
+		execution.sampleAlertID = boundedAlertID(reconciliation.Alerts[0].AlertID)
+	}
 	loop.count(absentalerts.OutcomeProducerForeign, foreign)
 	loop.count(absentalerts.OutcomeProducerUnknown, unknown)
 	if len(own) == 0 {
-		return
+		// Nothing of this deployment's to close, so nothing to address and no
+		// record to read; what the catalog remembers is still the answer to
+		// "which business was it".
+		execution.word = fleet.AbsentExecutionNoOwnAlerts
+		execution.identity, execution.business, execution.revision =
+			fleet.AbsentIdentityNotRead, absent.Identity.BusinessID, absent.Identity.Revision
+		return execution
 	}
 	strategyID, err := strconv.ParseInt(absent.Key.StrategyID, 10, 64)
 	if err != nil || strategyID <= 0 {
 		loop.observe(ctx, absentalerts.OutcomeIdentityUnknown, errors.New("strategy id is not a positive integer"), 1)
-		return
+		execution.word, execution.identity = absentalerts.OutcomeIdentityUnknown, fleet.AbsentIdentityNone
+		return execution
 	}
-	identity, outcome := loop.identity(ctx, absent, own, reconciliation.EventSourceID)
-	if outcome != "" {
-		loop.observe(ctx, outcome, errors.New("no business or revision for a strategy that no longer exists"), 1)
-		return
+	found := loop.identity(ctx, absent, own, reconciliation.EventSourceID)
+	identity := found.identity
+	execution.identity, execution.business, execution.revision, execution.recordsRead =
+		found.source, identity.BusinessID, identity.Revision, found.recordsRead
+	if found.outcome != "" {
+		loop.observe(ctx, found.outcome, errors.New("no business or revision for a strategy that no longer exists"), 1)
+		execution.word = found.outcome
+		return execution
 	}
 	batch := make([]linkdoutput.CloseRequest, 0, min(len(own), absentCloseAlertBatch))
 	for _, alert := range own {
@@ -381,6 +423,7 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 			break
 		}
 	}
+	execution.batch = len(batch)
 	if !loop.send {
 		// Everything up to here has run: the alerts were read, each one was
 		// filed under whose it is, the identity was found and the batch was
@@ -388,13 +431,27 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		// reads before arming - above all producer_foreign and
 		// identity_unknown - are the counts arming would act on.
 		loop.count(absentalerts.OutcomeWouldSend, len(batch))
-		return
+		execution.word = absentalerts.OutcomeWouldSend
+		return execution
 	}
 	if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
 		loop.observe(ctx, absentalerts.OutcomeSendFailed, err, len(batch))
-		return
+		execution.word = absentalerts.OutcomeSendFailed
+		return execution
 	}
 	loop.count(absentalerts.OutcomeAlertClosed, len(batch))
+	execution.word = absentalerts.OutcomeAlertClosed
+	return execution
+}
+
+// identityReading is a close's business and revision, where they came from,
+// how many alert records were read for them, and the outcome word when
+// either is still missing.
+type identityReading struct {
+	identity    absentalerts.Identity
+	source      string
+	recordsRead int
+	outcome     string
 }
 
 // identity is the business and revision a close carries. The catalog's
@@ -402,30 +459,43 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 // answer is on the alerts themselves, in the labels they were created with,
 // read from the link's record of the alert. A record is used only if it is
 // this deployment's alert of this strategy.
-func (loop *absentStrategyClose) identity(ctx context.Context, absent absentalerts.Absent, own []openalerts.Alert, source string) (absentalerts.Identity, string) {
+func (loop *absentStrategyClose) identity(ctx context.Context, absent absentalerts.Absent, own []openalerts.Alert, source string) identityReading {
 	if absent.Identity.BusinessID != 0 && absent.Identity.Revision > 0 {
-		return absent.Identity, ""
+		return identityReading{identity: absent.Identity, source: fleet.AbsentIdentityCatalog}
 	}
-	found := absent.Identity
+	reading := identityReading{identity: absent.Identity}
+	fromRecord := false
 	for i := 0; i < len(own) && i < absentCloseIdentityReads; i++ {
+		reading.recordsRead++
 		record, err := loop.link.AlertRecord(ctx, absent.Key.TenantID, own[i].AlertID)
 		if err != nil || record.EventSourceID != source || record.StrategyID != absent.Key.StrategyID {
 			continue
 		}
-		if found.BusinessID == 0 {
-			found.BusinessID = record.BusinessID
+		if reading.identity.BusinessID == 0 && record.BusinessID != 0 {
+			reading.identity.BusinessID, fromRecord = record.BusinessID, true
 		}
-		if found.Revision <= 0 {
-			found.Revision = record.Revision
+		if reading.identity.Revision <= 0 && record.Revision > 0 {
+			reading.identity.Revision, fromRecord = record.Revision, true
 		}
-		if found.BusinessID != 0 && found.Revision > 0 {
-			return found, ""
+		if reading.identity.BusinessID != 0 && reading.identity.Revision > 0 {
+			break
 		}
 	}
-	if found.BusinessID == 0 {
-		return found, absentalerts.OutcomeIdentityUnknown
+	switch {
+	case fromRecord:
+		reading.source = fleet.AbsentIdentityAlertRecord
+	case reading.identity.BusinessID != 0 || reading.identity.Revision > 0:
+		reading.source = fleet.AbsentIdentityCatalog
+	default:
+		reading.source = fleet.AbsentIdentityNone
 	}
-	return found, absentalerts.OutcomeRevisionUnknown
+	switch {
+	case reading.identity.BusinessID == 0:
+		reading.outcome = absentalerts.OutcomeIdentityUnknown
+	case reading.identity.Revision <= 0:
+		reading.outcome = absentalerts.OutcomeRevisionUnknown
+	}
+	return reading
 }
 
 // record writes the round's line: its refusal or its decision, with every

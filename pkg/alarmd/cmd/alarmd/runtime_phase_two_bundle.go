@@ -1183,6 +1183,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 			replica:        cfg.PhaseTwo.Worker.ID, interval: cfg.PhaseTwo.Control.RefreshInterval.Duration()}
 	}
 	fleetAPI = fleet.WithCostCandidates(fleetAPI, costCandidatesCache)
+	// The absent close's candidate page, answered from the control leader's
+	// loop, which is made further down and only with the alert link's
+	// Console; a follower forwards the one request. Without a Console there
+	// is no loop and the page says not_configured.
+	absentPage := &absentCandidatePage{}
+	fleetAPI = fleet.WithAbsentCandidates(fleetAPI, absentPage.source,
+		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, "absent", recorder.ObserveLeaderForward),
+		cfg.PhaseTwo.Worker.ID)
 	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, directoryForward, windowStore, diagnostics, seriesSampler, external.Now)
 	observationRefresh := &observationRefresh{cost: costSummary, now: external.Now,
 		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), identity: repository.CachedExecutionIdentity}
@@ -1314,6 +1322,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// link has neither the roster nor the alerts it would close.
 	if linkd.Console != nil {
 		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events, cfg.PhaseTwo.Linkd.AbsentCloseSend)
+		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
+		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	}
