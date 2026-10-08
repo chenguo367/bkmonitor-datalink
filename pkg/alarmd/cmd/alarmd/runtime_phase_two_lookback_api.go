@@ -257,6 +257,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 		}
 		if basis := bases[qg]; basis.known {
 			entry.DelaySeconds = int64(basis.delay / time.Second)
+			entry.SettlingWaitSeconds = int64(basis.settlingWait / time.Second)
 			if millis > 0 {
 				entry.SuggestedDelaySeconds = basis.suggestion(record)
 			}

@@ -39,6 +39,10 @@ type ReadHoldFacts struct {
 	// a hold that is a predecessor's bound -- or its query is not known yet.
 	DelaySeconds          int64 `json:"time_delay_seconds,omitempty"`
 	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds,omitempty"`
+	// SettlingWaitSeconds is the wait alarmd adds after the time_delay before
+	// a Slot is ready, which the suggestion was reckoned net of: why the
+	// time_delay suggested can be less than the arrival age.
+	SettlingWaitSeconds int64 `json:"settling_wait_seconds,omitempty"`
 }
 
 func withinReadHoldBudget(facts map[string]ReadHoldFacts, budget int) map[string]ReadHoldFacts {
