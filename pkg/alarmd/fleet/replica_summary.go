@@ -41,8 +41,11 @@ type ReplicaSummary struct {
 // same snapshot are the same.
 func SummaryOf(snapshot Snapshot, owned []string, stallAfter time.Duration) ReplicaSummary {
 	view := publishedView(snapshot, stallAfter)
-	return ReplicaSummary{Head: headOf(snapshot), Part: ReplicaPartOf(view, snapshot.TakenAt), Owned: DigestOf(owned),
-		AnomaliesCut: snapshot.Truncated()}
+	part := ReplicaPartOf(view, snapshot.TakenAt)
+	if snapshot.EvaluatingStrategiesKnown {
+		part.RunningStrategies = runningStrategiesOf(view, snapshot.EvaluatingStrategies, snapshot.TakenAt)
+	}
+	return ReplicaSummary{Head: headOf(snapshot), Part: part, Owned: DigestOf(owned), AnomaliesCut: snapshot.Truncated()}
 }
 
 // publishedView is the view of one snapshot with its rows decided at its
@@ -71,7 +74,7 @@ func headOf(snapshot Snapshot) Snapshot {
 	head.Anomalies, head.Demoted, head.Undecidable, head.ByDesign = nil, nil, nil, nil
 	head.PrunedSkips, head.GapSkips = nil, nil
 	head.NoData, head.NoDataMemory, head.RetainedShare, head.ReadEarly, head.LateSeries = nil, nil, nil, nil, nil
-	head.ReadHolds, head.OverdueEpisodes = nil, nil
+	head.ReadHolds, head.OverdueEpisodes, head.EvaluatingStrategies = nil, nil, nil
 	return head
 }
 

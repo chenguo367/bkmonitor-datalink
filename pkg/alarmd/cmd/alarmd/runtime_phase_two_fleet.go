@@ -433,6 +433,28 @@ func (publisher *fleetPublisher) noteOverdue(objects []fleet.OverdueObject, at t
 	}
 }
 
+// evaluatingStrategies is every strategy seen evaluating on the given
+// objects, once each, in order.
+func evaluatingStrategies(owned []execution.QueryGroupIdentity, strategies func(string) []fleet.StrategyRef) []fleet.StrategyRef {
+	seen := map[fleet.StrategyRef]bool{}
+	list := []fleet.StrategyRef{}
+	for _, queryGroup := range owned {
+		for _, ref := range strategies(string(queryGroup)) {
+			if !seen[ref] {
+				seen[ref] = true
+				list = append(list, ref)
+			}
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].StrategyID != list[j].StrategyID {
+			return list[i].StrategyID < list[j].StrategyID
+		}
+		return list[i].BusinessID < list[j].BusinessID
+	})
+	return list
+}
+
 // overdueEpisodeObserver logs an overdue episode's beginning and end with the
 // object and its hold, and counts each beginning by its hold.
 func overdueEpisodeObserver(logger *observability.Logger, recorder *metric.Recorder) func(fleet.OverdueEpisode, bool) {
@@ -672,6 +694,12 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		snapshot.ReadHolds = publisher.readHolds()
 	}
 	snapshot.OverdueEpisodes = append([]fleet.OverdueEpisode(nil), publisher.overdueEpisodes...)
+	// Which strategies evaluate on the objects this replica holds, for its
+	// summary to count the running ones by: a strategy on no row of its is
+	// running here.
+	if publisher.strategies != nil {
+		snapshot.EvaluatingStrategies, snapshot.EvaluatingStrategiesKnown = evaluatingStrategies(owned, publisher.strategies), true
+	}
 	// And the objects whose late series the lookback's supplements could
 	// not recover: past their round, or the tail of a window recovered in
 	// part.
@@ -887,6 +915,11 @@ func fleetVerdictOf(view fleet.View, part fleet.ReplicaPart, at time.Time) metri
 		verdict.HandoverObjects = &objects
 	}
 
+	if running, known := fleet.RunningStrategiesOf(&view, part); known {
+		for _, word := range fleet.StateWords {
+			verdict.RunningStrategies = append(verdict.RunningStrategies, metric.FleetCount{Value: string(word), Count: running[word]})
+		}
+	}
 	rows := part.Metrics
 	if rows == nil {
 		if len(view.Replicas) > 0 {

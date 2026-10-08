@@ -319,7 +319,7 @@ func TestASummaryReadsBackAsWritten(t *testing.T) {
 func TestEveryListOfASnapshotIsEitherRowsOrKeptInItsHead(t *testing.T) {
 	rows := map[string]bool{"OwnedObjects": true, "Anomalies": true, "Demoted": true, "Undecidable": true, "ByDesign": true,
 		"PrunedSkips": true, "GapSkips": true, "NoData": true, "NoDataMemory": true, "RetainedShare": true, "ReadEarly": true,
-		"LateSeries": true, "ReadHolds": true, "OverdueEpisodes": true}
+		"LateSeries": true, "ReadHolds": true, "OverdueEpisodes": true, "EvaluatingStrategies": true}
 	kept := map[string]bool{"AwaitingFirstRound": true, "Recovered": true, "Dependencies": true}
 	var full Snapshot
 	fill(reflect.ValueOf(&full).Elem(), 0)

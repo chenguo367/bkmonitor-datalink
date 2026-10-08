@@ -1677,6 +1677,12 @@ type Snapshot struct {
 	// overdue no more, at most MaxOverdueEpisodes. Not in the summary: read
 	// only by a reader that reads snapshots, a diagnosis.
 	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
+	// EvaluatingStrategies is the strategies this replica has seen evaluate
+	// on the objects it holds, and EvaluatingStrategiesKnown that it says
+	// which: a snapshot without it, from a build before it, says nothing of
+	// them. Read only into the replica's summary, its running strategies.
+	EvaluatingStrategies      []StrategyRef `json:"evaluating_strategies,omitempty"`
+	EvaluatingStrategiesKnown bool          `json:"evaluating_strategies_known,omitempty"`
 	// LateSeries is the objects whose late series the lookback's supplements
 	// could not recover, of KindLatePastRound and KindLateSeriesMissed. In no
 	// column -- the rounds complete -- and listed because those series were

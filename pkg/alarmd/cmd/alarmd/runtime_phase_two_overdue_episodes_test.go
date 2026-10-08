@@ -69,3 +69,61 @@ func TestTheFleetPublisherKeepsOverdueEpisodesWithTheirHold(t *testing.T) {
 		t.Fatalf("open %+v, want only the object still overdue", publisher.overdueOpen)
 	}
 }
+
+// The scrape exports the running strategies only from a view read whole:
+// snapshots deferred under the memory line or unread leave no series, and so
+// does a part from a build without the counts.
+func TestTheVerdictExportsRunningStrategiesOnlyFromAViewReadWhole(t *testing.T) {
+	at := time.Unix(1_791_400_000, 0)
+	part := fleet.ReplicaPart{RunningStrategies: map[fleet.StateWord]int{fleet.StateDetecting: 120, fleet.StateDataAbsent: 30}}
+	whole := fleet.View{Health: fleet.HealthHealthy, Replicas: []string{"pod-a", "pod-b"}}
+	verdict := fleetVerdictOf(whole, part, at)
+	if len(verdict.RunningStrategies) != len(fleet.StateWords) {
+		t.Fatalf("running %+v, want every state", verdict.RunningStrategies)
+	}
+	for _, count := range verdict.RunningStrategies {
+		if count.Value == string(fleet.StateDetecting) && count.Count != 120 {
+			t.Fatalf("DETECTING %d, want 120", count.Count)
+		}
+	}
+	for _, kind := range []fleet.GapKind{fleet.GapSnapshotsDeferred, fleet.GapSnapshotsUnreadable, fleet.GapReplicaMissing} {
+		view := whole
+		view.Gaps = []fleet.Gap{{Kind: kind}}
+		if verdict := fleetVerdictOf(view, part, at); verdict.RunningStrategies != nil {
+			t.Fatalf("%s: running %+v exported from a view not read whole", kind, verdict.RunningStrategies)
+		}
+	}
+	if verdict := fleetVerdictOf(whole, fleet.ReplicaPart{}, at); verdict.RunningStrategies != nil {
+		t.Fatalf("running %+v exported from a part without the counts", verdict.RunningStrategies)
+	}
+}
+
+// The strategies evaluating on the objects a replica holds, each once.
+func TestEvaluatingStrategiesAreEachStrategyOnce(t *testing.T) {
+	refs := map[string][]fleet.StrategyRef{
+		"qg-a": {{StrategyID: "9", BusinessID: "2"}, {StrategyID: "10", BusinessID: "2"}},
+		"qg-b": {{StrategyID: "9", BusinessID: "2"}},
+	}
+	list := evaluatingStrategies([]execution.QueryGroupIdentity{"qg-a", "qg-b", "qg-none"}, func(qg string) []fleet.StrategyRef { return refs[qg] })
+	if len(list) != 2 || list[0].StrategyID != "10" || list[1].StrategyID != "9" {
+		t.Fatalf("list %+v, want 10 and 9 once each", list)
+	}
+}
+
+// The snapshot says which strategies evaluate on the objects the replica
+// holds, and says nothing of them without the tracker's names.
+func TestTheFleetPublisherSaysWhichStrategiesEvaluate(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(1_791_400_000, 0)}
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now,
+		owned: func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-a"} },
+	}
+	if snapshot := publisher.snapshot(context.Background()); snapshot.EvaluatingStrategiesKnown || len(snapshot.EvaluatingStrategies) != 0 {
+		t.Fatalf("a publisher without strategy names said %+v (known %t)", snapshot.EvaluatingStrategies, snapshot.EvaluatingStrategiesKnown)
+	}
+	publisher.strategies = func(string) []fleet.StrategyRef { return []fleet.StrategyRef{{StrategyID: "4101", BusinessID: "2"}} }
+	snapshot := publisher.snapshot(context.Background())
+	if !snapshot.EvaluatingStrategiesKnown || len(snapshot.EvaluatingStrategies) != 1 || snapshot.EvaluatingStrategies[0].StrategyID != "4101" {
+		t.Fatalf("snapshot strategies %+v (known %t)", snapshot.EvaluatingStrategies, snapshot.EvaluatingStrategiesKnown)
+	}
+}

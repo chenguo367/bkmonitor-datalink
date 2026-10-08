@@ -106,6 +106,9 @@ type FleetVerdict struct {
 	// whole. The counts read from the replicas' parts can count each of these
 	// objects once per holder.
 	HandoverObjects *int
+	// RunningStrategies is the replicas' running strategies by state, every
+	// state; nil when not read whole, and the family is then left out.
+	RunningStrategies []FleetCount
 	// RowsUnknown says the counts read from rows -- stalled, anomalies by
 	// kind, failures, query cooldown, check lines and losses -- are not
 	// known for this judgment, and their families are left out rather than
@@ -134,6 +137,7 @@ type fleetCollector struct {
 	degradations *prometheus.Desc
 	losses       *prometheus.Desc
 	handover     *prometheus.Desc
+	running      *prometheus.Desc
 }
 
 func newFleetCollector(source FleetVerdictSource) *fleetCollector {
@@ -246,6 +250,15 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"emitted as zero; absent when some replica's owned set was not read whole, which says a "+
 				"handover may be happening without saying how much. Aggregate with max.",
 			nil),
+		running: descriptor("fleet_running_strategies",
+			"Strategies running on the replicas' objects, by state: each replica folds its own rows per strategy, "+
+				"as the page's strategy lines fold them, and counts a strategy evaluating on its objects with no row as "+
+				"DETECTING; the counts are added. A strategy whose objects are on k replicas is counted k times, so "+
+				"this is a trend, not a count of strategies -- /api/diagnose has each strategy's state. States only the "+
+				"strategy source decides (a strategy withheld, or not yet published) are not in it. Absent when any "+
+				"replica's rows were not read whole -- a summary missing, stale, unreadable, deferred, cut, or from a "+
+				"build without these counts -- so a half view never reads as detection stopping.",
+			[]string{"state"}),
 	}
 }
 
@@ -264,6 +277,7 @@ func (c *fleetCollector) Describe(descriptions chan<- *prometheus.Desc) {
 	descriptions <- c.degradations
 	descriptions <- c.losses
 	descriptions <- c.handover
+	descriptions <- c.running
 }
 
 func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
@@ -300,6 +314,9 @@ func (c *fleetCollector) Collect(metrics chan<- prometheus.Metric) {
 	}
 	if verdict.HandoverObjects != nil {
 		metrics <- prometheus.MustNewConstMetric(c.handover, prometheus.GaugeValue, float64(*verdict.HandoverObjects))
+	}
+	for _, count := range verdict.RunningStrategies {
+		metrics <- prometheus.MustNewConstMetric(c.running, prometheus.GaugeValue, float64(count.Count), count.Value)
 	}
 	for _, count := range verdict.Workers {
 		if count.Value == "" {
