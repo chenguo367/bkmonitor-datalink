@@ -398,6 +398,28 @@ type Inspection struct {
 	Corrupt bool
 }
 
+// Hold is the read hold the record states - the pending one while a change
+// is pending, the current one otherwise - and whether it is known. A record
+// read and decoded is known, and so is none at all: a group that has only
+// ever held nothing keeps no record. A record not read yet, or one that did
+// not decode, is not known, and every reader says so rather than zero.
+//
+// One group reads zero here and may not be: a group never prepared, whose
+// Plan moved from a group that held, can be held by the transition its first
+// prepare seeds; until that first Slot it reads zero.
+func (inspection Inspection) Hold() (int64, bool) {
+	if !inspection.Loaded || inspection.Corrupt {
+		return 0, false
+	}
+	return current(inspection.Record), true
+}
+
+// Hold is the group's read hold as its record states it, and whether it is
+// known (Inspection.Hold).
+func (controller *Controller) Hold(qg execution.QueryGroupIdentity) (int64, bool) {
+	return controller.Inspect(qg).Hold()
+}
+
 func (controller *Controller) Inspect(qg execution.QueryGroupIdentity) Inspection {
 	controller.mu.RLock()
 	state := controller.groups[qg]

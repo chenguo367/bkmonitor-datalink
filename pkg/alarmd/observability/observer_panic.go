@@ -101,12 +101,11 @@ func Named(name string, observer Observer) Observer {
 }
 
 // observeIsolated gives one fan-out member the observation, recovering and
-// counting a panic in it so the members after it still receive theirs.
-func observeIsolated(ctx context.Context, observer Observer, observation Observation) {
-	name := ObserverUnnamed
-	if named, ok := observer.(namedObserver); ok {
-		name = named.name
-	}
+// counting a panic in it under name so the members after it still receive
+// theirs. The observation travels by pointer to the member's own Observe:
+// it is large, and each member takes one copy of it, as before the
+// isolation.
+func observeIsolated(ctx context.Context, name string, observer Observer, observation *Observation) {
 	defer RecoverObserverPanic(name)
-	observer.Observe(ctx, observation)
+	observer.Observe(ctx, *observation)
 }

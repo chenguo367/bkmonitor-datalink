@@ -256,9 +256,7 @@ func lookbackReadEarly(engine *lookback.Engine, holds ...*productionReadHolds) f
 				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
 				Since: reading.Since}
 			if len(holds) > 0 && holds[0] != nil {
-				if _, err := holds[0].owner(reading.QueryGroup); err == nil && holds[0].controller.Inspect(reading.QueryGroup).Loaded {
-					row.ReadHoldMillis = holds[0].controller.ReadHold(reading.QueryGroup).Milliseconds()
-				}
+				row.ReadHoldMillis, row.ReadHoldUnknown, _ = holds[0].rowHold(reading.QueryGroup)
 			}
 			for _, sample := range reading.Samples {
 				row.Samples = append(row.Samples, fleet.ReadEarlySample{EvaluationTime: int64(sample.EvaluationTime),
@@ -342,8 +340,8 @@ func lookbackLateSeries(engine *lookback.Engine, holds ...*productionReadHolds) 
 		if len(holds) > 0 && holds[0] != nil {
 			for qg, reading := range past {
 				id := execution.QueryGroupIdentity(qg)
-				if _, err := holds[0].owner(id); err == nil && holds[0].controller.Inspect(id).Loaded {
-					reading.ReadHoldMillis = holds[0].controller.ReadHold(id).Milliseconds()
+				if millis, unknown, owned := holds[0].rowHold(id); owned {
+					reading.ReadHoldMillis, reading.ReadHoldUnknown = millis, unknown
 					past[qg] = reading
 				}
 			}
@@ -364,7 +362,8 @@ func lateSeriesFacts(pastRound []lookback.LatePastRoundReading, residual []lookb
 			SuggestedDelaySeconds: reading.SuggestedDelaySeconds, Since: reading.Since}
 		for _, sample := range reading.Samples {
 			row.Samples = append(row.Samples, fleet.LatePastRoundSample{EvaluationTime: int64(sample.EvaluationTime),
-				Rung: sample.Rung, SeenAgeSeconds: sample.SeenAgeSeconds, OnTimeSeries: sample.OnTimeSeries, LateSeries: sample.LateSeries,
+				Rung: sample.Rung, SeenAgeSeconds: sample.SeenAgeSeconds, ReadHoldSeconds: sample.ReadHoldSeconds,
+				OnTimeSeries: sample.OnTimeSeries, LateSeries: sample.LateSeries,
 				CrossedSeries: sample.CrossedSeries})
 		}
 		past[string(reading.QueryGroup)] = row

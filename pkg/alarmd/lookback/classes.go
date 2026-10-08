@@ -309,14 +309,14 @@ func readingOf(queryGroup execution.QueryGroupIdentity, state *group) (ReadEarly
 		samples = samples[len(samples)-readEarlyKept:]
 	}
 	step := int64(state.step / time.Second)
+	// How much later than the time_delay the data was whole: after the first
+	// read, which waited its hold, plus that hold.
 	later := int64(0)
 	for _, sample := range samples {
 		later = max(later, sample.CompletionAgeSeconds-sample.FirstReadyAgeSeconds+sample.ReadHoldSeconds)
 	}
-	suggested := run.delaySeconds + later
-	if unit := int64(state.delayUnit / time.Second); unit > 0 {
-		suggested = (suggested + unit - 1) / unit * unit
-	}
+	suggested := execution.SuggestedTimeDelaySeconds(time.Duration(run.delaySeconds+later)*time.Second,
+		time.Duration(run.delaySeconds)*time.Second, state.delayUnit)
 	return ReadEarlyReading{QueryGroup: queryGroup, Source: state.source, StepSeconds: step,
 		CurrentDelaySeconds: run.delaySeconds, SuggestedDelaySeconds: suggested, Since: run.since,
 		Samples: samples}, true

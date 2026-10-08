@@ -63,6 +63,10 @@ type ReadEarlyFacts struct {
 	CurrentDelaySeconds   int64 `json:"current_time_delay_seconds"`
 	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds"`
 	ReadHoldMillis        int64 `json:"read_hold_ms,omitempty"`
+	// ReadHoldUnknown is a group whose hold record is not read yet or did
+	// not decode: its hold is not known, which a missing read_hold_ms would
+	// read as none.
+	ReadHoldUnknown bool `json:"read_hold_unknown,omitempty"`
 	// Since is when the object was first reported this time, as this
 	// process saw it.
 	Since time.Time `json:"since"`
@@ -168,6 +172,11 @@ func (advice *TimeDelayAdvice) with(row Anomaly) *TimeDelayAdvice {
 	advice.objects[row.QueryGroup] = struct{}{}
 	advice.Objects = len(advice.objects)
 	facts := row.ReadEarly
+	if facts.SuggestedDelaySeconds <= 0 {
+		// The current time_delay covers it: nothing to advise, as for a held
+		// row (readHeldAdvice).
+		return advice
+	}
 	if advice.Object != "" && (facts.SuggestedDelaySeconds < advice.SuggestedDelaySeconds ||
 		(facts.SuggestedDelaySeconds == advice.SuggestedDelaySeconds && !facts.Since.Before(advice.Since))) {
 		return advice

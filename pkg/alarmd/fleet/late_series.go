@@ -28,23 +28,28 @@ type LatePastRoundSample struct {
 	EvaluationTime int64  `json:"evaluation_time"`
 	Rung           string `json:"rung,omitempty"`
 	SeenAgeSeconds int64  `json:"seen_age_seconds"`
-	OnTimeSeries   int    `json:"on_time_series"`
-	LateSeries     int    `json:"late_series"`
-	CrossedSeries  int    `json:"crossed_series"`
+	// ReadHoldSeconds is the hold the window's first read waited; the seen
+	// age is counted after it.
+	ReadHoldSeconds int64 `json:"read_hold_seconds,omitempty"`
+	OnTimeSeries    int   `json:"on_time_series"`
+	LateSeries      int   `json:"late_series"`
+	CrossedSeries   int   `json:"crossed_series"`
 }
 
 // LatePastRoundFacts is what a row of KindLatePastRound says for itself: the
-// object's data step, the time_delay its query runs under, and that plus how
-// long after the first read its late series were seen, aligned up to the
-// step -- an upper bound, since they came between that read and the one
-// before -- with the windows it rests on.
+// object's data step, the time_delay its query runs under, and that plus the
+// hold its first read waited plus how long after that read its late series
+// were seen, aligned up to the step -- an upper bound, since they came
+// between that read and the one before -- with the windows it rests on.
 type LatePastRoundFacts struct {
-	StepSeconds           int64                 `json:"step_seconds"`
-	CurrentDelaySeconds   int64                 `json:"current_time_delay_seconds"`
-	SuggestedDelaySeconds int64                 `json:"suggested_time_delay_seconds"`
-	ReadHoldMillis        int64                 `json:"read_hold_ms,omitempty"`
-	Since                 time.Time             `json:"since"`
-	Samples               []LatePastRoundSample `json:"samples,omitempty"`
+	StepSeconds           int64 `json:"step_seconds"`
+	CurrentDelaySeconds   int64 `json:"current_time_delay_seconds"`
+	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds"`
+	ReadHoldMillis        int64 `json:"read_hold_ms,omitempty"`
+	// ReadHoldUnknown: as ReadEarlyFacts.ReadHoldUnknown.
+	ReadHoldUnknown bool                  `json:"read_hold_unknown,omitempty"`
+	Since           time.Time             `json:"since"`
+	Samples         []LatePastRoundSample `json:"samples,omitempty"`
 }
 
 // LateSeriesMissedSample is one supplemented window with series recovered

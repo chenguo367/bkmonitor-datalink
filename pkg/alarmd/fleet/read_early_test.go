@@ -216,3 +216,15 @@ func sameAdvice(left, right TimeDelayAdvice) bool {
 		left.Object == right.Object && left.Objects == right.Objects && left.Since.Equal(right.Since) &&
 		left.Samples == right.Samples && left.PartialRevised == right.PartialRevised && left.ReadHoldSeconds == right.ReadHoldSeconds
 }
+
+// A read-early row whose current time_delay already covers its data advises
+// nothing: it counts as an object of the strategy, and the advice stays as
+// it was.
+func TestAReadEarlyRowWithNothingToSuggestLeavesTheAdvice(t *testing.T) {
+	row := Anomaly{QueryGroup: "qg-a", Kind: KindReadBeforeComplete,
+		ReadEarly: &ReadEarlyFacts{StepSeconds: 60, CurrentDelaySeconds: 60, SuggestedDelaySeconds: 0}}
+	advice := (*TimeDelayAdvice)(nil).with(row)
+	if advice == nil || advice.Objects != 1 || advice.Object != "" || advice.SuggestedDelaySeconds != 0 {
+		t.Fatalf("advice %+v, want the object counted and nothing suggested", advice)
+	}
+}
