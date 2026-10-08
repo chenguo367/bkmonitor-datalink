@@ -257,7 +257,12 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"this is a trend, not a count of strategies -- /api/diagnose has each strategy's state. States only the "+
 				"strategy source decides (a strategy withheld, or not yet published) are not in it. Absent when any "+
 				"replica's rows were not read whole -- a summary missing, stale, unreadable, deferred, cut, or from a "+
-				"build without these counts -- so a half view never reads as detection stopping.",
+				"build without these counts -- so a half view never reads as detection stopping. "+
+				"A replica knows a strategy evaluates on an object from the object's rounds since the replica started: "+
+				"after a restart a strategy is counted once one of its objects has run a round, so the count climbs back "+
+				"over the longest period, and a strategy that has left an object the replica still holds stays counted "+
+				"until the replica restarts or hands the object over. Every replica exports the same counts, merged "+
+				"from all the summaries: aggregate with max.",
 			[]string{"state"}),
 	}
 }

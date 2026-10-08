@@ -14,7 +14,10 @@ import "time"
 // runningStrategiesOf is one replica's running strategies by state: its own
 // rows folded per strategy as its strategy lines fold them, and every
 // strategy evaluating on its objects with no row DETECTING. Every state is
-// present, zero included.
+// present, zero included. Which strategies evaluate is what the objects'
+// rounds named since the replica started (Snapshot.EvaluatingStrategies),
+// not the catalog: a strategy none of whose objects has run a round yet is
+// not counted, and one that has left an object still held is.
 func runningStrategiesOf(view View, evaluating []StrategyRef, now time.Time) map[StateWord]int {
 	counts := make(map[StateWord]int, len(StateWords))
 	for _, word := range StateWords {
