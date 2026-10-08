@@ -452,7 +452,8 @@ var dependencySignatures = []struct {
 // this deployment stuck anywhere.
 func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	if anomaly.Kind == KindNoData || anomaly.Kind == KindEmptyEveryRound || anomaly.Kind == KindRetainedShareApproaching ||
-		anomaly.Kind == KindReadBeforeComplete || anomaly.Kind == KindLatePastRound || anomaly.Kind == KindLateSeriesMissed {
+		anomaly.Kind == KindReadBeforeComplete || anomaly.Kind == KindReadHeld || anomaly.Kind == KindLatePastRound ||
+		anomaly.Kind == KindLateSeriesMissed {
 		return nil
 	}
 	// A span every Slot of which an earlier attempt executed, or an object

@@ -65,6 +65,12 @@ const (
 	// rounds complete; its results are read from data that was not all
 	// there, and the strategy's time_delay is what moves the read.
 	KindReadBeforeComplete = "READ_BEFORE_COMPLETE"
+	// KindReadHeld is an object whose reads alarmd holds for it: its
+	// measured arrival age is past what its time_delay waits, so its Slots
+	// are read that much later than the time_delay says. Its rounds complete
+	// and read the data whole; the time_delay that would need no hold is
+	// still the strategy owner's to set.
+	KindReadHeld = "READ_HELD"
 	// KindLatePastRound is an object whose late series had crossed their
 	// Slots in two supplemented windows in a row: the supplement recovered
 	// none of them, and only a longer time_delay reads them.

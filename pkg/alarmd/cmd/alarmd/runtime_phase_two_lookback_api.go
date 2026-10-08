@@ -220,8 +220,11 @@ func (holds *productionReadHolds) holdOf(queryGroup string) (int64, bool) {
 func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 	holds.mu.Lock()
 	groups := make([]execution.QueryGroupIdentity, 0, len(holds.groups))
-	for qg := range holds.groups {
+	bases := make(map[execution.QueryGroupIdentity]readHoldBasis, len(holds.groups))
+	for qg, owned := range holds.groups {
 		groups = append(groups, qg)
+		bases[qg] = readHoldBasis{delay: owned.queryDelay, step: owned.queryStep, settlingWait: owned.settlingWait,
+			known: owned.settled && owned.queryRoute != ""}
 	}
 	holds.mu.Unlock()
 	facts := make(map[string]fleet.ReadHoldFacts)
@@ -238,10 +241,50 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 		if record.PendingHoldMillis != nil {
 			millis = *record.PendingHoldMillis
 		}
-		facts[string(qg)] = fleet.ReadHoldFacts{Millis: millis, ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
+		entry := fleet.ReadHoldFacts{Millis: millis, ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
 			AtLimit: record.AtLimit, RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
 			Buckets:    append([]int64(nil), record.Buckets[:min(len(record.Buckets), fleet.MaxReadEarlyBuckets)]...),
 			Annotation: "alarmd 当前自动推后 " + strconv.FormatFloat(float64(millis)/1000, 'f', -1, 64) + " 秒"}
+		if record.HoldMillis > 0 {
+			entry.HeldSince = int64(record.SinceSlot)
+		}
+		if basis := bases[qg]; basis.known {
+			entry.DelaySeconds = int64(basis.delay / time.Second)
+			if millis > 0 {
+				entry.SuggestedDelaySeconds = basis.suggestion(record)
+			}
+		}
+		facts[string(qg)] = entry
 	}
 	return facts
+}
+
+// readHoldBasis is what a Query Group's spec says of its reads: the
+// time_delay its query runs under, its data step, and the settling wait the
+// hold is reckoned beyond.
+type readHoldBasis struct {
+	delay, step, settlingWait time.Duration
+	known                     bool
+}
+
+// suggestion is the time_delay at which the record's arrival age needs no
+// hold, aligned up to the data step; zero when it is not past the delay.
+// Only a measured arrival age suggests: the record's is written by the
+// group's own early reads, the largest they found, or by a lowering, which
+// rests on three matching earlier reads (readhold, Lowered) -- both
+// measured. A hold that is a predecessor's bound or a degraded freeze
+// writes none, and suggests nothing.
+func (basis readHoldBasis) suggestion(record readhold.Record) int64 {
+	if record.ArrivalAgeMillis <= 0 {
+		return 0
+	}
+	need := record.ArrivalAgeMillis - basis.settlingWait.Milliseconds()
+	if need <= basis.delay.Milliseconds() {
+		return 0
+	}
+	seconds := (need + 999) / 1000
+	if step := int64(basis.step / time.Second); step > 0 {
+		seconds = (seconds + step - 1) / step * step
+	}
+	return seconds
 }

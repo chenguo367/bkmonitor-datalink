@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
@@ -159,5 +160,76 @@ func TestAHeldGroupThatLostAPlanAWeekAgoKeepsRunningAfterARestart(t *testing.T) 
 	restartUntilFull(t, f, left)
 	if skipped := f.bundle.dependencies.ReadHolds.closeSkipped.Load(); skipped == 0 {
 		t.Fatal("the skipped close was not counted")
+	}
+}
+
+// previousWith answers the Segment before the one at `at` with its Plans'
+// completion offset set to offsetSeconds: a previous Segment whose Plans
+// were not the current ones.
+type previousWith struct {
+	readHoldTimeline
+	at            execution.EvaluationTime
+	offsetSeconds int64
+}
+
+func (timeline previousWith) ReadFrozenSchedule(ctx context.Context, qg execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
+	schedule, err := timeline.readHoldTimeline.ReadFrozenSchedule(ctx, qg, at)
+	if err == nil && at == timeline.at {
+		plans := append([]execution.FrozenPlanSchedule(nil), schedule.Plans...)
+		for index := range plans {
+			plans[index].Spec.CompletionDeadlineOffsetSeconds = timeline.offsetSeconds
+			if plans[index].ScheduleRevision, err = execution.DerivePlanScheduleRevision(plans[index].Spec); err != nil {
+				return schedule, err
+			}
+		}
+		schedule.Plans = plans
+		schedule.Segment.ScheduleRevision, err = execution.DeriveQueryGroupScheduleRevision(plans)
+	}
+	return schedule, err
+}
+
+// The settling wait a group's time_delay suggestion is reckoned beyond is
+// the newest prepared Segment's, though preparing it specifies the previous
+// Segment too, to close it.
+func TestRuntimeTheSuggestionIsReckonedByTheNewestPreparedSegment(t *testing.T) {
+	ctx := context.Background()
+	f, qg, current, _ := thresholdCut(t)
+	holds := f.bundle.dependencies.ReadHolds
+	// A ready delay the current Segment's budget fits and the previous one's
+	// does not, so the two settle differently.
+	holds.cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(20 * time.Second)
+	holds.catalog = previousWith{readHoldTimeline: holds.catalog, at: current.Segment.Start - 1, offsetSeconds: 20}
+	old, err := holds.catalog.ReadFrozenSchedule(ctx, qg, current.Segment.Start-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSpec, err := holds.spec(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSpec, err := holds.spec(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldSpec.SettlingWait == currentSpec.SettlingWait {
+		t.Fatalf("both Segments settle %v; the fixture does not tell them apart", oldSpec.SettlingWait)
+	}
+	holds.mu.Lock()
+	group := holds.groups[qg]
+	group.settled, group.settlingWait = false, 0
+	holds.mu.Unlock()
+	group.mu.Lock()
+	group.prepared = execution.ScheduleSegmentFact{}
+	group.mu.Unlock()
+	lease, _ := group.session.Current()
+	if err := holds.PrepareSchedule(ctx, current, lease.Fence); err != nil {
+		t.Fatalf("prepare = %v", err)
+	}
+	holds.mu.Lock()
+	wait, settled := group.settlingWait, group.settled
+	holds.mu.Unlock()
+	if !settled || wait != currentSpec.SettlingWait {
+		t.Fatalf("kept settling %v (settled %t), want the current Segment's %v, not the previous one's %v",
+			wait, settled, currentSpec.SettlingWait, oldSpec.SettlingWait)
 	}
 }

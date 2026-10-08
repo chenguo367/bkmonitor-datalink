@@ -718,6 +718,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.readHolds != nil {
 		snapshot.ReadHolds = publisher.readHolds()
+		// And the objects whose reads alarmd holds on a measured arrival
+		// age: rounds completing whole, later than their time_delay says,
+		// and the time_delay that would need no hold for the owner to set.
+		snapshot.ReadHeld = publisher.tracker.ReadHeld(snapshot.ReadHolds)
 	}
 	snapshot.OverdueEpisodes = append([]fleet.OverdueEpisode(nil), publisher.overdueEpisodes...)
 	// Which strategies evaluate on the objects this replica holds, for its
@@ -748,7 +752,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.schedule != nil {
 		census := publisher.schedule.Census(at, len(owned))
 		snapshot.Schedule = &census
-		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare, snapshot.ReadEarly} {
+		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare, snapshot.ReadEarly, snapshot.ReadHeld} {
 			for index := range column {
 				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
 				column[index].Wake = &wake

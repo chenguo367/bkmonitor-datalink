@@ -1461,6 +1461,10 @@ type Anomaly struct {
 	// object's query runs under, the one that would have read its samples
 	// complete, and the samples.
 	ReadEarly *ReadEarlyFacts `json:"read_early,omitempty"`
+	// ReadHold is on rows of KindReadHeld: the hold alarmd reads the object
+	// with, the arrival age it was measured from, and the time_delay that
+	// would need none.
+	ReadHold *ReadHoldFacts `json:"read_hold,omitempty"`
 	// LatePastRound is on rows of KindLatePastRound and LateSeriesMissed on
 	// rows of KindLateSeriesMissed: what the lookback's supplements could not
 	// recover, and the evidence.
@@ -1673,6 +1677,11 @@ type Snapshot struct {
 	// read from data that was not all there, which only the strategy's
 	// time_delay changes.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// ReadHeld is the objects whose reads alarmd holds for them, from a
+	// measured arrival age past what their time_delay waits. In no column --
+	// the rounds complete and read the data whole -- and listed because the
+	// time_delay that would need no hold is the strategy owner's to set.
+	ReadHeld []Anomaly `json:"read_held,omitempty"`
 	// OverdueEpisodes is this replica's latest objects found overdue and
 	// overdue no more since it started, at most MaxOverdueEpisodes. Not in
 	// the summary: read only by a reader that reads snapshots, a diagnosis.
@@ -2803,6 +2812,9 @@ type View struct {
 	// ReadEarly is the objects read before their data was complete, from
 	// every counted replica. In no column and in no total, like NoData.
 	ReadEarly []Anomaly `json:"read_early,omitempty"`
+	// ReadHeld is the objects whose reads alarmd holds for them, from every
+	// counted replica. In no column and in no total, like NoData.
+	ReadHeld []Anomaly `json:"read_held,omitempty"`
 	// OverdueEpisodes is the counted replicas' latest overdue episodes, the
 	// latest-cleared first, at most MaxOverdueEpisodes.
 	OverdueEpisodes []OverdueEpisode `json:"overdue_episodes,omitempty"`
@@ -3087,6 +3099,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
 		view.RetainedShare = append(view.RetainedShare, snapshot.RetainedShare...)
 		view.ReadEarly = append(view.ReadEarly, snapshot.ReadEarly...)
+		view.ReadHeld = append(view.ReadHeld, snapshot.ReadHeld...)
 		view.OverdueEpisodes = latestOverdueEpisodes(append(view.OverdueEpisodes, snapshot.OverdueEpisodes...))
 		view.LateSeries = append(view.LateSeries, snapshot.LateSeries...)
 		mergeRecovered(&view, snapshot.Recovered)
@@ -3430,6 +3443,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		Attribute(view.NoDataMemory, now)
 		Attribute(view.RetainedShare, now)
 		Attribute(view.ReadEarly, now)
+		Attribute(view.ReadHeld, now)
 		Attribute(view.LateSeries, now)
 	}
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)

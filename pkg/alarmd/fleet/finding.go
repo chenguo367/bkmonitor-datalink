@@ -146,6 +146,8 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckRetainedShareApproaching, true, false
 	case anomaly.Kind == KindReadBeforeComplete:
 		return CheckReadBeforeComplete, true, false
+	case anomaly.Kind == KindReadHeld:
+		return CheckReadHeld, true, false
 	case anomaly.Kind == KindLatePastRound:
 		return CheckLatePastRound, true, false
 	case anomaly.Kind == KindLateSeriesMissed:

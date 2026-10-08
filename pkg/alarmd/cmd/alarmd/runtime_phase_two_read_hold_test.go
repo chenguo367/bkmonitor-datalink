@@ -258,3 +258,97 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 		t.Fatalf("groups no longer held were counted: %+v", counts)
 	}
 }
+
+// A group holding on a measured arrival age publishes the time_delay that
+// would need no hold: the arrival age less the settling wait, aligned up to
+// the data step -- also at the limit, where the hold cannot cover it, and
+// after a lowering, whose arrival age rests on three matching earlier
+// reads. A hold with no measured arrival age, a predecessor's bound,
+// suggests nothing; nor does a group holding nothing, or one whose query is
+// not known yet. The hold's first frozen Slot rides beside it.
+func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
+	h, c, at := runtimeTestHolds(t)
+	chosen := int64(99_000)
+	records := map[execution.QueryGroupIdentity]readhold.Record{
+		"measured":   {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
+		"limited":    {SinceSlot: 1_790_000_000, HoldMillis: 600_000, ArrivalAgeMillis: 990_000, AtLimit: true, LimitMillis: 600_000},
+		"lowered":    {SinceSlot: 1_790_000_000, HoldMillis: 40_000, ArrivalAgeMillis: 130_000, Lowered: true},
+		"fallback":   {SinceSlot: 1_790_000_000, HoldMillis: 600_000},
+		"inherited":  {SinceSlot: 1_790_000_000, HoldMillis: 120_000, ArrivalAgeMillis: 80_000},
+		"chosen":     {SinceSlot: 1_790_000_000, PendingHoldMillis: &chosen, ArrivalAgeMillis: 189_000},
+		"idle":       {SinceSlot: 1_790_000_000, ArrivalAgeMillis: 50_000},
+		"unprepared": {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
+	}
+	var groups []execution.QueryGroupIdentity
+	for qg, record := range records {
+		raw, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.values[qg] = raw
+		session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.bind(qg, session)
+		groups = append(groups, qg)
+	}
+	h.restore(context.Background(), groups)
+	h.mu.Lock()
+	for qg, group := range h.groups {
+		if qg != "unprepared" {
+			group.queryRoute, group.queryDelay, group.queryStep, group.settlingWait, group.settled = "route", time.Minute, time.Minute, 30*time.Second, true
+		}
+	}
+	h.mu.Unlock()
+	facts := h.fleetFacts()
+	for qg, want := range map[string]struct {
+		millis, since, delay, suggested int64
+	}{
+		"measured": {99_000, 1_790_000_000, 60, 180},
+		"limited":  {600_000, 1_790_000_000, 60, 960},
+		"lowered":  {40_000, 1_790_000_000, 60, 120},
+		"fallback": {600_000, 1_790_000_000, 60, 0},
+		// A hold not from this arrival age -- an inherited bound -- beside
+		// one that needs no more than the delay: nothing to move it to.
+		"inherited":  {120_000, 1_790_000_000, 60, 0},
+		"chosen":     {99_000, 0, 60, 180},
+		"idle":       {0, 0, 60, 0},
+		"unprepared": {99_000, 1_790_000_000, 0, 0},
+	} {
+		got, found := facts[qg]
+		if !found || got.Millis != want.millis || got.HeldSince != want.since || got.DelaySeconds != want.delay || got.SuggestedDelaySeconds != want.suggested {
+			t.Errorf("%s: facts %+v (found %t), want hold %d since %d delay %d suggested %d", qg, got, found, want.millis, want.since, want.delay, want.suggested)
+		}
+	}
+}
+
+// Preparing a group's Slot through the production wiring keeps, beside its
+// time_delay, the data step its query's lookback aligns to and the settling
+// wait its hold is reckoned beyond: what its suggestion is computed from.
+func TestRuntimeAPreparedGroupKeepsWhatItsSuggestionIsReckonedBy(t *testing.T) {
+	ctx := context.Background()
+	f := startCutoverFixture(t, nil)
+	_ = runOneSlotFull(t, f)
+	holds := f.bundle.dependencies.ReadHolds
+	holds.mu.Lock()
+	group := holds.groups[f.queryGroup]
+	var kept productionReadHoldGroup
+	if group != nil {
+		kept.queryDelay, kept.queryStep, kept.settlingWait, kept.settled = group.queryDelay, group.queryStep, group.settlingWait, group.settled
+	}
+	holds.mu.Unlock()
+	object, err := f.repository.LoadQueryGroupObject(ctx, f.initialSchedule.Segment.ObjectDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := holds.spec(ctx, f.initialSchedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group == nil || !kept.settled || kept.queryStep != time.Duration(object.QueryPlan.StepMillis)*time.Millisecond || kept.queryStep <= 0 ||
+		kept.settlingWait != spec.SettlingWait || kept.queryDelay != spec.Delay {
+		t.Fatalf("kept delay %v step %v settling %v (settled %t), want the spec's %v and %v and the query's step %d ms",
+			kept.queryDelay, kept.queryStep, kept.settlingWait, kept.settled, spec.Delay, spec.SettlingWait, object.QueryPlan.StepMillis)
+	}
+}

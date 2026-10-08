@@ -131,9 +131,15 @@ func (tracker *Tracker) ReadEarly(facts map[string]ReadEarlyFacts) []Anomaly {
 // not make it wrong. time_delay is one setting of the strategy, so it is the
 // largest suggestion of the strategy's objects, with the object it is from
 // and how many objects are read early.
+//
+// Or that alarmd holds the strategy's reads for it: ReadHoldSeconds is the
+// longest hold on its objects, and a hold measured from an arrival age
+// offers its suggestion as a read-early row does. A hold that rests on no
+// measurement says it holds and suggests nothing.
 type TimeDelayAdvice struct {
 	CurrentDelaySeconds   int64     `json:"current_time_delay_seconds"`
-	SuggestedDelaySeconds int64     `json:"suggested_time_delay_seconds"`
+	SuggestedDelaySeconds int64     `json:"suggested_time_delay_seconds,omitempty"`
+	ReadHoldSeconds       int64     `json:"read_hold_seconds,omitempty"`
 	Object                string    `json:"object"`
 	Objects               int       `json:"objects"`
 	Since                 time.Time `json:"since"`
@@ -150,6 +156,9 @@ type TimeDelayAdvice struct {
 // READ_BEFORE_COMPLETE row's suggestion, the largest so far and, among
 // equal ones, the earlier; any other row leaves it as it was.
 func (advice *TimeDelayAdvice) with(row Anomaly) *TimeDelayAdvice {
+	if row.Kind == KindReadHeld {
+		return advice.withHold(row.QueryGroup, row.ReadHold)
+	}
 	if row.Kind != KindReadBeforeComplete || row.ReadEarly == nil {
 		return advice
 	}
