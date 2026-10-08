@@ -78,7 +78,7 @@ func Decode(raw []byte) (Record, error) {
 		return Record{}, ErrRecordInvalid
 	}
 	for _, plan := range record.Plans {
-		if plan.Key.PlanIdentity.Validate() != nil || plan.Route == "" || plan.ArrivalAgeMillis < 0 ||
+		if plan.Key.PlanIdentity.Validate() != nil ||
 			!inRange(plan.PreviousHoldMillis) || plan.PreviousSlot < 0 || plan.CompletionOffsetMillis < 0 ||
 			plan.ClosedAt < 0 || (plan.ClosedAt > 0 && plan.PreviousSlot >= plan.ClosedAt) {
 			return Record{}, ErrRecordInvalid

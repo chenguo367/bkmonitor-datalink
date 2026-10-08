@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
-	"testing"
-	"time"
 )
 
 func runtimeExpiredZeroBridge(t *testing.T) (*productionReadHolds, *cutoverStallFixture, execution.FrozenQueryGroupSchedule, execution.OwnerFence, execution.QueryGroupIdentity, execution.ScheduleProgress) {
@@ -90,8 +91,7 @@ func runtimeExpiredZeroBridge(t *testing.T) (*productionReadHolds, *cutoverStall
 	if err := f.repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
-	progress := &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{next: {Status: execution.ProgressFound, Progress: &p}}}
-	h, err := newProductionReadHolds(f.cfg, control, f.repository, actual.catalog, progress, f.now, nil)
+	h, err := newProductionReadHolds(f.cfg, control, f.repository, actual.catalog, f.now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,47 +114,21 @@ func TestRuntimeRecentRealZeroCompletionMustNotWaitForExpiredPredecessor(t *test
 	}
 }
 
-func TestRuntimeRecentFullEmptyZeroCompletionMustNotWaitForExpiredPredecessor(t *testing.T) {
-	h, _, schedule, fence, _, p := runtimeExpiredZeroBridge(t)
-	p.LastDataSlot = 0
-	p.LastCompletionKind = execution.CompletionFullEmpty
-	p.LastCompletion.Kind = execution.CompletionFullEmpty
-	p.EmptyRunSinceSlot = p.LastCompletion.Slot
-	h.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{p.Identity.QueryGroup: {Status: execution.ProgressFound, Progress: &p}}}
-	if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
-		t.Fatalf("real current FULL_EMPTY h0 completion still blocked on expired predecessor: %v", err)
-	}
-	if got := h.ReadHold(schedule.Segment.QueryGroup); got != 0 {
-		t.Fatalf("empty group restored h=%s, want zero", got)
-	}
-}
-
 // Past its lifetime a link carries nothing: the old group's record has
 // aged out and every deadline the link kept has long passed. However the
 // group's own last round ended -- query-free here, which can never prove a
 // zero -- it prepares, and the link is counted as expired. It used to be read
 // as a predecessor whose zero could not be proven, and the group stopped.
 func TestRuntimeALinkPastItsLifetimeNoLongerStopsTheGroup(t *testing.T) {
-	for _, kind := range []execution.CompletionKind{execution.CompletionGapSkipped, execution.CompletionSnapshotUnavailable} {
-		t.Run(string(kind), func(t *testing.T) {
-			h, _, schedule, fence, _, p := runtimeExpiredZeroBridge(t)
-			p.LastDataSlot = 0
-			p.LastCompletionKind = kind
-			p.LastCompletion.Kind = kind
-			if kind == execution.CompletionGapSkipped {
-				p.CurrentOrRecentGap = &execution.ProgressGapSummary{Kind: kind, ReasonCode: execution.ReasonCode("GAP_SKIPPED"), FirstSlot: p.LastCompletion.Slot, LastSlot: p.LastCompletion.Slot, Count: 1}
-			}
-			h.progress = &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{p.Identity.QueryGroup: {Status: execution.ProgressFound, Progress: &p}}}
-			if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
-				t.Fatalf("a group stopped on a link past its lifetime: %v", err)
-			}
-			h.linksMu.Lock()
-			expired := h.links["expired"]
-			h.linksMu.Unlock()
-			if expired != 1 || len(h.controller.Stats().Predecessors) != 0 {
-				t.Fatalf("expired links %d, predecessors read %v: the link was not dropped unread", expired, h.controller.Stats().Predecessors)
-			}
-		})
+	h, _, schedule, fence, _, _ := runtimeExpiredZeroBridge(t)
+	if err := h.PrepareSchedule(context.Background(), schedule, fence); err != nil {
+		t.Fatalf("a group stopped on a link past its lifetime: %v", err)
+	}
+	h.linksMu.Lock()
+	expired := h.links["expired"]
+	h.linksMu.Unlock()
+	if expired != 1 || len(h.controller.Stats().Predecessors) != 0 {
+		t.Fatalf("expired links %d, predecessors read %v: the link was not dropped unread", expired, h.controller.Stats().Predecessors)
 	}
 }
 
@@ -171,7 +145,7 @@ func TestRuntimeALivePredecessorRecordIsNotReadPastTheLinksLifetime(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldRecord := readhold.Record{SinceSlot: 1, HoldMillis: 150000, ArrivalAgeMillis: 180000, Closed: true, Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0], ArrivalAgeMillis: 180000, PreviousSlot: links[0].ClosedAt - 59, PreviousHoldMillis: 150000, ClosedAt: links[0].ClosedAt, ClosedQueryGroup: old}}}
+	oldRecord := readhold.Record{SinceSlot: 1, HoldMillis: 150000, ArrivalAgeMillis: 180000, Closed: true, Plans: []readhold.PlanRecord{{PlanRef: spec.Plans[0], PreviousSlot: links[0].ClosedAt - 59, PreviousHoldMillis: 150000, ClosedAt: links[0].ClosedAt, ClosedQueryGroup: old}}}
 	raw, err := json.Marshal(oldRecord)
 	if err != nil {
 		t.Fatal(err)

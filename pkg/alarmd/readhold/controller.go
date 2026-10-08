@@ -101,7 +101,7 @@ type Stats struct {
 	OwnCorrupt uint64
 }
 
-// Control uses the existing ownership store. A value and its Plan/route
+// Control uses the existing ownership store. A value and its Plan
 // evidence are one fenced CAS in the owning Query Group's Redis hash slot.
 type Control interface {
 	ReadControlBatch(context.Context, []execution.QueryGroupIdentity, string) ([]ownership.ControlRead, error)
@@ -123,16 +123,12 @@ type Options struct {
 
 type PlanRef struct {
 	Key execution.PlanKey `json:"key"`
-	// Route excludes time_delay but includes the data source/metric identity:
-	// an unrelated metric of the same strategy must not inherit its lateness.
-	Route string `json:"route"`
 }
 
 // PlanRecord is the bridge to a replacement Query Group. Its previous Slot
 // is taken from the closed schedule, never from a lagging runtime cursor.
 type PlanRecord struct {
 	PlanRef
-	ArrivalAgeMillis       int64                        `json:"arrival_age_ms,omitempty"`
 	ClosedAt               execution.EvaluationTime     `json:"closed_at,omitempty"`
 	ClosedQueryGroup       execution.QueryGroupIdentity `json:"closed_query_group,omitempty"`
 	InheritedQueryGroup    execution.QueryGroupIdentity `json:"inherited_query_group,omitempty"`
@@ -186,14 +182,11 @@ type GroupSpec struct {
 }
 
 type Evidence struct {
-	Contract     execution.FrozenExecutionContractRef
-	ArrivalAge   time.Duration
-	FirstReadAge time.Duration
-	Rung         string
-	Buckets      []int64
-	Confirmed    bool
-	WholeWindow  bool
-	Noise        bool
+	Contract   execution.FrozenExecutionContractRef
+	ArrivalAge time.Duration
+	Rung       string
+	Buckets    []int64
+	Noise      bool
 }
 
 type EarlierEvidence struct {
@@ -276,8 +269,8 @@ func (controller *Controller) Configure(spec GroupSpec) error {
 		return errors.New("alarmd readhold: invalid Query Group spec")
 	}
 	for _, plan := range spec.Plans {
-		if plan.Key.PlanIdentity.Validate() != nil || plan.Route == "" {
-			return errors.New("alarmd readhold: invalid Plan route")
+		if plan.Key.PlanIdentity.Validate() != nil {
+			return errors.New("alarmd readhold: invalid Plan")
 		}
 	}
 	for _, previous := range spec.Previous {
@@ -633,7 +626,7 @@ func carries(record Record) bool {
 		return true
 	}
 	for _, plan := range record.Plans {
-		if plan.ArrivalAgeMillis != 0 || plan.PreviousHoldMillis != 0 || plan.PreviousHoldUnknown {
+		if plan.PreviousHoldMillis != 0 || plan.PreviousHoldUnknown {
 			return true
 		}
 	}
@@ -896,7 +889,7 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 			if fixed {
 				continue
 			}
-			closed := PlanRecord{PlanRef: ref, ArrivalAgeMillis: record.ArrivalAgeMillis,
+			closed := PlanRecord{PlanRef: ref,
 				ClosedAt:            *schedule.Segment.End,
 				ClosedQueryGroup:    schedule.Segment.QueryGroup,
 				PreviousHoldUnknown: unknown,
@@ -920,7 +913,7 @@ func closeRecord(record *Record, spec GroupSpec, schedule execution.FrozenQueryG
 }
 
 func (controller *Controller) Observe(ctx context.Context, evidence Evidence) error {
-	if evidence.Contract.Validate() != nil || evidence.ArrivalAge < 0 || evidence.FirstReadAge < 0 {
+	if evidence.Contract.Validate() != nil || evidence.ArrivalAge < 0 {
 		return errors.New("alarmd readhold: invalid lateness evidence")
 	}
 	qg := evidence.Contract.Slot.QueryGroup
@@ -929,9 +922,6 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 	defer state.mu.Unlock()
 	if err := ready(state); err != nil {
 		return err
-	}
-	if !evidence.Noise && (!evidence.Confirmed || !evidence.WholeWindow) {
-		return nil
 	}
 	if evidence.Contract.ScheduleSegmentStart < state.record.SegmentStart || state.record.Closed {
 		return nil
@@ -951,21 +941,19 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 		next.ArrivalAgeMillis = max(next.ArrivalAgeMillis, evidence.ArrivalAge.Milliseconds())
 		next.Rung, next.Buckets = evidence.Rung, append([]int64(nil), evidence.Buckets...)
 		for _, ref := range state.spec.Plans {
-			plan := PlanRecord{PlanRef: ref, ArrivalAgeMillis: next.ArrivalAgeMillis}
+			plan := PlanRecord{PlanRef: ref}
 			for _, existing := range next.Plans {
 				if existing.PlanRef == ref {
 					plan = existing
-					if plan.ClosedAt == 0 {
-						plan.ArrivalAgeMillis = next.ArrivalAgeMillis
-					}
 					break
 				}
 			}
 			mergePlan(&next, plan)
 		}
 		limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds()
-		// Only the configured delay and settling wait recur next round.
-		// Permit or scheduling delay in FirstReadAge cannot pay for its hold.
+		// Only the configured delay and settling wait recur next round: a
+		// permit or scheduling delay before the first read cannot pay for its
+		// hold, so the arrival age alone decides it.
 		target := max(0, evidence.ArrivalAge.Milliseconds()-state.spec.Delay.Milliseconds()-state.spec.SettlingWait.Milliseconds())
 		next.AtLimit, next.LimitMillis = target > limit, limit
 		if !next.Closed && min(target, limit) > current(next) {
@@ -1013,11 +1001,6 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 			next.PendingHoldMillis = &candidate
 			next.Lowered, next.EarlierMatches, next.QuietSinceMillis = true, 0, now
 			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
-			for index := range next.Plans {
-				if next.Plans[index].ClosedAt == 0 {
-					next.Plans[index].ArrivalAgeMillis = next.ArrivalAgeMillis
-				}
-			}
 		}
 	}
 	return controller.persist(ctx, evidence.Contract.Slot.QueryGroup, state, next, nil)

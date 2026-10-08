@@ -91,7 +91,7 @@ func TestRuntimePreparedZeroHoldDoesNotReadOrCreateKey(t *testing.T) {
 	}
 	h.bind(qg, session)
 	h.groups[qg].prepared = schedule.Segment
-	spec := readhold.GroupSpec{QueryGroup: qg, Plans: []readhold.PlanRef{{Key: schedule.Plans[0].Key(), Route: "source/metric"}}, SettlingWait: 30 * time.Second, HoldLimit: 10 * time.Minute}
+	spec := readhold.GroupSpec{QueryGroup: qg, Plans: []readhold.PlanRef{{Key: schedule.Plans[0].Key()}}, SettlingWait: 30 * time.Second, HoldLimit: 10 * time.Minute}
 	if err := h.controller.Configure(spec); err != nil {
 		t.Fatal(err)
 	}
