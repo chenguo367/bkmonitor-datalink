@@ -177,3 +177,14 @@ type thresholdTestCondition struct {
 	operator  string
 	threshold string
 }
+
+// recordValueMap is a record's values by name, the view a fixture hands the
+// evaluator.
+type recordValueMap map[string]json.RawMessage
+
+var _ RecordValueView = recordValueMap(nil)
+
+func (m recordValueMap) Value(name string) (json.RawMessage, bool) {
+	value, ok := m[name]
+	return value, ok
+}

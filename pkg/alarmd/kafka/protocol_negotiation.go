@@ -100,7 +100,9 @@ type brokerClient interface {
 	ApiVersions(addr string, config *sarama.Config) (*sarama.ApiVersionsResponse, error)
 }
 
-type saramaBrokerClient struct{}
+// saramaBrokerClient asks real brokers. topic is the one topic the broker
+// list is read with.
+type saramaBrokerClient struct{ topic string }
 
 func (saramaBrokerClient) open(addr string, config *sarama.Config) (*sarama.Broker, error) {
 	broker := sarama.NewBroker(addr)
@@ -123,7 +125,12 @@ func (client saramaBrokerClient) Brokers(bootstrap string, config *sarama.Config
 		return nil, err
 	}
 	defer func() { _ = broker.Close() }()
-	metadata, err := broker.GetMetadata(&sarama.MetadataRequest{})
+	// A Metadata request that names no topic asks for every topic of the
+	// cluster -- in version 0 an empty list means all of them, and the
+	// client encodes an empty list as all of them in every later version.
+	// The broker list comes with any answer, so the request names the one
+	// topic this producer writes.
+	metadata, err := broker.GetMetadata(&sarama.MetadataRequest{Topics: []string{client.topic}})
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +173,8 @@ func (client saramaBrokerClient) ApiVersions(addr string, config *sarama.Config)
 // are returned beside the error so a reader can say which broker did not
 // answer. The lazy sink retries the open, so an unreachable broker at start
 // is the same wait it always was.
-func NegotiateProtocol(bootstrap []string, config *sarama.Config) (ProtocolNegotiation, error) {
-	return negotiateProtocol(bootstrap, config, saramaBrokerClient{})
+func NegotiateProtocol(bootstrap []string, topic string, config *sarama.Config) (ProtocolNegotiation, error) {
+	return negotiateProtocol(bootstrap, config, saramaBrokerClient{topic: topic})
 }
 
 func negotiateProtocol(bootstrap []string, config *sarama.Config, client brokerClient) (ProtocolNegotiation, error) {

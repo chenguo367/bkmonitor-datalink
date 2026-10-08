@@ -529,34 +529,6 @@ func sortedReasonCountsV2(values []ReasonCountV1, domain ReasonDomainsV2) bool {
 	return true
 }
 
-func hasValidationTerminalReasonV1(values []ReasonCountV1) bool {
-	for _, value := range values {
-		definition, ok := LookupReasonV2(value.ReasonCode)
-		if ok && value.Count != 0 && definition.Domains.Has(ReasonDomainValidationIssue) {
-			return true
-		}
-	}
-	return false
-}
-
-func sumCountsV1(values ...uint64) (uint64, bool) {
-	var total uint64
-	for _, value := range values {
-		if !addCountV1(&total, value) {
-			return 0, false
-		}
-	}
-	return total, true
-}
-
-func addCountV1(total *uint64, value uint64) bool {
-	if ^uint64(0)-*total < value {
-		return false
-	}
-	*total += value
-	return true
-}
-
 func countSetBalancedV1(source, published, dropped CountSetV1) bool {
 	return countBalancedV1(source.Messages, published.Messages, dropped.Messages) &&
 		countBalancedV1(source.Records, published.Records, dropped.Records) &&

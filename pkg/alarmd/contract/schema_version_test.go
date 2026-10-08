@@ -7,28 +7,24 @@
 // an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-package trigger
+package contract
 
 import (
+	"os"
+	"strings"
 	"testing"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-func TestStrategyHandleDoesNotExposeMutableStrategyState(t *testing.T) {
+// The schema version a build reports beside its version is the one the
+// module's SCHEMA_VERSION file states.
+func TestSchemaVersionFileMatchesContract(t *testing.T) {
 	t.Parallel()
 
-	strategy := newStrategy(t, "generation-1", []contract.TriggerConfig{{Level: 1, CheckWindowSize: 3, TriggerCount: 2}})
-	handle, err := NewStrategyHandle(strategy)
+	payload, err := os.ReadFile("../SCHEMA_VERSION")
 	if err != nil {
-		t.Fatalf("NewStrategyHandle() error = %v", err)
+		t.Fatalf("ReadFile(SCHEMA_VERSION) error = %v", err)
 	}
-
-	strategy.TriggerConfigs[0].TriggerCount = 99
-	configs := handle.TriggerConfigs()
-	configs[0].TriggerCount = 88
-
-	if got := handle.TriggerConfigs()[0].TriggerCount; got != 2 {
-		t.Fatalf("handle trigger count = %d, want 2", got)
+	if got := strings.TrimSpace(string(payload)); got != SchemaVersion {
+		t.Fatalf("SCHEMA_VERSION = %q, want %q", got, SchemaVersion)
 	}
 }

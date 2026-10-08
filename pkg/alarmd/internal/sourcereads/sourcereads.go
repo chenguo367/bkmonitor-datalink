@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/detect"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 )
 
@@ -56,14 +55,10 @@ func Paths() []string {
 // it. A package that starts reading the document is added here.
 func Reads() []controlplane.SourceRead {
 	reads := controlplane.LegacySourceReads()
-	// The frozen copy: the frozen output's validation, the threshold
-	// processor's decode of it and the keys it reads from each threshold
-	// condition by name (parseThresholdAlgorithm), and the legacy output
+	// The frozen copy: the frozen output's validation and the legacy output
 	// converter's decodes.
 	reads = append(reads,
 		controlplane.SourceRead{Path: "", Decoded: []string{"id", "bk_biz_id", "update_time"}}, // contract.LegacyOutputContext.Validate
-		controlplane.SourceRead{Path: "", Decoded: detect.LegacyStrategySource()},
-		controlplane.SourceRead{Path: "items.algorithms.config", Decoded: []string{"method", "threshold"}},
 	)
 	for _, source := range legacyoutput.FrozenStrategySources() {
 		reads = append(reads, controlplane.SourceRead{Path: "", Decoded: source})

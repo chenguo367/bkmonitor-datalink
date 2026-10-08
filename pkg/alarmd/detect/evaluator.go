@@ -13,19 +13,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-const (
-	estimatedSeriesBytes    uint64 = 192
-	estimatedRecordBytes    uint64 = 160
-	estimatedProjectedBytes uint64 = 192
-	estimatedLevelFactBytes uint64 = 256
-)
+const ()
 
 type Evaluator struct {
 	registry *Registry
@@ -294,20 +288,6 @@ func declaresReason(spec strategy.DetectorSpec, reason string) bool {
 	reasons := spec.DeclaredExecutorErrors()
 	index := sort.SearchStrings(reasons, reason)
 	return index < len(reasons) && reasons[index] == reason
-}
-
-func checkedAdd(left, right uint64) (uint64, bool) {
-	if math.MaxUint64-left < right {
-		return 0, false
-	}
-	return left + right, true
-}
-
-func checkedMul(left, right uint64) (uint64, bool) {
-	if left != 0 && right > math.MaxUint64/left {
-		return 0, false
-	}
-	return left * right, true
 }
 
 // strongerUnknownReason reports whether a newly met unavailable input's reason
