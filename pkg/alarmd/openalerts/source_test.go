@@ -10,11 +10,7 @@
 package openalerts
 
 import (
-	"bytes"
 	"context"
-	"net"
-	"os/exec"
-	"strconv"
 	"testing"
 	"time"
 
@@ -109,45 +105,19 @@ func TestRedisSourceReadsTheContractKeys(t *testing.T) {
 
 func reserveTCPAddress(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return address
+	return redistest.FreeAddress(t)
 }
 
-func startRedisServer(t *testing.T, executable, address string) {
+func startRedisServer(t *testing.T, _ string, address string) {
 	t.Helper()
-	_, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable,
-		"--bind", "127.0.0.1", "--port", strconv.Itoa(port), "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning",
-	)
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("redis-server start error = %v", err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-	})
+	redistest.StartAt(t, address)
 }
 
 func waitRedisReady(t *testing.T, client *redis.Client) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// The server answered before StartAt returned; what is left is this
+	// client's own connection, under the same bound.
+	deadline := time.Now().Add(redistest.ReadyWithin)
 	for time.Now().Before(deadline) {
 		if err := client.Ping(context.Background()).Err(); err == nil {
 			return

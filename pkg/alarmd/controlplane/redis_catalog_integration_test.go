@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"os/exec"
 	"reflect"
 	"sort"
 	"strconv"
@@ -5029,49 +5027,8 @@ func assertNoAuditDisposition(
 
 func newControlplaneRedis(t *testing.T) *redis.Client {
 	t.Helper()
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	_, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "--bind", "127.0.0.1", "--port", portText,
-		"--save", "", "--appendonly", "no", "--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	client := redis.NewClient(&redis.Options{Addr: address, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
-	t.Cleanup(func() {
-		_ = client.Close()
-		if command.ProcessState == nil || !command.ProcessState.Exited() {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-		}
-	})
-	// The wait is generous on purpose. Three seconds encoded an assumption about
-	// machine load rather than about redis: under `go test ./...` dozens of
-	// packages start their own server at the same moment, and a window that is
-	// ample on an idle machine is not on a loaded one - which turned a whole-tree
-	// "all green" into a function of load rather than of the code. A healthy
-	// server answers Ping in milliseconds, so a longer budget costs the normal
-	// path nothing; it only matters when the server genuinely cannot start, and
-	// that case is meant to be read from the server's own output.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if client.Ping(context.Background()).Err() == nil {
-			return client
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("redis-server did not become ready: %s", output.String())
-	return nil
+	server := redistest.Start(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
 }

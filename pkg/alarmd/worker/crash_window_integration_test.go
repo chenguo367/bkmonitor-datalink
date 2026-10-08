@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -737,18 +736,7 @@ func g3aEventsAtBroker(t *testing.T, broker *sarama.MockBroker) int {
 
 func startG3ARedis(t *testing.T) string {
 	t.Helper()
-	// Which redis-server runs, and whether a missing one skips or fails, is
-	// redistest.Server's to decide, as for every real-Redis case in this tree.
-	redisServer := redistest.Server(t)
-	address := reserveG3AAddress(t)
-	_, port, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatalf("split Redis address %q: %v", address, err)
-	}
-	process := startG3AProcess(t, redisServer, nil,
-		"--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no", "--protected-mode", "no")
-	waitG3ATCP(t, address, process, 10*time.Second)
-	return address
+	return redistest.Start(t, "--protected-mode", "no").Addr
 }
 
 type lockedBuffer struct {
@@ -799,33 +787,6 @@ func (process *g3aProcess) Stop() {
 		_ = process.command.Process.Kill()
 		_ = process.command.Wait()
 	})
-}
-
-func waitG3ATCP(t *testing.T, address string, process *g3aProcess, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		connection, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
-		if err == nil {
-			_ = connection.Close()
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("process did not listen on %s within %s\n%s", address, timeout, process.output.String())
-}
-
-func reserveG3AAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve TCP address: %v", err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release reserved TCP address: %v", err)
-	}
-	return address
 }
 
 var _ execution.EventSink = (*g3aCrashEventSink)(nil)

@@ -14,9 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"os/exec"
-	"strconv"
 	"testing"
 	"time"
 
@@ -103,58 +100,17 @@ func TestRedisBackendStoreRoundTripTTLAndReconnect(t *testing.T) {
 
 func reserveTCPAddress(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatalf("listener.Close() error = %v", err)
-	}
-	return address
+	return redistest.FreeAddress(t)
 }
 
-func startRedisServer(t *testing.T, executable, address string) *exec.Cmd {
+func startRedisServer(t *testing.T, _ string, address string) *redistest.Instance {
 	t.Helper()
-	_, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatalf("SplitHostPort() error = %v", err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		t.Fatalf("Atoi(port) error = %v", err)
-	}
-	command := exec.Command(executable,
-		"--bind", "127.0.0.1", "--port", strconv.Itoa(port), "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning",
-	)
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("redis-server start error = %v", err)
-	}
-	t.Cleanup(func() {
-		if command.ProcessState == nil || !command.ProcessState.Exited() {
-			_ = command.Process.Kill()
-			_ = command.Wait()
-		}
-	})
-	return command
+	return redistest.StartAt(t, address)
 }
 
-func stopRedisServer(t *testing.T, command *exec.Cmd) {
+func stopRedisServer(t *testing.T, server *redistest.Instance) {
 	t.Helper()
-	if command == nil || command.ProcessState != nil {
-		return
-	}
-	if err := command.Process.Kill(); err != nil {
-		t.Fatalf("redis-server kill error = %v", err)
-	}
-	if err := command.Wait(); err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			t.Fatalf("redis-server wait error = %v", err)
-		}
-	}
+	server.Stop()
 }
 
 func waitRedisReady(t *testing.T, backend *RedisBackend) {

@@ -10,10 +10,7 @@
 package worker
 
 import (
-	"bytes"
 	"context"
-	"net"
-	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -34,39 +31,10 @@ const sixtyHours = 60 * time.Hour
 // startLifetimeRedis starts a redis-server of its own for one case.
 func startLifetimeRedis(t *testing.T) (string, *redis.Client) {
 	t.Helper()
-	executable := redistest.Server(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	_, port, err := net.SplitHostPort(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "--bind", "127.0.0.1", "--port", port, "--save", "", "--appendonly", "no",
-		"--dir", t.TempDir(), "--daemonize", "no", "--loglevel", "warning")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("redis-server start error = %v", err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-	})
-	client := redis.NewClient(&redis.Options{Addr: address, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+	server := redistest.Start(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
 	t.Cleanup(func() { _ = client.Close() })
-	for deadline := time.Now().Add(5 * time.Second); client.Ping(context.Background()).Err() != nil; {
-		if time.Now().After(deadline) {
-			t.Fatalf("redis-server did not become ready: %s", output.String())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return address, client
+	return server.Addr, client
 }
 
 // openLifetimeStore is the execution store on that server under the
