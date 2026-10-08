@@ -93,9 +93,10 @@ type Round struct {
 	SnapshotUsable      bool
 	SnapshotObservation string
 	SnapshotAgeSeconds  int64
-	// WriterHoldsLastGood is the writer's statement, read with this snapshot,
-	// that a strategy leaves its list only when disabled or deleted. Then a
-	// smaller list is deletions, and the shrink gate - which exists because a
+	// WriterHoldsLastGood is the writer's statement, made about this very
+	// list, that a strategy leaves it only for a fact about the strategy
+	// itself and never because publishing it failed. Then a smaller list is
+	// strategies that are gone, and the shrink gate - which exists because a
 	// writer could drop strategies that failed to publish - does not apply.
 	WriterHoldsLastGood bool
 	// PreviousSnapshotStrategies is how large the snapshot was when this

@@ -66,9 +66,9 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"link_health_age_seconds (since the link's last successful discovery) beside "+
 				"max_link_health_age_seconds - so a refused round can be read as the side falling behind rather "+
 				"than as a bound that does not fit. link_pending is the link's own refresh backlog. "+
-				"writer_holds_last_good is 1 when the strategy cache's writer stated, for the snapshot the round used, "+
-				"that a strategy leaves its list only when disabled or deleted; the shrink gate (snapshot_shrunk) "+
-				"applies only while it is 0.",
+				"writer_holds_last_good is 1 when the strategy cache's writer stated, about the exact strategy list "+
+				"the round used, that a strategy leaves it only for a fact about the strategy itself and never because "+
+				"publishing it failed; the shrink gate (snapshot_shrunk) applies only while it is 0.",
 			[]string{"side"}, nil),
 	}
 }

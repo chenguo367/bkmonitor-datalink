@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,12 +67,16 @@ type LegacyRedisStrategySource struct {
 // <prefix>.publication_semantics. Version 1 says one thing: the writer never
 // takes a strategy out of strategy_ids because the strategy failed to publish;
 // it keeps publishing the last good document, and a strategy leaves the set
-// only when it is disabled or deleted. LastUpdated names the change signal the
-// statement was written with.
+// only for a fact about the strategy itself - disabled, deleted, nothing left
+// of it to run. LastUpdated names the change signal the statement was written
+// with, and StrategyIDsSHA256 the strategy_ids it was written about: the
+// SHA-256, in lowercase hex, of the exact bytes stored at
+// <prefix>.strategy_ids in the same publication.
 type publicationSemantics struct {
-	HoldLastGood bool  `json:"hold_last_good"`
-	LastUpdated  int64 `json:"last_updated"`
-	Version      int   `json:"version"`
+	HoldLastGood      bool   `json:"hold_last_good"`
+	LastUpdated       int64  `json:"last_updated"`
+	StrategyIDsSHA256 string `json:"strategy_ids_sha256"`
+	Version           int    `json:"version"`
 }
 
 func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*LegacyRedisStrategySource, error) {
@@ -86,19 +92,39 @@ func NewLegacyRedisStrategySource(client redis.Cmdable, cachePrefix string) (*Le
 }
 
 func (source *LegacyRedisStrategySource) ActiveStrategyIDs(ctx context.Context) ([]string, error) {
+	ids, _, err := source.activeStrategyIDs(ctx)
+	return ids, err
+}
+
+// ActiveStrategyIDsWithDigest is ActiveStrategyIDs and the SHA-256 of the
+// strategy_ids value that one GET returned, hashed as returned: no trimming
+// and no re-encoding, so a writer's digest of what it stored matches only
+// those bytes. See ActiveSetDigestSource.
+func (source *LegacyRedisStrategySource) ActiveStrategyIDsWithDigest(ctx context.Context) ([]string, string, error) {
+	ids, payload, err := source.activeStrategyIDs(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(payload)
+	return ids, hex.EncodeToString(sum[:]), nil
+}
+
+// activeStrategyIDs reads strategy_ids once and returns the ids with the
+// payload they were decoded from.
+func (source *LegacyRedisStrategySource) activeStrategyIDs(ctx context.Context) ([]string, []byte, error) {
 	if source == nil || source.client == nil {
-		return nil, errors.New("alarmd controlplane: legacy Redis strategy source is required")
+		return nil, nil, errors.New("alarmd controlplane: legacy Redis strategy source is required")
 	}
 	payload, err := source.client.Get(ctx, source.strategyIDsKey).Bytes()
 	if errors.Is(err, redis.Nil) || (err == nil && len(payload) == 0) {
-		return nil, ErrLegacySourceIncomplete
+		return nil, nil, ErrLegacySourceIncomplete
 	}
 	if err != nil {
-		return nil, fmt.Errorf("alarmd controlplane: read legacy strategy active set: %w", err)
+		return nil, nil, fmt.Errorf("alarmd controlplane: read legacy strategy active set: %w", err)
 	}
 	var rawIDs []json.RawMessage
 	if err := json.Unmarshal(payload, &rawIDs); err != nil {
-		return nil, fmt.Errorf("%w: decode active strategy set: %v", ErrLegacySourceIncomplete, err)
+		return nil, nil, fmt.Errorf("%w: decode active strategy set: %v", ErrLegacySourceIncomplete, err)
 	}
 	ids := make([]string, 0, len(rawIDs))
 	for _, rawID := range rawIDs {
@@ -108,12 +134,12 @@ func (source *LegacyRedisStrategySource) ActiveStrategyIDs(ctx context.Context) 
 			if len(text) > invalidActiveStrategyIDText {
 				text = text[:invalidActiveStrategyIDText] + "..."
 			}
-			return nil, fmt.Errorf("%w: %w: element %d of %d is %q",
+			return nil, nil, fmt.Errorf("%w: %w: element %d of %d is %q",
 				ErrLegacySourceIncomplete, ErrActiveStrategyIDInvalid, len(ids), len(rawIDs), text)
 		}
 		ids = append(ids, strconv.FormatUint(id, 10))
 	}
-	return ids, nil
+	return ids, payload, nil
 }
 
 func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []string) ([]SourceStrategy, error) {
@@ -248,31 +274,54 @@ func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (Sour
 		return SourceChangeSignal{}, nil
 	}
 	return SourceChangeSignal{Present: true, Value: payload, WrittenAt: time.Unix(seconds, 0),
-		HoldsLastGood: source.holdsLastGood(ctx, seconds)}, nil
+		HoldsLastGoodFor: source.holdsLastGoodFor(ctx, seconds)}, nil
 }
 
-// holdsLastGood reads the writer's publication statement and reports whether
-// it holds for this change signal. Every way the statement can be missing or
+// holdsLastGoodFor reads the writer's publication statement and returns the
+// strategy_ids digest it was made about, when it was made for this change
+// signal; empty otherwise. Every way the statement can be missing or
 // unreadable - no key, a failed read, a payload that does not decode, another
-// version, or one written with a different last_updated - reads as "the
-// writer did not say so", which keeps every guard that exists because a
-// strategy can leave the set by mistake. The last_updated check is what makes
-// a writer that stopped making the statement read as one that never made it:
-// an older writer that publishes a change moves last_updated and leaves the
-// statement behind, and one that only renews lets it expire.
+// version, one written with a different last_updated, or one that does not
+// name the strategy_ids it is about - reads as "the writer did not say so",
+// which keeps every guard that exists because a strategy can leave the set by
+// mistake. The last_updated check is what makes a writer that stopped making
+// the statement read as one that never made it: an older writer that
+// publishes a change moves last_updated and leaves the statement behind, and
+// one that only renews lets it expire. The digest is what makes it hold only
+// for the set it was made about: an older writer can also rewrite
+// strategy_ids in place without moving last_updated, and the reconciler
+// compares the digest with the set its own read returned (observe).
 //
-// One GET of a few dozen bytes per change-signal read, on the control leader
-// only.
-func (source *LegacyRedisStrategySource) holdsLastGood(ctx context.Context, lastUpdated int64) bool {
+// One GET of about a hundred bytes per change-signal read, on the control
+// leader only.
+func (source *LegacyRedisStrategySource) holdsLastGoodFor(ctx context.Context, lastUpdated int64) string {
 	payload, err := source.client.Get(ctx, source.publicationSemanticsKey).Bytes()
 	if err != nil {
-		return false
+		return ""
 	}
 	var statement publicationSemantics
 	if json.Unmarshal(payload, &statement) != nil {
+		return ""
+	}
+	if statement.Version != 1 || !statement.HoldLastGood || statement.LastUpdated != lastUpdated ||
+		!lowercaseSHA256Hex(statement.StrategyIDsSHA256) {
+		return ""
+	}
+	return statement.StrategyIDsSHA256
+}
+
+// lowercaseSHA256Hex is whether text is a SHA-256 the way the statement has
+// to spell it, which is the way ActiveStrategyIDsWithDigest spells its own.
+func lowercaseSHA256Hex(text string) bool {
+	if len(text) != 2*sha256.Size {
 		return false
 	}
-	return statement.Version == 1 && statement.HoldLastGood && statement.LastUpdated == lastUpdated
+	for _, c := range text {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // missingIdentityFieldPath names the identity field or fields a document did
