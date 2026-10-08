@@ -244,7 +244,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// bounded diagnostic; the census is every owned Query Group's peak for
 	// the heartbeat, which has to be a census.
 	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
-	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary, retainedPeaks)
+	// Each member named, so that a panic in one is counted under it while the
+	// others still receive the observation.
+	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),
+		observability.Named(observability.ObserverAdditional, external.AdditionalObserver),
+		observability.Named(observability.ObserverTargetFlow, targetFlow),
+		observability.Named(observability.ObserverRejectionTally, rejectionTally),
+		observability.Named(observability.ObserverCostSummary, costSummary),
+		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks))
 	observer = phaseTwoRuntimeObserver(observer)
 	compiler, err := newPlanCompiler(cfg)
 	if err != nil {

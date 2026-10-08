@@ -2518,10 +2518,13 @@ func Multi(observers ...Observer) Observer {
 	return result
 }
 
+// Observe gives every observer the observation on its own: a panic in one
+// is counted under its name (observer_panic.go) and the rest still receive
+// it.
 func (m multiObserver) Observe(ctx context.Context, observation Observation) {
 	observation = NormalizeObservation(observation)
 	for _, observer := range m {
-		observer.Observe(ctx, observation)
+		observeIsolated(ctx, observer, observation)
 	}
 }
 
