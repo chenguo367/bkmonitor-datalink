@@ -613,6 +613,37 @@ func NoMessageFor(format, eventKind string, compatibilityContext bool) bool {
 	return !EventHasMessage(format, eventKind) && compatibilityContext
 }
 
+// CompatibleOffBoundary reports whether a record of a Plan detected more
+// often than it aggregates is one of the detections between two aggregation
+// boundaries. The record's source time is where its window starts; off the
+// aggregation grid, the window is not one of the buckets the compatible
+// protocol's consumer counts - it counts its windows in aggregation
+// intervals, and would read one window several times over - so the protocol
+// has no message for such a record of any kind. A Plan detected once an
+// aggregation interval has none.
+func CompatibleOffBoundary(semantics ExecutionSemanticsV2, sourceTime int64) bool {
+	step, aggregation := int64(semantics.EvaluationInterval), int64(semantics.AggregationInterval)
+	if step <= 0 || aggregation <= 0 || step == aggregation {
+		return false
+	}
+	return sourceTime%aggregation != 0
+}
+
+// EventHasMessageAt is EventHasMessage for a record that may lie between two
+// aggregation boundaries (CompatibleOffBoundary): under the compatible
+// protocol such a record has no message of any kind; every other protocol
+// carries it.
+func EventHasMessageAt(format, eventKind string, offBoundary bool) bool {
+	return EventHasMessage(format, eventKind) && !(offBoundary && format == WireFormatPythonCompatible)
+}
+
+// NoMessageForAt is NoMessageFor for a record that may lie between two
+// aggregation boundaries, read by the trigger that decides it and by the
+// result contract that checks it, so the two cannot disagree.
+func NoMessageForAt(format, eventKind string, compatibilityContext, offBoundary bool) bool {
+	return !EventHasMessageAt(format, eventKind, offBoundary) && compatibilityContext
+}
+
 // DroppedAtSink reports whether the sink would take this event and leave it
 // without a message, raising nothing: a kind its resolved protocol has no
 // message for, and nothing about the event the sink would refuse first. An

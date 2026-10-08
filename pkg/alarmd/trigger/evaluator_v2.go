@@ -121,8 +121,12 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 		// it without a message. What building it also did no longer happens
 		// for these records: its invariants are not checked, so one that
 		// would have failed no longer fails the Slot.
-		if format := request.Plan.WireFormat(); contract.NoMessageFor(format, result.RecordResult,
-			request.Plan.LegacyOutput() != nil && request.Plan.PublishesCompatibleProtocol()) {
+		// A detection between two aggregation boundaries of a Plan detected
+		// more often than it aggregates has no message on that protocol
+		// either: its window is none of the buckets the consumer counts.
+		if format := request.Plan.WireFormat(); contract.NoMessageForAt(format, result.RecordResult,
+			request.Plan.LegacyOutput() != nil && request.Plan.PublishesCompatibleProtocol(),
+			request.Plan.CompatibleOffBoundary(request.RecordRef.SourceTime)) {
 			result.WithoutMessageFormat = format
 			return result, nil
 		}
@@ -167,7 +171,17 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 					return EvaluationResultV2{}, invariantV2("legacy anomaly history", event.PrimaryLevelID, errors.New("actual anomaly timestamps disagree with trigger evidence"))
 				}
 			}
-			event.LegacyOutput = &contract.LegacyEventContext{Configuration: legacy, AnomalyTimestamps: append([]int64{}, timestamps...)}
+			// The anomalies the consumer is told of are the ones at windows it
+			// counts: a Plan detected more often than it aggregates names only
+			// those on the aggregation boundaries, the windows it would have
+			// read had it been detected once an interval.
+			kept := make([]int64, 0, len(timestamps))
+			for _, ts := range timestamps {
+				if !request.Plan.CompatibleOffBoundary(ts) {
+					kept = append(kept, ts)
+				}
+			}
+			event.LegacyOutput = &contract.LegacyEventContext{Configuration: legacy, AnomalyTimestamps: kept}
 		}
 		event.WireFormat = request.Plan.WireFormat()
 		event.SignalType = request.Plan.SignalType()

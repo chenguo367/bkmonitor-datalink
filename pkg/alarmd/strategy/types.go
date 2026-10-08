@@ -696,6 +696,16 @@ func (p *CompiledPlan) OutputIdentity() *contract.MonitorOutputIdentity {
 	return &contract.MonitorOutputIdentity{DimensionFields: append([]string{}, p.outputIdentity.DimensionFields...), DynamicDimensions: p.outputIdentity.DynamicDimensions}
 }
 
+// CompatibleOffBoundary reports whether a record at sourceTime is one of the
+// detections between two aggregation boundaries of a Plan detected more often
+// than it aggregates (contract.CompatibleOffBoundary).
+func (p *CompiledPlan) CompatibleOffBoundary(sourceTime int64) bool {
+	if p == nil {
+		return false
+	}
+	return contract.CompatibleOffBoundary(p.evaluationSemantics, sourceTime)
+}
+
 // PublishesCompatibleProtocol reports whether this Plan's events go out as the
 // Python-compatible event.
 func (p *CompiledPlan) PublishesCompatibleProtocol() bool {
