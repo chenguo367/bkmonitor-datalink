@@ -450,11 +450,13 @@ func sparseEvidence(coverage *HistoryCoverage) bool {
 	return uint32(len(coverage.Windows)) == coverage.Short || coverage.UnlistedHolesAnswered
 }
 
-// outOfHoursLine is a line a short window can bring a row to: the window
-// lines, and the configuration's line a guard's stored reason files it
-// under.
+// outOfHoursLine is a line a short window can bring a row to before its
+// window evidence is read: the window lines, and the configuration's line a
+// guard's stored reason files it under. SERIES_SPARSE is read from the
+// evidence after this, from these lines, so a window short only outside the
+// active hours never reaches it.
 func outOfHoursLine(check Check) bool {
-	return check == CheckWindowUndecided || check == CheckSeriesDataMissing || check == CheckSeriesSparse || check == CheckConfigUnresolved
+	return check == CheckWindowUndecided || check == CheckSeriesDataMissing || check == CheckConfigUnresolved
 }
 
 // outOfHoursEvidence says every short window is named and short only at
