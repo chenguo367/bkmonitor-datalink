@@ -377,6 +377,10 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			}
 		}
 	}
+	// The request's named inputs, which the RECOVERY fold, the effective
+	// time's check and the freeze below all judge a Level by: concatenated
+	// once for the record rather than once for each Level that asks.
+	bindings := evaluationBindings(request)
 	for i, o := range tr.LevelOutcomes {
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
@@ -402,7 +406,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// direction of this rule that loses an alert.
 		if kind == execution.LevelOutcomeRecovery {
 			if folded, proposed := execution.RoundGuardReasonForLevel(
-				evaluationBindings(request), due.Identity, o.LevelID,
+				bindings, due.Identity, o.LevelID,
 			); proposed {
 				kind, reason = execution.LevelOutcomeUnknown, folded
 			}
@@ -428,7 +432,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// and a window of nothing but such rounds read as data that did
 			// not arrive.
 			suppressed := o.UnavailableReason == "" && o.SuppressedReason == contract.ReasonEffectiveTimeInactive &&
-				execution.InputAllowsStateAdvance(evaluationBindings(request), execution.LevelOutcome{
+				execution.InputAllowsStateAdvance(bindings, execution.LevelOutcome{
 					Plan: due.Identity, LevelID: o.LevelID, SeriesIdentityDigest: series,
 					Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind})
 			if guarded, found := durableGuardReasons[o.LevelID]; found && !suppressed && guardStaysActive(o, historyCompleteness[o.LevelID]) {
@@ -444,7 +448,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				// contract compares. The stored reason stays for a round that
 				// adds nothing: it is still the reason the guard is up.
 				if folded, proposed := execution.RoundGuardReasonForLevel(
-					evaluationBindings(request), due.Identity, o.LevelID,
+					bindings, due.Identity, o.LevelID,
 				); proposed {
 					reason, guardTail = folded, false
 				}
@@ -469,7 +473,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		if outcome.StateDisposition != trigger.StateAdvance || outcomes[i].Outcome != execution.LevelOutcomeUnknown {
 			continue
 		}
-		if !execution.InputAllowsStateAdvance(evaluationBindings(request), outcomes[i]) {
+		if !execution.InputAllowsStateAdvance(bindings, outcomes[i]) {
 			tr.LevelOutcomes[i].StateDisposition = trigger.StateFreeze
 			// A frozen Level does not warm its guard, so it is not the
 			// guard's tail whatever made it UNKNOWN (unknownOnlyForItsHistory).
