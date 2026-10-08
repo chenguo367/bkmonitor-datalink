@@ -185,6 +185,45 @@ func TestTheRunningContentGivesAHeldBackQueryGroupItsOpenSegment(t *testing.T) {
 	}
 }
 
+// Deleting a held-back Query Group's timeline key is what clears the block
+// by hand: the next cutover opens it again as for a new Query Group, on the
+// records it was held with, and nothing is held back any more.
+func TestDeletingAHeldBackQueryGroupsTimelineOpensItAgainAndClearsTheBlock(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-unblock-by-delete")
+	first := cutoverCatalog(t, 80, nil)
+	second := cutoverCatalog(t, 90, nil)
+	edited, untouched := splitEdited(t, first, second)
+	fixture.publish(t, first, 60)
+	records := recordsOf(fixture.activation(t), untouched)
+	fixture.rewriteOpenDigest(t, untouched.Identity, digestOf(t, edited))
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatal(err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 1 || blocked[0].QueryGroup != untouched.Identity {
+		t.Fatalf("the rewritten Query Group was not held back: %+v", blocked)
+	}
+
+	if err := fixture.client.Del(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(untouched.Identity)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.publishNoEnsure(t, cutoverCatalog(t, 95, nil), 180); err != nil {
+		t.Fatalf("the publication after the delete: %v", err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 0 {
+		t.Fatalf("the Query Group whose timeline was deleted is still held back: %+v", blocked)
+	}
+	if state := fixture.activation(t); state.BlockedCount != 0 || state.BlockedDigest != "" {
+		t.Fatalf("the activation still counts a held-back set: %+v", state)
+	}
+	opened := fixture.openSegment(t, untouched.Identity, 180)
+	if opened.Start != 180 || opened.End != nil || opened.ObjectDigest != digestOf(t, untouched) {
+		t.Fatalf("the Query Group was not opened again at the boundary on its own content: %+v", opened)
+	}
+	if got := recordsOf(fixture.activation(t), untouched); !reflect.DeepEqual(sortedRecords(got), sortedRecords(records)) {
+		t.Fatalf("the reopened Query Group's records changed:\n before=%+v\n after=%+v", records, got)
+	}
+}
+
 // A timeline whose key is gone - evicted, expired - used to fail every
 // publication as a dependency that did not answer. It is opened again as
 // for a new Query Group.

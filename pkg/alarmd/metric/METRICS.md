@@ -35,7 +35,7 @@ UQ responses carrying a top-level status code, by that code and what this deploy
 
 Labels: `reason`
 
-Query Groups the Control Leader's last cutover held back, by reason. A held-back Query Group keeps the records it had and runs what its open Segment names; the rest of the publication was activated. It is judged again at every cutover; the repair subcommand fixes what a write outside the cutover broke. Zero on a deployment nothing outside the control plane writes to.
+Query Groups the Control Leader's last cutover held back, by reason. A held-back Query Group keeps the records it had and runs what its open Segment names; the rest of the publication was activated. It is judged again at every cutover; deleting its timeline key lets the next cutover open it again. Zero on a deployment nothing outside the control plane writes to.
 
 ## bkmonitor_alarmd_activation_blocked_set_total
 

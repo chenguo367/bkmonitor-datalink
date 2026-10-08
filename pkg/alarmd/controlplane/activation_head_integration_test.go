@@ -213,8 +213,7 @@ func unfinishedCutover(t *testing.T, fixture *cutoverFixture) (first, second con
 // A cutover a later build left unfinished is finished on the first tick,
 // with the source unchanged - not whenever the next publication comes, which
 // would leave C not detecting for as long as the source stays still. Until
-// then the running content is what each open Segment names, and the repair
-// subcommand refuses to cut anything behind the cutover's back.
+// then the running content is what each open Segment names.
 func TestAnUnfinishedCutoverIsFinishedOnTheFirstTick(t *testing.T) {
 	fixture := newCutoverFixture(t, "alarmd:control:activation-progress")
 	first, second, state := unfinishedCutover(t, fixture)
@@ -232,9 +231,6 @@ func TestAnUnfinishedCutoverIsFinishedOnTheFirstTick(t *testing.T) {
 	}
 	if len(running) != 1 || running[groupA.Identity].Digest != digestOf(t, groupA) {
 		t.Fatalf("running content while unfinished = %+v, want only A on its first content %s", running, digestOf(t, groupA))
-	}
-	if _, err := controlplane.RepairOpenSegments(fixture.ctx, fixture.repository, controlplane.RepairOpenSegmentsOptions{}); !errors.Is(err, controlplane.ErrCutoverInProgress) {
-		t.Fatalf("repair while a cutover is unfinished = %v, want ErrCutoverInProgress", err)
 	}
 
 	*fixture.now = time.Unix(180, 0)

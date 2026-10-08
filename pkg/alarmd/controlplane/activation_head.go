@@ -140,7 +140,7 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 ) error {
 	// Read live, not from the timeline cache: the cache is keyed by the
 	// activation header, and a timeline can be rewritten under an unchanged
-	// header (the repair subcommand does). What this answers decides what
+	// header (a write outside the cutover does). What this answers decides what
 	// the next activation writes, so it is not answered from a copy that may
 	// predate such a write. It is rare - a head this process did not write,
 	// or a cutover in progress - and what it reads refreshes the cache.

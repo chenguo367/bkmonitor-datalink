@@ -27,8 +27,9 @@ import (
 // Segment failed a precondition that only a write outside the cutover could
 // have broken: the fleet stayed on the previous activation and every later
 // publication failed at the same place, so no new strategy and no edit took
-// effect until someone ran the repair subcommand. Now that Query Group alone
-// is held back - blocked - and the rest of the publication is activated.
+// effect until someone repaired the timeline by hand. Now that Query Group
+// alone is held back - blocked - and the rest of the publication is
+// activated.
 //
 // A blocked Query Group keeps the activation records it had and its timeline
 // is not written. It is read and judged again at every cutover until its
