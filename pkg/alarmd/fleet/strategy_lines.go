@@ -44,6 +44,10 @@ type StrategyLine struct {
 	// the reach, the state word, the action word -- and one evidence clause
 	// the check's rule supplies. Nothing else is appended.
 	Line string `json:"line"`
+	// TimeDelayAdvice is beside the sentence, not in it: the time_delay
+	// that would read the strategy's data whole, whatever check decides
+	// the line.
+	TimeDelayAdvice *TimeDelayAdvice `json:"time_delay_advice,omitempty"`
 }
 
 // StrategyListResponse is GET /api/strategies.
@@ -113,6 +117,7 @@ type strategyFold struct {
 	deciding Anomaly
 	rank     int
 	objects  map[string]struct{}
+	advice   *TimeDelayAdvice
 }
 
 // StrategyLines folds every listed row into one line per strategy, most
@@ -135,6 +140,7 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 				folds[ref] = fold
 			}
 			fold.objects[row.QueryGroup] = struct{}{}
+			fold.advice = fold.advice.with(row)
 			if !row.Since.IsZero() && (fold.line.Since == nil || row.Since.Before(*fold.line.Since)) {
 				since := row.Since
 				fold.line.Since, fold.line.SinceFrom, fold.line.SinceBasis = &since, row.SinceFrom, sinceBasisOf(row.SinceFrom)
@@ -155,6 +161,7 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 	for _, fold := range folds {
 		fold.line.Objects = len(fold.objects)
 		fold.line.Line = strategyLineOf(fold.line, fold.deciding)
+		fold.line.TimeDelayAdvice = fold.advice
 		lines = append(lines, fold.line)
 	}
 	sort.Slice(lines, func(i, j int) bool {

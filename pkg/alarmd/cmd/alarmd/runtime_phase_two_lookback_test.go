@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -201,18 +202,34 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 
 // The lookback's report of an object read early reaches the fleet snapshot
 // as it was read: the time_delay the query runs under, the one that would
-// have read it complete, and the samples it rests on. A process without a
-// lookback publishes no such line.
+// have read it complete, and the samples it rests on, a partial revision
+// marked as one. A process without a lookback publishes no such line.
 func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 	if lookbackReadEarly(nil) != nil {
 		t.Fatal("a process without a lookback publishes a read-early line")
+	}
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%t", partial), func(t *testing.T) { lookbackReadEarlyReachesTheSnapshot(t, partial) })
+	}
+}
+
+func lookbackReadEarlyReachesTheSnapshot(t *testing.T, partial bool) {
+	// Partial: of two series, one comes back revised and one as it was. A
+	// series is delivered as a dataset of its own.
+	points := func(end int64, value string) []*execution.Dataset {
+		if !partial {
+			return []*execution.Dataset{lookbackPoint(end, value)}
+		}
+		return []*execution.Dataset{lookbackSeries(end, "h1", value), lookbackSeries(end, "h2", "5")}
 	}
 	var mu sync.Mutex
 	now := time.Unix(1_700_000_060, 0)
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	set := func(at time.Time) { mu.Lock(); now = at; mu.Unlock() }
 	revised := func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-		_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: lookbackPoint(spec.LogicalWindow.End, "3")})
+		for _, dataset := range points(spec.LogicalWindow.End, "3") {
+			_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: dataset})
+		}
 		return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
 	}
 	engine, err := lookback.New(lookback.Options{Now: clock, Recheck: revised, UnspreadFirstSamples: true,
@@ -229,7 +246,9 @@ func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 		query.Spec.LogicalWindow = execution.QueryWindow{Start: end - 60, End: end}
 		query.Spec.PlanFacts.QueryDelaySeconds = 60
 		read := engine.Begin(query)
-		read.Series(lookbackPoint(end, "1"), 10)
+		for _, dataset := range points(end, "1") {
+			read.Series(dataset, 10)
+		}
 		read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
 		readAt := clock()
 		// Each rung's moment in turn, until the sample is counted complete.
@@ -265,10 +284,18 @@ func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 		want := readings[0].Samples[index]
 		if sample.EvaluationTime != int64(want.EvaluationTime) || sample.Rung != lookback.RungNames[0] || sample.Rung != want.Rung ||
 			sample.FirstReadAgeSeconds != want.FirstReadAgeSeconds || sample.CompletionAgeSeconds != want.CompletionAgeSeconds ||
-			sample.ChangedAgeSeconds != want.ChangedAgeSeconds || len(sample.Buckets) != 1 || sample.Buckets[0] != want.Buckets[0] {
+			sample.ChangedAgeSeconds != want.ChangedAgeSeconds || len(sample.Buckets) != 1 || sample.Buckets[0] != want.Buckets[0] ||
+			sample.PartialRevised != partial || want.PartialRevised != partial {
 			t.Fatalf("sample %d on the snapshot %+v, want %+v", index, sample, want)
 		}
 	}
+}
+
+// lookbackSeries is one series' point at the window's start.
+func lookbackSeries(end int64, host, value string) *execution.Dataset {
+	return execution.NewDataset([]contract.CanonicalRecordV2{{RecordID: host, SourceTime: end - 60,
+		DimensionIdentity: contract.DimensionIdentityV2{Digest: "digest-" + host},
+		Values:            map[string]json.RawMessage{"value": json.RawMessage(value)}}})
 }
 
 func lookbackPoint(end int64, value string) *execution.Dataset {

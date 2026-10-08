@@ -113,10 +113,14 @@ type DiagnosisRow struct {
 	// window is full -- from the deciding row's named windows and the
 	// object's evaluation interval -- or why that cannot be computed. It is
 	// not when the result can be taken; see WindowClearing.
-	WindowClears *WindowClearing        `json:"window_clears,omitempty"`
-	Dispositions []DiagnosisDisposition `json:"dispositions,omitempty"`
-	Plans        []DiagnosisPlan        `json:"plans"`
-	UnknownParts []DiagnosisPart        `json:"unknown_parts,omitempty"`
+	WindowClears *WindowClearing `json:"window_clears,omitempty"`
+	// TimeDelayAdvice is the time_delay that would read the strategy's data
+	// whole, whatever check decides the row; absent when no object of it is
+	// read early.
+	TimeDelayAdvice *TimeDelayAdvice       `json:"time_delay_advice,omitempty"`
+	Dispositions    []DiagnosisDisposition `json:"dispositions,omitempty"`
+	Plans           []DiagnosisPlan        `json:"plans"`
+	UnknownParts    []DiagnosisPart        `json:"unknown_parts,omitempty"`
 
 	// Global marks a strategy the source marks global, so one pass over
 	// the rows lists every global strategy with its verdict - the first
@@ -250,8 +254,10 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 	// row speaks for several.
 	best, bestRank, found := Anomaly{}, unranked, false
 	var bestWords Standing
+	var advice *TimeDelayAdvice
 	for _, plan := range standing.Plans {
 		for _, anomaly := range plan.Rows {
+			advice = advice.with(anomaly)
 			words, given := standingForStrategy(anomaly, StrategyRef{StrategyID: id, BusinessID: plan.Business})
 			if !given {
 				if anomaly.Standing == nil {
@@ -264,6 +270,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 			}
 		}
 	}
+	row.TimeDelayAdvice = advice
 	if found {
 		row.Verdict, row.Action, row.Check = bestWords.State, bestWords.Action, bestWords.Check
 		row.Reason, row.DecidingObject = string(bestWords.Check), best.QueryGroup

@@ -141,3 +141,78 @@ func TestAReadEarlyRowCarriesItsEvidenceWithinItsBounds(t *testing.T) {
 		t.Fatalf("encoded %s (%d bytes), want the row within 1 KB at its widest", encoded, len(encoded))
 	}
 }
+
+// The time_delay advice rides on the strategy's diagnosis and its line
+// whatever check decides them: here the object is also on a line above
+// READ_BEFORE_COMPLETE, which decides the words, and the advice is beside
+// them, with the evidence's partial revisions counted.
+func TestTheTimeDelayAdviceRidesOnTheStrategyWhateverCheckDecidesIt(t *testing.T) {
+	now := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	tracker := newTracker(t, &clock{at: now})
+	tracker.Observe(context.Background(), slotCompleted("qg-late", 0, 0, now))
+	facts := readEarlyFacts(now)
+	facts.Samples = []ReadEarlySample{{EvaluationTime: now.Unix() - 120, PartialRevised: true}, {EvaluationTime: now.Unix() - 60}}
+	snapshot := Snapshot{Replica: "pod-a", TakenAt: now, Owned: 1, Determined: 1, OwnedObjects: []string{"qg-late"},
+		ReadEarly: tracker.ReadEarly(map[string]ReadEarlyFacts{"qg-late": facts})}
+	view := Aggregate(Expectation{Known: true, QueryGroups: 1, IDs: []string{"qg-late"}}, []Snapshot{snapshot}, []string{"pod-a"}, now, time.Minute)
+	Decide(&view, now, 0)
+	view.NoData = append(view.NoData, Anomaly{QueryGroup: "qg-late", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-a",
+		Since: now.Add(-time.Hour), Strategies: []StrategyRef{{StrategyID: "4101", BusinessID: "2"}}})
+	Attribute(view.NoData, now)
+	lookup := StrategyLookupFacts{Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+		Plans:        []StrategyPlanRef{{Tenant: "default", Business: "2", QueryGroup: "qg-late", SnapshotRevision: "s1", QueryRevision: "q", ScheduleRevision: "r"}},
+		Dispositions: []StrategyDisposition{{Scope: "PLAN", Disposition: "ACCEPTED"}}}
+	row := diagnoseStrategy("4101", lookup, newDiagnosisContext(&view, "pod-a", now))
+	if row.Check != CheckNoDataPersistent {
+		t.Fatalf("diagnosis decided under %s; the fixture needs a check above READ_BEFORE_COMPLETE to test this", row.Check)
+	}
+	want := TimeDelayAdvice{CurrentDelaySeconds: 60, SuggestedDelaySeconds: 180, Object: "qg-late", Objects: 1, Since: now, Samples: 2, PartialRevised: 1}
+	if advice := row.TimeDelayAdvice; advice == nil || !sameAdvice(*advice, want) {
+		t.Fatalf("diagnosis advice %+v, want %+v beside the deciding check", advice, want)
+	}
+	var line *StrategyLine
+	for _, candidate := range StrategyLines(&view, now) {
+		if candidate.StrategyID == "4101" {
+			line = &candidate
+		}
+	}
+	if line == nil || line.Standing.Check != CheckNoDataPersistent || line.TimeDelayAdvice == nil || !sameAdvice(*line.TimeDelayAdvice, want) {
+		t.Fatalf("line %+v, want the no-data words with the advice beside them", line)
+	}
+	if strings.Contains(line.Line, "time_delay") {
+		t.Fatalf("the advice went into the sentence %q; it rides beside it", line.Line)
+	}
+	encoded, err := json.Marshal(row)
+	if err != nil || !strings.Contains(string(encoded), `"time_delay_advice":{"current_time_delay_seconds":60,"suggested_time_delay_seconds":180`) {
+		t.Fatalf("encoded row %s %v", encoded, err)
+	}
+}
+
+// Of a strategy's objects read early, the advice is the largest suggestion
+// - time_delay is one setting of the strategy - from the object it is from,
+// counting every object read early once; a row of another kind adds nothing.
+func TestTheTimeDelayAdviceIsTheLargestSuggestionOfTheStrategysObjects(t *testing.T) {
+	now := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	row := func(queryGroup string, suggested int64, since time.Time) Anomaly {
+		facts := readEarlyFacts(since)
+		facts.SuggestedDelaySeconds = suggested
+		return Anomaly{QueryGroup: queryGroup, Kind: KindReadBeforeComplete, ReadEarly: &facts}
+	}
+	var advice *TimeDelayAdvice
+	if advice = advice.with(Anomaly{QueryGroup: "qg-x", Kind: KindNoData}); advice != nil {
+		t.Fatalf("a row of another kind gave advice %+v", advice)
+	}
+	for _, r := range []Anomaly{row("qg-a", 120, now), row("qg-b", 300, now.Add(time.Minute)), row("qg-c", 300, now), row("qg-a", 120, now)} {
+		advice = advice.with(r)
+	}
+	if advice == nil || advice.SuggestedDelaySeconds != 300 || advice.Object != "qg-c" || advice.Objects != 3 {
+		t.Fatalf("advice %+v, want 300 s from the earlier of the two equal objects, over 3 objects", advice)
+	}
+}
+
+func sameAdvice(left, right TimeDelayAdvice) bool {
+	left.objects, right.objects = nil, nil
+	return left.CurrentDelaySeconds == right.CurrentDelaySeconds && left.SuggestedDelaySeconds == right.SuggestedDelaySeconds &&
+		left.Object == right.Object && left.Objects == right.Objects && left.Since.Equal(right.Since) &&
+		left.Samples == right.Samples && left.PartialRevised == right.PartialRevised
+}

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1550,7 +1551,7 @@ func (f *fixture) classSampleByRung(delaySeconds int64, first []*execution.Datas
 // the Query Group is reported with the time_delay that would have read its
 // samples complete - the time_delay it runs under, and how much later than
 // its first read its data was complete, aligned up to the step.
-func TestAWindowReadEarlyTwiceInARowIsReportedWithTheTimeDelayThatReadsItComplete(t *testing.T) {
+func TestAWindowReadEarlyTwiceIsReportedWithTheTimeDelayThatReadsItComplete(t *testing.T) {
 	f := newFixture(t)
 	revised := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} }
 	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, revised)
@@ -1575,10 +1576,117 @@ func TestAWindowReadEarlyTwiceInARowIsReportedWithTheTimeDelayThatReadsItComplet
 		len(stats.ReadEarly) != 1 || stats.ReadEarly[0].SuggestedDelaySeconds != 180 {
 		t.Fatalf("classes %v read early %d list %+v", source.Classes, source.ReadEarlyGroups, stats.ReadEarly)
 	}
-	// A sample whose rungs found nothing ends the run, and the report.
+	// One sample whose rungs found nothing leaves two of the last three read
+	// early: still reported. A second withdraws the report.
 	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "3")}, revised)
-	if readings := f.engine.ReadEarly(); len(readings) != 0 || f.engine.Stats().Sources[sourceLog].Classes[ClassComplete] != 1 {
-		t.Fatalf("still reported after a complete sample: %+v", readings)
+	if readings := f.engine.ReadEarly(); len(readings) != 1 {
+		t.Fatalf("withdrawn after one complete sample: %+v", readings)
+	}
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "3")}, revised)
+	if readings := f.engine.ReadEarly(); len(readings) != 0 || f.engine.Stats().Sources[sourceLog].Classes[ClassComplete] != 2 {
+		t.Fatalf("still reported after two complete samples: %+v", readings)
+	}
+}
+
+// The report reads a group's last three classified samples: two read early
+// - read early or partially revised - report it, though a sample between
+// them read the data whole, and fewer withdraw it. An unclassified sample
+// is not one of the three. Withdrawn, a report that comes again rests on,
+// and dates from, samples after the withdrawal only.
+func TestAWindowReadEarlyInTwoOfTheLastThreeSamplesIsReported(t *testing.T) {
+	type kind byte
+	const (
+		early, partial, complete, unsettled kind = 'e', 'p', 'c', 'u'
+	)
+	run := func(f *fixture, k kind) {
+		f.t.Helper()
+		slot := f.clock.now().Unix()
+		switch k {
+		case early:
+			f.classSample(60, []*execution.Dataset{point(slot, "1")}, func(slot int64) []*execution.Dataset {
+				return []*execution.Dataset{point(slot, "3")}
+			})
+		case partial:
+			first := []*execution.Dataset{dataset("a", map[int64]string{slot - 60: "1"}), dataset("b", map[int64]string{slot - 60: "5"})}
+			f.classSample(60, first, func(slot int64) []*execution.Dataset {
+				return []*execution.Dataset{dataset("a", map[int64]string{slot - 60: "2"}), dataset("b", map[int64]string{slot - 60: "5"})}
+			})
+		case complete:
+			f.classSample(60, []*execution.Dataset{point(slot, "3")}, func(slot int64) []*execution.Dataset {
+				return []*execution.Dataset{point(slot, "3")}
+			})
+		case unsettled:
+			f.classSampleByRung(60, []*execution.Dataset{point(slot, "1")}, func(slot int64, rung int) []*execution.Dataset {
+				return []*execution.Dataset{point(slot, strconv.Itoa(rung+2))}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		samples  string
+		reported bool
+	}{
+		{"ee", true},
+		{"ece", true},
+		{"pcp", true},
+		{"epc", true},
+		{"eec", true},
+		{"eecc", false},
+		{"ecc", false},
+		{"eue", true},
+		{"eeuu", true},
+		{"ecce", false},
+		// Withdrawn at "c" with an early sample still in the window: that
+		// one is not evidence for the next report.
+		{"ecece", false},
+		{"c", false},
+	} {
+		t.Run(tc.samples, func(t *testing.T) {
+			f := newFixture(t)
+			for _, k := range tc.samples {
+				run(f, kind(k))
+			}
+			classes := f.engine.Stats().Sources[sourceLog].Classes
+			if classes[ClassWindowReadEarly] != uint64(strings.Count(tc.samples, "e")) || classes[ClassPartialRevised] != uint64(strings.Count(tc.samples, "p")) ||
+				classes[ClassComplete] != uint64(strings.Count(tc.samples, "c")) || classes[ClassUnclassified] != uint64(strings.Count(tc.samples, "u")) {
+				t.Fatalf("%s: classes %v; the fixture did not build the samples it names", tc.samples, classes)
+			}
+			if reported := len(f.engine.ReadEarly()) == 1; reported != tc.reported {
+				t.Fatalf("%s: reported %t, want %t: %+v", tc.samples, reported, tc.reported, f.engine.ReadEarly())
+			}
+			if state := f.group("qg"); !tc.reported && strings.Count(tc.samples[max(len(tc.samples)-3, 0):], "e")+
+				strings.Count(tc.samples[max(len(tc.samples)-3, 0):], "p") == 0 && state.readEarly != nil {
+				t.Fatalf("%s: a window with nothing read early kept its state: %+v", tc.samples, state.readEarly)
+			}
+		})
+	}
+	// Reported, its since stays where the report began while it stays up.
+	f := newFixture(t)
+	for _, k := range "ee" {
+		run(f, kind(k))
+	}
+	began := f.engine.ReadEarly()[0].Since
+	run(f, complete)
+	if readings := f.engine.ReadEarly(); len(readings) != 1 || !readings[0].Since.Equal(began) {
+		t.Fatalf("since %+v, want %v kept while the report stays up", readings, began)
+	}
+	// Reported, withdrawn, reported again: the second report's samples and
+	// its since are all after the withdrawal.
+	f = newFixture(t)
+	for _, k := range "eecc" {
+		run(f, kind(k))
+	}
+	withdrawn := f.clock.now()
+	for _, k := range "ee" {
+		run(f, kind(k))
+	}
+	readings := f.engine.ReadEarly()
+	if len(readings) != 1 || readings[0].Since.Before(withdrawn) || len(readings[0].Samples) != 2 {
+		t.Fatalf("report after a withdrawal %+v, want two samples and a since after %v", readings, withdrawn)
+	}
+	for _, sample := range readings[0].Samples {
+		if time.Unix(int64(sample.EvaluationTime), 0).Before(withdrawn.Add(-time.Minute)) {
+			t.Fatalf("a sample from before the withdrawal carried over: %+v", sample)
+		}
 	}
 }
 

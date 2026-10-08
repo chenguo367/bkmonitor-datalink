@@ -163,10 +163,10 @@ func TestASampleStillChangingAtTheDeepestRungIsUnsettled(t *testing.T) {
 	}
 }
 
-// A group whose window is read early does not rest longer from one sample
-// to the next: its rest stays at its deepest rung's, so a sample that reads
-// the data whole again, and ends the report, comes that soon after and not
-// up to restCap later. A complete sample lets the rest grow again.
+// A group whose window is reported read early does not rest longer from one
+// sample to the next, whatever the sample read: its rest stays at its
+// deepest rung's, so the sample that can withdraw the report comes that soon
+// after and not up to restCap later. Withdrawn, its rest grows again.
 func TestAGroupReadEarlyRestsNoLongerThanItsDeepestRung(t *testing.T) {
 	f := newFixture(t)
 	revised := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "3")} }
@@ -193,8 +193,13 @@ func TestAGroupReadEarlyRestsNoLongerThanItsDeepestRung(t *testing.T) {
 	if len(f.engine.ReadEarly()) != 1 {
 		t.Fatalf("read early %+v, want the group reported", f.engine.ReadEarly())
 	}
+	// One complete sample leaves it reported, and its rest where it was.
+	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "3")}, revised)
+	if state := f.group("qg"); state.rest != RungSteps[state.depth-1] || len(f.engine.ReadEarly()) != 1 {
+		t.Fatalf("one complete: rest %v steps, read early %+v; want the rest held and the report kept", state.rest, f.engine.ReadEarly())
+	}
 	f.classSample(60, []*execution.Dataset{point(f.clock.now().Unix(), "3")}, revised)
 	if state := f.group("qg"); state.rest <= RungSteps[state.depth-1] || len(f.engine.ReadEarly()) != 0 {
-		t.Fatalf("complete: rest %v steps, read early %+v; want the rest to grow and the report gone", state.rest, f.engine.ReadEarly())
+		t.Fatalf("two complete: rest %v steps, read early %+v; want the rest to grow and the report gone", state.rest, f.engine.ReadEarly())
 	}
 }

@@ -197,7 +197,8 @@ type Stats struct {
 	// latest first, at most maxLatest.
 	Latest []GroupLateness `json:"latest"`
 	// ReadEarly is the owned Query Groups whose window was read early in
-	// readEarlyRepeat completed samples in a row, with the time_delay that
+	// readEarlyRepeat of their latest readEarlyWindow classified samples,
+	// with the time_delay that
 	// would have read them complete, the furthest from it first, at most
 	// maxLatest.
 	ReadEarly []ReadEarlyReading `json:"read_early"`

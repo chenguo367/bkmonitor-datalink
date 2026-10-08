@@ -35,11 +35,15 @@ type ReadEarlySample struct {
 	Rung                 string  `json:"rung,omitempty"`
 	ChangedAgeSeconds    int64   `json:"changed_age_seconds"`
 	Buckets              []int64 `json:"buckets,omitempty"`
+	// PartialRevised is a sample some of whose series came back revised while
+	// the rest were whole: the series were late, not the window.
+	PartialRevised bool `json:"partial_revised,omitempty"`
 }
 
 // ReadEarlyFacts is what a row of KindReadBeforeComplete says for itself:
 // the late-data lookback found the object's window read before its data
-// was complete in two completed samples in a row. The strategy's time_delay
+// was complete - read early or partially revised - in two of its latest
+// three classified samples. The strategy's time_delay
 // is what moves the read, so the row is the strategy's, with the value
 // that would have read those samples complete and the samples it is read
 // from. The samples ride on the row, under 1 KB at their widest - three
@@ -59,7 +63,8 @@ type ReadEarlyFacts struct {
 	CurrentDelaySeconds   int64 `json:"current_time_delay_seconds"`
 	SuggestedDelaySeconds int64 `json:"suggested_time_delay_seconds"`
 	ReadHoldMillis        int64 `json:"read_hold_ms,omitempty"`
-	// Since is when the samples in a row began, as this process saw them.
+	// Since is when the object was first reported this time, as this
+	// process saw it.
 	Since time.Time `json:"since"`
 	// Samples is the evidence, newest last: at most MaxReadEarlySamples,
 	// each naming at most MaxReadEarlyBuckets changed buckets.
@@ -118,4 +123,52 @@ func (tracker *Tracker) ReadEarly(facts map[string]ReadEarlyFacts) []Anomaly {
 		return anomalies[left].QueryGroup < anomalies[right].QueryGroup
 	})
 	return anomalies
+}
+
+// TimeDelayAdvice is the time_delay the late-data lookback found would read
+// a strategy's data whole, carried whatever check decides the strategy: the
+// owner moves it, and a check above it -- one that stops detection -- does
+// not make it wrong. time_delay is one setting of the strategy, so it is the
+// largest suggestion of the strategy's objects, with the object it is from
+// and how many objects are read early.
+type TimeDelayAdvice struct {
+	CurrentDelaySeconds   int64     `json:"current_time_delay_seconds"`
+	SuggestedDelaySeconds int64     `json:"suggested_time_delay_seconds"`
+	Object                string    `json:"object"`
+	Objects               int       `json:"objects"`
+	Since                 time.Time `json:"since"`
+	// Samples is the evidence the suggestion rests on, and PartialRevised
+	// how many of them found only some series revised: a later read delays
+	// every series of the query, not only the revised ones.
+	Samples        int `json:"samples"`
+	PartialRevised int `json:"partial_revised"`
+
+	objects map[string]struct{}
+}
+
+// with is the advice with one more row of the strategy taken in: a
+// READ_BEFORE_COMPLETE row's suggestion, the largest so far and, among
+// equal ones, the earlier; any other row leaves it as it was.
+func (advice *TimeDelayAdvice) with(row Anomaly) *TimeDelayAdvice {
+	if row.Kind != KindReadBeforeComplete || row.ReadEarly == nil {
+		return advice
+	}
+	if advice == nil {
+		advice = &TimeDelayAdvice{objects: map[string]struct{}{}}
+	}
+	advice.objects[row.QueryGroup] = struct{}{}
+	advice.Objects = len(advice.objects)
+	facts := row.ReadEarly
+	if advice.Object != "" && (facts.SuggestedDelaySeconds < advice.SuggestedDelaySeconds ||
+		(facts.SuggestedDelaySeconds == advice.SuggestedDelaySeconds && !facts.Since.Before(advice.Since))) {
+		return advice
+	}
+	advice.CurrentDelaySeconds, advice.SuggestedDelaySeconds = facts.CurrentDelaySeconds, facts.SuggestedDelaySeconds
+	advice.Object, advice.Since, advice.Samples, advice.PartialRevised = row.QueryGroup, facts.Since, len(facts.Samples), 0
+	for _, sample := range facts.Samples {
+		if sample.PartialRevised {
+			advice.PartialRevised++
+		}
+	}
+	return advice
 }
