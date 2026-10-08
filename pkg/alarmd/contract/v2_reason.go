@@ -116,6 +116,9 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonQueryTargetMissing: {
 		ReasonQueryTargetMissing, ReasonClassCoverage, reasonQueryDomainsV2,
 	},
+	ReasonDetectIntervalStorageNotSliding: {
+		ReasonDetectIntervalStorageNotSliding, ReasonClassCoverage, reasonQueryDomainsV2,
+	},
 	ReasonReadinessBudgetInvalid: {
 		ReasonReadinessBudgetInvalid, ReasonClassCoverage, reasonQueryDomainsV2,
 	},

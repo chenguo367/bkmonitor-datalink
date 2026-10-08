@@ -643,6 +643,9 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 	var isPartial *bool
 	var resultTableIDs []string
 	var totalSeries, totalRecords, nullIdentityFields uint64
+	// offGrid is a series of an unaligned query that came back bucketed on
+	// some grid other than its request's own (errOffRequestGrid).
+	offGrid := false
 	receivedAt := client.now().Unix()
 	for decoder.More() {
 		if err := ctx.Err(); err != nil {
@@ -687,6 +690,10 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 				}
 				totalRecords += uint64(len(series.Values))
 				batch, nullFields, err := normalizeSeries(attempt.Spec, ref, series, receivedAt)
+				if errors.Is(err, errOffRequestGrid) {
+					offGrid = true
+					continue
+				}
 				if err != nil {
 					return execution.ProviderCompletion{}, err
 				}
@@ -781,6 +788,14 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		// conspicuous.
 		passthroughDetail = execution.ResponseStatusRouteDetail(status.Code)
 		passthroughStatus = &execution.ProviderStatusFact{Code: status.Code, Allowed: true}
+	}
+	if offGrid {
+		// No point of it is used: a bucket starting anywhere but where the
+		// window starts covers part of the window and part of another, and
+		// reads as a detection at the wrong time. The strategy's step cannot
+		// be read from this table's storage.
+		return client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonDetectIntervalStorageNotSliding),
+			execution.ResponseRouteDetail(execution.ResponseFailureOffRequestGrid), dataState, delivery, resultTableIDs, stats), nil
 	}
 	if isPartial == nil {
 		return client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
@@ -950,6 +965,9 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 		if sourceTime < spec.AcceptedRange.Start || sourceTime >= spec.AcceptedRange.End {
 			continue
 		}
+		if spec.PlanFacts.NotTimeAlign && !onRequestGrid(spec, sourceTime) {
+			return execution.ProviderSeriesBatch{}, 0, errOffRequestGrid
+		}
 		recordID, err := contract.DeriveRecordIDV2(dimensionDigest, sourceTime)
 		if err != nil {
 			return execution.ProviderSeriesBatch{}, 0, err
@@ -1024,4 +1042,21 @@ func stripTableSuffix(value string) string {
 		}
 	}
 	return value[:index]
+}
+
+// errOffRequestGrid is a series of an unaligned query - a Plan detected more
+// often than it aggregates - with a point that is not where its request's
+// buckets are: the storage bucketed on its own grid, the aggregation
+// interval's from the epoch, whatever start it was asked for.
+var errOffRequestGrid = errors.New("alarmd access uq: unaligned query answered off its request's grid")
+
+// onRequestGrid says whether an unaligned query's point sits where its
+// request's buckets start: the accepted range's start plus a whole number of
+// data steps.
+func onRequestGrid(spec execution.PhysicalQuerySpec, sourceTime int64) bool {
+	step := spec.PlanFacts.StepMillis / 1000
+	if step <= 0 {
+		return true
+	}
+	return (sourceTime-spec.AcceptedRange.Start)%step == 0
 }

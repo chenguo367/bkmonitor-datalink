@@ -963,7 +963,7 @@ var NEXT = {
   SERIES_DATA_MISSING:   '先看同一行有没有超时或保护：有的先按那个查（缺点可能是 alarmd 没取到）；没有的再按策略给数据负责人',
   EMPTY_AFTER_TARGET:    '交策略侧：数据在，但不在所选目标内，请核对目标——所选的主机、模块或分组里有没有正在上报这个指标的对象；数据源本身不用查',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
-  PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
+  PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略；原因码为 DETECT_INTERVAL_STORAGE_NOT_SLIDING 时，是该指标的存储不支持按检测周期滑动，请去掉检测周期',
   QUERY_TARGET_MISSING:  '按策略核引用的表与字段是否真不存在（对元数据）：是就改策略或接入数据，不是就是查询构造或元数据问题回 alarmd；已降级的对象修好后会自动重试',
   READ_BEFORE_COMPLETE: '交策略负责人把策略的 time_delay 改到对象行的建议值（或更大）；这是整窗读早，服务会按确认到齐的样本自动推后首读，当前等待见 read_hold_ms；自动等待已达上限仍读早时需调整策略。改完新配置发布后，下一次抽样仍读早会继续留在这一行',
   READ_HELD: '交策略负责人把策略的 time_delay 改到对象行的建议值（或更大）。不改也照常检测，只是首读一直比 time_delay 写的晚',

@@ -131,8 +131,16 @@ const (
 	// fallback (`... or vector(100)`) that still produced series is used
 	// despite it, so such a Query Group can leave the query cooldown on the
 	// rounds its fallback answers and return on the rounds it does not.
-	ReasonQueryTargetMissing     = "QUERY_TARGET_MISSING"
-	ReasonReadinessBudgetInvalid = "READINESS_BUDGET_INVALID"
+	ReasonQueryTargetMissing = "QUERY_TARGET_MISSING"
+	// ReasonDetectIntervalStorageNotSliding names a query of a Plan detected
+	// more often than it aggregates whose answer came back bucketed on the
+	// aggregation grid rather than from where the request started: the
+	// storage the query service routed the table to does not read unaligned
+	// windows. Its points cover partial buckets at the wrong times, so the
+	// query is not used. Like QUERY_TARGET_MISSING it stays until the
+	// strategy changes - here, until its detect_interval is removed.
+	ReasonDetectIntervalStorageNotSliding = "DETECT_INTERVAL_STORAGE_NOT_SLIDING"
+	ReasonReadinessBudgetInvalid          = "READINESS_BUDGET_INVALID"
 	// ReasonQueryNotReady names a Slot deferred because the window it would
 	// query is not in yet. It is the normal pacing of every Slot, and the
 	// highest-volume observation alarmd makes, so it needs its own name:

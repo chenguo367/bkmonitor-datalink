@@ -236,6 +236,10 @@ const (
 	DeliveryTimeoutRouteDetail = RouteDetailKindDelivery + "=" + TransportFailureTimeout
 
 	ResponseFailureIsPartialMissing = "is_partial_missing"
+	// ResponseFailureOffRequestGrid is an unaligned query - a Plan detected
+	// more often than it aggregates - answered with buckets on a grid other
+	// than its request's.
+	ResponseFailureOffRequestGrid = "off_request_grid"
 	// ResponseFailureStatusPrefix precedes the lower-cased UQ status code of a
 	// 200 response whose status field reports a deterministic backend failure
 	// (for example "response=status_space_table_id_field_is_not_exists").
@@ -281,7 +285,7 @@ func BodyRouteDetail(class string) string {
 // (for example a missing is_partial flag) as attempt detail.
 func ResponseRouteDetail(class string) string {
 	switch class {
-	case ResponseFailureIsPartialMissing:
+	case ResponseFailureIsPartialMissing, ResponseFailureOffRequestGrid:
 		return RouteDetailKindResponse + "=" + class
 	default:
 		return RouteDetailKindResponse + "=other"

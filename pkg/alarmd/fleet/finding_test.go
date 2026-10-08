@@ -758,3 +758,22 @@ func TestAWindowLineIsTheDatasOnlyWhenEveryWindowIsSparse(t *testing.T) {
 		t.Errorf("SERIES_SPARSE is owned by %s, want the data owner and no action item for this deployment", answers.Owner)
 	}
 }
+
+// A Plan detected more often than it aggregates, over a table whose storage
+// answered on its own grid, completes every round with its primary input
+// unavailable for that reason. The line is the strategy's: the definition
+// cannot be evaluated as written here, and its owner removes the step.
+func TestAStepTheStorageCannotReadIsTheStrategysUnevaluablePlan(t *testing.T) {
+	row := Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", Cause: "PRIMARY_INPUT_UNAVAILABLE",
+		CauseReason: "DETECT_INTERVAL_STORAGE_NOT_SLIDING"}
+	check, under, unclassified := checkOf(row, ScheduleOnTime)
+	if check != CheckPlanUnevaluable || !under || unclassified {
+		t.Fatalf("check = %s (under %v, unclassified %v), want %s", check, under, unclassified, CheckPlanUnevaluable)
+	}
+	if answers := checkAnswers[CheckPlanUnevaluable]; answers.Owner != OwnerStrategy {
+		t.Fatalf("%s is owned by %s, want the strategy", CheckPlanUnevaluable, answers.Owner)
+	}
+	if pair := checkWords[CheckPlanUnevaluable]; pair.Action != ActionStrategyEdit {
+		t.Fatalf("%s asks %s, want the strategy's owner to change it", CheckPlanUnevaluable, pair.Action)
+	}
+}
