@@ -554,10 +554,14 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	for key, count := range withoutMessageBy {
 		buckets = append(buckets, observability.OutputWithoutMessage{Format: key.format, EventKind: key.eventKind, Events: count})
 	}
+	// Compacted in place; eventOf says which event each published message
+	// is, for a batch some of whose messages are refused after it was sent.
 	published := messages[:0]
-	for _, message := range messages {
+	eventOf := make([]int, 0, len(messages))
+	for index, message := range messages {
 		if message != nil {
 			published = append(published, message)
+			eventOf = append(eventOf, index)
 		}
 	}
 	messages = published
@@ -579,9 +583,12 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			return publishErr
 		}
 		if detail, rejected := clientRejection(err); rejected {
-			// The client, not a broker: nothing was sent and nothing will
-			// be by retrying. Named for the first event of the batch; the
-			// detail is the client's own sentence.
+			if landed := partlyRefused(ctx, err, messages, eventOf, events, formats, refused); landed != nil {
+				return landed
+			}
+			// Every message refused, nothing landed, and nothing will by
+			// retrying. Named for the first event of the batch; the detail
+			// is the client's own sentence.
 			return outputRejected(contract.ReasonOutputClientRejected, detail, string(contract.ResolveOutputWireFormat(events[0].WireFormat, eventRevision(events[0]))), &events[0])
 		}
 		return &triggerEventDependencyError{err: publishErr}
