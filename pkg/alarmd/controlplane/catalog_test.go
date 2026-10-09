@@ -347,36 +347,215 @@ func TestLegacyLevelPriorityDistinguishesMissingFromExplicitZero(t *testing.T) {
 	}
 }
 
-func TestLegacyRecoveryPresenceMatchesPythonContract(t *testing.T) {
+// legacyRecoveryCatalog builds one strategy from its detects, with a
+// threshold algorithm at each of the given levels.
+func legacyRecoveryCatalog(t *testing.T, detects string, levels ...int) controlplane.Catalog {
+	t.Helper()
 	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
-	build := func(t *testing.T, recovery string) controlplane.Catalog {
-		t.Helper()
-		document := json.RawMessage(fmt.Sprintf(`{"id":11,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"q","expression":"a","unit":"percent","query_configs":[{"agg_interval":60}],"algorithms":[{"level":1,"type":"Threshold","config":[{"method":"gt","threshold":80}]}]}],"detects":[{"level":1,"trigger_config":{"count":1,"check_window":1}%s}]}`, recovery))
-		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "11", Document: document, Identity: identity}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return catalog
+	algorithms := make([]string, 0, len(levels))
+	for _, level := range levels {
+		algorithms = append(algorithms, fmt.Sprintf(`{"level":%d,"type":"Threshold","config":[{"method":"gt","threshold":80}]}`, level))
 	}
-
-	disabled := build(t, `,"recovery_config":{}`)
-	if len(disabled.QueryGroups) != 1 {
-		t.Fatalf("empty recovery config should disable recovery: %#v", disabled)
-	}
-	var disabledConfig struct {
-		Enabled            bool   `json:"enabled"`
-		ConsecutiveWindows uint32 `json:"consecutive_windows"`
-	}
-	if err := json.Unmarshal(disabled.QueryGroups[0].Plans[0].Plan.StrategyIR.Levels[0].RecoveryPlan.Config, &disabledConfig); err != nil {
+	document := json.RawMessage(fmt.Sprintf(`{"id":11,"bk_biz_id":2,"update_time":1,"items":[{"id":1,"query_md5":"q","expression":"a","unit":"percent","query_configs":[{"agg_interval":60}],"algorithms":[%s]}],"detects":[%s]}`,
+		strings.Join(algorithms, ","), detects))
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "11", Document: document, Identity: identity}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if disabledConfig.Enabled || disabledConfig.ConsecutiveWindows != 0 {
-		t.Fatalf("disabled recovery=%+v", disabledConfig)
-	}
+	return catalog
+}
 
-	invalid := build(t, `,"recovery_config":{"check_window":0}`)
-	if len(invalid.QueryGroups) != 0 || len(invalid.Dispositions) != 1 || invalid.Dispositions[0].Reason != "RECOVERY_CONFIG_INVALID" {
-		t.Fatalf("non-empty zero recovery was silently disabled: %#v", invalid)
+type legacyRecoveryReading struct {
+	Enabled            bool   `json:"enabled"`
+	ConsecutiveWindows uint32 `json:"consecutive_windows"`
+}
+
+func legacyRecoveryOf(t *testing.T, catalog controlplane.Catalog) map[uint32]legacyRecoveryReading {
+	t.Helper()
+	if len(catalog.QueryGroups) != 1 {
+		t.Fatalf("not compiled: %+v", catalog.Dispositions)
+	}
+	readings := map[uint32]legacyRecoveryReading{}
+	for _, level := range catalog.QueryGroups[0].Plans[0].Plan.StrategyIR.Levels {
+		var reading legacyRecoveryReading
+		if err := json.Unmarshal(level.RecoveryPlan.Config, &reading); err != nil {
+			t.Fatal(err)
+		}
+		readings[level.Definition.LevelID] = reading
+	}
+	return readings
+}
+
+func notedReasons(catalog controlplane.Catalog) map[uint32]string {
+	reasons := map[uint32]string{}
+	for _, disposition := range catalog.Dispositions {
+		if disposition.Disposition == controlplane.DispositionConfigNoted && disposition.Scope == "LEVEL" {
+			reasons[disposition.LevelID] = disposition.Reason
+		}
+	}
+	return reasons
+}
+
+// A level's recovery is read the way the backend reads it, and every level
+// recovers. get_recovery_configs reads int(detect["recovery_config"]
+// ["check_window"]) for every detect (strategy.py:379-392); the recovery
+// checker catches the KeyError, TypeError and ValueError that raises and
+// takes its default of 5 windows (recover.py:53, :253-267). So an empty, null
+// or missing recovery_config, one without check_window, a list, and a
+// check_window that int() cannot read all recover after 5 windows, noted as
+// defaulted; a quoted number and a fraction are read as int() reads them.
+// The trigger never reads the recovery, so every one of these levels
+// detects.
+//
+// A check_window of 0 or below is the exception, and stays refused as
+// RECOVERY_CONFIG_INVALID: the backend recovers at once there
+// (recover.py:467-506), and what this build should do is a rule difference
+// awaiting product (trigger review of 2026-10-09, section 6). Pinned so the
+// rule does not change by accident.
+func TestARecoveryIsReadAsTheBackendReadsItAndEveryLevelRecovers(t *testing.T) {
+	const defaulted, refused = "RECOVERY_CONFIG_DEFAULTED", "RECOVERY_CONFIG_INVALID"
+	for _, test := range []struct {
+		recovery string
+		windows  uint32
+		noted    string
+	}{
+		{`,"recovery_config":{}`, 5, defaulted},
+		{`,"recovery_config":null`, 5, defaulted},
+		{``, 5, defaulted},
+		{`,"recovery_config":{"status_setter":"recovery"}`, 5, defaulted},
+		{`,"recovery_config":[]`, 5, defaulted},
+		{`,"recovery_config":{"check_window":null}`, 5, defaulted},
+		{`,"recovery_config":{"check_window":"many"}`, 5, defaulted},
+		{`,"recovery_config":{"check_window":"3"}`, 3, ""},
+		{`,"recovery_config":{"check_window":" 3 "}`, 3, ""},
+		{`,"recovery_config":{"check_window":3.7}`, 3, ""},
+		{`,"recovery_config":{"check_window":2}`, 2, ""},
+		{`,"recovery_config":{"check_window":true}`, 1, ""},
+		{`,"recovery_config":{"check_window":0}`, 0, refused},
+		{`,"recovery_config":{"check_window":-2}`, 0, refused},
+	} {
+		t.Run(test.recovery, func(t *testing.T) {
+			catalog := legacyRecoveryCatalog(t, `{"level":1,"trigger_config":{"count":1,"check_window":1}`+test.recovery+`}`, 1)
+			if test.noted == refused {
+				if len(catalog.QueryGroups) != 0 || len(catalog.Dispositions) != 1 || catalog.Dispositions[0].Reason != refused || catalog.Dispositions[0].Detail == "" {
+					t.Fatalf("dispositions = %+v, want the level refused as %s with the window named", catalog.Dispositions, refused)
+				}
+				return
+			}
+			got := legacyRecoveryOf(t, catalog)[1]
+			if !got.Enabled || got.ConsecutiveWindows != test.windows {
+				t.Fatalf("recovery = %+v, want enabled with %d windows", got, test.windows)
+			}
+			if reason := notedReasons(catalog)[1]; reason != test.noted {
+				t.Fatalf("noted %q, want %q", reason, test.noted)
+			}
+		})
+	}
+}
+
+// One detect whose recovery the backend cannot read makes get_recovery_configs
+// raise for the whole strategy, and the checker takes the default for every
+// level, the readable ones included (recover.py:253-267): level 1's 3 windows
+// are read as 5 because level 2's recovery is empty.
+func TestOneUnreadableRecoveryDefaultsEveryLevelOfTheStrategy(t *testing.T) {
+	catalog := legacyRecoveryCatalog(t,
+		`{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3}},`+
+			`{"level":2,"trigger_config":{"count":1,"check_window":1},"recovery_config":{}}`, 1, 2)
+	got := legacyRecoveryOf(t, catalog)
+	for _, level := range []uint32{1, 2} {
+		if got[level] != (legacyRecoveryReading{Enabled: true, ConsecutiveWindows: 5}) {
+			t.Fatalf("level %d recovery = %+v, want the default 5 windows", level, got[level])
+		}
+		if reason := notedReasons(catalog)[level]; reason != "RECOVERY_CONFIG_DEFAULTED" {
+			t.Fatalf("level %d noted %q, want RECOVERY_CONFIG_DEFAULTED", level, reason)
+		}
+	}
+	// And with both readable, each keeps its own.
+	readable := legacyRecoveryOf(t, legacyRecoveryCatalog(t,
+		`{"level":1,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":3}},`+
+			`{"level":2,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":2}}`, 1, 2))
+	if readable[1].ConsecutiveWindows != 3 || readable[2].ConsecutiveWindows != 2 {
+		t.Fatalf("readable recoveries = %+v, want 3 and 2", readable)
+	}
+}
+
+// The trigger's numbers are read with int() as the backend reads them
+// (strategy.py:369-370): a quoted number, one with spaces, a fraction
+// truncated toward zero and a boolean. A value int() cannot read stops the
+// whole strategy there - get_trigger_configs raises for the map, and the
+// trigger stage reads it for the strategy (processor.py:667, checker.py:46) -
+// so every level is refused by name, the unreadable detect's level and value
+// in the detail; before, it failed the whole strategy's decode. A readable
+// count below one refuses only its own level: an older difference, the
+// backend runs it, registered as awaiting product.
+func TestTheTriggersNumbersAreReadAsTheBackendReadsThem(t *testing.T) {
+	for _, test := range []struct {
+		trigger       string
+		count, window uint32
+		refused       bool
+	}{
+		{`{"count":"1","check_window":"2"}`, 1, 2, false},
+		{`{"count":" 3 ","check_window":5}`, 3, 5, false},
+		{`{"count":2.8,"check_window":4.9}`, 2, 4, false},
+		{`{"count":true,"check_window":"2"}`, 1, 2, false},
+		{`{"count":"many","check_window":2}`, 0, 0, true},
+		{`{"count":1,"check_window":null}`, 0, 0, true},
+		{`{"count":-1,"check_window":2}`, 0, 0, true},
+		{`{"count":"","check_window":2}`, 0, 0, true},
+	} {
+		t.Run(test.trigger, func(t *testing.T) {
+			catalog := legacyRecoveryCatalog(t,
+				`{"level":1,"trigger_config":`+test.trigger+`,"recovery_config":{"check_window":1}},`+
+					`{"level":2,"trigger_config":{"count":1,"check_window":1},"recovery_config":{"check_window":1}}`, 1, 2)
+			_, unreadable := pythonIntForTest(test.trigger)
+			if test.refused && unreadable {
+				if len(catalog.QueryGroups) != 0 || len(catalog.Dispositions) != 2 {
+					t.Fatalf("dispositions = %+v, want both levels refused", catalog.Dispositions)
+				}
+				for _, disposition := range catalog.Dispositions {
+					if disposition.Reason != "TRIGGER_CONFIG_MISSING" || !strings.Contains(disposition.Detail, "level 1's trigger_config.") {
+						t.Fatalf("dispositions = %+v, want every level refused naming level 1's unreadable value", catalog.Dispositions)
+					}
+				}
+				return
+			}
+			if len(catalog.QueryGroups) != 1 {
+				t.Fatalf("the strategy did not compile: %+v", catalog.Dispositions)
+			}
+			levels := catalog.QueryGroups[0].Plans[0].Plan.StrategyIR.Levels
+			var level1 *contract.LevelIRV2
+			for index := range levels {
+				if levels[index].Definition.LevelID == 1 {
+					level1 = &levels[index]
+				}
+			}
+			if test.refused {
+				if level1 != nil || len(levels) != 1 {
+					t.Fatalf("levels = %+v, want level 1 refused and level 2 detecting", levels)
+				}
+				found := false
+				for _, disposition := range catalog.Dispositions {
+					found = found || (disposition.LevelID == 1 && disposition.Reason == "TRIGGER_CONFIG_MISSING" && disposition.Detail != "")
+				}
+				if !found {
+					t.Fatalf("dispositions = %+v, want level 1 refused as TRIGGER_CONFIG_MISSING with the value named", catalog.Dispositions)
+				}
+				return
+			}
+			if level1 == nil {
+				t.Fatalf("level 1 not compiled: %+v", catalog.Dispositions)
+			}
+			var trigger struct {
+				RequiredAnomalies uint32 `json:"required_anomalies"`
+				WindowSize        uint32 `json:"window_size"`
+			}
+			if err := json.Unmarshal(level1.TriggerPlan.Config, &trigger); err != nil {
+				t.Fatal(err)
+			}
+			if trigger.RequiredAnomalies != test.count || trigger.WindowSize != test.window {
+				t.Fatalf("trigger = %+v, want %d of %d", trigger, test.count, test.window)
+			}
+		})
 	}
 }
 
@@ -821,4 +1000,17 @@ func TestBuildCatalogDoesNotRetainALastGoodPlanWhoseRevisionNoLongerDerives(t *t
 		len(named) != 1 || named[0].Reason != "LAST_GOOD_FACTS_INVALID" {
 		t.Fatalf("with facts the rules refuse: plans %v, stale %d, dispositions %+v; want LAST_GOOD_FACTS_INVALID", got, catalog.RetainedStaleRevisions, named)
 	}
+}
+
+// pythonIntForTest says whether a trigger object written in a test case has a
+// count or check_window the backend's int() cannot read: the cases name it in
+// their own text, so the test decides which refusal to expect without
+// calling the reader under test.
+func pythonIntForTest(trigger string) (string, bool) {
+	for _, unreadable := range []string{`"many"`, `null`, `""`} {
+		if strings.Contains(trigger, unreadable) {
+			return unreadable, true
+		}
+	}
+	return "", false
 }

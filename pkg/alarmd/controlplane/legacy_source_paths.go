@@ -48,7 +48,6 @@ func LegacySourceReads() []SourceRead {
 		{"items.no_data_config", reflect.TypeOf(legacyNoDataConfig{})},
 		{"items.target", reflect.TypeOf(legacyTargetCondition{})},
 		{"items.target.value", reflect.TypeOf(legacyTargetValue{})},
-		{"detects.recovery_config", reflect.TypeOf(legacyRecovery{})},
 
 		// Structs declared inside functions of this package, and keys it
 		// reads by name, each under the function that reads it.
@@ -67,6 +66,8 @@ func LegacySourceReads() []SourceRead {
 		{"items.target", []string{"value"}},
 		// objectModelInstanceKey.
 		{"items.target.value", []string{defaultObjectModelField, defaultObjectModelInstField}},
+		// legacyRecoveryWindow.
+		{"detects.recovery_config", []string{"check_window"}},
 		// isAlwaysActiveUptime.
 		{"detects.trigger_config.uptime", []string{"calendars", "active_calendars", "time_ranges.start", "time_ranges.end"}},
 

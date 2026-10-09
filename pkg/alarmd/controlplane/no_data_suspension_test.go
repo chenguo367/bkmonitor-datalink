@@ -186,7 +186,8 @@ func onlyPlan(t *testing.T, catalog controlplane.Catalog) controlplane.FrozenPla
 func wantNotWithheld(t *testing.T, catalog controlplane.Catalog) {
 	t.Helper()
 	for _, disposition := range catalog.Dispositions {
-		if disposition.Disposition != controlplane.DispositionAccepted {
+		// A note is served, not withheld, as the fleet reads it (isWithheld).
+		if disposition.Disposition != controlplane.DispositionAccepted && disposition.Disposition != controlplane.DispositionConfigNoted {
 			t.Fatalf("the strategy is filed as %+v; a suspended no-data half is not a withheld object, "+
 				"and counting it as one is what took the thresholds down with it", disposition)
 		}
