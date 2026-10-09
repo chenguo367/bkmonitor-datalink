@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -298,5 +299,17 @@ func TestAnAssignmentChangeIsOneLineWithItsCountsAndSamples(t *testing.T) {
 		line["assignment_samples_truncated"] != true ||
 		strings.Count(line["assignment_acquired_sample"].(string), ",") != MaxAssignmentAppliedSamples-1 {
 		t.Fatalf("assignment line=%v", line)
+	}
+}
+
+// A no-data stall is written at WARN whichever skip it stalled on: it is
+// reported once per stall, and it says a Plan has stopped detecting absence.
+// The stall words live in two lists, the catalogue and the WARN set, and a
+// skip added to one and not the other would stall at INFO.
+func TestEveryNoDataStallIsWrittenAtWarn(t *testing.T) {
+	for _, reason := range NoDataStallReasons {
+		if got := ReasonLogLevel(reason); got != slog.LevelWarn {
+			t.Errorf("a stall on %s is written at %s, want WARN", reason, got)
+		}
 	}
 }

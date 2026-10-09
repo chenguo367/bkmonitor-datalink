@@ -44,7 +44,7 @@ var warnReasons = makeReasonSet([]ReasonCode{
 	// stalled: once per stall, and the Plan is not detecting absence.
 	"SKIPPED_QUERY_NOT_FULL", "SKIPPED_SLOT_BUDGET", "SKIPPED_MEMORY_UNREADABLE", "SKIPPED_HOSTS_UNRESOLVED",
 	"SKIPPED_DERIVATION_FAILED", "SKIPPED_TARGET_SELECTOR_UNAVAILABLE", "SKIPPED_TARGET_MEMBERS_DROPPED",
-	"SKIPPED_OUTPUT_FAILED",
+	"SKIPPED_OUTPUT_FAILED", "SKIPPED_ANSWER_TRUNCATED",
 	// A reason that could not be named is never quiet: the word for a site
 	// that failed to report one, and the one an unlisted word folds into.
 	ReasonInternalUnknown, ReasonNotReported, ReasonOther,
