@@ -105,7 +105,7 @@ func (s *linkdLocationSwitch) ReadSet(ctx context.Context, key openalerts.Strate
 
 // Watch implements openalerts.Subscriber on the binding in force, and returns
 // when that binding is replaced so the cache subscribes again on the new one.
-func (s *linkdLocationSwitch) Watch(ctx context.Context, ready func(bool), changed func(openalerts.StrategyKey)) error {
+func (s *linkdLocationSwitch) Watch(ctx context.Context, ready func(bool), changed func(openalerts.StrategyKey), refused func(openalerts.NoticeRefusal)) error {
 	current, replaced := s.binding()
 	if !current.bound() {
 		// Nothing to subscribe to until the Console names a place; the
@@ -126,7 +126,7 @@ func (s *linkdLocationSwitch) Watch(ctx context.Context, ready func(bool), chang
 		case <-inner.Done():
 		}
 	}()
-	err := current.subscriber.Watch(inner, ready, changed)
+	err := current.subscriber.Watch(inner, ready, changed, refused)
 	if ctx.Err() == nil {
 		// Replaced, not stopped: the cache's loop marks the copy not ready and
 		// subscribes again, which is the reread the move needs.

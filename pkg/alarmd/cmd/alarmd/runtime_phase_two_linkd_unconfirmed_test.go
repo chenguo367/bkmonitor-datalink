@@ -288,7 +288,9 @@ func TestAnUnboundLocationWaitsInsteadOfSubscribing(t *testing.T) {
 	location := &linkdLocationSwitch{replaced: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- location.Watch(ctx, func(bool) {}, func(openalerts.StrategyKey) {}) }()
+	go func() {
+		done <- location.Watch(ctx, func(bool) {}, func(openalerts.StrategyKey) {}, func(openalerts.NoticeRefusal) {})
+	}()
 	select {
 	case err := <-done:
 		t.Fatalf("Watch returned %v on an unbound location", err)
@@ -399,4 +401,43 @@ func redisCommandsOn(t *testing.T, address, prefix string) (stop func() []string
 		}
 		return named
 	}
+}
+
+// A notice the bound subscriber drops reaches the copy through the switch as
+// a refusal, so the copy's count is the link's, whichever place it is bound
+// to.
+func TestARefusedNoticeReachesTheCopyThroughTheLocationSwitch(t *testing.T) {
+	_, client := startPhaseTwoRedis(t)
+	binding, err := newLinkdBinding(client, config.RedisConnectionConfig{}, "test.linkd", openalerts.ReadLimits{MaxMembers: 10, MaxBytes: 1 << 10, MaxPages: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := &linkdLocationSwitch{current: binding, replaced: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan bool, 4)
+	refused := make(chan openalerts.NoticeRefusal, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- location.Watch(ctx, func(value bool) { ready <- value }, func(openalerts.StrategyKey) {},
+			func(reason openalerts.NoticeRefusal) { refused <- reason })
+	}()
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the bound subscriber was not acknowledged")
+	}
+	if err := client.Publish(ctx, "test.linkd:changes", `{"bk_tenant_id":"t","strategy_id":"1","key":"foreign"}`).Err(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reason := <-refused:
+		if reason != openalerts.NoticeUndecodable {
+			t.Fatalf("refused %q, want undecodable", reason)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the refusal did not reach the copy through the switch")
+	}
+	cancel()
+	<-done
 }

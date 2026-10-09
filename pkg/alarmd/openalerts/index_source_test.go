@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,8 +101,11 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 	ready := make(chan bool, 20)
 	changes := make(chan StrategyKey, 20)
 	done := make(chan error, 1)
+	var refusedMu sync.Mutex
+	refused := map[NoticeRefusal]int{}
 	go func() {
-		done <- subscriber.Watch(ctx, func(value bool) { ready <- value }, func(key StrategyKey) { changes <- key })
+		done <- subscriber.Watch(ctx, func(value bool) { ready <- value }, func(key StrategyKey) { changes <- key },
+			func(reason NoticeRefusal) { refusedMu.Lock(); refused[reason]++; refusedMu.Unlock() })
 	}()
 	waitReady := func(wanted bool) {
 		t.Helper()
@@ -114,7 +119,12 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 		}
 	}
 	waitReady(true)
-	for _, payload := range []string{`{"bk_tenant_id":"x","strategy_id":"y","key":"foreign"}`, `{"bk_tenant_id":"x","strategy_id":1}`, `{"bk_tenant_id":"a:b","strategy_id":"c"}`} {
+	// Every notice dropped is named by why, never silently: a field this
+	// build does not know, a wrong type, content after the notice, a key
+	// that is not a valid tenant and strategy, and a payload past the bound.
+	oversized := `{"bk_tenant_id":"x","strategy_id":"` + strings.Repeat("y", 64<<10) + `"}`
+	for _, payload := range []string{`{"bk_tenant_id":"x","strategy_id":"y","key":"foreign"}`, `{"bk_tenant_id":"x","strategy_id":1}`,
+		`{"bk_tenant_id":"x","strategy_id":"y"} {}`, `{"bk_tenant_id":"a:b","strategy_id":"c"}`, oversized} {
 		if err := client.Publish(ctx, "test:index:changes", payload).Err(); err != nil {
 			t.Fatal(err)
 		}
@@ -131,6 +141,11 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 	case <-time.After(3 * time.Second):
 		t.Fatal("valid notice lost")
 	}
+	refusedMu.Lock()
+	if want := map[NoticeRefusal]int{NoticeUndecodable: 3, NoticeInvalidKey: 1, NoticeOversized: 1}; !reflect.DeepEqual(refused, want) {
+		t.Fatalf("refused = %v, want %v", refused, want)
+	}
+	refusedMu.Unlock()
 	if err := client.Do(ctx, "CLIENT", "KILL", "TYPE", "pubsub").Err(); err != nil {
 		t.Fatal(err)
 	}

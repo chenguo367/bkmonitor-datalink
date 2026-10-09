@@ -206,7 +206,7 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 	}
 	cache := &Cache{now: options.Now, policy: options.Policy, maxLocal: options.MaxLocalEntries,
 		added:     map[member]stamped{},
-		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
+		refreshes: map[string]uint64{}, noticesRefused: map[NoticeRefusal]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
 		gateSince: options.Now(),
 		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]ownRecord{}},
 	}
@@ -446,6 +446,14 @@ func (cache *Cache) indexReady(ready bool) {
 	}
 }
 
+// indexRefused counts a change notice the subscriber dropped. The strategy
+// it named, if any, is read on the next periodic read.
+func (cache *Cache) indexRefused(reason NoticeRefusal) {
+	cache.mu.Lock()
+	cache.noticesRefused[reason]++
+	cache.mu.Unlock()
+}
+
 func (cache *Cache) indexChanged(key StrategyKey) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -481,7 +489,7 @@ func (cache *Cache) Run(ctx context.Context) error {
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			_ = cache.index.options.Subscriber.Watch(ctx, cache.indexReady, cache.indexChanged)
+			_ = cache.index.options.Subscriber.Watch(ctx, cache.indexReady, cache.indexChanged, cache.indexRefused)
 			cache.indexReady(false)
 			if !waitIndex(ctx, cache.index.options.RefreshInterval) {
 				return
@@ -1006,6 +1014,12 @@ func (cache *Cache) indexStats() Stats {
 	stats.SubscriptionReady = cache.index.ready
 	for k, v := range cache.refreshes {
 		stats.Refreshes[k] = v
+	}
+	for k, v := range cache.noticesRefused {
+		if stats.NoticesRefused == nil {
+			stats.NoticesRefused = map[NoticeRefusal]uint64{}
+		}
+		stats.NoticesRefused[k] = v
 	}
 	for k, v := range cache.unavailable {
 		stats.Unavailable[k] = v

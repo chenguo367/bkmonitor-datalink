@@ -27,10 +27,10 @@ func (f reconcilerFunc) Reconcile(ctx context.Context, key StrategyKey) (Reconci
 	return f(ctx, key)
 }
 
-type subscriberFunc func(context.Context, func(bool), func(StrategyKey)) error
+type subscriberFunc func(context.Context, func(bool), func(StrategyKey), func(NoticeRefusal)) error
 
-func (f subscriberFunc) Watch(ctx context.Context, ready func(bool), changed func(StrategyKey)) error {
-	return f(ctx, ready, changed)
+func (f subscriberFunc) Watch(ctx context.Context, ready func(bool), changed func(StrategyKey), refused func(NoticeRefusal)) error {
+	return f(ctx, ready, changed, refused)
 }
 
 // factsStub is the link Console's two facts as a test sets them. asked is
@@ -82,7 +82,7 @@ func (f *factsStub) set(location, keyed, known bool) {
 func indexOptions(c *clock) IndexOptions {
 	return IndexOptions{Facts: confirmedFacts(),
 		Source: setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return nil, nil }),
-		Subscriber: subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey)) error {
+		Subscriber: subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey), _ func(NoticeRefusal)) error {
 			ready(true)
 			<-ctx.Done()
 			return ctx.Err()
@@ -317,7 +317,7 @@ func TestIndexRunWaitsForSubscribeACKAndReconnectRereads(t *testing.T) {
 	options.RefreshInterval = 10 * time.Millisecond
 	options.IndexInterval = time.Hour
 	ack := make(chan bool, 2)
-	options.Subscriber = subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey)) error {
+	options.Subscriber = subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey), _ func(NoticeRefusal)) error {
 		for {
 			select {
 			case value := <-ack:
@@ -360,4 +360,41 @@ func waitIndexCondition(t *testing.T, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true")
+}
+
+// A refused notice is counted on the copy, not on the subscriber: a move of
+// the link's location replaces the subscriber, and a count kept there would
+// start again from zero. Two subscriptions, one refusal each, read as two.
+func TestRefusedNoticesAreCountedOnTheCopyAcrossSubscriptions(t *testing.T) {
+	options := indexOptions(&clock{})
+	options.Now = time.Now
+	options.RefreshInterval = 10 * time.Millisecond
+	var mu sync.Mutex
+	subscriptions := 0
+	options.Subscriber = subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey), refused func(NoticeRefusal)) error {
+		mu.Lock()
+		subscriptions++
+		first := subscriptions == 1
+		mu.Unlock()
+		if first {
+			refused(NoticeOversized)
+			return nil
+		}
+		refused(NoticeInvalidKey)
+		ready(true)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	cache := mustIndex(t, options)
+	if got := cache.Stats().NoticesRefused; len(got) != 0 {
+		t.Fatalf("refused before any subscription = %v, want none", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- cache.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitIndexCondition(t, func() bool { return len(cache.Stats().NoticesRefused) == 2 })
+	if got, want := cache.Stats().NoticesRefused, map[NoticeRefusal]uint64{NoticeOversized: 1, NoticeInvalidKey: 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("refused = %v, want %v", got, want)
+	}
 }

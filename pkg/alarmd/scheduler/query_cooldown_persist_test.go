@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -294,5 +295,84 @@ func TestNoRecordOrAnUnreadableOneIsOutsideThePool(t *testing.T) {
 		if !runner.queryCooldown.until.IsZero() || len(lines) != 0 || runner.deferUnavailableQuery(context.Background(), poolSlot()) {
 			t.Fatalf("%s: state %+v lines %+v, want outside the pool", name, runner.queryCooldown, lines)
 		}
+	}
+}
+
+// A pool record the store could not read is read again on the next round, and
+// nothing is written before a read succeeds. The memory a failed read leaves
+// is empty, and a write made from it would replace the record under the new
+// owner's epoch: the Query Group would read as entered today with no
+// re-entries, though it has been in the pool since its first entry, and an
+// entry would be counted that was not one. The pool's identity survives
+// restarts and owner changes, so the record is left as it was until it is
+// read, and read back it is what the Runner continues from.
+//
+// Both ways a write can come before the read succeeds: the read fails on
+// three rounds in a row, each with a failed Slot, and the third enters the
+// pool; or the read fails once and the same round's Slots enter it.
+func TestAFailedPoolReadIsReadAgainAndNothingIsWrittenBeforeIt(t *testing.T) {
+	entered := time.Unix(500, 0)
+	for name, sameRound := range map[string]bool{"one failed Slot per round": false, "the round the read failed": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Unix(1_000, 0)
+			store := newMemoryCooldownStore()
+			kept := QueryCooldownRecord{QueryGroup: "qg", OwnerEpoch: 1, EnteredAt: entered, Until: now.Add(time.Minute),
+				Failures: unavailableThreshold, Reentries: 123}
+			store.records["qg"] = kept
+			store.loadErr = errors.New("store down")
+			var lines []observability.QueryCooldownFacts
+			runner := poolRunner(store, &now, &lines)
+			slot := poolSlot()
+			if sameRound {
+				runner.restoreQueryCooldown(ctx, fenceAt(2))
+				failInto(runner, &slot)
+			} else {
+				for round := 0; round < unavailableThreshold; round++ {
+					runner.restoreQueryCooldown(ctx, fenceAt(2))
+					slot.Contract.Slot.EvaluationTime++
+					runner.recordQueryAvailability(ctx, slot, unavailableResult(), 60)
+				}
+			}
+			if runner.queryCooldown.until.IsZero() {
+				t.Fatal("fixture: the failed Slots did not enter the pool in memory")
+			}
+			if store.saves != 0 || !reflect.DeepEqual(store.records["qg"], kept) {
+				t.Fatalf("%d saves, record %+v; want nothing written before a read succeeds, the record as it was", store.saves, store.records["qg"])
+			}
+
+			store.loadErr = nil
+			runner.restoreQueryCooldown(ctx, fenceAt(2))
+			if !runner.cooldownMemory.enteredAt.Equal(entered) || runner.cooldownMemory.reentries != 123 {
+				t.Fatalf("memory after the read = %+v, want the record's entry time and re-entries", runner.cooldownMemory)
+			}
+			slot.Contract.Slot.EvaluationTime++
+			runner.recordQueryAvailability(ctx, slot, unavailableResult(), 60)
+			if got := store.records["qg"]; store.saves == 0 || !got.EnteredAt.Equal(entered) || got.Reentries != 123 || got.OwnerEpoch != 2 {
+				t.Fatalf("%d saves, record %+v; want the next write to carry the entry time and re-entries it read", store.saves, got)
+			}
+		})
+	}
+}
+
+// A record that does not decode is read as none, and unlike a failed read it
+// is a read: reading it again gives the same bytes. The Runner starts outside
+// the pool, and its next entry writes over the record.
+func TestAnUndecodableRecordIsReadAsNoneAndWrittenOver(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_000, 0)
+	store := newMemoryCooldownStore()
+	store.loadErr = ErrQueryCooldownUndecodable
+	var lines []observability.QueryCooldownFacts
+	runner := poolRunner(store, &now, &lines)
+	runner.restoreQueryCooldown(ctx, fenceAt(2))
+	store.loadErr = nil
+	if !runner.queryCooldown.until.IsZero() || len(lines) != 0 {
+		t.Fatalf("state %+v lines %+v, want outside the pool", runner.queryCooldown, lines)
+	}
+	slot := poolSlot()
+	failInto(runner, &slot)
+	if got := store.records["qg"]; store.saves != 1 || got.OwnerEpoch != 2 || got.Until.IsZero() {
+		t.Fatalf("%d saves, record %+v; want the entry written over the undecodable record", store.saves, got)
 	}
 }

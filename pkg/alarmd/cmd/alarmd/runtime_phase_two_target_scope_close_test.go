@@ -37,7 +37,7 @@ func (s scopeCloseIndex) Reconcile(ctx context.Context, key openalerts.StrategyK
 	return openalerts.Reconciliation{EventSourceID: s.source, Members: members, Alerts: s.alerts}, nil
 }
 
-func (s scopeCloseIndex) Watch(ctx context.Context, ready func(bool), _ func(openalerts.StrategyKey)) error {
+func (s scopeCloseIndex) Watch(ctx context.Context, ready func(bool), _ func(openalerts.StrategyKey), _ func(openalerts.NoticeRefusal)) error {
 	ready(true)
 	<-ctx.Done()
 	return ctx.Err()

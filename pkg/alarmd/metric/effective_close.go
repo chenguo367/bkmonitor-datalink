@@ -31,8 +31,8 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 	return &effectiveCloseCollector{
 		outcomes: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "effective_close_total"),
 			"What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the "+
-				"broker acknowledged a close for; a close is sent at every level of the strategy (__ALL__), so no "+
-				"alert is left open for want of its level. The others count "+
+				"broker acknowledged a close for: the close was sent, at every level of the strategy (__ALL__); "+
+				"whether the alert closed is the consumer's to say. The others count "+
 				"events: maintenance_busy is a close that could not take the Query Group's flight because a Slot was "+
 				"executing (one is nothing, a steady rate is a Query Group whose close never happens); "+
 				"close_precheck_failed is the owner or content check refusing before a send; close_send_failed is "+

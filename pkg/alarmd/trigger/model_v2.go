@@ -261,6 +261,12 @@ const (
 const (
 	// OpenAlertGatePassed: the consumer holds an open alert; the envelope goes.
 	OpenAlertGatePassed = "passed"
+	// OpenAlertGatePassedOneTimeClose: the one close of a group the target
+	// dropped, asked against a set that lets it through (a
+	// contract.OneTimeCloseSet); the envelope goes whether or not the
+	// consumer holds the alert, and where it does not the close is an orphan
+	// there.
+	OpenAlertGatePassedOneTimeClose = "passed_one_time_close"
 	// OpenAlertGateHeldNoOpenAlert: see RecoveryHeldNoOpenAlert.
 	OpenAlertGateHeldNoOpenAlert = "held_no_open_alert"
 	// OpenAlertGateHeldFingerprintUnknown: see RecoveryHeldFingerprintUnknown.

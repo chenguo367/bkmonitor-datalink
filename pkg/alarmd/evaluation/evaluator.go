@@ -160,6 +160,8 @@ func countOpenAlertGate(counts *execution.OpenAlertGateCounts, gate trigger.Reco
 	switch gate.OpenAlertGate {
 	case trigger.OpenAlertGatePassed:
 		counts.Passed++
+	case trigger.OpenAlertGatePassedOneTimeClose:
+		counts.PassedOneTimeClose++
 	case trigger.OpenAlertGateHeldNoOpenAlert:
 		counts.HeldNoOpenAlert++
 	case trigger.OpenAlertGateHeldFingerprintUnknown:

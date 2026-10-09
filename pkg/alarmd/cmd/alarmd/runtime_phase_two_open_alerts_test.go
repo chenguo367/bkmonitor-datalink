@@ -65,7 +65,7 @@ func (nothingIndexed) ReadSet(context.Context, openalerts.StrategyKey) ([]string
 	return nil, nil
 }
 
-func (nothingIndexed) Watch(ctx context.Context, _ func(bool), _ func(openalerts.StrategyKey)) error {
+func (nothingIndexed) Watch(ctx context.Context, _ func(bool), _ func(openalerts.StrategyKey), _ func(openalerts.NoticeRefusal)) error {
 	<-ctx.Done()
 	return ctx.Err()
 }

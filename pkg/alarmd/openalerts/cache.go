@@ -114,7 +114,11 @@ type Stats struct {
 	PendingReads, PendingReconciles int
 	OldestPendingAt                 time.Time
 	SubscriptionReady               bool
-	MemberBytes                     int
+	// NoticesRefused is the change notices dropped, by why, since the copy
+	// was built: counted here and not on the subscriber, which a move of the
+	// link's location replaces.
+	NoticesRefused map[NoticeRefusal]uint64
+	MemberBytes    int
 	// CalibrationConfigured says a reconciler is bound: without one the
 	// index knows members but never their severity, so no close is ever
 	// sent, and a deployment has to be able to read that as "off" rather
@@ -173,6 +177,7 @@ type Cache struct {
 	// index.opened. See departures.go.
 	sentDepartures, openDepartures map[string]uint64
 	refreshes                      map[string]uint64
+	noticesRefused                 map[NoticeRefusal]uint64
 	unavailable                    map[UnavailableReason]uint64
 	lookups                        map[Answer]uint64
 	// lastAnswer, ownLookups, ownHeld and the two samples are the gate's
