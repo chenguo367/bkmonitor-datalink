@@ -365,6 +365,24 @@ func (stream *streamedExecution) noDataCompleteness(due execution.DuePlan) execu
 // A memory for a Plan this round does not have, or one whose retention cannot
 // be derived, is not a refusal: nothing was asked of the store, the wiring
 // handed it a write it cannot place, and that does fail the Slot.
+// withoutWithheldNoData is the memory mutations of the Plans whose output
+// landed, in the order they were queued.
+func withoutWithheldNoData(
+	mutations []execution.PlanNoDataMutation, withheld map[execution.PlanIdentity]struct{},
+) []execution.PlanNoDataMutation {
+	if len(withheld) == 0 {
+		return mutations
+	}
+	kept := make([]execution.PlanNoDataMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		if _, skip := withheld[mutation.Identity.Plan]; skip {
+			continue
+		}
+		kept = append(kept, mutation)
+	}
+	return kept
+}
+
 func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	ctx context.Context, request execution.SlotExecutionRequest, duePlans []execution.DuePlan,
 	mutations []execution.PlanNoDataMutation,
