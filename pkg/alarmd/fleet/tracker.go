@@ -471,8 +471,17 @@ type queryGroupState struct {
 	reasonCode   string
 	degradedRuns int
 	blockedRuns  int
-	currentKind  string
-	inAnomalyRun bool
+	// awaitingViewSince is the first round of a blocked run every round of
+	// which the view refused only for not carrying the Query Group yet: the
+	// wait every Worker's start and every move has. Zero once any round of
+	// the run was refused for something else, which blockedNotWaiting then
+	// keeps for the rest of the run: a run alternating the wait with another
+	// refusal is not a wait, and restarting the clock on each wait would
+	// keep it off every line.
+	awaitingViewSince time.Time
+	blockedNotWaiting bool
+	currentKind       string
+	inAnomalyRun      bool
 	// determined records that at least one round said something conclusive
 	// about this object. Until it does, the replica cannot report the object as
 	// healthy: an empty anomaly list is what a freshly restarted tracker looks
@@ -802,6 +811,8 @@ type Tracker struct {
 	replica        string
 	degradedRounds int
 	blockedRounds  int
+	// awaitingViewBound is SetAwaitingViewBound's.
+	awaitingViewBound time.Duration
 	// emptyEveryRoundAfter is how long an object that never returned records
 	// must have completed every round empty before NoData lists it as such;
 	// noDataAfter how long one that did must have gone without them.
@@ -867,6 +878,16 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		startedAt:            now(),
 		groups:               make(map[string]*queryGroupState),
 	}
+}
+
+// SetAwaitingViewBound is how long a Query Group may wait for its Worker's
+// view to carry it before the wait is listed: the deployment's own timings,
+// derived by the caller. Zero lists the wait as any blocked run, after
+// DefaultBlockedRounds rounds.
+func (tracker *Tracker) SetAwaitingViewBound(bound time.Duration) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	tracker.awaitingViewBound = bound
 }
 
 // SetPlatformNoDataHorizon tells the tracker how to read the deployment's
@@ -1619,6 +1640,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.degradedRuns++
 		state.currentKind = KindDegradedRun
 		state.reasonCode = completion
+		// The view let a round through: whatever wait there was is over.
+		state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, false
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
 		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
@@ -1778,6 +1801,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// conclusion stays, since nothing completed.
 		if state.currentKind == KindBlockedRun && sourceRefusal(state.reasonCode) {
 			state.currentKind, state.reasonCode, state.blockedRuns = "", "", 0
+			state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, false
 			state.sawSomethingWrong = false
 			// The run is over, so its start is too: a refusal after this
 			// starts its own run and its own streak, not the old one's.
@@ -1813,6 +1837,16 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.blockedRuns++
 		state.currentKind = KindBlockedRun
 		state.reasonCode = runOutcome
+		// The view's one wait, kept apart for as long as it is all the run
+		// is (awaitingViewSince): any other refusal makes the run an
+		// ordinary blocked run until it ends.
+		if runOutcome == "view_not_executable" && observation.AwaitingView && !state.blockedNotWaiting {
+			if state.awaitingViewSince.IsZero() {
+				state.awaitingViewSince = at
+			}
+		} else {
+			state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, true
+		}
 		// The words the Slot source or the view refused the round with. A
 		// round that never ran has no slot_completed to carry them, so the
 		// row said source_error for a Query Group failing the same retention
@@ -1850,6 +1884,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.degradedRuns++
 		state.currentKind = KindDegradedRun
 		state.reasonCode = executeOutcome
+		// The view let the round reach execution: whatever wait there was
+		// is over.
+		state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, false
 		state.sawSomethingWrong = true
 	default:
 		// Rounds that neither completed nor were blocked -- not due, deferred,
@@ -1929,6 +1966,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.sawSomethingWrong = false
 	state.degradedRuns = 0
 	state.blockedRuns = 0
+	state.awaitingViewSince, state.blockedNotWaiting = time.Time{}, false
 	state.inAnomalyRun = false
 	state.currentKind = ""
 	state.reasonCode = ""
@@ -2074,8 +2112,16 @@ func columnOf(state *queryGroupState) string {
 // or the object is exposed by the pool: the one predicate for "is this a
 // row", shared by the list and by the recovery that ends a row.
 func (tracker *Tracker) over(state *queryGroupState) bool {
+	blockedOver := state.blockedRuns >= tracker.blockedRounds
+	if !state.awaitingViewSince.IsZero() && tracker.awaitingViewBound > 0 {
+		// The view's wait is listed by how long it has lasted, not by how
+		// many rounds it took: the Runner asks again within a renewal
+		// interval, so two rounds go by in seconds of a wait the design
+		// expects.
+		blockedOver = tracker.now().Sub(state.awaitingViewSince) >= tracker.awaitingViewBound
+	}
 	over := (state.currentKind == KindDegradedRun && (state.degradedRuns >= tracker.degradedRounds || terminalCompletion(state.lastCompleted))) ||
-		(state.currentKind == KindBlockedRun && state.blockedRuns >= tracker.blockedRounds)
+		(state.currentKind == KindBlockedRun && blockedOver)
 	return over || state.queryCooldown != nil || (state.cooldownExposed && state.inAnomalyRun)
 }
 
@@ -2123,6 +2169,13 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	anomaly.StateAdmissionRefusal = latestStateRefusal(state)
 	anomaly.NoDataTracking = noDataTrackingRows(state, tracker.replica, tracker.startedAt)
 	anomaly.WireFormats = wireFormatRows(state)
+	// Set only by a blocked round and cleared wherever a blocked run ends,
+	// so a row with a wait is a blocked run.
+	if !state.awaitingViewSince.IsZero() {
+		anomaly.AwaitingView = &AwaitingView{Since: state.awaitingViewSince,
+			WaitedSeconds: int64(tracker.now().Sub(state.awaitingViewSince) / time.Second),
+			BoundSeconds:  int64(tracker.awaitingViewBound / time.Second)}
+	}
 	// The holder of the latest round's Slot, when that round gave it up. The
 	// span keeps the word from the completion that wrote it; the row carries
 	// it only while the skip is the latest round -- a round since, run or

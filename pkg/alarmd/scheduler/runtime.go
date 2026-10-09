@@ -754,6 +754,10 @@ func (runner *Runner) runOne(ctx context.Context, admission ExecutionAdmission) 
 			runner.flights.observer.Observe(ctx, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
 				Result: observability.ResultTerminal, RunOutcome: outcome, Attempted: attempted, Err: refusal,
+				// The view's one wait, kept apart from its other refusals:
+				// the fleet reads it here, the line it decides a blocked
+				// round on.
+				AwaitingView: awaitingView(refusal),
 				// Carry the object this round belongs to. Observers that only
 				// merge context fields would otherwise see an anonymous round:
 				// the scheduler path only injects the key into the context for
@@ -976,6 +980,13 @@ func (runner *Runner) runOneTracked(
 func isViewNotExecutable(err error) bool {
 	var notExecutable *ViewNotExecutableError
 	return errors.As(err, &notExecutable)
+}
+
+// awaitingView reports a refusal that is the view's one wait
+// (ViewNotExecutableError.AwaitingView).
+func awaitingView(err error) bool {
+	var notExecutable *ViewNotExecutableError
+	return errors.As(err, &notExecutable) && notExecutable.AwaitingView
 }
 
 // refuseViewNotExecutable ends a round the executable view did not allow,

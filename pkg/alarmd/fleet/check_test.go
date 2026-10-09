@@ -207,8 +207,14 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// answered with no group - because such an object is detecting with
 	// nothing to judge, and the no-data lines would send its owner to a
 	// source that is only at rest (trigger review Dev 7).
-	if got := len(Checks()); got != 39 || len(checkAnswers) != 39 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 38: a new check has to "+
+	// Thirty-nine: AWAITING_VIEW is a rule over a dimension the rows did not
+	// carry before - how long a blocked run whose every round the view
+	// refused only for not carrying the Query Group yet has lasted - because
+	// that wait follows every Worker's start and every move by design, and
+	// filed as DEPENDENCY_DOWN it put a batch of objects there for the
+	// seconds the view took while a wait that really stuck read the same.
+	if got := len(Checks()); got != 40 || len(checkAnswers) != 40 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 40: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -267,8 +273,10 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		// every Plan: bookkeeping interrupted, not detection abandoned.
 		CheckBookkeepingAbandoned: {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED",
 			ExecutionEvidence: &ExecutionEvidence{Kind: "STATE_APPLIED", Reading: "STATE_APPLIED", PlansApplied: 2, PlansTotal: 2}},
-		CheckTimelinePruned:      {Kind: KindDegradedRun, CauseReason: "SCHEDULE_PRUNED"},
-		CheckDependencyDown:      {Kind: KindBlockedRun, ReasonCode: "source_error"},
+		CheckTimelinePruned: {Kind: KindDegradedRun, CauseReason: "SCHEDULE_PRUNED"},
+		CheckDependencyDown: {Kind: KindBlockedRun, ReasonCode: "source_error"},
+		CheckAwaitingView: {Kind: KindBlockedRun, ReasonCode: "view_not_executable",
+			AwaitingView: &AwaitingView{Since: at, WaitedSeconds: 80, BoundSeconds: 75}},
 		CheckDefect:              {Kind: KindBlockedRun, ReasonCode: "panic"},
 		CheckObservationGap:      {Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull},
 		CheckBackendNotAnswering: {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "transport=timeout"}},
