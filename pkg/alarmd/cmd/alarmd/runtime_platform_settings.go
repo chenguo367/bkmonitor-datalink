@@ -101,9 +101,9 @@ func newPlatformBoundPlanner(cfg config.Config, settings *platformsettings.Cache
 // dynamicHostStatusFilter is the host status filter with the states the
 // platform settings copy currently answers. The filter itself is immutable;
 // this holds the one in force and swaps it when the states change, so the
-// access path reads a pointer per plan and never a lock. No filter is in
-// force while the state list is empty, which is the platform saying no host
-// is disabled.
+// access path reads a pointer per plan and never a lock. A filter is always
+// in force: built with one, and an empty state list installs one that
+// disables no host by state.
 type dynamicHostStatusFilter struct {
 	current atomic.Pointer[admission.HostStatusFilter]
 }
@@ -114,14 +114,11 @@ func newDynamicHostStatusFilter(states []string) *dynamicHostStatusFilter {
 	return filter
 }
 
-// Apply installs the filter for states, or none for an empty list, and
-// reports how many states are now in force.
+// Apply installs the filter for states and reports how many states are now in
+// force. An empty list installs a filter all the same: it disables no host by
+// state, and still drops the invalid and unknown hosts Python drops.
 func (filter *dynamicHostStatusFilter) Apply(states []string) int {
-	installed, ok := admission.NewHostStatusFilter(states)
-	if !ok {
-		filter.current.Store(nil)
-		return 0
-	}
+	installed := admission.NewHostStatusFilter(states)
 	filter.current.Store(installed)
 	return len(installed.States())
 }
@@ -129,20 +126,13 @@ func (filter *dynamicHostStatusFilter) Apply(states []string) int {
 // States is what the filter in force decides on, for the surface that
 // reports it.
 func (filter *dynamicHostStatusFilter) States() []string {
-	if current := filter.current.Load(); current != nil {
-		return current.States()
-	}
-	return nil
+	return filter.current.Load().States()
 }
 
 func (*dynamicHostStatusFilter) Name() string { return "host_status" }
 
 func (filter *dynamicHostStatusFilter) Admit(plan admission.PlanContext, facts *admission.Facts) admission.Decision {
-	current := filter.current.Load()
-	if current == nil {
-		return admission.Decision{Admit: true}
-	}
-	return current.Admit(plan, facts)
+	return filter.current.Load().Admit(plan, facts)
 }
 
 // platformSettingsRefresher is what the runtime runs once a minute: read the

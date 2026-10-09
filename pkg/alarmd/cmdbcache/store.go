@@ -78,6 +78,24 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 		refusalsChanged: options.RefusalsChanged}, nil
 }
 
+// CurrentWithinBound is the index in force and whether it is younger than the
+// staleness bound. Admission acts only on an index within it: past it, the
+// CMDB facts are unavailable, admitted by name rather than decided on
+// (decision-013 section 2 #12 and section 5.1 item 4: a whole index that is
+// unavailable or stale is admitted and named host_facts_unavailable), and a
+// rejection made on them would be closed on facts nobody can vouch for.
+func (store *Store) CurrentWithinBound() (*Index, bool) {
+	if store == nil {
+		return nil, false
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	if store.index == nil {
+		return nil, false
+	}
+	return store.index, store.now().Sub(store.index.BuiltAt()) <= store.maxAge
+}
+
 // Current returns the index in force, or nil before the first successful load.
 func (store *Store) Current() *Index {
 	if store == nil {

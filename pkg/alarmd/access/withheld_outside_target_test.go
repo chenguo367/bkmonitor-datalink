@@ -57,10 +57,7 @@ func TestASeriesEveryTargetRefusesOnFullFactsIsCountedAsOutsideTheTarget(t *test
 // A refusal for a reason other than the target - a host whose monitoring is
 // off - is withheld data, not data outside the target.
 func TestAHostStatusRefusalIsWithheldButNotOutsideTheTarget(t *testing.T) {
-	filter, installed := admission.NewHostStatusFilter([]string{"spare"})
-	if !installed {
-		t.Fatal("host status filter not installed")
-	}
+	filter := admission.NewHostStatusFilter([]string{"spare"})
 	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, stateFuller{state: "spare"}},
 		[]admission.Filter{filter, admission.TargetScopeFilter{}})
 	got := withheldCompletion(t, chain, map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"7"`)},

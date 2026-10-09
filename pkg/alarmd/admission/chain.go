@@ -95,6 +95,15 @@ type Facts struct {
 	// resolve. A series whose host is unknown is not the same as one with no
 	// host dimensions, and filters need to tell them apart.
 	HostResolved bool
+	// HostUnresolved records that the record named a host - by a true id, by
+	// an address or its alias, or by a service instance - and the cache
+	// placed it nowhere: no branch of Python's fuller order found the host
+	// the record is about. It is what keeps a target rejection from being a
+	// verdict: a host the cache has not learned yet, or has lost, may well
+	// be inside the target (decision-024, "the cache must be trusted"). It
+	// differs from !HostResolved, which is also false for a record that
+	// names no host at all.
+	HostUnresolved bool
 	// HostState is the CMDB operational state, for the filter that acts on it.
 	HostState string
 	// HostBusinessID is the business the resolved host belongs to.

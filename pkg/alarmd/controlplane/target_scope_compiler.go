@@ -73,17 +73,10 @@ const (
 // may end up without one. The query configurations are read for the object
 // identity pairs an OBJECT_MODEL_INST condition is matched by.
 func compileTargetScope(target [][]legacyTargetCondition, queryConfigs []json.RawMessage) (*contract.TargetScopeV2, error) {
-	if len(target) == 0 {
-		return nil, nil
-	}
-	stated := false
-	for _, group := range target {
-		if len(group) > 0 {
-			stated = true
-			break
-		}
-	}
-	if !stated {
+	// Python builds no target condition when the target is missing or its
+	// first group is empty (item.py:123-126), whatever the groups after it
+	// say: only target[0] is looked at.
+	if len(target) == 0 || len(target[0]) == 0 {
 		return nil, nil
 	}
 
@@ -131,14 +124,13 @@ func compileTargetScope(target [][]legacyTargetCondition, queryConfigs []json.Ra
 func compileTargetCondition(
 	condition legacyTargetCondition,
 ) (contract.TargetScopeField, contract.TargetScopeMethod, []string, error) {
-	method := contract.TargetScopeInclude
-	switch strings.ToLower(strings.TrimSpace(condition.Method)) {
-	case "eq", "":
+	// Python matches a condition as "eq" only when its method, lower-cased
+	// and not trimmed, is exactly that, and as an exclusion otherwise
+	// (target.py:41,147-150): "neq", an empty method, " eq" and any other
+	// word all exclude.
+	method := contract.TargetScopeExclude
+	if strings.ToLower(condition.Method) == "eq" {
 		method = contract.TargetScopeInclude
-	case "neq":
-		method = contract.TargetScopeExclude
-	default:
-		return "", "", nil, fmt.Errorf("TARGET_SCOPE_UNSUPPORTED: target condition method %q", condition.Method)
 	}
 
 	field := strings.ToLower(strings.TrimSpace(condition.Field))

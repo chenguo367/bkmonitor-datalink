@@ -231,7 +231,10 @@ func TestAnUnreadableSelectorPausesAbsenceAndNotTheStaticMembers(t *testing.T) {
 	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}
 	filter := admission.TargetPlanFilter{}
 	record := func(host string) *admission.Facts {
-		return &admission.Facts{Dimensions: map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"` + host + `"`)}}
+		dimensions := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"` + host + `"`)}
+		facts := &admission.Facts{Dimensions: dimensions}
+		admission.IdentityFuller{}.Fill(dimensions, facts)
+		return facts
 	}
 	context := admission.PlanContext{TargetPlan: &admission.TargetPlanContext{Identity: identity, Members: target}}
 	if decision := filter.Admit(context, record("101")); !decision.Admit {
@@ -270,7 +273,9 @@ func TestAnUnavailableResolutionRefusesOutsideItsMembersAsNotKnown(t *testing.T)
 			t.Fatalf("%s selector: Unavailable() = %v", state, target.Unavailable())
 		}
 		plan := admission.PlanContext{TargetPlan: &admission.TargetPlanContext{Identity: identity, Members: target}}
-		record := &admission.Facts{Dimensions: map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"303"`)}}
+		dimensions := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"303"`)}
+		record := &admission.Facts{Dimensions: dimensions}
+		admission.IdentityFuller{}.Fill(dimensions, record)
 		if decision := (admission.TargetPlanFilter{}).Admit(plan, record); decision.Admit || decision.Reason != want {
 			t.Fatalf("%s selector: host outside the members = %+v, want refused as %s", state, decision, want)
 		}

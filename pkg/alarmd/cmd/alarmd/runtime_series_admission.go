@@ -228,25 +228,7 @@ func publishCMDBBusinessMappings(recorder *metric.Recorder, health cmdbcache.Hea
 	for mapping, stats := range map[string]cmdbcache.MappingStats{
 		"bcs_cluster": health.ClusterBusinessMapping, "bcs_namespace": health.NamespaceBusinessMapping,
 	} {
-		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed, stats.Emptied)
-	}
-}
-
-// groupEmptiedLogger writes the line the group store asks for when the
-// groups it holds back from an emptying judged the source's change in
-// number: a hold starting or growing is a warning with the groups held and
-// the groups that had members; the hold ending is said once too.
-func groupEmptiedLogger(logger *observability.Logger) func(held, candidates int) {
-	if logger == nil {
-		return nil
-	}
-	return func(held, candidates int) {
-		attributes := []slog.Attr{slog.Int("held", held), slog.Int("had_members", candidates)}
-		if held == 0 {
-			logger.Info("target_group", "emptied_released", 0, 0, attributes...)
-			return
-		}
-		logger.Warn("target_group", "emptied_held", held, 0, attributes...)
+		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed, stats.Missing)
 	}
 }
 
@@ -307,7 +289,6 @@ func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcac
 	}
 	groups, err := cmdbcache.NewGroupStore(reader, cmdbcache.GroupStoreOptions{
 		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound, ReadBound: readBound,
-		EmptiedChanged: groupEmptiedLogger(logger),
 	})
 	if err != nil {
 		return nil, nil, err

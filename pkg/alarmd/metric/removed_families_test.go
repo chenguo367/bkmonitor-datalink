@@ -10,6 +10,7 @@
 package metric
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // removedFamilies are families taken out because nothing read them: their
@@ -98,6 +100,17 @@ var removedLabelValues = []struct {
 	{"catalog_objects", "disposition", "CONFIG_NORMALIZED", false},
 	{"catalog_withheld_objects", "disposition", "CONFIG_NORMALIZED", false},
 	{"fleet_checks", "code", "CONFIG_NORMALIZED", false},
+	// A dynamic group whose writer states it empty is a normal empty answer
+	// (decision-017 section 4, the E ruling); nothing holds the read back a
+	// writer cycle or as a share of groups emptying (user, 10-08). The words
+	// for a held read go with the hold.
+	{"target_group_groups", "state", "emptied_pending", false},
+	{"target_group_groups", "state", "emptied_held", false},
+	{"target_selector_resolutions_total", "reason", "emptied_held", false},
+	// A business mapping the writer did not publish is named missing and its
+	// last entries carried within the staleness bound; "emptied" claimed the
+	// writer had emptied it, which a missing key cannot say.
+	{"cmdb_index_business_mappings", "state", "emptied", true},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -120,6 +133,30 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		return sides
 	})
 	r.SetTargetScopeCloseSource(everything)
+	for _, removed := range removedLabelValues {
+		if removed.family == "cmdb_index_business_mappings" {
+			r.SetCMDBBusinessMapping("bcs_cluster", 1, 0, 0, false, true)
+		}
+	}
+	// The target group store's states and the selector reasons are closed
+	// lists the recorder applies, so the guard hands it the removed words.
+	r.SetTargetGroupSource(func() TargetGroupReading {
+		groups := map[string]int{}
+		for _, removed := range removedLabelValues {
+			groups[removed.value] = 1
+		}
+		return TargetGroupReading{Groups: groups}
+	})
+	var selectors []observability.TargetSelectorFacts
+	for _, removed := range removedLabelValues {
+		if removed.family == "target_selector_resolutions_total" {
+			selectors = append(selectors, observability.TargetSelectorFacts{Kind: "dynamic_group", State: "Unavailable", Reason: removed.value})
+		}
+	}
+	r.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentAccess, Stage: observability.StageTargetResolved,
+		TargetResolution: &observability.TargetResolutionFacts{StrategyID: "1", State: "Unavailable", Selectors: selectors},
+	})
 	// The catalog's and the fleet's families are filled by their producers'
 	// closed lists, so the guard drives those: an object recorded under a
 	// removed disposition is composed by the control plane, and the check

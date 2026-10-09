@@ -179,6 +179,17 @@ func TestAGroupDocumentIsReadPerTheProtocolAndKeyedPerThePlan(t *testing.T) {
 	if empty.Unavailable != "" || len(empty.Members) != 0 || empty.Dropped != 0 {
 		t.Fatalf("an explicit empty member list = %+v, want a usable empty snapshot", empty)
 	}
+	// A summary listing instances no member carries contradicts the list: the
+	// list lost members, so each is counted dropped and the group is not a
+	// normal empty one (decision-017 section 4, E).
+	contradicted := decodeGroup("1", []byte(`{"model_id":"cw-Host","model_inst_ids":["1","2"],"member_list":[]}`), time.Unix(1000, 0))
+	if contradicted.Unavailable != "" || len(contradicted.Members) != 0 || contradicted.Dropped != 2 {
+		t.Fatalf("an empty member list under a summary of two = %+v, want two dropped", contradicted)
+	}
+	short := decodeGroup("1", []byte(`{"model_id":"cw-Host","model_inst_ids":["1","2"],"member_list":[{"model_id":"cw-Host","model_inst_id":"1","bk_host_id":1}]}`), time.Unix(1000, 0))
+	if len(short.Members) != 1 || short.Dropped != 1 {
+		t.Fatalf("a member list one short of its summary = %+v, want one kept and one dropped", short)
+	}
 }
 
 // The store reads a group the first time it is asked for it, then on its

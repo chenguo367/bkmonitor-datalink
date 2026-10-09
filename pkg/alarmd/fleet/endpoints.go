@@ -171,7 +171,7 @@ type WriterEvidence struct {
 	// State is the reader's own reading of the copy, in the reader's closed
 	// words, when it keeps one: never_loaded, index_stale, index_empty for the
 	// host cache; not_configured, authoritative and the like for the settings
-	// copy; no_groups_referenced, loaded, emptied_held and refresh_failed for
+	// copy; no_groups_referenced, loaded and refresh_failed for
 	// the target groups. Empty where the reader keeps no such state.
 	State string `json:"state,omitempty"`
 	// Refused is what the reader read of the writer's records and could not

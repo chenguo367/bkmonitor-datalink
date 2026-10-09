@@ -76,6 +76,7 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	for _, node := range plan.DynamicTopologies {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node, index))
 	}
+	resolver.markServedPastAFailedRefresh(plan, resolution.Selectors, index, readErr)
 	if plan.HasExclusions() {
 		exclusion := resolver.resolveExclusions(plan, index, readErr, groupExclusions)
 		resolution.Excluded = exclusion.Members
@@ -86,6 +87,43 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	}
 	resolution.Compose()
 	return resolution
+}
+
+// markServedPastAFailedRefresh says, on every selector answered from the host
+// index, that the index was served past a refresh that failed: the answer
+// is the snapshot before, younger than the bound but not the latest the
+// writer has (decision-017 section 3.2, resolved_from_stale_snapshot, the
+// same rule the group selectors follow). A resolution carrying it is no
+// verdict for the target-scope close (decision-024: facts not current are
+// not closed on). Exclusions are judged separately, with the error itself.
+//
+// The static and topology selectors are answered from the index; so is a
+// group under an ip_cloud plan, whose member hosts become addresses through
+// it - a member readdressed since is still at its old address there.
+func (resolver *TargetResolver) markServedPastAFailedRefresh(plan *contract.TargetPlanV1, selectors []targetplan.SelectorResult, index *Index, readErr error) {
+	if readErr == nil || index == nil {
+		return
+	}
+	age := resolver.now().Sub(index.BuiltAt())
+	if age <= 0 {
+		age = time.Nanosecond
+	}
+	for i := range selectors {
+		switch selectors[i].Kind {
+		case targetplan.SelectorKindStatic, targetplan.SelectorKindTopology:
+		case targetplan.SelectorKindGroup:
+			if plan.Rule != contract.TargetPlanRuleIPCloud {
+				continue
+			}
+		default:
+			continue
+		}
+		if selectors[i].State == targetplan.SelectorOK || selectors[i].State == targetplan.SelectorOKEmpty {
+			if selectors[i].StaleAge < age {
+				selectors[i].StaleAge = age
+			}
+		}
+	}
 }
 
 // excludedGroupFacts holds only the plan's excluded canonical members, for
@@ -102,9 +140,6 @@ func (facts *excludedGroupFacts) add(plan *contract.TargetPlanV1, lookup GroupLo
 	switch {
 	case result.State != targetplan.SelectorOK && result.State != targetplan.SelectorOKEmpty:
 		facts.reason = result.Reason
-		return
-	case lookup.EmptiedHeld:
-		facts.reason = targetplan.ReasonEmptiedHeld
 		return
 	case lookup.RefreshFailed:
 		facts.reason = targetplan.ReasonReadFailed
@@ -244,9 +279,6 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 		return result
 	case lookup.Age > resolver.groups.MaxAge():
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonStale
-		if lookup.EmptiedHeld {
-			result.Reason = targetplan.ReasonEmptiedHeld
-		}
 		return result
 	case snapshot.ModelID != plan.ModelID:
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelMismatch
@@ -418,10 +450,25 @@ func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, nod
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
 		return result
 	}
-	if !answer.NodeKnown {
-		// A node the topology cache does not list: dangling configuration,
-		// named as such. Zero members either way; for absence it is a
-		// resolved, empty answer, and the name is what tells it apart.
+	switch {
+	case len(answer.Hosts) > 0:
+		// The host cache places hosts under the node: it exists and these
+		// are its hosts, whatever the topology cache lists.
+	case answer.HostedElsewhere:
+	case answer.NodeKnown:
+	case index.TopologyNodes() == 0:
+		// The topology cache listed no node at all. A missing hash reads as
+		// no node, and it is not a published topology (decision-017 section
+		// 4, E: a missing hash does not prove an empty set was published),
+		// so no node is known to be gone. No host is under this one either:
+		// zero members, kept from being a verdict as an incomplete answer.
+		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonIndexIncomplete
+		return result
+	default:
+		// A node the topology cache does not list and no host sits under:
+		// dangling configuration, named as such. Zero members either way;
+		// for absence it is a resolved, empty answer, and the name is what
+		// tells it apart.
 		result.NodeMissing = true
 		result.State, result.Reason = targetplan.SelectorOKEmpty, targetplan.ReasonNodeMissing
 		return result
