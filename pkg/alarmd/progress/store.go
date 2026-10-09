@@ -388,6 +388,7 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 			ReasonCode:        request.Completion.ReasonCode,
 			Contract:          request.Completion.Contract,
 			TargetResolutions: request.Completion.TargetResolutions,
+			Empty:             emptyRoundOf(request.Completion.Primary, request.ContentScope),
 		}}
 	if !missing {
 		next.LastFullSlot = current.LastFullSlot
@@ -641,6 +642,18 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 		return nil, execution.ErrExpiredRangeProofTooLarge
 	}
 	return raw, err
+}
+
+// emptyRoundOf is what a whole, empty primary said about its emptiness, with
+// the content the round ran under; nil when it said nothing, so the record
+// carries nothing for it.
+func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string) *execution.EmptyRoundSummary {
+	if primary == nil || primary.Completeness != execution.CompletenessFull || primary.DataState != execution.DataStateEmpty ||
+		!primary.QuietWhenEmpty && !primary.EmptiedByTarget {
+		return nil
+	}
+	return &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
+		ContentScope: contentScope}
 }
 
 func decode(raw []byte) (execution.ScheduleProgress, error) {

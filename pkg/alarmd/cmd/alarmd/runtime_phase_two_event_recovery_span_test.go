@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -61,6 +63,14 @@ type eventSpanCase struct {
 	// native publishes the alert consumer's protocol, on which a RECOVERY
 	// asks the open-alert gate; the compatibility protocol is not gated.
 	native bool
+	// editAtTakeover widens every Level's recovery window by one while no
+	// process runs: the second process owns other content than the one the
+	// first wrote its record under, on the same Query Group.
+	editAtTakeover bool
+	// readRestored reads the second process's own row for the Plan's object
+	// after it takes the Plan over and before it runs a round: what it
+	// restored from the record, not anything it watched.
+	readRestored bool
 }
 
 // eventSpanRounds is what each round of a run did.
@@ -74,6 +84,9 @@ type eventSpanRounds struct {
 	gates   map[int][]observability.OpenAlertGateFact
 	written []contract.TriggerEventV1
 	ranges  [][2]int64
+	// restored is the second process's row kind before its first round
+	// (readRestored), empty when the object is on no line.
+	restored string
 }
 
 func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
@@ -98,27 +111,31 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 	if levels == nil {
 		levels = [][2]int{{2, 3}}
 	}
-	detects, algorithms := []any{}, []any{}
-	for index, windows := range levels {
-		detects = append(detects, map[string]any{"level": index + 1, "priority": 1, "connector": "and",
-			"trigger_config": map[string]any{"count": 1, "check_window": windows[0]}, "recovery_config": map[string]any{"check_window": windows[1]}})
-		algorithms = append(algorithms, map[string]any{"level": index + 1, "type": "Threshold", "config": threshold})
+	writeStrategy := func(recoveryWider int) {
+		detects, algorithms := []any{}, []any{}
+		for index, windows := range levels {
+			detects = append(detects, map[string]any{"level": index + 1, "priority": 1, "connector": "and",
+				"trigger_config":  map[string]any{"count": 1, "check_window": windows[0]},
+				"recovery_config": map[string]any{"check_window": windows[1] + recoveryWider}})
+			algorithms = append(algorithms, map[string]any{"level": index + 1, "type": "Threshold", "config": threshold})
+		}
+		document["detects"], item["algorithms"] = detects, algorithms
+		if run.native {
+			// The consumer's protocol names the alert by the frozen revision.
+			document["strategy_revision"] = 1 + recoveryWider
+		}
+		body, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Set(ctx, "alarm-config.strategy_ids", "[7201]", 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.Set(ctx, "alarm-config.strategy_7201", body, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	document["detects"], item["algorithms"] = detects, algorithms
-	if run.native {
-		// The consumer's protocol names the alert by the frozen revision.
-		document["strategy_revision"] = 1
-	}
-	body, err := json.Marshal(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Set(ctx, "alarm-config.strategy_ids", "[7201]", 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Set(ctx, "alarm-config.strategy_7201", body, 0).Err(); err != nil {
-		t.Fatal(err)
-	}
+	writeStrategy(0)
 
 	const period = int64(60)
 	base := controlledG4Base(t)
@@ -229,7 +246,14 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 			if err := bundle.Shutdown(ctx); err != nil {
 				t.Fatal(err)
 			}
+			if run.editAtTakeover {
+				writeStrategy(1)
+			}
+			clock.Store(base + int64(current)*period + 1)
 			bundle = open()
+			if run.readRestored {
+				result.restored = restoredRowKind(t, ctx, bundle)
+			}
 		}
 		mu.Lock()
 		round = current
@@ -455,5 +479,65 @@ func TestAnUngroupedEventCountAnsweredWithNothingIsNoDataNotQuiet(t *testing.T) 
 	}
 	if len(kinds) != 1 || kinds[0] != fleet.KindNoData {
 		t.Fatalf("the fleet lists %v, want the one object as no data", kinds)
+	}
+}
+
+// restoredRowKind is the kind of the row a process that has just taken the
+// Plan over publishes for its object, before it runs a round: it waits for
+// the assignment to reach the process, publishes once - which restores what
+// it owns from the records - and reads the object back from its own API.
+func restoredRowKind(t *testing.T, ctx context.Context, bundle *phaseTwoWorkerBundle) string {
+	t.Helper()
+	settleExecutableView(ctx, bundle, 10*time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	var owned []execution.QueryGroupIdentity
+	for owned = bundle.ownedQueryGroups(); len(owned) == 0 && time.Now().Before(deadline); owned = bundle.ownedQueryGroups() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(owned) != 1 {
+		t.Fatalf("the process that took the Plan over owns %v, want its one object", owned)
+	}
+	bundle.dependencies.PublishFleet(ctx)
+	recorder := httptest.NewRecorder()
+	bundle.dependencies.FleetAPI.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/objects/"+string(owned[0]), nil))
+	var body struct {
+		Anomaly *struct {
+			Kind string `json:"kind"`
+		} `json:"anomaly"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode the object route: %v (%s)", err, recorder.Body.String())
+	}
+	if body.Anomaly == nil {
+		return ""
+	}
+	return body.Anomaly.Kind
+}
+
+// A daily event count at rest reads quiet from the moment the replica that
+// takes it over restores it, not a day later at its first round there: the
+// record's last empty round said so, under the content the new owner runs.
+// Here the event is at round 0 with N = 2, R = 3, rounds 5 and 6 are quiet,
+// and a second process takes the Plan over at round 7 and is read before it
+// runs. With the recovery window widened while no process ran, the Plan
+// runs other content on the same Query Group, and the record's word is not
+// restored: the row waits for the first round, as before.
+func TestAnEventCountAtRestIsQuietOnRestoreUnderTheSameContent(t *testing.T) {
+	run := runGroupedEventCount(t, eventSpanCase{takeover: 7, rounds: 8, readRestored: true})
+	if !run.quiet[5] || !run.quiet[6] {
+		t.Fatalf("rounds 5 and 6 are not quiet before the takeover (rounds %v)", run.quiet)
+	}
+	if run.restored != fleet.KindQuiet {
+		t.Fatalf("the process that took the Plan over reads %q before its first round, want %s", run.restored, fleet.KindQuiet)
+	}
+	edited := runGroupedEventCount(t, eventSpanCase{takeover: 7, rounds: 8, readRestored: true, editAtTakeover: true})
+	if !edited.quiet[5] || !edited.quiet[6] {
+		t.Fatalf("rounds 5 and 6 are not quiet before the edit (rounds %v)", edited.quiet)
+	}
+	if edited.restored == fleet.KindQuiet {
+		t.Fatal("a record written under other content restored quiet before the first round under the new content")
+	}
+	if !edited.quiet[7] {
+		t.Fatalf("round 7 under the new content is not quiet (rounds %v)", edited.quiet)
 	}
 }

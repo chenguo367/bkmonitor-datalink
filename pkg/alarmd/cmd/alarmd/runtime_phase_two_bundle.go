@@ -1353,7 +1353,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// currently owns, which only the bundle knows.
 	publisher = fleetPublisher{
 		tracker: fleetTracker, store: fleetStore, replica: cfg.PhaseTwo.Worker.ID,
-		owned: bundle.ownedQueryGroups, now: external.Now,
+		owned: bundle.ownedQueryGroups, now: external.Now, contentScope: bundle.ownedContentScope,
 		// Captured once, here, rather than read per publish. It is the ceiling
 		// on every duration this replica reports, and a ceiling that moves is
 		// not one.
