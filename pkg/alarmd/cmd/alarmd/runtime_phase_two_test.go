@@ -772,8 +772,15 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 	// goroutine keeps running and keeps receiving ticks while the dispatcher
 	// does nothing. Progress also wins a tie with a tick, which the select
 	// alone does not promise.
+	//
+	// Ticks still count while the process runs but the dispatcher is not
+	// scheduled: with the machine's cores taken by the suites beside it, this
+	// goroutine wakes for its ticks and the dispatcher's sweep does not get
+	// the CPU to finish. Five seconds of that failed the gate on a machine at
+	// a load of thirty, and the test passed five runs of five alone. The
+	// stall bound is the one every event wait in this package gets.
 	const tick = 100 * time.Millisecond
-	const stallTicks = 50
+	const stallTicks = int(eventWatchdog / tick)
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	deadline := time.NewTimer(2 * signalWaitBound)
