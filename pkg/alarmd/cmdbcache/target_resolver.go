@@ -23,28 +23,43 @@ import (
 // the admission filter and the no-data round read that one value.
 type TargetResolver struct {
 	groups *GroupStore
-	hosts  *Store
-	now    func() time.Time
+	stores StoreSource
+	// hosts is the store of the tenant whose Plan is being resolved, set on
+	// the copy ResolveFor resolves with.
+	hosts *Store
+	now   func() time.Time
 }
 
 // NewTargetResolver builds the resolver. Either source may be nil: a
 // deployment without a group prefix has no group store, and every group
 // selector then resolves unavailable by name (source_unwired) rather than
 // empty.
-func NewTargetResolver(groups *GroupStore, hosts *Store, now func() time.Time) *TargetResolver {
+func NewTargetResolver(groups *GroupStore, hosts StoreSource, now func() time.Time) *TargetResolver {
 	if now == nil {
 		now = time.Now
 	}
-	return &TargetResolver{groups: groups, hosts: hosts, now: now}
+	return &TargetResolver{groups: groups, stores: hosts, now: now}
 }
 
-// Resolve answers one plan for one Slot. The interval is the Plan's
+// Resolve answers one plan of the default tenant for one Slot (ResolveFor).
+func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
+	return resolver.ResolveFor(ctx, "", plan, interval)
+}
+
+// ResolveFor answers one plan of a tenant for one Slot, against that
+// tenant's host index: the tenant is the Plan's, which a target plan names
+// itself only under its ip_cloud rule. The interval is the Plan's
 // evaluation period; a group it references is kept for twice that without
 // being asked, so the Plan never reads on its Slot for a group that aged
 // out between two of its Slots.
-func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
+func (resolver *TargetResolver) ResolveFor(ctx context.Context, tenant string, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
 	if plan == nil {
 		return nil
+	}
+	if resolver != nil && resolver.stores != nil {
+		bound := *resolver
+		bound.hosts = resolver.stores.For(tenant)
+		resolver = &bound
 	}
 	resolution := &targetplan.Resolution{Static: make(map[string]struct{}, len(plan.StaticKeys))}
 	// Pin the host snapshot so included and excluded identities cannot map

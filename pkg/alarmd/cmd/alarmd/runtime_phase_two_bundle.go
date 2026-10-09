@@ -717,8 +717,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// One lookup over the CMDB index for both readers of a host's business -
 	// the no-data roster and a global business Plan's event attribution -
 	// and for the cluster mapping read in the same snapshot.
-	hostBusiness := cmdbcache.NewHostBusinessLookup(cmdbIndex)
-	evaluator.WithBusinessAttribution(businessAttributionLookups(hostBusiness), recorder.ObserveEventBusinessAttribution)
+	hostBusiness := tenantHostLookup{cmdbcache.NewHostBusinessLookup(cmdbIndex)}
+	evaluator.WithBusinessAttribution(businessAttributionLookups(hostBusiness.HostBusinessLookup), recorder.ObserveEventBusinessAttribution)
 	sequencer, err := worker.NewKeyedSideEffectSequencer(cfg.PhaseTwo.Coordinator.MaxSequencerReservations)
 	if err != nil {
 		return nil, err
@@ -1388,7 +1388,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		leaderRound:      bundle.leaderRoundFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
-		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
+		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex.Default(), platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
 			linkd.Console, linkd.Location, external.Now), groupStore, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
@@ -1815,9 +1815,23 @@ func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
 // businessAttributionLookups is what a global business Plan's events are
 // attributed through: the host business and the published cluster and
 // namespace mappings, all answered from the one CMDB index lookup, so a host,
-// a cluster and a namespace are never attributed from two snapshots.
+// a cluster and a namespace are never attributed from two snapshots - the
+// index of the event's tenant.
 func businessAttributionLookups(index *cmdbcache.HostBusinessLookup) admission.BusinessLookups {
-	return admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index, Addresses: index}
+	lookups := admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index, Addresses: index}
+	lookups.Tenant = func(tenant string) admission.BusinessLookups {
+		bound := index.ForTenant(tenant)
+		return admission.BusinessLookups{Hosts: bound, Clusters: bound, Namespaces: bound, Addresses: bound}
+	}
+	return lookups
+}
+
+// tenantHostLookup is the host lookup as the worker's port: each tenant's
+// Plans are answered from that tenant's index (execution.TenantHostBusiness).
+type tenantHostLookup struct{ *cmdbcache.HostBusinessLookup }
+
+func (lookup tenantHostLookup) ForTenant(tenant string) execution.HostBusiness {
+	return lookup.HostBusinessLookup.ForTenant(tenant)
 }
 
 // controlLeaderSteppedDown is what losing the Control Leader authority takes

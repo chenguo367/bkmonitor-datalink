@@ -27,24 +27,27 @@ import (
 // writes, because a dimension that follows CMDB changes the alert's identity
 // every time CMDB does.
 type HostTopologyFuller struct {
-	store *Store
+	stores StoreSource
 	// acceptStale places on an index past its staleness bound, for a reader
 	// that labels rather than decides (attribution); admission does not.
 	acceptStale bool
 }
 
-func NewHostTopologyFuller(store *Store) *HostTopologyFuller {
-	return &HostTopologyFuller{store: store}
+// NewHostTopologyFuller places records against the host index of the tenant
+// each is read for (Facts.TenantID).
+func NewHostTopologyFuller(stores StoreSource) *HostTopologyFuller {
+	return &HostTopologyFuller{stores: stores}
 }
 
 func (*HostTopologyFuller) Name() string { return "cmdb_host_topology" }
 
 func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, facts *admission.Facts) {
-	if fuller == nil || fuller.store == nil {
+	store := fuller.tenantStore(facts.TenantID)
+	if store == nil {
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
-	index, unusable := fuller.store.Usable()
+	index, unusable := store.Usable()
 	if unusable != "" && !(fuller.acceptStale && unusable == IndexStale) {
 		// Never loaded, past the staleness bound, or empty (Store.judge). A
 		// filter that acts on "CMDB does not know this host" has to tell that
@@ -113,6 +116,15 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	// Named, and placed by nothing: an id, an address or alias, or an
 	// instance the cache did not find.
 	facts.HostUnresolved = unknownID || agent != "" || address != "" || len(facts.ServiceInstanceKeys()) > 0
+}
+
+// tenantStore is the store of the tenant a record is read for, nil when
+// there is none to read.
+func (fuller *HostTopologyFuller) tenantStore(tenant string) *Store {
+	if fuller == nil || fuller.stores == nil {
+		return nil
+	}
+	return fuller.stores.For(tenant)
 }
 
 // placeByAgent is Python's host-by-agent branch, which is its host-by-id
@@ -228,12 +240,14 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 // overwritten values. Here those become facts: the topology attribute, the
 // host identity attribute and HostNaming change; the dimensions do not.
 type ServiceInstanceTopologyFuller struct {
-	store       *Store
+	stores      StoreSource
 	acceptStale bool
 }
 
-func NewServiceInstanceTopologyFuller(store *Store) *ServiceInstanceTopologyFuller {
-	return &ServiceInstanceTopologyFuller{store: store}
+// NewServiceInstanceTopologyFuller places instance records against the
+// index of the tenant each is read for.
+func NewServiceInstanceTopologyFuller(stores StoreSource) *ServiceInstanceTopologyFuller {
+	return &ServiceInstanceTopologyFuller{stores: stores}
 }
 
 func (*ServiceInstanceTopologyFuller) Name() string { return "cmdb_service_instance_topology" }
@@ -253,11 +267,15 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		// would otherwise be marked unavailable here.
 		return
 	}
-	if fuller == nil || fuller.store == nil {
+	var store *Store
+	if fuller != nil && fuller.stores != nil {
+		store = fuller.stores.For(facts.TenantID)
+	}
+	if store == nil {
 		facts.MarkFactsUnavailable(admission.FactsUnavailableServiceInstanceIndex)
 		return
 	}
-	index, unusable := fuller.store.Usable()
+	index, unusable := store.Usable()
 	if (unusable != "" && !(fuller.acceptStale && unusable == IndexStale)) || index.ServiceInstances() == 0 {
 		// The same reading as an empty host cache: a series that names an
 		// instance while the instance cache holds none is the signature of a

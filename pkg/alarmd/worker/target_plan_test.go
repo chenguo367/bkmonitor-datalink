@@ -65,7 +65,7 @@ type scriptedTargetResolver struct {
 	resolutions map[string]*targetplan.Resolution
 }
 
-func (resolver *scriptedTargetResolver) Resolve(_ context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
+func (resolver *scriptedTargetResolver) ResolveFor(_ context.Context, _ string, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
 	resolver.calls = append(resolver.calls, plan)
 	resolver.intervals = append(resolver.intervals, interval)
 	return resolver.resolutions[plan.StaticKeys[0]]

@@ -60,7 +60,7 @@ func (e *Evaluator) attributeBusiness(event *contract.TriggerEventV1, plan *stra
 		return
 	}
 	attribution := admission.AttributeBusiness(
-		plan.TargetPlan(), plan.Projection().DimensionFields, event.BusinessID, event.RecordRef.Dimensions, e.lookups,
+		plan.TargetPlan(), plan.Projection().DimensionFields, event.BusinessID, event.RecordRef.Dimensions, e.lookups.For(event.TenantID),
 	)
 	event.AttributedBusinessID = attribution.BusinessID
 	if e.observeAttribution != nil {

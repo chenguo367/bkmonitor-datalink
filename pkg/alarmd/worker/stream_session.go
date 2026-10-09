@@ -1155,7 +1155,7 @@ func (stream *streamedExecution) resolveNoDataRosterHosts() error {
 			continue
 		}
 		stream.noDataHosts[identity] = resolveNoDataHosts(
-			stream.coordinator.ports.Hosts, due.Identity.BusinessID, candidates)
+			execution.HostBusinessFor(stream.coordinator.ports.Hosts, due.Identity.TenantID), due.Identity.BusinessID, candidates)
 	}
 	return nil
 }

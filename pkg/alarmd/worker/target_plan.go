@@ -123,7 +123,7 @@ func (stream *streamedExecution) resolveTargetPlans(ctx context.Context) {
 		var resolution *targetplan.Resolution
 		if resolver != nil {
 			interval := time.Duration(due.CompiledPlan.EvaluationSemantics().EvaluationInterval) * time.Second
-			resolution = resolver.Resolve(ctx, plan, interval)
+			resolution = resolver.ResolveFor(ctx, due.Identity.TenantID, plan, interval)
 		}
 		unresolved := resolution == nil
 		if unresolved {

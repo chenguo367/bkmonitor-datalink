@@ -1029,17 +1029,22 @@ func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderC
 	return completion
 }
 
-// admittedPlans enriches the series once and then decides for each plan it
-// could feed, and says whether every plan refused it as outside its
-// monitoring target, decided on facts that were all there. A nil result means
-// no filtering is installed and every plan is
-// admitted.
+// admittedPlans enriches the series once per tenant among the plans it could
+// feed - the CMDB facts are the plan's tenant's - and then decides for each
+// plan, and says whether every plan refused it as outside its monitoring
+// target, decided on facts that were all there. A nil result means no
+// filtering is installed and every plan is admitted.
 func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool) {
 	if adapter.admission == nil {
 		return nil, false
 	}
 	outside := true
-	facts := adapter.admission.Enrich(seriesDimensions(batch.Dataset))
+	dimensions := seriesDimensions(batch.Dataset)
+	// The plans of one query are one tenant's in practice: the facts are
+	// kept for the last tenant enriched for, and only a plan of another
+	// tenant enriches again.
+	var facts admission.Facts
+	factsTenant, enriched := "", false
 	decisions := make(map[execution.PlanIdentity]bool)
 	for _, requirement := range adapter.query.Requirements {
 		for _, consumer := range requirement.Consumers {
@@ -1057,6 +1062,9 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 					adapter.observe("target_scope", "admitted", "plan_not_indexed")
 				}
 				continue
+			}
+			if !enriched || plan.TenantID != factsTenant {
+				facts, factsTenant, enriched = adapter.admission.EnrichFor(plan.TenantID, dimensions), plan.TenantID, true
 			}
 			admit, filter, reason := adapter.admission.Admit(plan, &facts)
 			decisions[identity] = admit

@@ -90,6 +90,10 @@ type Facts struct {
 	// by the strategy rather than from an attribute filled ahead of time. It
 	// is the caller's map, read and never written.
 	Dimensions map[string]json.RawMessage
+	// TenantID is the tenant the record is read for - its Plan's - and so
+	// whose CMDB cache the fullers read: another tenant's hosts are under
+	// keys of their own. Empty is the default tenant.
+	TenantID string
 	// HostResolved records whether the host the record names was found in CMDB
 	// - the one HostNaming.LookupKey picks, not any identity that happens to
 	// resolve. A series whose host is unknown is not the same as one with no
@@ -292,11 +296,17 @@ func NewChain(fullers []Fuller, filters []Filter) *Chain {
 
 // Enrich derives the facts of one series once.
 func (chain *Chain) Enrich(dimensions map[string]json.RawMessage) Facts {
+	return chain.EnrichFor("", dimensions)
+}
+
+// EnrichFor is Enrich for a record read for a tenant's Plan: the fullers
+// read that tenant's CMDB cache.
+func (chain *Chain) EnrichFor(tenant string, dimensions map[string]json.RawMessage) Facts {
 	// The dimensions are handed to every fuller and kept on the facts by
 	// reference. They are read only: a fuller writes what it learns into
 	// Attributes, never into this map, so the series the fingerprint is
 	// derived from is exactly the series the provider returned.
-	facts := Facts{Dimensions: dimensions}
+	facts := Facts{Dimensions: dimensions, TenantID: tenant}
 	if chain == nil {
 		return facts
 	}
