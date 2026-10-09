@@ -153,6 +153,13 @@ type OwnerSession interface {
 	// discovered: a session without it would leave every batch admitted
 	// against no lease at all, with nothing failing to say so.
 	Deadline() time.Time
+	// NoteContentScope tells the session the content scope of the Slot
+	// about to run, so its renewals say what the holder runs (a holder
+	// already on a pending change's content is not capped at the change).
+	// Required, like Deadline: a session without it would have every
+	// renewal capped at every content change, and the Query Group would
+	// hand itself over on each one with nothing failing to say why.
+	NoteContentScope(string)
 	// ValidateCurrentWithAssignment is ValidateCurrent plus the Assignment
 	// record naming the fence owner, from one store round trip. The Runner
 	// opens every attempt with it and hands the result to the SlotSource, which
@@ -932,6 +939,7 @@ func (runner *Runner) runOneTracked(
 		defer releaseAdmission()
 	}
 	decision = "execute"
+	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	result, err := runner.executor.Execute(executeCtx, request)
 	if err != nil {

@@ -2405,6 +2405,16 @@ func (store *fakePhaseTwoOwnershipStore) Acquire(
 	}, Deadline: at.Add(ttl)}, nil
 }
 
+func (store *fakePhaseTwoOwnershipStore) RenewDeclaring(
+	ctx context.Context,
+	fence execution.OwnerFence,
+	_ string,
+	at time.Time,
+	ttl time.Duration,
+) (ownership.Lease, error) {
+	return store.Renew(ctx, fence, at, ttl)
+}
+
 func (store *fakePhaseTwoOwnershipStore) Renew(
 	_ context.Context,
 	fence execution.OwnerFence,
