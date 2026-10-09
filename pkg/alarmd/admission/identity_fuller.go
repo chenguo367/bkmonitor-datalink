@@ -61,6 +61,17 @@ func (IdentityFuller) Fill(dimensions map[string]json.RawMessage, facts *Facts) 
 		facts.AddHostKey(hostIDText)
 	}
 
+	// A topology condition on a record no fuller placed reads the record's
+	// own bk_obj_id and bk_inst_id (target.py:128-141): log keyword and
+	// CMDB-level series are aggregated by them (strategy.py:348-351). A
+	// fuller that places a host or an instance replaces this with its chain,
+	// as Python's written bk_topo_node takes precedence over the record's.
+	_, objectNamed := dimensions["bk_obj_id"]
+	_, instanceNamed := dimensions["bk_inst_id"]
+	if objectNamed && instanceNamed {
+		facts.SetTopoNodes([]string{dimensionText(dimensions, "bk_obj_id") + "|" + dimensionText(dimensions, "bk_inst_id")})
+	}
+
 	serviceInstance := dimensionText(dimensions, "bk_target_service_instance_id")
 	if serviceInstance == "" {
 		serviceInstance = dimensionText(dimensions, "service_instance_id")
