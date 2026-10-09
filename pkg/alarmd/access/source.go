@@ -54,9 +54,35 @@ func settlingWaitWithinBudget(schedule execution.ScheduleSpec, configured, reser
 // sent: its Slot, its frozen spec, the attempt, when it was ready, and the
 // Slot the frozen schedule has next, which the Runner put on ctx.
 func lookbackQuery(ctx context.Context, request execution.QueryExecutionRequest, spec execution.PhysicalQuerySpec,
-	attemptNo uint32, readyAtUnixMilli int64) lookback.Query {
+	attemptNo uint32, readyAtUnixMilli int64, secondary bool) lookback.Query {
 	return lookback.Query{Contract: request.Contract, Spec: spec, Operation: request.Operation, AttemptNo: attemptNo,
-		ReadyAt: time.UnixMilli(readyAtUnixMilli), FollowingSlot: execution.FollowingSlotOf(ctx)}
+		ReadyAt: time.UnixMilli(readyAtUnixMilli), FollowingSlot: execution.FollowingSlotOf(ctx), Secondary: secondary}
+}
+
+// slotFirstRead is the index in queries of the Slot's first read: the query
+// carrying the Slot's primary requirement with the smallest RequirementID
+// (the h design, section 14). The requirement id, a digest of the relative
+// window and the role, is the same at every Slot, where the queries' own
+// order, by deadline and then by a digest of the absolute window, can change
+// from one Slot to the next. A Slot with no primary requirement, which the
+// plan's validation rules out, has its first query as its first read, so
+// every Slot with a query has exactly one; -1 only for a Slot with none.
+func slotFirstRead(queries []PlannedQuery) int {
+	first, id := -1, execution.RequirementID("")
+	for index, query := range queries {
+		for _, requirement := range query.Requirements {
+			if requirement.Role != execution.InputRolePrimary {
+				continue
+			}
+			if first < 0 || requirement.RequirementID < id {
+				first, id = index, requirement.RequirementID
+			}
+		}
+	}
+	if first < 0 && len(queries) > 0 {
+		return 0
+	}
+	return first
 }
 
 type ReadinessDeferredError struct{ readyAt time.Time }
@@ -200,9 +226,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		}
 		return completeBudgetExhaustedQueries(execution.QueryExecutionCompletion{}, prepared.Queries, request.AttemptNo), nil
 	}
+	firstRead := slotFirstRead(prepared.Queries)
 	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
-		for _, query := range prepared.Queries {
-			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli))
+		for index, query := range prepared.Queries {
+			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli,
+				index != firstRead))
 		}
 	}
 	if readyAt := slotPendingReadiness(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {
@@ -344,7 +372,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			dispatchErr = err
 			break
 		}
-		kept := source.config.Lookback.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli))
+		kept := source.config.Lookback.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli,
+			queryIndex != firstRead))
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()

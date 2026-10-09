@@ -46,11 +46,10 @@ const (
 	EarlierFirstIncomplete = "first_read_incomplete"
 	EarlierOwnerLost       = "owner_lost"
 	EarlierOvertaken       = "overtaken"
-	EarlierMultiQuery      = "multi_query"
 )
 
 var EarlierReadOutcomes = []string{EarlierEqual, EarlierDifferent, EarlierPermitRefused, EarlierMemoryRefused,
-	EarlierReadFailed, EarlierFirstIncomplete, EarlierOwnerLost, EarlierOvertaken, EarlierMultiQuery}
+	EarlierReadFailed, EarlierFirstIncomplete, EarlierOwnerLost, EarlierOvertaken}
 
 // ReadHoldIgnoredReasons count findings that cannot raise a whole-window hold.
 var ReadHoldIgnoredReasons = []string{ClassPartialRevised, IgnoredNoWholeWindowArrival}
@@ -136,7 +135,7 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 // existing sampling rather than an independent query schedule. Begin then
 // continues that reservation even when readiness has been retried.
 func (engine *Engine) Prepare(query Query) {
-	if engine == nil || engine.options.OnEarlierRead == nil || query.Operation != execution.OperationNormal ||
+	if engine == nil || engine.options.OnEarlierRead == nil || query.Operation != execution.OperationNormal || query.Secondary ||
 		query.AttemptNo != 1 || query.Spec.PlanFacts.StepMillis <= 0 || query.Contract.ReadHoldMillis <= 0 || query.ReadyAt.IsZero() {
 		return
 	}
@@ -156,12 +155,8 @@ func (engine *Engine) Prepare(query Query) {
 	state := engine.groupLocked(query, now)
 	if previous := state.prepared; previous != nil {
 		if previous.query.Contract.Slot == query.Contract.Slot {
-			if previous.query.Spec.Digest != query.Spec.Digest {
-				previous.done, previous.outcome, previous.summary = true, EarlierMultiQuery, nil
-				if previous.cancel != nil {
-					previous.cancel()
-				}
-			}
+			// The same Slot prepared again, its readiness deferred and
+			// retried: the reservation stands.
 			engine.mu.Unlock()
 			return
 		}
