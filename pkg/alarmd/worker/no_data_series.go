@@ -356,9 +356,17 @@ func (stream *streamedExecution) evaluateNoData(
 // that matters is the Plan's own: a Slot in which another Plan's query came
 // back partial says nothing about this one.
 func (stream *streamedExecution) noDataCompleteness(due execution.DuePlan) execution.Completeness {
+	// Unavailable outranks partial: whichever order the bindings come in, the
+	// Plan's round is reported as short as its shortest binding.
 	worst := execution.CompletenessFull
 	for _, binding := range planBindings(stream.bindings, due.Identity) {
-		if binding.Completeness != execution.CompletenessFull {
+		switch binding.Completeness {
+		case execution.CompletenessFull:
+		case execution.CompletenessPartial:
+			if worst == execution.CompletenessFull {
+				worst = binding.Completeness
+			}
+		default:
 			worst = binding.Completeness
 		}
 	}
