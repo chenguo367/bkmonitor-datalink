@@ -126,26 +126,42 @@ type BuildRequest struct {
 	// Now is the round's clock, what an absence is measured against. Zero
 	// means the wall clock.
 	Now time.Time
+	// WriterHoldsLastGood is the writer's statement, made about the very
+	// active set this observation read (SourceChangeSignal.HoldsLastGoodFor),
+	// that a strategy leaves the set only for a fact about the strategy
+	// itself and never because publishing it failed. Under it a strategy
+	// absent from the set is gone, and its Plan leaves the Catalog on the
+	// round that finds it absent. Without it the strategy serves
+	// AbsenceGracePeriod first.
+	WriterHoldsLastGood bool
 }
 
 // AbsenceGracePeriod is how long a LastGood strategy absent from the
-// observed active set keeps executing before its Plan leaves the Catalog.
+// observed active set keeps executing before its Plan leaves the Catalog,
+// when the writer of the set makes no statement that it holds the last good
+// document (BuildRequest.WriterHoldsLastGood). A writer that makes the
+// statement removes a strategy only when the strategy is gone, and its
+// absences are removed at once.
 //
-// A period rather than one round because the active set is read from a
-// list another program writes, and that list has been seen to lose entries
-// for minutes at a time with the strategies unchanged: one deployment's
-// hourly full refresh dropped 99 ids for about six and a half minutes every
-// hour, and a one-round grace removed 22 Plans, swept their assignments and
-// re-acquired them five minutes later, with every Slot in between missing
-// and written off as CONFIG_DRIFT - eight percent of the hour blind, for a
-// configuration that never changed. The writer's flutter is the writer's to
-// fix; the reader still must not turn it into a detection gap, because the
-// next writer will flutter too.
+// A period rather than one round because the writer without a statement has
+// been seen to lose entries for minutes at a time with the strategies
+// unchanged: its hourly full refresh dropped 99 ids for about six and a half
+// minutes every hour, and a one-round grace removed 22 Plans, swept their
+// assignments and re-acquired them five minutes later, with every Slot in
+// between missing and written off as CONFIG_DRIFT - eight percent of the
+// hour blind, for a configuration that never changed. The flutter is the
+// writer's bug and the writer's to fix: it deletes a strategy whose business
+// looks missing without asking whether the strategy is enabled, and the next
+// full refresh adds it back.
 //
 // Ten minutes is the observed flutter with room to spare, and a program
 // constant rather than a setting: an operator does not know this number
 // better than the program. What it costs is that a strategy really removed
 // runs for up to ten minutes longer.
+//
+// Transition code. Retire when bk-monitor's strategy cache stops deleting
+// enabled strategies on a missing business
+// (alarm_backends/core/cache/strategy.py:780-784).
 const AbsenceGracePeriod = 10 * time.Minute
 
 type FrozenPlan struct {
@@ -446,10 +462,12 @@ type ObjectDisposition struct {
 	Detail string `json:",omitempty"`
 	// AbsentSince is when a strategy under PENDING_REMOVAL was first found
 	// absent from the observed active set, in Unix seconds; the removal
-	// grace is measured from it. Zero on every other disposition, and on a
-	// PENDING_REMOVAL written by a build before the grace was a period -
-	// which the next build reads as absent since now, so a rollout can only
-	// lengthen a grace, never cut one short.
+	// grace is measured from it, and the REMOVED that ends the grace carries
+	// it on. Zero on every other disposition; on a REMOVED that served no
+	// grace, which the writer's statement removed on the round that found it
+	// absent; and on a PENDING_REMOVAL written by a build before the grace
+	// was a period - which the next build reads as absent since now, so a
+	// rollout can only lengthen a grace, never cut one short.
 	AbsentSince int64 `json:",omitempty"`
 }
 
@@ -546,7 +564,8 @@ type CatalogRetention struct {
 // stand on the previous one's Catalog when each is held still, and names what
 // holds each. An input added here has to be added there:
 //
-//   - Strategies: the observation (held by a skipped read);
+//   - Strategies and WriterHoldsLastGood: the observation and the writer's
+//     statement read with it (both held by a skipped read);
 //   - the round key - OutputProtocol, the planner's round identity,
 //     TargetSources, NoDataPolicy (catalogRoundKey, the candidate cache's own);
 //   - LastGood and PreviousDispositions (held by the activation head and
@@ -723,10 +742,13 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	// Reaching this point means the upstream strategy id list was read
 	// completely; per-source incompleteness is already expressed above through
 	// SourceDisposition. A LastGood strategy absent from the observed set
-	// keeps executing under PENDING_REMOVAL until it has been absent for the
-	// whole grace period, and only then leaves the Catalog with REMOVED. The
+	// leaves the Catalog with REMOVED on this round when the writer states
+	// it holds the last good document: then the strategy is gone. Without
+	// the statement it keeps executing under PENDING_REMOVAL until it has
+	// been absent for the whole grace period, and only then leaves. The
 	// moment it was first found absent travels on the disposition, so every
-	// round of the grace publishes the same audit and the candidate confirms.
+	// round of the grace publishes the same audit and the candidate confirms;
+	// a removal that served no grace carries no moment, for the same reason.
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -749,6 +771,15 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			continue
 		}
 		since, graced := absentSince[sourceID]
+		if request.WriterHoldsLastGood && !activeSetEmpty {
+			removed := ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
+				Disposition: DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"}
+			if graced {
+				removed.AbsentSince = since
+			}
+			catalog.Dispositions = append(catalog.Dispositions, removed)
+			continue
+		}
 		if !graced {
 			since = now.Unix()
 		}

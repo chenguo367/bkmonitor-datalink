@@ -489,9 +489,10 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
 		QueryGroups: previous.QueryGroups,
 	}
-	// The grace is a period, not a round: the active set is a list another
-	// program writes, and it has been seen to lose entries for minutes with
-	// the strategies unchanged. A strategy absent from it keeps executing
+	// The grace is a period, not a round: without a statement that it holds
+	// the last good document, the writer of the active set has been seen to
+	// lose entries for minutes with the strategies unchanged (these rounds
+	// carry no statement, WriterHoldsLastGood false). A strategy absent from it keeps executing
 	// under PENDING_REMOVAL, stamped with when it was first found absent,
 	// until it has been absent for the whole period; only then is it REMOVED.
 	t0 := time.Unix(1_700_000_000, 0)
@@ -592,6 +593,87 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 	// constant cannot be shortened to a round without this case saying so.
 	if controlplane.AbsenceGracePeriod < 2*time.Minute {
 		t.Fatalf("AbsenceGracePeriod = %s: a grace shorter than the observed flutter is the one-round grace back", controlplane.AbsenceGracePeriod)
+	}
+}
+
+// Under the writer's statement that it holds the last good document, a
+// strategy leaves the active set only when it is gone: the round that finds
+// it absent removes its Plan, with no grace and so no moment to carry. One
+// already serving a grace from a round without the statement is removed
+// too, and keeps the moment its grace began.
+func TestBuildCatalogRemovesAnAbsenceAtOnceUnderTheWritersStatement(t *testing.T) {
+	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []json.RawMessage
+	if err := json.Unmarshal(payload, &documents); err != nil {
+		t.Fatal(err)
+	}
+	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
+	both := []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: identity},
+		{SourceID: "1002", Document: documents[1], Identity: identity},
+	}
+	previous, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Strategies: both, Planner: &recordingPlanner{facts: queryFacts(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastGood := &controlplane.PublishedSnapshot{
+		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
+		QueryGroups: previous.QueryGroups,
+	}
+	t0 := time.Unix(1_700_000_000, 0)
+	graced := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+		Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: t0.Unix()}
+	for _, test := range []struct {
+		name         string
+		strategies   []controlplane.SourceStrategy
+		previous     []controlplane.ObjectDisposition
+		wantPlans    []string
+		wantStrategy *controlplane.ObjectDisposition
+	}{
+		{
+			name: "first found absent leaves at once", strategies: both[:1], previous: previous.Dispositions,
+			wantPlans: []string{"1001"}, wantStrategy: &controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"},
+		},
+		{
+			name: "one serving a grace leaves at once with the moment it began", strategies: both[:1],
+			previous:  append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), graced),
+			wantPlans: []string{"1001"}, wantStrategy: &controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: t0.Unix()},
+		},
+		{
+			name: "listed is accepted", strategies: both, previous: previous.Dispositions, wantPlans: []string{"1001", "1002"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
+				LastGood: lastGood, PreviousDispositions: test.previous, Now: t0.Add(time.Minute), WriterHoldsLastGood: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, test.wantPlans) {
+				t.Fatalf("catalog plans=%v, want %v", got, test.wantPlans)
+			}
+			var strategyDispositions []controlplane.ObjectDisposition
+			for _, disposition := range catalog.Dispositions {
+				if disposition.Scope == "STRATEGY" {
+					strategyDispositions = append(strategyDispositions, disposition)
+				}
+			}
+			switch {
+			case test.wantStrategy == nil && len(strategyDispositions) != 0:
+				t.Fatalf("strategy dispositions=%#v, want none", strategyDispositions)
+			case test.wantStrategy != nil && (len(strategyDispositions) != 1 || strategyDispositions[0] != *test.wantStrategy):
+				t.Fatalf("strategy dispositions=%#v, want %#v", strategyDispositions, *test.wantStrategy)
+			}
+		})
 	}
 }
 

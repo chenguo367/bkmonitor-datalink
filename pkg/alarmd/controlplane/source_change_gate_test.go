@@ -375,11 +375,16 @@ func TestAStatementDoesNotCoverStrategyIDsRewrittenInPlace(t *testing.T) {
 	}
 
 	// A writer that makes the statement publishes about the list as it now is.
+	// Under it 1002, which was serving the grace, is gone and leaves at once,
+	// so the round is a change and not a restatement.
 	harness.clock = harness.clock.Add(time.Minute)
 	harness.publish(harness.clock, `[1001]`)
-	harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadChanged, 1)
+	settled := harness.settleAfter(controlplane.SourceReadChanged)
 	if observed := harness.observed(); !observed.HoldsLastGood || len(observed.Strategies) != 1 {
 		t.Fatalf("ObservedSnapshot() after the statement about this list = %+v, want it", observed)
+	}
+	if objects := settled.Composition.Objects; objects[controlplane.DispositionPendingRemoval] != 0 || objects[controlplane.DispositionAccepted] != 1 {
+		t.Fatalf("composition under the statement = %v, want 1001 alone and nothing under the grace", objects)
 	}
 }
 

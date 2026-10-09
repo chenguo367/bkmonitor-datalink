@@ -158,7 +158,10 @@ type sourceRoundMemory struct {
 	readAt time.Time
 	// holdsLastGood is the publisher's statement as it applies to this
 	// observation: made for the change signal read with it, and about the
-	// exact active set the cycle read (holdsLastGoodFor). statement is the
+	// exact active set the cycle read (holdsLastGoodFor). It decides whether
+	// a strategy the set no longer lists serves the removal grace
+	// (BuildRequest.WriterHoldsLastGood), and a round that reuses the
+	// observation reuses it with the documents. statement is the
 	// same verdict as a reader sees it: what was read and why it does not
 	// hold; nil from a source with no statement to read.
 	holdsLastGood bool
@@ -518,7 +521,7 @@ func (reconciler *SourceReconciler) Refresh(
 	}
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
-		PendingAbsences: pendingAbsences, Now: reconciler.now(),
+		PendingAbsences: pendingAbsences, Now: reconciler.now(), WriterHoldsLastGood: reconciler.memory.holdsLastGood,
 		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
 		NoDataPolicy: policy,
 	})

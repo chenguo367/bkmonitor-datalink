@@ -126,9 +126,11 @@ const (
 	dispositionConfigRejected        = "CONFIG_REJECTED"
 	dispositionStaleConfig           = "STALE_CONFIG"
 	dispositionCapabilityUnsupported = "UNSUPPORTED_PHASE2_CAPABILITY"
-	// The source took the strategy out of its active set: the last good
-	// Plan runs one more round under PENDING_REMOVAL, and the round after
-	// that records REMOVED with no Plan. Neither is a refusal.
+	// The source took the strategy out of its active set: under a writer
+	// without a statement the last good Plan runs through the removal grace
+	// under PENDING_REMOVAL, and the round after it records REMOVED with no
+	// Plan; under the writer's statement the first round records REMOVED.
+	// Neither is a refusal.
 	dispositionPendingRemoval = "PENDING_REMOVAL"
 	dispositionRemoved        = "REMOVED"
 	// The item was accepted with a note on its configuration: a part read

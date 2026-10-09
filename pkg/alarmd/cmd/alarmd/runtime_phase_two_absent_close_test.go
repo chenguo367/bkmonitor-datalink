@@ -162,7 +162,7 @@ func newAbsentFixture(t *testing.T, alerts []openalerts.Alert) *absentTestFixtur
 // observation of the source: the earliest a close can be sent.
 func (fixture *absentTestFixture) mature(ctx context.Context) {
 	fixture.loop.step(ctx)
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
@@ -187,7 +187,7 @@ func TestTheAlertsOfAStrategyDeletedBeforeThisProcessSawItAreClosed(t *testing.T
 	if len(fixture.writer.batches) != 0 || fixture.loop.Stats()[absentalerts.OutcomeWithinGrace] != 1 {
 		t.Fatalf("the first round closed, or did not say why it did not: %+v", fixture.loop.Stats())
 	}
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
 	}
@@ -304,7 +304,7 @@ func TestLosingTheControlTermRestartsTheGrace(t *testing.T) {
 	fixture.loop.bundle.controlLeader = false
 	fixture.loop.step(ctx)
 	fixture.loop.bundle.controlLeader = true
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
@@ -331,7 +331,7 @@ func TestALinkWhoseMaintenanceFailedRefusesTheRound(t *testing.T) {
 	fixture.link.pages[0].Health.Error = "discovery_failed"
 	ctx := context.Background()
 	fixture.loop.step(ctx)
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
 	fixture.loop.step(ctx)
 	if len(fixture.writer.batches) != 0 || fixture.loop.Rounds()[absentalerts.RefusalLinkUnhealthy] != 2 {
@@ -371,7 +371,7 @@ func TestASnapshotThatShrankRefusesTheRoundByName(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
 	ctx := context.Background()
 	fixture.loop.step(ctx)
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 40)
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
@@ -392,7 +392,7 @@ func TestASnapshotThatShrankFromAWriterThatHoldsFailuresIsDecidedOn(t *testing.T
 	if fixture.loop.Difference()["writer_holds_last_good"] != 0 {
 		t.Fatalf("a snapshot without the statement was reported as having it: %+v", fixture.loop.Difference())
 	}
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 40)
 	fixture.control.snapshot.HoldsLastGood = true
 	for i := range fixture.link.pages {
@@ -515,7 +515,7 @@ func TestAStatementAboutAnotherStrategyListDoesNotWaiveTheShrinkGate(t *testing.
 		}
 	}
 	later := func() {
-		fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+		fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 		for i := range fixture.link.pages {
 			fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
 		}
@@ -605,7 +605,7 @@ func TestAStrategyWhoseDocumentLostItsTenantKeepsItsAlerts(t *testing.T) {
 	ctx := context.Background()
 	fixture.control.snapshot = withoutTenant(fixture.control.snapshot)
 	fixture.loop.step(ctx)
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = withoutTenant(liveSnapshot("observation-two", fixture.now, 100))
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
