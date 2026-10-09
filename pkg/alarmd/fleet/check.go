@@ -143,9 +143,10 @@ const (
 	// one look away.
 	CheckQuiet Check = "QUIET"
 	// AnswerTruncated is an answer that may have been cut at the query
-	// service's terms cap: the groups past it are not in the answer, and no
-	// absence is judged for them. The strategy groups by something wider than
-	// the cap; detecting what came back.
+	// service's terms cap: thresholds evaluate the groups that came back,
+	// and a Plan that detects no data judges nothing that round
+	// (SKIPPED_ANSWER_TRUNCATED). The strategy groups by something wider than
+	// the cap.
 	CheckAnswerTruncated   Check = "ANSWER_TRUNCATED"
 	CheckSeriesChurning    Check = "SERIES_CHURNING"
 	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
@@ -421,8 +422,8 @@ var checkOrder = []Check{
 	// The event counts at rest: detecting, with nothing to judge. Any other
 	// row of the strategy decides it.
 	CheckQuiet,
-	// An answer that may have been cut: detecting what came back, and no
-	// absence judged for the groups past the cap.
+	// An answer that may have been cut: thresholds evaluate what came back,
+	// and no data is judged that round.
 	CheckAnswerTruncated,
 	// Last: the strategy runs. A reader who starts at the top meets every
 	// line that stops detection before the one that only widens it.

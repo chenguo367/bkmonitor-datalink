@@ -102,10 +102,10 @@ const (
 	KindQuiet = "QUIET"
 	// KindAnswerTruncated: an object whose latest answered query came back
 	// with a terms level of its Elasticsearch aggregation holding exactly
-	// the query service's bucket cap - a suspected cut. The rows it returned
-	// are evaluated as they are; the groups past the cap are not in the
-	// answer and are not judged absent. Listed while the latest answered
-	// round says so.
+	// the query service's bucket cap - a suspected cut. Thresholds evaluate
+	// the groups that came back; a Plan that detects no data judges nothing
+	// that round (SKIPPED_ANSWER_TRUNCATED), the groups the answer shows
+	// included. Listed while the latest answered round says so.
 	KindAnswerTruncated = "ANSWER_TRUNCATED"
 )
 
@@ -2181,8 +2181,10 @@ func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64
 // noteAnswerTruncation keeps whether the object's latest answered query may
 // have been cut: set from a completion that names a cut, from the first
 // such round on; ended by a successful completion that names none. A query
-// that failed answered nothing and leaves it as it was. Called with the lock
-// held.
+// that failed answered nothing and leaves it as it was. With several cut
+// queries in one completion only the first is kept: the row says the answer
+// may have been cut, and one source and dimension is enough to act on.
+// Called with the lock held.
 func (tracker *Tracker) noteAnswerTruncation(queryGroup string, observation observability.Observation, slot int64) {
 	state := tracker.groups[queryGroup]
 	if len(observation.QueryTruncation) == 0 {
