@@ -18,6 +18,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // day is a UTC midnight, the reference the schedule's clock minutes are read
@@ -112,6 +113,17 @@ func TestAHoleWhoseTimeIsNotKnownToBeUnderTheScheduleIsNotJudged(t *testing.T) {
 			t.Fatalf("out of hours = %v, want only the holes from this process's first Slot on %v", got, want)
 		}
 	})
+	t.Run("a replayed Slot from before the requirement was first seen", func(t *testing.T) {
+		coordinator := &SlotExecutionCoordinator{}
+		coordinator.markOutOfHours(context.Background(), outOfHoursHeader(due, clock(4, 10, 0), day), nil)
+		// A catch-up of 04:05 after the requirement was first seen at 04:10:
+		// its holes are from before then and stay unknown.
+		coverage := windowWithHoles(identity, clock(4, 4, 30), holes...)
+		coordinator.markOutOfHours(context.Background(), outOfHoursHeader(due, clock(4, 5, 0), day), &coverage)
+		if got := coverage.Windows[0].Inactive; len(got) != 0 {
+			t.Fatalf("out of hours = %v from a replayed Slot before the requirement was first seen, want none judged", got)
+		}
+	})
 	t.Run("before the Slot's schedule segment began", func(t *testing.T) {
 		coordinator := &SlotExecutionCoordinator{}
 		coordinator.markOutOfHours(context.Background(), outOfHoursHeader(due, day, day), nil)
@@ -170,6 +182,11 @@ func TestTheFirstSeenRecordIsReplacedOnAnEditAndDroppedWhenAPlanLeaves(t *testin
 	if since := seen.note(plan, []string{"a"}, 200, now); since["a"] != 100 {
 		t.Fatalf("since=%v, want the first Slot kept", since)
 	}
+	// A replayed Slot for an earlier time runs under today's requirement;
+	// it does not move the bound back.
+	if since := seen.note(plan, []string{"a"}, 50, now); since["a"] != 100 {
+		t.Fatalf("since=%v after a replay of an earlier Slot, want the first Slot seen kept", since)
+	}
 	if since := seen.note(plan, []string{"b"}, 300, now); since["b"] != 300 || seen.size() != 1 {
 		t.Fatalf("since=%v size=%d, want the edited requirement from its own first Slot and the old one dropped", since, seen.size())
 	}
@@ -208,4 +225,43 @@ func BenchmarkMarkOutOfHoursAtTheRoundsBounds(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		coordinator.markOutOfHours(context.Background(), header, &coverage)
 	}
+}
+
+// The commit carries the schedule's reading: a Slot out of its Plan's hours
+// commits with the listed holes of its short window marked out of hours, on
+// the observation the fleet reads the round from.
+func TestTheCommitCarriesTheOutOfHoursHolesOnItsObservation(t *testing.T) {
+	fixture := newPlanIsolationFixture(t, nil)
+	healthy := fixture.header.DuePlans[1].Identity
+	fixture.header.DuePlans[1].CompiledPlan = nightPlan(t, healthy, nightHours, true).CompiledPlan
+	slot := int64(fixture.header.Contract.Slot.EvaluationTime)
+	// The requirement was in effect for this process since the day began.
+	fixture.coordinator.markOutOfHours(context.Background(), execution.InternalExecutionHeader{
+		Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "query-group", EvaluationTime: execution.EvaluationTime(slot - slot%86400)},
+			ScheduleSegmentStart: execution.EvaluationTime(slot - slot%86400)},
+		DuePlans: fixture.header.DuePlans,
+	}, nil)
+	commitReady(fixture)
+	holes := []int64{slot - 60, slot}
+	fixture.evaluated.Plans[1].HistoryCoverage = execution.HistoryCoverage{Levels: 1, Short: 1, WorstValid: 1, WorstRequired: 3,
+		Windows: []execution.WindowCoverage{{Plan: healthy, LevelID: 1, Series: "healthy-series", Valid: 1, Required: 3, End: slot,
+			Missing: holes, MissingTotal: uint32(len(holes))}}}
+	if _, err := fixture.coordinator.finalizePreparedWithGaps(context.Background(), fixture.request, fixture.header, fixture.bindings,
+		fixture.loaded, execution.GapLoadResult{}, fixture.evaluated, nil, queryAvailabilityEvidence{}, seriesCensus{}, nil); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	for _, observation := range fixture.observations {
+		if observation.Stage != observability.StageProgressCommitted || observation.HistoryCoverage == nil {
+			continue
+		}
+		for _, window := range observation.HistoryCoverage.Windows {
+			if window.Strategy == healthy.StrategyID {
+				if !reflect.DeepEqual(window.Inactive, holes) {
+					t.Fatalf("committed window inactive = %v, want the out-of-hours holes %v", window.Inactive, holes)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("no committed observation carried the Plan's short window")
 }
