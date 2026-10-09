@@ -94,6 +94,12 @@ const (
 	// read HEALTHY on the page for a day, because FULL_EMPTY is a healthy
 	// completion and the line for no-data waits for data to have been seen.
 	KindEmptyEveryRound = "EMPTY_EVERY_ROUND"
+	// KindQuiet: an event count of groups whose latest round answered whole
+	// with no group - no group had an event in the range asked. That is the
+	// state an event stream spends most of its time in, not data that
+	// stopped or never came, so the object is on neither line above: it is
+	// detecting, and its row says why it has nothing to judge.
+	KindQuiet = "QUIET"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -272,7 +278,11 @@ type queryGroupState struct {
 	// emptiedByTarget says the latest empty round's query returned data the
 	// monitoring target selected none of.
 	emptiedByTarget bool
-	sawData         bool
+	// quiet is whether the latest empty round was an event count answering
+	// with no group (KindQuiet). Every empty round sets it, and it is read
+	// only while an empty run lasts, which a round with records ends.
+	quiet   bool
+	sawData bool
 	// emptySinceSlot and lastEmptySlot bound the run of empty completions on
 	// the source's own clock: the Slot of the first empty round of the run and
 	// of the latest. The "every round" line gates on their distance, Slot to
@@ -1434,6 +1444,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// a round with records -- degraded or not -- ends the empty run.
 		if completion == "FULL_EMPTY_COMPLETED" {
 			state.emptiedByTarget = observation.PrimaryInput != nil && observation.PrimaryInput.EmptiedByTarget
+			state.quiet = observation.PrimaryInput != nil && observation.PrimaryInput.QuietWhenEmpty
 			if state.emptyRuns == 0 {
 				state.emptySince = at
 				state.emptySinceFrom = SinceSnapshotContinuity
@@ -2498,6 +2509,11 @@ func (tracker *Tracker) NoData() []Anomaly {
 			Since: state.emptySince, SinceFrom: state.emptySinceFrom, Replica: tracker.replica,
 		}
 		switch {
+		case state.quiet:
+			// Quiet from its first empty round: no hour to wait out, and
+			// never the data's line or the strategy's - an event count with
+			// no event is what it is for.
+			anomaly.Kind = KindQuiet
 		case state.sawData && state.emptyRuns >= tracker.degradedRounds && state.lastDataSlot != 0 &&
 			time.Duration(state.lastEmptySlot-state.lastDataSlot)*time.Second >= tracker.noDataAfter:
 			// The data side's hour, on the same clock as the line below:

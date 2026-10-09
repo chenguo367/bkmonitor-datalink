@@ -26,6 +26,10 @@ type PrimaryInputFacts struct {
 	// EmptiedByTarget says an EMPTY primary returned data the monitoring
 	// target selected none of: the data was there, outside the target.
 	EmptiedByTarget bool `json:"emptied_by_target,omitempty"`
+	// QuietWhenEmpty says an EMPTY primary is an event count of groups
+	// that came back with no group: no group had an event in the range
+	// asked - quiet, not absent.
+	QuietWhenEmpty bool `json:"quiet_when_empty,omitempty"`
 }
 
 // PrimaryCompletenesses and PrimaryDataStates are the closed lists a
@@ -53,6 +57,8 @@ func normalizePrimaryInputFacts(facts *PrimaryInputFacts) *PrimaryInputFacts {
 	// Emptied by the target is a claim about an empty primary and nothing
 	// else.
 	copied.EmptiedByTarget = copied.EmptiedByTarget && copied.DataState == "EMPTY"
+	// And quiet is a claim about a whole, empty one.
+	copied.QuietWhenEmpty = copied.QuietWhenEmpty && copied.Completeness == "FULL" && copied.DataState == "EMPTY"
 	return &copied
 }
 

@@ -202,8 +202,13 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// whole, later than its time_delay says, and the time_delay that would
 	// need no hold stays the strategy owner's to set (user, 09-30: the
 	// advice stays with the owner while alarmd holds the read).
-	if got := len(Checks()); got != 37 || len(checkAnswers) != 37 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 37: a new check has to "+
+	// Thirty-eight: QUIET is a rule over a dimension the rows did not carry
+	// before - whether the round's primary is an event count of groups
+	// answered with no group - because such an object is detecting with
+	// nothing to judge, and the no-data lines would send its owner to a
+	// source that is only at rest (trigger review Dev 7).
+	if got := len(Checks()); got != 38 || len(checkAnswers) != 38 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 38: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -272,6 +277,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckNoDataPersistent:    {Kind: KindNoData},
 		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
 		CheckEmptyAfterTarget:    {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseOutsideTarget}},
+		CheckQuiet:               {Kind: KindQuiet},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},

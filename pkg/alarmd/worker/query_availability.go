@@ -62,6 +62,27 @@ func (e queryAvailabilityEvidence) emptiedByTarget(primary execution.PrimaryInpu
 		e.primaryEmptiedOutside && !e.primaryWithheldOtherwise
 }
 
+// quietWhenEmpty says a FULL, EMPTY primary is an event count of groups that
+// came back with no group at all: none had an event in the range asked, the
+// state an event stream spends most of its time in - quiet, not absent. An
+// event count's primary is the requirement asked from earlier than its
+// window (its provider lead); it counts groups when it requires identity
+// columns beside the value. Nothing may have been withheld: a group the
+// target turned away is the target's empty, and any other withholding
+// leaves the answer unproven.
+func (e queryAvailabilityEvidence) quietWhenEmpty(primary execution.PrimaryInputFact, requirements []execution.DataRequirement) bool {
+	if primary.Completeness != execution.CompletenessFull || primary.DataState != execution.DataStateEmpty ||
+		e.primaryEmptiedOutside || e.primaryWithheldOtherwise {
+		return false
+	}
+	for _, requirement := range requirements {
+		if requirement.Role == execution.InputRolePrimary && requirement.ProviderLeadSeconds > 0 && len(requirement.RequiredColumns) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // unavailableReason is why the primary query was unavailable, when it was.
 func (e queryAvailabilityEvidence) unavailableReason() execution.ReasonCode {
 	if e.availability() != execution.QueryAvailabilityUnavailable {

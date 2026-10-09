@@ -43,7 +43,9 @@ import (
 //
 // Through the production bundle, with a process restart after the event's
 // round, as a release would put one: the open alert's history is carried
-// across it on the same store.
+// across it on the same store. Past the range - round 5 on - the group is
+// not in the answer at all: nothing is decided for it, an open alert is not
+// closed by inference, and the round's whole, empty primary says quiet.
 func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
@@ -149,6 +151,7 @@ func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 		return bundle
 	}
 	decidedOn := make(map[int][]string)
+	quietOn := make(map[int]bool)
 	run := func(bundle *phaseTwoWorkerBundle, round int) {
 		mu.Lock()
 		seen := len(observations)
@@ -159,6 +162,11 @@ func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 		}
 		mu.Lock()
 		decidedOn[round] = decidedEventKinds(observations[seen:])
+		for _, observation := range observations[seen:] {
+			if observation.PrimaryInput != nil && observation.PrimaryInput.QuietWhenEmpty {
+				quietOn[round] = true
+			}
+		}
 		mu.Unlock()
 	}
 
@@ -173,7 +181,7 @@ func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	for round := 1; round <= 4; round++ {
+	for round := 1; round <= 6; round++ {
 		run(second, round)
 	}
 
@@ -187,6 +195,14 @@ func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 	}
 	if !containsKind(decidedOn[4], contract.TriggerEventRecovery) {
 		t.Fatalf("round 4 decided %v, want RECOVERY at t0 + N + R - 1 (all rounds: %v)", decidedOn[4], decidedOn)
+	}
+	for round := 0; round <= 6; round++ {
+		if want := round >= 5; quietOn[round] != want {
+			t.Fatalf("round %d quiet %v, want %v: quiet once the event left the range, and only then (rounds %v)", round, quietOn[round], want, quietOn)
+		}
+		if round >= 5 && len(decidedOn[round]) != 0 {
+			t.Fatalf("round %d decided %v for a group not in the answer, want nothing", round, decidedOn[round])
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
