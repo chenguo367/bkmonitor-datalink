@@ -505,6 +505,10 @@ func (coordinator *FlightCoordinator) tryAcquireAs(queryGroup execution.QueryGro
 // Runner is bound to one owned Query Group. normal, retry, replay and probe use
 // this same single-flight path and the same frozen Slot contract.
 type Runner struct {
+	// stage is where the Slot in flight has got to: the Runner enters the
+	// source and the execution, the coordinator the phases inside it. Read
+	// from the watchdog's goroutine while the Slot runs.
+	stage          execution.StageMarker
 	queryGroup     execution.QueryGroupIdentity
 	session        OwnerSession
 	source         SlotSource
@@ -703,6 +707,18 @@ func (runner *Runner) NextDeadline() time.Time {
 
 // NextReadyAt reports when the Runner can make its next QG-local attempt.
 // A zero value means there is no active source or execution backoff.
+// InFlight is the stage the Slot in flight last entered - source, execute,
+// or the coordinator's phase inside the execution - and that Slot's
+// deadline, zero while it is still being frozen. Meaningful only while a
+// Slot is in flight; a watchdog that finds one past its deadline names it by
+// this.
+func (runner *Runner) InFlight() (string, time.Time) {
+	if runner == nil {
+		return "", time.Time{}
+	}
+	return runner.stage.Stage(), runner.stage.Deadline()
+}
+
 func (runner *Runner) NextReadyAt() time.Time {
 	if runner == nil {
 		return time.Time{}
@@ -848,6 +864,7 @@ func (runner *Runner) runOneTracked(
 	ctx = withVerifiedOwnership(ctx, runner.queryGroup, confirmedAssignment, confirmedFence)
 	runner.restoreQueryCooldown(ctx, confirmedFence)
 	decision = "source_next"
+	runner.stage.Begin(execution.SlotStageSource, 0)
 	slot, due, facts, err := runner.source.Next(withQueryCooldownHeld(ctx, runner.queryCooldownHolds()), runner.queryGroup)
 	sourceFacts = facts
 	if err != nil {
@@ -940,7 +957,9 @@ func (runner *Runner) runOneTracked(
 	}
 	decision = "execute"
 	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
+	runner.stage.Begin(execution.SlotStageExecute, slot.EarliestQueryDeadlineUnixMilli)
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
+	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
 	result, err := runner.executor.Execute(executeCtx, request)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
