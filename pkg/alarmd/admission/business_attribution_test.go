@@ -103,12 +103,27 @@ func TestAHostNamedOnlyByAddressIsAttributedByItsHost(t *testing.T) {
 	if got.BusinessID != "11" || got.Source != contract.BusinessAttributionTarget {
 		t.Fatalf("AttributeBusiness() = %+v, want the host's business 11 found by its address", got)
 	}
-	// Without its cloud the address is not looked up, as admission does not
-	// look it up: the record names no host the cache is asked about.
-	record = attributionDimensions(map[string]any{"bk_target_ip": "192.0.2.10"})
+	// Without its cloud, or spelled ip / bk_cloud_id, the address is looked up
+	// where admission looks it up - Python's fuller, bk_target_ip or ip in
+	// bk_target_cloud_id or bk_cloud_id or the direct area (fullers.py:92-104)
+	// - so a record admission placed on a host is attributed to that host's
+	// business (the global design: the host is found by admission's naming).
+	for _, fields := range []map[string]any{
+		{"bk_target_ip": "192.0.2.10"},
+		{"ip": "192.0.2.10", "bk_cloud_id": 0},
+	} {
+		got = AttributeBusiness(hostTarget(), nil, planBusiness, attributionDimensions(fields), BusinessLookups{Hosts: hostCache{"192.0.2.10|0": "11"}})
+		if got.BusinessID != "11" || got.Source != contract.BusinessAttributionTarget {
+			t.Fatalf("AttributeBusiness(%v) = %+v, want the host's business 11 found in the direct area", fields, got)
+		}
+	}
+	// A true id the cache does not know is that host and no other: the
+	// address beside it is not consulted, and the record is not attributed by
+	// a host (admission drops it as unknown).
+	record = attributionDimensions(map[string]any{"bk_host_id": 999, "bk_target_ip": "192.0.2.10", "bk_target_cloud_id": "0"})
 	got = AttributeBusiness(hostTarget(), nil, planBusiness, record, BusinessLookups{Hosts: hostCache{"192.0.2.10|0": "11"}})
 	if got.Source != contract.BusinessAttributionGlobal {
-		t.Fatalf("AttributeBusiness() = %+v, want no host lookup without the cloud", got)
+		t.Fatalf("AttributeBusiness() = %+v, want an unknown id left unattributed by the address", got)
 	}
 }
 

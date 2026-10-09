@@ -155,3 +155,24 @@ func safeIntText(text string, fallback string) string {
 	}
 	return fallback
 }
+
+// FullerAddress is the address Python's fuller looks a host up by: bk_target_ip
+// or ip, whichever is true first, in bk_target_cloud_id or bk_cloud_id or
+// "0" the same way. Truthiness, not presence: an empty bk_target_ip falls
+// through to ip, and a zero cloud dimension falls through to the next. The
+// target match reads the same dimensions by presence instead, which is why
+// the two are built separately.
+func FullerAddress(dimensions map[string]json.RawMessage) (string, string) {
+	address := TruthyDimension(dimensions, "bk_target_ip")
+	if address == "" {
+		address = TruthyDimension(dimensions, "ip")
+	}
+	cloud := TruthyDimension(dimensions, "bk_target_cloud_id")
+	if cloud == "" {
+		cloud = TruthyDimension(dimensions, "bk_cloud_id")
+	}
+	if cloud == "" {
+		cloud = "0"
+	}
+	return address, cloud
+}

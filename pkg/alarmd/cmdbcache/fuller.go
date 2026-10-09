@@ -109,7 +109,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		facts.HostUnresolved = unknownID
 		return
 	}
-	address, cloud := fullerAddress(dimensions)
+	address, cloud := admission.FullerAddress(dimensions)
 	if address != "" {
 		if host, found := index.Lookup(address + "|" + cloud); found {
 			placeByAddress(dimensions, facts, cloud, host)
@@ -192,27 +192,6 @@ func placeByAddress(dimensions map[string]json.RawMessage, facts *admission.Fact
 		keys = append(keys, address)
 	}
 	facts.Set(contract.AttributeHostIdentity, keys)
-}
-
-// fullerAddress is the address Python's fuller looks a host up by: bk_target_ip
-// or ip, whichever is true first, in bk_target_cloud_id or bk_cloud_id or
-// "0" the same way. Truthiness, not presence: an empty bk_target_ip falls
-// through to ip, and a zero cloud dimension falls through to the next. The
-// target match reads the same dimensions by presence instead, which is why
-// the two are built separately.
-func fullerAddress(dimensions map[string]json.RawMessage) (string, string) {
-	address := admission.TruthyDimension(dimensions, "bk_target_ip")
-	if address == "" {
-		address = admission.TruthyDimension(dimensions, "ip")
-	}
-	cloud := admission.TruthyDimension(dimensions, "bk_target_cloud_id")
-	if cloud == "" {
-		cloud = admission.TruthyDimension(dimensions, "bk_cloud_id")
-	}
-	if cloud == "" {
-		cloud = "0"
-	}
-	return address, cloud
 }
 
 // instanceResolves is whether Python's service-instance branch would place the

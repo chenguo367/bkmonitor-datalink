@@ -148,11 +148,22 @@ func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.Ra
 		if hosts == nil {
 			return "", false
 		}
+		// The host the record is about, named the way admission names it -
+		// Python's fuller order: a true bk_host_id, else the address it
+		// looks up, bk_target_ip or ip in bk_target_cloud_id or bk_cloud_id
+		// or the direct area (fullers.py:55-110). A true id the cache does not
+		// know is that host and no other, as the status filter reads it; that
+		// record is dropped there. A record named by its agent alone is not
+		// attributed by it here and falls through to the next source.
 		facts := &Facts{}
 		IdentityFuller{}.Fill(dimensions, facts)
-		identity, named := facts.HostNaming.LookupKey()
-		if !named {
-			return "", false
+		identity := facts.HostNaming.IDKey
+		if identity == "" {
+			address, cloud := FullerAddress(dimensions)
+			if address == "" {
+				return "", false
+			}
+			identity = address + "|" + cloud
 		}
 		business, held := hosts.LookupHostBusiness(identity)
 		if !held {
