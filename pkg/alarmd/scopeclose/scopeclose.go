@@ -35,9 +35,7 @@
 //
 // Closes are sent at most Batch per step, starting after the last one the
 // previous step decided, so a large backlog is walked rather than retried
-// from its head; and only while the deployment has armed its own inferences
-// (absent_close_send). Unarmed, every close is decided and counted as
-// would_send, and nothing is sent.
+// from its head.
 package scopeclose
 
 import (
@@ -55,9 +53,6 @@ import (
 const (
 	// OutcomeClosed counts alerts a close was sent for.
 	OutcomeClosed = "closed"
-	// OutcomeWouldSend counts alerts a close was decided for while the
-	// close was not armed.
-	OutcomeWouldSend = "would_send"
 	// OutcomeUnconfirmed counts first observations: a fingerprint of an
 	// open alert turned away by one Slot, waiting for a second.
 	OutcomeUnconfirmed = "unconfirmed"
@@ -97,7 +92,7 @@ const (
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
-var Outcomes = []string{OutcomeClosed, OutcomeWouldSend, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
+var Outcomes = []string{OutcomeClosed, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
 	OutcomeStaleDeferred, OutcomeIndefinite}
 
@@ -141,9 +136,7 @@ type Writer interface {
 
 // Options bound the close.
 type Options struct {
-	// Send arms the close; see config.LinkdConfig.AbsentCloseSend.
-	Send bool
-	Now  func() time.Time
+	Now func() time.Time
 	// MaxEntries bounds the fingerprints observed and not yet decided.
 	MaxEntries int
 	// Batch bounds the closes one step decides.
@@ -235,9 +228,6 @@ func (closer *Closer) Bind(set OpenSet, writer Writer) {
 	closer.set, closer.writer = set, writer
 	closer.mu.Unlock()
 }
-
-// Armed says whether closes are sent.
-func (closer *Closer) Armed() bool { return closer.options.Send }
 
 // Screen answers once per strategy per query whether its rejections are
 // worth a fingerprint each: "" when the strategy has open alerts to judge
@@ -430,10 +420,6 @@ func (closer *Closer) Step(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
-	if !closer.options.Send {
-		closer.decide(decided, OutcomeWouldSend, now)
-		return
-	}
 	if writer == nil {
 		closer.countEach(decided, OutcomeSendFailed)
 		return
@@ -546,7 +532,6 @@ func (closer *Closer) Stats() map[string]uint64 {
 
 // Facts is what a replica publishes about the close.
 type Facts struct {
-	Armed                bool
 	Pending, Confirmed   int
 	MaxEntries           int
 	Outcomes             map[string]uint64
@@ -570,7 +555,7 @@ type StrategyFacts struct {
 func (closer *Closer) Facts() Facts {
 	closer.mu.Lock()
 	defer closer.mu.Unlock()
-	facts := Facts{Armed: closer.options.Send, MaxEntries: closer.options.MaxEntries, Outcomes: map[string]uint64{},
+	facts := Facts{MaxEntries: closer.options.MaxEntries, Outcomes: map[string]uint64{},
 		TalliedStrategies: len(closer.tallies), MaxTalliedStrategies: maxTalliedStrategies}
 	for _, outcome := range Outcomes {
 		facts.Outcomes[outcome] = closer.counts[outcome]

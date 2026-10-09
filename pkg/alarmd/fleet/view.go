@@ -1904,9 +1904,7 @@ func copyReadiness(facts *ReadinessFacts) *ReadinessFacts {
 // those counts.
 //
 // MostOwnedBy and LeastOwnedBy are the pair the round would move between,
-// named only when it would move something. Shadow is written where the
-// decision not to publish the moves lives, so the page reads what the build
-// does rather than what a page constant says it does.
+// named only when it would move something.
 type RebalanceFacts struct {
 	PlannedAt    time.Time `json:"planned_at"`
 	ReadyWorkers int       `json:"ready_workers"`
@@ -1923,9 +1921,6 @@ type RebalanceFacts struct {
 	// the even target. Carried so the recovery criterion is the scheduler's
 	// number and not one the page keeps.
 	StopSpreadPercent int `json:"stop_spread_percent"`
-	// Shadow is true while the round only computes and nothing publishes the
-	// moves; a plan is then a measurement, not an action in progress.
-	Shadow bool `json:"shadow"`
 	// PublishedMoves is how many of the planned moves this round wrote as
 	// Assignments; Conflicts how many the store refused because the record
 	// had moved under the round. Paused says the round wrote none because
@@ -2297,9 +2292,7 @@ type OpenAlertSetFacts struct {
 // the outcome totals (every outcome present, zeros included), how many
 // fingerprints wait for a second Slot and how many are confirmed, and up
 // to eight strategies with at most three fingerprint prefixes per list.
-// Armed false means every decision is counted as would_send and none sent.
 type TargetScopeCloseFacts struct {
-	Armed      bool                       `json:"armed"`
 	Pending    int                        `json:"pending"`
 	Confirmed  int                        `json:"confirmed"`
 	MaxEntries int                        `json:"max_entries"`

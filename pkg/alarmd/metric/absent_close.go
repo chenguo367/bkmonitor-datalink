@@ -31,7 +31,7 @@ type absentCloseCollector struct {
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
 var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_pages", "roster_complete",
-	"candidates", "snapshot_strategies", "remembered_identities", "send_armed",
+	"candidates", "snapshot_strategies", "remembered_identities",
 	"snapshot_age_seconds", "max_snapshot_age_seconds", "link_health_age_seconds", "max_link_health_age_seconds",
 	"link_pending", "writer_holds_last_good"}
 
@@ -39,10 +39,8 @@ func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
 		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_close_total"),
 			"What the control leader's difference against disabled or deleted strategies decided, by outcome. "+
-				"Counted per strategy except alert_closed, send_failed, would_send, producer_foreign and "+
-				"producer_unknown, which count alerts. closed counts decisions and alert_closed counts what went "+
-				"out: while the close is not armed (absent_strategy_difference side=send_armed is 0) closed rises, "+
-				"alert_closed stays at zero, and would_send counts the alerts arming would have sent. "+
+				"Counted per strategy except alert_closed, send_failed, producer_foreign and producer_unknown, "+
+				"which count alerts. closed counts decisions and alert_closed counts what went out. "+
 				"identity_unknown and revision_unknown are strategies decided and not sent because no business or "+
 				"revision could be found for them. Why a whole round decided nothing is "+
 				"absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a "+
@@ -60,8 +58,7 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages "+
 				"and roster_complete how far the walk of its roster got, candidates the difference itself, "+
 				"snapshot_strategies the strategy cache it was judged against, remembered_identities "+
-				"the strategies the catalog let go and still knows the business of, and send_armed whether this "+
-				"deployment has armed the close at all (0 means every decision is reported and none is sent). "+
+				"the strategies the catalog let go and still knows the business of. "+
 				"Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, "+
 				"link_health_age_seconds (since the link's last successful discovery) beside "+
 				"max_link_health_age_seconds - so a refused round can be read as the side falling behind rather "+

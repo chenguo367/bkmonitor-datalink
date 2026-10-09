@@ -13,10 +13,10 @@ import (
 func TestCLIAdminKeyLoadsWithoutAppearingInJSON(t *testing.T) {
 	key := strings.Repeat("k", 64)
 	var cfg CLIConfig
-	if err := yaml.Unmarshal([]byte("enabled: true\nadmin_key: "+key+"\n"), &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte("admin_key: "+key+"\n"), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Enabled || cfg.AdminKey != key {
+	if !cfg.Enabled() || cfg.AdminKey != key {
 		t.Fatal("administrator key not loaded")
 	}
 	raw, err := json.Marshal(cfg)
@@ -35,7 +35,7 @@ func TestCLIAdminKeyLoadsWithoutAppearingInJSON(t *testing.T) {
 func TestCLIAdminKeyComesFromTheEnvironment(t *testing.T) {
 	key := strings.Repeat("e", 64)
 	t.Setenv(CLIAdminKeyEnvironment, key)
-	fromEnv := CLIConfig{Enabled: true}
+	fromEnv := CLIConfig{}
 	if err := fromEnv.resolveAdminKeyFromEnvironment(); err != nil || fromEnv.AdminKey != key {
 		t.Fatalf("key not taken from the environment: %v", err)
 	}
@@ -50,17 +50,17 @@ func TestCLIAdminKeyComesFromTheEnvironment(t *testing.T) {
 	}
 }
 
-// Loading applies it: a file that enables the CLI without a key loads with
-// the key the environment carries.
+// Loading applies it: a file that states no key loads with the key the
+// environment carries, and the CLI is on.
 func TestLoadingTakesTheCLIAdminKeyFromTheEnvironment(t *testing.T) {
 	key := strings.Repeat("e", 64)
 	t.Setenv(CLIAdminKeyEnvironment, key)
-	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("cli-worker")+"cli:\n  enabled: true\n"))
+	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("cli-worker")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CLI.AdminKey != key {
-		t.Fatal("loading did not take the administrator key from the environment")
+	if cfg.CLI.AdminKey != key || !cfg.CLI.Enabled() {
+		t.Fatal("loading did not take the administrator key from the environment and turn the CLI on")
 	}
 }
 
@@ -110,7 +110,7 @@ func TestLoadingReadsTheAdminKeySecretAndTheFileCannotStateIt(t *testing.T) {
 	t.Setenv(CLIAdminKeyEnvironment, key)
 	t.Setenv(CLIAdminKeySecretNameEnvironment, "alarmd-cli-admin")
 	t.Setenv(CLIAdminKeySecretKeyEnvironment, "admin-key")
-	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("cli-worker")+"cli:\n  enabled: true\n"))
+	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("cli-worker")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestLoadingReadsTheAdminKeySecretAndTheFileCannotStateIt(t *testing.T) {
 		t.Fatalf("CLI configuration evidence carries the Secret or the key: %s", raw)
 	}
 	if _, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("cli-worker")+
-		"cli:\n  enabled: true\n  admin_key_secret:\n    name: from-file\n")); err == nil {
+		"cli:\n  admin_key_secret:\n    name: from-file\n")); err == nil {
 		t.Fatal("a configuration file stated the Secret's names")
 	}
 }

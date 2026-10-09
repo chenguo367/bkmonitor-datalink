@@ -155,7 +155,7 @@ func TestFleetPublisherCarriesTheActivationStanding(t *testing.T) {
 func TestFleetPublisherCarriesTheRebalanceRound(t *testing.T) {
 	clock := &dueIndexClock{at: time.Unix(20_000, 0)}
 	facts := &fleet.RebalanceFacts{PlannedAt: clock.now(), ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 2370,
-		MostOwnedBy: "replica-1", LeastOwnedBy: "replica-2", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5, Shadow: true}
+		MostOwnedBy: "replica-1", LeastOwnedBy: "replica-2", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5}
 	publisher := fleetPublisher{
 		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now,
 		owned:     func() []execution.QueryGroupIdentity { return nil },
@@ -175,7 +175,7 @@ func TestFleetPublisherCarriesTheRebalanceRound(t *testing.T) {
 // a fake without the method is a deployment with no round, not a nil
 // dereference.
 func TestBundleReadsTheRebalanceRoundOnlyFromARuntimeThatPlans(t *testing.T) {
-	facts := &fleet.RebalanceFacts{PlannedMoves: 1, MostOwnedBy: "a", LeastOwnedBy: "b", Shadow: true}
+	facts := &fleet.RebalanceFacts{PlannedMoves: 1, MostOwnedBy: "a", LeastOwnedBy: "b"}
 	planning := &planningOwnershipRuntime{fakePhaseTwoOwnership: &fakePhaseTwoOwnership{}, last: facts}
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Ownership: planning}}
 	if got := bundle.rebalanceFleetFacts(); got == nil || *got != *facts {

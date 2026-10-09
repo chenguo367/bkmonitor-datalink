@@ -58,7 +58,7 @@ func (store *memoryCooldownStore) SaveQueryCooldown(_ context.Context, fence exe
 // moves, and the cooldown lines it emits.
 func poolRunner(store QueryCooldownStore, now *time.Time, lines *[]observability.QueryCooldownFacts) *Runner {
 	runner := &Runner{queryGroup: "qg", now: func() time.Time { return *now }, flights: &FlightCoordinator{
-		limits: RecoveryLimits{QueryUnavailableCooldown: true},
+		limits: RecoveryLimits{},
 		observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
 			if o.QueryCooldown != nil {
 				*lines = append(*lines, *o.QueryCooldown)
@@ -141,7 +141,6 @@ func TestRunOneRestoresThePoolBeforeItDecidesAnything(t *testing.T) {
 		SegmentStart: source.slot.Contract.ScheduleSegmentStart}
 	executor := &scriptedExecutor{results: []execution.SlotExecutionResult{{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable}}}
 	limits := testRecoveryLimits()
-	limits.QueryUnavailableCooldown = true
 	flights, err := NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)

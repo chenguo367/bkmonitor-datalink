@@ -316,7 +316,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			FailureStage: "schedule_cutover", FailureClass: "schedule_conflict"}, ActivationReplica: "pod-a"},
 		CheckReplicaDegraded: {Degradations: []Degradation{{Kind: DegradationOpenAlertSetStale, Replica: "pod-b"}}},
 		CheckOwnershipSkewed: {Rebalance: &RebalanceFacts{ReadyWorkers: 2, Assigned: 4, Target: 2, MostOwned: 4,
-			MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 1, PlannedMoves: 1, StopSpreadPercent: 5, Shadow: true}, RebalanceReplica: "pod-a"},
+			MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 1, PlannedMoves: 1, StopSpreadPercent: 5}, RebalanceReplica: "pod-a"},
 		// The source standings: one withheld group each, under the
 		// disposition that owns the line. Accepted is non-zero so the view is
 		// not also SOURCE_BLOCKED, which would be a second fact.

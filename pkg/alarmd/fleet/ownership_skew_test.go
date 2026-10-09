@@ -19,7 +19,7 @@ import (
 // scheduler planning a batch of moves it does not publish.
 func skewedRound(at time.Time) *RebalanceFacts {
 	return &RebalanceFacts{PlannedAt: at, ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 2370, LeastOwned: 0,
-		MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5, Shadow: true}
+		MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5}
 }
 
 // The leader's round is the deployment's, kept whole on the view with the

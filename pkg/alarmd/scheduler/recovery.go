@@ -28,18 +28,15 @@ var (
 // RecoveryLimits are process-wide fixed bounds. They deliberately do not
 // contain QG-specific weights or adaptive controls.
 type RecoveryLimits struct {
-	// QueryUnavailableCooldown enables QG-local suppression after repeated
-	// committed, wholly unavailable primary queries. Product defaults enable it.
-	QueryUnavailableCooldown bool
-	ProcessQueryPermits      int
-	RecoveryQueryPermits     int
-	ReadyQueueCapacity       int
-	RecoveryQueueCapacity    int
-	MaxQueuedItemsPerQG      int
-	MaxReplaySlots           uint32
-	MaxReplayAge             time.Duration
-	RetryMinDelay            time.Duration
-	RetryMaxDelay            time.Duration
+	ProcessQueryPermits   int
+	RecoveryQueryPermits  int
+	ReadyQueueCapacity    int
+	RecoveryQueueCapacity int
+	MaxQueuedItemsPerQG   int
+	MaxReplaySlots        uint32
+	MaxReplayAge          time.Duration
+	RetryMinDelay         time.Duration
+	RetryMaxDelay         time.Duration
 }
 
 func (limits RecoveryLimits) Validate() error {

@@ -970,8 +970,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetViewStreamSource(func() metric.ViewStreamCounts { return viewStreamCounts(viewServer.Stats()) })
 	// This Worker's side of the same stream: it finds the Leader from the
 	// lease and the Leader's registration, installs what it is sent, and
-	// asks the catalog whether the objects a view names are there. In the
-	// shadow step nothing executes off the installed view.
+	// asks the catalog whether the objects a view names are there.
 	incarnation, err := newViewStreamIncarnation()
 	if err != nil {
 		return nil, err
@@ -1297,7 +1296,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// is the link's roster minus the snapshot, and a deployment without the
 	// link has neither the roster nor the alerts it would close.
 	if linkd.Console != nil {
-		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events, cfg.PhaseTwo.Linkd.AbsentCloseSend)
+		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events)
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run

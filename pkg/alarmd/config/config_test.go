@@ -107,9 +107,6 @@ func TestPhaseTwoRuntimePrefixCannotOverlapCanonicalStrategyCache(t *testing.T) 
 func TestDefaultRequiresExplicitEnvironmentCoordinates(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Input.Mode != InputModeGoAccess {
-		t.Fatalf("default input = %+v, want Go Access without compatibility coordinates", cfg.Input)
-	}
 	if cfg.HTTP.Listen == "" || cfg.ShutdownTimeout.Duration() <= 0 {
 		t.Fatal("default local HTTP and shutdown budgets must be usable")
 	}
@@ -332,6 +329,10 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 		{"kafka:\n  group_id: \"\"\n", "group_id"},
 		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
 		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
+		{"phase_two:\n  linkd:\n    absent_close_send: true\n", "absent_close_send"},
+		{"phase_two:\n  scheduler:\n    query_unavailable_cooldown: false\n", "query_unavailable_cooldown"},
+		{"cli:\n  enabled: true\n", "enabled"},
+		{"input:\n  mode: go_access\n", "input"},
 		{"phase_two:\n  scheduler:\n    expired_range_enabled: false\n", "expired_range_enabled"},
 		// A derived value spelled run together, which an untagged field took.
 		{"phase_two:\n  scheduler:\n    maxreplayage: 1h\n", "maxreplayage"},
@@ -426,7 +427,6 @@ func TestDerivedRedisPoolClearsAdmittedConcurrencyWithRoom(t *testing.T) {
 
 func TestWithResolvedRedisPoolSizeResolvesEveryConnection(t *testing.T) {
 	cfg := Default()
-	cfg.Input.Mode = InputModeGoAccess
 	platformCache := cfg.Redis.Connection()
 	cfg.PlatformCache.Strategy = &platformCache
 	cfg.PlatformCache.CMDB = &platformCache
@@ -514,9 +514,7 @@ func TestAnUnstatedPlatformCacheResolvesToTheTopLevelConnection(t *testing.T) {
 }
 
 func platformCacheConfigContents(platformCache string) string {
-	return `input:
-  mode: go_access
-http:
+	return `http:
   listen: 127.0.0.1:8080
 kafka:
   brokers: [127.0.0.1:9092]

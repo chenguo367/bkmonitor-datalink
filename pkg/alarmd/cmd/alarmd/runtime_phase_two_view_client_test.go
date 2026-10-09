@@ -280,7 +280,7 @@ func reserveAddressForBundle(t *testing.T) string {
 }
 
 // The execution path does not import the view stream: the hard condition
-// four of decision-016's shadow step, pinned on the import graph rather
+// four of decision-016, pinned on the import graph rather
 // than on one behaviour. A package on the Slot's path that starts to
 // depend on viewstream fails here before it can read a view.
 func TestTheHotPathDoesNotImportTheViewStream(t *testing.T) {

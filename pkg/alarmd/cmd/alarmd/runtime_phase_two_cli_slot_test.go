@@ -336,7 +336,7 @@ func TestSlotGetThroughTheBuiltCLICarriesTheLatestPublication(t *testing.T) {
 	cfg.Redis.Address = client.Options().Addr
 	cfg.PhaseTwo.Worker.ID = "test-worker"
 	cfg.PhaseTwo.Access.UQEndpoint = "http://127.0.0.1:1"
-	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test",
+	cfg.CLI = config.CLIConfig{EnvironmentID: "test", EnvironmentName: "Test",
 		PublicBaseURL: "https://ob.example/alarmd/", AdminKey: strings.Repeat("k", 40)}
 	h, closeCLI, _ := buildPhaseTwoCLI(cfg, standInAPI(), repo, nil, nil, func() *observability.RuntimeConfigFacts { return nil },
 		cliControlBinding{Incarnation: "test-process", PublicWindows: windowsStandIn})

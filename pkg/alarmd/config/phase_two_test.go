@@ -19,16 +19,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-func TestDefaultPhaseTwoInputUsesGoAccessWithoutPhaseOneCoordinates(t *testing.T) {
-	cfg := DefaultPhaseTwoInput()
-	if cfg.Mode != InputModeGoAccess {
-		t.Fatalf("default phase-two input = %+v", cfg)
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-}
-
 func TestDefaultPhaseTwoRegistrationSurvivesShortStoreOutage(t *testing.T) {
 	worker := Default().PhaseTwo.Worker
 	if worker.RegistrationTTL.Duration() != 60*time.Second || worker.RegistrationRenewInterval.Duration() != 10*time.Second {
@@ -281,9 +271,7 @@ func TestLoadPhaseTwoWorkerIdentityRejectsNonCanonicalDeploymentEnvironment(t *t
 }
 
 func validGoAccessRuntimeConfigYAML(workerID string) string {
-	return fmt.Sprintf(`input:
-  mode: go_access
-http:
+	return fmt.Sprintf(`http:
   listen: 127.0.0.1:8080
 kafka:
   brokers: [127.0.0.1:9092]

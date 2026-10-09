@@ -62,10 +62,6 @@ type absentStrategyClose struct {
 	control absentCloseControl
 	link    absentCloseLink
 	writer  closeWriter
-	// send arms the close. False takes the whole difference and reports
-	// every reading without sending one close; see LinkdConfig.
-	// AbsentCloseSend for why the decision is a setting.
-	send    bool
 	tracker *absentalerts.Tracker
 	bounds  absentalerts.Bounds
 	// previousSnapshot is how large the last snapshot this loop decided on
@@ -128,9 +124,9 @@ type eventSourceReader interface {
 }
 
 func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseControl, link absentCloseLink,
-	writer closeWriter, send bool) *absentStrategyClose {
+	writer closeWriter) *absentStrategyClose {
 	return &absentStrategyClose{
-		bundle: bundle, control: control, link: link, writer: writer, send: send,
+		bundle: bundle, control: control, link: link, writer: writer,
 		tracker: absentalerts.NewTracker(controlplane.MaxDepartedStrategies),
 		bounds: absentalerts.Bounds{
 			Grace: controlplane.AbsenceGracePeriod,
@@ -190,7 +186,6 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"roster_pages": last.rosterPages, "roster_complete": boolSide(last.rosterComplete),
 		"candidates": last.counts.Candidates, "snapshot_strategies": last.counts.SnapshotStrategies,
 		"remembered_identities": last.identities,
-		"send_armed":            boolSide(loop.send),
 		"snapshot_age_seconds":  last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
 		"link_health_age_seconds": last.linkAge, "max_link_health_age_seconds": int(loop.bounds.MaxLinkHealthAge / time.Second),
 		"link_pending":           last.linkPending,
@@ -424,16 +419,6 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		}
 	}
 	execution.batch = len(batch)
-	if !loop.send {
-		// Everything up to here has run: the alerts were read, each one was
-		// filed under whose it is, the identity was found and the batch was
-		// built. Only the send is held, so that the counts a deployment
-		// reads before arming - above all producer_foreign and
-		// identity_unknown - are the counts arming would act on.
-		loop.count(absentalerts.OutcomeWouldSend, len(batch))
-		execution.word = absentalerts.OutcomeWouldSend
-		return execution
-	}
 	if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
 		loop.observe(ctx, absentalerts.OutcomeSendFailed, err, len(batch))
 		execution.word = absentalerts.OutcomeSendFailed

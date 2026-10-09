@@ -172,7 +172,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		}
 	}
 	newClient := clientFor("evidence")
-	if !cfg.CLI.Enabled {
+	if !cfg.CLI.Enabled() {
 		// No channel, but the public diagnosis still carries the deployment
 		// section, read through the same operations the CLI's would use. So
 		// a process with the CLI off builds the evidence clients too; they

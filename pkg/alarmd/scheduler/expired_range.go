@@ -25,12 +25,6 @@ func rangeFitsProgress(current execution.ScheduleProgress, proof *execution.Expi
 	return err == nil && len(raw) <= execution.MaxExpiredRangeProjectionBytes-128
 }
 
-func WithExpiredRangeCreation(enabled bool) ProductionSlotSourceOption {
-	return func(source *ProductionSlotSource) error { source.expiredRangeEnabled = enabled; return nil }
-}
-
-func (source *ProductionSlotSource) RangeCreationEnabled() bool { return source.expiredRangeEnabled }
-
 // rangeBuildRefusal is why the builder produced no range, and the two
 // candidate bounds behind it when the branch that computes them was reached.
 //
@@ -344,8 +338,6 @@ func rangeGateRefusal(
 	queryGroup execution.QueryGroupIdentity,
 ) string {
 	switch {
-	case !source.expiredRangeEnabled:
-		return observability.RangeGateCreationDisabled
 	case load.Progress == nil:
 		return observability.RangeGateProgressMissing
 	case load.Progress.NextSlot != nextSlot:
@@ -384,10 +376,9 @@ func (source *ProductionSlotSource) observeRangeGate(
 	defer func() { _ = recover() }()
 	facts := &observability.RangeGateFacts{
 		Outcome: outcome.word, ExpectedNextSlot: int64(nextSlot),
-		RangeCreationEnabled: source.expiredRangeEnabled,
-		BoundsKnown:          outcome.boundsKnown,
-		DistanceBound:        outcome.distanceBound,
-		DeadlineBound:        outcome.deadlineBound,
+		BoundsKnown:   outcome.boundsKnown,
+		DistanceBound: outcome.distanceBound,
+		DeadlineBound: outcome.deadlineBound,
 	}
 	if load.Progress != nil {
 		facts.ProgressPresent = true

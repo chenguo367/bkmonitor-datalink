@@ -27,8 +27,8 @@ import (
 // The Leader's side of decision-016's view stream, wired into the
 // reconcile round: the round that placed every Query Group hands the
 // stream the desired set it arrived at, and the stream projects it per
-// Worker. Nothing in execution reads the stream in this step (the shadow
-// of 016 section 7.1); a failure anywhere in it is reported and the round
+// Worker. Workers execute from the installed view through their view gate
+// (016 batch 4); a failure anywhere in the stream is reported and the round
 // stands.
 
 // viewStreamRegistry is what admission reads: the Worker's own

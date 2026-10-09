@@ -16,7 +16,7 @@ import (
 // The absent close candidate page: one row per strategy the control
 // leader's last deciding round of the absent close decided about, with what
 // the latest close of it found. It is how a reader names the strategies
-// behind the absent_strategy_* counts before the close is armed.
+// behind the absent_strategy_* counts.
 //
 // The rows are kept by the loop from what each round already read and
 // decided; reading them calls nothing on the alert link. What the page does
@@ -72,7 +72,7 @@ const (
 )
 
 // AbsentExecutions is every word a row's execution takes.
-var AbsentExecutions = []string{AbsentExecutionNotRun, absentalerts.OutcomeWouldSend,
+var AbsentExecutions = []string{AbsentExecutionNotRun,
 	absentalerts.OutcomeAlertClosed, absentalerts.OutcomeSendFailed, AbsentExecutionNoOwnAlerts,
 	absentalerts.OutcomeIdentityUnknown, absentalerts.OutcomeRevisionUnknown, absentalerts.OutcomeEvidenceUnavailable}
 
@@ -133,7 +133,6 @@ const (
 type AbsentCandidatesResponse struct {
 	AnsweredBy string `json:"answered_by"`
 	State      string `json:"state"`
-	SendArmed  bool   `json:"send_armed"`
 	// LastRound is the latest round this leader ran, decided or refused.
 	LastRound *AbsentRoundFacts `json:"last_round,omitempty"`
 	// Table is the round the rows are of: the latest one that decided. A
@@ -199,8 +198,7 @@ type AbsentExecutionFacts struct {
 	Word      string `json:"word"`
 	// Alerts is absent when the strategy's alerts were not read.
 	Alerts *AbsentAlertCounts `json:"alerts,omitempty"`
-	// Batch is how many alerts the close addressed: sent, or with the
-	// close not armed, what it would send.
+	// Batch is how many alerts the close addressed.
 	Batch    int                  `json:"batch"`
 	Identity *AbsentIdentityFacts `json:"identity,omitempty"`
 	// SampleAlertID is one of the strategy's alerts, its own first.

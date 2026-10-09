@@ -429,9 +429,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "852", Sent: 1, Members: 3,
 						Alerts: 3, Calibrated: true, SentSample: []string{"5f3a9c1e"}, MemberSample: []string{"c0ffee42"},
 						AlertSample: []fleet.OpenAlertComparisonAlert{{AlertID: "d00dfeed", Fingerprint: "c0ffee42", EventSourceID: "src-other"}}}}},
-				// The target-scope close, unarmed: its samples stay in the API.
-				TargetScopeClose: &fleet.TargetScopeCloseFacts{Armed: false, Pending: 2, Confirmed: 1, MaxEntries: 1024,
-					Outcomes: map[string]uint64{"would_send": 3, "unconfirmed": 5, "cache_unavailable": 7},
+				// The target-scope close: its samples stay in the API.
+				TargetScopeClose: &fleet.TargetScopeCloseFacts{Pending: 2, Confirmed: 1, MaxEntries: 1024,
+					Outcomes: map[string]uint64{"closed": 3, "unconfirmed": 5, "cache_unavailable": 7},
 					Strategies: []fleet.TargetScopeCloseStrategy{{TenantID: "tenant-test", StrategyID: "1001", Pending: 2, Confirmed: 1,
 						PendingSample: []string{"feedf00d"}, DecidedSample: []string{"beadcafe"}}}}}},
 		{Role: fleet.EndpointQueryBackend, Kind: "http", Address: "http://unify-query.example:10205", Configured: true},
@@ -1116,7 +1116,6 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// left; a shadow round on a build that only plans; a round that
 		// published nothing and says so; conflicts named beside the moves.
 		{"SENTENCE rebalance-paused ::", "但这一轮没发：就绪副本集刚变过，等它稳定（还剩 23 秒）再发"},
-		{"SENTENCE rebalance-shadow ::", "但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
 		{"SENTENCE rebalance-none ::", "这一轮一个都没发出去，3 个因指派记录同时被改本轮没发、下轮再算——若下一轮仍是 0"},
 		{"SENTENCE rebalance-conflicts ::", "已在移：本轮发出 6 个（每轮最多 9 个），最多与最少还差 75 个，3 个因指派记录同时被改本轮没发、下轮再算；看这一行的数在不在降"},
 		{"LOAD behind-permits ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
@@ -1175,7 +1174,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "有：消费方按索引协议发布，本端 27 秒前读到"},
 		{"DEPS ::", "跟踪 60 条策略、索引覆盖 60 条、未恢复指纹 0 个（未配校准）"},
 		{"DEPS ::", "恢复门查过 168 次：索引里没有 168"},
-		{"DEPS ::", "目标移出范围关闭（未开启，只计算不发送）：等第二轮确认 2 个、已确认待关 1 个；累计已关 0、本应发送 3、首次观测 5、目标缓存不确定未判 7、不在集合 0、集合不可判 0、他源告警 0、发送失败 0、观测表满 0、多输入无法算指纹 0、观测过旧暂缓 0、拒绝本身不确定 0"},
+		{"DEPS ::", "目标移出范围关闭：等第二轮确认 2 个、已确认待关 1 个；累计已关 3、首次观测 5、目标缓存不确定未判 7、不在集合 0、集合不可判 0、他源告警 0、发送失败 0、观测表满 0、多输入无法算指纹 0、观测过旧暂缓 0、拒绝本身不确定 0"},
 		{"DEPS ::", "恢复闸对照：本端发出未恢复 4 个（32 位十六进制 4），集合成员 64 位十六进制 147；校准列出的活动告警本部署来源 2 条、其他来源 147 条；在已校准策略里的 4 个发出键中，等于某条活动告警 ID 的 0 个、等于其指纹的 0 个"},
 		// The consequence, said once rather than left for the reader to derive
 		// from a row that also says "available" and "not stale", both true.
@@ -1723,7 +1722,6 @@ const round = {ready_workers: 2, assigned: 979, target: 489, most_owned: 527, le
   most_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-abcde', least_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-fghij'};
 for (const [name, extra] of Object.entries({
   'paused': {paused: true, paused_for_seconds: 22.4},
-  'shadow': {shadow: true},
   'none': {published_moves: 0, conflicts: 3},
   'conflicts': {published_moves: 6, conflicts: 3},
 })) {

@@ -195,7 +195,6 @@ func TestPhaseTwoCPURecordsPinnedLibraryDecisionWithoutRawEnvironment(t *testing
 // but that answers a different question and only once a Pod exists.
 func TestResolvedRuntimeFactsCarryTheDerivedTimelineCacheBudget(t *testing.T) {
 	cfg := config.Default()
-	cfg.Input.Mode = config.InputModeGoAccess
 	facts, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)
@@ -223,26 +222,25 @@ func TestResolvedRuntimeFactsCarryTheDerivedTimelineCacheBudget(t *testing.T) {
 	}
 }
 
-// The alert link's switches are on the profile, the Console as configured or
-// not and never its address: whether the absent-strategy close sends is
+// The alert link's settings are on the profile, the Console as configured
+// or not and never its address: whether the alert closes run at all is
 // otherwise readable only from the file the process started with.
-func TestThePhaseTwoRuntimeProfileSaysWhetherTheAbsentCloseSends(t *testing.T) {
+func TestThePhaseTwoRuntimeProfileSaysWhetherTheLinkIsConfigured(t *testing.T) {
 	cfg := config.Default()
 	off, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if off.Linkd != (observability.RuntimeLinkdFacts{}) {
-		t.Fatalf("default linkd facts = %+v, want nothing configured and the close not sending", off.Linkd)
+		t.Fatalf("default linkd facts = %+v, want nothing configured", off.Linkd)
 	}
 	cfg.PhaseTwo.Linkd.ConsoleURL = "http://DO_NOT_LOG_CONSOLE:8080"
 	cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.HookName = "alarmd", "hook-a"
-	cfg.PhaseTwo.Linkd.AbsentCloseSend = true
 	on, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := observability.RuntimeLinkdFacts{ConsoleConfigured: true, EventSourceID: "alarmd", HookName: "hook-a", AbsentCloseSend: true}
+	want := observability.RuntimeLinkdFacts{ConsoleConfigured: true, EventSourceID: "alarmd", HookName: "hook-a"}
 	encoded, _ := json.Marshal(on)
 	if on.Linkd != want || strings.Contains(string(encoded), "DO_NOT_LOG") || on.Digest == off.Digest {
 		t.Fatalf("linkd facts = %+v (want %+v), digest moved %v: %s", on.Linkd, want, on.Digest != off.Digest, encoded)

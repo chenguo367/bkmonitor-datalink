@@ -140,9 +140,6 @@ func (a *phaseTwoApplication) HealthSnapshot() observability.HealthSnapshot {
 }
 
 func newPhaseTwoApplication(cfg config.Config) (*phaseTwoApplication, error) {
-	if cfg.Input.Mode != config.InputModeGoAccess {
-		return nil, fmt.Errorf("phase-two application requires input mode %q", config.InputModeGoAccess)
-	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate phase-two application configuration: %w", err)
 	}

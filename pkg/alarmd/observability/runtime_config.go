@@ -44,8 +44,9 @@ type RuntimeConfigFacts struct {
 	// credential-free by contract.
 	Storage RuntimeStorageFacts `json:"storage"`
 	// Linkd is the alert link's settings that decide what this process does,
-	// credential-free: whether a close it can send is armed is otherwise
-	// readable only from the configuration file it was started with.
+	// credential-free: whether the Console is configured, which is what
+	// turns the alert closes on, is otherwise readable only from the
+	// configuration file it was started with.
 	Linkd RuntimeLinkdFacts `json:"linkd"`
 	// Retention is how long this deployment keeps what a Slot reads again,
 	// beside every input each length is derived from. Whether a sixty-hour
@@ -100,14 +101,13 @@ type RuntimeRetentionFacts struct {
 
 // RuntimeLinkdFacts is what the alert link's configuration switches on: the
 // Console configured or not, the event source and hook the link's target is
-// narrowed to, and whether the close for strategies that no longer exist
-// sends (absent_close_send; false takes the difference and sends nothing).
-// No address, username or password.
+// narrowed to. With the Console configured, the closes of alerts of
+// strategies that no longer exist and of targets that left a strategy's
+// scope send. No address, username or password.
 type RuntimeLinkdFacts struct {
 	ConsoleConfigured bool   `json:"console_configured"`
 	EventSourceID     string `json:"event_source_id,omitempty"`
 	HookName          string `json:"hook_name,omitempty"`
-	AbsentCloseSend   bool   `json:"absent_close_send"`
 }
 
 type RuntimeStorageFacts struct {
@@ -139,7 +139,6 @@ type RuntimeStorageFacts struct {
 }
 
 type RuntimeCapacityFacts struct {
-	QueryUnavailableCooldown bool `json:"query_unavailable_cooldown"`
 	// The two execution-limit fields are the derivation and what the dispatcher
 	// actually runs with, and they differ only when the ready queue clamps the
 	// derived value down. Both are here so that a clamp which really did take

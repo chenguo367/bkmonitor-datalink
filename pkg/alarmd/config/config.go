@@ -61,11 +61,10 @@ type HTTPConfig struct {
 	InternalListen string `yaml:"internal_listen"`
 }
 
-// CLIConfig enables the deployment-operator evidence channel. AdminKey authorizes
+// CLIConfig is the deployment-operator evidence channel. AdminKey authorizes
 // grant issuance directly in alarmd; it is not a CLI session token or user identity.
 // The key must never be included in runtime configuration evidence.
 type CLIConfig struct {
-	Enabled         bool   `yaml:"enabled"`
 	EnvironmentID   string `yaml:"environment_id"`
 	EnvironmentName string `yaml:"environment_name"`
 	PublicBaseURL   string `yaml:"public_base_url"`
@@ -75,6 +74,12 @@ type CLIConfig struct {
 	// from the file; see resolveAdminKeySecret.
 	AdminKeySecret CLIAdminKeySecret `yaml:"-" json:"-"`
 }
+
+// Enabled is whether this process serves the CLI: it does exactly when an
+// administrator key is configured. The key is what makes a session
+// possible, so a second switch could only ever agree with it or open a
+// channel nobody can log in to.
+func (c CLIConfig) Enabled() bool { return c.AdminKey != "" }
 
 // CLIAdminKeySecret names the Secret that holds the administrator key:
 // the namespace, the Secret and the key inside it. Names only, never the
@@ -278,7 +283,6 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 }
 
 type Config struct {
-	Input           PhaseTwoInputConfig   `yaml:"input"`
 	HTTP            HTTPConfig            `yaml:"http"`
 	CLI             CLIConfig             `yaml:"cli"`
 	Kafka           KafkaConfig           `yaml:"kafka"`
@@ -296,7 +300,6 @@ type Config struct {
 // product default and every test's expectations a property of its host.
 func Default() Config {
 	cfg := Config{
-		Input: DefaultPhaseTwoInput(),
 		HTTP: HTTPConfig{
 			Listen: "127.0.0.1:8080",
 			// The pprof convention; kept off the query port so the two
@@ -507,7 +510,7 @@ func (c Config) TargetGroupRedis() (RedisConnectionConfig, bool) {
 // an incident is reconstructed from, and "inherited" is not an answer to the
 // question of where a read went.
 func (c *Config) resolvePlatformCacheRedis() {
-	if c == nil || c.Input.Mode != InputModeGoAccess {
+	if c == nil {
 		return
 	}
 	for _, cache := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig, &c.PlatformCache.TargetGroup} {
@@ -646,24 +649,20 @@ func Load(path string) (Config, error) {
 }
 
 // PublicSurfaceRestrictionRequested is the configuration's half of the one
-// switch for the public surface: the process serves the CLI with a
-// deployment administrator key. The key is what makes a CLI session
+// switch for the public surface: the process serves the CLI, which it does
+// with a deployment administrator key. The key is what makes a CLI session
 // available, and only then do the routes that carry deployment coordinates
-// have somewhere else to be read from; a key on a process with the CLI
-// switched off opens no session. The other half is the runtime's: the
+// have somewhere else to be read from. The other half is the runtime's: the
 // surface is restricted only once the CLI has actually come up, since
 // restricting without it would leave no way in. No separate setting exists,
 // so the two cannot disagree.
 func (c Config) PublicSurfaceRestrictionRequested() bool {
-	return c.CLI.Enabled && c.CLI.AdminKey != ""
+	return c.CLI.Enabled()
 }
 
 func (c Config) Validate() error {
 	if err := c.validateCommon(); err != nil {
 		return err
-	}
-	if err := c.Input.Validate(); err != nil {
-		return fmt.Errorf("input configuration: %w", err)
 	}
 
 	return c.validateGoAccessRuntime()
