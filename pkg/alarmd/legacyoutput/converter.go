@@ -339,11 +339,7 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 	// backend sorts it (nodata.py:259).
 	_, noData := event.RecordRef.Dimensions[contract.NoDataDimensionTag]
 	if noData {
-		dimensionFields = make([]string, 0, len(event.RecordRef.Dimensions))
-		for field := range event.RecordRef.Dimensions {
-			dimensionFields = append(dimensionFields, field)
-		}
-		sort.Strings(dimensionFields)
+		dimensionFields = noDataDimensionFields(event.RecordRef.Dimensions)
 	}
 	identity := map[string]json.RawMessage{}
 	for _, field := range dimensionFields {
@@ -462,4 +458,25 @@ func noDataMessage(itemName string, periods json.RawMessage) string {
 		}
 	}
 	return fmt.Sprintf("当前指标(%s)已经有%d个周期无数据上报", itemName, count)
+}
+
+// noDataDimensionFields is a no-data point's field list: every key its
+// record carries, the tag included, sorted as the backend sorts it. See
+// convertEvent for why the item's own identity fields are not used.
+func noDataDimensionFields(dimensions map[string]json.RawMessage) []string {
+	fields := make([]string, 0, len(dimensions))
+	for field := range dimensions {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// NoDataDedupeMD5 is the key a no-data event's message is written under,
+// the md5 Python's alert builder files the alert by: computed the way
+// convertEvent computes it, from the record alone, so a reader of what was
+// sent can name the alert without the frozen strategy in hand.
+func NoDataDedupeMD5(event *contract.TriggerEventV1) (string, error) {
+	return contract.MonitorDedupeMD5(event.PlanRef.StrategyID, event.BusinessID, event.RecordRef.Dimensions,
+		contract.MonitorOutputIdentity{DimensionFields: noDataDimensionFields(event.RecordRef.Dimensions)})
 }

@@ -11,6 +11,7 @@ package worker
 
 import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -26,7 +27,9 @@ func noDataEmissionOf(events []contract.TriggerEventV1, err error) *observabilit
 	notWritten, partial := outputNotWritten(err)
 	unknown := err != nil && !partial && isRetryableOutputDependency(err)
 	var facts *observability.NoDataEmissionFacts
-	for _, event := range events {
+	var lastAbnormal, lastRecovery *contract.TriggerEventV1
+	for i := range events {
+		event := &events[i]
 		if _, tagged := event.RecordRef.Dimensions[contract.NoDataDimensionTag]; !tagged {
 			continue
 		}
@@ -42,22 +45,45 @@ func noDataEmissionOf(events []contract.TriggerEventV1, err error) *observabilit
 			facts.NotWritten++
 			continue
 		}
-		latest := &facts.LastAbnormal
+		latest := &lastAbnormal
 		switch event.EventKind {
 		case contract.TriggerEventAbnormal:
 			facts.AbnormalSent++
 		case contract.TriggerEventRecovery:
 			facts.RecoverySent++
-			latest = &facts.LastRecovery
+			latest = &lastRecovery
 		default:
 			continue
 		}
 		if *latest != nil && (*latest).EvaluationTime > event.EvaluationTime {
 			continue
 		}
-		group, truncated := observability.NoDataEmittedGroup(event.RecordRef.Dimensions, contract.NoDataDimensionTag)
-		*latest = &observability.NoDataEmittedEvent{EvaluationTime: event.EvaluationTime, AlertKey: event.DedupeMD5,
-			Group: group, GroupTruncated: truncated}
+		*latest = event
+	}
+	if facts != nil {
+		facts.LastAbnormal, facts.LastRecovery = noDataEmitted(lastAbnormal), noDataEmitted(lastRecovery)
 	}
 	return facts
+}
+
+// noDataEmitted is one acknowledged no-data event as a reader looks it up,
+// built once per write for the latest of each kind. Its key is the one the
+// message was written under. Under the compatibility protocol that is the
+// md5 of the group's dimensions and the tag (legacyoutput.NoDataDedupeMD5),
+// not the event's own dedupe_md5, which a Plan without a frozen snapshot
+// revision leaves empty and which otherwise hashes the Plan's identity
+// fields; the converter computed the same key to write the message, so it
+// does not fail here for an event that was written. Under the standard
+// protocol it is the dedupe_md5, sent as the alert id.
+func noDataEmitted(event *contract.TriggerEventV1) *observability.NoDataEmittedEvent {
+	if event == nil {
+		return nil
+	}
+	key := event.DedupeMD5
+	if event.WireFormat == contract.WireFormatPythonCompatible {
+		key, _ = legacyoutput.NoDataDedupeMD5(event)
+	}
+	group, truncated := observability.NoDataEmittedGroup(event.RecordRef.Dimensions, contract.NoDataDimensionTag)
+	return &observability.NoDataEmittedEvent{EvaluationTime: event.EvaluationTime, AlertKey: key,
+		Group: group, GroupTruncated: truncated}
 }
