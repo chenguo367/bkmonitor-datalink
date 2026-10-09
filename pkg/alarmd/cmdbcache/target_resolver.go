@@ -330,13 +330,13 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 //
 // A member the cache knows as a host is that host's id. A member it does
 // not know is dropped and counted, as a group member that fails validation
-// is. When it knows none of them the selector is Unavailable by name: the
-// plan's model is not one the cache lists hosts under - a non-host model the
-// writer named no model_match for - or the writer has not put the canonical
-// identity on the host records at all (ModelledHosts is zero). Both are
-// "these members cannot be placed against the data", and neither is an
-// empty target; reading them as one would stop the Plan's detection with
-// nothing on the page.
+// is. When it knows none of them, it depends on the model. If the cache
+// lists hosts under it, the members are hosts that are gone: Incomplete,
+// members_dropped, as a group whose every member was refused - not an empty
+// target either. If it lists none - a non-host model the writer named no
+// model_match for, or a writer that does not put the canonical identity on
+// its host records - the selector is Unavailable by name: these members
+// cannot be placed against the data at all.
 func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1, index *Index, unusable string) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
@@ -358,9 +358,13 @@ func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1
 	}
 	result.Members, result.Kept = members, len(members)
 	switch {
-	case len(members) == 0:
+	case len(members) == 0 && !index.ListsModel(plan.ModelID):
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelUnresolved
 	case result.Dropped > 0:
+		// The cache lists hosts under the plan's model and not these: the
+		// members are hosts that are gone, every one of them when none is
+		// kept - dropped by name, as a group's refused members are, not a
+		// model the cache cannot place.
 		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonMembersDropped
 	default:
 		result.State = targetplan.SelectorOK

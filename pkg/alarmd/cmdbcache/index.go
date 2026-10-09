@@ -130,8 +130,10 @@ type Index struct {
 	topoNodes map[string]struct{}
 	// byModelInstance is every host that carries the canonical (model,
 	// instance) identity, keyed "model|instance": how a model_inst_id target
-	// read by host identity finds the host a static member names.
+	// read by host identity finds the host a static member names. models are
+	// the models those hosts carry.
 	byModelInstance map[string]*HostFacts
+	models          map[string]struct{}
 	// addressOf is, by host id, the tenant and ip_cloud key of every host
 	// the writer put a whole target address on: how an ip_cloud target maps
 	// its hosts to the keys records are read by. hostsAt is, by
@@ -333,6 +335,17 @@ func (index *Index) LookupModelInstance(model, instance string) (*HostFacts, boo
 	}
 	facts, found := index.byModelInstance[model+"|"+instance]
 	return facts, found
+}
+
+// ListsModel says the cache lists at least one host under the canonical
+// model: a static member of that model the index does not find is a host
+// that is gone, not a model the cache cannot place.
+func (index *Index) ListsModel(model string) bool {
+	if index == nil {
+		return false
+	}
+	_, listed := index.models[model]
+	return listed
 }
 
 // TopologyAnswer is what the index says about one dynamic topology
@@ -681,8 +694,8 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 		index: &Index{
 			byIdentity: make(map[string]*HostFacts), byHostID: seen, serviceInstances: make(map[string]*ServiceInstanceFacts),
 			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
-			byModelInstance: make(map[string]*HostFacts),
-			addressOf:       make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
+			byModelInstance: make(map[string]*HostFacts), models: make(map[string]struct{}),
+			addressOf: make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
 		},
 		seen: seen,
 	}
@@ -760,6 +773,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 		builder.addToNodes(facts)
 		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
+			builder.index.models[facts.ModelID] = struct{}{}
 		}
 		builder.addAddress(wire, facts)
 	}

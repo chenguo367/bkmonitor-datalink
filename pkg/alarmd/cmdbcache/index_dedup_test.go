@@ -46,6 +46,7 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 		builder.addToNodes(facts)
 		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
+			builder.index.models[facts.ModelID] = struct{}{}
 		}
 	}
 }
