@@ -16,7 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 )
 
-const multiModuleHost = `{"bk_host_id":183016,"bk_host_innerip":"10.0.0.1","bk_cloud_id":0,"bk_biz_id":999,
+const multiModuleHost = `{"bk_host_id":183016,"bk_host_innerip":"192.0.2.141","bk_cloud_id":0,"bk_biz_id":999,
 "bk_state":"运营中[需告警]","display_name":"web-1","topo_link":{
  "module|85":[{"bk_obj_id":"module","bk_inst_id":85},{"bk_obj_id":"set","bk_inst_id":12},{"bk_obj_id":"biz","bk_inst_id":999}],
  "module|91":[{"bk_obj_id":"module","bk_inst_id":91},{"bk_obj_id":"set","bk_inst_id":13},{"bk_obj_id":"biz","bk_inst_id":999}]}}`
@@ -41,7 +41,7 @@ func TestAHostCarriesEveryNodeOfEveryTopologyLink(t *testing.T) {
 	if len(facts.TopoNodes) != 5 {
 		t.Errorf("node set = %v, want the union of both links with no duplicates", facts.TopoNodes)
 	}
-	if facts.HostID != "183016" || facts.IP != "10.0.0.1" || facts.CloudID != "0" || facts.State == "" {
+	if facts.HostID != "183016" || facts.IP != "192.0.2.141" || facts.CloudID != "0" || facts.State == "" {
 		t.Errorf("facts = %+v", facts)
 	}
 }
@@ -51,25 +51,25 @@ func TestAHostCarriesEveryNodeOfEveryTopologyLink(t *testing.T) {
 // which is exactly the mistake the sizing measurement made.
 func TestBothIdentityShapesResolveToOneHostCountedOnce(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.1|0", multiModuleHost, "183016", multiModuleHost})
+	builder.addFields([]string{"192.0.2.141|0", multiModuleHost, "183016", multiModuleHost})
 	index := builder.index
 
 	if index.Hosts() != 1 {
 		t.Fatalf("hosts = %d, want 1", index.Hosts())
 	}
-	byAddress, foundAddress := index.Lookup("10.0.0.1|0")
+	byAddress, foundAddress := index.Lookup("192.0.2.141|0")
 	byIdentifier, foundIdentifier := index.Lookup("183016")
 	if !foundAddress || !foundIdentifier || byAddress != byIdentifier {
 		t.Fatalf("the two identities did not resolve to one record: %v %v", foundAddress, foundIdentifier)
 	}
-	if _, found := index.Lookup("10.9.9.9|0"); found {
+	if _, found := index.Lookup("192.0.2.199|0"); found {
 		t.Error("an unknown identity resolved")
 	}
 }
 
 func TestAMalformedRecordDoesNotBlindTheIndex(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"broken", "{not json", "10.0.0.1|0", multiModuleHost})
+	builder.addFields([]string{"broken", "{not json", "192.0.2.141|0", multiModuleHost})
 	if builder.index.Hosts() != 1 {
 		t.Fatalf("hosts = %d, want the readable one", builder.index.Hosts())
 	}
@@ -79,7 +79,7 @@ func TestAMalformedRecordDoesNotBlindTheIndex(t *testing.T) {
 // strategy filters on, and teaches the record the identity it did not carry.
 func TestEnrichmentResolvesTopologyAndTheOtherIdentity(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.1|0", multiModuleHost, "183016", multiModuleHost})
+	builder.addFields([]string{"192.0.2.141|0", multiModuleHost, "183016", multiModuleHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
 	chain := admission.NewChain(
@@ -87,7 +87,7 @@ func TestEnrichmentResolvesTopologyAndTheOtherIdentity(t *testing.T) {
 		[]admission.Filter{admission.TargetScopeFilter{}},
 	)
 	facts := chain.Enrich(map[string]json.RawMessage{
-		"bk_target_ip":       json.RawMessage(`"10.0.0.1"`),
+		"bk_target_ip":       json.RawMessage(`"192.0.2.141"`),
 		"bk_target_cloud_id": json.RawMessage(`0`),
 	})
 	if !facts.HostResolved || len(facts.TopoNodes()) != 5 {
@@ -111,10 +111,10 @@ func TestEnrichmentResolvesTopologyAndTheOtherIdentity(t *testing.T) {
 // target rejects it the way Python does.
 func TestAnUnknownHostStaysUnresolved(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.1|0", multiModuleHost})
+	builder.addFields([]string{"192.0.2.141|0", multiModuleHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)}, nil)
-	facts := chain.Enrich(map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"10.9.9.9"`)})
+	facts := chain.Enrich(map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.199"`)})
 	if facts.HostResolved || len(facts.TopoNodes()) != 0 {
 		t.Fatalf("facts = %+v", facts)
 	}
@@ -133,7 +133,7 @@ func (loader stubLoader) Load(context.Context, time.Time) (*Index, error) {
 // answering, and the failure is visible rather than silent.
 func TestAFailedRefreshKeepsTheLastGoodIndex(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.1|0", multiModuleHost})
+	builder.addFields([]string{"192.0.2.141|0", multiModuleHost})
 	clock := time.Unix(1700000000, 0).UTC()
 	store, err := NewStore(stubLoader{index: builder.index}, StoreOptions{
 		RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return clock },
@@ -234,11 +234,11 @@ func TestReaderRequiresAPlatformPrefix(t *testing.T) {
 // the platform marks as not monitored, its host id to one that is monitored.
 // Python looks a host up by its id whenever the record carries one and never
 // falls back to the address, so the state a filter acts on is the id's.
-const disabledByAddressHost = `{"bk_host_id":700001,"bk_host_innerip":"10.0.0.7","bk_cloud_id":0,"bk_biz_id":999,
+const disabledByAddressHost = `{"bk_host_id":700001,"bk_host_innerip":"192.0.2.147","bk_cloud_id":0,"bk_biz_id":999,
 "bk_state":"备用机","display_name":"spare","topo_link":{
  "module|85":[{"bk_obj_id":"module","bk_inst_id":85},{"bk_obj_id":"biz","bk_inst_id":999}]}}`
 
-const monitoredByIDHost = `{"bk_host_id":700002,"bk_host_innerip":"10.0.0.8","bk_cloud_id":0,"bk_biz_id":999,
+const monitoredByIDHost = `{"bk_host_id":700002,"bk_host_innerip":"192.0.2.148","bk_cloud_id":0,"bk_biz_id":999,
 "bk_state":"运营中[需告警]","display_name":"live","topo_link":{
  "module|91":[{"bk_obj_id":"module","bk_inst_id":91},{"bk_obj_id":"biz","bk_inst_id":999}]}}`
 
@@ -247,8 +247,8 @@ const monitoredByIDHost = `{"bk_host_id":700002,"bk_host_innerip":"10.0.0.8","bk
 // scope matches on either identity - only the attributes follow Python.
 func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.7|0", disabledByAddressHost, "700001", disabledByAddressHost,
-		"10.0.0.8|0", monitoredByIDHost, "700002", monitoredByIDHost})
+	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost,
+		"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
 	chain := admission.NewChain(
@@ -256,7 +256,7 @@ func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 		[]admission.Filter{admission.TargetScopeFilter{}},
 	)
 	facts := chain.Enrich(map[string]json.RawMessage{
-		"bk_target_ip":       json.RawMessage(`"10.0.0.7"`),
+		"bk_target_ip":       json.RawMessage(`"192.0.2.147"`),
 		"bk_target_cloud_id": json.RawMessage(`0`),
 		"bk_host_id":         json.RawMessage(`700002`),
 	})
@@ -270,7 +270,7 @@ func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	// either one.
 	address, id := false, false
 	for _, key := range facts.HostKeys() {
-		if key == "10.0.0.7|0" {
+		if key == "192.0.2.147|0" {
 			address = true
 		}
 		if key == "700002" {
@@ -286,7 +286,7 @@ func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 // one that counts.
 func TestHostAttributesComeFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.7|0", disabledByAddressHost, "700001", disabledByAddressHost})
+	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
 	chain := admission.NewChain(
@@ -294,7 +294,7 @@ func TestHostAttributesComeFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 		[]admission.Filter{admission.TargetScopeFilter{}},
 	)
 	facts := chain.Enrich(map[string]json.RawMessage{
-		"bk_target_ip":       json.RawMessage(`"10.0.0.7"`),
+		"bk_target_ip":       json.RawMessage(`"192.0.2.147"`),
 		"bk_target_cloud_id": json.RawMessage(`0`),
 	})
 	if facts.HostState != "备用机" {
@@ -310,7 +310,7 @@ func TestHostAttributesComeFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 // host's entry and keep a series Python drops.
 func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
-	builder.addFields([]string{"10.0.0.7|0", disabledByAddressHost, "700001", disabledByAddressHost})
+	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
 	statusFilter, installed := admission.NewHostStatusFilter([]string{"备用机"})
@@ -322,7 +322,7 @@ func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 		[]admission.Filter{statusFilter},
 	)
 	facts := chain.Enrich(map[string]json.RawMessage{
-		"bk_target_ip":       json.RawMessage(`"10.0.0.7"`),
+		"bk_target_ip":       json.RawMessage(`"192.0.2.147"`),
 		"bk_target_cloud_id": json.RawMessage(`0`),
 		"bk_host_id":         json.RawMessage(`700009`),
 	})
@@ -346,7 +346,7 @@ func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 	}
 	address := false
 	for _, key := range facts.HostKeys() {
-		if key == "10.0.0.7|0" {
+		if key == "192.0.2.147|0" {
 			address = true
 		}
 	}
@@ -374,7 +374,7 @@ func TestAnEmptyHostCacheIsNotAFleetWithNoHosts(t *testing.T) {
 		[]admission.Filter{admission.TargetScopeFilter{}, statusFilter},
 	)
 	facts := chain.Enrich(map[string]json.RawMessage{
-		"bk_target_ip":       json.RawMessage(`"10.0.0.7"`),
+		"bk_target_ip":       json.RawMessage(`"192.0.2.147"`),
 		"bk_target_cloud_id": json.RawMessage(`0`),
 	})
 	if !facts.HostFactsUnavailable {
@@ -439,7 +439,7 @@ func TestHostIndexResolvedFollowsWhetherThereIsAnIndexToAnswerFrom(t *testing.T)
 	}
 
 	builder := newIndexBuilder(clock)
-	builder.addFields([]string{"10.0.0.1|0", multiModuleHost})
+	builder.addFields([]string{"192.0.2.141|0", multiModuleHost})
 	loaded, err := NewStore(stubLoader{index: builder.index}, StoreOptions{
 		RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return clock },
 	})
