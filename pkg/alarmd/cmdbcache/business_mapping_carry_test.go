@@ -88,6 +88,37 @@ func TestAMissingMappingMapsNothingNamedMissing(t *testing.T) {
 	}
 }
 
+// The namespace mapping follows the same rule: its key gone after a hash with
+// entries maps nothing at the next load, named missing, and the cluster
+// mapping beside it is read as it is.
+func TestAMissingNamespaceMappingMapsNothingNamedMissing(t *testing.T) {
+	const namespaceKey = "bk_monitorv3.ce.cache.cmdb.bcs_namespace_business"
+	client := &hashClient{hashes: map[string][]string{
+		clusterMappingKey: {"BCS-K8S-00001", "11"},
+		namespaceKey:      {"BCS-K8S-00001|prod", "21"},
+	}}
+	store, _ := refreshingMappingStore(t, client)
+	mustRefresh(t, store)
+	lookup := NewHostBusinessLookup(store)
+	if business, found := lookup.LookupNamespaceBusiness("BCS-K8S-00001", "prod"); !found || business != "21" {
+		t.Fatalf("namespace prod before = %q, %v; want 21", business, found)
+	}
+
+	delete(client.hashes, namespaceKey)
+	mustRefresh(t, store)
+	health := store.Health()
+	if health.NamespaceBusinessMapping != (MappingStats{Missing: true}) || health.ClusterBusinessMapping != (MappingStats{Held: 1}) {
+		t.Fatalf("namespace %+v, cluster %+v; want the namespace mapping missing and the cluster mapping read",
+			health.NamespaceBusinessMapping, health.ClusterBusinessMapping)
+	}
+	if _, found := lookup.LookupNamespaceBusiness("BCS-K8S-00001", "prod"); found {
+		t.Fatal("an entry of a missing namespace mapping was carried")
+	}
+	if business, found := lookup.LookupClusterBusiness("BCS-K8S-00001"); !found || business != "11" {
+		t.Fatalf("cluster beside a missing namespace mapping = %q, %v; want 11", business, found)
+	}
+}
+
 // A key that cannot be read keeps the last mapping read, its counts included,
 // named read_failed, for as long as reads fail - past the index's staleness
 // bound too - and the next read that succeeds replaces it and clears the flag.
