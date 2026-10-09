@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -44,6 +45,20 @@ func (err *SourceBlockedError) Error() string {
 	return "alarmd scheduler: blocked exact Slot facts: " + err.Err.Error()
 }
 func (err *SourceBlockedError) Unwrap() error { return err.Err }
+
+// ReasonCode is the word a blocked round is named by: SCHEDULE_UNREADABLE
+// when what blocked it is a schedule timeline that does not decode, and
+// BLOCKED_EXACT_SET_UNAVAILABLE for the rest. The timeline case used to read
+// as the other word, which says the control plane handed nothing to run;
+// told apart, a rollout's old build that cannot read its new timelines is a
+// reading rather than an inference.
+func (err *SourceBlockedError) ReasonCode() execution.ReasonCode {
+	var undecodable *controlplane.DeterministicScheduleError
+	if err != nil && errors.As(err.Err, &undecodable) {
+		return execution.ReasonCode(contract.ReasonScheduleUnreadable)
+	}
+	return execution.ReasonBlockedExactSetUnavailable
+}
 
 // ViewNotExecutableError is a Slot source, or the executor, refusing a
 // Query Group its Worker's installed executable view does not yet allow
@@ -858,7 +873,7 @@ func (runner *Runner) runOneTracked(
 			}
 			runner.sourceFailures++
 			runner.sourceNextAt = runner.now().Add(retryDelay(runner.flights.limits, runner.queryGroup, runner.sourceFailures))
-			reason := execution.ReasonCode(execution.ReasonBlockedExactSetUnavailable)
+			reason := blocked.ReasonCode()
 			if retry != nil {
 				reason = execution.ReasonCode(contract.ReasonSlotSourceRetry)
 			}
