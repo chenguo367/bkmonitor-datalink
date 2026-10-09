@@ -715,8 +715,10 @@ func prepare(
 			return PreparedExecution{}, errors.New("alarmd access: frozen query revision mismatch")
 		}
 		window := requirement.AbsoluteWindow(contractRef.Slot.EvaluationTime)
+		// The provider is asked from earlier for an event count (its
+		// requirement's lead); only the window is accepted.
 		spec, err := execution.BuildPhysicalQuerySpec(execution.PhysicalQuerySpec{PlanFacts: facts,
-			LogicalWindow: window, ProviderRange: window, AcceptedRange: window,
+			LogicalWindow: window, ProviderRange: requirement.ProviderWindow(contractRef.Slot.EvaluationTime), AcceptedRange: window,
 			RequiredColumns: append([]string(nil), requirement.RequiredColumns...)})
 		if err != nil {
 			return PreparedExecution{}, fmt.Errorf("alarmd access: build physical query: %w", err)

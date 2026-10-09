@@ -2576,6 +2576,60 @@ func (runtime *RedisCatalogRuntime) readPersistedSegment(
 	return persistedScheduleSegment{}, ErrScheduleUnavailable
 }
 
+// eventCountProviderLeads is, by requirement window, how far before it a
+// custom/event count asks the provider from: an event count's group comes
+// back only while it holds an event inside the range asked, with zeros for
+// the empty steps, and a group that went quiet must stay in the answer until
+// it can recover. Recovery reads back N + R - 1 points (a level's
+// RequiredDetectHistoryPoints), so the range is N + R windows - the window
+// and that many before it - for the most demanding level of the Plans due
+// with that window; the window alone is accepted. Only a query that reads
+// custom/event and nothing else: a log count is read as a time series, whose
+// empty answer does not recover, and every other source answers without
+// zero-filled groups to keep. Rounded up to a whole number of steps.
+func eventCountProviderLeads(query execution.QueryPlanFacts, duePlans []execution.DuePlan) map[int64]int64 {
+	if !readsEventCountOnly(query) {
+		return nil
+	}
+	var histories []levelHistory
+	for _, due := range duePlans {
+		window := int64(due.CompiledPlan.EvaluationSemantics().QueryWindow)
+		for _, level := range due.CompiledPlan.Levels().All() {
+			histories = append(histories, levelHistory{window: window, points: int64(level.RequiredDetectHistoryPoints())})
+		}
+	}
+	return providerLeads(query.StepMillis, histories)
+}
+
+// levelHistory is one due Level's requirement window and the history points
+// its trigger reads back.
+type levelHistory struct{ window, points int64 }
+
+// readsEventCountOnly is whether a query reads custom/event and nothing else.
+func readsEventCountOnly(query execution.QueryPlanFacts) bool {
+	return len(query.SourceSemantics) == 1 && query.SourceSemantics[0] == eventCountSourceSemantics && query.StepMillis > 0
+}
+
+// providerLeads is, by window, the most history points of a Level due with
+// it times the window, rounded up to a whole number of steps; zero points
+// lead nothing.
+func providerLeads(stepMillis int64, histories []levelHistory) map[int64]int64 {
+	leads := make(map[int64]int64)
+	for _, history := range histories {
+		lead := history.points * history.window
+		if lead*1000%stepMillis != 0 {
+			lead = (lead*1000/stepMillis + 1) * stepMillis / 1000
+		}
+		if lead > leads[history.window] {
+			leads[history.window] = lead
+		}
+	}
+	return leads
+}
+
+// eventCountSourceSemantics is the source an event count reads.
+const eventCountSourceSemantics = "custom/event"
+
 func (runtime *RedisCatalogRuntime) primaryRequirements(
 	group QueryGroup,
 	duePlans []execution.DuePlan,
@@ -2587,19 +2641,24 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 	byWindow := make(map[requirementKey]*execution.DataRequirement)
 	columns := append([]string{"value"}, group.QueryPlan.Normalization.DatasetContract.IdentityFields...)
 	sort.Strings(columns)
+	leads := eventCountProviderLeads(group.QueryPlan, duePlans)
 	for _, due := range duePlans {
 		window := int64(due.CompiledPlan.EvaluationSemantics().QueryWindow)
 		key := requirementKey{window: window}
 		requirement := byWindow[key]
 		if requirement == nil {
+			lead := leads[window]
 			identity, err := contract.DeriveCanonicalDigestV2("alarmd-primary-requirement-v1", struct {
 				QueryRevision execution.QueryRevision `json:"query_revision"`
 				WindowSeconds int64                   `json:"window_seconds"`
-			}{group.QueryPlan.QueryRevision, window})
+				// Omitted when zero, so every requirement without a lead
+				// keeps the identity it had.
+				ProviderLeadSeconds int64 `json:"provider_lead_seconds,omitempty"`
+			}{group.QueryPlan.QueryRevision, window, lead})
 			if err != nil {
 				return nil, err
 			}
-			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity),
+			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity), ProviderLeadSeconds: lead,
 				DatasetName: execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
 				LogicalQueryRef: execution.LogicalQueryRef(group.QueryPlan.QueryRevision),
 				RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -group.QueryPlan.QueryDelaySeconds - window, EndOffsetSeconds: -group.QueryPlan.QueryDelaySeconds, HalfOpen: true},
