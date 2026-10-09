@@ -435,6 +435,17 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 		}
 	}
 	data := map[string]any{"record_id": md5 + "." + strconv.FormatInt(event.RecordRef.SourceTime, 10), "time": event.RecordRef.SourceTime, "dimensions": event.RecordRef.Dimensions, "dimension_fields": dimensionFields, "value": value, "values": observed}
+	if !noData {
+		// The time the point was processed, which the backend's access stamps
+		// on every record it reads (records.py:244) and the alert builder
+		// decides expiry from (event.py:394-415); without it the data time
+		// stands in, and an anomaly whose data is more than a minute older than
+		// an alert's end is dropped as expired. Here it is the conversion's,
+		// trigger_time's own value, in whole seconds where the backend's is
+		// fractional. A no-data record is built by the backend itself, never
+		// read by access, and carries none (nodata.py:253-261).
+		data["access_time"] = now
+	}
 	payload := map[string]any{
 		"event_id": anomalyID(event.RecordRef.SourceTime), "plugin_id": pluginID, "strategy_id": s.ID, "alert_name": name, "description": description, "severity": event.PrimaryLevelID, "tags": tags, "target_type": projection.Type, "target": projection.Target, "status": status, "metric": frozen.metrics, "category": s.Scenario, "data_type": s.Items[0].Queries[0].DataType, "dedupe_keys": dedupeKeys, "time": event.RecordRef.SourceTime, "anomaly_time": anomalyTime, "bk_ingest_time": now, "bk_clean_time": now, "bk_biz_id": s.BusinessID, "bk_tenant_id": event.TenantID,
 		"extra_info": map[string]any{"additional_dimensions": additional, "origin_alarm": map[string]any{"trigger_time": now, "data": data, "trigger": map[string]any{"level": level, "anomaly_ids": anomalyIDs}, "anomaly": map[string]any{level: map[string]any{"anomaly_id": anomalyID(event.RecordRef.SourceTime), "anomaly_message": description}}, "dimension_translation": map[string]any{}, "strategy_snapshot_key": frozen.snapshot, "alarmd_event_id": event.EventID}},

@@ -108,6 +108,12 @@ func TestASyntheticNoDataPointConvertsIntoTheBackendsObject(t *testing.T) {
 	if !reflect.DeepEqual(data["values"], wantValues) {
 		t.Fatalf("values = %#v, want %#v", data["values"], wantValues)
 	}
+	// No processing time: the backend builds this record itself, it never
+	// went through access (nodata.py:253-261), and the alert builder reads
+	// the checked period in its place (event.py:394-396).
+	if accessTime, present := data["access_time"]; present {
+		t.Fatalf("access_time = %v, want none: the backend's no-data record has none", accessTime)
+	}
 
 	// The tag is in the dimensions and in the field list, which is what the
 	// alert side reads to know this is a no-data alert at all.
