@@ -216,7 +216,9 @@ func TestLoggingObserverWritesBoundedActivationFailureReappearedSamples(t *testi
 	}
 }
 
-func TestLoggingObserverKeepsPendingCandidateWithoutInventingPublication(t *testing.T) {
+// A refresh line whose publication is not whole names none: a revision
+// without its epoch, or the reverse, is dropped rather than half reported.
+func TestLoggingObserverDropsAHalfNamedPublication(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
@@ -231,18 +233,18 @@ func TestLoggingObserverKeepsPendingCandidateWithoutInventingPublication(t *test
 	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
 		Component: ComponentControlPlane, Stage: StageSnapshotRefreshed, Result: ResultSuccess,
 		SourceRefresh: &SourceRefreshFacts{
-			Status: SourceRefreshPending, ObservationID: "observation-candidate",
+			Status: SourceRefreshPublished, ObservationID: "observation-1", SnapshotRevision: "snapshot-1",
 		},
 	})
 
 	var event map[string]any
 	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
-		t.Fatalf("decode pending source refresh log: %v; log=%s", err, output.String())
+		t.Fatalf("decode source refresh log: %v; log=%s", err, output.String())
 	}
-	if event["source_refresh_status"] != "PENDING_CONFIRMATION" ||
-		event["source_observation_id"] != "observation-candidate" ||
+	if event["source_refresh_status"] != "PUBLISHED" ||
+		event["source_observation_id"] != "observation-1" ||
 		event["snapshot_revision"] != nil || event["publication_epoch"] != nil {
-		t.Fatalf("pending source refresh log invented publication: %#v", event)
+		t.Fatalf("source refresh log with half a publication = %#v, want none named", event)
 	}
 }
 

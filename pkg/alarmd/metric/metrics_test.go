@@ -448,7 +448,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_leader_forward_duration_seconds"] = "variableLabels: {route,result}"
 	expected["bkmonitor_alarmd_control_source_mode"] = "variableLabels: {role,mode}"
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
-	expected["bkmonitor_alarmd_source_pending_confirmation_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
@@ -1014,7 +1013,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("leader_forward_duration_seconds")] = histogramSeries(len(LeaderForwardRoutes)*len(LeaderForwardResults), len(leaderForwardBuckets))
 	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
-	bounds[fqName("source_pending_confirmation_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)

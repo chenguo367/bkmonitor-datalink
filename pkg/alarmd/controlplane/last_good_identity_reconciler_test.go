@@ -76,7 +76,7 @@ func TestARefreshCountsTheLastGoodPlansItRefusedForAnotherIdentity(t *testing.T)
 			if result, err = reconciler.Refresh(ctx, source, planner); err != nil {
 				t.Fatalf("%s: Refresh() error = %v", round, err)
 			}
-			if result.Publication.PublicationEpoch > 0 && result.Status != controlplane.SourceRefreshPendingConfirmation {
+			if result.Publication.PublicationEpoch > 0 {
 				return result
 			}
 		}

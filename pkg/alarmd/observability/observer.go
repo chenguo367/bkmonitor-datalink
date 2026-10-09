@@ -316,7 +316,6 @@ const (
 	AlgorithmInputResultPartial     AlgorithmInputResult = "partial"
 	AlgorithmInputResultUnavailable AlgorithmInputResult = "unavailable"
 
-	SourceRefreshPending   SourceRefreshStatus = "PENDING_CONFIRMATION"
 	SourceRefreshPublished SourceRefreshStatus = "PUBLISHED"
 	SourceRefreshUnchanged SourceRefreshStatus = "UNCHANGED"
 	SourceRefreshConflict  SourceRefreshStatus = "PUBLICATION_CONFLICT"
@@ -1833,48 +1832,27 @@ type DrainingQGFacts struct {
 	Truncated    bool               `json:"truncated"`
 }
 
-// SourceRefreshFacts carries one bounded source refresh outcome. Snapshot
+// SourceRefreshFacts carries what one refresh round settled. Snapshot
 // identity is diagnostic log context only; Prometheus consumes Status alone.
-// SourceRefreshFacts carries what one refresh round settled. Two different
-// objects are described here and they must never share a field: SnapshotRevision
-// is the publication this round produced, and ActivatedRevision is the
-// publication the fleet is executing, which is older whenever a round ends
-// without publishing. A round that publishes nothing has no publication to name,
-// so it fills the activated pair and leaves the published pair empty.
-//
-// The distinction is load-bearing rather than cosmetic. These reach the log under
-// one stage, so a reader who cannot tell the two apart from the record will read
-// a lagging activation as a stalled publication -- and the lag is normal while
-// the stall is not.
+// Every round that returns names the publication it produced or found
+// already published, and the fleet is brought to it by the same round.
 type SourceRefreshFacts struct {
-	Status            SourceRefreshStatus
-	ObservationID     string
-	SnapshotRevision  string
-	PublicationEpoch  uint64
-	ActivatedRevision string
-	ActivatedEpoch    uint64
-	// ActivationCaughtUp marks a round that published nothing but moved the
-	// activation to the publication an earlier round had published and not
-	// activated. The counts below then describe that move.
-	ActivationCaughtUp bool
-	// ActivationRebuilt marks a caught-up round that found no activation
-	// record at all and established one from the published Catalog, as a
-	// first activation does. Catching up moves an activation; rebuilding
-	// writes one where the store had none, which is what a store that came
-	// back without its keys leaves behind, and the two must not read alike.
-	ActivationRebuilt bool
-	// ActiveQueryGroups is a size, not a change. The counts below are a change,
-	// and the two are kept apart because a round that publishes nothing has no
-	// previous set to difference against: reporting a difference there can only
-	// restate the current set against itself and produce zeroes that look
-	// measured.
-	ActiveQueryGroups      int
-	ActiveQueryGroupsKnown bool
-	CountsKnown            bool
-	OldQueryGroups         int
-	NewQueryGroups         int
-	AddedQueryGroups       int
-	RetiredQueryGroups     int
+	Status           SourceRefreshStatus
+	ObservationID    string
+	SnapshotRevision string
+	PublicationEpoch uint64
+	// ActivationRebuilt marks a round that found no activation record at all
+	// beside a publication that was already latest when the round began, and
+	// established one from it, as a first activation does. That is what a
+	// store that came back without its keys leaves behind, and it must not
+	// read like the first activation of a fresh deployment, which finds no
+	// record either and has no publication before it.
+	ActivationRebuilt  bool
+	CountsKnown        bool
+	OldQueryGroups     int
+	NewQueryGroups     int
+	AddedQueryGroups   int
+	RetiredQueryGroups int
 	// CompiledStrategies and ReusedStrategies say how the round's Catalog was
 	// built: how many strategies went through the compiler and how many were
 	// taken from an earlier round's compilation of the same document. Their
@@ -2707,7 +2685,7 @@ func normalizeSourceRefreshFacts(component Component, stage Stage, facts *Source
 
 func validSourceRefreshStatus(status SourceRefreshStatus) bool {
 	switch status {
-	case SourceRefreshPending, SourceRefreshPublished, SourceRefreshUnchanged, SourceRefreshConflict:
+	case SourceRefreshPublished, SourceRefreshUnchanged, SourceRefreshConflict:
 		return true
 	default:
 		return false
@@ -2716,7 +2694,7 @@ func validSourceRefreshStatus(status SourceRefreshStatus) bool {
 
 func AllSourceRefreshStatuses() []SourceRefreshStatus {
 	return []SourceRefreshStatus{
-		SourceRefreshPending, SourceRefreshPublished, SourceRefreshUnchanged, SourceRefreshConflict,
+		SourceRefreshPublished, SourceRefreshUnchanged, SourceRefreshConflict,
 	}
 }
 

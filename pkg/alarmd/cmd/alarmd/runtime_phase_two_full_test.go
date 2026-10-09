@@ -544,12 +544,9 @@ func testProductionPhaseTwoStrandedLatest(
 		}
 		return result
 	}
-	if result := refreshSource(); result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("first changed source refresh = %+v, want pending", result)
-	}
 	latest := refreshSource()
 	if latest.Status != controlplane.SourceRefreshPublished || latest.Publication == oldActivation.Current {
-		t.Fatalf("confirmed changed source refresh = %+v, want a new publication", latest)
+		t.Fatalf("changed source refresh = %+v, want a new publication", latest)
 	}
 	defer func() { _ = first.Shutdown(ctx) }()
 	nowUnix.Add(2)

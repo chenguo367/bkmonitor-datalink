@@ -220,9 +220,9 @@ type ObservedSnapshot struct {
 
 // ObservedSnapshot returns the last observation, and whether there is one.
 // A follower and a leader before its first read have none, which is not an
-// empty source.
+// empty source; a read of an empty list is an observation, of no strategy.
 func (reconciler *SourceReconciler) ObservedSnapshot() (ObservedSnapshot, bool) {
-	if reconciler == nil || reconciler.memory == nil || len(reconciler.memory.cycle.strategies) == 0 {
+	if reconciler == nil || reconciler.memory == nil {
 		return ObservedSnapshot{}, false
 	}
 	observed := ObservedSnapshot{Observation: reconciler.memory.readAt.UTC().Format(time.RFC3339Nano), ReadAt: reconciler.memory.readAt,

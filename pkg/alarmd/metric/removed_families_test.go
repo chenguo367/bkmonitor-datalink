@@ -62,6 +62,9 @@ var removedFamilies = []string{
 	// design's reading, run every Leader round and acted on by nothing.
 	"split_plan_total", "split_round_objects_total", "split_rounds_total", "shard_query_total",
 	"catalog_shardability_plans_total", "dimension_census_total", "dimension_census_values_total",
+	// How long a source change had waited for a second identical read. A
+	// change is published by the round that reads it, so nothing waits.
+	"source_pending_confirmation_age_seconds",
 }
 
 // removedLabelValues are label values taken out of families that stay.
@@ -111,6 +114,20 @@ var removedLabelValues = []struct {
 	// last entries carried within the staleness bound; "emptied" claimed the
 	// writer had emptied it, which a missing key cannot say.
 	{"cmdb_index_business_mappings", "state", "emptied", true},
+	// An empty strategy list was held without a time bound, every strategy
+	// kept under PENDING_REMOVAL for this reason. An empty list is now a list
+	// like any other, and its strategies are absent from it. A reason is
+	// carried as the control plane wrote it, so the scan of the sources is
+	// what guards it; the emission half only reads the family.
+	{"catalog_withheld_objects", "reason", "ACTIVE_SET_EMPTY", false},
+	// A changed source was published only after a second identical read;
+	// rounds in between answered PENDING_CONFIRMATION, and a candidate that
+	// could not be read, written or cleared, or keyed, failed the round at
+	// candidate or confirmation. The round that reads a change now publishes
+	// it, and nothing is kept between rounds to fail on.
+	{"source_refresh_total", "status", "PENDING_CONFIRMATION", false},
+	{"control_source_refresh_total", "exit", "candidate", true},
+	{"control_source_refresh_total", "exit", "confirmation", true},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -163,9 +180,30 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 	// lines are the fleet's whole table the way the process exports it.
 	var dispositions []controlplane.ObjectDisposition
 	for _, removed := range removedLabelValues {
-		if removed.family == "catalog_objects" || removed.family == "catalog_withheld_objects" {
+		if (removed.family == "catalog_objects" || removed.family == "catalog_withheld_objects") && removed.label == "disposition" {
 			dispositions = append(dispositions, controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN",
 				Disposition: controlplane.Disposition(removed.value), Reason: "ANY_REASON"})
+		}
+	}
+	// The refresh counters count what each round reports: a status, and a
+	// failed round's exit. Every word this build knows is reported, and every
+	// removed one beside it.
+	for _, status := range observability.AllSourceRefreshStatuses() {
+		r.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
+			Stage: observability.StageSnapshotRefreshed, Result: observability.ResultSuccess,
+			SourceRefresh: &observability.SourceRefreshFacts{Status: status}})
+	}
+	for _, removed := range removedLabelValues {
+		switch removed.family {
+		case "source_refresh_total":
+			r.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
+				Stage: observability.StageSnapshotRefreshed, Result: observability.ResultSuccess,
+				SourceRefresh: &observability.SourceRefreshFacts{Status: observability.SourceRefreshStatus(removed.value)}})
+		case "control_source_refresh_total":
+			r.Observe(context.Background(), observability.Observation{Component: observability.ComponentControlPlane,
+				Stage: observability.StageSnapshotRefreshed, Result: observability.ResultFailed,
+				ControlSourceRound: &observability.ControlSourceRoundFacts{
+					Outcome: observability.ControlSourceRoundFailed, Exit: removed.value}})
 		}
 	}
 	composition := controlplane.ComposeCatalog(controlplane.Catalog{Dispositions: dispositions})

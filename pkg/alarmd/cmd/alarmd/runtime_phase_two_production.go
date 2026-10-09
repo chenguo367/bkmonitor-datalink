@@ -345,10 +345,8 @@ type productionPhaseTwoControlDependencies struct {
 	// caller applies: a round that finds the activation missing and then
 	// rebuilds it returns a healthy result, so a count taken from the result
 	// would be absent in exactly the case worth seeing. Nil records nothing.
-	Recorder        *metric.Recorder
-	RefreshInterval time.Duration
-	Wait            func(context.Context, time.Duration) error
-	Close           func() error
+	Recorder *metric.Recorder
+	Close    func() error
 	// Now and MaxReplayAge bound how long an undrained draining Query Group
 	// stays in the active set. Past the termination window derived from
 	// MaxReplayAge nothing can execute its retired Slots, so it is retired
@@ -377,8 +375,7 @@ func newProductionPhaseTwoControl(
 ) (*productionPhaseTwoControl, error) {
 	if dependencies.Source == nil || dependencies.Planner == nil || dependencies.Reconciler == nil ||
 		dependencies.Activator == nil || dependencies.Repository == nil || dependencies.Schedules == nil ||
-		dependencies.Progress == nil || dependencies.RefreshInterval <= 0 ||
-		dependencies.Wait == nil || dependencies.MaxReplayAge < 0 {
+		dependencies.Progress == nil || dependencies.MaxReplayAge < 0 {
 		return nil, errors.New("phase-two production Control dependencies are incomplete")
 	}
 	if dependencies.Observer == nil {
@@ -390,21 +387,13 @@ func newProductionPhaseTwoControl(
 	return &productionPhaseTwoControl{dependencies: dependencies}, nil
 }
 
+// InitialRefresh is the first round of a Control Leader. It is an ordinary
+// round: a round that reads its source publishes and activates what it read,
+// so the first one has nothing to wait for.
 func (runtime *productionPhaseTwoControl) InitialRefresh(
 	ctx context.Context,
 ) (phaseTwoControlRefreshResult, error) {
-	if runtime == nil {
-		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
-	}
-	for {
-		result, pending, err := runtime.refresh(ctx)
-		if err != nil || !pending {
-			return completeControlResult(result, err)
-		}
-		if err := runtime.dependencies.Wait(ctx, runtime.dependencies.RefreshInterval); err != nil {
-			return phaseTwoControlRefreshResult{}, err
-		}
-	}
+	return runtime.Refresh(ctx)
 }
 
 func (runtime *productionPhaseTwoControl) Refresh(
@@ -413,8 +402,7 @@ func (runtime *productionPhaseTwoControl) Refresh(
 	if runtime == nil {
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
 	}
-	result, _, err := runtime.refresh(ctx)
-	return completeControlResult(result, err)
+	return completeControlResult(runtime.refresh(ctx))
 }
 
 // completeControlResult refuses the one shape this runtime must never hand
@@ -493,14 +481,10 @@ func (runtime *productionPhaseTwoControl) Close() error {
 
 func (runtime *productionPhaseTwoControl) refresh(
 	ctx context.Context,
-) (refreshResult phaseTwoControlRefreshResult, pending bool, refreshErr error) {
-	renewed := false
+) (refreshResult phaseTwoControlRefreshResult, refreshErr error) {
 	defer func() {
-		if renewed {
-			return
-		}
 		// Renewal is guarded by the Activation CAS and must not replace the
-		// Source/activation result or stop pending confirmation from converging.
+		// Source/activation result.
 		runtime.observeCurrentObjectRenewal(ctx, runtime.renewCurrentObjects(ctx))
 	}()
 	result, err := runtime.dependencies.Reconciler.Refresh(
@@ -526,10 +510,10 @@ func (runtime *productionPhaseTwoControl) refresh(
 			},
 		})
 		result, _, fallbackErr := runtime.keepLastGood(ctx, sourceKind, err)
-		return result, false, fallbackErr
+		return result, fallbackErr
 	}
 	if !knownSourceRefreshStatus(result.Status) {
-		return phaseTwoControlRefreshResult{}, false, errors.New("phase-two source refresh returned an invalid status")
+		return phaseTwoControlRefreshResult{}, errors.New("phase-two source refresh returned an invalid status")
 	}
 	// A round that returned, under any status, is a success of the source
 	// refresh, and its time is persisted: the age of the last success is
@@ -570,7 +554,6 @@ func (runtime *productionPhaseTwoControl) refresh(
 		refreshResult.Composition = publishedComposition(refreshErr, composition, refreshResult.Status)
 		refreshResult.ChangeSignalPresent, refreshResult.ChangeSignalAgeSeconds = changeSignalPresent, changeSignalAge
 		refreshResult.WriterStatement = writerStatement
-		refreshResult.SourceRefreshStatus = result.Status
 	}()
 	// Which strategies are behind the counts, once per change. Written here
 	// rather than at each return for the same reason the composition is: the
@@ -589,118 +572,8 @@ func (runtime *productionPhaseTwoControl) refresh(
 			},
 		})
 	}()
-	if result.Status == controlplane.SourceRefreshPendingConfirmation {
-		state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
-		activationMissing := false
-		if errors.Is(err, controlplane.ErrActivationUnavailable) {
-			// The activation record is gone. The store answered; there is
-			// nothing there -- a Redis reload that came back without the key,
-			// which is what happened on 2026-09-16.
-			//
-			// Falling through with the zero state is what repairs it: the
-			// branch below finds the publication this round named and no
-			// activation on it, and activating is idempotent -- it is the same
-			// call that establishes the first activation of a fresh
-			// deployment. The Control Leader is the only process that can do
-			// this, so returning early here left the one replica able to write
-			// the record deciding not to, once a round, for as long as it went
-			// on.
-			//
-			// Returning early also returned the zero result with a nil error,
-			// which the caller read as a health fact it could not act on and
-			// answered by ending the process. Whatever this round can say, it
-			// says as a complete fact below.
-			runtime.recordControlFactUnavailable("activation", "missing")
-			activationMissing = true
-			if result.Latest == (controlplane.SnapshotPublicationRef{}) {
-				// Nothing has been published yet, so there is nothing to
-				// activate. This is a fresh deployment whose candidate still
-				// needs its second observation, and it is the case pending
-				// exists for: InitialRefresh waits, and a running process
-				// keeps the facts it already has.
-				return phaseTwoControlRefreshResult{
-					Status: phaseTwoControlDegradedLastGood, QueryGroupsRetained: true,
-					SourceKind: observability.SourceKindCompiledSnapshot,
-					ReasonCode: observability.ReasonCode(contract.ReasonActivationMissing), Cause: err,
-				}, true, nil
-			}
-		} else if err != nil {
-			runtime.recordControlFactUnavailable("activation", "read_failed")
-			return phaseTwoControlRefreshResult{}, false, err
-		} else {
-			runtime.recordControlFactRead("activation")
-		}
-		// A publication an earlier round published and never activated (the
-		// process stopped between the two) is still the one the fleet should
-		// execute, and this round's candidate does not change that: the
-		// candidate needs its own confirmation, and a source that changes on
-		// every round never gives one. Returning here left the activation on
-		// the previous publication for as long as that went on, past the point
-		// where its payload expired, with nothing that could move it - only
-		// InitialRefresh loops on pending. The activation is caught up now,
-		// with the same failure handling as a round that published.
-		if result.Latest != (controlplane.SnapshotPublicationRef{}) && result.Latest != state.Current {
-			activated, activationResult, ok := runtime.activate(ctx, result.Latest)
-			if !ok {
-				return activationResult.result, false, activationResult.err
-			}
-			queryGroups, err := runtime.loadActiveQueryGroups(ctx, activated)
-			if err != nil {
-				return phaseTwoControlRefreshResult{QueryGroups: queryGroups, Status: phaseTwoControlHealthy}, false, err
-			}
-			sourceRefresh.ActivatedRevision = string(activated.Current.SnapshotRevision)
-			sourceRefresh.ActivatedEpoch = activated.Current.PublicationEpoch
-			sourceRefresh.ActivationCaughtUp = true
-			var previousErr error
-			if activationMissing {
-				// There was no previous activation to difference against: the
-				// counts say every Query Group was added, and the round is
-				// named as a rebuild in the log and in its own counter, so a
-				// store that lost the record is told from a lagging one.
-				previousErr = controlplane.ErrActivationUnavailable
-				sourceRefresh.ActivationRebuilt = true
-				runtime.dependencies.Recorder.RecordControlFactRebuilt("activation")
-			}
-			runtime.enrichSourceRefreshCounts(ctx, sourceRefresh, state, previousErr, activated, sourceRefreshCurrentCount(activated, queryGroups))
-			return phaseTwoControlRefreshResult{
-				QueryGroups: queryGroups, Status: phaseTwoControlHealthy, SourceRefreshObserved: true,
-				Activation: &phaseTwoActivationOutcome{Published: result.Latest, Applied: activated.Current},
-			}, false, nil
-		}
-		queryGroups, err := runtime.loadActiveQueryGroups(ctx, state)
-		if err != nil {
-			return phaseTwoControlRefreshResult{}, false, err
-		}
-		// This round published nothing, so it has no publication to name. What it
-		// does know is which publication the fleet is executing, and that goes
-		// under its own name: filling snapshot_revision here made a lagging
-		// activation indistinguishable from a stalled publication in the log.
-		sourceRefresh.ActivatedRevision = string(state.Current.SnapshotRevision)
-		sourceRefresh.ActivatedEpoch = state.Current.PublicationEpoch
-		// The size is reported; the change is not. Differencing the activation
-		// state against itself -- which is all this round has -- can only yield
-		// added=0, retired=0 and old==new, which reads as a measured finding and
-		// is arithmetic.
-		if currentCount := sourceRefreshCurrentCount(state, queryGroups); currentCount != nil {
-			sourceRefresh.ActiveQueryGroups = *currentCount
-			sourceRefresh.ActiveQueryGroupsKnown = true
-		}
-		renewErr := runtime.renewCurrentObjects(ctx)
-		renewed = true
-		runtime.observeCurrentObjectRenewal(ctx, renewErr)
-		if renewErr != nil {
-			return phaseTwoControlRefreshResult{
-				QueryGroups: queryGroups, Status: phaseTwoControlDegradedLastGood,
-				SourceKind: observability.SourceKindCompiledSnapshot,
-				ReasonCode: renewalReason(renewErr), Cause: renewErr,
-			}, false, nil
-		}
-		return phaseTwoControlRefreshResult{
-			QueryGroups: queryGroups, Status: phaseTwoControlHealthy, SourceRefreshObserved: true,
-		}, false, nil
-	}
 	if result.Publication.SnapshotRevision == "" || result.Publication.PublicationEpoch == 0 {
-		return phaseTwoControlRefreshResult{}, false, errors.New("phase-two source refresh returned an incomplete publication")
+		return phaseTwoControlRefreshResult{}, errors.New("phase-two source refresh returned an incomplete publication")
 	}
 	if result.Status == controlplane.SourceRefreshPublicationConflict {
 		runtime.dependencies.Observer.Observe(ctx, observability.Observation{
@@ -708,21 +581,37 @@ func (runtime *productionPhaseTwoControl) refresh(
 			Result: observability.ResultDegraded, ReasonCode: observability.ReasonContractRetryable,
 		})
 	}
-	previous := controlplane.ActivationState{}
-	previousErr := controlplane.ErrActivationUnavailable
-	if result.Status != controlplane.SourceRefreshUnchanged {
-		previous, previousErr = runtime.dependencies.Repository.LoadActivationHead(ctx)
+	// The activation before this round brings it to the publication: what the
+	// counts are differenced against, and whether the store still had one.
+	// One small read of the head, served from the control cache when the
+	// header has not moved.
+	previous, previousErr := runtime.dependencies.Repository.LoadActivationHead(ctx)
+	activationMissing := errors.Is(previousErr, controlplane.ErrActivationUnavailable)
+	switch {
+	case activationMissing:
+		runtime.recordControlFactUnavailable("activation", "missing")
+	case previousErr != nil:
+		runtime.recordControlFactUnavailable("activation", "read_failed")
+	default:
+		runtime.recordControlFactRead("activation")
 	}
 	state, activationResult, ok := runtime.activate(ctx, result.Publication)
 	if !ok {
-		return activationResult.result, false, activationResult.err
+		return activationResult.result, activationResult.err
 	}
-	if result.Status == controlplane.SourceRefreshUnchanged {
-		previous, previousErr = state, nil
+	// No activation beside a publication that was already latest when the
+	// round began is a store that lost the record - a Redis reload that came
+	// back without the key, as on 2026-09-16 - and activating is what wrote it
+	// back: the same idempotent call that makes a fresh deployment's first
+	// activation. A fresh deployment has no earlier publication, and its first
+	// activation is not a rebuild.
+	if activationMissing && result.Latest != (controlplane.SnapshotPublicationRef{}) {
+		sourceRefresh.ActivationRebuilt = true
+		runtime.dependencies.Recorder.RecordControlFactRebuilt("activation")
 	}
 	queryGroups, err := runtime.loadActiveQueryGroups(ctx, state)
 	if err != nil {
-		return phaseTwoControlRefreshResult{QueryGroups: queryGroups, Status: phaseTwoControlHealthy}, false, err
+		return phaseTwoControlRefreshResult{QueryGroups: queryGroups, Status: phaseTwoControlHealthy}, err
 	}
 	currentCount := sourceRefreshCurrentCount(state, queryGroups)
 	runtime.enrichSourceRefreshCounts(ctx, sourceRefresh, previous, previousErr, state, currentCount)
@@ -731,7 +620,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 		// A round that found the source unchanged still brought the activation
 		// to it (Ensure is idempotent), so it is a success of the same kind.
 		Activation: &phaseTwoActivationOutcome{Published: result.Publication, Applied: state.Current},
-	}, false, nil
+	}, nil
 }
 
 type phaseTwoActivationFallback struct {
@@ -866,8 +755,8 @@ func (runtime *productionPhaseTwoControl) enrichSourceRefreshCounts(
 
 func knownSourceRefreshStatus(status controlplane.SourceRefreshStatus) bool {
 	switch status {
-	case controlplane.SourceRefreshPendingConfirmation, controlplane.SourceRefreshPublished,
-		controlplane.SourceRefreshUnchanged, controlplane.SourceRefreshPublicationConflict:
+	case controlplane.SourceRefreshPublished, controlplane.SourceRefreshUnchanged,
+		controlplane.SourceRefreshPublicationConflict:
 		return true
 	default:
 		return false

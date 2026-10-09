@@ -618,10 +618,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
 		Source: strategySource, Planner: planner, Reconciler: reconciler, Activator: activator,
 		Repository: repository, Schedules: catalog, Progress: progressStore,
-		Observer:        observer,
-		Recorder:        recorder,
-		RefreshInterval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), Wait: waitProductionControl,
-		Now: external.Now, MaxReplayAge: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
+		Observer: observer,
+		Recorder: recorder,
+		Now:      external.Now, MaxReplayAge: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
 		Close: func() error {
 			controlClosed = true
 			return controlClient.Close()
@@ -1754,20 +1753,6 @@ func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
 	return accessuq.Limits{
 		MaxBodyBytes: maximumBody, MaxSeriesBytes: maximumSeries,
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRecords: maximumRecords,
-	}
-}
-
-func waitProductionControl(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		return errors.New("phase-two Control refresh delay must be positive")
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 

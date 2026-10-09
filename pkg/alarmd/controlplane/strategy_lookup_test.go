@@ -81,9 +81,6 @@ func TestLookupStrategyAnswersAcceptedAndWithheldStrategiesFromTheLastPublicatio
 	if before := reconciler.LookupStrategy("1002"); before.Available {
 		t.Fatalf("a process that has published nothing answered %+v, want not available", before)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("first refresh = (%#v, %v)", result, err)
-	}
 	published, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("publish = (%#v, %v)", published, err)
@@ -201,9 +198,6 @@ func TestAProcessWithoutAPublicationOfItsOwnAnswersNothingRatherThanNotListed(t 
 		return reconciler
 	}
 	first := newReconciler(withhold1001)
-	if result, err := first.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("first refresh = (%#v, %v)", result, err)
-	}
 	published, err := first.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("publish = (%#v, %v)", published, err)

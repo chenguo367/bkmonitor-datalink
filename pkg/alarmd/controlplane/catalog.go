@@ -118,34 +118,45 @@ type BuildRequest struct {
 	// observed set was first found absent (PENDING_REMOVAL.AbsentSince). Nil
 	// means no grace history.
 	PreviousDispositions []ObjectDisposition
-	// PendingAbsences is the same memory from the candidate the previous
-	// round left unconfirmed, by source id: the first round of an absence
-	// publishes a candidate, and the round that confirms it has to stamp the
-	// same moment or the candidate never confirms. Nil means none pending.
-	PendingAbsences map[string]int64
 	// Now is the round's clock, what an absence is measured against. Zero
 	// means the wall clock.
 	Now time.Time
+	// WriterHoldsLastGood is the writer's statement, made about the very
+	// active set this observation read (SourceChangeSignal.HoldsLastGoodFor),
+	// that a strategy leaves the set only for a fact about the strategy
+	// itself and never because publishing it failed. Under it a strategy
+	// absent from the set is gone, and its Plan leaves the Catalog on the
+	// round that finds it absent. Without it the strategy serves
+	// AbsenceGracePeriod first.
+	WriterHoldsLastGood bool
 }
 
 // AbsenceGracePeriod is how long a LastGood strategy absent from the
-// observed active set keeps executing before its Plan leaves the Catalog.
+// observed active set keeps executing before its Plan leaves the Catalog,
+// when the writer of the set makes no statement that it holds the last good
+// document (BuildRequest.WriterHoldsLastGood). A writer that makes the
+// statement removes a strategy only when the strategy is gone, and its
+// absences are removed at once.
 //
-// A period rather than one round because the active set is read from a
-// list another program writes, and that list has been seen to lose entries
-// for minutes at a time with the strategies unchanged: one deployment's
-// hourly full refresh dropped 99 ids for about six and a half minutes every
-// hour, and a one-round grace removed 22 Plans, swept their assignments and
-// re-acquired them five minutes later, with every Slot in between missing
-// and written off as CONFIG_DRIFT - eight percent of the hour blind, for a
-// configuration that never changed. The writer's flutter is the writer's to
-// fix; the reader still must not turn it into a detection gap, because the
-// next writer will flutter too.
+// A period rather than one round because the writer without a statement has
+// been seen to lose entries for minutes at a time with the strategies
+// unchanged: its hourly full refresh dropped 99 ids for about six and a half
+// minutes every hour, and a one-round grace removed 22 Plans, swept their
+// assignments and re-acquired them five minutes later, with every Slot in
+// between missing and written off as CONFIG_DRIFT - eight percent of the
+// hour blind, for a configuration that never changed. The flutter is the
+// writer's bug and the writer's to fix: it deletes a strategy whose business
+// looks missing without asking whether the strategy is enabled, and the next
+// full refresh adds it back.
 //
 // Ten minutes is the observed flutter with room to spare, and a program
 // constant rather than a setting: an operator does not know this number
 // better than the program. What it costs is that a strategy really removed
 // runs for up to ten minutes longer.
+//
+// Transition code. Retire when bk-monitor's strategy cache stops deleting
+// enabled strategies on a missing business
+// (alarm_backends/core/cache/strategy.py:780-784).
 const AbsenceGracePeriod = 10 * time.Minute
 
 type FrozenPlan struct {
@@ -452,10 +463,12 @@ type ObjectDisposition struct {
 	Detail string `json:",omitempty"`
 	// AbsentSince is when a strategy under PENDING_REMOVAL was first found
 	// absent from the observed active set, in Unix seconds; the removal
-	// grace is measured from it. Zero on every other disposition, and on a
-	// PENDING_REMOVAL written by a build before the grace was a period -
-	// which the next build reads as absent since now, so a rollout can only
-	// lengthen a grace, never cut one short.
+	// grace is measured from it, and the REMOVED that ends the grace carries
+	// it on. Zero on every other disposition; on a REMOVED that served no
+	// grace, which the writer's statement removed on the round that found it
+	// absent; and on a PENDING_REMOVAL written by a build before the grace
+	// was a period - which the next build reads as absent since now, so a
+	// rollout can only lengthen a grace, never cut one short.
 	AbsentSince int64 `json:",omitempty"`
 }
 
@@ -552,12 +565,12 @@ type CatalogRetention struct {
 // stand on the previous one's Catalog when each is held still, and names what
 // holds each. An input added here has to be added there:
 //
-//   - Strategies: the observation (held by a skipped read);
+//   - Strategies and WriterHoldsLastGood: the observation and the writer's
+//     statement read with it (both held by a skipped read);
 //   - the round key - OutputProtocol, the planner's round identity,
 //     TargetSources, NoDataPolicy (catalogRoundKey, the candidate cache's own);
 //   - LastGood and PreviousDispositions (held by the activation head and
 //     this process being the one writer);
-//   - PendingAbsences (none after an UNCHANGED round);
 //   - Now: read only for the absence grace (absenceGraceEnd).
 //
 // The deployment's admission and the runtime retention that follow it read
@@ -700,8 +713,8 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				// strategy refused as PLAN_INVALID alone had to be compiled again
 				// offline to learn that its expression was empty. The text is
 				// deterministic for one document - the candidate cache returns
-				// the same error for it every round - so it cannot keep a
-				// pending candidate from confirming.
+				// the same error for it every round - so it cannot make an
+				// unchanged source read as a changed audit.
 				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN",
 					Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID", Detail: dispositionDetail(err.Error())})
 			}
@@ -729,45 +742,40 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	// Reaching this point means the upstream strategy id list was read
 	// completely; per-source incompleteness is already expressed above through
 	// SourceDisposition. A LastGood strategy absent from the observed set
-	// keeps executing under PENDING_REMOVAL until it has been absent for the
-	// whole grace period, and only then leaves the Catalog with REMOVED. The
+	// leaves the Catalog with REMOVED on this round when the writer states
+	// it holds the last good document: then the strategy is gone. Without
+	// the statement it keeps executing under PENDING_REMOVAL until it has
+	// been absent for the whole grace period, and only then leaves. The
 	// moment it was first found absent travels on the disposition, so every
-	// round of the grace publishes the same audit and the candidate confirms.
+	// round of the grace publishes the same audit and the rounds inside it
+	// are UNCHANGED; a removal that served no grace carries no moment.
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
-	absentSince := indexAbsentSince(request.PreviousDispositions, request.PendingAbsences)
-	// An active set read whole and empty, with strategies running, is a
-	// source that lost its content - a writer that published an empty list
-	// or a store that answered with none - not a deployment whose every
-	// strategy was deleted at once. Removing them after the grace would stop
-	// every detection the deployment runs on one bad read, so nothing is
-	// removed on it: every strategy keeps executing under PENDING_REMOVAL,
-	// named ACTIVE_SET_EMPTY, until the set lists strategies again. The
-	// absent-alert close refuses the same round for the same reason
-	// (absentalerts.RefusalSnapshotEmpty). A set that shrank is not held:
-	// a bulk deletion is a real one, and a writer's single refusals are
-	// deletions to alarmd.
-	activeSetEmpty := len(observed) == 0 && len(lastGood) > 0
+	absentSince := indexAbsentSince(request.PreviousDispositions)
+	// An active set read whole and empty is a list like any other, and every
+	// strategy is absent from it. It used to be held without a time bound as
+	// a source that had lost its content; a store that lost the list answers
+	// with no list at all, which the source refuses (active_set_missing)
+	// before a Catalog is built, so an empty list here is one the writer
+	// wrote.
 	for sourceID := range lastGood {
 		if _, found := observed[sourceID]; found {
 			continue
 		}
 		since, graced := absentSince[sourceID]
+		if request.WriterHoldsLastGood {
+			removed := ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
+				Disposition: DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"}
+			if graced {
+				removed.AbsentSince = since
+			}
+			catalog.Dispositions = append(catalog.Dispositions, removed)
+			continue
+		}
 		if !graced {
 			since = now.Unix()
-		}
-		if activeSetEmpty {
-			retained, err := retainLastGood(sourceID, nil)
-			if err != nil {
-				return Catalog{}, err
-			}
-			if retained {
-				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
-					Disposition: DispositionPendingRemoval, Reason: "ACTIVE_SET_EMPTY", AbsentSince: since})
-			}
-			continue
 		}
 		if now.Unix()-since >= int64(AbsenceGracePeriod/time.Second) {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
@@ -1046,17 +1054,11 @@ func lastGoodRefusal(facts execution.QueryPlanFacts) string {
 }
 
 // indexAbsentSince is when each strategy under grace was first found
-// absent: from the published audit's PENDING_REMOVAL dispositions, and from
-// the unconfirmed candidate where the audit does not say. A PENDING_REMOVAL
-// without a moment - written by a build before the grace was a period - is
-// left out, and the caller stamps it absent since now.
-func indexAbsentSince(dispositions []ObjectDisposition, pending map[string]int64) map[string]int64 {
-	result := make(map[string]int64, len(dispositions)+len(pending))
-	for sourceID, since := range pending {
-		if sourceID != "" && since > 0 {
-			result[sourceID] = since
-		}
-	}
+// absent, from the published audit's PENDING_REMOVAL dispositions. A
+// PENDING_REMOVAL without a moment - written by a build before the grace
+// was a period - is left out, and the caller stamps it absent since now.
+func indexAbsentSince(dispositions []ObjectDisposition) map[string]int64 {
+	result := make(map[string]int64, len(dispositions))
 	for _, disposition := range dispositions {
 		if disposition.Scope == "STRATEGY" && disposition.Disposition == DispositionPendingRemoval &&
 			disposition.SourceID != "" && disposition.AbsentSince > 0 {
@@ -1064,16 +1066,6 @@ func indexAbsentSince(dispositions []ObjectDisposition, pending map[string]int64
 		}
 	}
 	return result
-}
-
-// AbsencesOf is the removal-grace memory of an audit, by source id: what a
-// candidate built from it carries into the next round.
-func AbsencesOf(dispositions []ObjectDisposition) map[string]int64 {
-	absences := indexAbsentSince(dispositions, nil)
-	if len(absences) == 0 {
-		return nil
-	}
-	return absences
 }
 
 // RetainsLastGoodDefinition says whether a refusal leaves the strategy running

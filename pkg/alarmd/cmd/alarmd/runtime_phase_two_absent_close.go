@@ -30,6 +30,14 @@ import (
 // confirmed absence reach a close inside a quarter of an hour.
 const absentCloseInterval = 5 * time.Minute
 
+// absentCloseGrace is how long this loop must have seen a strategy missing
+// from the snapshot before it closes the strategy's alerts. It is this
+// loop's own number and not the catalog's removal grace: that grace serves
+// only a writer that makes no statement and goes when that writer is fixed
+// (controlplane.AbsenceGracePeriod), while closing alerts takes a confirmed
+// absence whatever the writer states.
+const absentCloseGrace = 10 * time.Minute
+
 // absentCloseRosterPages bounds one walk of the link's roster. Each page is
 // the link scanning part of its key space on its own connection; the bound
 // is there so that a key space far larger than expected turns into an
@@ -129,7 +137,7 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseCon
 		bundle: bundle, control: control, link: link, writer: writer,
 		tracker: absentalerts.NewTracker(controlplane.MaxDepartedStrategies),
 		bounds: absentalerts.Bounds{
-			Grace: controlplane.AbsenceGracePeriod,
+			Grace: absentCloseGrace,
 			// Derived from how often the source is actually read rather than
 			// set as a second constant: a bound that does not follow the
 			// reader's own cadence refuses every round on a deployment whose

@@ -209,6 +209,19 @@ func acceptRunOf(t *testing.T, f *acceptFixture, args ...string) (int, map[strin
 	return code, verdicts, result
 }
 
+// itemDetail is the detail of the named item in an accept result.
+func itemDetail(t *testing.T, result map[string]any, name string) string {
+	t.Helper()
+	items, _ := objectField(result, "result")["items"].([]any)
+	for _, raw := range items {
+		if item := raw.(map[string]any); stringField(item, "item") == name {
+			return stringField(item, "detail")
+		}
+	}
+	t.Fatalf("no item %q in %v", name, result)
+	return ""
+}
+
 func healthyFixture() *acceptFixture {
 	return &acceptFixture{metrics: func(string, int) (string, map[string]any) { return "partial", healthyMetrics() }}
 }
@@ -234,8 +247,7 @@ func TestAcceptPassesAHealthyDeployment(t *testing.T) {
 		"target out of scope closes": verdictInfo, "control loop slowest turn": verdictPass, "output events refused by alarmd": verdictPass,
 		"diagnosis covers every strategy": verdictPass, "strategies detecting": verdictInfo, "public: restricted read refused": verdictPass,
 		"public: health carries no coordinates": verdictPass, "public: metrics not served": verdictPass, "public: login page served": verdictPass,
-		"control source publication not starved": verdictUndecided, "control source publication conflicts": verdictPass,
-		"control source pending age": verdictNotBuilt,
+		"control source rounds over the window": verdictUndecided, "control source publication conflicts": verdictPass,
 	} {
 		if verdicts[item] != want {
 			t.Errorf("%s = %q, want %s", item, verdicts[item], want)
@@ -355,31 +367,35 @@ func TestAcceptWantsTheRefusalToPointAtTheLoginPage(t *testing.T) {
 	}
 }
 
-// The refresh counts are read from the Control Leader twice: confirmations
-// pending with nothing published over the window is starvation; a Leader
-// that changed between the reads leaves the increase undecided.
+// The refresh counts are read from the Control Leader twice, and the
+// increase by status is reported; a Leader that changed between the reads
+// leaves the increase undecided.
 func TestAcceptReadsTheRefreshIncreaseFromTheLeader(t *testing.T) {
-	refresh := func(pending, published float64) map[string]any {
+	refresh := func(published, unchanged float64) map[string]any {
 		return healthyMetrics(map[string]any{"name": metricSourceRefresh, "series": []any{
-			series(map[string]string{"status": "PENDING_CONFIRMATION"}, pending), series(map[string]string{"status": "PUBLISHED"}, published)}})
+			series(map[string]string{"status": "PUBLISHED"}, published), series(map[string]string{"status": "UNCHANGED"}, unchanged)}})
 	}
-	starved := healthyFixture()
+	f := healthyFixture()
 	leaderReads := 0
-	starved.metrics = func(target string, _ int) (string, map[string]any) {
+	f.metrics = func(target string, _ int) (string, map[string]any) {
 		if target != "leader" {
 			return "ok", refresh(1, 1)
 		}
 		leaderReads++
-		return "ok", refresh(float64(leaderReads*5), 3)
+		return "ok", refresh(3, float64(leaderReads*5))
 	}
-	code, verdicts, _ := acceptRunOf(t, starved, "--window", "10ms")
-	if verdicts["control source publication not starved"] != verdictFail || code != 1 || leaderReads != 2 {
-		t.Fatalf("starved: code %d reads %d verdicts %v", code, leaderReads, verdicts)
+	code, verdicts, result := acceptRunOf(t, f, "--window", "10ms")
+	if verdicts["control source rounds over the window"] != verdictInfo || code != 0 || leaderReads != 2 {
+		t.Fatalf("code %d reads %d verdicts %v", code, leaderReads, verdicts)
+	}
+	if detail := itemDetail(t, result, "control source rounds over the window"); !strings.Contains(detail, "UNCHANGED") ||
+		!strings.Contains(detail, "5") {
+		t.Fatalf("increase detail = %q, want UNCHANGED up by 5", detail)
 	}
 
 	moved := healthyFixture()
 	moved.leader = func(call int) map[string]any { return map[string]any{"owner_id": "pod-a", "owner_epoch": call} }
-	if _, verdicts, _ := acceptRunOf(t, moved, "--window", "10ms"); verdicts["control source publication not starved"] != verdictUndecided {
+	if _, verdicts, _ := acceptRunOf(t, moved, "--window", "10ms"); verdicts["control source rounds over the window"] != verdictUndecided {
 		t.Fatalf("a Leader change: %v", verdicts)
 	}
 }
@@ -397,7 +413,7 @@ func TestAcceptSumsTheReplicasWhereTheLeaderCannotBeTargeted(t *testing.T) {
 		return "ok", healthyMetrics()
 	}
 	code, verdicts, _ := acceptRunOf(t, f, "--window", "10ms")
-	if verdicts["control source publication not starved"] != verdictPass || code != 0 || replicaReads < 4 {
+	if verdicts["control source rounds over the window"] != verdictInfo || code != 0 || replicaReads < 4 {
 		t.Fatalf("code %d replica reads %d verdicts %v", code, replicaReads, verdicts)
 	}
 }
@@ -438,41 +454,6 @@ func TestAcceptKeepsEveryVerdictOnStdout(t *testing.T) {
 	saved, _ := objectField(savedResult(t, result), "result")["items"].([]any)
 	if detail := stringField(saved[0].(map[string]any), "detail"); len([]rune(detail)) != acceptDetailRunes+1 {
 		t.Fatalf("the saved record holds %d runes of the detail", len([]rune(detail)))
-	}
-}
-
-// One more pending answer than before is a change the next round confirms;
-// two with nothing published is starvation. The Leader's pending age past the
-// window fails on its own, and a build without the gauge says it has none.
-func TestAcceptJudgesPendingConfirmationOnBothSidesOfItsBound(t *testing.T) {
-	leaderRefresh := func(step float64, age *float64) func(string, int) (string, map[string]any) {
-		reads := 0.0
-		return func(target string, _ int) (string, map[string]any) {
-			families := []map[string]any{{"name": metricSourceRefresh, "series": []any{
-				series(map[string]string{"status": "PENDING_CONFIRMATION"}, reads*step), series(map[string]string{"status": "PUBLISHED"}, 3)}}}
-			if target == "leader" {
-				reads++
-				if age != nil {
-					families = append(families, map[string]any{"name": metricPendingAge, "series": []any{series(nil, *age)}})
-				}
-			}
-			return "ok", healthyMetrics(families...)
-		}
-	}
-	for step, want := range map[float64]string{1: verdictPass, 2: verdictFail} {
-		f := healthyFixture()
-		f.metrics = leaderRefresh(step, nil)
-		if _, verdicts, _ := acceptRunOf(t, f, "--window", "10ms"); verdicts["control source publication not starved"] != want ||
-			verdicts["control source pending age"] != verdictNotBuilt {
-			t.Fatalf("pending up by %g: %v", step, verdicts)
-		}
-	}
-	for age, want := range map[float64]string{0: verdictPass, 300: verdictPass, 301: verdictFail} {
-		f := healthyFixture()
-		f.metrics = leaderRefresh(0, &age)
-		if _, verdicts, _ := acceptRunOf(t, f, "--window", "0"); verdicts["control source pending age"] != want {
-			t.Fatalf("pending for %g s against the default five minutes: %v", age, verdicts["control source pending age"])
-		}
 	}
 }
 

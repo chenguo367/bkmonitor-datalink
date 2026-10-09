@@ -359,7 +359,7 @@ func TestACloseTheRoundsDeadlineCutOffReadsNotRun(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
 	fixture.link.pages[1].Rows = append(fixture.link.pages[1].Rows, openalerts.RosterRow{TenantID: "system", StrategyID: "11", Members: members(1)})
 	fixture.loop.step(context.Background())
-	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
 	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
 	for i := range fixture.link.pages {
 		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)

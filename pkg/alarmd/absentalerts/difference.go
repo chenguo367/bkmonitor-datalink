@@ -155,9 +155,10 @@ const (
 	// unread snapshot is not an empty one, and reading it as empty would
 	// close every unrecovered alert in the deployment.
 	RefusalSnapshotUnusable = "snapshot_unusable"
-	// RefusalSnapshotEmpty: the snapshot was observed and holds no strategy
-	// at all. On a live deployment that is a source that lost its content,
-	// not a deployment without strategies.
+	// RefusalSnapshotEmpty: the snapshot was observed and lists no strategy
+	// at all. The catalog takes that list as written and removes every
+	// strategy; this loop closes nothing on it, because on it every
+	// unrecovered alert in the deployment would be a candidate at once.
 	RefusalSnapshotEmpty = "snapshot_empty"
 	// RefusalSnapshotStale: the observation is older than this round may
 	// decide on. Strategies created since it was read would read as absent.

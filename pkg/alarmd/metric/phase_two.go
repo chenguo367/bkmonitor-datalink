@@ -1292,7 +1292,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"until the publisher fixes it -- the shape a store outage does not have), documents, " +
 			"observation_unstable (the set moved under the read; clears itself), and the steps after the read " +
 			"(observation_id, last_good, build_catalog, retain_executable, observation_changed, validate_catalog, " +
-			"activation, confirmation, candidate, publish); other is an error no step claimed. The cause's text " +
+			"activation, publish); other is an error no step claimed. The cause's text " +
 			"is in the log line of the same round. Only the leader runs rounds: a flat zero on a follower is normal.",
 	}, []string{"outcome", "exit"})
 	metrics.controlSourceRounds.WithLabelValues(observability.ControlSourceRoundSucceeded, string(controlplane.SourceRefreshExitNone))

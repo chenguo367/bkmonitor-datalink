@@ -668,9 +668,10 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
 		QueryGroups: previous.QueryGroups,
 	}
-	// The grace is a period, not a round: the active set is a list another
-	// program writes, and it has been seen to lose entries for minutes with
-	// the strategies unchanged. A strategy absent from it keeps executing
+	// The grace is a period, not a round: without a statement that it holds
+	// the last good document, the writer of the active set has been seen to
+	// lose entries for minutes with the strategies unchanged (these rounds
+	// carry no statement, WriterHoldsLastGood false). A strategy absent from it keeps executing
 	// under PENDING_REMOVAL, stamped with when it was first found absent,
 	// until it has been absent for the whole period; only then is it REMOVED.
 	t0 := time.Unix(1_700_000_000, 0)
@@ -697,7 +698,6 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		name         string
 		strategies   []controlplane.SourceStrategy
 		previous     []controlplane.ObjectDisposition
-		pending      map[string]int64
 		now          time.Time
 		wantPlans    []string
 		wantStrategy *controlplane.ObjectDisposition
@@ -719,11 +719,6 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 			previous: withPrevious(pendingAt(t0)), now: expired, wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
 		},
 		{
-			name: "the unconfirmed candidate's stamp counts where the audit has none", strategies: onlyFirst,
-			previous: previous.Dispositions, pending: map[string]int64{"1002": t0.Unix()}, now: expired,
-			wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
-		},
-		{
 			name: "a grace stamped by an older build restarts from now rather than expiring", strategies: onlyFirst,
 			previous: withPrevious(pendingUnstamped), now: expired, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(expired)),
 		},
@@ -741,7 +736,7 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
 				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
-				LastGood: lastGood, PreviousDispositions: test.previous, PendingAbsences: test.pending, Now: test.now,
+				LastGood: lastGood, PreviousDispositions: test.previous, Now: test.now,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -774,13 +769,12 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 	}
 }
 
-// An active set read whole and empty while strategies are running is a source
-// that lost its content, not every strategy deleted at once: nothing is
-// removed on it, however long it lasts, and every strategy keeps executing
-// under a PENDING_REMOVAL that names why. A set that only shrank is still
-// graced and removed as before (the case above), and a deployment that never
-// had a strategy stays empty.
-func TestBuildCatalogEmptyActiveSetRemovesNothing(t *testing.T) {
+// Under the writer's statement that it holds the last good document, a
+// strategy leaves the active set only when it is gone: the round that finds
+// it absent removes its Plan, with no grace and so no moment to carry. One
+// already serving a grace from a round without the statement is removed
+// too, and keeps the moment its grace began.
+func TestBuildCatalogRemovesAnAbsenceAtOnceUnderTheWritersStatement(t *testing.T) {
 	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
 	if err != nil {
 		t.Fatal(err)
@@ -805,47 +799,156 @@ func TestBuildCatalogEmptyActiveSetRemovesNothing(t *testing.T) {
 		QueryGroups: previous.QueryGroups,
 	}
 	t0 := time.Unix(1_700_000_000, 0)
-	emptiedAt := func(sourceID string, since time.Time) controlplane.ObjectDisposition {
+	graced := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+		Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: t0.Unix()}
+	for _, test := range []struct {
+		name         string
+		strategies   []controlplane.SourceStrategy
+		previous     []controlplane.ObjectDisposition
+		wantPlans    []string
+		wantStrategy *controlplane.ObjectDisposition
+	}{
+		{
+			name: "first found absent leaves at once", strategies: both[:1], previous: previous.Dispositions,
+			wantPlans: []string{"1001"}, wantStrategy: &controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"},
+		},
+		{
+			name: "one serving a grace leaves at once with the moment it began", strategies: both[:1],
+			previous:  append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), graced),
+			wantPlans: []string{"1001"}, wantStrategy: &controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: t0.Unix()},
+		},
+		{
+			name: "listed is accepted", strategies: both, previous: previous.Dispositions, wantPlans: []string{"1001", "1002"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
+				LastGood: lastGood, PreviousDispositions: test.previous, Now: t0.Add(time.Minute), WriterHoldsLastGood: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, test.wantPlans) {
+				t.Fatalf("catalog plans=%v, want %v", got, test.wantPlans)
+			}
+			var strategyDispositions []controlplane.ObjectDisposition
+			for _, disposition := range catalog.Dispositions {
+				if disposition.Scope == "STRATEGY" {
+					strategyDispositions = append(strategyDispositions, disposition)
+				}
+			}
+			switch {
+			case test.wantStrategy == nil && len(strategyDispositions) != 0:
+				t.Fatalf("strategy dispositions=%#v, want none", strategyDispositions)
+			case test.wantStrategy != nil && (len(strategyDispositions) != 1 || strategyDispositions[0] != *test.wantStrategy):
+				t.Fatalf("strategy dispositions=%#v, want %#v", strategyDispositions, *test.wantStrategy)
+			}
+		})
+	}
+}
+
+// An active set read whole and empty is a statement like any other list:
+// every strategy in it is absent. It is not held: under the writer's
+// statement every strategy leaves at once, and without it every strategy
+// serves the removal grace and then leaves, as a strategy absent from a
+// list that only shrank does. A missing key never gets here - the source
+// refuses it as active_set_missing before a Catalog is built. A hold an
+// earlier build wrote for an empty list starts the grace where it began,
+// and a deployment that never had a strategy stays empty.
+func TestBuildCatalogEmptyActiveSetIsAStatement(t *testing.T) {
+	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []json.RawMessage
+	if err := json.Unmarshal(payload, &documents); err != nil {
+		t.Fatal(err)
+	}
+	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
+	both := []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: identity},
+		{SourceID: "1002", Document: documents[1], Identity: identity},
+	}
+	previous, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Strategies: both, Planner: &recordingPlanner{facts: queryFacts(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastGood := &controlplane.PublishedSnapshot{
+		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
+		QueryGroups: previous.QueryGroups,
+	}
+	t0 := time.Unix(1_700_000_000, 0)
+	graced := func(sourceID string, since time.Time) controlplane.ObjectDisposition {
 		return controlplane.ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
-			Disposition: controlplane.DispositionPendingRemoval, Reason: "ACTIVE_SET_EMPTY", AbsentSince: since.Unix()}
+			Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: since.Unix()}
+	}
+	removed := func(sourceID string, since int64) controlplane.ObjectDisposition {
+		return controlplane.ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
+			Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: since}
+	}
+	// What a build before this one wrote for an empty list. The retired word
+	// is spelled in two pieces: the removed-word scan looks for a source that
+	// still uses it, and this is a record of one that did.
+	heldByAnEarlierBuild := func(sourceID string, since time.Time) controlplane.ObjectDisposition {
+		held := graced(sourceID, since)
+		held.Reason = "ACTIVE_SET_" + "EMPTY"
+		return held
 	}
 	withPrevious := func(extra ...controlplane.ObjectDisposition) []controlplane.ObjectDisposition {
 		return append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), extra...)
 	}
+	empty := []controlplane.SourceStrategy{}
 	for _, test := range []struct {
 		name         string
 		strategies   []controlplane.SourceStrategy
 		lastGood     *controlplane.PublishedSnapshot
 		previous     []controlplane.ObjectDisposition
 		now          time.Time
+		statement    bool
 		wantPlans    []string
 		wantStrategy []controlplane.ObjectDisposition
 	}{
 		{
-			name: "first found empty keeps every strategy, stamped now", strategies: []controlplane.SourceStrategy{},
+			name: "under the writer's statement every strategy leaves at once", strategies: empty, statement: true,
 			lastGood: lastGood, previous: previous.Dispositions, now: t0,
-			wantPlans: []string{"1001", "1002"}, wantStrategy: []controlplane.ObjectDisposition{emptiedAt("1001", t0), emptiedAt("1002", t0)},
+			wantPlans: []string{}, wantStrategy: []controlplane.ObjectDisposition{removed("1001", 0), removed("1002", 0)},
 		},
 		{
-			name: "empty past the whole grace still removes nothing", strategies: []controlplane.SourceStrategy{},
-			lastGood: lastGood, previous: withPrevious(emptiedAt("1001", t0), emptiedAt("1002", t0)),
+			name: "without a statement first found empty serves the grace, stamped now", strategies: empty,
+			lastGood: lastGood, previous: previous.Dispositions, now: t0,
+			wantPlans: []string{"1001", "1002"}, wantStrategy: []controlplane.ObjectDisposition{graced("1001", t0), graced("1002", t0)},
+		},
+		{
+			name: "without a statement empty for the whole grace leaves", strategies: empty,
+			lastGood: lastGood, previous: withPrevious(graced("1001", t0), graced("1002", t0)),
+			now:       t0.Add(controlplane.AbsenceGracePeriod),
+			wantPlans: []string{}, wantStrategy: []controlplane.ObjectDisposition{removed("1001", t0.Unix()), removed("1002", t0.Unix())},
+		},
+		{
+			name: "a hold an earlier build wrote starts the grace where it began", strategies: empty,
+			lastGood: lastGood, previous: withPrevious(heldByAnEarlierBuild("1001", t0), heldByAnEarlierBuild("1002", t0)),
 			now:       t0.Add(10 * controlplane.AbsenceGracePeriod),
-			wantPlans: []string{"1001", "1002"}, wantStrategy: []controlplane.ObjectDisposition{emptiedAt("1001", t0), emptiedAt("1002", t0)},
+			wantPlans: []string{}, wantStrategy: []controlplane.ObjectDisposition{removed("1001", t0.Unix()), removed("1002", t0.Unix())},
 		},
 		{
-			name: "listed again, nothing is pending", strategies: both,
-			lastGood: lastGood, previous: withPrevious(emptiedAt("1001", t0), emptiedAt("1002", t0)),
-			now: t0.Add(10 * controlplane.AbsenceGracePeriod), wantPlans: []string{"1001", "1002"},
+			name: "listed again inside the grace, nothing is pending", strategies: both,
+			lastGood: lastGood, previous: withPrevious(graced("1001", t0), graced("1002", t0)),
+			now: t0.Add(time.Minute), wantPlans: []string{"1001", "1002"},
 		},
 		{
-			name: "a deployment that never ran a strategy stays empty", strategies: []controlplane.SourceStrategy{},
+			name: "a deployment that never ran a strategy stays empty", strategies: empty,
 			now: t0, wantPlans: []string{},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
 				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
-				LastGood: test.lastGood, PreviousDispositions: test.previous, Now: test.now,
+				LastGood: test.lastGood, PreviousDispositions: test.previous, Now: test.now, WriterHoldsLastGood: test.statement,
 			})
 			if err != nil {
 				t.Fatal(err)

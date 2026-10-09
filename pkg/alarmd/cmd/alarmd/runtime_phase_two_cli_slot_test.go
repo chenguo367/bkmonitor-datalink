@@ -63,9 +63,6 @@ func cliSlotFixture(t *testing.T) (config.Config, *redis.Client, execution.SlotI
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = reconciler.Refresh(ctx, source, planner); err != nil {
-		t.Fatal(err)
-	}
 	result, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || result.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("publish: %+v %v", result, err)
@@ -84,9 +81,6 @@ func cliSlotFixture(t *testing.T) (config.Config, *redis.Client, execution.SlotI
 	// Keep a genuinely historical Segment: activate a changed threshold at a
 	// later boundary while retaining the old Slot's object and output context.
 	source.document = json.RawMessage(strings.ReplaceAll(strings.ReplaceAll(string(source.document), `"threshold":80`, `"threshold":90`), `"update_time":1`, `"update_time":2`))
-	if _, err = reconciler.Refresh(ctx, source, planner); err != nil {
-		t.Fatal(err)
-	}
 	updated, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || updated.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("updated publication: %+v %v", updated, err)

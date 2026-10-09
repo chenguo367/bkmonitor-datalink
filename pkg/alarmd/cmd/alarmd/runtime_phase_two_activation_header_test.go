@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -20,18 +19,16 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// headerRound runs one leader round of the given source status against the
-// repository and returns what it answered and every renewal observation. An
-// unchanged round renews after its activation and reports a failed renewal
-// on the renewal's line only; a round waiting for confirmation renews as its
-// whole work and answers with it.
-func headerRound(t *testing.T, status controlplane.SourceRefreshStatus, repository *fakeProductionCatalogRepository) (phaseTwoControlRefreshResult, []observability.Observation) {
+// headerRound runs one leader round against the repository and returns what
+// it answered and every renewal observation. The round renews after its
+// activation and reports a failed renewal on the renewal's line.
+func headerRound(t *testing.T, repository *fakeProductionCatalogRepository) (phaseTwoControlRefreshResult, []observability.Observation) {
 	t.Helper()
 	publication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-current", PublicationEpoch: 2}
 	repository.activation = controlplane.ActivationState{RecordRevision: 2, Current: publication}
 	repository.snapshot = controlplane.PublishedSnapshot{Publication: publication, QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-1"}}}
 	reconciler := &fakeSourceReconciler{results: []controlplane.SourceRefreshResult{
-		{Status: status, Publication: publication},
+		{Status: controlplane.SourceRefreshUnchanged, Publication: publication},
 	}, errs: []error{nil}}
 	var renewals []observability.Observation
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
@@ -43,7 +40,6 @@ func headerRound(t *testing.T, status controlplane.SourceRefreshStatus, reposito
 				renewals = append(renewals, observation)
 			}
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +59,7 @@ func TestALeaderRoundWritesBackAMissingActivationHeaderAndRenews(t *testing.T) {
 		renewErrs:     []error{controlplane.ErrActivationHeaderMissing, nil},
 		headerRebuild: controlplane.ActivationHeaderRebuilt,
 	}
-	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	result, renewals := headerRound(t, repository)
 	if repository.headerRebuilds != 1 || repository.renewCalls != 2 {
 		t.Fatalf("rebuilds %d, renewals %d, want the header written back once and the renewal tried again",
 			repository.headerRebuilds, repository.renewCalls)
@@ -78,30 +74,18 @@ func TestALeaderRoundWritesBackAMissingActivationHeaderAndRenews(t *testing.T) {
 	}
 }
 
-// A missing header the leader cannot write back is reported by name, on the
-// round and on the renewal's own line. Returning quietly on it - as on a
-// conflict with another cutover - is how the fleet went without renewals.
+// A missing header the leader cannot write back is reported by name on the
+// renewal's own line. Returning quietly on it - as on a conflict with
+// another cutover - is how the fleet went without renewals.
 func TestAMissingActivationHeaderThatCannotBeWrittenBackIsReportedByName(t *testing.T) {
 	repository := &fakeProductionCatalogRepository{
 		renewErr:      controlplane.ErrActivationHeaderMissing,
 		headerRebuild: controlplane.ActivationHeaderRebuildBodyPending,
 	}
 	missing := observability.ReasonCode(contract.ReasonActivationMissing)
-	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
-	if result.Status != phaseTwoControlDegradedLastGood || result.ReasonCode != missing ||
-		!errors.Is(result.Cause, controlplane.ErrActivationHeaderMissing) {
-		t.Fatalf("result = %#v, want degraded on the last good activation, named activation missing", result)
-	}
-	if len(renewals) != 1 || renewals[0].Result != observability.ResultDegraded || renewals[0].ReasonCode != missing {
-		t.Fatalf("renewal observations = %#v, want one degraded, named activation missing", renewals)
-	}
-	unchanged := &fakeProductionCatalogRepository{
-		renewErr:      controlplane.ErrActivationHeaderMissing,
-		headerRebuild: controlplane.ActivationHeaderRebuildBodyPending,
-	}
-	if _, renewals := headerRound(t, controlplane.SourceRefreshUnchanged, unchanged); len(renewals) != 1 ||
+	if _, renewals := headerRound(t, repository); len(renewals) != 1 ||
 		renewals[0].Result != observability.ResultDegraded || renewals[0].ReasonCode != missing {
-		t.Fatalf("unchanged round renewal observations = %#v, want one degraded, named activation missing", renewals)
+		t.Fatalf("renewal observations = %#v, want one degraded, named activation missing", renewals)
 	}
 }
 
@@ -109,7 +93,7 @@ func TestAMissingActivationHeaderThatCannotBeWrittenBackIsReportedByName(t *test
 // reported: only a missing one is.
 func TestARenewalConflictWithAnotherCutoverIsStillNotReported(t *testing.T) {
 	repository := &fakeProductionCatalogRepository{renewErr: controlplane.ErrActivationConflict}
-	_, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	_, renewals := headerRound(t, repository)
 	if repository.headerRebuilds != 0 {
 		t.Fatalf("a conflict asked for the header to be written back %d times", repository.headerRebuilds)
 	}
@@ -152,7 +136,7 @@ func TestARenewalRetriesOnceAfterTheHeaderRebuildConflicts(t *testing.T) {
 		renewErrs:     []error{controlplane.ErrActivationHeaderMissing, nil},
 		headerRebuild: controlplane.ActivationHeaderRebuildConflict,
 	}
-	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	result, renewals := headerRound(t, repository)
 	if repository.headerRebuilds != 1 || repository.renewCalls != 2 || result.Status != phaseTwoControlHealthy {
 		t.Fatalf("rebuilds %d, renewals %d, result %#v: want one rebuild, a second renewal and a healthy round",
 			repository.headerRebuilds, repository.renewCalls, result)
@@ -166,21 +150,17 @@ func TestARenewalRetriesOnceAfterTheHeaderRebuildConflicts(t *testing.T) {
 
 // The other side of the retry: the header another writer's conflict implied
 // is gone again by the second renewal. The retry answers for it rather than
-// swallowing it - the round is degraded on the last good activation, named
-// activation missing, and the header is not asked for a second time.
+// swallowing it - the renewal is reported degraded, named activation
+// missing, and the header is not asked for a second time.
 func TestARenewalRetriedAfterAConflictStillReportsAHeaderStillMissing(t *testing.T) {
 	repository := &fakeProductionCatalogRepository{
 		renewErrs:     []error{controlplane.ErrActivationHeaderMissing, controlplane.ErrActivationHeaderMissing},
 		headerRebuild: controlplane.ActivationHeaderRebuildConflict,
 	}
 	missing := observability.ReasonCode(contract.ReasonActivationMissing)
-	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	_, renewals := headerRound(t, repository)
 	if repository.headerRebuilds != 1 || repository.renewCalls != 2 {
 		t.Fatalf("rebuilds %d, renewals %d, want one rebuild and one retry", repository.headerRebuilds, repository.renewCalls)
-	}
-	if result.Status != phaseTwoControlDegradedLastGood || result.ReasonCode != missing ||
-		!errors.Is(result.Cause, controlplane.ErrActivationHeaderMissing) {
-		t.Fatalf("result = %#v, want degraded on the last good activation, named activation missing", result)
 	}
 	if len(renewals) != 1 || renewals[0].Result != observability.ResultDegraded || renewals[0].ReasonCode != missing {
 		t.Fatalf("renewal observations = %#v, want one degraded, named activation missing", renewals)

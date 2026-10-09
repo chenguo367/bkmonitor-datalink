@@ -507,9 +507,6 @@ func TestSourceReconcilerReturnsPublicationConflictWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	planner := &recordingPlanner{facts: queryFacts(t)}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
-	}
 	initial, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || initial.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("initial publication=(%#v, %v)", initial, err)
@@ -517,9 +514,6 @@ func TestSourceReconcilerReturnsPublicationConflictWinner(t *testing.T) {
 	changed := strings.Replace(string(document), `"threshold":80`, `"threshold":82`, 1)
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", changed, 0).Err(); err != nil {
 		t.Fatal(err)
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("changed pending=(%#v, %v)", result, err)
 	}
 	raceArmed = true
 	result, err := reconciler.Refresh(ctx, source, planner)
@@ -549,30 +543,24 @@ func TestSourceReconcilerPublishesNewOccurrenceWhenHistoricalContentReturns(t *t
 		t.Fatal(err)
 	}
 	planner := &recordingPlanner{facts: queryFacts(t)}
-	publish := func(wantPending bool) controlplane.SourceRefreshResult {
+	publish := func() controlplane.SourceRefreshResult {
 		t.Helper()
-		if wantPending {
-			pending, err := reconciler.Refresh(ctx, source, planner)
-			if err != nil || pending.Status != controlplane.SourceRefreshPendingConfirmation {
-				t.Fatalf("pending refresh=(%#v,%v)", pending, err)
-			}
-		}
 		result, err := reconciler.Refresh(ctx, source, planner)
 		if err != nil || result.Status != controlplane.SourceRefreshPublished {
 			t.Fatalf("published refresh=(%#v,%v)", result, err)
 		}
 		return result
 	}
-	first := publish(true)
+	first := publish()
 	changed := strings.Replace(string(document), `"threshold":80`, `"threshold":81`, 1)
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", changed, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	second := publish(true)
+	second := publish()
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", string(document), 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	republished := publish(true)
+	republished := publish()
 	if republished.Publication.SnapshotRevision != first.Publication.SnapshotRevision ||
 		republished.Publication.PublicationEpoch <= second.Publication.PublicationEpoch {
 		t.Fatalf("Source A-B-A publications=%#v/%#v/%#v", first.Publication, second.Publication, republished.Publication)
@@ -628,7 +616,11 @@ func TestLegacyRedisSourceCompilesAndPublishesSharedQueryGroup(t *testing.T) {
 	}
 }
 
-func TestSourceReconcilerConfirmsChangeAcrossIndependentRefreshAndRestart(t *testing.T) {
+// Each refresh decides on its own read, and a restarted reconciler needs no
+// memory of an earlier one: the first round publishes what it read, a change
+// is published by the first round that reads it - in a new process too -
+// and a round that finds the source as published publishes nothing new.
+func TestSourceReconcilerPublishesEachChangeAcrossRefreshAndRestart(t *testing.T) {
 	client := newControlplaneRedis(t)
 	ctx := context.Background()
 	documents := realThresholdDocuments(t)
@@ -655,37 +647,26 @@ func TestSourceReconcilerConfirmsChangeAcrossIndependentRefreshAndRestart(t *tes
 		t.Fatal(err)
 	}
 	first, err := reconciler.Refresh(ctx, source, planner)
-	if err != nil || first.Status != controlplane.SourceRefreshPendingConfirmation {
+	if err != nil || first.Status != controlplane.SourceRefreshPublished || first.Publication.PublicationEpoch == 0 {
 		t.Fatalf("first refresh=(%#v, %v)", first, err)
-	}
-	if _, err := repository.LoadLatestPublication(ctx); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
-		t.Fatalf("unconfirmed candidate was published: %v", err)
 	}
 	changed := strings.Replace(string(documents[1]), `"threshold":90`, `"threshold":91`, 1)
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1002", changed, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Recreate the reconciler: confirmation must come from the persisted prior
-	// independent refresh, not process memory or a second read in one call.
 	restarted, err := controlplane.NewSourceReconciler(repository, compiler, stateSemantics)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := restarted.Refresh(ctx, source, planner)
-	if err != nil || second.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("second refresh=(%#v, %v)", second, err)
-	}
-	if _, err := repository.LoadLatestPublication(ctx); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
-		t.Fatalf("changed second candidate was published: %v", err)
+	if err != nil || second.Status != controlplane.SourceRefreshPublished ||
+		second.Publication.PublicationEpoch <= first.Publication.PublicationEpoch || second.Latest != first.Publication {
+		t.Fatalf("second refresh=(%#v, %v), want the change published after %+v", second, err, first.Publication)
 	}
 	third, err := restarted.Refresh(ctx, source, planner)
-	if err != nil || third.Status != controlplane.SourceRefreshPublished || third.Publication.PublicationEpoch == 0 {
-		t.Fatalf("third refresh=(%#v, %v)", third, err)
-	}
-	fourth, err := restarted.Refresh(ctx, source, planner)
-	if err != nil || fourth.Status != controlplane.SourceRefreshUnchanged || fourth.Publication != third.Publication {
-		t.Fatalf("unchanged refresh=(%#v, %v), published=%#v", fourth, err, third)
+	if err != nil || third.Status != controlplane.SourceRefreshUnchanged || third.Publication != second.Publication {
+		t.Fatalf("unchanged refresh=(%#v, %v), published=%#v", third, err, second)
 	}
 }
 
@@ -714,9 +695,6 @@ func TestSourceReconcilerPublishesOnlyRuntimeExecutablePlans(t *testing.T) {
 	reconciler, err := controlplane.NewSourceReconciler(repository, compiler, stateSemantics)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
 	}
 	published, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
@@ -780,9 +758,6 @@ func TestSourceReconcilerRuntimeCompilerKeepsOnlyInvalidLastGood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
-	}
 	initial, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || initial.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("initial publish=(%#v, %v)", initial, err)
@@ -801,9 +776,6 @@ func TestSourceReconcilerRuntimeCompilerKeepsOnlyInvalidLastGood(t *testing.T) {
 		if err := client.Set(ctx, "bkmonitor.cache.strategy_"+id, string(changed[index]), 0).Err(); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("changed pending=(%#v, %v)", result, err)
 	}
 	published, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
@@ -849,9 +821,6 @@ func TestSourceReconcilerMergesInvalidLevelLastGoodWithoutUnsupportedLevel(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
-	}
 	initial, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || initial.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("initial publish=(%#v, %v)", initial, err)
@@ -878,9 +847,6 @@ func TestSourceReconcilerMergesInvalidLevelLastGoodWithoutUnsupportedLevel(t *te
 	}
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", string(changedDocument), 0).Err(); err != nil {
 		t.Fatal(err)
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("changed pending=(%#v, %v)", result, err)
 	}
 	published, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
@@ -966,9 +932,6 @@ func TestSourceReconcilerExcludesMergedPlanWhenAuthoritativeRecompileFails(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
-	}
 	initial, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || initial.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("initial publish=(%#v, %v)", initial, err)
@@ -982,9 +945,6 @@ func TestSourceReconcilerExcludesMergedPlanWhenAuthoritativeRecompileFails(t *te
 	changedDocument = withThresholdForLevel(t, changedDocument, 2, 82)
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", string(changedDocument), 0).Err(); err != nil {
 		t.Fatal(err)
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("changed pending=(%#v, %v)", result, err)
 	}
 	published, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || published.Status != controlplane.SourceRefreshPublished {
@@ -1036,9 +996,6 @@ func TestSourceReconcilerRetainsLastGoodForMissingAndInvalidObjectWhileHealthySi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("initial pending=(%#v, %v)", result, err)
-	}
 	initial, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || initial.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("initial publish=(%#v, %v)", initial, err)
@@ -1068,9 +1025,6 @@ func TestSourceReconcilerRetainsLastGoodForMissingAndInvalidObjectWhileHealthySi
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1002", changedSibling, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("identity missing pending=(%#v, %v)", result, err)
-	}
 	reconciler, err = controlplane.NewSourceReconciler(repository, compiler, stateSemantics)
 	if err != nil {
 		t.Fatal(err)
@@ -1097,9 +1051,6 @@ func TestSourceReconcilerRetainsLastGoodForMissingAndInvalidObjectWhileHealthySi
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1002", changedSibling, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("missing pending=(%#v, %v)", result, err)
-	}
 	missing, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || missing.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("missing publish=(%#v, %v)", missing, err)
@@ -1121,9 +1072,6 @@ func TestSourceReconcilerRetainsLastGoodForMissingAndInvalidObjectWhileHealthySi
 	changedSibling = strings.Replace(string(documents[1]), `"threshold":90`, `"threshold":93`, 1)
 	if err := client.Set(ctx, "bkmonitor.cache.strategy_1002", changedSibling, 0).Err(); err != nil {
 		t.Fatal(err)
-	}
-	if result, err := reconciler.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("invalid pending=(%#v, %v)", result, err)
 	}
 	invalid, err := reconciler.Refresh(ctx, source, planner)
 	if err != nil || invalid.Status != controlplane.SourceRefreshPublished {
@@ -2622,16 +2570,13 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterTheGracePeriod(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			// settle runs one source cycle: a changed candidate needs the second
-			// identical observation before it publishes.
+			// settle runs one source cycle: one refresh, which publishes what
+			// it read.
 			settle := func() controlplane.SourceRefreshResult {
 				t.Helper()
 				result, err := reconciler.Refresh(ctx, source, planner)
-				if err == nil && result.Status == controlplane.SourceRefreshPendingConfirmation {
-					result, err = reconciler.Refresh(ctx, source, planner)
-				}
-				if err != nil || result.Status == controlplane.SourceRefreshPendingConfirmation {
-					t.Fatalf("source refresh did not settle: (%+v, %v)", result, err)
+				if err != nil {
+					t.Fatalf("source refresh: (%+v, %v)", result, err)
 				}
 				return result
 			}
@@ -2801,123 +2746,13 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterTheGracePeriod(t *testing.T) 
 	}
 }
 
-// The call site of the empty-set rule: the writer's active set is read whole
-// and empty from Redis after both strategies were published. However long it
-// stays empty, the reconciler publishes no removal - the snapshot keeps both
-// Plans and the audit names every one ACTIVE_SET_EMPTY - and once the set
-// lists them again nothing is pending.
-func TestSourceReconcilerKeepsEveryStrategyWhileTheActiveSetIsEmpty(t *testing.T) {
-	ctx := context.Background()
-	client := newControlplaneRedis(t)
-	documents := realThresholdDocuments(t)
-	setStrategyIDs := func(ids string) {
-		t.Helper()
-		if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", ids, 0).Err(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	setStrategyIDs(`[1001,1002]`)
-	for index, id := range []string{"1001", "1002"} {
-		if err := client.Set(ctx, "bkmonitor.cache.strategy_"+id, string(documents[index]), 0).Err(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	source := newRedisStrategySource(t, client)
-	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:empty-active-set", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compiler, semantics := runtimePlanCompiler(t)
-	reconciler, err := controlplane.NewSourceReconciler(repository, compiler, semantics)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sourceNow := time.Unix(1_700_000_000, 0)
-	if err := reconciler.ConfigureClock(func() time.Time { return sourceNow }); err != nil {
-		t.Fatal(err)
-	}
-	settle := func() controlplane.SourceRefreshResult {
-		t.Helper()
-		result, err := reconciler.Refresh(ctx, source, planner)
-		if err == nil && result.Status == controlplane.SourceRefreshPendingConfirmation {
-			result, err = reconciler.Refresh(ctx, source, planner)
-		}
-		if err != nil || result.Status == controlplane.SourceRefreshPendingConfirmation {
-			t.Fatalf("source refresh did not settle: (%+v, %v)", result, err)
-		}
-		return result
-	}
-	publishedPlans := func(publication controlplane.SnapshotPublicationRef) []string {
-		t.Helper()
-		snapshot, err := loadPublishedSnapshot(ctx, repository, publication)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids := make([]string, 0)
-		for _, group := range snapshot.QueryGroups {
-			for _, plan := range group.Plans {
-				ids = append(ids, plan.Identity.StrategyID)
-			}
-		}
-		sort.Strings(ids)
-		return ids
-	}
-	strategyReasons := func() map[string]string {
-		t.Helper()
-		audit, err := repository.LoadLatestAudit(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		reasons := map[string]string{}
-		for _, disposition := range audit.Dispositions {
-			if disposition.Scope == "STRATEGY" {
-				reasons[disposition.SourceID] = string(disposition.Disposition) + "/" + disposition.Reason
-			}
-		}
-		return reasons
-	}
-
-	first := settle()
-	if first.Status != controlplane.SourceRefreshPublished || !reflect.DeepEqual(publishedPlans(first.Publication), []string{"1001", "1002"}) {
-		t.Fatalf("cycle 1 = %+v, want both strategies published", first)
-	}
-
-	setStrategyIDs(`[]`)
-	for round, elapsed := range []time.Duration{0, controlplane.AbsenceGracePeriod, 10 * controlplane.AbsenceGracePeriod} {
-		sourceNow = time.Unix(1_700_000_000, 0).Add(time.Minute + elapsed)
-		result := settle()
-		if plans := publishedPlans(result.Publication); !reflect.DeepEqual(plans, []string{"1001", "1002"}) {
-			t.Fatalf("empty round %d (%s in) published %v, want both strategies kept", round, elapsed, plans)
-		}
-		want := map[string]string{"1001": "PENDING_REMOVAL/ACTIVE_SET_EMPTY", "1002": "PENDING_REMOVAL/ACTIVE_SET_EMPTY"}
-		if got := strategyReasons(); !reflect.DeepEqual(got, want) {
-			t.Fatalf("empty round %d audit = %v, want %v", round, got, want)
-		}
-	}
-
-	setStrategyIDs(`[1001,1002]`)
-	sourceNow = sourceNow.Add(time.Minute)
-	back := settle()
-	if plans := publishedPlans(back.Publication); !reflect.DeepEqual(plans, []string{"1001", "1002"}) {
-		t.Fatalf("listed again published %v, want both", plans)
-	}
-	if got := strategyReasons(); len(got) != 0 {
-		t.Fatalf("listed again audit = %v, want nothing pending", got)
-	}
-}
-
-// An absence that arrives in the same round as a change to the snapshot goes
-// through the two-round candidate confirmation, and the confirming round has
-// to stamp the absence with the same moment the candidate did: the
-// confirmation key covers the dispositions, so a candidate whose grace stamp
-// moved by one refresh interval never confirms, and the changed strategy
-// never publishes for as long as the other stays absent. The candidate
-// carries its stamps so the next round can repeat them.
-func TestSourceReconcilerConfirmsACandidateThatCarriesAGraceStamp(t *testing.T) {
+// An absence that arrives in the same round as a change to the snapshot is
+// published by that round with the moment the absence began, and the round
+// after it, a refresh interval later, stamps the same moment: the grace's
+// memory is the published audit, so an unchanged source makes an unchanged
+// audit and the round is UNCHANGED rather than a publication that only moved
+// a stamp.
+func TestSourceReconcilerKeepsAGraceStampAcrossRounds(t *testing.T) {
 	ctx := context.Background()
 	client := newControlplaneRedis(t)
 	documents := realThresholdDocuments(t)
@@ -2962,27 +2797,25 @@ func TestSourceReconcilerConfirmsACandidateThatCarriesAGraceStamp(t *testing.T) 
 		}
 		return result
 	}
-	// Cycle 1: both published (candidate, then confirmation).
-	if first := refresh(); first.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("cycle 1 first refresh = %+v, want a pending candidate", first)
-	}
+	// Cycle 1: both published.
 	first := refresh()
 	if first.Status != controlplane.SourceRefreshPublished {
 		t.Fatalf("cycle 1 = %+v, want PUBLISHED", first)
 	}
 	// Cycle 2: 1001 changes and 1002 disappears in the same round, so the
-	// snapshot moves and the round is a candidate.
+	// snapshot moves and the round publishes it.
 	setDocument("1001", withResultTable(t, documents[0], "system.mem"))
 	setStrategyIDs(`[1001]`)
 	absentAt := sourceNow
-	if candidate := refresh(); candidate.Status != controlplane.SourceRefreshPendingConfirmation {
-		t.Fatalf("cycle 2 first refresh = %+v, want a pending candidate", candidate)
+	changed := refresh()
+	if changed.Status != controlplane.SourceRefreshPublished || changed.Publication == first.Publication {
+		t.Fatalf("cycle 2 = %+v, want a new PUBLISHED snapshot", changed)
 	}
-	// One refresh interval later the confirming round stamps the same moment.
+	// One refresh interval later the next round stamps the same moment.
 	sourceNow = sourceNow.Add(time.Minute)
 	confirmed := refresh()
-	if confirmed.Status != controlplane.SourceRefreshPublished || confirmed.Publication == first.Publication {
-		t.Fatalf("cycle 2 confirming refresh = %+v, want a new PUBLISHED snapshot; a candidate whose grace stamp moved never confirms", confirmed)
+	if confirmed.Status != controlplane.SourceRefreshUnchanged || confirmed.Publication != changed.Publication {
+		t.Fatalf("the round after cycle 2 = %+v, want UNCHANGED at %+v; a grace stamp that moved would make every round a publication", confirmed, changed.Publication)
 	}
 	audit, err := repository.LoadLatestAudit(ctx)
 	if err != nil {

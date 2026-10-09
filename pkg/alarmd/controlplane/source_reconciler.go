@@ -2,25 +2,21 @@ package controlplane
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-const sourceCandidateSchemaVersion = "alarmd-control-source-candidate-v1"
-
+// SourceRefreshStatus is how a round that read its source ended: it
+// published a Catalog that differs from the latest publication, it found
+// the one it built already published, or another writer published first.
+// Every status names a publication.
 type SourceRefreshStatus string
 
 const (
-	SourceRefreshPendingConfirmation SourceRefreshStatus = "PENDING_CONFIRMATION"
 	SourceRefreshPublished           SourceRefreshStatus = "PUBLISHED"
 	SourceRefreshUnchanged           SourceRefreshStatus = "UNCHANGED"
 	SourceRefreshPublicationConflict SourceRefreshStatus = "PUBLICATION_CONFLICT"
@@ -56,10 +52,10 @@ const (
 	// SourceReadChanged: the change signal or the active set moved since the
 	// documents were last read.
 	SourceReadChanged SourceReadReason = "changed"
-	// SourceReadPending: the previous round did not end UNCHANGED, because a
-	// candidate awaits confirmation, a publication just happened, or the round
-	// failed. Confirmation is two independent reads of the source, so a
-	// remembered observation never confirms anything.
+	// SourceReadPending: the previous round did not end UNCHANGED, because it
+	// published or it failed. A round that published may have read the source
+	// in the middle of a write - a list written before its documents - and the
+	// read after it is what takes the rest of that write in.
 	SourceReadPending SourceReadReason = "pending"
 	// SourceReadPeriodic: sourceFullReadInterval passed since the last read.
 	SourceReadPeriodic SourceReadReason = "periodic"
@@ -89,11 +85,10 @@ type SourceRefreshResult struct {
 	Status      SourceRefreshStatus
 	Observation string
 	Publication SnapshotPublicationRef
-	// Latest is the publication the repository holds as latest when a round
-	// publishes nothing, so that a caller can still tell whether the fleet
-	// executes it. A confirmed publication whose activation never happened
-	// (the process stopped in between) stays latest through any number of
-	// pending rounds, and only the activation step can bring the fleet to it.
+	// Latest is the publication the repository held as latest when the round
+	// began, zero on a deployment that had published nothing. A caller that
+	// finds no activation beside a non-zero Latest is looking at a store that
+	// lost the record, not at a deployment activating for the first time.
 	Latest SnapshotPublicationRef
 	// CompiledStrategies and ReusedStrategies say how the round's Catalog was
 	// built: how many strategies went through the compiler and how many were
@@ -158,14 +153,18 @@ type sourceRoundMemory struct {
 	readAt time.Time
 	// holdsLastGood is the publisher's statement as it applies to this
 	// observation: made for the change signal read with it, and about the
-	// exact active set the cycle read (holdsLastGoodFor). statement is the
+	// exact active set the cycle read (holdsLastGoodFor). It decides whether
+	// a strategy the set no longer lists serves the removal grace
+	// (BuildRequest.WriterHoldsLastGood), and a round that reuses the
+	// observation reuses it with the documents. statement is the
 	// same verdict as a reader sees it: what was read and why it does not
 	// hold; nil from a source with no statement to read.
 	holdsLastGood bool
 	statement     *WriterStatement
 	// steady marks that the round which last used this observation ended
-	// UNCHANGED. Only a steady observation is reused: confirmation takes two
-	// independent reads, and a round that failed proves nothing for the next.
+	// UNCHANGED. Only a steady observation is reused: a round that published
+	// may have read a write half done, and a round that failed proves nothing
+	// for the next.
 	steady bool
 }
 
@@ -191,8 +190,7 @@ type reusableRound struct {
 //
 //   - the observation: the round did not read the source (SourceReadSkipped)
 //     and so reuses the previous round's documents, which a skip allows only
-//     after that round ended UNCHANGED - which also cleared any pending
-//     candidate and its absences;
+//     after that round ended UNCHANGED;
 //   - the round key (roundKey): the same four parts the candidate cache is
 //     emptied by;
 //   - the clock: not yet at the first absence grace the Catalog serves;
@@ -214,23 +212,11 @@ func (reconciler *SourceReconciler) reusableFor(read sourceRead, roundKey string
 	return reuse
 }
 
-type persistedSourceCandidate struct {
-	SchemaVersion    string `json:"schema_version"`
-	ConfirmationKey  string `json:"confirmation_key"`
-	ObservationID    string `json:"observation_id"`
-	SnapshotRevision string `json:"snapshot_revision"`
-	// Absences is the candidate's removal-grace memory: when each strategy
-	// it holds under PENDING_REMOVAL was first found absent. The round that
-	// confirms the candidate rebuilds the Catalog and must stamp the same
-	// moments, or its dispositions differ from the candidate's and nothing
-	// ever confirms. Absent from a candidate written before the grace was a
-	// period, which the next round reads as no memory.
-	Absences map[string]int64 `json:"absences,omitempty"`
-}
-
-// SourceReconciler confirms changed Legacy observations across independent
-// refresh calls. Its only durable intermediate fact is the candidate digest;
-// it does not own a leader, retry queue or activation state machine.
+// SourceReconciler turns each refresh round's read of the Legacy source into
+// a publication: one consistent read (the active set before and after the
+// documents, equal) is built and published by the round that made it. It
+// keeps no durable intermediate fact, and it does not own a leader, retry
+// queue or activation state machine.
 type SourceReconciler struct {
 	repository      *RedisCatalogRepository
 	publisher       *SnapshotPublisher
@@ -284,7 +270,7 @@ type SourceReconciler struct {
 	namedSuspended []ObjectDisposition
 	// strategies is the last publication indexed by strategy id, for
 	// LookupStrategy; replaced whole at the end of each round that published
-	// or confirmed one.
+	// one or found it already published.
 	strategies strategyLookupState
 	// departed remembers the strategies this catalog let go, with the
 	// identity each had while it still existed. Nothing else in the process
@@ -433,11 +419,16 @@ func (reconciler *SourceReconciler) Refresh(
 	// The round the next one may stand on: set where this one ends
 	// UNCHANGED, and kept only if it does.
 	var reuseNext *reusableRound
+	// latest is the publication that was latest when the round began.
+	var latest *PublishedSnapshot
 	defer func() {
 		if err != nil {
 			reconciler.unsettle()
 			reconciler.reusable = nil
 			return
+		}
+		if latest != nil {
+			result.Latest = latest.Publication
 		}
 		result.Build = build
 		result.RetainedStaleRevisions = retainedStaleRevisions
@@ -479,7 +470,7 @@ func (reconciler *SourceReconciler) Refresh(
 	if reuse := reconciler.reusableFor(read, roundKey, reconciler.now()); reuse != nil {
 		activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 		if activationErr == nil && activation.Current.SnapshotRevision == reuse.catalog.SnapshotRevision {
-			build, reuseNext = SourceRefreshReused, reuse
+			build, reuseNext, latest = SourceRefreshReused, reuse, reuse.current
 			// A reused round's identity count is zero: the refusal left the
 			// last-good Plan out of the catalog it published, so the rounds
 			// after it have nothing to refuse again. Carried for symmetry
@@ -500,25 +491,14 @@ func (reconciler *SourceReconciler) Refresh(
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitLastGood, err)
 	}
+	latest = current
 	var previousDispositions []ObjectDisposition
 	if audit != nil {
 		previousDispositions = audit.Dispositions
 	}
-	// The candidate the previous round left unconfirmed, read before the
-	// build: its grace memory is what the build stamps again so the two
-	// rounds agree and the candidate can confirm. A missing candidate is no
-	// memory, and the confirmation below reads the same load.
-	pending, pendingErr := reconciler.loadPending(ctx)
-	if pendingErr != nil && !errors.Is(pendingErr, redis.Nil) {
-		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, pendingErr)
-	}
-	var pendingAbsences map[string]int64
-	if pendingErr == nil {
-		pendingAbsences = pending.Absences
-	}
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
-		PendingAbsences: pendingAbsences, Now: reconciler.now(),
+		Now: reconciler.now(), WriterHoldsLastGood: reconciler.memory.holdsLastGood,
 		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
 		NoDataPolicy: policy,
 	})
@@ -569,15 +549,13 @@ func (reconciler *SourceReconciler) Refresh(
 	suspended = ChangedWithheld(composition.SuspendedNoDataObjects, reconciler.namedSuspended)
 	reconciler.namedSuspended = RememberNamed(
 		reconciler.namedSuspended, composition.SuspendedNoDataObjects, suspended.Lines)
-	// The active revision remains the execution authority even when latest points
-	// at a stranded candidate. Restore its occurrence directly; requiring two
-	// identical source observations here can leave the active Snapshot expired
-	// forever when non-semantic observation details change between refreshes.
 	remember := func() *reusableRound {
 		return &reusableRound{catalog: catalog, composition: composition, current: current, roundKey: roundKey,
 			retainedStaleRevisions: retainedStaleRevisions, lastGoodIdentityChanged: lastGoodIdentityChanged,
 			until: absenceGraceEnd(catalog.Dispositions)}
 	}
+	// The Catalog the fleet already runs: restore its publication and say
+	// nothing changed.
 	activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 	if activationErr == nil && activation.Current.SnapshotRevision == catalog.SnapshotRevision {
 		reuseNext = remember()
@@ -586,34 +564,33 @@ func (reconciler *SourceReconciler) Refresh(
 	if activationErr != nil && !errors.Is(activationErr, ErrActivationUnavailable) {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitActivation, activationErr)
 	}
-	confirmationKey, err := sourceCandidateConfirmationKey(catalog.ObservationID, catalog.SnapshotRevision, catalog.Dispositions)
-	if err != nil {
-		return SourceRefreshResult{}, exitAt(SourceRefreshExitConfirmation, err)
+	// The Catalog the latest publication already holds, under the same
+	// observation and audit: the activation lags it, or the store lost the
+	// activation. Publishing it again is idempotent and returns that
+	// publication, which the caller then activates; the round is UNCHANGED
+	// so the next one may stand on it.
+	if audit != nil && sameAudit(*audit, catalog) {
+		reuseNext = remember()
+		return reconciler.publish(ctx, current, catalog, SourceRefreshUnchanged)
 	}
-	if audit != nil {
-		currentKey, err := sourceCandidateConfirmationKey(audit.ObservationID, audit.Publication.SnapshotRevision, audit.Dispositions)
-		if err != nil {
-			return SourceRefreshResult{}, exitAt(SourceRefreshExitConfirmation, err)
-		}
-		if currentKey == confirmationKey {
-			reuseNext = remember()
-			return reconciler.publish(ctx, current, catalog, SourceRefreshUnchanged)
-		}
-	}
+	// Anything else is a change, and the round that read it publishes it.
+	// The read was consistent: the active set was the same before and after
+	// the documents (observeCycle). A writer that writes its list before its
+	// documents can still be read between the two, and what that costs is
+	// bounded per strategy: a strategy whose new document is not written yet
+	// keeps its last good Plan (or, new, is withheld as SOURCE_INCOMPLETE) and
+	// one whose document is still the old one runs the old version, for one
+	// round - this round published, so the next reads the source again
+	// (SourceReadPending). Nothing is removed by it: a strategy leaves only by
+	// being absent from the list.
+	return reconciler.publish(ctx, current, catalog, SourceRefreshPublished)
+}
 
-	if pendingErr == nil && pending.ConfirmationKey == confirmationKey {
-		return reconciler.publish(ctx, current, catalog, SourceRefreshPublished)
-	}
-	if err := reconciler.savePending(ctx, persistedSourceCandidate{SchemaVersion: sourceCandidateSchemaVersion,
-		ConfirmationKey: confirmationKey, ObservationID: catalog.ObservationID, SnapshotRevision: string(catalog.SnapshotRevision),
-		Absences: AbsencesOf(catalog.Dispositions)}); err != nil {
-		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, err)
-	}
-	pendingResult := SourceRefreshResult{Status: SourceRefreshPendingConfirmation, Observation: catalog.ObservationID}
-	if current != nil {
-		pendingResult.Latest = current.Publication
-	}
-	return pendingResult, nil
+// sameAudit is whether the published audit already says what this Catalog
+// says: the same observation, the same revision and the same dispositions.
+func sameAudit(audit SourceAuditState, catalog Catalog) bool {
+	return audit.ObservationID == catalog.ObservationID && audit.Publication.SnapshotRevision == catalog.SnapshotRevision &&
+		slices.Equal(audit.Dispositions, catalog.Dispositions)
 }
 
 type sourceRead struct {
@@ -746,9 +723,6 @@ func (reconciler *SourceReconciler) publish(
 			return SourceRefreshResult{}, exitAt(SourceRefreshExitPublish, loadErr)
 		}
 		reconciler.rememberLastGood(snapshot.Publication, catalog)
-		if clearErr := reconciler.clearPending(ctx); clearErr != nil {
-			return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, clearErr)
-		}
 		return SourceRefreshResult{Status: status, Observation: catalog.ObservationID,
 			Publication: snapshot.Publication}, nil
 	}
@@ -768,17 +742,11 @@ func (reconciler *SourceReconciler) publish(
 		if loadErr != nil {
 			return SourceRefreshResult{}, exitAt(SourceRefreshExitPublish, loadErr)
 		}
-		if clearErr := reconciler.clearPending(ctx); clearErr != nil {
-			return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, clearErr)
-		}
 		return SourceRefreshResult{Status: SourceRefreshPublicationConflict,
 			Observation: catalog.ObservationID, Publication: winner}, nil
 	}
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitPublish, err)
-	}
-	if err := reconciler.clearPending(ctx); err != nil {
-		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, err)
 	}
 	return SourceRefreshResult{Status: status, Observation: catalog.ObservationID, Publication: snapshot.Publication}, nil
 }
@@ -794,9 +762,9 @@ func (reconciler *SourceReconciler) loadCurrent(ctx context.Context) (*Published
 	snapshot, err := reconciler.currentSnapshot(ctx, publication)
 	if errors.Is(err, ErrSnapshotUnavailable) {
 		// Keep the latest publication as the CAS expectation even when its
-		// immutable payload expired. A confirmed source observation can then
-		// recreate identical content at the same occurrence without guessing
-		// any LastGood Plan body.
+		// immutable payload expired. A round that reads the same source can
+		// then recreate identical content at the same occurrence without
+		// guessing any LastGood Plan body.
 		return &PublishedSnapshot{Publication: publication}, nil, nil
 	}
 	if err != nil {
@@ -810,49 +778,6 @@ func (reconciler *SourceReconciler) loadCurrent(ctx context.Context) (*Published
 		return nil, nil, err
 	}
 	return &snapshot, &audit, nil
-}
-
-func sourceCandidateConfirmationKey(observationID string, revision execution.SnapshotRevision, dispositions []ObjectDisposition) (string, error) {
-	if observationID == "" || revision == "" {
-		return "", errors.New("alarmd controlplane: incomplete source candidate")
-	}
-	return contract.DeriveCanonicalDigestV2("alarmd-source-candidate-v1", struct {
-		ObservationID string              `json:"observation_id"`
-		Revision      string              `json:"snapshot_revision"`
-		Dispositions  []ObjectDisposition `json:"dispositions"`
-	}{ObservationID: observationID, Revision: string(revision), Dispositions: dispositions})
-}
-
-func (reconciler *SourceReconciler) loadPending(ctx context.Context) (persistedSourceCandidate, error) {
-	payload, err := reconciler.repository.client.Get(ctx, reconciler.repository.sourceCandidateKey()).Bytes()
-	if err != nil {
-		return persistedSourceCandidate{}, err
-	}
-	var candidate persistedSourceCandidate
-	if err := json.Unmarshal(payload, &candidate); err != nil {
-		return persistedSourceCandidate{}, fmt.Errorf("alarmd controlplane: decode persisted source candidate: %w", err)
-	}
-	if candidate.SchemaVersion != sourceCandidateSchemaVersion || candidate.ConfirmationKey == "" ||
-		candidate.ObservationID == "" || candidate.SnapshotRevision == "" {
-		return persistedSourceCandidate{}, errors.New("alarmd controlplane: invalid persisted source candidate")
-	}
-	return candidate, nil
-}
-
-func (reconciler *SourceReconciler) savePending(ctx context.Context, candidate persistedSourceCandidate) error {
-	payload, err := json.Marshal(candidate)
-	if err != nil {
-		return err
-	}
-	return reconciler.repository.client.Set(ctx, reconciler.repository.sourceCandidateKey(), payload, reconciler.repository.ttl).Err()
-}
-
-func (reconciler *SourceReconciler) clearPending(ctx context.Context) error {
-	return reconciler.repository.client.Del(ctx, reconciler.repository.sourceCandidateKey()).Err()
-}
-
-func (repository *RedisCatalogRepository) sourceCandidateKey() string {
-	return repository.prefix + ":source_candidate"
 }
 
 // rememberLastGood keeps the content of a publication this process just
