@@ -98,6 +98,12 @@ var removedLabelValues = []struct {
 	{"catalog_objects", "disposition", "CONFIG_NORMALIZED", false},
 	{"catalog_withheld_objects", "disposition", "CONFIG_NORMALIZED", false},
 	{"fleet_checks", "code", "CONFIG_NORMALIZED", false},
+	// An empty strategy list was held without a time bound, every strategy
+	// kept under PENDING_REMOVAL for this reason. An empty list is now a list
+	// like any other, and its strategies are absent from it. A reason is
+	// carried as the control plane wrote it, so the scan of the sources is
+	// what guards it; the emission half only reads the family.
+	{"catalog_withheld_objects", "reason", "ACTIVE_SET_EMPTY", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -126,7 +132,7 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 	// lines are the fleet's whole table the way the process exports it.
 	var dispositions []controlplane.ObjectDisposition
 	for _, removed := range removedLabelValues {
-		if removed.family == "catalog_objects" || removed.family == "catalog_withheld_objects" {
+		if (removed.family == "catalog_objects" || removed.family == "catalog_withheld_objects") && removed.label == "disposition" {
 			dispositions = append(dispositions, controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN",
 				Disposition: controlplane.Disposition(removed.value), Reason: "ANY_REASON"})
 		}

@@ -152,3 +152,48 @@ func TestWithoutAStatementTheGraceRidesOutAFlapAndRemovesAfterIt(t *testing.T) {
 		t.Fatalf("plans after the grace = %v, want only 1001", plans)
 	}
 }
+
+// An empty list is a statement like any other: every strategy in it is
+// absent. Under the writer's statement the publication that follows has no
+// Plan left, with no time passed; without a statement every strategy serves
+// the grace and then leaves. Neither is held for as long as the list stays
+// empty. The observation of an empty list is an observation of nothing, not
+// no observation: the absent-alert close then refuses it by its own word
+// (snapshot_empty) rather than as a snapshot it never read.
+func TestAnEmptyListRemovesEveryStrategy(t *testing.T) {
+	t.Run("under the writer's statement", func(t *testing.T) {
+		harness := newChangeGateHarness(t)
+		harness.state(harness.signalled(), harnessStrategyIDs)
+		harness.untilUnchanged("1001")
+		harness.clock = harness.clock.Add(time.Minute)
+		harness.publish(harness.clock, `[]`)
+		emptied, _ := harness.untilUnchanged("1001")
+		if plans := harness.publishedPlans(emptied.Publication); len(plans) != 0 {
+			t.Fatalf("plans after the writer published an empty list under its statement = %v, want none", plans)
+		}
+		observed, ok := harness.reconciler.ObservedSnapshot()
+		if !ok || len(observed.Strategies) != 0 || observed.Observation == "" {
+			t.Fatalf("ObservedSnapshot() of an empty list = (%+v, %v), want an observation of nothing", observed, ok)
+		}
+	})
+	t.Run("without a statement", func(t *testing.T) {
+		harness := newChangeGateHarness(t)
+		harness.untilUnchanged("1001")
+		emptiedAt := harness.clock
+		harness.setActiveSet(`[]`)
+		graced, _ := harness.untilUnchanged("1001")
+		if plans := harness.publishedPlans(graced.Publication); !reflect.DeepEqual(plans, []string{"1001", "1002"}) {
+			t.Fatalf("plans when the list was first found empty = %v, want both under the grace", plans)
+		}
+		want := controlplane.ObjectDisposition{SourceID: "1001", Scope: "STRATEGY", Disposition: controlplane.DispositionPendingRemoval,
+			Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: emptiedAt.Unix()}
+		if got := harness.strategyDisposition("1001"); got != want {
+			t.Fatalf("audit when the list was first found empty = %+v, want %+v", got, want)
+		}
+		harness.clock = emptiedAt.Add(controlplane.AbsenceGracePeriod)
+		gone, _ := harness.untilUnchanged("1001")
+		if plans := harness.publishedPlans(gone.Publication); len(plans) != 0 {
+			t.Fatalf("plans after the list stayed empty for the whole grace = %v, want none", plans)
+		}
+	})
+}
