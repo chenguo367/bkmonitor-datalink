@@ -317,11 +317,10 @@ func (coordinator *FlightCoordinator) acquireProcessQueryPermit(
 		return nil, context.DeadlineExceeded
 	}
 	waiter := &queryPermitWaiter{slot: slot, operation: operation, deadline: deadline, grant: make(chan *QueryPermit, 1)}
+	// A recovery operation arrives here only holding a recovery channel, and
+	// a channel is granted only while recovery permits are above zero: the
+	// recovery-off refusal is the channel's.
 	recovery := operation != execution.OperationNormal
-	if recovery && coordinator.limits.RecoveryQueryPermits == 0 {
-		coordinator.observeQueryPermitReason(ctx, operation, observability.ResultFailed, permitRecoveryOff, true, coordinator.queryPermitSnapshot())
-		return nil, ErrRecoveryPermitsOff
-	}
 	coordinator.mu.Lock()
 	queue := &coordinator.normalWaiters
 	capacity := coordinator.limits.ReadyQueueCapacity
