@@ -89,6 +89,22 @@ func TestAHostPlacedByItsAgentIsNotReplacedByTheRecordsServiceInstance(t *testin
 	}
 }
 
+// The host's own agent is read as any scalar: a record whose agent is written
+// as a number is filed, and places a record by that agent, rather than being
+// refused for the shape of one field.
+func TestAHostWhoseAgentIsANumberIsFiledAndPlaced(t *testing.T) {
+	record := `{"bk_host_id":720009,"bk_host_innerip":"192.0.2.179","bk_cloud_id":0,"bk_biz_id":999,"bk_agent_id":12345,` +
+		`"bk_state":"运营中[需告警]","topo_link":{"module|91":[{"bk_obj_id":"module","bk_inst_id":91}]}}`
+	store := storeWith([]string{"720009", record}, nil)
+	store.index.byAgent = map[string]string{"12345": "720009"}
+	if refused := store.index.Refused().Hosts; refused != 0 {
+		t.Fatalf("a numeric agent refused the record: %d refused", refused)
+	}
+	if host, found, _ := store.index.LookupAgent("12345"); !found || host.HostID != "720009" {
+		t.Fatalf("numeric agent placed %+v, %v", host, found)
+	}
+}
+
 // An agent hash that could not be read leaves an agent-named record's facts
 // unavailable, by name, rather than unknown: a topology target admits it under
 // that name instead of failing it for want of a chain.

@@ -108,13 +108,6 @@ type Facts struct {
 	HostState string
 	// HostBusinessID is the business the resolved host belongs to.
 	HostBusinessID string
-	// HostAttributes are the scalar fields of the resolved host's cache
-	// record, by field name, exposed to the matcher as
-	// contract.AttributeHostPrefix + name. The map is the index's own and is
-	// read only; keeping a reference costs the series nothing, where copying
-	// twenty fields into Attributes would allocate on every series for a
-	// target nobody has written yet.
-	HostAttributes map[string]string
 	// HostNaming records what the series said about its host, rather than what
 	// could be made of it. The host status filter needs the difference: Python
 	// keeps a record that names no host at all, drops one that names a host it
@@ -169,15 +162,7 @@ func (facts *Facts) Candidates(attribute string) []string {
 	if facts == nil {
 		return nil
 	}
-	if values, found := facts.Attributes[attribute]; found {
-		return values
-	}
-	if name, isHostAttribute := strings.CutPrefix(attribute, contract.AttributeHostPrefix); isHostAttribute {
-		if value, found := facts.HostAttributes[name]; found && value != "" {
-			return []string{value}
-		}
-	}
-	return nil
+	return facts.Attributes[attribute]
 }
 
 // Add records one candidate value for an attribute, keeping the values

@@ -36,16 +36,19 @@ func NewHostBusinessLookup(store *Store) *HostBusinessLookup {
 // then the host fuller (a true id, the agent, the address) and the
 // service-instance fuller, in Python's order (fullers.py:55-110). A record
 // they place on no host answers false, and so does one they could not place
-// because the index is unavailable or past its staleness bound: an event is
-// not attributed on facts admission would not decide on.
+// because no index is held or it is empty. An index past its staleness
+// bound still places: attribution is a label, not a verdict, and a host's
+// business a quarter of an hour on is almost always the same, while the
+// fallback - the strategy's own business - is certainly wrong for a host
+// target.
 func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.RawMessage) (string, bool) {
 	if lookup == nil || lookup.store == nil {
 		return "", false
 	}
 	facts := admission.Facts{Dimensions: dimensions}
 	admission.IdentityFuller{}.Fill(dimensions, &facts)
-	NewHostTopologyFuller(lookup.store).Fill(dimensions, &facts)
-	NewServiceInstanceTopologyFuller(lookup.store).Fill(dimensions, &facts)
+	(&HostTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
+	(&ServiceInstanceTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
 	if !facts.HostResolved || facts.HostFactsUnavailable || facts.HostBusinessID == "" {
 		return "", false
 	}
@@ -55,15 +58,21 @@ func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.R
 // LookupHostBusiness returns the business the host belongs to, and false when
 // the index does not hold it.
 //
-// A store that has never built an index answers false for everything, which is
-// the same answer as a host nobody has heard of. That is deliberate and it is
-// the safe direction here: not held means not expected, so a cold index expects
-// nothing rather than reporting every declared host absent while it warms up.
+// An index that may not be decided on (Store.Usable: never loaded, past its
+// bound, or empty) answers false for everything, which is the same answer as
+// a host nobody has heard of. That is deliberate and it is the safe direction
+// here: not held means not expected, so such an index expects nothing rather
+// than reporting every declared host absent. HostIndexResolved tells the two
+// apart for a caller asking about a whole target.
 func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, bool) {
 	if lookup == nil || lookup.store == nil {
 		return "", false
 	}
-	facts, found := lookup.store.Current().Lookup(identity)
+	index, unusable := lookup.store.Usable()
+	if unusable != "" {
+		return "", false
+	}
+	facts, found := index.Lookup(identity)
 	if !found || facts == nil {
 		return "", false
 	}
@@ -77,7 +86,13 @@ func (lookup *HostBusinessLookup) LookupAddressBusiness(tenantID, address string
 	if lookup == nil || lookup.store == nil {
 		return "", false
 	}
-	host, count := lookup.store.Current().AddressHost(tenantID, address)
+	// Attribution's, so a held index past its bound still answers, as
+	// PlaceHostBusiness does.
+	index, unusable := lookup.store.Usable()
+	if unusable != "" && unusable != IndexStale {
+		return "", false
+	}
+	host, count := index.AddressHost(tenantID, address)
 	if count != 1 || host == nil {
 		return "", false
 	}
@@ -113,13 +128,10 @@ func (lookup *HostBusinessLookup) LookupNamespaceBusiness(clusterID, namespace s
 // static target that resolved to nobody -- which is a legitimate state, so
 // nothing downstream can tell that this one is not it.
 //
-// An index holding no hosts is not resolved either, for the reason Health
-// already gives it: an empty host cache would put every host-scoped strategy
-// out of scope at once, and that is never a real state here. A stale index is
-// resolved: it holds hosts and answers about them, and the answer being a few
-// minutes old is a lag this deployment tolerates everywhere else, whereas
-// calling it unresolved would stop no-data detection on every static target
-// for the length of a CMDB hiccup.
+// It is Store.Usable's one judgement: an index holding no hosts is not
+// resolved, because an empty host cache would put every host-scoped strategy
+// out of scope at once and that is never a real state here; nor is one past
+// its staleness bound, whose answers nobody can vouch for any more.
 func (lookup *HostBusinessLookup) HostIndexResolved() bool {
 	if lookup == nil || lookup.store == nil {
 		return false

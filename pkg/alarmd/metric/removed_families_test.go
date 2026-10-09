@@ -65,6 +65,10 @@ var removedFamilies = []string{
 	// How long a source change had waited for a second identical read. A
 	// change is published by the round that reads it, so nothing waits.
 	"source_pending_confirmation_age_seconds",
+	// Per-group failure detail of the target group store: a refresh reads
+	// every group or none, and the replica's dependencies say since when and
+	// why the refreshes fail.
+	"target_group_unanswered_reads_total", "target_group_oldest_failing_seconds",
 }
 
 // removedLabelValues are label values taken out of families that stay.
@@ -110,9 +114,9 @@ var removedLabelValues = []struct {
 	{"target_group_groups", "state", "emptied_pending", false},
 	{"target_group_groups", "state", "emptied_held", false},
 	{"target_selector_resolutions_total", "reason", "emptied_held", false},
-	// A business mapping the writer did not publish is named missing and its
-	// last entries carried within the staleness bound; "emptied" claimed the
-	// writer had emptied it, which a missing key cannot say.
+	// A business mapping the writer did not publish is named missing and maps
+	// nothing; "emptied" claimed the writer had emptied it, which a missing
+	// key cannot say.
 	{"cmdb_index_business_mappings", "state", "emptied", true},
 	// An empty strategy list was held without a time bound, every strategy
 	// kept under PENDING_REMOVAL for this reason. An empty list is now a list

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 var defaultPair = [2]string{"cw_object_model_id", "cw_object_model_inst_id"}
@@ -170,13 +168,6 @@ func TestTheMatcherIsGenericOverTheAttributeTable(t *testing.T) {
 	}})}
 	if decision := (TargetScopeFilter{}).Admit(unknown, &facts); decision.Admit {
 		t.Fatalf("a condition on a field the table does not know admitted the record: %+v", decision)
-	}
-	facts.HostAttributes = map[string]string{"bk_os_type": "linux", "bk_state": "运营中[需告警]"}
-	if got := facts.Candidates(contract.AttributeHostPrefix + "bk_os_type"); !reflect.DeepEqual(got, []string{"linux"}) {
-		t.Fatalf("host attribute candidates = %v", got)
-	}
-	if got := facts.Candidates(contract.AttributeHostPrefix + "bk_cpu"); got != nil {
-		t.Fatalf("an attribute the host does not have produced %v", got)
 	}
 	if got := facts.Candidates("host.identity"); !reflect.DeepEqual(got, []string{"42"}) {
 		t.Fatalf("host identity candidates = %v", got)

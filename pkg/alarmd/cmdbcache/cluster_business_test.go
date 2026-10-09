@@ -39,7 +39,7 @@ func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 	if stats := index.ClusterBusinessStats(); stats != (MappingStats{Held: 2, Refused: 4}) {
 		t.Fatalf("cluster mapping %+v, want 2 held and 4 refused", stats)
 	}
-	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour}
 	lookup := NewHostBusinessLookup(store)
 	for cluster, want := range map[string]string{"BCS-K8S-00001": "11", "BCS-K8S-00002": "12"} {
 		if business, found := lookup.LookupClusterBusiness(cluster); !found || business != want {
@@ -73,7 +73,7 @@ func TestAnAbsentClusterMappingMapsNoCluster(t *testing.T) {
 	if stats := index.ClusterBusinessStats(); stats != (MappingStats{Missing: true}) {
 		t.Fatalf("cluster mapping %+v, want nothing held and missing named", stats)
 	}
-	store := &Store{index: index, now: func() time.Time { return at }, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: func() time.Time { return at }, maxAge: time.Hour}
 	if health := store.Health(); health.Degraded || health.Hosts != 1 {
 		t.Fatalf("health = %+v, want the hosts loaded and nothing degraded", health)
 	}
@@ -151,7 +151,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 		t.Fatalf("a mapping that cannot be read failed the refresh: %v", err)
 	}
 	health := store.Health()
-	if health.Refreshes != 2 || health.ConsecutiveErrors != 0 || health.Degraded {
+	if health.Refreshes != 2 || store.lastError != nil || health.Degraded {
 		t.Fatalf("health = %+v, want the second refresh taken, no store failure, nothing degraded", health)
 	}
 	if _, found := store.Current().Lookup("192.0.2.8|0"); !found {

@@ -128,7 +128,7 @@ func TestLoadReadsHostsAndServiceInstancesIntoOneSnapshot(t *testing.T) {
 	if index.TopologyNodes() != 1 {
 		t.Fatalf("topology nodes = %d, want the one the cache lists", index.TopologyNodes())
 	}
-	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour}
 	if health := store.Health(); health.Hosts != 1 || health.ServiceInstances != 1 {
 		t.Fatalf("health = %+v", health)
 	}
@@ -152,7 +152,7 @@ func storeWith(hostFields []string, instanceFields []string) *Store {
 	builder := newIndexBuilder(builtAt)
 	builder.addFields(hostFields)
 	builder.addServiceInstanceFields(instanceFields)
-	return &Store{index: builder.index, now: func() time.Time { return builtAt }, maxAge: time.Hour, interval: time.Minute}
+	return &Store{index: builder.index, now: func() time.Time { return builtAt }, maxAge: time.Hour}
 }
 
 // A series that names only a service instance is placed under the instance's
@@ -365,27 +365,6 @@ func TestAnEmptyInstanceCacheIsNamedApartFromAnEmptyHostCache(t *testing.T) {
 	both := instanceChain(t, empty).Enrich(map[string]json.RawMessage{"bk_target_service_instance_id": json.RawMessage(`7`)})
 	if both.FactsUnavailableReason() != admission.FactsUnavailableHostIndex {
 		t.Fatalf("reason = %q, want the host index named first", both.FactsUnavailableReason())
-	}
-}
-
-// The scalar fields of the resolved host are readable as host attributes
-// without any of them being copied per series; nested fields are not.
-func TestTheResolvedHostsScalarFieldsAreExposedAsAttributes(t *testing.T) {
-	store := storeWith([]string{"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost}, nil)
-	chain := instanceChain(t, store)
-	facts := chain.Enrich(map[string]json.RawMessage{"bk_host_id": json.RawMessage(`700002`)})
-	for attribute, want := range map[string]string{
-		"bk_state": "运营中[需告警]", "display_name": "live", "bk_host_id": "700002", "bk_biz_id": "999", "bk_cloud_id": "0",
-	} {
-		if got := facts.Candidates(contract.AttributeHostPrefix + attribute); !reflect.DeepEqual(got, []string{want}) {
-			t.Errorf("host attribute %s = %v, want %q", attribute, got, want)
-		}
-	}
-	if got := facts.Candidates(contract.AttributeHostPrefix + "topo_link"); got != nil {
-		t.Fatalf("a nested field was flattened into an attribute: %v", got)
-	}
-	if _, copied := facts.Attributes[contract.AttributeHostPrefix+"bk_state"]; copied {
-		t.Fatal("host attributes were copied into the per-series map")
 	}
 }
 

@@ -76,12 +76,18 @@ var cmdbIndexReasons = map[string]struct{}{
 // index is not filtering correctly, and without the age it is impossible to
 // tell a correct "out of scope" from one caused by a cache that stopped being
 // refreshed.
-func (r *Recorder) SetCMDBHostIndex(hosts int, ageSeconds float64, sourceAgeSeconds float64, degraded bool, reason string) {
+//
+// The ages are by kind: index is how long ago alarmd read it; published, how
+// long ago the writer published what was read, which is what staleness is
+// judged on when the writer says (0 when it does not); source, another
+// writer's last full-pass attempt, shown and not judged on.
+func (r *Recorder) SetCMDBHostIndex(hosts int, ageSeconds, publishedAgeSeconds, sourceAgeSeconds float64, degraded bool, reason string) {
 	if r == nil {
 		return
 	}
 	r.phaseTwo.cmdbIndexHosts.Set(float64(hosts))
 	r.phaseTwo.cmdbIndexAge.WithLabelValues("index").Set(ageSeconds)
+	r.phaseTwo.cmdbIndexAge.WithLabelValues("published").Set(publishedAgeSeconds)
 	r.phaseTwo.cmdbIndexAge.WithLabelValues("source").Set(sourceAgeSeconds)
 	if reason == "" {
 		reason = "none"

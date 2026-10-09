@@ -10,7 +10,6 @@
 package main
 
 import (
-	"sort"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
@@ -28,11 +27,9 @@ const (
 
 // withTargetGroups adds what this replica's dynamic group store reads of the
 // target group cache to its endpoint: the groups it holds, its own reading
-// of them, and the groups served past refreshes that could not read them -
-// the longest-failing by name, since when and why, and all of them counted
-// by reason. A replica serving a group from before Redis started
-// answering its key with an error is read here in one step, not guessed
-// from a Plan's stale age. Without a store the endpoint is as it was.
+// of them, and, while its refreshes fail, since when and why - every group
+// it holds is then served past them. Without a store the endpoint is as it
+// was.
 func withTargetGroups(endpoints func() []fleet.Endpoint, groups *cmdbcache.GroupStore, now func() time.Time) func() []fleet.Endpoint {
 	if groups == nil {
 		return endpoints
@@ -61,41 +58,24 @@ func targetGroupEvidence(health cmdbcache.GroupHealth, at time.Time) *fleet.Writ
 	default:
 		evidence.State = targetGroupLoaded
 	}
-	if len(health.Failing) == 0 {
-		return evidence
-	}
-	// The groups failing longest are named, and the rest counted: the list
-	// rides in every replica's head, and Redis loading fails every group.
-	failing := append([]cmdbcache.GroupFailure(nil), health.Failing...)
-	sort.Slice(failing, func(i, j int) bool {
-		if !failing[i].Since.Equal(failing[j].Since) {
-			return failing[i].Since.Before(failing[j].Since)
-		}
-		return failing[i].ID < failing[j].ID
-	})
-	evidence.FailingTotal, evidence.FailingReasons = len(failing), map[string]int{}
-	for index, failure := range failing {
-		evidence.FailingReasons[failure.Reason]++
-		if index < fleet.MaxFailingCopiesListed {
-			evidence.Failing = append(evidence.Failing, fleet.FailingCopy{
-				ID: failure.ID, SinceAgeSeconds: at.Sub(failure.Since).Seconds(), Reason: failure.Reason,
-			})
-		}
+	if !health.FailingSince.IsZero() {
+		since := at.Sub(health.FailingSince).Seconds()
+		evidence.FailingSinceAgeSeconds, evidence.FailingReason = &since, health.FailureReason
 	}
 	return evidence
 }
 
-// targetGroupReading is the store's health as the collector reads it at at.
-func targetGroupReading(health cmdbcache.GroupHealth, at time.Time) metric.TargetGroupReading {
-	reading := metric.TargetGroupReading{
+// targetGroupReading is the store's health as the collector reads it: while
+// the refreshes fail, every group held is served past them.
+func targetGroupReading(health cmdbcache.GroupHealth) metric.TargetGroupReading {
+	failing := 0
+	if health.RefreshFailed {
+		failing = health.Loaded + health.Unavailable
+	}
+	return metric.TargetGroupReading{
 		Groups: map[string]int{
-			"referenced": health.Referenced, "loaded": health.Loaded, "unavailable": health.Unavailable,
-			"failing": len(health.Failing),
+			"referenced": health.Referenced, "loaded": health.Loaded, "unavailable": health.Unavailable, "failing": failing,
 		},
-		RefreshFailed: health.RefreshFailed, UnansweredReads: health.UnansweredReads,
+		RefreshFailed: health.RefreshFailed,
 	}
-	for _, failure := range health.Failing {
-		reading.OldestFailingSeconds = max(reading.OldestFailingSeconds, at.Sub(failure.Since).Seconds())
-	}
-	return reading
 }

@@ -28,6 +28,9 @@ import (
 // every time CMDB does.
 type HostTopologyFuller struct {
 	store *Store
+	// acceptStale places on an index past its staleness bound, for a reader
+	// that labels rather than decides (attribution); admission does not.
+	acceptStale bool
 }
 
 func NewHostTopologyFuller(store *Store) *HostTopologyFuller {
@@ -41,30 +44,18 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
-	index, withinBound := fuller.store.CurrentWithinBound()
-	if index == nil {
-		// Never loaded. A filter that acts on "CMDB does not know this host"
-		// has to be able to tell that apart from "CMDB was not asked".
-		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
-		return
-	}
-	if !withinBound {
-		// Older than the staleness bound: a host added since is unknown to it
-		// and a host moved since sits in its old modules. The facts are
-		// unavailable, by name, as for an index that never loaded
-		// (decision-013 section 5.1 item 4).
-		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
-		return
-	}
-	if index.Hosts() == 0 {
-		// A host cache with nothing in it is not a fleet with no hosts. It is
-		// the signature of a cache that was never written, or of a connection
-		// pointed somewhere nothing writes it. Deciding on it would put every
-		// topology-targeted strategy out of scope and drop every host-named
-		// series at once - and silently, because each individual decision
-		// looks like an ordinary "this host is unknown". The facts are
-		// reported unavailable instead, which is the state the filters already
-		// know how to hold: keep the alerts, leave the gap in the counter.
+	index, unusable := fuller.store.Usable()
+	if unusable != "" && !(fuller.acceptStale && unusable == IndexStale) {
+		// Never loaded, past the staleness bound, or empty (Store.judge). A
+		// filter that acts on "CMDB does not know this host" has to tell that
+		// apart from "CMDB was not asked": past the bound a host added since
+		// is unknown and a host moved since sits in its old modules, and an
+		// empty cache is a cache nobody writes, not a fleet without hosts -
+		// deciding on either would drop host-named series and put targeted
+		// ones out of scope one ordinary-looking rejection at a time. The
+		// facts are unavailable, by name, which the filters already hold:
+		// keep the alerts, leave the gap in the counter (decision-013 section
+		// 5.1 item 4).
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
@@ -147,7 +138,6 @@ func placeByAgent(facts *admission.Facts, host *HostFacts) {
 	naming.Usable = true
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // placeByID is Python's host-by-id branch: the host's own address and cloud
@@ -166,7 +156,6 @@ func placeByID(facts *admission.Facts, id string, host *HostFacts) {
 	facts.HostNaming.AddressKey = host.IP + "|" + host.CloudID
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // placeByAddress is Python's address branch (fullers.py:92-110): it writes the
@@ -211,10 +200,7 @@ func instanceResolves(index *Index, facts *admission.Facts) bool {
 }
 
 // resolveHostState answers whether CMDB knows the host the record names and
-// what it says about it, by the one identity Python would look up. It also
-// exposes that host's scalar attributes, which the facts serve under
-// contract.AttributeHostPrefix, so a target on a host attribute is a table
-// row away and needs no fuller change; nothing reads them yet.
+// what it says about it, by the one identity Python would look up.
 func resolveHostState(index *Index, facts *admission.Facts) {
 	key, looked := facts.HostNaming.LookupKey()
 	if !looked {
@@ -222,12 +208,11 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 	}
 	host, found := index.Lookup(key)
 	if !found {
-		facts.HostResolved, facts.HostState, facts.HostBusinessID, facts.HostAttributes = false, "", "", nil
+		facts.HostResolved, facts.HostState, facts.HostBusinessID = false, "", ""
 		return
 	}
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // ServiceInstanceTopologyFuller resolves a series that names a service
@@ -243,7 +228,8 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 // overwritten values. Here those become facts: the topology attribute, the
 // host identity attribute and HostNaming change; the dimensions do not.
 type ServiceInstanceTopologyFuller struct {
-	store *Store
+	store       *Store
+	acceptStale bool
 }
 
 func NewServiceInstanceTopologyFuller(store *Store) *ServiceInstanceTopologyFuller {
@@ -271,8 +257,8 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		facts.MarkFactsUnavailable(admission.FactsUnavailableServiceInstanceIndex)
 		return
 	}
-	index, withinBound := fuller.store.CurrentWithinBound()
-	if index == nil || !withinBound || index.ServiceInstances() == 0 {
+	index, unusable := fuller.store.Usable()
+	if (unusable != "" && !(fuller.acceptStale && unusable == IndexStale)) || index.ServiceInstances() == 0 {
 		// The same reading as an empty host cache: a series that names an
 		// instance while the instance cache holds none is the signature of a
 		// cache nobody writes, not of a fleet without instances. Deciding on

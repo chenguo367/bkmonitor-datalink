@@ -52,10 +52,15 @@ func TestAGlobalEventIsAttributedToTheHostAdmissionPlaced(t *testing.T) {
 		}
 	}
 
-	// Past the staleness bound admission does not decide on the index, and
-	// an event is not attributed on it either: it falls through.
+	// Past the staleness bound admission does not decide on the index, but
+	// attribution is a label, and the held index still places the host.
 	store.now = func() time.Time { return store.index.BuiltAt().Add(store.maxAge + time.Second) }
+	if got := admission.AttributeBusiness(target, nil, planBusiness, jsonDims(t, `{"bk_host_id":"730001"}`), lookups); got.BusinessID != "11" {
+		t.Errorf("past the staleness bound: attributed %+v, want the host's business from the held index", got)
+	}
+	// An index that holds no host places nothing: the event falls through.
+	store.index = newIndexBuilder(store.index.BuiltAt()).index
 	if got := admission.AttributeBusiness(target, nil, planBusiness, jsonDims(t, `{"bk_host_id":"730001"}`), lookups); got.BusinessID != planBusiness {
-		t.Errorf("past the staleness bound: attributed %+v, want the strategy's own business", got)
+		t.Errorf("an empty index: attributed %+v, want the strategy's own business", got)
 	}
 }

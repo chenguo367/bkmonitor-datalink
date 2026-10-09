@@ -32,9 +32,17 @@ import (
 // that several failed reads in a row are not called stale and short enough that
 // a cache which stopped being refreshed is visible well before an operator
 // would notice through alerts.
+//
+// When the writer publishes when it published, the facts are aged from that
+// instead, held to three of its publish rounds (five minutes each on the CMDB
+// cache writer): one missed round is tolerated, and the index does not go in
+// and out of stale with a single slow build; a writer that stopped is stale
+// fifteen minutes after its last publish, not when its keys expire a week
+// later.
 const (
-	cmdbIndexRefreshInterval = time.Minute
-	cmdbIndexStalenessBound  = 10 * cmdbIndexRefreshInterval
+	cmdbIndexRefreshInterval         = time.Minute
+	cmdbIndexStalenessBound          = 10 * cmdbIndexRefreshInterval
+	cmdbIndexPublishedStalenessBound = 15 * time.Minute
 )
 
 // How often one plan may describe its object-identity rejections in the log.
@@ -70,7 +78,7 @@ func buildSeriesAdmission(
 	store, err := cmdbcache.NewStore(reader, cmdbcache.StoreOptions{
 		RefreshInterval: cmdbIndexRefreshInterval,
 		MaxAge:          cmdbIndexStalenessBound,
-		RefusalsChanged: cmdbRefusalLogger(logger),
+		PublishedMaxAge: cmdbIndexPublishedStalenessBound,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -168,7 +176,7 @@ func maintainCMDBIndex(ctx context.Context, store *cmdbcache.Store, recorder *me
 func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 	health := store.Health()
 	recorder.SetCMDBHostIndex(
-		health.Hosts, health.Age.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
+		health.Hosts, health.Age.Seconds(), health.PublishedAge.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
 	)
 	recorder.SetCMDBServiceInstanceIndex(health.ServiceInstances)
 	publishCMDBBusinessMappings(recorder, health)
@@ -183,40 +191,6 @@ func publishCMDBRefusedRecords(recorder *metric.Recorder, health cmdbcache.Healt
 		"host": health.Refused.Hosts, "service_instance": health.Refused.ServiceInstances, "topo_node": health.Refused.TopoNodes,
 	} {
 		recorder.SetCMDBRecordsRefused(record, refused)
-	}
-}
-
-// cmdbRefusalLogger writes the line the store asks for when what a CMDB
-// index load refused changes in number: the three counts, and the first
-// field of each by which the record can be read back from the cache. The
-// store asks only on a change, so a writer that keeps publishing the same
-// bad record is said once, and the load that reads clean again is said
-// once too.
-func cmdbRefusalLogger(logger *observability.Logger) func(cmdbcache.RefusedRecords) {
-	if logger == nil {
-		return nil
-	}
-	return func(refused cmdbcache.RefusedRecords) {
-		attributes := []slog.Attr{
-			slog.Int("host", refused.Hosts),
-			slog.Int("service_instance", refused.ServiceInstances),
-			slog.Int("topo_node", refused.TopoNodes),
-		}
-		if refused.FirstHost != "" {
-			attributes = append(attributes, slog.String("first_host", refused.FirstHost))
-		}
-		if refused.FirstServiceInstance != "" {
-			attributes = append(attributes, slog.String("first_service_instance", refused.FirstServiceInstance))
-		}
-		if refused.FirstTopoNode != "" {
-			attributes = append(attributes, slog.String("first_topo_node", refused.FirstTopoNode))
-		}
-		total := refused.Hosts + refused.ServiceInstances + refused.TopoNodes
-		if total == 0 {
-			logger.Info("cmdb_index", "records_refused", 0, 0, attributes...)
-			return
-		}
-		logger.Warn("cmdb_index", "records_refused", total, 0, attributes...)
 	}
 }
 
@@ -277,8 +251,7 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 // read holds at most readBound bytes of group documents at once: the
 // timeline cache's bound, derived from the container
 // (config.DeriveControlTimelineCache).
-func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, readBound int,
-	logger *observability.Logger) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
+func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, readBound int) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
 	prefix, rendered := cfg.DynamicGroupKeyPrefix()
 	if !rendered {
 		return cmdbcache.NewTargetResolver(nil, hosts, time.Now), nil, nil

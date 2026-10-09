@@ -407,8 +407,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_fleet_round_memory_line_held_objects":         "variableLabels: {}",
 		"bkmonitor_alarmd_target_group_groups":                          "variableLabels: {state}",
 		"bkmonitor_alarmd_target_group_refresh_failed":                  "variableLabels: {}",
-		"bkmonitor_alarmd_target_group_unanswered_reads_total":          "variableLabels: {}",
-		"bkmonitor_alarmd_target_group_oldest_failing_seconds":          "variableLabels: {}",
 		"bkmonitor_alarmd_loop_turn_age_seconds":                        "variableLabels: {loop}",
 		"bkmonitor_alarmd_loop_turn_duration_seconds":                   "variableLabels: {loop}",
 		"bkmonitor_alarmd_executions_past_deadline":                     "variableLabels: {}",
@@ -655,7 +653,7 @@ func populateAllCustomLabelCombinations(recorder *Recorder) {
 		}
 	}
 	for reason := range cmdbIndexReasons {
-		recorder.SetCMDBHostIndex(1, 1, 1, reason != "none", reason)
+		recorder.SetCMDBHostIndex(1, 1, 1, 1, reason != "none", reason)
 	}
 	for _, pair := range observability.AllMetricComponentStages() {
 		for _, result := range observability.AllResults() {
@@ -810,7 +808,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("retained_peak_census_groups"):           1,
 		fqName("retained_peak_census_overflow"):         1,
 		fqName("host_disable_monitor_states"):           1,
-		fqName("cmdb_host_index_age_seconds"):           2,
+		fqName("cmdb_host_index_age_seconds"):           3,
 		fqName("cmdb_host_index_degraded"):              len(cmdbIndexReasons),
 		// Every combination is created at construction, so these are exact rather
 		// than an upper bound: a series that has never happened still publishes a
@@ -969,8 +967,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("fleet_round_memory_line_held_objects"):    1,
 		fqName("target_group_groups"):                     len(TargetGroupStates),
 		fqName("target_group_refresh_failed"):             1,
-		fqName("target_group_unanswered_reads_total"):     1,
-		fqName("target_group_oldest_failing_seconds"):     1,
 		fqName("loop_turn_age_seconds"):                   len(LivenessLoops),
 		fqName("loop_turn_duration_seconds"):              histogramSeries(len(LivenessLoops), len(loopTurnDurationBuckets)),
 		fqName("executions_past_deadline"):                1,

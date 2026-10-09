@@ -119,7 +119,7 @@ func TestTheAdmissionChainAgreesWithTheRunningPython(t *testing.T) {
 		}
 		builder.addFields(fields)
 	}
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 	hostStatus := admission.NewHostStatusFilter(corpus.DisableStates)
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},

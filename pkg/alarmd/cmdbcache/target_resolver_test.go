@@ -30,7 +30,7 @@ func hostStore(t *testing.T, now func() time.Time, hosts []string, nodes []strin
 	builder := newIndexBuilder(now())
 	builder.addFields(hosts)
 	builder.addTopologyNodes(nodes)
-	return &Store{index: builder.index, now: now, maxAge: 10 * time.Minute, interval: time.Minute}
+	return &Store{index: builder.index, now: now, maxAge: 10 * time.Minute}
 }
 
 func selector(resolution *targetplan.Resolution, kind, id string) targetplan.SelectorResult {
@@ -157,7 +157,7 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 // out of Contains, and a source that was never wired says so. A snapshot
 // served past a failed refresh is answered and marked with its age; past
 // the staleness bound it is unavailable as stale; an index that is stale
-// makes every topology reference unavailable.
+// makes every topology reference unavailable as stale too.
 func TestTheResolverNeverReadsUnavailableAsEmpty(t *testing.T) {
 	now := time.Unix(1000, 0)
 	clock := func() time.Time { return now }
@@ -187,7 +187,7 @@ func TestTheResolverNeverReadsUnavailableAsEmpty(t *testing.T) {
 	if group := selector(tooOld, targetplan.SelectorKindGroup, "ok"); group.State != targetplan.SelectorUnavailable || group.Reason != targetplan.ReasonStale {
 		t.Fatalf("past the staleness bound the group answered %s %s", group.State, group.Reason)
 	}
-	if topology := selector(tooOld, targetplan.SelectorKindTopology, "2|set|12"); topology.State != targetplan.SelectorUnavailable || topology.Reason != targetplan.ReasonIndexUnavailable {
+	if topology := selector(tooOld, targetplan.SelectorKindTopology, "2|set|12"); topology.State != targetplan.SelectorUnavailable || topology.Reason != targetplan.ReasonStale {
 		t.Fatalf("with a stale host index the topology answered %s %s", topology.State, topology.Reason)
 	}
 	if tooOld.State != targetplan.ResolutionUnavailable || tooOld.Contains("101") || tooOld.Contains("501") {

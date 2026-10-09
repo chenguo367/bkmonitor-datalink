@@ -20,11 +20,11 @@ package cmdbcache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 
@@ -40,6 +40,12 @@ const (
 	// HostAgentIDManager, the cmdb.agent_id hash).
 	agentCacheSuffix       = "cache.cmdb.agent_id"
 	hostTopoRefreshedField = "cache.cmdb_last_refresh_all_time.host_topo"
+	// hostTopoPublishedField is when the CMDB cache writer published the
+	// host and topology hashes this index read: a String of epoch seconds it
+	// writes in the same atomic step as the hashes, only when a publish
+	// succeeds. hostTopoRefreshedField is another writer's attempt time,
+	// written whether its pass succeeded or not; the two are kept apart.
+	hostTopoPublishedField = "cache.cmdb_published_at.host_topo"
 	scanBatch              = int64(1000)
 	// clusterBusinessCacheSuffix is the BCS cluster -> business hash the
 	// platform's CMDB cache writer publishes beside the host hash, in the
@@ -68,19 +74,15 @@ const (
 // in three modules carries three chains of business, set and module, and a
 // target naming any one of them includes it.
 type HostFacts struct {
-	HostID      string
-	IP          string
-	CloudID     string
-	BusinessID  string
-	TopoNodes   []string
-	State       string
-	DisplayName string
-	// Attributes are the scalar top-level fields of the cache record as text,
-	// by field name: bk_state, bk_os_type, bk_host_name and whatever else the
-	// writer put there. They are decoded once here so a target on a host
-	// attribute costs the filter a lookup, not a decode; no target reads
-	// them yet.
-	Attributes map[string]string
+	HostID     string
+	IP         string
+	CloudID    string
+	BusinessID string
+	TopoNodes  []string
+	State      string
+	// AgentID is the agent the host record says it carries: the agent hash
+	// places a record on a host only when the host agrees (host.py:207-221).
+	AgentID string
 	// ModelID and ModelInstID are the canonical instance identity the writer
 	// adds beside the host id. Empty on a record written before it did.
 	ModelID     string
@@ -128,8 +130,10 @@ type Index struct {
 	topoNodes map[string]struct{}
 	// byModelInstance is every host that carries the canonical (model,
 	// instance) identity, keyed "model|instance": how a model_inst_id target
-	// read by host identity finds the host a static member names.
+	// read by host identity finds the host a static member names. models are
+	// the models those hosts carry.
 	byModelInstance map[string]*HostFacts
+	models          map[string]struct{}
 	// addressOf is, by host id, the tenant and ip_cloud key of every host
 	// the writer put a whole target address on: how an ip_cloud target maps
 	// its hosts to the keys records are read by. hostsAt is, by
@@ -141,6 +145,9 @@ type Index struct {
 	hostsAt           map[string]addressHosts
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
+	// publishedAt is when the writer published what this index read, and
+	// zero when the writer publishes no such time.
+	publishedAt time.Time
 	// clusterBusiness is the business of each BCS cluster the writer
 	// published, by cluster id: how a global business Plan's event on
 	// Kubernetes data that names no business finds the one it belongs to.
@@ -163,8 +170,7 @@ type Index struct {
 // numeric instance. Each is taken as absent, as it always was - a record
 // the writer got wrong is the same as one it deleted - and a node lost
 // this way is one a topology target silently does not match. These say how
-// many, and name the first of each by the hash field it was read under, so
-// the record can be read back from the cache.
+// many; the records themselves are read back from the cache by field.
 //
 // Hosts counts fields, not hosts: the writer publishes every host under
 // its "ip|cloud" field and its host id field, so one bad host record is
@@ -172,63 +178,16 @@ type Index struct {
 // is. A topology node is counted once per record, and a host's once, from
 // the first of its two fields that is read.
 type RefusedRecords struct {
-	Hosts                int
-	ServiceInstances     int
-	TopoNodes            int
-	FirstHost            string
-	FirstServiceInstance string
-	// FirstTopoNode names the record the first refused node was in, by its
-	// hash and field: "host:<field>" or "service_instance:<field>".
-	FirstTopoNode string
+	Hosts            int
+	ServiceInstances int
+	TopoNodes        int
 }
 
-// maxRefusedFieldBytes bounds a field name kept as the first refused of
-// its kind. The name comes from the writer and goes on to a log line and to
-// every replica's fleet snapshot; the writer's own names are tens of bytes.
-const maxRefusedFieldBytes = 256
+func (refused *RefusedRecords) host() { refused.Hosts++ }
 
-// refusedField is a field name as kept for naming a refused record: cut to
-// maxRefusedFieldBytes on a character boundary.
-func refusedField(field string) string {
-	if len(field) <= maxRefusedFieldBytes {
-		return field
-	}
-	cut := maxRefusedFieldBytes
-	for cut > 0 && !utf8.RuneStart(field[cut]) {
-		cut--
-	}
-	return field[:cut]
-}
+func (refused *RefusedRecords) serviceInstance() { refused.ServiceInstances++ }
 
-// SameCounts says whether two loads refused as many of each.
-func (refused RefusedRecords) SameCounts(other RefusedRecords) bool {
-	return refused.Hosts == other.Hosts && refused.ServiceInstances == other.ServiceInstances &&
-		refused.TopoNodes == other.TopoNodes
-}
-
-func (refused *RefusedRecords) host(field string) {
-	if refused.Hosts == 0 {
-		refused.FirstHost = refusedField(field)
-	}
-	refused.Hosts++
-}
-
-func (refused *RefusedRecords) serviceInstance(field string) {
-	if refused.ServiceInstances == 0 {
-		refused.FirstServiceInstance = refusedField(field)
-	}
-	refused.ServiceInstances++
-}
-
-func (refused *RefusedRecords) topoNodes(record, field string, nodes int) {
-	if nodes == 0 {
-		return
-	}
-	if refused.TopoNodes == 0 {
-		refused.FirstTopoNode = record + ":" + refusedField(field)
-	}
-	refused.TopoNodes += nodes
-}
+func (refused *RefusedRecords) topoNodes(nodes int) { refused.TopoNodes += nodes }
 
 // MappingStats describes one published business mapping the index read:
 // the entries held, the fields the latest load that read the hash left out
@@ -330,6 +289,17 @@ func (index *Index) LookupModelInstance(model, instance string) (*HostFacts, boo
 	return facts, found
 }
 
+// ListsModel says the cache lists at least one host under the canonical
+// model: a static member of that model the index does not find is a host
+// that is gone, not a model the cache cannot place.
+func (index *Index) ListsModel(model string) bool {
+	if index == nil {
+		return false
+	}
+	_, listed := index.models[model]
+	return listed
+}
+
 // TopologyAnswer is what the index says about one dynamic topology
 // reference.
 type TopologyAnswer struct {
@@ -396,14 +366,24 @@ func (index *Index) BuiltAt() time.Time {
 	return index.builtAt
 }
 
-// SourceRefreshedAt is when bmw last completed a full host-topology pass. It
-// bounds how stale the facts can be independently of how recently alarmd read
-// them: a fresh read of a stale cache is still stale.
+// SourceRefreshedAt is when bmw last attempted a full host-topology pass,
+// whether it succeeded or not. It is shown, not decided on.
 func (index *Index) SourceRefreshedAt() time.Time {
 	if index == nil {
 		return time.Time{}
 	}
 	return index.sourceRefreshedAt
+}
+
+// PublishedAt is when the writer published the host and topology hashes this
+// index read, and zero when it publishes no such time. It bounds how stale
+// the facts are independently of how recently alarmd read them: a fresh read
+// of a cache the writer stopped publishing is still stale.
+func (index *Index) PublishedAt() time.Time {
+	if index == nil {
+		return time.Time{}
+	}
+	return index.publishedAt
 }
 
 // Lookup resolves one identity key: either "ip|cloud" or a bare host id, the
@@ -486,7 +466,7 @@ func (index *Index) LookupAgent(agent string) (*HostFacts, bool, bool) {
 		return nil, false, false
 	}
 	host, found := index.byHostID[hostID]
-	if !found || host.Attributes["bk_agent_id"] != agent {
+	if !found || host.AgentID != agent {
 		return nil, false, false
 	}
 	return host, true, false
@@ -539,6 +519,10 @@ func (reader *Reader) refreshedKey() string {
 	return reader.prefix + "." + hostTopoRefreshedField
 }
 
+func (reader *Reader) publishedKey() string {
+	return reader.prefix + "." + hostTopoPublishedField
+}
+
 func (reader *Reader) topoKey() string {
 	return reader.prefix + "." + topoCacheSuffix
 }
@@ -560,6 +544,20 @@ func (reader *Reader) namespaceBusinessKey() string {
 // blocking full read of it would stall every other reader.
 func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	builder := newIndexBuilder(now)
+	// The writer's publish time is read before the hashes: a publish between
+	// the two reads leaves the hashes newer than the time, so the facts read
+	// at most one round older than they are, never younger.
+	var published time.Time
+	// A key that is not there is a writer that publishes no such time; one
+	// that cannot be read fails the load, which keeps the index before it,
+	// whose publish time goes on ageing - read as absent, a writer stopped
+	// for hours would read as fresh.
+	switch value, err := reader.client.Get(ctx, reader.publishedKey()).Result(); {
+	case err == nil:
+		published = parseEpochSeconds(value)
+	case !errors.Is(err, redis.Nil):
+		return nil, fmt.Errorf("alarmd cmdbcache: read the publish time: %w", err)
+	}
 
 	if err := reader.scan(ctx, reader.hostKey(), builder.addFields); err != nil {
 		return nil, fmt.Errorf("alarmd cmdbcache: scan host cache: %w", err)
@@ -603,8 +601,9 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
-		index.sourceRefreshedAt = parseRefreshedAt(refreshed)
+		index.sourceRefreshedAt = parseEpochSeconds(refreshed)
 	}
+	index.publishedAt = published
 	return index, nil
 }
 
@@ -654,8 +653,8 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 		index: &Index{
 			byIdentity: make(map[string]*HostFacts), byHostID: seen, serviceInstances: make(map[string]*ServiceInstanceFacts),
 			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
-			byModelInstance: make(map[string]*HostFacts),
-			addressOf:       make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
+			byModelInstance: make(map[string]*HostFacts), models: make(map[string]struct{}),
+			addressOf: make(map[string]hostAddress), hostsAt: make(map[string]addressHosts),
 		},
 		seen: seen,
 	}
@@ -693,10 +692,10 @@ func (builder *indexBuilder) addServiceInstanceFields(fields []string) {
 		identity, payload := fields[position], fields[position+1]
 		facts, refusedNodes, err := DecodeServiceInstanceRecord(identity, payload)
 		if err != nil {
-			builder.index.refused.serviceInstance(identity)
+			builder.index.refused.serviceInstance()
 			continue
 		}
-		builder.index.refused.topoNodes("service_instance", identity, refusedNodes)
+		builder.index.refused.topoNodes(refusedNodes)
 		builder.index.serviceInstances[identity] = facts
 	}
 }
@@ -708,16 +707,14 @@ func (builder *indexBuilder) addFields(fields []string) {
 		wire, err := decodeWireHost(payload)
 		if err != nil {
 			// One malformed record must not blind the whole filter.
-			builder.index.refused.host(identity)
+			builder.index.refused.host()
 			continue
 		}
 		// bmw writes every host twice, under its "ip|cloud" key and under its
 		// host id. Both identities must resolve, but the host counts once and
 		// shares one record - counting fields instead of hosts reports twice
 		// the fleet. The second is known by its host id before the rest of it
-		// is read: its topology and its attributes were built only to be
-		// dropped, and the attributes alone were most of a refresh's
-		// allocation.
+		// is read, so its topology is not built only to be dropped.
 		hostID := numberText(wire.HostID)
 		if hostID != "" {
 			if existing, found := builder.seen[hostID]; found {
@@ -725,8 +722,8 @@ func (builder *indexBuilder) addFields(fields []string) {
 				continue
 			}
 		}
-		facts, refusedNodes := hostFactsOf(wire, payload)
-		builder.index.refused.topoNodes("host", identity, refusedNodes)
+		facts, refusedNodes := hostFactsOf(wire)
+		builder.index.refused.topoNodes(refusedNodes)
 		if hostID != "" {
 			builder.seen[hostID] = facts
 		}
@@ -735,6 +732,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 		builder.addToNodes(facts)
 		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
+			builder.index.models[facts.ModelID] = struct{}{}
 		}
 		builder.addAddress(wire, facts)
 	}
@@ -799,13 +797,15 @@ type addressHosts struct {
 }
 
 type wireHost struct {
-	HostID      json.Number                  `json:"bk_host_id"`
-	InnerIP     string                       `json:"bk_host_innerip"`
-	CloudID     json.Number                  `json:"bk_cloud_id"`
-	BusinessID  json.Number                  `json:"bk_biz_id"`
-	State       string                       `json:"bk_state"`
-	DisplayName string                       `json:"display_name"`
-	TopoLinks   map[string][]json.RawMessage `json:"topo_link"`
+	HostID     json.Number                  `json:"bk_host_id"`
+	InnerIP    string                       `json:"bk_host_innerip"`
+	CloudID    json.Number                  `json:"bk_cloud_id"`
+	BusinessID json.Number                  `json:"bk_biz_id"`
+	State      string                       `json:"bk_state"`
+	TopoLinks  map[string][]json.RawMessage `json:"topo_link"`
+	// AgentID is read as any scalar: a record whose agent is written as a
+	// number is not refused for it.
+	AgentID json.RawMessage `json:"bk_agent_id"`
 	// ModelID and ModelInstID are the canonical instance identity the
 	// writer adds beside the host id, for a target plan whose rule reads
 	// records by model and instance.
@@ -841,13 +841,12 @@ func decodeHost(payload string) (*HostFacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	facts, _ := hostFactsOf(wire, payload)
+	facts, _ := hostFactsOf(wire)
 	return facts, nil
 }
 
 // decodeWireHost is the one step of reading a host record that can refuse
-// it. What follows it -- the topology nodes, the scalar attributes -- reads
-// the same payload again and cannot fail, and is the bulk of the cost.
+// it. What follows it - the topology nodes - cannot fail.
 func decodeWireHost(payload string) (wireHost, error) {
 	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.UseNumber()
@@ -881,9 +880,9 @@ func DecodeServiceInstanceRecord(field, payload string) (*ServiceInstanceFacts, 
 	return facts, refusedNodes, nil
 }
 
-// hostFactsOf is a host record's facts from its decoded fields and its
-// payload, and how many of its topology nodes were refused.
-func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
+// hostFactsOf is a host record's facts from its decoded fields, and how many
+// of its topology nodes were refused.
+func hostFactsOf(wire wireHost) (*HostFacts, int) {
 	nodes, refusedNodes := topoNodes(wire.TopoLinks)
 	facts := &HostFacts{
 		HostID:      numberText(wire.HostID),
@@ -891,9 +890,8 @@ func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
 		CloudID:     numberText(wire.CloudID),
 		BusinessID:  numberText(wire.BusinessID),
 		State:       wire.State,
-		DisplayName: wire.DisplayName,
 		TopoNodes:   nodes,
-		Attributes:  scalarAttributes(payload),
+		AgentID:     rawScalarText(wire.AgentID),
 		ModelID:     strings.TrimSpace(wire.ModelID),
 		ModelInstID: rawScalarText(wire.ModelInstID),
 	}
@@ -967,42 +965,6 @@ func topoNodes(links map[string][]json.RawMessage) ([]string, int) {
 	return flat, len(refused)
 }
 
-// scalarAttributes reads the top-level string, number and boolean fields of
-// a cache record as text. Objects and arrays are not attributes a target can
-// name a value of, so they are left out rather than flattened by a rule
-// nobody asked for.
-func scalarAttributes(payload string) map[string]string {
-	decoder := json.NewDecoder(strings.NewReader(payload))
-	decoder.UseNumber()
-	var fields map[string]json.RawMessage
-	if err := decoder.Decode(&fields); err != nil {
-		return nil
-	}
-	attributes := make(map[string]string, len(fields))
-	for name, raw := range fields {
-		if len(raw) == 0 {
-			continue
-		}
-		switch raw[0] {
-		case '"':
-			var text string
-			if err := json.Unmarshal(raw, &text); err == nil {
-				attributes[name] = text
-			}
-		case 't', 'f':
-			attributes[name] = string(raw)
-		case '{', '[', 'n':
-			continue
-		default:
-			attributes[name] = numberText(json.Number(raw))
-		}
-	}
-	if len(attributes) == 0 {
-		return nil
-	}
-	return attributes
-}
-
 func numberText(value json.Number) string {
 	text := strings.TrimSpace(value.String())
 	if text == "" {
@@ -1014,27 +976,15 @@ func numberText(value json.Number) string {
 	return text
 }
 
-// parseRefreshedAt accepts the shapes bmw has used for the marker: epoch
-// seconds, epoch milliseconds, or an RFC3339 stamp. An unreadable marker is
-// reported as unknown rather than as "just refreshed".
-func parseRefreshedAt(value string) time.Time {
-	value = strings.TrimSpace(value)
-	if value == "" {
+// parseEpochSeconds reads a writer's time marker: epoch seconds, the one
+// shape either writer writes. Anything else reads as no time - for the
+// publish time, the index is then aged by alarmd's own read instead.
+func parseEpochSeconds(value string) time.Time {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seconds <= 0 {
 		return time.Time{}
 	}
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds > 1e12 {
-			return time.UnixMilli(seconds).UTC()
-		}
-		if seconds > 1e9 {
-			return time.Unix(seconds, 0).UTC()
-		}
-		return time.Time{}
-	}
-	if stamp, err := time.Parse(time.RFC3339, value); err == nil {
-		return stamp.UTC()
-	}
-	return time.Time{}
+	return time.Unix(seconds, 0).UTC()
 }
 
 // rawScalarText reads a JSON string or number as text, without the "zero is

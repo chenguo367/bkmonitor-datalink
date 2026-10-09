@@ -29,10 +29,10 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 		identity, payload := fields[position], fields[position+1]
 		wire, err := decodeWireHost(payload)
 		if err != nil {
-			builder.index.refused.host(identity)
+			builder.index.refused.host()
 			continue
 		}
-		facts, refusedNodes := hostFactsOf(wire, payload)
+		facts, refusedNodes := hostFactsOf(wire)
 		if facts.HostID != "" {
 			if existing, found := builder.seen[facts.HostID]; found {
 				builder.index.byIdentity[identity] = existing
@@ -40,12 +40,13 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 			}
 			builder.seen[facts.HostID] = facts
 		}
-		builder.index.refused.topoNodes("host", identity, refusedNodes)
+		builder.index.refused.topoNodes(refusedNodes)
 		builder.index.hosts++
 		builder.index.byIdentity[identity] = facts
 		builder.addToNodes(facts)
 		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
+			builder.index.models[facts.ModelID] = struct{}{}
 		}
 	}
 }
@@ -132,8 +133,8 @@ func TestAHostsSecondCopyIsRecognisedBeforeItIsReadAndTheIndexIsTheSame(t *testi
 			t.Fatalf("setup: %s was filed; its record is refused", skipped)
 		}
 	}
-	if host := index.byIdentity["8"]; host == nil || host.Attributes["rack"] != "a1" {
-		t.Fatalf("setup: host 8 = %+v, want its first copy's rack", host)
+	if host := index.byIdentity["8"]; host == nil || host.BusinessID != "2" {
+		t.Fatalf("setup: host 8 = %+v, want its first copy's business", host)
 	}
 	if host := index.byIdentity["11"]; host == nil || host != index.byIdentity["192.0.2.6|0"] {
 		t.Fatal("setup: the host whose id was read in another case is not one record under both keys")
@@ -145,13 +146,16 @@ func TestAHostsSecondCopyIsRecognisedBeforeItIsReadAndTheIndexIsTheSame(t *testi
 
 // A host's second copy is not read past its host id: filing it allocates a
 // fraction of what filing a new host of the same record does, which is
-// building the topology and the attributes, the bulk of a refresh.
+// building its topology.
 func TestAHostsSecondCopyIsNotReadPastItsHostID(t *testing.T) {
-	var attributes strings.Builder
-	for index := 0; index < 60; index++ {
-		fmt.Fprintf(&attributes, `,"attribute_%d":"value %d"`, index, index)
+	var links strings.Builder
+	for index := 0; index < 30; index++ {
+		if index > 0 {
+			links.WriteString(",")
+		}
+		fmt.Fprintf(&links, `"module|%d":[{"bk_obj_id":"module","bk_inst_id":%d},{"bk_obj_id":"set","bk_inst_id":%d}]`, 100+index, 100+index, 500+index)
 	}
-	record := `{"bk_host_id":7,"bk_host_innerip":"192.0.2.1","bk_biz_id":2` + attributes.String() + `}`
+	record := `{"bk_host_id":7,"bk_host_innerip":"192.0.2.1","bk_biz_id":2,"topo_link":{` + links.String() + `}}`
 	at := time.Unix(1_788_000_000, 0)
 	first := testing.AllocsPerRun(20, func() {
 		newIndexBuilder(at).addFields([]string{"192.0.2.1|0", record})
