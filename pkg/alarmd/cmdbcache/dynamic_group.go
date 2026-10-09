@@ -228,9 +228,13 @@ func (snapshot *GroupSnapshot) Keys(plan *contract.TargetPlanV1) (map[string]str
 // decodeGroup reads one group document per the protocol: an object with
 // model_id, member_list and the model_inst_ids summary. A member is kept
 // when it names the group's model, names an instance, and the summary lists
-// it; the rest are dropped and counted. member_list absent is a structure
-// the reader does not accept - it cannot tell "empty" from "not written" -
-// and member_list present and empty is the writer saying empty.
+// it; the rest are dropped and counted. An instance the summary lists and no
+// member carries is a member the list lost, counted dropped too: the two
+// disagree, and the list is not the whole group (decision-017 sections 3.2
+// and 4: a normal empty group has a summary that does not contradict it).
+// member_list absent is a structure the reader does not accept - it cannot
+// tell "empty" from "not written" - and member_list present and empty, with
+// nothing in the summary, is the writer saying empty.
 func decodeGroup(id string, payload []byte, readAt time.Time) *GroupSnapshot {
 	snapshot := &GroupSnapshot{ID: id, ReadAt: readAt}
 	var document struct {
@@ -264,8 +268,12 @@ func decodeGroup(id string, payload []byte, readAt time.Time) *GroupSnapshot {
 			}
 		}
 	}
+	carried := make(map[string]struct{}, len(*document.MemberList))
 	for _, wire := range *document.MemberList {
 		instance := rawScalarText(wire.ModelInstID)
+		if instance != "" {
+			carried[instance] = struct{}{}
+		}
 		if wire.ModelID != document.ModelID || instance == "" {
 			snapshot.Dropped++
 			continue
@@ -281,6 +289,11 @@ func decodeGroup(id string, payload []byte, readAt time.Time) *GroupSnapshot {
 			host = ""
 		}
 		snapshot.Members = append(snapshot.Members, GroupMember{ModelID: wire.ModelID, ModelInstID: instance, HostID: host})
+	}
+	for instance := range listed {
+		if _, found := carried[instance]; !found {
+			snapshot.Dropped++
+		}
 	}
 	return snapshot
 }
