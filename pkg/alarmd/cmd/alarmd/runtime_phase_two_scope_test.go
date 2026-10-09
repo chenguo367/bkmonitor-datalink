@@ -591,11 +591,12 @@ func TestPhaseTwoWorkerBundleBackoffSiblingDoesNotCostHealthyQueryGroupItsRounds
 	if !beside.awaitRounds(t, "failing", beside.failing, 1) {
 		t.FailNow()
 	}
+	besideTarget := beside.healthy.calls.Load() + rounds
 	aloneReached := alone.awaitRounds(t, "healthy", alone.healthy, rounds)
-	besideReached := beside.awaitRounds(t, "healthy", beside.healthy, beside.healthy.calls.Load()+rounds)
+	besideReached := beside.awaitRounds(t, "healthy", beside.healthy, besideTarget)
 	if !aloneReached || !besideReached {
-		t.Fatalf("healthy rounds: alone=%d beside a failing sibling=%d, want %d in both arms",
-			alone.healthy.calls.Load(), beside.healthy.calls.Load(), rounds)
+		t.Fatalf("healthy rounds: alone=%d of %d, beside a failing sibling=%d of %d",
+			alone.healthy.calls.Load(), rounds, beside.healthy.calls.Load(), besideTarget)
 	}
 	if got := beside.failing.calls.Load(); got != 1 {
 		t.Fatalf("failing sibling executed %d times while its backoff held, want 1; "+
