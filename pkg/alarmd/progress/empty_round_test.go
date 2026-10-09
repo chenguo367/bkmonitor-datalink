@@ -42,6 +42,9 @@ func TestTheSummaryOfAnEmptyRoundKeepsWhatItSaidAndUnderWhichContent(t *testing.
 		{"outside the target", execution.CompletionFullEmpty, empty(false, true),
 			&execution.EmptyRoundSummary{EmptiedByTarget: true, ContentScope: "qg-object-a"}},
 		{"empty and neither", execution.CompletionFullEmpty, empty(false, false), nil},
+		// Without a content to say it under, the word could never be
+		// restored: a commit that declares none writes none.
+		{"no content declared", execution.CompletionFullEmpty, empty(true, false), nil},
 		// Only a whole, empty primary speaks about its emptiness: a flag on
 		// a round with records is not copied.
 		{"records", execution.CompletionFull,
@@ -52,8 +55,12 @@ func TestTheSummaryOfAnEmptyRoundKeepsWhatItSaidAndUnderWhichContent(t *testing.
 			fake := &controlFake{missing: true}
 			store := mustStore(t, fake)
 			identity := execution.ProgressIdentity{QueryGroup: "q"}
+			scope := "qg-object-a"
+			if tc.name == "no content declared" {
+				scope = ""
+			}
 			commit := execution.ProgressCommitRequest{
-				Identity: identity, ExpectedNextSlot: 60, ContentScope: "qg-object-a",
+				Identity: identity, ExpectedNextSlot: 60, ContentScope: scope,
 				OwnerFence: execution.OwnerFence{QueryGroup: "q", OwnerID: "worker", OwnerEpoch: 1, LeaseToken: "lease"},
 				Completion: execution.SlotCompletion{Contract: progressContractAt(60), Kind: tc.kind, Primary: tc.primary,
 					Result: observability.ResultSuccess},

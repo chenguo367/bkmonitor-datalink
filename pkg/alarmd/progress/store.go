@@ -646,10 +646,12 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 
 // emptyRoundOf is what a whole, empty primary said about its emptiness, with
 // the content the round ran under; nil when it said nothing, so the record
-// carries nothing for it.
+// carries nothing for it. Nil too when the commit declares no content: the
+// word is restored only under the content it was said under, and without
+// one it never would be.
 func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string) *execution.EmptyRoundSummary {
-	if primary == nil || primary.Completeness != execution.CompletenessFull || primary.DataState != execution.DataStateEmpty ||
-		!primary.QuietWhenEmpty && !primary.EmptiedByTarget {
+	if contentScope == "" || primary == nil || primary.Completeness != execution.CompletenessFull ||
+		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget {
 		return nil
 	}
 	return &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,

@@ -4177,7 +4177,7 @@ type LastCompletionSummary struct {
 // monitoring target (EmptiedByTarget), with the content the round ran under
 // - the ContentScope its commit declared. The flags are the Plan's and the
 // round's word, so a reader trusts them only while the object runs the same
-// content; an empty ContentScope matches none.
+// content, and a commit that declares no content writes none.
 type EmptyRoundSummary struct {
 	Quiet           bool   `json:"quiet,omitempty"`
 	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
