@@ -135,9 +135,10 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 		return FrozenSlot{}, rangeBuildRefusal{}, ErrSlotContractDrift
 	}
 	last := execution.EvaluationTime(int64(start) + steps*spec.EvaluationIntervalSeconds)
-	// last is frozen here for the first time: with the Query Group's current
-	// read hold, as Next would freeze it.
-	hold, err := source.slotReadHoldMillis(ctx, schedule, nil, last, first.Dispatch.OwnerFence)
+	// last is frozen here for the first time, with the hold Next would freeze
+	// it with - asked, not frozen: the answer is only compared with the
+	// first Slot's, and a freeze would record the hold as in force from last.
+	hold, err := source.peekSlotReadHoldMillis(schedule, last)
 	if err != nil || hold != first.Contract.ReadHoldMillis {
 		// The range arithmetic uses one hold. A transition is handled by
 		// the existing single-Slot path rather than sealing a false suffix.
