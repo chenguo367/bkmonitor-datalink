@@ -41,10 +41,18 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
-	index := fuller.store.Current()
+	index, withinBound := fuller.store.CurrentWithinBound()
 	if index == nil {
 		// Never loaded. A filter that acts on "CMDB does not know this host"
 		// has to be able to tell that apart from "CMDB was not asked".
+		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
+		return
+	}
+	if !withinBound {
+		// Older than the staleness bound: a host added since is unknown to it
+		// and a host moved since sits in its old modules. The facts are
+		// unavailable, by name, as for an index that never loaded
+		// (decision-013 section 5.1 item 4).
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
@@ -239,8 +247,8 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		facts.MarkFactsUnavailable(admission.FactsUnavailableServiceInstanceIndex)
 		return
 	}
-	index := fuller.store.Current()
-	if index == nil || index.ServiceInstances() == 0 {
+	index, withinBound := fuller.store.CurrentWithinBound()
+	if index == nil || !withinBound || index.ServiceInstances() == 0 {
 		// The same reading as an empty host cache: a series that names an
 		// instance while the instance cache holds none is the signature of a
 		// cache nobody writes, not of a fleet without instances. Deciding on

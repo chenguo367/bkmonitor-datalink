@@ -128,7 +128,7 @@ func TestLoadReadsHostsAndServiceInstancesIntoOneSnapshot(t *testing.T) {
 	if index.TopologyNodes() != 1 {
 		t.Fatalf("topology nodes = %d, want the one the cache lists", index.TopologyNodes())
 	}
-	store := &Store{index: index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
 	if health := store.Health(); health.Hosts != 1 || health.ServiceInstances != 1 {
 		t.Fatalf("health = %+v", health)
 	}

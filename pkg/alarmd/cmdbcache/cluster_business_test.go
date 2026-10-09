@@ -39,7 +39,7 @@ func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 	if stats := index.ClusterBusinessStats(); stats != (MappingStats{Held: 2, Refused: 4}) {
 		t.Fatalf("cluster mapping %+v, want 2 held and 4 refused", stats)
 	}
-	store := &Store{index: index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
 	lookup := NewHostBusinessLookup(store)
 	for cluster, want := range map[string]string{"BCS-K8S-00001": "11", "BCS-K8S-00002": "12"} {
 		if business, found := lookup.LookupClusterBusiness(cluster); !found || business != want {
