@@ -162,7 +162,29 @@ type QueryExecutionConsumer interface {
 	// silently lacked it would have every target-plan Plan admit nothing,
 	// and the only trace would be a rejection counter.
 	ResolvedTargets() TargetMemberships
+	// ResolvedScopeGroups is what this execution read the dynamic groups the
+	// due Plans' target scopes name to, by tenant and group, read by the
+	// source after Begin as ResolvedTargets is. A group it does not list is
+	// one nobody read, and its condition admits only what it knows: nothing.
+	ResolvedScopeGroups() ScopeGroupMemberships
 }
+
+// ScopeGroupRef names one dynamic group of one tenant.
+type ScopeGroupRef struct {
+	TenantID string
+	GroupID  string
+}
+
+// ScopeGroupMembership is one dynamic group as an execution read it: the host
+// ids it holds, and whether that is the whole group read from current facts.
+type ScopeGroupMembership struct {
+	HostIDs []string
+	Known   bool
+}
+
+// ScopeGroupMemberships is one execution's reading of the dynamic groups its
+// Plans' target scopes name.
+type ScopeGroupMemberships map[ScopeGroupRef]ScopeGroupMembership
 
 // TargetMembership answers whether a record key is among the members a
 // target plan resolved to in one execution.

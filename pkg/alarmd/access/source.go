@@ -295,7 +295,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	// The monitoring targets of this execution's plans are indexed once, not
 	// per series: one query commonly delivers thousands of series and every
 	// one of them would otherwise repeat the same lookup.
-	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets())
+	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets(), consumer.ResolvedScopeGroups())
 	var outputs planOutputs
 	if source.config.ScopeDrops != nil {
 		outputs = buildPlanOutputs(prepared.Header.DuePlans, prepared.Queries)

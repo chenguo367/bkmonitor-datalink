@@ -25,6 +25,9 @@ var admissionReasons = map[string]struct{}{
 	// apart from out_of_scope so the first is alertable and the second is
 	// readable against in_scope.
 	"object_identity_missing": {}, "object_identity_unmatched": {},
+	// Target scope on a dynamic group the Slot could not read: refused, as
+	// the group's unknown hosts are, and not known to be outside the target.
+	"dynamic_group_unavailable": {},
 	// Target plan: a record that carries no key is a defect on the writing or
 	// querying side, a record outside the resolved members is the filter
 	// working, and a target nobody resolved is this process not filtering -

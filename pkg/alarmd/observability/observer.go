@@ -434,6 +434,10 @@ type Counts struct {
 type TargetResolutionFacts struct {
 	StrategyID string
 	State      string
+	// ScopeGroups says the selectors are the dynamic groups a target scope
+	// names, read for the Slot, and not a target plan's: the groups are
+	// counted with every selector, the resolution not with target plans'.
+	ScopeGroups bool
 	// StaleAgeSeconds is non-zero when a selector answered from a snapshot
 	// kept past a failed refresh: resolved_from_stale_snapshot.
 	StaleAgeSeconds int64

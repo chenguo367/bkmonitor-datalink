@@ -673,6 +673,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return targetGroupReading(groupStore.Health())
 		})
 	}
+	// What a target scope's dynamic group conditions match: the platform's
+	// own group hash beside the host hash, read on the same connection, as
+	// Python reads it when it matches such a target. Nothing is read until a
+	// strategy names a group.
+	scopeGroups, err := buildScopeGroups(cfg, redisForCaller(cmdbClient, redisfailure.CallerCMDBCache))
+	if err != nil {
+		return nil, err
+	}
+	go scopeGroups.Run(cmdbIndexCtx)
 	// The close of alerts whose target left the strategy's scope hears the
 	// target filters' rejections from the query path below; the open set it
 	// judges them against and the producer it closes through are bound once
@@ -871,6 +880,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// runtime state lives at most this long past a series' last write.
 		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
 		Targets:      targetResolver,
+		ScopeGroups:  scopeGroups,
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,

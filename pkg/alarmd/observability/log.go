@@ -651,6 +651,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("target_resolution", facts.State),
 			slog.Int("target_selectors", len(facts.Selectors)),
 		)
+		if facts.ScopeGroups {
+			attributes = append(attributes, slog.Bool("target_scope_groups", true))
+		}
 		if facts.StaleAgeSeconds > 0 {
 			attributes = append(attributes, slog.Int64("resolved_from_stale_snapshot_age_seconds", facts.StaleAgeSeconds))
 		}

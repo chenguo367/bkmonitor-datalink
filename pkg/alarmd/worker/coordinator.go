@@ -77,6 +77,21 @@ type Ports struct {
 	// of their absence (SKIPPED_TARGET_SELECTOR_UNAVAILABLE), both by name.
 	// Plans without a target plan never touch it.
 	Targets TargetResolver
+	// ScopeGroups reads the dynamic groups a Plan's target scope names, for
+	// one Slot. Optional as Targets is: a worker without it admits none of
+	// those conditions' records (dynamic_group_unavailable), by name. Plans
+	// whose targets name no dynamic group never touch it.
+	ScopeGroups ScopeGroupResolver
+}
+
+// ScopeGroupResolver reads one dynamic group a target scope names for one
+// Slot. cmdbcache's platform group stores implement it; they read nothing
+// from Redis on the Slot path but a group's first reference.
+type ScopeGroupResolver interface {
+	// ResolveScopeGroup answers one group of a tenant; interval is the
+	// asking Plan's evaluation period, which bounds how long the group is
+	// kept without being asked for.
+	ResolveScopeGroup(ctx context.Context, tenant, id string, interval time.Duration) targetplan.SelectorResult
 }
 
 // TargetResolver resolves one target plan for one Slot. cmdbcache's

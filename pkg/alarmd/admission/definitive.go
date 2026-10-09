@@ -45,6 +45,11 @@ func RejectionStandingOf(plan PlanContext, facts *Facts, filter, reason string) 
 		if facts == nil || facts.HostFactsUnavailable {
 			return StandingCacheUnavailable
 		}
+		// A dynamic group the target names was not read: the record may be
+		// one of its hosts.
+		if reason == contract.TargetScopeReasonDynamicGroupUnavailable {
+			return StandingCacheUnavailable
+		}
 		if reason != contract.TargetScopeReasonOutOfScope {
 			return StandingIndefinite
 		}

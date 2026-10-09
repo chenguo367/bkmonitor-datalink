@@ -2092,8 +2092,10 @@ func frozenRenewalLabel(outcome execution.FrozenRenewalOutcome) string {
 }
 
 // observeTargetResolution counts one Plan's resolution and each of its
-// selectors. The labels are closed by the resolver's own lists; a word off
-// them lands on other rather than opening a series.
+// selectors; a target scope's dynamic groups are counted as selectors only,
+// the resolution count being target plans'. The labels are closed by the
+// resolver's own lists; a word off them lands on other rather than opening a
+// series.
 func (m phaseTwoMetrics) observeTargetResolution(facts *observability.TargetResolutionFacts) {
 	state := "other"
 	for _, known := range targetplan.ResolutionStates {
@@ -2101,7 +2103,9 @@ func (m phaseTwoMetrics) observeTargetResolution(facts *observability.TargetReso
 			state = facts.State
 		}
 	}
-	m.targetPlanResolutions.WithLabelValues(state).Inc()
+	if !facts.ScopeGroups {
+		m.targetPlanResolutions.WithLabelValues(state).Inc()
+	}
 	for _, selector := range facts.Selectors {
 		kind, selectorState, reason := "other", "other", "other"
 		switch selector.Kind {
