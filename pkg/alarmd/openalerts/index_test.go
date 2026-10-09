@@ -33,8 +33,54 @@ func (f subscriberFunc) Watch(ctx context.Context, ready func(bool), changed fun
 	return f(ctx, ready, changed)
 }
 
+// factsStub is the link Console's two facts as a test sets them. asked is
+// whether the keying has been asked; refreshes counts the copy's rounds
+// that asked for the facts.
+type factsStub struct {
+	mu                            sync.Mutex
+	location, keyed, known, asked bool
+	asOf                          time.Time
+	refreshes                     int
+}
+
+func confirmedFacts() *factsStub {
+	return &factsStub{location: true, keyed: true, known: true, asked: true}
+}
+
+func (f *factsStub) KeyingAsked() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asked
+}
+
+func (f *factsStub) Refresh(context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshes++
+}
+
+func (f *factsStub) LocationConfirmed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.location
+}
+
+func (f *factsStub) KeyedByAlertID() (bool, time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.keyed, f.asOf, f.known
+}
+
+func (f *factsStub) set(location, keyed, known bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.location, f.keyed, f.known = location, keyed, known
+}
+
+// indexOptions is a copy of a deployment whose Console has confirmed both
+// facts, which is what the index tests read the sets under.
 func indexOptions(c *clock) IndexOptions {
-	return IndexOptions{
+	return IndexOptions{Facts: confirmedFacts(),
 		Source: setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return nil, nil }),
 		Subscriber: subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey)) error {
 			ready(true)

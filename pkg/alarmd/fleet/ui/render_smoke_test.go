@@ -403,7 +403,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// own record for the last question.
 		{Role: fleet.EndpointOpenAlertSet, Kind: "redis", Address: "monitor@sentinel-0.example:26379,sentinel-1.example:26379", Mode: "sentinel", DB: &stateDB,
 			Prefix: "alarmd:open_alerts:", Configured: true, SharedWith: fleet.EndpointStateRedis, LastSuccessAgeSeconds: &successAge,
-			OpenAlertSet: &fleet.OpenAlertSetFacts{SubscriptionReady: true, CalibrationConfigured: true, IndexReadAgeSeconds: ptrFloat(200),
+			OpenAlertSet: &fleet.OpenAlertSetFacts{Configured: true, LocationConfirmed: true, KeyedByAlertID: ptrBool(true),
+				SubscriptionReady: true, CalibrationConfigured: true, IndexReadAgeSeconds: ptrFloat(200),
 				StaleBeyondBound: true, AuthoritativeAgeSeconds: ptrFloat(190), Available: false, UnavailableReason: "read_error",
 				TrackedSets: 6, LoadedSets: 6, Members: 517,
 				Lookups: map[string]uint64{"index_member": 3, "index_absent": 12, "self_maintained": 1}}},
@@ -419,16 +420,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				Available: true, StaleBeyondBound: false,
 				TrackedSets: 60, LoadedSets: 60, Members: 0,
 				Lookups: map[string]uint64{"index_absent": 168},
-				// The gate's side-by-side reading on a set that holds someone
-				// else's alerts under a 64-character rule: the samples carry
-				// prefixes, which the page must not print.
-				Comparison: &fleet.OpenAlertComparison{OwnEventSourceID: "src-own", Sent: 4,
-					SentShapes: map[string]int{"hex32": 4}, MemberShapes: map[string]int{"hex64": 147},
-					AlertSources:     map[string]int{"src-own": 2, "src-other": 140, "other": 7},
-					SentInCalibrated: 4, SentMatchingAlertID: 0, SentMatchingFingerprint: 0,
-					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "852", Sent: 1, Members: 3,
-						Alerts: 3, Calibrated: true, SentSample: []string{"5f3a9c1e"}, MemberSample: []string{"c0ffee42"},
-						AlertSample: []fleet.OpenAlertComparisonAlert{{AlertID: "d00dfeed", Fingerprint: "c0ffee42", EventSourceID: "src-other"}}}}},
+				// The Console's two facts: the location confirmed, the keying
+				// not yet read, which the page states as not read.
+				Configured: true, LocationConfirmed: true,
 				// The target-scope close: its samples stay in the API.
 				TargetScopeClose: &fleet.TargetScopeCloseFacts{Pending: 2, Confirmed: 1, MaxEntries: 1024,
 					Outcomes: map[string]uint64{"close_sent": 3, "unconfirmed": 5, "cache_unavailable": 7},
@@ -1159,7 +1153,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "策略缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache成功 3 秒前；失败 1 小时 0 分前：dial tcp: i/o timeout有：列出 62 条策略；写入方标记 last_updated 于 1 分 35 秒前更新"},
 		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：47788 台主机，来源刷新于 4 分 0 秒前"},
 		{"DEPS ::", "平台动态配置（平台写、alarmd 读）未配置"},
-		{"DEPS ::", "未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:open_alerts: · 与 state_redis 共用连接成功 3 秒前有：消费方按索引协议发布，本端 3 分 20 秒前读到；跟踪 6 条策略、索引覆盖 6 条、未恢复指纹 517 个；当前不可用：读不到（索引读取或校准失败）；校准已超过设计的暴露时长；恢复门查过 16 次：索引里有 3、索引里没有 12、按本副本记录 1"},
+		{"DEPS ::", "未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:open_alerts: · 与 state_redis 共用连接成功 3 秒前有：消费方按索引协议发布，本端 3 分 20 秒前读到；跟踪 6 条策略、索引覆盖 6 条、未恢复指纹 517 个；Console 确认：写入位置已确认、按告警 ID 建键是；当前不可用：读不到（索引读取或校准失败）；校准已超过设计的暴露时长；恢复门查过 16 次：索引里有 3、索引里没有 12、按本副本记录 1"},
 		// The sentinel address in words -- master name, then sentinels -- so
 		// the one '@' an address legitimately carries never reads as an account.
 		{"DEPS ::", "alarmd 自己的状态（目录、归属、进度、舰队）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:phase2:g2:runtime:v1成功 3 秒前"},
@@ -1175,7 +1169,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "跟踪 60 条策略、索引覆盖 60 条、未恢复指纹 0 个（未配校准）"},
 		{"DEPS ::", "恢复门查过 168 次：索引里没有 168"},
 		{"DEPS ::", "目标移出范围关闭：等第二轮确认 2 个、已确认待关 1 个；累计发出关闭 3（发出不等于 linkd 已关）、首次观测 5、目标缓存不确定未判 7、不在集合 0、集合不可判 0、他源告警 0、发送失败 0、观测表满 0、多输入无法算指纹 0、观测过旧暂缓 0、拒绝本身不确定 0"},
-		{"DEPS ::", "恢复闸对照：本端发出未恢复 4 个（32 位十六进制 4），集合成员 64 位十六进制 147；校准列出的活动告警本部署来源 2 条、其他来源 147 条；在已校准策略里的 4 个发出键中，等于某条活动告警 ID 的 0 个、等于其指纹的 0 个"},
+		// The Console's two facts, the keying not read yet said as such.
+		{"DEPS ::", "Console 确认：写入位置已确认、按告警 ID 建键还没读到"},
 		// The consequence, said once rather than left for the reader to derive
 		// from a row that also says "available" and "not stale", both true.
 		{"DEPS ::", "这套部署现在发不出恢复：集合装载了但一条未恢复指纹都没有，168 次全部落空、恢复被扣住"},

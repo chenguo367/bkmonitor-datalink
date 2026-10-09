@@ -15,9 +15,9 @@
 // set (IndexSource), reads it again when the consumer's change notices say it
 // moved (Subscriber), and, with a reconciler bound, calibrates it against the
 // consumer's own record (Reconciler). Between reads it adds what this process
-// itself sent. A set that carries none of this process's own alerts once the
-// consumer has had time to open them is taken to be keyed another way (see
-// DisjointMinimum), and the gate answers by the UnavailablePolicy instead.
+// itself sent. The sets answer the gate only while the consumer's Console
+// has confirmed where they are and that they are keyed by our alert ids
+// (ConsoleFacts); otherwise the gate answers by the UnavailablePolicy.
 package openalerts
 
 import "time"

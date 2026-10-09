@@ -258,20 +258,22 @@ func TestARecoveryAtTheAlertsLevelStillHidesItThroughTheLag(t *testing.T) {
 	}
 }
 
-// Against sets judged disjoint the gate answers from what this process
-// opened. A recovery at another Level must not take the alert out of that
-// record; one at its own Level does.
-func TestDisjointSetsKeepAnAlertWhoseOtherLevelRecovered(t *testing.T) {
+// Against sets the Console has not confirmed the gate answers from what this
+// process opened. A recovery at another Level must not take the alert out
+// of that record; one at its own Level does.
+func TestUnconfirmedSetsKeepAnAlertWhoseOtherLevelRecovered(t *testing.T) {
 	for _, tc := range []struct {
 		recovery string
 		open     bool
 	}{{"NR", true}, {"RN", false}} {
 		t.Run(tc.recovery, func(t *testing.T) {
-			f := newDisjointFixture(t, PolicySelfMaintain, "theirs")
+			facts := confirmedFacts()
+			f := newSetFixture(t, PolicySelfMaintain, facts, "theirs")
+			facts.set(true, false, true)
 			f.cache.Acknowledged([]contract.TriggerEventV1{decided(keyA, "ours", "A")})
-			f.reread(SentConfirmAfter + time.Second)
-			if !f.cache.Stats().Disjoint {
-				t.Fatal("fixture: the sets are not judged disjoint")
+			f.reread(time.Minute)
+			if f.cache.Trusted() {
+				t.Fatal("fixture: the sets are trusted")
 			}
 			f.cache.Acknowledged([]contract.TriggerEventV1{decided(keyA, "ours", tc.recovery)})
 			for minute := 0; minute < 60; minute++ {

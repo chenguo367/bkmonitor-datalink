@@ -1681,9 +1681,7 @@ func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
 // read as "just now" on a copy that never loaded.
 func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func() *fleet.OpenAlertSetFacts {
 	return func() *fleet.OpenAlertSetFacts {
-		facts := openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
-		facts.Comparison = openAlertComparisonFacts(cache.Comparison())
-		return facts
+		return openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
 	}
 }
 
@@ -1694,7 +1692,11 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 		PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
 		Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
 		TrackedSets: stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members,
-		SentInSet: stats.SentInSet, SentNotInSet: stats.SentNotInSet, Disjoint: stats.Disjoint}
+		Configured: stats.Configured, LocationConfirmed: stats.LocationConfirmed, KeyedByAlertID: stats.KeyedByAlertID}
+	if !stats.KeyedByAlertIDAsOf.IsZero() {
+		asOf := stats.KeyedByAlertIDAsOf
+		facts.KeyedByAlertIDAsOf = &asOf
+	}
 	if !stats.IndexReadAt.IsZero() {
 		age := at.Sub(stats.IndexReadAt).Seconds()
 		facts.IndexReadAgeSeconds = &age
@@ -1759,28 +1761,6 @@ func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
 func phaseTwoProductionBudgetsFitPlatform(cfg config.Config) bool {
 	return cfg.PhaseTwo.Coordinator.MaxRetainedBytes <= math.MaxInt64 &&
 		cfg.PhaseTwo.Coordinator.MaxSeries <= math.MaxUint64/cfg.Limits.Detect.MaxRecordsPerSeries
-}
-
-// openAlertComparisonFacts carries the copy's comparison into the replica's
-// facts field for field.
-func openAlertComparisonFacts(comparison *openalerts.Comparison) *fleet.OpenAlertComparison {
-	if comparison == nil {
-		return nil
-	}
-	facts := &fleet.OpenAlertComparison{OwnEventSourceID: comparison.OwnEventSourceID, Sent: comparison.Sent,
-		SentShapes: comparison.SentShapes, MemberShapes: comparison.MemberShapes, AlertSources: comparison.AlertSources,
-		SentInCalibrated: comparison.SentInCalibrated, SentMatchingAlertID: comparison.SentMatchingAlertID,
-		SentMatchingFingerprint: comparison.SentMatchingFingerprint}
-	for _, row := range comparison.Strategies {
-		strategy := fleet.OpenAlertComparisonStrategy{TenantID: row.TenantID, StrategyID: row.StrategyID, Sent: row.Sent,
-			Members: row.Members, Alerts: row.Alerts, Calibrated: row.Calibrated, SentSample: row.SentSample, MemberSample: row.MemberSample}
-		for _, alert := range row.AlertSample {
-			strategy.AlertSample = append(strategy.AlertSample, fleet.OpenAlertComparisonAlert{
-				AlertID: alert.AlertID, Fingerprint: alert.Fingerprint, EventSourceID: alert.EventSourceID})
-		}
-		facts.Strategies = append(facts.Strategies, strategy)
-	}
-	return facts
 }
 
 // gateLookupFacts is the kept gate lookups as the replica publishes them.

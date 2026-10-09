@@ -23,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
 // removedFamilies are families taken out because nothing read them: their
@@ -69,6 +70,12 @@ var removedFamilies = []string{
 	// every group or none, and the replica's dependencies say since when and
 	// why the refreshes fail.
 	"target_group_unanswered_reads_total", "target_group_oldest_failing_seconds",
+	// The inference that the sets were keyed another way, from none of this
+	// process's alerts being found in them: one alert the link closed on its
+	// own flipped it. The Console says where the sets are and how they are
+	// keyed, and open_alert_set_unavailable_total names what it has not
+	// confirmed.
+	"open_alert_set_sent_alerts", "open_alert_set_disjoint",
 }
 
 // removedLabelValues are label values taken out of families that stay.
@@ -135,6 +142,9 @@ var removedLabelValues = []struct {
 	// Every Plan a series is admitted for has its scope indexed: a consumer
 	// of a Plan that is not due is refused before the query is prepared.
 	{"series_admission_total", "reason", "plan_not_indexed", false},
+	// The disjoint inference went with its families: the Console's facts
+	// replace it, as location_unconfirmed and keying_unconfirmed.
+	{"open_alert_set_unavailable_total", "reason", "members_disjoint", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -183,6 +193,13 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 	r.Observe(context.Background(), observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageTargetResolved,
 		TargetResolution: &observability.TargetResolutionFacts{StrategyID: "1", State: "Unavailable", Selectors: selectors},
+	})
+	r.SetOpenAlertSetSource(func() openalerts.Stats {
+		counts := map[openalerts.UnavailableReason]uint64{}
+		for _, removed := range removedLabelValues {
+			counts[openalerts.UnavailableReason(removed.value)] = 1
+		}
+		return openalerts.Stats{Unavailable: counts}
 	})
 	// The catalog's and the fleet's families are filled by their producers'
 	// closed lists, so the guard drives those: an object recorded under a

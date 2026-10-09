@@ -33,16 +33,16 @@ func fp(n int) string { return fmt.Sprintf("%032x", n) }
 // the strategy's set holds, which alerts calibration listed, whether it can
 // be judged at all.
 type fakeSet struct {
-	disjoint bool
-	unjudged bool
-	own      string
-	held     map[string]bool
-	alerts   []openalerts.Alert
+	untrusted bool
+	unjudged  bool
+	own       string
+	held      map[string]bool
+	alerts    []openalerts.Alert
 }
 
-func (set *fakeSet) Disjoint() bool { return set.disjoint }
+func (set *fakeSet) Trusted() bool { return !set.untrusted }
 func (set *fakeSet) MemberCount(k openalerts.StrategyKey) (int, bool) {
-	if set.unjudged || set.disjoint || k != key {
+	if set.unjudged || set.untrusted || k != key {
 		return 0, false
 	}
 	n := 0
@@ -54,7 +54,7 @@ func (set *fakeSet) MemberCount(k openalerts.StrategyKey) (int, bool) {
 	return n, true
 }
 func (set *fakeSet) Holds(k openalerts.StrategyKey, fingerprint string) (bool, bool) {
-	if set.unjudged || set.disjoint || k != key {
+	if set.unjudged || set.untrusted || k != key {
 		return false, false
 	}
 	return set.held[fingerprint], true
@@ -195,8 +195,8 @@ func TestTargetScopeCloseDecisions(t *testing.T) {
 		{name: "a strategy whose set cannot be judged (uncalibrated) is not acted on",
 			set:   func() *fakeSet { s := openSet(ownSrc, member); s.unjudged = true; return s }(),
 			drops: []Drop{drop(member, 0)}, want: map[string]uint64{OutcomeSetUnavailable: 2}},
-		{name: "disjoint sets are not acted on",
-			set:   func() *fakeSet { s := openSet(ownSrc, member); s.disjoint = true; return s }(),
+		{name: "sets the Console has not confirmed are not acted on",
+			set:   func() *fakeSet { s := openSet(ownSrc, member); s.untrusted = true; return s }(),
 			drops: []Drop{drop(member, 0)}, want: map[string]uint64{OutcomeSetUnavailable: 2}},
 		{name: "a copy that has not learned its own source is not acted on",
 			set:   func() *fakeSet { s := openSet(ownSrc, member); s.own = ""; return s }(),
@@ -289,10 +289,10 @@ func TestARefusedStepKeepsTheObservation(t *testing.T) {
 	f.slot(1700000060, drop(member, 0))
 	f.want(t, "send refused", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1})
 	f.writer.fail = nil
-	f.set.disjoint = true
+	f.set.untrusted = true
 	f.slot(1700000120, drop(member, 0))
-	f.want(t, "copy disjoint", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2})
-	f.set.disjoint = false
+	f.want(t, "copy unconfirmed", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2})
+	f.set.untrusted = false
 	f.slot(1700000180, drop(member, 0))
 	f.want(t, "retried", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2, OutcomeCloseSent: 1})
 }
@@ -497,21 +497,22 @@ func TestScreenJudgesPerStrategy(t *testing.T) {
 	}
 }
 
-// countingDisjointSet is a copy whose sets are disjoint and whose per
-// strategy answers do not know it: the whole-copy gate is what refuses.
-type countingDisjointSet struct{ fakeSet }
+// countingUnconfirmedSet is a copy whose sets the Console has not confirmed
+// and whose per strategy answers do not know it: the whole-copy gate is what
+// refuses.
+type countingUnconfirmedSet struct{ fakeSet }
 
-func (set *countingDisjointSet) MemberCount(openalerts.StrategyKey) (int, bool) { return 1, true }
+func (set *countingUnconfirmedSet) MemberCount(openalerts.StrategyKey) (int, bool) { return 1, true }
 
-// Disjoint sets refuse the screen on their own, whatever a strategy's
+// Unconfirmed sets refuse the screen on their own, whatever a strategy's
 // count says.
-func TestScreenRefusesDisjointSets(t *testing.T) {
-	set := &countingDisjointSet{fakeSet: *openSet(ownSrc, fp(1))}
-	set.disjoint = true
+func TestScreenRefusesUnconfirmedSets(t *testing.T) {
+	set := &countingUnconfirmedSet{fakeSet: *openSet(ownSrc, fp(1))}
+	set.untrusted = true
 	closer := New(Options{})
 	closer.Bind(set, nil)
 	if screen := closer.Screen(key); screen != OutcomeSetUnavailable {
-		t.Fatalf("Screen = %q, want set_unavailable on disjoint sets", screen)
+		t.Fatalf("Screen = %q, want set_unavailable on unconfirmed sets", screen)
 	}
 }
 

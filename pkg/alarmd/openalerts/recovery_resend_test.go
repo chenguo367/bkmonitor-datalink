@@ -173,23 +173,6 @@ func TestARecoverySentAgainWithoutACalibrationWaitsAsLongAsOneWouldTake(t *testi
 	}
 }
 
-// While the sets carry none of the alerts this process opened, what they say
-// about an alert is not trusted, and a recovery keeps waiting for the next
-// calibration as it did before resends.
-func TestADisjointCopyDoesNotSendARecoveryAgainOnARead(t *testing.T) {
-	f := newResendFixture(t, "fp")
-	f.acknowledge(abnormal(keyA, "ours-0"))
-	f.c.advance(time.Second)
-	f.acknowledge(recovery(keyA, "fp"))
-	f.read(SentConfirmAfter + time.Second)
-	if !f.cache.Stats().Disjoint {
-		t.Fatal("fixture: the copy must be disjoint, the one alert this process opened missing from the set")
-	}
-	if f.open("fp") {
-		t.Fatal("a disjoint copy sent a recovery again on a read")
-	}
-}
-
 // A calibration past the retention, with no read of the set since the
 // recovery, still carrying the alert, lets the recovery through again just
 // the same: it prunes the ledger entry.

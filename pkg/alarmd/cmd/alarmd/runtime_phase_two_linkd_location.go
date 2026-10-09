@@ -16,9 +16,9 @@ type discoverLinkdTarget func(context.Context, openalerts.HTTPReconcilerOptions)
 
 // linkdDiscoveryAttempts bounds how long startup waits on a Console that does
 // not answer. Detection does not depend on the link; a process that could
-// not ask reads from the fallback location meanwhile, and keeps asking in the
-// background (linkdLocationSwitch.retry) until the Console answers, then moves
-// its reads to where the link writes without a restart.
+// not ask reads no set meanwhile - its gate answers from what it sent - and
+// keeps asking in the background (linkdLocationSwitch.retry) until the
+// Console answers, then reads where the link writes without a restart.
 const linkdDiscoveryAttempts = 3
 
 var linkdDiscoveryPause = 2 * time.Second

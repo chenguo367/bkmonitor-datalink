@@ -438,8 +438,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_header_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_renewal_conflict_total"] = "variableLabels: {reason}"
-	expected["bkmonitor_alarmd_open_alert_set_sent_alerts"] = "variableLabels: {in_set}"
-	expected["bkmonitor_alarmd_open_alert_set_disjoint"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_open_alert_set_recovery_resent_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
 	expected["bkmonitor_alarmd_catalog_strategy_returned_after_removal_total"] = "variableLabels: {}"
@@ -1001,8 +999,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("activation_header_rebuild_total")] = len(controlplane.ActivationHeaderRebuildOutcomes)
 	bounds[fqName("activation_renewal_conflict_total")] = len(controlplane.ActivationRenewalConflicts)
-	bounds[fqName("open_alert_set_sent_alerts")] = 2
-	bounds[fqName("open_alert_set_disjoint")] = 1
 	bounds[fqName("open_alert_set_recovery_resent_total")] = 1
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
 	bounds[fqName("catalog_strategy_returned_after_removal_total")] = 1

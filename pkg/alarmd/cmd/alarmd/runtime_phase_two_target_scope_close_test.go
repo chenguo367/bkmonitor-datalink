@@ -44,9 +44,20 @@ func (s scopeCloseIndex) Watch(ctx context.Context, ready func(bool), _ func(ope
 }
 
 // calibratedCopy is a real index copy, running, calibrated for one strategy.
+// confirmedConsole is a link Console that has confirmed both facts the sets
+// are trusted on, the state a deployment's close reads them in.
+type confirmedConsole struct{}
+
+func (confirmedConsole) LocationConfirmed() bool { return true }
+func (confirmedConsole) KeyedByAlertID() (bool, time.Time, bool) {
+	return true, time.Unix(1700000000, 0), true
+}
+func (confirmedConsole) KeyingAsked() bool       { return true }
+func (confirmedConsole) Refresh(context.Context) {}
+
 func calibratedCopy(t *testing.T, key openalerts.StrategyKey, index scopeCloseIndex) *openalerts.Cache {
 	t.Helper()
-	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: index, Reconciler: index, Subscriber: index,
+	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: index, Reconciler: index, Subscriber: index, Facts: confirmedConsole{},
 		MaxStrategies: 10, MaxMembers: 100, MaxBytes: 1 << 20, MaxLocalEntries: 100, ReadBatch: 2, ReconcileBatch: 1,
 		RefreshInterval: time.Hour, IndexInterval: time.Hour, ReconcileInterval: time.Hour, CalibrationMaxAge: 2 * time.Hour,
 		LocalRetention: time.Minute, CycleTimeout: time.Second})

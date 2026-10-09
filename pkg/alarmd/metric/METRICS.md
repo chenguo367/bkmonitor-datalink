@@ -1057,10 +1057,6 @@ Panics an observer raised and the fan-out recovered, by observer; every other ob
 
 Seconds since the oldest calibration among the tracked strategies' sets completed: a full read of the consumer's open alerts for a strategy, reconciled against its index. Absent until one has.
 
-## bkmonitor_alarmd_open_alert_set_disjoint
-
-1 while none of the alerts this process sent is in the consumer's sets (see open_alert_set_sent_alerts); it ends when one of them is found or none is left open. Every lookup against such sets would miss and hold the recovery, so while this is 1 the gate answers from what this process sent instead, and fleet health degrades with OPEN_ALERT_SET_DISJOINT.
-
 ## bkmonitor_alarmd_open_alert_set_entries
 
 Labels: `kind`
@@ -1087,12 +1083,6 @@ Labels: `result`
 
 Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), unavailable (either failed). A flat line is the refresh loop not running.
 
-## bkmonitor_alarmd_open_alert_set_sent_alerts
-
-Labels: `in_set`
-
-Alerts this process sent ABNORMAL for and has not sent RECOVERY for, by whether the latest read of their strategy's set carries them (in_set=yes|no). Only alerts first sent at least five minutes before that read are counted, so the consumer has had time to open them. Some no is an alert the consumer closed on its own; all no and none yes is the sets keyed differently from this process's lookups, which open_alert_set_disjoint reports.
-
 ## bkmonitor_alarmd_open_alert_set_tracked_strategies
 
 Strategies the copy reads on each refresh: those evaluated by this worker within the tracking window. Read against worker_owned_query_groups; well above it is strategies this worker lost still inside the window.
@@ -1101,7 +1091,7 @@ Strategies the copy reads on each refresh: those evaluated by this worker within
 
 Labels: `reason`
 
-Refreshes of a tracked set that failed, by why: read_error (an index read or a calibration failed), members_disjoint (counted once on entering the state open_alert_set_disjoint reports).
+Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration failed, each time), location_unconfirmed (the link's Console has not named where the sets are) and keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while either lasts. A deployment without the Console counts nothing here.
 
 ## bkmonitor_alarmd_operation_total
 

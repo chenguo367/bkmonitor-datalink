@@ -24,43 +24,21 @@ type UnavailableReason string
 
 const (
 	UnavailableReadError UnavailableReason = "read_error"
-	// UnavailableMembersDisjoint: the consumer's sets hold members, or were
-	// read, but none of the alerts this process sent ABNORMAL for is in
-	// them once the consumer has had time to open it. The sets are then not
-	// keyed the way this process asks, and every lookup would miss; see
-	// DisjointMinimum.
-	UnavailableMembersDisjoint UnavailableReason = "members_disjoint"
+	// UnavailableLocationUnconfirmed: the Console has not named the place
+	// this process reads the sets from - its discovery failed, the place it
+	// names is one this process holds no connection to, or the last
+	// reconciliation found it writing elsewhere. Nothing is read meanwhile.
+	UnavailableLocationUnconfirmed UnavailableReason = "location_unconfirmed"
+	// UnavailableKeyingUnconfirmed: the Console has not said that the link
+	// keys this deployment's alerts by the alert id this process sends - its
+	// event source was not read yet, keys by other fields, or is not in
+	// effect. Every lookup by our alert id would miss.
+	UnavailableKeyingUnconfirmed UnavailableReason = "keying_unconfirmed"
 )
 
 // UnavailableReasons lists every reason, for the metric that pre-creates
 // them all: a reason at zero has to be readable as "never happened".
-var UnavailableReasons = []UnavailableReason{UnavailableReadError, UnavailableMembersDisjoint}
-
-// SentConfirmAfter is how long after this process first sent an alert's
-// ABNORMAL a read of the consumer's set is expected to carry it. The
-// consumer opens the alert on the message and rebuilds the set on a hint
-// it batches for about a second; five minutes covers that and a slow
-// rebuild several times over. An alert younger than this at the read is
-// not counted either way.
-const SentConfirmAfter = 5 * time.Minute
-
-// DisjointMinimum is how many alerts this process sent, each past
-// SentConfirmAfter at the latest read and none of them found, before the
-// sets are taken to be keyed differently from this process's lookups.
-//
-// One is enough. An alert the consumer closed on its own can put a quiet
-// deployment into the state wrongly, and the price of that is the gate as
-// it was before it existed: a RECOVERY for an alert the consumer no longer
-// holds, which it records as orphaned and changes nothing for. A higher
-// bar would leave a deployment with one or two alerts outside the fallback
-// for good, holding exactly the recoveries it exists to release.
-//
-// Leaving the state takes positive evidence only: an alert of ours found
-// in a set, or nothing of ours left open. The count dropping does not end
-// it, because the recoveries the fallback lets through are what make it
-// drop; ending on that would hold the last few again against sets that
-// still carry none of ours.
-const DisjointMinimum = 1
+var UnavailableReasons = []UnavailableReason{UnavailableReadError, UnavailableLocationUnconfirmed, UnavailableKeyingUnconfirmed}
 
 // Answer is how a lookup was answered. Closed: a metric label. The index
 // members and absences are the consumer's word; the rest say the copy
@@ -109,8 +87,17 @@ const (
 
 // Stats is the copy's state and cumulative counts, read for metrics.
 type Stats struct {
+	// Configured is whether there is a Console to take the copy's facts
+	// from; a copy without one reads nothing and is never unavailable.
+	Configured        bool
 	Available         bool
 	UnavailableReason UnavailableReason
+	// LocationConfirmed and KeyedByAlertID are the Console's two facts
+	// (ConsoleFacts); KeyedByAlertID is nil until a read has answered, and
+	// KeyedByAlertIDAsOf is when the last one did.
+	LocationConfirmed  bool
+	KeyedByAlertID     *bool
+	KeyedByAlertIDAsOf time.Time
 	// LoadedAt is the oldest calibration among the tracked sets; zero if none
 	// has been calibrated. A metric derived from it must not be emitted while
 	// zero.
@@ -135,13 +122,6 @@ type Stats struct {
 	// than wonder why nothing closes.
 	CalibrationConfigured bool
 	Calibrated            int
-	// SentInSet and SentNotInSet split the alerts this process sent
-	// ABNORMAL for, and has not sent RECOVERY for, by whether the latest
-	// read of their strategy's set carries them. Only alerts first sent at
-	// least SentConfirmAfter before that read count. Disjoint is the state
-	// DisjointMinimum describes.
-	SentInSet, SentNotInSet int
-	Disjoint                bool
 	// OwnLookups is Lookups for the lookups of this process's own open
 	// alerts; OwnHeld how many of those the gate answered "not open", which
 	// holds a RECOVERY whose alert stays open. RecentLookups and

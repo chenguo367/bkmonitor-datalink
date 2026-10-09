@@ -49,6 +49,11 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 			return
 		}
+		if r.URL.Path == "/local-api/event-sources/source" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "source", "revision": 3, "published": 3,
+				"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
+			return
+		}
 		q := r.URL.Query()
 		if q.Get("event_source_id") != "source" || q.Get("hook_name") != "active" || q.Get("bk_tenant_id") != keyA.TenantID || q.Get("strategy_id") != keyA.StrategyID {
 			t.Errorf("query %v", q)
@@ -70,8 +75,19 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 	if len(result.Alerts) != 2 || result.Alerts[0].Severity != "critical" || result.Alerts[1].Severity != "" {
 		t.Fatal("optional severity lost or fabricated")
 	}
-	if len(requests) != 2 {
+	// A reconciliation also reads the event source's keying, once until it
+	// is due again: the Console's word on how the link keys our alerts.
+	if !reflect.DeepEqual(requests, []string{"/local-api/strategy-index/targets", "/local-api/event-sources/source", "/local-api/strategy-index/reconcile"}) {
 		t.Fatalf("requests %v", requests)
+	}
+	if keyed, _, known := reader.KeyedByAlertID(); !keyed || !known || !reader.LocationConfirmed() {
+		t.Fatalf("keyed %v known %v location %v, want both facts confirmed by the reconciliation", keyed, known, reader.LocationConfirmed())
+	}
+	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 5 {
+		t.Fatalf("requests %v, want the second reconciliation without another event source read", requests)
 	}
 }
 

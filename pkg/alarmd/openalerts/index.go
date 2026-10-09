@@ -21,6 +21,10 @@ type IndexOptions struct {
 	ReadBatch, ReconcileBatch                            int
 	RefreshInterval, IndexInterval, ReconcileInterval    time.Duration
 	CalibrationMaxAge, LocalRetention, CycleTimeout      time.Duration
+	// Facts are the link Console's facts the sets are trusted on (see
+	// ConsoleFacts). Nil is a deployment without the Console: the copy
+	// reads nothing and is not configured.
+	Facts ConsoleFacts
 }
 
 type StrategySnapshot struct {
@@ -58,22 +62,19 @@ type indexState struct {
 	members, bytes int
 	running        bool
 	// eventSourceID is this deployment's own source as the last successful
-	// calibration named it, kept for the recovery comparison.
+	// calibration named it.
 	eventSourceID string
 	// opened is when this process first sent the ABNORMAL for each alert it
 	// has not sent the RECOVERY for since. Kept apart from Cache.added,
-	// which a calibration prunes after the local retention: an alert resent
-	// every round would otherwise be forever younger than
-	// SentConfirmAfter, and the fallback would forget the alerts it exists
-	// to let recover. Bounded by MaxLocalEntries; past it a new alert is
+	// which a calibration prunes after the local retention: the fallback
+	// would otherwise forget the alerts it exists to let recover. Bounded by MaxLocalEntries; past it a new alert is
 	// not recorded and counted as an eviction. Each record also keeps the
 	// severity the alert stands at, which decides whether a later RECOVERY
 	// closes it (see standing).
 	opened map[member]openRecord
-	// The latest assessment of this process's own sends against the sets;
-	// see assessSent.
-	sentInSet, sentNotInSet int
-	disjoint                bool
+	// lastUnconfirmed is the unconfirmed reason the last round found, so an
+	// entry into the state is counted once (noteConfirmation).
+	lastUnconfirmed UnavailableReason
 }
 
 // noteOpened records the first ABNORMAL of an alert, and on every one after
@@ -295,6 +296,49 @@ func (cache *Cache) RequestReconcile(key StrategyKey) {
 	}
 }
 
+// RequestCalibration asks for every tracked strategy to be calibrated at the
+// next round rather than when its interval comes: after the reads moved to
+// where the Console names, its confirmation is a calibration away, and
+// waiting a whole interval would hold the recoveries of every alert this
+// process did not open for that long.
+func (cache *Cache) RequestCalibration() {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	for _, entry := range cache.index.entries {
+		entry.reconcileRequested = true
+		entry.lastReconcileAttempt = time.Time{}
+	}
+	cache.mu.Unlock()
+	cache.wakeIndex()
+}
+
+// LocationMoved forgets everything read where the sets were read before -
+// every strategy's members, calibration and its time - and asks for a
+// calibration at once, as RequestCalibration does. Called when the reads
+// move to another place: what the old place held says nothing about the new
+// one, so each strategy answers as never read until it is read again there,
+// and a read still in flight from the old place lands on an entry that is
+// no longer there and is dropped.
+func (cache *Cache) LocationMoved() {
+	if cache == nil {
+		return
+	}
+	now := cache.now()
+	cache.mu.Lock()
+	members, bytes := 0, 0
+	for key := range cache.index.entries {
+		entry := &indexEntry{dirty: 1, dirtySince: now, reconcileRequested: true}
+		cache.index.entries[key] = entry
+		count, size := entrySize(key, entry)
+		members, bytes = members+count, bytes+size
+	}
+	cache.index.members, cache.index.bytes = members, bytes
+	cache.mu.Unlock()
+	cache.wakeIndex()
+}
+
 func (cache *Cache) wakeIndex() {
 	select {
 	case cache.index.wake <- struct{}{}:
@@ -423,22 +467,30 @@ func (cache *Cache) jobs(calibration bool) []indexJob {
 
 func (cache *Cache) refreshIndex(ctx context.Context) {
 	state := cache.index
-	cache.mu.Lock()
-	awaitingACK := !state.everReady
-	cache.mu.Unlock()
-	if awaitingACK {
-		return
-	}
 	// One background round at a time, even if an external maintenance hook
 	// also calls Refresh. Contending callers do no I/O and never build a queue.
 	if !state.refreshMu.TryLock() {
 		return
 	}
 	defer state.refreshMu.Unlock()
+	// The Console's facts first, whether or not any strategy is tracked or
+	// due for calibration; the facts bound their own reads.
+	if facts := state.options.Facts; facts != nil {
+		factsCtx, cancel := context.WithTimeout(ctx, state.options.CycleTimeout/2)
+		facts.Refresh(factsCtx)
+		cancel()
+	}
+	cache.mu.Lock()
+	cache.noteConfirmation()
+	// The sets are read only where the Console named them and once their
+	// change notices are subscribed. Calibration does not wait on either:
+	// it is how the Console confirms the location, or names another.
+	reads := state.everReady && cache.configured() && cache.unconfirmed() != UnavailableLocationUnconfirmed
+	cache.mu.Unlock()
 	// Reserve half the cycle for each dependency; slow Redis cannot starve
 	// reconciliation (or vice versa). Calls are serial, never four per worker.
 	for _, calibration := range []bool{false, true} {
-		if calibration && state.options.Reconciler == nil {
+		if calibration && state.options.Reconciler == nil || !calibration && !reads {
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, state.options.CycleTimeout/2)
@@ -458,57 +510,17 @@ func (cache *Cache) refreshIndex(ctx context.Context) {
 		cancel()
 	}
 	cache.mu.Lock()
-	cache.assessSent()
+	cache.noteConfirmation()
 	cache.mu.Unlock()
 }
 
-// assessSent checks the alerts this process sent ABNORMAL for against the
-// latest read of their strategy's set. It is the one reading that tells a
-// consumer holding no alert on a series from sets keyed another way: both
-// answer every lookup "absent", and only the second also leaves out the
-// alerts this process opened itself. Called with the lock held, once per
-// refresh round; the work is one pass over the local entries.
-func (cache *Cache) assessSent() {
-	inSet, notInSet := 0, 0
-	for m, record := range cache.index.opened {
-		entry := cache.index.entries[m.key]
-		if entry == nil {
-			continue
-		}
-		read := entry.indexReadAt
-		if entry.calibratedStarted.After(read) {
-			read = entry.calibratedStarted
-		}
-		if read.IsZero() || record.at.After(read.Add(-SentConfirmAfter)) {
-			continue
-		}
-		_, inIndex := entry.index[m.fingerprint]
-		_, inMissing := entry.missing[m.fingerprint]
-		if inIndex || inMissing {
-			inSet++
-		} else {
-			notInSet++
-		}
-	}
-	disjoint := inSet == 0 && notInSet >= DisjointMinimum
-	if cache.index.disjoint {
-		// See DisjointMinimum: only positive evidence ends the state.
-		disjoint = inSet == 0 && len(cache.index.opened) > 0
-	}
-	if disjoint && !cache.index.disjoint {
-		cache.unavailable[UnavailableMembersDisjoint]++
-	}
-	cache.index.sentInSet, cache.index.sentNotInSet, cache.index.disjoint = inSet, notInSet, disjoint
-}
-
-// indexGate answers the recovery gate. While the sets are disjoint from
-// this process's sends (see DisjointMinimum) an "absent" from them says
-// nothing about the series, so the gate is answered as when the
-// publication is unavailable: by the policy in force, which by default is
-// what this process sent. A fingerprint the sets do carry is still open.
-// Called with the lock held.
+// indexGate answers the recovery gate. While the sets are not trusted - the
+// Console has not confirmed where they are or that they are keyed by our
+// alert ids, or there is no Console - what they hold says nothing about the
+// series, and the gate answers by the policy in force, which by default is
+// what this process sent (the 2026-09-14 ruling). Called with the lock held.
 func (cache *Cache) indexGate(m member, now time.Time) bool {
-	if !cache.index.disjoint {
+	if cache.trusted() {
 		return cache.indexContains(m, now, true)
 	}
 	if cache.policy == PolicyPassThrough {
@@ -516,11 +528,13 @@ func (cache *Cache) indexGate(m member, now time.Time) bool {
 		return true
 	}
 	cache.countLookup(AnswerSelfMaintained)
-	if cache.indexContains(m, now, false) {
+	if _, opened := cache.index.opened[m]; opened {
 		return true
 	}
-	_, opened := cache.index.opened[m]
-	return opened
+	if _, sent := cache.added[m]; sent {
+		return true
+	}
+	return false
 }
 
 func stringSet(values []string) map[string]struct{} {
@@ -595,6 +609,10 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Reconciliation, err error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	// The calibration resolved the target first: a move it found, and the
+	// agreement a later one finds, can open and close an unconfirmed state
+	// inside one round, which is still an entry.
+	cache.noteConfirmation()
 	if cache.index.entries[job.key] != job.entry {
 		return
 	}
@@ -708,10 +726,6 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 //     consumer that is behind by more than the retention has both copies
 //     queued; sending on every read would add one more per read for as long
 //     as it stays behind. This is the calibration path that backs the resend.
-//   - While the sets are disjoint from what this process sent, the rule this
-//     ledger had before resends: a calibration that began after it, or with
-//     none current, the next read. What the sets say about this process's
-//     alerts is not trusted then, and the gate answers from its own record.
 func (cache *Cache) removalHides(entry *indexEntry, removed stamped, now time.Time) bool {
 	retention := cache.index.options.LocalRetention
 	if entry == nil || now.Sub(removed.at) <= retention {
@@ -719,10 +733,6 @@ func (cache *Cache) removalHides(entry *indexEntry, removed stamped, now time.Ti
 	}
 	calibrated := cache.calibrated(entry, now)
 	switch {
-	case cache.index.disjoint && calibrated:
-		return !removed.at.Before(entry.calibratedStarted)
-	case cache.index.disjoint:
-		return !removed.at.Before(entry.indexReadAt)
 	case !removed.resent:
 		return !removed.at.Add(retention).Before(entry.indexReadAt)
 	case calibrated:
@@ -791,9 +801,8 @@ func (cache *Cache) indexMembers(key StrategyKey) []string {
 // Holds answers, from memory and without counting a lookup, whether the
 // strategy's set carries the fingerprint. judged is false whenever the
 // answer would not be the link's: a copy that does not read the index, a
-// subscription that is not ready, sets disjoint from this process's own
-// sends (see DisjointMinimum), or a strategy whose set has no current
-// calibration. A caller that acts on "not a member" must not act on an
+// subscription that is not ready, sets the Console has not confirmed
+// (ConsoleFacts), or a strategy whose set has no current calibration. A caller that acts on "not a member" must not act on an
 // unjudged answer.
 func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged bool) {
 	if cache == nil {
@@ -803,7 +812,7 @@ func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged boo
 	defer cache.mu.Unlock()
 	now := cache.now()
 	entry := cache.index.entries[key]
-	if !cache.index.ready || cache.index.disjoint || !cache.calibrated(entry, now) {
+	if !cache.index.ready || !cache.trusted() || !cache.calibrated(entry, now) {
 		return false, false
 	}
 	return cache.indexContains(member{key: key, fingerprint: fingerprint}, now, false), true
@@ -822,21 +831,22 @@ func (cache *Cache) MemberCount(key StrategyKey) (count int, judged bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	entry := cache.index.entries[key]
-	if !cache.index.ready || cache.index.disjoint || !cache.calibrated(entry, cache.now()) {
+	if !cache.index.ready || !cache.trusted() || !cache.calibrated(entry, cache.now()) {
 		return 0, false
 	}
 	return len(entry.index) + len(entry.missing), true
 }
 
-// Disjoint is whether the sets were last found to carry none of this
-// process's own alerts (see DisjointMinimum), read without the full stats.
-func (cache *Cache) Disjoint() bool {
+// Trusted is whether the sets may answer for this process: a Console is
+// configured and has confirmed both where the sets are and that they are
+// keyed by our alert ids (ConsoleFacts), read without the full stats.
+func (cache *Cache) Trusted() bool {
 	if cache == nil {
 		return false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	return cache.index.disjoint
+	return cache.trusted()
 }
 
 // OwnEventSourceID is this deployment's source as the last successful
@@ -918,12 +928,17 @@ func (cache *Cache) indexStats() Stats {
 			stats.UnavailableReason = UnavailableReadError
 		}
 	}
-	stats.Available = all && cache.index.ready
-	stats.SentInSet, stats.SentNotInSet, stats.Disjoint = cache.index.sentInSet, cache.index.sentNotInSet, cache.index.disjoint
-	if cache.index.disjoint {
-		stats.Available = false
-		if stats.UnavailableReason == "" {
-			stats.UnavailableReason = UnavailableMembersDisjoint
+	stats.Configured = cache.configured()
+	stats.Available = all && cache.index.ready && cache.trusted()
+	if reason := cache.unconfirmed(); reason != "" {
+		// The Console's word outranks a read error: it says whether the
+		// reads could answer at all.
+		stats.UnavailableReason = reason
+	}
+	if facts := cache.index.options.Facts; facts != nil {
+		stats.LocationConfirmed = facts.LocationConfirmed()
+		if keyed, asOf, known := facts.KeyedByAlertID(); known {
+			stats.KeyedByAlertID, stats.KeyedByAlertIDAsOf = &keyed, asOf
 		}
 	}
 	stats.MemberBytes = cache.index.bytes
