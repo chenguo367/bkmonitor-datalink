@@ -43,6 +43,18 @@ var acceptOperations = []string{"fleet.get", "k8s.pods", "k8s.events", "k8s.logs
 // surface restriction is not in force.
 var acceptSurfaceDegradations = []string{"METRICS_INTERNAL_LISTEN_MISSING", "CLI_AUTH_UNAVAILABLE"}
 
+// acceptControlDegradations are the fleet degradations that say a strategy
+// change does not reach what the fleet executes - in the publication, the
+// activation, or the view reaching the workers - each held to the fleet's
+// bound: no refresh round has succeeded, the activation is behind the
+// publication, nobody holds the leader lease, the round accepts none of the
+// strategies the source lists, the cutover held query groups back, the
+// leader cannot publish its view, or no worker holds a stream to take it.
+// The refresh counters cannot say it: a round that fails is not in
+// source_refresh_total, and the rest happen after the round.
+var acceptControlDegradations = []string{"CONTROL_SOURCE_STALE", "ACTIVATION_BEHIND", "CONTROL_LEADER_ABSENT", "SOURCE_BLOCKED",
+	"ACTIVATION_BLOCKED", "VIEW_PUBLISH_FAILING", "VIEW_STREAM_NO_SESSIONS"}
+
 // acceptHorizonSources are the sources a no-data horizon may be read from.
 var acceptHorizonSources = []string{"DEFAULT", "VALUES", "DYNAMIC"}
 
@@ -236,12 +248,12 @@ func (run *acceptRun) checkCatalog(discovered map[string]any, expectBuild string
 	run.add("operations listed and available", verdict, fmt.Sprintf("missing %s; unavailable %s", listOrNone(missing), listOrNone(down)))
 }
 
-// checkFleet reads the fleet: the public surface degradations, the no-data
-// horizon, and the replicas it knows.
+// checkFleet reads the fleet: the public surface degradations, the control
+// source's, the no-data horizon, and the replicas it knows.
 func (run *acceptRun) checkFleet() []string {
 	m, failure := run.read("fleet", "fleet.get", nil)
 	if m == nil {
-		for _, item := range []string{"public surface not degraded", "no-data horizon"} {
+		for _, item := range []string{"public surface not degraded", "control source publishes and activates", "no-data horizon"} {
 			run.add(item, verdictReadFailed, "fleet.get: "+failure)
 		}
 		return nil
@@ -262,6 +274,27 @@ func (run *acceptRun) checkFleet() []string {
 		run.add("public surface not degraded", verdictFail, "fleet degradations include "+strings.Join(surface, ", "))
 	} else {
 		run.add("public surface not degraded", verdictPass, "none of "+strings.Join(acceptSurfaceDegradations, ", "))
+	}
+	var control []string
+	for _, raw := range degradations {
+		degradation := raw.(map[string]any)
+		kind := stringField(degradation, "kind")
+		if !contains(acceptControlDegradations, kind) {
+			continue
+		}
+		words := kind
+		if replica := stringField(degradation, "replica"); replica != "" {
+			words += " on " + replica
+		}
+		if stage := stringField(degradation, "stage"); stage != "" {
+			words += " at " + stage
+		}
+		control = append(control, words)
+	}
+	if len(control) > 0 {
+		run.add("control source publishes and activates", verdictFail, "fleet degradations include "+strings.Join(control, "; "))
+	} else {
+		run.add("control source publishes and activates", verdictPass, "none of "+strings.Join(acceptControlDegradations, ", "))
 	}
 	horizon := objectField(result, "no_data_horizon")
 	source := stringField(horizon, "source")

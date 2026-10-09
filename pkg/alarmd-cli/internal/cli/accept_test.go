@@ -241,7 +241,7 @@ func TestAcceptPassesAHealthyDeployment(t *testing.T) {
 	}
 	for item, want := range map[string]string{
 		"session and build": verdictPass, "operations listed and available": verdictPass, "public surface not degraded": verdictPass,
-		"no-data horizon": verdictPass, "pods": verdictPass, "pod restarts": verdictInfo, "redis read": verdictPass,
+		"control source publishes and activates": verdictPass, "no-data horizon": verdictPass, "pods": verdictPass, "pod restarts": verdictInfo, "redis read": verdictPass,
 		"redis noeviction and nothing evicted": verdictPass, "redis memory": verdictPass, "metrics read on every replica": verdictPass,
 		"source refresh counted": verdictPass, "held recovery counter removed": verdictPass, "recovery beside another Level": verdictPass,
 		"target out of scope closes": verdictInfo, "control loop slowest turn": verdictPass, "output events refused by alarmd": verdictPass,
@@ -309,6 +309,47 @@ func TestAcceptFailsEachWrongFact(t *testing.T) {
 	}
 	if code != 1 || result["status"] != "failed" {
 		t.Fatalf("code %d status %v", code, result["status"])
+	}
+}
+
+// A strategy change that does not reach what the fleet executes fails the
+// acceptance on the fleet's own standings, each held to its staleness bound:
+// a refresh round that fails is not in the refresh counters at all, so the
+// window's increase cannot say it. Another degradation is not this item's.
+func TestAcceptFailsWhenAStrategyChangeDoesNotReachTheFleet(t *testing.T) {
+	fleetWith := func(kind string) func() (string, map[string]any) {
+		return func() (string, map[string]any) {
+			status, result := healthyAnswer("fleet.get")
+			result["degradations"] = []any{map[string]any{"kind": kind, "replica": "pod-a", "stage": "documents"}}
+			return status, result
+		}
+	}
+	const item = "control source publishes and activates"
+	for kind, want := range map[string]string{
+		"CONTROL_SOURCE_STALE": verdictFail, "ACTIVATION_BEHIND": verdictFail, "CONTROL_LEADER_ABSENT": verdictFail,
+		"SOURCE_BLOCKED": verdictFail, "ACTIVATION_BLOCKED": verdictFail, "VIEW_PUBLISH_FAILING": verdictFail,
+		"VIEW_STREAM_NO_SESSIONS": verdictFail, "PLATFORM_SETTINGS_STALE": verdictPass,
+	} {
+		f := healthyFixture()
+		f.override = map[string]func() (string, map[string]any){"fleet.get": fleetWith(kind)}
+		code, verdicts, result := acceptRunOf(t, f, "--window", "0")
+		if verdicts[item] != want {
+			t.Errorf("%s: %s = %q, want %q", kind, item, verdicts[item], want)
+			continue
+		}
+		if want == verdictFail {
+			if detail := itemDetail(t, result, item); code != 1 || !strings.Contains(detail, kind) || !strings.Contains(detail, "pod-a") ||
+				!strings.Contains(detail, "documents") {
+				t.Errorf("%s: code %d detail %q, want the run failed and the standing named with its replica and stage", kind, code, detail)
+			}
+		}
+	}
+	f := healthyFixture()
+	f.override = map[string]func() (string, map[string]any){"fleet.get": func() (string, map[string]any) {
+		return "error", map[string]any{"code": "evidence_unavailable", "message": "no replica answered"}
+	}}
+	if _, verdicts, _ := acceptRunOf(t, f, "--window", "0"); verdicts[item] != verdictReadFailed {
+		t.Fatalf("a failed fleet read: %s = %q, want %q", item, verdicts[item], verdictReadFailed)
 	}
 }
 
