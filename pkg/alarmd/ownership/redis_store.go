@@ -40,6 +40,9 @@ type RedisStore struct {
 	prefix     string
 	client     redis.UniversalClient
 	ownsClient bool
+	// epochRetention is how long a swept Query Group keeps its owner epoch
+	// (ConfigureEpochRetention); zero refuses to sweep.
+	epochRetention time.Duration
 }
 
 func NewRedisStore(options RedisStoreOptions) (*RedisStore, error) {
@@ -966,6 +969,11 @@ func parseInt(value string) int64 {
 // knows what it was admitted to execute, and the server instant so it can
 // keep the remaining duration on its own clock.
 //
+// The epoch counts on from the one the ownership hash keeps: a Release
+// leaves it, and so does the sweep that reclaims a retired Query Group,
+// which leaves it under an expiry and nothing else in the hash. A lease
+// clears that expiry, so a live holder's hash never expires under it.
+//
 // Every branch returns five elements: status, epoch, deadline_ms, scope,
 // now_ms. BUSY carries the deadline of the lease that is in the way.
 var acquireScript = redis.NewScript(FenceLua + `
@@ -990,6 +998,7 @@ if current_owner and current_owner ~= '' and current_deadline > now_ms then retu
 local epoch = tonumber(redis.call('HGET', KEYS[2], 'owner_epoch') or '0') + 1
 redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
   'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
+redis.call('PERSIST', KEYS[2])
 return {'OWNED', epoch, deadline_ms, scope, now_ms, timeline}
 `)
 

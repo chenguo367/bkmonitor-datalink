@@ -556,9 +556,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	ownershipStore, err := ownership.NewRedisStoreWithClient(
-		redisForCaller(runtimeClient, redisfailure.CallerOwnership), productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"),
-	)
+	ownershipStore, err := newProductionOwnershipStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerOwnership))
 	if err != nil {
 		return nil, err
 	}
@@ -1490,6 +1488,33 @@ func publishOutcomeObserver(observer observability.Observer) func(error) {
 			})
 		}
 	}
+}
+
+// newProductionOwnershipStore is the ownership store a production process
+// leads and works through. A named step, so the owner epoch retention its
+// sweep depends on is wiring a test runs.
+func newProductionOwnershipStore(cfg config.Config, client redis.UniversalClient) (*ownership.RedisStore, error) {
+	store, err := ownership.NewRedisStoreWithClient(client, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
+	if err != nil {
+		return nil, err
+	}
+	if err := store.ConfigureEpochRetention(phaseTwoOwnerEpochRetention(cfg)); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// phaseTwoOwnerEpochRetention is how long a retired Query Group's owner
+// epoch outlives the sweep that reclaims its Assignment record. 02 section
+// 6.3 rule 7 keeps it at least until the retirement recovery period ends:
+// the draining termination window, past which none of the Query Group's
+// Slots can execute. The pool record is ordered by owner epoch and
+// outlives its last write by queryCooldownRecordTTL, far longer. That write
+// came from an owner of the earlier life, and the sweep reclaims only once
+// no lease is live, so an epoch kept this long after the sweep outlives the
+// record: the owner that brings the Query Group back can write its own.
+func phaseTwoOwnerEpochRetention(cfg config.Config) time.Duration {
+	return maxDuration(controlplane.DrainingTerminationWindow(cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration()), queryCooldownRecordTTL)
 }
 
 func phaseTwoPostRecoveryTerminalDelay(cfg config.Config) time.Duration {
