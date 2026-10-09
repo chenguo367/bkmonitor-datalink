@@ -21,10 +21,8 @@ import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 type RosterSource string
 
 const (
-	RosterTargetStatic  RosterSource = "TARGET_STATIC"
-	RosterTargetTopo    RosterSource = "TARGET_TOPO"
-	RosterTargetService RosterSource = "TARGET_SERVICE"
-	RosterHistory       RosterSource = "HISTORY"
+	RosterTargetStatic RosterSource = "TARGET_STATIC"
+	RosterHistory      RosterSource = "HISTORY"
 	// RosterTargetPlan is declared for an item whose target is a target_plan
 	// and whose no-data dimensions are exactly the dimensions that target's
 	// record key is read from: the expected set is the members the worker

@@ -12,7 +12,6 @@ package nodata
 import (
 	"encoding/json"
 	"sort"
-	"strconv"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -66,13 +65,8 @@ type SyntheticSeries struct {
 func (series SyntheticSeries) IdentityFields() map[string]json.RawMessage {
 	fields := make(map[string]json.RawMessage, len(series.Group.dimensions)+1)
 	for _, dimension := range series.Group.dimensions {
-		encoded, err := json.Marshal(dimension.Value)
-		if err != nil {
-			// A Go string always marshals, so this cannot happen; encoding the
-			// value by hand rather than skipping it keeps a field that somehow
-			// failed from silently leaving the identity.
-			encoded = json.RawMessage(strconv.Quote(dimension.Value))
-		}
+		// A Go string always marshals, so the error is never set.
+		encoded, _ := json.Marshal(dimension.Value)
 		fields[dimension.Name] = encoded
 	}
 	fields[contract.NoDataDimensionTag] = json.RawMessage("true")
