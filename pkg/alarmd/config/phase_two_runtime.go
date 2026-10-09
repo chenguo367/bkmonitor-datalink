@@ -10,11 +10,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
@@ -250,44 +247,6 @@ type PhaseTwoNoDataConfig struct {
 	// indefinitely"; it is withdrawn in favour of the contract, which gives
 	// every group a finite horizon by default.
 	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
-}
-
-// UnmarshalYAML reads tracking_horizon_seconds as the contract writes a
-// horizon: a whole number of seconds in decimal, bare or quoted the way a
-// rendered values file may quote it. A fraction, an exponent or words are
-// refused by the key's name. The decoder alone takes 1.5 into an integer as
-// 1, which is a horizon nobody chose and one that stops every absence
-// before it can alert; and it refuses words by line number, which is not
-// the key an operator has to find.
-func (c *PhaseTwoNoDataConfig) UnmarshalYAML(node *yaml.Node) error {
-	*c = PhaseTwoNoDataConfig{}
-	if node.ShortTag() == "!!null" {
-		return nil
-	}
-	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("phase_two.no_data (line %d) must be a mapping", node.Line)
-	}
-	// The section's only key. The loader refuses unknown keys, and a decoder
-	// of its own does not inherit that, so it refuses them here: a
-	// misspelled key read as absent is a deployment on the default horizon
-	// that believes it set one.
-	for index := 0; index+1 < len(node.Content); index += 2 {
-		key, value := node.Content[index], node.Content[index+1]
-		if key.Value != "tracking_horizon_seconds" {
-			return fmt.Errorf("phase_two.no_data.%s (line %d) is not a key this build reads", key.Value, key.Line)
-		}
-		if value.ShortTag() == "!!null" {
-			continue
-		}
-		tag := value.ShortTag()
-		seconds, err := strconv.ParseInt(strings.TrimSpace(value.Value), 10, 64)
-		if value.Kind != yaml.ScalarNode || (tag != "!!int" && tag != "!!str") || err != nil {
-			return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %q (line %d) must be a whole number of "+
-				"seconds written in decimal; omit the key to inherit the platform's horizon", value.Value, value.Line)
-		}
-		c.TrackingHorizonSeconds = &seconds
-	}
-	return nil
 }
 
 func (c PhaseTwoNoDataConfig) validate() error {
