@@ -1705,6 +1705,12 @@ Labels: `level`
 
 Events published with a severity derived from the level number, because no name was known for it.
 
+## bkmonitor_alarmd_uq_answer_truncated_total
+
+Labels: `source_semantics`
+
+UQ answers that may have been cut, by source: a terms level of the Elasticsearch aggregation held exactly UQ's bucket cap (EsMaxSize, 10000 by default), and UQ drops the groups past the cap without marking the answer. The series it returned are evaluated as they are; the groups it may have dropped are not known absent. A query whose groups exceed the cap is cut every round, so any non-zero is worth reading: the query completion log line names the dimension (truncation_dimension). Every source is reported at zero, so a steady zero is an answer. Read with alarmd-cli invoke metrics.get.
+
 ## bkmonitor_alarmd_view_client_connected
 
 1 while this Worker holds an admitted stream to the Control Leader, else 0. Read the fleet's sum against the Leader's view_stream_sessions: they count the same streams from both ends.

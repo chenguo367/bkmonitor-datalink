@@ -357,7 +357,28 @@ type ProviderRouteFacts struct {
 	// say it stopped working. The decision about the status is made in the
 	// provider; this carries that decision as data to whoever reports it.
 	Status *ProviderStatusFact
+	// Truncation is an answer the provider may have cut without marking it:
+	// the query service returns at most a fixed number of groups per level
+	// of an Elasticsearch terms aggregation and drops the rest silently. The
+	// series it did return are whole and are read as they are; the groups
+	// it may have dropped are not known absent. Omitted when not suspected,
+	// so every other route encodes as it did.
+	Truncation *ProviderTruncationFact `json:",omitempty"`
 }
+
+// ProviderTruncationFact names a suspected cut: its kind (TruncationTermsCut),
+// the group-by dimension whose level held exactly the cap, the cap, and the
+// source the answer came from.
+type ProviderTruncationFact struct {
+	Kind            string
+	Dimension       string
+	Cap             int
+	SourceSemantics string
+}
+
+// TruncationTermsCut is a terms level of an Elasticsearch aggregation that
+// held exactly the query service's bucket cap.
+const TruncationTermsCut = "terms_cut_suspected"
 
 // ProviderStatusFact is a backend status code and what the provider did with
 // it. Allowed means the response was read for its series anyway, which is only

@@ -2330,44 +2330,47 @@ type Observation struct {
 	// the result -- the data's; one missing from a round whose query did not
 	// answer was never asked for -- this side's. Nil when the completion
 	// carried no primary fact (a Slot skipped without a query).
-	PrimaryInput          *PrimaryInputFacts
-	Dispatcher            *DispatcherFacts
-	DispatchTurnaway      *DispatchTurnawayFacts
-	PermitWait            *PermitWaitFacts
-	ExpiredRange          *ExpiredRangeFacts
-	Component             Component
-	Stage                 Stage
-	Result                Result
-	Operation             Operation
-	Direction             Direction
-	ReasonCode            ReasonCode
-	Duration              time.Duration
-	Counts                Counts
-	Trace                 TraceFields
-	Err                   error
-	CapacityBudget        CapacityBudget
-	CapacityRejection     *CapacityRejectionFacts
-	SlotBudgetUsage       *SlotBudgetUsageFacts
-	SlotTiming            *SlotTimingFacts
-	SourceKind            SourceKind
-	QueryPermit           *QueryPermitFacts
-	NoDataSlot            *NoDataSlotFacts
-	TargetResolution      *TargetResolutionFacts
-	NoDataStall           *NoDataStallFacts
-	NoDataAbsence         *NoDataAbsenceFacts
-	GapProgress           *GapProgressFacts
-	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
-	NoDataMemoryWrite     *NoDataMemoryWriteFacts
-	NoDataMemoryRead      *NoDataMemoryReadFacts
-	NoDataMemoryRenewal   *NoDataMemoryRenewalFacts
-	ExecutionEvidence     *ExecutionEvidenceFacts
-	FrozenStateRenewal    *FrozenStateRenewalFacts
-	SourceWithheld        *SourceWithheldFacts
-	NoDataCensus          *NoDataCensusFacts
-	SegmentContent        *SegmentContentFacts
-	RuntimeConfig         *RuntimeConfigFacts
-	QueryFailure          *QueryFailureFacts
-	QueryStatus           []QueryStatusFacts
+	PrimaryInput        *PrimaryInputFacts
+	Dispatcher          *DispatcherFacts
+	DispatchTurnaway    *DispatchTurnawayFacts
+	PermitWait          *PermitWaitFacts
+	ExpiredRange        *ExpiredRangeFacts
+	Component           Component
+	Stage               Stage
+	Result              Result
+	Operation           Operation
+	Direction           Direction
+	ReasonCode          ReasonCode
+	Duration            time.Duration
+	Counts              Counts
+	Trace               TraceFields
+	Err                 error
+	CapacityBudget      CapacityBudget
+	CapacityRejection   *CapacityRejectionFacts
+	SlotBudgetUsage     *SlotBudgetUsageFacts
+	SlotTiming          *SlotTimingFacts
+	SourceKind          SourceKind
+	QueryPermit         *QueryPermitFacts
+	NoDataSlot          *NoDataSlotFacts
+	TargetResolution    *TargetResolutionFacts
+	NoDataStall         *NoDataStallFacts
+	NoDataAbsence       *NoDataAbsenceFacts
+	GapProgress         *GapProgressFacts
+	NoDataMemoryRefusal *NoDataMemoryRefusalFacts
+	NoDataMemoryWrite   *NoDataMemoryWriteFacts
+	NoDataMemoryRead    *NoDataMemoryReadFacts
+	NoDataMemoryRenewal *NoDataMemoryRenewalFacts
+	ExecutionEvidence   *ExecutionEvidenceFacts
+	FrozenStateRenewal  *FrozenStateRenewalFacts
+	SourceWithheld      *SourceWithheldFacts
+	NoDataCensus        *NoDataCensusFacts
+	SegmentContent      *SegmentContentFacts
+	RuntimeConfig       *RuntimeConfigFacts
+	QueryFailure        *QueryFailureFacts
+	QueryStatus         []QueryStatusFacts
+	// QueryTruncation is every physical query of the completion whose
+	// answer may have been cut by the query service's terms cap.
+	QueryTruncation       []QueryTruncationFacts
 	QueryUnavailable      []QueryUnavailableFacts
 	QueryTiming           *QueryTimingFacts
 	SlotReadiness         *SlotReadinessFacts
@@ -2524,6 +2527,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
 	observation.QueryFailure = normalizeQueryFailure(observation.Component, observation.Stage, observation.QueryFailure)
 	observation.QueryStatus = normalizeQueryStatus(observation.Component, observation.Stage, observation.QueryStatus)
+	observation.QueryTruncation = normalizeQueryTruncation(observation.QueryTruncation)
 	observation.QueryUnavailable = normalizeQueryUnavailable(observation.Component, observation.Stage, observation.QueryUnavailable)
 	observation.SlotReadiness = normalizeSlotReadiness(observation.SlotReadiness)
 	if observation.RuntimeConfig != nil {

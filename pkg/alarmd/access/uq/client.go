@@ -682,6 +682,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 	var isPartial *bool
 	var resultTableIDs []string
 	var totalSeries, totalRecords, nullIdentityFields uint64
+	cut := newTermsCutCounter(attempt.Spec)
 	// offGrid is a series of an unaligned query that came back bucketed on
 	// some grid other than its request's own (errOffRequestGrid).
 	offGrid := false
@@ -717,6 +718,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 					return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: decode series: %w", err)
 				}
 				totalSeries++
+				cut.add(series)
 				if scanned != nil {
 					scanned.Series = totalSeries
 					scanned.Records += uint64(len(series.Values))
@@ -844,10 +846,15 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 	if *isPartial || status != nil && status.Code == queryTSPartial {
 		completeness = execution.CompletenessPartial
 	}
+	var truncation *execution.ProviderTruncationFact
+	if dimension, suspected := cut.suspected(); suspected {
+		truncation = &execution.ProviderTruncationFact{Kind: execution.TruncationTermsCut, Dimension: dimension, Cap: esTermsCap,
+			SourceSemantics: cut.source}
+	}
 	return execution.ProviderCompletion{Ref: ref, PhysicalQuery: attempt.Spec.Digest,
 		Completeness: completeness, DataState: dataState, Delivery: delivery,
 		RouteFacts: execution.ProviderRouteFacts{ProviderRouteRef: attempt.Spec.PlanFacts.ProviderRouteRef,
-			ResultTableIDs: append([]string(nil), resultTableIDs...), Status: passthroughStatus,
+			ResultTableIDs: append([]string(nil), resultTableIDs...), Status: passthroughStatus, Truncation: truncation,
 			Attempts: []execution.RouteAttemptFact{{AttemptNo: attempt.AttemptNo,
 				Endpoint: client.endpoint, Result: execution.RouteAttemptSucceeded, Detail: passthroughDetail}}},
 		Stats: stats}, nil
