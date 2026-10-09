@@ -60,10 +60,6 @@ func TestARefusalBuiltFromAnErrorCarriesWhatTheErrorSaid(t *testing.T) {
 		{"a fixed algorithm over another query", `{"agg_interval":60,"result_table_id":"system.cpu"}`,
 			`{"level":1,"type":"ProcPort","config":{}}`, refusalRecovery,
 			"LEVEL", "ALGORITHM_QUERY_INVALID", "canonical"},
-		// The decoder's account names what it found there, which a fixed
-		// sentence about the window could not.
-		{"a recovery that does not decode", refusalQuery, refusalThreshold, `{"check_window":"x"}`,
-			"LEVEL", "RECOVERY_CONFIG_INVALID", "string"},
 		{"a recovery with no window", refusalQuery, refusalThreshold, `{"check_window":0}`,
 			"LEVEL", "RECOVERY_CONFIG_INVALID", "check_window"},
 	}

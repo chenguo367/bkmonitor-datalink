@@ -104,6 +104,12 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What:   "策略的查询配置没有写聚合周期，或写的是 0，已按平台的读法按 60 秒作为检测周期——策略在检测，不是被扣住",
 		Next:   "策略负责人在查询配置里写上聚合周期；改好后下一轮刷新按写的周期检测，这一行消失",
 		Action: ActionStrategyEdit},
+	// Under CONFIG_NOTED too: the level recovers, on the window the platform
+	// reads when it cannot read the one written.
+	"RECOVERY_CONFIG_DEFAULTED": {Kind: WithheldStrategyDefinition,
+		What:   "这一级别的恢复配置平台读不出窗口数（没写、为空、不是数字，或同一策略另一级别的恢复配置读不出——平台那时整条策略都用默认），已按平台的读法用默认 5 个周期恢复——策略在检测，不是被扣住",
+		Next:   "策略负责人给每个级别写上恢复周期数；改好后下一轮刷新按写的周期恢复，这一行消失",
+		Action: ActionStrategyEdit},
 	// Under CONFIG_NOTED too, and not a reading at all: the no-data
 	// configuration runs as written and can never alert, because the
 	// tracking horizon stops each absence before the trigger has its count.

@@ -318,6 +318,12 @@ const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
 // owner's choice to make and the warning tells them it is one.
 const ReasonNoDataTriggerBeyondHorizon = "NO_DATA_TRIGGER_BEYOND_HORIZON"
 
+// ReasonRecoveryConfigDefaulted names a Level whose recovery takes the
+// platform's default of 5 windows because the backend cannot read a recovery
+// window for it - its own, or another level's, since one unreadable detect
+// defaults the whole strategy there (recover.py:253-267).
+const ReasonRecoveryConfigDefaulted = "RECOVERY_CONFIG_DEFAULTED"
+
 // The item fields a strategy cannot be compiled without, each refused under
 // its own name with the field it names, as a rejected configuration (the
 // last good Plan stays). They used to be one word, filed as PLAN_INVALID, and
@@ -1981,13 +1987,26 @@ type legacyDetect struct {
 // differ are still two triggers at one level, which is refused.
 func sameLegacyDetect(left, right legacyDetect) bool {
 	if left.Level != right.Level || left.Connector != right.Connector ||
-		left.Trigger.Count != right.Trigger.Count || left.Trigger.CheckWindow != right.Trigger.CheckWindow {
+		!sameLegacyNumber(left.Trigger.Count, right.Trigger.Count) ||
+		!sameLegacyNumber(left.Trigger.CheckWindow, right.Trigger.CheckWindow) {
 		return false
 	}
 	if (left.Priority == nil) != (right.Priority == nil) || (left.Priority != nil && *left.Priority != *right.Priority) {
 		return false
 	}
 	return sameJSONValue(left.Trigger.Uptime, right.Trigger.Uptime) && sameJSONValue(left.Recovery, right.Recovery)
+}
+
+// sameLegacyNumber compares two of a detect's numbers by what the backend
+// reads them as, so "5" and 5 are one trigger; two it cannot read are equal
+// only when they are written the same.
+func sameLegacyNumber(left, right json.RawMessage) bool {
+	leftValue, leftOK := pythonInt(left)
+	rightValue, rightOK := pythonInt(right)
+	if leftOK || rightOK {
+		return leftOK && rightOK && leftValue == rightValue
+	}
+	return sameJSONValue(left, right)
 }
 
 // sameJSONValue compares two raw JSON values by what they decode to, so key
@@ -2011,13 +2030,78 @@ func sameJSONValue(left, right json.RawMessage) bool {
 	return leftOK && rightOK && reflect.DeepEqual(leftValue, rightValue)
 }
 
+// legacyTrigger keeps its numbers as written: the backend reads each with
+// int() (strategy.py:369-370), and a strategy whose writer quoted one is a
+// strategy the backend detects. Decoding them as integers failed the whole
+// strategy's decode on a "5"; pythonInt reads them per level instead.
 type legacyTrigger struct {
-	Count       uint32          `json:"count"`
-	CheckWindow uint32          `json:"check_window"`
+	Count       json.RawMessage `json:"count"`
+	CheckWindow json.RawMessage `json:"check_window"`
 	Uptime      json.RawMessage `json:"uptime"`
 }
-type legacyRecovery struct {
-	CheckWindow uint32 `json:"check_window"`
+
+// pythonInt reads a value of the platform's strategy document the way the
+// backend's int() reads it: a JSON number truncated toward zero, a string
+// of a decimal integer with any surrounding spaces, a boolean as 0 or 1.
+// Anything else - null, an absent key, text that is not an integer, a list
+// or an object - is what int() raises on, and is not a number.
+//
+// Writer data is read as the backend reads it, so a writer's "5" is 5. The
+// rule for alarmd's own configuration is the opposite and is deliberate:
+// that file is this process's, and a 1.5 there is refused by its path (see
+// the config package's strictIntegers). The two are not to be merged.
+func pythonInt(raw json.RawMessage) (int64, bool) {
+	text := strings.TrimSpace(string(raw))
+	switch text {
+	case "", "null":
+		return 0, false
+	case "true":
+		return 1, true
+	case "false":
+		return 0, true
+	}
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		value, err := strconv.ParseInt(strings.TrimSpace(unquoted), 10, 64)
+		return value, err == nil
+	}
+	number := json.Number(text)
+	if value, err := number.Int64(); err == nil {
+		return value, true
+	}
+	value, err := number.Float64()
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) >= math.MaxInt64 {
+		return 0, false
+	}
+	return int64(math.Trunc(value)), true
+}
+
+// legacyTriggerNumber is one of a trigger's two counts as the backend reads
+// it, refused with what was written when that is not a count of at least one.
+func legacyTriggerNumber(field string, raw json.RawMessage) (uint32, string) {
+	value, ok := pythonInt(raw)
+	switch {
+	case !ok:
+		written := strings.TrimSpace(string(raw))
+		if written == "" {
+			written = "missing"
+		}
+		return 0, dispositionDetail(fmt.Sprintf("trigger_config.%s %s is not a number the platform reads", field, written))
+	case value < 1 || value > math.MaxUint32:
+		return 0, fmt.Sprintf("trigger_config.%s is %d", field, value)
+	}
+	return uint32(value), ""
+}
+
+// legacyRecoveryWindow is one detect's recovery check_window as
+// get_recovery_configs reads it: int(detect["recovery_config"]["check_window"])
+// (strategy.py:379-392). Not readable when that raises - the section absent,
+// null, empty, not an object, without the key, or the key not a number.
+func legacyRecoveryWindow(raw json.RawMessage) (int64, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return 0, false
+	}
+	return pythonInt(fields["check_window"])
 }
 
 // onlyKeysThePlatformReads drops the keys of a legacy object that Python does
@@ -2252,6 +2336,38 @@ func compilePlan(
 	if warning := step.warningDisposition(sourceID, interval); warning != nil {
 		dispositions = append(dispositions, *warning)
 	}
+	// get_recovery_configs reads every detect's recovery, and one it cannot
+	// read raises for the whole strategy: the checker then takes its default
+	// for every level (recover.py:253-267). Found once, before the levels.
+	recoveryDefaulted, unreadableRecovery := false, uint32(0)
+	for _, detect := range source.Detects {
+		if _, readable := legacyRecoveryWindow(detect.Recovery); !readable {
+			recoveryDefaulted, unreadableRecovery = true, detect.Level
+			break
+		}
+	}
+	// get_trigger_configs builds one map over every detect too
+	// (strategy.py:358-375), and the trigger stage reads it for the whole
+	// strategy - in_alarm_time before any point (processor.py:667) and the
+	// checker for each point (checker.py:46) - so one count or check_window
+	// int() cannot read stops the strategy at every level, not the detect's
+	// own. Found once, before the levels; every level is refused naming it.
+	unreadableTrigger := ""
+	for _, detect := range source.Detects {
+		for _, field := range []struct {
+			name string
+			raw  json.RawMessage
+		}{{"count", detect.Trigger.Count}, {"check_window", detect.Trigger.CheckWindow}} {
+			if _, readable := pythonInt(field.raw); !readable && unreadableTrigger == "" {
+				written := strings.TrimSpace(string(field.raw))
+				if written == "" {
+					written = "missing"
+				}
+				unreadableTrigger = dispositionDetail(fmt.Sprintf(
+					"level %d's trigger_config.%s %s is not a number the platform reads", detect.Level, field.name, written))
+			}
+		}
+	}
 	for _, rawLevel := range levelIDs {
 		levelID := uint32(rawLevel)
 		detect, ok := detectByLevel[levelID]
@@ -2270,8 +2386,23 @@ func compilePlan(
 				detect, ok, borrowed = borrowedLegacyDetect(source.Detects[0]), true, true
 			}
 		}
-		if !ok || detect.Level == 0 || detect.Trigger.Count == 0 || detect.Trigger.CheckWindow == 0 || duplicate {
+		if !ok || detect.Level == 0 || duplicate {
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING"})
+			continue
+		}
+		if unreadableTrigger != "" {
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING",
+				Detail: unreadableTrigger})
+			continue
+		}
+		count, countRefused := legacyTriggerNumber("count", detect.Trigger.Count)
+		window, windowRefused := legacyTriggerNumber("check_window", detect.Trigger.CheckWindow)
+		if refused := countRefused + windowRefused; refused != "" {
+			if countRefused != "" && windowRefused != "" {
+				refused = countRefused + "; " + windowRefused
+			}
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING",
+				Detail: refused})
 			continue
 		}
 		levelInputs := compiledPlanInputs{missingHistoryAsZero: inputs.missingHistoryAsZero, primary: inputs.primary, osRestartHistory: inputs.osRestartHistory}
@@ -2321,17 +2452,32 @@ func compilePlan(
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "LEVEL_PRIORITY_INVALID"})
 			continue
 		}
-		recoveryConfig, recoveryEnabled, err := decodeLegacyRecovery(detect.Recovery)
-		if err != nil || (recoveryEnabled && recoveryConfig.CheckWindow == 0) {
-			detail := "recovery_config.check_window is 0"
-			if err != nil {
-				detail = dispositionDetail(err.Error())
+		// The recovery as the backend's checker reads it: every level
+		// recovers. Any detect whose recovery it cannot read defaults every
+		// level to 5 windows, since get_recovery_configs raises for the
+		// whole strategy (recover.py:253-267).
+		//
+		// A window of 0 or below stays refused as before. The backend's loop
+		// then runs zero times and recovers at once (recover.py:467-506);
+		// what this build should do with it is a rule difference awaiting
+		// product, registered in the trigger review of 2026-10-09, section 6.
+		recoveryWindows := uint32(legacyDefaultRecoveryWindows)
+		if written, readable := legacyRecoveryWindow(detect.Recovery); readable && !recoveryDefaulted {
+			if written < 1 {
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID",
+					Detail: fmt.Sprintf("recovery_config.check_window is %d", written)})
+				continue
 			}
-			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID",
-				Detail: detail})
-			continue
+			recoveryWindows = uint32(min(written, math.MaxUint32))
+		} else if !borrowed {
+			detail := fmt.Sprintf("recovery_windows=%d", legacyDefaultRecoveryWindows)
+			if readable {
+				detail += fmt.Sprintf("; level %d's recovery_config is not read", unreadableRecovery)
+			}
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted,
+				Reason: ReasonRecoveryConfigDefaulted, FieldPath: "detects[*].recovery_config.check_window", Detail: detail})
 		}
-		triggerFields := map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": step.Seconds, "window_size": detect.Trigger.CheckWindow}
+		triggerFields := map[string]any{"required_anomalies": count, "step_seconds": step.Seconds, "window_size": window}
 		if len(detect.Trigger.Uptime) > 0 && string(detect.Trigger.Uptime) != "null" {
 			triggerFields["uptime"] = detect.Trigger.Uptime
 			triggerFields["timezone_ref"] = "BUSINESS_LOCAL"
@@ -2343,7 +2489,7 @@ func compilePlan(
 			}
 		}
 		trigger, _ := json.Marshal(triggerFields)
-		recovery, _ := json.Marshal(map[string]any{"consecutive_windows": recoveryConfig.CheckWindow, "enabled": recoveryEnabled})
+		recovery, _ := json.Marshal(map[string]any{"consecutive_windows": recoveryWindows, "enabled": true})
 		connector := contract.LevelConnectorAND
 		if strings.EqualFold(detect.Connector, "or") {
 			connector = contract.LevelConnectorOR
@@ -2735,18 +2881,6 @@ func (inputs *compiledPlanInputs) merge(source compiledPlanInputs) {
 	for ref, facts := range source.queryPlans {
 		inputs.addQuery(ref, facts)
 	}
-}
-
-func decodeLegacyRecovery(raw json.RawMessage) (legacyRecovery, bool, error) {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" || trimmed == "{}" {
-		return legacyRecovery{}, false, nil
-	}
-	var recovery legacyRecovery
-	if err := json.Unmarshal(raw, &recovery); err != nil {
-		return legacyRecovery{}, false, err
-	}
-	return recovery, true, nil
 }
 
 // pythonDefaultAggInterval is the 60 seconds Python reads a missing or zero
