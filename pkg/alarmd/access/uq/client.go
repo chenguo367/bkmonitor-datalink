@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -108,9 +107,25 @@ type Client struct {
 	querySource string
 	limits      Limits
 	now         func() time.Time
-	// rangeRetries counts connections that failed before a response began and
-	// had to be re-dialed. See doRangeRequest.
-	rangeRetries atomic.Uint64
+}
+
+// markReplayable lets the transport send a query again, once, when the
+// pooled connection it picked turns out to have been closed by the server
+// before any response began.
+//
+// unify-query sets no IdleTimeout, so Go closes its idle connections at the
+// 3s ReadTimeout, while this client keeps them for 90s; between the server's
+// close and the client noticing it, a request can pick the dead connection
+// and fail with a bare EOF. Go re-sends such a request by itself only when it
+// counts it as replayable, and a POST is not one unless it carries an
+// Idempotency-Key or X-Idempotency-Key header (net/http, Request.isReplayable).
+// A header with a nil value is never written to the wire, so the mark costs
+// nothing and tells the server nothing; the transport re-sends only on a
+// reused connection, and only for a failure before any response, so a fresh
+// connection refused or a response that arrived is never repeated. A query is
+// a read, and sending it twice is safe.
+func markReplayable(request *http.Request) {
+	request.Header["X-Idempotency-Key"] = nil
 }
 
 func NewClient(endpoint, querySource string, httpClient *http.Client) (*Client, error) {
@@ -228,6 +243,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
 		request.Header.Set(name, value)
 	}
+	markReplayable(request)
 	started := client.now()
 	response, err := client.httpClient.Do(request)
 	if err != nil {
