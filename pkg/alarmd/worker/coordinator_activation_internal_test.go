@@ -282,3 +282,94 @@ func TestAPlanWhoseActivationChangedKeepsItsNoDataMemoryWhileItsSiblingsMoves(t 
 		t.Fatalf("no-data memory applied = %+v, want only the stable sibling's", memoryStore.applied)
 	}
 }
+
+// refusingAdmissionPorts is the sibling fixture with a State admission that
+// refuses one key deterministically.
+type refusingAdmissionPorts struct {
+	*activationSiblingPorts
+	refuse execution.StateKeyIdentity
+}
+
+func (ports refusingAdmissionPorts) AdmitRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateAdmissionResult, error) {
+	result, err := ports.activationSiblingPorts.AdmitRuntime(ctx, request)
+	for index := range result.Items {
+		if result.Items[index].Identity == ports.refuse {
+			result.Items[index].Status = execution.StateAdmissionDeterministicInvalid
+			result.Items[index].ReasonCode = execution.ReasonCode(contract.ReasonRecordInvalid)
+			result.Items[index].RefusalRule, result.Items[index].RefusalText = "fixture_rule", "refused for this case"
+		}
+	}
+	return result, err
+}
+
+// A Plan one of whose State writes the admission refused does not send that
+// series' events, so its no-data memory is not applied: the memory follows
+// the Plan's output, and part of the output did not go. The other side is the
+// same Plan with nothing refused, whose memory is applied.
+func TestAPlanWhoseStateAdmissionRefusedAWriteKeepsItsNoDataMemory(t *testing.T) {
+	for name, refused := range map[string]bool{"one write refused": true, "nothing refused": false} {
+		t.Run(name, func(t *testing.T) {
+			contractRef := execution.FrozenExecutionContractRef{
+				Slot:             execution.SlotIdentity{QueryGroup: "query-group", EvaluationTime: 1_788_000_000},
+				SnapshotRevision: "snapshot-v1", QueryRevision: "query-v1", ScheduleRevision: "schedule-v1",
+				ScheduleSegmentStart: 1_787_999_940, DuePlanSetDigest: "due-set-v1",
+			}
+			request := execution.SlotExecutionRequest{
+				Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1,
+				OwnerFence:       execution.OwnerFence{QueryGroup: "query-group", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1"},
+				ExpectedNextSlot: contractRef.Slot.EvaluationTime,
+			}
+			plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "stable"}
+			duePlans := []execution.DuePlan{{Identity: plan, CompiledPlan: internalCompiledPlan(t, "stable", 1, 60),
+				StateGeneration: "stable-generation", StateApplyEpoch: 1, ScheduleRevision: "stable-schedule"}}
+			applyVersion, err := execution.BuildApplyVersion(contractRef, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := execution.StateKeyIdentity{Plan: plan, StateGeneration: "stable-generation", SeriesIdentityDigest: "kept-series"}
+			refusedKey := execution.StateKeyIdentity{Plan: plan, StateGeneration: "stable-generation", SeriesIdentityDigest: "refused-series"}
+			ports := refusingAdmissionPorts{activationSiblingPorts: &activationSiblingPorts{contract: contractRef,
+				changedPlan: execution.PlanIdentity{StrategyID: "not-due"}, stablePlan: plan}}
+			if refused {
+				ports.refuse = refusedKey
+			}
+			memoryStore := &emptyNoDataStore{}
+			coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10}, ports: Ports{
+				Activation: ports, Sequencer: ports, Admission: ports, GapGuard: ports, NoData: memoryStore, Hosts: SharedHostBusiness, Events: ports, State: ports, Progress: ports,
+				Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+			}}
+			header := execution.InternalExecutionHeader{Contract: contractRef, DuePlans: duePlans}
+			bindings := []execution.NamedInputBinding{{Consumer: execution.ConsumerRef{Plan: plan}, Role: execution.InputRolePrimary,
+				Completeness: execution.CompletenessFull, DataState: execution.DataStateData}}
+			loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{
+				{Identity: kept, VersionComparison: execution.ApplyVersionPersistedOlder},
+				{Identity: refusedKey, VersionComparison: execution.ApplyVersionPersistedOlder},
+			}}
+			evaluated := execution.EvaluationResult{
+				Contract: contractRef, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+				Plans: []execution.PlanEvaluationResult{{Plan: plan, Disposition: execution.PlanDecided, StateResults: []execution.StateEvaluation{
+					{Mutation: execution.StateMutation{Identity: kept, ApplyVersion: applyVersion, MutationDigest: "kept-digest"},
+						Events: []contract.TriggerEventV1{{EventID: "kept-event"}}},
+					{Mutation: execution.StateMutation{Identity: refusedKey, ApplyVersion: applyVersion, MutationDigest: "refused-digest"},
+						Events: []contract.TriggerEventV1{{EventID: "refused-event"}}},
+				}}},
+			}
+			memory := []execution.PlanNoDataMutation{{Identity: execution.PlanNoDataIdentity{Plan: plan, StateGeneration: "stable-generation"}}}
+
+			_, _ = coordinator.finalizePreparedWithGaps(context.Background(), request, header, bindings, loaded,
+				execution.GapLoadResult{}, evaluated, memory, queryAvailabilityEvidence{},
+				seriesCensus{Due: len(loaded.Items), Read: len(loaded.Items)}, nil)
+			sentRefused := false
+			for _, event := range ports.events {
+				sentRefused = sentRefused || event.EventID == "refused-event"
+			}
+			if sentRefused != !refused {
+				t.Fatalf("second series' event sent = %t, want %t: an event goes out exactly when its write was admitted",
+					sentRefused, !refused)
+			}
+			if want := map[bool]int{true: 0, false: 1}[refused]; len(memoryStore.applied) != want {
+				t.Fatalf("no-data memory applied = %+v, want %d", memoryStore.applied, want)
+			}
+		})
+	}
+}

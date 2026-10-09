@@ -778,3 +778,24 @@ func (failingStatePort) RenewFrozenRuntime(
 ) (execution.FrozenStateRenewalResult, error) {
 	return freshFrozenRenewals(request), nil
 }
+
+// A Slot completed beyond its budget replaces every result with a budget gap,
+// and the no-data memory those results decided goes with them: applied, it
+// would record decisions whose events are never sent.
+func TestASlotCompletedBeyondItsBudgetDiscardsTheNoDataMemoryItsResultsDecided(t *testing.T) {
+	due := noDataWiredPlan(t)
+	stream := noDataWiredStream(t, due, &emptyNoDataStore{})
+	stream.noDataMutations = []execution.PlanNoDataMutation{{Identity: due.NoDataIdentity()}}
+	// The Plan's gap marker as the load would have read it: none yet, so the
+	// budget gap opens one.
+	stream.gaps = execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{Identity: due.GapIdentity(), Status: execution.GapMissing}}}
+	if err := stream.completeBeyondSlotBudget(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(stream.noDataMutations) != 0 {
+		t.Fatalf("no-data memory still queued after the results were discarded: %+v", stream.noDataMutations)
+	}
+	if len(stream.evaluated.Plans) != 1 || stream.evaluated.Plans[0].ReasonCode != execution.ReasonCode(contract.ReasonExecutionBudgetExhausted) {
+		t.Fatalf("results = %+v, want the Plan's budget gap in place of what it decided", stream.evaluated.Plans)
+	}
+}
