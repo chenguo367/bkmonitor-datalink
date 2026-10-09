@@ -37,8 +37,11 @@ type indexEntry struct {
 	lastReadAttempt, lastReconcileAttempt        time.Time
 	index, missing, suppressed                   map[string]struct{}
 	alerts                                       []Alert
-	reconcileRequested                           bool
-	reason                                       string
+	// severities is alerts' severity by fingerprint, for the alerts the
+	// calibration named one for; see standing.
+	severities         map[string]string
+	reconcileRequested bool
+	reason             string
 }
 
 type indexState struct {
@@ -63,18 +66,23 @@ type indexState struct {
 	// every round would otherwise be forever younger than
 	// SentConfirmAfter, and the fallback would forget the alerts it exists
 	// to let recover. Bounded by MaxLocalEntries; past it a new alert is
-	// not recorded and counted as an eviction.
-	opened map[member]time.Time
+	// not recorded and counted as an eviction. Each record also keeps the
+	// severity the alert stands at, which decides whether a later RECOVERY
+	// closes it (see standing).
+	opened map[member]openRecord
 	// The latest assessment of this process's own sends against the sets;
 	// see assessSent.
 	sentInSet, sentNotInSet int
 	disjoint                bool
 }
 
-// noteOpened records the first ABNORMAL of an alert. Called with the lock
-// held.
-func (cache *Cache) noteOpened(m member, now time.Time) {
-	if _, ok := cache.index.opened[m]; ok {
+// noteOpened records the first ABNORMAL of an alert, and on every one after
+// it the severity the alert now stands at; the first send time is kept.
+// Called with the lock held.
+func (cache *Cache) noteOpened(m member, now time.Time, severity string) {
+	if record, ok := cache.index.opened[m]; ok {
+		record.severity = severity
+		cache.index.opened[m] = record
 		return
 	}
 	if len(cache.index.opened) >= cache.index.options.MaxLocalEntries {
@@ -82,7 +90,7 @@ func (cache *Cache) noteOpened(m member, now time.Time) {
 		cache.openRefusals++
 		return
 	}
-	cache.index.opened[m] = now
+	cache.index.opened[m] = openRecord{at: now, severity: severity}
 }
 
 func NewIndex(options IndexOptions) (*Cache, error) {
@@ -105,7 +113,7 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 		added: map[member]stamped{}, removed: map[member]stamped{},
 		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
 		gateSince: options.Now(),
-		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]time.Time{}},
+		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]openRecord{}},
 	}
 	return cache, nil
 }
@@ -462,7 +470,7 @@ func (cache *Cache) refreshIndex(ctx context.Context) {
 // refresh round; the work is one pass over the local entries.
 func (cache *Cache) assessSent() {
 	inSet, notInSet := 0, 0
-	for m, first := range cache.index.opened {
+	for m, record := range cache.index.opened {
 		entry := cache.index.entries[m.key]
 		if entry == nil {
 			continue
@@ -471,7 +479,7 @@ func (cache *Cache) assessSent() {
 		if entry.calibratedStarted.After(read) {
 			read = entry.calibratedStarted
 		}
-		if read.IsZero() || first.After(read.Add(-SentConfirmAfter)) {
+		if read.IsZero() || record.at.After(read.Add(-SentConfirmAfter)) {
 			continue
 		}
 		_, inIndex := entry.index[m.fingerprint]
@@ -535,6 +543,8 @@ func entrySize(key StrategyKey, entry *indexEntry) (int, int) {
 		count++
 		bytes += len(alert.AlertID) + len(alert.EventSourceID) + len(alert.Fingerprint) + len(alert.Severity) + 64
 	}
+	// The lookup shares the alerts' strings; what it adds is its own slots.
+	bytes += len(entry.severities) * 48
 	return count, bytes
 }
 
@@ -606,6 +616,12 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 		next.index[value] = struct{}{}
 	}
 	next.alerts = append([]Alert(nil), result.Alerts...)
+	next.severities = make(map[string]string, len(next.alerts))
+	for _, alert := range next.alerts {
+		if alert.Severity != "" {
+			next.severities[alert.Fingerprint] = alert.Severity
+		}
+	}
 	if !cache.admitEntry(job.key, &next) {
 		entry.reason = "capacity"
 		cache.evictions++
@@ -641,15 +657,8 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 	answer := AnswerSelfMaintained
 	present := false
 	if entry != nil {
-		_, present = entry.index[m.fingerprint]
-		if _, missing := entry.missing[m.fingerprint]; missing {
-			present = true
-		}
-		if cache.calibrated(entry, now) {
-			if _, suppressed := entry.suppressed[m.fingerprint]; suppressed {
-				present = false
-			}
-		} else {
+		present = cache.setCarries(entry, m.fingerprint, now)
+		if !cache.calibrated(entry, now) {
 			entry.reconcileRequested = true
 		}
 		if !entry.indexReadAt.IsZero() || !entry.calibratedAt.IsZero() {

@@ -11,16 +11,21 @@ package contract
 
 // OpenAlertSet is the consumer's set of open alerts as this process knows it.
 //
-// The consumer keeps one alert per series fingerprint and resolves it on any
-// RECOVERY envelope, so an envelope for a series it holds no alert on is not
-// a decision it can act on: it is written, read back and closed as an orphan,
-// at the cost of a store write and several reads. A healthy series produces
-// a RECOVERY result every cycle, which puts that cost at the population of
-// healthy series per minute. The set lets the sender skip those envelopes.
+// The consumer keeps at most one alert per series fingerprint, at one Level.
+// A RECOVERY closes it only when the recovered Level is the one the alert
+// stands at; a RECOVERY for any other Level, like one for a series it holds
+// no alert on, is not a decision it can act on: it is written, read back and
+// closed as an orphan, at the cost of a store write and several reads. A
+// healthy series produces a RECOVERY result every cycle, which puts that cost
+// at the population of healthy series per minute. The set lets the sender
+// skip the envelopes for series with no alert.
 //
 // What the set says is membership only. It cannot say at which Level the
 // alert stands, so it decides whether an envelope goes, never whether the
 // series recovered; that stays with the Level results and the recovery gate.
+// An implementation that keeps its own record of what it sent has to follow
+// the Level too, or a RECOVERY for another Level would take an alert that is
+// still open out of the set.
 //
 // The implementation decides how it knows: an authoritative copy the consumer
 // publishes, or what this process itself has sent while that copy is not

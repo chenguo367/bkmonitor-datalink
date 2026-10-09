@@ -184,6 +184,9 @@ type stamped struct {
 	// longer before it lets the alert through again (removalHides), so a
 	// consumer that is behind gets each recovery at most once more.
 	resent bool
+	// severity is, in removed, the severity the RECOVERY closed the alert
+	// at: while the set still carries the alert, it stands there (standing).
+	severity string
 }
 
 // Cache is this process's copy of the consumer's open alert set. It
@@ -250,12 +253,16 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	return open
 }
 
-// Acknowledged records what this process sent once the sink has taken it:
-// an ABNORMAL opens the fingerprint in the copy, a RECOVERY closes it. Only
-// envelopes the consumer will see count: a compatibility-protocol envelope
-// goes to another consumer, and one without a fingerprint opens nothing.
-// Called after the broker ACK and never before, or a batch the sink refused
-// would move the copy for alerts that were never opened.
+// Acknowledged records what this process sent once the sink has taken it,
+// as the consumer will apply it (nextStanding): a trigger opens the
+// fingerprint in the copy, or keeps it open at the severity the alert now
+// stands at; a RECOVERY closes it only when it resolves that severity. A
+// RECOVERY for any other Level leaves the alert open, as it does in the
+// consumer. Only envelopes the consumer will see count: a
+// compatibility-protocol envelope goes to another consumer, and one without
+// a fingerprint opens nothing. Called after the broker ACK and never
+// before, or a batch the sink refused would move the copy for alerts that
+// were never opened.
 func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 	if cache == nil || len(events) == 0 {
 		return
@@ -271,12 +278,14 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 		if cache.index.entries[m.key] == nil {
 			continue
 		}
-		switch event.EventKind {
-		case contract.TriggerEventAbnormal:
+		wasOpen, severity := cache.standing(m, now)
+		open, next, triggered := nextStanding(wasOpen, severity, event.LevelResults)
+		switch {
+		case triggered:
 			cache.added[m] = stamped{at: now}
 			delete(cache.removed, m)
-			cache.noteOpened(m, now)
-		case contract.TriggerEventRecovery:
+			cache.noteOpened(m, now, next)
+		case wasOpen && !open:
 			// A RECOVERY for an alert the ledger still holds closed is the
 			// same recovery sent again; the entry remembers it. Departures
 			// do not count it: the alert left added and opened with the
@@ -285,7 +294,7 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 			if resending {
 				cache.recoveriesResent++
 			}
-			cache.removed[m] = stamped{at: now, resent: resending}
+			cache.removed[m] = stamped{at: now, resent: resending, severity: severity}
 			cache.leaveSent(m, DepartureRecoveryAcked)
 			cache.leaveOpen(m, DepartureRecoveryAcked)
 		}

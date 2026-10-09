@@ -415,7 +415,7 @@ func TestSeverityNamesTheBuiltInLevelsAndPassesOthersThrough(t *testing.T) {
 		"a level with its own name": {contract.LevelResultV1{LevelID: 9, LevelCode: "notice"}, "notice"},
 		"a level with no name":      {contract.LevelResultV1{LevelID: 9}, "level_9"},
 	} {
-		if got := severityFor(test.level); got != test.want {
+		if got := SeverityFor(test.level); got != test.want {
 			t.Errorf("%s: severity = %q, want %q", name, got, test.want)
 		}
 	}
@@ -445,10 +445,10 @@ func TestSeverityNamesTheBuiltInLevelsAndPassesOthersThrough(t *testing.T) {
 func TestALevelCodeTheConsumerCannotCarryIsDerivedAndCounted(t *testing.T) {
 	long := strings.Repeat("s", MaxSeverityBytes+1)
 	exact := strings.Repeat("s", MaxSeverityBytes)
-	if got := severityFor(contract.LevelResultV1{LevelID: 9, LevelCode: long}); got != "level_9" {
+	if got := SeverityFor(contract.LevelResultV1{LevelID: 9, LevelCode: long}); got != "level_9" {
 		t.Fatalf("severity for a %d-byte code = %q, want the derived name", len(long), got)
 	}
-	if got := severityFor(contract.LevelResultV1{LevelID: 9, LevelCode: exact}); got != exact {
+	if got := SeverityFor(contract.LevelResultV1{LevelID: 9, LevelCode: exact}); got != exact {
 		t.Fatalf("severity for a %d-byte code = %q, want the code itself: the bound is inclusive", len(exact), got)
 	}
 	if SeverityIsBuiltIn(contract.LevelResultV1{LevelID: 9, LevelCode: long}) {

@@ -19,8 +19,8 @@ import (
 
 // resendFixture is a copy with the production cadences: the set read every
 // minute, the local retention a minute, a calibration every half hour. The
-// consumer's set is members, and a calibration reports the same, unless
-// calibrationFails.
+// consumer's set is members, and a calibration reports the same, each at
+// Level 1's severity as a current Console names it, unless calibrationFails.
 type resendFixture struct {
 	c                *clock
 	cache            *Cache
@@ -39,7 +39,7 @@ func newResendFixture(t *testing.T, members ...string) *resendFixture {
 		if f.calibrationFails {
 			return Reconciliation{}, ErrIncomplete
 		}
-		return Reconciliation{Members: append([]string(nil), f.members...)}, nil
+		return Reconciliation{Members: append([]string(nil), f.members...), Alerts: alertsAt("critical", f.members...)}, nil
 	})
 	f.cache = mustIndex(t, options)
 	if err := f.cache.SetTracked([]StrategyKey{keyA}); err != nil {

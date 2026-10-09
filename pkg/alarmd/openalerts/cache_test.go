@@ -29,17 +29,22 @@ var (
 	keyB   = StrategyKey{TenantID: tenant, StrategyID: "1002"}
 )
 
+// abnormal and recovery are single-Level envelopes in the shape the
+// evaluator publishes them: the Level's result rides with the kind, and the
+// copy reads the result, as the consumer does.
 func abnormal(key StrategyKey, fingerprint string) contract.TriggerEventV1 {
 	return contract.TriggerEventV1{
 		EventKind: contract.TriggerEventAbnormal, TenantID: key.TenantID, DedupeMD5: fingerprint,
-		StrategyRef: &contract.StrategySnapshotRef{TenantID: key.TenantID, Revision: 1},
-		PlanRef:     contract.RuntimePlanRefV1{StrategyID: key.StrategyID},
+		StrategyRef:  &contract.StrategySnapshotRef{TenantID: key.TenantID, Revision: 1},
+		PlanRef:      contract.RuntimePlanRefV1{StrategyID: key.StrategyID},
+		LevelResults: []contract.LevelResultV1{{LevelID: 1, Priority: 1, Result: contract.LevelResultAbnormal}},
 	}
 }
 
 func recovery(key StrategyKey, fingerprint string) contract.TriggerEventV1 {
 	event := abnormal(key, fingerprint)
 	event.EventKind = contract.TriggerEventRecovery
+	event.LevelResults = []contract.LevelResultV1{{LevelID: 1, Priority: 1, Result: contract.LevelResultRecovery}}
 	return event
 }
 
