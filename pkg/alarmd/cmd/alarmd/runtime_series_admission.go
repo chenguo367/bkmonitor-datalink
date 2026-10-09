@@ -32,9 +32,17 @@ import (
 // that several failed reads in a row are not called stale and short enough that
 // a cache which stopped being refreshed is visible well before an operator
 // would notice through alerts.
+//
+// When the writer publishes when it published, the facts are aged from that
+// instead, held to three of its publish rounds (five minutes each on the CMDB
+// cache writer): one missed round is tolerated, and the index does not go in
+// and out of stale with a single slow build; a writer that stopped is stale
+// fifteen minutes after its last publish, not when its keys expire a week
+// later.
 const (
-	cmdbIndexRefreshInterval = time.Minute
-	cmdbIndexStalenessBound  = 10 * cmdbIndexRefreshInterval
+	cmdbIndexRefreshInterval         = time.Minute
+	cmdbIndexStalenessBound          = 10 * cmdbIndexRefreshInterval
+	cmdbIndexPublishedStalenessBound = 15 * time.Minute
 )
 
 // How often one plan may describe its object-identity rejections in the log.
@@ -70,6 +78,7 @@ func buildSeriesAdmission(
 	store, err := cmdbcache.NewStore(reader, cmdbcache.StoreOptions{
 		RefreshInterval: cmdbIndexRefreshInterval,
 		MaxAge:          cmdbIndexStalenessBound,
+		PublishedMaxAge: cmdbIndexPublishedStalenessBound,
 		RefusalsChanged: cmdbRefusalLogger(logger),
 	})
 	if err != nil {
@@ -168,7 +177,7 @@ func maintainCMDBIndex(ctx context.Context, store *cmdbcache.Store, recorder *me
 func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 	health := store.Health()
 	recorder.SetCMDBHostIndex(
-		health.Hosts, health.Age.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
+		health.Hosts, health.Age.Seconds(), health.PublishedAge.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
 	)
 	recorder.SetCMDBServiceInstanceIndex(health.ServiceInstances)
 	publishCMDBBusinessMappings(recorder, health)

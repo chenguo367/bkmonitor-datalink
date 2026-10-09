@@ -30,10 +30,11 @@ type indexLoader interface {
 // declares itself degraded once that index is older than a stated bound, so the
 // decision to act on staleness belongs to the caller and is visible.
 type Store struct {
-	reader   indexLoader
-	maxAge   time.Duration
-	interval time.Duration
-	now      func() time.Time
+	reader          indexLoader
+	maxAge          time.Duration
+	publishedMaxAge time.Duration
+	interval        time.Duration
+	now             func() time.Time
 
 	refusalsChanged func(RefusedRecords)
 
@@ -47,10 +48,14 @@ type Store struct {
 type StoreOptions struct {
 	// RefreshInterval is how often the index is rebuilt.
 	RefreshInterval time.Duration
-	// MaxAge is how old the held index may get before the store reports itself
-	// degraded. It is not a deletion bound: a degraded store still answers with
-	// what it has, so the caller can choose between stale facts and none.
+	// MaxAge is how old the held index may get, counted from alarmd's own
+	// read, before the store reports itself degraded. It is not a deletion
+	// bound: a degraded store still answers with what it has, so the caller
+	// can choose between stale facts and none.
 	MaxAge time.Duration
+	// PublishedMaxAge is how old the facts may get, counted from the writer's
+	// publish time, when the index read one. Zero means MaxAge.
+	PublishedMaxAge time.Duration
 	// Now is injectable so the age rules are testable without sleeping.
 	Now func() time.Time
 	// RefusalsChanged, when set, is called after a refresh whose load
@@ -70,30 +75,80 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	if options.MaxAge <= options.RefreshInterval {
 		return nil, errors.New("alarmd cmdbcache: the staleness bound must exceed the refresh interval")
 	}
+	if options.PublishedMaxAge < 0 {
+		return nil, errors.New("alarmd cmdbcache: the publish staleness bound cannot be negative")
+	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{reader: reader, maxAge: options.MaxAge, interval: options.RefreshInterval, now: now,
+	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, interval: options.RefreshInterval, now: now,
 		refusalsChanged: options.RefusalsChanged}, nil
 }
 
-// CurrentWithinBound is the index in force and whether it is younger than the
-// staleness bound. Admission acts only on an index within it: past it, the
-// CMDB facts are unavailable, admitted by name rather than decided on
-// (decision-013 section 2 #12 and section 5.1 item 4: a whole index that is
-// unavailable or stale is admitted and named host_facts_unavailable), and a
-// rejection made on them would be closed on facts nobody can vouch for.
-func (store *Store) CurrentWithinBound() (*Index, bool) {
+// The reasons an index is not one to decide on, as Health and every caller
+// of Usable name them.
+const (
+	IndexNeverLoaded = "never_loaded"
+	IndexStale       = "index_stale"
+	IndexEmpty       = "index_empty"
+)
+
+// factsAge is how old an index's facts are and the bound they are held to:
+// from the writer's publish time when the index read one, else from alarmd's
+// own read. The publish time is the earlier of the two - read before the
+// hashes - so it also covers a run of failed reads; a writer clock ahead of
+// this one reads as just published.
+func (store *Store) factsAge(index *Index) (time.Duration, time.Duration) {
+	now := store.now()
+	if published := index.PublishedAt(); !published.IsZero() {
+		age := now.Sub(published)
+		if age < 0 {
+			age = 0
+		}
+		if store.publishedMaxAge == 0 {
+			return age, store.maxAge
+		}
+		return age, store.publishedMaxAge
+	}
+	return now.Sub(index.BuiltAt()), store.maxAge
+}
+
+// judge is the one staleness and emptiness judgement on a held index:
+// never_loaded, index_stale or index_empty, and "" for an index callers may
+// decide on. Admission, every target selector, the exclusions, no-data's
+// host resolution and attribution all read it through Usable, and Health
+// reports it, so no two of them can disagree about the same snapshot.
+func (store *Store) judge(index *Index) string {
+	if index == nil {
+		return IndexNeverLoaded
+	}
+	if age, bound := store.factsAge(index); age > bound {
+		return IndexStale
+	}
+	if index.Hosts() == 0 {
+		// An empty host cache would put every host-scoped strategy out of
+		// scope at once. That is never a real CMDB state here, so it is
+		// reported as degradation rather than acted on as fact.
+		return IndexEmpty
+	}
+	return ""
+}
+
+// Usable is the index in force and why it may not be decided on, "" when it
+// may. Past the bound, or empty, or never loaded, the CMDB facts are
+// unavailable: admitted by name rather than decided on (decision-013 section
+// 2 #12 and section 5.1 item 4), never the basis of a close, and no-data
+// does not judge a target on them. The index is returned either way, for a
+// caller that reports what it holds.
+func (store *Store) Usable() (*Index, string) {
 	if store == nil {
-		return nil, false
+		return nil, IndexNeverLoaded
 	}
 	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-	if store.index == nil {
-		return nil, false
-	}
-	return store.index, store.now().Sub(store.index.BuiltAt()) <= store.maxAge
+	index := store.index
+	store.mutex.RUnlock()
+	return index, store.judge(index)
 }
 
 // Current returns the index in force, or nil before the first successful load.
@@ -106,32 +161,26 @@ func (store *Store) Current() *Index {
 	return store.index
 }
 
-// targetIndex pins the held snapshot and the result of its latest refresh
-// together. Exclusions must not treat a failed read as an absent member.
-func (store *Store) targetIndex() (*Index, error) {
+// targetIndex pins the held snapshot, the one judgement on it, and the
+// result of its latest refresh together, so every selector of one resolution
+// reads the same snapshot the same way, and a snapshot served past a failed
+// refresh can be marked.
+func (store *Store) targetIndex() (*Index, string, error) {
 	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-	return store.index, store.lastError
+	index, readErr := store.index, store.lastError
+	store.mutex.RUnlock()
+	return index, store.judge(index), readErr
 }
 
-// HostIndexResolved reports whether this store can answer about hosts at all.
-//
-// It is the same judgement Health makes, read for a different question. Health
-// says how this process is doing; this says whether a caller may act on the
-// answers it gets, and the states where it may not are the ones Health names
-// never_loaded, index_empty and index_stale: with no index every host is
-// "not held", and with an empty one so is every host, which is
-// indistinguishable from a target whose hosts have all gone.
-//
-// An index past its staleness bound does not resolve either. Its answers are
-// facts nobody can vouch for any more, and no-data judges only on facts that
-// were there, as admission does on the same bound (CurrentWithinBound;
-// decision-013, section 2 #12 and section 5.1 item 4). The bound is ten
-// refresh intervals: a refresh failing for that long, not a hiccup, so what
-// this stops is deciding on a CMDB that has not answered for that long.
+// HostIndexResolved reports whether this store can answer about hosts at all:
+// whether Usable says the index may be decided on. With no index every host
+// is "not held", and with an empty one so is every host, which is
+// indistinguishable from a target whose hosts have all gone; past the bound
+// the answers are facts nobody can vouch for, and no-data judges only on
+// facts that were there, as admission does on the same judgement.
 func (store *Store) HostIndexResolved() bool {
-	index, within := store.CurrentWithinBound()
-	return index != nil && within && index.Hosts() > 0
+	_, reason := store.Usable()
+	return reason == ""
 }
 
 // Refresh rebuilds the index once. A failed refresh leaves the previous index
@@ -167,8 +216,12 @@ type Health struct {
 	// instances is a real state - but it is what a series naming an instance
 	// will be admitted-unavailable against, so it is published beside the
 	// host count for that reading.
-	ServiceInstances  int
+	ServiceInstances int
+	// Age is how long ago alarmd read the held index. PublishedAge is how
+	// long ago the writer published what it read, when the writer says;
+	// SourceAge is the other writer's last attempt, shown and not decided on.
 	Age               time.Duration
+	PublishedAge      time.Duration
 	SourceAge         time.Duration
 	Degraded          bool
 	DegradedReason    string
@@ -199,7 +252,7 @@ func (store *Store) Health() Health {
 	health := Health{ConsecutiveErrors: store.failures, Refreshes: store.refreshes}
 	if store.index == nil {
 		health.Degraded = true
-		health.DegradedReason = "never_loaded"
+		health.DegradedReason = IndexNeverLoaded
 		return health
 	}
 	now := store.now()
@@ -210,19 +263,14 @@ func (store *Store) Health() Health {
 	health.NamespaceBusinessMapping = store.index.NamespaceBusinessStats()
 	health.Refused = store.index.Refused()
 	health.Age = now.Sub(store.index.BuiltAt())
+	if published := store.index.PublishedAt(); !published.IsZero() {
+		health.PublishedAge = now.Sub(published)
+	}
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
 		health.SourceAge = now.Sub(source)
 	}
-	switch {
-	case health.Age > store.maxAge:
-		health.Degraded = true
-		health.DegradedReason = "index_stale"
-	case store.index.Hosts() == 0:
-		// An empty host cache would put every host-scoped strategy out of
-		// scope at once. That is never a real CMDB state here, so it is
-		// reported as degradation rather than acted on as fact.
-		health.Degraded = true
-		health.DegradedReason = "index_empty"
+	if reason := store.judge(store.index); reason != "" {
+		health.Degraded, health.DegradedReason = true, reason
 	}
 	return health
 }

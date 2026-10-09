@@ -253,7 +253,7 @@ Source objects the Catalog the leader last built did not turn into a Plan, by wh
 
 Labels: `kind`
 
-Age of the CMDB index alarmd holds, and of the platform refresh it was built from.
+Age of the CMDB index alarmd holds, by kind: index, since alarmd read it; published, since the writer published what was read, which staleness is judged on when the writer says (0 when it does not); source, since another writer's last full-pass attempt, shown and not judged on.
 
 ## bkmonitor_alarmd_cmdb_host_index_degraded
 

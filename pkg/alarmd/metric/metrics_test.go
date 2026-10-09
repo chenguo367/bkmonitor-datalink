@@ -656,7 +656,7 @@ func populateAllCustomLabelCombinations(recorder *Recorder) {
 		}
 	}
 	for reason := range cmdbIndexReasons {
-		recorder.SetCMDBHostIndex(1, 1, 1, reason != "none", reason)
+		recorder.SetCMDBHostIndex(1, 1, 1, 1, reason != "none", reason)
 	}
 	for _, pair := range observability.AllMetricComponentStages() {
 		for _, result := range observability.AllResults() {
@@ -811,7 +811,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("retained_peak_census_groups"):           1,
 		fqName("retained_peak_census_overflow"):         1,
 		fqName("host_disable_monitor_states"):           1,
-		fqName("cmdb_host_index_age_seconds"):           2,
+		fqName("cmdb_host_index_age_seconds"):           3,
 		fqName("cmdb_host_index_degraded"):              len(cmdbIndexReasons),
 		// Every combination is created at construction, so these are exact rather
 		// than an upper bound: a series that has never happened still publishes a

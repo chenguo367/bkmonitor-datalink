@@ -40,6 +40,12 @@ const (
 	// HostAgentIDManager, the cmdb.agent_id hash).
 	agentCacheSuffix       = "cache.cmdb.agent_id"
 	hostTopoRefreshedField = "cache.cmdb_last_refresh_all_time.host_topo"
+	// hostTopoPublishedField is when the CMDB cache writer published the
+	// host and topology hashes this index read: a String of epoch seconds it
+	// writes in the same atomic step as the hashes, only when a publish
+	// succeeds. hostTopoRefreshedField is another writer's attempt time,
+	// written whether its pass succeeded or not; the two are kept apart.
+	hostTopoPublishedField = "cache.cmdb_published_at.host_topo"
 	scanBatch              = int64(1000)
 	// clusterBusinessCacheSuffix is the BCS cluster -> business hash the
 	// platform's CMDB cache writer publishes beside the host hash, in the
@@ -141,6 +147,9 @@ type Index struct {
 	hostsAt           map[string]addressHosts
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
+	// publishedAt is when the writer published what this index read, and
+	// zero when the writer publishes no such time.
+	publishedAt time.Time
 	// clusterBusiness is the business of each BCS cluster the writer
 	// published, by cluster id: how a global business Plan's event on
 	// Kubernetes data that names no business finds the one it belongs to.
@@ -396,14 +405,24 @@ func (index *Index) BuiltAt() time.Time {
 	return index.builtAt
 }
 
-// SourceRefreshedAt is when bmw last completed a full host-topology pass. It
-// bounds how stale the facts can be independently of how recently alarmd read
-// them: a fresh read of a stale cache is still stale.
+// SourceRefreshedAt is when bmw last attempted a full host-topology pass,
+// whether it succeeded or not. It is shown, not decided on.
 func (index *Index) SourceRefreshedAt() time.Time {
 	if index == nil {
 		return time.Time{}
 	}
 	return index.sourceRefreshedAt
+}
+
+// PublishedAt is when the writer published the host and topology hashes this
+// index read, and zero when it publishes no such time. It bounds how stale
+// the facts are independently of how recently alarmd read them: a fresh read
+// of a cache the writer stopped publishing is still stale.
+func (index *Index) PublishedAt() time.Time {
+	if index == nil {
+		return time.Time{}
+	}
+	return index.publishedAt
 }
 
 // Lookup resolves one identity key: either "ip|cloud" or a bare host id, the
@@ -539,6 +558,10 @@ func (reader *Reader) refreshedKey() string {
 	return reader.prefix + "." + hostTopoRefreshedField
 }
 
+func (reader *Reader) publishedKey() string {
+	return reader.prefix + "." + hostTopoPublishedField
+}
+
 func (reader *Reader) topoKey() string {
 	return reader.prefix + "." + topoCacheSuffix
 }
@@ -560,6 +583,13 @@ func (reader *Reader) namespaceBusinessKey() string {
 // blocking full read of it would stall every other reader.
 func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	builder := newIndexBuilder(now)
+	// The writer's publish time is read before the hashes: a publish between
+	// the two reads leaves the hashes newer than the time, so the facts read
+	// at most one round older than they are, never younger.
+	var published time.Time
+	if value, err := reader.client.Get(ctx, reader.publishedKey()).Result(); err == nil {
+		published = parsePublishedAt(value)
+	}
 
 	if err := reader.scan(ctx, reader.hostKey(), builder.addFields); err != nil {
 		return nil, fmt.Errorf("alarmd cmdbcache: scan host cache: %w", err)
@@ -605,6 +635,7 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
 		index.sourceRefreshedAt = parseRefreshedAt(refreshed)
 	}
+	index.publishedAt = published
 	return index, nil
 }
 
@@ -1035,6 +1066,17 @@ func parseRefreshedAt(value string) time.Time {
 		return stamp.UTC()
 	}
 	return time.Time{}
+}
+
+// parsePublishedAt reads the writer's publish time: epoch seconds, the one
+// shape it writes. Anything else reads as no publish time, so the index is
+// aged by alarmd's own read instead.
+func parsePublishedAt(value string) time.Time {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(seconds, 0).UTC()
 }
 
 // rawScalarText reads a JSON string or number as text, without the "zero is

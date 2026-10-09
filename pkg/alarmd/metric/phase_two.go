@@ -1454,7 +1454,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"level"})
 	metrics.cmdbIndexAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_age_seconds",
-		Help: "Age of the CMDB index alarmd holds, and of the platform refresh it was built from.",
+		Help: "Age of the CMDB index alarmd holds, by kind: index, since alarmd read it; published, since the " +
+			"writer published what was read, which staleness is judged on when the writer says (0 when it does " +
+			"not); source, since another writer's last full-pass attempt, shown and not judged on.",
 	}, []string{"kind"})
 	metrics.cmdbIndexDegraded = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_degraded",

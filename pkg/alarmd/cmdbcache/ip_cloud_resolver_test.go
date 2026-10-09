@@ -146,10 +146,10 @@ func TestAnIPCloudPlanReadsItsHostsAtTheirAddressesInsideItsTenant(t *testing.T)
 		t.Fatalf("a readdressed host resolves %v", resolution.Members())
 	}
 
-	// A host index older than its bound places nobody.
+	// A host index older than its bound places nobody, and says it is stale.
 	now = now.Add(11 * time.Minute)
 	if got := selector(resolver.Resolve(context.Background(), plan, time.Minute), targetplan.SelectorKindStatic, "cw-Host"); got.State != targetplan.SelectorUnavailable ||
-		got.Reason != targetplan.ReasonIndexUnavailable {
+		got.Reason != targetplan.ReasonStale {
 		t.Fatalf("a stale index resolves %s/%s", got.State, got.Reason)
 	}
 }
