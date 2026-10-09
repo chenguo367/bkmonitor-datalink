@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
 // day is a UTC midnight, the reference the schedule's clock minutes are read
@@ -264,4 +265,42 @@ func TestTheCommitCarriesTheOutOfHoursHolesOnItsObservation(t *testing.T) {
 		}
 	}
 	t.Fatal("no committed observation carried the Plan's short window")
+}
+
+// staleOwnerProgress refuses every commit as the store does when the Query
+// Group moved while the Slot ran.
+type staleOwnerProgress struct{ execution.ProgressStore }
+
+func (staleOwnerProgress) CommitProgress(context.Context, execution.ProgressCommitRequest) (execution.ProgressCommitResult, error) {
+	return execution.ProgressCommitResult{Status: execution.ProgressStaleOwner}, nil
+}
+
+// A Progress commit refused for a stale owner is the handover's refusal: the
+// progress line names OWNERSHIP_STALE_FENCE, and the Slot's error carries the
+// ownership word, so the Slot line names it as the handover does. Another
+// refusal keeps its status and no ownership word.
+func TestAProgressCommitRefusedForAStaleOwnerNamesTheHandover(t *testing.T) {
+	fixture := newPlanIsolationFixture(t, nil)
+	commitReady(fixture)
+	fixture.coordinator.ports.Progress = staleOwnerProgress{fixture.coordinator.ports.Progress}
+	_, err := fixture.coordinator.finalizePreparedWithGaps(context.Background(), fixture.request, fixture.header, fixture.bindings,
+		fixture.loaded, execution.GapLoadResult{}, fixture.evaluated, nil, queryAvailabilityEvidence{}, seriesCensus{}, nil)
+	if refusal, refused := ownership.RefusalReason(err); !refused || refusal != contract.ReasonOwnershipStaleFence {
+		t.Fatalf("Slot error = %v, want it to carry %s", err, contract.ReasonOwnershipStaleFence)
+	}
+	found := false
+	for _, observation := range fixture.observations {
+		if observation.Stage == observability.StageProgressCommitted {
+			found = true
+			if observation.ReasonCode != observability.ReasonCode(contract.ReasonOwnershipStaleFence) {
+				t.Fatalf("progress line reason = %q, want %s", observation.ReasonCode, contract.ReasonOwnershipStaleFence)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no progress_committed observation")
+	}
+	if _, refused := ownership.RefusalReason(progressNotCommitted(execution.ProgressConflict)); refused {
+		t.Fatal("a conflict carried an ownership word")
+	}
 }

@@ -71,7 +71,7 @@ var admissionFailureReasonSet = makeReasonSet(AdmissionFailureReasons)
 func NormalizedReasonCount() int {
 	return len(commonReasonSet) + len(resourceReasonSet) + len(contractObservationReasonSet) + len(activationFailureReasonSet) +
 		len(viewStreamReasonSet) + len(schedulerDecisionReasonSet) + len(effectiveMaintenanceReasonSet) + len(absentCloseReasonSet) +
-		len(completionAttributionReasonSet) + len(admissionFailureReasonSet) + len(NoDataStallReasons) + len(contractClassReasons) + 2 + 3
+		len(completionAttributionReasonSet) + len(admissionFailureReasonSet) + len(NoDataStallReasons) + len(contractClassReasons) + 3 + 3
 }
 
 // CompletionScopeFacts is where a committed Slot's completion cause was

@@ -52,12 +52,13 @@ func (err *SourceBlockedError) Unwrap() error { return err.Err }
 // or timeline. Reason is the gate's own word for which. The Runner ends
 // the round as view_not_executable and comes back on the same backoff a
 // blocked source gets - the record's word arrives by renewal and the view's
-// by delta, so the next round asks again. AwaitingFirstView says the Worker
-// has not installed a view at all yet: the state every Worker starts in
-// until the Leader's first view reaches it.
+// by delta, so the next round asks again. AwaitingView says the refusal is
+// that one wait: the Worker holds the Query Group's lease and its view has
+// not carried the Query Group yet -- every Query Group at a Worker's start,
+// and each one that moves to it.
 type ViewNotExecutableError struct {
-	Reason            string
-	AwaitingFirstView bool
+	Reason       string
+	AwaitingView bool
 }
 
 func (err *ViewNotExecutableError) Error() string {

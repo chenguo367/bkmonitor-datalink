@@ -310,3 +310,27 @@ func TestTheNoSeriesPathTakesTheFoldAndLeavesThePlanResultAlone(t *testing.T) {
 			"whichever one the merge happened to report", reasons, err)
 	}
 }
+
+// A query stopped by the cancellation of the Slot's own context names that,
+// on the query line and on any other stage the coordinator observes; a
+// cancellation error under a live context keeps internal_unknown.
+func TestAQueryCancelledFromAboveSaysSo(t *testing.T) {
+	var got observability.Observation
+	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := fmt.Errorf("alarmd access: execute physical query: alarmd access uq: execute request: %w", context.Canceled)
+	c.observeQueryFailure(cancelled, execution.OperationNormal, time.Now(), "execute", err)
+	if got.ReasonCode != observability.ReasonSlotCancelled {
+		t.Fatalf("query cancelled from above: reason = %q, want %q", got.ReasonCode, observability.ReasonSlotCancelled)
+	}
+	c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", err)
+	if got.ReasonCode != observability.ReasonInternalUnknown {
+		t.Fatalf("cancellation under a live context: reason = %q, want internal_unknown", got.ReasonCode)
+	}
+	c.observe(cancelled, observability.ComponentEvaluation, observability.StageEvaluationCompleted, execution.OperationNormal, time.Now(), "", "",
+		fmt.Errorf("alarmd worker: evaluate series: %w", context.Canceled))
+	if got.ReasonCode != observability.ReasonSlotCancelled {
+		t.Fatalf("evaluation cancelled from above: reason = %q, want %q", got.ReasonCode, observability.ReasonSlotCancelled)
+	}
+}

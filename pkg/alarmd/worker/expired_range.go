@@ -83,7 +83,7 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 		return execution.SlotExecutionResult{}, err
 	}
 	if result.Status != execution.ProgressCommitted {
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: range Progress not committed: %s", result.Status)
+		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: range %w", progressNotCommitted(result.Status))
 	}
 	if !result.AlreadyCommitted {
 		if count, ok := ctx.Value(rangeCommittedCountKey{}).(*uint32); ok {

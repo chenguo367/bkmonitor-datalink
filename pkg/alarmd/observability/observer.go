@@ -332,6 +332,11 @@ const (
 	// again the moment the hold ends.
 	ReasonHeldBySupplement  ReasonCode = "held_by_supplement"
 	ReasonHeldByMaintenance ReasonCode = "held_by_maintenance"
+	// ReasonSlotCancelled is a Slot, or its query, stopped because the
+	// context it ran under was cancelled from above: this process stopping,
+	// or its Query Group leaving this Worker. Every rollout's outgoing
+	// replicas meet it once per Slot in flight, by design.
+	ReasonSlotCancelled ReasonCode = "SLOT_CANCELLED"
 	// ReasonNotReported is not chosen by anyone: it is what a failing
 	// observation gets when its emitting site reported no reason at all.
 	//
@@ -2413,10 +2418,12 @@ type Observation struct {
 	AssignmentIndex     *AssignmentIndexFacts
 	AssignmentSweep     *AssignmentSweepFacts
 	AssignmentApplied   *AssignmentAppliedFacts
-	// AwaitingFirstView says a round the executable view refused was refused
-	// before this Worker installed any view: the startup state every Worker
-	// is in until the Leader's first view reaches it.
-	AwaitingFirstView    bool
+	// AwaitingView says a round the executable view refused was refused only
+	// because the view has not carried its Query Group yet while the Worker
+	// already holds its lease: the record arrives by renewal and the view by
+	// delta, at every Worker's start and on every move. A Query Group that
+	// stays there is counted on the gate's not_in_view gauge.
+	AwaitingView         bool
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
@@ -3649,7 +3656,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)

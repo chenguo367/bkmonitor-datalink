@@ -816,8 +816,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			)
 		}
 	}
-	if observation.AwaitingFirstView {
-		attributes = append(attributes, slog.Bool("awaiting_first_view", true))
+	if observation.AwaitingView {
+		attributes = append(attributes, slog.Bool("awaiting_view", true))
 	}
 	if facts := observation.AssignmentApplied; facts != nil {
 		attributes = append(attributes,
