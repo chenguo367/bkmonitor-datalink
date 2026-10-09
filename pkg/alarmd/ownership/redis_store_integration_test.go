@@ -203,6 +203,57 @@ func TestRedisStoreLeaseFenceIsMonotonicAndAssignmentBound(t *testing.T) {
 	}
 }
 
+// 02 section 6.3 rule 3: Release matches at least owner, epoch and token;
+// V5: a Release cannot delete a newer owner's lease. The newer owner can be
+// the same worker. A lease that lapsed -- a renewal stalled past its
+// deadline, or one capped at a pending content change -- is acquired again
+// by the same worker at the next epoch with a new token, while the session
+// that lost it may still be on its way out and releases when it stops. That
+// late release names the right worker and must still leave the newer lease
+// alone.
+func TestAStaleReleaseLeavesTheSameWorkersNewerLease(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	const queryGroup = execution.QueryGroupIdentity("query-group-1")
+	now := time.UnixMilli(1_700_000_000_000)
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+		QueryGroup: queryGroup, DesiredWorkerID: "worker-1", PlacementReason: PlacementRendezvous, DecidedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Acquire(ctx, queryGroup, "worker-1", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elapseOnRedis(t, store, queryGroup, time.Minute+time.Second)
+	second, err := store.Acquire(ctx, queryGroup, "worker-1", now.Add(61*time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Fence.OwnerEpoch != first.Fence.OwnerEpoch+1 || second.Fence.LeaseToken == first.Fence.LeaseToken {
+		t.Fatalf("second lease = %+v, want the same worker at the next epoch with a new token after %+v", second.Fence, first.Fence)
+	}
+
+	if err := store.Release(ctx, first.Fence); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("the lost session's Release = %v, want ErrStaleFence", err)
+	}
+	if err := store.CheckFence(ctx, second.Fence); err != nil {
+		t.Fatalf("the newer lease after the lost session's Release: CheckFence = %v, want it live", err)
+	}
+	owner, found, err := store.ReadQueryGroupOwner(ctx, queryGroup)
+	if err != nil || !found || owner.OwnerID != "worker-1" || owner.OwnerEpoch != second.Fence.OwnerEpoch {
+		t.Fatalf("owner after the lost session's Release = (%+v, %t, %v), want worker-1 at epoch %d",
+			owner, found, err, second.Fence.OwnerEpoch)
+	}
+	if _, err := store.Renew(ctx, second.Fence, now.Add(70*time.Second), time.Minute); err != nil {
+		t.Fatalf("Renew(newer lease) = %v", err)
+	}
+}
+
 func TestRedisStoreFencedCASRejectsExpiredSnapshotPublisher(t *testing.T) {
 	store := newIntegrationStore(t)
 	now := time.UnixMilli(1_700_000_000_000)
