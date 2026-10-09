@@ -49,6 +49,14 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 				"assert state eligibility", outcome.LevelID, errors.New("Level outcome changed pre-history disposition"),
 			)
 		}
+		// A recovery the caller holds is not a recovery: decided here, before
+		// anything is derived from the Level's result, and not rewritten on
+		// an envelope that already says RECOVERY.
+		if outcome.Result == contract.LevelResultRecovery && request.HoldRecovery != nil {
+			if reason, held := request.HoldRecovery(outcome.LevelID); held {
+				outcome.Result, outcome.UnavailableReason = "", reason
+			}
+		}
 		result.LevelOutcomes = append(result.LevelOutcomes, outcome)
 		switch {
 		case outcome.Result != "":

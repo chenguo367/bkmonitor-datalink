@@ -353,7 +353,45 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	for i, v := range projected {
 		tvalues[i] = trigger.ProjectedValue{CanonicalDecimal: v.CanonicalDecimal, Available: v.Available, ReasonCode: v.ReasonCode}
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts})
+	// The request's named inputs, which the held recovery, the effective
+	// time's check and the freeze below all judge a Level by: concatenated
+	// at most once for the record, and not at all for a record none of them
+	// asks about - every Level in its hours and decided, the common round.
+	var bindings []execution.NamedInputBinding
+	bindingsRead := false
+	inputs := func() []execution.NamedInputBinding {
+		if !bindingsRead {
+			bindings, bindingsRead = evaluationBindings(request), true
+		}
+		return bindings
+	}
+	// A recovery reached on a round whose own inputs were incomplete is held,
+	// and carries the reason of the guard this round proposes.
+	//
+	// decision-022 relaxed one gate and only one: an incomplete *history*
+	// no longer stands in the way of closing what is open, because the
+	// recovery walk now reads the positions it actually observed. The
+	// completeness of *this round's inputs* is a different question with
+	// the same shape, and the trigger cannot see it - it is handed facts,
+	// not the bindings they were detected from. The newest position the
+	// walk counts is this record's own fact, so a fact detected on a
+	// dependency that came back empty would be counted as observed
+	// evidence when it is exactly the thing that was not observed.
+	//
+	// Held inside the trigger, not folded on its result: the record's
+	// result, the recovery gate and the envelope are derived from the
+	// Levels' verdicts there, and a RECOVERY rewritten after the envelope
+	// was built left the envelope saying RECOVERY beside an UNKNOWN
+	// outcome, which the result contract refuses for the whole Slot.
+	//
+	// ABNORMAL is deliberately not held: a degraded input may still have
+	// crossed a threshold, and refusing to say so is the one direction of
+	// this rule that loses an alert.
+	holdRecovery := func(levelID uint32) (string, bool) {
+		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
+		return string(folded), proposed
+	}
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
 	if err != nil {
 		return recordResult{}, err
 	}
@@ -377,18 +415,6 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			}
 		}
 	}
-	// The request's named inputs, which the RECOVERY fold, the effective
-	// time's check and the freeze below all judge a Level by: concatenated
-	// at most once for the record, and not at all for a record none of them
-	// asks about - every Level in its hours and decided, the common round.
-	var bindings []execution.NamedInputBinding
-	bindingsRead := false
-	inputs := func() []execution.NamedInputBinding {
-		if !bindingsRead {
-			bindings, bindingsRead = evaluationBindings(request), true
-		}
-		return bindings
-	}
 	for i, o := range tr.LevelOutcomes {
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
@@ -396,29 +422,6 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// because of that guard alone, this round adding nothing of its own
 		// (unknownOnlyForItsHistory).
 		guardTail := false
-		// A recovery reached on a round whose own inputs were incomplete is
-		// held, and carries the reason of the guard this round proposes.
-		//
-		// decision-022 relaxed one gate and only one: an incomplete *history*
-		// no longer stands in the way of closing what is open, because the
-		// recovery walk now reads the positions it actually observed. The
-		// completeness of *this round's inputs* is a different question with
-		// the same shape, and the trigger cannot see it - it is handed facts,
-		// not the bindings they were detected from. The newest position the
-		// walk counts is this record's own fact, so a fact detected on a
-		// dependency that came back empty would be counted as observed
-		// evidence when it is exactly the thing that was not observed.
-		//
-		// ABNORMAL is deliberately not held here: a degraded input may still
-		// have crossed a threshold, and refusing to say so is the one
-		// direction of this rule that loses an alert.
-		if kind == execution.LevelOutcomeRecovery {
-			if folded, proposed := execution.RoundGuardReasonForLevel(
-				inputs(), due.Identity, o.LevelID,
-			); proposed {
-				kind, reason = execution.LevelOutcomeUnknown, folded
-			}
-		}
 		if kind == "" {
 			kind = execution.LevelOutcomeUnknown
 			reason = execution.ReasonCode(o.UnavailableReason)
