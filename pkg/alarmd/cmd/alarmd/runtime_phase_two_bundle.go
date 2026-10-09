@@ -1290,7 +1290,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
-		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}
+		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	if linkd.Console != nil {
 		maintenance.sourceOf = func(ctx context.Context) (string, error) {
 			binding, err := linkd.Console.Binding(ctx)

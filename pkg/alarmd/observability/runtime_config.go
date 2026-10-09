@@ -105,9 +105,7 @@ type RuntimeRetentionFacts struct {
 // strategies that no longer exist and of targets that left a strategy's
 // scope send. No address, username or password.
 type RuntimeLinkdFacts struct {
-	ConsoleConfigured bool   `json:"console_configured"`
-	EventSourceID     string `json:"event_source_id,omitempty"`
-	HookName          string `json:"hook_name,omitempty"`
+	ConsoleConfigured bool `json:"console_configured"`
 }
 
 type RuntimeStorageFacts struct {

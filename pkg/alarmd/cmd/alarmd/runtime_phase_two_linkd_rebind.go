@@ -269,8 +269,7 @@ func (s *linkdLocationSwitch) retry(ctx context.Context, cfg config.Config, disc
 	}
 	settings := cfg.PhaseTwo.Linkd
 	options := openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL, Username: settings.Username, Password: settings.Password,
-		Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: 1 << 20,
-		Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName}}
+		Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: 1 << 20}
 	pause := first
 	for {
 		if !waitLinkdRetry(ctx, pause) {
@@ -286,6 +285,7 @@ func (s *linkdLocationSwitch) retry(ctx context.Context, cfg config.Config, disc
 		target, err := discover(ctx, options)
 		s.mu.Lock()
 		s.discovery.Attempts++
+		noteListedTargets(&s.discovery, target, err)
 		if err != nil {
 			s.discovery.Error = boundedText(err.Error())
 			s.mu.Unlock()

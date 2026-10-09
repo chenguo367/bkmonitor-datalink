@@ -54,13 +54,16 @@ type TargetBinding struct {
 	Sources       []string `json:"sources"`
 }
 
-// TargetSelector picks which of the link's targets is this deployment's. Both
-// fields are optional: with neither, the one target the link lists is used,
-// and a link that lists several is refused with their names, so the choice is
-// never the first one that happened to come back.
-type TargetSelector struct {
-	EventSourceID string
-	HookName      string
+// TargetCountError is a link that lists other than one target, with the
+// targets' names: alarmd reads the sets of a link with exactly one.
+type TargetCountError struct {
+	Count int
+	Names []string
+}
+
+func (err *TargetCountError) Error() string {
+	return fmt.Sprintf("alarmd openalerts: the link lists %d targets, and alarmd reads the sets of a link with one (targets: %s)",
+		err.Count, strings.Join(err.Names, ", "))
 }
 
 // IndexLocation is where this process reads the open alert sets from. The
@@ -77,7 +80,6 @@ type HTTPReconcilerOptions struct {
 	Username         string
 	Password         string
 	Client           *http.Client
-	Select           TargetSelector
 	Index            IndexLocation
 	MaxResponseBytes int64
 	// Now is the clock the call record is kept by; nil is the wall clock.
@@ -234,7 +236,10 @@ func (reader *HTTPReconciler) SetIndexLocation(index IndexLocation) error {
 	return nil
 }
 
-// choose is the target the selector picks among those the Console lists.
+// choose is the one target the Console lists. A link that lists none, or
+// several, is refused with the targets' names: the choice is never the first
+// one that happened to come back, and a link that maintains several targets
+// is the link's to disambiguate, not this deployment's.
 func (reader *HTTPReconciler) choose(ctx context.Context) (TargetBinding, error) {
 	var targets []TargetBinding
 	if err := reader.get(ctx, "targets", nil, &targets); err != nil {
@@ -243,25 +248,14 @@ func (reader *HTTPReconciler) choose(ctx context.Context) (TargetBinding, error)
 	if len(targets) > 512 {
 		return TargetBinding{}, ErrIncomplete
 	}
-	selector := reader.options.Select
-	candidates := make([]TargetBinding, 0, 1)
 	names := make([]string, 0, len(targets))
 	for _, target := range targets {
 		names = append(names, target.EventSourceID+"/"+target.HookName)
-		if (selector.EventSourceID == "" || target.EventSourceID == selector.EventSourceID) &&
-			(selector.HookName == "" || target.HookName == selector.HookName) {
-			candidates = append(candidates, target)
-		}
 	}
-	switch {
-	case len(candidates) == 0:
-		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link lists no target matching event_source_id=%q hook_name=%q (targets: %s)",
-			selector.EventSourceID, selector.HookName, strings.Join(names, ", "))
-	case len(candidates) > 1:
-		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link lists %d targets, set linkd event_source_id and hook_name to choose one (targets: %s)",
-			len(candidates), strings.Join(names, ", "))
+	if len(targets) != 1 {
+		return TargetBinding{}, &TargetCountError{Count: len(targets), Names: names}
 	}
-	return normalizeBinding(candidates[0])
+	return normalizeBinding(targets[0])
 }
 
 func normalizeBinding(b TargetBinding) (TargetBinding, error) {

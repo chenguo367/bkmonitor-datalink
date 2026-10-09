@@ -133,20 +133,19 @@ func TestHTTPReconcilerRejectsPartialAndInvalidScope(t *testing.T) {
 }
 
 // The target is read from the link, not configured: the one target it lists
-// is used; several are refused by name unless the configuration narrows the
-// choice; and errors never carry the credentials.
+// is used; none, or several, are refused with the count and the names, and
+// the refusal no longer points at settings the deployment does not have; and
+// errors never carry the credentials.
 func TestTheTargetIsReadFromTheLinkAndNeverGuessed(t *testing.T) {
 	other := testBinding()
 	other.EventSourceID, other.HookName, other.Sources = "other", "other-hook", []string{"other"}
 	for name, tc := range map[string]struct {
-		targets  []TargetBinding
-		selector TargetSelector
-		ok       bool
+		targets []TargetBinding
+		ok      bool
 	}{
-		"the only target":             {[]TargetBinding{testBinding()}, TargetSelector{}, true},
-		"several without a selector":  {[]TargetBinding{testBinding(), other}, TargetSelector{}, false},
-		"several with a selector":     {[]TargetBinding{other, testBinding()}, TargetSelector{EventSourceID: "source"}, true},
-		"a selector matching nothing": {[]TargetBinding{other}, TargetSelector{HookName: "active"}, false},
+		"the only target": {[]TargetBinding{testBinding()}, true},
+		"several":         {[]TargetBinding{testBinding(), other}, false},
+		"none":            {nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +153,7 @@ func TestTheTargetIsReadFromTheLinkAndNeverGuessed(t *testing.T) {
 			}))
 			defer server.Close()
 			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "private-user",
-				Password: "private-password", Select: tc.selector, Index: testIndex(), MaxResponseBytes: 1 << 20})
+				Password: "private-password", Index: testIndex(), MaxResponseBytes: 1 << 20})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,6 +166,15 @@ func TestTheTargetIsReadFromTheLinkAndNeverGuessed(t *testing.T) {
 			}
 			if tc.ok && binding.EventSourceID != "source" {
 				t.Fatalf("the wrong target was chosen: %+v", binding)
+			}
+			if !tc.ok {
+				var counted *TargetCountError
+				if !errors.As(err, &counted) || counted.Count != len(tc.targets) || len(counted.Names) != len(tc.targets) {
+					t.Fatalf("refusal %v, want the count %d and every name", err, len(tc.targets))
+				}
+				if strings.Contains(err.Error(), "event_source_id") || strings.Contains(err.Error(), "hook_name") {
+					t.Fatalf("the refusal points at settings that do not exist: %v", err)
+				}
 			}
 		})
 	}

@@ -235,12 +235,11 @@ func TestThePhaseTwoRuntimeProfileSaysWhetherTheLinkIsConfigured(t *testing.T) {
 		t.Fatalf("default linkd facts = %+v, want nothing configured", off.Linkd)
 	}
 	cfg.PhaseTwo.Linkd.ConsoleURL = "http://DO_NOT_LOG_CONSOLE:8080"
-	cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.HookName = "alarmd", "hook-a"
 	on, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := observability.RuntimeLinkdFacts{ConsoleConfigured: true, EventSourceID: "alarmd", HookName: "hook-a"}
+	want := observability.RuntimeLinkdFacts{ConsoleConfigured: true}
 	encoded, _ := json.Marshal(on)
 	if on.Linkd != want || strings.Contains(string(encoded), "DO_NOT_LOG") || on.Digest == off.Digest {
 		t.Fatalf("linkd facts = %+v (want %+v), digest moved %v: %s", on.Linkd, want, on.Digest != off.Digest, encoded)

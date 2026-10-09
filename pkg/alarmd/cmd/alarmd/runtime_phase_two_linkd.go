@@ -60,14 +60,12 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	var facts openalerts.ConsoleFacts
 	var err error
 	if settings.ConsoleURL != "" {
-		// Which of the link's targets is this deployment's, and its source
-		// scope, are read from the Console; the configuration only narrows the
-		// choice when the link maintains more than one target.
+		// The link's target, and its source scope, are read from the
+		// Console, which lists one target for a link alarmd reads.
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
-			Now: now, Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName},
-			Index: index, LocationConfirmed: adopted, OnLocationMismatch: location.relocate,
-			KeyingEvery: settings.CalibrationInterval()})
+			Now: now, Index: index, LocationConfirmed: adopted, OnLocationMismatch: location.relocate,
+			KeyingEvery: config.LinkdCalibrationInterval})
 		if err != nil {
 			return linkdIndex{}, err
 		}
@@ -77,7 +75,7 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: location, Subscriber: location, Reconciler: reconciler, Now: now,
 		Policy: openalerts.PolicySelfMaintain, MaxStrategies: capacity.Strategies, MaxMembers: capacity.Members, MaxBytes: capacity.Bytes,
 		MaxLocalEntries: capacity.LocalEntries, ReadBatch: capacity.ReadBatch, ReconcileBatch: 1, RefreshInterval: time.Second,
-		IndexInterval: time.Minute, ReconcileInterval: settings.CalibrationInterval(), CalibrationMaxAge: 2 * settings.CalibrationInterval(),
+		IndexInterval: time.Minute, ReconcileInterval: config.LinkdCalibrationInterval, CalibrationMaxAge: 2 * config.LinkdCalibrationInterval,
 		LocalRetention: time.Minute, CycleTimeout: 5 * time.Second, Facts: facts})
 	if err != nil {
 		return linkdIndex{}, err

@@ -1288,7 +1288,6 @@ var alarmdWords = []string{
 	"startup",
 	"stat",
 	"state",
-	"stated",
 	"stateless",
 	"statement",
 	"statements",
