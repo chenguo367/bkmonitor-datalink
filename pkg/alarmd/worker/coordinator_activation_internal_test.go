@@ -206,3 +206,79 @@ func (ports *activationSiblingPorts) RenewFrozenRuntime(
 	ports.frozenRenewals = append(ports.frozenRenewals, request)
 	return freshFrozenRenewals(request), nil
 }
+
+// A Plan whose activation changed under the Slot is not evaluated this
+// attempt - its output is not written and its State is not applied - so its
+// no-data memory is not applied either, while the stable sibling's is. The
+// memory follows the Plan's output like State does, and the attempt that
+// converges the activation decides the changed Plan again from the memory it
+// had.
+func TestAPlanWhoseActivationChangedKeepsItsNoDataMemoryWhileItsSiblingsMoves(t *testing.T) {
+	contractRef := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: "query-group", EvaluationTime: 1_788_000_000},
+		SnapshotRevision: "snapshot-v1", QueryRevision: "query-v1", ScheduleRevision: "schedule-v1",
+		ScheduleSegmentStart: 1_787_999_940, DuePlanSetDigest: "due-set-v1",
+	}
+	request := execution.SlotExecutionRequest{
+		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1,
+		OwnerFence:       execution.OwnerFence{QueryGroup: "query-group", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1"},
+		ExpectedNextSlot: contractRef.Slot.EvaluationTime,
+	}
+	changedPlan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "changed"}
+	stablePlan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "stable"}
+	duePlans := []execution.DuePlan{
+		{Identity: changedPlan, CompiledPlan: internalCompiledPlan(t, "changed", 1, 60),
+			StateGeneration: "old-changed", StateApplyEpoch: 1, ScheduleRevision: "old-changed-schedule"},
+		{Identity: stablePlan, CompiledPlan: internalCompiledPlan(t, "stable", 1, 60),
+			StateGeneration: "stable-generation", StateApplyEpoch: 1, ScheduleRevision: "stable-schedule"},
+	}
+	applyVersion, err := execution.BuildApplyVersion(contractRef, 1)
+	if err != nil {
+		t.Fatalf("BuildApplyVersion() error: %v", err)
+	}
+	changedState := execution.StateKeyIdentity{Plan: changedPlan, StateGeneration: "old-changed", SeriesIdentityDigest: "changed-series"}
+	stableState := execution.StateKeyIdentity{Plan: stablePlan, StateGeneration: "stable-generation", SeriesIdentityDigest: "stable-series"}
+	mutation := func(identity execution.StateKeyIdentity, digest execution.MutationDigest) execution.StateMutation {
+		return execution.StateMutation{Identity: identity, ApplyVersion: applyVersion, MutationDigest: digest}
+	}
+	ports := &activationSiblingPorts{contract: contractRef, changedPlan: changedPlan, stablePlan: stablePlan}
+	memoryStore := &emptyNoDataStore{}
+	coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10}, ports: Ports{
+		Activation: ports, Sequencer: ports, Admission: ports, GapGuard: ports, NoData: memoryStore, Hosts: SharedHostBusiness, Events: ports, State: ports, Progress: ports,
+		Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+	}}
+	header := execution.InternalExecutionHeader{Contract: contractRef, DuePlans: duePlans}
+	bindings := []execution.NamedInputBinding{
+		{Consumer: execution.ConsumerRef{Plan: changedPlan}, Role: execution.InputRolePrimary, Completeness: execution.CompletenessFull, DataState: execution.DataStateData},
+		{Consumer: execution.ConsumerRef{Plan: stablePlan}, Role: execution.InputRolePrimary, Completeness: execution.CompletenessFull, DataState: execution.DataStateData},
+	}
+	loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{
+		{Identity: changedState, VersionComparison: execution.ApplyVersionPersistedOlder},
+		{Identity: stableState, VersionComparison: execution.ApplyVersionPersistedOlder},
+	}}
+	evaluated := execution.EvaluationResult{
+		Contract: contractRef, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+		Plans: []execution.PlanEvaluationResult{
+			{Plan: changedPlan, Disposition: execution.PlanDecided, StateResults: []execution.StateEvaluation{{Mutation: mutation(changedState, "changed-digest"), Events: []contract.TriggerEventV1{{EventID: "changed-event"}}}}},
+			{Plan: stablePlan, Disposition: execution.PlanDecided, StateResults: []execution.StateEvaluation{{Mutation: mutation(stableState, "stable-digest"), Events: []contract.TriggerEventV1{{EventID: "stable-event"}}}}},
+		},
+	}
+	memory := []execution.PlanNoDataMutation{
+		{Identity: execution.PlanNoDataIdentity{Plan: changedPlan, StateGeneration: "old-changed"}},
+		{Identity: execution.PlanNoDataIdentity{Plan: stablePlan, StateGeneration: "stable-generation"}},
+	}
+
+	_, err = coordinator.finalizePreparedWithGaps(context.Background(), request, header, bindings, loaded,
+		execution.GapLoadResult{}, evaluated, memory, queryAvailabilityEvidence{},
+		seriesCensus{Due: len(loaded.Items), Read: len(loaded.Items)}, nil)
+	var protection *activationProtectionRequiredError
+	if !errors.As(err, &protection) {
+		t.Fatalf("finalizePreparedWithGaps() error=%v, want activation convergence", err)
+	}
+	if len(ports.events) != 1 || ports.events[0].EventID != "stable-event" {
+		t.Fatalf("events = %+v, want only the stable sibling's", ports.events)
+	}
+	if len(memoryStore.applied) != 1 || memoryStore.applied[0].Identity.Plan != stablePlan {
+		t.Fatalf("no-data memory applied = %+v, want only the stable sibling's", memoryStore.applied)
+	}
+}
