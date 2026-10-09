@@ -110,10 +110,9 @@ type Index struct {
 	agentsUnreadable bool
 	// byHostID is the canonical host presence table already used to deduplicate
 	// a load. An absent address is not evidence that the host was deleted.
-	byHostID          map[string]*HostFacts
-	hostIDsIncomplete bool
-	hosts             int
-	serviceInstances  map[string]*ServiceInstanceFacts
+	byHostID         map[string]*HostFacts
+	hosts            int
+	serviceInstances map[string]*ServiceInstanceFacts
 	// byNode is the reverse of every host's topology links, keyed by
 	// "biz|obj|inst": the hosts a dynamic topology reference resolves to.
 	// Built once per load so a resolution is a lookup, never a scan.
@@ -130,10 +129,7 @@ type Index struct {
 	// byModelInstance is every host that carries the canonical (model,
 	// instance) identity, keyed "model|instance": how a model_inst_id target
 	// read by host identity finds the host a static member names.
-	// modelledHosts counts them, so a cache the writer has not put the
-	// identity on can be told from a model the cache knows no host of.
 	byModelInstance map[string]*HostFacts
-	modelledHosts   int
 	// addressOf is, by host id, the tenant and ip_cloud key of every host
 	// the writer put a whole target address on: how an ip_cloud target maps
 	// its hosts to the keys records are read by. hostsAt is, by
@@ -332,15 +328,6 @@ func (index *Index) LookupModelInstance(model, instance string) (*HostFacts, boo
 	}
 	facts, found := index.byModelInstance[model+"|"+instance]
 	return facts, found
-}
-
-// ModelledHosts is how many hosts carry the canonical (model, instance)
-// identity. Zero on a cache whose writer does not put it on hosts.
-func (index *Index) ModelledHosts() int {
-	if index == nil {
-		return 0
-	}
-	return index.modelledHosts
 }
 
 // TopologyAnswer is what the index says about one dynamic topology
@@ -732,9 +719,6 @@ func (builder *indexBuilder) addFields(fields []string) {
 		// dropped, and the attributes alone were most of a refresh's
 		// allocation.
 		hostID := numberText(wire.HostID)
-		if parsed, err := strconv.ParseInt(hostID, 10, 64); err != nil || parsed <= 0 {
-			builder.index.hostIDsIncomplete = true
-		}
 		if hostID != "" {
 			if existing, found := builder.seen[hostID]; found {
 				builder.index.byIdentity[identity] = existing
@@ -750,7 +734,6 @@ func (builder *indexBuilder) addFields(fields []string) {
 		builder.index.byIdentity[identity] = facts
 		builder.addToNodes(facts)
 		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
-			builder.index.modelledHosts++
 			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
 		}
 		builder.addAddress(wire, facts)

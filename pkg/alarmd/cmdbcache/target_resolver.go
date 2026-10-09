@@ -76,15 +76,15 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	for _, node := range plan.DynamicTopologies {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node, index))
 	}
-	resolver.markServedPastAFailedRefresh(plan, resolution.Selectors, index, readErr)
 	if plan.HasExclusions() {
-		exclusion := resolver.resolveExclusions(plan, index, readErr, groupExclusions)
+		exclusion := resolver.resolveExclusions(plan, index, groupExclusions)
 		resolution.Excluded = exclusion.Members
 		resolution.ExclusionUnavailable = exclusion.State == targetplan.SelectorUnavailable
 		// Exclusion evidence is not an inclusion source.
 		exclusion.Members = nil
 		resolution.Selectors = append(resolution.Selectors, exclusion)
 	}
+	resolver.markServedPastAFailedRefresh(plan, resolution.Selectors, index, readErr)
 	resolution.Compose()
 	return resolution
 }
@@ -95,11 +95,14 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 // writer has (decision-017 section 3.2, resolved_from_stale_snapshot, the
 // same rule the group selectors follow). A resolution carrying it is no
 // verdict for the target-scope close (decision-024: facts not current are
-// not closed on). Exclusions are judged separately, with the error itself.
+// not closed on).
 //
 // The static and topology selectors are answered from the index; so is a
 // group under an ip_cloud plan, whose member hosts become addresses through
-// it - a member readdressed since is still at its old address there.
+// it - a member readdressed since is still at its old address there; and so
+// is an exclusion that maps members or hosts through it, which would
+// subtract a readdressed host at its old address. An exclusion of frozen keys
+// alone does not read the index.
 func (resolver *TargetResolver) markServedPastAFailedRefresh(plan *contract.TargetPlanV1, selectors []targetplan.SelectorResult, index *Index, readErr error) {
 	if readErr == nil || index == nil {
 		return
@@ -113,6 +116,10 @@ func (resolver *TargetResolver) markServedPastAFailedRefresh(plan *contract.Targ
 		case targetplan.SelectorKindStatic, targetplan.SelectorKindTopology:
 		case targetplan.SelectorKindGroup:
 			if plan.Rule != contract.TargetPlanRuleIPCloud {
+				continue
+			}
+		case targetplan.SelectorKindExclude:
+			if len(plan.ExcludeMembers)+len(plan.ExcludeHosts) == 0 {
 				continue
 			}
 		default:
@@ -141,9 +148,6 @@ func (facts *excludedGroupFacts) add(plan *contract.TargetPlanV1, lookup GroupLo
 	case result.State != targetplan.SelectorOK && result.State != targetplan.SelectorOKEmpty:
 		facts.reason = result.Reason
 		return
-	case lookup.RefreshFailed:
-		facts.reason = targetplan.ReasonReadFailed
-		return
 	}
 	for _, member := range lookup.Snapshot.Members {
 		identity := contract.TargetPlanMemberV1{ModelID: member.ModelID, ModelInstID: member.ModelInstID}
@@ -166,7 +170,14 @@ func (facts *excludedGroupFacts) add(plan *contract.TargetPlanV1, lookup GroupLo
 // resolveExclusions uses frozen keys directly, and checks the same host
 // snapshot and validated group facts as inclusion when an identity must be
 // mapped. A member absent from both is a normal no-op, not a failure.
-func (resolver *TargetResolver) resolveExclusions(plan *contract.TargetPlanV1, index *Index, readErr error, groupFacts *excludedGroupFacts) targetplan.SelectorResult {
+//
+// An exclusion that maps identities through the host index is unavailable
+// only when that index is: never loaded, empty, or past its staleness
+// bound - the same index the inclusion side answers from. A snapshot served
+// past a failed refresh is within the bound and is answered (the close is
+// held by the stale mark instead), and the writer publishes the host hash
+// whole, so a snapshot is not judged incomplete record by record.
+func (resolver *TargetResolver) resolveExclusions(plan *contract.TargetPlanV1, index *Index, groupFacts *excludedGroupFacts) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindExclude, ID: plan.ModelID,
 		State: targetplan.SelectorOK, Reason: targetplan.ReasonNone,
 		Members: make(map[string]struct{}, len(plan.ExcludeKeys)+len(plan.ExcludeMembers)+len(plan.ExcludeHosts))}
@@ -177,20 +188,12 @@ func (resolver *TargetResolver) resolveExclusions(plan *contract.TargetPlanV1, i
 		switch {
 		case resolver == nil || resolver.hosts == nil:
 			result.Reason = targetplan.ReasonSourceUnwired
-		case readErr != nil:
-			result.Reason = targetplan.ReasonReadFailed
 		case index == nil || index.Hosts() == 0:
 			// An empty or missing host hash has no published completeness
 			// marker; neither proves that every excluded host was deleted.
 			result.Reason = targetplan.ReasonIndexUnavailable
 		case resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge:
 			result.Reason = targetplan.ReasonStale
-		case !index.SourceRefreshedAt().IsZero() && resolver.now().Sub(index.SourceRefreshedAt()) > resolver.hosts.maxAge:
-			result.Reason = targetplan.ReasonStale
-		case index.Refused().Hosts > 0 || index.hostIDsIncomplete || len(index.byHostID) != index.Hosts():
-			result.Reason = targetplan.ReasonIndexIncomplete
-		case len(plan.ExcludeMembers) > 0 && (index.ModelledHosts() != index.Hosts() || len(index.byModelInstance) != index.Hosts()):
-			result.Reason = targetplan.ReasonModelUnresolved
 		case groupFacts != nil && groupFacts.reason != "":
 			result.Reason = groupFacts.reason
 		}

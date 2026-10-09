@@ -156,8 +156,8 @@ func TestAHostCacheWithoutTheCanonicalIdentityLeavesHostMembersUnresolvedByName(
 		t.Fatal(err)
 	}
 	hosts := hostStore(t, clock, []string{"101", hostWithoutIdentity101}, []string{"set|12", "module|31"})
-	if hosts.Current().ModelledHosts() != 0 || hosts.Current().Hosts() != 1 {
-		t.Fatalf("fixture: modelled %d of %d hosts, want a cache with hosts and no identity", hosts.Current().ModelledHosts(), hosts.Current().Hosts())
+	if len(hosts.Current().byModelInstance) != 0 || hosts.Current().Hosts() != 1 {
+		t.Fatalf("fixture: modelled %d of %d hosts, want a cache with hosts and no identity", len(hosts.Current().byModelInstance), hosts.Current().Hosts())
 	}
 	resolver := NewTargetResolver(groups, hosts, clock)
 	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,

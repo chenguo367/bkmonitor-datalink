@@ -142,7 +142,9 @@ func TestARecentlyReadOldSourceCannotTurnExcludedGroupMembersIntoAbsentHosts(t *
 		groupHasExcludedHost bool
 		reason               string
 	}{
-		{"source expired", now.Add(-10*time.Minute - time.Nanosecond), true, targetplan.ReasonStale},
+		// The writer's marker is not an exclusion gate: the excluded host is
+		// subtracted through the group's own host, whatever the marker says.
+		{"source marker past the bound", now.Add(-10*time.Minute - time.Nanosecond), true, targetplan.ReasonNone},
 		{"source only one second behind the group", now.Add(-time.Second), true, targetplan.ReasonNone},
 		{"source at the age bound", now.Add(-10 * time.Minute), true, targetplan.ReasonNone},
 		{"source marker absent and excluded host absent from both caches", time.Time{}, false, targetplan.ReasonExcludedAbsent},
@@ -234,7 +236,6 @@ func TestUntrustedGroupFactsCannotProveExcludedMembersAbsent(t *testing.T) {
 	}{
 		{"missing host identity", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502"}]}`, targetplan.ReasonMembersDropped, ""},
 		{"unlisted identity", `{"model_id":"cw-Host","model_inst_ids":["501"],"member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonMembersDropped, ""},
-		{"read failed", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonReadFailed, "failed"},
 		{"snapshot aged", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonStale, "aged"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -247,13 +248,7 @@ func TestUntrustedGroupFactsCannotProveExcludedMembersAbsent(t *testing.T) {
 			if test.refresh != "" {
 				groups.Group(context.Background(), "g", time.Minute)
 				now = now.Add(time.Minute)
-				switch test.refresh {
-				case "failed":
-					client.err = errors.New("read failed")
-					if err := groups.Refresh(context.Background()); err == nil {
-						t.Fatal("group refresh did not fail")
-					}
-				case "aged":
+				if test.refresh == "aged" {
 					now = now.Add(10 * time.Minute)
 				}
 				hosts.index.builtAt = now
@@ -270,6 +265,62 @@ func TestUntrustedGroupFactsCannotProveExcludedMembersAbsent(t *testing.T) {
 	}
 }
 
+// A group snapshot served past a failed refresh is within its bound: its
+// host facts still subtract the excluded member, and the resolution carries
+// the snapshot's age, so it is no verdict for the close (decision-017
+// section 3.2, resolved_from_stale_snapshot). A failed group refresh used to
+// make every Plan with exclusions admit nothing.
+func TestAGroupServedPastAFailedRefreshStillSubtractsItsExcludedHost(t *testing.T) {
+	now := time.Unix(1000, 0)
+	clock := func() time.Time { return now }
+	hosts := hostStore(t, clock, []string{"501", hostUnderSet}, nil)
+	client := &groupClient{values: map[string]string{"cw:dynamic_group:g": `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`}}
+	reader, _ := NewGroupReader(client, "cw:")
+	groups, _ := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: testGroupReadBound, Now: clock})
+	groups.Group(context.Background(), "g", time.Minute)
+	now = now.Add(time.Minute)
+	client.err = errors.New("read failed")
+	if err := groups.Refresh(context.Background()); err == nil {
+		t.Fatal("group refresh did not fail")
+	}
+	hosts.index.builtAt = now
+	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"501"},
+		DynamicGroups: []string{"g"}, ExcludeMembers: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "502"}}}
+	got := NewTargetResolver(groups, hosts, clock).Resolve(context.Background(), plan, time.Minute)
+	exclusion := selector(got, targetplan.SelectorKindExclude, "cw-Host")
+	if got.ExclusionUnavailable || exclusion.State == targetplan.SelectorUnavailable || got.Contains("602") || !got.Contains("501") || got.StaleAge != time.Minute {
+		t.Fatalf("group past a failed refresh: %+v exclusion %+v; want 602 subtracted, 501 kept, one minute stale", got, exclusion)
+	}
+}
+
+// An exclusion mapped through a host index served past a failed refresh is
+// answered from that snapshot and carries its age: a host readdressed since
+// would be subtracted at its old address, so the resolution is no verdict for
+// the close even when nothing on the inclusion side reads the index. One of
+// frozen keys alone does not read the index and carries no age.
+func TestAnExclusionMappedThroughAHostIndexPastAFailedRefreshIsStale(t *testing.T) {
+	at := time.Unix(1000, 0)
+	now := at.Add(2 * time.Minute)
+	clock := func() time.Time { return now }
+	hosts := hostStore(t, func() time.Time { return at }, []string{"501", hostUnderSet}, nil)
+	hosts.now = clock
+	hosts.lastError = errors.New("scan host cache: i/o timeout")
+	byMember := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"501", "503"},
+		ExcludeMembers: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "501"}}}
+	got := NewTargetResolver(nil, hosts, clock).Resolve(context.Background(), byMember, time.Minute)
+	if exclusion := selector(got, targetplan.SelectorKindExclude, "cw-Host"); exclusion.StaleAge != 2*time.Minute || got.StaleAge != 2*time.Minute || got.Contains("501") {
+		t.Fatalf("exclusion through a stale index: %+v selector %+v; want 501 subtracted and two minutes stale", got, exclusion)
+	}
+	byKey := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"501", "503"},
+		ExcludeKeys: []string{"501"}}
+	if keys := NewTargetResolver(nil, hosts, clock).Resolve(context.Background(), byKey, time.Minute); keys.StaleAge != 0 || keys.Contains("501") {
+		t.Fatalf("exclusion of frozen keys marked by the host index: %+v", keys)
+	}
+}
+
 func TestExcludedHostModelsUseTheSameCanonicalTextAsThePlan(t *testing.T) {
 	now := time.Unix(1000, 0)
 	clock := func() time.Time { return now }
@@ -277,7 +328,9 @@ func TestExcludedHostModelsUseTheSameCanonicalTextAsThePlan(t *testing.T) {
 		name, model string
 		unavailable bool
 	}{
-		{"blank model identity is incomplete", " ", true},
+		// The host record carries no canonical identity, and the group names
+		// the host: the group's host is what the exclusion subtracts.
+		{"blank model identity is answered from the group's host", " ", false},
 		{"padded model identity matches the plan", "cw-Host ", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -306,7 +359,16 @@ func TestExcludedHostModelsUseTheSameCanonicalTextAsThePlan(t *testing.T) {
 	}
 }
 
-func TestUnreadableOrIncompleteExcludedIdentityBlocksTheWholePlan(t *testing.T) {
+// An exclusion that maps identities through the host index is unavailable
+// only when the index is: never loaded, empty, or past its staleness bound -
+// and then it blocks the whole Plan rather than widen it. Within the bound it
+// is answered from the same snapshot the inclusion side reads: past a failed
+// refresh (the close is held by the stale mark instead), with the writer's
+// refresh marker old, and with records the load refused or that carry no
+// usable host id. Those used to make every Plan with exclusions admit
+// nothing; the writer publishes the host hash whole, so a snapshot is not
+// judged incomplete record by record.
+func TestOnlyAnUnusableHostIndexMakesAnExcludedIdentityUnavailable(t *testing.T) {
 	now := time.Unix(1000, 0)
 	clock := func() time.Time { return now }
 	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
@@ -319,20 +381,7 @@ func TestUnreadableOrIncompleteExcludedIdentityBlocksTheWholePlan(t *testing.T) 
 	}{
 		{"never loaded", targetplan.ReasonIndexUnavailable, func(s *Store) { s.index = nil }},
 		{"empty has no completeness proof", targetplan.ReasonIndexUnavailable, func(s *Store) { s.index = newIndexBuilder(now).index }},
-		{"latest refresh failed", targetplan.ReasonReadFailed, func(s *Store) {
-			s.reader = stubLoader{err: errors.New("read failed")}
-			_ = s.Refresh(context.Background())
-		}},
-		{"old snapshot", targetplan.ReasonStale, func(s *Store) { s.index.builtAt = now.Add(-11 * time.Minute) }},
-		{"refused host", targetplan.ReasonIndexIncomplete, func(s *Store) { s.index.refused.host("502") }},
-		{"host without id", targetplan.ReasonIndexIncomplete, func(s *Store) { s.index.hosts++ }},
-		{"invalid host id", targetplan.ReasonIndexIncomplete, func(s *Store) {
-			builder := newIndexBuilder(now)
-			builder.addFields([]string{"501", hostUnderSet, "502", `{"bk_host_id":-1}`})
-			s.index = builder.index
-		}},
-		{"missing canonical model", targetplan.ReasonModelUnresolved, func(s *Store) { s.index.modelledHosts = 0 }},
-		{"ambiguous canonical model", targetplan.ReasonModelUnresolved, func(s *Store) { s.index.byModelInstance = nil }},
+		{"past the staleness bound", targetplan.ReasonStale, func(s *Store) { s.index.builtAt = now.Add(-11 * time.Minute) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			hosts := hostStore(t, clock, []string{"501", hostUnderSet}, []string{"set|12"})
@@ -341,6 +390,32 @@ func TestUnreadableOrIncompleteExcludedIdentityBlocksTheWholePlan(t *testing.T) 
 			failure := selector(got, targetplan.SelectorKindExclude, "cw-Host")
 			if got.State != targetplan.ResolutionUnavailable || !got.ExclusionUnavailable || got.Contains("501") || len(got.Members()) != 0 || failure.Reason != test.reason {
 				t.Fatalf("untrusted exclusion widened target: %+v selector %+v", got, failure)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Store)
+	}{
+		{"latest refresh failed, within the bound", func(s *Store) {
+			s.reader = stubLoader{err: errors.New("read failed")}
+			_ = s.Refresh(context.Background())
+		}},
+		{"writer marker past the bound", func(s *Store) { s.index.sourceRefreshedAt = now.Add(-time.Hour) }},
+		{"a refused host record", func(s *Store) { s.index.refused.host("509") }},
+		{"a record without a usable host id", func(s *Store) {
+			builder := newIndexBuilder(now)
+			builder.addFields([]string{"501", hostUnderSet, "507", `{"bk_host_id":-1}`})
+			s.index = builder.index
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hosts := hostStore(t, clock, []string{"501", hostUnderSet}, []string{"set|12"})
+			test.mutate(hosts)
+			got := NewTargetResolver(nil, hosts, clock).Resolve(context.Background(), plan, time.Minute)
+			exclusion := selector(got, targetplan.SelectorKindExclude, "cw-Host")
+			if got.ExclusionUnavailable || exclusion.State == targetplan.SelectorUnavailable || !got.Contains("501") {
+				t.Fatalf("exclusion within the bound was not answered: %+v selector %+v", got, exclusion)
 			}
 		})
 	}
@@ -400,7 +475,9 @@ func TestIPCloudAbsentExclusionsStayUsableAndUnreadableAddressesDoNot(t *testing
 		{"same tenant sharing address", addressedHost(104, "tenant-a", "192.0.2.1|0", 2, ""), targetplan.ReasonAddressAmbiguous, []string{"101"}, true},
 		{"present host without address", addressedHost(104, "tenant-a", "", 2, ""), targetplan.ReasonAddressUnresolved, []string{"101", "104"}, true},
 		{"present host in another tenant", addressedHost(104, "tenant-b", "192.0.2.4|0", 3, ""), targetplan.ReasonAddressUnresolved, []string{"101", "104"}, true},
-		{"refused record is not deleted", `{"bk_host_id":104,`, targetplan.ReasonIndexIncomplete, []string{"101", "104"}, true},
+		// The writer publishes host records from typed structures; one the
+		// reader cannot decode reads as absent, as a deleted host does.
+		{"refused record reads as absent", `{"bk_host_id":104,`, targetplan.ReasonExcludedAbsent, []string{"101", "104"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			records := map[int]string{101: addressedHost(101, "tenant-a", "192.0.2.1|0", 2, ""), 102: addressedHost(102, "tenant-a", "192.0.2.2|0", 2, "")}
@@ -423,8 +500,8 @@ func TestIPCloudAbsentExclusionsStayUsableAndUnreadableAddressesDoNot(t *testing
 			} else if got.State != targetplan.ResolutionComplete || !reflect.DeepEqual(got.Members(), []string{"192.0.2.2|0"}) {
 				t.Fatalf("usable exclusion did not subtract addresses: %+v members %v", got, got.Members())
 			}
-			if test.reason == targetplan.ReasonExcludedAbsent && exclusion.Dropped != 2 {
-				t.Fatalf("absent members counted as %d, want 2", exclusion.Dropped)
+			if test.reason == targetplan.ReasonExcludedAbsent && exclusion.Dropped != len(test.excluded)-1 {
+				t.Fatalf("absent members counted as %d, want %d", exclusion.Dropped, len(test.excluded)-1)
 			}
 		})
 	}
