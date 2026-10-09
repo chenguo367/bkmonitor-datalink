@@ -150,10 +150,11 @@ func longestStep(requirements []LevelRequirement) time.Duration {
 // step of extra life per key, and less than 3% on the deployment it was
 // measured on.
 //
-// Generation-scoped keys are not moved: GenerationScopedTTL lifts them to a
-// whole-day floor, they are renewed on every read, and nothing writes them at
-// a Slot's phase, so the property "TTL mod step == half a step" is one this
-// function gives Runtime State keys alone.
+// Generation-scoped keys do not need it -- they are renewed on every read and
+// nothing writes them at a Slot's phase -- but they get it where their life is
+// the runtime TTL: GenerationScopedTTL takes this TTL, offset included, when
+// it is longer than the whole-day floor, and the floor itself when not. The
+// offset only lengthens a life, so on those keys it costs at most one step.
 func offsetFromTheStep(ttl time.Duration, requirements []LevelRequirement) time.Duration {
 	step := longestStep(requirements)
 	if step <= 0 {
