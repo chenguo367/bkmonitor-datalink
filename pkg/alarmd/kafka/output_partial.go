@@ -209,8 +209,11 @@ func partlyRefused(ctx context.Context, err error, messages []*sarama.ProducerMe
 	after := append([]refusal(nil), refused...)
 	reported := make([]observability.OutputRejectedEvent, 0, len(batch))
 	for _, failure := range batch {
+		if failure == nil {
+			return nil
+		}
 		index, known := position[failure.Msg]
-		if failure == nil || !known {
+		if !known {
 			return nil
 		}
 		detail, _ := oneClientRejection(failure.Err)
