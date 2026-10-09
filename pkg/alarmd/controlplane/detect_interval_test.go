@@ -85,7 +85,7 @@ func executionBytes(t *testing.T, catalog controlplane.Catalog) []byte {
 func warningsOf(catalog controlplane.Catalog) []string {
 	var reasons []string
 	for _, disposition := range catalog.Dispositions {
-		if disposition.Disposition == controlplane.DispositionConfigNormalized && disposition.FieldPath == "items[0].detect_interval" {
+		if disposition.Disposition == controlplane.DispositionConfigNoted && disposition.FieldPath == "items[0].detect_interval" {
 			reasons = append(reasons, disposition.Reason)
 		}
 	}

@@ -66,7 +66,7 @@ const (
 )
 
 // DetectIntervalWarnings are the reasons a detect_interval that runs is
-// noted under. They are CONFIG_NORMALIZED dispositions: the Plan runs, and
+// noted under. They are CONFIG_NOTED dispositions: the Plan runs, and
 // the fleet lists them under their own check.
 var DetectIntervalWarnings = []string{
 	ReasonDetectIntervalAboveAgg, ReasonDetectIntervalNotDivisible, ReasonDetectIntervalBelowFloor,
@@ -165,7 +165,7 @@ func notSliding(item legacyItem, step int64) (string, string) {
 	return "", ""
 }
 
-// warningDisposition is the CONFIG_NORMALIZED disposition a step that runs
+// warningDisposition is the CONFIG_NOTED disposition a step that runs
 // with a warning is listed under, nil for one without.
 func (step detectStep) warningDisposition(sourceID string, aggregation int64) *ObjectDisposition {
 	if step.Warning == "" {
@@ -175,7 +175,7 @@ func (step detectStep) warningDisposition(sourceID string, aggregation int64) *O
 	if step.Detail != "" {
 		detail += " " + step.Detail
 	}
-	return &ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized, Reason: step.Warning,
+	return &ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNoted, Reason: step.Warning,
 		FieldPath: "items[0].detect_interval", Detail: detail}
 }
 

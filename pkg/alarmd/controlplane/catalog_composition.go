@@ -480,17 +480,17 @@ var AlwaysReportedWithheld = []WithheldKey{
 	// "No strategy's effective time was widened to the whole day because a
 	// range did not parse" is a claim a reader acts on: the widening is the
 	// direction of more detection, and the only way to see it is this pair.
-	{Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid},
+	{Disposition: DispositionConfigNoted, Reason: ReasonEffectiveTimeRangeInvalid},
 	// "No strategy here takes part in priority arbitration" is the zero that
 	// says every strategy detects exactly as it would alone on the platform.
-	{Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored},
+	{Disposition: DispositionConfigNoted, Reason: ReasonPriorityIgnored},
 	// "No strategy here runs a level on another level's trigger."
-	{Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed},
+	{Disposition: DispositionConfigNoted, Reason: ReasonLevelTriggerBorrowed},
 	// "No strategy here runs on a period it did not write."
-	{Disposition: DispositionConfigNormalized, Reason: ReasonAggIntervalDefaulted},
+	{Disposition: DispositionConfigNoted, Reason: ReasonAggIntervalDefaulted},
 	// "No strategy here has a no-data trigger the tracking horizon stops
 	// before it can fire."
-	{Disposition: DispositionConfigNormalized, Reason: ReasonNoDataTriggerBeyondHorizon},
+	{Disposition: DispositionConfigNoted, Reason: ReasonNoDataTriggerBeyondHorizon},
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers
@@ -517,5 +517,5 @@ var CatalogDispositions = []Disposition{
 	DispositionRemoved,
 	DispositionUnsupported,
 	DispositionCompatibilityIgnored,
-	DispositionConfigNormalized,
+	DispositionConfigNoted,
 }

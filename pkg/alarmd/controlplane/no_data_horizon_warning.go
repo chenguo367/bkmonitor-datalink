@@ -30,7 +30,7 @@ import (
 // (the user's rule of 2026-10-08: warn, do not refuse what can be executed):
 // the Plan stays accepted, its no-data is tracked, stopped and recovered as
 // configured, and no partition count moves. It is listed under
-// CONFIG_NORMALIZED, the disposition a running Plan's configuration notes
+// CONFIG_NOTED, the disposition a running Plan's configuration notes
 // live under, with the numbers the owner chooses between.
 //
 // The best case only. A round that did not see the whole period does not
@@ -47,7 +47,7 @@ func noDataTriggerBeyondHorizon(sourceID string, config *contract.NoDataConfigV1
 		return nil
 	}
 	return &ObjectDisposition{
-		SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized,
+		SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNoted,
 		Reason: ReasonNoDataTriggerBeyondHorizon, FieldPath: "items[0].no_data_config.continuous",
 		Detail: fmt.Sprintf("continuous=%d period=%d earliest_alert_after=%d tracking_horizon=%d horizon_source=%s",
 			config.Continuous, periodSeconds, earliest, config.TrackingHorizonSeconds, config.TrackingHorizonSource),

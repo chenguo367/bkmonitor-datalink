@@ -741,7 +741,7 @@ var CHECK = {
   CAPABILITY_UNSUPPORTED: '{s} 条策略这个部署跑不了（{g} 种原因）——处理办法按原因组看',
   CAPABILITY_UNLISTED: '{s} 条策略这个部署跑不了，原因不在本构建声明的能力缺口清单里（{g} 种）——归本服务按原因组查清',
   CONFIG_REJECTED:       '{s} 条策略的定义编译不过（{g} 种原因）——按原因组看是哪个字段；带 STALE_CONFIG 的那组仍按上一版配置在跑',
-  CONFIG_NORMALIZED:     '{s} 条策略在检测，但有一部分配置的读法和写的不同（{g} 种原因，各原因的说明见下）——不是被扣',
+  CONFIG_NOTED:     '{s} 条策略在检测，但有一部分配置的读法和写的不同（{g} 种原因，各原因的说明见下）——不是被扣',
   // The three standings. {since}, {c}, {applied} and {published} come from
   // the leader's activation facts on the report, not from counts; the split
   // line's numbers come from the leader's rebalance round on the report.
@@ -898,7 +898,7 @@ var EVIDENCE = {
   CAPABILITY_UNSUPPORTED: '展开按原因看：每组带服务端给的"这是什么 / 谁能处理 / 下一步"（words.kind ∈ DEPLOYMENT_PARAMETER 部署参数不够 · BUILD_CAPABILITY 本构建不支持 · WRITER_AHEAD 写入方超前于本构建 · STRATEGY_DEFINITION 策略定义超出护栏 · UNKNOWN_REASON 页面还没有说明）与策略样本、field_path。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CAPABILITY_UNLISTED: '展开按原因看：这些原因同样被记为能力不支持，但不在本构建声明的能力缺口清单里（一个没人登记的新原因，或记错处置的缺陷），所以先算本服务的，每组带服务端给的说明与策略样本、field_path',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
-  CONFIG_NORMALIZED:     '展开按原因看策略与级别，每组带服务端给的"读成了什么 / 下一步"；指标 catalog_withheld_objects{disposition="CONFIG_NORMALIZED",reason}（零也可读）',
+  CONFIG_NOTED:     '展开按原因看策略与级别，每组带服务端给的"读成了什么 / 下一步"；指标 catalog_withheld_objects{disposition="CONFIG_NOTED",reason}（零也可读）',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
   REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；输出未就绪的组带该副本的未就绪时长、重试次数与最近一次失败原文；副本表里该副本的策略源/告警集合/平台设置时钟；依赖面板"告警输出"行',
@@ -938,7 +938,7 @@ var NEXT = {
   CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档；策略定义超出护栏的先收策略，护栏不是工作上限',
   CAPABILITY_UNLISTED: '按原因组各自的"下一步"；说明写着原因待查的，交本服务查清是能力缺口、部署参数还是缺陷，登记后归到对应的一行',
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
-  CONFIG_NORMALIZED:     '按原因组的"下一步"处理；有的要策略侧改写法，有的不需要处理。策略一直在检测，不算漏检',
+  CONFIG_NOTED:     '按原因组的"下一步"处理；有的要策略侧改写法，有的不需要处理。策略一直在检测，不算漏检',
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
   REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者；输出未就绪看该副本所在节点到告警输出的网络（它自己在重试，最多 30 秒一次，通了就就绪），不用重启它',
@@ -982,7 +982,7 @@ var RECOVERY = {
   CAPABILITY_UNSUPPORTED: '参数调好或新构建上线后一轮刷新：该原因组消失，"应有"涨上来',
   CAPABILITY_UNLISTED: '原因查清归位或修好后一轮刷新：该原因组从这一行消失',
   CONFIG_REJECTED:       '策略改好后一轮刷新：该策略离开这一组；这一行只在全部改好后消失',
-  CONFIG_NORMALIZED:     '配置改好后一轮刷新：该策略离开这一组，按写的范围检测；这一行只在全部改好后消失',
+  CONFIG_NOTED:     '配置改好后一轮刷新：该策略离开这一组，按写的范围检测；这一行只在全部改好后消失',
   CUTOVER_FAILING:       '执行版本追上目标发布（两者一致）且之后一轮激活成功；这一行消失',
   OWNERSHIP_SKEWED:      'Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 {stop}% 以内，这是调度器自己的容差）；这一行消失',
   REPLICA_DEGRADED:      '该副本的那个时钟回到设计界内；策略源的 = 一轮刷新成功、新目录发布；输出的 = 该副本打开告警输出成功、变为就绪并开始接任务，这一行消失',
@@ -1853,7 +1853,7 @@ function loadChecks() {
 function isStanding(report) {
   return report.code === 'CUTOVER_FAILING' || report.code === 'REPLICA_DEGRADED' || report.code === 'OWNERSHIP_SKEWED'
     || report.code === 'SOURCE_INCOMPLETE' || report.code === 'CAPABILITY_UNSUPPORTED' || report.code === 'CAPABILITY_UNLISTED' || report.code === 'CONFIG_REJECTED'
-    || report.code === 'SOURCE_SET_FLAPPING' || report.code === 'CONFIG_NORMALIZED';
+    || report.code === 'SOURCE_SET_FLAPPING' || report.code === 'CONFIG_NOTED';
 }
 
 // The first screen: the checks this reader acts on now; folded away, the
@@ -3391,8 +3391,8 @@ function renderSource(source, expected, standing) {
   // A normalized item is not withheld: the strategy runs, read otherwise
   // than written. It gets its own verb, or the hint counts a running
   // strategy among the held ones.
-  var held = withheld.filter(function (g) { return g.disposition !== 'CONFIG_NORMALIZED'; });
-  var widened = withheld.filter(function (g) { return g.disposition === 'CONFIG_NORMALIZED'; });
+  var held = withheld.filter(function (g) { return g.disposition !== 'CONFIG_NOTED'; });
+  var widened = withheld.filter(function (g) { return g.disposition === 'CONFIG_NOTED'; });
   if (held.length) {
     parts.push('扣住 ' + held.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、'));
   }

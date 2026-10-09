@@ -26,7 +26,7 @@ func TestANoDataTriggerBeyondTheHorizonIsReadOnTheStrategyAndItsDiagnosis(t *tes
 		Plans: plans(planA),
 		Dispositions: []StrategyDisposition{
 			{Scope: "PLAN", Disposition: "ACCEPTED"},
-			{Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "NO_DATA_TRIGGER_BEYOND_HORIZON",
+			{Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "NO_DATA_TRIGGER_BEYOND_HORIZON",
 				FieldPath: "items[0].no_data_config.continuous", Detail: detail}}}
 
 	handler := standingHandler(t, func(id string) StrategyLookupFacts { return facts[id] }, nil)
@@ -35,7 +35,7 @@ func TestANoDataTriggerBeyondTheHorizonIsReadOnTheStrategyAndItsDiagnosis(t *tes
 		t.Fatalf("status %d standing %v, want DETECTING: the warning withholds nothing", status, body["standing"])
 	}
 	line, _ := body["line"].(string)
-	if !strings.Contains(line, "1 项配置有提示、仍在检测：PLAN：CONFIG_NORMALIZED/NO_DATA_TRIGGER_BEYOND_HORIZON"+
+	if !strings.Contains(line, "1 项配置有提示、仍在检测：PLAN：CONFIG_NOTED/NO_DATA_TRIGGER_BEYOND_HORIZON"+
 		"（items[0].no_data_config.continuous）——无数据告警要连续缺席的时长达到或超过追踪期限") ||
 		strings.Contains(line, "项被扣住") || strings.Contains(line, "全部被扣住") || strings.Contains(line, "部分生效") {
 		t.Fatalf("line = %q, want the note in the page's words and nothing withheld", line)
@@ -82,7 +82,7 @@ func TestAWithheldStrategysDiagnosisReadsTheWithheldItemBeforeAnyNote(t *testing
 	facts := diagnosisFacts()
 	facts["4111"] = StrategyLookupFacts{Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
 		Dispositions: []StrategyDisposition{
-			{Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "NO_DATA_TRIGGER_BEYOND_HORIZON",
+			{Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "NO_DATA_TRIGGER_BEYOND_HORIZON",
 				FieldPath: "items[0].no_data_config.continuous", Detail: "continuous=11 period=60 earliest_alert_after=600 tracking_horizon=600 horizon_source=PLATFORM"},
 			{Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"}}}
 	rig := newDiagnosisRig(t, facts, nil)

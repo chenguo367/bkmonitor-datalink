@@ -204,12 +204,12 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 	standing := StrategyStandingOf(id, "", "", ctx.replica, facts, ctx.view, ctx.now)
 	row.Catalog = standing.Standing
 	// The withheld items first, then the notes on a configuration that runs
-	// (CONFIG_NORMALIZED): a withheld row reads its words off the first item,
+	// (CONFIG_NOTED): a withheld row reads its words off the first item,
 	// so a note must never stand in front of what withheld it, and a
 	// detecting strategy with a note - a range read as the whole day, a
 	// no-data trigger the horizon stops first - has to say so here, or the
 	// owner reading the diagnosis never learns it.
-	for _, pass := range []func(string) bool{isWithheld, func(disposition string) bool { return disposition == dispositionConfigNormalized }} {
+	for _, pass := range []func(string) bool{isWithheld, func(disposition string) bool { return disposition == dispositionConfigNoted }} {
 		for _, disposition := range standing.Dispositions {
 			if !pass(disposition.Disposition) {
 				continue

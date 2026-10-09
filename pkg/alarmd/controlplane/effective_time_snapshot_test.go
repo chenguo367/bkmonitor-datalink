@@ -111,7 +111,7 @@ func TestEffectiveTimeMultipleLevelsKeepTheirOwnUptime(t *testing.T) {
 
 // A strategy whose uptime has a range that does not parse is accepted, its
 // Level running on the range read as Python reads it, and the Leader names
-// the widening at the Level scope: CONFIG_NORMALIZED with
+// the widening at the Level scope: CONFIG_NOTED with
 // EFFECTIVE_TIME_RANGE_INVALID, the pair the composition always reports so
 // "no strategy was widened" is a reading too.
 func TestAMalformedTimeRangeIsAcceptedAndNamed(t *testing.T) {
@@ -133,7 +133,7 @@ func TestAMalformedTimeRangeIsAcceptedAndNamed(t *testing.T) {
 	named := func(catalog controlplane.Catalog) int {
 		count := 0
 		for _, disposition := range catalog.Dispositions {
-			if disposition.Disposition == controlplane.DispositionConfigNormalized && disposition.Reason == controlplane.ReasonEffectiveTimeRangeInvalid && disposition.Scope == "LEVEL" && disposition.SourceID == "1001" {
+			if disposition.Disposition == controlplane.DispositionConfigNoted && disposition.Reason == controlplane.ReasonEffectiveTimeRangeInvalid && disposition.Scope == "LEVEL" && disposition.SourceID == "1001" {
 				count++
 			}
 		}
@@ -156,7 +156,7 @@ func TestAMalformedTimeRangeIsAcceptedAndNamed(t *testing.T) {
 	}
 	found := false
 	for _, key := range controlplane.AlwaysReportedWithheld {
-		found = found || (key.Disposition == controlplane.DispositionConfigNormalized && key.Reason == controlplane.ReasonEffectiveTimeRangeInvalid)
+		found = found || (key.Disposition == controlplane.DispositionConfigNoted && key.Reason == controlplane.ReasonEffectiveTimeRangeInvalid)
 	}
 	if !found {
 		t.Fatal("the pair is not always reported, so its zero is not a reading")

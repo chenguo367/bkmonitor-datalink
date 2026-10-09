@@ -197,8 +197,8 @@ var checkWords = map[Check]wordPair{
 	CheckConfigRejected:        {StateNotDetecting, ActionStrategyEdit},
 	// Detecting, because the Plan runs. The action here is the line's when a
 	// reason asks for an edit; a line whose reasons ask nothing is nobody's
-	// (normalizedOwner), and each reason carries its own action.
-	CheckConfigNormalized:       {StateDetecting, ActionStrategyEdit},
+	// (notedOwner), and each reason carries its own action.
+	CheckConfigNoted:            {StateDetecting, ActionStrategyEdit},
 	CheckCutoverFailing:         {StateResultUntrusted, ActionServiceFix},
 	CheckReplicaDegraded:        {StateResultUntrusted, ActionServiceFix},
 	CheckOwnershipSkewed:        {StateDetecting, ActionNone},

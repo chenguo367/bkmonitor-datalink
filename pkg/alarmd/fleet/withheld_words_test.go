@@ -40,7 +40,7 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 	sources := map[string]*regexp.Regexp{
 		// The normalized disposition's reasons are named constants beside
 		// the disposition; the words table carries them because the group
-		// under CONFIG_NORMALIZED shows the reason's words the same way.
+		// under CONFIG_NOTED shows the reason's words the same way.
 		"../controlplane": regexp.MustCompile(`DispositionUnsupported,?[^\n]*\n?[^\n]*Reason: "([A-Z_]+)"|queryUnsupported\("([A-Z_]+)"|return "(UNSUPPORTED_[A-Z_]+)"|Reason(?:EffectiveTimeRangeInvalid|PriorityIgnored|LevelTriggerBorrowed|AggIntervalDefaulted|NoDataTriggerBeyondHorizon|DetectInterval[A-Za-z]+) += "([A-Z_]+)"`),
 		"../targetplan":   regexp.MustCompile(`Reason[A-Za-z]* += "([A-Z_]+)"`),
 		"../contract":     regexp.MustCompile(`Reason(?:SnapshotRetentionInsufficient|CompletionOffsetBelowReserve) += "([A-Z_]+)"`),
@@ -355,7 +355,7 @@ func TestTheDeclaredCapabilitiesAreNamedReasonsAndOnlyThose(t *testing.T) {
 }
 
 // A detect_interval the catalog runs with a warning is listed under
-// CONFIG_NORMALIZED with words of its own: the strategy detects, and the
+// CONFIG_NOTED with words of its own: the strategy detects, and the
 // words say at which step and what follows. Each asks its owner to act
 // except the source one, which the owner cannot change.
 func TestADetectIntervalWarningHasWordsAndTheActionItsOwnerCanTake(t *testing.T) {
@@ -368,7 +368,7 @@ func TestADetectIntervalWarningHasWordsAndTheActionItsOwnerCanTake(t *testing.T)
 			t.Errorf("%s: words %+v, want the strategy's, said, asking %s", reason, words, action)
 		}
 	}
-	if checkWords[CheckConfigNormalized] != (wordPair{StateDetecting, ActionStrategyEdit}) {
-		t.Errorf("CONFIG_NORMALIZED is %+v, want a strategy that detects", checkWords[CheckConfigNormalized])
+	if checkWords[CheckConfigNoted] != (wordPair{StateDetecting, ActionStrategyEdit}) {
+		t.Errorf("CONFIG_NOTED is %+v, want a strategy that detects", checkWords[CheckConfigNoted])
 	}
 }

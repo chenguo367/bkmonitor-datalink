@@ -204,7 +204,7 @@ func TestPriorityGroupStrategyRunsStandaloneAndIsNamed(t *testing.T) {
 				}
 				return
 			}
-			want := controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: controlplane.DispositionConfigNormalized, Reason: controlplane.ReasonPriorityIgnored}
+			want := controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: controlplane.DispositionConfigNoted, Reason: controlplane.ReasonPriorityIgnored}
 			if len(records) != 1 || records[0] != want {
 				t.Fatalf("records=%#v, want one %#v", records, want)
 			}
@@ -237,7 +237,7 @@ func TestPriorityGroupStrategyRunsStandaloneAndIsNamed(t *testing.T) {
 		t.Fatalf("a strategy without priority was named: %#v", records)
 	}
 	// The zero is a reading: no strategy here is arbitrated by priority.
-	key := controlplane.WithheldKey{Disposition: controlplane.DispositionConfigNormalized, Reason: controlplane.ReasonPriorityIgnored}
+	key := controlplane.WithheldKey{Disposition: controlplane.DispositionConfigNoted, Reason: controlplane.ReasonPriorityIgnored}
 	if count, reported := controlplane.ComposeCatalog(standalone).Withheld[key]; !reported || count != 0 {
 		t.Fatalf("PRIORITY_IGNORED reported=%v count=%d, want a zero that is published", reported, count)
 	}

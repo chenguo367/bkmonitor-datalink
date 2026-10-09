@@ -106,14 +106,14 @@ func TestANoDataTriggerTheHorizonStopsFirstIsWarnedAndNothingElseChanges(t *test
 				t.Fatalf("warned = %t (%+v), want %t", warned, warning, test.warned)
 			}
 			if warned {
-				if warning.Disposition != controlplane.DispositionConfigNormalized || warning.Scope != "PLAN" ||
+				if warning.Disposition != controlplane.DispositionConfigNoted || warning.Scope != "PLAN" ||
 					warning.Detail != test.detail || warning.FieldPath != "items[0].no_data_config.continuous" {
-					t.Fatalf("warning = %+v, want CONFIG_NORMALIZED on the Plan with detail %q", warning, test.detail)
+					t.Fatalf("warning = %+v, want CONFIG_NOTED on the Plan with detail %q", warning, test.detail)
 				}
 			}
 			for _, disposition := range catalog.Dispositions {
 				if disposition.Disposition != controlplane.DispositionAccepted &&
-					disposition.Disposition != controlplane.DispositionConfigNormalized {
+					disposition.Disposition != controlplane.DispositionConfigNoted {
 					t.Fatalf("the strategy is filed as %+v; the warning must not withhold anything", disposition)
 				}
 			}

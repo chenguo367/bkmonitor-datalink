@@ -72,7 +72,7 @@ func TestADetectIntervalIsReadAgainstTheAggregationInterval(t *testing.T) {
 				t.Fatalf("step %+v, want seconds %d configured %t warning %q", step, test.step, test.configured, test.warning)
 			}
 			if disposition := step.warningDisposition("7", test.aggregate); (disposition != nil) != (test.warning != "") ||
-				disposition != nil && (disposition.Disposition != DispositionConfigNormalized || disposition.Reason != test.warning || disposition.FieldPath != "items[0].detect_interval") {
+				disposition != nil && (disposition.Disposition != DispositionConfigNoted || disposition.Reason != test.warning || disposition.FieldPath != "items[0].detect_interval") {
 				t.Fatalf("warning disposition %+v for %+v", disposition, step)
 			}
 		})

@@ -282,7 +282,7 @@ const (
 	DispositionRemoved              Disposition = "REMOVED"
 	DispositionUnsupported          Disposition = "UNSUPPORTED_PHASE2_CAPABILITY"
 	DispositionCompatibilityIgnored Disposition = "COMPATIBILITY_IGNORED"
-	// DispositionConfigNormalized is an object accepted with a note about
+	// DispositionConfigNoted is an object accepted with a note about
 	// its configuration: a part read as something other than what was
 	// written, the way Python reads it, or a part that runs as written and
 	// cannot do what it appears to (a no-data trigger the tracking horizon
@@ -291,7 +291,13 @@ const (
 	// dispositions because that is the list a reader looks at for "what did
 	// the catalog do to my strategy", and a note that is not there is a note
 	// nobody finds.
-	DispositionConfigNormalized Disposition = "CONFIG_NORMALIZED"
+	//
+	// The word is "noted" and not "normalized" because the second case is
+	// not a reading: nothing is read otherwise than written, and a word
+	// that said so would send the owner looking for a change that was not
+	// made. The earlier word, which said normalized, is retired: no build
+	// emits it and no source names it (metric's removedLabelValues).
+	DispositionConfigNoted Disposition = "CONFIG_NOTED"
 )
 
 // ReasonEffectiveTimeRangeInvalid names a Level whose uptime has a range
@@ -1356,7 +1362,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	}
 	candidate.dispositions = append(candidate.dispositions, dispositions...)
 	if priorityIgnored {
-		candidate.dispositions = append(candidate.dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored})
+		candidate.dispositions = append(candidate.dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigNoted, Reason: ReasonPriorityIgnored})
 	}
 	return candidate, nil
 }
@@ -2237,7 +2243,7 @@ func compilePlan(
 	levels := make([]contract.LevelIRV2, 0, len(levelIDs))
 	dispositions := make([]ObjectDisposition, 0)
 	if intervalDefaulted {
-		dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized,
+		dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNoted,
 			Reason: ReasonAggIntervalDefaulted, FieldPath: "items[0].query_configs[*].agg_interval",
 			Detail: fmt.Sprintf("agg_interval=%d", pythonDefaultAggInterval)})
 	}
@@ -2331,7 +2337,7 @@ func compilePlan(
 			// the compiler reads the range as Python does and does not know
 			// whose it is.
 			if strategy.UptimeTimeRangesNormalized(detect.Trigger.Uptime) {
-				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid})
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted, Reason: ReasonEffectiveTimeRangeInvalid})
 			}
 		}
 		trigger, _ := json.Marshal(triggerFields)
@@ -2341,7 +2347,7 @@ func compilePlan(
 			connector = contract.LevelConnectorOR
 		}
 		if borrowed {
-			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed,
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNoted, Reason: ReasonLevelTriggerBorrowed,
 				Detail: fmt.Sprintf("trigger_from_level=%d", detect.Level)})
 		}
 		levels = append(levels, contract.LevelIRV2{Definition: contract.LevelDefinitionV2{LevelID: levelID, Priority: priority}, Connector: connector, DetectPlan: contract.DetectPlanV2{Algorithms: compiledAlgorithms}, TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: trigger}, RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: recovery}})

@@ -418,7 +418,7 @@ func strategyStandingLine(standing StrategyStanding) string {
 		if disposition.FieldPath != "" {
 			item += "（" + disposition.FieldPath + "）"
 		}
-		if disposition.Disposition == dispositionConfigNormalized {
+		if disposition.Disposition == dispositionConfigNoted {
 			normalized = append(normalized, item+"——"+WithheldWordsOf(disposition.Reason).What)
 			continue
 		}
@@ -459,13 +459,13 @@ func strategyStandingLine(standing StrategyStanding) string {
 		objects = append(objects, object)
 	}
 	removed, pending := removedFromSource(standing)
-	return strategyStandingSentence(standing, objects, withheld, removed, pending) + normalizedClause(normalized)
+	return strategyStandingSentence(standing, objects, withheld, removed, pending) + notedClause(normalized)
 }
 
-// normalizedClause is the sentence's tail for the items that run with a
+// notedClause is the sentence's tail for the items that run with a
 // note about their configuration - read other than written, or run as
 // written and unable to do what they appear to; empty when there are none.
-func normalizedClause(normalized []string) string {
+func notedClause(normalized []string) string {
 	if len(normalized) == 0 {
 		return ""
 	}
