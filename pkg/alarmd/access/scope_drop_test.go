@@ -168,10 +168,7 @@ func TestRejectionsTheCloseCannotUseAreCountedInBulk(t *testing.T) {
 // A host turned away by the host status filter is still inside its target;
 // the close does not hear about it at all.
 func TestAHostStatusRejectionIsNotReported(t *testing.T) {
-	filter, installed := admission.NewHostStatusFilter([]string{"spare"})
-	if !installed {
-		t.Fatal("host status filter not installed")
-	}
+	filter := admission.NewHostStatusFilter([]string{"spare"})
 	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, stateFuller{state: "spare"}},
 		[]admission.Filter{filter, admission.TargetScopeFilter{}})
 	sink := &recordingSink{}

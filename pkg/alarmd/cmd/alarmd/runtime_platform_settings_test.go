@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
@@ -238,5 +239,22 @@ func TestEveryPlanCompilerIsBuiltWithTheQueriesTimeZone(t *testing.T) {
 		if got := strings.Count(string(source), "strategy.NewCompiler("); got != want {
 			t.Fatalf("%s builds %d strategy compilers itself, want %d: build them with newPlanCompiler", file, got, want)
 		}
+	}
+}
+
+// The platform publishing an empty list of disabled states disables no host by
+// state; it does not take the host status filter away. Python installs that
+// filter whatever the list (processor.py:76-80), so a host CMDB does not know
+// is still dropped (filters.py:114-116), as before the list emptied.
+func TestAnEmptyDisabledStateListStillDropsUnknownHosts(t *testing.T) {
+	filter := newDynamicHostStatusFilter([]string{"备用机"})
+	if states := filter.Apply(nil); states != 0 {
+		t.Fatalf("states in force after an empty list = %d, want 0", states)
+	}
+	dimensions := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"800001"`)}
+	facts := admission.Facts{Dimensions: dimensions}
+	admission.IdentityFuller{}.Fill(dimensions, &facts)
+	if decision := filter.Admit(admission.PlanContext{}, &facts); decision.Admit || decision.Reason != "host_unknown" {
+		t.Fatalf("unknown host with no disabled states = %+v, want host_unknown", decision)
 	}
 }

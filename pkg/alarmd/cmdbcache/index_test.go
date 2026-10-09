@@ -321,10 +321,7 @@ func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
-	statusFilter, installed := admission.NewHostStatusFilter([]string{"备用机"})
-	if !installed {
-		t.Fatal("NewHostStatusFilter declined to install")
-	}
+	statusFilter := admission.NewHostStatusFilter([]string{"备用机"})
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},
 		[]admission.Filter{statusFilter},
@@ -373,10 +370,7 @@ func TestAnEmptyHostCacheIsNotAFleetWithNoHosts(t *testing.T) {
 	builder := newIndexBuilder(time.Now())
 	store := &Store{index: builder.index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 
-	statusFilter, installed := admission.NewHostStatusFilter([]string{"备用机"})
-	if !installed {
-		t.Fatal("NewHostStatusFilter declined to install")
-	}
+	statusFilter := admission.NewHostStatusFilter([]string{"备用机"})
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},
 		[]admission.Filter{admission.TargetScopeFilter{}, statusFilter},

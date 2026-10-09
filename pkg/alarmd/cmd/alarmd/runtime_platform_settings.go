@@ -114,14 +114,11 @@ func newDynamicHostStatusFilter(states []string) *dynamicHostStatusFilter {
 	return filter
 }
 
-// Apply installs the filter for states, or none for an empty list, and
-// reports how many states are now in force.
+// Apply installs the filter for states and reports how many states are now in
+// force. An empty list installs a filter all the same: it disables no host by
+// state, and still drops the invalid and unknown hosts Python drops.
 func (filter *dynamicHostStatusFilter) Apply(states []string) int {
-	installed, ok := admission.NewHostStatusFilter(states)
-	if !ok {
-		filter.current.Store(nil)
-		return 0
-	}
+	installed := admission.NewHostStatusFilter(states)
 	filter.current.Store(installed)
 	return len(installed.States())
 }

@@ -12,10 +12,7 @@ import (
 
 func hostStatusFilter(t *testing.T, states ...string) *HostStatusFilter {
 	t.Helper()
-	filter, installed := NewHostStatusFilter(states)
-	if !installed {
-		t.Fatalf("NewHostStatusFilter(%v) declined to install", states)
-	}
+	filter := NewHostStatusFilter(states)
 	return filter
 }
 
@@ -148,12 +145,26 @@ func TestAnUnreadableIndexDoesNotSilenceEveryHost(t *testing.T) {
 	}
 }
 
-// No configured states means the platform disables no host. Installing a
-// filter that can never reject would spend a decision per series to say yes.
-func TestNoConfiguredStatesInstallsNoFilter(t *testing.T) {
+// No configured states disables no host by state, and nothing else changes:
+// Python installs its host status filter whatever the list
+// (processor.py:76-80), and drops an invalid or unknown host before the list
+// is consulted (filters.py:96-116). A known host is kept whatever its state.
+func TestNoConfiguredStatesStillDropsInvalidAndUnknownHosts(t *testing.T) {
 	for _, states := range [][]string{nil, {}, {"", "  "}} {
-		if _, installed := NewHostStatusFilter(states); installed {
-			t.Fatalf("NewHostStatusFilter(%q) installed a filter that cannot reject", states)
+		filter := NewHostStatusFilter(states)
+		unknown := factsFor(map[string]json.RawMessage{"bk_host_id": raw(`"800001"`)}, nil)
+		if decision := filter.Admit(PlanContext{}, unknown); decision.Admit || decision.Reason != "host_unknown" {
+			t.Errorf("states %q, unknown host: %+v, want host_unknown", states, decision)
+		}
+		invalid := factsFor(map[string]json.RawMessage{"bk_target_ip": raw(`""`)}, nil)
+		if decision := filter.Admit(PlanContext{}, invalid); decision.Admit || decision.Reason != "host_identity_invalid" {
+			t.Errorf("states %q, invalid host: %+v, want host_identity_invalid", states, decision)
+		}
+		spare := factsFor(map[string]json.RawMessage{"bk_host_id": raw(`"700001"`)}, func(f *Facts) {
+			f.HostResolved, f.HostState = true, "备用机"
+		})
+		if decision := filter.Admit(PlanContext{}, spare); !decision.Admit {
+			t.Errorf("states %q, known spare host: %+v, want admitted - no state is disabled", states, decision)
 		}
 	}
 }

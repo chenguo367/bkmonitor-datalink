@@ -138,10 +138,7 @@ func instanceChain(t *testing.T, store *Store, disabledStates ...string) *admiss
 	t.Helper()
 	filters := []admission.Filter{admission.TargetScopeFilter{}}
 	if len(disabledStates) > 0 {
-		statusFilter, installed := admission.NewHostStatusFilter(disabledStates)
-		if !installed {
-			t.Fatal("NewHostStatusFilter declined to install")
-		}
+		statusFilter := admission.NewHostStatusFilter(disabledStates)
 		filters = append(filters, statusFilter)
 	}
 	return admission.NewChain(
