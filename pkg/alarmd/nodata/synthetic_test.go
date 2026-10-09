@@ -72,7 +72,9 @@ func TestSyntheticSeriesCarryTheVerdictAsAValueInAStableOrder(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("two runs over the same verdicts produced different lists")
 	}
-	if len(first) != 2 {
+	// One per judged group: the two hosts, and the whole item, which the
+	// present host's data recovers.
+	if len(first) != 3 {
 		t.Fatalf("series = %+v, want one per judged group", first)
 	}
 	// Ascending by group key, read off the list itself. Comparing two runs only
@@ -104,6 +106,9 @@ func TestSyntheticSeriesCarryTheVerdictAsAValueInAStableOrder(t *testing.T) {
 	}
 	if byKey[absent.Key()].Value != 1 {
 		t.Fatalf("absent group = %+v, want value 1", byKey[absent.Key()])
+	}
+	if whole, ok := byKey[WholeItemGroup().Key()]; !ok || whole.Value != 0 || whole.Periods != 0 {
+		t.Fatalf("whole item = %+v (present %v), want value 0 and no period count", whole, ok)
 	}
 	// The point is the period this Slot decides, which is one behind the Slot.
 	for _, entry := range first {

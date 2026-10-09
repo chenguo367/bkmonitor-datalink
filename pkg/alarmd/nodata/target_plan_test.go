@@ -131,8 +131,14 @@ func TestEvaluateSlotJudgesATargetPlanOnlyAgainstACompleteResolution(t *testing.
 	if got := result.Verdicts[absent.Key()]; got != VerdictNormal {
 		t.Fatalf("102 verdict = %q, want %q: it arrived", got, VerdictNormal)
 	}
-	if _, whole := result.Verdicts[WholeItemGroup().Key()]; whole {
-		t.Fatal("a target plan roster judged the whole item")
+	// The whole item is never reported absent under a target plan, but data
+	// arriving recovers it like any group (retention proposal, section 4 item
+	// 2), and it keeps no entry.
+	if got := result.Verdicts[WholeItemGroup().Key()]; got != VerdictNormal {
+		t.Fatalf("whole-item verdict = %q, want NORMAL: 102 reported", got)
+	}
+	if entry, kept := result.Memory[WholeItemGroup().Key()]; kept {
+		t.Fatalf("whole-item memory = %+v under a target plan, want none", entry)
 	}
 }
 
