@@ -176,9 +176,12 @@ func TestIndexPartialAndLocalAcknowledgements(t *testing.T) {
 	if !cache.Contains(tenant, keyA.StrategyID, "new") {
 		t.Fatal("local abnormal not retained")
 	}
+	// A RECOVERY changes nothing in the copy: whether the alert closed is
+	// the set's word, and while the set cannot say, this process's own
+	// alert keeps answering open.
 	cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "new")})
-	if cache.Contains(tenant, keyA.StrategyID, "new") {
-		t.Fatal("local recovery not applied")
+	if !cache.Contains(tenant, keyA.StrategyID, "new") {
+		t.Fatal("a RECOVERY took this process's alert out of the copy")
 	}
 	cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "fp")})
 	readFail = false
@@ -284,7 +287,7 @@ func TestIndexCapacityAndAtomicTracking(t *testing.T) {
 	}
 }
 
-func TestIndexCalibrationDoesNotEraseConcurrentACKAndCanCorrectOldRecovery(t *testing.T) {
+func TestIndexCalibrationDoesNotEraseConcurrentACK(t *testing.T) {
 	c := &clock{at: time.Unix(1700000000, 0)}
 	options := indexOptions(c)
 	var cache *Cache
@@ -293,7 +296,7 @@ func TestIndexCalibrationDoesNotEraseConcurrentACKAndCanCorrectOldRecovery(t *te
 		if concurrent {
 			cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "new")})
 		}
-		return Reconciliation{Members: []string{"fp"}, Alerts: alertsAt("critical", "fp")}, nil
+		return Reconciliation{Members: []string{"fp"}}, nil
 	})
 	cache = mustIndex(t, options)
 	_ = cache.SetTracked([]StrategyKey{keyA})
@@ -301,43 +304,10 @@ func TestIndexCalibrationDoesNotEraseConcurrentACKAndCanCorrectOldRecovery(t *te
 	if !cache.Contains(tenant, keyA.StrategyID, "new") {
 		t.Fatal("concurrent abnormal erased")
 	}
+	// A RECOVERY for a member the calibration lists leaves it a member.
 	cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "fp")})
-	if cache.Contains(tenant, keyA.StrategyID, "fp") {
-		t.Fatal("recent recovery did not subtract")
-	}
-	concurrent = false
-	c.advance(time.Hour)
-	cache.RequestReconcile(keyA)
-	cache.Refresh(context.Background())
 	if !cache.Contains(tenant, keyA.StrategyID, "fp") {
-		t.Fatal("old ACK permanently masks still active alert")
-	}
-}
-
-func TestIndexFailedCalibrationDoesNotPermanentlySuppressAnAcknowledgedRecovery(t *testing.T) {
-	c := &clock{at: time.Unix(1700000000, 0)}
-	options := indexOptions(c)
-	options.Source = setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return []string{"fp"}, nil })
-	fail := false
-	options.Reconciler = reconcilerFunc(func(context.Context, StrategyKey) (Reconciliation, error) {
-		if fail {
-			return Reconciliation{}, ErrIncomplete
-		}
-		return Reconciliation{Members: []string{"fp"}, Alerts: alertsAt("critical", "fp")}, nil
-	})
-	cache := mustIndex(t, options)
-	_ = cache.TrackOwned(keyA)
-	cache.Refresh(context.Background())
-	c.advance(time.Minute)
-	cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "fp")})
-	if cache.Contains(tenant, keyA.StrategyID, "fp") {
-		t.Fatal("recent recovery was not suppressed")
-	}
-	fail = true
-	c.advance(4 * time.Hour)
-	cache.Refresh(context.Background())
-	if cache.Snapshot(keyA).Calibrated || !cache.Contains(tenant, keyA.StrategyID, "fp") {
-		t.Fatal("failed calibration permanently suppressed an index member after both bounds expired")
+		t.Fatal("a RECOVERY hid a member the calibrated set still lists")
 	}
 }
 

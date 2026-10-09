@@ -76,6 +76,10 @@ var removedFamilies = []string{
 	// keyed, and open_alert_set_unavailable_total names what it has not
 	// confirmed.
 	"open_alert_set_sent_alerts", "open_alert_set_disjoint",
+	// The recovery ledger: a RECOVERY the consumer had not processed was held
+	// and counted when sent again. A duplicate RECOVERY is an orphan there,
+	// which changes nothing, so the copy no longer hides one or counts it.
+	"open_alert_set_recovery_resent_total",
 }
 
 // removedLabelValues are label values taken out of families that stay.
@@ -145,6 +149,8 @@ var removedLabelValues = []struct {
 	// The disjoint inference went with its families: the Console's facts
 	// replace it, as location_unconfirmed and keying_unconfirmed.
 	{"open_alert_set_unavailable_total", "reason", "members_disjoint", false},
+	// The ledger's entries went with the ledger.
+	{"open_alert_set_entries", "kind", "sent_closed", false},
 }
 
 // A removed label value is emitted by no family, whatever its source

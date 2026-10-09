@@ -77,7 +77,7 @@ func TestOpenAlertSetFactsEncodeWithoutInventingAnAge(t *testing.T) {
 	// answer and an absent count is not; whether calibration is configured
 	// present at false, since "off" is a reading a deployment has to be
 	// able to make.
-	if !strings.Contains(string(encoded), `"open_alert_set":{"calibration_configured":false,"stale_beyond_bound":false,"available":false,"tracked_sets":0,"loaded_sets":0,"members":0,"configured":false,"location_confirmed":false,"recoveries_resent":0}`) ||
+	if !strings.Contains(string(encoded), `"open_alert_set":{"calibration_configured":false,"stale_beyond_bound":false,"available":false,"tracked_sets":0,"loaded_sets":0,"members":0,"configured":false,"location_confirmed":false}`) ||
 		strings.Contains(string(encoded), "authoritative_age_seconds") || strings.Contains(string(encoded), "heartbeat_age_seconds") {
 		t.Fatalf("encoded = %s", encoded)
 	}

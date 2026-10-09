@@ -13,18 +13,22 @@ package openalerts
 // whose ABNORMAL it sent within the local retention -- an alert still firing
 // is sent again every round and stays; one that stops being sent leaves at
 // the next calibration after the retention, whether or not it recovered.
-// index.opened holds every alert it opened and has not sent the RECOVERY
-// for at the Level the alert stands at, and is what makes an alert "own" at the gate long after it left
-// added. A count that falls in added with no RECOVERY past the gate read as
-// alerts leaving without recovering, when it was alerts no longer re-sent
-// that are still open; counting each departure by its path tells the two
-// apart.
+// index.opened holds every alert it opened until a trusted set shows it
+// closed or its RECOVERY has been sent for a grace period, and is what makes
+// an alert "own" at the gate long after it left added. A RECOVERY does not
+// take an alert out at once: the consumer closes an alert only at the Level
+// it stands at, and the set says which closed. Counting each departure by its path tells an alert no longer
+// re-sent from one the set no longer carries.
 
 // Why an alert left one of the two records, closed.
 const (
-	// DepartureRecoveryAcked is a RECOVERY for the alert, at the Level it
-	// stands at, that the broker took.
-	DepartureRecoveryAcked = "recovery_acked"
+	// DepartureNotInSet is an alert of ours a trusted set's calibration no
+	// longer lists, and that this process has not sent the ABNORMAL for
+	// within the local retention: the consumer closed it.
+	DepartureNotInSet = "not_in_set"
+	// DepartureRecovered is an alert whose RECOVERY the broker took a grace
+	// period ago with no ABNORMAL since, in either trust state.
+	DepartureRecovered = "recovered"
 	// DepartureNotResent is an alert whose ABNORMAL was not sent again within
 	// the local retention, pruned from added by a calibration or a refresh.
 	// It says nothing about whether the alert is still open.
@@ -37,11 +41,13 @@ const (
 )
 
 // SentDepartures is every path out of added.
-var SentDepartures = []string{DepartureRecoveryAcked, DepartureNotResent, DepartureUntracked, DepartureEvicted}
+var SentDepartures = []string{DepartureNotResent, DepartureUntracked, DepartureEvicted}
 
-// OwnOpenDepartures is every path out of index.opened: a RECOVERY, or the
-// strategy leaving. Being no longer re-sent is not one of them.
-var OwnOpenDepartures = []string{DepartureRecoveryAcked, DepartureUntracked}
+// OwnOpenDepartures is every path out of index.opened: the set showing the
+// alert closed, its recovery sent a grace period ago, the strategy leaving,
+// or room made for a new alert in a full record. Being no longer re-sent is
+// not one of them.
+var OwnOpenDepartures = []string{DepartureNotInSet, DepartureRecovered, DepartureUntracked, DepartureEvicted}
 
 // leaveSent removes m from added and counts why. Called with the lock held.
 func (cache *Cache) leaveSent(m member, path string) {
@@ -75,7 +81,6 @@ func (cache *Cache) departureStats(stats *Stats) {
 		stats.SentDepartures[path] = cache.sentDepartures[path]
 	}
 	stats.OwnOpen = len(cache.index.opened)
-	stats.OwnOpenRefusals = cache.openRefusals
 	stats.OwnOpenDepartures = make(map[string]uint64, len(OwnOpenDepartures))
 	for _, path := range OwnOpenDepartures {
 		stats.OwnOpenDepartures[path] = cache.openDepartures[path]

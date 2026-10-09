@@ -21,7 +21,8 @@ import (
 // process opened and the set does not carry is held, counted as the
 // replica's own held, and kept whole -- with the other strategy whose set
 // carries the same fingerprint named, which is what a lookup keyed
-// differently from the sets looks like.
+// differently from the sets looks like. (The next calibration then lets the
+// alert go from the record, as one the set shows closed.)
 func TestTheGateSaysWhichHeldLookupsWereItsOwnAlerts(t *testing.T) {
 	ours := sentFingerprints(3)
 	c := &clock{at: time.Unix(1700000000, 0)}
@@ -36,12 +37,15 @@ func TestTheGateSaysWhichHeldLookupsWereItsOwnAlerts(t *testing.T) {
 	if err := f.cache.SetTracked([]StrategyKey{keyA, keyB}); err != nil {
 		t.Fatal(err)
 	}
-	f.cache.Refresh(context.Background())
+	// The first read and calibration come after the sends, so they still
+	// hold the alerts as just sent; past the retention a read alone, with no
+	// calibration since, no longer counts them as sent.
 	f.send(ours...)
-	c.advance(5*time.Minute + time.Second)
+	c.advance(time.Second)
+	f.cache.Refresh(context.Background())
+	c.advance(options.LocalRetention + time.Second)
 	for _, key := range []StrategyKey{keyA, keyB} {
 		f.cache.indexChanged(key)
-		f.cache.RequestReconcile(key)
 	}
 	f.cache.Refresh(context.Background())
 

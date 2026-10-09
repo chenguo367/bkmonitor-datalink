@@ -106,7 +106,6 @@ type Stats struct {
 	Loaded                          int
 	Members                         int
 	Added                           int
-	Removed                         int
 	Evictions                       uint64
 	Refreshes                       map[string]uint64
 	Unavailable                     map[UnavailableReason]uint64
@@ -137,19 +136,13 @@ type Stats struct {
 	GateSince time.Time
 	// SentDepartures counts why alerts left Added since the process
 	// started, every path in SentDepartures present. OwnOpen is how many
-	// alerts this process opened and has not sent the RECOVERY for --
+	// alerts this process opened that a trusted set has not shown closed --
 	// the alerts the gate treats as its own -- and OwnOpenDepartures why
-	// alerts left that record; OwnOpenRefusals how many times a first
-	// ABNORMAL found the record full -- a count of refusals, not of alerts:
-	// an alert still firing is refused again every round it is sent.
+	// alerts left that record, every path in OwnOpenDepartures present; a
+	// full record makes room by letting the stalest go (evicted).
 	SentDepartures    map[string]uint64
 	OwnOpen           int
 	OwnOpenDepartures map[string]uint64
-	OwnOpenRefusals   uint64
-	// RecoveriesResent counts RECOVERY events the broker took for an alert
-	// whose earlier RECOVERY the ledger still held: sent again because the
-	// consumer's set still carried the alert once the ledger let it through.
-	RecoveriesResent uint64
 }
 
 type member struct {
@@ -157,16 +150,9 @@ type member struct {
 	fingerprint string
 }
 
+// stamped is when this process last sent an alert's ABNORMAL.
 type stamped struct {
 	at time.Time
-	// resent is a RECOVERY whose alert the ledger already held closed when
-	// the broker took it: the recovery went out again. Such an entry waits
-	// longer before it lets the alert through again (removalHides), so a
-	// consumer that is behind gets each recovery at most once more.
-	resent bool
-	// severity is, in removed, the severity the RECOVERY closed the alert
-	// at: while the set still carries the alert, it stands there (standing).
-	severity string
 }
 
 // Cache is this process's copy of the consumer's open alert set. It
@@ -180,18 +166,12 @@ type Cache struct {
 	// Past it the oldest is evicted and counted.
 	maxLocal int
 
-	added   map[member]stamped
-	removed map[member]stamped
+	added map[member]stamped
 
 	evictions uint64
-	// recoveriesResent: see Stats.RecoveriesResent.
-	recoveriesResent uint64
 	// sentDepartures and openDepartures count why alerts left added and
-	// index.opened; openRefusals the times index.opened was full when an
-	// alert not in it was sent -- refusals, not alerts.
-	// See departures.go.
+	// index.opened. See departures.go.
 	sentDepartures, openDepartures map[string]uint64
-	openRefusals                   uint64
 	refreshes                      map[string]uint64
 	unavailable                    map[UnavailableReason]uint64
 	lookups                        map[Answer]uint64
@@ -233,12 +213,16 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	return open
 }
 
-// Acknowledged records what this process sent once the sink has taken it,
-// as the consumer will apply it (nextStanding): a trigger opens the
-// fingerprint in the copy, or keeps it open at the severity the alert now
-// stands at; a RECOVERY closes it only when it resolves that severity. A
-// RECOVERY for any other Level leaves the alert open, as it does in the
-// consumer. Only envelopes the consumer will see count: a
+// Acknowledged records what this process sent once the sink has taken it:
+// an ABNORMAL opens the fingerprint in the copy - among what was sent
+// recently, and in the record of what this process opened - and a RECOVERY
+// only starts the grace after which that record lets the alert go
+// (expireRecovered); it hides nothing from the gate. The consumer closes an alert only at
+// the Level it stands at and takes any other RECOVERY as an orphan, which
+// it records and otherwise ignores; whether the alert is still open is the
+// set's word while the set is trusted, and the record of what this process
+// opened answers for its own alerts while it is not (the 2026-09-14
+// ruling). Only envelopes the consumer will see count: a
 // compatibility-protocol envelope goes to another consumer, and one without
 // a fingerprint opens nothing. Called after the broker ACK and never
 // before, or a batch the sink refused would move the copy for alerts that
@@ -250,64 +234,58 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 	now := cache.now()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	for _, event := range events {
+	tracked := func(event contract.TriggerEventV1) (member, bool) {
 		if event.DedupeMD5 == "" || event.StrategyRef == nil || event.LegacyOutput != nil {
-			continue
+			return member{}, false
 		}
 		m := member{key: StrategyKey{TenantID: event.TenantID, StrategyID: event.PlanRef.StrategyID}, fingerprint: event.DedupeMD5}
-		if cache.index.entries[m.key] == nil {
+		return m, cache.index.entries[m.key] != nil
+	}
+	// Room for the batch's first sends is made once, in one pass over the
+	// record, not once per alert under this lock.
+	incoming := map[member]struct{}{}
+	for _, event := range events {
+		if m, ok := tracked(event); ok && event.EventKind == contract.TriggerEventAbnormal {
+			if _, opened := cache.index.opened[m]; !opened {
+				incoming[m] = struct{}{}
+			}
+		}
+	}
+	cache.makeRoomForOpened(len(incoming))
+	for _, event := range events {
+		m, ok := tracked(event)
+		if !ok {
 			continue
 		}
-		wasOpen, severity := cache.standing(m, now)
-		open, next, triggered := nextStanding(wasOpen, severity, event.LevelResults)
-		switch {
-		case triggered:
+		switch event.EventKind {
+		case contract.TriggerEventAbnormal:
 			cache.added[m] = stamped{at: now}
-			delete(cache.removed, m)
-			cache.noteOpened(m, now, next)
-		case wasOpen && !open:
-			// A RECOVERY for an alert the ledger still holds closed is the
-			// same recovery sent again; the entry remembers it. Departures
-			// do not count it: the alert left added and opened with the
-			// first one, and both leave* are no-ops for it now.
-			_, resending := cache.removed[m]
-			if resending {
-				cache.recoveriesResent++
-			}
-			cache.removed[m] = stamped{at: now, resent: resending, severity: severity}
-			cache.leaveSent(m, DepartureRecoveryAcked)
-			cache.leaveOpen(m, DepartureRecoveryAcked)
+			cache.noteOpened(m, now)
+		case contract.TriggerEventRecovery:
+			cache.noteRecovered(m, now)
 		}
 	}
 	cache.boundLocal()
 }
 
-// boundLocal keeps added plus removed inside maxLocal by evicting the
-// oldest. Called with the lock held.
+// boundLocal keeps added inside maxLocal by evicting the oldest. Called with
+// the lock held.
 func (cache *Cache) boundLocal() {
-	over := len(cache.added) + len(cache.removed) - cache.maxLocal
+	over := len(cache.added) - cache.maxLocal
 	if over <= 0 {
 		return
 	}
 	type aged struct {
-		m       member
-		at      time.Time
-		removed bool
+		m  member
+		at time.Time
 	}
-	all := make([]aged, 0, len(cache.added)+len(cache.removed))
+	all := make([]aged, 0, len(cache.added))
 	for m, s := range cache.added {
 		all = append(all, aged{m: m, at: s.at})
 	}
-	for m, s := range cache.removed {
-		all = append(all, aged{m: m, at: s.at, removed: true})
-	}
 	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
 	for _, entry := range all[:over] {
-		if entry.removed {
-			delete(cache.removed, entry.m)
-		} else {
-			cache.leaveSent(entry.m, DepartureEvicted)
-		}
+		cache.leaveSent(entry.m, DepartureEvicted)
 		cache.evictions++
 	}
 }

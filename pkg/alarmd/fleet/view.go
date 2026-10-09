@@ -2324,27 +2324,19 @@ type OpenAlertSetFacts struct {
 	// RECOVERY held while its alert stays open. GateRecent and
 	// GateRecentOwnHeld are the last lookups of each, whole.
 	GateOwnLookups map[string]uint64 `json:"gate_own_lookups,omitempty"`
-	// OwnOpen is how many alerts the replica opened and has not sent the
-	// RECOVERY for: the alerts the gate asks about as its own. It keeps an
-	// alert that is no longer re-sent, which comparison.sent does not.
-	// OwnOpenDepartures counts why alerts left it (recovery_acked,
-	// untracked) and OwnOpenRefusals how many times an alert not in it was
-	// sent while it was full: refusals, not alerts, since an alert still
-	// firing is refused again every round.
-	// SentDepartures counts why alerts left comparison.sent (recovery_acked,
-	// not_resent, untracked, evicted). All since the process started, every
-	// word present; the own-open fields are absent on a copy that does not
-	// read the index.
+	// OwnOpen is how many alerts the replica opened that a trusted set has
+	// not shown closed: the alerts the gate asks about as its own. It keeps
+	// an alert that is no longer re-sent, which the recent sends do not.
+	// OwnOpenDepartures counts why alerts left it (not_in_set, recovered,
+	// untracked, evicted: a full record makes room by letting the alert
+	// whose last ABNORMAL is oldest go). SentDepartures counts why alerts
+	// left the recent sends (not_resent, untracked, evicted). All since the
+	// process started, every word present; the own-open fields are absent
+	// on a copy that does not read the index.
 	OwnOpen           *int              `json:"own_open,omitempty"`
 	OwnOpenDepartures map[string]uint64 `json:"own_open_departures,omitempty"`
-	OwnOpenRefusals   uint64            `json:"own_open_refusals,omitempty"`
 	SentDepartures    map[string]uint64 `json:"sent_departures,omitempty"`
 	GateOwnHeld       uint64            `json:"gate_own_held,omitempty"`
-	// RecoveriesResent is how many RECOVERY events went out again for an
-	// alert whose earlier RECOVERY the replica still held closed, because
-	// the consumer's set still carried it (open_alert_set_recovery_resent_total).
-	// Present at zero: a word missing cannot be told from none sent.
-	RecoveriesResent uint64 `json:"recoveries_resent"`
 	// GateSince is when the own split started. What the replica sent is
 	// held in memory and starts empty at every start, so an alert opened
 	// before GateSince is not "own" here: no own lookup says only that no
