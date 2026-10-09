@@ -15,9 +15,9 @@ import (
 // ViewClientCounts is the Worker's account of decision-016's view stream:
 // whether it holds a stream to the Leader, which version it has installed,
 // how many of that version's objects it cannot read, and what happened on
-// the way. Every Worker reports these; in the shadow step nothing executes
-// off the installed view, so a Worker with no stream is a Worker with one
-// fewer diagnostic and nothing else.
+// the way. Every Worker reports these. A Worker with no stream keeps
+// executing from the view it installed last; one that starts without a
+// stream has no view and executes nothing.
 type ViewClientCounts struct {
 	Connected                         bool
 	InstalledRevision, InstalledEpoch uint64
