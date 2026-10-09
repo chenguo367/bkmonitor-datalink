@@ -167,6 +167,42 @@ func TestWhichSuccessesAreWrittenAndWhichAreCounted(t *testing.T) {
 	}
 }
 
+// A worker's index read is written when the index did not advance for two
+// rounds or more, or could not be read; one stale round is the race between a
+// worker reading and the Leader writing, counted and not written.
+func TestAnIndexReadOneRoundBehindIsCountedAndTwoIsWritten(t *testing.T) {
+	t.Parallel()
+
+	read := func(facts AssignmentIndexFacts) Observation {
+		return Observation{Component: ComponentOwnership, Stage: StageAssignmentIndexRead, Result: ResultSuccess, AssignmentIndex: &facts}
+	}
+	for _, tc := range []struct {
+		name    string
+		facts   AssignmentIndexFacts
+		written bool
+	}{
+		{"fresh", AssignmentIndexFacts{Result: AssignmentIndexFresh}, false},
+		{"one round behind", AssignmentIndexFacts{Result: AssignmentIndexStale, StaleRounds: 1}, false},
+		{"two rounds behind", AssignmentIndexFacts{Result: AssignmentIndexStale, StaleRounds: 2}, true},
+		{"missing", AssignmentIndexFacts{Result: AssignmentIndexMissing}, true},
+		{"invalid", AssignmentIndexFacts{Result: AssignmentIndexInvalid}, true},
+		{"fresh but rewritten", AssignmentIndexFacts{Result: AssignmentIndexFresh, Rewritten: 3}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			now := time.Unix(1_000, 0)
+			observer := levelObserver(t, &output, &now)
+			observer.Observe(context.Background(), read(tc.facts))
+			if written := output.Len() > 0; written != tc.written {
+				t.Fatalf("written=%v, want %v: %s", written, tc.written, output.String())
+			}
+			if unwritten := observer.LineCounts().Unwritten[StageAssignmentIndexRead]; (unwritten == 1) == tc.written {
+				t.Fatalf("unwritten=%d with written=%v", unwritten, tc.written)
+			}
+		})
+	}
+}
+
 // A result that is not a failure keeps one line per (reason, stage, Query
 // Group) an hour; a failure keeps one a minute; and the recovery after a run
 // of failures is not counted against them.
