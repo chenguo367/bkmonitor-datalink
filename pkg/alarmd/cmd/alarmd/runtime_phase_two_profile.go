@@ -116,9 +116,6 @@ func configurePhaseTwoCPUWith(set func(func(string, ...interface{})) error) (str
 // GOMAXPROCS came from, so a table printed outside the Pod says so itself
 // rather than passing the host's core count off as the container's.
 func printResolvedRuntimeFacts(cfg config.Config, stdout io.Writer) error {
-	if cfg.Input.Mode != config.InputModeGoAccess {
-		return nil
-	}
 	cpuSource, err := configurePhaseTwoCPU()
 	if err != nil {
 		return err

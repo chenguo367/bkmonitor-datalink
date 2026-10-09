@@ -5,17 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
 
 type runtimeTestReadHoldControl struct {

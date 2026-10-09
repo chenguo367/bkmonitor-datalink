@@ -195,7 +195,6 @@ func TestPhaseTwoCPURecordsPinnedLibraryDecisionWithoutRawEnvironment(t *testing
 // but that answers a different question and only once a Pod exists.
 func TestResolvedRuntimeFactsCarryTheDerivedTimelineCacheBudget(t *testing.T) {
 	cfg := config.Default()
-	cfg.Input.Mode = config.InputModeGoAccess
 	facts, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)

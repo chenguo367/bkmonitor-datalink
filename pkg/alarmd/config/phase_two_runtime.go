@@ -309,7 +309,7 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 }
 
 func (c *Config) resolvePhaseTwoWorkerIDFromEnvironment() {
-	if c == nil || c.Input.Mode != InputModeGoAccess {
+	if c == nil {
 		return
 	}
 	if workerID, ok := os.LookupEnv(PhaseTwoWorkerIDEnvironment); ok {

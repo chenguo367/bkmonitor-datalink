@@ -283,7 +283,6 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 }
 
 type Config struct {
-	Input           PhaseTwoInputConfig   `yaml:"input"`
 	HTTP            HTTPConfig            `yaml:"http"`
 	CLI             CLIConfig             `yaml:"cli"`
 	Kafka           KafkaConfig           `yaml:"kafka"`
@@ -301,7 +300,6 @@ type Config struct {
 // product default and every test's expectations a property of its host.
 func Default() Config {
 	cfg := Config{
-		Input: DefaultPhaseTwoInput(),
 		HTTP: HTTPConfig{
 			Listen: "127.0.0.1:8080",
 			// The pprof convention; kept off the query port so the two
@@ -512,7 +510,7 @@ func (c Config) TargetGroupRedis() (RedisConnectionConfig, bool) {
 // an incident is reconstructed from, and "inherited" is not an answer to the
 // question of where a read went.
 func (c *Config) resolvePlatformCacheRedis() {
-	if c == nil || c.Input.Mode != InputModeGoAccess {
+	if c == nil {
 		return
 	}
 	for _, cache := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig, &c.PlatformCache.TargetGroup} {
@@ -665,9 +663,6 @@ func (c Config) PublicSurfaceRestrictionRequested() bool {
 func (c Config) Validate() error {
 	if err := c.validateCommon(); err != nil {
 		return err
-	}
-	if err := c.Input.Validate(); err != nil {
-		return fmt.Errorf("input configuration: %w", err)
 	}
 
 	return c.validateGoAccessRuntime()
