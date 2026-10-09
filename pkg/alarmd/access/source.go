@@ -148,6 +148,11 @@ type Config struct {
 	Admission SeriesAdmission
 	// ObserveAdmission counts decisions. Optional.
 	ObserveAdmission AdmissionObserver
+	// ObserveAddressDiffers counts each admitted series a Plan reads whose
+	// host CMDB placed by id at another address than the record's
+	// (admission.Facts.ReportedAddressDiffers), by whether the Plan's alert
+	// identity groups by bk_target_ip. Optional.
+	ObserveAddressDiffers func(groupedByTargetIP bool)
 	// ScopeDrops receives the series the target filters turned away, for
 	// the target-scope close; see ScopeDropSink. Optional.
 	ScopeDrops ScopeDropSink
@@ -379,7 +384,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			defer running.Done()
 			adapter := &seriesAdapter{consumer: consumer, query: query, attemptNo: attempt.AttemptNo,
 				admission: source.config.Admission, observe: source.config.ObserveAdmission,
-				pulled: source.config.ObserveSeriesPulled, scopes: scopes,
+				addressDiffers: source.config.ObserveAddressDiffers, pulled: source.config.ObserveSeriesPulled, scopes: scopes,
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
 				lookback: kept}
 			adapters[index] = adapter
@@ -943,6 +948,9 @@ type seriesAdapter struct {
 	attemptNo uint32
 	admission SeriesAdmission
 	observe   AdmissionObserver
+	// addressDiffers counts an admitted series whose host CMDB placed at
+	// another address than the record's, per Plan. Optional.
+	addressDiffers func(groupedByTargetIP bool)
 	// pulled counts the series this query actually handed on. Optional.
 	pulled func(records uint64)
 	scopes planScopes
@@ -1077,6 +1085,9 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			decisions[identity] = admit
 			if !admit {
 				adapter.reportScopeDrop(identity, plan, &facts, filter, reason)
+			}
+			if admit && facts.ReportedAddressDiffers && adapter.addressDiffers != nil {
+				adapter.addressDiffers(adapter.query.groupsByTargetIP())
 			}
 			outside = outside && !admit && admission.DefinitelyOutside(plan, &facts, filter, reason)
 			if adapter.observe != nil {

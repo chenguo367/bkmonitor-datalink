@@ -699,14 +699,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
-		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
-		Now:                 external.Now,
-		Observer:            observer,
-		Admission:           seriesAdmission,
-		ObserveAdmission:    recorder.RecordSeriesAdmission,
-		ScopeDrops:          scopeDrops,
-		ObserveSeriesPulled: seriesPullTally.Add,
-		Lookback:            lookbackEngine,
+		MinReadyDelay:         cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
+		Now:                   external.Now,
+		Observer:              observer,
+		Admission:             seriesAdmission,
+		ObserveAdmission:      recorder.RecordSeriesAdmission,
+		ObserveAddressDiffers: recorder.RecordAddressDiffers,
+		ScopeDrops:            scopeDrops,
+		ObserveSeriesPulled:   seriesPullTally.Add,
+		Lookback:              lookbackEngine,
 	})
 	if err != nil {
 		return nil, err
