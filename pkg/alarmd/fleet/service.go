@@ -85,12 +85,15 @@ type SummaryReader interface {
 type Service struct {
 	// localRow builds this replica's live row for an object it tracks; set
 	// once at wiring (SetLocalRows), nil where there is no local tracker.
-	localRow     func(queryGroup string) (Anomaly, bool)
-	expectations ExpectationSource
-	registry     ReplicaRegistry
-	snapshots    SnapshotReader
-	freshness    time.Duration
-	now          func() time.Time
+	localRow func(queryGroup string) (Anomaly, bool)
+	// localQueryRanges is this replica's account of an object's latest asked
+	// ranges, set the same way (SetLocalQueryRanges).
+	localQueryRanges func(queryGroup string) (QueryRanges, bool)
+	expectations     ExpectationSource
+	registry         ReplicaRegistry
+	snapshots        SnapshotReader
+	freshness        time.Duration
+	now              func() time.Time
 
 	// The denominator and the replica list are read from the control plane on
 	// the same Redis the pipeline depends on, and reading the active object set
@@ -563,6 +566,23 @@ func (service *Service) SetLocalRows(row func(queryGroup string) (Anomaly, bool)
 	if service != nil {
 		service.localRow = row
 	}
+}
+
+// SetLocalQueryRanges binds what this replica knows of an object's latest
+// asked ranges (Tracker.QueryRanges) for the object detail.
+func (service *Service) SetLocalQueryRanges(ranges func(queryGroup string) (QueryRanges, bool)) {
+	if service != nil {
+		service.localQueryRanges = ranges
+	}
+}
+
+// LocalQueryRanges is this replica's account of the object's latest asked
+// ranges, when it has one.
+func (service *Service) LocalQueryRanges(queryGroup string) (QueryRanges, bool) {
+	if service == nil || service.localQueryRanges == nil {
+		return QueryRanges{}, false
+	}
+	return service.localQueryRanges(queryGroup)
 }
 
 // LocalRow is this replica's live row for the object, when it tracks it.

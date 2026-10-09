@@ -2370,7 +2370,10 @@ type Observation struct {
 	QueryStatus         []QueryStatusFacts
 	// QueryTruncation is every physical query of the completion whose
 	// answer may have been cut by the query service's terms cap.
-	QueryTruncation       []QueryTruncationFacts
+	QueryTruncation []QueryTruncationFacts
+	// QueryRanges is every primary physical query of the completion with the
+	// range it asked and accepts.
+	QueryRanges           []QueryRangeFacts
 	QueryUnavailable      []QueryUnavailableFacts
 	QueryTiming           *QueryTimingFacts
 	SlotReadiness         *SlotReadinessFacts

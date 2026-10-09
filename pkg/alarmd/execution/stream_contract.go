@@ -248,6 +248,20 @@ type PhysicalQueryCompletion struct {
 	// EMPTY, as it would had none been returned; these say it was not.
 	Withheld              uint64
 	WithheldOutsideTarget uint64
+	// Range is how long a range the query asked the provider for and how
+	// long a range it accepts, and whether it serves a primary requirement:
+	// the request's facts, from the spec that was sent. Nil from a source
+	// that does not name it.
+	Range *PhysicalQueryRange `json:",omitempty"`
+}
+
+// PhysicalQueryRange is a physical query's asked and accepted range lengths
+// in seconds. They differ for an event count, which asks from its lead
+// earlier so a quiet group's zeros come back, and accepts only its window.
+type PhysicalQueryRange struct {
+	Primary         bool
+	AskedSeconds    int64
+	AcceptedSeconds int64
 }
 
 type QueryExecutionCompletion struct {

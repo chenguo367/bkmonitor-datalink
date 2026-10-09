@@ -444,6 +444,9 @@ type queryGroupState struct {
 	// truncation is the suspected cut of the latest answered query, nil when
 	// it named none (KindAnswerTruncated).
 	truncation *AnswerTruncation
+	// queryRanges is what the latest round's primary queries were sent
+	// asking for, nil before any round named it (QueryRanges).
+	queryRanges *QueryRanges
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -949,6 +952,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// what ends the row.
 	if observation.Stage == observability.StageQueryCompleted {
 		tracker.noteAnswerTruncation(queryGroup, observation, trace.EvaluationTime)
+		tracker.noteQueryRanges(queryGroup, observation, trace.EvaluationTime)
 	}
 
 	tracker.mu.Lock()
@@ -2206,6 +2210,53 @@ func (tracker *Tracker) noteAnswerTruncation(queryGroup string, observation obse
 		since = state.truncation.Since
 	}
 	state.truncation = &AnswerTruncation{Source: cut.Source, Dimension: cut.Dimension, Since: since, LastSlot: slot}
+}
+
+// noteQueryRanges keeps the ranges the object's latest round's primary
+// queries were sent with, at most MaxQueryRanges in digest order with the
+// count of all. They are the request's facts: a round whose query failed
+// still sent them, and replaces them; an observation that names none leaves
+// them. Called with the lock held.
+func (tracker *Tracker) noteQueryRanges(queryGroup string, observation observability.Observation, slot int64) {
+	if len(observation.QueryRanges) == 0 {
+		return
+	}
+	state := tracker.groups[queryGroup]
+	if state == nil {
+		if len(tracker.groups) >= tracker.maxTracked {
+			return
+		}
+		state = &queryGroupState{strategies: map[StrategyRef]struct{}{}}
+		tracker.groups[queryGroup] = state
+	}
+	ranges := make([]QueryRangeFact, 0, len(observation.QueryRanges))
+	for _, item := range observation.QueryRanges {
+		ranges = append(ranges, QueryRangeFact{Digest: item.Digest, AskedSeconds: item.AskedSeconds, AcceptedSeconds: item.AcceptedSeconds})
+	}
+	sort.Slice(ranges, func(left, right int) bool { return ranges[left].Digest < ranges[right].Digest })
+	total := len(ranges)
+	if total > MaxQueryRanges {
+		ranges = ranges[:MaxQueryRanges]
+	}
+	state.queryRanges = &QueryRanges{Slot: slot, Total: total, Ranges: ranges}
+}
+
+// QueryRanges is what the object's latest round's primary queries were sent
+// asking for, when this process has seen a round name it. Answered from the
+// owner: the object detail reads it here, like the live row.
+func (tracker *Tracker) QueryRanges(queryGroup string) (QueryRanges, bool) {
+	if tracker == nil {
+		return QueryRanges{}, false
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	state := tracker.groups[queryGroup]
+	if state == nil || state.queryRanges == nil {
+		return QueryRanges{}, false
+	}
+	ranges := *state.queryRanges
+	ranges.Ranges = append([]QueryRangeFact(nil), ranges.Ranges...)
+	return ranges, true
 }
 
 // rowFailure is the failure the row is read by: this process's own, or,
