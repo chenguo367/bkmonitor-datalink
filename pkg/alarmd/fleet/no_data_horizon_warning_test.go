@@ -73,3 +73,30 @@ func strategyBodyCarriesDetail(raw any, detail string) bool {
 	}
 	return false
 }
+
+// A withheld strategy that also carries a note on its configuration reads its
+// diagnosis from what withheld it: the note is listed, after the withheld
+// item, and never stands in for it. The catalog may list the note first; the
+// row's verdict, reason and words are the withheld item's all the same.
+func TestAWithheldStrategysDiagnosisReadsTheWithheldItemBeforeAnyNote(t *testing.T) {
+	facts := diagnosisFacts()
+	facts["4111"] = StrategyLookupFacts{Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+		Dispositions: []StrategyDisposition{
+			{Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "NO_DATA_TRIGGER_BEYOND_HORIZON",
+				FieldPath: "items[0].no_data_config.continuous", Detail: "continuous=11 period=60 earliest_alert_after=600 tracking_horizon=600 horizon_source=PLATFORM"},
+			{Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"}}}
+	rig := newDiagnosisRig(t, facts, nil)
+	rig.universe = []string{"4111"}
+	page := rig.page(t, "", 0)
+	if len(page.Strategies) != 1 {
+		t.Fatalf("diagnosis rows = %+v, want the one strategy", page.Strategies)
+	}
+	row := page.Strategies[0]
+	if row.Verdict != StateNotDetecting || row.Reason != "ALGORITHM_NOT_MIGRATED" {
+		t.Fatalf("diagnosis = %s/%s, want NOT_DETECTING for the algorithm that withheld it", row.Verdict, row.Reason)
+	}
+	if len(row.Dispositions) != 2 || row.Dispositions[0].Reason != "ALGORITHM_NOT_MIGRATED" ||
+		row.Dispositions[1].Reason != "NO_DATA_TRIGGER_BEYOND_HORIZON" {
+		t.Fatalf("dispositions = %+v, want the withheld item first and the note after it", row.Dispositions)
+	}
+}
