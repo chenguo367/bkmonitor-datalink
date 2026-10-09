@@ -192,17 +192,11 @@ type WriterEvidence struct {
 // not use, each taken as absent: fields of the host and service instance
 // hashes whose record does not decode, and topology nodes of decoded records
 // that do not decode to an object and a numeric instance. Host counts fields,
-// not hosts: the writer publishes every host under two fields. The First
-// fields name the first of each by the hash field it was read under, so the
-// record can be read back from the cache; FirstTopoNode is
-// "host:<field>" or "service_instance:<field>", the record the node was in.
+// not hosts: the writer publishes every host under two fields.
 type RefusedRecords struct {
-	Host                 int    `json:"host"`
-	ServiceInstance      int    `json:"service_instance"`
-	TopoNode             int    `json:"topo_node"`
-	FirstHost            string `json:"first_host,omitempty"`
-	FirstServiceInstance string `json:"first_service_instance,omitempty"`
-	FirstTopoNode        string `json:"first_topo_node,omitempty"`
+	Host            int `json:"host"`
+	ServiceInstance int `json:"service_instance"`
+	TopoNode        int `json:"topo_node"`
 }
 
 // The endpoint roles, closed. The page's wording table is held to this list.

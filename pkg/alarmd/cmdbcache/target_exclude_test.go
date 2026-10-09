@@ -402,7 +402,7 @@ func TestOnlyAnUnusableHostIndexMakesAnExcludedIdentityUnavailable(t *testing.T)
 			_ = s.Refresh(context.Background())
 		}},
 		{"writer marker past the bound", func(s *Store) { s.index.sourceRefreshedAt = now.Add(-time.Hour) }},
-		{"a refused host record", func(s *Store) { s.index.refused.host("509") }},
+		{"a refused host record", func(s *Store) { s.index.refused.host() }},
 		{"a record without a usable host id", func(s *Store) {
 			builder := newIndexBuilder(now)
 			builder.addFields([]string{"501", hostUnderSet, "507", `{"bk_host_id":-1}`})

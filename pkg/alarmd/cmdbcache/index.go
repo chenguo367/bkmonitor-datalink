@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 
@@ -170,8 +169,7 @@ type Index struct {
 // numeric instance. Each is taken as absent, as it always was - a record
 // the writer got wrong is the same as one it deleted - and a node lost
 // this way is one a topology target silently does not match. These say how
-// many, and name the first of each by the hash field it was read under, so
-// the record can be read back from the cache.
+// many; the records themselves are read back from the cache by field.
 //
 // Hosts counts fields, not hosts: the writer publishes every host under
 // its "ip|cloud" field and its host id field, so one bad host record is
@@ -179,63 +177,16 @@ type Index struct {
 // is. A topology node is counted once per record, and a host's once, from
 // the first of its two fields that is read.
 type RefusedRecords struct {
-	Hosts                int
-	ServiceInstances     int
-	TopoNodes            int
-	FirstHost            string
-	FirstServiceInstance string
-	// FirstTopoNode names the record the first refused node was in, by its
-	// hash and field: "host:<field>" or "service_instance:<field>".
-	FirstTopoNode string
+	Hosts            int
+	ServiceInstances int
+	TopoNodes        int
 }
 
-// maxRefusedFieldBytes bounds a field name kept as the first refused of
-// its kind. The name comes from the writer and goes on to a log line and to
-// every replica's fleet snapshot; the writer's own names are tens of bytes.
-const maxRefusedFieldBytes = 256
+func (refused *RefusedRecords) host() { refused.Hosts++ }
 
-// refusedField is a field name as kept for naming a refused record: cut to
-// maxRefusedFieldBytes on a character boundary.
-func refusedField(field string) string {
-	if len(field) <= maxRefusedFieldBytes {
-		return field
-	}
-	cut := maxRefusedFieldBytes
-	for cut > 0 && !utf8.RuneStart(field[cut]) {
-		cut--
-	}
-	return field[:cut]
-}
+func (refused *RefusedRecords) serviceInstance() { refused.ServiceInstances++ }
 
-// SameCounts says whether two loads refused as many of each.
-func (refused RefusedRecords) SameCounts(other RefusedRecords) bool {
-	return refused.Hosts == other.Hosts && refused.ServiceInstances == other.ServiceInstances &&
-		refused.TopoNodes == other.TopoNodes
-}
-
-func (refused *RefusedRecords) host(field string) {
-	if refused.Hosts == 0 {
-		refused.FirstHost = refusedField(field)
-	}
-	refused.Hosts++
-}
-
-func (refused *RefusedRecords) serviceInstance(field string) {
-	if refused.ServiceInstances == 0 {
-		refused.FirstServiceInstance = refusedField(field)
-	}
-	refused.ServiceInstances++
-}
-
-func (refused *RefusedRecords) topoNodes(record, field string, nodes int) {
-	if nodes == 0 {
-		return
-	}
-	if refused.TopoNodes == 0 {
-		refused.FirstTopoNode = record + ":" + refusedField(field)
-	}
-	refused.TopoNodes += nodes
-}
+func (refused *RefusedRecords) topoNodes(nodes int) { refused.TopoNodes += nodes }
 
 // MappingStats describes one published business mapping the index read:
 // the entries held, the fields the latest load that read the hash left out
@@ -733,10 +684,10 @@ func (builder *indexBuilder) addServiceInstanceFields(fields []string) {
 		identity, payload := fields[position], fields[position+1]
 		facts, refusedNodes, err := DecodeServiceInstanceRecord(identity, payload)
 		if err != nil {
-			builder.index.refused.serviceInstance(identity)
+			builder.index.refused.serviceInstance()
 			continue
 		}
-		builder.index.refused.topoNodes("service_instance", identity, refusedNodes)
+		builder.index.refused.topoNodes(refusedNodes)
 		builder.index.serviceInstances[identity] = facts
 	}
 }
@@ -748,7 +699,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 		wire, err := decodeWireHost(payload)
 		if err != nil {
 			// One malformed record must not blind the whole filter.
-			builder.index.refused.host(identity)
+			builder.index.refused.host()
 			continue
 		}
 		// bmw writes every host twice, under its "ip|cloud" key and under its
@@ -764,7 +715,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 			}
 		}
 		facts, refusedNodes := hostFactsOf(wire)
-		builder.index.refused.topoNodes("host", identity, refusedNodes)
+		builder.index.refused.topoNodes(refusedNodes)
 		if hostID != "" {
 			builder.seen[hostID] = facts
 		}

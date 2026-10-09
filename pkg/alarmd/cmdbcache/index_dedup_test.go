@@ -29,7 +29,7 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 		identity, payload := fields[position], fields[position+1]
 		wire, err := decodeWireHost(payload)
 		if err != nil {
-			builder.index.refused.host(identity)
+			builder.index.refused.host()
 			continue
 		}
 		facts, refusedNodes := hostFactsOf(wire)
@@ -40,7 +40,7 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 			}
 			builder.seen[facts.HostID] = facts
 		}
-		builder.index.refused.topoNodes("host", identity, refusedNodes)
+		builder.index.refused.topoNodes(refusedNodes)
 		builder.index.hosts++
 		builder.index.byIdentity[identity] = facts
 		builder.addToNodes(facts)

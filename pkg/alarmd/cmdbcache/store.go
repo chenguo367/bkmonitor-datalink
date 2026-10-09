@@ -35,8 +35,6 @@ type Store struct {
 	publishedMaxAge time.Duration
 	now             func() time.Time
 
-	refusalsChanged func(RefusedRecords)
-
 	mutex     sync.RWMutex
 	index     *Index
 	lastError error
@@ -56,11 +54,6 @@ type StoreOptions struct {
 	PublishedMaxAge time.Duration
 	// Now is injectable so the age rules are testable without sleeping.
 	Now func() time.Time
-	// RefusalsChanged, when set, is called after a refresh whose load
-	// refused a different number of records than the index it replaced -
-	// counted from none for the first load - so what the writer got wrong
-	// is said when it appears, changes or clears, and not on every refresh.
-	RefusalsChanged func(RefusedRecords)
 }
 
 func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
@@ -80,8 +73,7 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, now: now,
-		refusalsChanged: options.RefusalsChanged}, nil
+	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, now: now}, nil
 }
 
 // The reasons an index is not one to decide on, as Health and every caller
@@ -192,15 +184,11 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.mutex.Unlock()
 		return err
 	}
-	changed := !index.Refused().SameCounts(store.index.Refused())
 	index.carryOptional(store.index)
 	store.index = index
 	store.lastError = nil
 	store.refreshes++
 	store.mutex.Unlock()
-	if changed && store.refusalsChanged != nil {
-		store.refusalsChanged(index.Refused())
-	}
 	return nil
 }
 

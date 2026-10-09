@@ -7,12 +7,10 @@ package cmdbcache
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 // refusalHost is a host record with the given topology links, as the writer
@@ -42,7 +40,7 @@ func TestAHostRecordThatDoesNotDecodeIsCountedAndTheOthersIndexed(t *testing.T) 
 		"192.0.2.4|0", `not a record`,
 	})
 	index := builder.index
-	assertRefused(t, index.Refused(), RefusedRecords{Hosts: 2, FirstHost: "192.0.2.2|0"})
+	assertRefused(t, index.Refused(), RefusedRecords{Hosts: 2})
 	if index.Hosts() != 2 {
 		t.Fatalf("hosts = %d, want the 2 that decode", index.Hosts())
 	}
@@ -67,7 +65,7 @@ func TestAServiceInstanceRecordThatDoesNotDecodeIsCountedAndTheOthersIndexed(t *
 		"14", `{"service_instance_id":`,
 	})
 	index := builder.index
-	assertRefused(t, index.Refused(), RefusedRecords{ServiceInstances: 2, FirstServiceInstance: "12"})
+	assertRefused(t, index.Refused(), RefusedRecords{ServiceInstances: 2})
 	for _, id := range []string{"11", "13"} {
 		if _, found := index.LookupServiceInstance(id); !found {
 			t.Fatalf("instance %s is not indexed beside the refused record", id)
@@ -96,7 +94,7 @@ func TestATopologyNodeThatDoesNotDecodeIsCountedOncePerRecord(t *testing.T) {
 		"192.0.2.5|0", refusalHost("5", "192.0.2.5", noObject),
 	})
 	index := builder.index
-	assertRefused(t, index.Refused(), RefusedRecords{TopoNodes: 2, FirstTopoNode: "host:192.0.2.1|0"})
+	assertRefused(t, index.Refused(), RefusedRecords{TopoNodes: 2})
 	for field, want := range map[string]string{"1": "biz|2,module|1,module|3", "192.0.2.5|0": "biz|2,module|5"} {
 		host, found := index.Lookup(field)
 		if !found {
@@ -114,12 +112,12 @@ func TestATopologyNodeThatDoesNotDecodeIsCountedOncePerRecord(t *testing.T) {
 	builder.addServiceInstanceFields([]string{
 		"11", `{"service_instance_id":11,"bk_host_id":1,"topo_link":{"module|1":[{"bk_obj_id":"module","bk_inst_id":"x"}]}}`,
 	})
-	assertRefused(t, builder.index.Refused(), RefusedRecords{TopoNodes: 3, FirstTopoNode: "host:192.0.2.1|0"})
+	assertRefused(t, builder.index.Refused(), RefusedRecords{TopoNodes: 3})
 	instances := newIndexBuilder(time.Unix(1_700_000_000, 0))
 	instances.addServiceInstanceFields([]string{
 		"11", `{"service_instance_id":11,"bk_host_id":1,"topo_link":{"module|1":[{"bk_obj_id":"module","bk_inst_id":"x"}]}}`,
 	})
-	assertRefused(t, instances.index.Refused(), RefusedRecords{TopoNodes: 1, FirstTopoNode: "service_instance:11"})
+	assertRefused(t, instances.index.Refused(), RefusedRecords{TopoNodes: 1})
 }
 
 // Records the writer got right refuse nothing.
@@ -128,29 +126,6 @@ func TestCleanRecordsRefuseNothing(t *testing.T) {
 	builder.addFields([]string{"192.0.2.1|0", refusalHost("1", "192.0.2.1", refusalChain), "1", refusalHost("1", "192.0.2.1", refusalChain)})
 	builder.addServiceInstanceFields([]string{"11", `{"service_instance_id":11,"bk_host_id":1,"topo_link":{` + refusalChain + `}}`})
 	assertRefused(t, builder.index.Refused(), RefusedRecords{})
-}
-
-// A field kept to name a refused record is bounded, on both sides of the
-// bound, and stays text: one of exactly the bound is kept whole, one a byte
-// over is cut to the bound, and a cut that would split a character falls
-// back to the character's start. The record a refused node was in is named
-// under the same bound.
-func TestTheFieldKeptForARefusedRecordIsBounded(t *testing.T) {
-	at := strings.Repeat("a", maxRefusedFieldBytes)
-	over := at + "b"
-	split := strings.Repeat("a", maxRefusedFieldBytes-1) + "主机"
-	for field, want := range map[string]string{at: at, over: at, split: strings.Repeat("a", maxRefusedFieldBytes-1)} {
-		builder := newIndexBuilder(time.Unix(1_700_000_000, 0))
-		builder.addFields([]string{field, "{"})
-		if kept := builder.index.Refused().FirstHost; kept != want || !utf8.ValidString(kept) {
-			t.Fatalf("a %d-byte field kept as %d bytes, want %d", len(field), len(kept), len(want))
-		}
-	}
-	builder := newIndexBuilder(time.Unix(1_700_000_000, 0))
-	builder.addFields([]string{over, refusalHost("1", "192.0.2.1", `"module|1":[{"bk_obj_id":"module","bk_inst_id":"x"}]`)})
-	if kept := builder.index.Refused().FirstTopoNode; kept != "host:"+at {
-		t.Fatalf("the record a refused node was in is named in %d bytes, want the field cut to %d", len(kept), maxRefusedFieldBytes)
-	}
 }
 
 // scriptedLoads hands the store one index or error per load, in order.
@@ -170,56 +145,5 @@ func loadOf(hosts []string, instances ...string) func() (*Index, error) {
 		builder.addFields(hosts)
 		builder.addServiceInstanceFields(instances)
 		return builder.index, nil
-	}
-}
-
-// Health carries what the held index's load refused, back to none once a
-// load reads clean; a failed load keeps the held index's counts. The store
-// says so when any of the three counts changes - the first load's from
-// none - and not on a load that refuses as many again.
-func TestTheStoreSaysWhatALoadRefusedWhenItChanges(t *testing.T) {
-	good := []string{"192.0.2.1|0", refusalHost("1", "192.0.2.1", refusalChain)}
-	dirty := append([]string{"192.0.2.2|0", "{"}, good...)
-	badNode := []string{"11", `{"service_instance_id":11,"bk_host_id":1,"topo_link":{"module|1":[{"bk_obj_id":"module","bk_inst_id":"x"}]}}`}
-	badInstance := append([]string{"12", "not a record"}, badNode...)
-	script := &scriptedLoads{loads: []func() (*Index, error){
-		loadOf(dirty), loadOf(dirty), func() (*Index, error) { return nil, errors.New("scan failed") },
-		loadOf(dirty, badNode...), loadOf(dirty, badInstance...), loadOf(good), loadOf(good),
-	}}
-	var said []RefusedRecords
-	store, err := NewStore(script, StoreOptions{RefreshInterval: time.Minute, MaxAge: time.Hour,
-		RefusalsChanged: func(refused RefusedRecords) { said = append(said, refused) }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosts := RefusedRecords{Hosts: 1, FirstHost: "192.0.2.2|0"}
-	nodes := RefusedRecords{Hosts: 1, FirstHost: "192.0.2.2|0", TopoNodes: 1, FirstTopoNode: "service_instance:11"}
-	instances := RefusedRecords{Hosts: 1, FirstHost: "192.0.2.2|0", ServiceInstances: 1, FirstServiceInstance: "12",
-		TopoNodes: 1, FirstTopoNode: "service_instance:11"}
-	steps := []struct {
-		failed bool
-		health RefusedRecords
-		said   int
-	}{
-		{health: hosts, said: 1},
-		{health: hosts, said: 1},
-		{failed: true, health: hosts, said: 1},
-		// Only the node count changes, then only the instance count.
-		{health: nodes, said: 2},
-		{health: instances, said: 3},
-		{health: RefusedRecords{}, said: 4},
-		{health: RefusedRecords{}, said: 4},
-	}
-	for step, want := range steps {
-		if err := store.Refresh(context.Background()); (err != nil) != want.failed {
-			t.Fatalf("load %d: err = %v", step+1, err)
-		}
-		assertRefused(t, store.Health().Refused, want.health)
-		if len(said) != want.said {
-			t.Fatalf("load %d: said %d times %v, want %d", step+1, len(said), said, want.said)
-		}
-	}
-	for index, want := range []RefusedRecords{hosts, nodes, instances, {}} {
-		assertRefused(t, said[index], want)
 	}
 }
