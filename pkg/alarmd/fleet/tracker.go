@@ -423,6 +423,11 @@ type queryGroupState struct {
 	// skip was the cooldown's doing; the anomaly's onset is earlier and was
 	// an approximation on the refusal's side.
 	demotedSince time.Time
+	// poolReason is the pool's reason while the object is in it: the
+	// record's on a restore, the failed probe's on an entry, re-entry or
+	// extension, cleared when it leaves. It stands for the object's failure
+	// until this process sees one of its own.
+	poolReason string
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -649,7 +654,7 @@ func roundFiledUnder(cause, reason string) string {
 // FiledCauses are the completion causes a round is filed under in place of
 // its reason (roundFiledUnder): a vocabulary of its own beside the reason
 // catalogue, since these words reach the checks as a round's reason.
-var FiledCauses = []string{string(model.CauseGapGuardWarming)}
+var FiledCauses = []string{string(model.CauseGapGuardWarming), string(model.CauseSnapshotCorrupt)}
 
 // undecidableReason is a completion reason that means the detection window
 // could not decide recovery, rather than that anything went wrong.
@@ -1193,8 +1198,36 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal}
 		}
 	}
+	// A Slot that came after its recovery bound is committed without a query,
+	// under SNAPSHOT_UNAVAILABLE and the cause EXPIRED_REPLAY. It ran nothing,
+	// so it says nothing about the query or any dependency, and it is not a
+	// round: it is a skip, on the record of what was never evaluated, and the
+	// row stays as the rounds left it. Read as a round it put the object on
+	// this deployment's dependency line for a round after every takeover,
+	// counted toward listing a run, and released the object's held scopes.
+	// The same completion word under another cause is a round: a corrupt
+	// Snapshot (filed under its cause, a defect) or one that could not be read
+	// until the bound (the dependency down it always read as). A line with no
+	// cause, from a build before causes, is read as it was.
+	if completion == snapshotUnavailableCompletion && observation.ProgressCompletionCause == string(model.CauseExpiredReplay) {
+		if state.gapSkip == nil || state.gapSkip.Reason != snapshotUnavailableCompletion ||
+			state.gapSkip.LastSlot >= trace.EvaluationTime {
+			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt,
+				Reason: snapshotUnavailableCompletion}
+		}
+		state.gapSkip.LastSlot = trace.EvaluationTime
+		state.gapSkip.Slots++
+		state.gapSkip.At = at
+		state.gapSkip.HeldBy = heldByOf(observation)
+		tracker.noteSkipEvidence(queryGroup, state, at)
+		recordStrategy(state.strategies, StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID})
+		return
+	}
 	if completion == "GAP_SKIPPED" {
-		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" {
+		// A span of the other kind is not continued: an expired replay's
+		// commit does not move lastCompleted, so a skip after it would
+		// otherwise extend a span recorded under its reason.
+		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" || state.gapSkip.Reason == snapshotUnavailableCompletion {
 			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt}
 		}
 		state.gapSkip.LastSlot = trace.EvaluationTime
@@ -1220,6 +1253,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if facts := observation.QueryCooldown; facts != nil {
 		switch facts.Event {
 		case "entered", "reentered", "extended", "restored":
+			if reason := string(observation.ReasonCode); reason != "" && reason != string(observability.ReasonNone) {
+				state.poolReason = reason
+			}
 			copy := *facts
 			if state.queryCooldown == nil && facts.Event == "restored" {
 				// Back from its record: in the pool since it first entered,
@@ -1262,6 +1298,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			state.queryCooldown = nil
 			state.demotedSince = time.Time{}
+			state.poolReason = ""
 		}
 	}
 	if failure != nil {
@@ -2035,7 +2072,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		RoundSlot:        state.lastRoundSlot,
 		Consecutive:      state.reasonRuns,
 		Replica:          tracker.replica,
-		Failure:          state.lastFailure,
+		Failure:          rowFailure(state),
 		Internal:         state.internal,
 		LastError:        state.lastError,
 		LastHealthyAt:    state.lastHealthyAt,
@@ -2089,6 +2126,21 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	sortStrategies(anomaly.Strategies)
 	return anomaly
 }
+
+// rowFailure is the failure the row is read by: this process's own, or,
+// for an object in the pool this process has not seen fail, the pool's
+// reason as its record and its probes kept it. poolReason is set and
+// cleared with the pool membership, so a reason is an object in the pool.
+func rowFailure(state *queryGroupState) *FailureRef {
+	if state.lastFailure != nil || state.poolReason == "" {
+		return state.lastFailure
+	}
+	return &FailureRef{Code: state.poolReason, Source: FailureFromPoolRecord}
+}
+
+// snapshotUnavailableCompletion is the completion of a Slot finalized
+// without a query because its replay passed its age.
+const snapshotUnavailableCompletion = "SNAPSHOT_UNAVAILABLE"
 
 // worstGuards is the row's held scopes, the worst MaxGuardsPerRow of them:
 // gapped before warming, then the least advanced -- observed against

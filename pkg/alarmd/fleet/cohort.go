@@ -231,7 +231,12 @@ func coolingRowsOf(columns [][]Anomaly, now time.Time) coolingRows {
 			if anomaly.Finding.Check != "" {
 				rows.ByCheck[anomaly.Finding.Check]++
 			}
-			since := anomaly.ReasonSince
+			// How long the object has been in the pool, as its record says;
+			// the run's start is this process's, and a rollout resets it.
+			since := anomaly.DemotedSince
+			if since.IsZero() {
+				since = anomaly.ReasonSince
+			}
 			if since.IsZero() {
 				since = anomaly.Since
 			}

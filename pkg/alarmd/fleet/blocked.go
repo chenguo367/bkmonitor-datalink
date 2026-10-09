@@ -235,6 +235,7 @@ var failureFacets = map[string]facets{
 
 	// This deployment in conflict with what it persisted.
 	"STATE_CORRUPT":              {StageCommit, ClassContract, DependencyNone},
+	"SNAPSHOT_CORRUPT":           {StageConfig, ClassContract, DependencyNone},
 	"STATE_SCHEMA_UNSUPPORTED":   {StageCommit, ClassContract, DependencyNone},
 	"AUDIT_DROP":                 {StageCommit, ClassContract, DependencyNone},
 	"BACKEND_CAPABILITY_MISSING": {StageCommit, ClassContract, DependencyNone},

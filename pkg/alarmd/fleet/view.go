@@ -215,6 +215,10 @@ type StrategyRef struct {
 	BusinessID string `json:"business_id"`
 }
 
+// FailureFromPoolRecord marks a row's failure as the cooldown pool's reason,
+// not one this process observed (FailureRef.Source).
+const FailureFromPoolRecord = "pool_record"
+
 // FailureRef is why the object's last failing round failed, as the bounded
 // classification the pipeline already emits.
 //
@@ -225,6 +229,12 @@ type FailureRef struct {
 	Stage    string `json:"stage"`
 	Category string `json:"category"`
 	Code     string `json:"code,omitempty"`
+	// Source is where the failure was learned when it was not a round of
+	// this process's own: FailureFromPoolRecord is the pool's reason as its
+	// record kept it, read on the restore and on each probe that failed,
+	// for an object this process has not yet seen fail. Empty is a failure
+	// this process observed.
+	Source string `json:"source,omitempty"`
 	// Detail is the one field that says what the backend actually did. The code
 	// answers "the query did not come back"; this answers "it returned 503" or
 	// "the connection was refused", and those are different people's problems.

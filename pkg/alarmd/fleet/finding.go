@@ -177,6 +177,13 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		if queryRejected(anomaly.Failure) {
 			return refusalCheck(anomaly.Failure), true, false
 		}
+		// The pool's reason, read from its record or its last probe: a code
+		// with no response detail, so it is read by the code.
+		if failure := anomaly.Failure; failure != nil && failure.Source == FailureFromPoolRecord {
+			if landing, known := codeChecks[failure.Code]; known && !landing.normal {
+				return landing.check, true, false
+			}
+		}
 		return CheckBackendNotAnswering, true, false
 	}
 	// The window counts and the guard describe the last round that
@@ -624,7 +631,10 @@ var codeChecks = map[string]verdict{
 
 	// What this deployment persisted cannot be read back as written. Retrying
 	// reads the same bytes.
-	"STATE_CORRUPT":            lands(CheckDefect),
+	"STATE_CORRUPT": lands(CheckDefect),
+	// A persisted Snapshot that does not decode: this deployment's own record
+	// is wrong (execution.CauseSnapshotCorrupt, the round filed under it).
+	"SNAPSHOT_CORRUPT":         lands(CheckDefect),
 	"STATE_SCHEMA_UNSUPPORTED": lands(CheckDefect),
 	"AUDIT_DROP":               lands(CheckDefect),
 	// The Level contract on the record this deployment stored is not the one

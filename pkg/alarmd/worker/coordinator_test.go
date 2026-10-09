@@ -1310,6 +1310,7 @@ func (ports *recordingPorts) ResolveFinalization(
 		// A query-free finalization carries the due Plans it is finalizing:
 		// that frozen set is the only thing the path has to work from.
 		finalization.Targets = request.DuePlanTargets
+		finalization.Cause = execution.CauseExpiredReplay
 		finalization.ReasonCode = execution.ReasonCode(contract.ReasonGapSkipped)
 		if mode == execution.FinalizationSnapshotUnavailable {
 			finalization.ReasonCode = execution.ReasonCode(contract.ReasonSnapshotUnavailable)

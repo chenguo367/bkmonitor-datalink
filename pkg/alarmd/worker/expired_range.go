@@ -63,7 +63,7 @@ func (coordinator *SlotExecutionCoordinator) executeExpiredRange(ctx context.Con
 	}
 	finalization := execution.QueryFreeFinalization{Contract: request.Contract,
 		Mode: mode, ReasonCode: request.ExpiredRange.CompletionReason(),
-		Targets: request.DuePlanTargets.Clone()}
+		Targets: request.DuePlanTargets.Clone(), Cause: execution.CauseExpiredReplay}
 	if err := finalization.Validate(request); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}

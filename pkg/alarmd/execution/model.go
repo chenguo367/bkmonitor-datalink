@@ -3529,7 +3529,31 @@ const (
 	// with is not in the activation at all any more: the Slot ran after its
 	// Plan left the active set. Still a partial gap, still nothing to fix.
 	CausePlanNotActive CompletionCause = "PLAN_NOT_ACTIVE"
+	// The causes of a Slot finalized without a query (QueryFreeFinalization),
+	// one of which every such finalization names. The completion word is the
+	// same for several of them - SNAPSHOT_UNAVAILABLE - and only the cause
+	// says whether anything failed.
+	//
+	// CauseExpiredReplay is a Slot that came after its recovery bound, or
+	// past the replay's reach, and was given up without resolving anything:
+	// the backlog of a takeover, or a cursor resting on a Segment no longer
+	// retained. Nothing failed; the Slot came too late to be evaluated.
+	CauseExpiredReplay CompletionCause = "EXPIRED_REPLAY"
+	// CauseSnapshotCorrupt is a persisted Snapshot that does not decode:
+	// finalized at once, on a live Slot, every round it is read. This
+	// deployment's own record is wrong.
+	CauseSnapshotCorrupt CompletionCause = "SNAPSHOT_CORRUPT"
+	// CauseSnapshotUnavailablePastBound is a Snapshot that could not be read
+	// until the Slot's recovery bound passed: the store did not answer.
+	CauseSnapshotUnavailablePastBound CompletionCause = "SNAPSHOT_UNAVAILABLE_PAST_BOUND"
+	// CauseResolveFailedPastBound is any other failure to resolve the frozen
+	// Slot that lasted until its recovery bound passed.
+	CauseResolveFailedPastBound CompletionCause = "RESOLVE_FAILED_PAST_BOUND"
 )
+
+// QueryFreeCauses are the causes a query-free finalization may name.
+var QueryFreeCauses = []CompletionCause{CauseExpiredReplay, CauseSnapshotCorrupt, CauseSnapshotUnavailablePastBound,
+	CauseResolveFailedPastBound}
 
 // CompletionAttribution is why a Slot completed the way it did: the condition
 // that folded into the kind, and that condition's own reason.
