@@ -292,11 +292,32 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	// previews that Segment's content so a Worker executing from the view
 	// finishes them (decision-016 batch 4b). Read only for the draining
 	// ones, which are few and go away as their timelines retire.
+	//
+	// A timeline that does not decode is its own Query Group's fault and
+	// reads the same every round: that Query Group stays in its Worker's
+	// view without content, which is not executed, and the rest of the set
+	// is published - a missing object makes only its own Query Group
+	// unexecutable (decision-016 section 4.1), a deterministic error ends
+	// only its own Plan (02 section 10). It is counted under the reason a
+	// failed read has, and named on the line. Any other error says nothing
+	// about the Query Group - a store that does not answer - and the set is
+	// not published: the view the Workers hold stands until a read succeeds.
 	for identity := range records {
 		if _, published := desired.Content[identity]; published {
 			continue
 		}
 		digest, refs, draining, err := source.DrainingContent(ctx, identity)
+		var undecodable *controlplane.DeterministicScheduleError
+		if errors.As(err, &undecodable) {
+			stream.NotePublishFailure(viewstream.PublishFailureDrainingUnreadable)
+			observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+				Component: observability.ComponentOwnership, Stage: observability.StageViewPublished,
+				Result: observability.ResultDegraded, ReasonCode: observability.ReasonContractDeterministic, Err: err,
+				ViewStream: &observability.ViewStreamFacts{Event: viewstream.PublishFailureDrainingUnreadable, ControlEpoch: authority.Fence.OwnerEpoch,
+					Reason: fmt.Sprintf("draining %s left without content: %v", identity, err)},
+			})
+			continue
+		}
 		if err != nil {
 			stream.NotePublishFailure(viewstream.PublishFailureDrainingUnreadable)
 			report(fmt.Errorf("read draining content %s: %w", identity, err))

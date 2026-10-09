@@ -1787,7 +1787,7 @@ How long this Leader has been failing to publish with no success since; 0 while 
 
 Labels: `reason`
 
-Desired sets the Leader could not publish, by why: activation_unreadable, content_unreadable, draining_unreadable, active_set_unreadable, assignments_unreadable (a read the set is built from failed), publish_rejected (the stream refused it). A Leader that cannot publish leaves view_revision flat exactly like one with nothing new to publish; this tells them apart. Counted since the process started.
+Desired sets the Leader could not publish, by why: activation_unreadable, content_unreadable, draining_unreadable, active_set_unreadable, assignments_unreadable (a read the set is built from failed), publish_rejected (the stream refused it). A Leader that cannot publish leaves view_revision flat exactly like one with nothing new to publish; this tells them apart. draining_unreadable also counts, once a round, each draining Query Group whose timeline does not decode: that set is published, with the Query Group in its Worker's view without content, so it alone is not executed from the view (no_content at the Worker's gate) and view_publish_failing_seconds stays 0. Counted since the process started.
 
 ## bkmonitor_alarmd_view_receipts_ignored_total
 
