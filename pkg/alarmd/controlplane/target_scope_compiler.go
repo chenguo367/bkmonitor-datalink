@@ -124,18 +124,13 @@ func compileTargetScope(target [][]legacyTargetCondition, queryConfigs []json.Ra
 func compileTargetCondition(
 	condition legacyTargetCondition,
 ) (contract.TargetScopeField, contract.TargetScopeMethod, []string, error) {
-	// Python matches a condition as "eq" only when its method is exactly
-	// that, lower-cased, and as an exclusion otherwise (target.py:41,
-	// 147-150): an empty method excludes. Other words are refused by name
-	// rather than read as an exclusion nobody meant.
-	method := contract.TargetScopeInclude
-	switch strings.ToLower(condition.Method) {
-	case "eq":
+	// Python matches a condition as "eq" only when its method, lower-cased
+	// and not trimmed, is exactly that, and as an exclusion otherwise
+	// (target.py:41,147-150): "neq", an empty method, " eq" and any other
+	// word all exclude.
+	method := contract.TargetScopeExclude
+	if strings.ToLower(condition.Method) == "eq" {
 		method = contract.TargetScopeInclude
-	case "neq", "":
-		method = contract.TargetScopeExclude
-	default:
-		return "", "", nil, fmt.Errorf("TARGET_SCOPE_UNSUPPORTED: target condition method %q", condition.Method)
 	}
 
 	field := strings.ToLower(strings.TrimSpace(condition.Field))

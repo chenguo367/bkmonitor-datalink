@@ -21,12 +21,14 @@ func hostCondition(method string) legacyTargetCondition {
 		Values: []json.RawMessage{json.RawMessage(`{"bk_target_ip":"192.0.2.7","bk_target_cloud_id":0}`)}}
 }
 
-// The method is lower-cased and matched against "eq"; anything else is an
-// exclusion (target.py:41,147-150), an empty method included.
+// The method is lower-cased, not trimmed, and matched against "eq"; anything
+// else is an exclusion (target.py:41,147-150) - an empty method, " eq" and a
+// word Python has no meaning for included. None refuses the strategy.
 func TestAConditionIsAnInclusionOnlyWhenItsMethodIsEq(t *testing.T) {
 	for method, want := range map[string]contract.TargetScopeMethod{
 		"eq": contract.TargetScopeInclude, "EQ": contract.TargetScopeInclude,
 		"neq": contract.TargetScopeExclude, "": contract.TargetScopeExclude,
+		" eq": contract.TargetScopeExclude, "include": contract.TargetScopeExclude,
 	} {
 		scope, err := compileTargetScope([][]legacyTargetCondition{{hostCondition(method)}}, nil)
 		if err != nil {
@@ -35,11 +37,6 @@ func TestAConditionIsAnInclusionOnlyWhenItsMethodIsEq(t *testing.T) {
 		if got := scope.Groups[0].Conditions[0].Method; got != want {
 			t.Errorf("method %q compiled as %s, want %s", method, got, want)
 		}
-	}
-	// A word that is neither is refused by name rather than read as an
-	// exclusion nobody meant.
-	if _, err := compileTargetScope([][]legacyTargetCondition{{hostCondition("include")}}, nil); err == nil {
-		t.Error("method \"include\" compiled; want a named refusal")
 	}
 }
 
