@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -51,6 +52,10 @@ import (
 // view's propagation delay is the reading batch 4a is accepted on.
 type viewExecutionGate struct {
 	view installedView
+	// retryWithin is the lease renewal interval: what a refused round waits
+	// for arrives by the view's delta or by the next renewal, so a refusal
+	// is asked again within it (scheduler.ViewNotExecutableError.RetryWithin).
+	retryWithin time.Duration
 
 	mu       sync.Mutex
 	outcomes map[execution.QueryGroupIdentity]viewGateOutcome
@@ -267,7 +272,8 @@ func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execut
 	}
 	gate.record(queryGroup, outcome)
 	if revision == 0 {
-		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome), AwaitingView: outcome == viewGateNotInView}
+		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome), AwaitingView: outcome == viewGateNotInView,
+			RetryWithin: gate.retryWithin}
 	}
 	return controlplane.WithTimelineRevisionHint(ctx, revision), nil
 }

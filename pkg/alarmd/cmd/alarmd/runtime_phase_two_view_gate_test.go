@@ -471,3 +471,20 @@ func TestASlotCancelledFromAboveSaysSo(t *testing.T) {
 		}
 	}
 }
+
+// Every refusal names the renewal interval as the longest the round waits
+// before asking again: what it waits for arrives by the view's delta or the
+// lease's renewal (B4 §2), and the Runner caps its backoff there.
+func TestARefusalNamesTheRenewalIntervalAsItsLongestWait(t *testing.T) {
+	ctx := context.Background()
+	store := newViewGateTestStore(t)
+	session, _ := openViewGateTestSessionWithAuthority(t, store, "qg-1", 12, "obj-a")
+	gate := newViewExecutionGate()
+	gate.retryWithin = 10 * time.Second
+	gate.attach(mapView{})
+	_, err := gateContext(ctx, gate, "qg-1", session, nil)
+	var refusal *scheduler.ViewNotExecutableError
+	if !errors.As(err, &refusal) || refusal.RetryWithin != 10*time.Second {
+		t.Fatalf("refusal = %v, want it to name the renewal interval", err)
+	}
+}

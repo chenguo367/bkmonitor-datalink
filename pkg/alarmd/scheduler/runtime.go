@@ -59,6 +59,15 @@ func (err *SourceBlockedError) Unwrap() error { return err.Err }
 type ViewNotExecutableError struct {
 	Reason       string
 	AwaitingView bool
+	// RetryWithin bounds how long the Runner waits before asking again; zero
+	// leaves it on the blocked source's backoff. What a refusal waits for
+	// arrives by the view's delta or the lease's renewal, and B4 §2 bounds
+	// the view's lag behind the record by the renewal interval plus the
+	// delta's propagation, so the gate names the renewal interval here: a
+	// refused Query Group is asked again within it however often it was
+	// refused, and a growing backoff past it only keeps the Query Group
+	// dark after the view has come.
+	RetryWithin time.Duration
 }
 
 func (err *ViewNotExecutableError) Error() string {
@@ -837,7 +846,7 @@ func (runner *Runner) runOneTracked(
 	if err != nil {
 		if isViewNotExecutable(err) {
 			decision, *refusal = "view_not_executable", err
-			return runner.refuseViewNotExecutable(), true, nil
+			return runner.refuseViewNotExecutable(err), true, nil
 		}
 		*refusal = err
 		var retry *SourceRetryError
@@ -933,7 +942,7 @@ func (runner *Runner) runOneTracked(
 		// the records agree again.
 		if isViewNotExecutable(err) {
 			decision, *refusal = "view_not_executable", err
-			return runner.refuseViewNotExecutable(), true, nil
+			return runner.refuseViewNotExecutable(err), true, nil
 		}
 		var deferred interface{ ReadinessReadyAt() time.Time }
 		if errors.As(err, &deferred) {
@@ -966,9 +975,14 @@ func isViewNotExecutable(err error) bool {
 // backoff a blocked source gets, counted against neither the Slot's attempts
 // nor its execution backoff - the record's word arrives by renewal and the
 // view's by delta, and the next round asks again.
-func (runner *Runner) refuseViewNotExecutable() execution.SlotExecutionResult {
+func (runner *Runner) refuseViewNotExecutable(err error) execution.SlotExecutionResult {
 	runner.sourceFailures++
-	runner.sourceNextAt = runner.now().Add(retryDelay(runner.flights.limits, runner.queryGroup, runner.sourceFailures))
+	delay := retryDelay(runner.flights.limits, runner.queryGroup, runner.sourceFailures)
+	var refusal *ViewNotExecutableError
+	if errors.As(err, &refusal) && refusal.RetryWithin > 0 && delay > refusal.RetryWithin {
+		delay = refusal.RetryWithin
+	}
+	runner.sourceNextAt = runner.now().Add(delay)
 	return execution.SlotExecutionResult{Result: observability.ResultRetrying,
 		ReasonCode: execution.ReasonCode(contract.ReasonViewNotExecutable), SourceRetry: true}
 }
