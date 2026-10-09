@@ -167,7 +167,7 @@ func TestRunPhaseTwoApplicationBoundsHTTPShutdownWhenBundleOpenFails(t *testing.
 		if !errors.Is(err, want) || !errors.Is(err, ErrApplicationShutdownTimeout) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want open and shutdown timeout", err)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		close(httpRelease)
 		<-done
 		t.Fatal("bundle open failure waited indefinitely for HTTP shutdown")
@@ -221,7 +221,7 @@ func TestRunPhaseTwoApplicationCancelsWorkerAndMarksFatalWhenHTTPStopsEarly(t *t
 		if !errors.Is(err, want) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want HTTP failure", err)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		cancel()
 		<-done
 		t.Fatal("HTTP runtime stopped but the Worker Bundle kept running")
@@ -665,7 +665,7 @@ func TestPhaseTwoWorkerBundleRetriesReadyQueryGroupBeforeFullSweepCompletes(t *t
 	select {
 	case <-retried:
 		retriedBeforeSweepCompleted = true
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 	}
 	close(blockingRelease)
 	if err := <-done; err != nil {
@@ -772,8 +772,15 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 	// goroutine keeps running and keeps receiving ticks while the dispatcher
 	// does nothing. Progress also wins a tie with a tick, which the select
 	// alone does not promise.
+	//
+	// Ticks still count while the process runs but the dispatcher is not
+	// scheduled: with the machine's cores taken by the suites beside it, this
+	// goroutine wakes for its ticks and the dispatcher's sweep does not get
+	// the CPU to finish. Five seconds of that failed the gate on a machine at
+	// a load of thirty, and the test passed five runs of five alone. The
+	// stall bound is the one every event wait in this package gets.
 	const tick = 100 * time.Millisecond
-	const stallTicks = 50
+	const stallTicks = int(eventWatchdog / tick)
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	deadline := time.NewTimer(2 * signalWaitBound)
@@ -932,7 +939,7 @@ func TestPhaseTwoWorkerBundleDelayedQueueKeepsEarliestReadyQueryGroups(t *testin
 		if queryGroup != target {
 			t.Fatalf("first delayed Query Group = %s, want %s", queryGroup, target)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		t.Fatal("ready Query Group was hidden behind a full future delayed queue")
 	}
 	cancel()
@@ -2876,7 +2883,20 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalCutsHungStoreCall(t *testing.T) 
 	waitPhaseTwoCondition(t, 3*time.Second, "READY renewals after the hung call", func() bool {
 		return readyRegistrationCount(owner) >= readyBefore+2
 	})
-	if !hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason) {
+	// The failure is observed by the goroutine whose call hung, after the
+	// call returns. That is the renewal loop or the control round's first
+	// READY registration, whichever reached the store first; in the second
+	// case the renewal loop goes on beside it, and the renewals above can
+	// land before the control round is scheduled to record its failure.
+	// So the observation is waited for, not read at one instant.
+	failureObserved := func() bool {
+		return hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason)
+	}
+	deadline := time.Now().Add(eventWatchdog)
+	for !failureObserved() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !failureObserved() {
 		t.Fatalf("observations = %+v, want a retryable registration renewal failure", observations())
 	}
 	if snapshot := health.HealthSnapshot(); snapshot.State == observability.HealthNotReady {
@@ -3009,3 +3029,11 @@ func waitPhaseTwoCondition(t *testing.T, timeout time.Duration, name string, con
 	}
 	t.Fatalf("timed out waiting for %s", name)
 }
+
+// eventWatchdog is how long a test waits for something it expects to happen
+// before calling it missing. It bounds a hang, not a speed: these waits ran
+// at 20 to 200 ms, and on a machine busy with other test runs the process
+// stalls longer than that while nothing is wrong, which failed them. The
+// property each one guards - the event comes at all while the test holds
+// the rest still - is the same at ten seconds.
+const eventWatchdog = 10 * time.Second

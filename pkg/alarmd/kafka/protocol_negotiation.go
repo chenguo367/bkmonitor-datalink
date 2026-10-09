@@ -167,12 +167,20 @@ func (client saramaBrokerClient) ApiVersions(addr string, config *sarama.Config)
 // and the newest version they all accept is the only one a whole batch can
 // rely on. Asking by the metadata also gives each answer its node id.
 //
-// A cluster whose metadata cannot be read from any bootstrap address, or a
-// listed broker that cannot be asked, fails the negotiation: the answer is
+// A listed broker that cannot be asked decides nothing and is named
+// (Answered false, Error set); the brokers that answered decide. Waiting
+// for every broker kept the whole replica writing nothing for as long as
+// one broker of the cluster was down, while the brokers that lead its
+// partitions now were up. What this gives up: a silent broker that turns
+// out to accept no record batches, and leads a partition, refuses the
+// writes to that partition, and they are retried like any broker failure.
+// The produce-version check on the page fails on the silent broker by name.
+//
+// A cluster whose metadata cannot be read from any bootstrap address, or
+// whose listed brokers none answered, fails the negotiation: the answer is
 // not known, and the producer is not opened on a guess. The partial answers
 // are returned beside the error so a reader can say which broker did not
-// answer. The lazy sink retries the open, so an unreachable broker at start
-// is the same wait it always was.
+// answer. The lazy sink retries the open.
 func NegotiateProtocol(bootstrap []string, topic string, config *sarama.Config) (ProtocolNegotiation, error) {
 	return negotiateProtocol(bootstrap, config, saramaBrokerClient{topic: topic})
 }
@@ -210,7 +218,8 @@ func negotiateProtocol(bootstrap []string, config *sarama.Config, client brokerC
 		return negotiation, metadataErr
 	}
 	negotiation.Brokers = make([]BrokerProtocol, 0, len(listed))
-	var failed error
+	var silent error
+	answered := 0
 	headers := true
 	for _, member := range listed {
 		answer := BrokerProtocol{Address: member.Address, ID: member.ID, ProduceMinVersion: -1, ProduceMaxVersion: -1}
@@ -224,12 +233,13 @@ func negotiateProtocol(bootstrap []string, config *sarama.Config, client brokerC
 		if err != nil {
 			answer.Error = err.Error()
 			negotiation.Brokers = append(negotiation.Brokers, answer)
-			if failed == nil {
-				failed = fmt.Errorf("kafka: protocol negotiation: broker %d at %s did not answer ApiVersions: %w", member.ID, member.Address, err)
+			if silent == nil {
+				silent = fmt.Errorf("broker %d at %s did not answer ApiVersions: %w", member.ID, member.Address, err)
 			}
 			continue
 		}
 		answer.Answered = true
+		answered++
 		for _, api := range response.ApiVersions {
 			if api != nil && api.ApiKey == produceAPIKey {
 				answer.ProduceMinVersion, answer.ProduceMaxVersion = api.MinVersion, api.MaxVersion
@@ -240,8 +250,8 @@ func negotiateProtocol(bootstrap []string, config *sarama.Config, client brokerC
 		}
 		negotiation.Brokers = append(negotiation.Brokers, answer)
 	}
-	if failed != nil {
-		return negotiation, failed
+	if answered == 0 {
+		return negotiation, fmt.Errorf("kafka: protocol negotiation: no broker answered ApiVersions; %w", silent)
 	}
 	if headers && recordHeaderBrokerVersion.IsAtLeast(config.Version) {
 		negotiation.version = recordHeaderBrokerVersion

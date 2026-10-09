@@ -110,6 +110,7 @@ var refusalOwners = map[string]string{
 	"legacy_context_missing":     refusalOwnerAlarmd,
 	"legacy_conversion_rejected": refusalOwnerAlarmd,
 	"legacy_output_invalid":      refusalOwnerAlarmd,
+	"producer_refused":           refusalOwnerAlarmd,
 	"_other":                     refusalOwnerAlarmd,
 	"standard_business_identity": refusalOwnerStrategy,
 	"legacy_strategy_invalid":    refusalOwnerStrategy,
