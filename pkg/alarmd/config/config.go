@@ -10,12 +10,14 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -618,7 +620,27 @@ func Load(path string) (Config, error) {
 	}
 	defer file.Close()
 
-	decoder := yaml.NewDecoder(file)
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	rewritten, err := strictIntegers(&document, reflect.TypeOf(cfg), "")
+	if err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	// Only a document with a quoted integer is re-encoded, so every other
+	// one is decoded from the bytes as written and its errors keep their
+	// lines.
+	if rewritten {
+		if raw, err = yaml.Marshal(&document); err != nil {
+			return Config{}, fmt.Errorf("decode config: %w", err)
+		}
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)

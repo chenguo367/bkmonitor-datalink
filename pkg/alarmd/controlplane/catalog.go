@@ -1752,8 +1752,10 @@ func legacyNoDataEnabled(raw json.RawMessage) (bool, error) {
 	if unquoted, err := strconv.Unquote(text); err == nil {
 		// Python's `if no_data_config.get("is_enabled")` is true for any
 		// non-empty string, "false" included. Following that literally is the
-		// point: this reads a store the backend also reads.
-		return strings.TrimSpace(unquoted) != "", nil
+		// point: this reads a store the backend also reads. Not trimmed: a
+		// string of spaces is non-empty and true there, and trimming it
+		// turned off a no-data detection the backend runs.
+		return unquoted != "", nil
 	}
 	if number, err := json.Number(text).Float64(); err == nil {
 		return number != 0, nil

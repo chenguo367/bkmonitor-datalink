@@ -263,7 +263,7 @@ func (c PhaseTwoNoDataConfig) validate() error {
 	// way to mean.
 	if c.TrackingHorizonSeconds != nil && *c.TrackingHorizonSeconds < 1 {
 		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d must be a positive number of "+
-			"seconds; omit the key entirely to leave absence tracked indefinitely",
+			"seconds; omit the key to inherit the platform's horizon (the published dynamic value, else one day)",
 			*c.TrackingHorizonSeconds)
 	}
 	if c.TrackingHorizonSeconds != nil && *c.TrackingHorizonSeconds > contract.MaxNoDataTrackingHorizonSeconds {
