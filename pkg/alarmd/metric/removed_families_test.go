@@ -111,9 +111,9 @@ var removedLabelValues = []struct {
 	{"target_group_groups", "state", "emptied_pending", false},
 	{"target_group_groups", "state", "emptied_held", false},
 	{"target_selector_resolutions_total", "reason", "emptied_held", false},
-	// A business mapping the writer did not publish is named missing and its
-	// last entries carried within the staleness bound; "emptied" claimed the
-	// writer had emptied it, which a missing key cannot say.
+	// A business mapping the writer did not publish is named missing and maps
+	// nothing; "emptied" claimed the writer had emptied it, which a missing
+	// key cannot say.
 	{"cmdb_index_business_mappings", "state", "emptied", true},
 }
 
