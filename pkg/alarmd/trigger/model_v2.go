@@ -185,6 +185,16 @@ type EvaluationRequestV2 struct {
 	// answers from what this process sent, and is never nil. The two are
 	// told apart in the gate outcome, not folded into one another.
 	OpenAlerts contract.OpenAlertSet
+	// HoldRecovery is asked about a Level this record would recover: whether
+	// that recovery is held, and why. The caller's own inputs for the Level
+	// this round may have been incomplete, which this package cannot see --
+	// it is handed facts, not the bindings they were detected from. A held
+	// Level is unavailable for that reason instead, before the record's
+	// result, the recovery gate and the envelope are derived, so every one
+	// of them agrees with the verdict. Asked only for a Level that would
+	// recover, so a round that recovers nothing costs nothing. Nil holds
+	// nothing.
+	HoldRecovery func(levelID uint32) (reason string, held bool)
 }
 
 type LevelOutcomeV2 struct {
