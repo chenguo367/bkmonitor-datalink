@@ -6,6 +6,7 @@
 package cmdbcache
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
@@ -142,6 +143,12 @@ func reportedAddressDiffers(dimensions map[string]json.RawMessage, host *HostFac
 	raw, present := dimensions["bk_target_ip"]
 	if !present {
 		return true
+	}
+	// A quoted string without an escape is its own value byte for byte:
+	// compared as it is, with nothing decoded or allocated on a path every
+	// series placed by id takes. Anything else is decoded.
+	if n := len(raw); n >= 2 && raw[0] == '"' && raw[n-1] == '"' && bytes.IndexByte(raw, '\\') < 0 {
+		return string(raw[1:n-1]) != host.IP
 	}
 	var reported string
 	if err := json.Unmarshal(raw, &reported); err != nil {

@@ -31,6 +31,9 @@ func TestARecordPlacedByIDWhoseAddressIsNotTheHostsIsMarked(t *testing.T) {
 		{"by id, an address that is not a string", `{"bk_host_id":"720002","bk_target_ip":192}`, true},
 		{"by agent, another address", `{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`, true},
 		{"by agent, the host's address", `{"bk_agent_id":"agent-live","bk_target_ip":"192.0.2.172"}`, false},
+		// Escaped in the JSON, the host's address once decoded: the same
+		// string Python's dedupe sees, so not marked.
+		{"by id, the host's address escaped", `{"bk_host_id":"720002","bk_target_ip":"192.0.2.\u0031\u0037\u0032"}`, false},
 		{"by address", `{"bk_target_ip":"192.0.2.172","bk_target_cloud_id":0}`, false},
 		{"an id CMDB does not know", `{"bk_host_id":"720999","bk_target_ip":"198.51.100.9"}`, false},
 	} {
@@ -38,5 +41,16 @@ func TestARecordPlacedByIDWhoseAddressIsNotTheHostsIsMarked(t *testing.T) {
 		if facts.ReportedAddressDiffers != c.marked {
 			t.Errorf("%s: marked %t, want %t", c.name, facts.ReportedAddressDiffers, c.marked)
 		}
+	}
+}
+
+// The comparison runs for every series placed by id or agent, on every
+// query: an address written without escapes is compared as it is, with
+// nothing allocated.
+func TestComparingAnUnescapedAddressAllocatesNothing(t *testing.T) {
+	host := &HostFacts{IP: "192.0.2.172"}
+	dimensions := jsonDims(t, `{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`)
+	if allocations := testing.AllocsPerRun(100, func() { reportedAddressDiffers(dimensions, host) }); allocations != 0 {
+		t.Fatalf("%v allocations a comparison, want none", allocations)
 	}
 }
