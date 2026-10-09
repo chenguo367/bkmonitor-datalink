@@ -219,11 +219,6 @@ const (
 	// OutcomeSendFailed: the producer did not acknowledge the batch. Per
 	// alert.
 	OutcomeSendFailed = "send_failed"
-	// OutcomeWouldSend: an alert a round decided on and did not send,
-	// because the deployment has not armed the close. Per alert, so that
-	// what arming would do is a number and not an estimate from the strategy
-	// counts.
-	OutcomeWouldSend = "would_send"
 	// OutcomeNotLeader: this replica is not the control leader and takes no
 	// difference. Counted so that a deployment where no replica ever ran a
 	// round is not read as a deployment with nothing to close.
@@ -245,7 +240,7 @@ const (
 // Outcomes is the closed list, for the metric that reports every cell.
 var Outcomes = []string{OutcomeClosed, OutcomeWithinGrace, OutcomeUnconfirmed,
 	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown,
-	OutcomeEvidenceUnavailable, OutcomeAlertClosed, OutcomeSendFailed, OutcomeWouldSend,
+	OutcomeEvidenceUnavailable, OutcomeAlertClosed, OutcomeSendFailed,
 	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
 
 // Counts is what the round measured. The denominators are reported with
@@ -295,9 +290,10 @@ type Bounds struct {
 }
 
 // Result is the round's decision. Close is what the round decided to
-// close, which is not the same as what it sent: arming the send is the
-// caller's, and the two are counted apart so that a deployment can read
-// what the difference would do before it does it.
+// close, which is not the same as what it sent: the send is the caller's,
+// and its own guards - whose alerts they are, which business and revision
+// they carry - can still hold a decided strategy back, so the two are
+// counted apart.
 type Result struct {
 	Close []Absent
 	// Decisions is every candidate's decision, in the candidates' order

@@ -2297,9 +2297,7 @@ type OpenAlertSetFacts struct {
 // the outcome totals (every outcome present, zeros included), how many
 // fingerprints wait for a second Slot and how many are confirmed, and up
 // to eight strategies with at most three fingerprint prefixes per list.
-// Armed false means every decision is counted as would_send and none sent.
 type TargetScopeCloseFacts struct {
-	Armed      bool                       `json:"armed"`
 	Pending    int                        `json:"pending"`
 	Confirmed  int                        `json:"confirmed"`
 	MaxEntries int                        `json:"max_entries"`

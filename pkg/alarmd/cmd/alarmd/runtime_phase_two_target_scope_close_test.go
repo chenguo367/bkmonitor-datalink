@@ -82,7 +82,7 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 		{AlertID: "instance-ours", EventSourceID: "native", Fingerprint: ours},
 		{AlertID: "instance-theirs", EventSourceID: "elsewhere", Fingerprint: theirs},
 	}})
-	closer := scopeclose.New(scopeclose.Options{Send: true})
+	closer := scopeclose.New(scopeclose.Options{})
 	writer := &maintenanceTestWriter{}
 	closer.Bind(scopeclose.CacheSet(cache), writer)
 	sink := scopeDropSink{closer: closer}
@@ -126,8 +126,8 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 // on the open set's facts: a field dropped on the way would read as zero,
 // which here is a reading.
 func TestTheTargetScopeCloseFactsAreCarriedFieldForField(t *testing.T) {
-	facts := targetScopeCloseFacts(scopeclose.Facts{Armed: true, Pending: 1, Confirmed: 2, MaxEntries: 3,
-		Outcomes: map[string]uint64{scopeclose.OutcomeWouldSend: 4},
+	facts := targetScopeCloseFacts(scopeclose.Facts{Pending: 1, Confirmed: 2, MaxEntries: 3,
+		Outcomes: map[string]uint64{scopeclose.OutcomeClosed: 4},
 		Strategies: []scopeclose.StrategyFacts{{TenantID: "t", StrategyID: "s", Pending: 1, Confirmed: 2,
 			Outcomes: map[string]uint64{scopeclose.OutcomeUnconfirmed: 5}, PendingSample: []string{"aaaaaaaa"}, DecidedSample: []string{"bbbbbbbb"}}}})
 	var zero func(path string, value reflect.Value)

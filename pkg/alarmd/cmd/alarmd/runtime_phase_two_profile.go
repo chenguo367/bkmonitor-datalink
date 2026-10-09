@@ -160,7 +160,6 @@ func phaseTwoRuntimeProfile(cfg config.Config, cpuSource string, procs int) (obs
 		Linkd: observability.RuntimeLinkdFacts{
 			ConsoleConfigured: cfg.PhaseTwo.Linkd.ConsoleURL != "",
 			EventSourceID:     cfg.PhaseTwo.Linkd.EventSourceID, HookName: cfg.PhaseTwo.Linkd.HookName,
-			AbsentCloseSend: cfg.PhaseTwo.Linkd.AbsentCloseSend,
 		},
 		Retention: phaseTwoRuntimeRetention(cfg),
 	}

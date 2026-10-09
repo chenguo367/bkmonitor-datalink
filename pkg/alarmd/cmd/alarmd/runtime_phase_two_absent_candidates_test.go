@@ -113,7 +113,7 @@ func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 	if link.calls != 0 {
 		t.Fatalf("reading the page called the link %d times", link.calls)
 	}
-	if page.State != fleet.AbsentStateReady || !page.SendArmed || page.LastRound == nil || page.LastRound.Refusal != absentalerts.RefusalNone ||
+	if page.State != fleet.AbsentStateReady || page.LastRound == nil || page.LastRound.Refusal != absentalerts.RefusalNone ||
 		page.LastRound.At != stamp(decided) || page.Table == nil || page.Table.At != stamp(decided) {
 		t.Fatalf("the header does not say which round the rows are of: %+v %+v %+v", page, page.LastRound, page.Table)
 	}
@@ -191,15 +191,14 @@ func TestTheIdentityOfARowSaysWhereItCameFrom(t *testing.T) {
 	}
 }
 
-// Before arming, a row says what arming would send.
-func TestAnUnarmedRowSaysWhatArmingWouldSend(t *testing.T) {
+// A row says what the close sent: the word, and how many alerts.
+func TestARowSaysWhatTheCloseSent(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
-	fixture.loop.send = false
 	fixture.mature(context.Background())
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
 	execution := absentRowOf(t, page, "10").Execution
-	if page.SendArmed || execution == nil || execution.Word != absentalerts.OutcomeWouldSend || execution.Batch != 1 || len(fixture.writer.batches) != 0 {
-		t.Fatalf("an unarmed close did not say what it would send: %+v %+v", page, execution)
+	if execution == nil || execution.Word != absentalerts.OutcomeAlertClosed || execution.Batch != 1 || len(fixture.writer.batches) != 1 {
+		t.Fatalf("the row does not say what the close sent: %+v %+v", page, execution)
 	}
 }
 
@@ -382,8 +381,8 @@ func TestPagesFollowTheCursorAndTheFilters(t *testing.T) {
 	if len(rows) != 2 || rows[0].key != keys[0] || rows[1].key != keys[2] {
 		t.Fatalf("a strategy id did not find its rows under every tenant: %+v", rows)
 	}
-	table.executed(keys[4], absentExecution{word: absentalerts.OutcomeWouldSend})
-	rows, _, _ = table.page(fleet.AbsentCandidateQuery{Limit: 10, Execution: absentalerts.OutcomeWouldSend})
+	table.executed(keys[4], absentExecution{word: absentalerts.OutcomeSendFailed})
+	rows, _, _ = table.page(fleet.AbsentCandidateQuery{Limit: 10, Execution: absentalerts.OutcomeSendFailed})
 	if len(rows) != 1 || rows[0].key != keys[4] {
 		t.Fatalf("the execution filter did not find the one row: %+v", rows)
 	}

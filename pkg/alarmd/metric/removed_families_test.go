@@ -59,6 +59,111 @@ var removedFamilies = []string{
 	"catalog_shardability_plans_total", "dimension_census_total", "dimension_census_values_total",
 }
 
+// removedLabelValues are label values taken out of families that stay.
+// A reader still filtering on one would read nothing and take it for zero,
+// the same way as for a removed family.
+var removedLabelValues = []struct{ family, label, value string }{
+	// The alert closes send wherever the link's Console is configured:
+	// nothing is decided and held back any more, so there is no count of
+	// what would have been sent and no side saying whether sending is on.
+	{"absent_strategy_close_total", "outcome", "would_send"},
+	{"target_scope_close_total", "outcome", "would_send"},
+	{"absent_strategy_difference", "side", "send_armed"},
+}
+
+// A removed label value is emitted by no family, whatever its source
+// reports: every cell of these families comes from a closed list, so a
+// source still counting the old word is not enough to bring it back.
+func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	everything := func() map[string]uint64 {
+		counts := map[string]uint64{}
+		for _, removed := range removedLabelValues {
+			counts[removed.value] = 1
+		}
+		return counts
+	}
+	r.SetAbsentCloseSource(everything, everything, func() map[string]int {
+		sides := map[string]int{}
+		for _, removed := range removedLabelValues {
+			sides[removed.value] = 1
+		}
+		return sides
+	})
+	r.SetTargetScopeCloseSource(everything)
+	families, err := r.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted := map[string]bool{}
+	for _, family := range families {
+		for _, series := range family.GetMetric() {
+			for _, label := range series.GetLabel() {
+				emitted[family.GetName()+"|"+label.GetName()+"|"+label.GetValue()] = true
+			}
+		}
+	}
+	for _, removed := range removedLabelValues {
+		name := "bkmonitor_alarmd_" + removed.family
+		if len(emittedOf(emitted, name)) == 0 {
+			t.Fatalf("%s emitted nothing: the guard is not reading it", name)
+		}
+		if emitted[name+"|"+removed.label+"|"+removed.value] {
+			t.Errorf("%s{%s=%q} is emitted again", name, removed.label, removed.value)
+		}
+	}
+}
+
+func emittedOf(emitted map[string]bool, family string) []string {
+	var cells []string
+	for cell := range emitted {
+		if strings.HasPrefix(cell, family+"|") {
+			cells = append(cells, cell)
+		}
+	}
+	return cells
+}
+
+// No code, page, operation or test of alarmd or its CLI names a removed
+// label value as a word.
+func TestNoSourceNamesARemovedLabelValue(t *testing.T) {
+	var values []string
+	for _, removed := range removedLabelValues {
+		values = append(values, regexp.QuoteMeta(removed.value))
+	}
+	pattern := regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(` + strings.Join(values, "|") + `)(?:[^A-Za-z0-9_]|$)`)
+	self, err := filepath.Abs("removed_families_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{"..", filepath.Join("..", "..", "alarmd-cli")} {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			switch filepath.Ext(path) {
+			case ".go", ".html", ".js", ".md", ".yaml", ".json":
+			default:
+				return nil
+			}
+			if abs, _ := filepath.Abs(path); abs == self {
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if match := pattern.FindSubmatch(body); match != nil {
+				t.Errorf("%s names the removed label value %s", path, match[1])
+			}
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+}
+
 // A removed family is registered nowhere, bound or not.
 func TestARemovedFamilyIsNotRegistered(t *testing.T) {
 	r := NewRecorder(BuildInfo{})

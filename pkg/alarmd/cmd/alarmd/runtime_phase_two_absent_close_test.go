@@ -154,7 +154,7 @@ func newAbsentFixture(t *testing.T, alerts []openalerts.Alert) *absentTestFixtur
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{
 		Now: func() time.Time { return fixture.now }, Observer: observability.NopObserver{}}}
 	bundle.controlLeader = true
-	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, fixture.link, fixture.writer, true)
+	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, fixture.link, fixture.writer)
 	return fixture
 }
 
@@ -561,24 +561,21 @@ func TestAnUnreadableAlertListIsReported(t *testing.T) {
 	}
 }
 
-// Until the deployment arms it, the difference runs in full and sends
-// nothing, and every per-alert guard is read exactly as it would be armed.
-func TestAnUnarmedDifferenceDecidesEverythingAndSendsNothing(t *testing.T) {
+// A candidate past its grace is closed by the loop production builds, with
+// nothing to switch on: its own alert is sent, and another producer's is
+// counted and left.
+func TestACandidatePastGraceIsSentWithNoSwitch(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{
 		nativeAlert("mine", "0123456789abcdef0123456789abcdef"),
 		{AlertID: "theirs", EventSourceID: "another-source", Fingerprint: "1123456789abcdef0123456789abcdef"},
 	})
-	fixture.loop.send = false
 	fixture.mature(context.Background())
 	stats := fixture.loop.Stats()
-	if len(fixture.writer.batches) != 0 || stats[absentalerts.OutcomeAlertClosed] != 0 {
-		t.Fatalf("an unarmed difference sent a close: %+v", fixture.writer.batches)
+	if len(fixture.writer.batches) != 1 || len(fixture.writer.batches[0]) != 1 || fixture.writer.batches[0][0].AlertInstanceID != "mine" {
+		t.Fatalf("the candidate's own alert was not sent alone: %+v", fixture.writer.batches)
 	}
-	if stats[absentalerts.OutcomeClosed] != 1 || stats[absentalerts.OutcomeWouldSend] != 1 || stats[absentalerts.OutcomeProducerForeign] != 1 {
-		t.Fatalf("an unarmed difference did not report what arming would do: %+v", stats)
-	}
-	if fixture.loop.Difference()["send_armed"] != 0 {
-		t.Fatalf("the reading does not say the close is unarmed: %+v", fixture.loop.Difference())
+	if stats[absentalerts.OutcomeClosed] != 1 || stats[absentalerts.OutcomeAlertClosed] != 1 || stats[absentalerts.OutcomeProducerForeign] != 1 {
+		t.Fatalf("outcomes = %+v, want one strategy closed, one alert closed, one foreign", stats)
 	}
 }
 

@@ -270,7 +270,6 @@ func (loop *absentStrategyClose) Page(ctx context.Context, query fleet.AbsentCan
 		return fleet.AbsentCandidatesResponse{}, false
 	}
 	rows, next, page := loop.table.page(query)
-	page.SendArmed = loop.send
 	if page.Table != nil {
 		page.Table.MemoryFull = loop.Stats()[absentalerts.OutcomeMemoryFull]
 	}
