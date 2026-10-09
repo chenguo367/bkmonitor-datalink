@@ -227,6 +227,35 @@ func TestANoDataDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 	}
 }
 
+// The no-data recovery: the group reported again. Its text says that, and it
+// carries no period count, because the count on a recovery's point is zero by
+// construction and a zero would be read as a count (decision-010, the no-data
+// paragraph). The absence it closes keeps both (the case above).
+func TestANoDataRecoverySaysTheDataIsBackAndCarriesNoPeriodCount(t *testing.T) {
+	recovery := noDataDecision()
+	recovery.EventKind = contract.TriggerEventRecovery
+	recovery.Observed.Values[contract.NoDataPeriodFactField] = json.RawMessage("0")
+	for index := range recovery.LevelResults {
+		recovery.LevelResults[index].Result = contract.LevelResultRecovery
+	}
+	message := convert(t, recovery)
+	assertFields(t, message, map[string]string{
+		"evaluations": `[{"severity":"warning","action":"resolved","action_reason":""}]`,
+		"content":     `"data reported again, as of 2025-09-01T00:00:00Z"`,
+	})
+	assertAbsent(t, message, "values")
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
+		t.Fatal(err)
+	}
+	if _, written := extra["no_data_periods"]; written {
+		t.Fatalf("extra_data = %s, want no period count on a recovery", message["extra_data"])
+	}
+	if string(extra["evaluation_family"]) != `"no_data"` {
+		t.Fatalf("extra_data = %s, want the no_data family", message["extra_data"])
+	}
+}
+
 // The action has two values and no others.
 //
 // closed is the consumer's third and is a lifetime decision: it says an alert
