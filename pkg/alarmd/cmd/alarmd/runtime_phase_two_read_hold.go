@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,8 +129,22 @@ func (holds *productionReadHolds) bind(qg execution.QueryGroupIdentity, session 
 	holds.groups[qg] = &productionReadHoldGroup{session: session}
 }
 
-func (holds *productionReadHolds) forget(qg execution.QueryGroupIdentity) {
+// forget releases the binding a Runner made, and only that one: the session
+// is the Runner's own, and a Runner lost and released after the next one
+// bound the same Query Group must leave the newer binding - and the
+// controller's state for the group - in place. Released by name, a late
+// release unbound its successor, whose every Slot was then refused as a
+// stale fence while its lease kept renewing. Compared as the *Session the
+// binding holds, never as an address or an id derived from one: the binding
+// keeps the old session reachable, so a pointer it compares against cannot
+// have been reused.
+func (holds *productionReadHolds) forget(qg execution.QueryGroupIdentity, session *ownership.Session) {
 	holds.mu.Lock()
+	group := holds.groups[qg]
+	if group == nil || group.session != session {
+		holds.mu.Unlock()
+		return
+	}
 	delete(holds.groups, qg)
 	holds.mu.Unlock()
 	holds.controller.Forget(qg)
@@ -148,19 +163,40 @@ func (holds *productionReadHolds) releasePredecessors(group *productionReadHoldG
 	group.predecessors = nil
 }
 
-// Restore only new or invalidated entries. One bad answer leaves that group
+// Restore only invalidated entries of groups this Worker has opened: a read
+// that failed, or a write conflict that dropped what was read. A group not
+// opened here is read by the round that opens it (load), once its lease is
+// held; read before, the record could still change under the old owner's
+// lease, and nothing would read it again. One bad answer leaves that group
 // retryable without discarding successfully loaded siblings.
 func (holds *productionReadHolds) restore(ctx context.Context, groups []execution.QueryGroupIdentity) error {
 	var missing []execution.QueryGroupIdentity
+	holds.mu.Lock()
 	for _, qg := range groups {
-		if !holds.controller.Inspect(qg).Loaded {
+		if holds.groups[qg] != nil {
 			missing = append(missing, qg)
 		}
 	}
+	holds.mu.Unlock()
+	missing = slices.DeleteFunc(missing, func(qg execution.QueryGroupIdentity) bool { return holds.controller.Inspect(qg).Loaded })
 	if len(missing) == 0 {
 		return nil
 	}
 	return holds.controller.RestoreBatch(ctx, missing)
+}
+
+// load reads the records of the Query Groups a round has just opened, each
+// whether or not its entry is loaded: one loaded before this Worker held the
+// lease - read as another group's predecessor - may be older than what the
+// previous owner last wrote. A pipeline of ownership.ControlReadBatch groups
+// at a time, so a pipeline that fails leaves only its own groups to the next
+// reconcile's restore; until then their Slots take the unrestored path, never
+// a hold read before the lease.
+func (holds *productionReadHolds) load(ctx context.Context, groups []execution.QueryGroupIdentity) {
+	for start := 0; start < len(groups); start += ownership.ControlReadBatch {
+		batch := groups[start:min(start+ownership.ControlReadBatch, len(groups))]
+		holds.report("restore_failed", "", holds.controller.RestoreBatch(ctx, batch))
+	}
 }
 
 func readHoldRoute(facts execution.QueryPlanFacts) (string, error) {

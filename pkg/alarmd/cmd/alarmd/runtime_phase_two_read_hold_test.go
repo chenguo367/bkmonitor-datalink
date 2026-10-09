@@ -23,12 +23,26 @@ type runtimeTestReadHoldControl struct {
 	values map[execution.QueryGroupIdentity][]byte
 	reads  [][]execution.QueryGroupIdentity
 	writes int
+	// failRead answers one group's read with an error of its own, as Redis
+	// answers one key of a pipeline; failBatch fails every read that names
+	// the group, as a pipeline whose replies never came.
+	failRead  map[execution.QueryGroupIdentity]error
+	failBatch map[execution.QueryGroupIdentity]error
 }
 
 func (c *runtimeTestReadHoldControl) ReadControlBatch(_ context.Context, groups []execution.QueryGroupIdentity, _ string) ([]ownership.ControlRead, error) {
 	c.reads = append(c.reads, append([]execution.QueryGroupIdentity(nil), groups...))
+	for _, qg := range groups {
+		if err := c.failBatch[qg]; err != nil {
+			return nil, err
+		}
+	}
 	result := make([]ownership.ControlRead, len(groups))
 	for i, qg := range groups {
+		if err := c.failRead[qg]; err != nil {
+			result[i] = ownership.ControlRead{Err: err}
+			continue
+		}
 		raw, found := c.values[qg]
 		result[i] = ownership.ControlRead{Raw: append([]byte(nil), raw...), Missing: !found}
 	}
@@ -66,10 +80,18 @@ func runtimeTestHoldSchedule(t *testing.T, qg execution.QueryGroupIdentity) exec
 	return execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{Publication: execution.SnapshotPublicationRef{PublicationEpoch: 1, SnapshotRevision: "snapshot"}, QueryGroup: qg, QueryRevision: "query", ScheduleRevision: groupRev, Start: 60}, Plans: plans}
 }
 func TestRuntimeOwnedRestoreIsolatesBadGroups(t *testing.T) {
-	h, c, _ := runtimeTestHolds(t)
+	h, c, at := runtimeTestHolds(t)
 	raw, _ := json.Marshal(readhold.Record{SinceSlot: 1, HoldMillis: 120000})
 	c.values["good"] = raw
 	c.values["bad"] = []byte(`{"hold_ms":-1,"since_slot":1}`)
+	// Opened here: only a group this Worker has opened is restored.
+	for _, qg := range []execution.QueryGroupIdentity{"bad", "good", "zero"} {
+		session, err := ownership.OpenSession(context.Background(), &fakePhaseTwoOwnershipStore{}, qg, "worker", *at, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.bind(qg, session)
+	}
 	h.restore(context.Background(), []execution.QueryGroupIdentity{"bad", "good", "zero"})
 	// The corrupt record restores its group marked, so the next write
 	// replaces it -- it would otherwise keep the group unrestored for a week.
@@ -113,7 +135,7 @@ func TestRuntimePreparedZeroHoldDoesNotReadOrCreateKey(t *testing.T) {
 	if _, err := h.owner(qg); !errors.Is(err, ownership.ErrStaleFence) {
 		t.Fatalf("expired owner still admitted: %v", err)
 	}
-	h.forget(qg)
+	h.forget(qg, session)
 	if len(h.groups) != 0 || h.controller.Inspect(qg).Loaded {
 		t.Fatal("release kept the owner's controller record")
 	}

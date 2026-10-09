@@ -2251,6 +2251,8 @@ func (runtime *productionPhaseTwoOwnership) AssignedQueryGroups(
 	queryGroups []execution.QueryGroupIdentity,
 ) (assigned []execution.QueryGroupIdentity, resultErr error) {
 	defer func() {
+		// The groups held here whose hold a failed read or a write conflict
+		// left unloaded; a new group is read by the round that opens it.
 		if resultErr == nil && runtime != nil && runtime.dependencies.ReadHolds != nil {
 			holds := runtime.dependencies.ReadHolds
 			holds.report("restore_failed", "", holds.restore(ctx, assigned))
@@ -2434,6 +2436,13 @@ func (runtime *productionPhaseTwoOwnership) clearControlAuthority(authority owne
 	}
 }
 
+func (runtime *productionPhaseTwoOwnership) LoadOpened(ctx context.Context, queryGroups []execution.QueryGroupIdentity) {
+	if runtime.dependencies.ReadHolds == nil {
+		return
+	}
+	runtime.dependencies.ReadHolds.load(ctx, queryGroups)
+}
+
 func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	ctx context.Context,
 	queryGroup execution.QueryGroupIdentity,
@@ -2452,7 +2461,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	release := func() {}
 	if holds := runtime.dependencies.ReadHolds; holds != nil {
 		holds.bind(queryGroup, session)
-		release = func() { holds.forget(queryGroup) }
+		release = func() { holds.forget(queryGroup, session) }
 	}
 	if runtime.viewGate != nil {
 		// The early renewal the gate makes when the view is ahead of the
@@ -2464,7 +2473,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		// slot_completed line with the gate's word like any other outcome.
 		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session, renew: renew}
 		previousRelease := release
-		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup) }
+		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup, session) }
 	}
 	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds}
 	var readHolds scheduler.ReadHolds
