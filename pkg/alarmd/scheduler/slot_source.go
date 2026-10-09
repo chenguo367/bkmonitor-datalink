@@ -195,7 +195,6 @@ type PrunedCursorAdvancer interface {
 // ProductionSlotSource is bound to one owned Query Group. It reads current
 // control facts and returns one normal due Slot; it never executes queries,
 type ProductionSlotSource struct {
-	expiredRangeEnabled       bool
 	queryGroup                execution.QueryGroupIdentity
 	workerID                  string
 	session                   OwnerSession
@@ -633,7 +632,7 @@ func (source *ProductionSlotSource) Next(
 		Recovery:         recovery,
 		FollowingSlot:    followingSlot(schedule, nextSlot),
 	}
-	if source.expiredRangeEnabled && load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
+	if load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
 		ctx.Value(rangeFlightContextKey{}) == queryGroup && recovery.Disposition == ReplayExpired {
 		outcome := refusedRange(observability.RangeGateApplied)
 		if rangeSlot, refusal, rangeErr := source.buildExpiredRange(ctx, slot, schedule, at); rangeErr != nil {

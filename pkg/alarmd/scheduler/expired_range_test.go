@@ -10,7 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-func TestExpiredRangeProductionSourceAgeBoundaryAndDisabledResume(t *testing.T) {
+func TestExpiredRangeProductionSourceAgeBoundaryAndResume(t *testing.T) {
 	for _, tc := range []struct {
 		at   int64
 		last execution.EvaluationTime
@@ -19,7 +19,6 @@ func TestExpiredRangeProductionSourceAgeBoundaryAndDisabledResume(t *testing.T) 
 			schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.UnixMilli(tc.at), testRecoveryLimits())
-			source.expiredRangeEnabled = true
 			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 			slot, due, _, err := source.Next(ctx, "query-group-1")
 			if err != nil || !due || slot.ExpiredRange == nil {
@@ -38,7 +37,7 @@ func TestExpiredRangeProductionSourceAgeBoundaryAndDisabledResume(t *testing.T) 
 			restarted := newProductionSlotSourceWithRecoveryForTest(t, catalog, load, time.Unix(2000, 0), testRecoveryLimits())
 			resumed, due, _, err := restarted.Next(context.Background(), "query-group-1")
 			if err != nil || !due || resumed.ExpiredRange == nil || !resumed.ExpiredRange.Equal(*p) {
-				t.Fatalf("disabled resume: %+v %v %v", resumed, due, err)
+				t.Fatalf("resume: %+v %v %v", resumed, due, err)
 			}
 			if len(catalog.requests) != 2 {
 				t.Fatal("persisted range attempted Snapshot re-freeze")
@@ -47,11 +46,11 @@ func TestExpiredRangeProductionSourceAgeBoundaryAndDisabledResume(t *testing.T) 
 	}
 }
 
-func TestExpiredRangeSourceRequiresEnabledUnstartedSingleFlight(t *testing.T) {
+func TestExpiredRangeSourceRequiresUnstartedSingleFlight(t *testing.T) {
 	for _, tc := range []struct {
-		name                    string
-		enabled, flight, single bool
-	}{{"disabled", false, true, false}, {"without flight", true, false, false}, {"single pending", true, true, true}} {
+		name           string
+		flight, single bool
+	}{{"without flight", false, false}, {"single pending", true, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
@@ -64,7 +63,6 @@ func TestExpiredRangeSourceRequiresEnabledUnstartedSingleFlight(t *testing.T) {
 				}
 				load.Progress.UnfinishedSlot = &execution.UnfinishedSlotProjection{Contract: slot.Contract, DuePlanTargets: slot.DuePlanTargets, EarliestQueryDeadlineUnixMilli: slot.EarliestQueryDeadlineUnixMilli, KeepUntilUnixMilli: slot.KeepUntilUnixMilli}
 			}
-			source.expiredRangeEnabled = tc.enabled
 			ctx := context.Background()
 			if tc.flight {
 				ctx = context.WithValue(ctx, rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
@@ -82,7 +80,6 @@ func TestExpiredRangeSourceStopsAtRetirementAndBlocksChangedTail(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, retiredAt: &end}
 	source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.Unix(2000, 0), testRecoveryLimits())
-	source.expiredRangeEnabled = true
 	slot, due, _, err := source.Next(context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1")), "query-group-1")
 	if err != nil || !due || slot.ExpiredRange == nil || slot.ExpiredRange.Last.Contract.Slot.EvaluationTime != 240 || slot.ExpiredRange.Next != 277 {
 		t.Fatalf("retirement %+v %v %v", slot, due, err)
@@ -114,7 +111,6 @@ func TestAnExpiredRangeOverHeldSlotsSealsOnTheShiftedClock(t *testing.T) {
 			schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.UnixMilli(tc.at), testRecoveryLimits())
-			source.expiredRangeEnabled = true
 			source.readHolds = &testReadHolds{hold: hold * time.Millisecond}
 			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 			slot, due, _, err := source.Next(ctx, "query-group-1")
@@ -136,7 +132,6 @@ func TestAnExpiredRangeOverHeldSlotsSealsOnTheShiftedClock(t *testing.T) {
 			schedule := schedulerSchedule(t, interval, firstSlot, nil, "snapshot-1", 1)
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(firstSlot, firstSlot-execution.EvaluationTime(interval)), at, testRecoveryLimits())
-			source.expiredRangeEnabled = true
 			source.readHolds = &testReadHolds{hold: time.Duration(hold) * time.Millisecond}
 			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 			slot, due, _, err := source.Next(ctx, "query-group-1")

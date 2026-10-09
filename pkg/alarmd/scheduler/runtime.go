@@ -800,9 +800,7 @@ func (runner *Runner) runOneTracked(
 		return execution.SlotExecutionResult{}, false, &SlotInFlightError{HeldBy: heldBy}
 	}
 	defer release()
-	if source, ok := runner.source.(interface{ RangeCreationEnabled() bool }); ok && source.RangeCreationEnabled() {
-		ctx = context.WithValue(ctx, rangeFlightContextKey{}, runner.queryGroup)
-	}
+	ctx = context.WithValue(ctx, rangeFlightContextKey{}, runner.queryGroup)
 
 	// The local backoff decision comes first because it needs nothing from the
 	// store. It is free today -- a normal Query Group has no source backoff

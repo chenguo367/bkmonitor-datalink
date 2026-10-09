@@ -186,7 +186,6 @@ func TestExpiredRangeFallsBackToOneSlotAcrossAHoldTransition(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 	source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.Unix(1000, 0), testRecoveryLimits())
-	source.expiredRangeEnabled = true
 	source.readHolds = changingReadHold{}
 	ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 	slot, due, _, err := source.Next(ctx, "query-group-1")

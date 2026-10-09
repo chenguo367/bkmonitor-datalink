@@ -69,6 +69,9 @@ var removedLabelValues = []struct{ family, label, value string }{
 	{"absent_strategy_close_total", "outcome", "would_send"},
 	{"target_scope_close_total", "outcome", "would_send"},
 	{"absent_strategy_difference", "side", "send_armed"},
+	// Expired-range creation is always on, so the range gate never refuses
+	// for it being off.
+	{"range_gate_total", "outcome", "range_creation_disabled"},
 }
 
 // A removed label value is emitted by no family, whatever its source

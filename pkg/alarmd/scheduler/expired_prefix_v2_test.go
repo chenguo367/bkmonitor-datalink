@@ -29,7 +29,6 @@ func TestDistanceExpiredPrefixRetainsReplayTail(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 	source := newProductionSlotSourceWithRecoveryForTest(t, catalog, foundProgress(120, 60), time.Unix(700, 0), testRecoveryLimits())
-	source.expiredRangeEnabled = true
 	ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 	slot, due, _, err := source.Next(ctx, "query-group-1")
 	if err != nil || !due {
@@ -61,7 +60,6 @@ func TestDistanceExpiredPrefixKeepsBoundaryAndOriginalPending(t *testing.T) {
 			catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
 			load := foundProgress(tc.next, 60)
 			source := newProductionSlotSourceWithRecoveryForTest(t, catalog, load, time.Unix(700, 0), testRecoveryLimits())
-			source.expiredRangeEnabled = true
 			ctx := context.WithValue(context.Background(), rangeFlightContextKey{}, execution.QueryGroupIdentity("query-group-1"))
 			slot, due, _, err := source.Next(ctx, "query-group-1")
 			if err != nil || !due || (slot.ExpiredRange != nil) != tc.wantRange || slot.Recovery.Disposition != tc.wantDisposition {

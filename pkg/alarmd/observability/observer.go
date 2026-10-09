@@ -931,7 +931,6 @@ var ScheduleCutoverReadHoldLinks = []string{"linked", "linked_generation_unknown
 // silent fallthrough.
 const (
 	RangeGateApplied               = "applied"
-	RangeGateCreationDisabled      = "range_creation_disabled"
 	RangeGateProgressMissing       = "progress_missing"
 	RangeGateNextSlotMoved         = "next_slot_moved"
 	RangeGateUnfinishedSlotPresent = "unfinished_slot_present"
@@ -955,7 +954,7 @@ const (
 // RangeGateOutcomes is every value the outcome takes, for the partition to
 // pre-create and for a reader to bound the family by.
 var RangeGateOutcomes = []string{
-	RangeGateApplied, RangeGateCreationDisabled, RangeGateProgressMissing, RangeGateNextSlotMoved,
+	RangeGateApplied, RangeGateProgressMissing, RangeGateNextSlotMoved,
 	RangeGateUnfinishedSlotPresent, RangeGateNoRangeFlight,
 	RangeGateRecoveryDisabled, RangeGatePlansMismatch, RangeGateDeadlineNotReached,
 	RangeGateStepsBelowOne, RangeGateFreezeFailed, RangeGateProofTooLarge,
@@ -981,7 +980,6 @@ type RangeGateFacts struct {
 	// is still holding the Slot it began, and the evaluation time says which.
 	UnfinishedSlotPresent        bool  `json:"unfinished_slot_present"`
 	UnfinishedSlotEvaluationTime int64 `json:"unfinished_slot_evaluation_time"`
-	RangeCreationEnabled         bool  `json:"range_creation_enabled"`
 	// The two candidate bounds the builder's distance branch compared, when
 	// the refusal came from a branch that had computed them. BoundsKnown says
 	// so: the other refusals never compute these, and reporting zeroes for

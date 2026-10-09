@@ -2581,7 +2581,6 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithQueryDeadlineReserve(runtime.dependencies.QueryDeadlineReserve),
 		scheduler.WithSettlingWait(runtime.dependencies.SettlingWait),
 		scheduler.WithSnapshotRetention(runtime.dependencies.SnapshotRetention, runtime.dependencies.PublicationDelayAllowance),
-		scheduler.WithExpiredRangeCreation(true),
 		scheduler.WithObserver(runtime.dependencies.Observer),
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),
@@ -2682,11 +2681,6 @@ func (runtime *productionPhaseTwoQueryGroup) Supplement(
 	scope execution.SupplementScope,
 ) (execution.SupplementFacts, error) {
 	return runtime.runner.Supplement(ctx, at, readHoldMillis, scope)
-}
-
-func (source observedProductionSlotSource) RangeCreationEnabled() bool {
-	next, ok := source.next.(interface{ RangeCreationEnabled() bool })
-	return ok && next.RangeCreationEnabled()
 }
 
 func (source observedProductionSlotSource) Next(
