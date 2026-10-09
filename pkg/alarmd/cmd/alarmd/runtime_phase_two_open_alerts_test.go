@@ -114,13 +114,13 @@ func TestTheGatesOwnHeldLookupsReachTheFacts(t *testing.T) {
 func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 	at := time.Date(2026, 9, 28, 4, 0, 0, 0, time.UTC)
 	facts := openAlertSetFacts(openalerts.Stats{SentDepartures: map[string]uint64{openalerts.DepartureNotResent: 3},
-		OwnOpen: 0, OwnOpenDepartures: map[string]uint64{openalerts.DepartureRecoveryAcked: 1}, OwnOpenRefusals: 2}, false, at)
+		OwnOpen: 0, OwnOpenDepartures: map[string]uint64{openalerts.DepartureNotInSet: 1, openalerts.DepartureEvicted: 2}}, false, at)
 	if facts.SentDepartures["not_resent"] != 3 || len(facts.SentDepartures) != len(openalerts.SentDepartures) {
 		t.Fatalf("sent departures %v", facts.SentDepartures)
 	}
-	if facts.OwnOpen == nil || *facts.OwnOpen != 0 || facts.OwnOpenRefusals != 2 ||
-		facts.OwnOpenDepartures["recovery_acked"] != 1 || len(facts.OwnOpenDepartures) != len(openalerts.OwnOpenDepartures) {
-		t.Fatalf("own open %v departures %v refused %d", facts.OwnOpen, facts.OwnOpenDepartures, facts.OwnOpenRefusals)
+	if facts.OwnOpen == nil || *facts.OwnOpen != 0 || facts.OwnOpenDepartures["evicted"] != 2 ||
+		facts.OwnOpenDepartures["not_in_set"] != 1 || len(facts.OwnOpenDepartures) != len(openalerts.OwnOpenDepartures) {
+		t.Fatalf("own open %v departures %v", facts.OwnOpen, facts.OwnOpenDepartures)
 	}
 	encoded, err := json.Marshal(facts)
 	if err != nil {
@@ -128,21 +128,5 @@ func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"own_open":0`) {
 		t.Fatalf("a known zero own_open was dropped: %s", encoded)
-	}
-}
-
-// The resend count reaches the facts, and a zero is written: a copy that
-// sent nothing again says so.
-func TestTheRecoveriesResentReachTheFacts(t *testing.T) {
-	at := time.Date(2026, 9, 28, 4, 0, 0, 0, time.UTC)
-	if facts := openAlertSetFacts(openalerts.Stats{RecoveriesResent: 3}, false, at); facts.RecoveriesResent != 3 {
-		t.Fatalf("recoveries resent = %d, want 3", facts.RecoveriesResent)
-	}
-	encoded, err := json.Marshal(openAlertSetFacts(openalerts.Stats{}, false, at))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(encoded), `"recoveries_resent":0`) {
-		t.Fatalf("a zero resend count was dropped: %s", encoded)
 	}
 }

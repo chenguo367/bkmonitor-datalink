@@ -1061,7 +1061,7 @@ Seconds since the oldest calibration among the tracked strategies' sets complete
 
 Labels: `kind`
 
-What the copy holds: member is fingerprints from the last publication, sent_open those this process sent ABNORMAL for and has not sent RECOVERY for since, sent_closed the reverse.
+What the copy holds: member is fingerprints from the last publication, sent_open those this process sent ABNORMAL for within the local retention.
 
 ## bkmonitor_alarmd_open_alert_set_evictions_total
 
@@ -1072,10 +1072,6 @@ Fingerprints this process sent that were dropped from the copy to stay inside it
 Labels: `answer`
 
 Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force.
-
-## bkmonitor_alarmd_open_alert_set_recovery_resent_total
-
-RECOVERY events the broker took for an alert whose earlier RECOVERY this process still held closed: sent again because the consumer's set still carried the alert once the ledger let it through - the first time after the next read of the set past the local retention, after that only after a calibration. Each one the consumer had already processed arrives there as an event with no open alert to act on.
 
 ## bkmonitor_alarmd_open_alert_set_refresh_total
 

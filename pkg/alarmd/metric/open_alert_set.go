@@ -38,7 +38,6 @@ type openAlertSetCollector struct {
 	entries     *prometheus.Desc
 	tracked     *prometheus.Desc
 	evictions   *prometheus.Desc
-	resent      *prometheus.Desc
 }
 
 func newOpenAlertSetCollector() *openAlertSetCollector {
@@ -66,7 +65,7 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 				"the unavailable policy answering, and which of the two appears is the policy in force.", "answer"),
 		entries: descriptor("open_alert_set_entries",
 			"What the copy holds: member is fingerprints from the last publication, sent_open those this "+
-				"process sent ABNORMAL for and has not sent RECOVERY for since, sent_closed the reverse.", "kind"),
+				"process sent ABNORMAL for within the local retention.", "kind"),
 		tracked: descriptor("open_alert_set_tracked_strategies",
 			"Strategies the copy reads on each refresh: those evaluated by this worker within the tracking "+
 				"window. Read against worker_owned_query_groups; well above it is strategies this worker lost "+
@@ -74,12 +73,6 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 		evictions: descriptor("open_alert_set_evictions_total",
 			"Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest "+
 				"first."),
-		resent: descriptor("open_alert_set_recovery_resent_total",
-			"RECOVERY events the broker took for an alert whose earlier RECOVERY this process still held closed: "+
-				"sent again because the consumer's set still carried the alert once the ledger let it through - the "+
-				"first time after the next read of the set past the local retention, after that only after a "+
-				"calibration. Each one the consumer had already processed arrives there as an event with no open "+
-				"alert to act on."),
 	}
 }
 
@@ -102,7 +95,6 @@ func (c *openAlertSetCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.entries
 	ch <- c.tracked
 	ch <- c.evictions
-	ch <- c.resent
 }
 
 func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
@@ -127,8 +119,6 @@ func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Members), "member")
 	ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Added), "sent_open")
-	ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Removed), "sent_closed")
 	ch <- prometheus.MustNewConstMetric(c.tracked, prometheus.GaugeValue, float64(stats.Tracked))
 	ch <- prometheus.MustNewConstMetric(c.evictions, prometheus.CounterValue, float64(stats.Evictions))
-	ch <- prometheus.MustNewConstMetric(c.resent, prometheus.CounterValue, float64(stats.RecoveriesResent))
 }

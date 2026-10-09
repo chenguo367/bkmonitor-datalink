@@ -84,18 +84,3 @@ func TestOpenAlertSetCollectorEmitsEveryWordAndTheAgeOnlyOnceCalibrated(t *testi
 		t.Fatalf("age after a calibration = %v, want one series at 90", age)
 	}
 }
-
-// The resend count is one series from the start, zero until a recovery is
-// sent again.
-func TestOpenAlertSetCollectorReportsRecoveriesResentFromZero(t *testing.T) {
-	r := NewRecorder(BuildInfo{})
-	stats := openalerts.Stats{}
-	r.SetOpenAlertSetSource(func() openalerts.Stats { return stats })
-	for _, want := range []float64{0, 2} {
-		stats.RecoveriesResent = uint64(want)
-		series := gatherFamily(t, r, "bkmonitor_alarmd_open_alert_set_recovery_resent_total")
-		if len(series) != 1 || series[0].GetCounter().GetValue() != want {
-			t.Fatalf("recovery resent series = %v, want one at %v", series, want)
-		}
-	}
-}

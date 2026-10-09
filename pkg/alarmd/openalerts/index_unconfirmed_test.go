@@ -315,8 +315,9 @@ func TestUnconfirmedSetsFollowThePassThroughPolicy(t *testing.T) {
 // it opened is kept, and is what the gate answers from while unconfirmed.
 func TestCalibrationBetweenResendsDoesNotForgetWhatWasOpened(t *testing.T) {
 	facts := confirmedFacts()
-	f := newSetFixture(t, PolicySelfMaintain, facts, "theirs-1")
 	ours := sentFingerprints(2)
+	// The consumer holds our alerts open throughout.
+	f := newSetFixture(t, PolicySelfMaintain, facts, append([]string{"theirs-1"}, ours...)...)
 	for round := 0; round < 6; round++ {
 		f.send(ours...)
 		f.reread(time.Minute + time.Second)
@@ -347,26 +348,67 @@ func TestTheOpenedRecordIsBounded(t *testing.T) {
 	}
 }
 
-// While unconfirmed, an alert whose ABNORMAL was sent while the record of
-// what this process opened was full is still one it sent: the gate answers
-// it open from the recent sends.
-func TestAnUnconfirmedGateAnswersAnAlertSentWhileTheRecordWasFull(t *testing.T) {
+// While unconfirmed, a full record of what this process opened takes a new
+// alert by letting go of the one whose last ABNORMAL is oldest - an alert
+// whose series stopped is never sent RECOVERY, so nothing else takes it
+// out - and the new alert answers open past the recent sends' retention,
+// so its recovery is not held. The alert sent first but still firing stays.
+func TestAFullUnconfirmedRecordLetsTheStalestGoForANewAlert(t *testing.T) {
 	facts := confirmedFacts()
 	facts.set(false, true, true)
 	c := &clock{at: time.Unix(1700000000, 0)}
 	options := indexOptions(c)
-	options.Facts, options.MaxLocalEntries = facts, 1
+	options.Facts, options.MaxLocalEntries = facts, 2
 	cache := mustIndex(t, options)
 	if err := cache.SetTracked([]StrategyKey{keyA}); err != nil {
 		t.Fatal(err)
 	}
-	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "first")})
-	c.advance(time.Second)
-	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "refused")})
-	if cache.Stats().OwnOpenRefusals != 1 {
-		t.Fatal("fixture: the second alert was not refused by the full record")
+	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "firing")})
+	c.advance(5 * time.Minute)
+	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "vanished")})
+	c.advance(10 * time.Minute)
+	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "firing")})
+	c.advance(5 * time.Minute)
+	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "new")})
+	c.advance(options.LocalRetention + time.Minute)
+	for fingerprint, want := range map[string]bool{"new": true, "firing": true, "vanished": false} {
+		if got := cache.Contains(tenant, keyA.StrategyID, fingerprint); got != want {
+			t.Errorf("%s answered open %v, want %v", fingerprint, got, want)
+		}
 	}
-	if !cache.Contains(tenant, keyA.StrategyID, "refused") {
-		t.Fatal("an alert this process sent, refused by the full record, answered not open")
+	if stats := cache.Stats(); stats.OwnOpen != 2 || stats.OwnOpenDepartures[DepartureEvicted] != 1 {
+		t.Fatalf("own open %d departures %v, want 2 held and 1 evicted", stats.OwnOpen, stats.OwnOpenDepartures)
+	}
+}
+
+// One acknowledged batch of first sends against a full record makes room for
+// all of them in one pass: as many as the batch needs leave, an alert whose
+// RECOVERY was sent before any still open, then the oldest last send, and
+// every alert of the batch is held.
+func TestAFullRecordMakesRoomForABatchInOnePass(t *testing.T) {
+	facts := confirmedFacts()
+	facts.set(false, true, true)
+	c := &clock{at: time.Unix(1700000000, 0)}
+	options := indexOptions(c)
+	options.Facts, options.MaxLocalEntries = facts, 4
+	cache := mustIndex(t, options)
+	if err := cache.SetTracked([]StrategyKey{keyA}); err != nil {
+		t.Fatal(err)
+	}
+	for _, fingerprint := range []string{"oldest", "older", "recent", "recovered"} {
+		cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, fingerprint)})
+		c.advance(time.Minute)
+	}
+	cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "recovered")})
+	cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "new-1"), abnormal(keyA, "new-2"), abnormal(keyA, "new-1")})
+	c.advance(options.LocalRetention + time.Minute)
+	want := map[string]bool{"new-1": true, "new-2": true, "recent": true, "older": true, "oldest": false, "recovered": false}
+	for fingerprint, open := range want {
+		if got := cache.Contains(tenant, keyA.StrategyID, fingerprint); got != open {
+			t.Errorf("%s answered open %v, want %v", fingerprint, got, open)
+		}
+	}
+	if stats := cache.Stats(); stats.OwnOpen != 4 || stats.OwnOpenDepartures[DepartureEvicted] != 2 {
+		t.Fatalf("own open %d departures %v, want 4 held and the 2 the batch needed evicted", stats.OwnOpen, stats.OwnOpenDepartures)
 	}
 }
