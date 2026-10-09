@@ -131,6 +131,12 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 			reason = observability.ReasonCode(facts.Code)
 		}
 	}
+	// A query stopped because the Slot's context was cancelled from above --
+	// the process stopping or the Query Group leaving -- says so rather than
+	// reading as an internal error on every rollout's outgoing replicas.
+	if reason == observability.ReasonInternalUnknown && observability.CancelledFromAbove(ctx, err) {
+		reason = observability.ReasonSlotCancelled
+	}
 	// A failure that can say more than its code, in the bounded detail
 	// grammar, does so here: the detail is what the rate-limited line keeps
 	// when the free text is gone.

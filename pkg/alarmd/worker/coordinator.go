@@ -1687,8 +1687,12 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: commit progress: %w", err)
 	}
 	if progress.Status != execution.ProgressCommitted {
-		err = fmt.Errorf("progress not committed: %s", progress.Status)
-		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", progress.ReasonCode, err)
+		err = progressNotCommitted(progress.Status)
+		reason := progress.ReasonCode
+		if refusal, refused := ownership.RefusalReason(err); refused {
+			reason = execution.ReasonCode(refusal)
+		}
+		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", reason, err)
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 	}
 	// The Slot is written down. Whatever this attempt applied is now recorded
@@ -1705,6 +1709,18 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionScopeFacts(completionCause),
 		completionCause.Coverage, completion.Evidence, completion.Primary)
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
+}
+
+// progressNotCommitted is the error for a Progress commit the store did not
+// take. A stale owner is the handover's refusal -- the Query Group moved
+// while the Slot ran and the fence the commit carried is no longer the
+// owner's -- and wraps the ownership word, so the Slot names it as the
+// handover does; the other statuses keep theirs.
+func progressNotCommitted(status execution.ProgressCommitStatus) error {
+	if status == execution.ProgressStaleOwner {
+		return fmt.Errorf("progress not committed: %s: %w", status, ownership.ErrStaleFence)
+	}
+	return fmt.Errorf("progress not committed: %s", status)
 }
 
 func (coordinator *SlotExecutionCoordinator) admit(
@@ -2406,6 +2422,11 @@ func (coordinator *SlotExecutionCoordinator) emitObservation(ctx context.Context
 		observation.Result = observability.Result(observability.ResultFailed)
 		if observation.ReasonCode == "" || observation.ReasonCode == observability.ReasonNone {
 			observation.ReasonCode = observability.ReasonInternalUnknown
+		}
+		// Any stage of a Slot stopped by its context's cancellation from
+		// above -- the process stopping or the Query Group leaving -- says so.
+		if observation.ReasonCode == observability.ReasonInternalUnknown && observability.CancelledFromAbove(ctx, observation.Err) {
+			observation.ReasonCode = observability.ReasonSlotCancelled
 		}
 	} else {
 		if observation.Result == "" {

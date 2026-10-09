@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -402,6 +403,16 @@ func TestARefusalWhileTheViewHasNotCarriedTheQueryGroupSaysItIsAwaitingIt(t *tes
 	if _, err = gateContext(ctx, gate, "qg-1", session, nil); !errors.As(err, &refusal) || refusal.Reason != string(viewGateScopeMismatch) || refusal.AwaitingView {
 		t.Fatalf("refusal from a view carrying the Query Group with another scope = %v, want scope_mismatch not awaiting", err)
 	}
+	// Without the lease the refusal is the lease's, whatever the view lacks:
+	// the wait for the view is a wait only while the record already gives
+	// the Worker the Query Group.
+	gate.attach(client)
+	if err := session.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = gateContext(ctx, gate, "qg-1", session, nil); !errors.As(err, &refusal) || refusal.Reason != string(viewGateNoLease) || refusal.AwaitingView {
+		t.Fatalf("refusal without the lease from a view lacking the Query Group = %v, want no_lease not awaiting", err)
+	}
 
 	var observations []observability.Observation
 	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
@@ -426,6 +437,37 @@ func TestARefusalWhileTheViewHasNotCarriedTheQueryGroupSaysItIsAwaitingIt(t *tes
 		if line := observationAt(t, observations, stage); !line.AwaitingView ||
 			line.ReasonCode != observability.ReasonCode(contract.ReasonViewNotExecutable) {
 			t.Fatalf("%s line = %+v, want %s awaiting the view", stage, line, contract.ReasonViewNotExecutable)
+		}
+	}
+}
+
+// A Slot stopped by its own context's cancellation -- the process stopping
+// or its Query Group leaving, every rollout's outgoing replicas -- completes
+// as SLOT_CANCELLED, not an internal error. A cancellation error under a
+// live context keeps internal_unknown.
+func TestASlotCancelledFromAboveSaysSo(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want observability.ReasonCode
+	}{
+		{"cancelled from above", cancelled, observability.ReasonSlotCancelled},
+		{"a cancellation under a live context", context.Background(), observability.ReasonInternalUnknown},
+	} {
+		var observations []observability.Observation
+		executor := observedProductionSlotExecutor{
+			next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", context.Canceled)
+			}),
+			observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+				observations = append(observations, observation)
+			}),
+		}
+		_, _ = executor.Execute(tc.ctx, execution.SlotExecutionRequest{})
+		if line := observationAt(t, observations, observability.StageSlotCompleted); line.ReasonCode != tc.want {
+			t.Fatalf("%s: slot_completed reason = %q, want %q", tc.name, line.ReasonCode, tc.want)
 		}
 	}
 }

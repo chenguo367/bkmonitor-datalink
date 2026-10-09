@@ -2817,6 +2817,11 @@ func (executor observedProductionSlotExecutor) Execute(
 		} else {
 			observedResult = observability.ResultFailed
 			reason, gapApplySite = slotFailureReason(err)
+			// A Slot stopped by its own context's cancellation -- the process
+			// stopping or its Query Group leaving -- names that.
+			if reason == observability.ReasonInternalUnknown && observability.CancelledFromAbove(ctx, err) {
+				reason = observability.ReasonSlotCancelled
+			}
 		}
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess
