@@ -83,6 +83,11 @@ const (
 	// Control Leader: how many named retired Query Groups and how many of
 	// those it reclaimed (AssignmentSweepFacts).
 	StageAssignmentSwept = "assignment_swept"
+	// StageAssignmentApplied names one assignment change a Worker applied:
+	// how many Query Groups it lost, took over and failed to take over, with
+	// the first few of each (AssignmentAppliedFacts). It is the line for a
+	// handover; the per-Query Group successes are counted and not written.
+	StageAssignmentApplied = "assignment_applied"
 	// StageViewPublished names one publication of the Control Leader's
 	// desired set over the view stream (decision-016): the term revision
 	// it produced and how many Workers' views moved. StageViewSession names
@@ -1575,6 +1580,46 @@ type AssignmentSweepFacts struct {
 	Changed     int `json:"changed"`
 }
 
+// MaxAssignmentAppliedSamples bounds the Query Groups an assignment_applied
+// line names in each list; the counts carry the rest.
+const MaxAssignmentAppliedSamples = 8
+
+// AssignmentAppliedFacts is one assignment change a Worker applied: the
+// Query Groups it released, the ones it took over and the ones it could not,
+// each counted, and the first MaxAssignmentAppliedSamples of each by name.
+// Truncated says some list was longer than its sample.
+type AssignmentAppliedFacts struct {
+	Lost           int      `json:"lost"`
+	Acquired       int      `json:"acquired"`
+	Failed         int      `json:"failed"`
+	LostSample     []string `json:"lost_sample,omitempty"`
+	AcquiredSample []string `json:"acquired_sample,omitempty"`
+	FailedSample   []string `json:"failed_sample,omitempty"`
+	Truncated      bool     `json:"truncated,omitempty"`
+}
+
+// Note adds one Query Group to the list its outcome names.
+func (facts *AssignmentAppliedFacts) Note(queryGroup string, lost, failed bool) {
+	count, sample := &facts.Acquired, &facts.AcquiredSample
+	switch {
+	case failed:
+		count, sample = &facts.Failed, &facts.FailedSample
+	case lost:
+		count, sample = &facts.Lost, &facts.LostSample
+	}
+	*count++
+	if len(*sample) < MaxAssignmentAppliedSamples {
+		*sample = append(*sample, queryGroup)
+	} else {
+		facts.Truncated = true
+	}
+}
+
+// Changed says the change moved anything at all.
+func (facts AssignmentAppliedFacts) Changed() bool {
+	return facts.Lost+facts.Acquired+facts.Failed > 0
+}
+
 // ViewStreamFacts describe one event of the view stream: a publication
 // (Event "published": Revision, Affected, and the four numbers of the
 // version it closed when Closed is set), or a session event (Event
@@ -2367,6 +2412,7 @@ type Observation struct {
 	ControlReads         *ControlReadFacts
 	AssignmentIndex      *AssignmentIndexFacts
 	AssignmentSweep      *AssignmentSweepFacts
+	AssignmentApplied    *AssignmentAppliedFacts
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
@@ -3214,31 +3260,10 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 		}
 		return ReasonNotReported
 	}
-	if _, ok := commonReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := resourceReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := contractObservationReasonSet[string(reason)]; ok {
-		return reason
-	}
-	if _, ok := activationFailureReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := viewStreamReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := schedulerDecisionReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := effectiveMaintenanceReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := absentCloseReasonSet[reason]; ok {
-		return reason
-	}
-	if _, ok := completionAttributionReasonSet[reason]; ok {
+	// One catalogue for what a reason may be and for what the log limiter
+	// keeps a bucket for: a word normalized here but missing there was
+	// refused by the limiter and its lines never written.
+	if _, ok := logReasonSet[reason]; ok {
 		return reason
 	}
 	return ReasonOther
@@ -3392,7 +3417,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageRebalancePlanned},
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
-	{ComponentOwnership, StageAssignmentSwept},
+	{ComponentOwnership, StageAssignmentSwept}, {ComponentOwnership, StageAssignmentApplied},
 	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession}, {ComponentOwnership, StageViewInstalled},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
@@ -3616,7 +3641,11 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+
+// allLogReasons is every reason NormalizeReason can return: the limiter keeps
+// a bucket for each, and refuses a reason it has none for, so a catalogue
+// NormalizeReason accepts and this list leaves out has its lines dropped.
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -3624,6 +3653,7 @@ var resultSet = makeResultSet(allResults)
 var operationSet = makeOperationSet(allOperations)
 var metricOperationSet = makeOperationSet(metricOperations)
 var directionSet = makeDirectionSet(allDirections)
+var logReasonSet = makeReasonSet(AllLogReasons())
 var commonReasonSet = makeReasonSet(joinReasons(unclassifiedReasons, []ReasonCode{ReasonStateAlreadyAppliedBeforeEvaluation}))
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
 var activationFailureReasonSet = makeReasonSet(activationFailureReasons)

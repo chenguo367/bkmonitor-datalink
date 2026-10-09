@@ -11,24 +11,14 @@ package observability
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"testing"
-	"time"
 )
 
 func refreshEvent(t *testing.T, facts *SourceRefreshFacts) map[string]any {
 	t.Helper()
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	renderTo(&output, Observation{
 		Component: ComponentControlPlane, Stage: StageSnapshotRefreshed, Result: ResultSuccess,
 		SourceRefresh: facts,
 	})

@@ -18,11 +18,12 @@ import (
 	"time"
 )
 
-// The observer counts, by stage, the lines it wrote and the ones its limiter
-// held back, every stage present from the start: which stage fills the log
-// is one reading. A routine success the policy never writes, and the stages
-// the observer never logs by design, are not lines and are not counted; a
-// stage outside the closed list counts as _other.
+// The observer counts, by stage, the lines it wrote, the ones its limiter
+// held back and a workflow stage's routine successes it counted without
+// writing, every stage present from the start: which stage fills the log is
+// one reading, and whether a stage runs at all is another. Any other routine
+// success, and the stages the observer never logs by design, are not lines
+// and are not counted; a stage outside the closed list counts as _other.
 func TestTheLogObserverCountsItsLinesByStage(t *testing.T) {
 	var output bytes.Buffer
 	limiter, _ := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 2, MaxScopes: 1024})
@@ -34,10 +35,15 @@ func TestTheLogObserverCountsItsLinesByStage(t *testing.T) {
 		t.Fatalf("stages counted %d / %d, want every stage and _other present from the start", len(counts.Written), len(counts.Limited))
 	}
 	for range 5 {
-		observer.Observe(ctx, Observation{Component: ComponentResource, Stage: StageResourceHard, Result: ResultPaused, Err: errors.New("pool full")})
+		observer.Observe(ctx, Observation{Component: ComponentResource, Stage: StageResourceHard, Result: ResultFailed, Err: errors.New("pool full")})
 	}
 	for range 3 {
 		observer.Observe(ctx, Observation{Component: ComponentRuntime, Stage: StageStartup, Result: ResultSuccess})
+	}
+	// A workflow stage's routine success: counted, not written.
+	for range 4 {
+		observer.Observe(ctx, Observation{Component: ComponentScheduler, Stage: StageSlotStarted, Result: ResultStarted,
+			Trace: TraceFields{QueryGroupKey: "qg-a"}})
 	}
 	// Not lines: a routine success, a scheduler wait, a catalog object read.
 	observer.Observe(ctx, Observation{Component: ComponentRuntime, Stage: StageFleetSnapshotPublish, Result: ResultSuccess})
@@ -52,6 +58,26 @@ func TestTheLogObserverCountsItsLinesByStage(t *testing.T) {
 	}
 	if counts.Written[StageStartup] != 3 || counts.Limited[StageStartup] != 0 {
 		t.Errorf("startup written %d limited %d, want 3 and 0", counts.Written[StageStartup], counts.Limited[StageStartup])
+	}
+	if counts.Unwritten[StageSlotStarted] != 4 || counts.Written[StageSlotStarted] != 0 || counts.Limited[StageSlotStarted] != 0 {
+		t.Errorf("slot_started unwritten %d written %d limited %d, want 4, 0, 0",
+			counts.Unwritten[StageSlotStarted], counts.Written[StageSlotStarted], counts.Limited[StageSlotStarted])
+	}
+	if _, startup := counts.Unwritten[StageStartup]; startup {
+		t.Error("startup has an unwritten count: only workflow stages have unwritten lines")
+	}
+	for stage := range routineStages {
+		if _, present := counts.Unwritten[stage]; !present {
+			t.Errorf("routine stage %s has no unwritten count: a zero is a reading", stage)
+		}
+	}
+	for stage := range roundStages {
+		if _, present := counts.Unwritten[stage]; !present {
+			t.Errorf("round stage %s has no unwritten count: a zero is a reading", stage)
+		}
+	}
+	if _, turnaway := counts.Unwritten[StageDispatchTurnaway]; turnaway {
+		t.Error("dispatch_turnaway has an unwritten count: an event stage writes its success")
 	}
 	for _, stage := range []Stage{StageFleetSnapshotPublish, StageSlotWait, StageObjectRead} {
 		if counts.Written[stage] != 0 || counts.Limited[stage] != 0 {

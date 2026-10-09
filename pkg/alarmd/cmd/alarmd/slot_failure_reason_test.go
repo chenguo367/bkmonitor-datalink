@@ -41,6 +41,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			err:  &trigger.InternalErrorV2{Operation: "window", LevelID: 5, Err: errors.New("no window")},
 			want: observability.ReasonCode(contract.ReasonTriggerInvariant),
 		},
+		{
+			name: "the query's permit wait ran out at its deadline",
+			err:  fmt.Errorf("alarmd worker: query: %w", admissionFailure{}),
+			want: "QUERY_PERMIT_DEADLINE",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reason, site := slotFailureReason(test.err)
@@ -91,4 +96,15 @@ func TestTheTwoNamedFailuresSurviveReasonNormalization(t *testing.T) {
 				"and the classification that produced it leaves no trace", reason, got)
 		}
 	}
+}
+
+// admissionFailure answers the query failure classification the way the
+// access layer's permit deadline does.
+type admissionFailure struct{}
+
+func (admissionFailure) Error() string {
+	return "alarmd access: acquire physical query permit: context deadline exceeded"
+}
+func (admissionFailure) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryAdmission, "QUERY_PERMIT_DEADLINE"
 }

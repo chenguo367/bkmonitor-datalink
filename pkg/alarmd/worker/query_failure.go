@@ -125,6 +125,11 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 		if facts.Category == observability.QueryFailureCategoryProviderTransport {
 			reason = observability.ReasonCode(facts.Code)
 		}
+		// A query that never reached its backend because the permit wait ran
+		// out names that, not an internal error.
+		if facts.Category == observability.QueryFailureCategoryAdmission {
+			reason = observability.ReasonCode(facts.Code)
+		}
 	}
 	// A failure that can say more than its code, in the bounded detail
 	// grammar, does so here: the detail is what the rate-limited line keeps

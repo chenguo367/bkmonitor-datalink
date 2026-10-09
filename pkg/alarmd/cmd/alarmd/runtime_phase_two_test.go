@@ -2153,17 +2153,27 @@ func TestPhaseTwoWorkerBundleObservesLifecycleWithoutInventingSlotTransitions(t 
 		ownershipTransition := observation.Component == observability.ComponentOwnership &&
 			(observation.Stage == observability.StageAssignmentAcquired || observation.Stage == observability.StageAssignmentLost ||
 				observation.Stage == observability.StageTakeoverStarted || observation.Stage == observability.StageTakeoverCompleted)
-		if ownershipTransition {
+		applied := observation.Component == observability.ComponentOwnership && observation.Stage == observability.StageAssignmentApplied
+		switch {
+		case ownershipTransition:
 			if observation.Trace.QueryGroupKey != "query-group-1" || observation.Trace.OwnerID != cfg.PhaseTwo.Worker.ID {
 				t.Fatalf("ownership lifecycle observation lacks diagnostic identity: %+v", observation)
 			}
-		} else if observation.Trace.QueryGroupKey != "" || observation.Trace.OwnerID != "" {
+		case applied:
+			// The assignment change's one line names the Worker and, in its
+			// facts, the Query Groups it took over.
+			facts := observation.AssignmentApplied
+			if observation.Trace.OwnerID != cfg.PhaseTwo.Worker.ID || observation.Trace.QueryGroupKey != "" || facts == nil ||
+				facts.Acquired != 1 || len(facts.AcquiredSample) != 1 || facts.AcquiredSample[0] != "query-group-1" {
+				t.Fatalf("assignment change observation = %+v, want the Worker and the one Query Group taken over", observation)
+			}
+		case observation.Trace.QueryGroupKey != "" || observation.Trace.OwnerID != "":
 			t.Fatalf("non-ownership lifecycle observation leaked business identity: %+v", observation)
 		}
 	}
 	for _, want := range []observability.Stage{
 		observability.Stage(observability.StageStartup), observability.StageConfigLoaded,
-		observability.StageSnapshotRefreshed, observability.StageAssignmentAcquired,
+		observability.StageSnapshotRefreshed, observability.StageAssignmentAcquired, observability.StageAssignmentApplied,
 		observability.Stage(observability.StageShutdown),
 	} {
 		if !containsStage(stages, want) {

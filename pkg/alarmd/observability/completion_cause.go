@@ -47,13 +47,21 @@ var CompletionAttributionReasons = []ReasonCode{"QUERY_NOT_ATTEMPTED", "QUERY_RE
 
 var completionAttributionReasonSet = makeReasonSet(CompletionAttributionReasons)
 
+// AdmissionFailureReasons are the reasons a query that never reached its
+// backend names, one per admission failure code: the permit wait ran out at
+// the query's deadline. The query failure facts carried the code; the line's
+// reason and the Slot's said internal_unknown.
+var AdmissionFailureReasons = []ReasonCode{"QUERY_PERMIT_DEADLINE"}
+
+var admissionFailureReasonSet = makeReasonSet(AdmissionFailureReasons)
+
 // NormalizedReasonCount is how many words NormalizeReason can return: its
 // catalogues and the three words it answers with outside them. A counter
 // labelled by a normalized reason has at most this many values of it.
 func NormalizedReasonCount() int {
 	return len(commonReasonSet) + len(resourceReasonSet) + len(contractObservationReasonSet) + len(activationFailureReasonSet) +
 		len(viewStreamReasonSet) + len(schedulerDecisionReasonSet) + len(effectiveMaintenanceReasonSet) + len(absentCloseReasonSet) +
-		len(completionAttributionReasonSet) + 3
+		len(completionAttributionReasonSet) + len(admissionFailureReasonSet) + 3
 }
 
 // CompletionScopeFacts is where a committed Slot's completion cause was

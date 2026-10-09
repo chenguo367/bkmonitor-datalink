@@ -10,11 +10,28 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-	"time"
 )
 
 // renderObservation returns the line the logger actually writes.
 //
+// renderTo writes the line the logger renders for an observation, whatever
+// lets it through: the renderer alone, after the normalization every
+// observation goes through. A workflow stage's routine success is counted and
+// not written, so a case about which keys a line carries reads the renderer,
+// and the policy's own cases read the policy.
+func renderTo(output *bytes.Buffer, observation Observation) {
+	New(ComponentScheduler, output).logObservation(context.Background(), NormalizeObservation(observation), LogAdmission{Allowed: true})
+}
+
+// rendererObserver writes every observation it is given through the
+// renderer (renderTo), for the cases that read the keys a sequence of lines
+// carries rather than which lines the policy lets through.
+type rendererObserver struct{ output *bytes.Buffer }
+
+func (r rendererObserver) Observe(_ context.Context, observation Observation) {
+	renderTo(r.output, observation)
+}
+
 // Every case in this file reads the rendered line rather than the fact
 // struct. A field can be set on the struct, carried all the way to the
 // observer, and never appear on any line -- the renderer here emits a chosen
@@ -26,15 +43,7 @@ import (
 func renderObservation(t *testing.T, observation Observation) map[string]any {
 	t.Helper()
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1000, MaxScopes: 1024})
-	if err != nil {
-		t.Fatalf("NewScopedLogLimiter() error = %v", err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatalf("NewScopedBoundedLogPolicy() error = %v", err)
-	}
-	NewLoggingObserver(New(ComponentScheduler, &output), policy).Observe(context.Background(), observation)
+	renderTo(&output, observation)
 	if output.Len() == 0 {
 		t.Fatal("the observation was not written at all")
 	}

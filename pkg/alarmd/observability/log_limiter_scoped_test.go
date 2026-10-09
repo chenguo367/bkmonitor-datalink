@@ -79,13 +79,13 @@ func TestScopedLogLimiterKeepsOneLinePerReasonAndQueryGroup(t *testing.T) {
 	}
 	noScope := scopedFailure("")
 	if !limiter.Admit(noScope).Allowed || limiter.Admit(noScope).Allowed {
-		t.Fatal("observations without a Query Group did not fall back to the fixed reason bucket")
+		t.Fatal("observations without a Query Group did not keep their stage's own bucket")
 	}
 	if !limiter.Admit(scopedFailure("qg-c")).Allowed {
-		t.Fatal("fixed reason bucket traffic suppressed a scoped bucket")
+		t.Fatal("a line without a Query Group suppressed a Query Group's bucket")
 	}
-	if got := limiter.ScopeBuckets(); got != 4 {
-		t.Fatalf("scope buckets=%d, want 4 (qg-a x2 reasons, qg-b, qg-c)", got)
+	if got := limiter.ScopeBuckets(); got != 5 {
+		t.Fatalf("scope buckets=%d, want 5 (qg-a x2 reasons, qg-b, the stage without a Query Group, qg-c)", got)
 	}
 }
 
@@ -305,9 +305,9 @@ func TestScopedLogLimiterResetsOnItsWindowAndOnAClockRollback(t *testing.T) {
 }
 
 // An observation without a Query Group is bounded by its reason, or by its
-// stage when it has none; each bucket is its own, and an unknown reason is
-// not given one.
-func TestScopedLogLimiterKeepsOneFixedBucketPerReasonAndStage(t *testing.T) {
+// stage when it has none; each bucket is its own, and an unlisted reason
+// folds into _other's rather than opening one of its own.
+func TestScopedLogLimiterKeepsOneBucketPerReasonAndStageWithoutAQueryGroup(t *testing.T) {
 	t.Parallel()
 
 	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Minute, MaxEvents: 1, MaxScopes: 16})
@@ -334,9 +334,7 @@ func TestScopedLogLimiterKeepsOneFixedBucketPerReasonAndStage(t *testing.T) {
 	if !admit(Observation{Component: ComponentRuntime, Stage: StageShutdown, Result: ResultFailed}) {
 		t.Fatal("one stage's traffic suppressed another stage's bucket")
 	}
-	buckets := len(limiter.fixed)
-	admit(failed("UNKNOWN_REASON"))
-	if len(limiter.fixed) != buckets {
-		t.Fatal("an unknown reason created a bucket")
+	if !admit(failed("UNKNOWN_REASON")) || admit(failed("ANOTHER_UNKNOWN_REASON")) {
+		t.Fatal("two unlisted reasons did not share _other's bucket")
 	}
 }

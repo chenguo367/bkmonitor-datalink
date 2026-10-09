@@ -38,6 +38,15 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	// round for the same Query Group. internal_unknown is where a site that
 	// looked at a failure and could not name it puts things; this one has a
 	// name and carries the two values it compared.
+	// A Slot whose query never reached its backend because the permit wait
+	// ran out at the query's deadline: the query's own word, which the query
+	// failure facts have carried all along.
+	var admission interface{ QueryFailure() (string, string) }
+	if errors.As(err, &admission) {
+		if category, code := admission.QueryFailure(); category == observability.QueryFailureCategoryAdmission {
+			reason = observability.ReasonCode(code)
+		}
+	}
 	if conflict, named := worker.GapGuardConflictReason(err); named {
 		reason = observability.ReasonCode(conflict)
 	}

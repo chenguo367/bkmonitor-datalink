@@ -11,10 +11,8 @@ package observability
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"testing"
-	"time"
 )
 
 // The committed line of a Slot that did not answer whole says why and
@@ -23,15 +21,7 @@ import (
 func TestTheCommittedLineNamesTheCauseAndWhereItWasFound(t *testing.T) {
 	render := func(observation Observation) map[string]any {
 		var output bytes.Buffer
-		limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-		if err != nil {
-			t.Fatal(err)
-		}
-		policy, err := NewScopedBoundedLogPolicy(limiter)
-		if err != nil {
-			t.Fatal(err)
-		}
-		NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), observation)
+		renderTo(&output, observation)
 		if output.Len() == 0 {
 			return nil
 		}

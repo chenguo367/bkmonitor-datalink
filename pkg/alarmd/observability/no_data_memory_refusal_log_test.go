@@ -6,20 +6,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
-func refusalLogObserver(output *bytes.Buffer, t *testing.T) *LoggingObserver {
+func refusalLogObserver(output *bytes.Buffer, t *testing.T) Observer {
 	t.Helper()
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 100, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return NewLoggingObserver(New("alarmd", output), policy)
+	return rendererObserver{output: output}
 }
 
 // The size and the bound travel together on the line.

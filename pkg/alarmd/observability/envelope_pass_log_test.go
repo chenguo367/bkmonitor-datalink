@@ -11,25 +11,15 @@ package observability
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 func preflightLine(t *testing.T, counts Counts, stage string) map[string]any {
 	t.Helper()
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 8, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	renderTo(&output, Observation{
 		Component: ComponentState, Stage: Stage(stage), Result: ResultSuccess, Counts: counts,
 	})
 	line := strings.TrimSpace(output.String())
