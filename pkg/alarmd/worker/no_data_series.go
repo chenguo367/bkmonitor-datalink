@@ -237,7 +237,7 @@ func (stream *streamedExecution) noDataCompletedSeries(
 		Disposition: execution.AccessAvailable, ImpactScope: execution.ImpactPlan,
 	}
 	return completedSeries{
-		due: view, series: series,
+		due: view, series: series, closing: synthetic.Closing,
 		inputs: []execution.SeriesEvaluationInputRequest{{
 			Contract: stream.header.Contract, Consumer: consumer, SeriesIdentity: series,
 			Kind: execution.SeriesKindNoData, RequirementIDs: []execution.RequirementID{noDataRequirementID},

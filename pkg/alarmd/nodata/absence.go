@@ -188,7 +188,13 @@ func (buckets *AbsentAgeBuckets) count(firstAbsent, evaluationTime int64) {
 type AbsenceResult struct {
 	Verdicts map[string]Verdict
 	Memory   map[string]GroupMemory
-	Facts    AbsenceFacts
+	// Closing names the groups whose NORMAL is the one close an absence gets
+	// when the roster stops expecting its group (A8): the group is forgotten
+	// this round, so nothing will speak about it again. Its envelope must not
+	// be held by the open-alert gate, or the alert it was for stays open for
+	// good; see SyntheticSeries.Closing.
+	Closing map[string]bool
+	Facts   AbsenceFacts
 	// Roster is the expected set the verdicts were made against. The verdicts
 	// are keyed by group key, so turning one back into the group it names needs
 	// this: a result carrying verdicts without it is incomplete for its own
@@ -507,6 +513,10 @@ func closeDroppedAbsences(result *AbsenceResult, input AbsenceInput, wholeItemDe
 			continue
 		}
 		result.Verdicts[key] = VerdictNormal
+		if result.Closing == nil {
+			result.Closing = map[string]bool{}
+		}
+		result.Closing[key] = true
 		delete(result.Memory, key)
 	}
 }
