@@ -48,6 +48,18 @@ type BusinessLookups struct {
 	Clusters   ClusterBusinessReader
 	Namespaces NamespaceBusinessReader
 	Addresses  AddressBusinessReader
+	// Tenant, when set, gives the lookups that answer from a tenant's own
+	// caches: an event is attributed through its tenant's.
+	Tenant func(tenant string) BusinessLookups
+}
+
+// For is the lookups that answer for the tenant: Tenant's when it is set,
+// these otherwise.
+func (lookups BusinessLookups) For(tenant string) BusinessLookups {
+	if lookups.Tenant == nil {
+		return lookups
+	}
+	return lookups.Tenant(tenant)
 }
 
 // BusinessAttribution is what a global business Plan's event is filed

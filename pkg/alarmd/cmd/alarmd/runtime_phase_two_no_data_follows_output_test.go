@@ -285,13 +285,17 @@ func startFollowsFixture(t *testing.T, maxStateMutations uint64) *followsFixture
 	return fixture
 }
 
+// followsSeedHosts writes the hosts under the strategy's tenant's CMDB keys,
+// where a tenant's Plans read them, and under the default tenant's, which
+// the replica waits on to be ready.
 func followsSeedHosts(t *testing.T, ctx context.Context, client *redis.Client, platformPrefix string) {
 	t.Helper()
-	hosts := platformPrefix + ".cache.cmdb.host"
-	for id, ip := range map[int]string{1: followsHostA, 2: followsHostB} {
-		record := `{"bk_host_id":` + strconv.Itoa(id) + `,"bk_host_innerip":"` + ip + `","bk_cloud_id":0,"bk_biz_id":2}`
-		if err := client.HSet(ctx, hosts, ip+"|0", record, strconv.Itoa(id), record).Err(); err != nil {
-			t.Fatal(err)
+	for _, hosts := range []string{platformPrefix + ".cache.cmdb.host", "tenant-a." + platformPrefix + ".cache.cmdb.host"} {
+		for id, ip := range map[int]string{1: followsHostA, 2: followsHostB} {
+			record := `{"bk_host_id":` + strconv.Itoa(id) + `,"bk_host_innerip":"` + ip + `","bk_cloud_id":0,"bk_biz_id":2}`
+			if err := client.HSet(ctx, hosts, ip+"|0", record, strconv.Itoa(id), record).Err(); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }

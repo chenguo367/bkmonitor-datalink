@@ -20,9 +20,10 @@ import (
 //
 // It is split in two because enrichment is per series and admission is per
 // plan. One series commonly feeds several plans, and deriving its facts once
-// per plan would repeat the CMDB lookup for every one of them.
+// per plan would repeat the CMDB lookup for every one of them. Enrichment is
+// for a tenant: the CMDB facts are read from that tenant's cache.
 type SeriesAdmission interface {
-	Enrich(dimensions map[string]json.RawMessage) admission.Facts
+	EnrichFor(tenant string, dimensions map[string]json.RawMessage) admission.Facts
 	Admit(plan admission.PlanContext, facts *admission.Facts) (bool, string, string)
 }
 

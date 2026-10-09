@@ -63,7 +63,8 @@ func TestWhatACMDBIndexLoadRefusedIsPublishedAsThatLoadsCounts(t *testing.T) {
 	}
 
 	recorder := metric.NewRecorder(metric.BuildInfo{})
-	_, store, err := buildSeriesAdmission(ctx, cfg, client, recorder, nil, nil, startupWaiter{initial: time.Millisecond, ceiling: time.Millisecond})
+	_, stores, err := buildSeriesAdmission(ctx, cfg, client, recorder, nil, nil, startupWaiter{initial: time.Millisecond, ceiling: time.Millisecond})
+	store := stores.Default()
 	if err != nil {
 		t.Fatal(err)
 	}

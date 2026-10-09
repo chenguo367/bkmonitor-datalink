@@ -23,12 +23,32 @@ import (
 // for the series inside one round; but this is asked once per Plan and the
 // question is "where is this host now", so reading the published snapshot each
 // time is what keeps a refresh from being invisible for a whole Slot.
+//
+// It answers for one tenant, from that tenant's index: the default tenant
+// unless ForTenant bound another.
 type HostBusinessLookup struct {
-	store *Store
+	stores StoreSource
+	tenant string
 }
 
-func NewHostBusinessLookup(store *Store) *HostBusinessLookup {
-	return &HostBusinessLookup{store: store}
+func NewHostBusinessLookup(stores StoreSource) *HostBusinessLookup {
+	return &HostBusinessLookup{stores: stores}
+}
+
+// ForTenant is the same lookup answering from the tenant's index.
+func (lookup *HostBusinessLookup) ForTenant(tenant string) *HostBusinessLookup {
+	if lookup == nil {
+		return nil
+	}
+	return &HostBusinessLookup{stores: lookup.stores, tenant: tenant}
+}
+
+// store is the index this lookup answers from, nil when there is none.
+func (lookup *HostBusinessLookup) store() *Store {
+	if lookup == nil || lookup.stores == nil {
+		return nil
+	}
+	return lookup.stores.For(lookup.tenant)
 }
 
 // PlaceHostBusiness answers the business of the host a record is about,
@@ -42,13 +62,13 @@ func NewHostBusinessLookup(store *Store) *HostBusinessLookup {
 // fallback - the strategy's own business - is certainly wrong for a host
 // target.
 func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.RawMessage) (string, bool) {
-	if lookup == nil || lookup.store == nil {
+	if lookup.store() == nil {
 		return "", false
 	}
-	facts := admission.Facts{Dimensions: dimensions}
+	facts := admission.Facts{Dimensions: dimensions, TenantID: lookup.tenant}
 	admission.IdentityFuller{}.Fill(dimensions, &facts)
-	(&HostTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
-	(&ServiceInstanceTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
+	(&HostTopologyFuller{stores: lookup.stores, acceptStale: true}).Fill(dimensions, &facts)
+	(&ServiceInstanceTopologyFuller{stores: lookup.stores, acceptStale: true}).Fill(dimensions, &facts)
 	if !facts.HostResolved || facts.HostFactsUnavailable || facts.HostBusinessID == "" {
 		return "", false
 	}
@@ -65,10 +85,11 @@ func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.R
 // than reporting every declared host absent. HostIndexResolved tells the two
 // apart for a caller asking about a whole target.
 func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, bool) {
-	if lookup == nil || lookup.store == nil {
+	store := lookup.store()
+	if store == nil {
 		return "", false
 	}
-	index, unusable := lookup.store.Usable()
+	index, unusable := store.Usable()
 	if unusable != "" {
 		return "", false
 	}
@@ -83,12 +104,13 @@ func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, b
 // address of a tenant, and false when the index holds none there, or more
 // than one: an address two hosts share names neither's business.
 func (lookup *HostBusinessLookup) LookupAddressBusiness(tenantID, address string) (string, bool) {
-	if lookup == nil || lookup.store == nil {
+	store := lookup.store()
+	if store == nil {
 		return "", false
 	}
 	// Attribution's, so a held index past its bound still answers, as
 	// PlaceHostBusiness does.
-	index, unusable := lookup.store.Usable()
+	index, unusable := store.Usable()
 	if unusable != "" && unusable != IndexStale {
 		return "", false
 	}
@@ -104,20 +126,22 @@ func (lookup *HostBusinessLookup) LookupAddressBusiness(tenantID, address string
 // It is asked when a global business Plan's event on Kubernetes data names
 // no business of its own.
 func (lookup *HostBusinessLookup) LookupClusterBusiness(clusterID string) (string, bool) {
-	if lookup == nil || lookup.store == nil {
+	store := lookup.store()
+	if store == nil {
 		return "", false
 	}
-	return lookup.store.Current().LookupClusterBusiness(clusterID)
+	return store.Current().LookupClusterBusiness(clusterID)
 }
 
 // LookupNamespaceBusiness returns the business the platform published for
 // one namespace of one BCS cluster, from the current snapshot, and false
 // when it published none.
 func (lookup *HostBusinessLookup) LookupNamespaceBusiness(clusterID, namespace string) (string, bool) {
-	if lookup == nil || lookup.store == nil {
+	store := lookup.store()
+	if store == nil {
 		return "", false
 	}
-	return lookup.store.Current().LookupNamespaceBusiness(clusterID, namespace)
+	return store.Current().LookupNamespaceBusiness(clusterID, namespace)
 }
 
 // HostIndexResolved reports whether there is an index behind those answers.
@@ -133,8 +157,9 @@ func (lookup *HostBusinessLookup) LookupNamespaceBusiness(clusterID, namespace s
 // out of scope at once and that is never a real state here; nor is one past
 // its staleness bound, whose answers nobody can vouch for any more.
 func (lookup *HostBusinessLookup) HostIndexResolved() bool {
-	if lookup == nil || lookup.store == nil {
+	store := lookup.store()
+	if store == nil {
 		return false
 	}
-	return lookup.store.HostIndexResolved()
+	return store.HostIndexResolved()
 }
