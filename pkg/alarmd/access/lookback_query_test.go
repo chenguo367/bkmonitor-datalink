@@ -23,12 +23,12 @@ func TestTheLookbackHearsWhenTheQueryWasReadyAndTheSlotAfter(t *testing.T) {
 	request := execution.QueryExecutionRequest{Contract: execution.FrozenExecutionContractRef{
 		Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: 120}}, Operation: execution.OperationNormal, AttemptNo: 1}
 	ctx := execution.WithFollowingSlot(context.Background(), 180)
-	q := lookbackQuery(ctx, request, execution.PhysicalQuerySpec{Digest: "d"}, 1, 150_000)
+	q := lookbackQuery(ctx, request, execution.PhysicalQuerySpec{Digest: "d"}, 1, 150_000, false)
 	if q.FollowingSlot != 180 || !q.ReadyAt.Equal(time.UnixMilli(150_000)) || q.Contract != request.Contract || q.Spec.Digest != "d" ||
 		q.AttemptNo != 1 || q.Operation != execution.OperationNormal {
 		t.Fatalf("lookback query %+v, want the Slot after and the ready moment", q)
 	}
-	if q := lookbackQuery(context.Background(), request, execution.PhysicalQuerySpec{}, 1, 150_000); q.FollowingSlot != 0 {
+	if q := lookbackQuery(context.Background(), request, execution.PhysicalQuerySpec{}, 1, 150_000, false); q.FollowingSlot != 0 {
 		t.Fatalf("following Slot %d with none on the context, want none", q.FollowingSlot)
 	}
 }

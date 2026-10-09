@@ -235,6 +235,16 @@ type Query struct {
 	// Query Group's next Slot reads: FollowingSlot plus the same offset.
 	ReadyAt       time.Time
 	FollowingSlot execution.EvaluationTime
+	// Secondary marks a physical query that is not its Slot's first read. A
+	// Slot's first read is the read of its primary window (the h design,
+	// section 14), and the access layer marks every other query of the Slot,
+	// its dependencies on earlier windows among them. A secondary query is
+	// counted among its source's first reads and their bytes, takes no
+	// sample and no trial read, and does not move its Query Group's state.
+	// A directed Slot still records it: a supplement replays one kept read
+	// per physical query, and a Slot whose other queries were not kept
+	// cannot be supplemented (it is set aside as multi_query).
+	Secondary bool
 }
 
 // Engine is the lookback of one process.
@@ -453,6 +463,12 @@ func (engine *Engine) Begin(query Query) *Read {
 	defer engine.mu.Unlock()
 	engine.counts.firstReads[source]++
 	if step <= 0 {
+		return read
+	}
+	if query.Secondary {
+		if state := engine.groups[slot.QueryGroup]; state != nil && state.seriesLate != nil && engine.options.Supplement != nil {
+			read.directed = engine.captureDirectedLocked(state, query, source, step, now)
+		}
 		return read
 	}
 	state := engine.groupLocked(query, now)

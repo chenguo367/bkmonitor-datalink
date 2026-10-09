@@ -363,7 +363,7 @@ type GroupLateness struct {
 var GroupReadHoldClasses = []string{"h0", "h_positive"}
 
 // groupCounts has only the closed dimensions: two hold classes, six rungs,
-// five sample classes, two ignored reasons and nine earlier-read outcomes.
+// five sample classes, two ignored reasons and eight earlier-read outcomes.
 // It belongs to the live group and is discarded by Forget, like supplements.
 type groupCounts struct {
 	since        time.Time
@@ -371,7 +371,7 @@ type groupCounts struct {
 	changed      [2][6]uint64
 	classes      [5]uint64
 	ignored      [2]uint64
-	earlier      [9]uint64
+	earlier      [8]uint64
 	earlierBytes uint64
 }
 

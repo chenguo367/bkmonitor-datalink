@@ -83,7 +83,7 @@ func TestEarlierReadIsReservedOnceAndComparedOnlyWithTheFormalFirstRead(t *testi
 }
 
 func TestEarlierRefusalOrIncompleteReadsSupplyNoDecreaseEvidence(t *testing.T) {
-	for _, outcome := range []string{EarlierPermitRefused, EarlierMemoryRefused, EarlierReadFailed, EarlierFirstIncomplete, EarlierOvertaken, EarlierOwnerLost, EarlierMultiQuery} {
+	for _, outcome := range []string{EarlierPermitRefused, EarlierMemoryRefused, EarlierReadFailed, EarlierFirstIncomplete, EarlierOvertaken, EarlierOwnerLost} {
 		t.Run(outcome, func(t *testing.T) {
 			f := newFixture(t)
 			observed := make(chan EarlierReadEvidence, 1)
@@ -97,12 +97,8 @@ func TestEarlierRefusalOrIncompleteReadsSupplyNoDecreaseEvidence(t *testing.T) {
 				f.set(func() { f.refuse = "waiters" })
 			case EarlierMemoryRefused:
 				f.engine.options.Memory = func(uint64) bool { return false }
-			case EarlierMultiQuery:
-				other := q
-				other.Spec.Digest += "-other"
-				f.engine.Prepare(other)
 			}
-			if outcome != EarlierOvertaken && outcome != EarlierMultiQuery {
+			if outcome != EarlierOvertaken {
 				if outcome != EarlierPermitRefused && outcome != EarlierMemoryRefused {
 					if outcome == EarlierReadFailed {
 						f.answers <- func(execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
