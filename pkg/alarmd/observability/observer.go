@@ -1414,6 +1414,16 @@ type RebalanceFacts struct {
 	Conflicts        int     `json:"conflicts"`
 	Paused           bool    `json:"paused"`
 	PausedForSeconds float64 `json:"paused_for_seconds"`
+	// Replaced is how many Query Groups the round moved off holders that are
+	// alive and READY but no longer eligible (a rollout that changed the
+	// capability digest), Deferred how many more it left where they were for
+	// a later round because the round's handover batch was spent, and
+	// Unplaceable how many no ready worker could take this round, each kept
+	// as it was. The batch is shared: the count correction above plans within
+	// what Replaced left of Batch.
+	Replaced    int `json:"replaced"`
+	Deferred    int `json:"replacements_deferred"`
+	Unplaceable int `json:"unplaceable"`
 	// Bytes is the same round's byte-constraint planning (decision-020
 	// section 5.7), which runs before the count correction above.
 	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`

@@ -130,6 +130,15 @@ func indexReadyWorkers(workers []ownership.WorkerRegistration) readyWorkerIndex 
 	return index
 }
 
+// alive says the worker is in the ready set with a valid, READY registration
+// that has not expired: everything incumbentEligibleIn asks except the
+// additional eligibility. A holder like that is still running its Query
+// Groups, so moving one is a handover.
+func (index readyWorkerIndex) alive(workerID string, at time.Time) bool {
+	worker, found := index.byID[workerID]
+	return found && worker.Validate() == nil && worker.AssignmentReadiness == ownership.WorkerReady && worker.ExpiresAt.After(at)
+}
+
 func (router *Router) incumbentEligibleIn(
 	queryGroup execution.QueryGroupIdentity,
 	workerID string,
@@ -338,7 +347,11 @@ func (reconciler *Reconciler) ReconcileWith(
 	if !hasCurrent && !errors.Is(err, ownership.ErrAssignmentAbsent) {
 		return ownership.AssignmentRecord{}, err
 	}
-	return reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at, ContentScopes{})
+	record, outcome, err := reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at, ContentScopes{}, nil)
+	if err == nil && outcome == settleUnplaceable {
+		return ownership.AssignmentRecord{}, ErrNoEligibleWorker
+	}
+	return record, err
 }
 
 // ReconcileRound settles every Query Group of a round against one ready set,
@@ -378,29 +391,101 @@ func (reconciler *Reconciler) ReconcileRoundWithScopes(
 	at time.Time,
 	scopes ContentScopes,
 ) (map[execution.QueryGroupIdentity]ownership.AssignmentRecord, ownership.ControlReadStats, error) {
+	settlement, err := reconciler.ReconcileRoundSettling(ctx, authority, queryGroups, workers, at, scopes)
+	return settlement.Records, settlement.Stats, err
+}
+
+// RoundSettlement is one round's records and what the round did to get
+// them beyond keeping and placing.
+type RoundSettlement struct {
+	Records map[execution.QueryGroupIdentity]ownership.AssignmentRecord
+	Stats   ownership.ControlReadStats
+	// Replaced counts the Query Groups whose holder is alive and READY but no
+	// longer eligible - a rollout that changed the capability digest - that
+	// the round moved, each a handover; Deferred those it left where they
+	// were for a later round, because the round's handover batch was spent.
+	Replaced, Deferred int
+	// Unplaceable counts the Query Groups no ready worker can take this
+	// round. Each keeps the record it had, or stays without one; the round
+	// goes on with the rest.
+	Unplaceable int
+}
+
+// ReconcileRoundSettling is ReconcileRoundWithScopes with the round's
+// settlement. One round moves at most a batch (rebalanceBatch) of Query
+// Groups off holders that are alive and READY but ineligible: those are
+// handovers, each holder drains the Slot it is running, and a rollout that
+// changes the capability digest makes every old replica's Query Group one
+// at once (design 02 §6.2: handovers go in batches; a membership change does
+// not move everything). The batch is shared with the count correction that
+// follows in the same round (PlanRebalanceWithin), so a round hands over at
+// most one batch in all. A holder that is gone, not ready or draining is
+// not a handover - nothing is left there to drain - and its Query Groups
+// are placed at once.
+func (reconciler *Reconciler) ReconcileRoundSettling(
+	ctx context.Context,
+	authority ownership.PublicationAuthority,
+	queryGroups []execution.QueryGroupIdentity,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+	scopes ContentScopes,
+) (RoundSettlement, error) {
 	if reconciler == nil {
-		return nil, ownership.ControlReadStats{}, errors.New("alarmd scheduler: initialized reconciler is required")
+		return RoundSettlement{}, errors.New("alarmd scheduler: initialized reconciler is required")
 	}
 	current, stats, err := reconciler.store.ReadAssignments(ctx, queryGroups)
+	settlement := RoundSettlement{Stats: stats}
 	if err != nil {
-		return nil, stats, err
+		return settlement, err
 	}
 	index := indexReadyWorkers(workers)
+	budget := rebalanceBatch(len(queryGroups))
 	settled := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(queryGroups))
 	for _, queryGroup := range queryGroups {
 		existing, hasCurrent := current[queryGroup]
-		record, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes)
+		record, outcome, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes, &budget)
 		if settleErr != nil {
-			return nil, stats, settleErr
+			return settlement, settleErr
+		}
+		switch outcome {
+		case settleReplaced:
+			settlement.Replaced++
+		case settleDeferred:
+			settlement.Deferred++
+		case settleUnplaceable:
+			settlement.Unplaceable++
+			if !hasCurrent {
+				continue
+			}
 		}
 		settled[queryGroup] = record
 	}
-	return settled, stats, nil
+	settlement.Records = settled
+	return settlement, nil
 }
+
+// settleOutcome is what settle did with one Query Group.
+type settleOutcome int
+
+const (
+	// settleKept: the holder is eligible; the record stands, or carries the
+	// round's content scope or timeline revision.
+	settleKept settleOutcome = iota
+	// settlePlaced: no record, or a holder that is not alive and READY.
+	settlePlaced
+	// settleReplaced: a live, ineligible holder handed over within the batch.
+	settleReplaced
+	// settleDeferred: a live, ineligible holder kept for a later batch.
+	settleDeferred
+	// settleUnplaceable: no ready worker can take it; kept as it was.
+	settleUnplaceable
+)
 
 // settle is the placement decision itself, over a record the caller has
 // already read. Both entry points route through it so that reading one record
-// or reading a batch of them cannot come to different conclusions.
+// or reading a batch of them cannot come to different conclusions. budget is
+// the round's remaining handover batch; nil is no batch, for the one-Query
+// Group entry point.
 func (reconciler *Reconciler) settle(
 	ctx context.Context,
 	authority ownership.PublicationAuthority,
@@ -410,7 +495,8 @@ func (reconciler *Reconciler) settle(
 	workers readyWorkerIndex,
 	at time.Time,
 	scopes ContentScopes,
-) (ownership.AssignmentRecord, error) {
+	budget *int,
+) (ownership.AssignmentRecord, settleOutcome, error) {
 	expectedRevision := uint64(0)
 	if hasCurrent {
 		expectedRevision = current.RecordRevision
@@ -419,19 +505,35 @@ func (reconciler *Reconciler) settle(
 	if hasCurrent && reconciler.router.incumbentEligibleIn(queryGroup, current.DesiredWorkerID, workers, at) {
 		scope, withdraw, needed := scopes.wanted(queryGroup, current)
 		if !needed && timeline == 0 {
-			return current, nil
+			return current, settleKept, nil
 		}
-		return reconciler.store.PublishAssignment(
+		record, err := reconciler.store.PublishAssignment(
 			ctx, authority, ownership.AssignmentDecision{
 				QueryGroup: queryGroup, DesiredWorkerID: current.DesiredWorkerID,
 				ExpectedRecordRevision: expectedRevision, PlacementReason: current.PlacementReason, DecidedAt: at,
 				ContentScope: scope, WithdrawContentScope: withdraw, TimelineRecordRevision: timeline,
 			},
 		)
+		return record, settleKept, err
 	}
 	selected, err := reconciler.router.Select(queryGroup, workers.ordered, at)
+	if errors.Is(err, ErrNoEligibleWorker) {
+		// Nobody can take it this round; one Query Group's answer is its
+		// own (design 016 §4.1), and the rest of the round goes on.
+		return current, settleUnplaceable, nil
+	}
 	if err != nil {
-		return ownership.AssignmentRecord{}, err
+		return ownership.AssignmentRecord{}, settlePlaced, err
+	}
+	outcome := settlePlaced
+	if hasCurrent && workers.alive(current.DesiredWorkerID, at) {
+		if budget != nil && *budget <= 0 {
+			return current, settleDeferred, nil
+		}
+		if budget != nil {
+			*budget--
+		}
+		outcome = settleReplaced
 	}
 	decision := ownership.AssignmentDecision{
 		QueryGroup: queryGroup, DesiredWorkerID: selected.WorkerID,
@@ -448,5 +550,6 @@ func (reconciler *Reconciler) settle(
 	case ContentScopesWithdrawn:
 		decision.WithdrawContentScope = true
 	}
-	return reconciler.store.PublishAssignment(ctx, authority, decision)
+	record, err := reconciler.store.PublishAssignment(ctx, authority, decision)
+	return record, outcome, err
 }
