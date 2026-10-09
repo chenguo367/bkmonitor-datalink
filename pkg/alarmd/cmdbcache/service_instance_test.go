@@ -122,7 +122,7 @@ func TestLoadReadsHostsAndServiceInstancesIntoOneSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(client.scans, []string{"bk_monitorv3.ce.cache.cmdb.host", "bk_monitorv3.ce.cache.cmdb.service_instance",
 		"bk_monitorv3.ce.cache.cmdb.topo", "bk_monitorv3.ce.cache.cmdb.bcs_cluster_business",
-		"bk_monitorv3.ce.cache.cmdb.bcs_namespace_business"}) {
+		"bk_monitorv3.ce.cache.cmdb.bcs_namespace_business", "bk_monitorv3.ce.cache.cmdb.agent_id"}) {
 		t.Fatalf("scanned %v", client.scans)
 	}
 	if index.TopologyNodes() != 1 {

@@ -35,8 +35,12 @@ const (
 	hostCacheSuffix            = "cache.cmdb.host"
 	serviceInstanceCacheSuffix = "cache.cmdb.service_instance"
 	topoCacheSuffix            = "cache.cmdb.topo"
-	hostTopoRefreshedField     = "cache.cmdb_last_refresh_all_time.host_topo"
-	scanBatch                  = int64(1000)
+	// agentCacheSuffix is the agent id -> host id hash the platform's CMDB
+	// cache writer publishes beside the host hash (Python's
+	// HostAgentIDManager, the cmdb.agent_id hash).
+	agentCacheSuffix       = "cache.cmdb.agent_id"
+	hostTopoRefreshedField = "cache.cmdb_last_refresh_all_time.host_topo"
+	scanBatch              = int64(1000)
 	// clusterBusinessCacheSuffix is the BCS cluster -> business hash the
 	// platform's CMDB cache writer publishes beside the host hash, in the
 	// same round: field the cluster id, value the business id in decimal.
@@ -99,6 +103,11 @@ type ServiceInstanceFacts struct {
 // using the one they hold, so a refresh never leaves a half-built view visible.
 type Index struct {
 	byIdentity map[string]*HostFacts
+	// byAgent is the agent id -> host id hash; agentsUnreadable says this
+	// load could not read it, so a record named by an agent cannot be placed
+	// by it and its host facts are unavailable rather than unknown.
+	byAgent          map[string]string
+	agentsUnreadable bool
 	// byHostID is the canonical host presence table already used to deduplicate
 	// a load. An absent address is not evidence that the host was deleted.
 	byHostID          map[string]*HostFacts
@@ -474,6 +483,28 @@ func (index *Index) carryOptional(previous *Index) {
 	index.namespaceBusiness = index.namespaceBusiness.carriedFrom(previous.namespaceBusiness)
 }
 
+// LookupAgent finds the host an agent id names: the host the agent hash points
+// at, and only if that host's own record carries the same agent id - Python
+// returns nothing otherwise (host.py:207-221). The second result says the
+// agent hash could not be read, which is not "no such agent".
+func (index *Index) LookupAgent(agent string) (*HostFacts, bool, bool) {
+	if index == nil || agent == "" {
+		return nil, false, false
+	}
+	if index.agentsUnreadable {
+		return nil, false, true
+	}
+	hostID, found := index.byAgent[agent]
+	if !found {
+		return nil, false, false
+	}
+	host, found := index.byHostID[hostID]
+	if !found || host.Attributes["bk_agent_id"] != agent {
+		return nil, false, false
+	}
+	return host, true, false
+}
+
 // LookupServiceInstance resolves one service-instance id.
 func (index *Index) LookupServiceInstance(id string) (*ServiceInstanceFacts, bool) {
 	if index == nil || id == "" {
@@ -525,6 +556,10 @@ func (reader *Reader) topoKey() string {
 	return reader.prefix + "." + topoCacheSuffix
 }
 
+func (reader *Reader) agentKey() string {
+	return reader.prefix + "." + agentCacheSuffix
+}
+
 func (reader *Reader) clusterBusinessKey() string {
 	return reader.prefix + "." + clusterBusinessCacheSuffix
 }
@@ -565,6 +600,19 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// businessMapping); neither is a failed load.
 	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
 	builder.index.namespaceBusiness = reader.readMapping(ctx, reader.namespaceBusinessKey(), MaxNamespaceBusinesses)
+	// The agent hash places a record that names its host by agent alone, as
+	// Python's fuller does. A missing hash maps no agent; one that cannot be
+	// read makes agent-named records' facts unavailable, not unknown.
+	builder.index.byAgent = make(map[string]string)
+	if err := reader.scan(ctx, reader.agentKey(), func(fields []string) {
+		for i := 0; i+1 < len(fields); i += 2 {
+			if agent, host := strings.TrimSpace(fields[i]), strings.TrimSpace(fields[i+1]); agent != "" && host != "" {
+				builder.index.byAgent[agent] = host
+			}
+		}
+	}); err != nil {
+		builder.index.byAgent, builder.index.agentsUnreadable = nil, true
+	}
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {

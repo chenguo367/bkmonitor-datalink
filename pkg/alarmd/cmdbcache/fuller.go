@@ -70,11 +70,13 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	}
 	// Which host the record is about is decided the way Python's
 	// TopoNodeFuller decides it (fullers.py:55-110): by bk_host_id when the
-	// record carries a true one, else by service instance, else by address,
+	// record carries a true one, else by bk_agent_id, else by service
+	// instance, else by address,
 	// stopping at the first that resolves. Its host status filter and its
 	// target match then read the record as the fuller left it, so the host
 	// those judge is the one this order picks - and only that host: the
 	// identities of a record are not a union of everything that resolves.
+	agent := admission.TruthyDimension(dimensions, "bk_agent_id")
 	if id := facts.HostNaming.IDKey; id != "" {
 		if host, found := index.Lookup(id); found {
 			placeByID(facts, id, host)
@@ -84,6 +86,18 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		// filter looks it up by that id and nothing else, whatever the
 		// address below resolves to. Python still takes the topology from
 		// the address, and so does this.
+	} else if agent != "" {
+		// No true id: Python looks the host up by agent next
+		// (fullers.py:57-74), and treats it as found by id.
+		host, found, unreadable := index.LookupAgent(agent)
+		if unreadable {
+			facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
+			return
+		}
+		if found {
+			placeByAgent(facts, host)
+			return
+		}
 	}
 	// Past this point a true id the record carried is one CMDB does not know:
 	// whatever else places the record's topology, the host the status filter
@@ -107,7 +121,33 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	resolveHostState(index, facts)
 	// Named, and placed by nothing: an id, an address or alias, or an
 	// instance the cache did not find.
-	facts.HostUnresolved = unknownID || address != "" || len(facts.ServiceInstanceKeys()) > 0
+	facts.HostUnresolved = unknownID || agent != "" || address != "" || len(facts.ServiceInstanceKeys()) > 0
+}
+
+// placeByAgent is Python's host-by-agent branch, which is its host-by-id
+// branch reached another way: the host's address and topology replace the
+// record's, and its id is written when the record has no bk_host_id
+// dimension at all (fullers.py:66-74).
+func placeByAgent(facts *admission.Facts, host *HostFacts) {
+	naming := &facts.HostNaming
+	if !naming.NamedID {
+		naming.NamedID, naming.IDKey = true, host.HostID
+	}
+	keys := make([]string, 0, 2)
+	if naming.IDKey != "" {
+		keys = append(keys, naming.IDKey)
+	}
+	if host.IP != "" {
+		keys = append(keys, host.IP+"|"+host.CloudID)
+	}
+	facts.Set(contract.AttributeHostIdentity, keys)
+	facts.SetTopoNodes(host.TopoNodes)
+	naming.NamedAddress, naming.NamedCloud = true, true
+	naming.AddressKey = host.IP + "|" + host.CloudID
+	naming.Usable = true
+	facts.HostResolved = true
+	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
+	facts.HostAttributes = host.Attributes
 }
 
 // placeByID is Python's host-by-id branch: the host's own address and cloud
