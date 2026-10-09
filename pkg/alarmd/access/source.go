@@ -205,7 +205,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli))
 		}
 	}
-	if readyAt := sharedPendingReadiness(prepared.Queries, source.now()); !readyAt.IsZero() {
+	if readyAt := slotPendingReadiness(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {
 		return execution.QueryExecutionCompletion{}, &ReadinessDeferredError{readyAt: readyAt}
 	}
 	// Past the turn-away, so this arrival is one that goes on to do the work.
@@ -827,6 +827,31 @@ func frozenSchedules(frozen FrozenPlan) (map[execution.PlanIdentity]execution.Sc
 		schedules[due.Identity] = due.ScheduleSpec
 	}
 	return schedules, nil
+}
+
+// slotPendingReadiness is when a Slot that is not ready comes back, instead
+// of waiting inside its execution. A Slot carrying a read hold comes back
+// when the last of its queries is ready, whenever any is still pending: it
+// waits in the due index, as its held readiness is its due time there, and
+// does not sleep through the hold holding a dispatch slot and its Query
+// Group's flight. A query already readable is read then; its window is the
+// same and no less complete. A Slot without a hold keeps the shared rule:
+// deferred only when every query waits for the same moment, otherwise the
+// settling wait for the earliest is spent inside the execution.
+func slotPendingReadiness(queries []PlannedQuery, readHoldMillis int64, now time.Time) time.Time {
+	if readHoldMillis <= 0 {
+		return sharedPendingReadiness(queries, now)
+	}
+	var latest time.Time
+	for _, query := range queries {
+		if len(query.Requirements) == 0 {
+			continue
+		}
+		if readyAt := time.UnixMilli(query.ReadyAtUnixMilli); readyAt.After(now) && readyAt.After(latest) {
+			latest = readyAt
+		}
+	}
+	return latest
 }
 
 func sharedPendingReadiness(queries []PlannedQuery, now time.Time) time.Time {
