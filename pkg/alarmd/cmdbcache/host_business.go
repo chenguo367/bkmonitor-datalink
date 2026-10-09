@@ -9,6 +9,12 @@
 
 package cmdbcache
 
+import (
+	"encoding/json"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
+)
+
 // HostBusinessLookup answers which business a host identity belongs to, from
 // whichever index snapshot is current when it is asked.
 //
@@ -23,6 +29,27 @@ type HostBusinessLookup struct {
 
 func NewHostBusinessLookup(store *Store) *HostBusinessLookup {
 	return &HostBusinessLookup{store: store}
+}
+
+// PlaceHostBusiness answers the business of the host a record is about,
+// placed by admission's own fullers over the store: the identity fuller,
+// then the host fuller (a true id, the agent, the address) and the
+// service-instance fuller, in Python's order (fullers.py:55-110). A record
+// they place on no host answers false, and so does one they could not place
+// because the index is unavailable or past its staleness bound: an event is
+// not attributed on facts admission would not decide on.
+func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.RawMessage) (string, bool) {
+	if lookup == nil || lookup.store == nil {
+		return "", false
+	}
+	facts := admission.Facts{Dimensions: dimensions}
+	admission.IdentityFuller{}.Fill(dimensions, &facts)
+	NewHostTopologyFuller(lookup.store).Fill(dimensions, &facts)
+	NewServiceInstanceTopologyFuller(lookup.store).Fill(dimensions, &facts)
+	if !facts.HostResolved || facts.HostFactsUnavailable || facts.HostBusinessID == "" {
+		return "", false
+	}
+	return facts.HostBusinessID, true
 }
 
 // LookupHostBusiness returns the business the host belongs to, and false when

@@ -12,10 +12,14 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-// HostBusinessReader is the host cache asked which business a host is in,
-// by the identity the record names it with: a host id, or "ip|cloud".
-type HostBusinessReader interface {
-	LookupHostBusiness(identity string) (string, bool)
+// HostPlacer answers the business of the host a record is about, placed the
+// way admission places it: the identity fuller, then the CMDB host and
+// service-instance fullers over the index admission reads - Python's fuller
+// order, by a true id, the agent, the service instance and the address
+// (fullers.py:55-110). It answers false for a record placed on no host, and
+// while the index is one admission does not decide on.
+type HostPlacer interface {
+	PlaceHostBusiness(dimensions map[string]json.RawMessage) (string, bool)
 }
 
 // ClusterBusinessReader is the platform's published BCS cluster -> business
@@ -40,7 +44,7 @@ type AddressBusinessReader interface {
 // is asked. Any may be nil: a nil host cache holds no host, and a nil
 // mapping maps nothing.
 type BusinessLookups struct {
-	Hosts      HostBusinessReader
+	Hosts      HostPlacer
 	Clusters   ClusterBusinessReader
 	Namespaces NamespaceBusinessReader
 	Addresses  AddressBusinessReader
@@ -59,9 +63,9 @@ type BusinessAttribution struct {
 // answers:
 //
 //  1. The target. A host target (host_id, or model_inst_id over hosts) gives
-//     the business of the record's host, found the way admission finds it -
-//     HostNaming.LookupKey, then the host cache - so a record that names its
-//     host only by address and cloud is attributed like one with a host id.
+//     the business of the record's host, placed by admission's own fullers -
+//     so a record that names its host by address, by agent or by service
+//     instance is attributed like one with a host id.
 //     A Kubernetes target gives the business configured on the static
 //     target the record's key matches.
 //  2. The bk_biz_id aggregation dimension, when the strategy groups by it
@@ -143,30 +147,17 @@ func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.Ra
 		}
 		return canonicalBusiness(business)
 	}
-	hosts := lookups.Hosts
 	if target.Identity.HostIdentity {
-		if hosts == nil {
+		if lookups.Hosts == nil {
 			return "", false
 		}
-		// The host the record is about, named the way admission names it -
-		// Python's fuller order: a true bk_host_id, else the address it
-		// looks up, bk_target_ip or ip in bk_target_cloud_id or bk_cloud_id
-		// or the direct area (fullers.py:55-110). A true id the cache does not
-		// know is that host and no other, as the status filter reads it; that
-		// record is dropped there. A record named by its agent alone is not
-		// attributed by it here and falls through to the next source.
-		facts := &Facts{}
-		IdentityFuller{}.Fill(dimensions, facts)
-		identity := facts.HostNaming.IDKey
-		if identity == "" {
-			address, cloud := FullerAddress(dimensions)
-			if address == "" {
-				return "", false
-			}
-			identity = address + "|" + cloud
-		}
-		business, held := hosts.LookupHostBusiness(identity)
-		if !held {
+		// The host admission placed the record on, by admission's own
+		// fullers: one placement, so the host an event is attributed to is
+		// the host its record was admitted for. A record placed on no host -
+		// a true id the cache does not know among them, which admission
+		// drops - falls through to the next source.
+		business, placed := lookups.Hosts.PlaceHostBusiness(dimensions)
+		if !placed {
 			return "", false
 		}
 		return canonicalBusiness(business)
