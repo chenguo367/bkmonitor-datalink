@@ -27,6 +27,10 @@ func TestCostSummaryObservesRealWorkerWithoutChangingExecution(t *testing.T) {
 			})
 			enabled := newFixtureWithObserver(t, true, failure, observability.Multi(summary, recorder))
 			disabled := newFixtureWithObserver(t, true, failure, observability.NopObserver{})
+			// Slot timing is whole milliseconds and the in-memory Slot often
+			// finishes inside one, which read as "no timing at all" on about
+			// a third of runs. Both runs take a few milliseconds to answer.
+			enabled.ports.queryTakes, disabled.ports.queryTakes = 3*time.Millisecond, 3*time.Millisecond
 			got, gotErr := enabled.coordinator.Execute(context.Background(), request)
 			want, wantErr := disabled.coordinator.Execute(context.Background(), request)
 			// The wall clock is the one thing two runs of the same Slot cannot
