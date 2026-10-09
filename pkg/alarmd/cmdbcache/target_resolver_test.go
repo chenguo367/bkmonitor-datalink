@@ -240,4 +240,25 @@ func TestSelectorsAnsweredFromAHostIndexPastAFailedRefreshAreStale(t *testing.T)
 	if static.State != targetplan.SelectorOK || static.StaleAge != 2*time.Minute || stale.StaleAge != 2*time.Minute {
 		t.Fatalf("served past a failed refresh: selector %+v, resolution stale %s; want OK and two minutes stale", static, stale.StaleAge)
 	}
+
+	// A group under an ip_cloud plan names hosts by id, and the index turns
+	// them into addresses: answered from the same index, so stale the same.
+	// The group's own read is current, so the age is the index's alone.
+	client := &groupClient{values: map[string]string{"cw:dynamic_group:g": `{"model_id":"cw-Host","bk_tenant_id":"tenant-a",` +
+		`"model_inst_ids":["101"],"member_list":[{"model_id":"cw-Host","model_inst_id":"101","bk_host_id":101}]}`}}
+	reader, _ := NewGroupReader(client, "cw:")
+	groups, _ := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: testGroupReadBound, Now: clock})
+	grouped := *plan
+	grouped.StaticHosts, grouped.DynamicGroups = nil, []string{"g"}
+	byGroup := NewTargetResolver(groups, hosts, clock).Resolve(context.Background(), &grouped, time.Minute)
+	if group := selector(byGroup, targetplan.SelectorKindGroup, "g"); group.State != targetplan.SelectorOK || group.StaleAge != 2*time.Minute {
+		t.Fatalf("ip_cloud group served past a failed host refresh: %+v; want OK and two minutes stale", group)
+	}
+	// A host_id plan's group is answered by the group alone: the index is not
+	// read for it, and its age is the group's.
+	byID := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, DynamicGroups: []string{"g"}}
+	if group := selector(NewTargetResolver(groups, hosts, clock).Resolve(context.Background(), byID, time.Minute), targetplan.SelectorKindGroup, "g"); group.StaleAge != 0 {
+		t.Fatalf("host_id group marked by the host index: %+v", group)
+	}
 }

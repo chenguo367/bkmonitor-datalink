@@ -76,7 +76,7 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	for _, node := range plan.DynamicTopologies {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node, index))
 	}
-	resolver.markServedPastAFailedRefresh(resolution.Selectors, index, readErr)
+	resolver.markServedPastAFailedRefresh(plan, resolution.Selectors, index, readErr)
 	if plan.HasExclusions() {
 		exclusion := resolver.resolveExclusions(plan, index, readErr, groupExclusions)
 		resolution.Excluded = exclusion.Members
@@ -96,7 +96,11 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 // same rule the group selectors follow). A resolution carrying it is no
 // verdict for the target-scope close (decision-024: facts not current are
 // not closed on). Exclusions are judged separately, with the error itself.
-func (resolver *TargetResolver) markServedPastAFailedRefresh(selectors []targetplan.SelectorResult, index *Index, readErr error) {
+//
+// The static and topology selectors are answered from the index; so is a
+// group under an ip_cloud plan, whose member hosts become addresses through
+// it - a member readdressed since is still at its old address there.
+func (resolver *TargetResolver) markServedPastAFailedRefresh(plan *contract.TargetPlanV1, selectors []targetplan.SelectorResult, index *Index, readErr error) {
 	if readErr == nil || index == nil {
 		return
 	}
@@ -107,6 +111,10 @@ func (resolver *TargetResolver) markServedPastAFailedRefresh(selectors []targetp
 	for i := range selectors {
 		switch selectors[i].Kind {
 		case targetplan.SelectorKindStatic, targetplan.SelectorKindTopology:
+		case targetplan.SelectorKindGroup:
+			if plan.Rule != contract.TargetPlanRuleIPCloud {
+				continue
+			}
 		default:
 			continue
 		}
