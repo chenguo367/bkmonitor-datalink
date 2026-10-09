@@ -118,11 +118,6 @@ type BuildRequest struct {
 	// observed set was first found absent (PENDING_REMOVAL.AbsentSince). Nil
 	// means no grace history.
 	PreviousDispositions []ObjectDisposition
-	// PendingAbsences is the same memory from the candidate the previous
-	// round left unconfirmed, by source id: the first round of an absence
-	// publishes a candidate, and the round that confirms it has to stamp the
-	// same moment or the candidate never confirms. Nil means none pending.
-	PendingAbsences map[string]int64
 	// Now is the round's clock, what an absence is measured against. Zero
 	// means the wall clock.
 	Now time.Time
@@ -570,7 +565,6 @@ type CatalogRetention struct {
 //     TargetSources, NoDataPolicy (catalogRoundKey, the candidate cache's own);
 //   - LastGood and PreviousDispositions (held by the activation head and
 //     this process being the one writer);
-//   - PendingAbsences (none after an UNCHANGED round);
 //   - Now: read only for the absence grace (absenceGraceEnd).
 //
 // The deployment's admission and the runtime retention that follow it read
@@ -713,8 +707,8 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				// strategy refused as PLAN_INVALID alone had to be compiled again
 				// offline to learn that its expression was empty. The text is
 				// deterministic for one document - the candidate cache returns
-				// the same error for it every round - so it cannot keep a
-				// pending candidate from confirming.
+				// the same error for it every round - so it cannot make an
+				// unchanged source read as a changed audit.
 				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN",
 					Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID", Detail: dispositionDetail(err.Error())})
 			}
@@ -747,13 +741,13 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	// the statement it keeps executing under PENDING_REMOVAL until it has
 	// been absent for the whole grace period, and only then leaves. The
 	// moment it was first found absent travels on the disposition, so every
-	// round of the grace publishes the same audit and the candidate confirms;
-	// a removal that served no grace carries no moment, for the same reason.
+	// round of the grace publishes the same audit and the rounds inside it
+	// are UNCHANGED; a removal that served no grace carries no moment.
 	now := request.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
-	absentSince := indexAbsentSince(request.PreviousDispositions, request.PendingAbsences)
+	absentSince := indexAbsentSince(request.PreviousDispositions)
 	// An active set read whole and empty is a list like any other, and every
 	// strategy is absent from it. It used to be held without a time bound as
 	// a source that had lost its content; a store that lost the list answers
@@ -1054,17 +1048,11 @@ func lastGoodRefusal(facts execution.QueryPlanFacts) string {
 }
 
 // indexAbsentSince is when each strategy under grace was first found
-// absent: from the published audit's PENDING_REMOVAL dispositions, and from
-// the unconfirmed candidate where the audit does not say. A PENDING_REMOVAL
-// without a moment - written by a build before the grace was a period - is
-// left out, and the caller stamps it absent since now.
-func indexAbsentSince(dispositions []ObjectDisposition, pending map[string]int64) map[string]int64 {
-	result := make(map[string]int64, len(dispositions)+len(pending))
-	for sourceID, since := range pending {
-		if sourceID != "" && since > 0 {
-			result[sourceID] = since
-		}
-	}
+// absent, from the published audit's PENDING_REMOVAL dispositions. A
+// PENDING_REMOVAL without a moment - written by a build before the grace
+// was a period - is left out, and the caller stamps it absent since now.
+func indexAbsentSince(dispositions []ObjectDisposition) map[string]int64 {
+	result := make(map[string]int64, len(dispositions))
 	for _, disposition := range dispositions {
 		if disposition.Scope == "STRATEGY" && disposition.Disposition == DispositionPendingRemoval &&
 			disposition.SourceID != "" && disposition.AbsentSince > 0 {
@@ -1072,16 +1060,6 @@ func indexAbsentSince(dispositions []ObjectDisposition, pending map[string]int64
 		}
 	}
 	return result
-}
-
-// AbsencesOf is the removal-grace memory of an audit, by source id: what a
-// candidate built from it carries into the next round.
-func AbsencesOf(dispositions []ObjectDisposition) map[string]int64 {
-	absences := indexAbsentSince(dispositions, nil)
-	if len(absences) == 0 {
-		return nil
-	}
-	return absences
 }
 
 // RetainsLastGoodDefinition says whether a refusal leaves the strategy running

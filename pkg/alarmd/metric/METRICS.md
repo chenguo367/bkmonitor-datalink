@@ -397,7 +397,7 @@ Which role this process has in refreshing the control plane's strategy source an
 
 Labels: `outcome`, `exit`
 
-Refresh rounds of the control plane's strategy source on this process, every round, by outcome and, for a failed round, the exit it stopped at. Counted on the round, not on the transition into an episode: the transition counter records one increment for an episode of any length, so a source failing every round for hours was one increment there and is one increment per round here. outcome succeeded carries exit none. A failed round's exit names the step: change_signal, active_set_read (the store refused the read), active_set_missing (no set published), active_set_invalid_id and active_set_duplicate (one element refuses the whole set, every round, until the publisher fixes it -- the shape a store outage does not have), documents, observation_unstable (the set moved under the read; clears itself), and the steps after the read (observation_id, last_good, build_catalog, retain_executable, observation_changed, validate_catalog, activation, confirmation, candidate, publish); other is an error no step claimed. The cause's text is in the log line of the same round. Only the leader runs rounds: a flat zero on a follower is normal.
+Refresh rounds of the control plane's strategy source on this process, every round, by outcome and, for a failed round, the exit it stopped at. Counted on the round, not on the transition into an episode: the transition counter records one increment for an episode of any length, so a source failing every round for hours was one increment there and is one increment per round here. outcome succeeded carries exit none. A failed round's exit names the step: change_signal, active_set_read (the store refused the read), active_set_missing (no set published), active_set_invalid_id and active_set_duplicate (one element refuses the whole set, every round, until the publisher fixes it -- the shape a store outage does not have), documents, observation_unstable (the set moved under the read; clears itself), and the steps after the read (observation_id, last_good, build_catalog, retain_executable, observation_changed, validate_catalog, activation, publish); other is an error no step claimed. The cause's text is in the log line of the same round. Only the leader runs rounds: a flat zero on a follower is normal.
 
 ## bkmonitor_alarmd_control_source_retained_stale_revisions_total
 
@@ -1528,10 +1528,6 @@ Strategies a source refresh round asked the compiler about, by whether they were
 Labels: `source_kind`, `result`, `reason_class`
 
 Phase-two source health episode transitions by bounded source, result and reason class.
-
-## bkmonitor_alarmd_source_pending_confirmation_age_seconds
-
-Seconds the leader's source refresh has been answering PENDING_CONFIRMATION with no PUBLISHED or UNCHANGED since; 0 when nothing is pending. A candidate is published only when two whole observations agree, and every pending round counts as a successful refresh, so control_source_last_success_age_seconds stays young while a change waits to go live; this is the reading that rises. Emitted by the leader only, from this process's rounds: a new leader starts it again.
 
 ## bkmonitor_alarmd_source_read_total
 

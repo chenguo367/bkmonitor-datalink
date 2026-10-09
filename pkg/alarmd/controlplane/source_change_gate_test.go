@@ -147,22 +147,22 @@ func (harness *changeGateHarness) refresh(
 	return result
 }
 
-// settle takes a fresh repository to the steady state: the first observation
-// is a candidate, the second confirms and publishes it, and the third finds
-// the publication unchanged. None of the three may reuse an observation.
+// settle takes a fresh repository to the steady state: the first
+// observation is published, and the second, which reads again because a
+// publication came before it, finds the publication unchanged. Neither may
+// reuse an observation.
 func (harness *changeGateHarness) settle() controlplane.SourceRefreshResult {
 	harness.t.Helper()
-	harness.refresh(controlplane.SourceRefreshPendingConfirmation, controlplane.SourceReadFull, controlplane.SourceReadElected, 1)
-	harness.refresh(controlplane.SourceRefreshPublished, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
+	harness.refresh(controlplane.SourceRefreshPublished, controlplane.SourceReadFull, controlplane.SourceReadElected, 1)
 	return harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
 }
 
 // settleAfter runs rounds until one finds the publication unchanged. The
 // first must read for the given reason, and every later one reads because the
 // round before it did not end unchanged. How many rounds that takes is not
-// asserted: a change of the active set goes through more than one
-// confirmation here, as retention carries a departed strategy's Plan through
-// one publication before dropping it.
+// asserted: a change of the active set can take more than one publication
+// here, as retention carries a departed strategy's Plan through one
+// publication before dropping it.
 func (harness *changeGateHarness) settleAfter(reason controlplane.SourceReadReason) controlplane.SourceRefreshResult {
 	harness.t.Helper()
 	for round := 0; round < 8; round++ {
@@ -234,8 +234,7 @@ func TestSourceRefreshReusesItsObservationWhileTheSourceSignalsNoChange(t *testi
 // The publisher rewrites some content without moving its change signal (the
 // conditions it derives from other tables), so a skipped round cannot see
 // such a change. That staleness is bounded by a periodic read, six minutes
-// after the last one, which sees the change and takes it through the usual
-// confirmation.
+// after the last one, which sees the change and publishes it.
 func TestSourceRefreshSeesAnUnsignalledChangeWithinThePeriodicBound(t *testing.T) {
 	harness := newChangeGateHarness(t)
 	settled := harness.settle()
@@ -245,35 +244,16 @@ func TestSourceRefreshSeesAnUnsignalledChangeWithinThePeriodicBound(t *testing.T
 		t.Fatalf("a skipped round observed %s, want the observation it reused %s: an unsignalled change is invisible to it by construction", blind.Observation, settled.Observation)
 	}
 	harness.clock = harness.clock.Add(6 * time.Minute)
-	seen := harness.refresh(controlplane.SourceRefreshPendingConfirmation, controlplane.SourceReadFull, controlplane.SourceReadPeriodic, 1)
-	if seen.Observation == settled.Observation {
-		t.Fatalf("the periodic read observed %s again, want the edited document seen", seen.Observation)
+	seen := harness.refresh(controlplane.SourceRefreshPublished, controlplane.SourceReadFull, controlplane.SourceReadPeriodic, 1)
+	if seen.Observation == settled.Observation || seen.Publication == settled.Publication {
+		t.Fatalf("the periodic read = %+v, want the edited document seen and published", seen)
 	}
-	published := harness.refresh(controlplane.SourceRefreshPublished, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
-	if published.Observation != seen.Observation {
-		t.Fatalf("confirmed %s, want the periodic read's observation %s", published.Observation, seen.Observation)
+	after := harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
+	if after.Observation != seen.Observation || after.Publication != seen.Publication {
+		t.Fatalf("the round after the periodic read = %+v, want it to find %s published", after, seen.Observation)
 	}
-	if published.CompiledStrategies != 0 || published.ReusedStrategies != 2 {
-		t.Fatalf("confirming round compiled=%d reused=%d, want the periodic read's compilation reused", published.CompiledStrategies, published.ReusedStrategies)
-	}
-}
-
-// Confirmation is two independent reads of the source. A round that follows
-// a candidate reads even when the signal and the active set have not moved,
-// so what it confirms is what the source holds now and not what an earlier
-// round remembered; here the source moved in between and the candidate is
-// replaced rather than published.
-func TestSourceRefreshConfirmsOnlyWhatItReadTwice(t *testing.T) {
-	harness := newChangeGateHarness(t)
-	first := harness.refresh(controlplane.SourceRefreshPendingConfirmation, controlplane.SourceReadFull, controlplane.SourceReadElected, 1)
-	harness.edit("1002", 1, `"threshold":90`, `"threshold":95`)
-	second := harness.refresh(controlplane.SourceRefreshPendingConfirmation, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
-	if second.Observation == first.Observation {
-		t.Fatalf("the round after a candidate observed %s again, want the source read anew", second.Observation)
-	}
-	third := harness.refresh(controlplane.SourceRefreshPublished, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
-	if third.Observation != second.Observation {
-		t.Fatalf("published %s, want the twice-read observation %s", third.Observation, second.Observation)
+	if after.CompiledStrategies != 0 || after.ReusedStrategies != 2 {
+		t.Fatalf("round after the periodic read compiled=%d reused=%d, want its compilation reused", after.CompiledStrategies, after.ReusedStrategies)
 	}
 }
 
@@ -443,7 +423,11 @@ func TestASourceThatCannotNameItsActiveSetHasNoStatement(t *testing.T) {
 			t.Fatalf("ObservedSnapshot() of a source %s = %+v, want no statement", name, observed)
 		}
 	}
-	harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadPending, 1)
+	// The writer publishes again, so the round reads whatever the round
+	// before it was.
+	harness.clock = harness.clock.Add(time.Minute)
+	harness.publish(harness.clock, harnessStrategyIDs)
+	harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadFull, controlplane.SourceReadChanged, 1)
 	if observed := harness.observed(); !observed.HoldsLastGood {
 		t.Fatalf("ObservedSnapshot() of the source that names its bytes = %+v, want the statement", observed)
 	}

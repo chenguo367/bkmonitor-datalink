@@ -68,13 +68,7 @@ const (
 	metricEventsByKind    = "bkmonitor_alarmd_output_events_by_kind_total"
 	metricEventsRejected  = "bkmonitor_alarmd_output_events_rejected_total"
 	metricRejectedOverrun = "bkmonitor_alarmd_output_events_rejected_strategies_overflow_total"
-	metricPendingAge      = "bkmonitor_alarmd_source_pending_confirmation_age_seconds"
 )
-
-// acceptStarvedRounds is how many more pending answers than none a window
-// must see before it says starved: one pending round is a change the next
-// round confirms, and a window can close between the two.
-const acceptStarvedRounds = 2
 
 type acceptItem struct {
 	Item    string `json:"item"`
@@ -874,27 +868,14 @@ func (run *acceptRun) reachesLoginPage(path, href string) bool {
 // counts it, and which Leader term it was read from.
 type refreshReading struct {
 	byStatus map[string]float64
-	// pendingAge is the Leader's gauge of how long a change has waited for
-	// confirmation; nil where the build has no such gauge.
-	pendingAge *float64
-	leader     string
-	failure    string
+	leader   string
+	failure  string
 }
 
 // read adds one answer's families to the reading.
 func (reading *refreshReading) read(families map[string][]map[string]any) {
 	for _, s := range families[metricSourceRefresh] {
 		reading.byStatus[stringField(objectField(s, "labels"), "status")] += float(s["value"])
-	}
-	if series, ok := families[metricPendingAge]; ok {
-		age := 0.0
-		if reading.pendingAge != nil {
-			age = *reading.pendingAge
-		}
-		for _, s := range series {
-			age = max(age, float(s["value"]))
-		}
-		reading.pendingAge = &age
 	}
 }
 
@@ -903,7 +884,7 @@ func (reading *refreshReading) read(families map[string][]map[string]any) {
 // replica and summed.
 func (run *acceptRun) refreshCounts(name string, targets []string) refreshReading {
 	reading := refreshReading{byStatus: map[string]float64{}}
-	names := []string{metricSourceRefresh, metricPendingAge}
+	names := []string{metricSourceRefresh}
 	families, failure := run.metricsOf(name, names, map[string]any{"control_leader": true})
 	if families != nil {
 		answer := objectField(objectField(run.answers[name].(map[string]any), "meta"), "control_leader")
@@ -932,19 +913,20 @@ func (run *acceptRun) refreshCounts(name string, targets []string) refreshReadin
 }
 
 // checkRefresh reads the refresh counts a window after the first read and
-// decides on the increase: publication is starved when confirmations keep
-// pending and nothing is published. A Leader change between the reads
-// leaves no increase to read.
+// reports the increase by status: how many rounds the Control Leader
+// published a change on, found unchanged, or lost to another writer over the
+// window. Every round that reads a change publishes it, so the increase is a
+// reading and not a verdict. A Leader change between the reads leaves no
+// increase to read.
 func (run *acceptRun) checkRefresh(before refreshReading, started time.Time, window time.Duration, targets []string) {
-	const starved, conflicts = "control source publication not starved", "control source publication conflicts"
+	const rounds, conflicts = "control source rounds over the window", "control source publication conflicts"
 	if before.failure != "" {
-		run.add("control source pending age", verdictReadFailed, before.failure)
-		run.add(starved, verdictReadFailed, before.failure)
+		run.add(rounds, verdictReadFailed, before.failure)
 		run.add(conflicts, verdictReadFailed, before.failure)
 		return
 	}
 	if window <= 0 {
-		run.add(starved, verdictUndecided, "--window 0: the increase was not read")
+		run.add(rounds, verdictUndecided, "--window 0: the increase was not read")
 	} else {
 		if wait := window - time.Since(started); wait > 0 {
 			fmt.Fprintf(run.app.Err, "Waiting %s for the second control source refresh read...\n", wait.Round(time.Second))
@@ -954,36 +936,20 @@ func (run *acceptRun) checkRefresh(before refreshReading, started time.Time, win
 		elapsed := time.Since(started).Round(time.Second)
 		switch {
 		case after.failure != "":
-			run.add(starved, verdictReadFailed, after.failure)
+			run.add(rounds, verdictReadFailed, after.failure)
 		case after.leader != before.leader:
-			run.add(starved, verdictUndecided, fmt.Sprintf("the Control Leader changed between the reads (%s, then %s)", before.leader, after.leader))
+			run.add(rounds, verdictUndecided, fmt.Sprintf("the Control Leader changed between the reads (%s, then %s)", before.leader, after.leader))
 		default:
 			delta := map[string]float64{}
 			for status, value := range after.byStatus {
 				delta[status] = value - before.byStatus[status]
 			}
-			pending, published := delta["PENDING_CONFIRMATION"], delta["PUBLISHED"]
-			run.add(starved, passIf(!(pending >= acceptStarvedRounds && published == 0)),
-				fmt.Sprintf("increase over %s: %s; starved means PENDING_CONFIRMATION rising by %d or more with PUBLISHED at 0", elapsed, floats(delta), acceptStarvedRounds))
+			run.add(rounds, verdictInfo, fmt.Sprintf("increase over %s: %s", elapsed, floats(delta)))
 		}
 		before = after
 	}
 	conflict := before.byStatus["PUBLICATION_CONFLICT"]
 	run.add(conflicts, passIf(conflict == 0), fmt.Sprintf("PUBLICATION_CONFLICT since start %g", conflict))
-	// A change pending longer than the window has missed more than a
-	// window's worth of confirmations; the gauge says so without waiting.
-	bound := window
-	if bound <= 0 {
-		bound = acceptDefaultWindow
-	}
-	switch {
-	case before.pendingAge == nil:
-		run.add("control source pending age", verdictNotBuilt, metricPendingAge+" is not reported by this build")
-	case *before.pendingAge > bound.Seconds():
-		run.add("control source pending age", verdictFail, fmt.Sprintf("a change has waited %g s for confirmation, longer than %s", *before.pendingAge, bound))
-	default:
-		run.add("control source pending age", verdictPass, fmt.Sprintf("pending %g s (0 is nothing pending); bound %s", *before.pendingAge, bound))
-	}
 }
 
 // acceptRecord saves the whole run -- items and the answers they were

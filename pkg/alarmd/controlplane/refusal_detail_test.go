@@ -83,8 +83,8 @@ func TestARefusalBuiltFromAnErrorCarriesWhatTheErrorSaid(t *testing.T) {
 				t.Fatalf("detail = %q, want the error's own account (mentioning %q)", found.Detail, test.detailMention)
 			}
 			// The same document refused the same way twice: the text is part
-			// of what confirms a pending candidate, and one that moved between
-			// rounds would keep the round from ever confirming.
+			// of the audit a round compares with the published one, and one
+			// that moved between rounds would make every round a publication.
 			again := refusalCatalog(t, test.query, test.algorithm, test.recovery)
 			if !reflect.DeepEqual(again.Dispositions, catalog.Dispositions) {
 				t.Fatalf("a second build refused differently:\n%+v\n%+v", catalog.Dispositions, again.Dispositions)

@@ -519,7 +519,6 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		name         string
 		strategies   []controlplane.SourceStrategy
 		previous     []controlplane.ObjectDisposition
-		pending      map[string]int64
 		now          time.Time
 		wantPlans    []string
 		wantStrategy *controlplane.ObjectDisposition
@@ -541,11 +540,6 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 			previous: withPrevious(pendingAt(t0)), now: expired, wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
 		},
 		{
-			name: "the unconfirmed candidate's stamp counts where the audit has none", strategies: onlyFirst,
-			previous: previous.Dispositions, pending: map[string]int64{"1002": t0.Unix()}, now: expired,
-			wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
-		},
-		{
 			name: "a grace stamped by an older build restarts from now rather than expiring", strategies: onlyFirst,
 			previous: withPrevious(pendingUnstamped), now: expired, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(expired)),
 		},
@@ -563,7 +557,7 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
 				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
-				LastGood: lastGood, PreviousDispositions: test.previous, PendingAbsences: test.pending, Now: test.now,
+				LastGood: lastGood, PreviousDispositions: test.previous, Now: test.now,
 			})
 			if err != nil {
 				t.Fatal(err)

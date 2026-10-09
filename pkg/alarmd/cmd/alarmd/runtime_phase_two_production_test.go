@@ -786,54 +786,6 @@ func (catalog *fakeFrozenCatalog) FreezeSlotContract(
 var _ access.FrozenPlanSource = (*productionFrozenExecution)(nil)
 var _ execution.QueryFreeFinalizationSource = (*productionFrozenExecution)(nil)
 
-func TestProductionPhaseTwoControlConfirmsColdStartBeforeInitialActivation(t *testing.T) {
-	publication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-1", PublicationEpoch: 1}
-	reconciler := &fakeSourceReconciler{results: []controlplane.SourceRefreshResult{
-		{Status: controlplane.SourceRefreshPendingConfirmation, Observation: "observation-1"},
-		{Status: controlplane.SourceRefreshPublished, Observation: "observation-1", Publication: publication},
-	}}
-	repository := &fakeProductionCatalogRepository{activationErr: controlplane.ErrActivationUnavailable,
-		snapshot: controlplane.PublishedSnapshot{Publication: publication,
-			QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-1"}}}}
-	activator := &fakeInitialScheduleActivator{state: controlplane.ActivationState{
-		RecordRevision: 1, Current: publication,
-	}}
-	waits := 0
-	var observations []observability.Observation
-	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
-		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
-		Activator: activator, Repository: repository, Schedules: &fakeScheduleProjection{},
-		Progress: &fakeProductionProgressReader{}, RefreshInterval: time.Second,
-		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-			observations = append(observations, observation)
-		}),
-		Wait: func(context.Context, time.Duration) error { waits++; return nil },
-	})
-	if err != nil {
-		t.Fatalf("newProductionPhaseTwoControl() error = %v", err)
-	}
-	result, err := control.InitialRefresh(context.Background())
-	if err != nil || result.Status != phaseTwoControlHealthy ||
-		!reflect.DeepEqual(result.QueryGroups, []execution.QueryGroupIdentity{"query-group-1"}) {
-		t.Fatalf("InitialRefresh() = %#v, %v", result, err)
-	}
-	if reconciler.calls != 2 || waits != 1 || activator.calls != 1 || activator.publication != publication {
-		t.Fatalf("cold-start calls refresh/wait/activate=%d/%d/%d publication=%+v",
-			reconciler.calls, waits, activator.calls, activator.publication)
-	}
-	pending := sourceRefreshObservations(observations, observability.SourceRefreshPending)
-	if len(pending) != 1 || pending[0].SourceRefresh.ObservationID != "observation-1" ||
-		pending[0].SourceRefresh.SnapshotRevision != "" || pending[0].SourceRefresh.PublicationEpoch != 0 ||
-		pending[0].SourceRefresh.CountsKnown {
-		t.Fatalf("cold-start pending observation = %#v", pending)
-	}
-	published := sourceRefreshObservations(observations, observability.SourceRefreshPublished)
-	if len(published) != 1 || published[0].SourceRefresh.SnapshotRevision != string(publication.SnapshotRevision) ||
-		published[0].SourceRefresh.PublicationEpoch != publication.PublicationEpoch {
-		t.Fatalf("cold-start published observation = %#v", published)
-	}
-}
-
 // A follower tick loads the active set and, first, steps the reconciler's
 // catalog memory down: a process on this path is not the Leader, and what
 // it published in an earlier term is not its to answer strategy lookups
@@ -850,8 +802,7 @@ func TestProductionPhaseTwoControlLoadsAllActiveQueryGroups(t *testing.T) {
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
 		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
 		Activator: &fakeInitialScheduleActivator{}, Repository: repository, Schedules: &fakeScheduleProjection{},
-		Progress: &fakeProductionProgressReader{}, RefreshInterval: time.Second,
-		Wait: func(context.Context, time.Duration) error { return nil },
+		Progress: &fakeProductionProgressReader{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -894,7 +845,6 @@ func TestProductionPhaseTwoControlDrainsRetiredQueryGroupBeforeRemovingIt(t *tes
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -948,7 +898,6 @@ func TestProductionPhaseTwoControlRemovesRetiredZeroSlotQueryGroupWithoutProgres
 		Progress: &fakeProductionProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{
 			retired: {Status: execution.ProgressMissing},
 		}},
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1029,7 +978,6 @@ func TestProductionPhaseTwoControlRetiresUndrainedQueryGroupPastTerminationWindo
 				Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 					observations = append(observations, observation)
 				}),
-				RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 				Now: func() time.Time { return test.now }, MaxReplayAge: test.maxReplayAge,
 			})
 			if err != nil {
@@ -1060,7 +1008,6 @@ func TestProductionPhaseTwoControlRetiresUndrainedQueryGroupPastTerminationWindo
 		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: &fakeSourceReconciler{},
 		Activator: &fakeInitialScheduleActivator{}, Repository: &fakeProductionCatalogRepository{},
 		Schedules: &fakeScheduleProjection{}, Progress: &fakeProductionProgressReader{},
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 		MaxReplayAge: -time.Second,
 	}); err == nil {
 		t.Fatal("negative replay age was accepted")
@@ -1095,7 +1042,6 @@ func TestProductionPhaseTwoControlIsolatesInvalidDrainingQueryGroup(t *testing.T
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1111,71 +1057,6 @@ func TestProductionPhaseTwoControlIsolatesInvalidDrainingQueryGroup(t *testing.T
 	if observations[1].DrainingQG == nil || observations[1].DrainingQG.Total != 1 ||
 		observations[1].DrainingQG.Undrained != 0 || observations[1].DrainingQG.Isolated != 1 {
 		t.Fatalf("draining aggregate observation=%#v", observations)
-	}
-}
-
-func TestProductionPhaseTwoControlKeepsCurrentActivationWhileCandidateIsPending(t *testing.T) {
-	publication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-current", PublicationEpoch: 2}
-	reconciler := &fakeSourceReconciler{results: []controlplane.SourceRefreshResult{
-		{Status: controlplane.SourceRefreshPendingConfirmation, Observation: "observation-next"},
-		{Status: controlplane.SourceRefreshPendingConfirmation, Observation: "observation-next-changed"},
-	}}
-	renewErr := errors.New("renew pending current objects")
-	repository := &fakeProductionCatalogRepository{activation: controlplane.ActivationState{
-		RecordRevision: 1, Current: publication,
-	}, snapshot: controlplane.PublishedSnapshot{Publication: publication,
-		QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-1"}}}, renewErrs: []error{renewErr, nil}}
-	activator := &fakeInitialScheduleActivator{}
-	var observations []observability.Observation
-	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
-		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
-		Activator: activator, Repository: repository, Schedules: &fakeScheduleProjection{},
-		Progress: &fakeProductionProgressReader{}, RefreshInterval: time.Second,
-		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
-			observations = append(observations, observation)
-		}),
-		Wait: func(context.Context, time.Duration) error { return errors.New("unexpected wait") },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := control.Refresh(context.Background())
-	if err != nil || result.Status != phaseTwoControlDegradedLastGood ||
-		result.ReasonCode != observability.ReasonCode(contract.ReasonRedisUnavailable) ||
-		!errors.Is(result.Cause, renewErr) ||
-		!reflect.DeepEqual(result.QueryGroups, []execution.QueryGroupIdentity{"query-group-1"}) {
-		t.Fatalf("Refresh() = %#v, %v", result, err)
-	}
-	if activator.calls != 0 {
-		t.Fatalf("pending candidate changed current activation, calls = %d", activator.calls)
-	}
-	recovered, err := control.Refresh(context.Background())
-	if err != nil || recovered.Status != phaseTwoControlHealthy ||
-		!reflect.DeepEqual(recovered.QueryGroups, []execution.QueryGroupIdentity{"query-group-1"}) {
-		t.Fatalf("recovered Refresh() = %#v, %v", recovered, err)
-	}
-	if repository.renewCalls != 2 {
-		t.Fatalf("pending refresh renew calls=%d, want 2", repository.renewCalls)
-	}
-	// The active set is read from the set, never from the publication's
-	// content or the snapshot body.
-	if repository.contentLoads != 0 || repository.activeSetLoads != 2 {
-		t.Fatalf("pending refresh content reads=%d active set reads=%d, want 0 and one per round", repository.contentLoads, repository.activeSetLoads)
-	}
-	pending := sourceRefreshObservations(observations, observability.SourceRefreshPending)
-	// A pending round reports the size of the active set. It used to report a
-	// change as well, differenced from the activation state against itself, which
-	// could only ever come out as added=0/retired=0 and was read as a measurement.
-	if len(pending) != 2 || pending[0].SourceRefresh.ObservationID != "observation-next" ||
-		pending[1].SourceRefresh.ObservationID != "observation-next-changed" ||
-		!pending[0].SourceRefresh.ActiveQueryGroupsKnown || !pending[1].SourceRefresh.ActiveQueryGroupsKnown ||
-		pending[0].SourceRefresh.CountsKnown || pending[1].SourceRefresh.CountsKnown {
-		t.Fatalf("pending source refresh observations=%#v", pending)
-	}
-	renewal := observationsWithoutDrainingFacts(observations)
-	if len(renewal) != 2 || renewal[0].Stage != observability.StageActiveQGSet ||
-		renewal[0].Result != observability.ResultDegraded || renewal[1].Result != observability.ResultRecovered {
-		t.Fatalf("pending renewal observations=%#v", renewal)
 	}
 }
 
@@ -1197,7 +1078,6 @@ func TestProductionPhaseTwoControlKeepsHealthyQueryGroupsAcrossPublicationConfli
 		Progress: &fakeProductionProgressReader{}, Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1252,11 +1132,10 @@ func TestProductionPhaseTwoControlReportsUnchangedRefreshWithoutChangingActiveSe
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
 		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
 		Activator: activator, Repository: repository, Schedules: &fakeScheduleProjection{},
-		Progress: &fakeProductionProgressReader{}, RefreshInterval: time.Second,
+		Progress: &fakeProductionProgressReader{},
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1363,7 +1242,6 @@ func TestProductionPhaseTwoControlObservesPublishedBeforeActivationFailure(t *te
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1417,7 +1295,6 @@ func TestProductionPhaseTwoControlObservesUnchangedBeforeActiveSetFailure(t *tes
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1470,8 +1347,7 @@ func TestProductionPhaseTwoControlKeepsLastGoodAcrossFailedRefreshAndRecovery(t 
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
 		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
 		Activator: activator, Repository: repository, Schedules: &fakeScheduleProjection{},
-		Progress:        &fakeProductionProgressReader{},
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
+		Progress: &fakeProductionProgressReader{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1516,7 +1392,6 @@ func TestProductionPhaseTwoControlObservesRenewFailureAsOneRecoverableEpisode(t 
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1587,7 +1462,6 @@ func TestProductionPhaseTwoControlPreservesPrimaryRefreshClassificationWithoutLa
 					snapshotErr: test.snapshotErr, activeSetErr: test.snapshotErr,
 				},
 				Schedules: &fakeScheduleProjection{}, Progress: &fakeProductionProgressReader{},
-				RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1634,8 +1508,7 @@ func TestProductionPhaseTwoControlKeepsLastGoodAcrossFailedCutoverAndRecovery(t 
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		Progress:        &fakeProductionProgressReader{},
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
+		Progress: &fakeProductionProgressReader{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2976,7 +2849,6 @@ func TestProductionPhaseTwoControlReportsEveryRoundAndPersistsSuccess(t *testing
 		Progress: &fakeProductionProgressReader{}, Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
 		}),
-		RefreshInterval: time.Second, Wait: func(context.Context, time.Duration) error { return nil },
 		Now: func() time.Time { return now },
 	})
 	if err != nil {
