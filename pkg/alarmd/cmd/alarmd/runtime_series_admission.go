@@ -216,14 +216,18 @@ func publishCMDBBusinessMappings(recorder *metric.Recorder, health cmdbcache.Hea
 // same resolution the platform's own consumers apply, so the list in force
 // here is the list in force there. It follows the copy when the platform
 // changes it, through the filter's own swap, without a restart.
+//
+// It is always in the chain, as Python installs it whatever the list
+// (processor.py:76-80): a list emptied of states disables no host by state
+// and still drops the invalid and unknown hosts (filters.py:114-116). Given
+// none, it is built over no states.
 func seriesAdmissionFilters(hostStatus *dynamicHostStatusFilter, reporter *admission.IdentityReporter) []admission.Filter {
+	if hostStatus == nil {
+		hostStatus = newDynamicHostStatusFilter(nil)
+	}
 	// The two target filters are told apart by which frozen form the Plan
 	// carries; a Plan carries at most one, so at most one of them decides.
-	filters := []admission.Filter{admission.TargetScopeFilter{Reporter: reporter}, admission.TargetPlanFilter{}}
-	if hostStatus != nil {
-		filters = append(filters, hostStatus)
-	}
-	return filters
+	return []admission.Filter{admission.TargetScopeFilter{Reporter: reporter}, admission.TargetPlanFilter{}, hostStatus}
 }
 
 // hostDisableMonitorStateCount reports what the host status filter is actually
