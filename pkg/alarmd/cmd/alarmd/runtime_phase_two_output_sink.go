@@ -189,9 +189,9 @@ func (sink *lazyOutputSink) tryOpen() bool {
 	if err != nil {
 		sink.state.LastFailureAt = at
 		sink.state.LastFailure = boundedFailureText(err)
-		// An attempt that asked the brokers and got no answer from one of
-		// them keeps the answers it did get, so the entry names the broker.
-		// Any other failure leaves the last agreement as it was.
+		// An attempt that asked the brokers and got no answer from any of
+		// them keeps what it heard, so the entry names the brokers. Any
+		// other failure leaves the last agreement as it was.
 		var negotiation *enginekafka.ProtocolNegotiationError
 		if errors.As(err, &negotiation) {
 			sink.state.Protocol = copyNegotiation(&negotiation.Negotiation)

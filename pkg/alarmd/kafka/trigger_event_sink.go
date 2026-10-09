@@ -325,9 +325,9 @@ func (opener *TriggerEventSinkOpener) Open() (*TriggerEventSink, error) {
 }
 
 // ProtocolNegotiationError is an open that could not decide the protocol
-// because a broker did not answer. It carries the partial answers so the
-// state a reader sees says which broker, and is retried like any open
-// failure: the producer is not opened on a guess.
+// because no broker answered. It carries the partial answers so the state a
+// reader sees says which brokers, and is retried like any open failure: the
+// producer is not opened on a guess.
 type ProtocolNegotiationError struct {
 	Negotiation ProtocolNegotiation
 	Err         error
