@@ -806,6 +806,18 @@ func rank(counts map[string]int) Distribution {
 type DetailResponse struct {
 	Found   bool     `json:"found"`
 	Anomaly *Anomaly `json:"anomaly,omitempty"`
+	// Tracked is the answering replica's live row for an object it tracks
+	// and does not list -- a healthy object, which no snapshot carries a row
+	// for -- in the listed rows' shape with listed false. Absent when the
+	// object has a listed row, which Anomaly and Facts carry.
+	Tracked *Anomaly `json:"tracked,omitempty"`
+	// TrackedBy is the replica whose latest snapshot lists the object as
+	// owned, when the answering replica does not track it, and
+	// TrackedByAsOf that snapshot's time. Best effort: right after the
+	// object moves it can still name the old owner; read another pod, or use
+	// the routed read, which goes by the lease.
+	TrackedBy     string     `json:"tracked_by,omitempty"`
+	TrackedByAsOf *time.Time `json:"tracked_by_as_of,omitempty"`
 	// Anomaly is the first matching fact for old clients. Facts preserves
 	// coexisting facts, capped by MaxPageSize; FactsTotal reports the full count.
 	Facts      []Anomaly `json:"facts"`
@@ -1331,6 +1343,19 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	})
 	if len(body.Facts) > 0 {
 		body.Anomaly = &body.Facts[0]
+	}
+	// A healthy object has a row in no snapshot. The replica that tracks it
+	// builds one on request; another replica says which one does.
+	if len(body.Facts) == 0 && check == "" {
+		if row, tracked := service.LocalRow(queryGroup); tracked {
+			body.Tracked = &row
+		} else if owner, at, owned := view.OwnerOf(queryGroup); owned {
+			body.TrackedBy = owner
+			if !at.IsZero() {
+				asOf := at
+				body.TrackedByAsOf = &asOf
+			}
+		}
 	}
 	// Whether the object is observed is asked of every fact, not of the ones
 	// under the named check: a check the object has left still leaves the

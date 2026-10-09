@@ -83,6 +83,9 @@ type SummaryReader interface {
 
 // Service answers deployment-wide questions from any replica.
 type Service struct {
+	// localRow builds this replica's live row for an object it tracks; set
+	// once at wiring (SetLocalRows), nil where there is no local tracker.
+	localRow     func(queryGroup string) (Anomaly, bool)
 	expectations ExpectationSource
 	registry     ReplicaRegistry
 	snapshots    SnapshotReader
@@ -551,4 +554,21 @@ func gapDetail(err error) string {
 	default:
 		return "unavailable"
 	}
+}
+
+// SetLocalRows gives the service this replica's tracker, for the rows no
+// snapshot carries: a healthy object's, which only the replica tracking it
+// can build. Set once at wiring, before the routes serve.
+func (service *Service) SetLocalRows(row func(queryGroup string) (Anomaly, bool)) {
+	if service != nil {
+		service.localRow = row
+	}
+}
+
+// LocalRow is this replica's live row for the object, when it tracks it.
+func (service *Service) LocalRow(queryGroup string) (Anomaly, bool) {
+	if service == nil || service.localRow == nil {
+		return Anomaly{}, false
+	}
+	return service.localRow(queryGroup)
 }

@@ -2118,6 +2118,24 @@ func guardShare(guard GapGuard) float64 {
 	return float64(guard.Observed) / float64(guard.Required)
 }
 
+// TrackedRow is this replica's live row for an object it tracks, listed or
+// not, marked as not listed: what the object and strategy routes answer with
+// for a healthy object, whose row no snapshot carries. Built under the
+// tracker's lock, because the observe path keeps changing the maps the row
+// is read from; the row copies what it carries, per Plan.
+func (tracker *Tracker) TrackedRow(queryGroup string) (Anomaly, bool) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	state := tracker.groups[queryGroup]
+	if state == nil {
+		return Anomaly{}, false
+	}
+	row := tracker.rowOf(queryGroup, state)
+	listed := false
+	row.Listed = &listed
+	return row, true
+}
+
 func (tracker *Tracker) listed(column string) []Anomaly {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()

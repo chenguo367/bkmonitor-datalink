@@ -1484,10 +1484,14 @@ type Anomaly struct {
 	// and telling them apart by clock dropped a real failure filed one
 	// millisecond before its own Slot completed. Zero on rows from a
 	// publisher that predates it, or for a round with no Slot in its trace.
-	RoundSlot   int64       `json:"round_slot,omitempty"`
-	Consecutive int         `json:"consecutive,omitempty"`
-	Replica     string      `json:"replica"`
-	Failure     *FailureRef `json:"failure,omitempty"`
+	RoundSlot   int64  `json:"round_slot,omitempty"`
+	Consecutive int    `json:"consecutive,omitempty"`
+	Replica     string `json:"replica"`
+	// Listed is false on a row its replica built on request for an object it
+	// tracks and does not list -- a healthy one -- and absent on every listed
+	// row: the same shape, so one reader reads both.
+	Listed  *bool       `json:"listed,omitempty"`
+	Failure *FailureRef `json:"failure,omitempty"`
 	// LastError is the last round that returned an error, verbatim: what it
 	// said, which Slot it was on, and how many rounds in a row that same Slot
 	// has failed. The classification above answers "what kind"; this answers
@@ -2803,6 +2807,9 @@ type View struct {
 	// in it, which the strategy standing reports as such rather than as
 	// nobody's.
 	ownerOf map[string]string
+	// takenAt is when each replica's snapshot was taken: how old the owner
+	// ownerOf names may be.
+	takenAt map[string]time.Time
 	// expectation is the already-read authoritative active set. It is kept
 	// off the wire and shared read-only, so detail can distinguish a quiet
 	// active object from an absent one without another control-plane read.
@@ -3350,6 +3357,10 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 			view.Degradations = append(view.Degradations, degradation)
 		}
+		if view.takenAt == nil {
+			view.takenAt = map[string]time.Time{}
+		}
+		view.takenAt[replica] = snapshot.TakenAt
 		perReplica := ReplicaView{
 			Replica: replica, Owned: snapshot.Owned, Determined: snapshot.Determined,
 			Anomalies: snapshot.TotalAnomalies, Demoted: snapshot.TotalDemoted,
@@ -4131,4 +4142,18 @@ func samePlatformSettingFields(a, b []PlatformSettingField) bool {
 
 func sameIntPtr(a, b *int) bool {
 	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
+// OwnerOf is the replica whose latest snapshot lists the object as owned,
+// with that snapshot's time: best effort -- for up to one publication after
+// the object moves it names the old owner.
+func (view *View) OwnerOf(queryGroup string) (string, time.Time, bool) {
+	if view == nil {
+		return "", time.Time{}, false
+	}
+	replica, owned := view.ownerOf[queryGroup]
+	if !owned {
+		return "", time.Time{}, false
+	}
+	return replica, view.takenAt[replica], true
 }

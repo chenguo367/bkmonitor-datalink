@@ -286,6 +286,10 @@ type StrategyPlanStanding struct {
 	// Rows is what the fleet lists the object under, every row: an object
 	// under no row is healthy for the equation and appears as none.
 	Rows []Anomaly `json:"rows"`
+	// Tracked is the answering replica's live row for the Plan's object when
+	// it lists none and this replica tracks it, as on the object route.
+	// Otherwise Replica names the owner to ask.
+	Tracked *Anomaly `json:"tracked,omitempty"`
 	// Config is the Plan's key configuration, redacted, read from the
 	// frozen object on request (include=config) and absent otherwise. See
 	// StrategyPlanConfigs for what it carries and what it refuses.
@@ -576,6 +580,7 @@ func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLo
 			view = &current
 		}
 		standing := StrategyStandingOf(strategyID, query.Get("tenant"), query.Get("business"), replica, facts, view, now())
+		attachTrackedRows(&standing, service)
 		if includes[IncludeConfig] {
 			attachStrategyConfigs(request.Context(), &standing, loader)
 		}
@@ -676,4 +681,20 @@ func knownActionWord(word ActionWord) bool {
 		}
 	}
 	return false
+}
+
+// attachTrackedRows gives each Plan whose object lists no row this
+// replica's live row for it, where this replica tracks it: the strategy
+// route's answer for a healthy object. Kept off StrategyStandingOf, which
+// every diagnosis row is built from, so the diagnosis does not grow.
+func attachTrackedRows(standing *StrategyStanding, service *Service) {
+	for index := range standing.Plans {
+		plan := &standing.Plans[index]
+		if len(plan.Rows) != 0 {
+			continue
+		}
+		if row, tracked := service.LocalRow(plan.QueryGroup); tracked {
+			plan.Tracked = &row
+		}
+	}
 }
