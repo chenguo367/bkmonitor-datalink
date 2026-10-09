@@ -1691,7 +1691,12 @@ function consoleWords(c) {
   if (d) {
     words += '；启动时：' + (LINKD_DISCOVERY[d.outcome] || d.outcome)
       + (d.target && d.outcome !== 'adopted' ? '（Console 说 ' + linkdTargetWords(d.target) + '）' : '')
-      + (d.error ? '（试了 ' + d.attempts + ' 次：' + d.error + consoleFailureHint(d.error) + '）' : '');
+      + (d.error ? '（试了 ' + d.attempts + ' 次：' + d.error + consoleFailureHint(d.error) + '）' : '')
+      // A link that lists several targets: alarmd reads one, so the listing
+      // is the reason, named here rather than left inside the error.
+      + (d.target_count > 1 ? '；Console 列出 ' + d.target_count + ' 个目标'
+        + ((d.target_names || []).length ? '：' + d.target_names.join('、') + (d.target_names.length < d.target_count ? ' 等' : '') : '')
+        + '，alarmd 只读只列一个目标的 link' : '');
   }
   return words;
 }

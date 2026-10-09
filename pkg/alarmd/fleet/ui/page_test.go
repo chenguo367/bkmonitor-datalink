@@ -993,3 +993,15 @@ func TestThePageHasWordingForEveryDependencyEvidence(t *testing.T) {
 		}
 	}
 }
+
+// The Console's listing reaches the first-screen Console sentence when the
+// link lists several targets: the count and the names the discovery carries,
+// not only the error that refused them.
+func TestTheConsoleSentenceNamesTheTargetsTheLinkListed(t *testing.T) {
+	text := string(page)
+	for _, field := range []string{"d.target_count", "d.target_names"} {
+		if !strings.Contains(text, field) {
+			t.Errorf("the Console sentence does not read %s", field)
+		}
+	}
+}
