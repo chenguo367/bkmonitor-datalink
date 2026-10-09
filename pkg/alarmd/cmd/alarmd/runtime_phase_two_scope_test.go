@@ -528,7 +528,14 @@ func TestPhaseTwoWorkerBundleExecutionErrorBacksOffForAsLongAsItsDelayHolds(t *t
 	const rounds = 8
 	arm := newScopeTestBackoffArm(t, "failing sibling", cfg, now, true)
 
-	if !arm.awaitRounds(t, "healthy", arm.healthy, rounds) {
+	// The rounds are counted from the failing Query Group's first attempt. Both
+	// are dispatched in the first generation, but the failing one is counted
+	// only once its worker runs it, and the healthy one can finish several
+	// generations before that; those rounds were never under the backoff.
+	if !arm.awaitRounds(t, "failing", arm.failing, 1) {
+		t.FailNow()
+	}
+	if !arm.awaitRounds(t, "healthy", arm.healthy, arm.healthy.calls.Load()+rounds) {
 		t.FailNow()
 	}
 	if got := arm.failing.calls.Load(); got != 1 {
@@ -579,11 +586,17 @@ func TestPhaseTwoWorkerBundleBackoffSiblingDoesNotCostHealthyQueryGroupItsRounds
 	alone := newScopeTestBackoffArm(t, "healthy alone", cfg, now, false)
 	beside := newScopeTestBackoffArm(t, "beside a failing sibling", cfg, now, true)
 
+	// As in the backoff test, the sibling is parked only from its first attempt,
+	// which its worker may run several healthy generations late.
+	if !beside.awaitRounds(t, "failing", beside.failing, 1) {
+		t.FailNow()
+	}
+	besideTarget := beside.healthy.calls.Load() + rounds
 	aloneReached := alone.awaitRounds(t, "healthy", alone.healthy, rounds)
-	besideReached := beside.awaitRounds(t, "healthy", beside.healthy, rounds)
+	besideReached := beside.awaitRounds(t, "healthy", beside.healthy, besideTarget)
 	if !aloneReached || !besideReached {
-		t.Fatalf("healthy rounds: alone=%d beside a failing sibling=%d, want %d in both arms",
-			alone.healthy.calls.Load(), beside.healthy.calls.Load(), rounds)
+		t.Fatalf("healthy rounds: alone=%d of %d, beside a failing sibling=%d of %d",
+			alone.healthy.calls.Load(), rounds, beside.healthy.calls.Load(), besideTarget)
 	}
 	if got := beside.failing.calls.Load(); got != 1 {
 		t.Fatalf("failing sibling executed %d times while its backoff held, want 1; "+
