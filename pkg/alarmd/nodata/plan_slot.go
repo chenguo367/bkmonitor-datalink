@@ -30,6 +30,8 @@ type PlanSlotInput struct {
 	// worker resolved it to this Slot; both nil for a Plan without one.
 	Plan             *contract.TargetPlanV1
 	TargetResolution *TargetResolution
+	// AnswerTruncated is SlotInput.AnswerTruncated, forwarded.
+	AnswerTruncated  bool
 	Identity         execution.PlanNoDataIdentity
 	Snapshot         execution.NoDataMemorySnapshot
 	ApplyVersion     execution.ApplyVersion
@@ -103,6 +105,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		HostsResolved:    input.HostsResolved,
 		OutOfBusiness:    input.OutOfBusiness,
 		TargetResolution: input.TargetResolution,
+		AnswerTruncated:  input.AnswerTruncated,
 		Memory:           memory,
 		// The Plan-level fact comes out of the record, never out of the groups:
 		// the round it describes is one where there are no groups left to

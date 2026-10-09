@@ -58,6 +58,11 @@ type streamedExecution struct {
 	// under another. A Plan with a target plan and no entry here is read as
 	// unresolved by both, never as unscoped or as empty.
 	targetResolutions map[execution.PlanIdentity]*resolvedTarget
+	// answerTruncated is the Plans a primary query of which came back with a
+	// suspected cut on its route: whole by its own account, and possibly
+	// missing groups the query service dropped at its cap. Absence is not
+	// judged for them this Slot (nodata.OutcomeSkippedAnswerTruncated).
+	answerTruncated map[execution.PlanIdentity]bool
 	// scopeGroups is what this Slot read the dynamic groups its Plans'
 	// target scopes name to, by tenant and group, read once at Begin for
 	// every record the Slot admits.
@@ -734,6 +739,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			return completionContractError(codeDuplicateCompletionBinding, "alarmd worker: duplicate completion binding")
 		}
 		stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, false, item.sourceBackend)
+		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		completionBindings[key] = binding
 	}
 	for key, binding := range stream.streamed {
@@ -742,6 +748,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			return completionContractError(codeStreamedBindingMismatch, "alarmd worker: streamed binding differs from physical completion")
 		}
 		stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, true, item.sourceBackend)
+		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		switch item.Completeness {
 		case execution.CompletenessFull:
 			if binding.Completeness != execution.CompletenessFull {

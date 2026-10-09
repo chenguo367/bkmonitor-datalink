@@ -451,18 +451,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Help: "Plans that detect no-data, counted once per Slot by what happened to that detection. " +
 				"The outcomes partition: every such Plan lands on exactly one every Slot, so their sum is " +
 				"the no-data Plans this worker evaluated. EVALUATED is the only one that judged anything. " +
-				"The other three are different kinds of not judging and must be read apart, because once " +
-				"the round is over they look identical: SKIPPED_QUERY_NOT_FULL is a query that did not " +
+				"The others are different kinds of not judging and must be read apart, because once " +
+				"the round is over they look identical. Among them: SKIPPED_QUERY_NOT_FULL is a query that did not " +
 				"cover the period and resolves itself next round; SKIPPED_MEMORY_UNREADABLE is a record " +
-				"written by a newer build, which lasts as long as a rollback does; and " +
+				"written by a newer build, which lasts as long as a rollback does; " +
 				"SKIPPED_SLOT_BUDGET is the Slot being unable to carry the work, which does not resolve " +
 				"on its own - a history roster only grows, so a Plan that did not fit this round does " +
-				"not fit the next one either. A steady zero on that last one is the expected reading and " +
-				"any non-zero is worth acting on. All four labels are created at startup so a zero can " +
+				"not fit the next one either, and a steady zero on it is the expected reading; and " +
+				"SKIPPED_ANSWER_TRUNCATED is an answer the query service may have cut at its group cap " +
+				"(uq_answer_truncated_total), which lasts as long as the strategy's groups stay at the cap. " +
+				"Any non-zero on those last two is worth acting on. Every outcome's label is created at startup so a zero can " +
 				"be told from a label nothing ever wrote. " +
-				"Read the fleet's sum of all four over a minute against the leader's " +
+				"Read the fleet's sum over every outcome over a minute against the leader's " +
 				"sum(catalog_no_data_plans) times the Slots in that minute: they are the same Plans " +
-				"counted at the two ends of the publication, so the two should agree. All four at zero " +
+				"counted at the two ends of the publication, so the two should agree. Every outcome at zero " +
 				"while the leader reports Plans is what a Plan losing its no-data section between the " +
 				"leader and the worker looks like, and it looks like nothing else: the Plans still " +
 				"execute, nothing fails, and every label here reads as a computed zero.",

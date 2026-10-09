@@ -126,6 +126,7 @@ func (stream *streamedExecution) noDataRoundFor(
 		Scope:            due.CompiledPlan.TargetScope(),
 		Plan:             due.CompiledPlan.TargetPlan(),
 		TargetResolution: stream.targetResolutions[identity.Plan].absenceView(),
+		AnswerTruncated:  stream.answerTruncated[due.Identity],
 		Identity:         identity,
 		Snapshot:         snapshot,
 		ApplyVersion:     version,
@@ -351,6 +352,20 @@ func (stream *streamedExecution) evaluateNoData(
 		}
 	}
 	return flush()
+}
+
+// noteAnswerTruncation marks the binding's Plan when the binding is a
+// primary input and its physical query's answer may have been cut. Only a
+// primary answer says which groups reported; a cut dependency answer leaves
+// the Plan's presence as it was.
+func (stream *streamedExecution) noteAnswerTruncation(binding execution.NamedInputBinding, route execution.ProviderRouteFacts) {
+	if binding.Role != execution.InputRolePrimary || route.Truncation == nil {
+		return
+	}
+	if stream.answerTruncated == nil {
+		stream.answerTruncated = map[execution.PlanIdentity]bool{}
+	}
+	stream.answerTruncated[binding.Consumer.Plan] = true
 }
 
 // noDataCompleteness is whether this Slot saw the whole period for one Plan.
