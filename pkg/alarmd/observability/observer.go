@@ -2287,6 +2287,9 @@ type Observation struct {
 	// OutputEventKinds is OutputWireFormats split by event kind, on the same
 	// event_acked observation.
 	OutputEventKinds OutputEventKindCounts
+	// NoDataEmission is what the write did with the no-data events in it, on
+	// the write's own observation; nil when it carried none.
+	NoDataEmission *NoDataEmissionFacts
 	// PlanSeriesMatched is how many PRIMARY series this Slot's query bound to
 	// the Plan an evaluation line is about, on every evaluation line of that
 	// Plan and on the completion-only line of a Plan bound to none. A Plan

@@ -340,6 +340,10 @@ type queryGroupState struct {
 	// object's Plans counted, by Plan. Replaced whole on every deciding
 	// round; a Plan that stops deciding keeps its last word, dated.
 	noDataTracking map[StrategyRef]*NoDataTracking
+	// noDataEmitted is what this replica sent of each of this object's
+	// Plans' no-data events, by Plan, since its start; kept apart from
+	// noDataTracking, which each deciding round replaces whole.
+	noDataEmitted map[StrategyRef]*NoDataEmitted
 	// wireFormats is the wire format each of this object's Plans last said
 	// its events go out as, by Plan, from the Plan's evaluation line.
 	wireFormats map[StrategyRef]*PlanWireFormat
@@ -768,6 +772,9 @@ type Tracker struct {
 	noDataAfter          time.Duration
 	maxTracked           int
 	now                  func() time.Time
+	// startedAt is when this tracker began counting: what a count kept
+	// since the replica started is counted from.
+	startedAt time.Time
 	// platformHorizon reads the deployment's no-data tracking horizon, the
 	// number a Plan's effective horizon is read against to say where it came
 	// from; nil is a tracker that was not told it at all.
@@ -820,6 +827,7 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		noDataAfter:          DefaultNoDataAfter,
 		maxTracked:           DefaultTrackedQueryGroups,
 		now:                  now,
+		startedAt:            now(),
 		groups:               make(map[string]*queryGroupState),
 	}
 }
@@ -1074,6 +1082,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				UnderDay: absence.AbsentAges.UnderDay, DayOrMore: absence.AbsentAges.DayOrMore,
 			},
 		}
+	}
+	// What a write of the Plan's events did with its no-data events, on the
+	// write's own line: acknowledged, unknown or known unwritten, added up
+	// since this replica started.
+	if emission := observation.NoDataEmission; emission != nil && plan.StrategyID != "" {
+		if state.noDataEmitted == nil {
+			state.noDataEmitted = map[StrategyRef]*NoDataEmitted{}
+		}
+		emitted := state.noDataEmitted[plan]
+		if emitted == nil {
+			emitted = &NoDataEmitted{}
+			state.noDataEmitted[plan] = emitted
+		}
+		emitted.record(*emission, at)
 	}
 	// A renewal that reached the store. Success -- whether or not it set a
 	// new lifetime; "enough life left" is the ordinary answer -- is the one
@@ -2010,7 +2032,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	anomaly.PlanSeries = planSeriesRows(state)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
 	anomaly.StateAdmissionRefusal = latestStateRefusal(state)
-	anomaly.NoDataTracking = noDataTrackingRows(state)
+	anomaly.NoDataTracking = noDataTrackingRows(state, tracker.replica, tracker.startedAt)
 	anomaly.WireFormats = wireFormatRows(state)
 	// The holder of the latest round's Slot, when that round gave it up. The
 	// span keeps the word from the completion that wrote it; the row carries
@@ -2588,13 +2610,22 @@ func latestStateRefusal(state *queryGroupState) *StateAdmissionRefusal {
 
 // noDataTrackingRows is every Plan's last deciding word, smallest strategy
 // first, copied so the row does not alias the tracker's state.
-func noDataTrackingRows(state *queryGroupState) []NoDataTracking {
-	if len(state.noDataTracking) == 0 {
+func noDataTrackingRows(state *queryGroupState, replica string, since time.Time) []NoDataTracking {
+	if len(state.noDataTracking) == 0 && len(state.noDataEmitted) == 0 {
 		return nil
 	}
 	rows := make([]NoDataTracking, 0, len(state.noDataTracking))
-	for _, tracking := range state.noDataTracking {
-		rows = append(rows, *tracking)
+	for plan, tracking := range state.noDataTracking {
+		row := *tracking
+		row.Emitted = emittedRow(state.noDataEmitted[plan], replica, since)
+		rows = append(rows, row)
+	}
+	// A Plan that sent and has no deciding round on record -- one this
+	// replica no longer decides for -- still shows what it sent.
+	for plan, emitted := range state.noDataEmitted {
+		if state.noDataTracking[plan] == nil {
+			rows = append(rows, NoDataTracking{Plan: plan, Emitted: emittedRow(emitted, replica, since)})
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Plan.StrategyID != rows[j].Plan.StrategyID {
@@ -2603,6 +2634,26 @@ func noDataTrackingRows(state *queryGroupState) []NoDataTracking {
 		return rows[i].Plan.BusinessID < rows[j].Plan.BusinessID
 	})
 	return rows
+}
+
+// emittedRow is a Plan's Emitted as a row shows it: a copy, with the
+// replica, its start and the reading; zero counts for a Plan that has sent
+// nothing, so the reading is on the row either way.
+func emittedRow(emitted *NoDataEmitted, replica string, since time.Time) *NoDataEmitted {
+	row := NoDataEmitted{}
+	if emitted != nil {
+		row = *emitted
+		if emitted.LastAbnormal != nil {
+			last := *emitted.LastAbnormal
+			row.LastAbnormal = &last
+		}
+		if emitted.LastRecovery != nil {
+			last := *emitted.LastRecovery
+			row.LastRecovery = &last
+		}
+	}
+	row.Replica, row.CountingSince, row.Reading = replica, since, NoDataEmittedReading
+	return &row
 }
 
 // NoDataTrackingSummary is what every tracked object's no-data Plans last
@@ -2619,6 +2670,13 @@ func (tracker *Tracker) NoDataTrackingSummary() *NoDataTrackingSummary {
 				summary = &NoDataTrackingSummary{}
 			}
 			summary.add(tracking.summaryOf())
+		}
+		for _, emitted := range state.noDataEmitted {
+			if summary == nil {
+				summary = &NoDataTrackingSummary{}
+			}
+			summary.add(NoDataTrackingSummary{AbnormalSent: emitted.AbnormalSent, RecoverySent: emitted.RecoverySent,
+				AckUnknown: emitted.AckUnknown, NotWritten: emitted.NotWritten, PlansSent: 1})
 		}
 	}
 	return summary
