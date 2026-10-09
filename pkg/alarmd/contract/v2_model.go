@@ -255,6 +255,13 @@ const (
 	ReasonSnapshotRetryPending       = "SNAPSHOT_RETRY_PENDING"
 	ReasonSlotSourceRetry            = "SLOT_SOURCE_RETRY"
 	ReasonBlockedExactSetUnavailable = "BLOCKED_EXACT_SET_UNAVAILABLE"
+	// ReasonScheduleUnreadable names a round the Slot source could not take
+	// because the Query Group's schedule timeline does not decode: corrupt
+	// bytes, or a timeline written by a build this one cannot read (a rollout
+	// whose new content the previous build cannot run). Until the timeline is
+	// rewritten or the Query Group moves to a build that reads it, every round
+	// meets the same bytes.
+	ReasonScheduleUnreadable = "SCHEDULE_UNREADABLE"
 	// ReasonViewNotExecutable names a round the Worker did not run because
 	// its installed executable view does not yet agree with the Assignment
 	// record on the Query Group's content or timeline, or does not carry it

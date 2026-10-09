@@ -2616,7 +2616,10 @@ func (source observedProductionSlotSource) Next(
 			Trace: observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: notExecutable,
 		})
 	} else if errors.As(err, &retry) || errors.As(err, &blocked) {
-		reason := observability.ReasonCode(contract.ReasonBlockedExactSetUnavailable)
+		var reason observability.ReasonCode
+		if blocked != nil {
+			reason = observability.ReasonCode(blocked.ReasonCode())
+		}
 		var cause error
 		if retry != nil {
 			reason = observability.ReasonCode(contract.ReasonSlotSourceRetry)

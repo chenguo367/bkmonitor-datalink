@@ -293,10 +293,12 @@ var failureFacets = map[string]facets{
 
 	// The control plane did not hand the runner something to run.
 	"BLOCKED_EXACT_SET_UNAVAILABLE": {StageConfig, ClassUnavailable, ""},
-	"SLOT_SOURCE_RETRY":             {StageConfig, ClassUnavailable, ""},
-	"VIEW_NOT_EXECUTABLE":           {StageConfig, ClassUnavailable, ""},
-	"PROGRESS_BEGIN_FAILED":         {StageSchedule, ClassUnavailable, ""},
-	"PROGRESS_BEGIN_REJECTED":       {StageSchedule, ClassRefused, DependencyNone},
+	// The timeline is there and does not decode: the same bytes every round.
+	"SCHEDULE_UNREADABLE":     {StageConfig, ClassContract, DependencyNone},
+	"SLOT_SOURCE_RETRY":       {StageConfig, ClassUnavailable, ""},
+	"VIEW_NOT_EXECUTABLE":     {StageConfig, ClassUnavailable, ""},
+	"PROGRESS_BEGIN_FAILED":   {StageSchedule, ClassUnavailable, ""},
+	"PROGRESS_BEGIN_REJECTED": {StageSchedule, ClassRefused, DependencyNone},
 
 	// Budgets this deployment allocates itself.
 	"EXECUTION_BUDGET_EXHAUSTED": {StageEvaluate, ClassCapacity, DependencyNone},

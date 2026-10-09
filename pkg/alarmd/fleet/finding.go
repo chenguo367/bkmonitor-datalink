@@ -735,10 +735,14 @@ var codeChecks = map[string]verdict{
 	// were still being retried every thirty seconds: the disposition was known
 	// inside the system and never reached the runner.
 	"BLOCKED_EXACT_SET_UNAVAILABLE": lands(CheckDependencyDown),
-	"SLOT_SOURCE_RETRY":             lands(CheckDependencyDown),
-	"VIEW_NOT_EXECUTABLE":           lands(CheckDependencyDown),
-	"PROGRESS_BEGIN_FAILED":         lands(CheckDependencyDown),
-	"PROGRESS_BEGIN_REJECTED":       lands(CheckDependencyDown),
+	// A timeline this build cannot decode is a defect - corrupt bytes, or a
+	// release whose content the previous build cannot read - not a dependency
+	// that is down.
+	"SCHEDULE_UNREADABLE":     lands(CheckDefect),
+	"SLOT_SOURCE_RETRY":       lands(CheckDependencyDown),
+	"VIEW_NOT_EXECUTABLE":     lands(CheckDependencyDown),
+	"PROGRESS_BEGIN_FAILED":   lands(CheckDependencyDown),
+	"PROGRESS_BEGIN_REJECTED": lands(CheckDependencyDown),
 
 	// Budgets this deployment allocates itself, at run time: work it gave up on
 	// because of its own limits. The next step is capacity, the same as for a

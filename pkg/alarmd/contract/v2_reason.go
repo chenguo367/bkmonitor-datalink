@@ -174,6 +174,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonSlotSourceRetry:            {ReasonSlotSourceRetry, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonViewNotExecutable:          {ReasonViewNotExecutable, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonBlockedExactSetUnavailable: {ReasonBlockedExactSetUnavailable, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonScheduleUnreadable:         {ReasonScheduleUnreadable, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the persisted marker and the proposed one are both facts,
 	// and repeating the attempt compares the same two facts again.
 	ReasonGapGuardConflict: {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
