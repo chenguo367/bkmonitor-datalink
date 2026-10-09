@@ -2630,6 +2630,15 @@ func providerLeads(stepMillis int64, histories []levelHistory) map[int64]int64 {
 // eventCountSourceSemantics is the source an event count reads.
 const eventCountSourceSemantics = "custom/event"
 
+// primaryIdentityFields is the dimensions every series of the query is told
+// apart by: the dataset's identity fields. The primary requirement reads them
+// beside the value - an event count with any is a count of groups, which is
+// what its quiet is decided on - and a strategy lookup names them as the
+// Plan's grouping, so the two are one definition.
+func primaryIdentityFields(query execution.QueryPlanFacts) []string {
+	return append([]string(nil), query.Normalization.DatasetContract.IdentityFields...)
+}
+
 func (runtime *RedisCatalogRuntime) primaryRequirements(
 	group QueryGroup,
 	duePlans []execution.DuePlan,
@@ -2639,7 +2648,7 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 		window int64
 	}
 	byWindow := make(map[requirementKey]*execution.DataRequirement)
-	columns := append([]string{"value"}, group.QueryPlan.Normalization.DatasetContract.IdentityFields...)
+	columns := append([]string{"value"}, primaryIdentityFields(group.QueryPlan)...)
 	sort.Strings(columns)
 	leads := eventCountProviderLeads(group.QueryPlan, duePlans)
 	for _, due := range duePlans {

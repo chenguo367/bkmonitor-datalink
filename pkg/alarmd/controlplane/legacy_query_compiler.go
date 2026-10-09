@@ -326,7 +326,7 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 	}
 	legacyOnly := true
 	for _, label := range sourceSemantics {
-		if label != "bk_monitor/time_series" {
+		if label != omittedSourceSemantics {
 			legacyOnly = false
 		}
 	}
@@ -1078,4 +1078,21 @@ func queryUnsupported(reason string, err error) error {
 
 func querySourceIncomplete(reason string, err error) error {
 	return &QueryPlanCompileError{Disposition: DispositionSourceIncomplete, Reason: reason, Err: err}
+}
+
+// omittedSourceSemantics is the one source a query's facts leave unnamed: a
+// query that reads bk_monitor/time_series alone carries no SourceSemantics,
+// so those Query Groups keep the identity they had before sources were
+// named.
+const omittedSourceSemantics = "bk_monitor/time_series"
+
+// querySources is what a query reads: the sources its facts name, or, for a
+// query that names none, the one source the compiler leaves unnamed. Only
+// this compiler leaves one unnamed; the PromQL compiler always names its
+// own.
+func querySources(facts execution.QueryPlanFacts) []string {
+	if len(facts.SourceSemantics) > 0 {
+		return append([]string(nil), facts.SourceSemantics...)
+	}
+	return []string{omittedSourceSemantics}
 }

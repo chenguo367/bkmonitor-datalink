@@ -69,6 +69,44 @@ type StrategyPlanRef struct {
 	SnapshotRevision execution.SnapshotRevision
 	QueryRevision    execution.QueryRevision
 	ScheduleRevision execution.ScheduleRevision
+	// SourceSemantics is what the Plan's query reads (querySources): the
+	// sources its facts name, bk_monitor/time_series for the clause query
+	// that names none. GroupBy is the dimensions every series of it is told apart by:
+	// the dataset's identity fields, the same ones the primary requirement
+	// reads beside the value, which is what an event count's quiet is
+	// decided on - so "grouped" here and there is one definition. They are
+	// author-written names, at most planGroupByBound of them in the sorted
+	// order the compiler keeps them, each cut to planGroupByNameBound bytes; GroupByTotal counts all
+	// of them. PromQL says the query runs as PromQL, whose grouping comes
+	// from its normalization rather than a clause list.
+	SourceSemantics []string
+	GroupBy         []string
+	GroupByTotal    int
+	PromQL          bool
+}
+
+// planGroupByBound and planGroupByNameBound bound a Plan's grouping as a
+// lookup names it: a strategy grouping by hundreds of fields does not grow
+// every answer that lists it.
+const (
+	planGroupByBound     = 16
+	planGroupByNameBound = 128
+)
+
+// planGroupBy is the bounded grouping of a query and how many dimensions it
+// has in all. The fields come sorted: the compiler keeps a query's identity
+// fields sorted and unique, so the first planGroupByBound are the first in
+// that order.
+func planGroupBy(query execution.QueryPlanFacts) ([]string, int) {
+	fields := primaryIdentityFields(query)
+	total := len(fields)
+	if len(fields) > planGroupByBound {
+		fields = fields[:planGroupByBound]
+	}
+	for index := range fields {
+		fields[index] = boundedStatementText(fields[index], planGroupByNameBound)
+	}
+	return fields, total
 }
 
 // strategyIndex is one publication indexed by strategy id. Built once per
@@ -161,7 +199,9 @@ func (index *strategyIndex) lookup(strategyID string) StrategyLookup {
 		group := &index.groups[at.group]
 		plan := &group.Plans[at.plan]
 		ref := StrategyPlanRef{Plan: plan.Identity, QueryGroup: group.Identity, SnapshotRevision: index.publication.SnapshotRevision,
-			QueryRevision: group.QueryPlan.QueryRevision, ScheduleRevision: group.ScheduleRevision}
+			QueryRevision: group.QueryPlan.QueryRevision, ScheduleRevision: group.ScheduleRevision,
+			SourceSemantics: querySources(group.QueryPlan), PromQL: group.QueryPlan.PromQL != nil}
+		ref.GroupBy, ref.GroupByTotal = planGroupBy(group.QueryPlan)
 		// The digest of the object this Plan is read from. It cannot fail on
 		// a group that was published; if it does the ref goes out without it
 		// rather than the whole answer going out empty.
