@@ -35,9 +35,10 @@ type NoDataEmissionFacts struct {
 }
 
 // NoDataEmittedEvent is one acknowledged no-data event as a reader looks it
-// up downstream: the Slot that decided it, the key the alert store files it
-// under -- the event's dedupe md5, which the standard protocol carries as the
-// alert id -- and the group's dimension values, at most
+// up downstream: the Slot that decided it, the key its message was written
+// under -- the alert id under the standard protocol, the dedupe md5 of the
+// group's dimensions and the tag under the compatibility protocol, which is
+// what the alert store files it by -- and the group's dimension values, at most
 // MaxNoDataEmittedGroupKeys keys of at most MaxNoDataEmittedGroupValueBytes
 // bytes each, GroupTruncated when either bound cut it.
 type NoDataEmittedEvent struct {

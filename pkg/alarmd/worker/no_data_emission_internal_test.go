@@ -93,3 +93,38 @@ func TestTheWriteCarriesItsNoDataEventsOnItsObservation(t *testing.T) {
 		t.Fatalf("event_acked = %+v, want it to carry the no-data ABNORMAL it wrote", acked)
 	}
 }
+
+// Under the compatibility protocol the key a reader finds the alert by is
+// the one the message is written under: the dedupe md5 of the group's
+// dimensions and the tag, which Python's alert builder files the alert
+// under. It is not the event's own dedupe_md5, which is empty for a Plan
+// with no frozen snapshot revision and, when it is set, hashes the Plan's
+// identity fields rather than the group's. Expected keys are Python's
+// (event.py cal_dedupe_md5 over adapter.py extract_target, bk-monitor
+// c0e828fa8c), for strategy 41 in business 2.
+func TestACompatibleNoDataEventIsKeyedByWhatItsMessageCarries(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dimensions map[string]json.RawMessage
+		dedupe     string
+		want       string
+	}{
+		{"no_snapshot_revision", map[string]json.RawMessage{"path": json.RawMessage(`"/data"`)}, "", "6be6ecb2f642dcd62da2dfc6fdd1e918"},
+		{"identity_md5_set", map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"127.0.0.1"`), "bk_target_cloud_id": json.RawMessage(`"0"`)},
+			"0123456789abcdef0123456789abcdef", "2bfe71eec3bb4c3bd4331aeeb2bee3f3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.dimensions[contract.NoDataDimensionTag] = json.RawMessage("true")
+			event := contract.TriggerEventV1{EventID: "event-1", EventKind: contract.TriggerEventAbnormal, EvaluationTime: 600,
+				WireFormat: contract.WireFormatPythonCompatible, BusinessID: "2", PlanRef: contract.RuntimePlanRefV1{StrategyID: "41"},
+				DedupeMD5: tc.dedupe, RecordRef: contract.TriggerRecordRefV1{Dimensions: tc.dimensions}}
+			facts := noDataEmissionOf([]contract.TriggerEventV1{event}, nil)
+			if facts == nil || facts.LastAbnormal == nil {
+				t.Fatalf("facts = %+v, want the ABNORMAL kept as the latest", facts)
+			}
+			if got := facts.LastAbnormal.AlertKey; got != tc.want {
+				t.Fatalf("alert key = %q, want %s", got, tc.want)
+			}
+		})
+	}
+}
