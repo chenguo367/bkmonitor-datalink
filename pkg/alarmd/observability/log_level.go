@@ -195,8 +195,24 @@ func roundChanged(observation Observation) bool {
 		facts := observation.Rebalance
 		return facts != nil && (facts.PlannedMoves > 0 || facts.PublishedMoves > 0 || facts.Conflicts > 0 || facts.Paused)
 	case StageAssignmentIndexRead:
+		// A worker that reads just before the Leader writes sees the previous
+		// round once: stale for one round is the ordinary race, the same
+		// healthy value assignment_index_stale_rounds names. Two or more is an
+		// index that stopped advancing.
 		facts := observation.AssignmentIndex
-		return facts != nil && (facts.Result != "fresh" || facts.Rewritten > 0 || facts.Missing > 0)
+		if facts == nil {
+			return false
+		}
+		switch facts.Result {
+		case AssignmentIndexFresh:
+		case AssignmentIndexStale:
+			if facts.StaleRounds >= 2 {
+				return true
+			}
+		default:
+			return true
+		}
+		return facts.Rewritten > 0 || facts.Missing > 0
 	case StageAssignmentIndexWritten:
 		facts := observation.AssignmentIndex
 		return facts != nil && (facts.Result != "" || facts.Rewritten > 0 || facts.Missing > 0)
