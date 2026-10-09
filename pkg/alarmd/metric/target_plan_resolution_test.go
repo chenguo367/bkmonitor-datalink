@@ -122,6 +122,32 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 	}
 }
 
+// A target scope's dynamic groups, read for a Slot, are selectors like any
+// other and are counted as such; the Plan has no target plan, so the
+// resolution count, which is target plans', does not move.
+func TestATargetScopesGroupsCountAsSelectorsAndNotAsATargetPlan(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentAccess, Stage: observability.StageTargetResolved,
+		TargetResolution: &observability.TargetResolutionFacts{
+			StrategyID: "8", State: "Unavailable", ScopeGroups: true,
+			Selectors: []observability.TargetSelectorFacts{
+				{Kind: "dynamic_group", ID: "g1", State: "OK", Reason: "none", Kept: 2},
+				{Kind: "dynamic_group", ID: "g2", State: "Unavailable", Reason: "key_missing"},
+			},
+		},
+	})
+	got := selectorCells(t, r)
+	if got["dynamic_group|OK|none"] != 1 || got["dynamic_group|Unavailable|key_missing"] != 1 {
+		t.Fatalf("a target scope's groups as selectors = %v", got)
+	}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_target_plan_resolution_total") {
+		if value := m.GetCounter().GetValue(); value != 0 {
+			t.Fatalf("target plan resolutions %s = %v after a target scope's groups, want 0", m.Label[0].GetValue(), value)
+		}
+	}
+}
+
 // selectorCells reads target_selector_resolutions_total as kind|state|reason
 // to value, in the label order the metric declares.
 func selectorCells(t *testing.T, r *Recorder) map[string]float64 {

@@ -79,7 +79,7 @@ func (source *Source) executeSupplement(
 	if err := consumer.Begin(ctx, prepared.Header); err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}
-	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets())
+	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets(), consumer.ResolvedScopeGroups())
 	completion := execution.QueryExecutionCompletion{PhysicalQueries: make([]execution.PhysicalQueryCompletion, 0, len(prepared.Queries))}
 	for _, query := range prepared.Queries {
 		if len(query.Requirements) == 0 {

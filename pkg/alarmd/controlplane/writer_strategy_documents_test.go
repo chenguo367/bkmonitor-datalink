@@ -157,10 +157,12 @@ func formatOutcomes(outcomes map[string]string) string {
 // the contract:
 //   - an FTA event source is not supported;
 //   - an AIOps algorithm is not migrated;
-//   - three legacy target forms the writer publishes without a target_plan -
-//     a dynamic group it could not convert without loss, a service topology
-//     node, a set template - are withheld by name rather than run over a
-//     scope this build cannot resolve.
+//   - two legacy target forms the writer publishes without a target_plan -
+//     a service topology node, a set template - are withheld by name rather
+//     than run over a scope this build cannot resolve. A dynamic group it
+//     could not convert without loss is not among them: the scope names the
+//     group, and a Slot reads its hosts from the platform's group hash, which
+//     that writer's CMDB cache also publishes.
 var writerDocumentOutcomes = map[string]string{
 	"test_projector_adds_committed_strategy_ref_and_legacy_query_fields[0]": "",
 	"test_projector_adds_committed_strategy_ref_and_legacy_query_fields[1]": "",
@@ -180,7 +182,7 @@ var writerDocumentOutcomes = map[string]string{
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[3]":   "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[4]":   "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[5]":   "",
-	"test_projector_omits_target_plan_when_conversion_is_not_lossless[6]":   "UNSUPPORTED_PHASE2_CAPABILITY UNSUPPORTED_TARGET_SCOPE at items[0].target",
+	"test_projector_omits_target_plan_when_conversion_is_not_lossless[6]":   "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[7]":   "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[8]":   "UNSUPPORTED_PHASE2_CAPABILITY UNSUPPORTED_TARGET_SCOPE_UNRESOLVABLE at items[0].target",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[9]":   "",

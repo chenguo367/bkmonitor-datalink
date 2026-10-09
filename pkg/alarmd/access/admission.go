@@ -258,14 +258,22 @@ func flushScopeDrops(sink ScopeDropSink, adapters []*seriesAdapter, slot executi
 // execution. It is built once per execution rather than looked up per series.
 type planScopes map[execution.PlanIdentity]admission.PlanContext
 
-func buildPlanScopes(duePlans []execution.DuePlan, targets execution.TargetMemberships) planScopes {
+func buildPlanScopes(duePlans []execution.DuePlan, targets execution.TargetMemberships, groups execution.ScopeGroupMemberships) planScopes {
 	scopes := make(planScopes, len(duePlans))
 	for _, due := range duePlans {
+		tenant := due.Identity.TenantID
+		// A dynamic group condition matches the hosts this Slot read its
+		// groups to hold; one the Slot did not read knows no host.
+		scope := admission.TargetScopeFromContract(due.CompiledPlan.TargetScope()).WithGroupMemberships(
+			func(id string) (admission.GroupMembership, bool) {
+				read, found := groups[execution.ScopeGroupRef{TenantID: tenant, GroupID: id}]
+				return admission.GroupMembership{HostIDs: read.HostIDs, Known: read.Known}, found
+			})
 		context := admission.PlanContext{
-			TenantID:    due.Identity.TenantID,
+			TenantID:    tenant,
 			BusinessID:  due.Identity.BusinessID,
 			StrategyID:  due.Identity.StrategyID,
-			TargetScope: admission.TargetScopeFromContract(due.CompiledPlan.TargetScope()),
+			TargetScope: scope,
 		}
 		if plan := due.CompiledPlan.TargetPlan(); plan != nil {
 			// The resolution is the Slot's, looked up by Plan; a Plan the Slot

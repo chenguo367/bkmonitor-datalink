@@ -239,6 +239,19 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 	return 0
 }
 
+// buildScopeGroups assembles what a target scope's dynamic group conditions
+// are read from: the platform's dynamic group hash of each tenant, under the
+// platform prefix the host index reads (cmdbcache.PlatformGroupStores), on
+// the host index's cadence and staleness bound. There is no coordinate of its
+// own: the platform keeps it beside the host hash. One read holds at most
+// readBound bytes of group values, the bound the fork's group reader windows
+// by.
+func buildScopeGroups(cfg config.Config, client redis.Cmdable, readBound int) (*cmdbcache.PlatformGroupStores, error) {
+	return cmdbcache.NewPlatformGroupStores(client, cfg.PlatformKeyPrefix(), cmdbcache.GroupStoreOptions{
+		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound, ReadBound: readBound,
+	})
+}
+
 // buildTargetResolver assembles what resolves a target plan's dynamic
 // references (decision-017): the dynamic group store, when the deployment
 // renders the fork's key prefix, and the host index for topology nodes.

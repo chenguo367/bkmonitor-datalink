@@ -773,6 +773,9 @@ func (consumer *recordingConsumer) ConsumeSeries(_ context.Context, batch execut
 	return batch.Validate(consumer.header)
 }
 func (consumer *recordingConsumer) ResolvedTargets() execution.TargetMemberships { return nil }
+func (consumer *recordingConsumer) ResolvedScopeGroups() execution.ScopeGroupMemberships {
+	return nil
+}
 
 func frozenExecution(t *testing.T) (execution.FrozenExecutionContractRef, FrozenPlan) {
 	t.Helper()

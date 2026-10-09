@@ -58,6 +58,21 @@ func (reader *GroupReader) key(id string) string {
 	return reader.prefix + "dynamic_group:" + id
 }
 
+// decode reads one of the fork's group documents (decodeGroup).
+func (reader *GroupReader) decode(id string, payload []byte, readAt time.Time) *GroupSnapshot {
+	return decodeGroup(id, payload, readAt)
+}
+
+// groupSource is where a store reads its groups and how it reads one: the
+// fork's per-group documents (GroupReader) or the platform's one hash per
+// tenant (PlatformGroupReader). Read hands each id's read to visit, a missing
+// group as an answer and a failed read as the error; decode makes a read
+// payload a snapshot.
+type groupSource interface {
+	Read(ctx context.Context, ids []string, bound int, visit func(id string, read GroupRead)) error
+	decode(id string, payload []byte, readAt time.Time) *GroupSnapshot
+}
+
 // GroupRead is one id's raw read: the payload, or that the key was absent.
 // The payload is the reply's own bytes, valid only while visit runs.
 type GroupRead struct {
@@ -281,7 +296,7 @@ type GroupLookup struct {
 // first Slot after a restart does not run a minute with its group members
 // outside the target.
 type GroupStore struct {
-	reader    *GroupReader
+	reader    groupSource
 	interval  time.Duration
 	maxAge    time.Duration
 	readBound int
@@ -327,6 +342,10 @@ func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore,
 	if reader == nil {
 		return nil, errors.New("alarmd cmdbcache: a group reader is required")
 	}
+	return newGroupStore(reader, options)
+}
+
+func newGroupStore(reader groupSource, options GroupStoreOptions) (*GroupStore, error) {
 	if options.RefreshInterval <= 0 {
 		return nil, errors.New("alarmd cmdbcache: a positive refresh interval is required")
 	}
@@ -401,7 +420,7 @@ func (store *GroupStore) Group(ctx context.Context, id string, interval time.Dur
 		// included, publishes nothing: the next ask reads it again.
 		var first *GroupSnapshot
 		if err := store.reader.Read(ctx, []string{id}, store.readBound, func(_ string, read GroupRead) {
-			first = snapshotOf(id, read, now)
+			first = snapshotOf(store.reader, id, read, now)
 		}); err != nil {
 			return GroupLookup{ReadErr: err}
 		}
@@ -415,11 +434,11 @@ func (store *GroupStore) Group(ctx context.Context, id string, interval time.Dur
 
 // snapshotOf is one id's read as a snapshot. It keeps nothing of the read:
 // the payload is the reply's, and is let go with its window.
-func snapshotOf(id string, read GroupRead, at time.Time) *GroupSnapshot {
+func snapshotOf(source groupSource, id string, read GroupRead, at time.Time) *GroupSnapshot {
 	if read.Missing {
 		return &GroupSnapshot{ID: id, ReadAt: at, Unavailable: targetplan.ReasonKeyMissing}
 	}
-	return decodeGroup(id, read.Payload, at)
+	return source.decode(id, read.Payload, at)
 }
 
 // Refresh re-reads every referenced group. A transport failure keeps every
@@ -462,7 +481,7 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	// snapshots it makes, not every referenced group's document.
 	next := make(map[string]*GroupSnapshot, len(ids))
 	readErr := store.reader.Read(ctx, ids, store.readBound, func(id string, read GroupRead) {
-		next[id] = snapshotOf(id, read, time.Time{})
+		next[id] = snapshotOf(store.reader, id, read, time.Time{})
 	})
 	// A read that failed - at the round trip, or Redis answering a key with
 	// an error - keeps every group's snapshot, served as past a failed

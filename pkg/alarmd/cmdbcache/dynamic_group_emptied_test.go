@@ -58,7 +58,7 @@ func TestAGroupReadIsAWindowAtATimeAndAFailurePartWayReturnsTheError(t *testing.
 		}
 		visited, ahead := []string{}, 0
 		visit := func(id string, read GroupRead) {
-			if snapshot := snapshotOf(id, read, time.Time{}); len(snapshot.Members) != 1 {
+			if snapshot := snapshotOf(reader, id, read, time.Time{}); len(snapshot.Members) != 1 {
 				t.Fatalf("%d groups: %s handed over as %+v", count, id, snapshot)
 			}
 			visited = append(visited, id)
@@ -100,7 +100,7 @@ func TestALargeDocumentIsReadAloneAndAnAnsweredKeyStopsTheRead(t *testing.T) {
 	}
 	handed := []string{}
 	err = reader.Read(context.Background(), []string{"1", "2", "3"}, 1, func(id string, read GroupRead) {
-		handed = append(handed, fmt.Sprintf("%s=%d", id, len(snapshotOf(id, read, time.Time{}).Members)))
+		handed = append(handed, fmt.Sprintf("%s=%d", id, len(snapshotOf(reader, id, read, time.Time{}).Members)))
 	})
 	var unanswered *redisbatch.UnansweredError
 	if !errors.As(err, &unanswered) || unanswered.Keys != 1 || fmt.Sprint(handed) != "[1=1]" || len(client.calls) != 2 {

@@ -58,6 +58,10 @@ type streamedExecution struct {
 	// under another. A Plan with a target plan and no entry here is read as
 	// unresolved by both, never as unscoped or as empty.
 	targetResolutions map[execution.PlanIdentity]*resolvedTarget
+	// scopeGroups is what this Slot read the dynamic groups its Plans'
+	// target scopes name to, by tenant and group, read once at Begin for
+	// every record the Slot admits.
+	scopeGroups execution.ScopeGroupMemberships
 	// seriesCensus is where this Slot's series went, counted where each
 	// decision is made rather than inferred afterwards. See seriesCensus.
 	seriesCensus seriesCensus
@@ -259,6 +263,7 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.
 	stream.resolveTargetPlans(ctx)
+	stream.resolveScopeGroups(ctx)
 	return nil
 }
 

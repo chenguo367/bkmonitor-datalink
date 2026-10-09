@@ -136,8 +136,66 @@ func (stream *streamedExecution) resolveTargetPlans(ctx context.Context) {
 		target := newResolvedTarget(resolution)
 		target.unresolved = unresolved
 		stream.targetResolutions[due.Identity] = target
-		stream.observeTargetResolution(ctx, due, resolution)
+		stream.observeTargetResolution(ctx, due, resolution, false)
 	}
+}
+
+// ResolvedScopeGroups hands the source the dynamic groups Begin read, so a
+// target scope's group conditions are matched against one reading for the
+// whole Slot.
+func (stream *streamedExecution) ResolvedScopeGroups() execution.ScopeGroupMemberships {
+	if len(stream.scopeGroups) == 0 {
+		return nil
+	}
+	return stream.scopeGroups
+}
+
+// resolveScopeGroups reads, once for this Slot at Begin, every dynamic group
+// the due Plans' target scopes name: the platform keeps a dynamic group
+// target as the group ids, and Python reads the groups' hosts when it
+// matches. Each Plan's groups are reported as one resolution. A worker
+// without the reader reads none, and each is unavailable by name: its
+// condition admits no host, as a target plan nothing resolved admits none.
+func (stream *streamedExecution) resolveScopeGroups(ctx context.Context) {
+	reader := stream.coordinator.ports.ScopeGroups
+	for _, due := range stream.header.DuePlans {
+		ids := due.CompiledPlan.TargetScope().DynamicGroupIDs()
+		if len(ids) == 0 {
+			continue
+		}
+		if stream.scopeGroups == nil {
+			stream.scopeGroups = make(execution.ScopeGroupMemberships)
+		}
+		interval := time.Duration(due.CompiledPlan.EvaluationSemantics().EvaluationInterval) * time.Second
+		resolution := &targetplan.Resolution{Selectors: make([]targetplan.SelectorResult, 0, len(ids))}
+		for _, id := range ids {
+			selector := targetplan.SelectorResult{Kind: targetplan.SelectorKindGroup, ID: id,
+				State: targetplan.SelectorUnavailable, Reason: targetplan.ReasonSourceUnwired}
+			if reader != nil {
+				// Asked per Plan, not once per Slot: the store keeps a group
+				// for as long as the longest period that asks for it.
+				selector = reader.ResolveScopeGroup(ctx, due.Identity.TenantID, id, interval)
+			}
+			stream.scopeGroups[execution.ScopeGroupRef{TenantID: due.Identity.TenantID, GroupID: id}] = scopeGroupMembership(selector)
+			resolution.Selectors = append(resolution.Selectors, selector)
+		}
+		resolution.Compose()
+		stream.observeTargetResolution(ctx, due, resolution, true)
+	}
+}
+
+// scopeGroupMembership is one group's reading as the admission filter takes
+// it: its hosts, known only when it answered in full from current facts. A
+// group served past a failed refresh, or one some of whose members were
+// refused, still admits the hosts it holds; a host outside them is not then
+// known to be outside the target.
+func scopeGroupMembership(selector targetplan.SelectorResult) execution.ScopeGroupMembership {
+	membership := execution.ScopeGroupMembership{HostIDs: make([]string, 0, len(selector.Members)),
+		Known: (selector.State == targetplan.SelectorOK || selector.State == targetplan.SelectorOKEmpty) && selector.StaleAge == 0}
+	for host := range selector.Members {
+		membership.HostIDs = append(membership.HostIDs, host)
+	}
+	return membership
 }
 
 // newResolvedTarget projects one resolution into the two views the Slot
@@ -189,9 +247,9 @@ func newResolvedTarget(resolution *targetplan.Resolution) *resolvedTarget {
 // observeTargetResolution writes the line and counters a
 // resolution leaves: the composed state, the stale age when a selector ate
 // old grain, and each selector by name.
-func (stream *streamedExecution) observeTargetResolution(ctx context.Context, due execution.DuePlan, resolution *targetplan.Resolution) {
+func (stream *streamedExecution) observeTargetResolution(ctx context.Context, due execution.DuePlan, resolution *targetplan.Resolution, scopeGroups bool) {
 	facts := &observability.TargetResolutionFacts{
-		StrategyID: due.Identity.StrategyID, State: string(resolution.State),
+		StrategyID: due.Identity.StrategyID, State: string(resolution.State), ScopeGroups: scopeGroups,
 		StaleAgeSeconds: int64(resolution.StaleAge.Seconds()),
 		Selectors:       make([]observability.TargetSelectorFacts, 0, len(resolution.Selectors)),
 	}
