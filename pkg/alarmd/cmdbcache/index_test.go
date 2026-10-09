@@ -407,9 +407,12 @@ func TestAnEmptyHostCacheIsNotAFleetWithNoHosts(t *testing.T) {
 // a target that resolved to nobody. That reading is legitimate for a real
 // empty target, so nothing downstream can tell the two apart afterwards.
 //
-// A stale index resolves. It holds hosts and answers about them; refusing to
-// act on it would stop every host-scoped decision for the length of a CMDB
-// hiccup, which is the larger harm and not the one this is for.
+// An index past its staleness bound does not resolve either: its answers are
+// facts nobody can vouch for any more, and no-data judges only on facts that
+// were there (A1), as admission does since the same bound (decision-013,
+// section 2 #12 and section 5.1 item 4). The bound is ten refresh intervals,
+// a refresh failing for that long rather than a hiccup. At the bound itself
+// the index still resolves.
 func TestHostIndexResolvedFollowsWhetherThereIsAnIndexToAnswerFrom(t *testing.T) {
 	clock := time.Unix(1700000000, 0).UTC()
 	cold, err := NewStore(stubLoader{}, StoreOptions{
@@ -455,14 +458,20 @@ func TestHostIndexResolvedFollowsWhetherThereIsAnIndexToAnswerFrom(t *testing.T)
 		t.Fatal("an index holding hosts reported that it cannot resolve them")
 	}
 
-	// And it stays resolved when the index goes stale: the answers are old,
-	// not absent.
-	clock = clock.Add(11 * time.Minute)
+	// At the bound the index still resolves, through the store and through
+	// the lookup the worker holds; one second past it, it does not, and
+	// Health names the same state.
+	lookup := NewHostBusinessLookup(loaded)
+	clock = clock.Add(10 * time.Minute)
+	if !loaded.HostIndexResolved() || !lookup.HostIndexResolved() {
+		t.Fatal("an index exactly at its staleness bound reported that it cannot resolve hosts")
+	}
+	clock = clock.Add(time.Second)
 	if health := loaded.Health(); !health.Degraded || health.DegradedReason != "index_stale" {
 		t.Fatalf("fixture: health = %+v, want the stale state this asserts against", health)
 	}
-	if !loaded.HostIndexResolved() {
-		t.Fatal("a stale index reported that it cannot resolve hosts; that would stop every " +
-			"host-scoped decision for the length of a CMDB hiccup")
+	if loaded.HostIndexResolved() || lookup.HostIndexResolved() {
+		t.Fatal("an index one second past its staleness bound reported that it can resolve hosts; " +
+			"no-data would judge a static target's hosts absent on facts nobody can vouch for")
 	}
 }

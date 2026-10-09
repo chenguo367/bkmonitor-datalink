@@ -118,22 +118,20 @@ func (store *Store) targetIndex() (*Index, error) {
 //
 // It is the same judgement Health makes, read for a different question. Health
 // says how this process is doing; this says whether a caller may act on the
-// answers it gets, and the two states where it may not are the ones Health
-// already names as never_loaded and index_empty: with no index every host is
+// answers it gets, and the states where it may not are the ones Health names
+// never_loaded, index_empty and index_stale: with no index every host is
 // "not held", and with an empty one so is every host, which is
 // indistinguishable from a target whose hosts have all gone.
 //
-// A stale index resolves. It holds hosts and answers about them, and the
-// answers being a refresh interval old is a lag this deployment lives with;
-// refusing to act on them would stop every host-scoped decision for the length
-// of a CMDB hiccup, which is the larger harm.
+// An index past its staleness bound does not resolve either. Its answers are
+// facts nobody can vouch for any more, and no-data judges only on facts that
+// were there, as admission does on the same bound (CurrentWithinBound;
+// decision-013, section 2 #12 and section 5.1 item 4). The bound is ten
+// refresh intervals: a refresh failing for that long, not a hiccup, so what
+// this stops is deciding on a CMDB that has not answered for that long.
 func (store *Store) HostIndexResolved() bool {
-	if store == nil {
-		return false
-	}
-	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-	return store.index != nil && store.index.Hosts() > 0
+	index, within := store.CurrentWithinBound()
+	return index != nil && within && index.Hosts() > 0
 }
 
 // Refresh rebuilds the index once. A failed refresh leaves the previous index
