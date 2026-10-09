@@ -115,6 +115,9 @@ var removedLabelValues = []struct {
 	// nothing; "emptied" claimed the writer had emptied it, which a missing
 	// key cannot say.
 	{"cmdb_index_business_mappings", "state", "emptied", true},
+	// Every Plan a series is admitted for has its scope indexed: a consumer
+	// of a Plan that is not due is refused before the query is prepared.
+	{"series_admission_total", "reason", "plan_not_indexed", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -140,6 +143,9 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 	for _, removed := range removedLabelValues {
 		if removed.family == "cmdb_index_business_mappings" {
 			r.SetCMDBBusinessMapping("bcs_cluster", 1, 0, 0, false, true)
+		}
+		if removed.family == "series_admission_total" {
+			r.RecordSeriesAdmission("target_scope", "admitted", removed.value)
 		}
 	}
 	// The target group store's states and the selector reasons are closed
