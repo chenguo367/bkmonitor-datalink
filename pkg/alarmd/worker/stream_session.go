@@ -701,7 +701,8 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	}
 	physical := make(map[execution.PhysicalQueryDigest]classifiedPhysicalCompletion, len(completion.PhysicalQueries))
 	for _, item := range completion.PhysicalQueries {
-		physical[item.PhysicalQuery] = classifiedPhysicalCompletion{PhysicalQueryCompletion: item, sourceBackend: physicalFailureCategory(item.RouteFacts) == observability.QueryFailureCategorySourceBackend}
+		sourceBackend := physicalFailureCategory(item.RouteFacts) == observability.QueryFailureCategorySourceBackend || backendDidNotAnswer(item.RouteFacts)
+		physical[item.PhysicalQuery] = classifiedPhysicalCompletion{PhysicalQueryCompletion: item, sourceBackend: sourceBackend}
 	}
 	completionBindings := make(map[struct {
 		consumer    execution.ConsumerRef

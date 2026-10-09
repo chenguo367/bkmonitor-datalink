@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -44,6 +45,12 @@ type queryCooldownState struct {
 	until, wakeAt, lastQueryAt time.Time
 	// reason is why the latest failed query was unavailable.
 	reason execution.ReasonCode
+	// timeouts is how many of the failures were the backend not answering
+	// before the deadline (QUERY_TIMEOUT), and firstTimeoutAt when the first
+	// of them was: what a reader of the pool needs to say "in it since T
+	// after N timeouts". Both clear with the failures.
+	timeouts       uint32
+	firstTimeoutAt time.Time
 }
 
 // queryCooldownMemory is what the pool remembers across membership: since
@@ -79,6 +86,11 @@ type QueryCooldownRecord struct {
 	ExitReason       string                       `json:"exit_reason,omitempty"`
 	Reentries        uint32                       `json:"reentries,omitempty"`
 	Reason           execution.ReasonCode         `json:"reason,omitempty"`
+	// Timeouts and FirstTimeoutAt are the failures that were timeouts and
+	// when the first of them was. A record written before they existed reads
+	// as none, which is what it had.
+	Timeouts       uint32    `json:"timeouts,omitempty"`
+	FirstTimeoutAt time.Time `json:"first_timeout_at"`
 }
 
 // QueryCooldownKey is where a Query Group's record is kept under prefix. The
@@ -128,7 +140,8 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	}
 	runner.queryCooldown = queryCooldownState{failures: record.Failures, queryRevision: record.QueryRevision,
 		scheduleRevision: record.ScheduleRevision, segmentStart: record.SegmentStart,
-		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason}
+		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason,
+		timeouts: record.Timeouts, firstTimeoutAt: record.FirstTimeoutAt}
 	memory.enteredAt, memory.source = record.EnteredAt, QueryCooldownRestored
 	runner.emitQueryCooldown(ctx, QueryCooldownRestored)
 }
@@ -146,6 +159,7 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		EnteredAt: memory.enteredAt, Until: state.until, LastQueryAt: state.lastQueryAt, Failures: state.failures,
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
 		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
+		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
 	})
 }
 
@@ -268,6 +282,14 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 	if state.failures < 32 {
 		state.failures++
 	}
+	if state.reason == execution.ReasonCode(contract.ReasonQueryTimeout) {
+		if state.timeouts == 0 {
+			state.firstTimeoutAt = runner.now()
+		}
+		if state.timeouts < 32 {
+			state.timeouts++
+		}
+	}
 	// A missing or extreme interval is not permission to guess a cooldown.
 	if state.failures < unavailableThreshold || intervalSeconds <= 0 ||
 		intervalSeconds > int64((24*time.Hour)/time.Second) {
@@ -325,7 +347,7 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 		Result: result, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup)},
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
-			LastQueryAt: state.lastQueryAt, Failures: state.failures,
+			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
 			EnteredAt: memory.enteredAt, Source: memory.source,
 			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries},
 	})

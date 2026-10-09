@@ -11,6 +11,10 @@ type QueryCooldownFacts struct {
 	Until       time.Time `json:"until"`
 	LastQueryAt time.Time `json:"last_query_at"`
 	Failures    uint32    `json:"failures"` // Saturates at 32; 32 means at least 32.
+	// Timeouts is how many of the failures were the backend not answering
+	// before the deadline, FirstTimeoutAt when the first was; saturates at 32.
+	Timeouts       uint32    `json:"timeouts,omitempty"`
+	FirstTimeoutAt time.Time `json:"first_timeout_at,omitempty"`
 	// EnteredAt is when the Query Group entered the pool, across restarts and
 	// owners; Source says how it is in it now: probe (this process's own
 	// failed queries) or restored (read back from its record). LastExitAt and
