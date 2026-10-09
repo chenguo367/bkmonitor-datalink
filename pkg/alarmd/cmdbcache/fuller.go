@@ -77,9 +77,14 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		// address below resolves to. Python still takes the topology from
 		// the address, and so does this.
 	}
+	// Past this point a true id the record carried is one CMDB does not know:
+	// whatever else places the record's topology, the host the status filter
+	// judges is that unknown id.
+	unknownID := facts.HostNaming.IDKey != ""
 	if instanceResolves(index, facts) {
 		// Python's service-instance branch comes before the address one and
 		// returns when it resolves; the next fuller is that branch.
+		facts.HostUnresolved = unknownID
 		return
 	}
 	address, cloud := fullerAddress(dimensions)
@@ -87,10 +92,14 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		if host, found := index.Lookup(address + "|" + cloud); found {
 			placeByAddress(dimensions, facts, cloud, host)
 			resolveHostState(index, facts)
+			facts.HostUnresolved = unknownID
 			return
 		}
 	}
 	resolveHostState(index, facts)
+	// Named, and placed by nothing: an id, an address or alias, or an
+	// instance the cache did not find.
+	facts.HostUnresolved = unknownID || address != "" || len(facts.ServiceInstanceKeys()) > 0
 }
 
 // placeByID is Python's host-by-id branch: the host's own address and cloud
