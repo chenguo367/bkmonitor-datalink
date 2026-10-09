@@ -76,6 +76,7 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	for _, node := range plan.DynamicTopologies {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node, index))
 	}
+	resolver.markServedPastAFailedRefresh(resolution.Selectors, index, readErr)
 	if plan.HasExclusions() {
 		exclusion := resolver.resolveExclusions(plan, index, readErr, groupExclusions)
 		resolution.Excluded = exclusion.Members
@@ -86,6 +87,35 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	}
 	resolution.Compose()
 	return resolution
+}
+
+// markServedPastAFailedRefresh says, on every selector answered from the host
+// index, that the index was served past a refresh that failed: the answer
+// is the snapshot before, younger than the bound but not the latest the
+// writer has (decision-017 section 3.2, resolved_from_stale_snapshot, the
+// same rule the group selectors follow). A resolution carrying it is no
+// verdict for the target-scope close (decision-024: facts not current are
+// not closed on). Exclusions are judged separately, with the error itself.
+func (resolver *TargetResolver) markServedPastAFailedRefresh(selectors []targetplan.SelectorResult, index *Index, readErr error) {
+	if readErr == nil || index == nil {
+		return
+	}
+	age := resolver.now().Sub(index.BuiltAt())
+	if age <= 0 {
+		age = time.Nanosecond
+	}
+	for i := range selectors {
+		switch selectors[i].Kind {
+		case targetplan.SelectorKindStatic, targetplan.SelectorKindTopology:
+		default:
+			continue
+		}
+		if selectors[i].State == targetplan.SelectorOK || selectors[i].State == targetplan.SelectorOKEmpty {
+			if selectors[i].StaleAge < age {
+				selectors[i].StaleAge = age
+			}
+		}
+	}
 }
 
 // excludedGroupFacts holds only the plan's excluded canonical members, for

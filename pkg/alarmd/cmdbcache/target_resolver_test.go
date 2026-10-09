@@ -211,3 +211,33 @@ func nonNil(values []string) []string {
 	}
 	return values
 }
+
+// A host index whose latest refresh failed is served as the snapshot before,
+// within the bound. Every selector answered from it says so - stale - as a
+// group served past a failed refresh does (decision-017 section 3.2,
+// resolved_from_stale_snapshot), so the resolution is not a verdict the
+// target-scope close may act on (decision-024: facts not current are not
+// closed on). With the refresh succeeding, it is current.
+func TestSelectorsAnsweredFromAHostIndexPastAFailedRefreshAreStale(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	now := at.Add(2 * time.Minute)
+	clock := func() time.Time { return now }
+	records := map[int]string{101: addressedHost(101, "tenant-a", "192.0.2.1|0", 2, "")}
+	plan := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleIPCloud,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"}, Address: true}, TenantID: "tenant-a",
+		StaticKeys: []string{}, StaticHosts: []string{"101"}}
+
+	hosts := hostStore(t, func() time.Time { return at }, hostFields(records), nil)
+	hosts.now = clock
+	current := NewTargetResolver(nil, hosts, clock).Resolve(context.Background(), plan, time.Minute)
+	if current.StaleAge != 0 || selector(current, targetplan.SelectorKindStatic, "cw-Host").StaleAge != 0 {
+		t.Fatalf("a current index answered stale: %+v", current)
+	}
+
+	hosts.lastError = errors.New("scan host cache: i/o timeout")
+	stale := NewTargetResolver(nil, hosts, clock).Resolve(context.Background(), plan, time.Minute)
+	static := selector(stale, targetplan.SelectorKindStatic, "cw-Host")
+	if static.State != targetplan.SelectorOK || static.StaleAge != 2*time.Minute || stale.StaleAge != 2*time.Minute {
+		t.Fatalf("served past a failed refresh: selector %+v, resolution stale %s; want OK and two minutes stale", static, stale.StaleAge)
+	}
+}
