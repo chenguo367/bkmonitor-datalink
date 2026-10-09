@@ -862,6 +862,8 @@ func (session *sequenceOwnerSession) ValidateCurrent(context.Context, time.Time)
 
 func (session *sequenceOwnerSession) Deadline() time.Time { return time.Time{} }
 
+func (session *sequenceOwnerSession) NoteContentScope(string) {}
+
 func (session *sequenceOwnerSession) ValidateCurrentWithAssignment(
 	context.Context,
 	time.Time,

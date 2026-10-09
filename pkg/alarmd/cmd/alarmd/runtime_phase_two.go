@@ -3362,7 +3362,7 @@ func (bundle *phaseTwoWorkerBundle) stopLostQueryGroup(
 		err = errors.Join(err, releaseErr)
 	}
 	bundle.updateReadiness()
-	bundle.observeOwnership(context.Background(), observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
+	bundle.observeOwnership(context.Background(), observability.StageAssignmentLost, lostResult(err), queryGroup, err)
 }
 
 func (bundle *phaseTwoWorkerBundle) detachLostQueryGroup(
@@ -3379,7 +3379,20 @@ func (bundle *phaseTwoWorkerBundle) detachLostQueryGroup(
 		err = errors.Join(err, releaseErr)
 	}
 	bundle.updateReadiness()
-	bundle.observeOwnership(context.Background(), observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
+	bundle.observeOwnership(context.Background(), observability.StageAssignmentLost, lostResult(err), queryGroup, err)
+}
+
+// lostResult is how a Query Group let go of outside a planned stop reads: a
+// failure, unless its lease ran out at a content switch - the holder was
+// still on the old content when the change fell due, and the next reconcile
+// takes the Query Group again on the new content. Its reason says so
+// either way (ownership.LeaseEndedAtContentSwitch).
+func lostResult(err error) observability.Result {
+	var switched *ownership.LeaseEndedAtContentSwitch
+	if errors.As(err, &switched) {
+		return observability.ResultSuccess
+	}
+	return observability.ResultFailed
 }
 
 func (bundle *phaseTwoWorkerBundle) detachQueryGroup(

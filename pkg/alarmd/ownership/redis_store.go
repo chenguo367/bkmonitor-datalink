@@ -282,7 +282,7 @@ func (store *RedisStore) RenewControlLeader(
 	if authority.Fence.QueryGroup != ControlLeaderIdentity {
 		return PublicationAuthority{}, ErrStaleFence
 	}
-	lease, err := store.renew(ctx, authority.Fence, at, ttl, false)
+	lease, err := store.renew(ctx, authority.Fence, "", at, ttl, false)
 	if err != nil {
 		return PublicationAuthority{}, err
 	}
@@ -579,12 +579,30 @@ func (store *RedisStore) Renew(
 	at time.Time,
 	ttl time.Duration,
 ) (Lease, error) {
-	return store.renew(ctx, fence, at, ttl, true)
+	return store.renew(ctx, fence, "", at, ttl, true)
+}
+
+// RenewDeclaring is Renew for a holder that says which content scope it
+// runs now. A renewal under a pending content change is capped at the
+// change's effective time so a holder still on the old content stops there;
+// a holder that declares the pending scope already runs the new content and
+// is not who the cap protects against, so its renewal is not capped for the
+// change and its lease carries across the switch. An empty declaration is
+// Renew.
+func (store *RedisStore) RenewDeclaring(
+	ctx context.Context,
+	fence execution.OwnerFence,
+	declared string,
+	at time.Time,
+	ttl time.Duration,
+) (Lease, error) {
+	return store.renew(ctx, fence, declared, at, ttl, true)
 }
 
 func (store *RedisStore) renew(
 	ctx context.Context,
 	fence execution.OwnerFence,
+	declared string,
 	at time.Time,
 	ttl time.Duration,
 	requireAssignment bool,
@@ -594,7 +612,7 @@ func (store *RedisStore) renew(
 	}
 	result, err := renewScript.Run(ctx, store.client, []string{
 		store.assignmentKey(fence.QueryGroup), store.ownershipKey(fence.QueryGroup),
-	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, ttl.Milliseconds()).Result()
+	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, ttl.Milliseconds(), declared).Result()
 	if err != nil {
 		return Lease{}, err
 	}
@@ -1034,6 +1052,7 @@ local owner_id = ARGV[2]
 local epoch = ARGV[3]
 local token = ARGV[4]
 local ttl_ms = tonumber(ARGV[5])
+local declared = ARGV[6] or ''
 local now_ms = redis_now_ms()
 local deadline_ms = now_ms + ttl_ms
 local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, '', now_ms)
@@ -1043,14 +1062,21 @@ if require_assignment == '1' then
   scope = current_content_scope(KEYS[1], now_ms)
   local change = redis.call('HMGET', KEYS[1], 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision',
     'desired_worker_id')
+  local cap = 0
   if change[1] and change[1] ~= '' then
     pending = change[1]
     effective = tonumber(change[2] or '0')
+    -- The cap stops a holder still on the old content at the change; one
+    -- that declares the pending content already runs it and is not capped.
+    if declared ~= pending then cap = effective end
   end
   -- The fence admitted a caller the record no longer desires only as the
   -- draining holder of a move, whose lease ends where its grace does.
-  if change[4] ~= owner_id then effective = tonumber(change[2] or '0') end
-  if effective > 0 and deadline_ms > effective then deadline_ms = effective end
+  if change[4] ~= owner_id then
+    effective = tonumber(change[2] or '0')
+    cap = effective
+  end
+  if cap > 0 and deadline_ms > cap then deadline_ms = cap end
   timeline = tonumber(change[3] or '0')
 end
 redis.call('HSET', KEYS[2], 'deadline_ms', deadline_ms)

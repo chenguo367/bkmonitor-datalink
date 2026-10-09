@@ -257,6 +257,8 @@ func (session scopeTestSession) ValidateCurrent(context.Context, time.Time) (exe
 
 func (session scopeTestSession) Deadline() time.Time { return time.Time{} }
 
+func (session scopeTestSession) NoteContentScope(string) {}
+
 func (session scopeTestSession) ValidateCurrentWithAssignment(
 	context.Context,
 	time.Time,

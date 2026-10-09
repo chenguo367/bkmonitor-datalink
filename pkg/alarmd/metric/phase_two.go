@@ -409,13 +409,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"refusal: OWNERSHIP_STALE_FENCE (the fence's epoch, token or deadline no longer match the lease), " +
 				"OWNERSHIP_NOT_DESIRED (the assignment names another worker), OWNERSHIP_LEASE_BUSY (another " +
 				"owner holds the lease), CONTENT_SCOPE_MOVED (the content scope a write was fenced against has " +
-				"moved; the lease itself is live). site: admission is the side-effect admission check before a " +
-				"Slot's writes, state_apply the fenced State write itself, lease the worker's acquire, release and " +
-				"takeover, renewal the lease renewal, control the control leader's assignment writes. Every " +
-				"pair is created at startup, so a zero is never happened and not an absent series; a change " +
-				"of content scope is read as state_apply CONTENT_SCOPE_MOVED rising for the old scope after it " +
-				"took effect and nothing before. Counted once per observation, not per key: a fenced batch " +
-				"refused as a whole is one.",
+				"moved while the lease is live; at renewal, the lease ran out at a content switch because the " +
+				"holder was still on the old content when the change fell due). site: admission is the " +
+				"side-effect admission check before a Slot's writes, state_apply the fenced State write itself, " +
+				"lease the worker's acquire, release and takeover, renewal the lease renewal, control the control " +
+				"leader's assignment writes. Every pair is created at startup, so a zero is never happened and " +
+				"not an absent series. A content change reads as follows: a holder already on the new content " +
+				"when the change falls due keeps its lease across it and nothing here moves; one still on the " +
+				"old content reads renewal CONTENT_SCOPE_MOVED once as its lease runs out at the switch, and " +
+				"takes the Query Group again on the new content at the next reconcile; a write still fenced " +
+				"against the old scope after the switch reads state_apply CONTENT_SCOPE_MOVED. Counted once per " +
+				"observation, not per key: a fenced batch refused as a whole is one.",
 		}, []string{"site", "refusal"}),
 		targetPlanResolutions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "target_plan_resolution_total",

@@ -408,6 +408,8 @@ type fakeSession struct {
 	assignment ownership.AssignmentRecord
 	err        error
 	deadline   time.Time
+	// noted is every content scope the Runner told the session it runs.
+	noted []string
 }
 
 func (session *fakeSession) ValidateCurrent(context.Context, time.Time) (execution.OwnerFence, error) {
@@ -419,6 +421,10 @@ func (session *fakeSession) Deadline() time.Time { return session.deadline }
 // The zero Assignment record is deliberate: this fake has no Assignment facts,
 // so the Runner has nothing worth handing to the source and the source reads
 // for itself, which is what these tests have always exercised.
+func (session *fakeSession) NoteContentScope(scope string) {
+	session.noted = append(session.noted, scope)
+}
+
 func (session *fakeSession) ValidateCurrentWithAssignment(
 	context.Context,
 	time.Time,

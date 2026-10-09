@@ -207,6 +207,7 @@ func (runner *Runner) Supplement(
 		Operation:                      execution.OperationSupplement, AttemptNo: 1, OwnerFence: fence,
 		ExpectedNextSlot: slot.ExpectedNextSlot, ContentScope: slot.Dispatch.ContentScope, Supplement: &scope,
 	}
+	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
 	result, err := runner.executor.Execute(execution.ContextWithLeaseAuthority(ctx, runner.session), request)
 	if err != nil {
 		return execution.SupplementFacts{}, err
