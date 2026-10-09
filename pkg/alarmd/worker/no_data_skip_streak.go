@@ -94,20 +94,31 @@ func (streaks *noDataSkipStreaks) record(plan execution.PlanKey, round execution
 	return true
 }
 
-// recordNoDataOutcome files one Plan's outcome for this Slot and reports a
-// stall the round it becomes one.
+// recordNoDataOutcome files one Plan's outcome for this Slot.
 //
-// The outcome reaches the Slot's partition here and nowhere else, so the
-// partition and the streak cannot disagree about what happened to a Plan.
+// The outcome reaches the Slot's partition here and nowhere else. The streak
+// is counted later, from the outcome the Slot settles on (noteNoDataStreaks):
+// a Slot past its cap turns an EVALUATED already filed into a skip, and a
+// streak counted at filing would be reset by the judgement and then counted
+// as one, every round, never reaching a stall.
 func (stream *streamedExecution) recordNoDataOutcome(
-	ctx context.Context, due execution.DuePlan, outcome nodata.SlotOutcome,
+	_ context.Context, due execution.DuePlan, outcome nodata.SlotOutcome,
 ) {
 	if stream.noDataOutcomeIndex == nil {
 		stream.noDataOutcomeIndex = map[execution.PlanKey]int{}
 	}
 	stream.noDataOutcomeIndex[due.Key()] = len(stream.noDataOutcomes)
 	stream.noDataOutcomes = append(stream.noDataOutcomes, outcome)
-	stream.noteNoDataStreak(ctx, due, outcome)
+}
+
+// noteNoDataStreaks counts each due Plan's settled outcome into its streak,
+// once per Slot, when the Slot's results are final.
+func (stream *streamedExecution) noteNoDataStreaks(ctx context.Context) {
+	for _, due := range stream.header.DuePlans {
+		if index, filed := stream.noDataOutcomeIndex[due.Key()]; filed {
+			stream.noteNoDataStreak(ctx, due, stream.noDataOutcomes[index])
+		}
+	}
 }
 
 // noteNoDataStreak counts one Plan's outcome into its streak and reports a

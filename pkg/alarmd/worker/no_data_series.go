@@ -558,6 +558,7 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 	if len(stream.noDataOutcomes) == 0 {
 		return
 	}
+	stream.noteNoDataStreaks(ctx)
 	counts := make(map[nodata.SlotOutcome]int, len(nodata.SlotOutcomes))
 	for _, outcome := range stream.noDataOutcomes {
 		counts[outcome]++
@@ -611,7 +612,6 @@ func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context
 			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
 		case stream.noDataOutcomes[index] == nodata.OutcomeEvaluated:
 			stream.noDataOutcomes[index] = nodata.OutcomeSkippedSlotBudget
-			stream.noteNoDataStreak(ctx, due, nodata.OutcomeSkippedSlotBudget)
 		}
 	}
 	stream.noDataPlansSeen = seen
