@@ -116,6 +116,10 @@ func TestATrackedRowIsBuiltUnderTheTrackersLockWhileObservationsArrive(t *testin
 // and that this replica tracks, and leaves a Plan with a listed row alone.
 func TestTheStrategyRouteAttachesTheLiveRowOnlyWhereNoRowIsListed(t *testing.T) {
 	tracker, snapshots, expectation := unlistedFixture(t)
+	// The listed object is tracked here too, so only its listed row keeps
+	// the live one off it.
+	listed := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-listed"})
+	absenceDecided(listed, tracker, "s-listed", 600, observability.NoDataAbsenceFacts{RosterSource: "HISTORY", Expected: 1, Present: 1})
 	service := mustService(t, stubExpectations{expectation: expectation}, stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: snapshots})
 	service.SetLocalRows(tracker.TrackedRow)
 	standing := StrategyStanding{Plans: []StrategyPlanStanding{

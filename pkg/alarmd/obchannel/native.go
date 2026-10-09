@@ -463,16 +463,11 @@ func invokeNative(ctx context.Context, handler http.Handler, path string, query 
 }
 
 // objectElsewhere is the Query Group to route an object read to: one whose
-// answer carries no listed row and no row of the answering replica's own,
-// only the replica that holds it.
+// answer names the replica holding it, which the object route does only when
+// it has neither a listed row nor a row of its own for it.
 func objectElsewhere(p Params, result any) (string, bool) {
-	body, ok := result.(map[string]any)
-	if !ok || body["anomaly"] != nil || body["tracked"] != nil {
-		return "", false
-	}
-	if holder, _ := body["tracked_by"].(string); holder == "" {
-		return "", false
-	}
+	body, _ := result.(map[string]any)
+	holder, _ := body["tracked_by"].(string)
 	group := p.String("query_group")
-	return group, group != ""
+	return group, holder != "" && group != ""
 }
