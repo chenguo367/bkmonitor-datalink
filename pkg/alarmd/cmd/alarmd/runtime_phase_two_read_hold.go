@@ -137,16 +137,20 @@ func (holds *productionReadHolds) bind(qg execution.QueryGroupIdentity, session 
 // stale fence while its lease kept renewing. Compared as the *Session the
 // binding holds, never as an address or an id derived from one: the binding
 // keeps the old session reachable, so a pointer it compares against cannot
-// have been reused.
+// have been reused. The controller's state goes in the same critical section
+// as the binding: forgotten after the lock was let go, a successor could bind
+// and load in between, and this release then dropped the successor's freshly
+// read hold. Forget takes only the controller's map lock, which is never
+// held across the Owner callback that takes holds.mu, so holding holds.mu
+// over it is safe, as releasePredecessors already does.
 func (holds *productionReadHolds) forget(qg execution.QueryGroupIdentity, session *ownership.Session) {
 	holds.mu.Lock()
+	defer holds.mu.Unlock()
 	group := holds.groups[qg]
 	if group == nil || group.session != session {
-		holds.mu.Unlock()
 		return
 	}
 	delete(holds.groups, qg)
-	holds.mu.Unlock()
 	holds.controller.Forget(qg)
 }
 
