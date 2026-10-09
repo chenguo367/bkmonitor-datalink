@@ -42,6 +42,8 @@ func TestTheAbsentPageRefusesAWordOutsideItsLists(t *testing.T) {
 	for query, refusal := range map[string]string{
 		"limit=0": "INVALID_LIMIT", "limit=201": "INVALID_LIMIT", "limit=x": "INVALID_LIMIT",
 		"cursor=%25%25": "INVALID_CURSOR", "outcome=gone": "OUTCOME_UNKNOWN", "execution=sent": "EXECUTION_UNKNOWN",
+		// The word the decision count used before it said decided.
+		"outcome=closed": "OUTCOME_UNKNOWN",
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/absent?"+query, nil))
@@ -52,9 +54,9 @@ func TestTheAbsentPageRefusesAWordOutsideItsLists(t *testing.T) {
 	cursor := EncodeAbsentCursor(absentalerts.Key{TenantID: "system", StrategyID: "10"})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet,
-		"/api/absent?limit=200&cursor="+cursor+"&outcome=closed&execution=not_run&strategy_id=10", nil))
+		"/api/absent?limit=200&cursor="+cursor+"&outcome=close_decided&execution=not_run&strategy_id=10", nil))
 	if recorder.Code != http.StatusOK || asked.Limit != 200 || asked.After == nil || asked.After.StrategyID != "10" ||
-		asked.Outcome != absentalerts.OutcomeClosed || asked.Execution != AbsentExecutionNotRun || asked.StrategyID != "10" {
+		asked.Outcome != absentalerts.OutcomeCloseDecided || asked.Execution != AbsentExecutionNotRun || asked.StrategyID != "10" {
 		t.Fatalf("the page was not asked what the request asked: %d %+v", recorder.Code, asked)
 	}
 	if !strings.Contains(recorder.Body.String(), `"answered_by":"replica-a"`) || !strings.Contains(recorder.Body.String(), `"rows":[]`) {

@@ -424,8 +424,8 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		execution.word = absentalerts.OutcomeSendFailed
 		return execution
 	}
-	loop.count(absentalerts.OutcomeAlertClosed, len(batch))
-	execution.word = absentalerts.OutcomeAlertClosed
+	loop.count(absentalerts.OutcomeCloseSent, len(batch))
+	execution.word = absentalerts.OutcomeCloseSent
 	return execution
 }
 
@@ -491,7 +491,7 @@ func (loop *absentStrategyClose) record(ctx context.Context, result absentalerts
 	loop.last = sizes
 	loop.counts[result.Refusal]++
 	loop.countsMu.Unlock()
-	loop.count(absentalerts.OutcomeClosed, counts.Closed)
+	loop.count(absentalerts.OutcomeCloseDecided, counts.CloseDecided)
 	loop.count(absentalerts.OutcomeWithinGrace, counts.WithinGrace)
 	loop.count(absentalerts.OutcomeUnconfirmed, counts.Unconfirmed)
 	loop.count(absentalerts.OutcomeDeferred, counts.Deferred)

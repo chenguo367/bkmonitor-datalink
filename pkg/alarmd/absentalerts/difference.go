@@ -118,7 +118,7 @@ type Round struct {
 
 // Decision is what a round decided about one candidate: one of the four
 // per-candidate outcomes OutcomeWithinGrace, OutcomeUnconfirmed,
-// OutcomeDeferred and OutcomeClosed. AbsentSince is zero when the memory did
+// OutcomeDeferred and OutcomeCloseDecided. AbsentSince is zero when the memory did
 // not hold the candidate, which keeps it within the grace on every round.
 type Decision struct {
 	Key         Key
@@ -179,9 +179,11 @@ var Refusals = []string{RefusalNone, RefusalLinkUnavailable, RefusalLinkUnhealth
 // The per-strategy outcomes of the decision. Every candidate the round did
 // not close lands on one of these, and every one of them is counted.
 const (
-	// OutcomeClosed: absent from the snapshot for the grace under two
-	// observations, and within this round's bound.
-	OutcomeClosed = "closed"
+	// OutcomeCloseDecided: absent from the snapshot for the grace under two
+	// observations, and within this round's bound. Decided, not closed: what
+	// went out is OutcomeCloseSent, and whether the link acted on it is what
+	// its next reconcile read lists as active.
+	OutcomeCloseDecided = "close_decided"
 	// OutcomeWithinGrace: absent, but not for long enough by this loop's own
 	// clock. A leader that has just been elected cannot close on its first
 	// round.
@@ -213,9 +215,11 @@ const (
 	// from the link, so there is nothing to address a close to. Per
 	// strategy.
 	OutcomeEvidenceUnavailable = "evidence_unavailable"
-	// OutcomeAlertClosed: an alert the broker acknowledged a close for. Per
-	// alert, where OutcomeClosed counts strategies.
-	OutcomeAlertClosed = "alert_closed"
+	// OutcomeCloseSent: an alert the broker acknowledged a close for. Per
+	// alert, where OutcomeCloseDecided counts strategies. Sent, not closed:
+	// the link closes the alert or does not, and an alert it left open is
+	// listed active again by the next close's reconcile read.
+	OutcomeCloseSent = "close_sent"
 	// OutcomeSendFailed: the producer did not acknowledge the batch. Per
 	// alert.
 	OutcomeSendFailed = "send_failed"
@@ -238,9 +242,9 @@ const (
 )
 
 // Outcomes is the closed list, for the metric that reports every cell.
-var Outcomes = []string{OutcomeClosed, OutcomeWithinGrace, OutcomeUnconfirmed,
+var Outcomes = []string{OutcomeCloseDecided, OutcomeWithinGrace, OutcomeUnconfirmed,
 	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown,
-	OutcomeEvidenceUnavailable, OutcomeAlertClosed, OutcomeSendFailed,
+	OutcomeEvidenceUnavailable, OutcomeCloseSent, OutcomeSendFailed,
 	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
 
 // Counts is what the round measured. The denominators are reported with
@@ -257,11 +261,11 @@ type Counts struct {
 	WriterHoldsLastGood bool
 	// Candidates is the difference this round acts on: listed by the link,
 	// not listed by the snapshot.
-	Candidates  int
-	Closed      int
-	WithinGrace int
-	Unconfirmed int
-	Deferred    int
+	Candidates   int
+	CloseDecided int
+	WithinGrace  int
+	Unconfirmed  int
+	Deferred     int
 }
 
 // Bounds are the gates a round is decided under.
@@ -393,9 +397,9 @@ func Compute(round Round, bounds Bounds) Result {
 			decision.Outcome = OutcomeDeferred
 			result.Counts.Deferred++
 		default:
-			decision.Outcome = OutcomeClosed
+			decision.Outcome = OutcomeCloseDecided
 			result.Close = append(result.Close, Absent{Key: key, Identity: round.Identities[key], AbsentSince: absence.Since})
-			result.Counts.Closed++
+			result.Counts.CloseDecided++
 		}
 		result.Decisions[at] = decision
 	}

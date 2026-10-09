@@ -57,7 +57,7 @@ var AbsentStates = []string{AbsentStateReady, AbsentStateNoRoundYet, AbsentState
 // round makes about a candidate, and the link listing a strategy whose set
 // it could not read.
 var AbsentOutcomes = []string{absentalerts.OutcomeWithinGrace, absentalerts.OutcomeUnconfirmed,
-	absentalerts.OutcomeDeferred, absentalerts.OutcomeClosed, absentalerts.OutcomeIndexUnreadable}
+	absentalerts.OutcomeDeferred, absentalerts.OutcomeCloseDecided, absentalerts.OutcomeIndexUnreadable}
 
 // The execution words that are the page's own; the rest are the absent
 // close's outcome words for the same facts.
@@ -73,7 +73,7 @@ const (
 
 // AbsentExecutions is every word a row's execution takes.
 var AbsentExecutions = []string{AbsentExecutionNotRun,
-	absentalerts.OutcomeAlertClosed, absentalerts.OutcomeSendFailed, AbsentExecutionNoOwnAlerts,
+	absentalerts.OutcomeCloseSent, absentalerts.OutcomeSendFailed, AbsentExecutionNoOwnAlerts,
 	absentalerts.OutcomeIdentityUnknown, absentalerts.OutcomeRevisionUnknown, absentalerts.OutcomeEvidenceUnavailable}
 
 // Where a close's business and revision came from. Closed.
@@ -163,7 +163,7 @@ type AbsentTableFacts struct {
 	WithinGrace      int    `json:"within_grace"`
 	Unconfirmed      int    `json:"unconfirmed"`
 	Deferred         int    `json:"deferred"`
-	Closed           int    `json:"closed"`
+	CloseDecided     int    `json:"close_decided"`
 	// Rows is how many rows the table keeps; RowsNotKept how many the
 	// round decided about beyond the table's bound, in key order.
 	Rows        int `json:"rows"`
@@ -187,9 +187,16 @@ type AbsentCandidateRow struct {
 	AbsentSince string `json:"absent_since,omitempty"`
 	// Execution is the latest close of the strategy in this term; absent
 	// for one never decided to close.
-	Execution       *AbsentExecutionFacts `json:"execution,omitempty"`
-	SourceNow       string                `json:"source_now"`
-	SourceNowReason string                `json:"source_now_reason,omitempty"`
+	Execution *AbsentExecutionFacts `json:"execution,omitempty"`
+	// Sends is how many closes of the strategy went out this term, the
+	// broker acknowledging each, and FirstSentAt when the first did; both
+	// last as long as the strategy stays a candidate. Sent is not closed:
+	// the link closes the alerts or does not, which
+	// Execution.ActiveAfterSend reads.
+	Sends           int    `json:"sends"`
+	FirstSentAt     string `json:"first_sent_at,omitempty"`
+	SourceNow       string `json:"source_now"`
+	SourceNowReason string `json:"source_now_reason,omitempty"`
 }
 
 // AbsentExecutionFacts is what one close of a strategy found and did.
@@ -203,6 +210,11 @@ type AbsentExecutionFacts struct {
 	Identity *AbsentIdentityFacts `json:"identity,omitempty"`
 	// SampleAlertID is one of the strategy's alerts, its own first.
 	SampleAlertID string `json:"sample_alert_id,omitempty"`
+	// ActiveAfterSend is how many of this deployment's alerts of the
+	// strategy the link's reconcile still listed active when this close
+	// read them, an earlier close of them having gone out: above zero, the
+	// link did not close what it was sent. Absent before the first send.
+	ActiveAfterSend *int `json:"active_after_send,omitempty"`
 }
 
 // AbsentAlertCounts is the strategy's alerts by whose they are.

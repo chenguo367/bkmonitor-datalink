@@ -51,8 +51,9 @@ import (
 
 // The outcomes, closed: a metric label is made of them.
 const (
-	// OutcomeClosed counts alerts a close was sent for.
-	OutcomeClosed = "closed"
+	// OutcomeCloseSent counts alerts a close was sent for: acknowledged by
+	// the broker, which is not that the link closed them.
+	OutcomeCloseSent = "close_sent"
 	// OutcomeUnconfirmed counts first observations: a fingerprint of an
 	// open alert turned away by one Slot, waiting for a second.
 	OutcomeUnconfirmed = "unconfirmed"
@@ -92,7 +93,7 @@ const (
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
-var Outcomes = []string{OutcomeClosed, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
+var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
 	OutcomeStaleDeferred, OutcomeIndefinite}
 
@@ -429,7 +430,7 @@ func (closer *Closer) Step(ctx context.Context) {
 		closer.countEach(decided, OutcomeSendFailed)
 		return
 	}
-	closer.decide(decided, OutcomeClosed, now)
+	closer.decide(decided, OutcomeCloseSent, now)
 }
 
 // fresh is whether the entry's last observation is recent enough to act on.

@@ -116,7 +116,7 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 		t.Fatalf("request = %+v", request)
 	}
 	stats := closer.Stats()
-	if stats[scopeclose.OutcomeClosed] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 || stats[scopeclose.OutcomeIndefinite] != 2 ||
+	if stats[scopeclose.OutcomeCloseSent] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 || stats[scopeclose.OutcomeIndefinite] != 2 ||
 		stats[scopeclose.OutcomeFingerprintUnsupported] != 4 || stats[scopeclose.OutcomeNotMember] != 6 {
 		t.Fatalf("stats = %v", stats)
 	}
@@ -127,7 +127,7 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 // which here is a reading.
 func TestTheTargetScopeCloseFactsAreCarriedFieldForField(t *testing.T) {
 	facts := targetScopeCloseFacts(scopeclose.Facts{Pending: 1, Confirmed: 2, MaxEntries: 3,
-		Outcomes: map[string]uint64{scopeclose.OutcomeClosed: 4},
+		Outcomes: map[string]uint64{scopeclose.OutcomeCloseSent: 4},
 		Strategies: []scopeclose.StrategyFacts{{TenantID: "t", StrategyID: "s", Pending: 1, Confirmed: 2,
 			Outcomes: map[string]uint64{scopeclose.OutcomeUnconfirmed: 5}, PendingSample: []string{"aaaaaaaa"}, DecidedSample: []string{"bbbbbbbb"}}}})
 	var zero func(path string, value reflect.Value)

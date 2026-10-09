@@ -183,7 +183,7 @@ func TestTargetScopeCloseDecisions(t *testing.T) {
 		sent  int
 	}{
 		{name: "an open alert of ours turned away by two Slots is closed", set: openSet(ownSrc, member),
-			drops: []Drop{drop(member, 0)}, want: map[string]uint64{OutcomeUnconfirmed: 1, OutcomeClosed: 1}, sent: 1},
+			drops: []Drop{drop(member, 0)}, want: map[string]uint64{OutcomeUnconfirmed: 1, OutcomeCloseSent: 1}, sent: 1},
 		{name: "a strategy with no open alert is counted in bulk", set: openSet(ownSrc),
 			drops: []Drop{drop(member, 0), drop(fp(2), 0)}, want: map[string]uint64{OutcomeNotMember: 4}},
 		{name: "a fingerprint the set does not hold is not closed", set: openSet(ownSrc, member),
@@ -226,7 +226,7 @@ func TestOneSlotIsOneObservation(t *testing.T) {
 		t.Fatal("closed on one Slot's observation")
 	}
 	f.slot(1700000060, drop(member, 0))
-	f.want(t, "a second Slot", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeClosed: 1})
+	f.want(t, "a second Slot", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeCloseSent: 1})
 }
 
 // What is sent is the same close every other close is: one evaluation at
@@ -273,7 +273,7 @@ func TestAClosedAlertIsSentOnce(t *testing.T) {
 	for i := int64(0); i < 10; i++ {
 		f.slot(1700000000+60*i, drop(member, 0))
 	}
-	f.want(t, "ten Slots", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeClosed: 1})
+	f.want(t, "ten Slots", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeCloseSent: 1})
 	if len(f.writer.batches) != 1 || len(f.writer.sent()) != 1 {
 		t.Fatalf("sent %v, want one close in one batch", f.writer.batches)
 	}
@@ -294,7 +294,7 @@ func TestARefusedStepKeepsTheObservation(t *testing.T) {
 	f.want(t, "copy disjoint", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2})
 	f.set.disjoint = false
 	f.slot(1700000180, drop(member, 0))
-	f.want(t, "retried", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2, OutcomeClosed: 1})
+	f.want(t, "retried", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeSendFailed: 1, OutcomeSetUnavailable: 2, OutcomeCloseSent: 1})
 }
 
 // At most Batch closes per step, and the next step starts after the last
@@ -372,7 +372,7 @@ func TestFactsAreBoundedPrefixes(t *testing.T) {
 	f.slot(1700000060, drops...)
 	facts = f.closer.Facts()
 	row = facts.Strategies[0]
-	if row.Outcomes[OutcomeClosed] != 4 || len(row.DecidedSample) != 3 || facts.Outcomes[OutcomeClosed] != 4 {
+	if row.Outcomes[OutcomeCloseSent] != 4 || len(row.DecidedSample) != 3 || facts.Outcomes[OutcomeCloseSent] != 4 {
 		t.Fatalf("facts after the decision = %+v", facts)
 	}
 }
@@ -408,7 +408,7 @@ func TestTheObservationTTLBoundary(t *testing.T) {
 		want map[string]uint64
 		sent int
 	}{
-		{30*time.Minute - time.Second, map[string]uint64{OutcomeUnconfirmed: 1, OutcomeClosed: 1}, 1},
+		{30*time.Minute - time.Second, map[string]uint64{OutcomeUnconfirmed: 1, OutcomeCloseSent: 1}, 1},
 		{30 * time.Minute, map[string]uint64{OutcomeUnconfirmed: 2}, 0},
 	} {
 		f := newFixture(openSet(ownSrc, fp(1)), nil)
@@ -438,7 +438,7 @@ func TestTheDedupeTTLBoundary(t *testing.T) {
 		f.observeAt(start, 1700000000, fp(1))
 		f.observeAt(start.Add(time.Minute), 1700000060, fp(1))
 		f.closer.Step(context.Background())
-		if f.closer.Stats()[OutcomeClosed] != 1 {
+		if f.closer.Stats()[OutcomeCloseSent] != 1 {
 			t.Fatalf("%s: fixture did not decide", c.gap)
 		}
 		f.observeAt(start.Add(time.Minute+c.gap), 1700009999, fp(1))

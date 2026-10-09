@@ -3667,7 +3667,7 @@ function targetScopeCloseWords(c) {
   var o = c.outcomes || {};
   var n = function (k) { return o[k] || 0; };
   return '目标移出范围关闭：等第二轮确认 ' + (c.pending || 0)
-    + ' 个、已确认待关 ' + (c.confirmed || 0) + ' 个；累计已关 ' + n('closed')
+    + ' 个、已确认待关 ' + (c.confirmed || 0) + ' 个；累计发出关闭 ' + n('close_sent') + '（发出不等于 linkd 已关）'
     + '、首次观测 ' + n('unconfirmed') + '、目标缓存不确定未判 ' + n('cache_unavailable') + '、不在集合 ' + n('not_member')
     + '、集合不可判 ' + n('set_unavailable') + '、他源告警 ' + n('producer_foreign') + '、发送失败 ' + n('send_failed')
     + '、观测表满 ' + n('memory_full') + '、多输入无法算指纹 ' + n('fingerprint_unsupported') + '、观测过旧暂缓 ' + n('stale_deferred') + '、拒绝本身不确定 ' + n('indefinite');

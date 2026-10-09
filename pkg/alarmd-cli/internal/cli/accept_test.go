@@ -47,7 +47,7 @@ func series(labels map[string]string, value float64) map[string]any {
 func healthyMetrics(families ...map[string]any) map[string]any {
 	byName := map[string]map[string]any{
 		metricSourceRefresh:  {"name": metricSourceRefresh, "series": []any{series(map[string]string{"status": "PUBLISHED"}, 12)}},
-		metricScopeClose:     {"name": metricScopeClose, "series": []any{series(map[string]string{"outcome": "counted"}, 3), series(map[string]string{"outcome": "closed"}, 0)}},
+		metricScopeClose:     {"name": metricScopeClose, "series": []any{series(map[string]string{"outcome": "counted"}, 3), series(map[string]string{"outcome": "close_sent"}, 0)}},
 		metricRecoveryBeside: {"name": metricRecoveryBeside, "series": []any{series(map[string]string{"beside": "level_unavailable"}, 2), series(map[string]string{"beside": "level_recovering"}, 1)}},
 		metricEventsByKind:   {"name": metricEventsByKind, "series": []any{series(map[string]string{"format": "standard_raw_event", "event_kind": "RECOVERY"}, 7)}},
 		metricEventsRejected: {"name": metricEventsRejected, "series": []any{series(map[string]string{"rule": "standard_encode", "strategy": "_other"}, 0), series(map[string]string{"rule": "legacy_strategy_invalid", "strategy": "_other"}, 0)}},
@@ -231,7 +231,7 @@ func TestAcceptPassesAHealthyDeployment(t *testing.T) {
 		"no-data horizon": verdictPass, "pods": verdictPass, "pod restarts": verdictInfo, "redis read": verdictPass,
 		"redis noeviction and nothing evicted": verdictPass, "redis memory": verdictPass, "metrics read on every replica": verdictPass,
 		"source refresh counted": verdictPass, "held recovery counter removed": verdictPass, "recovery beside another Level": verdictPass,
-		"target out of scope closes nothing": verdictPass, "control loop slowest turn": verdictPass, "output events refused by alarmd": verdictPass,
+		"target out of scope closes": verdictInfo, "control loop slowest turn": verdictPass, "output events refused by alarmd": verdictPass,
 		"diagnosis covers every strategy": verdictPass, "strategies detecting": verdictInfo, "public: restricted read refused": verdictPass,
 		"public: health carries no coordinates": verdictPass, "public: metrics not served": verdictPass, "public: login page served": verdictPass,
 		"control source publication not starved": verdictUndecided, "control source publication conflicts": verdictPass,
@@ -248,6 +248,29 @@ func TestAcceptPassesAHealthyDeployment(t *testing.T) {
 	}
 }
 
+// Closes sent for alerts whose target left the strategy's scope are what the
+// deployment does: the item reads them and does not fail the run for them.
+// Only a close the producer refused does.
+func TestAcceptReadsSentTargetScopeClosesAsWhatTheDeploymentDid(t *testing.T) {
+	for _, c := range []struct {
+		sent, failed float64
+		want         string
+	}{{5, 0, verdictInfo}, {0, 0, verdictInfo}, {5, 1, verdictFail}} {
+		f := healthyFixture()
+		f.metrics = func(string, int) (string, map[string]any) {
+			return "ok", healthyMetrics(map[string]any{"name": metricScopeClose, "series": []any{
+				series(map[string]string{"outcome": "close_sent"}, c.sent), series(map[string]string{"outcome": "send_failed"}, c.failed)}})
+		}
+		code, verdicts, _ := acceptRunOf(t, f, "--window", "0")
+		if verdicts["target out of scope closes"] != c.want {
+			t.Errorf("sent %g, failed %g: item = %q, want %q", c.sent, c.failed, verdicts["target out of scope closes"], c.want)
+		}
+		if c.want == verdictInfo && code != 0 {
+			t.Errorf("sent %g, failed %g: exit %d, want 0", c.sent, c.failed, code)
+		}
+	}
+}
+
 // Each fact the deployment gets wrong fails its own item and the run.
 func TestAcceptFailsEachWrongFact(t *testing.T) {
 	f := healthyFixture()
@@ -255,7 +278,7 @@ func TestAcceptFailsEachWrongFact(t *testing.T) {
 	f.metrics = func(string, int) (string, map[string]any) {
 		return "ok", healthyMetrics(
 			map[string]any{"name": metricRecoveryHeld, "series": []any{series(nil, 0)}},
-			map[string]any{"name": metricScopeClose, "series": []any{series(map[string]string{"outcome": "closed"}, 2)}},
+			map[string]any{"name": metricScopeClose, "series": []any{series(map[string]string{"outcome": "send_failed"}, 2)}},
 			map[string]any{"name": metricEventsRejected, "series": []any{series(map[string]string{"rule": "standard_encode", "strategy": "1001"}, 4)}},
 			map[string]any{"name": metricLoopTurn, "series": []any{map[string]any{"labels": map[string]string{"loop": "control"}, "count": 9,
 				"buckets": map[string]any{"262.144": 8, "1048.576": 9}}}},
@@ -266,7 +289,7 @@ func TestAcceptFailsEachWrongFact(t *testing.T) {
 			"fields": map[string]any{"maxmemory": "1000", "used_memory": "900", "maxmemory_policy": "allkeys-lru", "evicted_keys": "5"}}}}
 	}}
 	code, verdicts, result := acceptRunOf(t, f, "--window", "0")
-	for _, item := range []string{"held recovery counter removed", "target out of scope closes nothing", "output events refused by alarmd",
+	for _, item := range []string{"held recovery counter removed", "target out of scope closes", "output events refused by alarmd",
 		"control loop slowest turn", "redis noeviction and nothing evicted", "redis memory", "public: restricted read refused"} {
 		if verdicts[item] != verdictFail {
 			t.Errorf("%s = %q, want FAIL", item, verdicts[item])

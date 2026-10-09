@@ -80,7 +80,7 @@ func roundFor(roster map[Key]struct{}, absences map[Key]Absence) Round {
 func TestAStrategyTheLinkListsAndTheSnapshotDoesNotIsClosed(t *testing.T) {
 	k := key("10")
 	result := Compute(roundFor(set(k), ripe(k)), testBounds())
-	if len(result.Close) != 1 || result.Close[0].Key != k || result.Counts.Closed != 1 {
+	if len(result.Close) != 1 || result.Close[0].Key != k || result.Counts.CloseDecided != 1 {
 		t.Fatalf("the strategy this capability exists for was not closed: %+v", result)
 	}
 	if result.Counts.Candidates != 1 || result.Counts.Roster != 6 {
@@ -157,7 +157,7 @@ func TestTheLinkHealthBoundIsABoundaryOnBothSides(t *testing.T) {
 	bounds := testBounds()
 	inside := roundFor(set(k), ripe(k))
 	inside.LinkLastSuccess = testNow.Add(-bounds.MaxLinkHealthAge + time.Minute)
-	if result := Compute(inside, bounds); result.Refusal != RefusalNone || result.Counts.Closed != 1 {
+	if result := Compute(inside, bounds); result.Refusal != RefusalNone || result.Counts.CloseDecided != 1 {
 		t.Fatalf("a link inside its bound was refused: %+v", result)
 	}
 	past := roundFor(set(k), ripe(k))
@@ -172,7 +172,7 @@ func TestAnIncompleteWalkStillClosesWhatItSaw(t *testing.T) {
 	k := key("10")
 	round := roundFor(set(k), ripe(k))
 	round.RosterComplete = false
-	if result := Compute(round, testBounds()); result.Refusal != RefusalNone || result.Counts.Closed != 1 {
+	if result := Compute(round, testBounds()); result.Refusal != RefusalNone || result.Counts.CloseDecided != 1 {
 		t.Fatalf("an incomplete walk refused what it saw: %+v", result)
 	}
 }
@@ -286,7 +286,7 @@ func TestABacklogLargerThanAnyRatioIsStillWorkedOff(t *testing.T) {
 	}
 	round := roundFor(roster, ripe(gone...))
 	result := Compute(round, testBounds())
-	if result.Refusal != RefusalNone || result.Counts.Closed != 4 || result.Counts.Deferred != 96 {
+	if result.Refusal != RefusalNone || result.Counts.CloseDecided != 4 || result.Counts.Deferred != 96 {
 		t.Fatalf("the backlog this exists to clear was refused or not bounded: %+v", result)
 	}
 }
@@ -377,11 +377,11 @@ func TestEveryCandidateLandsOnExactlyOneOutcome(t *testing.T) {
 	}
 	round := roundFor(roster, absences)
 	counts := Compute(round, testBounds()).Counts
-	filed := counts.Closed + counts.WithinGrace + counts.Unconfirmed + counts.Deferred
+	filed := counts.CloseDecided + counts.WithinGrace + counts.Unconfirmed + counts.Deferred
 	if filed != counts.Candidates || counts.Candidates != 3 {
 		t.Fatalf("a candidate was not filed under any outcome: %+v", counts)
 	}
-	for _, count := range []int{counts.Closed, counts.WithinGrace, counts.Unconfirmed} {
+	for _, count := range []int{counts.CloseDecided, counts.WithinGrace, counts.Unconfirmed} {
 		if count != 1 {
 			t.Fatalf("each shape should file once: %+v", counts)
 		}
@@ -443,7 +443,7 @@ func TestEveryCandidateIsDecidedOnceInKeyOrder(t *testing.T) {
 		t.Fatalf("not one decision per candidate: %d decisions, %+v", len(result.Decisions), result.Counts)
 	}
 	want := map[Key]string{young: OutcomeWithinGrace, untracked: OutcomeWithinGrace, unconfirmed: OutcomeUnconfirmed,
-		second: OutcomeClosed, third: OutcomeDeferred, first: OutcomeDeferred}
+		second: OutcomeCloseDecided, third: OutcomeDeferred, first: OutcomeDeferred}
 	tally := map[string]int{}
 	for i, decision := range result.Decisions {
 		if i > 0 && !LessKey(result.Decisions[i-1].Key, decision.Key) {
@@ -455,7 +455,7 @@ func TestEveryCandidateIsDecidedOnceInKeyOrder(t *testing.T) {
 		tally[decision.Outcome]++
 	}
 	if tally[OutcomeWithinGrace] != result.Counts.WithinGrace || tally[OutcomeUnconfirmed] != result.Counts.Unconfirmed ||
-		tally[OutcomeDeferred] != result.Counts.Deferred || tally[OutcomeClosed] != result.Counts.Closed {
+		tally[OutcomeDeferred] != result.Counts.Deferred || tally[OutcomeCloseDecided] != result.Counts.CloseDecided {
 		t.Fatalf("the decisions and the counts disagree: %+v %+v", tally, result.Counts)
 	}
 	for _, decision := range result.Decisions {

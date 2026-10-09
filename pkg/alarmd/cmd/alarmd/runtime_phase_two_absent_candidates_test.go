@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -117,7 +118,7 @@ func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 		page.LastRound.At != stamp(decided) || page.Table == nil || page.Table.At != stamp(decided) {
 		t.Fatalf("the header does not say which round the rows are of: %+v %+v %+v", page, page.LastRound, page.Table)
 	}
-	if table := page.Table; table.Roster != 2 || table.Candidates != 1 || table.Closed != 1 || table.Snapshot != 100 ||
+	if table := page.Table; table.Roster != 2 || table.Candidates != 1 || table.CloseDecided != 1 || table.Snapshot != 100 ||
 		table.Rows != 1 || table.RowsNotKept != 0 {
 		t.Fatalf("the table's counts are not the round's: %+v", table)
 	}
@@ -125,12 +126,12 @@ func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 		t.Fatalf("a strategy the snapshot lists is on the page, or the candidate is missing: %+v", page.Rows)
 	}
 	row := page.Rows[0]
-	if row.TenantID != "system" || row.Members == nil || *row.Members != 3 || row.Outcome != absentalerts.OutcomeClosed ||
+	if row.TenantID != "system" || row.Members == nil || *row.Members != 3 || row.Outcome != absentalerts.OutcomeCloseDecided ||
 		row.OutcomeAt != stamp(decided) || row.AbsentSince != stamp(firstRound) {
 		t.Fatalf("the row is not the round's decision: %+v", row)
 	}
 	execution := row.Execution
-	if execution == nil || execution.Word != absentalerts.OutcomeAlertClosed || execution.DecidedAt != stamp(decided) ||
+	if execution == nil || execution.Word != absentalerts.OutcomeCloseSent || execution.DecidedAt != stamp(decided) ||
 		execution.Batch != 1 || execution.SampleAlertID != "mine" {
 		t.Fatalf("the row does not say what the close did: %+v", execution)
 	}
@@ -197,8 +198,97 @@ func TestARowSaysWhatTheCloseSent(t *testing.T) {
 	fixture.mature(context.Background())
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
 	execution := absentRowOf(t, page, "10").Execution
-	if execution == nil || execution.Word != absentalerts.OutcomeAlertClosed || execution.Batch != 1 || len(fixture.writer.batches) != 1 {
+	if execution == nil || execution.Word != absentalerts.OutcomeCloseSent || execution.Batch != 1 || len(fixture.writer.batches) != 1 {
 		t.Fatalf("the row does not say what the close sent: %+v %+v", page, execution)
+	}
+}
+
+// A close sent is not a close made. A row counts its strategy's sends and
+// when the first went out, and a close that reads the alerts after one went
+// out says how many the link still lists active - the reading of whether the
+// earlier close took. A refused send is not a send, and a strategy that
+// leaves the difference starts again from nothing if it comes back.
+func TestARowSaysHowOftenItsCloseWentOutAndWhatTheLinkStillLists(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("mine", "0123456789abcdef0123456789abcdef")})
+	ctx := context.Background()
+	fixture.mature(ctx)
+	first := fixture.now
+	round := 0
+	advance := func() {
+		round++
+		fixture.now = fixture.now.Add(absentCloseInterval)
+		fixture.control.snapshot = liveSnapshot("observation-later-"+strconv.Itoa(round), fixture.now, 100)
+		for i := range fixture.link.pages {
+			fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+		}
+		fixture.loop.step(ctx)
+	}
+	step := func() fleet.AbsentCandidateRow {
+		t.Helper()
+		advance()
+		return absentRowOf(t, readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{}), "10")
+	}
+	active := func(row fleet.AbsentCandidateRow) int {
+		if row.Execution == nil || row.Execution.ActiveAfterSend == nil {
+			return -1
+		}
+		return *row.Execution.ActiveAfterSend
+	}
+
+	row := absentRowOf(t, readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{}), "10")
+	if row.Sends != 1 || row.FirstSentAt != stamp(first) || active(row) != -1 {
+		t.Fatalf("the first send: sends %d since %q, active after send %d; want 1 since %q, none read yet",
+			row.Sends, row.FirstSentAt, active(row), stamp(first))
+	}
+	// The link keeps listing the alert: the next close finds it and sends again.
+	if row = step(); row.Sends != 2 || row.FirstSentAt != stamp(first) || active(row) != 1 {
+		t.Fatalf("a close sent again: sends %d since %q, active after send %d; want 2 since %q, 1 still listed",
+			row.Sends, row.FirstSentAt, active(row), stamp(first))
+	}
+	// The broker refuses: nothing went out, though the alert was read still listed.
+	fixture.writer.err = errors.New("broker unavailable")
+	if row = step(); row.Execution == nil || row.Execution.Word != absentalerts.OutcomeSendFailed || row.Sends != 2 || active(row) != 1 {
+		t.Fatalf("a refused send: %+v sends %d, active after send %d; want send_failed, still 2 sends, 1 listed",
+			row.Execution, row.Sends, active(row))
+	}
+	fixture.writer.err = nil
+	// The link's alerts could not be read: that says nothing about whether the
+	// close took, and the row does not read it as zero still listed.
+	fixture.link.alertsErr = errors.New("reconcile unavailable")
+	if row = step(); row.Execution == nil || row.Execution.Word != absentalerts.OutcomeEvidenceUnavailable || row.Sends != 2 || active(row) != -1 {
+		t.Fatalf("alerts not read: %+v sends %d, active after send %d; want evidence_unavailable, 2 sends, nothing read",
+			row.Execution, row.Sends, active(row))
+	}
+	fixture.link.alertsErr = nil
+	// The link closed it: the next close reads none of this deployment's alerts.
+	fixture.link.alerts = nil
+	if row = step(); row.Execution == nil || row.Execution.Word != fleet.AbsentExecutionNoOwnAlerts || row.Sends != 2 || active(row) != 0 {
+		t.Fatalf("after the link closed the alert: %+v sends %d, active after send %d; want no_own_alerts, 2 sends, 0 listed",
+			row.Execution, row.Sends, active(row))
+	}
+
+	// It leaves the link's roster, and the page; when it is listed again, its
+	// count starts over.
+	fixture.link.alerts = []openalerts.Alert{nativeAlert("mine-again", "fedcba9876543210fedcba9876543210")}
+	fixture.link.records["mine-again"] = openalerts.AlertRecord{AlertID: "mine-again", TenantID: "system",
+		EventSourceID: "native", Fingerprint: "fedcba9876543210fedcba9876543210", Status: "active",
+		StrategyID: "10", BusinessID: 2, Revision: 7}
+	listed := fixture.link.pages[1].Rows
+	fixture.link.pages[1].Rows = nil
+	advance()
+	if page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{}); slices.ContainsFunc(page.Rows,
+		func(r fleet.AbsentCandidateRow) bool { return r.StrategyID == "10" }) {
+		t.Fatalf("a strategy the link no longer lists is still on the page: %+v", page.Rows)
+	}
+	fixture.link.pages[1].Rows = listed
+	for range 4 {
+		if row = step(); row.Sends > 0 {
+			break
+		}
+	}
+	if row.Sends != 1 || row.FirstSentAt != stamp(fixture.now) || active(row) != -1 {
+		t.Fatalf("a strategy back in the difference: sends %d since %q, active after send %d; want 1 since %q, none read yet",
+			row.Sends, row.FirstSentAt, active(row), stamp(fixture.now))
 	}
 }
 
@@ -216,12 +306,12 @@ func TestARefusedRoundLeavesTheRowsAndSaysHowOldTheyAre(t *testing.T) {
 	if page.LastRound == nil || page.LastRound.Refusal != absentalerts.RefusalLinkUnhealthy || page.LastRound.At != stamp(fixture.now) {
 		t.Fatalf("the refused round is not the latest round: %+v", page.LastRound)
 	}
-	if page.Table == nil || page.Table.At != stamp(decided) || page.Table.Closed != 1 {
+	if page.Table == nil || page.Table.At != stamp(decided) || page.Table.CloseDecided != 1 {
 		t.Fatalf("the refused round changed which round the rows are of: %+v", page.Table)
 	}
 	row := absentRowOf(t, page, "10")
-	if row.Outcome != absentalerts.OutcomeClosed || row.OutcomeAt != stamp(decided) || row.Execution == nil ||
-		row.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if row.Outcome != absentalerts.OutcomeCloseDecided || row.OutcomeAt != stamp(decided) || row.Execution == nil ||
+		row.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("the refused round changed a row: %+v", row)
 	}
 }
@@ -247,7 +337,7 @@ func TestARowKeepsItsLatestCloseUntilItLeaves(t *testing.T) {
 	if kept.Outcome != absentalerts.OutcomeDeferred || kept.OutcomeAt != stamp(fixture.now) {
 		t.Fatalf("the row does not carry this round's decision: %+v", kept)
 	}
-	if kept.Execution == nil || kept.Execution.DecidedAt != stamp(decided) || kept.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if kept.Execution == nil || kept.Execution.DecidedAt != stamp(decided) || kept.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("a strategy still in the difference lost what its latest close found: %+v", kept.Execution)
 	}
 
@@ -281,10 +371,10 @@ func TestACloseTheRoundsDeadlineCutOffReadsNotRun(t *testing.T) {
 
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
 	first, second := absentRowOf(t, page, "10"), absentRowOf(t, page, "11")
-	if first.Execution == nil || first.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if first.Execution == nil || first.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("the close that ran is not on its row: %+v", first.Execution)
 	}
-	if second.Outcome != absentalerts.OutcomeClosed || second.Execution == nil || second.Execution.Word != fleet.AbsentExecutionNotRun ||
+	if second.Outcome != absentalerts.OutcomeCloseDecided || second.Execution == nil || second.Execution.Word != fleet.AbsentExecutionNotRun ||
 		second.Execution.DecidedAt != stamp(fixture.now) || second.Execution.Alerts != nil {
 		t.Fatalf("a close the deadline cut off does not read as not run this round: %+v %+v", second, second.Execution)
 	}

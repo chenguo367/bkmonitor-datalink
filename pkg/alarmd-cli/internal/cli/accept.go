@@ -478,7 +478,7 @@ func (run *acceptRun) checkMetrics(targets []string) {
 		targets = []string{""}
 	}
 	var failures, held []string
-	var refreshed, recoveries, closed, overflow float64
+	var refreshed, recoveries, closeSendFailed, overflow float64
 	beside := map[string]float64{}
 	closes := map[string]float64{}
 	rejectedBy := map[string]map[string]float64{refusalOwnerAlarmd: {}, refusalOwnerStrategy: {}}
@@ -509,7 +509,7 @@ func (run *acceptRun) checkMetrics(targets []string) {
 		for _, s := range families[metricScopeClose] {
 			closes[stringField(objectField(s, "labels"), "outcome")] += float(s["value"])
 		}
-		closed += sum(families[metricScopeClose], "outcome", "closed")
+		closeSendFailed += sum(families[metricScopeClose], "outcome", "send_failed")
 		if _, ok := families[metricEventsRejected]; ok {
 			rejectedRead = true
 			for _, s := range families[metricEventsRejected] {
@@ -544,7 +544,7 @@ func (run *acceptRun) checkMetrics(targets []string) {
 	}
 	if read == 0 {
 		for _, item := range []string{"source refresh counted", "held recovery counter removed", "recovery beside another Level",
-			"target out of scope closes nothing", "control loop slowest turn", "output events refused by alarmd"} {
+			"target out of scope closes", "control loop slowest turn", "output events refused by alarmd"} {
 			run.add(item, verdictReadFailed, "no replica's metrics were read")
 		}
 		return
@@ -556,7 +556,13 @@ func (run *acceptRun) checkMetrics(targets []string) {
 		run.add("held recovery counter removed", verdictPass, metricRecoveryHeld+" absent on every replica read")
 	}
 	run.checkBeside(beside, recoveries)
-	run.add("target out of scope closes nothing", passIf(closed == 0), fmt.Sprintf("outcome=closed %g (want 0); by outcome %s", closed, floats(closes)))
+	// The alerts of a target that left the strategy's scope are closed, and the closes are sent: how many
+	// went out is what the deployment did, not a fault. A close the producer would not take is.
+	scopeVerdict := verdictInfo
+	if closeSendFailed > 0 {
+		scopeVerdict = verdictFail
+	}
+	run.add("target out of scope closes", scopeVerdict, fmt.Sprintf("send_failed %g (want 0); by outcome %s", closeSendFailed, floats(closes)))
 	switch {
 	case worst == 0:
 		run.add("control loop slowest turn", verdictUndecided, "no control loop turn observed on any replica read")
