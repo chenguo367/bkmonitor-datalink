@@ -510,6 +510,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int64("failure_local_ms", timing.LocalMillis))
 		}
 	}
+	// The answer the query service may have cut: the source and the
+	// dimension whose level held its bucket cap, for each such query.
+	for _, cut := range observation.QueryTruncation {
+		attributes = append(attributes, slog.String("answer_truncation", "terms_cut_suspected"),
+			slog.String("truncation_source", cut.Source), slog.String("truncation_dimension", cut.Dimension))
+	}
 	if observation.RuntimeConfig != nil {
 		attributes = append(attributes, slog.Any("runtime_config", observation.RuntimeConfig))
 	}

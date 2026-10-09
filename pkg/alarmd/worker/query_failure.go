@@ -185,7 +185,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: reason, Duration: time.Since(started),
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion),
-		QueryUnavailable: providerUnavailableFacts(completion),
+		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
@@ -213,6 +213,19 @@ func providerStatusFacts(completion execution.QueryExecutionCompletion) []observ
 			outcome = observability.QueryStatusOutcomeAllowed
 		}
 		facts = append(facts, observability.QueryStatusFacts{Code: status.Code, Outcome: outcome})
+	}
+	return facts
+}
+
+// providerTruncationFacts projects every physical query whose answer the
+// provider suspects was cut, one entry each, for the same reason the two
+// beside it take every one: it feeds a counter.
+func providerTruncationFacts(completion execution.QueryExecutionCompletion) []observability.QueryTruncationFacts {
+	var facts []observability.QueryTruncationFacts
+	for _, item := range completion.PhysicalQueries {
+		if cut := item.RouteFacts.Truncation; cut != nil {
+			facts = append(facts, observability.QueryTruncationFacts{Source: cut.SourceSemantics, Dimension: cut.Dimension})
+		}
 	}
 	return facts
 }
