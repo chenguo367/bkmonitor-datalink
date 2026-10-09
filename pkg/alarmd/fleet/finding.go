@@ -151,6 +151,8 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckEmptyEveryRound, true, false
 	case anomaly.Kind == KindQuiet:
 		return CheckQuiet, true, false
+	case anomaly.Kind == KindAnswerTruncated:
+		return CheckAnswerTruncated, true, false
 	case anomaly.Kind == KindNoDataMemoryRefused:
 		return CheckNoDataMemoryRefused, true, false
 	case anomaly.Kind == KindRetainedShareApproaching:

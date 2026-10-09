@@ -100,6 +100,13 @@ const (
 	// stopped or never came, so the object is on neither line above: it is
 	// detecting, and its row says why it has nothing to judge.
 	KindQuiet = "QUIET"
+	// KindAnswerTruncated: an object whose latest answered query came back
+	// with a terms level of its Elasticsearch aggregation holding exactly
+	// the query service's bucket cap - a suspected cut. The rows it returned
+	// are evaluated as they are; the groups past the cap are not in the
+	// answer and are not judged absent. Listed while the latest answered
+	// round says so.
+	KindAnswerTruncated = "ANSWER_TRUNCATED"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -434,6 +441,9 @@ type queryGroupState struct {
 	// a round, so whether a round came between is this, not the last
 	// completion.
 	skipSpanOpen bool
+	// truncation is the suspected cut of the latest answered query, nil when
+	// it named none (KindAnswerTruncated).
+	truncation *AnswerTruncation
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -933,6 +943,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// here are rounds.
 	if observation.Operation == observability.OperationSupplement {
 		return
+	}
+	// The query's answer, read for a suspected cut before anything decides
+	// the observation is not this tracker's: an answer that names none is
+	// what ends the row.
+	if observation.Stage == observability.StageQueryCompleted {
+		tracker.noteAnswerTruncation(queryGroup, observation, trace.EvaluationTime)
 	}
 
 	tracker.mu.Lock()
@@ -2162,6 +2178,34 @@ func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64
 	state.skipSpanOpen = true
 }
 
+// noteAnswerTruncation keeps whether the object's latest answered query may
+// have been cut: set from a completion that names a cut, from the first
+// such round on; ended by a successful completion that names none. A query
+// that failed answered nothing and leaves it as it was. Called with the lock
+// held.
+func (tracker *Tracker) noteAnswerTruncation(queryGroup string, observation observability.Observation, slot int64) {
+	state := tracker.groups[queryGroup]
+	if len(observation.QueryTruncation) == 0 {
+		if state != nil && state.truncation != nil && observation.Result == observability.ResultSuccess {
+			state.truncation = nil
+		}
+		return
+	}
+	if state == nil {
+		if len(tracker.groups) >= tracker.maxTracked {
+			return
+		}
+		state = &queryGroupState{strategies: map[StrategyRef]struct{}{}}
+		tracker.groups[queryGroup] = state
+	}
+	cut := observation.QueryTruncation[0]
+	since := tracker.now()
+	if state.truncation != nil {
+		since = state.truncation.Since
+	}
+	state.truncation = &AnswerTruncation{Source: cut.Source, Dimension: cut.Dimension, Since: since, LastSlot: slot}
+}
+
 // rowFailure is the failure the row is read by: this process's own, or,
 // for an object in the pool this process has not seen fail, the pool's
 // reason as its record and its probes kept it. poolReason is set and
@@ -2626,6 +2670,22 @@ func (tracker *Tracker) NoData() []Anomaly {
 		default:
 			continue
 		}
+		for strategy := range state.strategies {
+			anomaly.Strategies = append(anomaly.Strategies, strategy)
+		}
+		sortStrategies(anomaly.Strategies)
+		anomalies = append(anomalies, anomaly)
+	}
+	// The objects whose latest answered query may have been cut at the query
+	// service's terms cap: not empty, and not a failure, so on no line above;
+	// on the strategy's, whose grouping is wider than the cap.
+	for queryGroup, state := range tracker.groups {
+		if state.truncation == nil {
+			continue
+		}
+		truncation := *state.truncation
+		anomaly := Anomaly{QueryGroup: queryGroup, Kind: KindAnswerTruncated, ReasonCode: "terms_cut_suspected",
+			Since: truncation.Since, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica, AnswerTruncation: &truncation}
 		for strategy := range state.strategies {
 			anomaly.Strategies = append(anomaly.Strategies, strategy)
 		}

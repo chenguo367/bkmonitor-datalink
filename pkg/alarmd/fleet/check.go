@@ -141,7 +141,12 @@ const (
 	// so that "no data" is never read into an event stream at rest, and so
 	// that a storage that failed silently - which answers the same way - is
 	// one look away.
-	CheckQuiet             Check = "QUIET"
+	CheckQuiet Check = "QUIET"
+	// AnswerTruncated is an answer that may have been cut at the query
+	// service's terms cap: the groups past it are not in the answer, and no
+	// absence is judged for them. The strategy groups by something wider than
+	// the cap; detecting what came back.
+	CheckAnswerTruncated   Check = "ANSWER_TRUNCATED"
 	CheckSeriesChurning    Check = "SERIES_CHURNING"
 	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
 	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
@@ -325,6 +330,7 @@ var checkAnswers = map[Check]struct {
 	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
 	CheckEmptyAfterTarget:   {OwnerStrategy, GroupByStrategy},
 	CheckQuiet:              {OwnerStrategy, GroupByStrategy},
+	CheckAnswerTruncated:    {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
@@ -415,6 +421,9 @@ var checkOrder = []Check{
 	// The event counts at rest: detecting, with nothing to judge. Any other
 	// row of the strategy decides it.
 	CheckQuiet,
+	// An answer that may have been cut: detecting what came back, and no
+	// absence judged for the groups past the cap.
+	CheckAnswerTruncated,
 	// Last: the strategy runs. A reader who starts at the top meets every
 	// line that stops detection before the one that only widens it.
 	CheckConfigNoted,
