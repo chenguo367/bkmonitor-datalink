@@ -69,11 +69,11 @@ func newHandoverMetrics() handoverMetrics {
 }
 
 // handoverDrainOutcomes is the outcomes a handover can end with: every drain
-// outcome but the stop's own deadline.
+// outcome but the stop's own two at its deadline.
 func handoverDrainOutcomes() []string {
 	outcomes := make([]string, 0, len(observability.SlotDrainOutcomes))
 	for _, outcome := range observability.SlotDrainOutcomes {
-		if outcome != observability.SlotDrainDeadline {
+		if outcome != observability.SlotDrainDeadline && outcome != observability.SlotDrainDeadlineUnreturned {
 			outcomes = append(outcomes, outcome)
 		}
 	}

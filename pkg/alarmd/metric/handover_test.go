@@ -22,8 +22,8 @@ import (
 // not a handover outcome.
 func TestAHandoverDrainIsCountedUnderItsOutcome(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	if cells := testutil.CollectAndCount(r.phaseTwo.handover.drains); cells != len(observability.SlotDrainOutcomes)-1 {
-		t.Fatalf("%d drain cells from start, want every outcome but the stop's deadline", cells)
+	if cells := testutil.CollectAndCount(r.phaseTwo.handover.drains); cells != len(observability.SlotDrainOutcomes)-2 {
+		t.Fatalf("%d drain cells from start, want every outcome but the stop's two deadline ones", cells)
 	}
 	if cells := testutil.CollectAndCount(r.phaseTwo.handover.outputUnapplied); cells != len(ownership.RefusalReasons) {
 		t.Fatalf("%d output_unapplied cells from start, want one per refusal", cells)
@@ -34,7 +34,7 @@ func TestAHandoverDrainIsCountedUnderItsOutcome(t *testing.T) {
 	if got := testutil.ToFloat64(r.phaseTwo.handover.drains.WithLabelValues(observability.SlotDrainFinished)); got != 1 {
 		t.Fatalf("finished = %v, want 1", got)
 	}
-	if cells := testutil.CollectAndCount(r.phaseTwo.handover.drains); cells != len(observability.SlotDrainOutcomes)-1 {
+	if cells := testutil.CollectAndCount(r.phaseTwo.handover.drains); cells != len(observability.SlotDrainOutcomes)-2 {
 		t.Fatal("a stop's deadline outcome was counted as a handover")
 	}
 	if count := testutil.CollectAndCount(r.phaseTwo.handover.drainSeconds); count != 1 {

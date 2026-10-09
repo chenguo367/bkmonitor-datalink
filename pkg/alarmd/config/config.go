@@ -285,14 +285,21 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 }
 
 type Config struct {
-	HTTP            HTTPConfig            `yaml:"http"`
-	CLI             CLIConfig             `yaml:"cli"`
-	Kafka           KafkaConfig           `yaml:"kafka"`
-	Redis           RedisConfig           `yaml:"redis"`
-	PlatformCache   PlatformCacheConfig   `yaml:"platform_cache"`
-	Limits          LimitsConfig          `yaml:"limits"`
-	PhaseTwo        PhaseTwoRuntimeConfig `yaml:"phase_two"`
-	ShutdownTimeout Duration              `yaml:"shutdown_timeout"`
+	HTTP          HTTPConfig            `yaml:"http"`
+	CLI           CLIConfig             `yaml:"cli"`
+	Kafka         KafkaConfig           `yaml:"kafka"`
+	Redis         RedisConfig           `yaml:"redis"`
+	PlatformCache PlatformCacheConfig   `yaml:"platform_cache"`
+	Limits        LimitsConfig          `yaml:"limits"`
+	PhaseTwo      PhaseTwoRuntimeConfig `yaml:"phase_two"`
+	// ShutdownTimeout is the drain deadline of a stop (design 02 section
+	// 6.6), and the lease releases after it get as long again: a stop takes
+	// up to 2 x ShutdownTimeout, plus a second for Slots that ignore their
+	// cancellation, plus the stop record's write (2 s). The Pod's
+	// terminationGracePeriodSeconds must cover that, or the kubelet kills the
+	// process before its leases are released and its stop is recorded; with
+	// the default 30 s grace that is up to about 13 s here.
+	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
 }
 
 // Default is the product configuration, and it is the same on every machine:

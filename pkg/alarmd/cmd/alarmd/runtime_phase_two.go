@@ -2517,7 +2517,13 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		if cancelMaintain != nil {
 			cancelMaintain()
 		}
-		result = append(result, waitPhaseTwoGroup(ctx, &bundle.inflightWG))
+		// The scheduler's group is waited for unless the stop's drain has
+		// already cancelled Slots that did not return: waiting again would
+		// spend the whole of this context on them and leave no time for the
+		// releases below, and every lease would expire by TTL instead.
+		if drain := bundle.shutdownDrain(); drain == nil || drain.Unreturned == 0 {
+			result = append(result, waitPhaseTwoGroup(ctx, &bundle.inflightWG))
+		}
 		bundle.mu.Lock()
 		runners := make([]*phaseTwoQueryGroupLifecycle, 0, len(bundle.runners))
 		queryGroups := make([]execution.QueryGroupIdentity, 0, len(bundle.runners))
@@ -2609,7 +2615,15 @@ func (bundle *phaseTwoWorkerBundle) drainSlots(
 	case <-ctx.Done():
 		drain.Outcome, drain.Cancelled = observability.SlotDrainDeadline, bundle.runningSlots()
 		cancelExecution()
-		schedulerErr = <-schedulerDone
+		// Bounded too: a Slot that honours its context returns within
+		// moments of the cancellation, and one that has not is in a call
+		// that does not watch it, whose own timeout would only spend what the
+		// releases after this need. The stop goes on without it.
+		select {
+		case schedulerErr = <-schedulerDone:
+		case <-time.After(drainCancelGrace):
+			drain.Outcome, drain.Unreturned = observability.SlotDrainDeadlineUnreturned, bundle.runningSlots()
+		}
 	}
 	drain.WaitMS = time.Since(began).Milliseconds()
 	bundle.mu.Lock()
@@ -2617,6 +2631,12 @@ func (bundle *phaseTwoWorkerBundle) drainSlots(
 	bundle.mu.Unlock()
 	return schedulerErr
 }
+
+// drainCancelGrace is how long a stop waits, after cancelling the Slots still
+// running at its drain deadline, for them to return. A Slot that honours its
+// context returns within milliseconds; one still running a second later is
+// blocked in a call that ignores it.
+const drainCancelGrace = time.Second
 
 // shutdownDrain is the stop's wait for its Slots; nil before a stop has run
 // one.

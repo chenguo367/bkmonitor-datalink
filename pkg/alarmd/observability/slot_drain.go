@@ -36,13 +36,20 @@ const (
 	// SlotDrainDeadline: a stop's drain deadline passed and what was still
 	// running was cancelled.
 	SlotDrainDeadline = "deadline"
+	// SlotDrainDeadlineUnreturned: as deadline, and some of what was
+	// cancelled had still not returned a moment later - a call that does not
+	// watch its context. The stop went on without it: its leases were
+	// released and its later writes are refused by the fence.
+	SlotDrainDeadlineUnreturned = "deadline_unreturned"
 	// SlotDrainStopped: a handover was still waiting when the process began
 	// to stop; the stop's own drain covers the Slot.
 	SlotDrainStopped = "stopped"
 )
 
 // SlotDrainOutcomes is every outcome, for closed label sets.
-var SlotDrainOutcomes = []string{SlotDrainIdle, SlotDrainFinished, SlotDrainLeaseEnded, SlotDrainDeadline, SlotDrainStopped}
+var SlotDrainOutcomes = []string{
+	SlotDrainIdle, SlotDrainFinished, SlotDrainLeaseEnded, SlotDrainDeadline, SlotDrainDeadlineUnreturned, SlotDrainStopped,
+}
 
 // SlotDrainFacts is one wait for in-flight Slots before a lease or a process
 // let go (design 02 §6.2, §6.6). A Slot that outlives the wait can have had
@@ -54,7 +61,10 @@ type SlotDrainFacts struct {
 	Outcome string `json:"outcome"`
 	// Waited is how many Slots were in flight when the wait began, and
 	// Cancelled how many were still running when a stop's deadline passed.
-	Waited    int   `json:"waited"`
-	Cancelled int   `json:"cancelled"`
-	WaitMS    int64 `json:"wait_ms"`
+	Waited    int `json:"waited"`
+	Cancelled int `json:"cancelled"`
+	// Unreturned is how many of the cancelled had not returned when the stop
+	// went on without them.
+	Unreturned int   `json:"unreturned"`
+	WaitMS     int64 `json:"wait_ms"`
 }

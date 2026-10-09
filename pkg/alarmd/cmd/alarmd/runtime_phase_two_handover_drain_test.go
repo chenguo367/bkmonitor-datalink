@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
@@ -209,4 +210,42 @@ func heldRunner(bundle *phaseTwoWorkerBundle, queryGroup execution.QueryGroupIde
 	bundle.mu.RLock()
 	defer bundle.mu.RUnlock()
 	return bundle.runners[queryGroup]
+}
+
+// A Slot that ignores its cancellation - blocked in a call that does not
+// watch its context - does not hold the stop past its bound: the drain gives
+// up on it a moment after the deadline, names it, and the leases are still
+// released (the hung Slot's later writes are refused by the fence).
+func TestAStopDoesNotWaitForeverOnASlotThatIgnoresCancellation(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	cfg.ShutdownTimeout = config.Duration(200 * time.Millisecond)
+	queryGroup := execution.QueryGroupIdentity("query-group-deaf")
+	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{queryGroup}}
+	runner := newFakePhaseTwoQueryGroup()
+	runner.runStarted = make(chan struct{})
+	runner.runRelease = make(chan struct{}) // closed only at the end: the Slot ignores its context
+	defer close(runner.runRelease)
+	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{queryGroup}, runner: runner}
+	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, owner)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bundle.Run(ctx) }()
+	waitSignal(t, runner.runStarted, "the Slot that ignores cancellation")
+	stopped := time.Now()
+	cancel()
+	bound := 2*cfg.ShutdownTimeout.Duration() + 2*time.Second
+	select {
+	case <-done:
+	case <-time.After(bound + time.Second):
+		t.Fatalf("the stop was still waiting on a Slot that ignores cancellation after %s, want it done within %s",
+			time.Since(stopped), bound)
+	}
+	drain := bundle.shutdownDrain()
+	if drain == nil || drain.Outcome != observability.SlotDrainDeadlineUnreturned || drain.Waited != 1 ||
+		drain.Cancelled != 1 || drain.Unreturned != 1 {
+		t.Fatalf("shutdown drain = %+v, want deadline_unreturned with 1 waited, 1 cancelled, 1 unreturned", drain)
+	}
+	if released := runner.releaseCount(); released != 1 {
+		t.Fatalf("release calls = %d, want the lease released despite the hung Slot", released)
+	}
 }
