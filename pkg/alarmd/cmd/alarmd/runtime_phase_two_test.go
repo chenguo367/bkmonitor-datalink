@@ -2883,7 +2883,20 @@ func TestPhaseTwoWorkerBundleRegistrationRenewalCutsHungStoreCall(t *testing.T) 
 	waitPhaseTwoCondition(t, 3*time.Second, "READY renewals after the hung call", func() bool {
 		return readyRegistrationCount(owner) >= readyBefore+2
 	})
-	if !hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason) {
+	// The failure is observed by the goroutine whose call hung, after the
+	// call returns. That is the renewal loop or the control round's first
+	// READY registration, whichever reached the store first; in the second
+	// case the renewal loop goes on beside it, and the renewals above can
+	// land before the control round is scheduled to record its failure.
+	// So the observation is waited for, not read at one instant.
+	failureObserved := func() bool {
+		return hasRegistrationRenewalObservation(observations(), observability.ResultFailed, phaseTwoControlDependencyReason)
+	}
+	deadline := time.Now().Add(eventWatchdog)
+	for !failureObserved() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !failureObserved() {
 		t.Fatalf("observations = %+v, want a retryable registration renewal failure", observations())
 	}
 	if snapshot := health.HealthSnapshot(); snapshot.State == observability.HealthNotReady {
