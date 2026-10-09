@@ -37,6 +37,12 @@ type HostStatusFilter struct {
 // NewHostStatusFilter returns the filter for the given disabled states. An
 // empty list disables no host by state; the filter still decides the other
 // four branches.
+//
+// Each state is trimmed and an empty one is left out, which Python does not
+// do: its `state in host.bk_state` with an empty state is true for every
+// host, so one empty entry in the platform's list would drop every host
+// series there. This is a rule difference kept on purpose, awaiting product
+// (the target-scope review of 2026-10-09, section 6).
 func NewHostStatusFilter(states []string) *HostStatusFilter {
 	kept := make([]string, 0, len(states))
 	for _, state := range states {
