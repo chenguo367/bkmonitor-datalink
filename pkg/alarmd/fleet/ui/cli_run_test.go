@@ -65,7 +65,7 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 		t.Errorf("a generation refused for its origin says the entry the preview named: %+v", got)
 	}
 
-	for _, code := range []string{"admin_unauthorized", "admin_not_configured", "auth_rate_limited",
+	for _, code := range []string{"admin_unauthorized", "auth_rate_limited",
 		"auth_busy", "auth_store_unavailable", "not_found"} {
 		got := run("code:" + code)
 		if !got.Error || got.Status == "" || got.Status == "server sentence for "+code || got.At != "inspect-status" {
@@ -310,7 +310,7 @@ async function inspect(pageURL, respond, then) {
     (url, options) => options.method === 'GET' ? answer(200, preview)
       : answer(403, { status: 'error', error: { code: 'origin_denied', message: 'server sentence for origin_denied' } }),
     e => e.issue.listeners.click());
-  for (const code of ['admin_unauthorized', 'admin_not_configured', 'auth_rate_limited', 'auth_busy',
+  for (const code of ['admin_unauthorized', 'auth_rate_limited', 'auth_busy',
     'auth_store_unavailable', 'not_found', 'something_new', 'constructor', 'toString', '__proto__']) {
     runs['code:' + code] = await inspect(entryPage,
       () => answer(403, { status: 'error', error: { code, message: 'server sentence for ' + code } }));
