@@ -427,6 +427,61 @@ type NoDataTracking struct {
 	// saw it.
 	EvaluationTime int64     `json:"evaluation_time"`
 	DecidedAt      time.Time `json:"decided_at"`
+	// Emitted is what this replica sent of the Plan's no-data events: the
+	// answer to whether the Plan's no-data alert went out and recovered.
+	Emitted *NoDataEmitted `json:"emitted,omitempty"`
+}
+
+// NoDataEmittedReading is the sentence every Emitted carries, so a count of
+// zero is not read as more than it is: a restart or a move of the Query
+// Group starts the count again, and older sends are in the alert store.
+// Short, because it rides every listed row of the fleet snapshot.
+const NoDataEmittedReading = "acknowledged writes on this replica since counting_since, retries included; 0 is none sent here since then, not never"
+
+// NoDataEmitted is what this replica sent of one Plan's no-data events since
+// CountingSince, its start: the writes acknowledged by kind, retries
+// included, so not a count of alerts; the writes whose acknowledgement is
+// unknown, which may have landed; the events known not written; and the
+// latest acknowledged event of each kind, with the key the alert store files
+// it under. Counted at the write and nowhere earlier: every full round
+// decides a NORMAL for every group that reported, and a count of decisions
+// says nothing about what reached the store. strategy.get shows the Plan's
+// current owner only, so the part sent before a move is not here.
+type NoDataEmitted struct {
+	Replica       string              `json:"replica"`
+	CountingSince time.Time           `json:"counting_since"`
+	AbnormalSent  uint64              `json:"abnormal_sent"`
+	RecoverySent  uint64              `json:"recovery_sent"`
+	AckUnknown    uint64              `json:"ack_unknown"`
+	NotWritten    uint64              `json:"not_written"`
+	LastAbnormal  *NoDataEmittedEvent `json:"last_abnormal,omitempty"`
+	LastRecovery  *NoDataEmittedEvent `json:"last_recovery,omitempty"`
+	Reading       string              `json:"reading"`
+}
+
+// NoDataEmittedEvent is one acknowledged no-data event and when this replica
+// saw its acknowledgement.
+type NoDataEmittedEvent struct {
+	observability.NoDataEmittedEvent
+	SentAt time.Time `json:"sent_at"`
+}
+
+// record adds one write's facts, keeping the later event of each kind by
+// the Slot that decided it.
+func (emitted *NoDataEmitted) record(facts observability.NoDataEmissionFacts, at time.Time) {
+	emitted.AbnormalSent += uint64(facts.AbnormalSent)
+	emitted.RecoverySent += uint64(facts.RecoverySent)
+	emitted.AckUnknown += uint64(facts.AckUnknown)
+	emitted.NotWritten += uint64(facts.NotWritten)
+	for _, pair := range []struct {
+		into **NoDataEmittedEvent
+		from *observability.NoDataEmittedEvent
+	}{{&emitted.LastAbnormal, facts.LastAbnormal}, {&emitted.LastRecovery, facts.LastRecovery}} {
+		if pair.from == nil || (*pair.into != nil && (*pair.into).EvaluationTime > pair.from.EvaluationTime) {
+			continue
+		}
+		*pair.into = &NoDataEmittedEvent{NoDataEmittedEvent: *pair.from, SentAt: at}
+	}
 }
 
 // NoDataAbsentAges is the age buckets of the absences a round reported: the
@@ -522,6 +577,14 @@ type NoDataTrackingSummary struct {
 	AbsentAges       NoDataAbsentAges `json:"absent_ages"`
 	// LastDecidedAt is the latest deciding round seen.
 	LastDecidedAt time.Time `json:"last_decided_at,omitempty"`
+	// AbnormalSent, RecoverySent, AckUnknown and NotWritten are the sums of
+	// the Plans' Emitted, and PlansSent how many Plans sent anything: what
+	// these replicas sent since each one's start, not ever.
+	AbnormalSent uint64 `json:"abnormal_sent"`
+	RecoverySent uint64 `json:"recovery_sent"`
+	AckUnknown   uint64 `json:"ack_unknown"`
+	NotWritten   uint64 `json:"not_written"`
+	PlansSent    int    `json:"plans_sent"`
 	// HorizonSourceInferred is how many of the Plans' sources were read by
 	// inference rather than off the frozen word: Plans compiled before the
 	// source was frozen, or lines from a Worker before it carried the word.
@@ -551,6 +614,11 @@ func (summary *NoDataTrackingSummary) add(other NoDataTrackingSummary) {
 	summary.ExpiredThisRound += other.ExpiredThisRound
 	summary.Suppressed += other.Suppressed
 	summary.AbsentAges.add(other.AbsentAges)
+	summary.AbnormalSent += other.AbnormalSent
+	summary.RecoverySent += other.RecoverySent
+	summary.AckUnknown += other.AckUnknown
+	summary.NotWritten += other.NotWritten
+	summary.PlansSent += other.PlansSent
 	if other.LastDecidedAt.After(summary.LastDecidedAt) {
 		summary.LastDecidedAt = other.LastDecidedAt
 	}

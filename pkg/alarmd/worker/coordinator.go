@@ -1884,6 +1884,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
 		Counts: observability.Counts{Events: int64(len(events) + len(withoutMessage))}, Err: err, OutputRejection: rejection,
 		OutputWrite: written, OutputWireFormats: formats, OutputEventKinds: kinds,
+		NoDataEmission: noDataEmissionOf(events, err),
 	})
 	acked := events
 	if notWritten, partial := outputNotWritten(err); partial {
