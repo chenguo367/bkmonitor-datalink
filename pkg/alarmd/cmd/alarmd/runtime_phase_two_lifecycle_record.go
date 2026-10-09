@@ -11,6 +11,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
@@ -48,6 +49,12 @@ type lifecycleEntry struct {
 	Build   string    `json:"build"`
 	Reason  string    `json:"reason,omitempty"`
 	Error   string    `json:"error,omitempty"`
+	// Drain is how a stop's wait for its running Slots ended: finished, or
+	// cancelled at the drain deadline, with how many were waited for and
+	// cancelled. A Slot cancelled there can have had its events acknowledged
+	// and not its State, and the next owner sends them again. Absent on a
+	// start, and on a stop whose process never ran its scheduler.
+	Drain *observability.SlotDrainFacts `json:"drain,omitempty"`
 }
 
 type lifecycleRecord struct {
@@ -82,9 +89,10 @@ func (record *lifecycleRecord) start() {
 }
 
 // stop records why the process stopped. err is the error it stops with,
-// when there is one.
-func (record *lifecycleRecord) stop(reason string, err error) {
-	entry := lifecycleEntry{Event: "stop", Reason: reason}
+// when there is one, and drain how its running Slots drained, when it ran
+// any scheduler.
+func (record *lifecycleRecord) stop(reason string, err error, drain *observability.SlotDrainFacts) {
+	entry := lifecycleEntry{Event: "stop", Reason: reason, Drain: drain}
 	if err != nil {
 		text := err.Error()
 		if len(text) > lifecycleErrorBytes {

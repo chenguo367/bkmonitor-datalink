@@ -1535,6 +1535,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			if len(accepted) > 0 {
 				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 				if err != nil {
+					coordinator.observeOutputUnapplied(planCtx, request.Operation, accepted, eventsByState, withoutMessageByState, err)
 					return execution.SlotExecutionResult{}, err
 				}
 				// Counted after the write, not from the mutations built: a
@@ -2457,6 +2458,36 @@ func (coordinator *SlotExecutionCoordinator) observeWithCounts(
 // emitObservation applies the shared result and reason defaults of internal
 // stage observations and hands the observation to the Observer; an observer
 // panic never fails the Slot.
+// observeOutputUnapplied writes the one line a Slot leaves when the broker
+// acknowledged its events and the ownership store then refused their State:
+// the Slot stops, Progress stays, and the next owner redoes the Slot from
+// Progress and sends the same events again. A refusal with no event before it
+// sent nothing and is not this; nor is a State write that failed for any other
+// reason, which the same owner retries.
+func (coordinator *SlotExecutionCoordinator) observeOutputUnapplied(
+	ctx context.Context,
+	operation execution.Operation,
+	accepted []execution.StateMutation,
+	eventsByState map[execution.StateKeyIdentity][]contract.TriggerEventV1,
+	withoutMessageByState map[execution.StateKeyIdentity][]execution.EventWithoutMessage,
+	err error,
+) {
+	refusal, refused := ownership.RefusalReason(err)
+	if !refused {
+		return
+	}
+	sent, _ := outputsOf(accepted, eventsByState, withoutMessageByState)
+	if len(sent) == 0 {
+		return
+	}
+	coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageOutputUnapplied,
+		Result: observability.ResultFailed, Operation: observability.Operation(operation),
+		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonCode(refusal),
+		Counts: observability.Counts{Events: int64(len(sent))}, Err: err,
+	})
+}
+
 func (coordinator *SlotExecutionCoordinator) emitObservation(ctx context.Context, observation observability.Observation) {
 	if observation.Err != nil {
 		observation.Result = observability.Result(observability.ResultFailed)

@@ -736,7 +736,7 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 	// every wake counted below is a pass the dispatcher ran.
 	wake := make(chan struct{})
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	defer func() {
 		cancel()
 		close(blockingRelease)
@@ -847,7 +847,7 @@ func TestPhaseTwoWorkerBundleNormalQueueRotatesPastFastPrefixAcrossTicks(t *test
 	defer cancel()
 	wake := make(chan struct{})
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	wake <- struct{}{}
 	target := execution.QueryGroupIdentity("query-group-09")
 	reachedTarget := false
@@ -924,7 +924,7 @@ func TestPhaseTwoWorkerBundleDelayedQueueKeepsEarliestReadyQueryGroups(t *testin
 	defer cancel()
 	wake := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	wake <- struct{}{}
 	select {
 	case queryGroup := <-started:
@@ -1002,7 +1002,7 @@ func TestPhaseTwoWorkerBundleDispatcherDoesNotHoldQueryRecoveryAllowanceAcrossRu
 	done := make(chan error, 1)
 	dispatcher := newPhaseTwoRunnerDispatcher(bundle, false)
 	dispatcher.start(ctx)
-	go func() { done <- dispatcher.run(ctx, wake) }()
+	go func() { done <- dispatcher.run(ctx, wake, nil) }()
 	wake <- struct{}{}
 	waitSignal(t, holderStarted, "first-attempt Replay")
 
@@ -1220,6 +1220,10 @@ func TestPhaseTwoWorkerBundleRunKeepsControlTicksActiveWhileSchedulerIsBusy(t *t
 		t.Run(test.name, func(t *testing.T) {
 			cfg := validGoAccessRuntimeConfig()
 			cfg.PhaseTwo.Scheduler.TickInterval = config.Duration(time.Millisecond)
+			// The busy Slot only returns when cancelled, which a stop does at
+			// its drain deadline (design 02 §6.6); a short one keeps the
+			// test about the ticks.
+			cfg.ShutdownTimeout = config.Duration(200 * time.Millisecond)
 			test.configure(&cfg)
 			queryGroup := execution.QueryGroupIdentity("query-group-busy")
 			var schedulerBusy atomic.Bool

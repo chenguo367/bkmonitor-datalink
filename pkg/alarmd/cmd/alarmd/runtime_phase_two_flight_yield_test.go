@@ -133,7 +133,7 @@ func TestTheRunningDispatcherRunsATurnedAwayRoundWhenTheHoldEnds(t *testing.T) {
 	done := make(chan error, 1)
 	dispatcher := newPhaseTwoRunnerDispatcher(bundle, false)
 	dispatcher.start(ctx)
-	go func() { done <- dispatcher.run(ctx, wake) }()
+	go func() { done <- dispatcher.run(ctx, wake, nil) }()
 	wake <- struct{}{}
 	for deadline := time.Now().Add(2 * time.Second); runs.Load() == 0 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
 	}

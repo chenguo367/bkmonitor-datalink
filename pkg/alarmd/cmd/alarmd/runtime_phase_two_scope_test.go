@@ -426,7 +426,7 @@ func newScopeTestBackoffArm(
 	arm.cancel = cancel
 	arm.wake = make(chan struct{}, 1)
 	arm.done = make(chan error, 1)
-	go func() { arm.done <- arm.bundle.runScheduler(ctx, arm.wake, false) }()
+	go func() { arm.done <- arm.bundle.runScheduler(ctx, arm.wake, nil, false) }()
 	// The wake is refreshed on a cadence, which is what the deployment's
 	// scheduler ticker does: one pending wake, replaced on an interval. The
 	// cadence is short because nothing here is waiting on real work, and it is
