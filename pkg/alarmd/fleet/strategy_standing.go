@@ -462,13 +462,14 @@ func strategyStandingLine(standing StrategyStanding) string {
 	return strategyStandingSentence(standing, objects, withheld, removed, pending) + normalizedClause(normalized)
 }
 
-// normalizedClause is the sentence's tail for the items read wider than
-// written; empty when there are none.
+// normalizedClause is the sentence's tail for the items that run with a
+// note about their configuration - read other than written, or run as
+// written and unable to do what they appear to; empty when there are none.
 func normalizedClause(normalized []string) string {
 	if len(normalized) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("；%d 项的读法和配置写的不同、在检测：%s", len(normalized), strings.Join(normalized, "；"))
+	return fmt.Sprintf("；%d 项配置有提示、仍在检测：%s", len(normalized), strings.Join(normalized, "；"))
 }
 
 // strategyStandingSentence is the standing, the objects and the withheld

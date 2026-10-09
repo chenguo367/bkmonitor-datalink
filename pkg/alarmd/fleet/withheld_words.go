@@ -104,6 +104,14 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What:   "策略的查询配置没有写聚合周期，或写的是 0，已按平台的读法按 60 秒作为检测周期——策略在检测，不是被扣住",
 		Next:   "策略负责人在查询配置里写上聚合周期；改好后下一轮刷新按写的周期检测，这一行消失",
 		Action: ActionStrategyEdit},
+	// Under CONFIG_NORMALIZED too, and not a reading at all: the no-data
+	// configuration runs as written and can never alert, because the
+	// tracking horizon stops each absence before the trigger has its count.
+	// The detail carries the numbers the owner chooses between.
+	"NO_DATA_TRIGGER_BEYOND_HORIZON": {Kind: WithheldStrategyDefinition,
+		What:   "无数据告警要连续缺席的时长达到或超过追踪期限：第 N 个连续缺席点出现在首次缺席后（连续周期数−1）×周期 秒，而追踪在缺席满追踪期限的那一轮停止且不出裁决，所以这条无数据永远发不出告警（详情里写明连续周期数、周期、最早可告警时刻、追踪期限及其来源）——策略在检测，阈值检测和无数据的追踪、停止、恢复都照常，不是被扣住",
+		Next:   "策略负责人把连续周期数调小，或调大追踪期限（来源是 STRATEGY 时改策略的无数据配置，是 PLATFORM 时改平台配置）；改好后下一轮刷新这一行消失",
+		Action: ActionStrategyEdit},
 	// The detect_interval readings, under CONFIG_NORMALIZED: the Plan runs,
 	// at the step written or at the aggregation interval, and the words say
 	// which and what follows from it.

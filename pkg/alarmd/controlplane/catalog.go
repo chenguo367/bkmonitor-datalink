@@ -282,13 +282,15 @@ const (
 	DispositionRemoved              Disposition = "REMOVED"
 	DispositionUnsupported          Disposition = "UNSUPPORTED_PHASE2_CAPABILITY"
 	DispositionCompatibilityIgnored Disposition = "COMPATIBILITY_IGNORED"
-	// DispositionConfigNormalized is an object accepted with a part of its
-	// configuration read as something other than what was written, the way
-	// Python reads it: the Plan runs, and this says what was widened. It
-	// is not withheld from anything; it is listed with the withheld
+	// DispositionConfigNormalized is an object accepted with a note about
+	// its configuration: a part read as something other than what was
+	// written, the way Python reads it, or a part that runs as written and
+	// cannot do what it appears to (a no-data trigger the tracking horizon
+	// stops first). The Plan runs, and this says what the owner should know.
+	// It is not withheld from anything; it is listed with the withheld
 	// dispositions because that is the list a reader looks at for "what did
-	// the catalog do to my strategy", and a widening that is not there is a
-	// widening nobody finds.
+	// the catalog do to my strategy", and a note that is not there is a note
+	// nobody finds.
 	DispositionConfigNormalized Disposition = "CONFIG_NORMALIZED"
 )
 
@@ -301,6 +303,14 @@ const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 // aggregation interval, or a 0 among them, read as the 60 seconds Python
 // reads it as (itemInterval).
 const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
+
+// ReasonNoDataTriggerBeyondHorizon names a Plan whose no-data trigger needs
+// at least as long as the tracking horizon lets an absence be tracked, so it
+// can never alert: the N-th consecutive absent point lands (N-1) periods
+// after the absence began, and tracking stops on the round the absence is
+// the horizon old. The Plan runs as written, no-data included; this is the
+// owner's choice to make and the warning tells them it is one.
+const ReasonNoDataTriggerBeyondHorizon = "NO_DATA_TRIGGER_BEYOND_HORIZON"
 
 // The item fields a strategy cannot be compiled without, each refused under
 // its own name with the field it names, as a rejected configuration (the
@@ -1796,6 +1806,38 @@ func legacyNoDataNumber(field string, raw json.RawMessage) (uint32, bool, error)
 	return uint32(truncated), true, nil
 }
 
+// legacyNoDataHorizon reads an item's own tracking horizon. Unlike the other
+// numbers of the section it has no backend reading to follow - the platform
+// has no such field - so its value takes the horizon's own contract
+// (retention proposal, section 0 item 4): a positive whole number of seconds.
+// A fraction, a whole number written with a fraction (1.0), an exponent and
+// zero are refused by name rather than truncated or defaulted; a stated
+// horizon that was silently changed is a horizon nobody chose. The quotes
+// are not the value: the section is a bare dict in the platform's store, so a
+// number may arrive as text, and "900" is read as 900 like every other number
+// here - while "1.5" is refused like 1.5.
+func legacyNoDataHorizon(raw json.RawMessage) (int64, bool, error) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return 0, false, nil
+	}
+	if quoted, err := strconv.Unquote(text); err == nil {
+		text = strings.TrimSpace(quoted)
+		if text == "" {
+			return 0, false, nil
+		}
+	}
+	refused := func() (int64, bool, error) {
+		return 0, false, fmt.Errorf("no_data_config tracking_horizon_seconds %s must be a positive whole number "+
+			"of seconds written as a JSON integer; remove the field to inherit the platform's", text)
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || value <= 0 {
+		return refused()
+	}
+	return value, true, nil
+}
+
 // defaultNoDataLevel is the backend's read-side default for a level the item
 // omits: mixins/nodata.py reads .get("level", NO_DATA_LEVEL). continuous has no
 // counterpart here on purpose - the same dict literal that defaults level
@@ -1888,19 +1930,15 @@ func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataC
 	if policy.TrackingHorizonSeconds > 0 {
 		config.TrackingHorizonSource = contract.NoDataHorizonSourcePlatform
 	}
-	horizon, stated, err := legacyNoDataNumber("tracking_horizon_seconds", source.TrackingHorizonSeconds)
+	horizon, stated, err := legacyNoDataHorizon(source.TrackingHorizonSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
 	}
 	if stated {
-		if horizon == 0 {
-			return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config tracking_horizon_seconds "+
-				"must be a positive number of seconds; remove the field to inherit the platform's", item.ID)
-		}
 		// The source is frozen beside the number: a reader of the Plan does
 		// not have to compare it against the platform's current value to
 		// know whose it is.
-		config.TrackingHorizonSeconds = int64(horizon)
+		config.TrackingHorizonSeconds = horizon
 		config.TrackingHorizonSource = contract.NoDataHorizonSourceStrategy
 	}
 	if err := config.Validate(); err != nil {
@@ -2342,6 +2380,9 @@ func compilePlan(
 		// build cannot do is the roster, and the thresholds do not depend on
 		// it.
 		suspended, plan.NoData = contract.ReasonNoDataRosterUnsupported, nil
+	}
+	if warning := noDataTriggerBeyondHorizon(sourceID, plan.NoData, step.Seconds); warning != nil {
+		dispositions = append(dispositions, *warning)
 	}
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}

@@ -357,7 +357,7 @@ func TestASourceAcceptingNothingDegradesOnlyWhenNothingRunsBecauseOfIt(t *testin
 				{StrategyID: "4110", Scope: "STRATEGY", Disposition: "SOURCE_INCOMPLETE", Reason: "SOURCE_IDENTITY_UNAVAILABLE"}})}}
 	view = Aggregate(Expectation{QueryGroups: 70, Known: true}, widened, []string{"pod-a"}, now, freshness)
 	if s := view.SourceStanding; s == nil || s.Normalized != 2 ||
-		s.Cache != "策略缓存列出 81 条，可用 70 条，扣住 11 条（原因见检查项），可用的里有 2 条的读法和配置写的不同（在检测，不是被扣，原因见检查项）" {
+		s.Cache != "策略缓存列出 81 条，可用 70 条，扣住 11 条（原因见检查项），可用的里有 2 条配置有提示（仍在检测，不是被扣，原因见检查项）" {
 		t.Errorf("accepting standing with normalized records = %+v", s)
 	}
 	empty := []Snapshot{{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Source: NewSourceFacts(now, map[string]int{}, nil)}}

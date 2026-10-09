@@ -488,6 +488,9 @@ var AlwaysReportedWithheld = []WithheldKey{
 	{Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed},
 	// "No strategy here runs on a period it did not write."
 	{Disposition: DispositionConfigNormalized, Reason: ReasonAggIntervalDefaulted},
+	// "No strategy here has a no-data trigger the tracking horizon stops
+	// before it can fire."
+	{Disposition: DispositionConfigNormalized, Reason: ReasonNoDataTriggerBeyondHorizon},
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers

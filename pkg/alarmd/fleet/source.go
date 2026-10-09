@@ -383,7 +383,7 @@ func sourceStandingLines(standing *SourceStanding) (run, cache string) {
 			cache += fmt.Sprintf("，扣住 %d 条（原因见检查项）", withheld)
 		}
 		if standing.Normalized > 0 {
-			cache += fmt.Sprintf("，可用的里有 %d 条的读法和配置写的不同（在检测，不是被扣，原因见检查项）", standing.Normalized)
+			cache += fmt.Sprintf("，可用的里有 %d 条配置有提示（仍在检测，不是被扣，原因见检查项）", standing.Normalized)
 		}
 		return fmt.Sprintf("%d 个对象正在检测", standing.Executing), cache
 	case SourceUpdateUnusable:
