@@ -74,6 +74,11 @@ func (*outputSinkNotOpenError) Error() string { return "output sink is not open"
 
 func (*outputSinkNotOpenError) RetryableOutputDependency() {}
 
+// OutputFailureKind: no broker was asked.
+func (*outputSinkNotOpenError) OutputFailureKind() string {
+	return observability.OutputFailureSinkNotOpen
+}
+
 // lazyOutputSink opens the output sink when it can and stands in for it
 // until then.
 //

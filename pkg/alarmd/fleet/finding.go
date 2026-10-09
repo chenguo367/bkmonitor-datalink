@@ -14,6 +14,7 @@ import (
 
 	// Aliased: a test helper in this package is named execution.
 	routedetail "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A Finding is what the page renders for one object, decided here.
@@ -131,9 +132,9 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 	// This deployment's own client refusing to write the round's events is
 	// the same kind of line: a refusal the client decided, repeated every
 	// round until the configuration or the converter changes. Read from the
-	// failure's words, because the code it arrives under is the one the
+	// failure's kind, because the code it arrives under is the one the
 	// broker not answering also arrives under.
-	if _, kind, isOutput := outputFailureOf(anomaly); isOutput && kind == OutputFailureClientRejected && failureThisRound(anomaly) {
+	if _, kind, isOutput := outputFailureOf(anomaly); isOutput && kind == observability.OutputFailureClientRejected && failureThisRound(anomaly) {
 		return CheckDefect, true, false
 	}
 	switch {

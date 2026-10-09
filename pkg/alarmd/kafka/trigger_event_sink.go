@@ -97,8 +97,13 @@ func (sink *TriggerEventSink) ConfigureLegacyOutput(converter LegacyEventConvert
 // client for want of a protocol version read as a Kafka that was down,
 // retried every round, and committed no progress. Encoding and local
 // lifecycle errors remain ordinary.
+//
+// kind is what the failure was (OutputFailureKind): the broker's answer read
+// by brokerFailureKind for a send, and nothing for a conversion, whose
+// wrapped error says its own (a snapshot store's) or is the caller's context.
 type triggerEventDependencyError struct {
-	err error
+	err  error
+	kind string
 }
 
 // OutputRejectedError is a decision this process will not write, decided
@@ -272,6 +277,18 @@ func (err *triggerEventDependencyError) Unwrap() error {
 
 func (err *triggerEventDependencyError) RetryableOutputDependency() {}
 
+func (err *triggerEventDependencyError) OutputFailureKind() string {
+	if err == nil {
+		return ""
+	}
+	return err.kind
+}
+
+// OutputFailureKind: refused before sending, or for good by the producer.
+func (err *OutputRejectedError) OutputFailureKind() string {
+	return observability.OutputFailureClientRejected
+}
+
 // TriggerEventSinkOpener is the half of opening the sink that needs the
 // network. The other half -- reading and validating the coordinates -- has
 // already run when one of these exists, so an error from Open is the broker
@@ -372,7 +389,7 @@ const tenantHeader = "bk_tenant_id"
 
 func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.TriggerEventV1) error {
 	if sink == nil || sink.core == nil {
-		return ErrDecisionSinkClosed
+		return &outputKindError{kind: observability.OutputFailureSinkNotOpen, err: ErrDecisionSinkClosed}
 	}
 	if ctx == nil {
 		return errors.New("kafka trigger event sink: context is required")
@@ -579,8 +596,17 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	}
 	if err := sink.core.writeMessages(ctx, messages); err != nil {
 		publishErr := fmt.Errorf("kafka trigger event sink: publish batch: %w", err)
-		if errors.Is(err, ErrDecisionSinkClosed) || ctx.Err() != nil {
-			return publishErr
+		if errors.Is(err, ErrDecisionSinkClosed) {
+			return &outputKindError{kind: observability.OutputFailureSinkNotOpen, err: publishErr}
+		}
+		if ctx.Err() != nil {
+			if err == ctx.Err() {
+				// The Slot's context ended before the batch reached the
+				// client: nothing was sent, and the cause is the caller's.
+				return publishErr
+			}
+			// Ended while the batch was being sent: what landed is unknown.
+			return &outputKindError{kind: observability.OutputFailureAckUnknown, err: publishErr}
 		}
 		if detail, rejected := clientRejection(err); rejected {
 			if landed := partlyRefused(ctx, err, messages, eventOf, events, formats, refused); landed != nil {
@@ -591,7 +617,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			// is the client's own sentence.
 			return outputRejected(contract.ReasonOutputClientRejected, detail, string(contract.ResolveOutputWireFormat(events[0].WireFormat, eventRevision(events[0]))), &events[0])
 		}
-		return &triggerEventDependencyError{err: publishErr}
+		return &triggerEventDependencyError{err: publishErr, kind: brokerFailureKind(err)}
 	}
 	return partial.err()
 }

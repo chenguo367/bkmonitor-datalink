@@ -555,32 +555,34 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		blocked.Stage, blocked.Class = StageQuery, ClassTimeout
 		blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
 	}
-	// A failure writing the round's events is read by its words, not by its
+	// A failure writing the round's events is read by its kind, not by its
 	// code: the code says the ACK did not come and nothing about why. The
-	// broker not answering is the dependency's, unavailable; the client
-	// refusing to send is this deployment's, a contract, and no dependency
-	// is named for it -- pointing the reader at the broker for a refusal the
-	// client decided before any byte left is the reading that lost an
-	// afternoon. Words nobody has a signature for stay unlocated, on this
-	// deployment's side of the page.
+	// broker not answering, or answering no, is Kafka's, unavailable; the
+	// snapshot store is Redis's; the client refusing to send is this
+	// deployment's, a contract, and no dependency is named for it --
+	// pointing the reader at the broker for a refusal the client decided
+	// before any byte left is the reading that lost an afternoon. A failure
+	// without a kind stays unlocated, on this deployment's side of the page.
 	if failureThisRound(anomaly) {
 		if failure, kind, isOutput := outputFailureOf(anomaly); isOutput {
-			blocked.DependencyEvidence = kind
+			// A code the sink named itself without a kind - the lease too
+			// short to start a batch - is read by its code alone: no
+			// evidence word claims more than the code does.
+			if !outputNamedCodes[failure.Code] || kind != observability.OutputFailureUnknown {
+				blocked.DependencyEvidence = kind
+			}
 			if blocked.Code == "" {
 				blocked.Code = failure.Code
 			}
 			// A code the sink named itself already has its reading in the
-			// table -- the two refusal words say commit, no dependency, and
-			// which class -- and the words only add which kind. A failure
-			// under the shared code is read here, by its words.
-			if !outputRejectionCodes[failure.Code] {
+			// table -- the refusal words and the lease say commit, the
+			// dependency and the class -- and the kind only adds which one.
+			// A failure under the shared code is read here, by its kind.
+			if !outputNamedCodes[failure.Code] {
 				blocked.Stage = StageCommit
-				switch kind {
-				case OutputFailureClientRejected:
-					blocked.Dependency, blocked.Class = DependencyNone, ClassContract
-				case OutputFailureBrokerError:
-					blocked.Dependency, blocked.Class = DependencyKafka, ClassUnavailable
-				default:
+				if reading, known := outputFailureReading[kind]; known {
+					blocked.Dependency, blocked.Class = reading.dependency, reading.class
+				} else {
 					blocked.Dependency, blocked.Class = DependencyUnlocated, ClassUnlocated
 				}
 			}

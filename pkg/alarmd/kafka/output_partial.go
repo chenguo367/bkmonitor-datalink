@@ -83,6 +83,12 @@ func (err *OutputPartiallyRejectedError) OutputRejectionDetail() string {
 	return err.Rejected[0].Rule + ": " + err.Rejected[0].Detail
 }
 
+// OutputFailureKind: part of the batch was refused before sending or for
+// good by the producer - this deployment's, as a whole refusal is.
+func (err *OutputPartiallyRejectedError) OutputFailureKind() string {
+	return observability.OutputFailureClientRejected
+}
+
 // OutputNotWrittenEventIDs is every event of the batch that was not written,
 // rejected or withheld: the caller leaves the State of their series as it
 // was and acknowledges only the others.

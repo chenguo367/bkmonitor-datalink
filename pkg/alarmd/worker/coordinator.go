@@ -1909,12 +1909,19 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		// counted anything said nothing about these either.
 		written = withoutMessageReported(written, withoutMessage)
 	}
+	// The kind the sink's error says it is, by its type: which of the
+	// failures that share a reason this one was. Empty on a success.
+	failureKind := ""
+	if err != nil {
+		failureKind = observability.OutputFailureKindOf(err)
+	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
 		Counts: observability.Counts{Events: int64(len(events) + len(withoutMessage))}, Err: err, OutputRejection: rejection,
-		OutputWrite: written, OutputWireFormats: formats, OutputEventKinds: kinds,
+		OutputFailureKind: failureKind,
+		OutputWrite:       written, OutputWireFormats: formats, OutputEventKinds: kinds,
 		NoDataEmission: noDataEmissionOf(events, err),
 	})
 	acked := events

@@ -970,3 +970,26 @@ func TestTheFirstScreenConsoleLineReadsTheServersAttention(t *testing.T) {
 		t.Fatal("the brief no longer renders the Console line from deployment.linkd_console")
 	}
 }
+
+// How a row's dependency was named has words on the page for every word the
+// server sends - the two naming words and each kind of output failure - and
+// for none it does not: a kind without words would render as nothing, which
+// reads as "named by nothing".
+func TestThePageHasWordingForEveryDependencyEvidence(t *testing.T) {
+	found := regexp.MustCompile(`var DEPENDENCY_EVIDENCE = \{([\s\S]*?)\};`).FindStringSubmatch(string(page))
+	if found == nil {
+		t.Fatal("the page has no DEPENDENCY_EVIDENCE wording table")
+	}
+	worded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([a-z_]+):`).FindAllStringSubmatch(found[1], -1) {
+		worded[entry[1]] = true
+		if !containsString(fleet.DependencyEvidences, entry[1]) {
+			t.Errorf("DEPENDENCY_EVIDENCE has words for %s, which the server never sends", entry[1])
+		}
+	}
+	for _, word := range fleet.DependencyEvidences {
+		if !worded[word] {
+			t.Errorf("DEPENDENCY_EVIDENCE has no words for %s", word)
+		}
+	}
+}

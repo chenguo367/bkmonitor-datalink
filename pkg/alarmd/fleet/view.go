@@ -242,12 +242,16 @@ type FailureRef struct {
 	// error and no detail -- the write of the round's events. Bounded and
 	// sanitized the way the row's last error is, and kept apart from Detail
 	// because Detail has a grammar (a bounded token the backend answered
-	// with) and this does not. It is the field that decides the reading of
-	// an output failure: the client refusing to send is not the broker
-	// failing to answer, and on a live deployment the two read identically
-	// for an afternoon because neither the row nor the window carried the
-	// sentence that told them apart.
+	// with) and this does not. It is for the reader; it decides nothing.
 	Text string `json:"text,omitempty"`
+	// Kind is which kind of output failure this was, as the sink's error
+	// says by its type (observability.OutputFailureKinds): the field that
+	// decides the reading of an output failure. The client refusing to send
+	// is not the broker failing to answer, and on a live deployment the two
+	// read identically for an afternoon; they were then told apart by the
+	// error's words, which a Redis's EOF could pass as Kafka's. Empty on
+	// other stages and on rows from a publisher that predates it.
+	Kind string `json:"kind,omitempty"`
 	// At is when this failure was observed. The reference is kept until a
 	// healthy completion, so on a row whose latest round ended some other
 	// way it describes an earlier round; the reading that names the current
