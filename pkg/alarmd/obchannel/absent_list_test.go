@@ -21,8 +21,8 @@ func TestAbsentListReadsThePageAndSaysWhatItCannot(t *testing.T) {
 		_, _ = w.Write([]byte(`{"answered_by":"r","state":"ready","rows":[]}`))
 	})
 	c := testChannel(t, &testAuth{}, NativeOperations(native)...)
-	status, out := call(t, c, envelope(c, "invoke", "absent.list", Params{"outcome": "closed", "limit": 7}))
-	if status != 200 || !strings.HasPrefix(asked, "/api/absent?") || !strings.Contains(asked, "outcome=closed") ||
+	status, out := call(t, c, envelope(c, "invoke", "absent.list", Params{"outcome": "close_decided", "limit": 7}))
+	if status != 200 || !strings.HasPrefix(asked, "/api/absent?") || !strings.Contains(asked, "outcome=close_decided") ||
 		!strings.Contains(asked, "limit=7") || strings.Contains(asked, "execution=") || strings.Contains(asked, "cursor=") {
 		t.Fatalf("status %d, asked %q: %+v", status, asked, out)
 	}

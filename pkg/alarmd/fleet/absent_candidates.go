@@ -57,7 +57,7 @@ var AbsentStates = []string{AbsentStateReady, AbsentStateNoRoundYet, AbsentState
 // round makes about a candidate, and the link listing a strategy whose set
 // it could not read.
 var AbsentOutcomes = []string{absentalerts.OutcomeWithinGrace, absentalerts.OutcomeUnconfirmed,
-	absentalerts.OutcomeDeferred, absentalerts.OutcomeClosed, absentalerts.OutcomeIndexUnreadable}
+	absentalerts.OutcomeDeferred, absentalerts.OutcomeCloseDecided, absentalerts.OutcomeIndexUnreadable}
 
 // The execution words that are the page's own; the rest are the absent
 // close's outcome words for the same facts.
@@ -73,7 +73,7 @@ const (
 
 // AbsentExecutions is every word a row's execution takes.
 var AbsentExecutions = []string{AbsentExecutionNotRun,
-	absentalerts.OutcomeAlertClosed, absentalerts.OutcomeSendFailed, AbsentExecutionNoOwnAlerts,
+	absentalerts.OutcomeCloseSent, absentalerts.OutcomeSendFailed, AbsentExecutionNoOwnAlerts,
 	absentalerts.OutcomeIdentityUnknown, absentalerts.OutcomeRevisionUnknown, absentalerts.OutcomeEvidenceUnavailable}
 
 // Where a close's business and revision came from. Closed.
@@ -163,7 +163,7 @@ type AbsentTableFacts struct {
 	WithinGrace      int    `json:"within_grace"`
 	Unconfirmed      int    `json:"unconfirmed"`
 	Deferred         int    `json:"deferred"`
-	Closed           int    `json:"closed"`
+	CloseDecided     int    `json:"close_decided"`
 	// Rows is how many rows the table keeps; RowsNotKept how many the
 	// round decided about beyond the table's bound, in key order.
 	Rows        int `json:"rows"`

@@ -405,7 +405,7 @@ func TestASnapshotThatShrankFromAWriterThatHoldsFailuresIsDecidedOn(t *testing.T
 	if fixture.loop.Difference()["writer_holds_last_good"] != 1 {
 		t.Fatalf("the waived gate was not reported: %+v", fixture.loop.Difference())
 	}
-	if fixture.loop.Stats()[absentalerts.OutcomeClosed] != 1 {
+	if fixture.loop.Stats()[absentalerts.OutcomeCloseDecided] != 1 {
 		t.Fatalf("the absent strategy was not decided after its grace: %+v", fixture.loop.Stats())
 	}
 }
@@ -574,7 +574,7 @@ func TestACandidatePastGraceIsSentWithNoSwitch(t *testing.T) {
 	if len(fixture.writer.batches) != 1 || len(fixture.writer.batches[0]) != 1 || fixture.writer.batches[0][0].AlertInstanceID != "mine" {
 		t.Fatalf("the candidate's own alert was not sent alone: %+v", fixture.writer.batches)
 	}
-	if stats[absentalerts.OutcomeClosed] != 1 || stats[absentalerts.OutcomeAlertClosed] != 1 || stats[absentalerts.OutcomeProducerForeign] != 1 {
+	if stats[absentalerts.OutcomeCloseDecided] != 1 || stats[absentalerts.OutcomeCloseSent] != 1 || stats[absentalerts.OutcomeProducerForeign] != 1 {
 		t.Fatalf("outcomes = %+v, want one strategy closed, one alert closed, one foreign", stats)
 	}
 }

@@ -62,16 +62,31 @@ var removedFamilies = []string{
 // removedLabelValues are label values taken out of families that stay.
 // A reader still filtering on one would read nothing and take it for zero,
 // the same way as for a removed family.
-var removedLabelValues = []struct{ family, label, value string }{
+//
+// everyday marks a value that is also an ordinary word the sources use in
+// other senses - a closed list, a closed record - so only its emission is
+// guarded, not its spelling.
+var removedLabelValues = []struct {
+	family, label, value string
+	everyday             bool
+}{
 	// The alert closes send wherever the link's Console is configured:
 	// nothing is decided and held back any more, so there is no count of
 	// what would have been sent and no side saying whether sending is on.
-	{"absent_strategy_close_total", "outcome", "would_send"},
-	{"target_scope_close_total", "outcome", "would_send"},
-	{"absent_strategy_difference", "side", "send_armed"},
+	{"absent_strategy_close_total", "outcome", "would_send", false},
+	{"target_scope_close_total", "outcome", "would_send", false},
+	{"absent_strategy_difference", "side", "send_armed", false},
 	// Expired-range creation is always on, so the range gate never refuses
 	// for it being off.
-	{"range_gate_total", "outcome", "range_creation_disabled"},
+	{"range_gate_total", "outcome", "range_creation_disabled", false},
+	// The close counts said closed where they counted decisions and sends:
+	// a deployment read 354 alert_closed while the link still listed nearly every
+	// one of those alerts active. They now say close_decided and close_sent,
+	// and whether the link closed anything is read per strategy, from what
+	// its reconcile still lists active after an earlier send.
+	{"absent_strategy_close_total", "outcome", "alert_closed", false},
+	{"absent_strategy_close_total", "outcome", "closed", true},
+	{"target_scope_close_total", "outcome", "closed", true},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -132,7 +147,9 @@ func emittedOf(emitted map[string]bool, family string) []string {
 func TestNoSourceNamesARemovedLabelValue(t *testing.T) {
 	var values []string
 	for _, removed := range removedLabelValues {
-		values = append(values, regexp.QuoteMeta(removed.value))
+		if !removed.everyday {
+			values = append(values, regexp.QuoteMeta(removed.value))
+		}
 	}
 	pattern := regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(` + strings.Join(values, "|") + `)(?:[^A-Za-z0-9_]|$)`)
 	self, err := filepath.Abs("removed_families_test.go")

@@ -149,7 +149,7 @@ func (table *absentCandidateTable) rebuild(at time.Time, result absentalerts.Res
 			row := absentCandidateRow{key: decision.Key, outcome: decision.Outcome, outcomeAt: at,
 				absentSince: decision.AbsentSince, execution: previousAt(decision.Key)}
 			row.members, row.readable = roster[decision.Key], true
-			if decision.Outcome == absentalerts.OutcomeClosed {
+			if decision.Outcome == absentalerts.OutcomeCloseDecided {
 				row.execution = &absentExecution{decidedAt: at, word: fleet.AbsentExecutionNotRun}
 			}
 			admit(row)
@@ -163,7 +163,7 @@ func (table *absentCandidateTable) rebuild(at time.Time, result absentalerts.Res
 	table.decided = true
 	table.table = fleet.AbsentTableFacts{At: at.UTC().Format(time.RFC3339), Roster: counts.Roster,
 		RosterUnreadable: counts.RosterUnreadable, Snapshot: counts.SnapshotStrategies, Candidates: counts.Candidates,
-		WithinGrace: counts.WithinGrace, Unconfirmed: counts.Unconfirmed, Deferred: counts.Deferred, Closed: counts.Closed,
+		WithinGrace: counts.WithinGrace, Unconfirmed: counts.Unconfirmed, Deferred: counts.Deferred, CloseDecided: counts.CloseDecided,
 		Rows: len(rows), RowsNotKept: total - len(rows)}
 }
 

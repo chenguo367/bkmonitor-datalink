@@ -117,7 +117,7 @@ func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 		page.LastRound.At != stamp(decided) || page.Table == nil || page.Table.At != stamp(decided) {
 		t.Fatalf("the header does not say which round the rows are of: %+v %+v %+v", page, page.LastRound, page.Table)
 	}
-	if table := page.Table; table.Roster != 2 || table.Candidates != 1 || table.Closed != 1 || table.Snapshot != 100 ||
+	if table := page.Table; table.Roster != 2 || table.Candidates != 1 || table.CloseDecided != 1 || table.Snapshot != 100 ||
 		table.Rows != 1 || table.RowsNotKept != 0 {
 		t.Fatalf("the table's counts are not the round's: %+v", table)
 	}
@@ -125,12 +125,12 @@ func TestTheCandidatePageNamesTheStrategyAndWhatItsCloseFound(t *testing.T) {
 		t.Fatalf("a strategy the snapshot lists is on the page, or the candidate is missing: %+v", page.Rows)
 	}
 	row := page.Rows[0]
-	if row.TenantID != "system" || row.Members == nil || *row.Members != 3 || row.Outcome != absentalerts.OutcomeClosed ||
+	if row.TenantID != "system" || row.Members == nil || *row.Members != 3 || row.Outcome != absentalerts.OutcomeCloseDecided ||
 		row.OutcomeAt != stamp(decided) || row.AbsentSince != stamp(firstRound) {
 		t.Fatalf("the row is not the round's decision: %+v", row)
 	}
 	execution := row.Execution
-	if execution == nil || execution.Word != absentalerts.OutcomeAlertClosed || execution.DecidedAt != stamp(decided) ||
+	if execution == nil || execution.Word != absentalerts.OutcomeCloseSent || execution.DecidedAt != stamp(decided) ||
 		execution.Batch != 1 || execution.SampleAlertID != "mine" {
 		t.Fatalf("the row does not say what the close did: %+v", execution)
 	}
@@ -197,7 +197,7 @@ func TestARowSaysWhatTheCloseSent(t *testing.T) {
 	fixture.mature(context.Background())
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
 	execution := absentRowOf(t, page, "10").Execution
-	if execution == nil || execution.Word != absentalerts.OutcomeAlertClosed || execution.Batch != 1 || len(fixture.writer.batches) != 1 {
+	if execution == nil || execution.Word != absentalerts.OutcomeCloseSent || execution.Batch != 1 || len(fixture.writer.batches) != 1 {
 		t.Fatalf("the row does not say what the close sent: %+v %+v", page, execution)
 	}
 }
@@ -216,12 +216,12 @@ func TestARefusedRoundLeavesTheRowsAndSaysHowOldTheyAre(t *testing.T) {
 	if page.LastRound == nil || page.LastRound.Refusal != absentalerts.RefusalLinkUnhealthy || page.LastRound.At != stamp(fixture.now) {
 		t.Fatalf("the refused round is not the latest round: %+v", page.LastRound)
 	}
-	if page.Table == nil || page.Table.At != stamp(decided) || page.Table.Closed != 1 {
+	if page.Table == nil || page.Table.At != stamp(decided) || page.Table.CloseDecided != 1 {
 		t.Fatalf("the refused round changed which round the rows are of: %+v", page.Table)
 	}
 	row := absentRowOf(t, page, "10")
-	if row.Outcome != absentalerts.OutcomeClosed || row.OutcomeAt != stamp(decided) || row.Execution == nil ||
-		row.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if row.Outcome != absentalerts.OutcomeCloseDecided || row.OutcomeAt != stamp(decided) || row.Execution == nil ||
+		row.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("the refused round changed a row: %+v", row)
 	}
 }
@@ -247,7 +247,7 @@ func TestARowKeepsItsLatestCloseUntilItLeaves(t *testing.T) {
 	if kept.Outcome != absentalerts.OutcomeDeferred || kept.OutcomeAt != stamp(fixture.now) {
 		t.Fatalf("the row does not carry this round's decision: %+v", kept)
 	}
-	if kept.Execution == nil || kept.Execution.DecidedAt != stamp(decided) || kept.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if kept.Execution == nil || kept.Execution.DecidedAt != stamp(decided) || kept.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("a strategy still in the difference lost what its latest close found: %+v", kept.Execution)
 	}
 
@@ -281,10 +281,10 @@ func TestACloseTheRoundsDeadlineCutOffReadsNotRun(t *testing.T) {
 
 	page := readAbsentPage(t, fixture.loop, fleet.AbsentCandidateQuery{})
 	first, second := absentRowOf(t, page, "10"), absentRowOf(t, page, "11")
-	if first.Execution == nil || first.Execution.Word != absentalerts.OutcomeAlertClosed {
+	if first.Execution == nil || first.Execution.Word != absentalerts.OutcomeCloseSent {
 		t.Fatalf("the close that ran is not on its row: %+v", first.Execution)
 	}
-	if second.Outcome != absentalerts.OutcomeClosed || second.Execution == nil || second.Execution.Word != fleet.AbsentExecutionNotRun ||
+	if second.Outcome != absentalerts.OutcomeCloseDecided || second.Execution == nil || second.Execution.Word != fleet.AbsentExecutionNotRun ||
 		second.Execution.DecidedAt != stamp(fixture.now) || second.Execution.Alerts != nil {
 		t.Fatalf("a close the deadline cut off does not read as not run this round: %+v %+v", second, second.Execution)
 	}
