@@ -91,7 +91,17 @@ func (streaks *noDataSkipStreaks) record(plan execution.PlanKey, outcome nodata.
 func (stream *streamedExecution) recordNoDataOutcome(
 	ctx context.Context, due execution.DuePlan, outcome nodata.SlotOutcome,
 ) {
+	if stream.noDataOutcomeIndex == nil {
+		stream.noDataOutcomeIndex = map[execution.PlanKey]int{}
+	}
+	stream.noDataOutcomeIndex[due.Key()] = len(stream.noDataOutcomes)
 	stream.noDataOutcomes = append(stream.noDataOutcomes, outcome)
+	stream.noteNoDataStreak(ctx, due, outcome)
+}
+
+// noteNoDataStreak counts one Plan's outcome into its streak and reports a
+// stall the round it becomes one.
+func (stream *streamedExecution) noteNoDataStreak(ctx context.Context, due execution.DuePlan, outcome nodata.SlotOutcome) {
 	if !stream.coordinator.noDataSkips.record(due.Key(), outcome) {
 		return
 	}

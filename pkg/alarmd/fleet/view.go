@@ -579,7 +579,9 @@ type NoDataTrackingSummary struct {
 	LastDecidedAt time.Time `json:"last_decided_at,omitempty"`
 	// AbnormalSent, RecoverySent, AckUnknown and NotWritten are the sums of
 	// the Plans' Emitted, and PlansSent how many Plans sent anything: what
-	// these replicas sent since each one's start, not ever.
+	// these replicas sent since each one's start, not ever. PlansSent counts
+	// a Plan with at least one acknowledged write, not one whose writes were
+	// all unknown or refused.
 	AbnormalSent uint64 `json:"abnormal_sent"`
 	RecoverySent uint64 `json:"recovery_sent"`
 	AckUnknown   uint64 `json:"ack_unknown"`

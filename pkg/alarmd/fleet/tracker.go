@@ -342,7 +342,10 @@ type queryGroupState struct {
 	noDataTracking map[StrategyRef]*NoDataTracking
 	// noDataEmitted is what this replica sent of each of this object's
 	// Plans' no-data events, by Plan, since its start; kept apart from
-	// noDataTracking, which each deciding round replaces whole.
+	// noDataTracking, whose entry each deciding round replaces whole. Both
+	// live as long as the object's state: a Plan that leaves the object keeps
+	// its entry, dated by its last send, until the object leaves this
+	// replica; the tracker is not told the object's current Plans.
 	noDataEmitted map[StrategyRef]*NoDataEmitted
 	// wireFormats is the wire format each of this object's Plans last said
 	// its events go out as, by Plan, from the Plan's evaluation line.
@@ -2675,8 +2678,14 @@ func (tracker *Tracker) NoDataTrackingSummary() *NoDataTrackingSummary {
 			if summary == nil {
 				summary = &NoDataTrackingSummary{}
 			}
+			// A Plan sent when an acknowledged write went out; one whose
+			// writes were all unknown or refused has not.
+			sent := 0
+			if emitted.AbnormalSent+emitted.RecoverySent > 0 {
+				sent = 1
+			}
 			summary.add(NoDataTrackingSummary{AbnormalSent: emitted.AbnormalSent, RecoverySent: emitted.RecoverySent,
-				AckUnknown: emitted.AckUnknown, NotWritten: emitted.NotWritten, PlansSent: 1})
+				AckUnknown: emitted.AckUnknown, NotWritten: emitted.NotWritten, PlansSent: sent})
 		}
 	}
 	return summary

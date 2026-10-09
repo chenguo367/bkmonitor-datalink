@@ -180,6 +180,17 @@ func TestSlotExecutionCoordinatorCompletesSlotBeyondItsOwnBudgetAsUnavailable(t 
 			rejection = &(*fixture.observations)[index]
 		}
 	}
+	// The Slot still reports its no-data census, on this path as on the
+	// ordinary one, so a replaced Slot is not silent about its Plans.
+	census := false
+	for _, observation := range *fixture.observations {
+		if observation.NoDataCensus != nil {
+			census = true
+		}
+	}
+	if !census {
+		t.Fatal("the over-budget Slot reported no no-data census")
+	}
 	if rejection == nil || rejection.CapacityBudget != observability.CapacityBudgetStateMutations ||
 		rejection.ReasonCode != execution.ReasonCode(contract.ReasonSlotBudgetExceeded) {
 		t.Fatalf("capacity rejection = %+v, want the per-Slot budget reason", rejection)

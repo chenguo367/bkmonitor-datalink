@@ -427,9 +427,11 @@ func TestARowSaysWhatThisReplicaSentOfAPlansNoDataEvents(t *testing.T) {
 	if quiet == nil || quiet.AbnormalSent != 0 || quiet.RecoverySent != 0 || quiet.Reading != NoDataEmittedReading || !quiet.CountingSince.Equal(started) {
 		t.Fatalf("s-quiet emitted = %+v, want zeros with the reading and the window", quiet)
 	}
+	// A Plan whose only write was refused has an entry and did not send.
+	written(ctx, tracker, "s-refused", observability.NoDataEmissionFacts{NotWritten: 3})
 	summary := tracker.NoDataTrackingSummary()
 	if summary == nil || summary.Plans != 2 || summary.AbnormalSent != 2 || summary.RecoverySent != 1 || summary.AckUnknown != 2 ||
-		summary.NotWritten != 1 || summary.PlansSent != 1 {
-		t.Fatalf("summary = %+v, want two deciding Plans, one of which sent, and its counts", summary)
+		summary.NotWritten != 4 || summary.PlansSent != 1 {
+		t.Fatalf("summary = %+v, want two deciding Plans, one of which sent, and the counts with the refused write", summary)
 	}
 }
