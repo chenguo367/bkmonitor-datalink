@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 // The sentence the page owes a reader is "releasing needs N consecutive
@@ -16,15 +15,7 @@ import (
 // strategy's Levels and so differs strategy by strategy.
 func TestGapScopeProgressLineCarriesBothNumbers(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 100, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	observer := NewLoggingObserver(New("alarmd", &output), policy)
+	observer := rendererObserver{output: &output}
 	observer.Observe(context.Background(), Observation{
 		Component: ComponentState, Stage: StageGapGuardProgress, Result: ResultSuccess,
 		Trace: TraceFields{StrategyID: "846"},

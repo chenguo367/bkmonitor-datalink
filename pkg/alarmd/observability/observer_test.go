@@ -281,15 +281,7 @@ func TestAllStagesIsCompleteUniqueLabelCatalog(t *testing.T) {
 
 func TestOwnershipLifecycleLogCarriesExactOperationalIdentity(t *testing.T) {
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	renderTo(&output, Observation{
 		Component: ComponentOwnership,
 		Stage:     StageTakeoverCompleted,
 		Result:    ResultSuccess,
@@ -311,6 +303,9 @@ func TestOwnershipLifecycleLogCarriesExactOperationalIdentity(t *testing.T) {
 	}
 }
 
+// A round with Query Groups draining writes its bounded facts every time --
+// each such round is a decision and the samples are the only names there
+// are -- and a round with nothing draining is counted and not written.
 func TestDrainingQueryGroupLogCarriesBoundedDiagnosticFacts(t *testing.T) {
 	var output bytes.Buffer
 	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
@@ -321,7 +316,8 @@ func TestDrainingQueryGroupLogCarriesBoundedDiagnosticFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	observer := NewLoggingObserver(New("alarmd", &output), policy)
+	observer.Observe(context.Background(), Observation{
 		Component: ComponentControlPlane, Stage: StageDrainingQGReconciled, Result: ResultSuccess,
 		DrainingQG: &DrainingQGFacts{Total: 3, Undrained: 1, Isolated: 1, Retired: 1,
 			Samples: []DrainingQGSample{
@@ -330,23 +326,32 @@ func TestDrainingQueryGroupLogCarriesBoundedDiagnosticFacts(t *testing.T) {
 					Disposition: DrainingQGSampleRetired},
 			}},
 	})
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	observer.Observe(context.Background(), Observation{
+		Component: ComponentControlPlane, Stage: StageDrainingQGReconciled, Result: ResultSuccess,
+		DrainingQG: &DrainingQGFacts{},
+	})
+	observer.Observe(context.Background(), Observation{
 		Component: ComponentControlPlane, Stage: StageDrainingQGReconciled, Result: ResultSuccess,
 		DrainingQG: &DrainingQGFacts{Total: 1, Undrained: 1,
-			Samples: []DrainingQGSample{{QueryGroupKey: "must-be-rate-limited", RetiredBoundary: 120,
+			Samples: []DrainingQGSample{{QueryGroupKey: "query-group-next-round", RetiredBoundary: 120,
 				NextSlot: 90, ProgressStatus: "FOUND"}}},
 	})
 	for _, want := range []string{
 		`"draining_total":3`, `"draining_undrained":1`, `"draining_isolated":1`, `"draining_retired":1`,
 		`"draining_samples":[{"query_group_key":"query-group-old","retired_boundary":90,"next_slot":60,"progress_status":"FOUND"},` +
 			`{"query_group_key":"query-group-retired","retired_boundary":30,"next_slot":10,"progress_status":"FOUND","disposition":"RETIRED"}]`,
+		`"query_group_key":"query-group-next-round"`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("draining log %s does not contain %s", output.String(), want)
 		}
 	}
-	if strings.Contains(output.String(), "must-be-rate-limited") || strings.Count(output.String(), "\n") != 1 {
-		t.Fatalf("repeated draining log was not limited: %s", output.String())
+	if lines := strings.Count(output.String(), "\n"); lines != 2 {
+		t.Fatalf("draining lines = %d, want the two rounds with Query Groups draining: %s", lines, output.String())
+	}
+	if counts := observer.LineCounts(); counts.Unwritten[StageDrainingQGReconciled] != 1 || counts.Written[StageDrainingQGReconciled] != 2 {
+		t.Fatalf("draining unwritten %d written %d, want 1 and 2",
+			counts.Unwritten[StageDrainingQGReconciled], counts.Written[StageDrainingQGReconciled])
 	}
 }
 
@@ -356,15 +361,7 @@ func TestRebalancePlanLogNamesEveryMove(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	renderTo(&output, Observation{
 		Component: ComponentOwnership, Stage: StageRebalancePlanned, Result: ResultSuccess, Operation: OperationLoad,
 		Rebalance: &RebalanceFacts{ReadyWorkers: 2, Assigned: 3, Target: 1, MostOwned: 3, LeastOwned: 0, Batch: 1, PlannedMoves: 1,
 			Owned: []RebalanceOwnedSample{{WorkerID: "worker-1", Owned: 3}, {WorkerID: "worker-2", Owned: 0}},
@@ -597,7 +594,10 @@ func TestMultiObserverSkipsNilObservers(t *testing.T) {
 	NopObserver{}.Observe(context.Background(), Observation{})
 }
 
-func TestPhaseTwoSuccessLogsAreBoundedAndCarryTraceID(t *testing.T) {
+// A routine stage's success is counted and not written, however often it
+// comes; the line a degraded round of the same stage writes carries the
+// trace and the frozen Slot's provenance, once an hour.
+func TestARoutineSuccessIsCountedNotWrittenAndItsDegradedLineCarriesTheTrace(t *testing.T) {
 	var output bytes.Buffer
 	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
 	if err != nil {
@@ -608,17 +608,24 @@ func TestPhaseTwoSuccessLogsAreBoundedAndCarryTraceID(t *testing.T) {
 		t.Fatal(err)
 	}
 	observer := NewLoggingObserver(New("alarmd", &output), policy)
-	observation := Observation{
-		Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultSuccess,
-	}
 	ctx := ContextWithTraceFields(context.Background(), TraceFields{
 		TraceID: "uq-trace-1", QueryGroupKey: "qg-sensitive",
 		ScheduleSegmentStart: 1_700_000_000, DuePlanSetDigest: "due-plan-set-sensitive",
 	})
-	observer.Observe(ctx, observation)
-	observer.Observe(ctx, observation)
+	success := Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultSuccess}
+	observer.Observe(ctx, success)
+	observer.Observe(ctx, success)
+	if output.Len() != 0 {
+		t.Fatalf("a routine success was written: %s", output.String())
+	}
+	if counts := observer.LineCounts(); counts.Unwritten[StageQueryCompleted] != 2 {
+		t.Fatalf("query_completed unwritten = %d, want both successes counted", counts.Unwritten[StageQueryCompleted])
+	}
+	degraded := Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded, ReasonCode: "QUERY_TIMEOUT"}
+	observer.Observe(ctx, degraded)
+	observer.Observe(ctx, degraded)
 	if got := strings.Count(output.String(), "\"stage\":\"query_completed\""); got != 1 {
-		t.Fatalf("bounded phase-two success logs = %d, want 1: %s", got, output.String())
+		t.Fatalf("degraded query lines = %d, want one an hour: %s", got, output.String())
 	}
 	if !strings.Contains(output.String(), "\"trace_id\":\"uq-trace-1\"") {
 		t.Fatalf("trace id missing from structured log: %s", output.String())

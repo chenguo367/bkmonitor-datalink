@@ -783,7 +783,7 @@ Owned Query Groups whose last Slot was read by content and so have an object in 
 
 Labels: `stage`, `admission`
 
-Lines the process's log observer wrote (admission=written) and lines its limiter held back (admission=limited), by the observation's stage; a stage outside the closed list counts as _other. Which stage fills the log is read here rather than from the log, which a busy Pod keeps for minutes. Stages the observer never writes by design -- scheduler waits and snapshots, catalog object reads -- are not counted: they are metrics only.
+Lines the process's log observer wrote (admission=written), held back (admission=limited) or counted without writing (admission=unwritten: a routine stage's success, a Control Leader round that changed nothing), by stage; a stage outside the closed list counts as _other. Which stage fills the log is read here rather than from the log, which a busy Pod keeps for minutes. Read the three together as the check that a stage runs at all: Slots starting (slot_started moving) while a routine stage moves under none of them is a stage that is not wired. Stages the observer never writes by design -- scheduler waits and snapshots, catalog object reads -- are not counted: they are metrics only.
 
 ## bkmonitor_alarmd_lookback_changed_windows_total
 

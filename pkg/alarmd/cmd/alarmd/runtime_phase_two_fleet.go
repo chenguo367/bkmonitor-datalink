@@ -525,11 +525,15 @@ func evaluatingStrategies(owned []execution.QueryGroupIdentity, strategies func(
 }
 
 // overdueEpisodeObserver logs an overdue episode's beginning and end with the
-// object and its hold, and counts each beginning by its hold.
+// object and its hold, and counts each beginning by its hold. An object whose
+// reads are held is overdue by its hold whenever the hold is longer than its
+// period -- every Slot, by design -- so that episode is INFO; one with no
+// hold, or a hold not known, is overdue with nothing to explain it, at WARN.
 func overdueEpisodeObserver(logger *observability.Logger, recorder *metric.Recorder) func(fleet.OverdueEpisode, bool) {
 	return func(episode fleet.OverdueEpisode, began bool) {
+		hold := episode.HoldClass()
 		if began {
-			recorder.FleetOverdueEpisodeBegan(episode.HoldClass())
+			recorder.FleetOverdueEpisodeBegan(hold)
 		}
 		if logger == nil {
 			return
@@ -538,8 +542,12 @@ func overdueEpisodeObserver(logger *observability.Logger, recorder *metric.Recor
 		if began {
 			result = "began"
 		}
-		logger.Warn("fleet_overdue_episode", result, 0, 0, slog.String("query_group", episode.QueryGroup),
-			slog.String("hold", episode.HoldClass()), slog.Int64("read_hold_ms", episode.ReadHoldMillis),
+		write := logger.Warn
+		if hold == "positive" {
+			write = logger.Info
+		}
+		write("fleet_overdue_episode", result, 0, 0, slog.String("query_group", episode.QueryGroup),
+			slog.String("hold", hold), slog.Int64("read_hold_ms", episode.ReadHoldMillis),
 			slog.Time("due_at", episode.DueAt), slog.Int64("interval_seconds", episode.IntervalSeconds),
 			slog.Time("onset", episode.Onset), slog.Int("strategies", len(episode.Strategies)))
 	}

@@ -2890,10 +2890,17 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 	}
 	bundle.mu.Unlock()
 
+	// One line for the whole change, however it returns: the per-Query Group
+	// successes below are counted and not written, and at a start they were
+	// about 2,100 lines a Pod.
+	var applied observability.AssignmentAppliedFacts
+	defer bundle.observeAssignmentApplied(ctx, &applied)
+
 	// Every error below is scoped to one Query Group. Store I/O failures mark
 	// the Worker degraded and are retried on the next reconcile; siblings and
 	// the Worker continue. Only invariant violations and cancellation return.
 	for queryGroup, lifecycle := range removed {
+		applied.Note(string(queryGroup), true, false)
 		if err := bundle.stopQueryGroup(ctx, queryGroup, lifecycle); err != nil {
 			bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
 			if ctx.Err() != nil {
@@ -2911,6 +2918,7 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 			ctx, queryGroup, bundle.dependencies.Now(), bundle.dependencies.Config.PhaseTwo.Ownership.LeaseTTL.Duration(),
 		)
 		if err != nil {
+			applied.Note(string(queryGroup), false, true)
 			bundle.observeOwnership(ctx, observability.StageTakeoverCompleted, observability.ResultFailed, queryGroup, err)
 			if errors.Is(err, ownership.ErrLeaseBusy) || errors.Is(err, ownership.ErrNotDesired) ||
 				errors.Is(err, ownership.ErrStaleFence) {
@@ -2928,7 +2936,9 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		if runner == nil {
 			return newPhaseTwoInvariantError(fmt.Sprintf("phase-two open Query Group %s returned no runner", queryGroup))
 		}
-		if !bundle.startQueryGroup(ctx, queryGroup, runner) {
+		if bundle.startQueryGroup(ctx, queryGroup, runner) {
+			applied.Note(string(queryGroup), false, false)
+		} else {
 			if err := runner.Release(ctx); err != nil {
 				bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
 				if ctx.Err() != nil {
@@ -2936,10 +2946,25 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 				}
 				bundle.markControlDependencyDegraded()
 			}
-			continue
 		}
 	}
 	return nil
+}
+
+// observeAssignmentApplied writes the one line an assignment change has, when
+// it moved anything: how many Query Groups were released, taken over and not
+// taken over, and the first few of each.
+func (bundle *phaseTwoWorkerBundle) observeAssignmentApplied(ctx context.Context, applied *observability.AssignmentAppliedFacts) {
+	if applied == nil || !applied.Changed() {
+		return
+	}
+	facts := *applied
+	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageAssignmentApplied,
+		Result: observability.ResultSuccess, Operation: observability.OperationTransition,
+		Direction: observability.DirectionInternal, AssignmentApplied: &facts,
+		Trace: observability.TraceFields{OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+	})
 }
 
 // markControlDependencyDegraded records one transient control or Ownership

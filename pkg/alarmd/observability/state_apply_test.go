@@ -7,11 +7,9 @@ package observability
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestNormalizeObservationKeepsStateApplyChunkFactsOnlyForStateStages(t *testing.T) {
@@ -41,15 +39,7 @@ func TestLoggingObserverWritesStateApplyChunkAttributes(t *testing.T) {
 	t.Parallel()
 
 	var output bytes.Buffer
-	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := NewScopedBoundedLogPolicy(limiter)
-	if err != nil {
-		t.Fatal(err)
-	}
-	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+	renderTo(&output, Observation{
 		Component: ComponentState, Stage: StageStateApplied, Result: ResultSuccess, Operation: OperationNormal,
 		Direction: DirectionInternal, Counts: Counts{Keys: 8192, StateBytes: 1024},
 		StateApplyChunk: &StateApplyChunkFacts{Index: 3, Count: 9, AppliedKeys: 32768, AppliedBytes: 4096, ElapsedMillis: 250},
@@ -80,15 +70,7 @@ func TestTheAdmissionLineCarriesTheRefusalRulesAndSentence(t *testing.T) {
 	logged := func(facts *StateApplyChunkFacts, result Result) map[string]any {
 		t.Helper()
 		var output bytes.Buffer
-		limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 1, MaxScopes: 1024})
-		if err != nil {
-			t.Fatal(err)
-		}
-		policy, err := NewScopedBoundedLogPolicy(limiter)
-		if err != nil {
-			t.Fatal(err)
-		}
-		NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		renderTo(&output, Observation{
 			Component: ComponentState, Stage: StageStateAdmission, Result: result, Operation: OperationNormal,
 			Direction: DirectionInternal, ReasonCode: ReasonCode("STATE_BUDGET_EXCEEDED"), StateApplyChunk: facts,
 		})

@@ -56,11 +56,12 @@ type Logger struct {
 	writer    *serializedLogWriter
 }
 
-// BoundedLogPolicy always records one-time lifecycle transitions. Routine
-// success is omitted. Repeated transitions, recovery and exceptional results
-// go through the scoped limiter: by reason or reason-empty stage, and by
-// Query Group where the observation names one, with suppressed counts on the
-// next admitted line.
+// BoundedLogPolicy always records one-time lifecycle transitions. A routine
+// stage's success, and a Control Leader round that changed nothing, is
+// counted and not written: its facts are in the stage's metrics, and one
+// line per Slot of every Query Group was nearly the whole log. Every other
+// result goes through the scoped limiter, by reason, stage and Query Group,
+// with suppressed counts on the next admitted line.
 type BoundedLogPolicy struct {
 	repeated RepeatedLogLimiter
 }
@@ -78,9 +79,18 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 	return p.Admit(observation).Allowed
 }
 
-// Admit decides whether the observation is logged and how many earlier lines
-// of the same bucket were merged into it.
+// Admit decides whether the observation is logged, held back, or counted
+// and not written, and how many earlier lines of the same bucket were merged
+// into a logged one.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
+	if routineResult(observation.Result) {
+		switch {
+		case roundStages[observation.Stage] && roundChanged(observation):
+			return LogAdmission{Allowed: true, Candidate: true}
+		case roundStages[observation.Stage], routineStages[observation.Stage]:
+			return LogAdmission{Candidate: true, Unwritten: true}
+		}
+	}
 	if mandatoryLogStage(observation.Stage) {
 		return LogAdmission{Allowed: true, Candidate: true}
 	}
@@ -95,16 +105,17 @@ func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
 type LoggingObserver struct {
 	logger *Logger
 	policy *BoundedLogPolicy
-	// written and limited count, by stage, the lines this observer wrote
-	// and the ones its limiter held back, at the place logStageIndex gives
-	// the stage.
-	written []atomic.Uint64
-	limited []atomic.Uint64
+	// written, limited and unwritten count, by stage, the lines this
+	// observer wrote, the ones its limiter held back and the routine ones it
+	// counted without writing, at the place logStageIndex gives the stage.
+	written   []atomic.Uint64
+	limited   []atomic.Uint64
+	unwritten []atomic.Uint64
 }
 
 func NewLoggingObserver(logger *Logger, policy *BoundedLogPolicy) *LoggingObserver {
-	return &LoggingObserver{logger: logger, policy: policy,
-		written: make([]atomic.Uint64, len(logStages)), limited: make([]atomic.Uint64, len(logStages))}
+	return &LoggingObserver{logger: logger, policy: policy, written: make([]atomic.Uint64, len(logStages)),
+		limited: make([]atomic.Uint64, len(logStages)), unwritten: make([]atomic.Uint64, len(logStages))}
 }
 
 // logStages is every stage a line is counted under: the closed list, which
@@ -130,38 +141,49 @@ var logStageIndex = func() map[Stage]int {
 	return index
 }()
 
-// LogLineCounts is how many lines the observer wrote and how many its
-// limiter held back, by stage, every stage present: which stage fills the
-// log is then a reading of this process and not a sample of the log, which
-// on a busy Pod holds minutes. A stage outside the closed list counts under
-// StageOther.
+// LogLineCounts is how many lines the observer wrote, how many its limiter
+// held back and how many routine lines it counted without writing, by stage,
+// every stage present: which stage fills the log is then a reading of this
+// process and not a sample of the log, which on a busy Pod holds minutes. A
+// stage outside the closed list counts under StageOther. Unwritten holds the
+// routine and Control Leader round stages only, the ones whose success is
+// counted and not written; no other stage has an unwritten line to count.
 type LogLineCounts struct {
-	Written map[Stage]uint64
-	Limited map[Stage]uint64
+	Written   map[Stage]uint64
+	Limited   map[Stage]uint64
+	Unwritten map[Stage]uint64
 }
 
 // LineCounts reads the counts now.
 func (l *LoggingObserver) LineCounts() LogLineCounts {
-	counts := LogLineCounts{Written: make(map[Stage]uint64, len(logStageIndex)), Limited: make(map[Stage]uint64, len(logStageIndex))}
+	counts := LogLineCounts{Written: make(map[Stage]uint64, len(logStageIndex)), Limited: make(map[Stage]uint64, len(logStageIndex)),
+		Unwritten: make(map[Stage]uint64, len(routineStages)+len(roundStages))}
 	// By the index, the one place countLine adds to for each stage.
 	for stage, place := range logStageIndex {
-		if l == nil || place >= len(l.written) {
-			counts.Written[stage], counts.Limited[stage] = 0, 0
-			continue
+		var written, limited, unwritten uint64
+		if l != nil && place < len(l.written) {
+			written, limited, unwritten = l.written[place].Load(), l.limited[place].Load(), l.unwritten[place].Load()
 		}
-		counts.Written[stage], counts.Limited[stage] = l.written[place].Load(), l.limited[place].Load()
+		counts.Written[stage], counts.Limited[stage] = written, limited
+		if unwrittenStage(stage) {
+			counts.Unwritten[stage] = unwritten
+		}
 	}
 	return counts
 }
 
-// countLine adds one line of the stage to the written or the limited count.
-func (l *LoggingObserver) countLine(stage Stage, written bool) {
+// countLine adds one line of the stage to the count the admission says: a
+// routine line counted and not written, a line written, or one held back.
+func (l *LoggingObserver) countLine(stage Stage, admission LogAdmission) {
 	place, known := logStageIndex[stage]
 	if !known {
 		place = logStageIndex[StageOther]
 	}
 	counts := l.limited
-	if written {
+	switch {
+	case admission.Unwritten:
+		counts = l.unwritten
+	case admission.Allowed:
 		counts = l.written
 	}
 	if place < len(counts) {
@@ -232,10 +254,11 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 	// the Query Group the Coordinator attached to ctx.
 	observation.Trace = mergeTraceFields(observation.Trace, TraceFieldsFromContext(ctx))
 	admission := l.policy.Admit(observation)
-	// Counted only where the policy would write a line, as the policy
-	// decides it: a routine success it never writes is not a line held back.
+	// Counted only where the policy decides a line: written, held back, or
+	// a routine stage's success counted and not written. A success outside
+	// the workflow stages is not a line at all.
 	if admission.Candidate {
-		l.countLine(observation.Stage, admission.Allowed)
+		l.countLine(observation.Stage, admission)
 	}
 	if !admission.Allowed {
 		return
@@ -793,6 +816,24 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			)
 		}
 	}
+	if facts := observation.AssignmentApplied; facts != nil {
+		attributes = append(attributes,
+			slog.Int("assignment_lost", facts.Lost),
+			slog.Int("assignment_acquired", facts.Acquired),
+			slog.Int("assignment_failed", facts.Failed),
+		)
+		for _, list := range []struct {
+			key    string
+			sample []string
+		}{{"assignment_lost_sample", facts.LostSample}, {"assignment_acquired_sample", facts.AcquiredSample}, {"assignment_failed_sample", facts.FailedSample}} {
+			if len(list.sample) > 0 {
+				attributes = append(attributes, slog.String(list.key, strings.Join(list.sample, ",")))
+			}
+		}
+		if facts.Truncated {
+			attributes = append(attributes, slog.Bool("assignment_samples_truncated", true))
+		}
+	}
 	if facts := observation.AssignmentSweep; facts != nil {
 		// The five numbers of a sweep, zeros included: the line existed for a
 		// release with only its stage and result on it, and "swept" with
@@ -948,10 +989,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if admission.SuppressedEvicted > 0 {
 		attributes = append(attributes, slog.Uint64("suppressed_logs_evicted", admission.SuppressedEvicted))
 	}
-	level := slog.LevelInfo
-	if observation.Result == Result(ResultFailed) || observation.Result == Result(ResultTimeout) {
-		level = slog.LevelError
-	}
+	level := observationLevel(observation)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1152,8 +1190,11 @@ func mandatoryLogStage(stage Stage) bool {
 	switch stage {
 	case StageStartup, StageConfigLoaded, StageShutdown, StageFatal:
 		return true
-	case StageSnapshotRefreshed, StageSnapshotUnavailable, StageAssignmentAcquired, StageAssignmentLost,
-		StageTakeoverStarted, StageTakeoverCompleted:
+	case StageSnapshotRefreshed, StageSnapshotUnavailable:
+		return true
+	case StageAssignmentApplied:
+		// One line per assignment change in place of one per Query Group
+		// acquired, lost or taken over: about 2,100 a Pod at every start.
 		return true
 	case StageAssignmentSwept, StageViewPublished, StageViewSession, StageViewInstalled:
 		// Once per term, or once per Worker per connection: rare, and the

@@ -50,6 +50,30 @@ func TestABodyThatStoppedPartwayReportsItsTimeoutAndTiming(t *testing.T) {
 	}
 }
 
+// A query that never reached its backend because the permit wait ran out
+// names that on the line's reason, through the Source's wrapping, not
+// internal_unknown; the failure facts carried the code all along.
+func TestAPermitWaitThatRanOutNamesItselfOnTheQueryLine(t *testing.T) {
+	var got observability.Observation
+	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+	named := fmt.Errorf("alarmd access: acquire physical query permit: %w", permitDeadlineError{errors.New("context deadline exceeded")})
+	c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", named)
+	if got.QueryFailure == nil || got.QueryFailure.Category != observability.QueryFailureCategoryAdmission ||
+		got.QueryFailure.Code != "QUERY_PERMIT_DEADLINE" {
+		t.Fatalf("failure facts = %+v, want admission / QUERY_PERMIT_DEADLINE", got.QueryFailure)
+	}
+	if got.ReasonCode != "QUERY_PERMIT_DEADLINE" {
+		t.Fatalf("reason = %q, want QUERY_PERMIT_DEADLINE rather than internal_unknown", got.ReasonCode)
+	}
+}
+
+type permitDeadlineError struct{ error }
+
+func (e permitDeadlineError) Unwrap() error { return e.error }
+func (permitDeadlineError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryAdmission, "QUERY_PERMIT_DEADLINE"
+}
+
 type providerBodyError struct {
 	error
 	timing execution.AttemptTiming
