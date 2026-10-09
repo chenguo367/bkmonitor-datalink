@@ -66,6 +66,10 @@ func TestAnObjectReadIsRoutedToItsHolderOnlyWhenTheAnswerIsElsewhere(t *testing.
 	if len(routed) != 1 || routed[0].Target.OwnerQueryGroup != "qg-healthy" || result == nil || result["tracked"] == nil {
 		t.Fatalf("healthy object: routed %+v, result %+v; want one read routed by its Query Group's lease and the holder's row", routed, out.Result)
 	}
+	// The routed answer still speaks for the caller's session.
+	if out.Meta.Session == nil || out.Meta.Session.ID != "test-only" {
+		t.Fatalf("routed answer session = %+v, want the caller's", out.Meta.Session)
+	}
 	_, out = call(t, c, envelope(c, "invoke", "object.get", Params{"query_group": "qg-listed"}))
 	if len(routed) != 1 || out.Result.(map[string]any)["anomaly"] == nil {
 		t.Fatalf("listed object: routed %d times, result %+v; want it answered where it landed", len(routed), out.Result)
@@ -74,7 +78,7 @@ func TestAnObjectReadIsRoutedToItsHolderOnlyWhenTheAnswerIsElsewhere(t *testing.
 	_, out = call(t, c, envelope(c, "invoke", "object.get", Params{"query_group": "qg-healthy"}))
 	result, _ = out.Result.(map[string]any)
 	said := strings.Join(out.Evidence.Limitations, " ")
-	if result == nil || result["tracked_by"] != "pod-a" || out.Evidence.Complete || !strings.Contains(said, "target_unavailable") {
+	if result == nil || result["tracked_by"] != "pod-a" || out.Evidence.Complete || out.Status != "partial" || !strings.Contains(said, "target_unavailable") {
 		t.Fatalf("failed route: result %+v evidence %+v; want the local answer with the holder named and the failure said", out.Result, out.Evidence)
 	}
 }

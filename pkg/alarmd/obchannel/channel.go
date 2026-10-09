@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"io"
 	"math"
 	"net/http"
@@ -28,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 const (
@@ -516,7 +516,13 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if routed.Error != nil {
 					reason = routed.Error.Code + ": " + observability.SanitizeErrorText(routed.Error.Message)
 				}
+				// Partial, not ok: run() derived the status from the evidence
+				// before this step, and a reader acting on the exit code must
+				// see the answer is not whole.
 				out.Evidence.Complete = false
+				if out.Status == "ok" {
+					out.Status = "partial"
+				}
 				out.Evidence.Limitations = append(out.Evidence.Limitations,
 					"The answer is held by another replica and the read routed to its lease holder failed ("+reason+"); tracked_by names the holder as of its latest snapshot.")
 			}

@@ -86,6 +86,16 @@ func TestAHealthyObjectsRowIsReadThroughTheRouteFromTheReplicaTrackingIt(t *test
 	if body["anomaly"] == nil || body["tracked"] != nil || body["tracked_by"] != nil {
 		t.Fatalf("listed object body = %+v, want the view's row only", body)
 	}
+	// Read under another check's filter, a listed object has no facts in
+	// the answer and is still listed: no live row stands in for it.
+	tracker.Observe(observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-listed"}),
+		observability.Observation{Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
+			Result: observability.ResultSuccess, Trace: observability.TraceFields{StrategyID: "s-listed", BusinessID: "2"},
+			NoDataAbsence: &observability.NoDataAbsenceFacts{Outcome: "EVALUATED", Expected: 1, Present: 1}})
+	_, body = get(t, owner, "/api/objects/qg-listed?check="+string(CheckReadHeld))
+	if facts, _ := body["facts"].([]any); len(facts) != 0 || body["tracked"] != nil {
+		t.Fatalf("listed object under another check = %+v, want no facts and no live row", body)
+	}
 }
 
 // The live row is built while the observe path keeps writing the maps it
