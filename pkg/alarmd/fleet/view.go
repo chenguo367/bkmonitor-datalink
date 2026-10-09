@@ -2329,12 +2329,19 @@ type OpenAlertSetFacts struct {
 	// membership is known and no close is ever sent.
 	CalibrationConfigured bool     `json:"calibration_configured"`
 	IndexReadAgeSeconds   *float64 `json:"index_read_age_seconds,omitempty"`
-	SubscriptionReady     bool     `json:"subscription_ready,omitempty"`
-	CalibratedSets        int      `json:"calibrated_sets,omitempty"`
-	PendingReads          int      `json:"pending_reads,omitempty"`
-	PendingReconciles     int      `json:"pending_reconciles,omitempty"`
-	MemberBytes           int      `json:"member_bytes,omitempty"`
-	StaleBeyondBound      bool     `json:"stale_beyond_bound"`
+	// IndexStaleAfterSeconds is the bound a set's last successful read is
+	// judged against - 3 x (index interval + ceil(tracked sets / read
+	// batch) x refresh interval) - and StaleSets how many sets are past it
+	// and answer by the unavailable policy. Beside the read's age, so the
+	// two read in one step whatever the deployment's strategy count.
+	IndexStaleAfterSeconds float64 `json:"index_stale_after_seconds,omitempty"`
+	StaleSets              int     `json:"stale_sets,omitempty"`
+	SubscriptionReady      bool    `json:"subscription_ready,omitempty"`
+	CalibratedSets         int     `json:"calibrated_sets,omitempty"`
+	PendingReads           int     `json:"pending_reads,omitempty"`
+	PendingReconciles      int     `json:"pending_reconciles,omitempty"`
+	MemberBytes            int     `json:"member_bytes,omitempty"`
+	StaleBeyondBound       bool    `json:"stale_beyond_bound"`
 	// AuthoritativeAgeSeconds is how long ago the oldest calibration among
 	// the tracked sets completed. Absent until one has; a zero here would
 	// read as "just now".

@@ -1713,6 +1713,7 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 		age := at.Sub(stats.IndexReadAt).Seconds()
 		facts.IndexReadAgeSeconds = &age
 	}
+	facts.IndexStaleAfterSeconds, facts.StaleSets = stats.StaleAfter.Seconds(), stats.Stale
 	if !stats.LoadedAt.IsZero() {
 		age := at.Sub(stats.LoadedAt).Seconds()
 		facts.AuthoritativeAgeSeconds = &age

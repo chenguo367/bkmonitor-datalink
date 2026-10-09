@@ -31,8 +31,9 @@ func TestTheReasonsTheSetsCouldNotAnswerAreScrapedEachAtZero(t *testing.T) {
 		return reasons
 	}
 	reasons := read()
-	if len(reasons) != 3 || reasons["read_error"] != 0 || reasons["location_unconfirmed"] != 0 || reasons["keying_unconfirmed"] != 0 {
-		t.Fatalf("before anything: %v, want the three reasons at zero", reasons)
+	if len(reasons) != 4 || reasons["read_error"] != 0 || reasons["location_unconfirmed"] != 0 || reasons["keying_unconfirmed"] != 0 ||
+		reasons["too_large"] != 0 {
+		t.Fatalf("before anything: %v, want the four reasons at zero", reasons)
 	}
 	stats.Unavailable = map[openalerts.UnavailableReason]uint64{openalerts.UnavailableLocationUnconfirmed: 1, openalerts.UnavailableKeyingUnconfirmed: 2}
 	if reasons = read(); reasons["location_unconfirmed"] != 1 || reasons["keying_unconfirmed"] != 2 {

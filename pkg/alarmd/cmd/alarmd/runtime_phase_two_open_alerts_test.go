@@ -130,3 +130,14 @@ func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 		t.Fatalf("a known zero own_open was dropped: %s", encoded)
 	}
 }
+
+// The bound a set's last read is judged stale against reaches the replica's
+// facts beside the read's age, with how many sets are past it: the age and
+// the bound read in one step, on any deployment, whatever its strategies.
+func TestTheStaleBoundIsPublishedBesideTheReadAge(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	facts := openAlertSetFacts(openalerts.Stats{IndexReadAt: at.Add(-400 * time.Second), StaleAfter: 336 * time.Second, Stale: 2}, false, at)
+	if facts.IndexReadAgeSeconds == nil || *facts.IndexReadAgeSeconds != 400 || facts.IndexStaleAfterSeconds != 336 || facts.StaleSets != 2 {
+		t.Fatalf("facts = age %v, bound %v, stale %d; want 400 against 336 with two stale", facts.IndexReadAgeSeconds, facts.IndexStaleAfterSeconds, facts.StaleSets)
+	}
+}

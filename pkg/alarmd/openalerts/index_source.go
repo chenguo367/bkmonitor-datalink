@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -15,6 +16,13 @@ import (
 )
 
 var ErrIncomplete = errors.New("alarmd openalerts: incomplete index observation")
+
+// ErrSetTooLarge is a set larger than one read may hold - more members or
+// bytes than the read's bounds, or more pages than it may take. It is an
+// incomplete read to every caller that asks (errors.Is), and named apart so
+// the copy counts it apart from a read that failed: a set this size is not
+// an outage, and is read in no other way yet.
+var ErrSetTooLarge = fmt.Errorf("alarmd openalerts: set too large for one read: %w", ErrIncomplete)
 var ErrCapacity = errors.New("alarmd openalerts: cache capacity reached")
 
 // IndexSource returns only a complete bounded read. Empty is an index
@@ -90,7 +98,7 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 		return nil, err
 	}
 	if before > int64(source.limits.MaxMembers) {
-		return nil, ErrIncomplete
+		return nil, ErrSetTooLarge
 	}
 	members := make(map[string]struct{})
 	var cursor uint64
@@ -102,12 +110,17 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 		}
 		for _, value := range values {
 			bytes += len(value)
-			if value == "" || len(value) > 4096 || bytes > source.limits.MaxBytes {
+			// A member no alert id can be is a read refused, not a set too
+			// large.
+			if value == "" || len(value) > 4096 {
 				return nil, ErrIncomplete
+			}
+			if bytes > source.limits.MaxBytes {
+				return nil, ErrSetTooLarge
 			}
 			members[value] = struct{}{}
 			if len(members) > source.limits.MaxMembers {
-				return nil, ErrIncomplete
+				return nil, ErrSetTooLarge
 			}
 		}
 		cursor = next
@@ -126,7 +139,7 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 			return result, nil
 		}
 	}
-	return nil, ErrIncomplete
+	return nil, ErrSetTooLarge
 }
 
 // RedisSubscriber owns only its PubSub connection, never the supplied client.
