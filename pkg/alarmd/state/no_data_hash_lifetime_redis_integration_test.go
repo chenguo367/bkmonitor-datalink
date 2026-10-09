@@ -61,6 +61,19 @@ func within(got, want time.Duration) bool {
 	return got > want-lifetimeSlack && got <= want+time.Second
 }
 
+// edgeSlack is the slack for lifetimes whose edges are a second apart. The
+// runtime arms take the one-round floor at 119, 120 and 121 seconds, and a
+// floor that went missing moves the first of them by exactly one second, so a
+// reading has to tell two lifetimes a second apart; the milliseconds between a
+// write and its read are well inside this.
+const edgeSlack = 500 * time.Millisecond
+
+// withinEdge reports whether got is want, give or take edgeSlack. A remaining
+// life never reads above what was set.
+func withinEdge(got, want time.Duration) bool {
+	return got > want-edgeSlack && got <= want
+}
+
 // storeNoDataFor sends one mutation carrying the Plan's retention, which is
 // what decides the lifetime the write gives the key.
 func storeNoDataFor(
@@ -358,7 +371,7 @@ func TestARuntimeKeyLivesTheRetentionCappedAtTheHorizonOnARealServer(t *testing.
 				t.Fatalf("the write left keys %v (%v)", keys, err)
 			}
 			for _, key := range keys {
-				if left := server.remaining(t, key); !within(left, arm.want) {
+				if left := server.remaining(t, key); !withinEdge(left, arm.want) {
 					t.Fatalf("the write gave %s %s, want %s", key, left, arm.want)
 				}
 			}
@@ -381,7 +394,7 @@ func TestARuntimeKeyLivesTheRetentionCappedAtTheHorizonOnARealServer(t *testing.
 			if outcome := renewed.Items[0].Outcome; outcome != execution.FrozenRenewalRenewed {
 				t.Fatalf("frozen renewal = %+v, want the running-out key renewed", renewed.Items[0])
 			}
-			if left := server.remaining(t, key); !within(left, arm.want) {
+			if left := server.remaining(t, key); !withinEdge(left, arm.want) {
 				t.Fatalf("the renewal gave %s %s, want %s", key, left, arm.want)
 			}
 		})
