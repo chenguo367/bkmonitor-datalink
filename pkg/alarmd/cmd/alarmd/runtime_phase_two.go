@@ -420,6 +420,13 @@ type phaseTwoOwnershipRuntime interface {
 		time.Time,
 		time.Duration,
 	) (phaseTwoQueryGroupRuntime, error)
+	// LoadOpened reads back what the Query Groups a round has just opened
+	// keep in the ownership store - their read holds - once their leases are
+	// held and before their Runners take a Slot, in one batched read for the
+	// round. Required: read before the lease, a hold could be a lease TTL
+	// old, and nothing read it again until the new owner's own write
+	// conflicted.
+	LoadOpened(context.Context, []execution.QueryGroupIdentity)
 	Close() error
 }
 
@@ -3087,6 +3094,19 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		applied.Note(string(queryGroup), true, false)
 		go bundle.handOverQueryGroup(queryGroup, lifecycle)
 	}
+	// Every missing Query Group is opened before any of their Runners starts,
+	// and what the opened ones keep in the ownership store is read in
+	// between, once for the round (LoadOpened): after their leases are held,
+	// so it is what the previous owner last wrote, and before their first
+	// Slot is classified. Read one at a time as each was opened, a slow store
+	// cost every one of them a timeout at the takeover with the most to
+	// catch up.
+	type openedQueryGroup struct {
+		queryGroup execution.QueryGroupIdentity
+		runner     phaseTwoQueryGroupRuntime
+	}
+	opened := make([]openedQueryGroup, 0, len(missing))
+	var stop error
 	for _, queryGroup := range missing {
 		bundle.observeOwnership(ctx, observability.StageTakeoverStarted, observability.ResultStarted, queryGroup, nil)
 		runner, err := bundle.dependencies.Ownership.OpenQueryGroup(
@@ -3100,30 +3120,66 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 				continue
 			}
 			if ctx.Err() != nil {
-				return ctx.Err()
+				stop = ctx.Err()
+				break
 			}
 			if isPhaseTwoInvariantError(err) {
-				return fmt.Errorf("phase-two open Query Group %s: %w", queryGroup, err)
+				stop = fmt.Errorf("phase-two open Query Group %s: %w", queryGroup, err)
+				break
 			}
 			bundle.markControlDependencyDegraded()
 			continue
 		}
 		if runner == nil {
-			return newPhaseTwoInvariantError(fmt.Sprintf("phase-two open Query Group %s returned no runner", queryGroup))
+			stop = newPhaseTwoInvariantError(fmt.Sprintf("phase-two open Query Group %s returned no runner", queryGroup))
+			break
 		}
-		if bundle.startQueryGroup(ctx, queryGroup, runner) {
-			applied.Note(string(queryGroup), false, false)
-		} else {
-			if err := runner.Release(ctx); err != nil {
-				bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				bundle.markControlDependencyDegraded()
-			}
+		opened = append(opened, openedQueryGroup{queryGroup: queryGroup, runner: runner})
+	}
+	if stop != nil {
+		// What the round opened and will not start is released, as a start
+		// the bundle refuses is.
+		for _, entry := range opened {
+			_ = bundle.releaseUnstarted(ctx, entry.queryGroup, entry.runner)
+		}
+		return stop
+	}
+	queryGroups := make([]execution.QueryGroupIdentity, len(opened))
+	for index, entry := range opened {
+		queryGroups[index] = entry.queryGroup
+	}
+	bundle.dependencies.Ownership.LoadOpened(ctx, queryGroups)
+	canceled := false
+	for _, entry := range opened {
+		if bundle.startQueryGroup(ctx, entry.queryGroup, entry.runner) {
+			applied.Note(string(entry.queryGroup), false, false)
+			continue
+		}
+		if err := bundle.releaseUnstarted(ctx, entry.queryGroup, entry.runner); err != nil && ctx.Err() != nil {
+			canceled = true
 		}
 	}
+	if canceled {
+		return ctx.Err()
+	}
 	return nil
+}
+
+// releaseUnstarted releases a Query Group opened and never started. A
+// release that fails leaves the lease to expire by its TTL.
+func (bundle *phaseTwoWorkerBundle) releaseUnstarted(
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+	runner phaseTwoQueryGroupRuntime,
+) error {
+	err := runner.Release(ctx)
+	if err != nil {
+		bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
+		if ctx.Err() == nil {
+			bundle.markControlDependencyDegraded()
+		}
+	}
+	return err
 }
 
 // observeAssignmentApplied writes the one line an assignment change has, when

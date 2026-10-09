@@ -2337,11 +2337,18 @@ type fakePhaseTwoOwnership struct {
 	beforeRegister func(ownership.WorkerRegistration)
 	// registerHook may reject or block one registration. It runs before the
 	// registration is recorded and receives the per-attempt context.
-	registerHook  func(context.Context, ownership.WorkerRegistration) error
-	assigned      []execution.QueryGroupIdentity
-	runner        phaseTwoQueryGroupRuntime
-	runners       map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime
-	openErrors    map[execution.QueryGroupIdentity]error
+	registerHook func(context.Context, ownership.WorkerRegistration) error
+	assigned     []execution.QueryGroupIdentity
+	runner       phaseTwoQueryGroupRuntime
+	runners      map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime
+	openErrors   map[execution.QueryGroupIdentity]error
+	// opens counts OpenQueryGroup calls, refused ones included, and the call
+	// numbered failOpenAt fails with failOpenErr; loadOpened, when set, is
+	// called with each LoadOpened's Query Groups.
+	opens         int
+	failOpenAt    int
+	failOpenErr   error
+	loadOpened    func([]execution.QueryGroupIdentity)
 	follower      bool
 	controlLeader int
 	published     int
@@ -2455,6 +2462,10 @@ func (owner *fakePhaseTwoOwnership) OpenQueryGroup(
 ) (phaseTwoQueryGroupRuntime, error) {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
+	owner.opens++
+	if owner.failOpenAt != 0 && owner.opens == owner.failOpenAt {
+		return nil, owner.failOpenErr
+	}
 	if err := owner.openErrors[queryGroup]; err != nil {
 		return nil, err
 	}
@@ -2465,6 +2476,17 @@ func (owner *fakePhaseTwoOwnership) OpenQueryGroup(
 		return owner.runners[queryGroup], nil
 	}
 	return owner.runner, nil
+}
+
+// LoadOpened reads nothing: no read hold is kept here. A test that hooks it
+// sees the Query Groups each round passed.
+func (owner *fakePhaseTwoOwnership) LoadOpened(_ context.Context, queryGroups []execution.QueryGroupIdentity) {
+	owner.mu.Lock()
+	hook := owner.loadOpened
+	owner.mu.Unlock()
+	if hook != nil {
+		hook(queryGroups)
+	}
 }
 
 func (owner *fakePhaseTwoOwnership) Close() error {
@@ -2504,6 +2526,7 @@ type fakePhaseTwoQueryGroup struct {
 	mu            sync.Mutex
 	runCalls      int
 	releaseCalls  int
+	releaseErr    error
 	leaseErr      error
 	leaseRelease  chan struct{}
 	leaseStarted  chan struct{}
@@ -2641,7 +2664,7 @@ func (runner *fakePhaseTwoQueryGroup) Release(context.Context) error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	runner.releaseCalls++
-	return nil
+	return runner.releaseErr
 }
 
 func (runner *fakePhaseTwoQueryGroup) releaseCount() int {

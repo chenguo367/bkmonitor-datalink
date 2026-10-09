@@ -155,7 +155,14 @@ func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 	if gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}) != 0 || gate.Counts()[string(viewGateTimelineMismatch)] != 1 {
 		t.Fatalf("after a refused read the gate counts %d switched, %v", gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}), gate.Counts())
 	}
-	gate.forget("qg-1")
+	// A Runner lost and released after the next one judged the Query Group
+	// releases its own outcome only: here none, the outcome is the other
+	// session's.
+	gate.forget("qg-1", &ownership.Session{})
+	if counts := gate.Counts(); counts[string(viewGateTimelineMismatch)] != 1 {
+		t.Fatalf("a release by another Runner's session dropped this one's outcome: %v", counts)
+	}
+	gate.forget("qg-1", session)
 	if counts := gate.Counts(); counts[string(viewGateTimelineMismatch)] != 0 {
 		t.Fatalf("a forgotten Query Group still counts: %v", counts)
 	}

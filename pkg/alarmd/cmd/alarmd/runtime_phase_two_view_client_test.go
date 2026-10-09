@@ -158,7 +158,7 @@ func TestTheProductionWorkerExecutesFromTheViewAndRefusesWhenItGoesStale(t *test
 func viewGateOutcomeOf(gate *viewExecutionGate, queryGroup execution.QueryGroupIdentity) viewGateOutcome {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	return gate.outcomes[queryGroup]
+	return gate.outcomes[queryGroup].outcome
 }
 
 type slotOutcome struct {
