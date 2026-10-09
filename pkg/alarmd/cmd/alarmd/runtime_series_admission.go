@@ -286,8 +286,7 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 // read holds at most readBound bytes of group documents at once: the
 // timeline cache's bound, derived from the container
 // (config.DeriveControlTimelineCache).
-func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, readBound int,
-	logger *observability.Logger) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
+func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, readBound int) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
 	prefix, rendered := cfg.DynamicGroupKeyPrefix()
 	if !rendered {
 		return cmdbcache.NewTargetResolver(nil, hosts, time.Now), nil, nil

@@ -74,13 +74,12 @@ const (
 // in three modules carries three chains of business, set and module, and a
 // target naming any one of them includes it.
 type HostFacts struct {
-	HostID      string
-	IP          string
-	CloudID     string
-	BusinessID  string
-	TopoNodes   []string
-	State       string
-	DisplayName string
+	HostID     string
+	IP         string
+	CloudID    string
+	BusinessID string
+	TopoNodes  []string
+	State      string
 	// AgentID is the agent the host record says it carries: the agent hash
 	// places a record on a host only when the host agrees (host.py:207-221).
 	AgentID string
@@ -585,7 +584,7 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// at most one round older than they are, never younger.
 	var published time.Time
 	if value, err := reader.client.Get(ctx, reader.publishedKey()).Result(); err == nil {
-		published = parsePublishedAt(value)
+		published = parseEpochSeconds(value)
 	}
 
 	if err := reader.scan(ctx, reader.hostKey(), builder.addFields); err != nil {
@@ -630,7 +629,7 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
-		index.sourceRefreshedAt = parseRefreshedAt(refreshed)
+		index.sourceRefreshedAt = parseEpochSeconds(refreshed)
 	}
 	index.publishedAt = published
 	return index, nil
@@ -825,13 +824,12 @@ type addressHosts struct {
 }
 
 type wireHost struct {
-	HostID      json.Number                  `json:"bk_host_id"`
-	InnerIP     string                       `json:"bk_host_innerip"`
-	CloudID     json.Number                  `json:"bk_cloud_id"`
-	BusinessID  json.Number                  `json:"bk_biz_id"`
-	State       string                       `json:"bk_state"`
-	DisplayName string                       `json:"display_name"`
-	TopoLinks   map[string][]json.RawMessage `json:"topo_link"`
+	HostID     json.Number                  `json:"bk_host_id"`
+	InnerIP    string                       `json:"bk_host_innerip"`
+	CloudID    json.Number                  `json:"bk_cloud_id"`
+	BusinessID json.Number                  `json:"bk_biz_id"`
+	State      string                       `json:"bk_state"`
+	TopoLinks  map[string][]json.RawMessage `json:"topo_link"`
 	// AgentID is read as any scalar: a record whose agent is written as a
 	// number is not refused for it.
 	AgentID json.RawMessage `json:"bk_agent_id"`
@@ -919,7 +917,6 @@ func hostFactsOf(wire wireHost) (*HostFacts, int) {
 		CloudID:     numberText(wire.CloudID),
 		BusinessID:  numberText(wire.BusinessID),
 		State:       wire.State,
-		DisplayName: wire.DisplayName,
 		TopoNodes:   nodes,
 		AgentID:     rawScalarText(wire.AgentID),
 		ModelID:     strings.TrimSpace(wire.ModelID),
@@ -1006,33 +1003,10 @@ func numberText(value json.Number) string {
 	return text
 }
 
-// parseRefreshedAt accepts the shapes bmw has used for the marker: epoch
-// seconds, epoch milliseconds, or an RFC3339 stamp. An unreadable marker is
-// reported as unknown rather than as "just refreshed".
-func parseRefreshedAt(value string) time.Time {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return time.Time{}
-	}
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds > 1e12 {
-			return time.UnixMilli(seconds).UTC()
-		}
-		if seconds > 1e9 {
-			return time.Unix(seconds, 0).UTC()
-		}
-		return time.Time{}
-	}
-	if stamp, err := time.Parse(time.RFC3339, value); err == nil {
-		return stamp.UTC()
-	}
-	return time.Time{}
-}
-
-// parsePublishedAt reads the writer's publish time: epoch seconds, the one
-// shape it writes. Anything else reads as no publish time, so the index is
-// aged by alarmd's own read instead.
-func parsePublishedAt(value string) time.Time {
+// parseEpochSeconds reads a writer's time marker: epoch seconds, the one
+// shape either writer writes. Anything else reads as no time - for the
+// publish time, the index is then aged by alarmd's own read instead.
+func parseEpochSeconds(value string) time.Time {
 	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 	if err != nil || seconds <= 0 {
 		return time.Time{}

@@ -141,7 +141,7 @@ func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T)
 		}
 	}
 	if health := fixture.store.Health(); !health.RefreshFailed || health.Unanswered != 3 || health.UnansweredReads != 3 ||
-		health.ConsecutiveErrors != 1 || health.Loaded != 3 {
+		health.Loaded != 3 {
 		t.Fatalf("health after an unanswered refresh = %+v", health)
 	}
 

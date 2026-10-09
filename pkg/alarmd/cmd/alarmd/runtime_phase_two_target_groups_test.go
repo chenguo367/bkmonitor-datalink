@@ -37,7 +37,7 @@ func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing
 			t.Fatal(err)
 		}
 	}
-	_, groups, err := buildTargetResolver(cfg, client, nil, 1<<20, nil)
+	_, groups, err := buildTargetResolver(cfg, client, nil, 1<<20)
 	if err != nil || groups == nil {
 		t.Fatalf("group store = %v, %v", groups, err)
 	}

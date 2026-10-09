@@ -664,7 +664,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Plan per Slot (decision-017). The group store, when there is one,
 	// refreshes on the same cadence as the host index and stops with it.
 	targetResolver, groupStore, err := buildTargetResolver(cfg, redisForCaller(targetGroupClient, redisfailure.CallerTargetGroup), cmdbIndex,
-		timelineCache.MaxBytes, logger)
+		timelineCache.MaxBytes)
 	if err != nil {
 		return nil, err
 	}

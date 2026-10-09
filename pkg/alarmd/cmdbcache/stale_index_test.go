@@ -21,7 +21,7 @@ func TestAnIndexPastItsBoundIsAdmittedByNameNotDecidedOn(t *testing.T) {
 	builder := newIndexBuilder(builtAt)
 	builder.addFields([]string{"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost})
 	now := builtAt.Add(10 * time.Minute)
-	store := &Store{index: builder.index, now: func() time.Time { return now }, maxAge: 10 * time.Minute, interval: time.Minute}
+	store := &Store{index: builder.index, now: func() time.Time { return now }, maxAge: 10 * time.Minute}
 	chain := instanceChain(t, store, "备用机")
 	module85 := scopeOf(admission.TargetScopeTopoNode, admission.TargetScopeInclude, "module|85")
 	record := dims("bk_host_id", `"800001"`)

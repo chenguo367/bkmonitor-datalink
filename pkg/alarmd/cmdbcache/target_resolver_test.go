@@ -30,7 +30,7 @@ func hostStore(t *testing.T, now func() time.Time, hosts []string, nodes []strin
 	builder := newIndexBuilder(now())
 	builder.addFields(hosts)
 	builder.addTopologyNodes(nodes)
-	return &Store{index: builder.index, now: now, maxAge: 10 * time.Minute, interval: time.Minute}
+	return &Store{index: builder.index, now: now, maxAge: 10 * time.Minute}
 }
 
 func selector(resolution *targetplan.Resolution, kind, id string) targetplan.SelectorResult {

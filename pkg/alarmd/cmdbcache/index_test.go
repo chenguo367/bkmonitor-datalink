@@ -80,7 +80,7 @@ func TestAMalformedRecordDoesNotBlindTheIndex(t *testing.T) {
 func TestEnrichmentResolvesTopologyAndTheOtherIdentity(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.141|0", multiModuleHost, "183016", multiModuleHost})
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},
@@ -112,7 +112,7 @@ func TestEnrichmentResolvesTopologyAndTheOtherIdentity(t *testing.T) {
 func TestAnUnknownHostStaysUnresolved(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.141|0", multiModuleHost})
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)}, nil)
 	facts := chain.Enrich(map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.199"`)})
 	if facts.HostResolved || len(facts.TopoNodes()) != 0 {
@@ -152,7 +152,7 @@ func TestAFailedRefreshKeepsTheLastGoodIndex(t *testing.T) {
 	if store.Current() == nil || store.Current().Hosts() != 1 {
 		t.Fatal("the last good index was discarded on failure")
 	}
-	if health := store.Health(); health.Degraded || health.ConsecutiveErrors != 1 {
+	if health := store.Health(); health.Degraded || store.lastError == nil {
 		t.Fatalf("health = %+v", health)
 	}
 
@@ -199,18 +199,14 @@ func TestTheStalenessBoundMustExceedTheRefreshInterval(t *testing.T) {
 	}
 }
 
-func TestRefreshedAtAcceptsTheShapesTheMarkerHasUsed(t *testing.T) {
-	seconds := parseRefreshedAt("1788958800")
-	millis := parseRefreshedAt("1788958800000")
-	stamp := parseRefreshedAt("2026-09-09T13:00:00Z")
-	if seconds.IsZero() || millis.IsZero() || stamp.IsZero() {
-		t.Fatalf("parsed %v %v %v", seconds, millis, stamp)
+func TestAWritersTimeMarkerIsEpochSeconds(t *testing.T) {
+	if got := parseEpochSeconds("1788958800"); !got.Equal(time.Unix(1788958800, 0)) {
+		t.Fatalf("parsed %v", got)
 	}
-	if !seconds.Equal(millis) || !seconds.Equal(stamp) {
-		t.Fatalf("the three encodings disagree: %v %v %v", seconds, millis, stamp)
-	}
-	if !parseRefreshedAt("").IsZero() || !parseRefreshedAt("not a time").IsZero() {
-		t.Error("an unreadable marker was treated as a time")
+	for _, value := range []string{"", "not a time", "-5", "0", "1788958800000x", "2026-09-09T13:00:00Z"} {
+		if !parseEpochSeconds(value).IsZero() {
+			t.Errorf("marker %q was treated as a time", value)
+		}
 	}
 }
 
@@ -252,7 +248,7 @@ func TestHostFactsFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost,
 		"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost})
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},
@@ -295,7 +291,7 @@ func containsNode(nodes []string, want string) bool {
 func TestHostStateComesFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 
 	chain := admission.NewChain(
 		[]admission.Fuller{admission.IdentityFuller{}, NewHostTopologyFuller(store)},
@@ -319,7 +315,7 @@ func TestHostStateComesFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 
 	statusFilter := admission.NewHostStatusFilter([]string{"备用机"})
 	chain := admission.NewChain(
@@ -368,7 +364,7 @@ func TestAnUnknownHostIDIsNotRescuedByTheAddress(t *testing.T) {
 func TestAnEmptyHostCacheIsNotAFleetWithNoHosts(t *testing.T) {
 	// Built now, so the emptiness is what degrades it rather than its age.
 	builder := newIndexBuilder(time.Now())
-	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour}
 
 	statusFilter := admission.NewHostStatusFilter([]string{"备用机"})
 	chain := admission.NewChain(

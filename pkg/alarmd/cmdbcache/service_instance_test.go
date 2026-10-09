@@ -128,7 +128,7 @@ func TestLoadReadsHostsAndServiceInstancesIntoOneSnapshot(t *testing.T) {
 	if index.TopologyNodes() != 1 {
 		t.Fatalf("topology nodes = %d, want the one the cache lists", index.TopologyNodes())
 	}
-	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour, interval: time.Minute}
+	store := &Store{index: index, now: index.BuiltAt, maxAge: time.Hour}
 	if health := store.Health(); health.Hosts != 1 || health.ServiceInstances != 1 {
 		t.Fatalf("health = %+v", health)
 	}
@@ -152,7 +152,7 @@ func storeWith(hostFields []string, instanceFields []string) *Store {
 	builder := newIndexBuilder(builtAt)
 	builder.addFields(hostFields)
 	builder.addServiceInstanceFields(instanceFields)
-	return &Store{index: builder.index, now: func() time.Time { return builtAt }, maxAge: time.Hour, interval: time.Minute}
+	return &Store{index: builder.index, now: func() time.Time { return builtAt }, maxAge: time.Hour}
 }
 
 // A series that names only a service instance is placed under the instance's

@@ -33,7 +33,6 @@ type Store struct {
 	reader          indexLoader
 	maxAge          time.Duration
 	publishedMaxAge time.Duration
-	interval        time.Duration
 	now             func() time.Time
 
 	refusalsChanged func(RefusedRecords)
@@ -41,7 +40,6 @@ type Store struct {
 	mutex     sync.RWMutex
 	index     *Index
 	lastError error
-	failures  uint64
 	refreshes uint64
 }
 
@@ -82,7 +80,7 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, interval: options.RefreshInterval, now: now,
+	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, now: now,
 		refusalsChanged: options.RefusalsChanged}, nil
 }
 
@@ -191,7 +189,6 @@ func (store *Store) Refresh(ctx context.Context) error {
 	store.mutex.Lock()
 	if err != nil {
 		store.lastError = err
-		store.failures++
 		store.mutex.Unlock()
 		return err
 	}
@@ -220,13 +217,12 @@ type Health struct {
 	// Age is how long ago alarmd read the held index. PublishedAge is how
 	// long ago the writer published what it read, when the writer says;
 	// SourceAge is the other writer's last attempt, shown and not decided on.
-	Age               time.Duration
-	PublishedAge      time.Duration
-	SourceAge         time.Duration
-	Degraded          bool
-	DegradedReason    string
-	ConsecutiveErrors uint64
-	Refreshes         uint64
+	Age            time.Duration
+	PublishedAge   time.Duration
+	SourceAge      time.Duration
+	Degraded       bool
+	DegradedReason string
+	Refreshes      uint64
 	// ClusterBusinessMapping and NamespaceBusinessMapping describe the BCS
 	// cluster and cluster + namespace -> business mappings the held index
 	// read. Zero held is not a degradation of the store - a writer that does
@@ -249,7 +245,7 @@ func (store *Store) Health() Health {
 	}
 	store.mutex.RLock()
 	defer store.mutex.RUnlock()
-	health := Health{ConsecutiveErrors: store.failures, Refreshes: store.refreshes}
+	health := Health{Refreshes: store.refreshes}
 	if store.index == nil {
 		health.Degraded = true
 		health.DegradedReason = IndexNeverLoaded
@@ -273,23 +269,4 @@ func (store *Store) Health() Health {
 		health.Degraded, health.DegradedReason = true, reason
 	}
 	return health
-}
-
-// Run keeps the index fresh until the context ends. The first load happens
-// immediately so a starting worker does not filter against an empty index.
-func (store *Store) Run(ctx context.Context) {
-	if store == nil {
-		return
-	}
-	_ = store.Refresh(ctx)
-	ticker := time.NewTicker(store.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_ = store.Refresh(ctx)
-		}
-	}
 }

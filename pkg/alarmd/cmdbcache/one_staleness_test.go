@@ -72,7 +72,7 @@ func TestTheIndexReadsTheWritersPublishTimeBeforeTheHashes(t *testing.T) {
 		t.Fatalf("reads in order %v: the publish time must come before the host hash", client.scans)
 	}
 	for _, value := range []string{"", "not-a-time", "-5", "0"} {
-		if got := parsePublishedAt(value); !got.IsZero() {
+		if got := parseEpochSeconds(value); !got.IsZero() {
 			t.Errorf("publish time %q read as %v, want none", value, got)
 		}
 	}
@@ -117,7 +117,7 @@ func TestEveryCallerReadsTheOneJudgementOnTheHostIndex(t *testing.T) {
 				builder.index.sourceRefreshedAt = now.Add(-c.attempted)
 			}
 			store := &Store{index: builder.index, now: func() time.Time { return now }, maxAge: 10 * time.Minute,
-				publishedMaxAge: 15 * time.Minute, interval: time.Minute}
+				publishedMaxAge: 15 * time.Minute}
 
 			_, unusable := store.Usable()
 			if (unusable == "") != c.usable {

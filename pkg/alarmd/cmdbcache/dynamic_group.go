@@ -340,7 +340,6 @@ type GroupStore struct {
 	lastFailureAt time.Time
 	syncReads     uint64
 	lastError     error
-	failures      uint64
 	refreshes     uint64
 	// unanswered is how many groups the last refresh could not read, Redis
 	// answering their keys with an error; unansweredReads how many such
@@ -536,7 +535,6 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	if readErr != nil && !errors.As(readErr, &unanswered) {
 		store.mu.Lock()
 		store.lastFailureAt, store.lastError = store.now(), readErr
-		store.failures++
 		for _, id := range ids {
 			store.failedLocked(id, store.lastFailureAt, readErr)
 		}
@@ -561,7 +559,6 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	store.lastError, store.unanswered = nil, 0
 	if unanswered != nil {
 		store.lastFailureAt, store.lastError = at, readErr
-		store.failures++
 		store.unanswered = len(unanswered.Groups)
 		store.unansweredReads += uint64(len(unanswered.Groups))
 		for id, why := range unanswered.Groups {
@@ -597,9 +594,8 @@ type GroupHealth struct {
 	Unavailable int
 	// RefreshFailed says the last refresh failed at the transport; the
 	// snapshots served are older than the cadence promises.
-	RefreshFailed     bool
-	ConsecutiveErrors uint64
-	Refreshes         uint64
+	RefreshFailed bool
+	Refreshes     uint64
 	// SyncReads counts the reads made on a Slot path for an id not held:
 	// one per first reference, and none after, is the reading.
 	SyncReads uint64
@@ -629,7 +625,7 @@ func (store *GroupStore) Health() GroupHealth {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	health := GroupHealth{Referenced: len(store.referenced), RefreshFailed: store.lastError != nil,
-		ConsecutiveErrors: store.failures, Refreshes: store.refreshes, SyncReads: store.syncReads,
+		Refreshes: store.refreshes, SyncReads: store.syncReads,
 		Unanswered: store.unanswered, UnansweredReads: store.unansweredReads}
 	for id, failure := range store.failing {
 		health.Failing = append(health.Failing, GroupFailure{ID: id, Since: failure.since, Reason: failure.reason})
