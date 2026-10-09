@@ -166,12 +166,18 @@ func TestASupplementJudgesNoAbsenceAndFilesNoOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := map[execution.SeriesIdentityDigest]string{hotSeries: "80"}
+	// Each Slot is its own round, a period after the last: a stall is
+	// counted in rounds, and the same round attempted again counts once.
+	rounds := 0
 	slot := func(what string) {
 		t.Helper()
-		batches, completion := supplementRead(t, header, read)
-		ports.executeOverride = streamExecution(header, batches, completion)
-		request := workerSlotRequest(header.Contract)
-		request.DuePlanTargets.DuePlanSetDigest = header.Contract.DuePlanSetDigest
+		round := header
+		round.Contract.Slot.EvaluationTime += execution.EvaluationTime(60 * rounds)
+		rounds++
+		batches, completion := supplementRead(t, round, read)
+		ports.executeOverride = streamExecution(round, batches, completion)
+		request := workerSlotRequest(round.Contract)
+		request.DuePlanTargets.DuePlanSetDigest = round.Contract.DuePlanSetDigest
 		if result, err := coordinator.Execute(context.Background(), request); err != nil || !result.Completed {
 			t.Fatalf("%s: Slot result %+v error %v", what, result, err)
 		}
