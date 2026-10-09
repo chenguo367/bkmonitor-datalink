@@ -207,7 +207,6 @@ func partlyRefused(ctx context.Context, err error, messages []*sarama.ProducerMe
 		position[message] = eventOf[at]
 	}
 	after := append([]refusal(nil), refused...)
-	reported := make([]observability.OutputRejectedEvent, 0, len(batch))
 	for _, failure := range batch {
 		if failure == nil {
 			return nil
@@ -218,15 +217,14 @@ func partlyRefused(ctx context.Context, err error, messages []*sarama.ProducerMe
 		}
 		detail, _ := oneClientRejection(failure.Err)
 		after[index] = refusal{rule: observability.OutputRejectProducerRefused, detail: detail}
-		reported = append(reported, observability.OutputRejectedEvent{Rule: observability.OutputRejectProducerRefused,
-			StrategyID: events[index].PlanRef.StrategyID, Format: formats[index]})
 	}
 	withheld := withholdSeriesOf(events, after)
 	partial := partialRejection(events, formats, after, withheld)
 	if partial == nil {
 		return nil
 	}
-	observability.ReportOutputRejected(ctx, reported, len(partial.Withheld))
-	partial.whole = false
+	// The report is the batch's and is replaced, not added to: it carries
+	// the refusals made before sending beside the ones the producer made.
+	observability.ReportOutputRejected(ctx, partial.facts(), len(partial.Withheld))
 	return partial
 }

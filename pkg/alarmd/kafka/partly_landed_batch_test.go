@@ -85,10 +85,17 @@ func TestABatchPartlyRefusedAfterSendingIsReportedPartlyWritten(t *testing.T) {
 	}
 	producer := &partlyRefusingProducer{refuse: map[int]bool{1: true}, cause: sarama.ErrMessageSizeTooLarge}
 	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
-	err := sink.WriteBatch(context.Background(), events)
+	ctx, report := observability.ContextWithOutputWriteReport(context.Background())
+	err := sink.WriteBatch(ctx, events)
 	var partial *OutputPartiallyRejectedError
 	if !errors.As(err, &partial) {
 		t.Fatalf("WriteBatch() = %v (%T), want the batch reported partly written", err, err)
+	}
+	// The Slot's report names the refusal by its rule and strategy, and
+	// nothing withheld: the reader counts it under the producer's refusal.
+	if facts := report(); facts == nil || len(facts.Rejected) != 1 || facts.Rejected[0].Rule != "producer_refused" ||
+		facts.Rejected[0].StrategyID != events[1].PlanRef.StrategyID || facts.Withheld != 0 {
+		t.Fatalf("output write report = %+v, want one producer_refused event of strategy %s and none withheld", facts, events[1].PlanRef.StrategyID)
 	}
 	if producer.sent != 2 {
 		t.Fatalf("fixture: %d messages landed, want 2", producer.sent)
@@ -113,10 +120,14 @@ func TestAnEventOfARefusedSeriesIsReportedNotWrittenThoughItLanded(t *testing.T)
 	}
 	producer := &partlyRefusingProducer{refuse: map[int]bool{1: true}, cause: sarama.ErrMessageSizeTooLarge}
 	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
-	err := sink.WriteBatch(context.Background(), events)
+	ctx, report := observability.ContextWithOutputWriteReport(context.Background())
+	err := sink.WriteBatch(ctx, events)
 	var partial *OutputPartiallyRejectedError
 	if !errors.As(err, &partial) {
 		t.Fatalf("WriteBatch() = %v, want the batch reported partly written", err)
+	}
+	if facts := report(); facts == nil || len(facts.Rejected) != 1 || facts.Withheld != 1 {
+		t.Fatalf("output write report = %+v, want the refused event and its sibling withheld", facts)
 	}
 	got := map[string]bool{}
 	for _, id := range partial.OutputNotWrittenEventIDs() {
@@ -139,5 +150,66 @@ func TestAWholeRefusalAndABrokerFailureAreAsBefore(t *testing.T) {
 	broker := newTriggerEventSinkForTest(t, &partlyRefusingProducer{refuse: map[int]bool{1: true}, cause: sarama.ErrNotLeaderForPartition}, &fakeCloser{})
 	if err := broker.WriteBatch(context.Background(), events); !isRetryableDependency(err) {
 		t.Fatalf("a broker failure = %v, want a dependency failure sent again", err)
+	}
+}
+
+// A failure the producer names that is not a message of the batch, or no
+// failure at all, cannot be placed on an event, so the batch is not read as
+// partly written and the caller refuses it whole, as before the batch could
+// be refused in part. Sarama lists the batch's own messages, so this is the
+// direction a broken answer falls, not a path a deployment takes.
+func TestAFailureThatNamesNoMessageOfTheBatchLeavesItRefusedWhole(t *testing.T) {
+	events := []contract.TriggerEventV1{eventOfSeries(t, "series-a"), eventOfSeries(t, "series-b"), eventOfSeries(t, "series-c")}
+	messages := []*sarama.ProducerMessage{{Topic: "alarmd-trigger-event"}, {Topic: "alarmd-trigger-event"}, {Topic: "alarmd-trigger-event"}}
+	eventOf := []int{0, 1, 2}
+	formats := []string{"standard", "standard", "standard"}
+	refused := make([]refusal, len(events))
+	foreign := &sarama.ProducerError{Msg: &sarama.ProducerMessage{Topic: "alarmd-trigger-event"}, Err: sarama.ErrMessageSizeTooLarge}
+	ours := &sarama.ProducerError{Msg: messages[0], Err: sarama.ErrMessageSizeTooLarge}
+	for name, failures := range map[string]sarama.ProducerErrors{
+		"a message of another batch":                    {foreign},
+		"a message of another batch beside one of ours": {ours, foreign},
+		"no failure": {nil},
+	} {
+		if got := partlyRefused(context.Background(), failures, messages, eventOf, events, formats, refused); got != nil {
+			t.Fatalf("%s: partlyRefused() = %v, want nil so the batch is refused whole", name, got)
+		}
+	}
+}
+
+// A batch with an event the sink refused before sending and another the
+// producer refused after it is reported with both: the Slot's report is the
+// batch's, and the refusal found later does not replace the one found
+// earlier. Both events are not written; the third landed.
+func TestARefusalBeforeSendingAndOneAfterAreBothReported(t *testing.T) {
+	before, landed, after := standardSeriesEvent(t, "series-b", "b"), standardSeriesEvent(t, "series-a", "a"), standardSeriesEvent(t, "series-c", "c")
+	before.BusinessID = "biz-2"
+	// The producer sees the two messages left once the refused event is
+	// taken out, and refuses the second of them: series-c's.
+	producer := &partlyRefusingProducer{refuse: map[int]bool{1: true}, cause: sarama.ErrMessageSizeTooLarge}
+	sink := newTriggerEventSinkForTest(t, producer, &fakeCloser{})
+	ctx, report := observability.ContextWithOutputWriteReport(context.Background())
+	err := sink.WriteBatch(ctx, []contract.TriggerEventV1{before, landed, after})
+	var partial *OutputPartiallyRejectedError
+	if !errors.As(err, &partial) {
+		t.Fatalf("WriteBatch() = %v (%T), want the batch reported partly written", err, err)
+	}
+	if producer.sent != 1 {
+		t.Fatalf("fixture: %d messages landed, want 1", producer.sent)
+	}
+	notWritten := map[string]bool{}
+	for _, id := range partial.OutputNotWrittenEventIDs() {
+		notWritten[id] = true
+	}
+	if len(notWritten) != 2 || !notWritten[before.EventID] || !notWritten[after.EventID] {
+		t.Fatalf("not written = %v, want the event refused before sending and the one refused after", partial.OutputNotWrittenEventIDs())
+	}
+	facts := report()
+	rules := map[string]string{}
+	for _, rejected := range facts.Rejected {
+		rules[rejected.Rule] = rejected.StrategyID
+	}
+	if facts == nil || len(facts.Rejected) != 2 || rules["producer_refused"] == "" || rules["standard_business_identity"] == "" || facts.Withheld != 0 {
+		t.Fatalf("output write report = %+v, want both refusals by their rules and none withheld", facts)
 	}
 }
