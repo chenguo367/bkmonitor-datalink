@@ -141,8 +141,9 @@ func TestPlanSlotProducesSeriesAndTheMemoryToStore(t *testing.T) {
 	if result.Outcome != OutcomeEvaluated {
 		t.Fatalf("outcome = %q, want %q", result.Outcome, OutcomeEvaluated)
 	}
-	if len(result.Series) != 2 {
-		t.Fatalf("series = %+v, want one per judged host", result.Series)
+	// One per judged host, and the whole item's NORMAL: the round had data.
+	if len(result.Series) != 3 {
+		t.Fatalf("series = %+v, want one per judged host and one for the whole item", result.Series)
 	}
 	if result.Mutation == nil {
 		t.Fatal("a round that judged two hosts stored nothing")
@@ -276,8 +277,8 @@ func TestPlanSlotWritesNothingWhenTheMemoryDidNotMove(t *testing.T) {
 	}
 	// It still produced the series - the trigger needs a point every round, and
 	// skipping the write is about the store, not about the evaluation.
-	if len(repeat.Series) != 2 {
-		t.Fatalf("series = %d, want one per judged host even when nothing is written", len(repeat.Series))
+	if len(repeat.Series) != 3 {
+		t.Fatalf("series = %d, want one per judged host and the whole item even when nothing is written", len(repeat.Series))
 	}
 }
 

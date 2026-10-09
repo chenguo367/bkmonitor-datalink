@@ -122,13 +122,16 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		// absence clocks must not move on evidence the round did not have.
 		return slot, nil
 	}
-	slot.Series = SyntheticSeriesFor(SyntheticInput{
+	slot.Series, err = SyntheticSeriesFor(SyntheticInput{
 		EvaluationTime: input.EvaluationTime,
 		PeriodSeconds:  input.PeriodSeconds,
 		Result:         result,
 		Memory:         result.Memory,
 		Roster:         result.Roster,
 	})
+	if err != nil {
+		return PlanSlotResult{}, err
+	}
 
 	groups := storedGroups(result.Memory)
 	presentAsOf := presentAsOf(groups, input.Snapshot.PresentAsOf, input.EvaluationTime, result.WholeItemPresent)

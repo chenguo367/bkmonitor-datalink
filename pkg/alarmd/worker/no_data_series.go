@@ -271,7 +271,16 @@ func (stream *streamedExecution) evaluateNoData(
 		pending = pending[:0]
 		return err
 	}
-	budget := stream.coordinator.slotBudget().MaxStateMutations
+	// What the Slot's own series have already spent. They are all evaluated
+	// and merged by now, so the no-data Plans share only what is left of each
+	// per-Slot cap their series spend from: one State write per series, and
+	// at most one event per series, since a no-data Plan has one Level.
+	// Checked against the whole cap instead, a Plan whose series fit alone
+	// and not beside the threshold ones passes here and is refused by the
+	// Slot-wide check, which replaces every Plan's results with a budget gap -
+	// the threshold detection this round already decided included.
+	budget := stream.coordinator.slotBudget()
+	spentStates, spentEvents := stream.effects.states, stream.effects.events
 	for _, due := range stream.header.DuePlans {
 		if due.CompiledPlan.NoData() == nil {
 			continue
@@ -309,7 +318,9 @@ func (stream *streamedExecution) evaluateNoData(
 		// will not fit next round either, and a partial set of synthetic series
 		// would report the groups that fitted as absent and say nothing about
 		// the rest.
-		if !noDataFitsSlotBudget(stream.noDataStateMutations, uint64(len(round.series)), budget) {
+		adding := uint64(len(round.series))
+		if !noDataFitsSlotBudget(spentStates+stream.noDataStateMutations, adding, budget.MaxStateMutations) ||
+			!noDataFitsSlotBudget(spentEvents+stream.noDataStateMutations, adding, budget.MaxEvents) {
 			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
 			continue
 		}
@@ -365,6 +376,24 @@ func (stream *streamedExecution) noDataCompleteness(due execution.DuePlan) execu
 // A memory for a Plan this round does not have, or one whose retention cannot
 // be derived, is not a refusal: nothing was asked of the store, the wiring
 // handed it a write it cannot place, and that does fail the Slot.
+// withoutWithheldNoData is the memory mutations of the Plans whose output
+// landed, in the order they were queued.
+func withoutWithheldNoData(
+	mutations []execution.PlanNoDataMutation, withheld map[execution.PlanIdentity]struct{},
+) []execution.PlanNoDataMutation {
+	if len(withheld) == 0 {
+		return mutations
+	}
+	kept := make([]execution.PlanNoDataMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		if _, skip := withheld[mutation.Identity.Plan]; skip {
+			continue
+		}
+		kept = append(kept, mutation)
+	}
+	return kept
+}
+
 func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	ctx context.Context, request execution.SlotExecutionRequest, duePlans []execution.DuePlan,
 	mutations []execution.PlanNoDataMutation,

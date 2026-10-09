@@ -1271,12 +1271,21 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	// this Slot's keys were read and not written, and a Plan is not a
 	// population anyone reads that against.
 	var frozenRenewals observability.FrozenStateRenewalFacts
+	// The Plans whose output did not all land this attempt. Their no-data
+	// memory is not applied: the memory follows the output exactly as State
+	// does (output acknowledged, then State and memory, then Progress), and
+	// the round that decides them again has to decide from the memory the
+	// unsent decision started from. Applied anyway, a closing NORMAL that
+	// deletes a group would be gone for good - the next round finds no group
+	// and says nothing, and the alert stays open.
+	withheldNoData := make(map[execution.PlanIdentity]struct{})
 	for _, planResult := range planResults {
 		due, ok := duePlan(header.DuePlans, planResult.Plan)
 		if !ok {
 			return execution.SlotExecutionResult{}, errors.New("alarmd worker: evaluated plan is not due")
 		}
 		if _, changed := changedPlans[due.Key()]; changed {
+			withheldNoData[planResult.Plan] = struct{}{}
 			continue
 		}
 		if err := coordinator.admit(ctx, request, due); err != nil {
@@ -1437,6 +1446,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 					if deterministicTerminalReason == "" {
 						deterministicTerminalReason = reason
 					}
+					// Its series' events are not sent either.
+					withheldNoData[planResult.Plan] = struct{}{}
 					continue
 				}
 				accepted = append(accepted, mutation)
@@ -1462,6 +1473,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 					if reason, rejected := outputRejectionReason(err); rejected && deterministicTerminalReason == "" {
 						deterministicTerminalReason = reason
 					}
+					withheldNoData[planResult.Plan] = struct{}{}
 					accepted, acceptedBytes = kept, keptBytes
 					held.settle(acceptedBytes)
 				} else if reason, deferred := outputDeferralReason(err); deferred {
@@ -1472,6 +1484,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 					if retryPendingReason == "" {
 						retryPendingReason = reason
 					}
+					withheldNoData[planResult.Plan] = struct{}{}
 					held.release()
 					continue
 				} else if reason, rejected := outputRejectionReason(err); rejected {
@@ -1486,6 +1499,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 					if deterministicTerminalReason == "" {
 						deterministicTerminalReason = reason
 					}
+					withheldNoData[planResult.Plan] = struct{}{}
 					held.release()
 					continue
 				} else {
@@ -1498,6 +1512,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 					// Event acknowledgement is Plan-local. Keep the Slot retryable and
 					// continue healthy sibling Plans, but do not apply this Plan's State
 					// or advance Progress until the stable event identity is replayed.
+					withheldNoData[planResult.Plan] = struct{}{}
 					held.release()
 					continue
 				}
@@ -1537,11 +1552,12 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	}
 	frozenRenewals.RecordCensus(census.Due, census.Read, census.Written)
 	coordinator.observeFrozenStateRenewal(ctx, request.Operation, frozenRenewals)
-	// After every Plan's state and gap, inside the same sequenced scope. The
-	// memory only changes what the next round reports as a duration and which
-	// groups it expects, never whether this round fired - so it follows the
-	// writes that do decide that, rather than racing them.
-	if err := coordinator.applyNoDataMemory(ctx, request, header.DuePlans, noDataMemory); err != nil {
+	// After every Plan's state and gap, inside the same sequenced scope, and
+	// only for the Plans whose output landed. The memory decides which groups
+	// the next round expects and what it says about them, so it follows the
+	// writes that carry this round's decisions rather than racing them.
+	if err := coordinator.applyNoDataMemory(ctx, request, header.DuePlans,
+		withoutWithheldNoData(noDataMemory, withheldNoData)); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
 	if retryPendingReason != "" {

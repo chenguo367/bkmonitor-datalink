@@ -44,7 +44,7 @@ func TestANoDataRoundThatCannotBeDerivedIsThatPlansOutcome(t *testing.T) {
 	stream := &streamedExecution{
 		coordinator: &SlotExecutionCoordinator{
 			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
 		},
 		header: execution.InternalExecutionHeader{
 			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
@@ -99,7 +99,7 @@ func TestANoDataRoundThatCannotBeDerivedIsReportedTimed(t *testing.T) {
 		coordinator: &SlotExecutionCoordinator{
 			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
 				Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { observed = append(observed, o) })},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
 		},
 		header: execution.InternalExecutionHeader{
 			Contract: noDataPreflightContract(t, []execution.DuePlan{failing}), DuePlans: []execution.DuePlan{failing},
@@ -154,4 +154,27 @@ func dropNoDataMemory(loaded execution.NoDataLoadResult, strategyID string) exec
 		}
 	}
 	return kept
+}
+
+// A stored key the no-data package could not have written reaches the Plan's
+// outcome as a derivation failure, by name, and nothing is remembered.
+func TestAStoredKeyThatDoesNotParseIsADerivationFailure(t *testing.T) {
+	due := noDataWiredPlan(t)
+	evaluation := int64(noDataPreflightContract(t, []execution.DuePlan{due}).Slot.EvaluationTime)
+	store := &horizonNoDataStore{
+		groups:  []execution.NoDataGroupMemory{{GroupKey: "bk_target_cloud_id=0,bk_target_ip=192.0.2.9", LastSeen: evaluation - 60}},
+		present: evaluation - 60,
+	}
+	stream := noDataWiredStream(t, due, store)
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	round, err := stream.noDataRoundFor(due, nil, execution.CompletenessFull)
+	outcome, local := noDataLocalOutcome(err)
+	if !local || outcome != nodata.OutcomeSkippedDerivationFailed {
+		t.Fatalf("noDataRoundFor() error = %v (outcome %q, local %t), want %s", err, outcome, local, nodata.OutcomeSkippedDerivationFailed)
+	}
+	if round.mutation != nil {
+		t.Fatalf("a round that could not be derived remembered %+v", round.mutation)
+	}
 }

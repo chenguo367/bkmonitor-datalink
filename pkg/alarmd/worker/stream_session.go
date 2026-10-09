@@ -1459,6 +1459,10 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
 	stream.evaluated = execution.EvaluationResult{}
+	// The no-data memory those results decided goes with them. Applied, it
+	// would record decisions whose events are never sent, and the next round
+	// would decide from there.
+	stream.noDataMutations = nil
 	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
 	for _, due := range stream.header.DuePlans {
 		mutation, err := stream.gapMutationForReasons(due, map[execution.GapScope]execution.ReasonCode{{}: reason})
