@@ -1402,6 +1402,9 @@ type recordingPorts struct {
 	// eventRejection, when set with failStage event_ack, makes the event
 	// write fail as the sink's own refusal rather than a retryable dependency.
 	eventRejection *eventRejectionShape
+	// eventFailureKind is the kind a failed write's dependency error says,
+	// as the sink's errors do; empty says none.
+	eventFailureKind string
 	// outputWrite, when set, is the count the fake sink reports for every
 	// batch, the way the real sink counts what a batch became.
 	outputWrite    *observability.OutputWriteFacts
@@ -1970,7 +1973,7 @@ func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.T
 			// retryable dependency, and named by reason word and sentence.
 			return &outputRejectedTestError{err: err, reason: ports.eventRejection.reason, detail: ports.eventRejection.detail}
 		}
-		return &retryableOutputTestError{err: err}
+		return &retryableOutputTestError{err: err, kind: ports.eventFailureKind}
 	}
 	return nil
 }
@@ -1988,15 +1991,22 @@ func (err *outputRejectedTestError) Error() string {
 }
 func (err *outputRejectedTestError) Unwrap() error                 { return err.err }
 func (err *outputRejectedTestError) OutputRejectionReason() string { return err.reason }
+func (err *outputRejectedTestError) OutputFailureKind() string {
+	return observability.OutputFailureClientRejected
+}
 func (err *outputRejectedTestError) OutputRejectionDetail() string { return err.detail }
 
 type eventRejectionShape struct{ reason, detail string }
 
-type retryableOutputTestError struct{ err error }
+type retryableOutputTestError struct {
+	err  error
+	kind string
+}
 
 func (err *retryableOutputTestError) Error() string              { return err.err.Error() }
 func (err *retryableOutputTestError) Unwrap() error              { return err.err }
 func (err *retryableOutputTestError) RetryableOutputDependency() {}
+func (err *retryableOutputTestError) OutputFailureKind() string  { return err.kind }
 
 func (ports *recordingPorts) AdmitRuntime(_ context.Context, request execution.StateApplyRequest) (execution.StateAdmissionResult, error) {
 	ports.record("state_admission")

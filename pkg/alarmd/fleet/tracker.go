@@ -1279,9 +1279,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// OUTPUT_ACK_UNKNOWN at "other" and the page saying the broker was
 	// unavailable, while the client had refused to send at all -- a sentence
 	// on this observation that reached no row. The words are kept, bounded
-	// and sanitized as the row's last error is; the reading decides from them
-	// whether the broker or this deployment's own client is the one that
-	// said no, and files the failure as internal only in the second case.
+	// and sanitized as the row's last error is, for the reader; the kind the
+	// sink's error carries decides whether the broker, a Redis or this
+	// deployment's own client is the one that said no, and the failure is
+	// filed as internal only in the last case.
 	if outputFailed {
 		seen := at
 		code := string(observation.ReasonCode)
@@ -1301,12 +1302,18 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				text = boundedErrorTail(observability.SanitizeErrorText(r.Detail))
 			}
 		}
+		// Kept only when it is one of the kinds; the reading decides what
+		// a failure without one is (outputFailureOf).
+		kind := observation.OutputFailureKind
+		if !validOutputFailureKind(kind) {
+			kind = ""
+		}
 		state.lastFailure = &FailureRef{Stage: observability.QueryFailureStageOutput, Category: observability.QueryFailureCategoryOutput,
-			Code: code, Text: text, At: &seen, Slot: trace.EvaluationTime}
+			Code: code, Text: text, Kind: kind, At: &seen, Slot: trace.EvaluationTime}
 		state.lastFailureSlot = trace.EvaluationTime
-		// This deployment's own, when the sink said it refused or when the
-		// words say the client did.
-		if observation.OutputRejection != nil || OutputFailureKind(text) == OutputFailureClientRejected {
+		// This deployment's own, when the sink said it refused or its error
+		// says, by its type, that the client did.
+		if observation.OutputRejection != nil || kind == observability.OutputFailureClientRejected {
 			copy := *state.lastFailure
 			state.internal = &copy
 			state.internalEndedRound = false

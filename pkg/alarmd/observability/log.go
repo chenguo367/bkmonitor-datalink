@@ -309,6 +309,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if r := observation.OutputRejection; r != nil {
 		attributes = append(attributes, slog.Any("output_rejection", r))
 	}
+	if kind := observation.OutputFailureKind; kind != "" {
+		attributes = append(attributes, slog.String("output_failure_kind", kind))
+	}
 	if w := observation.OutputWrite; w != nil {
 		// Both numbers, zero included: a success that handed the broker
 		// nothing is the case this exists to tell from a write.

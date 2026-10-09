@@ -2250,6 +2250,11 @@ type Observation struct {
 	// event_acked observation. Nil when the write failed for any other
 	// reason, or did not fail.
 	OutputRejection *OutputRejectionFacts
+	// OutputFailureKind is which kind of failure a failed event_acked
+	// observation's write was, as the sink's error says by its type (one of
+	// OutputFailureKinds; OutputFailureKindOf). Empty when the write did
+	// not fail.
+	OutputFailureKind string
 	// OutputWrite is the sink's own count of the batch on an event_acked
 	// observation: messages handed to the client and events the protocol
 	// had no message for. Nil when the sink did not count -- and left

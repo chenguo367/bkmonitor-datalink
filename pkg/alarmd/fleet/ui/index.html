@@ -651,12 +651,25 @@ var EFFECT = {
   MEMORY_LOST: '这一轮的结果可信，丢的是无数据记忆的维护（没写进去或续不了期），下一轮再向存储要一次'
 };
 
+// How the dependency was named: by the reason code, by the error's words,
+// or - for a failed write of the round's events - by the kind the sink's
+// error said by its type. Held to fleet.DependencyEvidences.
+var DEPENDENCY_EVIDENCE = {
+  code: '，由原因码判定',
+  text: '，由错误原文判定',
+  ack_unknown: '，写事件时问了 broker、没拿到确认：消息可能已部分落地，这一轮会重做',
+  broker_refused: '，broker 应答说没写入（权限、主题、版本、时间戳之类，按 Kafka 协议错误码判定），这一轮会重做',
+  client_rejected: '，本部署的客户端或转换器拒绝发送（或生产者已彻底拒收），重试还会被拒，要改配置或策略',
+  snapshot_store: '，兼容协议的快照库（Redis）没写成，不是 Kafka 的问题',
+  sink_not_open: '，输出还没打开，没有问过任何 broker',
+  unknown: '，写事件失败，错误没带种类（升级过程中旧副本发布的行也是这样）'
+};
+
 // One sentence for the row: where it is stuck, talking to what, what kind,
 // and what it did to the detection -- then the last success, or that this
 // process never saw one, which is the fact a recovery is judged on.
 function blockedWords(blocked) {
-  var evidence = blocked.dependency_evidence === 'code' ? '，由原因码判定'
-    : blocked.dependency_evidence === 'text' ? '，由错误原文判定' : '';
+  var evidence = DEPENDENCY_EVIDENCE[blocked.dependency_evidence] || '';
   return (STAGE[blocked.stage] || blocked.stage)
     + '（' + (DEPENDENCY[blocked.dependency] || blocked.dependency) + evidence
     + (blocked.operation ? '，操作 ' + blocked.operation : '') + '）'

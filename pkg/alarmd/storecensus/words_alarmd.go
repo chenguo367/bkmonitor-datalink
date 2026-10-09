@@ -1250,6 +1250,7 @@ var alarmdWords = []string{
 	"simple",
 	"since",
 	"single",
+	"sink",
 	"site",
 	"size",
 	"sized",

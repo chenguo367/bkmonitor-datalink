@@ -275,6 +275,12 @@ func (err *SnapshotStoreError) Unwrap() error {
 
 func (err *SnapshotStoreError) RetryableOutputDependency() {}
 
+// OutputFailureKind names the failure as the snapshot store's - a Redis's,
+// not the broker's - whatever wraps it on the way up (observability's
+// OutputFailureSnapshotStore; the word is spelled here, not imported, to keep
+// this package free of the observation types).
+func (err *SnapshotStoreError) OutputFailureKind() string { return "snapshot_store" }
+
 func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen preparedStrategy, now int64, pods PodResolver, pluginID string) (Event, error) {
 	if pluginID == "" {
 		pluginID = "bkmonitor"
