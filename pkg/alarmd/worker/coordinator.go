@@ -606,7 +606,7 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 			Contract: request.Contract, Kind: completionKind,
 			Result: observability.ResultDegraded, ReasonCode: finalization.ReasonCode,
 			Evidence: evidence,
-		}, execution.CompletionAttribution{})
+		}, execution.CompletionAttribution{Cause: finalization.Cause})
 		return err
 	})
 	if err != nil {

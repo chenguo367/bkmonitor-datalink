@@ -122,7 +122,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 		return execution.QueryFreeFinalization{
 			Contract: request.Contract, Mode: execution.FinalizationGapSkipped,
 			ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped),
-			Targets:    request.DuePlanTargets.Clone(),
+			Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseExpiredReplay,
 		}, nil
 	}
 	// The Coordinator has already persisted this validated request as the unfinished
@@ -131,7 +131,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 		return execution.QueryFreeFinalization{
 			Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
 			ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
-			Targets:    request.DuePlanTargets.Clone(),
+			Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseExpiredReplay,
 		}, nil
 	}
 	fact, _, err := source.resolveFrozenFact(ctx, request.Contract)
@@ -146,7 +146,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 			return execution.QueryFreeFinalization{
 				Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
 				ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
-				Targets:    request.DuePlanTargets.Clone(),
+				Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseSnapshotUnavailablePastBound,
 			}, nil
 		}
 		var corrupt *controlplane.PersistedSnapshotCorruptError
@@ -154,14 +154,14 @@ func (source *productionFrozenExecution) ResolveFinalization(
 			return execution.QueryFreeFinalization{
 				Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
 				ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
-				Targets:    request.DuePlanTargets.Clone(),
+				Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseSnapshotCorrupt,
 			}, nil
 		}
 		if source.now().UnixMilli() >= request.RecoveryUntilUnixMilli {
 			return execution.QueryFreeFinalization{
 				Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
 				ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
-				Targets:    request.DuePlanTargets.Clone(),
+				Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseResolveFailedPastBound,
 			}, nil
 		}
 		return execution.QueryFreeFinalization{
@@ -182,6 +182,7 @@ func (source *productionFrozenExecution) ResolveFinalization(
 			Mode:       execution.FinalizationSnapshotUnavailable,
 			ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable),
 			Targets:    request.DuePlanTargets.Clone(),
+			Cause:      execution.CauseExpiredReplay,
 		}, nil
 	}
 	if request.Operation == execution.OperationNormal {

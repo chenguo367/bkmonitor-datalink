@@ -235,7 +235,13 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 			// not detection given up, bookkeeping interrupted.
 			check = CheckBookkeepingAbandoned
 		}
-		each(queryGroup, check, "GAP_SKIPPED", skip)
+		// An expired replay's span is recorded under its own word; a gap skip's
+		// Reason is what came before the skip, not the skip's code.
+		code := "GAP_SKIPPED"
+		if skip.Reason == snapshotUnavailableCompletion {
+			code = snapshotUnavailableCompletion
+		}
+		each(queryGroup, check, code, skip)
 	}
 	for queryGroup, pruned := range view.PrunedSkips {
 		each(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED", SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To,

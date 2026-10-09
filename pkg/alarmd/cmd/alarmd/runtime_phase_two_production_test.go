@@ -2923,3 +2923,84 @@ func (store *countingCooldownStore) LoadQueryCooldown(context.Context, execution
 func (*countingCooldownStore) SaveQueryCooldown(context.Context, execution.OwnerFence, scheduler.QueryCooldownRecord) error {
 	return nil
 }
+
+// Every query-free finalization names why no query ran, because the
+// completion word does not: SNAPSHOT_UNAVAILABLE is a Slot that came after
+// its recovery bound, a Snapshot that is corrupt, or one that could not be
+// read until the bound passed. Each branch of the resolver, and each one's
+// finalization is valid.
+func TestEveryQueryFreeFinalizationNamesWhyNoQueryRan(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "101"}
+	spec := execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Alignment: 0, Timezone: "UTC"}
+	planRevision, err := execution.DerivePlanScheduleRevision(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulePlan := execution.FrozenPlanSchedule{Identity: plan, ScheduleRevision: planRevision, Spec: spec}
+	scheduleRevision, err := execution.DeriveQueryGroupScheduleRevision([]execution.FrozenPlanSchedule{schedulePlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractRef := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: "query-group-1", EvaluationTime: 120},
+		SnapshotRevision: "snapshot-1", QueryRevision: "query-1", ScheduleRevision: scheduleRevision,
+		ScheduleSegmentStart: 60, DuePlanSetDigest: "due-1",
+	}
+	catalog := &fakeFrozenCatalog{
+		schedule: execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{
+			Publication: execution.SnapshotPublicationRef{SnapshotRevision: "snapshot-1", PublicationEpoch: 1},
+			QueryGroup:  "query-group-1", QueryRevision: "query-1", ScheduleRevision: scheduleRevision, Start: 60,
+		}, Plans: []execution.FrozenPlanSchedule{schedulePlan}},
+		fact: execution.FrozenSlotContractFact{Contract: contractRef, DuePlans: []execution.DuePlan{{
+			Identity: plan, ScheduleRevision: planRevision, ScheduleSpec: spec, CompletionDeadlineUnixMilli: 180_000,
+		}}, Requirements: []execution.DataRequirement{{Consumers: []execution.DataRequirementConsumer{{
+			Consumer: execution.ConsumerRef{Plan: plan}, ConsumerDeadlineUnixMilli: 180_000, DownstreamExecutionReserveMilliSec: 5_000,
+		}}}}},
+	}
+	repository := &fakeProductionCatalogRepository{snapshot: controlplane.PublishedSnapshot{
+		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-1", PublicationEpoch: 1},
+		QueryGroups: []controlplane.QueryGroup{{Identity: "query-group-1", QueryPlan: execution.QueryPlanFacts{QueryRevision: "query-1"}}},
+	}}
+	// The clock answers each read with the next instant: before the bound,
+	// then at it, so a resolve that outlasts the bound can be reached. A
+	// request whose replay has not expired reads the clock once before the
+	// resolve and once after it.
+	var instants []int64
+	resolver, err := newProductionFrozenExecution(catalog, repository, func() time.Time {
+		at := instants[0]
+		if len(instants) > 1 {
+			instants = instants[1:]
+		}
+		return time.UnixMilli(at)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := productionRequest(catalog.fact, execution.OperationNormal)
+	before, bound := request.RecoveryUntilUnixMilli-1, request.RecoveryUntilUnixMilli
+	for _, test := range []struct {
+		name     string
+		expired  bool
+		readErr  error
+		instants []int64
+		mode     execution.FinalizationMode
+		cause    execution.CompletionCause
+	}{
+		{"past the replay's reach", true, nil, []int64{before}, execution.FinalizationGapSkipped, execution.CauseExpiredReplay},
+		{"after the bound, nothing resolved", false, nil, []int64{bound}, execution.FinalizationSnapshotUnavailable, execution.CauseExpiredReplay},
+		{"resolved, but the bound passed meanwhile", false, nil, []int64{before, bound}, execution.FinalizationSnapshotUnavailable, execution.CauseExpiredReplay},
+		{"a corrupt Snapshot, on a live Slot", false, &controlplane.PersistedSnapshotCorruptError{Err: errors.New("bad bytes")}, []int64{before}, execution.FinalizationSnapshotUnavailable, execution.CauseSnapshotCorrupt},
+		{"a Snapshot unreadable until the bound", false, controlplane.ErrSnapshotUnavailable, []int64{before, bound}, execution.FinalizationSnapshotUnavailable, execution.CauseSnapshotUnavailablePastBound},
+		{"another resolve failure until the bound", false, errors.New("store refused"), []int64{before, bound}, execution.FinalizationSnapshotUnavailable, execution.CauseResolveFailedPastBound},
+	} {
+		instants, catalog.readErr = test.instants, test.readErr
+		request.ReplayExpired = test.expired
+		finalization, err := resolver.ResolveFinalization(context.Background(), request)
+		if err != nil || finalization.Mode != test.mode || finalization.Cause != test.cause {
+			t.Fatalf("%s: %+v, %v; want %s under %s", test.name, finalization, err, test.mode, test.cause)
+		}
+		if err := finalization.Validate(request); err != nil {
+			t.Fatalf("%s: the finalization is not valid: %v", test.name, err)
+		}
+	}
+}
