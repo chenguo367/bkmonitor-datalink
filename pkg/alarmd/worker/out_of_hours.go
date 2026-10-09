@@ -27,7 +27,7 @@ import (
 const effectiveTimeSeenTTL = 48 * time.Hour
 
 // effectiveTimeSeen remembers, per Plan and effective-time requirement, the
-// earliest Slot this process committed with that requirement in effect. A
+// Slot with which this process first committed that requirement. A
 // window hole is judged against the schedule only from then on: before it,
 // the schedule that held may have been another one -- an edit, a calendar
 // changed, or a time this process never ran the Plan -- and judging an old
@@ -75,8 +75,13 @@ func (seen *effectiveTimeSeen) note(plan execution.PlanIdentity, digests []strin
 	current := make(map[string]effectiveTimeSince, len(digests))
 	since := make(map[string]int64, len(digests))
 	for _, digest := range digests {
+		// Set once, when the requirement is first seen, and never moved back:
+		// a replayed or catch-up Slot for a time before an edit, or before
+		// this process started, runs under today's requirement, and letting
+		// it lower the bound would judge those older holes by today's
+		// schedule. Their holes stay below the bound, unknown.
 		entry, kept := previous[digest]
-		if !kept || slot < entry.since {
+		if !kept {
 			entry.since = slot
 		}
 		entry.touched = now
