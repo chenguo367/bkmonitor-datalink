@@ -94,9 +94,6 @@ func boundBodyRead(w http.ResponseWriter, r *http.Request, timeout time.Duration
 // authorizeAdmin checks the deployment administrator key, the one credential
 // that can issue a grant.
 func (m *Manager) authorizeAdmin(r *http.Request) error {
-	if !m.adminConfigured {
-		return failure("admin_not_configured", "Deployment authorization is not configured.", 503)
-	}
 	authorization, single := singleHeader(r, "Authorization")
 	scheme, key, separated := strings.Cut(authorization, " ")
 	hash := sha256.Sum256([]byte(key))

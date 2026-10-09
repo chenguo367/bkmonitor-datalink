@@ -125,7 +125,6 @@ type Manager struct {
 	publicBaseURL   string
 	origin          string
 	adminHash       [sha256.Size]byte
-	adminConfigured bool
 	now             func() time.Time
 	httpSlots       chan struct{}
 	limitMu         sync.Mutex
@@ -160,8 +159,11 @@ func New(o Options) (*Manager, error) {
 			return nil, errors.New("cliauth: PublicBaseURL path is invalid")
 		}
 	}
-	if o.AdminKey != "" && (len(o.AdminKey) < 32 || len(o.AdminKey) > 256 || !validAdminKey(o.AdminKey)) {
-		return nil, errors.New("cliauth: AdminKey must contain 32 to 256 printable ASCII bytes without spaces when configured")
+	// The key is what makes a session possible, and the process serves the
+	// CLI exactly when one is configured: a manager without it could issue
+	// nothing, so it is not built.
+	if len(o.AdminKey) < 32 || len(o.AdminKey) > 256 || !validAdminKey(o.AdminKey) {
+		return nil, errors.New("cliauth: AdminKey must contain 32 to 256 printable ASCII bytes without spaces")
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -182,8 +184,8 @@ func New(o Options) (*Manager, error) {
 		prefix:         o.Prefix + ".cli:{" + digest(o.EnvironmentID) + "}:",
 		environmentID:  o.EnvironmentID, environmentName: o.EnvironmentName,
 		publicBaseURL: u.String(), origin: u.Scheme + "://" + u.Host,
-		adminHash: sha256.Sum256([]byte(o.AdminKey)), adminConfigured: o.AdminKey != "",
-		now: o.Now, httpSlots: make(chan struct{}, 4),
+		adminHash: sha256.Sum256([]byte(o.AdminKey)),
+		now:       o.Now, httpSlots: make(chan struct{}, 4),
 	}, nil
 }
 
