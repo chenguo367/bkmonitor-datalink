@@ -450,10 +450,25 @@ func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, nod
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
 		return result
 	}
-	if !answer.NodeKnown {
-		// A node the topology cache does not list: dangling configuration,
-		// named as such. Zero members either way; for absence it is a
-		// resolved, empty answer, and the name is what tells it apart.
+	switch {
+	case len(answer.Hosts) > 0:
+		// The host cache places hosts under the node: it exists and these
+		// are its hosts, whatever the topology cache lists.
+	case answer.HostedElsewhere:
+	case answer.NodeKnown:
+	case index.TopologyNodes() == 0:
+		// The topology cache listed no node at all. A missing hash reads as
+		// no node, and it is not a published topology (decision-017 section
+		// 4, E: a missing hash does not prove an empty set was published),
+		// so no node is known to be gone. No host is under this one either:
+		// zero members, kept from being a verdict as an incomplete answer.
+		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonIndexIncomplete
+		return result
+	default:
+		// A node the topology cache does not list and no host sits under:
+		// dangling configuration, named as such. Zero members either way;
+		// for absence it is a resolved, empty answer, and the name is what
+		// tells it apart.
 		result.NodeMissing = true
 		result.State, result.Reason = targetplan.SelectorOKEmpty, targetplan.ReasonNodeMissing
 		return result
