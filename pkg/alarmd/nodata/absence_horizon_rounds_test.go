@@ -372,3 +372,53 @@ func TestRaisingTheHorizonLeavesAStoppedAbsenceStoppedAndExtendsAnOpenOne(t *tes
 		memory = result.Memory
 	}
 }
+
+// The same for the whole item, whose stop lives in a branch of its own: it is
+// what an empty roster produces and never enters the roster loop, so the rule
+// has to hold there separately. The whole item is one group per item, so the
+// control is a second item walked in lockstep whose absence began a round
+// later: under the raised horizon it is still reported on the round it would
+// have stopped under the old one.
+func TestRaisingTheHorizonLeavesAStoppedWholeItemAbsenceStopped(t *testing.T) {
+	const lowered, raised = int64(120), int64(6000)
+	whole := WholeItemGroup().Key()
+	empty := Roster{Version: "v1", Source: RosterWhole}
+	at := func(index int) int64 { return absenceRound1 + int64(index)*absencePeriod }
+	whole1 := groupSet(WholeItemGroup())
+
+	// Round 0: the first item is silent from here; the second still reports.
+	stopped := evaluate(t, roundsInput(at(0), lowered, empty, nil, map[string]GroupMemory{}))
+	open := evaluate(t, roundsInput(at(0), lowered, empty, whole1, map[string]GroupMemory{}))
+	wantVerdicts(t, stopped, map[string]Verdict{whole: VerdictAnomaly})
+	wantVerdicts(t, open, map[string]Verdict{whole: VerdictNormal})
+	// Round 1: both silent.
+	stopped = evaluate(t, roundsInput(at(1), lowered, empty, nil, stopped.Memory))
+	open = evaluate(t, roundsInput(at(1), lowered, empty, nil, open.Memory))
+	wantVerdicts(t, stopped, map[string]Verdict{whole: VerdictAnomaly})
+	wantVerdicts(t, open, map[string]Verdict{whole: VerdictAnomaly})
+	// Round 2: the first absence is 120 seconds old and stops.
+	stopped = evaluate(t, roundsInput(at(2), lowered, empty, nil, stopped.Memory))
+	open = evaluate(t, roundsInput(at(2), lowered, empty, nil, open.Memory))
+	wantVerdicts(t, stopped, map[string]Verdict{})
+	wantTrackingFacts(t, stopped, 1, 0)
+	wantVerdicts(t, open, map[string]Verdict{whole: VerdictAnomaly})
+	mark := GroupMemory{FirstAbsent: at(0), SuppressedAt: at(2)}
+	wantMemory(t, stopped, whole, mark)
+
+	// Round 3 under the old horizon, for the record: the second item's
+	// absence would stop here.
+	unraised := evaluate(t, roundsInput(at(3), lowered, empty, nil, open.Memory))
+	wantVerdicts(t, unraised, map[string]Verdict{})
+	wantTrackingFacts(t, unraised, 1, 0)
+
+	for index := 3; index < 3+8; index++ {
+		stopped = evaluate(t, roundsInput(at(index), raised, empty, nil, stopped.Memory))
+		open = evaluate(t, roundsInput(at(index), raised, empty, nil, open.Memory))
+		wantVerdicts(t, stopped, map[string]Verdict{})
+		wantTrackingFacts(t, stopped, 0, 1)
+		wantMemory(t, stopped, whole, mark)
+		wantVerdicts(t, open, map[string]Verdict{whole: VerdictAnomaly})
+		wantTrackingFacts(t, open, 0, 0)
+		wantMemory(t, open, whole, GroupMemory{FirstAbsent: at(1)})
+	}
+}

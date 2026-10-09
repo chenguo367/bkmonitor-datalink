@@ -135,12 +135,15 @@ func noDataHashKey(t *testing.T, admin *redis.Client) string {
 }
 
 // massExpiryGroups is how many groups expire together below: about a
-// thousand, more than three of the script's 256-field delete batches, so a
-// deletion that stopped after its first batch leaves most of them behind.
-const massExpiryGroups = 1000
+// thousand, and chosen as four of the script's 256-field delete batches and
+// one field more. A deletion that stopped after its first batch leaves most of
+// the groups behind, and one whose batch loop stopped a field short of the end
+// leaves the last batch's one field behind - which a count that fills its
+// last batch with more than one field would never show.
+const massExpiryGroups = 4*256 + 1
 
 // massExpiryHost is the i-th host of the item: two hundred and fifty
-// documentation addresses in each of four clouds.
+// documentation addresses in each of five clouds.
 func massExpiryHost(index int) map[string]string {
 	return map[string]string{
 		"bk_target_ip":       fmt.Sprintf("192.0.2.%d", index%250),
@@ -148,7 +151,7 @@ func massExpiryHost(index int) map[string]string {
 	}
 }
 
-// A thousand groups of one history Plan expire on the same round. The worker
+// About a thousand groups of one history Plan expire on the same round. The worker
 // sends no series for any of them, the store deletes all of them with one
 // script, and the record that is left holds its header and nothing else (no-data
 // tracking retention proposal, section 3: emptied of groups the record keeps
