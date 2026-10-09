@@ -16,11 +16,9 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-// A series' identity fields are encoded once: the delivery digest takes
-// their encoding from the identity the series' identity digest was derived
-// with. One series normalized here is one delivery digest counted as taking
-// the identity's encoding, and none as encoding it again -- and the digest is
-// the generic canonical digest of the records the series delivered.
+// A series' delivery digest, assembled with the encoding of the identity its
+// identity digest was derived with, is the generic canonical digest of the
+// records the series delivered.
 func TestASeriesDeliveryDigestTakesItsIdentitysEncoding(t *testing.T) {
 	names := make([]string, 10)
 	values := make([]string, 10)
@@ -29,14 +27,9 @@ func TestASeriesDeliveryDigestTakesItsIdentitysEncoding(t *testing.T) {
 		values[index] = fmt.Sprintf("value-%d", index)
 	}
 	attempt := identityAttempt(t, names...)
-	reused, encoded := contract.ReadIdentityPartCounts()
 	batch, _, err := normalizeSeries(attempt.Spec, "provider-result", identityTestSeries(names, values), 1_700_123_500)
 	if err != nil {
 		t.Fatalf("normalizeSeries() error = %v", err)
-	}
-	if nowReused, nowEncoded := contract.ReadIdentityPartCounts(); nowReused != reused+1 || nowEncoded != encoded {
-		t.Fatalf("identity parts: reused %d -> %d, encoded %d -> %d; want one reused and none encoded again",
-			reused, nowReused, encoded, nowEncoded)
 	}
 	records := batch.Dataset.Records()
 	if len(records) != 1 || len(records[0].DimensionIdentity.Fields) != len(names) {

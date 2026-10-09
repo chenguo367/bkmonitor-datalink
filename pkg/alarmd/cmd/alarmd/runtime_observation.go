@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"log/slog"
 	"net"
 	"slices"
 	"sort"
@@ -119,18 +118,6 @@ func observationProjectionLimits(interval time.Duration) fleet.CostProjectionLim
 	rankings := 2 * len(observability.CostDimensions())
 	return fleet.CostProjectionLimits{PublishBytes: rankings * observationCostTopN * observationProjectionRowBytes,
 		Timeout: time.Second, FreshFor: 3 * interval, TTL: 4 * interval}
-}
-
-// warnObservationMemoryPercent says, once, that a memory_percent the values
-// still carry is read and not used.
-func warnObservationMemoryPercent(logger *observability.Logger, observation config.PhaseTwoObservationConfig) {
-	if observation.MemoryPercent == 0 || logger == nil {
-		return
-	}
-	logger.Warn(observability.StageStartup, observability.ResultDegraded, 0, 0,
-		slog.String("reason_code", "OBSERVATION_MEMORY_PERCENT_IGNORED"),
-		slog.Int("memory_percent", observation.MemoryPercent),
-		slog.String("detail", "phase_two.observation.memory_percent is read and not used: observation memory grows under the runtime memory line"))
 }
 
 // The existing maintenance loop publishes small cost projections. Cross-replica

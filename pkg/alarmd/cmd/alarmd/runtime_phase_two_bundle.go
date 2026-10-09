@@ -212,7 +212,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The rounds the tracker keeps past the fixed last few grow by how far
 	// each object's windows reach back, and take their room under the line.
 	fleetTracker.SetRoundAdmission(observationAdmit(observationMemory, memoryline.ConsumerFleetRounds))
-	warnObservationMemoryPercent(logger, cfg.PhaseTwo.Observation)
 	costSummary := observability.NewCostSummary(observationCostOptions(fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()),
 		external.Now, observationAdmit(observationMemory, memoryline.ConsumerCostSummary)))
 	// The census beside the summary, not instead of it: the summary is the
@@ -944,7 +943,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
-		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,

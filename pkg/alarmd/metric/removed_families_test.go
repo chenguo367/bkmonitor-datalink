@@ -48,6 +48,11 @@ var removedFamilies = []string{
 	// such a body is refused now, not upgraded.
 	"legacy_active_qg_migration_total", "legacy_active_qg_migration_scan_keys",
 	"legacy_active_qg_migration_duration_seconds",
+	// The canonical encoder's rollout: its mode, the shadow comparison and
+	// what the comparison covered, concluded with the single-pass form
+	// answering and the established one kept only for what it declines.
+	"canonical_encoding_mode", "canonical_encoding_shadow_sample_stride", "canonical_encoding_shadow_total",
+	"canonical_encoding_covered_call_sites", "canonical_encoding_distinct_findings", "canonical_encoding_identity_part_total",
 }
 
 // A removed family is registered nowhere, bound or not.

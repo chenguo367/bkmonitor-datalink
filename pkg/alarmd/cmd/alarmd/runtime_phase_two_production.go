@@ -1331,7 +1331,6 @@ type productionPhaseTwoProgressReader interface {
 }
 
 type productionPhaseTwoOwnershipDependencies struct {
-	ExpiredRangeEnabled bool
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
@@ -2592,7 +2591,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithQueryDeadlineReserve(runtime.dependencies.QueryDeadlineReserve),
 		scheduler.WithSettlingWait(runtime.dependencies.SettlingWait),
 		scheduler.WithSnapshotRetention(runtime.dependencies.SnapshotRetention, runtime.dependencies.PublicationDelayAllowance),
-		scheduler.WithExpiredRangeCreation(runtime.dependencies.ExpiredRangeEnabled),
+		scheduler.WithExpiredRangeCreation(true),
 		scheduler.WithObserver(runtime.dependencies.Observer),
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),

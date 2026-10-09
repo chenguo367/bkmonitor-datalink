@@ -83,48 +83,33 @@ func recordID(random *rand.Rand, index int) string {
 	return fmt.Sprintf("%064x", random.Uint64())
 }
 
-// withCanonicalMode runs body under a canonical encoding mode.
-func withCanonicalMode(t *testing.T, mode string, body func()) {
-	t.Helper()
-	previous := CanonicalMode()
-	if _, err := SetCanonicalMode(mode); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _, _ = SetCanonicalMode(previous) }()
-	body()
-}
-
 // The digest assembled from a series' shared parts is the generic canonical
 // digest of its records, byte for byte, under both the established encoder
 // and the single-pass one: for series of every width, with every kind of
 // dimension text and value token, and for one point and sixty.
 func TestAssembledRecordsDigestIsTheCanonicalOne(t *testing.T) {
-	for _, mode := range []string{CanonicalModeEstablished, CanonicalModeStream} {
-		withCanonicalMode(t, mode, func() {
-			random := rand.New(rand.NewSource(20260928))
-			assembled := 0
-			for index := 0; index < 600; index++ {
-				records := seriesRecords(random, 1+random.Intn(60))
-				want, wantErr := DeriveCanonicalDigestV2(recordsTestDomain, records)
-				got, shared := deriveSharedRecordsDigest(recordsTestDomain, records, DimensionIdentityEncodingV2{})
-				if wantErr != nil {
-					if shared {
-						t.Fatalf("%s case %d: assembled %s where the canonical digest refuses: %v", mode, index, got, wantErr)
-					}
-					continue
-				}
-				if !shared {
-					t.Fatalf("%s case %d: a series was not assembled", mode, index)
-				}
-				if got != want {
-					t.Fatalf("%s case %d: assembled %s, canonical %s", mode, index, got, want)
-				}
-				assembled++
+	random := rand.New(rand.NewSource(20260928))
+	assembled := 0
+	for index := 0; index < 600; index++ {
+		records := seriesRecords(random, 1+random.Intn(60))
+		want, wantErr := DeriveCanonicalDigestV2(recordsTestDomain, records)
+		got, shared := deriveSharedRecordsDigest(recordsTestDomain, records, DimensionIdentityEncodingV2{})
+		if wantErr != nil {
+			if shared {
+				t.Fatalf("case %d: assembled %s where the canonical digest refuses: %v", index, got, wantErr)
 			}
-			if assembled < 500 {
-				t.Fatalf("%s: only %d of 600 series assembled; the corpus is not exercising the fast path", mode, assembled)
-			}
-		})
+			continue
+		}
+		if !shared {
+			t.Fatalf("case %d: a series was not assembled", index)
+		}
+		if got != want {
+			t.Fatalf("case %d: assembled %s, canonical %s", index, got, want)
+		}
+		assembled++
+	}
+	if assembled < 500 {
+		t.Fatalf("only %d of 600 series assembled; the corpus is not exercising the fast path", assembled)
 	}
 }
 

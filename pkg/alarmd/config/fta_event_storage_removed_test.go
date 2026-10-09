@@ -22,7 +22,7 @@ func TestAConfigurationNamingTheFTAEventStorageIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "fta_event_storage") {
-		t.Fatalf("Load() = %v, want the fta_event_storage key refused", err)
+	if err == nil || !strings.Contains(err.Error(), "legacy_query_runtime") {
+		t.Fatalf("Load() = %v, want the group that held fta_event_storage refused", err)
 	}
 }

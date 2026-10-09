@@ -510,7 +510,7 @@ func (probe cutoverStallProbe) run(
 		scheduler.WithPostRecoveryTerminalDelay(dependencies.PostRecoveryTerminalDelay),
 		scheduler.WithQueryDeadlineReserve(dependencies.QueryDeadlineReserve),
 		scheduler.WithSnapshotRetention(dependencies.SnapshotRetention, dependencies.PublicationDelayAllowance),
-		scheduler.WithExpiredRangeCreation(dependencies.ExpiredRangeEnabled),
+		scheduler.WithExpiredRangeCreation(true),
 	)
 	if err != nil {
 		t.Fatal(err)

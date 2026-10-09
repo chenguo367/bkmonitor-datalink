@@ -177,32 +177,14 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encod
 func dimensionIdentityPart(identity DimensionIdentityV2, encoded DimensionIdentityEncodingV2) ([]byte, error) {
 	if encoded.canonical == nil || encoded.Digest != identity.Digest || !sha256Pattern.MatchString(identity.Digest) ||
 		!sameSlice(encoded.fields, identity.Fields) {
-		identityPartEncoded.Add(1)
 		return CanonicalJSONV2(identity)
 	}
-	identityPartReused.Add(1)
 	part := make([]byte, 0, len(encoded.canonical)+len(identity.Digest)+24)
 	part = append(part, `{"digest":"`...)
 	part = append(part, identity.Digest...)
 	part = append(part, `","fields":`...)
 	part = append(part, encoded.canonical...)
 	return append(part, '}'), nil
-}
-
-// identityPartReused and identityPartEncoded count the series' delivery
-// digests by where their dimension identity's encoding came from: the
-// identity's own, or encoded here. Only dimensionIdentityPart writes them,
-// so they read the path and nothing else.
-var (
-	identityPartReused  atomic.Uint64
-	identityPartEncoded atomic.Uint64
-)
-
-// ReadIdentityPartCounts is how many series' delivery digests, since the
-// process started, took their dimension identity's encoding from the
-// identity, and how many encoded it themselves.
-func ReadIdentityPartCounts() (reused, encoded uint64) {
-	return identityPartReused.Load(), identityPartEncoded.Load()
 }
 
 // sameSlice is whether two field lists are the one list: the records of a

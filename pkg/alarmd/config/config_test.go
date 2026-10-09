@@ -129,21 +129,6 @@ func TestDefaultRequiresExplicitEnvironmentCoordinates(t *testing.T) {
 	}
 }
 
-// The consumer-side Kafka fields survive the input runtime that filled them.
-// This pins that a valid configuration leaves every one of them empty and
-// validates with no receipt budget at all, so the fields cannot quietly come
-// back into use without an assertion noticing.
-func TestValidConfigurationLeavesConsumerKafkaFieldsEmpty(t *testing.T) {
-	cfg := validGoAccessConfigObject()
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if cfg.Kafka.InputTopic != "" || cfg.Kafka.GroupID != "" || cfg.Kafka.InitialOffset != "" {
-		t.Fatalf("a valid configuration carries consumer-side Kafka assets: %+v", cfg.Kafka)
-	}
-}
-
 func TestGoAccessValidatesOnlyTriggerEventKafkaTopology(t *testing.T) {
 	tests := map[string]func(*Config){
 		"missing broker":        func(cfg *Config) { cfg.Kafka.Brokers = nil },
@@ -219,7 +204,6 @@ func TestValidateRejectsInvalidRedisAndRuntimeBudgets(t *testing.T) {
 		"negative restart margin": func(cfg *Config) {
 			cfg.Redis.RestartMargin = Duration(-time.Second)
 		},
-		"zero reader budget":   func(cfg *Config) { cfg.Limits.Reader.MaxEnvelopeBytes = 0 },
 		"zero compiler budget": func(cfg *Config) { cfg.Limits.Compiler.MaxPlanBytes = 0 },
 		"zero detect budget":   func(cfg *Config) { cfg.Limits.Detect.MaxPlans = 0 },
 		"zero trigger budget":  func(cfg *Config) { cfg.Limits.Trigger.MaxLevels = 0 },
@@ -231,7 +215,7 @@ func TestValidateRejectsInvalidRedisAndRuntimeBudgets(t *testing.T) {
 		// budget above it would be met one dropped alert at a time.
 		"compiler levels exceed the standard output's evaluations": func(cfg *Config) {
 			over := linkdoutput.MaxEvaluations + 1
-			cfg.Limits.Reader.MaxLevelsPerPlan, cfg.Limits.Compiler.MaxLevelsPerPlan = over, over
+			cfg.Limits.Compiler.MaxLevelsPerPlan = over
 			cfg.Limits.Trigger.MaxLevels, cfg.Limits.Trigger.MaxLevelResultsPerEvent = uint32(over), uint32(over)
 			cfg.Limits.Codec.MaxLevels = over
 		},
@@ -335,12 +319,35 @@ func withCompatibilityServiceRedis(cfg *Config, address string) {
 	}
 }
 
+// A key kept "for one release" is gone once retired: decoding is strict, so
+// values that still carry one refuse to load, and the refusal names it.
+func TestRetiredKeysAreRefusedByName(t *testing.T) {
+	for _, retired := range []struct{ yaml, name string }{
+		{"phase_two:\n  control:\n    legacy_query_runtime:\n      access_bk_data: true\n", "legacy_query_runtime"},
+		{"phase_two:\n  access:\n    host_disable_monitor_states: [a]\n", "host_disable_monitor_states"},
+		{"phase_two:\n  observation:\n    memory_percent: 30\n", "observation"},
+		{"phase_two:\n  canonical:\n    mode: stream\n", "canonical"},
+		{"kafka:\n  allowed_output_topics: [a]\n", "allowed_output_topics"},
+		{"kafka:\n  input_topic: \"\"\n", "input_topic"},
+		{"kafka:\n  group_id: \"\"\n", "group_id"},
+		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
+		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
+		{"phase_two:\n  scheduler:\n    expired_range_enabled: false\n", "expired_range_enabled"},
+		// A derived value spelled run together, which an untagged field took.
+		{"phase_two:\n  scheduler:\n    maxreplayage: 1h\n", "maxreplayage"},
+		{"phase_two:\n  scheduler:\n    processquerypermits: 999\n", "processquerypermits"},
+	} {
+		_, err := Load(writeConfig(t, retired.yaml))
+		if err == nil || !strings.Contains(err.Error(), "field "+retired.name+" not found") {
+			t.Errorf("values carrying %s loaded with %v, want it refused by name", retired.name, err)
+		}
+	}
+}
+
 func validGoAccessConfigObject() Config {
 	cfg := Default()
-	accessBKData := false
 	cfg.Kafka.Brokers = []string{"127.0.0.1:9092"}
 	cfg.Kafka.TriggerEvent.Topic = "alarmd-trigger-event"
-	cfg.Kafka.AllowedOutputTopics = []string{"alarmd-trigger-event", cfg.Kafka.LegacyAdapter.Topic}
 	withCompatibilityServiceRedis(&cfg, "redis.test:6379")
 	cfg.Kafka.ClientID = "alarmd"
 	cfg.Kafka.BrokerVersion = "2.6.0"
@@ -350,10 +357,6 @@ func validGoAccessConfigObject() Config {
 	cfg.PhaseTwo.Control.StrategyCachePrefix = "alarm-config"
 	cfg.PhaseTwo.Control.ProviderRoute = "unify-query-primary"
 	cfg.PhaseTwo.Control.Timezone = "Asia/Shanghai"
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.AccessBKData = &accessBKData
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.BKDataCMDBLevelTables = []string{}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemDiskFilter = PhaseTwoRuntimeFilterConfig{FieldName: "device_type", Values: []string{}}
-	cfg.PhaseTwo.Control.LegacyQueryRuntime.SystemNetworkFilter = PhaseTwoRuntimeFilterConfig{FieldName: "device_name", Values: []string{}}
 	cfg.PhaseTwo.Access.UQEndpoint = "http://unify-query.service"
 	cfg.PhaseTwo.Access.QuerySource = "alarmd"
 	return cfg
@@ -519,7 +522,6 @@ kafka:
   brokers: [127.0.0.1:9092]
   trigger_event:
     topic: alarmd-trigger-event
-  allowed_output_topics: [alarmd-trigger-event, alarmd_0bkmonitor_backend_event]
   legacy_adapter:
     topic: alarmd_0bkmonitor_backend_event
     snapshot_prefix: alarmd-test
@@ -537,12 +539,6 @@ phase_two:
   control:
     strategy_cache_prefix: alarm-config
     timezone: Asia/Shanghai
-    legacy_query_runtime:
-      access_bk_data: false
-      bkdata_cmdb_level_tables: []
-      system_disk_filter:
-        field_name: device_type
-        values: []
   access:
     uq_endpoint: http://unify-query.service
     query_source: alarmd
@@ -648,7 +644,6 @@ func TestTheCompatibilityTopicMustCarryThePrefixTheOutputRequires(t *testing.T) 
 		t.Fatalf("fixture: topic %q, want one with the prefix", cfg.Kafka.LegacyAdapter.Topic)
 	}
 	cfg.Kafka.LegacyAdapter.Topic = "bkmonitor_backend_event"
-	cfg.Kafka.AllowedOutputTopics = append(cfg.Kafka.AllowedOutputTopics, cfg.Kafka.LegacyAdapter.Topic)
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "legacy_adapter.topic must start with") {
 		t.Fatalf("Validate() = %v, want the topic refused for its prefix", err)

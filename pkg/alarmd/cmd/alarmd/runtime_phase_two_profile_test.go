@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -113,13 +112,12 @@ func TestPhaseTwoRuntimeProfileTracksSchedulerFieldsAndCPU(t *testing.T) {
 	cfg := config.Default()
 	base, _ := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	for name, change := range map[string]func(*config.Config){
-		"expired_range": func(c *config.Config) { c.PhaseTwo.Scheduler.ExpiredRangeEnabled = false },
-		"F":             func(c *config.Config) { c.PhaseTwo.Scheduler.ActiveExecutionLimit++ },
-		"P":             func(c *config.Config) { c.PhaseTwo.Scheduler.ProcessQueryPermits++ },
-		"R":             func(c *config.Config) { c.PhaseTwo.Scheduler.RecoveryQueryPermits++ },
-		"retry":         func(c *config.Config) { c.PhaseTwo.Scheduler.RetryMaxDelay++ },
-		"replay":        func(c *config.Config) { c.PhaseTwo.Scheduler.MaxReplayAge++ },
-		"bytes":         func(c *config.Config) { c.PhaseTwo.Coordinator.MaxRetainedBytes++ },
+		"F":      func(c *config.Config) { c.PhaseTwo.Scheduler.ActiveExecutionLimit++ },
+		"P":      func(c *config.Config) { c.PhaseTwo.Scheduler.ProcessQueryPermits++ },
+		"R":      func(c *config.Config) { c.PhaseTwo.Scheduler.RecoveryQueryPermits++ },
+		"retry":  func(c *config.Config) { c.PhaseTwo.Scheduler.RetryMaxDelay++ },
+		"replay": func(c *config.Config) { c.PhaseTwo.Scheduler.MaxReplayAge++ },
+		"bytes":  func(c *config.Config) { c.PhaseTwo.Coordinator.MaxRetainedBytes++ },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := cfg
@@ -222,47 +220,6 @@ func TestResolvedRuntimeFactsCarryTheDerivedTimelineCacheBudget(t *testing.T) {
 		if !strings.Contains(printed.String(), field) {
 			t.Fatalf("--check-config table has no %s:\n%s", field, printed.String())
 		}
-	}
-}
-
-// The preflight table has to name which canonical encoder the process will
-// run. It decides the provenance of every digest written, and a digest that
-// later fails to match will be asked which encoder produced it at a point
-// where the process is gone and only this record survives.
-//
-// The digest over this table moves when the table gains a field. That is safe
-// only while nothing outside the process freezes it and asserts equality
-// later; nothing does today. This test pins the reasoning next to the field so
-// the next person to add one checks the same thing rather than the tests.
-func TestRuntimeProfileNamesTheCanonicalEncoder(t *testing.T) {
-	cfg := config.Default()
-	facts, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if facts.Capacity.CanonicalEncoding != contract.CanonicalModeStream {
-		t.Fatalf("default deployment should preflight as the single-pass encoder, got %q",
-			facts.Capacity.CanonicalEncoding)
-	}
-	if facts.Capacity.CanonicalShadowStride != 0 {
-		t.Fatalf("nothing compares by default, so nothing should be sampling; got %d",
-			facts.Capacity.CanonicalShadowStride)
-	}
-
-	cfg.PhaseTwo.Canonical.Mode = contract.CanonicalModeEstablished
-	established, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if established.Capacity.CanonicalEncoding != contract.CanonicalModeEstablished {
-		t.Fatalf("preflight did not follow the selected mode, got %q", established.Capacity.CanonicalEncoding)
-	}
-	if established.Capacity.CanonicalShadowStride != 0 {
-		t.Fatalf("nothing compares in the established mode, so nothing should be sampling; got %d",
-			established.Capacity.CanonicalShadowStride)
-	}
-	if established.Digest == facts.Digest {
-		t.Fatal("two deployments running different encoders share a runtime config digest")
 	}
 }
 

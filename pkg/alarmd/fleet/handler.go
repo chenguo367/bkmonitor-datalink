@@ -868,8 +868,8 @@ type ObjectRecoveryContext struct {
 // answers samples= (criterion samples), and the windows take mode=sample.
 // Each is recorded in the observability handoff
 // contract, each is wrapped around this handler by the runtime rather than
-// added here, and each is off until an operator allocates the diagnostics a
-// share (phase_two.observation.memory_percent). A mode that is not in that
+// added here, and its memory grows under the runtime memory line rather than
+// a share an operator allocates. A mode that is not in that
 // contract is a sixth capability wearing a query parameter.
 //
 // Windows are the one place this API writes. The write is scoped to diagnostics
