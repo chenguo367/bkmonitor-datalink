@@ -165,11 +165,6 @@ type AbsentAgeBuckets struct {
 	DayOrMore uint64
 }
 
-// Total is every absence the buckets counted, which equals Absent.
-func (buckets AbsentAgeBuckets) Total() uint64 {
-	return buckets.ThisRound + buckets.UnderHour + buckets.UnderDay + buckets.DayOrMore
-}
-
 // count files one open absence by its age at evaluationTime. An absence
 // with no start is filed as this round's, which is the only round it can
 // have begun in for the memory to lack the start.

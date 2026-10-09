@@ -209,7 +209,7 @@ func TestASyntheticSeriesIsBoundToTheNoDataLevelsOwnEffectiveTime(t *testing.T) 
 		Contract: noDataPreflightContract(t, []execution.DuePlan{due}),
 		DuePlans: []execution.DuePlan{due},
 	}
-	prepared, err := prepareAlwaysEffectiveTimeFacts(context.Background(), header)
+	prepared, err := PrepareEffectiveTimeFacts(context.Background(), header, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
