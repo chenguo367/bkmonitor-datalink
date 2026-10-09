@@ -608,6 +608,7 @@ var alarmdWords = []string{
 	"href",
 	"hscan",
 	"hset",
+	"hstrlen",
 	"html",
 	"http",
 	"https",
