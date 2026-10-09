@@ -311,8 +311,17 @@ func TestASlotBeyondItsBudgetSettlesEveryNoDataPlanOnce(t *testing.T) {
 				t.Fatalf("fixture: %d outcomes filed before the trip, want both Plans", len(stream.noDataOutcomes))
 			}
 		}
-		stream.closeNoDataBeyondSlotBudget(context.Background())
+		// Through the replacement itself, which is where the settling is wired.
+		// It settles the no-data side first; this fixture loads no gap
+		// markers, so the replacement gaps after it fail, and that is not
+		// what is read here.
+		_ = stream.completeBeyondSlotBudget(context.Background())
 		stream.observeNoDataOutcomes(context.Background())
+		// The discarded EVALUATED counts as a skip: the streak the judgement
+		// reset starts again at this round.
+		if rounds := stream.coordinator.noDataSkips.rounds[first.Key()]; rounds != 1 {
+			t.Fatalf("decided first=%v: first Plan's streak = %d, want 1", decidedFirst, rounds)
+		}
 		if stream.noDataMutations != nil {
 			t.Fatalf("decided first=%v: memory mutations %+v survived a replaced Slot", decidedFirst, stream.noDataMutations)
 		}
