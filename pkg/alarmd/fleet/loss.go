@@ -236,9 +236,10 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 			check = CheckBookkeepingAbandoned
 		}
 		// An expired replay's span is recorded under its own word; a gap skip's
-		// Reason is what came before the skip, not the skip's code.
+		// Reason is what came before the skip, not the skip's code, and may
+		// itself read SNAPSHOT_UNAVAILABLE, so the span's kind decides.
 		code := "GAP_SKIPPED"
-		if skip.Reason == snapshotUnavailableCompletion {
+		if skip.Kind == SkipKindExpiredReplay {
 			code = snapshotUnavailableCompletion
 		}
 		each(queryGroup, check, code, skip)
