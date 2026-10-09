@@ -56,8 +56,10 @@ func decodeLines(t *testing.T, output *bytes.Buffer) []map[string]any {
 }
 
 // Each written line takes the level the rules give it: a handover refusal
-// is INFO where a handover is decided and ERROR on a Slot; any other failure
-// is ERROR; a held result is INFO; any other result takes its reason's level.
+// is INFO wherever it is met, on the handover or on a Slot that was running
+// when its Query Group moved; any other failure is ERROR; a held result is
+// INFO, and so is a round refused before the Worker's first view; any other
+// result takes its reason's level.
 func TestEachLineTakesTheLevelItsResultAndReasonGive(t *testing.T) {
 	t.Parallel()
 
@@ -72,7 +74,19 @@ func TestEachLineTakesTheLevelItsResultAndReasonGive(t *testing.T) {
 		{"handover refusal on a lost assignment", Observation{Component: ComponentOwnership, Stage: StageAssignmentLost, Result: ResultFailed,
 			ReasonCode: ReasonCode(contract.ReasonOwnershipNotDesired), Err: errors.New("not desired")}, "INFO"},
 		{"the same refusal on a Slot", Observation{Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultFailed,
-			ReasonCode: ReasonCode(contract.ReasonOwnershipNotDesired), Err: errors.New("not desired")}, "ERROR"},
+			ReasonCode: ReasonCode(contract.ReasonOwnershipNotDesired), Err: errors.New("not desired")}, "INFO"},
+		{"a fence the handover moved", Observation{Component: ComponentOwnership, Stage: StageFenceChecked, Result: ResultFailed,
+			ReasonCode: ReasonCode(contract.ReasonOwnershipNotDesired), Err: errors.New("not desired")}, "INFO"},
+		{"a round refused before the first view", Observation{Component: ComponentScheduler, Stage: StageScheduleDue, Result: ResultRetrying,
+			ReasonCode: ReasonCode(contract.ReasonViewNotExecutable), AwaitingFirstView: true}, "INFO"},
+		{"a round refused once a view is installed", Observation{Component: ComponentScheduler, Stage: StageScheduleDue, Result: ResultRetrying,
+			ReasonCode: ReasonCode(contract.ReasonViewNotExecutable)}, "WARN"},
+		{"a round the supplement held", Observation{Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultSkipped,
+			ReasonCode: ReasonHeldBySupplement}, "INFO"},
+		{"a retryable failure class not failed", Observation{Component: ComponentControlPlane, Stage: StageSnapshotUnavailable, Result: ResultDegraded,
+			ReasonCode: ReasonContractRetryable}, "WARN"},
+		{"a no-data stall", Observation{Component: ComponentEvaluation, Stage: StageNoDataDecided, Result: ResultDegraded,
+			ReasonCode: "SKIPPED_HOSTS_UNRESOLVED"}, "WARN"},
 		{"a failure", Observation{Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultFailed,
 			ReasonCode: "QUERY_PERMIT_DEADLINE", Err: errors.New("deadline")}, "ERROR"},
 		{"a timeout", Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultTimeout,
@@ -102,6 +116,11 @@ func TestEachLineTakesTheLevelItsResultAndReasonGive(t *testing.T) {
 			lines := decodeLines(t, &output)
 			if len(lines) != 1 || lines[0]["level"] != tc.level {
 				t.Fatalf("lines=%v, want one at %s", lines, tc.level)
+			}
+			// The reader of an INFO refusal needs to see why it is not a
+			// WARN: the line says it is awaiting the first view.
+			if awaiting, _ := lines[0]["awaiting_first_view"].(bool); awaiting != tc.observation.AwaitingFirstView {
+				t.Fatalf("line=%v, want awaiting_first_view only on a round refused before the first view", lines[0])
 			}
 		})
 	}

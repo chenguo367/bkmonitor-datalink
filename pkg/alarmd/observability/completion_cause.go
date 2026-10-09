@@ -47,11 +47,21 @@ var CompletionAttributionReasons = []ReasonCode{"QUERY_NOT_ATTEMPTED", "QUERY_RE
 
 var completionAttributionReasonSet = makeReasonSet(CompletionAttributionReasons)
 
-// AdmissionFailureReasons are the reasons a query that never reached its
-// backend names, one per admission failure code: the permit wait ran out at
-// the query's deadline. The query failure facts carried the code; the line's
-// reason and the Slot's said internal_unknown.
-var AdmissionFailureReasons = []ReasonCode{"QUERY_PERMIT_DEADLINE"}
+// AdmissionFailureReasons are the reasons a query permit that was not granted
+// names: the wait ran out at the query's deadline, the queue was full, the
+// recovery permits are off, or the wait was cancelled. The query failure
+// facts carried the deadline's code; the lines said internal_unknown or
+// nothing.
+var AdmissionFailureReasons = []ReasonCode{"QUERY_PERMIT_DEADLINE", "QUERY_PERMIT_QUEUE_FULL", "QUERY_PERMIT_RECOVERY_OFF", "QUERY_PERMIT_CANCELLED"}
+
+// NoDataStallReasons are the skips a Plan's no-data detection reports when it
+// has skipped long enough to count as stalled: nodata.SlotOutcomes but the
+// evaluated one, which a test in the worker keeps in step.
+var NoDataStallReasons = []ReasonCode{
+	"SKIPPED_QUERY_NOT_FULL", "SKIPPED_SLOT_BUDGET", "SKIPPED_MEMORY_UNREADABLE", "SKIPPED_HOSTS_UNRESOLVED",
+	"SKIPPED_DERIVATION_FAILED", "SKIPPED_TARGET_SELECTOR_UNAVAILABLE", "SKIPPED_TARGET_MEMBERS_DROPPED",
+	"SKIPPED_OUTPUT_FAILED",
+}
 
 var admissionFailureReasonSet = makeReasonSet(AdmissionFailureReasons)
 
@@ -61,7 +71,7 @@ var admissionFailureReasonSet = makeReasonSet(AdmissionFailureReasons)
 func NormalizedReasonCount() int {
 	return len(commonReasonSet) + len(resourceReasonSet) + len(contractObservationReasonSet) + len(activationFailureReasonSet) +
 		len(viewStreamReasonSet) + len(schedulerDecisionReasonSet) + len(effectiveMaintenanceReasonSet) + len(absentCloseReasonSet) +
-		len(completionAttributionReasonSet) + len(admissionFailureReasonSet) + 3
+		len(completionAttributionReasonSet) + len(admissionFailureReasonSet) + len(NoDataStallReasons) + len(contractClassReasons) + 2 + 3
 }
 
 // CompletionScopeFacts is where a committed Slot's completion cause was

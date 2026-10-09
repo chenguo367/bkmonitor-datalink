@@ -2398,21 +2398,25 @@ type Observation struct {
 	// before it ran, and the two want opposite investigations. Its own field
 	// rather than ProgressCompletionKind, which target flow reads to fill
 	// Completion on a line that already emits its own.
-	SlotCompletionKind   string
-	RangeDistance        *RangeDistanceFacts
-	RangeGate            *RangeGateFacts
-	SlotWait             *SlotWaitFacts
-	ObjectCatalog        *ObjectCatalogFacts
-	ObjectRead           *ObjectReadFacts
-	StateGenerationSkew  *StateGenerationSkewFacts
-	StateCarry           *StateCarryFacts
-	ActivationHold       *ActivationHoldFacts
-	DrainingQG           *DrainingQGFacts
-	Rebalance            *RebalanceFacts
-	ControlReads         *ControlReadFacts
-	AssignmentIndex      *AssignmentIndexFacts
-	AssignmentSweep      *AssignmentSweepFacts
-	AssignmentApplied    *AssignmentAppliedFacts
+	SlotCompletionKind  string
+	RangeDistance       *RangeDistanceFacts
+	RangeGate           *RangeGateFacts
+	SlotWait            *SlotWaitFacts
+	ObjectCatalog       *ObjectCatalogFacts
+	ObjectRead          *ObjectReadFacts
+	StateGenerationSkew *StateGenerationSkewFacts
+	StateCarry          *StateCarryFacts
+	ActivationHold      *ActivationHoldFacts
+	DrainingQG          *DrainingQGFacts
+	Rebalance           *RebalanceFacts
+	ControlReads        *ControlReadFacts
+	AssignmentIndex     *AssignmentIndexFacts
+	AssignmentSweep     *AssignmentSweepFacts
+	AssignmentApplied   *AssignmentAppliedFacts
+	// AwaitingFirstView says a round the executable view refused was refused
+	// before this Worker installed any view: the startup state every Worker
+	// is in until the Leader's first view reaches it.
+	AwaitingFirstView    bool
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
@@ -3645,7 +3649,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)

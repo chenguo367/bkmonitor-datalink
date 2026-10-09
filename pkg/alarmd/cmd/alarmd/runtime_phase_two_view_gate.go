@@ -267,7 +267,7 @@ func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execut
 	}
 	gate.record(queryGroup, outcome)
 	if revision == 0 {
-		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome)}
+		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome), AwaitingFirstView: gate.installed() == nil}
 	}
 	return controlplane.WithTimelineRevisionHint(ctx, revision), nil
 }

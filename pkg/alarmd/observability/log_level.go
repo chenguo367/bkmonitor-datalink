@@ -38,10 +38,19 @@ var warnReasons = makeReasonSet([]ReasonCode{
 	"STATE_BUDGET_EXCEEDED", "STATE_CORRUPT", "STATE_LEVEL_CONTRACT_MISMATCH", "STATE_READ_DEADLINE",
 	"STATE_READ_TIMEOUT", "STATE_SCHEMA_UNSUPPORTED", "STATE_STALE_VERSION", "STATE_VERSION_CONFLICT",
 	"STATE_WRITE_RETRYABLE", "TRIGGER_INVARIANT", "VALIDATION_BUDGET_EXCEEDED", "VIEW_NOT_EXECUTABLE",
-	"view_not_executable", "QUERY_PERMIT_DEADLINE", "QUERY_REASON_UNRECORDED",
+	"view_not_executable", "QUERY_PERMIT_DEADLINE", "QUERY_PERMIT_QUEUE_FULL", "QUERY_PERMIT_RECOVERY_OFF",
+	"QUERY_REASON_UNRECORDED",
+	// A Plan's no-data detection that kept skipping until it counted as
+	// stalled: once per stall, and the Plan is not detecting absence.
+	"SKIPPED_QUERY_NOT_FULL", "SKIPPED_SLOT_BUDGET", "SKIPPED_MEMORY_UNREADABLE", "SKIPPED_HOSTS_UNRESOLVED",
+	"SKIPPED_DERIVATION_FAILED", "SKIPPED_TARGET_SELECTOR_UNAVAILABLE", "SKIPPED_TARGET_MEMBERS_DROPPED",
+	"SKIPPED_OUTPUT_FAILED",
 	// A reason that could not be named is never quiet: the word for a site
 	// that failed to report one, and the one an unlisted word folds into.
 	ReasonInternalUnknown, ReasonNotReported, ReasonOther,
+	// The contract's class words a site reports when it has no finer one: a
+	// retryable or a deterministic failure of this deployment's own.
+	ReasonContractRetryable, ReasonContractDeterministic,
 })
 
 // infoActivationKinds are the activation failure kinds that only mean the
@@ -104,16 +113,11 @@ func ReasonLogLevel(reason ReasonCode) slog.Level {
 // ownershipContentionReasons are the store's refusals of a handover: another
 // replica still holds the lease, the Query Group is not this replica's by
 // the assignment, or the fence moved. On a rollout each Query Group meets
-// one of them once, by design.
+// one of them once, by design -- on the stage that decides the handover, or
+// on a Slot that was running when the Query Group moved.
 var ownershipContentionReasons = makeReasonSet([]ReasonCode{
 	contract.ReasonOwnershipNotDesired, contract.ReasonOwnershipLeaseBusy, contract.ReasonOwnershipStaleFence,
 })
-
-// ownershipTransitionStages are where a handover is decided. A Slot that
-// meets the same refusal is not a handover and keeps its own level.
-var ownershipTransitionStages = map[Stage]bool{
-	StageAssignmentAcquired: true, StageAssignmentLost: true, StageTakeoverCompleted: true, StageLeaseRenewed: true,
-}
 
 func inReasonSet(set map[ReasonCode]struct{}, reason ReasonCode) bool {
 	_, in := set[reason]
@@ -132,21 +136,22 @@ func routineResult(result Result) bool {
 }
 
 // observationLevel is the level a written line takes. A handover refusal is
-// INFO on the stages that decide a handover; any other failure is ERROR; a
-// result something else held is INFO, because the holder's own entry and
-// exit are the lines that say why; any other result takes its reason's
-// level, and a success is INFO.
+// INFO wherever it is met; any other failure is ERROR; a result something
+// else held is INFO, because the holder's own entry and exit are the lines
+// that say why; a round refused before the Worker's first view is INFO, the
+// state every Worker starts in; any other result takes its reason's level,
+// and a success is INFO.
 func observationLevel(observation Observation) slog.Level {
 	if routineResult(observation.Result) {
 		return slog.LevelInfo
 	}
-	if ownershipTransitionStages[observation.Stage] && inReasonSet(ownershipContentionReasons, observation.ReasonCode) {
+	if inReasonSet(ownershipContentionReasons, observation.ReasonCode) {
 		return slog.LevelInfo
 	}
 	if failedResult(observation.Result) {
 		return slog.LevelError
 	}
-	if observation.HeldBy != nil {
+	if observation.HeldBy != nil || observation.AwaitingFirstView {
 		return slog.LevelInfo
 	}
 	return ReasonLogLevel(observation.ReasonCode)
