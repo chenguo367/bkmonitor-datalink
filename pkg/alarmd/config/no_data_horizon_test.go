@@ -10,6 +10,8 @@
 package config
 
 import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -83,6 +85,31 @@ func TestANoDataHorizonThatIsNotPositiveIsRefusedAtLoad(t *testing.T) {
 				t.Fatalf("Load() accepted %s as a horizon", stated)
 			}
 			if !strings.Contains(err.Error(), "tracking_horizon_seconds") {
+				t.Fatalf("Load() error = %v, want it to name the key the operator has to fix", err)
+			}
+		})
+	}
+}
+
+// The deployment's horizon has a ceiling as well as a floor: the largest
+// horizon a runtime-state lifetime can hold. That one is taken, and one
+// second more is refused by the key's name, since past it the lifetime would
+// wrap (retention proposal, section 6).
+func TestANoDataHorizonPastWhatALifetimeHoldsIsRefusedAtLoad(t *testing.T) {
+	for name, test := range map[string]struct {
+		stated  int64
+		refused bool
+	}{
+		"the largest a lifetime holds": {stated: contract.MaxNoDataTrackingHorizonSeconds},
+		"one second more":              {stated: contract.MaxNoDataTrackingHorizonSeconds + 1, refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, platformSettingsConfigContents("",
+				platformSettingsControlBase+"  no_data:\n    tracking_horizon_seconds: "+strconv.FormatInt(test.stated, 10)+"\n")))
+			if test.refused != (err != nil) {
+				t.Fatalf("Load(%d) error = %v, want refused %t", test.stated, err, test.refused)
+			}
+			if test.refused && !strings.Contains(err.Error(), "tracking_horizon_seconds") {
 				t.Fatalf("Load() error = %v, want it to name the key the operator has to fix", err)
 			}
 		})

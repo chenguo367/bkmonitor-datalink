@@ -1835,6 +1835,10 @@ func legacyNoDataHorizon(raw json.RawMessage) (int64, bool, error) {
 	if err != nil || value <= 0 {
 		return refused()
 	}
+	if value > contract.MaxNoDataTrackingHorizonSeconds {
+		return 0, false, fmt.Errorf("no_data_config tracking_horizon_seconds %s is past the largest horizon a lifetime "+
+			"can hold, %d seconds", text, contract.MaxNoDataTrackingHorizonSeconds)
+	}
 	return value, true, nil
 }
 

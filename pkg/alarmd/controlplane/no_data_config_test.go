@@ -11,6 +11,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -407,6 +408,8 @@ func TestAnItemsOwnHorizonIsAWholeNumberOfSecondsOrRefused(t *testing.T) {
 		"words":                             {written: `"a day"`, refused: true},
 		"zero":                              {written: `0`, refused: true},
 		"negative":                          {written: `-60`, refused: true},
+		"the largest a lifetime holds":      {written: strconv.FormatInt(contract.MaxNoDataTrackingHorizonSeconds, 10), want: contract.MaxNoDataTrackingHorizonSeconds},
+		"one second more":                   {written: strconv.FormatInt(contract.MaxNoDataTrackingHorizonSeconds+1, 10), refused: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			item := noDataItem(t, `{"is_enabled":true,"continuous":3,"tracking_horizon_seconds":`+test.written+`}`)
