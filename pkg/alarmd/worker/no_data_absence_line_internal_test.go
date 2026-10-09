@@ -296,7 +296,7 @@ func TestASlotBeyondItsBudgetSettlesEveryNoDataPlanOnce(t *testing.T) {
 					Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 						recorded = append(recorded, observation)
 					})},
-				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
 			},
 			header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 		}
@@ -307,8 +307,11 @@ func TestASlotBeyondItsBudgetSettlesEveryNoDataPlanOnce(t *testing.T) {
 			// The first Plan judges and files EVALUATED, the second is skipped by
 			// the no-data budget; then the cap trips.
 			_ = stream.evaluateNoData(context.Background(), nil, 16)
-			if len(stream.noDataOutcomes) != 2 {
-				t.Fatalf("fixture: %d outcomes filed before the trip, want both Plans", len(stream.noDataOutcomes))
+			// The guard on the fixture: the case is only read if the first Plan
+			// really judged, or the correction below is never exercised.
+			index, filed := stream.noDataOutcomeIndex[first.Key()]
+			if len(stream.noDataOutcomes) != 2 || !filed || stream.noDataOutcomes[index] != nodata.OutcomeEvaluated {
+				t.Fatalf("fixture: outcomes %v before the trip, want the first Plan EVALUATED and the second skipped", stream.noDataOutcomes)
 			}
 		}
 		// Through the replacement itself, which is where the settling is wired.
