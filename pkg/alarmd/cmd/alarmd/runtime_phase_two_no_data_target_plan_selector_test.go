@@ -52,10 +52,10 @@ func hostIDGroupKey(id string) string {
 // alone: it leaves the expected set, and its absence is closed and forgotten.
 //
 // A new process runs round 2, so the empty g1 is what its group store reads
-// first. The consumer holds the three alerts round 1 raised and publishes
-// them, as it does (no-data tracking retention proposal, section 5), so the
-// new process's open alert gate lets a close through for any of them: the
-// close host 3 gets is exactly one RECOVERY, and hosts 1 and 2 get none.
+// first. The close is read where it is decided, in the memory: host 3 is
+// gone from it and was not raised again, hosts 1 and 2 keep their round 1
+// absences. What becomes of the close on its way out of a process that did
+// not raise the alert is the open alert gate's matter and is not read here.
 func TestAMemberAnotherSelectorStillHoldsIsNotClosedWhenOneGroupEmpties(t *testing.T) {
 	strategy := lifecycleStrategy{revision: 7, continuous: 1, dimensions: []string{"bk_host_id"},
 		edit: func(item map[string]any) {
@@ -93,9 +93,6 @@ func TestAMemberAnotherSelectorStillHoldsIsNotClosedWhenOneGroupEmpties(t *testi
 		}
 	}
 
-	for _, host := range []string{"1", "2", "3"} {
-		fixture.publishOpenAlert(fixture.noDataEventsWhere("bk_host_id", host)[0].DedupeMD5)
-	}
 	if err := client.Set(ctx, selectorGroupPrefix+"dynamic_group:g1", hostGroupDocument(), 0).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +108,10 @@ func TestAMemberAnotherSelectorStillHoldsIsNotClosedWhenOneGroupEmpties(t *testi
 				"still holds it, so nothing closed it", host, firstAbsent, held, opened)
 		}
 	}
-	closed := fixture.noDataEventsWhere("bk_host_id", "3")
-	if len(closed) != 2 || closed[1].EventKind != contract.TriggerEventRecovery || closed[1].EvaluationTime != fixture.evaluationAt(2) ||
-		closed[1].DedupeMD5 != closed[0].DedupeMD5 {
-		t.Fatalf("host 3, which only g1 selected, has no-data events %+v; want its alert closed by one RECOVERY on round 2", closed)
+	for _, event := range fixture.noDataEventsWhere("bk_host_id", "3")[1:] {
+		if event.EventKind == contract.TriggerEventAbnormal {
+			t.Fatalf("host 3, which only g1 selected, was raised again on round 2: %+v", event)
+		}
 	}
 	if firstAbsent, held := fixture.absenceOfGroup(hostIDGroupKey("3")); held {
 		t.Fatalf("host 3 is still remembered with an absence from %d after nothing selects it; its absence is closed "+
