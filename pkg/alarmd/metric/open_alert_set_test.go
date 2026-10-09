@@ -74,7 +74,7 @@ func TestOpenAlertSetCollectorEmitsEveryWordAndTheAgeOnlyOnceCalibrated(t *testi
 	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_open_alert_set_unavailable_total") {
 		unavailable[m.Label[0].GetValue()] = m.GetCounter().GetValue()
 	}
-	if len(unavailable) != len(openalerts.UnavailableReasons) || unavailable["read_error"] != 2 || unavailable["members_disjoint"] != 0 {
+	if len(unavailable) != len(openalerts.UnavailableReasons) || unavailable["read_error"] != 2 || unavailable["location_unconfirmed"] != 0 {
 		t.Fatalf("unavailable = %v", unavailable)
 	}
 

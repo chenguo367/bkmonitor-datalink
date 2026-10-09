@@ -19,8 +19,9 @@
 //   - the rejection is the target's own verdict on facts that were all read
 //     and current (admission.DefinitelyOutside); a cache that could not
 //     answer is cache_unavailable, never a reason to close;
-//   - the strategy's open set could be judged at all: calibrated, and not
-//     disjoint from this process's own sends; otherwise set_unavailable;
+//   - the strategy's open set could be judged at all: calibrated, and
+//     confirmed by the link's Console (where it is, how it is keyed);
+//     otherwise set_unavailable;
 //   - the fingerprint is in the set (not_member otherwise) and the alert is
 //     this deployment's (producer_foreign otherwise);
 //   - two different Slots turned the same fingerprint away. One Slot is a
@@ -65,7 +66,8 @@ const (
 	// not an open alert of the strategy - the ordinary case.
 	OutcomeNotMember = "not_member"
 	// OutcomeSetUnavailable counts decisions refused because the open set
-	// could not be judged: not calibrated, disjoint, not read.
+	// could not be judged: not calibrated, not confirmed by the Console, not
+	// read.
 	OutcomeSetUnavailable = "set_unavailable"
 	// OutcomeProducerForeign counts open alerts of another source.
 	OutcomeProducerForeign = "producer_foreign"
@@ -120,9 +122,10 @@ type Drop struct {
 
 // OpenSet is what the close asks the open alert copy.
 type OpenSet interface {
-	// Disjoint is the one whole-copy state that makes every set's answer
-	// meaningless; everything else is judged per strategy.
-	Disjoint() bool
+	// Trusted is whether the sets may answer at all: the link's Console has
+	// confirmed where they are and that they are keyed by our alert ids. An
+	// untrusted copy's every "not a member" is a lookup that could not see.
+	Trusted() bool
 	// MemberCount is asked once per strategy per query before any record.
 	MemberCount(key openalerts.StrategyKey) (count int, judged bool)
 	Holds(key openalerts.StrategyKey, fingerprint string) (held, judged bool)
@@ -239,7 +242,7 @@ func (closer *Closer) Screen(key openalerts.StrategyKey) string {
 	closer.mu.Lock()
 	set := closer.set
 	closer.mu.Unlock()
-	if set == nil || set.Disjoint() || set.OwnEventSourceID() == "" {
+	if set == nil || !set.Trusted() || set.OwnEventSourceID() == "" {
 		return OutcomeSetUnavailable
 	}
 	count, judged := set.MemberCount(key)
@@ -363,7 +366,7 @@ func (closer *Closer) Step(ctx context.Context) {
 	}
 	sort.Slice(confirmed, func(i, j int) bool { return lessEntry(confirmed[i], confirmed[j]) })
 	own := ""
-	if set != nil && !set.Disjoint() {
+	if set != nil && set.Trusted() {
 		own = set.OwnEventSourceID()
 	}
 	if own == "" {
@@ -640,13 +643,14 @@ func prefix(value string) string {
 }
 
 // CacheSet is the open alert copy as the close reads it. The whole copy is
-// refused only when disjoint; calibration, freshness and availability are
-// judged per strategy by MemberCount and Holds.
+// refused only when the Console has not confirmed it; calibration,
+// freshness and availability are judged per strategy by MemberCount and
+// Holds.
 func CacheSet(cache *openalerts.Cache) OpenSet { return cacheSet{cache: cache} }
 
 type cacheSet struct{ cache *openalerts.Cache }
 
-func (set cacheSet) Disjoint() bool { return set.cache.Disjoint() }
+func (set cacheSet) Trusted() bool { return set.cache.Trusted() }
 
 func (set cacheSet) MemberCount(key openalerts.StrategyKey) (int, bool) {
 	return set.cache.MemberCount(key)

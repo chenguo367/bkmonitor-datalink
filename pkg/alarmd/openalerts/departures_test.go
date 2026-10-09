@@ -38,7 +38,7 @@ func TestEveryDepartureFromWhatWasSentIsCountedByItsPath(t *testing.T) {
 	options.Reconciler = reconcilerFunc(func(_ context.Context, key StrategyKey) (Reconciliation, error) {
 		return Reconciliation{Members: append([]string(nil), sets[key]...)}, nil
 	})
-	f := &disjointFixture{c: c, cache: mustIndex(t, options)}
+	f := &setFixture{c: c, cache: mustIndex(t, options)}
 	if err := f.cache.SetTracked([]StrategyKey{keyA, keyB}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestTheLocalBoundIsCountedOnBothRecords(t *testing.T) {
 	c := &clock{at: time.Unix(1700000000, 0)}
 	options := indexOptions(c)
 	options.MaxLocalEntries = 3
-	f := &disjointFixture{c: c, cache: mustIndex(t, options)}
+	f := &setFixture{c: c, cache: mustIndex(t, options)}
 	if err := f.cache.SetTracked([]StrategyKey{keyA}); err != nil {
 		t.Fatal(err)
 	}

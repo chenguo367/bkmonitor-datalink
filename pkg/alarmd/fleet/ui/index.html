@@ -873,7 +873,7 @@ var DEGRADATION = {
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
   OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
-  OPEN_ALERT_SET_DISJOINT: '本副本发出的告警一条都不在 linkd 的已开告警集合里，集合的键和本副本查的不是一种；恢复门改按本副本发过的告警放行，本副本没发过的告警的恢复仍会被扣住，请核对 linkd 告警源的指纹配置',
+  OPEN_ALERT_SET_UNCONFIRMED: 'linkd 的 Console 还没确认已开告警集合在哪里、或没确认集合按本副本发出的告警 ID 建键；恢复门改按本副本发过的告警放行，本副本没开过的告警的恢复要等 Console 确认后才放行，看开放告警集合那一行写的是哪一条没确认',
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
   OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量',
   VIEW_PUBLISH_FAILING: 'leader 超过一分钟发不出视图：已有视图的副本照常检测，这期间重启的副本没有视图、什么都不执行；原因见说明',
@@ -3598,7 +3598,8 @@ function writerWords(dep) {
 // consumer's word or on the copy's own.
 var OPEN_ALERT_UNAVAILABLE = {
   read_error: '读不到（索引读取或校准失败）',
-  members_disjoint: '消费方集合里没有本副本发过的任何告警——集合的键与本副本查的不是一种'
+  location_unconfirmed: 'Console 还没确认集合写在哪里（发现失败、Console 给的 Redis 本副本没有连接，或对账发现写入位置变了）；这期间一条集合也不读',
+  keying_unconfirmed: 'Console 还没确认集合按本副本发出的告警 ID 建键（事件源没读到、按其他字段建键，或未发布）'
 };
 // Every answer the gate can give. A key missing here is not rendered and
 // does not count towards the total, so the row said "the gate has not been
@@ -3633,33 +3634,6 @@ function openAlertConsequence(a, lookups) {
     + ' 次全部落空、恢复被扣住——要么消费方此刻确实没有未恢复告警，要么它没有把本部署发过去的告警记进这个集合';
 }
 
-var KEY_SHAPE = { hex32: '32 位十六进制', hex64: '64 位十六进制', hex_other: '其他长度十六进制', non_hex: '非十六进制' };
-
-function shapeWords(shapes) {
-  var out = [];
-  Object.keys(shapes || {}).sort().forEach(function (key) {
-    if (shapes[key]) out.push((KEY_SHAPE[key] || key) + ' ' + shapes[key]);
-  });
-  return out.length ? out.join('、') : '无';
-}
-
-// The recovery gate's side-by-side reading, in counts and shapes only: the
-// keys themselves stay in the API sample. Which of the three misses it is
-// reads off the three clauses -- member shape, whose alerts, and whether our
-// keys are there as an alert id or as a fingerprint.
-function openAlertComparisonWords(c) {
-  if (!c) return '';
-  var own = c.own_event_source_id ? (c.alert_sources || {})[c.own_event_source_id] || 0 : null;
-  var others = 0;
-  Object.keys(c.alert_sources || {}).forEach(function (key) {
-    if (key !== c.own_event_source_id) others += c.alert_sources[key];
-  });
-  return '恢复闸对照：本端发出未恢复 ' + c.sent + ' 个（' + shapeWords(c.sent_shapes) + '），集合成员 ' + shapeWords(c.member_shapes)
-    + '；校准列出的活动告警' + (own === null ? '来源 ' + others + ' 条（本部署来源尚未读到）' : '本部署来源 ' + own + ' 条、其他来源 ' + others + ' 条')
-    + '；在已校准策略里的 ' + c.sent_in_calibrated + ' 个发出键中，等于某条活动告警 ID 的 ' + c.sent_matching_alert_id
-    + ' 个、等于其指纹的 ' + c.sent_matching_fingerprint + ' 个';
-}
-
 // The close of alerts whose target left the strategy's scope, in counts
 // only: the fingerprint samples stay in the API.
 function targetScopeCloseWords(c) {
@@ -3677,12 +3651,16 @@ function openAlertSetWords(dep) {
   var a = dep.open_alert_set;
   var w = dep.writer;
   if (!a) return w && w.present ? '有' : '没有';
+  if (!a.configured) return '没配 linkd 的 Console：本副本不读集合，恢复门按本副本发过的告警回答';
   var parts = [];
   parts.push('有：消费方按索引协议发布'
     + (a.index_read_age_seconds != null ? '，本端 ' + elapsedLabel(a.index_read_age_seconds) + '前读到' : '，本端还没读到过')
     + (a.subscription_ready ? '' : '，订阅未就绪'));
   parts.push('跟踪 ' + a.tracked_sets + ' 条策略、索引覆盖 ' + a.loaded_sets + ' 条、未恢复指纹 ' + a.members + ' 个'
     + (a.calibration_configured ? '' : '（未配校准）'));
+  parts.push('Console 确认：写入位置' + (a.location_confirmed ? '已确认' : '未确认') + '、按告警 ID 建键'
+    + (a.keyed_by_alert_id == null ? '还没读到' : (a.keyed_by_alert_id ? '是' : '否'))
+    + (a.keyed_by_alert_id_as_of ? '（' + elapsedLabel((Date.now() - Date.parse(a.keyed_by_alert_id_as_of)) / 1000) + '前确认）' : ''));
   if (a.unavailable_reason) parts.push('当前不可用：' + (OPEN_ALERT_UNAVAILABLE[a.unavailable_reason] || a.unavailable_reason));
   if (a.stale_beyond_bound) parts.push('校准已超过设计的暴露时长');
   var answers = [];
@@ -3693,7 +3671,6 @@ function openAlertSetWords(dep) {
   });
   parts.push(total ? '恢复门查过 ' + total + ' 次：' + answers.join('、') : '恢复门还没查过');
   parts.push(openAlertConsequence(a, total));
-  parts.push(openAlertComparisonWords(a.comparison));
   parts.push(targetScopeCloseWords(a.target_scope_close));
   return parts.filter(Boolean).join('；');
 }

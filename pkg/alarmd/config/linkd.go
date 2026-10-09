@@ -13,9 +13,11 @@ import (
 // the link's targets is this deployment's - its source, hook, prefix, where
 // its sets are and which sources share them - is read from the Console.
 // EventSourceID and HookName only narrow that choice when the link maintains
-// more than one target. An omitted connection and prefix are where this
-// process reads the sets from, its runtime Redis and alarmd:open_alerts, and
-// the Console is asked whether that is where the link writes them.
+// more than one target. A stated connection, with its prefix
+// (alarmd:open_alerts when omitted), is where this process reads the sets
+// from, and the Console is asked whether that is where the link writes
+// them; with no connection stated, nothing is read until the Console names
+// the place.
 type LinkdConfig struct {
 	Connection        *RedisConnectionConfig `yaml:"connection"`
 	KeyPrefix         string                 `yaml:"key_prefix"`

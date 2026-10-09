@@ -32,13 +32,13 @@ func TestTheGateSaysWhichHeldLookupsWereItsOwnAlerts(t *testing.T) {
 	options.Reconciler = reconcilerFunc(func(_ context.Context, key StrategyKey) (Reconciliation, error) {
 		return Reconciliation{Members: append([]string(nil), sets[key]...)}, nil
 	})
-	f := &disjointFixture{c: c, cache: mustIndex(t, options)}
+	f := &setFixture{c: c, cache: mustIndex(t, options)}
 	if err := f.cache.SetTracked([]StrategyKey{keyA, keyB}); err != nil {
 		t.Fatal(err)
 	}
 	f.cache.Refresh(context.Background())
 	f.send(ours...)
-	c.advance(SentConfirmAfter + time.Second)
+	c.advance(5*time.Minute + time.Second)
 	for _, key := range []StrategyKey{keyA, keyB} {
 		f.cache.indexChanged(key)
 		f.cache.RequestReconcile(key)

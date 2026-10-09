@@ -82,6 +82,17 @@ type HTTPReconcilerOptions struct {
 	MaxResponseBytes int64
 	// Now is the clock the call record is kept by; nil is the wall clock.
 	Now func() time.Time
+	// LocationConfirmed is whether Index was taken from the Console's own
+	// target (its startup discovery adopted it). Every reconciliation then
+	// confirms it again, or finds the link writing elsewhere.
+	LocationConfirmed bool
+	// OnLocationMismatch is told the target a reconciliation found writing
+	// somewhere other than Index, outside the reader's lock, so the caller
+	// can move its reads there.
+	OnLocationMismatch func(TargetBinding)
+	// KeyingEvery is how often a reconciliation reads the event source's
+	// keying again; zero reads it only until it has answered once.
+	KeyingEvery time.Duration
 }
 
 // HTTPReconciler reads the link's Console. Which target is this deployment's
@@ -94,6 +105,11 @@ type HTTPReconciler struct {
 	mu         sync.Mutex
 	binding    TargetBinding
 	resolvedAt time.Time
+	// confirmed is ConsoleFacts.LocationConfirmed; keyingTried when the
+	// event source was last asked for, answered or not; factsTried when
+	// Refresh last resolved the target.
+	confirmed               bool
+	keyingTried, factsTried time.Time
 	// calls is what this process has seen of each Console operation.
 	calls consoleCalls
 }
@@ -114,7 +130,7 @@ func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 	client := *options.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	options.Client = &client
-	return &HTTPReconciler{options: options}, nil
+	return &HTTPReconciler{options: options, confirmed: options.LocationConfirmed}, nil
 }
 
 func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Values, out any) error {
@@ -184,21 +200,28 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 	index := reader.options.Index
 	reader.mu.Unlock()
 	if binding.KeyPrefix != index.KeyPrefix || !strings.EqualFold(binding.Address, index.Address) || binding.Database != index.Database {
+		reader.mu.Lock()
+		reader.confirmed = false
+		onMismatch := reader.options.OnLocationMismatch
+		reader.mu.Unlock()
+		if onMismatch != nil {
+			onMismatch(binding)
+		}
 		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link writes open alert sets to %s db %d prefix %s, this process reads %s db %d prefix %s, and none of the Redis connections this process holds is at %s",
 			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix, binding.Address)
 	}
 	reader.mu.Lock()
-	reader.binding, reader.resolvedAt = binding, reader.now()
+	reader.binding, reader.resolvedAt, reader.confirmed = binding, reader.now(), true
 	reader.mu.Unlock()
 	return binding, nil
 }
 
 // SetIndexLocation moves where this process says it reads the open alert
-// sets from. A process that could not ask the Console at startup reads from
-// a fallback location, and every reconciliation refuses with both locations
-// named; once a later discovery finds where the link writes, the reader is
-// rebound there and this is the reconciler's half of that move. The resolved
-// target is forgotten so the next reconciliation checks the new location.
+// sets from: to a place a later discovery found after a failed start, or to
+// the one a reconciliation found the link writing to. The resolved target is
+// forgotten, and the location is not confirmed until a resolution agrees
+// with it - the next Refresh, at once, or the calibration the caller asks
+// for - so nothing read before that is trusted as the link's word.
 func (reader *HTTPReconciler) SetIndexLocation(index IndexLocation) error {
 	if !validPrefix(index.KeyPrefix) || index.Address == "" || index.Database < 0 {
 		return errors.New("alarmd openalerts: invalid index location")
@@ -206,7 +229,8 @@ func (reader *HTTPReconciler) SetIndexLocation(index IndexLocation) error {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
 	reader.options.Index = index
-	reader.binding, reader.resolvedAt = TargetBinding{}, time.Time{}
+	reader.binding, reader.resolvedAt, reader.confirmed = TargetBinding{}, time.Time{}, false
+	reader.keyingTried, reader.factsTried = time.Time{}, time.Time{}
 	return nil
 }
 
@@ -275,6 +299,7 @@ func (reader *HTTPReconciler) reconcile(ctx context.Context, key StrategyKey) (R
 	if err != nil {
 		return Reconciliation{}, err
 	}
+	reader.refreshKeying(ctx, b)
 	var response struct {
 		Target     TargetBinding `json:"target"`
 		TenantID   string        `json:"tenantId"`

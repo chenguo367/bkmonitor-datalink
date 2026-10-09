@@ -38,8 +38,6 @@ type openAlertSetCollector struct {
 	entries     *prometheus.Desc
 	tracked     *prometheus.Desc
 	evictions   *prometheus.Desc
-	sent        *prometheus.Desc
-	disjoint    *prometheus.Desc
 	resent      *prometheus.Desc
 }
 
@@ -53,8 +51,11 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 			"Seconds since the oldest calibration among the tracked strategies' sets completed: a full read of "+
 				"the consumer's open alerts for a strategy, reconciled against its index. Absent until one has."),
 		unavailable: descriptor("open_alert_set_unavailable_total",
-			"Refreshes of a tracked set that failed, by why: read_error (an index read or a calibration failed), "+
-				"members_disjoint (counted once on entering the state open_alert_set_disjoint reports).", "reason"),
+			"Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration "+
+				"failed, each time), location_unconfirmed (the link's Console has not named where the sets are) and "+
+				"keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each "+
+				"counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while "+
+				"either lasts. A deployment without the Console counts nothing here.", "reason"),
 		refreshes: descriptor("open_alert_set_refresh_total",
 			"Refreshes by result: index (a strategy's index read), authoritative (a calibration completed), "+
 				"unavailable (either failed). A flat line is the refresh loop not running.", "result"),
@@ -73,17 +74,6 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 		evictions: descriptor("open_alert_set_evictions_total",
 			"Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest "+
 				"first."),
-		sent: descriptor("open_alert_set_sent_alerts",
-			"Alerts this process sent ABNORMAL for and has not sent RECOVERY for, by whether the latest read of "+
-				"their strategy's set carries them (in_set=yes|no). Only alerts first sent at least five minutes "+
-				"before that read are counted, so the consumer has had time to open them. Some no is an alert the "+
-				"consumer closed on its own; all no and none yes is the sets keyed differently from this process's "+
-				"lookups, which open_alert_set_disjoint reports.", "in_set"),
-		disjoint: descriptor("open_alert_set_disjoint",
-			"1 while none of the alerts this process sent is in the consumer's sets (see "+
-				"open_alert_set_sent_alerts); it ends when one of them is found or none is left open. Every lookup against such sets would miss and hold the recovery, so "+
-				"while this is 1 the gate answers from what this process sent instead, and fleet health degrades "+
-				"with OPEN_ALERT_SET_DISJOINT."),
 		resent: descriptor("open_alert_set_recovery_resent_total",
 			"RECOVERY events the broker took for an alert whose earlier RECOVERY this process still held closed: "+
 				"sent again because the consumer's set still carried the alert once the ledger let it through - the "+
@@ -112,8 +102,6 @@ func (c *openAlertSetCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.entries
 	ch <- c.tracked
 	ch <- c.evictions
-	ch <- c.sent
-	ch <- c.disjoint
 	ch <- c.resent
 }
 
@@ -142,12 +130,5 @@ func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Removed), "sent_closed")
 	ch <- prometheus.MustNewConstMetric(c.tracked, prometheus.GaugeValue, float64(stats.Tracked))
 	ch <- prometheus.MustNewConstMetric(c.evictions, prometheus.CounterValue, float64(stats.Evictions))
-	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.GaugeValue, float64(stats.SentInSet), "yes")
-	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.GaugeValue, float64(stats.SentNotInSet), "no")
-	disjoint := 0.0
-	if stats.Disjoint {
-		disjoint = 1
-	}
-	ch <- prometheus.MustNewConstMetric(c.disjoint, prometheus.GaugeValue, disjoint)
 	ch <- prometheus.MustNewConstMetric(c.resent, prometheus.CounterValue, float64(stats.RecoveriesResent))
 }

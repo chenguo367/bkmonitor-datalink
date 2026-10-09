@@ -12,7 +12,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -60,45 +59,6 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	}
 }
 
-// Every field of the copy's comparison reaches the replica's facts: a field
-// added to one side and not carried would read as zero, and a zero here is a
-// reading ("none of the alerts is ours").
-func TestTheOpenAlertComparisonIsCarriedFieldForField(t *testing.T) {
-	comparison := &openalerts.Comparison{OwnEventSourceID: "own", Sent: 3,
-		SentShapes: map[string]int{openalerts.ShapeHex32: 3}, MemberShapes: map[string]int{openalerts.ShapeHex64: 5},
-		AlertSources: map[string]int{"own": 0, "elsewhere": 5}, SentInCalibrated: 3, SentMatchingAlertID: 2, SentMatchingFingerprint: 1,
-		Strategies: []openalerts.ComparisonStrategy{{TenantID: "t", StrategyID: "s", Sent: 1, Members: 2, Alerts: 3, Calibrated: true,
-			SentSample: []string{"a"}, MemberSample: []string{"b"},
-			AlertSample: []openalerts.ComparisonAlert{{AlertID: "c", Fingerprint: "d", EventSourceID: "e"}}}}}
-	facts := openAlertComparisonFacts(comparison)
-	var zero func(path string, value reflect.Value)
-	zero = func(path string, value reflect.Value) {
-		switch value.Kind() {
-		case reflect.Ptr:
-			zero(path, value.Elem())
-		case reflect.Struct:
-			for i := 0; i < value.NumField(); i++ {
-				zero(path+"."+value.Type().Field(i).Name, value.Field(i))
-			}
-		case reflect.Slice:
-			if value.Len() == 0 {
-				t.Errorf("%s was not carried", path)
-			}
-			for i := 0; i < value.Len(); i++ {
-				zero(path, value.Index(i))
-			}
-		default:
-			if value.IsZero() {
-				t.Errorf("%s was not carried", path)
-			}
-		}
-	}
-	zero("comparison", reflect.ValueOf(facts))
-	if openAlertComparisonFacts(nil) != nil {
-		t.Error("no comparison is carried as none")
-	}
-}
-
 type nothingIndexed struct{}
 
 func (nothingIndexed) ReadSet(context.Context, openalerts.StrategyKey) ([]string, error) {
@@ -110,36 +70,24 @@ func (nothingIndexed) Watch(ctx context.Context, _ func(bool), _ func(openalerts
 	return ctx.Err()
 }
 
-// A copy that reads the index publishes its comparison in the replica's
-// facts, before any read as well: the counts are then zeros, which is what
-// the copy knows.
-func TestAnIndexCopyPublishesItsComparison(t *testing.T) {
-	now := func() time.Time { return time.Unix(1_700_000_000, 0) }
-	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: nothingIndexed{}, Subscriber: nothingIndexed{}, Now: now,
-		MaxStrategies: 1, MaxMembers: 1, MaxBytes: 1, MaxLocalEntries: 1, ReadBatch: 1, ReconcileBatch: 1,
-		RefreshInterval: time.Minute, IndexInterval: time.Minute, ReconcileInterval: time.Minute, CalibrationMaxAge: time.Minute,
-		LocalRetention: time.Minute, CycleTimeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
+// The Console's two facts reach the published facts under their own names,
+// and so the fleet verdict: the copy saying so is not enough if the replica
+// does not pass it on. The keying's age is carried with it, and is absent
+// while the keying was never read.
+func TestTheConsoleFactsArePublishedWithTheReason(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0)
+	stats := openalerts.Stats{Configured: true, LocationConfirmed: false, UnavailableReason: openalerts.UnavailableLocationUnconfirmed}
+	facts := openAlertSetFacts(stats, false, at)
+	if !facts.Configured || facts.LocationConfirmed || facts.KeyedByAlertID != nil || facts.KeyedByAlertIDAsOf != nil ||
+		facts.UnavailableReason != "location_unconfirmed" {
+		t.Fatalf("facts = %+v, want configured, unconfirmed, keying absent and the reason named", facts)
 	}
-	facts := openAlertSetFactsSource(cache, now)()
-	if facts.Comparison == nil || facts.Comparison.SentShapes == nil || facts.Comparison.MemberShapes == nil {
-		t.Fatalf("the index copy's facts carry no comparison: %+v", facts.Comparison)
-	}
-}
-
-// Sets that carry none of this replica's alerts reach the published facts
-// under their own names, and so the fleet verdict: the copy saying so is
-// not enough if the replica does not pass it on.
-func TestTheDisjointStateIsPublishedWithTheSentCounts(t *testing.T) {
-	stats := openalerts.Stats{SentInSet: 0, SentNotInSet: 103, Disjoint: true, UnavailableReason: openalerts.UnavailableMembersDisjoint}
-	facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0))
-	if !facts.Disjoint || facts.SentInSet != 0 || facts.SentNotInSet != 103 || facts.UnavailableReason != "members_disjoint" {
-		t.Fatalf("facts = %+v, want disjoint with 0 of 103 found and the reason named", facts)
-	}
-	stats.SentInSet, stats.Disjoint, stats.UnavailableReason = 4, false, ""
-	if facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0)); facts.Disjoint || facts.SentInSet != 4 {
-		t.Fatalf("facts = %+v, want the found count and no disjoint", facts)
+	keyed := true
+	stats = openalerts.Stats{Configured: true, LocationConfirmed: true, KeyedByAlertID: &keyed, KeyedByAlertIDAsOf: at.Add(-time.Hour), Available: true}
+	facts = openAlertSetFacts(stats, false, at)
+	if !facts.LocationConfirmed || facts.KeyedByAlertID == nil || !*facts.KeyedByAlertID || facts.KeyedByAlertIDAsOf == nil ||
+		!facts.KeyedByAlertIDAsOf.Equal(at.Add(-time.Hour)) || facts.UnavailableReason != "" {
+		t.Fatalf("facts = %+v, want both confirmed with the keying's time", facts)
 	}
 }
 

@@ -45,7 +45,7 @@ type linkdLocationReport interface {
 // of it. A nil console is a deployment that configured none, whose entry
 // already says so. When a later discovery moved the reads, the open alert
 // set's entry is rewritten to where they are read now: the list is otherwise
-// resolved once, at startup, from the fallback location.
+// resolved once, at startup, from the configured connection.
 func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTTPReconciler,
 	location linkdLocationReport, now func() time.Time) func() []fleet.Endpoint {
 	if console == nil {
