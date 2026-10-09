@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
@@ -70,5 +71,31 @@ func TestNoDataSequencesSendWhatTheTriggerDefines(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Through the production bundle on the compatible protocol, the whole-item
+// no-data alert carries the object the backend writes for the same silence.
+// The fixture's item aggregates by its own dimensions and its no-data
+// agg_dimension is empty, so every group reduces to the tag alone
+// (nodata.py:83-84, :106-107); the anomaly_id starts with count_md5 of
+// {"__NO_DATA_DIMENSION__": True}, computed with the backend's own count_md5
+// (common_utils.py:452-479), not with this module's hash.
+func TestTheCompatibleNoDataIdentityIsTheBackendsWholeItemObject(t *testing.T) {
+	fixture := startNoDataFixtureOn(t, config.OutputProtocolLegacy)
+	ctx := context.Background()
+	var anomalies []contract.TriggerEventV1
+	for round := int64(0); round <= noDataContinuous+2 && len(anomalies) == 0; round++ {
+		fixture.runSlot(ctx, round)
+		anomalies = fixture.noDataAnomalies()
+	}
+	if len(anomalies) == 0 {
+		t.Fatalf("no no-data anomaly after %d absent rounds", noDataContinuous+3)
+	}
+	id, _ := noDataAnomalyID(t, anomalies[0])
+	const want = "3e06a0b6d0560271cafee9f08a6da2d7.1001."
+	if !strings.HasPrefix(id, want) {
+		t.Fatalf("anomaly_id without its period = %q, want it to start %q: the backend's recovery looks the "+
+			"group up by this md5, so any other value opens a new alert every round", id, want)
 	}
 }

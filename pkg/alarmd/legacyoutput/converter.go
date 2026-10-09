@@ -326,19 +326,23 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 		}
 		sort.Strings(dimensionFields)
 	}
-	// A no-data point's identity is its group's dimensions plus the tag, which
-	// is what makes it a different object from the threshold anomaly on the
-	// same series -- on both sides. The tag is on the record already; it was
-	// the field list that did not have it, so the dimensions md5 was hashed
-	// from the item's identity fields alone and matched nothing the backend
-	// ever wrote. Nothing downstream would have called that an error: every
-	// round would simply have looked like a fresh anomaly that never closes.
+	// A no-data point's identity is its group's dimensions plus the tag, and
+	// nothing else (nodata.py:106-107): the record carries exactly those, so
+	// its own keys are the field list. The item's identity fields are not:
+	// the item aggregates by its own dimensions and no-data by its
+	// agg_dimension, and hashing the item's fields -- the absent ones as null
+	// -- gave an object the backend never wrote. Its recovery looks the
+	// group up by that md5 (recover.py:203-221), so each alert would have
+	// opened and closed every round.
 	//
-	// The same list decides dimension_fields on the wire, so both follow from
-	// the one correction.
+	// The same list decides dimension_fields on the wire, sorted as the
+	// backend sorts it (nodata.py:259).
 	_, noData := event.RecordRef.Dimensions[contract.NoDataDimensionTag]
-	if noData && !containsField(dimensionFields, contract.NoDataDimensionTag) {
-		dimensionFields = append(append([]string(nil), dimensionFields...), contract.NoDataDimensionTag)
+	if noData {
+		dimensionFields = make([]string, 0, len(event.RecordRef.Dimensions))
+		for field := range event.RecordRef.Dimensions {
+			dimensionFields = append(dimensionFields, field)
+		}
 		sort.Strings(dimensionFields)
 	}
 	identity := map[string]json.RawMessage{}
@@ -438,15 +442,6 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 		return Event{}, err
 	}
 	return Event{EventID: event.EventID, Payload: raw, DedupeMD5: dedupe}, nil
-}
-
-func containsField(fields []string, name string) bool {
-	for _, field := range fields {
-		if field == name {
-			return true
-		}
-	}
-	return false
 }
 
 // noDataMessage is the alert text for a group that has stopped reporting.
