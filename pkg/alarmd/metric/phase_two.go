@@ -25,12 +25,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
-// splitRoundDispositions is what one round can do with an over-share object,
-// and the label set the round family is pre-created with. Written once and
-// read by both the pre-creation and the test that counts it, so a
-// disposition added in one place cannot be missing from the other.
-var splitRoundDispositions = []string{"over_share", "examined", "skipped"}
-
 type phaseTwoMetrics struct {
 	workflow                       workflowMetrics
 	shortPeriod                    shortPeriodMetrics
@@ -148,13 +142,6 @@ type phaseTwoMetrics struct {
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
 	levelOutcomes                   *prometheus.CounterVec
-	dimensionCensusWrites           *prometheus.CounterVec
-	splitPlans                      *prometheus.CounterVec
-	splitRoundObjects               *prometheus.CounterVec
-	shardQueries                    *prometheus.CounterVec
-	splitRounds                     prometheus.Counter
-	shardabilityPlans               *prometheus.CounterVec
-	dimensionCensusValues           *prometheus.CounterVec
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
 	activationRebuild               *activationRebuildCollector
@@ -1146,128 +1133,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 		metrics.levelOutcomes.WithLabelValues(outcome, "")
 	}
-	// What the Leader's split dry run decided, by outcome (decision-020
-	// section 4.7.4). One family and one label: "this object was not split"
-	// is the answer a reader arrives with, and the reasons behind it call for
-	// different actions.
-	metrics.splitPlans = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "split_plan_total",
-		Help: "Split decisions this Leader reached, by outcome. PLANNED is an object a split was computed " +
-			"for and NOT acted on - the planner only reports for now, and the line's split_dry_run says so. " +
-			"UNDER_SHARE is the ordinary answer, counted so that 'nothing was planned' can be told from " +
-			"'nothing was looked at'. NO_CENSUS is expected for one round after a replica takes an object " +
-			"over; standing, it means the census is not being written. VALUE_TOO_HEAVY is the object that " +
-			"cannot be cut by matching values at all and needs hashing. TAIL_TOO_LARGE is the census's own " +
-			"bound in the way, SKEW_UNREACHABLE a split that would be undone as fast as it was made, " +
-			"TOO_FEW_VALUES a dimension too coarse to cut on, CENSUS_STALE a distribution that is no longer " +
-			"this object's, and NO_READING a number missing - never read as no pressure.",
-	}, []string{"outcome"})
-	for _, outcome := range observability.SplitOutcomes() {
-		metrics.splitPlans.WithLabelValues(outcome)
-	}
-	// What each round of the dry run looked at, as opposed to what it decided
-	// about any one object. A separate family for a separate subject: a
-	// round's counts wearing an object's outcome word is how one label comes
-	// to have two meanings.
-	metrics.splitRoundObjects = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "split_round_objects_total",
-		Help: "Objects each split dry run round met, by what the round did with them. over_share is how " +
-			"many the readings put past the share a single object may hold, examined how many a split was " +
-			"worked out for, and skipped the rest. Read skipped against over_share: standing skips are not " +
-			"a split problem but a round finding far more over-share objects than a split trigger should " +
-			"ever name, and the readings to look at then are the pools and the peaks.",
-	}, []string{"disposition"})
-	for _, disposition := range splitRoundDispositions {
-		metrics.splitRoundObjects.WithLabelValues(disposition)
-	}
-	// Whether the objects a split was planned for could express it. The
-	// catalog's own census (shardable_*) says how much of the whole fleet a
-	// value list could cut; this says how much of the population that
-	// actually needs cutting can be cut, and the two are read together: if
-	// the objects over their share are disjunctive far more often than the
-	// fleet at large, then value lists miss precisely the strategies the
-	// split exists for.
-	metrics.shardQueries = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "shard_query_total",
-		Help: "Planned splits this Leader tried to express as queries, by what the strategy's own query " +
-			"allowed. BUILT is a split the queries express. DISJUNCTIVE is the structural one: a condition " +
-			"list is flat, so a matcher appended after an 'or' changes what the existing conditions mean, " +
-			"and such a strategy cannot be cut by a value list at all - read it against " +
-			"catalog_shardability_plans_total{answer=\"disjunctive\"} to see whether the objects that need splitting are the ones value lists " +
-			"cannot serve. NOT_STRUCTURED is PromQL, DIMENSION_NOT_QUERYABLE a dimension the query does not " +
-			"group by, TOO_MANY_VALUES a matcher past the value bound, NOT_PLANNED and NO_QUERIES nothing " +
-			"to build from, and INVALID this build producing facts the query contract refuses. The unit is one " +
-			"object per dry-run round: an object that stays over its share is counted again every round, so a " +
-			"share of this family is weighted by how long each object stayed, while the catalog family is one " +
-			"Plan per publication. Compare the two as shares of their own totals over the same window, and read a " +
-			"standing object as many counts, not many objects.",
-	}, []string{"outcome"})
-	for _, outcome := range observability.ShardQueryOutcomes() {
-		metrics.shardQueries.WithLabelValues(outcome)
-	}
-	// How many rounds the dry run ran, apart from what they found. The round
-	// family adds each round's counts, so a round with nothing over its
-	// share adds zero to every cell - and a family that stays at zero then
-	// reads the same whether the dry run ran every round and found nothing,
-	// or never ran. This is the denominator that tells them apart.
-	metrics.splitRounds = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "split_rounds_total",
-		Help: "Split dry run rounds this Leader ran, one per placement round that reached the dry run. " +
-			"Read split_round_objects_total against it: rounds rising with over_share flat is a fleet with " +
-			"nothing over its share; rounds flat is a Leader whose placement round never gets that far, or " +
-			"a replica that is not the Leader.",
-	})
-	// The whole catalog counted by whether a value-list split could be
-	// expressed for each Plan, once per publication this replica wrote
-	// (decision-020 section 4.7.2). A counter rather than a gauge: only the
-	// replica that publishes counts, and a gauge pre-created at zero would
-	// say "a catalog of no Plans" on every other replica, where a counter at
-	// zero says what is true there - this replica counted no publication.
-	// Read as a ratio over a window, which is per-publication shares
-	// weighted by how often the catalog was published.
-	metrics.shardabilityPlans = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "catalog_shardability_plans_total",
-		Help: "Plans in each catalog publication this replica wrote, by whether a value-list split could be " +
-			"expressed for them. splittable can take a matcher; disjunctive has an 'or' in its own conditions, " +
-			"which a flat condition list cannot be cut under; not_structured is PromQL; no_queries carries no " +
-			"query facts; unrecognised is an answer this build does not know. The five sum to the Plans " +
-			"published, one Plan per publication. Read disjunctive over the sum, against shard_query_total{outcome=\"DISJUNCTIVE\"} " +
-			"over the planned splits: the first is the fleet, the second the objects that need splitting.",
-	}, []string{"answer"})
-	for _, cell := range (observability.ShardabilityFacts{}).Cells() {
-		metrics.shardabilityPlans.WithLabelValues(cell.Answer)
-	}
-	// What the dimension census did, by where its values came from and what
-	// the store said (decision-020 section 4.7.3). Two families rather than
-	// one: how many censuses were taken is a different question from how
-	// much of a strategy they could name, and a reader asking the second
-	// needs the overflow beside the named values or the answer is a number
-	// with no denominator.
-	metrics.dimensionCensusWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dimension_census_total",
-		Help: "Dimension censuses this replica took, by source and by what the store did with them. " +
-			"source=round is the ordinary one, counted from the series the round evaluated; source=roster is the " +
-			"fallback for a round that saw no series, and its values are an upper bound because the no-data roster " +
-			"remembers groups that are gone. status=WRITTEN is stored, REJECTED is refused whole (too large or " +
-			"unencodable - never truncated, because a cut census reads like a distribution), RETRYABLE is the store " +
-			"not answering. Only candidate Query Groups take one, so a flat zero here is a fleet with no object " +
-			"heavy enough to split.",
-	}, []string{"source", "status"})
-	for _, source := range observability.DimensionCensusSources() {
-		for _, status := range observability.DimensionCensusStatuses() {
-			metrics.dimensionCensusWrites.WithLabelValues(source, status)
-		}
-	}
-	metrics.dimensionCensusValues = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dimension_census_values_total",
-		Help: "Dimension values the censuses named, and what they could not: kind=named is values carried in the " +
-			"census, kind=overflow_values is values the bound left out, kind=overflow_series is the series on those " +
-			"values. Read named against overflow_series: a census that names four thousand values while a hundred " +
-			"thousand series sit in the overflow is not a distribution a split can be planned from.",
-	}, []string{"kind"})
-	for _, kind := range []string{"named", "overflow_values", "overflow_series"} {
-		metrics.dimensionCensusValues.WithLabelValues(kind)
-	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
@@ -1789,7 +1654,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
@@ -1993,14 +1858,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if facts.Operation == "write" && facts.Result == "success" {
 			m.objectCatalogWrittenBytes.WithLabelValues("manifest").Add(float64(facts.ManifestBytes))
 			m.objectCatalogManifestBytes.Set(float64(facts.ManifestBytes))
-			// Counted on the write that succeeded and on no other: a failed
-			// write is retried under the same revision and counted then, so
-			// counting the failure too would count that catalog twice.
-			if shardability := observation.Shardability; shardability != nil {
-				for _, cell := range shardability.Cells() {
-					m.shardabilityPlans.WithLabelValues(cell.Answer).Add(float64(cell.Plans))
-				}
-			}
 		}
 	}
 	if facts := observation.ObjectRead; facts != nil {
@@ -2016,28 +1873,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
 		).Inc()
-	}
-	if facts := observation.ShardQuery; facts != nil {
-		m.shardQueries.WithLabelValues(facts.Outcome).Inc()
-	}
-	if facts := observation.SplitRound; facts != nil {
-		m.splitRounds.Inc()
-		m.splitRoundObjects.WithLabelValues("over_share").Add(float64(facts.OverShare))
-		m.splitRoundObjects.WithLabelValues("examined").Add(float64(facts.Examined))
-		m.splitRoundObjects.WithLabelValues("skipped").Add(float64(facts.Skipped))
-	}
-	if facts := observation.SplitPlan; facts != nil {
-		// By outcome and nothing else. How many pieces THIS strategy would be
-		// cut into is on the line, where it costs one field; as a metric it
-		// would be one series per strategy, which is a label set bounded by
-		// how many strategies a deployment has - that is, not bounded.
-		m.splitPlans.WithLabelValues(facts.Outcome).Inc()
-	}
-	if facts := observation.DimensionCensus; facts != nil {
-		m.dimensionCensusWrites.WithLabelValues(facts.Source, facts.Status).Inc()
-		m.dimensionCensusValues.WithLabelValues("named").Add(float64(facts.Values))
-		m.dimensionCensusValues.WithLabelValues("overflow_values").Add(float64(facts.OverflowValues))
-		m.dimensionCensusValues.WithLabelValues("overflow_series").Add(float64(facts.OverflowSeries))
 	}
 	if rejected := observation.HistoryCoverageRejected; rejected != nil {
 		m.historyCoverageRejected.WithLabelValues(string(rejected.Rule)).Inc()

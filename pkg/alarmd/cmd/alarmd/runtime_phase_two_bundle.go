@@ -865,7 +865,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
-		NoData: executionStore, Hosts: hostBusiness, State: executionStore, Census: executionStore, Progress: progressStore, Observer: observer,
+		NoData: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
 		// The horizon the platform settings copy resolves now, read per Slot:
@@ -961,7 +961,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes:             currentContentScopes(repository),
 		ViewStream:                viewServer, ViewSource: repository, Costs: costs,
-		SplitCensus: newCatalogSplitCensusSource(repository, repository, executionStore),
 	})
 	if err != nil {
 		return nil, err

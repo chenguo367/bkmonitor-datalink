@@ -239,12 +239,6 @@ History points the Levels of the Catalog the leader last built require, summed o
 
 History points the Levels of the Catalog the leader last built retain, summed the same way. It exceeds catalog_required_history_points by the recovery slack: the positions a recovery walk needs to step over a rollout's hole and still reach the run of answered windows it requires. Equal to it on a deployment where no Level passes both R5 gates, which is a real state and not a broken one. Reported by the leader only.
 
-## bkmonitor_alarmd_catalog_shardability_plans_total
-
-Labels: `answer`
-
-Plans in each catalog publication this replica wrote, by whether a value-list split could be expressed for them. splittable can take a matcher; disjunctive has an 'or' in its own conditions, which a flat condition list cannot be cut under; not_structured is PromQL; no_queries carries no query facts; unrecognised is an answer this build does not know. The five sum to the Plans published, one Plan per publication. Read disjunctive over the sum, against shard_query_total{outcome="DISJUNCTIVE"} over the planned splits: the first is the fleet, the second the objects that need splitting.
-
 ## bkmonitor_alarmd_catalog_strategy_returned_after_removal_total
 
 Strategies the source listed again after their Plan had already left the Catalog: absent past the removal grace, withdrawn, then back. A return inside the grace is not one. Counted by the Control Leader's source-set ledger; read it summed over replicas, since only the Leader counts.
@@ -426,18 +420,6 @@ Connections a diagnostic client dialled a second time because the first dial fai
 Labels: `client`, `reason`
 
 Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's store reads), auth (the CLI's authorization store), lifecycle (the start and stop record) -- and by reason: connection_closed (the connection was closed under the call; a pooled connection the network cut while idle fails so), connection_refused, sentinel_unreachable (no Sentinel answered for the master), timeout, pool_timeout, canceled, server_error, malformed_reply, other. Every cell exists from startup, so a zero is a count.
-
-## bkmonitor_alarmd_dimension_census_total
-
-Labels: `source`, `status`
-
-Dimension censuses this replica took, by source and by what the store did with them. source=round is the ordinary one, counted from the series the round evaluated; source=roster is the fallback for a round that saw no series, and its values are an upper bound because the no-data roster remembers groups that are gone. status=WRITTEN is stored, REJECTED is refused whole (too large or unencodable - never truncated, because a cut census reads like a distribution), RETRYABLE is the store not answering. Only candidate Query Groups take one, so a flat zero here is a fleet with no object heavy enough to split.
-
-## bkmonitor_alarmd_dimension_census_values_total
-
-Labels: `kind`
-
-Dimension values the censuses named, and what they could not: kind=named is values carried in the census, kind=overflow_values is values the bound left out, kind=overflow_series is the series on those values. Read named against overflow_series: a census that names four thousand values while a hundred thousand series sit in the overflow is not a distribution a split can be planned from.
 
 ## bkmonitor_alarmd_dispatch_crowded_out_total
 
@@ -1487,12 +1469,6 @@ Labels: `filter`, `result`, `reason`
 
 Access-path admission decisions by filter, outcome and bounded reason.
 
-## bkmonitor_alarmd_shard_query_total
-
-Labels: `outcome`
-
-Planned splits this Leader tried to express as queries, by what the strategy's own query allowed. BUILT is a split the queries express. DISJUNCTIVE is the structural one: a condition list is flat, so a matcher appended after an 'or' changes what the existing conditions mean, and such a strategy cannot be cut by a value list at all - read it against catalog_shardability_plans_total{answer="disjunctive"} to see whether the objects that need splitting are the ones value lists cannot serve. NOT_STRUCTURED is PromQL, DIMENSION_NOT_QUERYABLE a dimension the query does not group by, TOO_MANY_VALUES a matcher past the value bound, NOT_PLANNED and NO_QUERIES nothing to build from, and INVALID this build producing facts the query contract refuses. The unit is one object per dry-run round: an object that stays over its share is counted again every round, so a share of this family is weighted by how long each object stayed, while the catalog family is one Plan per publication. Compare the two as shares of their own totals over the same window, and read a standing object as many counts, not many objects.
-
 ## bkmonitor_alarmd_shard_unaware_ready_replicas
 
 Ready replicas whose registration does not declare the strategy-split contract (shard-aware.v1), as the latest reconcile round on this Control Leader saw them. A split is published only while this is zero, and a split fleet is collapsed to one piece per strategy while it is not. Across a rolling release it goes 0, n, 0; a rollback puts the rolled-back replica back on it. Which replicas they are is on /api/health rebalance.shard_aware.unaware. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
@@ -1578,22 +1554,6 @@ Phase-two source refresh outcomes by fixed status.
 ## bkmonitor_alarmd_source_strategies_read_total
 
 Strategy documents source refresh rounds asked the source for. A skipped round adds nothing; a full read adds the whole active set.
-
-## bkmonitor_alarmd_split_plan_total
-
-Labels: `outcome`
-
-Split decisions this Leader reached, by outcome. PLANNED is an object a split was computed for and NOT acted on - the planner only reports for now, and the line's split_dry_run says so. UNDER_SHARE is the ordinary answer, counted so that 'nothing was planned' can be told from 'nothing was looked at'. NO_CENSUS is expected for one round after a replica takes an object over; standing, it means the census is not being written. VALUE_TOO_HEAVY is the object that cannot be cut by matching values at all and needs hashing. TAIL_TOO_LARGE is the census's own bound in the way, SKEW_UNREACHABLE a split that would be undone as fast as it was made, TOO_FEW_VALUES a dimension too coarse to cut on, CENSUS_STALE a distribution that is no longer this object's, and NO_READING a number missing - never read as no pressure.
-
-## bkmonitor_alarmd_split_round_objects_total
-
-Labels: `disposition`
-
-Objects each split dry run round met, by what the round did with them. over_share is how many the readings put past the share a single object may hold, examined how many a split was worked out for, and skipped the rest. Read skipped against over_share: standing skips are not a split problem but a round finding far more over-share objects than a split trigger should ever name, and the readings to look at then are the pools and the peaks.
-
-## bkmonitor_alarmd_split_rounds_total
-
-Split dry run rounds this Leader ran, one per placement round that reached the dry run. Read split_round_objects_total against it: rounds rising with over_share flat is a fleet with nothing over its share; rounds flat is a Leader whose placement round never gets that far, or a replica that is not the Leader.
 
 ## bkmonitor_alarmd_startup_dependency_wait_total
 
