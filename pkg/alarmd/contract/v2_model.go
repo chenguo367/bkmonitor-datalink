@@ -581,9 +581,10 @@ const (
 // output sink use the same rule. Unknown formats remain unknown for rejection.
 // EventHasMessage reports whether an event of this kind becomes a message
 // under this resolved wire format. The Python-compatible protocol carries
-// anomalies and nothing else: its consumer decides recovery from the absence
-// of anomalies, so an event of any other kind has no message there. Every
-// other format carries every kind.
+// anomalies and nothing else: its consumer recovers and closes alerts by the
+// checkpoints the backend's own detection writes, not by any message, so an
+// event of any other kind has no message there. Every other format carries
+// every kind.
 //
 // One rule with two readers: the sink, which leaves such an event without a
 // message, and the trigger, which does not build one the sink would leave

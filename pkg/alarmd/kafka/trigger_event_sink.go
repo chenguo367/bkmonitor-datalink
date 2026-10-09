@@ -470,14 +470,20 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			}
 			// The Python protocol carries anomaly points and nothing else: its
 			// producer builds every message from the anomaly list and stamps
-			// ABNORMAL, and recovery is decided downstream from the absence of
-			// anomalies. alarmd's own Recovery is a steady-state result, so
-			// every healthy series produces one every cycle - converting those
-			// put a hundred times Python's volume on the topic. A Recovery
-			// event has no representation in this protocol, so it produces no
-			// message here and no snapshot; the native protocol still carries
-			// it, because the choice of protocol is the revision's, not the
-			// event kind's.
+			// ABNORMAL. The consumer does not decide recovery from their
+			// absence: its recovery and close checks read the checkpoints the
+			// backend's own detection writes (recover.py:296-314,
+			// close.py:281-300), which alarmd does not write. So alarmd's
+			// recovery does not leave on this protocol, and an alert it raised
+			// recovers and closes by those checkpoints while the backend's
+			// detection runs; without them the close check closes every such
+			// alert within about a minute, as reporting no data. alarmd's own
+			// Recovery is a steady-state result, so every healthy series
+			// produces one every cycle - converting those put a hundred times
+			// Python's volume on the topic. A Recovery event has no
+			// representation in this protocol, so it produces no message here
+			// and no snapshot; the native protocol still carries it, because
+			// the choice of protocol is the revision's, not the event kind's.
 			if !contract.EventHasMessage(format, events[index].EventKind) {
 				messages[index] = nil
 				continue

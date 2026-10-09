@@ -1245,10 +1245,11 @@ func verdictOf(counts WindowHoleCounts) WindowVerdict {
 // recovery waits for the window to fill. What that costs depends on the
 // Plans' wire format, which the row carries beside this: the
 // Python-compatible exit publishes anomaly points and nothing else, so on
-// such a Plan alarmd's recovery never leaves and the consumer decides
-// recovery from the absence of anomalies -- a short window changes nothing
-// downstream. Only a standard raw event Plan waits. The page words the cost
-// per row from WireFormats; this struct states the mechanism.
+// such a Plan alarmd's recovery never leaves -- the consumer recovers and
+// closes its alerts by the checkpoints the backend's own detection writes,
+// which alarmd does not -- and a short window changes nothing downstream.
+// Only a standard raw event Plan waits. The page words the cost per row from
+// WireFormats; this struct states the mechanism.
 type WindowFill struct {
 	// Holes is required − valid on the worst window; Required the window's
 	// length in positions; PeriodSeconds the object's evaluation period, so
