@@ -75,6 +75,16 @@ type StrategyPlanRef struct {
 	SnapshotRevision string `json:"snapshot_revision"`
 	QueryRevision    string `json:"query_revision"`
 	ScheduleRevision string `json:"schedule_revision"`
+	// SourceSemantics is what the Plan's query reads; GroupBy the dimensions
+	// every series of it is told apart by - the same ones an event count's
+	// quiet is decided on - at most sixteen with GroupByTotal counting all;
+	// PromQL says the query runs as PromQL. A census reads them off one pass
+	// over the diagnose rows. All four are absent from a build before they
+	// existed, which a reader tells from SourceSemantics missing.
+	SourceSemantics []string `json:"source_semantics,omitempty"`
+	GroupBy         []string `json:"group_by,omitempty"`
+	GroupByTotal    int      `json:"group_by_total,omitempty"`
+	PromQL          bool     `json:"promql,omitempty"`
 }
 
 // StrategyDisposition is what the round decided about one item of the

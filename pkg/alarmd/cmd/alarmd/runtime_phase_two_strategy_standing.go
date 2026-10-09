@@ -49,6 +49,8 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 			Tenant: plan.Plan.TenantID, Business: plan.Plan.BusinessID, QueryGroup: string(plan.QueryGroup),
 			ObjectDigest: string(plan.ObjectDigest), SnapshotRevision: string(plan.SnapshotRevision),
 			QueryRevision: string(plan.QueryRevision), ScheduleRevision: string(plan.ScheduleRevision),
+			SourceSemantics: append([]string(nil), plan.SourceSemantics...), GroupBy: append([]string(nil), plan.GroupBy...),
+			GroupByTotal: plan.GroupByTotal, PromQL: plan.PromQL,
 		})
 	}
 	for _, disposition := range lookup.Dispositions {

@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"sync"
@@ -71,6 +72,9 @@ type eventSpanCase struct {
 	// after it takes the Plan over and before it runs a round: what it
 	// restored from the record, not anything it watched.
 	readRestored bool
+	// readDiagnose reads the strategy's row from the process's own
+	// /api/diagnose after the last round.
+	readDiagnose bool
 }
 
 // eventSpanRounds is what each round of a run did.
@@ -87,6 +91,17 @@ type eventSpanRounds struct {
 	// restored is the second process's row kind before its first round
 	// (readRestored), empty when the object is on no line.
 	restored string
+	// diagnosed is the strategy's Plans as /api/diagnose names them
+	// (readDiagnose).
+	diagnosed []diagnosedPlan
+}
+
+// diagnosedPlan is what a diagnose row says a Plan reads and groups by.
+type diagnosedPlan struct {
+	SourceSemantics []string `json:"source_semantics"`
+	GroupBy         []string `json:"group_by"`
+	GroupByTotal    int      `json:"group_by_total"`
+	PromQL          bool     `json:"promql"`
 }
 
 func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
@@ -280,11 +295,50 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 		}
 		mu.Unlock()
 	}
+	if run.readDiagnose {
+		result.diagnosed = diagnosedPlans(t, bundle, "7201")
+	}
 	if err := bundle.Shutdown(ctx); err != nil {
 		t.Fatal(err)
 	}
 	result.written = sink.snapshot()
 	return result
+}
+
+// diagnosedPlans is the given strategy's Plans on the process's own
+// /api/diagnose, every page read.
+func diagnosedPlans(t *testing.T, bundle *phaseTwoWorkerBundle, strategyID string) []diagnosedPlan {
+	t.Helper()
+	cursor := ""
+	for page := 0; page < 100; page++ {
+		target := "/api/diagnose"
+		if cursor != "" {
+			target += "?cursor=" + url.QueryEscape(cursor)
+		}
+		recorder := httptest.NewRecorder()
+		bundle.dependencies.FleetAPI.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		var body struct {
+			Strategies []struct {
+				StrategyID string          `json:"strategy_id"`
+				Plans      []diagnosedPlan `json:"plans"`
+			} `json:"strategies"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode /api/diagnose: %v (%s)", err, recorder.Body.String())
+		}
+		for _, row := range body.Strategies {
+			if row.StrategyID == strategyID {
+				return row.Plans
+			}
+		}
+		if body.NextCursor == "" {
+			break
+		}
+		cursor = body.NextCursor
+	}
+	t.Fatalf("strategy %s is not on /api/diagnose", strategyID)
+	return nil
 }
 
 // A grouped event count recovers on the zeros the query service fills in
@@ -539,5 +593,22 @@ func TestAnEventCountAtRestIsQuietOnRestoreUnderTheSameContent(t *testing.T) {
 	}
 	if !edited.quiet[7] {
 		t.Fatalf("round 7 under the new content is not quiet (rounds %v)", edited.quiet)
+	}
+}
+
+// A diagnose row names what each of its Plans reads and groups by, so one
+// pass over the rows sorts the strategies by source and grouping: the event
+// count here reads custom/event, grouped by the one dimension it is written
+// with, and the same count written with none is ungrouped.
+func TestADiagnoseRowNamesWhatItsPlanReadsAndGroupsBy(t *testing.T) {
+	grouped := runGroupedEventCount(t, eventSpanCase{rounds: 1, readDiagnose: true})
+	want := []diagnosedPlan{{SourceSemantics: []string{"custom/event"}, GroupBy: []string{"host"}, GroupByTotal: 1}}
+	if !reflect.DeepEqual(grouped.diagnosed, want) {
+		t.Fatalf("the grouped count's diagnose row names %+v, want %+v", grouped.diagnosed, want)
+	}
+	ungrouped := runGroupedEventCount(t, eventSpanCase{ungrouped: true, rounds: 1, readDiagnose: true})
+	want = []diagnosedPlan{{SourceSemantics: []string{"custom/event"}}}
+	if !reflect.DeepEqual(ungrouped.diagnosed, want) {
+		t.Fatalf("the ungrouped count's diagnose row names %+v, want %+v", ungrouped.diagnosed, want)
 	}
 }
