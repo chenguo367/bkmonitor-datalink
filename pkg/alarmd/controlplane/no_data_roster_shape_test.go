@@ -172,6 +172,10 @@ func nonZeroSources(counts map[nodata.RosterSource]int) map[nodata.RosterSource]
 //   - A static list naming hosts by identifier only cannot be read as hosts
 //     by address: the backend subscripts inst["bk_target_ip"] (base.py:185)
 //     and has no roster for it either.
+//   - A dynamic group target with the host pair: the backend expands the
+//     group to its hosts in the strategy's business (base.py:201-215) and
+//     reports the missing ones; this build matches such a target on the
+//     group's members but derives no roster from it.
 func TestARosterShapeThisCutCannotDeriveSuspendsOnlyNoData(t *testing.T) {
 	topology := legacyTarget("host_topo_node", "eq", map[string]any{"bk_obj_id": "set", "bk_inst_id": 12})
 	for name, test := range map[string]struct {
@@ -206,6 +210,13 @@ func TestARosterShapeThisCutCannotDeriveSuspendsOnlyNoData(t *testing.T) {
 			target:    legacyTarget("bk_target_ip", "eq", map[string]any{"bk_host_id": 101}),
 			suspended: []string{"bk_target_ip", "bk_target_cloud_id"},
 			attached:  []string{}, attachedAs: nodata.RosterWhole,
+		},
+		"a dynamic group target under the host pair": {
+			target:    legacyTarget("dynamic_group", "eq", map[string]any{"dynamic_group_id": "dg-1"}),
+			suspended: []string{"bk_target_ip", "bk_target_cloud_id"},
+			// Without bk_target_ip the backend returns before it reads the
+			// target (base.py:173-174), as for the topology rows.
+			attached: []string{"device_name"}, attachedAs: nodata.RosterWhole,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
