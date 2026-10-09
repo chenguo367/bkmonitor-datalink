@@ -201,7 +201,12 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst bool) {
 	set := func(to time.Time) { clock.Lock(); now = to; clock.Unlock() }
 	recheck := &lookbackRecheck{hosts: map[string]string{"192.0.2.10": "60"}}
 	evidence := make(chan lookback.EarlierReadEvidence, 4)
-	engine, err := lookback.New(lookback.Options{Recheck: recheck.read, UnspreadFirstSamples: true, Now: at,
+	// The recheck says how many bytes it delivered, as the query service's
+	// answer does: the engine counts them as the trial read finishes.
+	reported := func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+		return recheck.read(ctx, spec, deliveredBytesSink{sink})
+	}
+	engine, err := lookback.New(lookback.Options{Recheck: reported, UnspreadFirstSamples: true, Now: at,
 		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true },
 		Owned:           func() int { return 1 },
 		CurrentReadHold: func(execution.QueryGroupIdentity) time.Duration { return hold },
@@ -228,12 +233,16 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst bool) {
 	step := time.Duration(frozen.QueryFacts[frozen.Requirements[0].LogicalQueryRef].StepMillis) * time.Millisecond
 	set(heldReady.Add(-hold + execution.LoweredReadHold(hold, step) - lookback.RecheckTimeout))
 	engine.StepEarly(context.Background())
+	// Wait for the trial read to have finished, not only to have asked: the
+	// engine counts its bytes in the same step that files its answer, and a
+	// formal first read that finds it still running takes it as overtaken.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		recheck.mu.Lock()
-		read := len(recheck.specs)
-		recheck.mu.Unlock()
-		if read > 0 {
+		var earlier uint64
+		for _, source := range engine.Stats().Sources {
+			earlier += source.EarlierReadBytes
+		}
+		if earlier > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -343,4 +352,15 @@ func TestASecondAttemptTakesNoSample(t *testing.T) {
 			t.Fatalf("%s: samples %v first reads %d after a second attempt, want none", name, stats.Samples, stats.FirstReads)
 		}
 	}
+}
+
+// deliveredBytesSink states each batch's delivered bytes when the stub did
+// not, as a provider's batch does.
+type deliveredBytesSink struct{ inner execution.ProviderSeriesSink }
+
+func (sink deliveredBytesSink) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
+	if batch.Delivery.Bytes == 0 {
+		batch.Delivery.Bytes = 1
+	}
+	return sink.inner.ConsumeProviderSeries(ctx, batch)
 }
