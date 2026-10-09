@@ -28,6 +28,7 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
 // The lifecycle fixture runs the production bundle over a real redis-server
@@ -147,6 +148,13 @@ func startLifecycleFixtureOn(t *testing.T, address string, client *redis.Client,
 	cfg.PhaseTwo.Ownership.ControlLeaderRenewInterval = config.Duration(time.Minute)
 	cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(6 * time.Hour)
 	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(time.Minute)
+	// The link Console a deployment on the consumer's protocol has. Without
+	// one the open alert copy is not configured and reads no set, so the
+	// cases that publish an open alert and wait for it to be read need it.
+	console := httptest.NewServer(lifecycleConsole(address, client))
+	t.Cleanup(console.Close)
+	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	if configure != nil {
 		configure(&cfg)
 	}
@@ -629,7 +637,7 @@ func (fixture *lifecycleFixture) progressKey() string {
 func (fixture *lifecycleFixture) publishOpenAlert(dedupeMD5 string) {
 	fixture.t.Helper()
 	ctx := context.Background()
-	prefix := fixture.cfg.PhaseTwo.Linkd.Prefix()
+	prefix := lifecycleLinkPrefix
 	if err := fixture.redis.SAdd(ctx, prefix+":tenant-a:"+lifecycleStrategyID, dedupeMD5).Err(); err != nil {
 		fixture.t.Fatal(err)
 	}
@@ -700,4 +708,40 @@ func (fixture *lifecycleFixture) heldForNoOpenAlert() uint64 {
 		}
 	}
 	return held
+}
+
+// lifecycleLinkPrefix is where the fixture's link Console says the open alert
+// sets are written, on the runtime redis-server.
+const lifecycleLinkPrefix = "hook:open"
+
+// lifecycleConsole is a link Console naming the runtime redis-server under
+// lifecycleLinkPrefix, its event source keyed by the alert id, and answering
+// each reconciliation with what that strategy's set holds, as matched - so a
+// calibration agrees with the set the fixture published rather than replacing
+// it.
+func lifecycleConsole(address string, client *redis.Client) http.HandlerFunc {
+	target := openalerts.TargetBinding{EventSourceID: "source", HookName: "active", KeyPrefix: lifecycleLinkPrefix,
+		Address: address, Database: 0, Sources: []string{"source"}}
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/local-api/strategy-index/targets":
+			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{target})
+		case "/local-api/event-sources/" + target.EventSourceID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": target.EventSourceID, "revision": 1, "published": 1,
+				"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
+		default:
+			q := r.URL.Query()
+			tenant, strategy := q.Get("bk_tenant_id"), q.Get("strategy_id")
+			key := target.KeyPrefix + ":" + tenant + ":" + strategy
+			members, _ := client.SMembers(r.Context(), key).Result()
+			rows := make([]any, 0, len(members))
+			for _, fingerprint := range members {
+				rows = append(rows, map[string]any{"fingerprint": fingerprint, "status": "matched",
+					"alerts": []openalerts.Alert{{AlertID: fingerprint, EventSourceID: target.EventSourceID, Fingerprint: fingerprint, Severity: "warning"}}})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"target": target, "tenantId": tenant, "strategyId": strategy,
+				"key": key, "complete": true, "redis": map[string]any{"complete": true}, "alerts": map[string]any{"complete": true},
+				"rows": rows})
+		}
+	}
 }
