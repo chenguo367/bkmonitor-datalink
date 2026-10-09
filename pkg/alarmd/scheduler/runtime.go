@@ -52,8 +52,13 @@ func (err *SourceBlockedError) Unwrap() error { return err.Err }
 // or timeline. Reason is the gate's own word for which. The Runner ends
 // the round as view_not_executable and comes back on the same backoff a
 // blocked source gets - the record's word arrives by renewal and the view's
-// by delta, so the next round asks again.
-type ViewNotExecutableError struct{ Reason string }
+// by delta, so the next round asks again. AwaitingFirstView says the Worker
+// has not installed a view at all yet: the state every Worker starts in
+// until the Leader's first view reaches it.
+type ViewNotExecutableError struct {
+	Reason            string
+	AwaitingFirstView bool
+}
 
 func (err *ViewNotExecutableError) Error() string {
 	return "alarmd scheduler: the executable view does not allow this Query Group: " + err.Reason

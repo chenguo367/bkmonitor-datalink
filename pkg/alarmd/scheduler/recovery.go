@@ -319,7 +319,7 @@ func (coordinator *FlightCoordinator) acquireProcessQueryPermit(
 	waiter := &queryPermitWaiter{slot: slot, operation: operation, deadline: deadline, grant: make(chan *QueryPermit, 1)}
 	recovery := operation != execution.OperationNormal
 	if recovery && coordinator.limits.RecoveryQueryPermits == 0 {
-		coordinator.observeQueryPermit(ctx, operation, observability.ResultFailed, true, coordinator.queryPermitSnapshot())
+		coordinator.observeQueryPermitReason(ctx, operation, observability.ResultFailed, permitRecoveryOff, true, coordinator.queryPermitSnapshot())
 		return nil, ErrRecoveryPermitsOff
 	}
 	coordinator.mu.Lock()
@@ -332,7 +332,7 @@ func (coordinator *FlightCoordinator) acquireProcessQueryPermit(
 	coordinator.expireWaitersLocked(queue)
 	if len(*queue) >= capacity || queuedForQueryGroup(*queue, slot.QueryGroup) >= coordinator.limits.MaxQueuedItemsPerQG {
 		coordinator.mu.Unlock()
-		coordinator.observeQueryPermit(ctx, operation, observability.ResultFailed, true, coordinator.queryPermitSnapshot())
+		coordinator.observeQueryPermitReason(ctx, operation, observability.ResultFailed, permitQueueFull, true, coordinator.queryPermitSnapshot())
 		return nil, ErrQueryPermitQueueFull
 	}
 	*queue = append(*queue, waiter)
@@ -498,6 +498,34 @@ func (coordinator *FlightCoordinator) observeQueryPermit(
 	admission bool,
 	snapshot queryPermitSnapshot,
 ) {
+	// A permit not granted names why, as the query that needed it does.
+	reason := observability.ReasonNone
+	switch result {
+	case observability.Result(observability.ResultTimeout):
+		reason = permitDeadline
+	case observability.ResultPaused:
+		reason = permitCancelled
+	}
+	coordinator.observeQueryPermitReason(ctx, operation, result, reason, admission, snapshot)
+}
+
+// The words a permit that was not granted names. The deadline is the same
+// word the query that needed it carries.
+const (
+	permitDeadline    observability.ReasonCode = "QUERY_PERMIT_DEADLINE"
+	permitQueueFull   observability.ReasonCode = "QUERY_PERMIT_QUEUE_FULL"
+	permitRecoveryOff observability.ReasonCode = "QUERY_PERMIT_RECOVERY_OFF"
+	permitCancelled   observability.ReasonCode = "QUERY_PERMIT_CANCELLED"
+)
+
+func (coordinator *FlightCoordinator) observeQueryPermitReason(
+	ctx context.Context,
+	operation execution.Operation,
+	result observability.Result,
+	reason observability.ReasonCode,
+	admission bool,
+	snapshot queryPermitSnapshot,
+) {
 	if coordinator == nil || coordinator.observer == nil {
 		return
 	}
@@ -508,7 +536,7 @@ func (coordinator *FlightCoordinator) observeQueryPermit(
 	defer func() { _ = recover() }()
 	coordinator.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryAdmission,
-		Result: result, Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
+		Result: result, ReasonCode: reason, Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		QueryPermit: &observability.QueryPermitFacts{
 			QueueKind: queueKind, Admission: admission,
 			NormalWaiting: snapshot.NormalWaiting, RecoveryWaiting: snapshot.RecoveryWaiting,

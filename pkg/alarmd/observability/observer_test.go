@@ -474,8 +474,13 @@ func TestReasonNormalizationConsumesM0ObservationCatalog(t *testing.T) {
 	if got := NormalizeReason("UNKNOWN_REASON", ResultTerminal); got != ReasonOther {
 		t.Fatalf("unknown catalog reason = %q, want %q", got, ReasonOther)
 	}
-	if got := NormalizeReason(ReasonContractDeterministic, ResultTerminal); got != ReasonOther {
-		t.Fatalf("metric-only contract class leaked into logs: got %q, want %q", got, ReasonOther)
+	// A site with no finer word than the contract's class says the class.
+	// Folding it to _other, the word for an unlisted reason, made about ten
+	// sites' failures read as unnamed when they had named their class.
+	for _, class := range []ReasonCode{ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage} {
+		if got := NormalizeReason(class, ResultTerminal); got != class {
+			t.Fatalf("contract class %q normalized to %q, want itself", class, got)
+		}
 	}
 	// A failing observation whose site reported no reason is not the same fact
 	// as a site that looked and had nothing finer to say. Collapsing them meant

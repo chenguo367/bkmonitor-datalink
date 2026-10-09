@@ -332,6 +332,9 @@ func TestARefusalFromTheGateIsObservedByNameOnBothPaths(t *testing.T) {
 		t.Fatalf("Next() error = %v, want the refusal passed through", err)
 	}
 	due := observationAt(t, observations, observability.StageScheduleDue)
+	if due.AwaitingFirstView {
+		t.Fatalf("schedule_due line = %+v, want not awaiting a first view the refusal did not name", due)
+	}
 	if due.Result != observability.ResultRetrying || due.ReasonCode != observability.ReasonCode(contract.ReasonViewNotExecutable) ||
 		due.Err == nil || !strings.Contains(due.Err.Error(), "scope_mismatch") || due.Trace.QueryGroupKey != "query-group-1" {
 		t.Fatalf("schedule_due line = %+v, want retrying %s carrying the gate's word", due, contract.ReasonViewNotExecutable)
@@ -363,4 +366,51 @@ func observationAt(t *testing.T, observations []observability.Observation, stage
 	}
 	t.Fatalf("no %s observation in %+v", stage, observations)
 	return observability.Observation{}
+}
+
+// A Worker that has installed no view yet refuses every round as not in the
+// view, the state it starts in until the Leader's first view reaches it; the
+// refusal says so, and both lines carry it. Once a view is installed the same
+// refusal does not.
+func TestARefusalBeforeTheFirstViewSaysItIsAwaitingIt(t *testing.T) {
+	ctx := context.Background()
+	store := newViewGateTestStore(t)
+	session, _ := openViewGateTestSessionWithAuthority(t, store, "qg-1", 12, "obj-a")
+	gate := newViewExecutionGate()
+	_, err := gateContext(ctx, gate, "qg-1", session, nil)
+	var refusal *scheduler.ViewNotExecutableError
+	if !errors.As(err, &refusal) || !refusal.AwaitingFirstView {
+		t.Fatalf("refusal with no view installed = %v, want awaiting the first view", err)
+	}
+	gate.attach(mapView{})
+	_, err = gateContext(ctx, gate, "qg-1", session, nil)
+	if !errors.As(err, &refusal) || refusal.AwaitingFirstView {
+		t.Fatalf("refusal once a view is installed = %v, want not awaiting", err)
+	}
+
+	var observations []observability.Observation
+	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		observations = append(observations, observation)
+	})
+	awaiting := &scheduler.ViewNotExecutableError{Reason: "not_in_view", AwaitingFirstView: true}
+	source := observedProductionSlotSource{
+		next: slotSourceFunc(func(context.Context, execution.QueryGroupIdentity) (scheduler.FrozenSlot, bool, scheduler.SlotDueFacts, error) {
+			return scheduler.FrozenSlot{}, false, scheduler.SlotDueFacts{}, awaiting
+		}),
+		observer: observer,
+	}
+	_, _, _, _ = source.Next(ctx, "qg-1")
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			return execution.SlotExecutionResult{}, awaiting
+		}),
+		observer: observer,
+	}
+	_, _ = executor.Execute(ctx, execution.SlotExecutionRequest{})
+	for _, stage := range []observability.Stage{observability.StageScheduleDue, observability.StageSlotCompleted} {
+		if line := observationAt(t, observations, stage); !line.AwaitingFirstView ||
+			line.ReasonCode != observability.ReasonCode(contract.ReasonViewNotExecutable) {
+			t.Fatalf("%s line = %+v, want %s awaiting the first view", stage, line, contract.ReasonViewNotExecutable)
+		}
+	}
 }
