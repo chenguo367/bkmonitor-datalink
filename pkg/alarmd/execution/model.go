@@ -3405,6 +3405,10 @@ type PrimaryInputFact struct {
 	// target: the data was there, the target selected none of it. Set by
 	// the worker from the query completions; never part of a durable record.
 	EmptiedByTarget bool
+	// QuietWhenEmpty says a FULL, EMPTY primary is an event count of groups
+	// that came back with no group: no event in the range asked. Set by the
+	// worker the same way; never part of a durable record.
+	QuietWhenEmpty bool
 }
 
 func DerivePrimaryInputFact(input InternalExecution) (PrimaryInputFact, error) {

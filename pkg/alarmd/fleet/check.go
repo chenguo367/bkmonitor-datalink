@@ -135,7 +135,13 @@ const (
 	// owner checks the target. A strategy whose nine reporting hosts sat in
 	// one module while its target named another read EMPTY_EVERY_ROUND for a
 	// day.
-	CheckEmptyAfterTarget  Check = "EMPTY_AFTER_TARGET"
+	CheckEmptyAfterTarget Check = "EMPTY_AFTER_TARGET"
+	// Quiet is an event count of groups answered whole with no group: no
+	// event in the range asked. Detecting, nothing to do: the row is there
+	// so that "no data" is never read into an event stream at rest, and so
+	// that a storage that failed silently - which answers the same way - is
+	// one look away.
+	CheckQuiet             Check = "QUIET"
 	CheckSeriesChurning    Check = "SERIES_CHURNING"
 	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
 	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
@@ -318,6 +324,7 @@ var checkAnswers = map[Check]struct {
 
 	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
 	CheckEmptyAfterTarget:   {OwnerStrategy, GroupByStrategy},
+	CheckQuiet:              {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
@@ -405,6 +412,9 @@ var checkOrder = []Check{
 	// whole, only later than its time_delay says. Any other row of the
 	// strategy decides it.
 	CheckReadHeld,
+	// The event counts at rest: detecting, with nothing to judge. Any other
+	// row of the strategy decides it.
+	CheckQuiet,
 	// Last: the strategy runs. A reader who starts at the top meets every
 	// line that stops detection before the one that only widens it.
 	CheckConfigNoted,
