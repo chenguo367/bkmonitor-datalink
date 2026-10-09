@@ -1478,8 +1478,12 @@ type recordingPorts struct {
 	eventCount              int
 	gapMutations            []execution.PlanGapMutation
 	executeOverride         func(context.Context, execution.QueryExecutionRequest, execution.QueryExecutionConsumer) (execution.QueryExecutionCompletion, error)
-	queryAfterSeriesError   error
-	queryDeliveryBytes      []uint64
+	// queryTakes is how long the default query answer takes once it has
+	// begun, so a Slot measured in whole milliseconds measures more than
+	// zero; the in-memory answer is otherwise often done within one.
+	queryTakes            time.Duration
+	queryAfterSeriesError error
+	queryDeliveryBytes    []uint64
 
 	// stateAdmissionRule and stateAdmissionText go on the refused admission
 	// item, as the store names its rule and says its sentence.
@@ -1557,6 +1561,9 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 	}
 	if err := consumer.Begin(ctx, header); err != nil {
 		return execution.QueryExecutionCompletion{}, err
+	}
+	if ports.queryTakes > 0 {
+		time.Sleep(ports.queryTakes)
 	}
 	if err := ports.fail("query"); err != nil {
 		return execution.QueryExecutionCompletion{}, err
