@@ -155,3 +155,26 @@ func dropNoDataMemory(loaded execution.NoDataLoadResult, strategyID string) exec
 	}
 	return kept
 }
+
+// A stored key the no-data package could not have written reaches the Plan's
+// outcome as a derivation failure, by name, and nothing is remembered.
+func TestAStoredKeyThatDoesNotParseIsADerivationFailure(t *testing.T) {
+	due := noDataWiredPlan(t)
+	evaluation := int64(noDataPreflightContract(t, []execution.DuePlan{due}).Slot.EvaluationTime)
+	store := &horizonNoDataStore{
+		groups:  []execution.NoDataGroupMemory{{GroupKey: "bk_target_cloud_id=0,bk_target_ip=192.0.2.9", LastSeen: evaluation - 60}},
+		present: evaluation - 60,
+	}
+	stream := noDataWiredStream(t, due, store)
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	round, err := stream.noDataRoundFor(due, nil, execution.CompletenessFull)
+	outcome, local := noDataLocalOutcome(err)
+	if !local || outcome != nodata.OutcomeSkippedDerivationFailed {
+		t.Fatalf("noDataRoundFor() error = %v (outcome %q, local %t), want %s", err, outcome, local, nodata.OutcomeSkippedDerivationFailed)
+	}
+	if round.mutation != nil {
+		t.Fatalf("a round that could not be derived remembered %+v", round.mutation)
+	}
+}

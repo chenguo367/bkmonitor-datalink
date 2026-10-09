@@ -95,7 +95,10 @@ type SyntheticInput struct {
 // recovery while a point valued one would advance it as an absence. Producing
 // nothing leaves the window where it was, which is the only reading that says
 // "this round has no evidence".
-func SyntheticSeriesFor(input SyntheticInput) []SyntheticSeries {
+//
+// A verdict whose group cannot be named is an error, and the round with it:
+// see below.
+func SyntheticSeriesFor(input SyntheticInput) ([]SyntheticSeries, error) {
 	keys := make([]string, 0, len(input.Result.Verdicts))
 	for key, verdict := range input.Result.Verdicts {
 		if verdict == VerdictUnavailable {
@@ -119,11 +122,16 @@ func SyntheticSeriesFor(input SyntheticInput) []SyntheticSeries {
 			// This has to be right rather than approximately right. The point
 			// carries the group's identity all the way to the event, so a
 			// closing recovery built from the wrong group would end some other
-			// alert and leave the one it was for standing, which is worse than
-			// the verdict never having been made.
+			// alert and leave the one it was for standing.
+			//
+			// A key that does not parse fails the round rather than dropping
+			// the verdict. Dropped, the round would still delete the group it
+			// was closing, and the alert would stay open with nothing left to
+			// close it; failed, the round writes nothing, the memory keeps the
+			// group, and the Plan reports the round by name.
 			parsed, ok := ParseGroupKey(key)
 			if !ok {
-				continue
+				return nil, unparseableGroupKey(key)
 			}
 			group = parsed
 		}
@@ -134,7 +142,7 @@ func SyntheticSeriesFor(input SyntheticInput) []SyntheticSeries {
 		}
 		series = append(series, entry)
 	}
-	return series
+	return series, nil
 }
 
 // absentPeriods is how many periods the event says this group has been without

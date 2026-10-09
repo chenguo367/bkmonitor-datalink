@@ -42,7 +42,7 @@ func TestSyntheticSeriesAreNotProducedForAnUnavailableRound(t *testing.T) {
 		Completeness: execution.CompletenessPartial,
 		Roster:       synthRoster(group), Memory: map[string]GroupMemory{},
 	})
-	if series := SyntheticSeriesFor(SyntheticInput{
+	if series := mustSynthetic(t, SyntheticInput{
 		EvaluationTime: synthNow, PeriodSeconds: synthPeriod,
 		Result: result, Memory: result.Memory, Roster: synthRoster(group),
 	}); len(series) != 0 {
@@ -61,11 +61,11 @@ func TestSyntheticSeriesCarryTheVerdictAsAValueInAStableOrder(t *testing.T) {
 		Present: map[string]Group{present.Key(): present}, Roster: roster, Memory: map[string]GroupMemory{},
 	})
 
-	first := SyntheticSeriesFor(SyntheticInput{
+	first := mustSynthetic(t, SyntheticInput{
 		EvaluationTime: synthNow, PeriodSeconds: synthPeriod,
 		Result: result, Memory: result.Memory, Roster: roster,
 	})
-	second := SyntheticSeriesFor(SyntheticInput{
+	second := mustSynthetic(t, SyntheticInput{
 		EvaluationTime: synthNow, PeriodSeconds: synthPeriod,
 		Result: result, Memory: result.Memory, Roster: roster,
 	})
@@ -198,11 +198,22 @@ func TestSyntheticSeriesIncludeTheWholeItemVerdict(t *testing.T) {
 		EvaluationTime: synthNow, PeriodSeconds: synthPeriod, Completeness: execution.CompletenessFull,
 		Roster: Roster{Source: RosterHistory, Groups: map[string]Group{}}, Memory: map[string]GroupMemory{},
 	})
-	series := SyntheticSeriesFor(SyntheticInput{
+	series := mustSynthetic(t, SyntheticInput{
 		EvaluationTime: synthNow, PeriodSeconds: synthPeriod,
 		Result: result, Memory: result.Memory, Roster: Roster{Groups: map[string]Group{}},
 	})
 	if len(series) != 1 || series[0].Group.Key() != WholeItemGroup().Key() || series[0].Value != AbsentValue {
 		t.Fatalf("series = %+v, want one absent whole-item series", series)
 	}
+}
+
+// mustSynthetic is SyntheticSeriesFor for a case whose verdicts all name
+// groups it can rebuild: an error there is the fixture's, not the case's.
+func mustSynthetic(t *testing.T, input SyntheticInput) []SyntheticSeries {
+	t.Helper()
+	series, err := SyntheticSeriesFor(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return series
 }
