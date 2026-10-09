@@ -2418,6 +2418,9 @@ type Observation struct {
 	AssignmentIndex     *AssignmentIndexFacts
 	AssignmentSweep     *AssignmentSweepFacts
 	AssignmentApplied   *AssignmentAppliedFacts
+	// SlotDrain is one wait for in-flight Slots: a handover's, on
+	// handover_drained, or a stop's, on the shutdown line.
+	SlotDrain *SlotDrainFacts
 	// AwaitingView says a round the executable view refused was refused only
 	// because the view has not carried its Query Group yet while the Worker
 	// already holds its lease: the record arrives by renewal and the view by
@@ -3430,6 +3433,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
 	{ComponentOwnership, StageAssignmentSwept}, {ComponentOwnership, StageAssignmentApplied},
+	{ComponentOwnership, StageHandoverDrained},
 	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession}, {ComponentOwnership, StageViewInstalled},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
@@ -3463,7 +3467,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission},
-	{ComponentState, StageStateApplied},
+	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},
 	{ComponentOutput, StageEventACKed},
 	{ComponentProgress, StageProgressCommitted},
 }

@@ -681,6 +681,16 @@ Labels: `state`
 
 Replicas the fleet view counted, by whether they have applied the Activation the control plane published: acked, lagging or unknown. Unknown is a replica that reported no version or a published version that could not be read; it is never folded into acked. The three sum to the counted replicas. Written by every replica from the same shared facts, so aggregate with max, not sum.
 
+## bkmonitor_alarmd_handover_drain_seconds
+
+How long a planned handover waited for the moved Query Group's running Slot before releasing its lease; 0 for one with nothing running. The next owner cannot start the Query Group for this long.
+
+## bkmonitor_alarmd_handover_drains_total
+
+Labels: `outcome`
+
+Planned handovers - a Query Group this Worker is no longer desired for - by how the wait for its running Slot ended before the lease was released. idle: nothing was running, the release did not wait. finished: the Slot returned and the lease was released after its commit boundary. lease_ended: the lease stopped renewing first (the grace the move gave it ran out, or the store refused it), so the Slot's later writes are refused and the next owner may send its events again. stopped: the process began stopping while it waited, and the Slot was waited for within the shutdown timeout. Every outcome has a series at startup. Read finished against lease_ended for whether handovers complete inside the grace; output_unapplied_total says whether a duplicate followed.
+
 ## bkmonitor_alarmd_heap_inuse_live_bytes
 
 Live heap the runtime marked in the collection forced before the profile was read, so the two describe the same cycle.
@@ -1134,6 +1144,12 @@ Events the output sink would not write because of their own content, one each, b
 Labels: `format`, `event_kind`
 
 Events decided that the protocol has no message for, by the event's resolved wire format and kind, counted at the output write that would have carried them. Under python_compatible that is every RECOVERY: the Python protocol carries anomaly points and nothing else, so the recovery envelope is not built -- the record keeps its identity and is counted here. It says how many recoveries a deployment decides that no message carries, one per healthy series per round, and stays the same number it was when the envelope was built and dropped. A counter rather than the event_acked line's events_without_message summed: log lines are bounded by the emitter's limiter, so a sum over them is a lower bound, and a lower bound cannot say 'not much'. Every format and kind is created at startup; a kind or format this build does not name folds to _other. Read against output_events_by_wire_format_total{format}: the difference is what the broker was actually handed.
+
+## bkmonitor_alarmd_output_unapplied_total
+
+Labels: `refusal`
+
+Slots whose events the broker acknowledged and whose State write the ownership store then refused, by the refusal: the Slot stops there, Progress does not move, and the next owner redoes it from Progress and sends the same events again (same event identities). Counted where the Slot holds both facts, once per Slot. A planned handover or stop that waits for the Slot keeps this at zero; what is left is a Slot that outlived its lease - a crash, a hung Slot, a drain deadline - and a lease lost to the store. ownership_refusals_total{site="state_apply"} counts every refused State write, with or without events before it; this is the subset that sent something. Every refusal has a series at startup.
 
 ## bkmonitor_alarmd_ownership_refusals_total
 

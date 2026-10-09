@@ -135,7 +135,7 @@ func TestPhaseTwoDispatcherTakesTheEarliestDeadlineAcrossBothQueues(t *testing.T
 	defer cancel()
 	wake := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	wake <- struct{}{}
 	order := collectDispatches(t, started, len(runners))
 	stopDeadlineDispatcher(t, cancel, done)
@@ -174,7 +174,7 @@ func TestPhaseTwoDispatcherFullReadyQueueGivesUpTheLatestDeadlineForAnEarlierOne
 	defer cancel()
 	wake := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	wake <- struct{}{}
 	// Walk: 1 and 2 fill the queue; 3 arrives no earlier than either and is
 	// held back, the walk stopping at it. Dispatching 1 frees a place; the
@@ -319,7 +319,7 @@ func TestPhaseTwoDispatcherTurnedAwayShortPeriodSlotSaysWhatItLostTo(t *testing.
 	defer cancel()
 	wake := make(chan struct{}, 1)
 	done := make(chan error, 1)
-	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
+	go func() { done <- bundle.runScheduler(ctx, wake, nil, false) }()
 	wake <- struct{}{}
 	order := collectDispatches(t, started, 4)
 	want := []execution.QueryGroupIdentity{"short-a", "short-b", "short-c", "short-d"}

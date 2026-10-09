@@ -489,12 +489,13 @@ func TestRedisStoreReadControlBatchMatchesReadControl(t *testing.T) {
 // Two workers that both believe they own a Query Group, the shape a rolling
 // update produces when a new replica is assigned a Query Group an old one
 // still runs: the Assignment and the lease keep the two apart. From the
-// moment the Assignment names the new worker, every write the old worker
-// attempts under its fence is refused as a stale owner and changes
-// nothing, and its next renewal tells it the Assignment moved; the new
-// worker cannot acquire while the old lease lives (busy), and once it
-// holds the lease, by release or by expiry, its writes apply. No write of
-// the old worker lands after the move, and no window has two writers.
+// moment the Assignment names the new worker, the old worker is the
+// draining holder: its lease stays the only valid one, so the commit
+// boundary it is in still lands, and its renewal is capped at the grace's
+// end. The new worker cannot acquire while the old lease lives (busy), and
+// once it holds the lease, by release or by expiry, every write of the old
+// worker is refused as a stale owner and changes nothing, and the new
+// worker's writes apply. No window has two writers.
 func TestRedisStoreOverlappingOwnersOldWriteIsRefused(t *testing.T) {
 	for _, handover := range []struct {
 		name     string
@@ -548,24 +549,21 @@ func TestRedisStoreOverlappingOwnersOldWriteIsRefused(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("PublishAssignment(new) error = %v", err)
 			}
-			if _, err := store.Renew(ctx, old.Fence, moved, time.Minute); !errors.Is(err, ErrNotDesired) {
-				t.Fatalf("Renew(old after the move) error = %v, want ErrNotDesired", err)
+			if _, err := store.Renew(ctx, old.Fence, moved, time.Minute); err != nil {
+				t.Fatalf("Renew(old after the move) error = %v, want a renewal capped at the grace's end", err)
 			}
 			if _, err := store.Acquire(ctx, queryGroup, "worker-new", moved, time.Minute); !errors.Is(err, ErrLeaseBusy) {
 				t.Fatalf("Acquire(new while the old lease lives) error = %v, want ErrLeaseBusy", err)
 			}
-			// The old lease still lives, but the fence it carries is no
-			// longer the one the Assignment names: the old worker's writes
-			// are refused from the move on, before anyone else can write.
+			// The old lease is still the only valid one: the commit boundary
+			// the old worker is in lands, and nobody else can write yet.
 			if result, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
 				Fence: old.Fence, Namespace: "progress", Expected: []byte("cursor-1"), Value: []byte("cursor-old-2"),
-			}); !errors.Is(err, ErrStaleFence) || result != FencedCASStaleOwner {
-				t.Fatalf("FencedCompareAndSet(old during the handover window) = (%s, %v), want stale owner", result, err)
+			}); err != nil || result != FencedCASApplied {
+				t.Fatalf("FencedCompareAndSet(old during the handover window) = (%s, %v), want applied", result, err)
 			}
-			// The fence check answers the same way, and says why: the
-			// Assignment names another worker.
-			if err := store.CheckFence(ctx, old.Fence); !errors.Is(err, ErrNotDesired) {
-				t.Fatalf("CheckFence(old during the handover window) error = %v, want ErrNotDesired", err)
+			if err := store.CheckFence(ctx, old.Fence); err != nil {
+				t.Fatalf("CheckFence(old during the handover window) error = %v, want valid", err)
 			}
 
 			at := handover.takeover(t, store, old, now)
@@ -576,7 +574,7 @@ func TestRedisStoreOverlappingOwnersOldWriteIsRefused(t *testing.T) {
 			// The old worker still believes it owns the Query Group and
 			// writes under its fence: refused, and the value stands.
 			result, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
-				Fence: old.Fence, Namespace: "progress", Expected: []byte("cursor-1"), Value: []byte("cursor-old-3"),
+				Fence: old.Fence, Namespace: "progress", Expected: []byte("cursor-old-2"), Value: []byte("cursor-old-3"),
 			})
 			if !errors.Is(err, ErrStaleFence) || result != FencedCASStaleOwner {
 				t.Fatalf("FencedCompareAndSet(old after takeover) = (%s, %v), want stale owner", result, err)
@@ -585,11 +583,11 @@ func TestRedisStoreOverlappingOwnersOldWriteIsRefused(t *testing.T) {
 				t.Fatalf("CheckFence(old after takeover) error = %v, want ErrNotDesired", err)
 			}
 			value, missing, err := store.ReadControl(ctx, queryGroup, "progress")
-			if err != nil || missing || !bytes.Equal(value, []byte("cursor-1")) {
-				t.Fatalf("ReadControl(after the refused writes) = (%q, %t, %v), want cursor-1 untouched", value, missing, err)
+			if err != nil || missing || !bytes.Equal(value, []byte("cursor-old-2")) {
+				t.Fatalf("ReadControl(after the refused writes) = (%q, %t, %v), want the old worker's last landed write", value, missing, err)
 			}
 			if result, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
-				Fence: replacement.Fence, Namespace: "progress", Expected: []byte("cursor-1"), Value: []byte("cursor-2"),
+				Fence: replacement.Fence, Namespace: "progress", Expected: []byte("cursor-old-2"), Value: []byte("cursor-2"),
 			}); err != nil || result != FencedCASApplied {
 				t.Fatalf("FencedCompareAndSet(new) = (%s, %v), want applied", result, err)
 			}

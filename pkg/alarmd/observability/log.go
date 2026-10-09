@@ -831,6 +831,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if observation.AwaitingView {
 		attributes = append(attributes, slog.Bool("awaiting_view", true))
 	}
+	if facts := observation.SlotDrain; facts != nil {
+		attributes = append(attributes,
+			slog.String("drain_site", facts.Site),
+			slog.String("drain_outcome", facts.Outcome),
+			slog.Int("drain_waited", facts.Waited),
+			slog.Int("drain_cancelled", facts.Cancelled),
+			slog.Int64("drain_wait_ms", facts.WaitMS),
+		)
+	}
 	if facts := observation.AssignmentApplied; facts != nil {
 		attributes = append(attributes,
 			slog.Int("assignment_lost", facts.Lost),

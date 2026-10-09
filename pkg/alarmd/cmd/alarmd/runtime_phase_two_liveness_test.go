@@ -432,13 +432,11 @@ func TestStoppingAQueryGroupWhoseLeaseNeverEndsIsBounded(t *testing.T) {
 	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(),
 		&fakePhaseTwoControl{}, &fakePhaseTwoOwnership{runner: runner})
 	lifecycle := &phaseTwoQueryGroupLifecycle{runner: runner, cancel: func() {}, done: make(chan struct{})}
-	stopped := make(chan error, 1)
-	go func() { stopped <- bundle.stopQueryGroup(context.Background(), "query-group-1", lifecycle) }()
+	stopped := make(chan struct{})
+	bundle.maintenanceWG.Add(1)
+	go func() { bundle.handOverQueryGroup("query-group-1", lifecycle); close(stopped) }()
 	select {
-	case err := <-stopped:
-		if err != nil {
-			t.Fatalf("stop: %v", err)
-		}
+	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the control loop waited on a lease goroutine that never ended")
 	}

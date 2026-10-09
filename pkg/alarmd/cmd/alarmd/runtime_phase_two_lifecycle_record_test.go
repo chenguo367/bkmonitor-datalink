@@ -40,12 +40,14 @@ func TestTheLifecycleRecordOutlivesTheProcess(t *testing.T) {
 	at := time.Date(2026, 9, 24, 6, 0, 0, 0, time.UTC)
 	record.now = func() time.Time { at = at.Add(time.Second); return at }
 	record.start()
-	record.stop(lifecycleStopSignal, nil)
+	record.stop(lifecycleStopSignal, nil, &observability.SlotDrainFacts{
+		Site: observability.SlotDrainSiteShutdown, Outcome: observability.SlotDrainDeadline, Waited: 3, Cancelled: 1, WaitMS: 10000,
+	})
 	other := *record
 	other.replica = "pod-b"
 	other.start()
 	other.start() // pod-b's first process died without a stop
-	other.stop(lifecycleStopWorkerStopped, errors.New("the worker stopped: "+strings.Repeat("x", 2*lifecycleErrorBytes)))
+	other.stop(lifecycleStopWorkerStopped, errors.New("the worker stopped: "+strings.Repeat("x", 2*lifecycleErrorBytes)), nil)
 
 	reading, err := readLifecycle(context.Background(), reader, lifecycleRecordKey(cfg))
 	if err != nil {
@@ -54,6 +56,14 @@ func TestTheLifecycleRecordOutlivesTheProcess(t *testing.T) {
 	if len(reading.Entries) != 5 || reading.Entries[0].Replica != "pod-b" || reading.Entries[0].Event != "stop" ||
 		len(reading.Entries[0].Error) != lifecycleErrorBytes || reading.Entries[0].Build == "" {
 		t.Fatalf("entries %+v, want five, newest first, the error bounded", reading.Entries)
+	}
+	// A stop carries how its Slots drained, read back after the Pod is gone.
+	if drain := reading.Entries[3].Drain; reading.Entries[3].Replica != "pod-a" || drain == nil ||
+		drain.Outcome != observability.SlotDrainDeadline || drain.Waited != 3 || drain.Cancelled != 1 || drain.WaitMS != 10000 {
+		t.Fatalf("pod-a's stop = %+v, want its drain read back", reading.Entries[3])
+	}
+	if reading.Entries[0].Drain != nil {
+		t.Fatalf("pod-b's stop = %+v, want no drain on a stop that ran none", reading.Entries[0])
 	}
 	byReplica := map[string]lifecycleReplica{}
 	for _, summary := range reading.Replicas {

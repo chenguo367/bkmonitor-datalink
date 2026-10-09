@@ -995,6 +995,19 @@ if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_
 local current_owner = redis.call('HGET', KEYS[2], 'owner_id')
 local current_deadline = tonumber(redis.call('HGET', KEYS[2], 'deadline_ms') or '0')
 if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, '', now_ms, 0} end
+if require_assignment == '1' and redis.call('HEXISTS', KEYS[1], 'releasing_worker_id') == 1 then
+  -- The holder a move's grace protected has let go or run out, so this
+  -- grant ends the grace. The content the move brought is promoted now
+  -- rather than at the grace's end: nobody is left on the old content, and
+  -- left pending it would cap this new owner's first lease and take it away
+  -- at that instant.
+  local pending = redis.call('HGET', KEYS[1], 'pending_content_scope')
+  if pending and pending ~= '' then
+    redis.call('HSET', KEYS[1], 'content_scope', pending)
+    scope = pending
+  end
+  redis.call('HDEL', KEYS[1], 'releasing_worker_id', 'pending_content_scope', 'effective_at_ms')
+end
 local epoch = tonumber(redis.call('HGET', KEYS[2], 'owner_epoch') or '0') + 1
 redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
   'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
@@ -1028,12 +1041,16 @@ if refusal then return {refusal, 0, '', '', 0, now_ms, 0} end
 local scope, pending, effective, timeline = '', '', 0, 0
 if require_assignment == '1' then
   scope = current_content_scope(KEYS[1], now_ms)
-  local change = redis.call('HMGET', KEYS[1], 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision')
+  local change = redis.call('HMGET', KEYS[1], 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision',
+    'desired_worker_id')
   if change[1] and change[1] ~= '' then
     pending = change[1]
     effective = tonumber(change[2] or '0')
-    if effective > 0 and deadline_ms > effective then deadline_ms = effective end
   end
+  -- The fence admitted a caller the record no longer desires only as the
+  -- draining holder of a move, whose lease ends where its grace does.
+  if change[4] ~= owner_id then effective = tonumber(change[2] or '0') end
+  if effective > 0 and deadline_ms > effective then deadline_ms = effective end
   timeline = tonumber(change[3] or '0')
 end
 redis.call('HSET', KEYS[2], 'deadline_ms', deadline_ms)
@@ -1197,7 +1214,7 @@ if current_desired and current_desired == desired then
     if pending == wanted_scope then return reply() end
     local effective = lease_deadline + margin_ms
     local existing = tonumber(redis.call('HGET', KEYS[2], 'effective_at_ms') or '0')
-    if existing > effective then effective = existing end
+    if existing > effective or (holder ~= desired and existing > now_ms) then effective = existing end
     redis.call('HSET', KEYS[2], 'pending_content_scope', wanted_scope, 'effective_at_ms', effective,
       'record_revision', current_revision + 1)
     return reply()
@@ -1208,12 +1225,41 @@ if current_desired and current_desired == desired then
 end
 local generation = tonumber(redis.call('HGET', KEYS[2], 'assignment_generation') or '0') + 1
 local revision = current_revision + 1
+local holder = redis.call('HGET', KEYS[3], 'owner_id')
+local lease_deadline = tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0')
+local releasing = redis.call('HGET', KEYS[2], 'releasing_worker_id')
+-- A holder this record authorized -- its desired worker, or the holder an
+-- earlier move is still draining -- that holds a live lease and is not the
+-- new decision keeps the lease until it lets go or its grace ends.
+local draining = holder and holder ~= '' and holder ~= desired and lease_deadline > now_ms and
+  (holder == current_desired or holder == releasing)
 redis.call('HSET', KEYS[2], 'query_group', query_group, 'desired_worker_id', desired,
   'assignment_generation', generation, 'record_revision', revision, 'control_epoch', leader_epoch,
   'placement_reason', reason, 'assigned_at_ms', assigned_at)
-if wanted_scope ~= '' then redis.call('HSET', KEYS[2], 'content_scope', wanted_scope) end
-if withdraw then redis.call('HDEL', KEYS[2], 'content_scope') end
-redis.call('HDEL', KEYS[2], 'pending_content_scope', 'effective_at_ms')
+if not draining then
+  if wanted_scope ~= '' then redis.call('HSET', KEYS[2], 'content_scope', wanted_scope) end
+  if withdraw then redis.call('HDEL', KEYS[2], 'content_scope') end
+  redis.call('HDEL', KEYS[2], 'pending_content_scope', 'effective_at_ms', 'releasing_worker_id')
+  return reply()
+end
+-- The grace ends at the holder's deadline plus the margin, and a holder
+-- already draining keeps the end it was given: a later decision moves the
+-- Query Group on, never the holder's end further out.
+local existing = tonumber(redis.call('HGET', KEYS[2], 'effective_at_ms') or '0')
+local effective = lease_deadline + margin_ms
+if existing > effective or (releasing == holder and existing > now_ms) then effective = existing end
+redis.call('HSET', KEYS[2], 'releasing_worker_id', holder, 'effective_at_ms', effective)
+if withdraw then
+  redis.call('HDEL', KEYS[2], 'content_scope', 'pending_content_scope')
+elseif wanted_scope ~= '' then
+  local scope = current_content_scope(KEYS[2], now_ms)
+  if scope == '' or scope == wanted_scope then
+    redis.call('HSET', KEYS[2], 'content_scope', wanted_scope)
+    redis.call('HDEL', KEYS[2], 'pending_content_scope')
+  else
+    redis.call('HSET', KEYS[2], 'pending_content_scope', wanted_scope)
+  end
+end
 return reply()
 `)
 

@@ -265,7 +265,7 @@ func runPhaseTwoApplicationWithDependencies(
 		server.SetLiveness(bundle.liveness)
 	}
 	if err != nil {
-		lifecycle.stop(lifecycleStopStartFailed, err)
+		lifecycle.stop(lifecycleStopStartFailed, err, nil)
 		cancelRuntime()
 		cancelHTTP()
 		httpErr := waitRuntimeComponent(httpDone, time.Now().Add(cfg.ShutdownTimeout.Duration()))
@@ -300,16 +300,25 @@ func runPhaseTwoApplicationWithDependencies(
 			markPhaseTwoFatal(runtimeContext, bundle, application.health, httpErr)
 		}
 	}
-	lifecycle.stop(lifecycleStopReason(ctx.Err() != nil, bundleStoppedEarly, httpStoppedEarly), errors.Join(runErr, httpErr))
+	stopReason := lifecycleStopReason(ctx.Err() != nil, bundleStoppedEarly, httpStoppedEarly)
+	stopErr := errors.Join(runErr, httpErr)
 	cancelRuntime()
 	cancelHTTP()
-	deadline := time.Now().Add(cfg.ShutdownTimeout.Duration())
+	// The bundle drains its Slots within one shutdown timeout and releases
+	// its leases within another (phaseTwoWorkerBundle.Run).
+	bundleDeadline := time.Now().Add(2 * cfg.ShutdownTimeout.Duration())
+	httpDeadline := time.Now().Add(cfg.ShutdownTimeout.Duration())
 	if !bundleFinished {
-		runErr = waitRuntimeComponent(bundleDone, deadline)
+		runErr = waitRuntimeComponent(bundleDone, bundleDeadline)
 	}
 	if !httpFinished {
-		httpErr = waitRuntimeComponent(httpDone, deadline)
+		httpErr = waitRuntimeComponent(httpDone, httpDeadline)
 	}
+	// Written once the bundle has stopped, so the stop says how its Slots
+	// drained: a stop that cancelled Slots at the deadline is one whose
+	// events may be sent again by the next owner, and this record is the
+	// one reading of it that outlives the Pod.
+	lifecycle.stop(stopReason, stopErr, bundle.shutdownDrain())
 	result := errors.Join(
 		normalizeRuntimeShutdownError(runErr, bundleStoppedEarly),
 		normalizeRuntimeShutdownError(httpErr, httpStoppedEarly),
@@ -511,6 +520,13 @@ type phaseTwoQueryGroupLifecycle struct {
 	runner phaseTwoQueryGroupRuntime
 	cancel context.CancelFunc
 	done   chan struct{}
+	// inflight counts this Query Group's Slots that are executing, and idle
+	// is closed when it falls back to zero; both under the bundle's lock. A
+	// Slot is counted in the same step that finds its lifecycle current, so
+	// once a lifecycle is detached no Slot can start on it, and a release
+	// that waits on idle waits for exactly the Slots already running.
+	inflight int
+	idle     chan struct{}
 }
 
 type phaseTwoQueryGroupRuntime interface {
@@ -697,6 +713,13 @@ type phaseTwoWorkerBundle struct {
 	flightReleased chan execution.QueryGroupIdentity
 	shutdownOnce   sync.Once
 	shutdownErr    error
+	drainOnce      sync.Once
+	drainErr       error
+	// handoverDrain is the last planned handover's wait and shutdownDrain the
+	// stop's, for the lifecycle record and the tests; under mu.
+	handoverDrain      observability.SlotDrainFacts
+	shutdownDrainFacts *observability.SlotDrainFacts
+	slotsRunning       int
 	// dependencyDegraded is set while a control or Ownership Store call fails
 	// transiently. dependencyFailureSeq counts those failures so a reconcile
 	// pass only clears the flag when no new failure happened during the pass.
@@ -1138,7 +1161,13 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 	defer scheduleTicker.Stop()
 	defer refreshTicker.Stop()
 	defer reconcileTicker.Stop()
-	schedulerCtx, cancelScheduler := context.WithCancel(ctx)
+	// Slots execute under a context of their own that the stop signal does
+	// not reach: a stop ends dispatch and leaves the Slots already running to
+	// finish within the drain deadline, which alone cancels them (design 02
+	// §6.6). The values of ctx are kept.
+	executionCtx, cancelExecution := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelExecution()
+	dispatchStop := make(chan struct{})
 	schedulerWake := make(chan struct{}, 1)
 	schedulerDone := make(chan error, 1)
 	ticksDone := make(chan struct{})
@@ -1148,7 +1177,7 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 		defer close(ticksDone)
 		for {
 			select {
-			case <-schedulerCtx.Done():
+			case <-dispatchStop:
 				return
 			case <-scheduleTicker.C:
 				select {
@@ -1159,7 +1188,7 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 		}
 	}()
 	go func() {
-		schedulerDone <- bundle.runScheduler(schedulerCtx, schedulerWake, false)
+		schedulerDone <- bundle.runScheduler(executionCtx, schedulerWake, dispatchStop, false)
 	}()
 
 	var runErr error
@@ -1192,17 +1221,27 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 			runErr = schedulerErr
 		}
 	}
-	cancelScheduler()
+	// The drain deadline (design 02 §6.6) runs from here. DRAINING is
+	// registered first, so the leader stops placing work here while the last
+	// Slots finish. The releases that follow get a shutdown timeout of their
+	// own: a drain that used its whole deadline must not leave every lease to
+	// expire by TTL, which would hold each Query Group's next owner out for
+	// the rest of it.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), bundle.dependencies.Config.ShutdownTimeout.Duration())
+	defer cancelDrain()
+	drainErr := bundle.beginDraining(drainCtx)
+	close(dispatchStop)
 	<-ticksDone
 	if schedulerRunning {
-		schedulerErr := <-schedulerDone
+		schedulerErr := bundle.drainSlots(drainCtx, schedulerDone, cancelExecution)
 		if schedulerErr != nil && !errors.Is(schedulerErr, context.Canceled) {
 			runErr = errors.Join(runErr, schedulerErr)
 		}
 	}
+	cancelExecution()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), bundle.dependencies.Config.ShutdownTimeout.Duration())
 	defer cancel()
-	shutdownErr := bundle.Shutdown(shutdownCtx)
+	shutdownErr := errors.Join(drainErr, bundle.Shutdown(shutdownCtx))
 	if errors.Is(runErr, context.Canceled) && ctx.Err() != nil {
 		runErr = nil
 	}
@@ -1228,12 +1267,19 @@ const oneShotGenerationLimit = 16
 func (bundle *phaseTwoWorkerBundle) runScheduledOnce(ctx context.Context) error {
 	wake := make(chan struct{}, 1)
 	wake <- struct{}{}
-	return bundle.runScheduler(ctx, wake, true)
+	return bundle.runScheduler(ctx, wake, nil, true)
 }
 
+// runScheduler runs the dispatcher until ctx ends or stop is closed. Slots
+// execute under ctx. A closed stop ends dispatch without touching ctx: no
+// Slot starts after it, the Slots already running go on under ctx, and the
+// call returns context.Canceled once they have all returned. That is how a
+// stop lets the commit boundaries in flight finish (design 02 §6.6); a nil
+// stop is never closed.
 func (bundle *phaseTwoWorkerBundle) runScheduler(
 	ctx context.Context,
 	wake <-chan struct{},
+	stop <-chan struct{},
 	oneShot bool,
 ) error {
 	bundle.mu.Lock()
@@ -1250,7 +1296,7 @@ func (bundle *phaseTwoWorkerBundle) runScheduler(
 	dispatcher := newPhaseTwoRunnerDispatcher(bundle, oneShot)
 	dispatcher.start(ctx)
 	defer dispatcher.stop()
-	return dispatcher.run(ctx, wake)
+	return dispatcher.run(ctx, wake, stop)
 }
 
 func newPhaseTwoRunnerDispatcher(
@@ -1383,9 +1429,10 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 		defer dispatcher.changeExecuting(-1)
 		token := dispatcher.bundle.liveness.executionStarted(scheduled.place.deadline)
 		defer dispatcher.bundle.liveness.executionReturned(token)
-		if ctx.Err() == nil && dispatcher.bundle.isCurrentScheduledRunner(scheduled) {
+		if ctx.Err() == nil && dispatcher.bundle.enterScheduledRunner(scheduled) {
 			result.ran = true
 			func() {
+				defer dispatcher.bundle.exitScheduledRunner(scheduled.lifecycle)
 				defer startSlotTiming(runCtx, dispatcher.bundle.dependencies.Observer, observability.StageRunnerCompleted, time.Now)()
 				_, result.attempted, result.admissionDenied, result.err =
 					scheduled.lifecycle.runner.RunOneAdmitted(runCtx, func(execution.Operation) (func(), bool) {
@@ -1409,7 +1456,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) stop() {
 	dispatcher.workers.Wait()
 }
 
-func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan struct{}) error {
+func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan struct{}, stop <-chan struct{}) error {
 	var canceled error
 	ctxDone := ctx.Done()
 	liveness := dispatcher.bundle.liveness
@@ -1528,6 +1575,11 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 		case <-ctxDone:
 			canceled = ctx.Err()
 			ctxDone = nil
+		case <-stop:
+			if canceled == nil {
+				canceled = context.Canceled
+			}
+			stop = nil
 		}
 		if retryTimer != nil && !retryTimer.Stop() {
 			select {
@@ -2392,6 +2444,56 @@ func (bundle *phaseTwoWorkerBundle) isCurrentScheduledRunner(scheduled phaseTwoS
 	return !bundle.draining && !bundle.closed && bundle.runners[scheduled.queryGroup] == scheduled.lifecycle
 }
 
+// enterScheduledRunner is isCurrentScheduledRunner for a Slot about to run:
+// the same answer, and when it is yes the Slot is counted on its lifecycle
+// under the same lock. A check followed by a separate count would leave a
+// window in which the Query Group is detached and released between the two,
+// and the Slot then runs on a lease its owner has already let go.
+func (bundle *phaseTwoWorkerBundle) enterScheduledRunner(scheduled phaseTwoScheduledRunner) bool {
+	bundle.mu.Lock()
+	defer bundle.mu.Unlock()
+	if bundle.draining || bundle.closed || bundle.runners[scheduled.queryGroup] != scheduled.lifecycle {
+		return false
+	}
+	lifecycle := scheduled.lifecycle
+	if lifecycle.inflight == 0 {
+		lifecycle.idle = make(chan struct{})
+	}
+	lifecycle.inflight++
+	bundle.slotsRunning++
+	return true
+}
+
+func (bundle *phaseTwoWorkerBundle) exitScheduledRunner(lifecycle *phaseTwoQueryGroupLifecycle) {
+	bundle.mu.Lock()
+	defer bundle.mu.Unlock()
+	lifecycle.inflight--
+	bundle.slotsRunning--
+	if lifecycle.inflight == 0 {
+		close(lifecycle.idle)
+		lifecycle.idle = nil
+	}
+}
+
+// slotsInFlight is how many Slots of a lifecycle are running, and the
+// channel closed when none is; nil when none is now.
+func (bundle *phaseTwoWorkerBundle) slotsInFlight(lifecycle *phaseTwoQueryGroupLifecycle) (int, <-chan struct{}) {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	if lifecycle.inflight == 0 {
+		return 0, nil
+	}
+	return lifecycle.inflight, lifecycle.idle
+}
+
+// runningSlots is how many Slots are running in this process, detached
+// lifecycles included.
+func (bundle *phaseTwoWorkerBundle) runningSlots() int {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	return bundle.slotsRunning
+}
+
 func (bundle *phaseTwoWorkerBundle) schedulerNow() time.Time {
 	if bundle.dependencies.Now != nil {
 		return bundle.dependencies.Now()
@@ -2407,18 +2509,21 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		return errors.New("phase-two worker shutdown context is required")
 	}
 	bundle.shutdownOnce.Do(func() {
-		bundle.liveness.stopJudging()
-		bundle.mu.Lock()
-		bundle.draining = true
-		cancelMaintain := bundle.cancelMaintain
-		bundle.mu.Unlock()
-		bundle.dependencies.Health.Update(phaseTwoReadiness{State: observability.HealthDraining})
 		var result []error
-		result = append(result, bundle.register(ctx, ownership.WorkerDraining))
+		result = append(result, bundle.beginDraining(ctx))
+		bundle.mu.RLock()
+		cancelMaintain := bundle.cancelMaintain
+		bundle.mu.RUnlock()
 		if cancelMaintain != nil {
 			cancelMaintain()
 		}
-		result = append(result, waitPhaseTwoGroup(ctx, &bundle.inflightWG))
+		// The scheduler's group is waited for unless the stop's drain has
+		// already cancelled Slots that did not return: waiting again would
+		// spend the whole of this context on them and leave no time for the
+		// releases below, and every lease would expire by TTL instead.
+		if drain := bundle.shutdownDrain(); drain == nil || drain.Unreturned == 0 {
+			result = append(result, waitPhaseTwoGroup(ctx, &bundle.inflightWG))
+		}
 		bundle.mu.Lock()
 		runners := make([]*phaseTwoQueryGroupLifecycle, 0, len(bundle.runners))
 		queryGroups := make([]execution.QueryGroupIdentity, 0, len(bundle.runners))
@@ -2461,9 +2566,91 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		if bundle.shutdownErr != nil {
 			shutdownResult = observability.ResultFailed
 		}
-		bundle.observe(ctx, observability.ComponentRuntime, observability.Stage(observability.StageShutdown), shutdownResult, bundle.shutdownErr)
+		bundle.mu.RLock()
+		drain := bundle.shutdownDrainFacts
+		bundle.mu.RUnlock()
+		observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentRuntime, Stage: observability.StageShutdown, Result: shutdownResult,
+			Direction: observability.DirectionInternal, Err: bundle.shutdownErr, SlotDrain: drain,
+		})
 	})
 	return bundle.shutdownErr
+}
+
+// beginDraining is the first step of every stop, once: the replica stops
+// being judged for liveness, refuses new Slots and new Assignments, reports
+// DRAINING and registers it, so the leader stops placing work here while the
+// Slots in flight finish.
+func (bundle *phaseTwoWorkerBundle) beginDraining(ctx context.Context) error {
+	bundle.drainOnce.Do(func() {
+		bundle.liveness.stopJudging()
+		bundle.mu.Lock()
+		bundle.draining = true
+		bundle.mu.Unlock()
+		bundle.dependencies.Health.Update(phaseTwoReadiness{State: observability.HealthDraining})
+		bundle.drainErr = bundle.register(ctx, ownership.WorkerDraining)
+	})
+	return bundle.drainErr
+}
+
+// drainSlots waits for the dispatcher, already told to stop, to return: it
+// returns once every Slot in flight has. Past the drain deadline the Slots
+// still running are cancelled, and the dispatcher is waited for again --
+// they return on cancellation. What happened is kept for the shutdown line
+// and the lifecycle record.
+func (bundle *phaseTwoWorkerBundle) drainSlots(
+	ctx context.Context,
+	schedulerDone <-chan error,
+	cancelExecution context.CancelFunc,
+) error {
+	began := time.Now()
+	drain := observability.SlotDrainFacts{Site: observability.SlotDrainSiteShutdown, Waited: bundle.runningSlots()}
+	var schedulerErr error
+	select {
+	case schedulerErr = <-schedulerDone:
+		drain.Outcome = observability.SlotDrainFinished
+		if drain.Waited == 0 {
+			drain.Outcome = observability.SlotDrainIdle
+		}
+	case <-ctx.Done():
+		drain.Outcome, drain.Cancelled = observability.SlotDrainDeadline, bundle.runningSlots()
+		cancelExecution()
+		// Bounded too: a Slot that honours its context returns within
+		// moments of the cancellation, and one that has not is in a call
+		// that does not watch it, whose own timeout would only spend what the
+		// releases after this need. The stop goes on without it.
+		select {
+		case schedulerErr = <-schedulerDone:
+		case <-time.After(drainCancelGrace):
+			drain.Outcome, drain.Unreturned = observability.SlotDrainDeadlineUnreturned, bundle.runningSlots()
+		}
+	}
+	drain.WaitMS = time.Since(began).Milliseconds()
+	bundle.mu.Lock()
+	bundle.shutdownDrainFacts = &drain
+	bundle.mu.Unlock()
+	return schedulerErr
+}
+
+// drainCancelGrace is how long a stop waits, after cancelling the Slots still
+// running at its drain deadline, for them to return. A Slot that honours its
+// context returns within milliseconds; one still running a second later is
+// blocked in a call that ignores it.
+const drainCancelGrace = time.Second
+
+// shutdownDrain is the stop's wait for its Slots; nil before a stop has run
+// one.
+func (bundle *phaseTwoWorkerBundle) shutdownDrain() *observability.SlotDrainFacts {
+	if bundle == nil {
+		return nil
+	}
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	if bundle.shutdownDrainFacts == nil {
+		return nil
+	}
+	drain := *bundle.shutdownDrainFacts
+	return &drain
 }
 
 func markPhaseTwoFatal(
@@ -2874,6 +3061,9 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		}
 		bundle.removeRunnerLocked(queryGroup)
 		removed[queryGroup] = lifecycle
+		// The handover is counted here, under the lock that saw the bundle
+		// not draining, so Shutdown's wait on the group cannot begin before it.
+		bundle.maintenanceWG.Add(1)
 	}
 	bundle.setOwnedQueryGroupsLocked()
 	missing := make([]execution.QueryGroupIdentity, 0, len(desired))
@@ -2895,16 +3085,7 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 	// the Worker continue. Only invariant violations and cancellation return.
 	for queryGroup, lifecycle := range removed {
 		applied.Note(string(queryGroup), true, false)
-		if err := bundle.stopQueryGroup(ctx, queryGroup, lifecycle); err != nil {
-			bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup, err)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// The lifecycle is already detached; the lease expires by TTL.
-			bundle.markControlDependencyDegraded()
-			continue
-		}
-		bundle.observeOwnership(ctx, observability.StageAssignmentLost, observability.ResultSuccess, queryGroup, nil)
+		go bundle.handOverQueryGroup(queryGroup, lifecycle)
 	}
 	for _, queryGroup := range missing {
 		bundle.observeOwnership(ctx, observability.StageTakeoverStarted, observability.ResultStarted, queryGroup, nil)
@@ -3066,26 +3247,100 @@ func (bundle *phaseTwoWorkerBundle) startQueryGroup(
 	return true
 }
 
-func (bundle *phaseTwoWorkerBundle) stopQueryGroup(
-	ctx context.Context,
+// handOverQueryGroup lets go of a Query Group this Worker is no longer
+// desired for (design 02 §6.2 steps 2-3). Its lifecycle is already detached,
+// so no Slot starts on it. A Slot already running is waited for while the
+// lease keeps renewing: the store admits this holder until the grace the move
+// gave it ends, and caps the renewal there. The lease is released after the
+// Slot, so the commit boundary it is in lands under the lease it began under,
+// and the next owner does not send its events again.
+//
+// The wait ends with the Slot, or with the lease. Once renewal stops -- the
+// grace ran out, or the store refused the lease -- the Slot's later writes are
+// refused whatever happens, and waiting longer only keeps the next owner out.
+// A process that begins to stop meanwhile stops renewing every lease, and the
+// Slot is then waited for within the shutdown timeout, which is what the stop
+// gives its own Slots. It runs on its own goroutine under maintenanceWG, so
+// the control loop never waits on a Slot.
+func (bundle *phaseTwoWorkerBundle) handOverQueryGroup(
 	queryGroup execution.QueryGroupIdentity,
 	lifecycle *phaseTwoQueryGroupLifecycle,
-) error {
+) {
+	defer bundle.maintenanceWG.Done()
+	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
+	began := time.Now()
+	waited, idle := bundle.slotsInFlight(lifecycle)
+	outcome := observability.SlotDrainIdle
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-lifecycle.done:
+		}
+		switch {
+		case channelClosed(idle):
+			outcome = observability.SlotDrainFinished
+		case bundle.maintenanceCtx != nil && bundle.maintenanceCtx.Err() != nil:
+			outcome = observability.SlotDrainStopped
+			select {
+			case <-idle:
+			case <-time.After(bound):
+			}
+		default:
+			outcome = observability.SlotDrainLeaseEnded
+		}
+	}
+	bundle.recordHandoverDrain(queryGroup, observability.SlotDrainFacts{
+		Site: observability.SlotDrainSiteHandover, Outcome: outcome, Waited: waited,
+		WaitMS: time.Since(began).Milliseconds(),
+	})
 	lifecycle.cancel()
-	// Bounded as a lost Query Group's stop is: the control loop runs this, and
-	// the run context has no deadline, so a lease goroutine that did not end
-	// would have held the loop for good. Past the bound the lease is released
-	// anyway; a renewal still in flight then finds its fence stale and stops.
+	// Bounded as a lost Query Group's stop is: a lease goroutine that did not
+	// end would otherwise hold this one for good. Past the bound the lease is
+	// released anyway; a renewal still in flight then finds its fence stale.
 	select {
 	case <-lifecycle.done:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(bundle.dependencies.Config.ShutdownTimeout.Duration()):
+	case <-time.After(bound):
 	}
-	if err := lifecycle.runner.Release(ctx); err != nil {
-		return fmt.Errorf("phase-two release Query Group %s: %w", queryGroup, err)
+	releaseCtx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	if err := lifecycle.runner.Release(releaseCtx); err != nil {
+		bundle.observeOwnership(releaseCtx, observability.StageAssignmentLost, observability.ResultFailed, queryGroup,
+			fmt.Errorf("phase-two release Query Group %s: %w", queryGroup, err))
+		// The lease expires by its TTL.
+		bundle.markControlDependencyDegraded()
+		return
 	}
-	return nil
+	bundle.observeOwnership(releaseCtx, observability.StageAssignmentLost, observability.ResultSuccess, queryGroup, nil)
+}
+
+func channelClosed(signal <-chan struct{}) bool {
+	select {
+	case <-signal:
+		return true
+	default:
+		return false
+	}
+}
+
+// recordHandoverDrain counts one handover's wait and writes its line.
+func (bundle *phaseTwoWorkerBundle) recordHandoverDrain(queryGroup execution.QueryGroupIdentity, drain observability.SlotDrainFacts) {
+	bundle.mu.Lock()
+	bundle.handoverDrain = drain
+	bundle.mu.Unlock()
+	bundle.dependencies.Recorder.RecordHandoverDrain(drain.Outcome, time.Duration(drain.WaitMS)*time.Millisecond)
+	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageHandoverDrained,
+		Result: observability.ResultSuccess, Operation: observability.OperationTransition,
+		Direction: observability.DirectionInternal, SlotDrain: &drain,
+		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+	})
+}
+
+// lastHandoverDrain is the last planned handover's wait.
+func (bundle *phaseTwoWorkerBundle) lastHandoverDrain() observability.SlotDrainFacts {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	return bundle.handoverDrain
 }
 
 func (bundle *phaseTwoWorkerBundle) stopLostQueryGroup(
