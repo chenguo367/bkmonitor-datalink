@@ -23,6 +23,7 @@ package cmdbcache
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
@@ -215,5 +216,40 @@ func TestATargetPlanHostIdentityIsOneHostNotAUnion(t *testing.T) {
 	taught := chain.Enrich(dims("bk_target_ip", `"192.0.2.147"`, "bk_target_cloud_id", `"0"`))
 	if admit, filter, reason := chain.Admit(plan, &taught); !admit {
 		t.Errorf("a record naming 700001 by address: rejected by %s/%s, want admitted by the taught id", filter, reason)
+	}
+}
+
+// Python has two host state lists acting at different stages. The disabled
+// monitoring states (备用机/测试中/故障中, HOST_DISABLE_MONITOR_STATES) make
+// host.ignore_monitoring true and drop the record at access (filters.py:118),
+// matched as `state in host.bk_state` - a substring. The no-notice states
+// (运营中[无告警]/开发中[无告警], HOST_DISABLE_NOTICE_STATES) make
+// host.is_shielding true, which only the converge shield reads
+// (converge/shield/shielder/saas_config.py:293): detection still runs and the
+// alert exists, shielded - the alarm center's work, not alarmd's. So a
+// no-notice host's series is admitted, and a disabled one's is dropped
+// however it is named, its state string carrying more than the word included.
+func TestOnlyTheDisabledMonitoringStatesDropAHostsSeries(t *testing.T) {
+	host := func(id int, ip, state string) string {
+		return `{"bk_host_id":` + strconv.Itoa(id) + `,"bk_host_innerip":"` + ip + `","bk_cloud_id":0,"bk_biz_id":999,"bk_state":"` +
+			state + `","display_name":"h","topo_link":{"module|1":[{"bk_obj_id":"module","bk_inst_id":1}]}}`
+	}
+	noNotice, suffixed := host(710001, "192.0.2.161", "运营中[无告警]"), host(710002, "192.0.2.162", "备用机-待回收")
+	store := storeWith([]string{"710001", noNotice, "192.0.2.161|0", noNotice, "710002", suffixed, "192.0.2.162|0", suffixed}, nil)
+	chain := instanceChain(t, store, "备用机", "测试中", "故障中")
+	for _, c := range []struct {
+		name   string
+		record map[string]json.RawMessage
+		admit  bool
+	}{
+		{"a no-notice host by id", dims("bk_host_id", `"710001"`), true},
+		{"a no-notice host by alias", dims("ip", `"192.0.2.161"`, "bk_cloud_id", `0`), true},
+		{"a spare host whose state carries a suffix, by id", dims("bk_host_id", `"710002"`), false},
+		{"the same host by alias", dims("ip", `"192.0.2.162"`), false},
+	} {
+		facts := chain.Enrich(c.record)
+		if admit, filter, reason := chain.Admit(admission.PlanContext{}, &facts); admit != c.admit {
+			t.Errorf("%s: admit=%v (%s/%s), want %v", c.name, admit, filter, reason, c.admit)
+		}
 	}
 }
