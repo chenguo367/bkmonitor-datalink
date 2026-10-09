@@ -428,15 +428,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"closed reason: key_missing, json_invalid, " +
 				"structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, " +
 				"node_in_other_business, members_dropped, source_unwired, model_representation_unresolved, " +
-				"emptied_held, tenant_mismatch, address_unresolved, address_ambiguous, index_incomplete, excluded_absent. OKEmpty " +
+				"tenant_mismatch, address_unresolved, address_ambiguous, index_incomplete, excluded_absent. OKEmpty " +
 				"with node_missing is a topology reference to a node the topology cache does not list; OKEmpty with " +
 				"node_in_other_business is one whose node is listed but hosts machines under another business only; " +
 				"static Unavailable with model_representation_unresolved is a model_inst_id plan whose members the " +
 				"host cache knows no host for - a non-host model without a model_match, or a host cache without the " +
-				"canonical identity on its records. group Unavailable with emptied_held is a group read empty that is " +
-				"not yet believed: waiting a writer cycle for the emptying to hold, or held because every group the " +
-				"replica references (at least two), or many at once, emptied; the snapshot before was served until " +
-				"the staleness bound, and the group is not read as empty. The last three are ip_cloud plans: " +
+				"canonical identity on its records. A group whose writer states member_list [] is OKEmpty. The last three are ip_cloud plans: " +
 				"tenant_mismatch is a referenced group of another tenant, address_unresolved a selector none of " +
 				"whose hosts has an address inside the plan's tenant yet, address_ambiguous members left out " +
 				"because another host of the tenant shares their address. An unavailable exclusion blocks the whole " +
@@ -1505,7 +1502,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonKeyMissing},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonReadFailed},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
-		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonEmptiedHeld},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorIncomplete), targetplan.ReasonMembersDropped},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},

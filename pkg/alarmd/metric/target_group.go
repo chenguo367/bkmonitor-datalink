@@ -18,9 +18,8 @@ import (
 // TargetGroupStates are the states the dynamic group store counts its
 // groups by: referenced by a Plan; loaded, a usable snapshot held; and
 // unavailable, a snapshot that names why it cannot be used; failing, served
-// past a refresh that could not read it; emptied_pending, an empty read held
-// back until it is believed; emptied_held, held back as the writer's.
-var TargetGroupStates = []string{"referenced", "loaded", "unavailable", "failing", "emptied_pending", "emptied_held"}
+// past a refresh that could not read it.
+var TargetGroupStates = []string{"referenced", "loaded", "unavailable", "failing"}
 
 // TargetGroupReading is the dynamic group store as its health reads, by
 // TargetGroupStates.
@@ -55,8 +54,8 @@ func newTargetGroupCollector() *targetGroupCollector {
 		groups: prometheus.NewDesc(name("target_group_groups"),
 			"Dynamic groups the target group store holds, by state: referenced by a Plan; loaded, a usable snapshot "+
 				"held; unavailable, a snapshot naming why it cannot be used; failing, served past a refresh that could "+
-				"not read it (the replica's dependencies name each, since when and why); emptied_pending and "+
-				"emptied_held, an empty read held back.", []string{"state"}, nil),
+				"not read it (the replica's dependencies name each, since when and why). A group the writer states "+
+				"empty is loaded, with no members.", []string{"state"}, nil),
 		refreshFailed: prometheus.NewDesc(name("target_group_refresh_failed"),
 			"1 when the latest refresh of the dynamic groups failed: at the round trip, or Redis answered some "+
 				"group's key with an error (LOADING, BUSY, a key of another type), which the group is not read from.", nil, nil),

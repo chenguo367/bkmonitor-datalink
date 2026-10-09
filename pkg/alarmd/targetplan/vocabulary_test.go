@@ -43,7 +43,7 @@ func TestTheClosedWordsArePinnedByTheirSpelling(t *testing.T) {
 	if got, want := sorted(targetplan.SelectorReasons...), sorted(
 		"none", "key_missing", "json_invalid", "structure_invalid", "model_mismatch", "read_failed",
 		"stale", "index_unavailable", "node_missing", "node_in_other_business", "members_dropped", "source_unwired",
-		"model_representation_unresolved", "emptied_held", "tenant_mismatch", "address_unresolved", "address_ambiguous",
+		"model_representation_unresolved", "tenant_mismatch", "address_unresolved", "address_ambiguous",
 		"index_incomplete", "excluded_absent",
 	); !reflect.DeepEqual(got, want) {
 		t.Fatalf("selector reasons = %v, want %v", got, want)

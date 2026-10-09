@@ -98,20 +98,19 @@ func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing
 }
 
 // Each count of the store's health lands under its own name, and the state
-// says a failed refresh before a held emptying, a held emptying before a
-// store with nothing referenced: every count differs here, so none can
-// stand in for another. The oldest failing group is the one failing
+// says a failed refresh before a store with nothing referenced: every count
+// differs here, so none can stand in for another. The oldest failing group is the one failing
 // longest, listed first here, not the last listed.
 func TestTargetGroupHealthIsReadUnderItsOwnNames(t *testing.T) {
 	at := time.Unix(10_000, 0)
-	health := cmdbcache.GroupHealth{Referenced: 9, Loaded: 5, Unavailable: 2, EmptiedPending: 3, EmptiedHeld: 1,
+	health := cmdbcache.GroupHealth{Referenced: 9, Loaded: 5, Unavailable: 2,
 		RefreshFailed: true, Unanswered: 7, UnansweredReads: 11,
 		Failing: []cmdbcache.GroupFailure{
 			{ID: "a", Since: at.Add(-300 * time.Second), Reason: "transport"},
 			{ID: "b", Since: at.Add(-30 * time.Second), Reason: "LOADING"},
 		}}
 	reading := targetGroupReading(health, at)
-	want := map[string]int{"referenced": 9, "loaded": 5, "unavailable": 2, "failing": 2, "emptied_pending": 3, "emptied_held": 1}
+	want := map[string]int{"referenced": 9, "loaded": 5, "unavailable": 2, "failing": 2}
 	for state, count := range want {
 		if reading.Groups[state] != count {
 			t.Fatalf("%s = %d, want %d (%+v)", state, reading.Groups[state], count, reading)
@@ -132,8 +131,8 @@ func TestTargetGroupHealthIsReadUnderItsOwnNames(t *testing.T) {
 		state  string
 		loaded bool
 	}{
-		{health: cmdbcache.GroupHealth{Referenced: 2, Loaded: 2, EmptiedHeld: 2, RefreshFailed: true}, state: targetGroupRefreshFailed, loaded: true},
-		{health: cmdbcache.GroupHealth{Referenced: 2, Loaded: 2, EmptiedHeld: 2}, state: targetGroupEmptiedHeld, loaded: true},
+		{health: cmdbcache.GroupHealth{Referenced: 2, Loaded: 2, RefreshFailed: true}, state: targetGroupRefreshFailed, loaded: true},
+		{health: cmdbcache.GroupHealth{Referenced: 2, Loaded: 2}, state: targetGroupLoaded, loaded: true},
 		{health: cmdbcache.GroupHealth{Referenced: 1, Unavailable: 1}, state: targetGroupLoaded, loaded: true},
 		{health: cmdbcache.GroupHealth{}, state: targetGroupNoneReferenced},
 	} {

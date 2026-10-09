@@ -235,7 +235,6 @@ func TestUntrustedGroupFactsCannotProveExcludedMembersAbsent(t *testing.T) {
 		{"missing host identity", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502"}]}`, targetplan.ReasonMembersDropped, ""},
 		{"unlisted identity", `{"model_id":"cw-Host","model_inst_ids":["501"],"member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonMembersDropped, ""},
 		{"read failed", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonReadFailed, "failed"},
-		{"empty refresh held", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonEmptiedHeld, "empty"},
 		{"snapshot aged", `{"model_id":"cw-Host","member_list":[{"model_id":"cw-Host","model_inst_id":"502","bk_host_id":602}]}`, targetplan.ReasonStale, "aged"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -253,11 +252,6 @@ func TestUntrustedGroupFactsCannotProveExcludedMembersAbsent(t *testing.T) {
 					client.err = errors.New("read failed")
 					if err := groups.Refresh(context.Background()); err == nil {
 						t.Fatal("group refresh did not fail")
-					}
-				case "empty":
-					client.values["cw:dynamic_group:g"] = `{"model_id":"cw-Host","member_list":[]}`
-					if err := groups.Refresh(context.Background()); err != nil {
-						t.Fatal(err)
 					}
 				case "aged":
 					now = now.Add(10 * time.Minute)

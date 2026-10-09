@@ -23,7 +23,6 @@ import (
 const (
 	targetGroupNoneReferenced = "no_groups_referenced"
 	targetGroupLoaded         = "loaded"
-	targetGroupEmptiedHeld    = "emptied_held"
 	targetGroupRefreshFailed  = "refresh_failed"
 )
 
@@ -50,15 +49,13 @@ func withTargetGroups(endpoints func() []fleet.Endpoint, groups *cmdbcache.Group
 }
 
 // targetGroupEvidence is the store's health as the endpoint's writer
-// evidence at at. A failed refresh names the state before a held emptying
-// does: it is the one that says the copies are not the writer's latest.
+// evidence at at. A failed refresh names the state: it is the one that says
+// the copies are not the writer's latest.
 func targetGroupEvidence(health cmdbcache.GroupHealth, at time.Time) *fleet.WriterEvidence {
 	evidence := &fleet.WriterEvidence{Present: health.Loaded+health.Unavailable > 0, Count: health.Loaded}
 	switch {
 	case health.RefreshFailed:
 		evidence.State = targetGroupRefreshFailed
-	case health.EmptiedHeld > 0:
-		evidence.State = targetGroupEmptiedHeld
 	case health.Referenced == 0:
 		evidence.State = targetGroupNoneReferenced
 	default:
@@ -93,7 +90,7 @@ func targetGroupReading(health cmdbcache.GroupHealth, at time.Time) metric.Targe
 	reading := metric.TargetGroupReading{
 		Groups: map[string]int{
 			"referenced": health.Referenced, "loaded": health.Loaded, "unavailable": health.Unavailable,
-			"failing": len(health.Failing), "emptied_pending": health.EmptiedPending, "emptied_held": health.EmptiedHeld,
+			"failing": len(health.Failing),
 		},
 		RefreshFailed: health.RefreshFailed, UnansweredReads: health.UnansweredReads,
 	}

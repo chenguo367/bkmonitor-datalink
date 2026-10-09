@@ -50,14 +50,13 @@ func TestTargetGroupsReadTheStoreAtScrape(t *testing.T) {
 	}
 	recorder.SetTargetGroupSource(func() TargetGroupReading {
 		return TargetGroupReading{
-			Groups:        map[string]int{"referenced": 7, "loaded": 5, "unavailable": 2, "failing": 3, "emptied_pending": 1, "emptied_held": 1},
+			Groups:        map[string]int{"referenced": 7, "loaded": 5, "unavailable": 2, "failing": 3},
 			RefreshFailed: true, UnansweredReads: 12, OldestFailingSeconds: 240,
 		}
 	})
 	values = read(recorder)
 	want := map[string]float64{
 		"groups:referenced": 7, "groups:loaded": 5, "groups:unavailable": 2, "groups:failing": 3,
-		"groups:emptied_pending": 1, "groups:emptied_held": 1,
 		"bkmonitor_alarmd_target_group_refresh_failed": 1, "bkmonitor_alarmd_target_group_unanswered_reads_total": 12,
 		"bkmonitor_alarmd_target_group_oldest_failing_seconds": 240,
 	}

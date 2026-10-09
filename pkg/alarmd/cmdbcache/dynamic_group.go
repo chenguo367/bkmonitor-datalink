@@ -293,9 +293,6 @@ type GroupLookup struct {
 	Snapshot      *GroupSnapshot
 	Age           time.Duration
 	RefreshFailed bool
-	// EmptiedHeld says the store is holding back an empty read of this group
-	// (see GroupStore.Refresh) and the snapshot served is the one before it.
-	EmptiedHeld bool
 	// ReadErr is set when the id was not held and the synchronous first
 	// read failed; the snapshot is then nil.
 	ReadErr error
@@ -342,20 +339,6 @@ type GroupStore struct {
 	// refresh's read said: Redis's answer to its key, or the round trip's
 	// failure. A read of the group ends it.
 	failing map[string]groupFailure
-
-	// pending are the groups whose snapshot has members and whose reads have
-	// been empty since the time recorded; the snapshot before is served until
-	// the emptying is believed (see Refresh). unconfirmed are groups first
-	// read empty while others were pending, served as emptied_held until the
-	// same. held is how many pending groups the latest refresh judged the
-	// source's, emptiedHolds how many refreshes judged so, and emptiedChanged
-	// is told the held count and the groups it was judged against whenever
-	// that count changes.
-	pending        map[string]time.Time
-	unconfirmed    map[string]time.Time
-	held           int
-	emptiedHolds   uint64
-	emptiedChanged func(held, candidates int)
 }
 
 // GroupStoreOptions mirror StoreOptions: the same cadence and the same
@@ -367,10 +350,6 @@ type GroupStoreOptions struct {
 	// (GroupReader.Read), derived from the container by the caller.
 	ReadBound int
 	Now       func() time.Time
-	// EmptiedChanged, when set, is called after a refresh whose held-back
-	// emptying changed in size - a hold starting, growing, shrinking or
-	// ending - with the groups held and the groups that had members before.
-	EmptiedChanged func(held, candidates int)
 }
 
 func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore, error) {
@@ -392,8 +371,7 @@ func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore,
 	}
 	return &GroupStore{reader: reader, interval: options.RefreshInterval, maxAge: options.MaxAge, readBound: options.ReadBound, now: now,
 		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]groupReference),
-		pending: make(map[string]time.Time), unconfirmed: make(map[string]time.Time), failing: make(map[string]groupFailure),
-		emptiedChanged: options.EmptiedChanged}, nil
+		failing: make(map[string]groupFailure)}, nil
 }
 
 // MaxAge is the bound past which a held snapshot is not served.
@@ -465,7 +443,6 @@ func (store *GroupStore) Group(ctx context.Context, id string, interval time.Dur
 	store.referenced[id] = reference
 	snapshot, held := store.snapshots[id]
 	failedAt := store.lastFailureAt
-	_, emptiedHeld := store.pending[id]
 	if !held {
 		store.syncReads++
 	}
@@ -479,11 +456,12 @@ func (store *GroupStore) Group(ctx context.Context, id string, interval time.Dur
 		}); err != nil {
 			return GroupLookup{ReadErr: err}
 		}
-		snapshot = store.publishFirst(id, first, now)
-		failedAt, emptiedHeld = time.Time{}, false
+		store.mu.Lock()
+		store.snapshots[id] = first
+		store.mu.Unlock()
+		snapshot, failedAt = first, time.Time{}
 	}
-	return GroupLookup{Snapshot: snapshot, Age: now.Sub(snapshot.ReadAt),
-		RefreshFailed: failedAt.After(snapshot.ReadAt) || emptiedHeld, EmptiedHeld: emptiedHeld}
+	return GroupLookup{Snapshot: snapshot, Age: now.Sub(snapshot.ReadAt), RefreshFailed: failedAt.After(snapshot.ReadAt)}
 }
 
 // snapshotOf is one id's read as a snapshot. It keeps nothing of the read:
@@ -495,65 +473,6 @@ func snapshotOf(id string, read GroupRead, at time.Time) *GroupSnapshot {
 	return decodeGroup(id, read.Payload, at)
 }
 
-// emptiedRead is a read that says the group has no members: available,
-// with none kept and none refused. A group whose members were all refused is
-// not empty; it resolves incomplete.
-func emptiedRead(snapshot *GroupSnapshot) bool {
-	return snapshot.Unavailable == "" && len(snapshot.Members) == 0 && snapshot.Dropped == 0
-}
-
-// hasMembers is a snapshot a strategy finds members in.
-func hasMembers(snapshot *GroupSnapshot) bool {
-	return snapshot != nil && snapshot.Unavailable == "" && len(snapshot.Members) > 0
-}
-
-// publishFirst publishes a group's first read. A first read that is empty
-// while other groups' emptyings are pending has no snapshot before it to
-// judge by, and may be one of them: it is served as emptied_held and decided
-// with the pending ones (see Refresh) rather than read as empty.
-func (store *GroupStore) publishFirst(id string, snapshot *GroupSnapshot, at time.Time) *GroupSnapshot {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if emptiedRead(snapshot) && len(store.pending) > 0 {
-		store.unconfirmed[id] = at
-		snapshot = &GroupSnapshot{ID: id, ReadAt: at, Unavailable: targetplan.ReasonEmptiedHeld}
-	}
-	store.snapshots[id] = snapshot
-	return snapshot
-}
-
-// groupEmptiedSettle is how long a group that went from members to none has
-// to read empty before the emptying is believed: one cycle of the group cache
-// writer. The writer rewrites every group once a cycle of ten minutes,
-// dispatching one task per group to a worker pool shared with its other
-// work; when a cycle's writes land depends on the pool, its concurrency and
-// the group count, none of which its source bounds, and the cycle is the one
-// bound it states. So every group a cycle rewrote empty is read empty within
-// one cycle of the first, and they are judged together.
-const groupEmptiedSettle = 10 * time.Minute
-
-// The emptying of groups the store judges the source's rather than the
-// groups': the same proportion and floor the strategy cache writer and the
-// absent-strategy close judge a shrink of their own sets by.
-const (
-	emptiedShareDenominator = 5
-	emptiedMinimum          = 20
-)
-
-// emptiedBySource says whether flipped of candidates groups going from
-// members to none within one writer cycle is the source's doing: every group
-// that had members, when there were at least two, or at least emptiedMinimum
-// and more than a fifth of them. A group emptying alone is a group emptying -
-// a service retired, a condition that matches nothing any more - and is read
-// as it is once it has stayed empty a cycle; many at once is a writer that
-// answered nothing.
-func emptiedBySource(flipped, candidates int) bool {
-	if flipped < 2 {
-		return false
-	}
-	return flipped == candidates || (flipped >= emptiedMinimum && flipped*emptiedShareDenominator > candidates)
-}
-
 // Refresh re-reads every referenced group. A transport failure keeps every
 // snapshot and is recorded, so the next lookups say they are served past a
 // failed refresh; a missing key replaces the snapshot with an unavailable
@@ -561,39 +480,16 @@ func emptiedBySource(flipped, candidates int) bool {
 // reference nobody has asked for within its horizon is forgotten first,
 // snapshot and all.
 //
-// A group read with no members where it had some is the writer saying the
-// group emptied, and a group's members are where its strategies look for
-// the series they judge: read as it is, every series of those members is
-// out of the target, undetected, and its alert closable. The writer writes
-// an empty list when its member query answered nothing, which one group
-// emptying and a source that answered nothing for everyone both look like,
-// and it writes a cycle's groups one task at a time, so neither arrives in
-// one refresh. So an emptying is judged over a writer cycle:
-//
-//   - a group that went from members to none is pending: the snapshot before
-//     is still served, as past a failed refresh, and unavailable by name
-//     (emptied_held) once older than the staleness bound, which never closes
-//     an alert;
-//   - the pending groups are judged together against the groups that had
-//     members (emptiedBySource). At or above the line they are held for as
-//     long as they stay empty; below it, a group that has read empty for a
-//     whole cycle (groupEmptiedSettle) is published empty;
-//   - a pending group read with members again is published, and the rest's
-//     wait starts over, the groups first read during it included: a writer
-//     writing members back is partway through a cycle that will bring the
-//     others back too;
-//   - a group first read empty while others are pending waits with them.
-//
-// Known boundaries: a store referencing one group cannot tell its emptying
-// from the writer's and reads it empty after a cycle. When every group a
-// store references (two or more, fewer than emptiedMinimum) really empties
-// at once, the hold does not end until members come back, the references go
-// or the process restarts: those groups' alerts are not closed, never closed
-// wrongly, and the groups read emptied_held. A group that really emptied
-// beside groups that empty and come back in turn, one a writer cycle, has
-// its wait started over by each return and is not believed while that goes
-// on; it is held, named, and believed a cycle after the returns stop. A
-// restart forgets every pending group and reads what the writer has then.
+// A group read with an explicit empty member list is the writer saying the
+// group is empty, and it is read as that: a normal empty answer, with no
+// members (decision-017 section 4, the E ruling: a key that is there, whose
+// structure and root model check out and that states member_list: [] with no
+// contradicting model_inst_ids, is a normal empty group). Nothing is held
+// back for a writer cycle and no share of groups emptying together is
+// judged the writer's fault: the user ruled out such share-of-set gates on
+// 10-08, and a writer failure is a key missing, a document that does not
+// decode, or a read that fails, each of which keeps or names its own state
+// above. A restart reads what the writer has, as every refresh does.
 func (store *GroupStore) Refresh(ctx context.Context) error {
 	now := store.now()
 	store.mu.Lock()
@@ -606,8 +502,6 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 		if now.Sub(reference.askedAt) > horizon {
 			delete(store.referenced, id)
 			delete(store.snapshots, id)
-			delete(store.pending, id)
-			delete(store.unconfirmed, id)
 			delete(store.failing, id)
 			continue
 		}
@@ -643,72 +537,13 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 		snapshot.ReadAt = at
 	}
 	store.mu.Lock()
-	returned := false
 	for _, id := range ids {
 		current, read := next[id]
 		if !read {
 			continue
 		}
 		delete(store.failing, id)
-		if _, isPending := store.pending[id]; isPending {
-			if emptiedRead(current) {
-				continue
-			}
-			delete(store.pending, id)
-			returned = returned || hasMembers(current)
-			store.snapshots[id] = current
-			continue
-		}
-		if _, isUnconfirmed := store.unconfirmed[id]; isUnconfirmed {
-			if emptiedRead(current) {
-				continue
-			}
-			delete(store.unconfirmed, id)
-			store.snapshots[id] = current
-			continue
-		}
-		if hasMembers(store.snapshots[id]) && emptiedRead(current) {
-			store.pending[id] = at
-			continue
-		}
 		store.snapshots[id] = current
-	}
-	if returned {
-		for id := range store.pending {
-			store.pending[id] = at
-		}
-		for id := range store.unconfirmed {
-			store.unconfirmed[id] = at
-		}
-	}
-	candidates := 0
-	for _, id := range ids {
-		if hasMembers(store.snapshots[id]) {
-			candidates++
-		}
-	}
-	holding := emptiedBySource(len(store.pending), candidates)
-	if holding {
-		store.emptiedHolds++
-	} else {
-		for id, since := range store.pending {
-			if _, read := next[id]; read && at.Sub(since) >= groupEmptiedSettle {
-				store.snapshots[id] = next[id]
-				delete(store.pending, id)
-			}
-		}
-	}
-	for id, since := range store.unconfirmed {
-		if _, read := next[id]; !read || holding || len(store.pending) > 0 || at.Sub(since) < groupEmptiedSettle {
-			continue
-		}
-		store.snapshots[id] = next[id]
-		delete(store.unconfirmed, id)
-	}
-	heldBefore := store.held
-	store.held = 0
-	if holding {
-		store.held = len(store.pending)
 	}
 	store.lastError, store.unanswered = nil, 0
 	if unanswered != nil {
@@ -721,12 +556,7 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 		}
 	}
 	store.refreshes++
-	changed := store.held != heldBefore
-	held := store.held
 	store.mu.Unlock()
-	if changed && store.emptiedChanged != nil {
-		store.emptiedChanged(held, candidates)
-	}
 	return readErr
 }
 
@@ -760,12 +590,6 @@ type GroupHealth struct {
 	// SyncReads counts the reads made on a Slot path for an id not held:
 	// one per first reference, and none after, is the reading.
 	SyncReads uint64
-	// EmptiedPending is how many groups' empty reads are held back, pending
-	// or judged the source's; EmptiedHeld how many the latest refresh judged
-	// the source's; EmptiedHolds how many refreshes have judged so.
-	EmptiedPending int
-	EmptiedHeld    int
-	EmptiedHolds   uint64
 	// Unanswered is how many groups the last refresh could not read, Redis
 	// answering their keys with an error (LOADING, BUSY, a key of another
 	// type); each keeps its snapshot, served as past a failed refresh.
@@ -793,7 +617,6 @@ func (store *GroupStore) Health() GroupHealth {
 	defer store.mu.RUnlock()
 	health := GroupHealth{Referenced: len(store.referenced), RefreshFailed: store.lastError != nil,
 		ConsecutiveErrors: store.failures, Refreshes: store.refreshes, SyncReads: store.syncReads,
-		EmptiedPending: len(store.pending) + len(store.unconfirmed), EmptiedHeld: store.held, EmptiedHolds: store.emptiedHolds,
 		Unanswered: store.unanswered, UnansweredReads: store.unansweredReads}
 	for id, failure := range store.failing {
 		health.Failing = append(health.Failing, GroupFailure{ID: id, Since: failure.since, Reason: failure.reason})

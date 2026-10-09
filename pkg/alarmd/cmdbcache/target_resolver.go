@@ -103,9 +103,6 @@ func (facts *excludedGroupFacts) add(plan *contract.TargetPlanV1, lookup GroupLo
 	case result.State != targetplan.SelectorOK && result.State != targetplan.SelectorOKEmpty:
 		facts.reason = result.Reason
 		return
-	case lookup.EmptiedHeld:
-		facts.reason = targetplan.ReasonEmptiedHeld
-		return
 	case lookup.RefreshFailed:
 		facts.reason = targetplan.ReasonReadFailed
 		return
@@ -244,9 +241,6 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 		return result
 	case lookup.Age > resolver.groups.MaxAge():
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonStale
-		if lookup.EmptiedHeld {
-			result.Reason = targetplan.ReasonEmptiedHeld
-		}
 		return result
 	case snapshot.ModelID != plan.ModelID:
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelMismatch
