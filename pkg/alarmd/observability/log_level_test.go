@@ -117,6 +117,11 @@ func TestEachLineTakesTheLevelItsResultAndReasonGive(t *testing.T) {
 			if len(lines) != 1 || lines[0]["level"] != tc.level {
 				t.Fatalf("lines=%v, want one at %s", lines, tc.level)
 			}
+			// The reader of an INFO refusal needs to see why it is not a
+			// WARN: the line says it is awaiting the first view.
+			if awaiting, _ := lines[0]["awaiting_first_view"].(bool); awaiting != tc.observation.AwaitingFirstView {
+				t.Fatalf("line=%v, want awaiting_first_view only on a round refused before the first view", lines[0])
+			}
 		})
 	}
 }
