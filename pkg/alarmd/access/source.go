@@ -446,6 +446,7 @@ func appendQueryCompletion(
 		DataState: providerCompletion.DataState, Delivery: providerCompletion.Delivery,
 		RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
 		Stats: providerCompletion.Stats, Withheld: providerCompletion.Withheld, WithheldOutsideTarget: providerCompletion.WithheldOutsideTarget,
+		Range: queryRange(query),
 	})
 	// Every valid requirement receives a completion binding, also when the
 	// query delivered series. A Plan whose PRIMARY query returned no series
@@ -459,6 +460,20 @@ func appendQueryCompletion(
 	completion.CompletionBindings = append(completion.CompletionBindings,
 		readinessInvalidBindings(query, providerCompletion.Ref, attemptNo)...)
 	return completion
+}
+
+// queryRange is how long a range the query was sent asking for and how long
+// a range it accepts, and whether any requirement it serves is primary.
+func queryRange(query PlannedQuery) *execution.PhysicalQueryRange {
+	primary := false
+	for _, requirement := range query.Requirements {
+		if requirement.Role == execution.InputRolePrimary {
+			primary = true
+		}
+	}
+	return &execution.PhysicalQueryRange{Primary: primary,
+		AskedSeconds:    query.Spec.ProviderRange.End - query.Spec.ProviderRange.Start,
+		AcceptedSeconds: query.Spec.AcceptedRange.End - query.Spec.AcceptedRange.Start}
 }
 
 type physicalQueryResult struct {

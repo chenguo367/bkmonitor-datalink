@@ -225,6 +225,27 @@ type AnswerTruncation struct {
 	LastSlot  int64     `json:"last_slot,omitempty"`
 }
 
+// QueryRanges is what an object's latest round's primary queries were sent
+// asking for: per physical query, how long a range it asked the provider for
+// and how long a range it accepts, in seconds - an event count asks from its
+// lead earlier than it accepts. At most MaxQueryRanges in digest order;
+// Total counts all of them. Slot is the round's.
+type QueryRanges struct {
+	Slot   int64            `json:"slot"`
+	Total  int              `json:"total"`
+	Ranges []QueryRangeFact `json:"ranges"`
+}
+
+// QueryRangeFact is one physical query's asked and accepted range lengths.
+type QueryRangeFact struct {
+	Digest          string `json:"digest"`
+	AskedSeconds    int64  `json:"asked_seconds"`
+	AcceptedSeconds int64  `json:"accepted_seconds"`
+}
+
+// MaxQueryRanges bounds the physical queries an object keeps a range for.
+const MaxQueryRanges = 4
+
 // FailureFromPoolRecord marks a row's failure as the cooldown pool's reason,
 // not one this process observed (FailureRef.Source).
 const FailureFromPoolRecord = "pool_record"

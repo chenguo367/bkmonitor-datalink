@@ -75,6 +75,9 @@ type eventSpanCase struct {
 	// readDiagnose reads the strategy's row from the process's own
 	// /api/diagnose after the last round.
 	readDiagnose bool
+	// readQueryRanges reads the object's latest asked ranges from the
+	// process's own object detail after the last round.
+	readQueryRanges bool
 }
 
 // eventSpanRounds is what each round of a run did.
@@ -94,6 +97,21 @@ type eventSpanRounds struct {
 	// diagnosed is the strategy's Plans as /api/diagnose names them
 	// (readDiagnose).
 	diagnosed []diagnosedPlan
+	// queryRanges is the object detail's last_query_ranges
+	// (readQueryRanges).
+	queryRanges *objectQueryRanges
+}
+
+// objectQueryRanges is the object detail's account of what its latest
+// round's primary queries asked of the provider.
+type objectQueryRanges struct {
+	Slot   int64 `json:"slot"`
+	Total  int   `json:"total"`
+	Ranges []struct {
+		Digest          string `json:"digest"`
+		AskedSeconds    int64  `json:"asked_seconds"`
+		AcceptedSeconds int64  `json:"accepted_seconds"`
+	} `json:"ranges"`
 }
 
 // diagnosedPlan is what a diagnose row says a Plan reads and groups by.
@@ -297,6 +315,21 @@ func runGroupedEventCount(t *testing.T, run eventSpanCase) eventSpanRounds {
 	}
 	if run.readDiagnose {
 		result.diagnosed = diagnosedPlans(t, bundle, "7201")
+	}
+	if run.readQueryRanges {
+		owned := bundle.ownedQueryGroups()
+		if len(owned) != 1 {
+			t.Fatalf("the process owns %v, want its one object", owned)
+		}
+		recorder := httptest.NewRecorder()
+		bundle.dependencies.FleetAPI.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/objects/"+string(owned[0]), nil))
+		var body struct {
+			LastQueryRanges *objectQueryRanges `json:"last_query_ranges"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode the object detail: %v (%s)", err, recorder.Body.String())
+		}
+		result.queryRanges = body.LastQueryRanges
 	}
 	if err := bundle.Shutdown(ctx); err != nil {
 		t.Fatal(err)
@@ -610,5 +643,21 @@ func TestADiagnoseRowNamesWhatItsPlanReadsAndGroupsBy(t *testing.T) {
 	want = []diagnosedPlan{{SourceSemantics: []string{"custom/event"}}}
 	if !reflect.DeepEqual(ungrouped.diagnosed, want) {
 		t.Fatalf("the ungrouped count's diagnose row names %+v, want %+v", ungrouped.diagnosed, want)
+	}
+}
+
+// The object detail says what the event count's primary query asked of the
+// query service on its latest round: with N = 2 and R = 3 it asks five
+// periods and accepts one, so a group that does not recover can be read
+// against its strategy's windows in one step.
+func TestTheObjectDetailNamesTheRangeTheEventCountAsked(t *testing.T) {
+	run := runGroupedEventCount(t, eventSpanCase{rounds: 2, readQueryRanges: true})
+	if run.queryRanges == nil || run.queryRanges.Total != 1 || len(run.queryRanges.Ranges) != 1 ||
+		run.queryRanges.Ranges[0].AskedSeconds != 5*60 || run.queryRanges.Ranges[0].AcceptedSeconds != 60 ||
+		run.queryRanges.Ranges[0].Digest == "" || run.queryRanges.Slot == 0 {
+		t.Fatalf("the object detail names %+v, want one primary query asking 300 s and accepting 60 s at its latest Slot", run.queryRanges)
+	}
+	if asked := run.ranges[len(run.ranges)-1]; asked[1]-asked[0] != 5*60 {
+		t.Fatalf("the query service was asked %v, the range the detail should name", asked)
 	}
 }

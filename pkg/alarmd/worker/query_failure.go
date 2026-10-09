@@ -186,6 +186,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		ReasonCode: reason, Duration: time.Since(started),
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
+		QueryRanges: providerRangeFacts(completion),
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
@@ -225,6 +226,21 @@ func providerTruncationFacts(completion execution.QueryExecutionCompletion) []ob
 	for _, item := range completion.PhysicalQueries {
 		if cut := item.RouteFacts.Truncation; cut != nil {
 			facts = append(facts, observability.QueryTruncationFacts{Source: cut.SourceSemantics, Dimension: cut.Dimension})
+		}
+	}
+	return facts
+}
+
+// providerRangeFacts projects every primary physical query's range, one
+// entry each with its digest: a Query Group's primaries can differ, by an
+// expression's clauses or by Plans of different windows, and each asks its
+// own range.
+func providerRangeFacts(completion execution.QueryExecutionCompletion) []observability.QueryRangeFacts {
+	var facts []observability.QueryRangeFacts
+	for _, item := range completion.PhysicalQueries {
+		if item.Range != nil && item.Range.Primary {
+			facts = append(facts, observability.QueryRangeFacts{Digest: string(item.PhysicalQuery),
+				AskedSeconds: item.Range.AskedSeconds, AcceptedSeconds: item.Range.AcceptedSeconds})
 		}
 	}
 	return facts

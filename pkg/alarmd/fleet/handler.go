@@ -811,6 +811,12 @@ type DetailResponse struct {
 	// for -- in the listed rows' shape with listed false. Absent when the
 	// object has a listed row, which Anomaly and Facts carry.
 	Tracked *Anomaly `json:"tracked,omitempty"`
+	// LastQueryRanges is what the object's latest round's primary queries
+	// were sent asking for, from the replica that answers - present when it
+	// tracks the object, as the routed read's owner does. A grouped event
+	// count that does not recover is read against its strategy's windows
+	// here: it asks N + R periods and accepts one.
+	LastQueryRanges *QueryRanges `json:"last_query_ranges,omitempty"`
 	// TrackedBy is the replica whose latest snapshot lists the object as
 	// owned, when the answering replica does not track it, and
 	// TrackedByAsOf that snapshot's time. Best effort: right after the
@@ -1343,6 +1349,9 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	})
 	if len(body.Facts) > 0 {
 		body.Anomaly = &body.Facts[0]
+	}
+	if ranges, known := service.LocalQueryRanges(queryGroup); known {
+		body.LastQueryRanges = &ranges
 	}
 	// A healthy object has a row in no snapshot. The replica that tracks it
 	// builds one on request; another replica says which one does.

@@ -1055,6 +1055,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// A healthy object's row is in no snapshot; this replica builds it on
 	// request for the objects it tracks.
 	fleetService.SetLocalRows(fleetTracker.TrackedRow)
+	fleetService.SetLocalQueryRanges(fleetTracker.QueryRanges)
 	// Windows live under the same phase-two prefix as the rest of the runtime
 	// objects, and every replica reads them on the reconcile tick it already
 	// runs, so opening one needs neither a restart nor a release.

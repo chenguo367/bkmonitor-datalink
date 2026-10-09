@@ -35,3 +35,13 @@ func normalizeQueryTruncation(facts []QueryTruncationFacts) []QueryTruncationFac
 	}
 	return kept
 }
+
+// QueryRangeFacts is one primary physical query's range as it was sent: its
+// digest, how long a range it asked the provider for and how long a range it
+// accepts, in seconds. An event count asks from its lead earlier than it
+// accepts; any other query asks what it accepts.
+type QueryRangeFacts struct {
+	Digest          string
+	AskedSeconds    int64
+	AcceptedSeconds int64
+}
