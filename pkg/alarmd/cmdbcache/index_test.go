@@ -243,8 +243,11 @@ const monitoredByIDHost = `{"bk_host_id":700002,"bk_host_innerip":"192.0.2.148",
  "module|91":[{"bk_obj_id":"module","bk_inst_id":91},{"bk_obj_id":"biz","bk_inst_id":999}]}}`
 
 // Taking whichever identity resolved first would read the spare host's state
-// and drop a series Python keeps. The address is still resolved - the target
-// scope matches on either identity - only the attributes follow Python.
+// and drop a series Python keeps. Python looks the host up by the id and,
+// having found it, writes that host's own address over the record's and
+// returns (fullers.py:61-74); its target match then reads the written values
+// (target.py:112-120). So the keys are the id and the id's host's address,
+// and the record's own address - another host's - is not one of them.
 func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost,
@@ -266,20 +269,25 @@ func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	if facts.HostState != "运营中[需告警]" {
 		t.Fatalf("host state = %q, want the state of the host the id names", facts.HostState)
 	}
-	// Both identities still resolve, because a monitoring target may name
-	// either one.
-	address, id := false, false
+	keys := map[string]bool{}
 	for _, key := range facts.HostKeys() {
-		if key == "192.0.2.147|0" {
-			address = true
-		}
-		if key == "700002" {
-			id = true
+		keys[key] = true
+	}
+	if len(keys) != 2 || !keys["700002"] || !keys["192.0.2.148|0"] {
+		t.Fatalf("host keys = %v, want exactly the id and its host's own address", facts.HostKeys())
+	}
+	if nodes := facts.TopoNodes(); len(nodes) == 0 || containsNode(nodes, "module|85") {
+		t.Fatalf("topology = %v, want only the id's host's chain", nodes)
+	}
+}
+
+func containsNode(nodes []string, want string) bool {
+	for _, node := range nodes {
+		if node == want {
+			return true
 		}
 	}
-	if !address || !id {
-		t.Fatalf("host keys = %v, want both identities kept for target matching", facts.HostKeys())
-	}
+	return false
 }
 
 // Without a host id the address is what Python looks up, so its state is the

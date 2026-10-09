@@ -38,7 +38,9 @@ func TestExcludedMembersAreAbsentFromAdmissionAndNoDataTogether(t *testing.T) {
 	}
 	plan := admission.PlanContext{TargetPlan: &admission.TargetPlanContext{
 		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, Members: target}}
-	facts := admission.Facts{Dimensions: map[string]json.RawMessage{"bk_host_id": json.RawMessage(`101`)}}
+	dimensions := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`101`)}
+	facts := admission.Facts{Dimensions: dimensions}
+	admission.IdentityFuller{}.Fill(dimensions, &facts)
 	decision := (admission.TargetPlanFilter{}).Admit(plan, &facts)
 	if decision.Admit || !admission.DefinitelyOutside(plan, &facts, "target_plan", decision.Reason) {
 		t.Fatalf("excluded member was admitted or scope-close lost the complete verdict: %+v", decision)

@@ -7,7 +7,6 @@ package admission
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -86,26 +85,18 @@ type TargetPlanFilter struct{}
 
 func (TargetPlanFilter) Name() string { return "target_plan" }
 
-// hostIDCandidates are the host ids a record may be matched by: the
-// bk_host_id dimension when it carries one, and the bare host ids among its
-// host identities (the same dimension as the identity fuller records it,
-// and the id the host cache taught it). Address identities are not ids.
+// hostIDCandidates is the host id a record is matched by under the host_id
+// rule (decision-017 section 2.3): its bk_host_id when it carries a true one,
+// and otherwise the id the host cache found from its address - the 09-21 host
+// model exemption, for collected metrics that name their host by address.
+// That is the bk_host_id Python's fuller leaves in the record, which the CMDB
+// fuller records as HostNaming.IDKey. One id, not a union: a record that
+// carries 700002 is host 700002 whatever host its address belongs to.
 func hostIDCandidates(facts *Facts) []string {
-	candidates := make([]string, 0, 2)
-	seen := make(map[string]struct{}, 2)
-	if id := dimensionText(facts.Dimensions, contract.HostIdentityDimension); id != "" {
-		candidates, seen[id] = append(candidates, id), struct{}{}
+	if id := facts.HostNaming.IDKey; id != "" {
+		return []string{id}
 	}
-	for _, candidate := range facts.HostKeys() {
-		if candidate == "" || strings.Contains(candidate, contract.TargetPlanKeySeparator) {
-			continue
-		}
-		if _, duplicate := seen[candidate]; duplicate {
-			continue
-		}
-		candidates, seen[candidate] = append(candidates, candidate), struct{}{}
-	}
-	return candidates
+	return nil
 }
 
 func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {

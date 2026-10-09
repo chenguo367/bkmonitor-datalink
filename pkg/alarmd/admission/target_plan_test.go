@@ -22,7 +22,11 @@ func recordFacts(dimensions map[string]string) *Facts {
 		encoded, _ := json.Marshal(value)
 		raw[name] = encoded
 	}
-	return &Facts{Dimensions: raw}
+	// The identity fuller always runs first in production; the host naming a
+	// target plan reads is what it records.
+	facts := &Facts{Dimensions: raw}
+	IdentityFuller{}.Fill(raw, facts)
+	return facts
 }
 
 // The filter admits a record whose key, read by the Plan's identity, is
@@ -73,19 +77,20 @@ func TestAHostIdentityTargetReadsTheRecordsHostIdentityHoweverItCameByIt(t *test
 		t.Fatalf("record naming bk_host_id 101 = %+v", decision)
 	}
 	byAddress := recordFacts(map[string]string{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "0"})
-	byAddress.AddHostKey("192.0.2.1|0")
-	byAddress.AddHostKey("101") // what the CMDB fuller teaches it
+	// What the CMDB fuller records for a host it found by address
+	// (cmdbcache placeByAddress, Python fullers.py:106-110): the found
+	// host's id as the record's bk_host_id.
+	byAddress.HostNaming.NamedID, byAddress.HostNaming.IDKey = true, "101"
 	if decision := (TargetPlanFilter{}).Admit(plan, byAddress); !decision.Admit {
 		t.Fatalf("record named by address, host id learned from CMDB = %+v; the host identity is read however it came", decision)
 	}
 	otherHost := recordFacts(map[string]string{"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"})
-	otherHost.AddHostKey("192.0.2.2|0")
-	otherHost.AddHostKey("202")
+	otherHost.HostNaming.NamedID, otherHost.HostNaming.IDKey = true, "202"
 	if decision := (TargetPlanFilter{}).Admit(plan, otherHost); decision.Admit || decision.Reason != TargetPlanReasonOutOfTarget {
 		t.Fatalf("record of another host = %+v, want out_of_target", decision)
 	}
 	unplaced := recordFacts(map[string]string{"bk_target_ip": "192.0.2.3", "bk_target_cloud_id": "0"})
-	unplaced.AddHostKey("192.0.2.3|0") // the address alone: CMDB did not know it
+	// The address alone: CMDB did not know it, so no id was written.
 	if decision := (TargetPlanFilter{}).Admit(plan, unplaced); decision.Admit || decision.Reason != TargetPlanReasonKeyMissing {
 		t.Fatalf("record with no host id = %+v, want target_key_missing", decision)
 	}

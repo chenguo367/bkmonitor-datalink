@@ -36,7 +36,7 @@ func NewHostTopologyFuller(store *Store) *HostTopologyFuller {
 
 func (*HostTopologyFuller) Name() string { return "cmdb_host_topology" }
 
-func (fuller *HostTopologyFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
+func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, facts *admission.Facts) {
 	if fuller == nil || fuller.store == nil {
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
@@ -60,52 +60,118 @@ func (fuller *HostTopologyFuller) Fill(_ map[string]json.RawMessage, facts *admi
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
-	hostKeys := facts.HostKeys()
-	if len(hostKeys) == 0 {
+	// Which host the record is about is decided the way Python's
+	// TopoNodeFuller decides it (fullers.py:55-110): by bk_host_id when the
+	// record carries a true one, else by service instance, else by address,
+	// stopping at the first that resolves. Its host status filter and its
+	// target match then read the record as the fuller left it, so the host
+	// those judge is the one this order picks - and only that host: the
+	// identities of a record are not a union of everything that resolves.
+	if id := facts.HostNaming.IDKey; id != "" {
+		if host, found := index.Lookup(id); found {
+			placeByID(facts, id, host)
+			return
+		}
+		// An id CMDB does not know is a host CMDB does not know: the status
+		// filter looks it up by that id and nothing else, whatever the
+		// address below resolves to. Python still takes the topology from
+		// the address, and so does this.
+	}
+	if instanceResolves(index, facts) {
+		// Python's service-instance branch comes before the address one and
+		// returns when it resolves; the next fuller is that branch.
 		return
 	}
-	// A series names one host, but it may name it by more than one identity
-	// (address and host id), and the two are not guaranteed to agree. The node
-	// set is the union of everything that resolves, so a host in several
-	// modules carries all of its chains.
-	nodes := make([]string, 0, 8)
-	// Resolution below teaches the record identities it did not arrive with,
-	// so the keys to look up are taken before the fuller starts adding any.
-	lookups := append([]string(nil), hostKeys...)
-	// Two different questions are answered below, and only one of them is
-	// about a single host.
-	//
-	// Whether CMDB knows this host, and what state it is in, is that one: the
-	// host Python would have looked up, by id whenever the record carried one
-	// and by address only otherwise. Python never falls back from an unknown
-	// id to the address, so an id CMDB does not know is a host CMDB does not
-	// know. Resolving the address instead would answer "known" out of a
-	// different host's entry, and keep a series Python drops.
+	address, cloud := fullerAddress(dimensions)
+	if address != "" {
+		if host, found := index.Lookup(address + "|" + cloud); found {
+			placeByAddress(dimensions, facts, cloud, host)
+			resolveHostState(index, facts)
+			return
+		}
+	}
 	resolveHostState(index, facts)
-	// Which topology the record sits in, and which identities a target may
-	// name it by, is the other question, and there every identity counts: a
-	// monitoring target matches on either one. That is TargetCondition's own
-	// rule rather than the host status filter's, so the union below is not
-	// narrowed to the identity the attributes came from - including when that
-	// identity resolved to nothing.
-	for _, key := range lookups {
-		host, found := index.Lookup(key)
-		if !found {
-			continue
-		}
-		nodes = append(nodes, host.TopoNodes...)
-		// Resolving by one identity teaches the record its other identity, so
-		// a target that names the host the other way still matches.
-		if host.HostID != "" {
-			facts.AddHostKey(host.HostID)
-		}
-		if host.IP != "" {
-			facts.AddHostKey(host.IP + "|" + host.CloudID)
+}
+
+// placeByID is Python's host-by-id branch: the host's own address and cloud
+// replace the record's, its topology is the only topology, and nothing else
+// is consulted (fullers.py:61-74). The address the record arrived with no
+// longer counts for a target - a host that changed its address, or an address
+// reused by another host, would otherwise put the record in two hosts' scope.
+func placeByID(facts *admission.Facts, id string, host *HostFacts) {
+	keys := []string{id}
+	if host.IP != "" {
+		keys = append(keys, host.IP+"|"+host.CloudID)
+	}
+	facts.Set(contract.AttributeHostIdentity, keys)
+	facts.SetTopoNodes(host.TopoNodes)
+	facts.HostNaming.NamedAddress, facts.HostNaming.NamedCloud = true, true
+	facts.HostNaming.AddressKey = host.IP + "|" + host.CloudID
+	facts.HostResolved = true
+	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
+	facts.HostAttributes = host.Attributes
+}
+
+// placeByAddress is Python's address branch (fullers.py:92-110): it writes the
+// cloud it looked the host up in and the host's topology, and the host's id
+// when the record has no bk_host_id dimension at all - one that is there but
+// empty is left as it is. bk_target_ip is not written. The status filter then
+// finds the host by the written id, which is how a host spelled ip, or given
+// without its cloud, is judged by its state.
+func placeByAddress(dimensions map[string]json.RawMessage, facts *admission.Facts, cloud string, host *HostFacts) {
+	facts.SetTopoNodes(host.TopoNodes)
+	naming := &facts.HostNaming
+	if !naming.NamedID {
+		naming.NamedID, naming.IDKey = true, host.HostID
+	}
+	naming.NamedCloud = true
+	naming.AddressKey = admission.LookupAddressKey(admission.TruthyDimension(dimensions, "bk_target_ip"), cloud)
+	naming.Usable = admission.TruthyDimension(dimensions, "bk_target_ip") != "" || naming.IDKey != ""
+	keys := make([]string, 0, 2)
+	if naming.IDKey != "" {
+		keys = append(keys, naming.IDKey)
+	}
+	if address := admission.TargetAddressKey(dimensions, cloud); address != "" {
+		keys = append(keys, address)
+	}
+	facts.Set(contract.AttributeHostIdentity, keys)
+}
+
+// fullerAddress is the address Python's fuller looks a host up by: bk_target_ip
+// or ip, whichever is true first, in bk_target_cloud_id or bk_cloud_id or
+// "0" the same way. Truthiness, not presence: an empty bk_target_ip falls
+// through to ip, and a zero cloud dimension falls through to the next. The
+// target match reads the same dimensions by presence instead, which is why
+// the two are built separately.
+func fullerAddress(dimensions map[string]json.RawMessage) (string, string) {
+	address := admission.TruthyDimension(dimensions, "bk_target_ip")
+	if address == "" {
+		address = admission.TruthyDimension(dimensions, "ip")
+	}
+	cloud := admission.TruthyDimension(dimensions, "bk_target_cloud_id")
+	if cloud == "" {
+		cloud = admission.TruthyDimension(dimensions, "bk_cloud_id")
+	}
+	if cloud == "" {
+		cloud = "0"
+	}
+	return address, cloud
+}
+
+// instanceResolves is whether Python's service-instance branch would place the
+// record: the instance cache holds instances and one of the record's resolves.
+// An empty instance cache resolves nothing there, so Python goes on to the
+// address; the instance fuller names that gap separately.
+func instanceResolves(index *Index, facts *admission.Facts) bool {
+	if index.ServiceInstances() == 0 {
+		return false
+	}
+	for _, key := range facts.ServiceInstanceKeys() {
+		if _, found := index.LookupServiceInstance(key); found {
+			return true
 		}
 	}
-	if len(nodes) > 0 {
-		facts.SetTopoNodes(nodes)
-	}
+	return false
 }
 
 // resolveHostState answers whether CMDB knows the host the record names and
