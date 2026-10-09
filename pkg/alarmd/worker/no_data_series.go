@@ -95,7 +95,10 @@ func dimensionText(raw map[string]json.RawMessage) map[string]string {
 // dataset, a primary binding, the same batch, the same evaluator, the same
 // recovery gate, the same state writer. The one thing that marks them is the
 // kind on the input, and that is what decides they are judged against the
-// no-data level rather than the strategy's declared ones.
+// no-data level rather than the strategy's declared ones. The one exception
+// to the gate is the close of a group the roster dropped: it is the absence's
+// last word, sent once and then forgotten, so the gate is not asked about it
+// (completedSeries.closing).
 func (stream *streamedExecution) noDataRoundFor(
 	due execution.DuePlan, seen []map[string]string, completeness execution.Completeness,
 ) (noDataRound, error) {

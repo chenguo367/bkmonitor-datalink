@@ -54,8 +54,9 @@ func hostIDGroupKey(id string) string {
 // A new process runs round 2, so the empty g1 is what its group store reads
 // first. The close is read where it is decided, in the memory: host 3 is
 // gone from it and was not raised again, hosts 1 and 2 keep their round 1
-// absences. What becomes of the close on its way out of a process that did
-// not raise the alert is the open alert gate's matter and is not read here.
+// absences. It is also read where it lands: host 3's alert gets its one
+// RECOVERY on round 2, under the identity round 1 raised it with, although
+// the process that sends it never raised it and has read no open alert set.
 func TestAMemberAnotherSelectorStillHoldsIsNotClosedWhenOneGroupEmpties(t *testing.T) {
 	strategy := lifecycleStrategy{revision: 7, continuous: 1, dimensions: []string{"bk_host_id"},
 		edit: func(item map[string]any) {
@@ -108,10 +109,11 @@ func TestAMemberAnotherSelectorStillHoldsIsNotClosedWhenOneGroupEmpties(t *testi
 				"still holds it, so nothing closed it", host, firstAbsent, held, opened)
 		}
 	}
-	for _, event := range fixture.noDataEventsWhere("bk_host_id", "3")[1:] {
-		if event.EventKind == contract.TriggerEventAbnormal {
-			t.Fatalf("host 3, which only g1 selected, was raised again on round 2: %+v", event)
-		}
+	third := fixture.noDataEventsWhere("bk_host_id", "3")
+	if len(third) != 2 || third[1].EventKind != contract.TriggerEventRecovery ||
+		third[1].EvaluationTime != fixture.evaluationAt(2) || third[1].DedupeMD5 != third[0].DedupeMD5 {
+		t.Fatalf("host 3, which only g1 selected, has no-data events %+v; want its round 1 ABNORMAL and one "+
+			"RECOVERY on round 2 under the same identity: its absence is closed once", third)
 	}
 	if firstAbsent, held := fixture.absenceOfGroup(hostIDGroupKey("3")); held {
 		t.Fatalf("host 3 is still remembered with an absence from %d after nothing selects it; its absence is closed "+
