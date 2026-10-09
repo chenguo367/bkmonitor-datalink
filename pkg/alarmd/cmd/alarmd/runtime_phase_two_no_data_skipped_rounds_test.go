@@ -69,8 +69,8 @@ func outcomesAre(t *testing.T, round int64, got map[string]int, want map[string]
 // A record a newer build wrote is neither read nor written.
 //
 // decision-008 section 3: a record whose schema this build does not know reads
-// as unreadable, and it is kept as it is, not cleared. decision-018 section 1.2
-// (which narrowed unreadable to exactly this case): the round that meets one
+// as unreadable, and it is kept as it is, not cleared. decision-018 section 1.2,
+// for an older build meeting a newer build's record: the round that meets one
 // produces no synthetic series and no mutation and does not fail; while that
 // lasts the Plan's no-data detection is paused, and once a build that can read
 // the record is back the absence is still counted from its first_absent. The
