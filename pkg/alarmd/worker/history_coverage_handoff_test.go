@@ -139,7 +139,7 @@ func TestEveryNamedWindowFieldAndThePrimaryFactReachTheObservation(t *testing.T)
 	window := execution.WindowCoverage{
 		Plan:    execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"},
 		LevelID: 5, Series: "abc", Valid: 2, Required: 9, End: 540,
-		Missing: []int64{120, 180}, MissingTotal: 6, Unusable: []int64{240}, UnusableTotal: 1,
+		Missing: []int64{120, 180}, MissingTotal: 6, Unusable: []int64{240}, UnusableTotal: 1, Inactive: []int64{180, 240},
 		Guarded: true, GuardReason: "CONFIG_DRIFT", Fresh: true}
 	facts := historyCoverageFacts(execution.HistoryCoverage{Levels: 1, Short: 1, WorstValid: 2, WorstRequired: 9, Windows: []execution.WindowCoverage{window}})
 	if facts == nil || len(facts.Windows) != 1 {

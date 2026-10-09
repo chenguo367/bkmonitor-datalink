@@ -2115,6 +2115,12 @@ type WindowCoverage struct {
 	MissingTotal  uint32
 	Unusable      []int64
 	UnusableTotal uint32
+	// Inactive are the listed holes, Missing or Unusable, whose own
+	// evaluation time the window's Level schedule says is outside its
+	// effective time; set by the Worker at commit, from the schedule, for the
+	// holes whose time it can tell. A listed hole not in it is in hours or
+	// not known.
+	Inactive []int64
 	// Guarded says the verdict reported for this window was held over from a
 	// guard, and GuardReason the reason that guard was established with --
 	// per window, because a round's one reason is the fold over its windows

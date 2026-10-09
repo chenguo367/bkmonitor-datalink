@@ -97,6 +97,10 @@ type SlotExecutionCoordinator struct {
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
 	noDataSkips noDataSkipStreaks
+	// effectiveSeen is when each Plan's effective-time requirement came into
+	// effect for this process, the bound below which a window hole's minute
+	// is not judged against the schedule. See out_of_hours.go.
+	effectiveSeen effectiveTimeSeen
 }
 
 type processProvisionalReservations struct {
@@ -1620,6 +1624,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		return execution.SlotExecutionResult{}, err
 	}
 
+	coordinator.markOutOfHours(ctx, header, &attribution.Coverage)
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
 		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
@@ -2743,7 +2748,8 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 			Series: string(window.Series), Level: window.LevelID, Valid: window.Valid, Required: window.Required, End: window.End,
 			Missing: append([]int64(nil), window.Missing...), MissingTotal: window.MissingTotal,
 			Unusable: append([]int64(nil), window.Unusable...), UnusableTotal: window.UnusableTotal,
-			Guarded: window.Guarded, GuardReason: string(window.GuardReason), Fresh: window.Fresh,
+			Inactive: append([]int64(nil), window.Inactive...),
+			Guarded:  window.Guarded, GuardReason: string(window.GuardReason), Fresh: window.Fresh,
 		})
 	}
 	return facts

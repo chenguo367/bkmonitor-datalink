@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -236,6 +237,15 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, s
 	}
 	rows := make([]WindowRow, 0, len(facts.Windows))
 	for _, window := range facts.Windows {
+		inactive := make(map[int64]bool, len(window.Inactive))
+		for _, minute := range window.Inactive {
+			inactive[minute] = true
+		}
+		outside := func(hole *WindowHole, minute int64) {
+			if inactive[minute] {
+				hole.OutsideEffectiveTime, hole.Reason = true, contract.ReasonEffectiveTimeInactive
+			}
+		}
 		row := WindowRow{
 			Key:      windowKey(window.Strategy, window.Series, window.Level),
 			Strategy: window.Strategy, Business: window.Business, Series: window.Series, Level: window.Level,
@@ -277,6 +287,7 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, s
 				hole.Cause = HoleNotInMemory
 				row.HolesBy.NotInMemory++
 			}
+			outside(&hole, minute)
 			row.Holes = append(row.Holes, hole)
 		}
 		for _, minute := range window.Unusable {
@@ -284,6 +295,7 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, s
 			if mark, found := roundAt(rounds, minute); found {
 				hole.Round, hole.Reason, hole.Inferred = mark.kindWord(), mark.reasonWord(), mark.endInferred
 			}
+			outside(&hole, minute)
 			row.HolesBy.Unusable++
 			row.Holes = append(row.Holes, hole)
 		}

@@ -1059,6 +1059,13 @@ type WindowHole struct {
 	Round    string `json:"round,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Inferred bool   `json:"inferred,omitempty"`
+	// OutsideEffectiveTime says the window's Level schedule puts the hole's
+	// own evaluation time outside its effective time: the Worker asked the
+	// schedule for that minute. Reason then reads EFFECTIVE_TIME_INACTIVE
+	// whatever the round at that minute did -- answered empty, could not
+	// query, was given up or warming -- because out of hours nothing was due
+	// to be detected; Round keeps what it did.
+	OutsideEffectiveTime bool `json:"outside_effective_time,omitempty"`
 }
 
 // WindowHoleCounts is the holes of one window by cause, over every hole:
