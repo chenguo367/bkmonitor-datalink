@@ -226,7 +226,7 @@ func TestTriggerEventSinkShutdownDeadlineStartsClientCloseAttempt(t *testing.T) 
 		if !errors.Is(err, sarama.ErrClosedClient) {
 			t.Fatalf("inflight WriteBatch() error = %v, want closed client", err)
 		}
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		t.Fatal("test producer did not observe the client-close attempt")
 	}
 	if err := sink.Close(); err != nil {
@@ -313,7 +313,7 @@ func TestTriggerEventSinkForcedShutdownDoesNotHideProducerCloseFailure(t *testin
 	}
 	select {
 	case <-writeDone:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		t.Fatal("test producer did not observe the client-close attempt")
 	}
 	if err := sink.Close(); !errors.Is(err, want) {
@@ -576,3 +576,7 @@ func waitForTriggerEventSinkClosing(t *testing.T, sink *TriggerEventSink) {
 		}
 	}
 }
+
+// eventWatchdog bounds a wait for something the test expects to happen: a
+// hang, not a speed. See the same constant in cmd/alarmd's tests.
+const eventWatchdog = 10 * time.Second

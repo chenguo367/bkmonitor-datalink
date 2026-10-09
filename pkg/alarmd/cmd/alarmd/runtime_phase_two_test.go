@@ -167,7 +167,7 @@ func TestRunPhaseTwoApplicationBoundsHTTPShutdownWhenBundleOpenFails(t *testing.
 		if !errors.Is(err, want) || !errors.Is(err, ErrApplicationShutdownTimeout) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want open and shutdown timeout", err)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		close(httpRelease)
 		<-done
 		t.Fatal("bundle open failure waited indefinitely for HTTP shutdown")
@@ -221,7 +221,7 @@ func TestRunPhaseTwoApplicationCancelsWorkerAndMarksFatalWhenHTTPStopsEarly(t *t
 		if !errors.Is(err, want) {
 			t.Fatalf("runPhaseTwoApplicationWithDependencies() error = %v, want HTTP failure", err)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		cancel()
 		<-done
 		t.Fatal("HTTP runtime stopped but the Worker Bundle kept running")
@@ -665,7 +665,7 @@ func TestPhaseTwoWorkerBundleRetriesReadyQueryGroupBeforeFullSweepCompletes(t *t
 	select {
 	case <-retried:
 		retriedBeforeSweepCompleted = true
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 	}
 	close(blockingRelease)
 	if err := <-done; err != nil {
@@ -932,7 +932,7 @@ func TestPhaseTwoWorkerBundleDelayedQueueKeepsEarliestReadyQueryGroups(t *testin
 		if queryGroup != target {
 			t.Fatalf("first delayed Query Group = %s, want %s", queryGroup, target)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(eventWatchdog):
 		t.Fatal("ready Query Group was hidden behind a full future delayed queue")
 	}
 	cancel()
@@ -3009,3 +3009,11 @@ func waitPhaseTwoCondition(t *testing.T, timeout time.Duration, name string, con
 	}
 	t.Fatalf("timed out waiting for %s", name)
 }
+
+// eventWatchdog is how long a test waits for something it expects to happen
+// before calling it missing. It bounds a hang, not a speed: these waits ran
+// at 20 to 200 ms, and on a machine busy with other test runs the process
+// stalls longer than that while nothing is wrong, which failed them. The
+// property each one guards - the event comes at all while the test holds
+// the rest still - is the same at ten seconds.
+const eventWatchdog = 10 * time.Second
