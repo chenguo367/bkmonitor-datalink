@@ -2413,10 +2413,12 @@ type Observation struct {
 	AssignmentIndex     *AssignmentIndexFacts
 	AssignmentSweep     *AssignmentSweepFacts
 	AssignmentApplied   *AssignmentAppliedFacts
-	// AwaitingFirstView says a round the executable view refused was refused
-	// before this Worker installed any view: the startup state every Worker
-	// is in until the Leader's first view reaches it.
-	AwaitingFirstView    bool
+	// AwaitingView says a round the executable view refused was refused only
+	// because the view has not carried its Query Group yet while the Worker
+	// already holds its lease: the record arrives by renewal and the view by
+	// delta, at every Worker's start and on every move. A Query Group that
+	// stays there is counted on the gate's not_in_view gauge.
+	AwaitingView         bool
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts

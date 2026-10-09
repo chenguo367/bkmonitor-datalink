@@ -2705,7 +2705,7 @@ func (source observedProductionSlotSource) Next(
 		observeRuntime(ctx, source.observer, observability.Observation{
 			Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
 			Result: observability.Result(observability.ResultRetrying), ReasonCode: observability.ReasonCode(contract.ReasonViewNotExecutable),
-			Direction: observability.DirectionInternal, AwaitingFirstView: notExecutable.AwaitingFirstView,
+			Direction: observability.DirectionInternal, AwaitingView: notExecutable.AwaitingView,
 			Trace: observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: notExecutable,
 		})
 	} else if errors.As(err, &retry) || errors.As(err, &blocked) {
@@ -2824,8 +2824,8 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
-		AwaitingFirstView: notExecutable != nil && notExecutable.AwaitingFirstView,
-		HeldBy:            heldBy, GapApplySite: gapApplySite,
+		AwaitingView: notExecutable != nil && notExecutable.AwaitingView,
+		HeldBy:       heldBy, GapApplySite: gapApplySite,
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes

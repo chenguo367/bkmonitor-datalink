@@ -138,9 +138,9 @@ func routineResult(result Result) bool {
 // observationLevel is the level a written line takes. A handover refusal is
 // INFO wherever it is met; any other failure is ERROR; a result something
 // else held is INFO, because the holder's own entry and exit are the lines
-// that say why; a round refused before the Worker's first view is INFO, the
-// state every Worker starts in; any other result takes its reason's level,
-// and a success is INFO.
+// that say why; a round refused while the view has not carried its Query
+// Group yet is INFO, the wait every Worker starts with and every move
+// brings; any other result takes its reason's level, and a success is INFO.
 func observationLevel(observation Observation) slog.Level {
 	if routineResult(observation.Result) {
 		return slog.LevelInfo
@@ -151,7 +151,7 @@ func observationLevel(observation Observation) slog.Level {
 	if failedResult(observation.Result) {
 		return slog.LevelError
 	}
-	if observation.HeldBy != nil || observation.AwaitingFirstView {
+	if observation.HeldBy != nil || observation.AwaitingView {
 		return slog.LevelInfo
 	}
 	return ReasonLogLevel(observation.ReasonCode)
