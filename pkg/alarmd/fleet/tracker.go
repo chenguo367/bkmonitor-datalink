@@ -947,16 +947,18 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if observation.Operation == observability.OperationSupplement {
 		return
 	}
+
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+
 	// The query's answer, read for a suspected cut before anything decides
 	// the observation is not this tracker's: an answer that names none is
-	// what ends the row.
+	// what ends the row. Under the lock: both can add the object to the
+	// table, which every Slot's goroutine and every reader share.
 	if observation.Stage == observability.StageQueryCompleted {
 		tracker.noteAnswerTruncation(queryGroup, observation, trace.EvaluationTime)
 		tracker.noteQueryRanges(queryGroup, observation, trace.EvaluationTime)
 	}
-
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
 
 	completion := observation.ProgressCompletionKind
 	runOutcome := observation.RunOutcome
