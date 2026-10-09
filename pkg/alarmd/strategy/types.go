@@ -636,7 +636,8 @@ func (p *CompiledPlan) NoDataLevel() *CompiledLevel {
 // nothing to thread and nothing to forget.
 //
 // Everything else is shared with the Plan it came from, deliberately: the plan
-// ref, the fingerprints, the state compatibility hash. A synthetic series is
+// ref, the fingerprints, the state compatibility hash. The alert identity is
+// the exception, below. A synthetic series is
 // this Plan's series, and its runtime state is told apart by the series digest
 // - its dimensions carry the no-data tag - not by pretending to be a different
 // Plan.
@@ -654,6 +655,16 @@ func (p *CompiledPlan) NoDataView() *CompiledPlan {
 	}
 	view := *p
 	view.levels = []CompiledLevel{*p.noDataLevel}
+	// The one thing not shared: the alert identity reads the record's own
+	// dimensions, the group's and the tag. The backend's adapter hands
+	// extract_target the event's dimension_fields (adapter.py:109-111), which
+	// for a no-data record are exactly those (nodata.py:259); the Plan's
+	// fields name the item's dimensions, and a topology or service-instance
+	// group read through them stopped at an empty host target and filed every
+	// such group of the strategy under one alert.
+	if p.outputIdentity != nil {
+		view.outputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: true}
+	}
 	return &view
 }
 
