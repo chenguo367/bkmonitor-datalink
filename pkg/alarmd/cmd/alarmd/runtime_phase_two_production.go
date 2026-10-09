@@ -1480,8 +1480,9 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// decisions over it. Reading them one at a time cost the round a Redis
 	// round trip per Query Group, all of it waiting, all of it before any
 	// decision could be taken.
-	records, assignmentReads, err := runtime.reconciler.ReconcileRoundWithScopes(ctx, authority, ordered, workers, at, scopes)
-	runtime.observeControlReads(ctx, assignmentReads, registryReads, len(ordered))
+	settlement, err := runtime.reconciler.ReconcileRoundSettling(ctx, authority, ordered, workers, at, scopes)
+	records := settlement.Records
+	runtime.observeControlReads(ctx, settlement.Stats, registryReads, len(ordered))
 	if err != nil {
 		if errors.Is(err, ownership.ErrStaleFence) {
 			runtime.clearControlAuthority(authority)
@@ -1528,16 +1529,20 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		owners[move.QueryGroup] = move.To
 	}
 	if err != nil {
-		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, at)
+		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, settlement, at)
 		return err
 	}
 	round.done(fleet.LeaderRoundStageByteMoves)
-	plan := runtime.reconciler.PlanRebalanceWithBytes(owners, workers, readings, at)
+	// One handover batch a round: what the round's own re-placements of
+	// live, ineligible holders spent of it is not the count correction's
+	// to spend again (design 02 §6.2).
+	within := max(scheduler.HandoverBatch(len(ordered))-settlement.Replaced, 0)
+	plan := runtime.reconciler.PlanRebalanceWithin(owners, workers, readings, at, within)
 	outcome, err := runtime.publishMoves(ctx, authority, plan.Moves, records, stable, remaining, at)
 	for _, move := range outcome.applied {
 		owners[move.QueryGroup] = move.To
 	}
-	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, shardGate, at)
+	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, shardGate, settlement, at)
 	if err != nil {
 		return err
 	}
@@ -1865,6 +1870,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	bytePlan scheduler.BytePlan,
 	byteOutcome rebalanceOutcome,
 	shardGate ownership.ShardSplitGate,
+	settlement scheduler.RoundSettlement,
 	at time.Time,
 ) {
 	facts := &observability.RebalanceFacts{
@@ -1872,6 +1878,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
+		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}
@@ -1900,6 +1907,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent,
 		PublishedMoves:    len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
+		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
 	}
 	if len(plan.Moves) > 0 {
 		// The pair the round chose, from the round's own first move rather
