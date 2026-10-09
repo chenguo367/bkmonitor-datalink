@@ -1052,17 +1052,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			if _, decided := decisions[identity]; decided {
 				continue
 			}
-			plan, known := adapter.scopes[identity]
-			if !known {
-				// A plan whose scope was not indexed must not be filtered on a
-				// guess. It is admitted and the gap is visible in the counter.
-				decisions[identity] = true
-				outside = false
-				if adapter.observe != nil {
-					adapter.observe("target_scope", "admitted", "plan_not_indexed")
-				}
-				continue
-			}
+			plan := adapter.scopes[identity]
 			if !enriched || plan.TenantID != factsTenant {
 				facts, factsTenant, enriched = adapter.admission.EnrichFor(plan.TenantID, dimensions), plan.TenantID, true
 			}

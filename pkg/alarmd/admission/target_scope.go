@@ -281,53 +281,6 @@ func objectIdentityKeys(facts *Facts, pairs [][2]string) []string {
 	return keys
 }
 
-// ResolvesToNoHost reports whether no host in the index can satisfy the scope.
-//
-// This is the one place a scope is evaluated ahead of the data, and it answers
-// exactly one question: may the query be skipped entirely? It never decides
-// whether a series is admitted - that stays with Admit, so there is only ever
-// one implementation of the predicate that can drift.
-//
-// It can only be answered for a scope whose every condition reads facts a
-// host carries. A condition built from the record's own dimensions has no
-// candidate on any host, and its absence fails the group, so evaluating such
-// a scope against hosts would answer "no host can satisfy it" for every
-// object-model target and skip every one of their queries. For those the
-// answer is false: not "some host can", but "this cannot be known ahead of
-// the data".
-func (scope *TargetScope) ResolvesToNoHost(candidates func(func(*Facts) bool)) bool {
-	if scope == nil || !scope.decidableFromHosts() {
-		return false
-	}
-	matched := false
-	candidates(func(facts *Facts) bool {
-		var trace matchTrace
-		for _, group := range scope.Groups {
-			if group.matches(facts, &trace) {
-				matched = true
-				return false
-			}
-		}
-		return true
-	})
-	return !matched
-}
-
-// decidableFromHosts reports whether every condition in the scope reads an
-// attribute a host fact can carry, so that evaluating the scope against the
-// host index is evaluating it at all.
-func (scope *TargetScope) decidableFromHosts() bool {
-	for _, group := range scope.Groups {
-		for _, condition := range group.Conditions {
-			attribute, known := contract.TargetScopeAttributeFor(contract.TargetScopeField(condition.Field))
-			if !known || attribute.Source != contract.TargetScopeSourceFacts {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 // dimensionNames lists a record's dimension names for a report. Names are
 // coordinates, not payload: they say what the data is keyed by, which is
 // exactly what a report about a missing identity has to show.

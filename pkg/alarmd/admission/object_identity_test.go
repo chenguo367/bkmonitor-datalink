@@ -342,38 +342,6 @@ func TestAnObjectIdentityHitCountsOnlyForTheGroupThatMatched(t *testing.T) {
 	}
 }
 
-// ResolvesToNoHost is answered from host facts, which carry no dimensions,
-// so a scope with an object-model condition would read as satisfiable by no
-// host and its query would be skipped outright. Such a scope is not decidable
-// ahead of the data and the answer is false, whatever the hosts say; a scope
-// of host attributes alone is still decided.
-func TestAScopeWithAnObjectModelConditionIsNotDecidableFromHosts(t *testing.T) {
-	noHosts := func(func(*Facts) bool) {}
-	oneHost := func(yield func(*Facts) bool) {
-		facts := hostFacts("10.0.0.1|0")
-		facts.SetTopoNodes([]string{"module|91"})
-		yield(&facts)
-	}
-	objectScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2")}})
-	mixedScope := scope(
-		TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|85")}},
-		TargetScopeGroup{Conditions: []TargetScopeCondition{object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2")}},
-	)
-	for name, candidate := range map[string]*TargetScope{"object only": objectScope, "object beside topology": mixedScope} {
-		if candidate.ResolvesToNoHost(noHosts) || candidate.ResolvesToNoHost(oneHost) {
-			t.Fatalf("%s: a scope with an object-model condition was decided from hosts", name)
-		}
-	}
-	topoScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|85")}})
-	if !topoScope.ResolvesToNoHost(oneHost) || !topoScope.ResolvesToNoHost(noHosts) {
-		t.Fatalf("a topology scope no host is under was not resolved to no host")
-	}
-	underScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|91")}})
-	if underScope.ResolvesToNoHost(oneHost) {
-		t.Fatalf("a topology scope a host is under was resolved to no host")
-	}
-}
-
 // Missing and unmatched do not share a window, a nil reporter counts and
 // says nothing, and plans not seen for a long time are forgotten.
 func TestTheReporterKeepsItsBookkeepingBounded(t *testing.T) {
