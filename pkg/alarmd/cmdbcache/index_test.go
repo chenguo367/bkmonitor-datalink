@@ -248,7 +248,7 @@ const monitoredByIDHost = `{"bk_host_id":700002,"bk_host_innerip":"192.0.2.148",
 // returns (fullers.py:61-74); its target match then reads the written values
 // (target.py:112-120). So the keys are the id and the id's host's address,
 // and the record's own address - another host's - is not one of them.
-func TestHostAttributesFollowTheIdentityPythonWouldLookUp(t *testing.T) {
+func TestHostFactsFollowTheIdentityPythonWouldLookUp(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost,
 		"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost})
@@ -292,7 +292,7 @@ func containsNode(nodes []string, want string) bool {
 
 // Without a host id the address is what Python looks up, so its state is the
 // one that counts.
-func TestHostAttributesComeFromTheAddressWhenNoIDIsNamed(t *testing.T) {
+func TestHostStateComesFromTheAddressWhenNoIDIsNamed(t *testing.T) {
 	builder := newIndexBuilder(time.Unix(1700000000, 0).UTC())
 	builder.addFields([]string{"192.0.2.147|0", disabledByAddressHost, "700001", disabledByAddressHost})
 	store := &Store{index: builder.index, now: builder.index.BuiltAt, maxAge: time.Hour, interval: time.Minute}

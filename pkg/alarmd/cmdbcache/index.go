@@ -81,12 +81,9 @@ type HostFacts struct {
 	TopoNodes   []string
 	State       string
 	DisplayName string
-	// Attributes are the scalar top-level fields of the cache record as text,
-	// by field name: bk_state, bk_os_type, bk_host_name and whatever else the
-	// writer put there. They are decoded once here so a target on a host
-	// attribute costs the filter a lookup, not a decode; no target reads
-	// them yet.
-	Attributes map[string]string
+	// AgentID is the agent the host record says it carries: the agent hash
+	// places a record on a host only when the host agrees (host.py:207-221).
+	AgentID string
 	// ModelID and ModelInstID are the canonical instance identity the writer
 	// adds beside the host id. Empty on a record written before it did.
 	ModelID     string
@@ -505,7 +502,7 @@ func (index *Index) LookupAgent(agent string) (*HostFacts, bool, bool) {
 		return nil, false, false
 	}
 	host, found := index.byHostID[hostID]
-	if !found || host.Attributes["bk_agent_id"] != agent {
+	if !found || host.AgentID != agent {
 		return nil, false, false
 	}
 	return host, true, false
@@ -746,9 +743,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 		// host id. Both identities must resolve, but the host counts once and
 		// shares one record - counting fields instead of hosts reports twice
 		// the fleet. The second is known by its host id before the rest of it
-		// is read: its topology and its attributes were built only to be
-		// dropped, and the attributes alone were most of a refresh's
-		// allocation.
+		// is read, so its topology is not built only to be dropped.
 		hostID := numberText(wire.HostID)
 		if hostID != "" {
 			if existing, found := builder.seen[hostID]; found {
@@ -756,7 +751,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 				continue
 			}
 		}
-		facts, refusedNodes := hostFactsOf(wire, payload)
+		facts, refusedNodes := hostFactsOf(wire)
 		builder.index.refused.topoNodes("host", identity, refusedNodes)
 		if hostID != "" {
 			builder.seen[hostID] = facts
@@ -837,6 +832,9 @@ type wireHost struct {
 	State       string                       `json:"bk_state"`
 	DisplayName string                       `json:"display_name"`
 	TopoLinks   map[string][]json.RawMessage `json:"topo_link"`
+	// AgentID is read as any scalar: a record whose agent is written as a
+	// number is not refused for it.
+	AgentID json.RawMessage `json:"bk_agent_id"`
 	// ModelID and ModelInstID are the canonical instance identity the
 	// writer adds beside the host id, for a target plan whose rule reads
 	// records by model and instance.
@@ -872,13 +870,12 @@ func decodeHost(payload string) (*HostFacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	facts, _ := hostFactsOf(wire, payload)
+	facts, _ := hostFactsOf(wire)
 	return facts, nil
 }
 
 // decodeWireHost is the one step of reading a host record that can refuse
-// it. What follows it -- the topology nodes, the scalar attributes -- reads
-// the same payload again and cannot fail, and is the bulk of the cost.
+// it. What follows it - the topology nodes - cannot fail.
 func decodeWireHost(payload string) (wireHost, error) {
 	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.UseNumber()
@@ -912,9 +909,9 @@ func DecodeServiceInstanceRecord(field, payload string) (*ServiceInstanceFacts, 
 	return facts, refusedNodes, nil
 }
 
-// hostFactsOf is a host record's facts from its decoded fields and its
-// payload, and how many of its topology nodes were refused.
-func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
+// hostFactsOf is a host record's facts from its decoded fields, and how many
+// of its topology nodes were refused.
+func hostFactsOf(wire wireHost) (*HostFacts, int) {
 	nodes, refusedNodes := topoNodes(wire.TopoLinks)
 	facts := &HostFacts{
 		HostID:      numberText(wire.HostID),
@@ -924,7 +921,7 @@ func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
 		State:       wire.State,
 		DisplayName: wire.DisplayName,
 		TopoNodes:   nodes,
-		Attributes:  scalarAttributes(payload),
+		AgentID:     rawScalarText(wire.AgentID),
 		ModelID:     strings.TrimSpace(wire.ModelID),
 		ModelInstID: rawScalarText(wire.ModelInstID),
 	}
@@ -996,42 +993,6 @@ func topoNodes(links map[string][]json.RawMessage) ([]string, int) {
 		flat = append(flat, node)
 	}
 	return flat, len(refused)
-}
-
-// scalarAttributes reads the top-level string, number and boolean fields of
-// a cache record as text. Objects and arrays are not attributes a target can
-// name a value of, so they are left out rather than flattened by a rule
-// nobody asked for.
-func scalarAttributes(payload string) map[string]string {
-	decoder := json.NewDecoder(strings.NewReader(payload))
-	decoder.UseNumber()
-	var fields map[string]json.RawMessage
-	if err := decoder.Decode(&fields); err != nil {
-		return nil
-	}
-	attributes := make(map[string]string, len(fields))
-	for name, raw := range fields {
-		if len(raw) == 0 {
-			continue
-		}
-		switch raw[0] {
-		case '"':
-			var text string
-			if err := json.Unmarshal(raw, &text); err == nil {
-				attributes[name] = text
-			}
-		case 't', 'f':
-			attributes[name] = string(raw)
-		case '{', '[', 'n':
-			continue
-		default:
-			attributes[name] = numberText(json.Number(raw))
-		}
-	}
-	if len(attributes) == 0 {
-		return nil
-	}
-	return attributes
 }
 
 func numberText(value json.Number) string {

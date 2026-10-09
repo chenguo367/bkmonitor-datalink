@@ -92,11 +92,6 @@ const (
 	AttributeServiceInstanceID = "service_instance.id"
 	// AttributeHostTopoNode holds the "obj|inst" nodes the record sits under.
 	AttributeHostTopoNode = "host.topo_node"
-	// AttributeHostPrefix is where the CMDB host fuller exposes the scalar
-	// attributes of the resolved host, one per field: "host.attr.bk_state",
-	// "host.attr.bk_os_type" and so on. No field reads them yet; a target on a
-	// host attribute is a row in the table naming one of them.
-	AttributeHostPrefix = "host.attr."
 )
 
 // TargetScopeAttributeSource says where a field's candidates come from.

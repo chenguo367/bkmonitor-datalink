@@ -135,7 +135,6 @@ func placeByAgent(facts *admission.Facts, host *HostFacts) {
 	naming.Usable = true
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // placeByID is Python's host-by-id branch: the host's own address and cloud
@@ -154,7 +153,6 @@ func placeByID(facts *admission.Facts, id string, host *HostFacts) {
 	facts.HostNaming.AddressKey = host.IP + "|" + host.CloudID
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // placeByAddress is Python's address branch (fullers.py:92-110): it writes the
@@ -199,10 +197,7 @@ func instanceResolves(index *Index, facts *admission.Facts) bool {
 }
 
 // resolveHostState answers whether CMDB knows the host the record names and
-// what it says about it, by the one identity Python would look up. It also
-// exposes that host's scalar attributes, which the facts serve under
-// contract.AttributeHostPrefix, so a target on a host attribute is a table
-// row away and needs no fuller change; nothing reads them yet.
+// what it says about it, by the one identity Python would look up.
 func resolveHostState(index *Index, facts *admission.Facts) {
 	key, looked := facts.HostNaming.LookupKey()
 	if !looked {
@@ -210,12 +205,11 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 	}
 	host, found := index.Lookup(key)
 	if !found {
-		facts.HostResolved, facts.HostState, facts.HostBusinessID, facts.HostAttributes = false, "", "", nil
+		facts.HostResolved, facts.HostState, facts.HostBusinessID = false, "", ""
 		return
 	}
 	facts.HostResolved = true
 	facts.HostState, facts.HostBusinessID = host.State, host.BusinessID
-	facts.HostAttributes = host.Attributes
 }
 
 // ServiceInstanceTopologyFuller resolves a series that names a service

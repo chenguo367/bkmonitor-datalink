@@ -368,27 +368,6 @@ func TestAnEmptyInstanceCacheIsNamedApartFromAnEmptyHostCache(t *testing.T) {
 	}
 }
 
-// The scalar fields of the resolved host are readable as host attributes
-// without any of them being copied per series; nested fields are not.
-func TestTheResolvedHostsScalarFieldsAreExposedAsAttributes(t *testing.T) {
-	store := storeWith([]string{"192.0.2.148|0", monitoredByIDHost, "700002", monitoredByIDHost}, nil)
-	chain := instanceChain(t, store)
-	facts := chain.Enrich(map[string]json.RawMessage{"bk_host_id": json.RawMessage(`700002`)})
-	for attribute, want := range map[string]string{
-		"bk_state": "运营中[需告警]", "display_name": "live", "bk_host_id": "700002", "bk_biz_id": "999", "bk_cloud_id": "0",
-	} {
-		if got := facts.Candidates(contract.AttributeHostPrefix + attribute); !reflect.DeepEqual(got, []string{want}) {
-			t.Errorf("host attribute %s = %v, want %q", attribute, got, want)
-		}
-	}
-	if got := facts.Candidates(contract.AttributeHostPrefix + "topo_link"); got != nil {
-		t.Fatalf("a nested field was flattened into an attribute: %v", got)
-	}
-	if _, copied := facts.Attributes[contract.AttributeHostPrefix+"bk_state"]; copied {
-		t.Fatal("host attributes were copied into the per-series map")
-	}
-}
-
 // The separation the whole design rests on: what enrichment learns from CMDB
 // changes when CMDB changes, and none of it may reach the series the alert
 // is identified by. The same record is enriched against three snapshots -
