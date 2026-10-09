@@ -228,19 +228,20 @@ func (refused *RefusedRecords) topoNodes(record, field string, nodes int) {
 // MappingStats describes one published business mapping the index read:
 // the entries held, the fields the latest load that read the hash left out
 // as not a positive business or past the bound, and whether the latest load
-// could not read it or read it empty after one that held entries (the
-// entries are then an earlier load's).
+// could not read it (the entries and counts are then the last read's) or
+// found no hash under its key (nothing is held).
 type MappingStats struct {
 	Held       int
 	Refused    int
 	Truncated  int
 	ReadFailed bool
-	Emptied    bool
+	// Missing says the latest load found no hash under the mapping's key.
+	Missing bool
 }
 
 func (mapping businessMapping) stats() MappingStats {
 	return MappingStats{Held: len(mapping.entries), Refused: mapping.refused, Truncated: mapping.truncated,
-		ReadFailed: mapping.readFailed, Emptied: mapping.emptied}
+		ReadFailed: mapping.readFailed, Missing: mapping.missing}
 }
 
 // businessMapping is one published "key -> business" hash read into the
@@ -256,19 +257,23 @@ func (mapping businessMapping) stats() MappingStats {
 // it replaces, so one failed read does not turn every mapped event into an
 // unmapped one, and the flag stays up until a read succeeds.
 //
-// emptied says this load read the hash empty while the index it replaces
-// held entries. The writer publishes an empty mapping by deleting the hash,
-// which is also what a source that answered nothing looks like, and read as
-// fact it would file every global business event under its strategy's own
-// business at once. The store carries the previous entries as it does for a
-// failed read, and the flag stays up until a load holds entries again. A
-// mapping never held stays empty: that is a writer not publishing it yet.
+// missing says this load found no hash under the key. The writer cannot
+// state an empty mapping: it publishes a mapping by renaming a staging hash
+// over the key and deleting the staging placeholder, and a hash left with no
+// fields does not exist in Redis. So a tenant with no clusters, a mapping the
+// writer left out of every round since its key expired (it leaves a mapping
+// out of a round whose query failed, and the old one stands until its TTL),
+// and a writer that does not publish it at all all read as a missing key.
+// The writer already keeps its last good mapping through its own failed
+// rounds, up to the key's TTL; a key gone is past that, and the reader does
+// not extend it. A missing key maps nothing, and it is named (missing), so an
+// event that would have used it is counted unmapped with the reason in view.
 type businessMapping struct {
 	entries    map[string]string
 	refused    int
 	truncated  int
 	readFailed bool
-	emptied    bool
+	missing    bool
 }
 
 // add records one page of field, value pairs, up to bound entries.
@@ -298,22 +303,16 @@ func (mapping *businessMapping) add(fields []string, bound int) {
 	}
 }
 
-// carriedFrom is this mapping, or the entries of the previous one when this
-// load could not read it or read it empty after one that held entries, with
-// the reason flagged.
+// carriedFrom is this mapping, or, when this load could not read the key, the
+// previous one - its entries and its counts - flagged read_failed, however
+// many loads in a row fail. A missing key and a hash whose every field was
+// refused were both read: they stand as read, with no entries.
 func (mapping businessMapping) carriedFrom(previous businessMapping) businessMapping {
-	switch {
-	case mapping.readFailed:
-		previous.readFailed = true
-		return previous
-	case len(mapping.entries) == 0 && len(previous.entries) > 0:
-		// This load read the hash: what it left out is its own count, and a
-		// hash whose every field was refused reads as refused, not as gone.
-		previous.refused, previous.truncated = mapping.refused, mapping.truncated
-		previous.readFailed, previous.emptied = false, true
-		return previous
+	if !mapping.readFailed {
+		return mapping
 	}
-	return mapping
+	previous.readFailed, previous.missing = true, false
+	return previous
 }
 
 // LookupModelInstance finds the host carrying the canonical (model,
@@ -466,8 +465,7 @@ func (index *Index) Refused() RefusedRecords {
 }
 
 // carryOptional takes over, from the index this one replaces, the optional
-// mappings this load could not read or read empty while that index held
-// entries (see carriedFrom).
+// mappings this load could not read (see carriedFrom).
 func (index *Index) carryOptional(previous *Index) {
 	if index == nil || previous == nil {
 		return
@@ -562,11 +560,9 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	builder.addTopologyNodes(nodes)
 	// The cluster mapping is a small hash the same writer publishes in the
 	// same round as the hosts, read into the same snapshot so a host and a
-	// cluster are never attributed from two refreshes. An absent hash is a
-	// writer that does not publish it yet: no cluster is mapped, and every
-	// event that would have used one is counted as unmapped - unless the
-	// index before held entries, which the store then carries (emptied, see
-	// businessMapping). A hash that cannot be read is not a failed load.
+	// cluster are never attributed from two refreshes. A missing hash maps
+	// nothing and one that cannot be read is carried, both named (see
+	// businessMapping); neither is a failed load.
 	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
 	builder.index.namespaceBusiness = reader.readMapping(ctx, reader.namespaceBusinessKey(), MaxNamespaceBusinesses)
 	index := builder.index
@@ -583,8 +579,13 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 // left them out.
 func (reader *Reader) readMapping(ctx context.Context, key string, bound int) businessMapping {
 	var mapping businessMapping
-	if err := reader.scan(ctx, key, func(fields []string) { mapping.add(fields, bound) }); err != nil {
+	fields := 0
+	if err := reader.scan(ctx, key, func(page []string) { fields += len(page); mapping.add(page, bound) }); err != nil {
 		return businessMapping{readFailed: true}
+	}
+	if fields == 0 {
+		// Redis holds no empty hash: no field is no key.
+		return businessMapping{missing: true}
 	}
 	return mapping
 }

@@ -228,7 +228,7 @@ func publishCMDBBusinessMappings(recorder *metric.Recorder, health cmdbcache.Hea
 	for mapping, stats := range map[string]cmdbcache.MappingStats{
 		"bcs_cluster": health.ClusterBusinessMapping, "bcs_namespace": health.NamespaceBusinessMapping,
 	} {
-		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed, stats.Emptied)
+		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed, stats.Missing)
 	}
 }
 

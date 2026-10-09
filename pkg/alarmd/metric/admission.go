@@ -111,15 +111,16 @@ func (r *Recorder) SetCMDBServiceInstanceIndex(instances int) {
 // reads, and CMDBBusinessMappingStates the states of their gauge.
 var (
 	CMDBBusinessMappings      = []string{"bcs_cluster", "bcs_namespace"}
-	CMDBBusinessMappingStates = []string{"held", "refused", "truncated", "read_failed", "emptied"}
+	CMDBBusinessMappingStates = []string{"held", "refused", "truncated", "read_failed", "missing"}
 )
 
 // SetCMDBBusinessMapping publishes one business mapping the index holds,
 // what its load left out, and whether the latest load could not read it at
-// all (read_failed 1) or read it empty after one that held entries (emptied
-// 1) - the held counts are then an earlier read's. A mapping outside
-// CMDBBusinessMappings is dropped rather than creating a series.
-func (r *Recorder) SetCMDBBusinessMapping(mapping string, held, refused, truncated int, readFailed, emptied bool) {
+// all (read_failed 1; the held count is then the last read's, kept until a
+// read succeeds) or found no hash under its key (missing 1; nothing is held).
+// A mapping outside CMDBBusinessMappings is dropped rather than creating a
+// series.
+func (r *Recorder) SetCMDBBusinessMapping(mapping string, held, refused, truncated int, readFailed, missing bool) {
 	if r == nil || r.phaseTwo.cmdbIndexBusinessMappings == nil || !knownLabel(CMDBBusinessMappings, mapping) {
 		return
 	}
@@ -132,11 +133,11 @@ func (r *Recorder) SetCMDBBusinessMapping(mapping string, held, refused, truncat
 		failed = 1
 	}
 	gauge.WithLabelValues(mapping, "read_failed").Set(failed)
-	carried := 0.0
-	if emptied {
-		carried = 1
+	absent := 0.0
+	if missing {
+		absent = 1
 	}
-	gauge.WithLabelValues(mapping, "emptied").Set(carried)
+	gauge.WithLabelValues(mapping, "missing").Set(absent)
 }
 
 // CMDBRefusedRecords are the kinds of record a CMDB index load counts as

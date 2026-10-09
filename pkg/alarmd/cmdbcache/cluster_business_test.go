@@ -69,8 +69,9 @@ func TestAnAbsentClusterMappingMapsNoCluster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if stats := index.ClusterBusinessStats(); stats != (MappingStats{}) {
-		t.Fatalf("cluster mapping %+v, want nothing", stats)
+	// No hash under the key: nothing mapped, and missing named.
+	if stats := index.ClusterBusinessStats(); stats != (MappingStats{Missing: true}) {
+		t.Fatalf("cluster mapping %+v, want nothing held and missing named", stats)
 	}
 	store := &Store{index: index, now: func() time.Time { return at }, maxAge: time.Hour, interval: time.Minute}
 	if health := store.Health(); health.Degraded || health.Hosts != 1 {

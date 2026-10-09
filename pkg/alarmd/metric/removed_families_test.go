@@ -107,6 +107,10 @@ var removedLabelValues = []struct {
 	{"target_group_groups", "state", "emptied_pending", false},
 	{"target_group_groups", "state", "emptied_held", false},
 	{"target_selector_resolutions_total", "reason", "emptied_held", false},
+	// A business mapping the writer did not publish is named missing and its
+	// last entries carried within the staleness bound; "emptied" claimed the
+	// writer had emptied it, which a missing key cannot say.
+	{"cmdb_index_business_mappings", "state", "emptied", true},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -129,6 +133,11 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		return sides
 	})
 	r.SetTargetScopeCloseSource(everything)
+	for _, removed := range removedLabelValues {
+		if removed.family == "cmdb_index_business_mappings" {
+			r.SetCMDBBusinessMapping("bcs_cluster", 1, 0, 0, false, true)
+		}
+	}
 	// The target group store's states and the selector reasons are closed
 	// lists the recorder applies, so the guard hands it the removed words.
 	r.SetTargetGroupSource(func() TargetGroupReading {

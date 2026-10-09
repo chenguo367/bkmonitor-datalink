@@ -1386,9 +1386,9 @@ func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 	}
 	want := map[string]float64{
 		"bcs_cluster/held": 3, "bcs_cluster/refused": 1, "bcs_cluster/truncated": 0, "bcs_cluster/read_failed": 1,
-		"bcs_cluster/emptied": 0,
+		"bcs_cluster/missing": 0,
 		"bcs_namespace/held":  5, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 2, "bcs_namespace/read_failed": 0,
-		"bcs_namespace/emptied": 1,
+		"bcs_namespace/missing": 1,
 	}
 	if len(values) != len(want) {
 		t.Fatalf("gauge = %v, want exactly %v", values, want)

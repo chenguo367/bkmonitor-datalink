@@ -58,13 +58,13 @@ func TestEachBusinessMappingIsPublishedUnderItsOwnName(t *testing.T) {
 	recorder := metric.NewRecorder(metric.BuildInfo{})
 	publishCMDBBusinessMappings(recorder, cmdbcache.Health{
 		ClusterBusinessMapping:   cmdbcache.MappingStats{Held: 11, Refused: 12, Truncated: 13},
-		NamespaceBusinessMapping: cmdbcache.MappingStats{Held: 21, Refused: 22, Truncated: 23, ReadFailed: true, Emptied: true},
+		NamespaceBusinessMapping: cmdbcache.MappingStats{Held: 21, Refused: 22, Truncated: 23, ReadFailed: true, Missing: true},
 	})
 	assertBusinessMappingCells(t, businessMappingCells(t, recorder), map[string]float64{
 		"bcs_cluster/held": 11, "bcs_cluster/refused": 12, "bcs_cluster/truncated": 13, "bcs_cluster/read_failed": 0,
-		"bcs_cluster/emptied": 0,
+		"bcs_cluster/missing": 0,
 		"bcs_namespace/held":  21, "bcs_namespace/refused": 22, "bcs_namespace/truncated": 23, "bcs_namespace/read_failed": 1,
-		"bcs_namespace/emptied": 1,
+		"bcs_namespace/missing": 1,
 	})
 }
 
