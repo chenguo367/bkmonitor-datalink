@@ -696,31 +696,113 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	spec, predecessors := controller.predecessorSnapshot(state)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !reflect.DeepEqual(state.validated, schedule.Segment) {
-		// A frozen Segment's schedule does not change: checked once, not
-		// recomputing its digests for every Slot.
-		if schedule.Validate() != nil {
-			return 0, errors.New("alarmd readhold: invalid Slot schedule")
-		}
-		state.validated = schedule.Segment
-	}
-	if err := ready(state); err != nil {
+	if err := controller.checkSlot(state, schedule, spec); err != nil {
 		return 0, err
-	}
-	if !reflect.DeepEqual(spec, state.spec) {
-		return 0, ErrConflict
 	}
 	owner, err := controller.options.Owner(qg)
 	if err != nil {
 		return 0, err
 	}
 	owner.Fence = fence
-	next, err := controller.seed(state, predecessors)
+	frozen, err := controller.slotHoldOf(state, predecessors, schedule, at)
 	if err != nil {
 		return 0, err
 	}
+	if frozen.clamp != "" {
+		controller.counted(controller.clamped, frozen.clamp)
+	}
+	next, hold := frozen.next, frozen.hold
+	if !reflect.DeepEqual(next, state.record) {
+		// A first zero hold has no durable value to protect. Remember the
+		// segment locally without creating a record for the full population
+		// -- nor for a group that closed a Segment at zero: a missing record
+		// is what tells its successor its hold was zero.
+		if len(state.raw) == 0 && !carries(next) {
+			state.record, state.seeded = next, true
+			return 0, nil
+		}
+		if err := controller.persist(ctx, qg, state, next, &owner); err != nil {
+			return 0, err
+		}
+	}
+	state.seeded = true
+	return time.Duration(hold) * time.Millisecond, nil
+}
+
+// PeekSlotReadHold is the hold Slot at would be frozen with, asked without
+// freezing it: the same check and the same computation as SlotReadHold, on a
+// working copy that is thrown away - no record written, no transition
+// pruned, no clamp counted. An expired range asks it of its last Slot only
+// to compare with its first. A group not seeded yet is refused: seeding
+// counts what it finds, and a question counts nothing; the caller then
+// freezes the Slot the ordinary way.
+func (controller *Controller) PeekSlotReadHold(schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) (time.Duration, error) {
+	if !schedule.Segment.Contains(at) || len(schedule.DuePlanRefs(at)) == 0 {
+		return 0, errors.New("alarmd readhold: invalid Slot schedule")
+	}
+	state := controller.group(schedule.Segment.QueryGroup)
+	spec, predecessors := controller.predecessorSnapshot(state)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := controller.checkSlot(state, schedule, spec); err != nil {
+		return 0, err
+	}
+	if !state.seeded {
+		return 0, ErrNotSeeded
+	}
+	frozen, err := controller.slotHoldOf(state, predecessors, schedule, at)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(frozen.hold) * time.Millisecond, nil
+}
+
+// ErrNotSeeded refuses a question about a group whose first Slot has not
+// been frozen in this process.
+var ErrNotSeeded = errors.New("alarmd readhold: group not seeded")
+
+// checkSlot is what a Slot's schedule and the group's state must be for its
+// hold to be computed. Called with the group's lock held.
+func (controller *Controller) checkSlot(state *entry, schedule execution.FrozenQueryGroupSchedule, spec GroupSpec) error {
+	if !reflect.DeepEqual(state.validated, schedule.Segment) {
+		// A frozen Segment's schedule does not change: checked once, not
+		// recomputing its digests for every Slot.
+		if schedule.Validate() != nil {
+			return errors.New("alarmd readhold: invalid Slot schedule")
+		}
+		state.validated = schedule.Segment
+	}
+	if err := ready(state); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(spec, state.spec) {
+		return ErrConflict
+	}
+	return nil
+}
+
+// frozenHold is what freezing a Slot gives: its hold, the record freezing it
+// leaves, and the clamp source when the hold was cut to the limit.
+type frozenHold struct {
+	hold  int64
+	next  Record
+	clamp string
+}
+
+// slotHoldOf computes, on a working copy of the group's record, the hold
+// Slot at is frozen with and the record freezing it leaves. It writes
+// nothing and changes no state but the copy; seeding counts what it finds
+// on a group's first Slot, which a caller that must count nothing avoids by
+// asking only a seeded group. The one computation both SlotReadHold and
+// PeekSlotReadHold run. Called with the group's lock held.
+func (controller *Controller) slotHoldOf(state *entry, predecessors map[execution.QueryGroupIdentity]Inspection,
+	schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) (frozenHold, error) {
+	next, err := controller.seed(state, predecessors)
+	if err != nil {
+		return frozenHold{}, err
+	}
 	if schedule.Segment.Start < next.SegmentStart {
-		return 0, ErrSegmentStale
+		return frozenHold{}, ErrSegmentStale
 	}
 	if schedule.Segment.Start > next.SegmentStart {
 		next.SegmentStart, next.Closed = schedule.Segment.Start, false
@@ -730,12 +812,13 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 	}
 	pruneTransitions(&next, int64(at)*1000+state.spec.SettlingWait.Milliseconds())
 	hold := holdAt(next, at, state.spec.SettlingWait)
+	clamp := ""
 	if limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds(); hold > limit {
 		// Refusing the Slot refused it on every retry, and the group stopped
 		// on it. Frozen at the limit, the old group's last Slot may overtake
 		// this one, which is counted, and known apart from a bound standing
 		// in for a hold nobody could read.
-		source := ClampFallback
+		clamp = ClampFallback
 		known := current(next)
 		for _, transition := range next.Transitions {
 			if !transition.Fallback {
@@ -743,9 +826,8 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 			}
 		}
 		if known > limit {
-			source = ClampKnown
+			clamp = ClampKnown
 		}
-		controller.counted(controller.clamped, source)
 		hold = limit
 	}
 	if next.HoldMillis != hold || next.PendingHoldMillis != nil {
@@ -763,21 +845,7 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 			next.PendingHoldMillis = nil
 		}
 	}
-	if !reflect.DeepEqual(next, state.record) {
-		// A first zero hold has no durable value to protect. Remember the
-		// segment locally without creating a record for the full population
-		// -- nor for a group that closed a Segment at zero: a missing record
-		// is what tells its successor its hold was zero.
-		if len(state.raw) == 0 && !carries(next) {
-			state.record, state.seeded = next, true
-			return 0, nil
-		}
-		if err := controller.persist(ctx, qg, state, next, &owner); err != nil {
-			return 0, err
-		}
-	}
-	state.seeded = true
-	return time.Duration(hold) * time.Millisecond, nil
+	return frozenHold{hold: hold, next: next, clamp: clamp}, nil
 }
 
 // CloseSchedule fixes the old hold and each Plan's last legal Slot before a

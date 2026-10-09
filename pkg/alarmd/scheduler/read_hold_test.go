@@ -132,6 +132,9 @@ type slotTestReadHolds struct{ testReadHolds }
 func (holds *slotTestReadHolds) SlotReadHold(context.Context, execution.FrozenQueryGroupSchedule, execution.EvaluationTime, execution.OwnerFence) (time.Duration, error) {
 	return holds.hold, nil
 }
+func (holds *slotTestReadHolds) PeekSlotReadHold(execution.FrozenQueryGroupSchedule, execution.EvaluationTime) (time.Duration, error) {
+	return holds.hold, nil
+}
 
 func TestReadHoldShiftsReplayClockWithoutWideningSettlingBudget(t *testing.T) {
 	schedule := schedulerSchedule(t, 10, 60, nil, "snapshot-1", 1)
@@ -177,6 +180,9 @@ type changingReadHold struct{}
 
 func (changingReadHold) ReadHold(execution.QueryGroupIdentity) time.Duration { return 0 }
 func (changingReadHold) SlotReadHold(_ context.Context, _ execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, _ execution.OwnerFence) (time.Duration, error) {
+	return changingReadHold{}.PeekSlotReadHold(execution.FrozenQueryGroupSchedule{}, at)
+}
+func (changingReadHold) PeekSlotReadHold(_ execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) (time.Duration, error) {
 	if at == 120 {
 		return 0, nil
 	}

@@ -492,6 +492,14 @@ func (holds *productionReadHolds) SlotReadHold(ctx context.Context, schedule exe
 	return holds.degradedHold(schedule, at), nil
 }
 
+// PeekSlotReadHold is the hold the Slot would be frozen with, asked without
+// freezing it (readhold.Controller.PeekSlotReadHold): nothing is prepared,
+// released, counted or degraded. An error refuses the question, and the
+// asker freezes the Slot the ordinary way.
+func (holds *productionReadHolds) PeekSlotReadHold(schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime) (time.Duration, error) {
+	return holds.controller.PeekSlotReadHold(schedule, at)
+}
+
 // degradedHold is the hold the group last read at the Slot, its transitions
 // included -- zero for a group without a record -- within the schedule's hold
 // limit. It reads nothing, so it cannot fail as the hold it stands in for did.

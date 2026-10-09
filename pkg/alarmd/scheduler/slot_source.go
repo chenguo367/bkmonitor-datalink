@@ -228,6 +228,11 @@ type ReadHolds interface {
 // predecessor's completion deadline during a Plan's QG transition.
 type SlotReadHolds interface {
 	SlotReadHold(context.Context, execution.FrozenQueryGroupSchedule, execution.EvaluationTime, execution.OwnerFence) (time.Duration, error)
+	// PeekSlotReadHold is the hold a Slot would be frozen with, asked
+	// without freezing it: what an expired range compares its last Slot by.
+	// In the interface rather than beside it, so an implementation cannot
+	// leave the range freezing a Slot it only meant to ask about.
+	PeekSlotReadHold(execution.FrozenQueryGroupSchedule, execution.EvaluationTime) (time.Duration, error)
 }
 
 // ErrReadHoldDegraded marks a read hold its Query Group could not prepare
@@ -278,6 +283,20 @@ func (source *ProductionSlotSource) slotReadHoldMillis(ctx context.Context, sche
 		return hold.Milliseconds(), nil
 	}
 	return source.readHoldMillis(progress, slot), nil
+}
+
+// peekSlotReadHoldMillis is the hold a later Slot would be frozen with,
+// asked without freezing it. Freezing it to compare wrote the read hold
+// record as in force from that Slot, and the Slots before it could no
+// longer be written. An error refuses the question. The answer is only
+// compared with a Slot's frozen hold, so a hold no Slot could be frozen
+// with refuses the range by not matching it.
+func (source *ProductionSlotSource) peekSlotReadHoldMillis(schedule execution.FrozenQueryGroupSchedule, slot execution.EvaluationTime) (int64, error) {
+	if holds, ok := source.readHolds.(SlotReadHolds); ok {
+		hold, err := holds.PeekSlotReadHold(schedule, slot)
+		return hold.Milliseconds(), err
+	}
+	return source.readHoldMillis(nil, slot), nil
 }
 
 // WithTakeoverClock lets the source tell a Slot due before this process took
