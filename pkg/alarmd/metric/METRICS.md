@@ -1665,19 +1665,11 @@ Excluded members absent from a complete current host snapshot, counted per membe
 
 Labels: `state`
 
-Dynamic groups the target group store holds, by state: referenced by a Plan; loaded, a usable snapshot held; unavailable, a snapshot naming why it cannot be used; failing, served past a refresh that could not read it (the replica's dependencies name each, since when and why). A group the writer states empty is loaded, with no members.
-
-## bkmonitor_alarmd_target_group_oldest_failing_seconds
-
-How long the group served past failed refreshes the longest has been, since the first of them after its last read; 0 with none.
+Dynamic groups the target group store holds, by state: referenced by a Plan; loaded, a usable snapshot held; unavailable, a snapshot naming why it cannot be used; failing, held while the refreshes fail, which a refresh does for every group or none (the replica's dependencies say since when and why). A group the writer states empty is loaded, with no members.
 
 ## bkmonitor_alarmd_target_group_refresh_failed
 
-1 when the latest refresh of the dynamic groups failed: at the round trip, or Redis answered some group's key with an error (LOADING, BUSY, a key of another type), which the group is not read from.
-
-## bkmonitor_alarmd_target_group_unanswered_reads_total
-
-Group reads Redis answered with an error rather than the group's document; each such group keeps the snapshot it had.
+1 when the latest refresh of the dynamic groups failed: at the round trip, or Redis answered some group's key with an error (LOADING, BUSY, a key of another type); every group keeps the snapshot it had.
 
 ## bkmonitor_alarmd_target_plan_resolution_total
 

@@ -88,9 +88,9 @@ func TestAGroupReadIsAWindowAtATimeAndAFailurePartWayReturnsTheError(t *testing.
 
 // A document larger than the bound is read alone, and read: every read
 // makes progress. A key Redis answers with an error says nothing about its
-// group: it is not handed over, the groups beside it are, and the read
-// returns an error counting it.
-func TestALargeDocumentIsReadAloneAndAnAnsweredKeyIsNotHandedOver(t *testing.T) {
+// group and is never handed over: the read stops there and returns an error
+// saying so, after handing over the windows before it.
+func TestALargeDocumentIsReadAloneAndAnAnsweredKeyStopsTheRead(t *testing.T) {
 	client := &groupClient{values: map[string]string{
 		"p:dynamic_group:1": hostGroupOf(101), "p:dynamic_group:2": hostGroupOf(102), "p:dynamic_group:3": hostGroupOf(103)},
 		answered: map[string]error{"p:dynamic_group:2": answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")}}
@@ -103,8 +103,8 @@ func TestALargeDocumentIsReadAloneAndAnAnsweredKeyIsNotHandedOver(t *testing.T) 
 		handed = append(handed, fmt.Sprintf("%s=%d", id, len(snapshotOf(id, read, time.Time{}).Members)))
 	})
 	var unanswered *redisbatch.UnansweredError
-	if !errors.As(err, &unanswered) || unanswered.Keys != 1 || fmt.Sprint(handed) != "[1=1 3=1]" || len(client.calls) != 3 {
-		t.Fatalf("handed %v in %d pipelines of documents and returned %v; want 1 and 3, one a pipeline, and group 2 unanswered",
+	if !errors.As(err, &unanswered) || unanswered.Keys != 1 || fmt.Sprint(handed) != "[1=1]" || len(client.calls) != 2 {
+		t.Fatalf("handed %v in %d pipelines of documents and returned %v; want 1 alone, one a pipeline, and the read stopped at group 2",
 			handed, len(client.calls), err)
 	}
 }
@@ -123,16 +123,16 @@ func (fixture *groupFixture) answerEvery(err error) {
 
 // Redis answering every key with an error - LOADING while it restarts -
 // says nothing about the groups: the refresh keeps every snapshot, serves
-// each as past a failed refresh, fails, and counts the groups it could not
-// read. Answered again, the groups are read as before.
+// each as past a failed refresh, fails, and says why. Answered again, the
+// groups are read as before.
 func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T) {
 	fixture := newGroupFixture(t, 3)
 	fixture.answerEvery(answeredError("LOADING Redis is loading the dataset in memory"))
 	fixture.now = fixture.now.Add(time.Minute)
 	err := fixture.store.Refresh(context.Background())
 	var unanswered *redisbatch.UnansweredError
-	if !errors.As(err, &unanswered) || unanswered.Keys != 3 {
-		t.Fatalf("the refresh returned %v, want every group unanswered", err)
+	if !errors.As(err, &unanswered) {
+		t.Fatalf("the refresh returned %v, want an unanswered read", err)
 	}
 	for _, id := range fixture.ids {
 		lookup := fixture.store.Group(context.Background(), id, time.Minute)
@@ -140,7 +140,7 @@ func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T)
 			t.Fatalf("group %s after an unanswered refresh = %+v, %+v; want its members, past a failed refresh", id, lookup, lookup.Snapshot)
 		}
 	}
-	if health := fixture.store.Health(); !health.RefreshFailed || health.Unanswered != 3 || health.UnansweredReads != 3 ||
+	if health := fixture.store.Health(); !health.RefreshFailed || health.FailureReason != "LOADING" || health.FailingSince.IsZero() ||
 		health.Loaded != 3 {
 		t.Fatalf("health after an unanswered refresh = %+v", health)
 	}
@@ -153,90 +153,50 @@ func TestARefreshRedisAnswersEveryKeyWithAnErrorKeepsEverySnapshot(t *testing.T)
 	if lookup := fixture.store.Group(context.Background(), fixture.ids[0], time.Minute); lookup.RefreshFailed || lookup.Age != 0 {
 		t.Fatalf("group after an answered refresh = %+v", lookup)
 	}
-	if health := fixture.store.Health(); health.RefreshFailed || health.Unanswered != 0 || health.UnansweredReads != 3 {
+	if health := fixture.store.Health(); health.RefreshFailed || health.FailureReason != "" || !health.FailingSince.IsZero() {
 		t.Fatalf("health after an answered refresh = %+v", health)
 	}
 }
 
-// The health names each group served past refreshes that could not read
-// it: since the first of them after its last read, which a second does not
-// move, and why the latest could not, in closed words - the code Redis
-// answered its key with, or transport. A group never read is not served past anything and is not
-// named; a read of the group, or its reference ageing out, ends its run.
-func TestTheHealthNamesEachGroupServedPastAFailedRefresh(t *testing.T) {
+// The health says since when the refreshes fail and why: since the first
+// that failed after the last that read the groups, which a second does not
+// move, and why the latest failed, in closed words - the code Redis answered
+// a key with, or transport. A refresh that reads ends the run. A refresh
+// reads every group or none: one group Redis answers with an error leaves
+// every group served past the failure, with its snapshot.
+func TestTheHealthSaysSinceWhenAndWhyTheRefreshesFail(t *testing.T) {
 	fixture := newGroupFixture(t, 2)
 	loading := answeredError("LOADING Redis is loading the dataset in memory")
-	// A group whose key Redis answers with an error throughout is never read.
-	fixture.client.values["p:dynamic_group:never"] = hostGroupOf(9)
-	answer := func(answered map[string]error) {
-		answered["p:dynamic_group:never"] = loading
-		fixture.client.answered = answered
-	}
-	answer(map[string]error{})
-	if lookup := fixture.store.Group(context.Background(), "never", time.Minute); lookup.ReadErr == nil {
-		t.Fatal("setup: a group never read was read")
-	}
-	answer(map[string]error{"p:dynamic_group:" + fixture.ids[0]: loading, "p:dynamic_group:" + fixture.ids[1]: loading})
+	fixture.client.answered = map[string]error{"p:dynamic_group:" + fixture.ids[0]: loading}
 	fixture.now = fixture.now.Add(time.Minute)
 	started := fixture.now
-	_ = fixture.store.Refresh(context.Background())
-	failing := fixture.store.Health().Failing
-	if len(failing) != 2 || failing[0].ID != fixture.ids[0] || failing[1].ID != fixture.ids[1] || !failing[0].Since.Equal(started) ||
-		failing[0].Reason != "LOADING" {
-		t.Fatalf("failing after an unanswered refresh = %+v", failing)
-	}
-
-	answer(map[string]error{})
-	fixture.client.err = errors.New("connection refused")
-	fixture.now = fixture.now.Add(time.Minute)
-	_ = fixture.store.Refresh(context.Background())
-	failing = fixture.store.Health().Failing
-	if len(failing) != 2 || !failing[1].Since.Equal(started) || failing[1].Reason != "transport" {
-		t.Fatalf("failing after a refresh that failed at the transport = %+v, want the run's start kept and the latest reason", failing)
-	}
-
-	fixture.client.err = nil
-	answer(map[string]error{"p:dynamic_group:" + fixture.ids[1]: answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")})
-	fixture.now = fixture.now.Add(time.Minute)
-	_ = fixture.store.Refresh(context.Background())
-	if failing = fixture.store.Health().Failing; len(failing) != 1 || failing[0].ID != fixture.ids[1] || failing[0].Reason != "WRONGTYPE" {
-		t.Fatalf("failing after the first group read again = %+v, want only the second", failing)
-	}
-
-	// Nobody asks for the second group any more: past its horizon it leaves
-	// the refresh and the health, run and all.
-	for step := 0; step < 12; step++ {
-		fixture.now = fixture.now.Add(time.Minute)
-		_ = fixture.store.Refresh(context.Background())
-		fixture.store.Group(context.Background(), fixture.ids[0], time.Minute)
-	}
-	if failing = fixture.store.Health().Failing; len(failing) != 0 {
-		t.Fatalf("failing after the group aged out = %+v, want none", failing)
-	}
-}
-
-// One group Redis answers with an error keeps its snapshot and is served as
-// past a failed refresh; the groups beside it are refreshed as usual.
-func TestAGroupRedisAnswersWithAnErrorKeepsOnlyItsOwnSnapshot(t *testing.T) {
-	fixture := newGroupFixture(t, 3)
-	for _, id := range fixture.ids {
-		fixture.client.values["p:dynamic_group:"+id] = hostGroupOf(500, 501)
-	}
-	fixture.client.answered = map[string]error{
-		"p:dynamic_group:" + fixture.ids[1]: answeredError("WRONGTYPE Operation against a key holding the wrong kind of value")}
-	fixture.now = fixture.now.Add(time.Minute)
 	if err := fixture.store.Refresh(context.Background()); err == nil {
 		t.Fatal("a refresh with a group unanswered did not fail")
 	}
-	for index, id := range fixture.ids {
-		lookup := fixture.store.Group(context.Background(), id, time.Minute)
-		want, failed := 2, false
-		if index == 1 {
-			want, failed = 1, true
+	if health := fixture.store.Health(); !health.FailingSince.Equal(started) || health.FailureReason != "LOADING" {
+		t.Fatalf("health after an unanswered refresh = %+v", health)
+	}
+	for _, id := range fixture.ids {
+		if lookup := fixture.store.Group(context.Background(), id, time.Minute); lookup.Snapshot == nil || len(lookup.Snapshot.Members) != 1 || !lookup.RefreshFailed {
+			t.Fatalf("group %s = %+v; want its snapshot, served past the failed refresh", id, lookup)
 		}
-		if len(lookup.Snapshot.Members) != want || lookup.RefreshFailed != failed {
-			t.Fatalf("group %s = %d members, refresh failed %v; want %d, %v", id, len(lookup.Snapshot.Members), lookup.RefreshFailed, want, failed)
-		}
+	}
+
+	fixture.client.answered = map[string]error{}
+	fixture.client.err = errors.New("connection refused")
+	fixture.now = fixture.now.Add(time.Minute)
+	_ = fixture.store.Refresh(context.Background())
+	if health := fixture.store.Health(); !health.FailingSince.Equal(started) || health.FailureReason != "transport" {
+		t.Fatalf("health after a refresh that failed at the transport = %+v, want the run's start kept and the latest reason", health)
+	}
+
+	fixture.client.err = nil
+	fixture.now = fixture.now.Add(time.Minute)
+	if err := fixture.store.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if health := fixture.store.Health(); !health.FailingSince.IsZero() || health.FailureReason != "" || health.RefreshFailed {
+		t.Fatalf("health after a refresh that read = %+v, want the run ended", health)
 	}
 }
 

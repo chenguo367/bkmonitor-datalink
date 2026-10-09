@@ -14,8 +14,7 @@ import (
 )
 
 // The dynamic group store is read at scrape time: every state and gauge
-// present at zero before the store is bound, the store's reading after,
-// the unanswered reads as a counter.
+// present at zero before the store is bound, the store's reading after.
 func TestTargetGroupsReadTheStoreAtScrape(t *testing.T) {
 	read := func(recorder *Recorder) map[string]float64 {
 		t.Helper()
@@ -29,10 +28,8 @@ func TestTargetGroupsReadTheStoreAtScrape(t *testing.T) {
 				switch name := family.GetName(); name {
 				case "bkmonitor_alarmd_target_group_groups":
 					values["groups:"+sample.GetLabel()[0].GetValue()] = sample.GetGauge().GetValue()
-				case "bkmonitor_alarmd_target_group_refresh_failed", "bkmonitor_alarmd_target_group_oldest_failing_seconds":
+				case "bkmonitor_alarmd_target_group_refresh_failed":
 					values[name] = sample.GetGauge().GetValue()
-				case "bkmonitor_alarmd_target_group_unanswered_reads_total":
-					values[name] = sample.GetCounter().GetValue()
 				}
 			}
 		}
@@ -40,7 +37,7 @@ func TestTargetGroupsReadTheStoreAtScrape(t *testing.T) {
 	}
 	recorder := NewRecorder(BuildInfo{})
 	values := read(recorder)
-	if len(values) != len(TargetGroupStates)+3 {
+	if len(values) != len(TargetGroupStates)+1 {
 		t.Fatalf("unbound series = %v, want every state and gauge", values)
 	}
 	for name, value := range values {
@@ -51,14 +48,13 @@ func TestTargetGroupsReadTheStoreAtScrape(t *testing.T) {
 	recorder.SetTargetGroupSource(func() TargetGroupReading {
 		return TargetGroupReading{
 			Groups:        map[string]int{"referenced": 7, "loaded": 5, "unavailable": 2, "failing": 3},
-			RefreshFailed: true, UnansweredReads: 12, OldestFailingSeconds: 240,
+			RefreshFailed: true,
 		}
 	})
 	values = read(recorder)
 	want := map[string]float64{
 		"groups:referenced": 7, "groups:loaded": 5, "groups:unavailable": 2, "groups:failing": 3,
-		"bkmonitor_alarmd_target_group_refresh_failed": 1, "bkmonitor_alarmd_target_group_unanswered_reads_total": 12,
-		"bkmonitor_alarmd_target_group_oldest_failing_seconds": 240,
+		"bkmonitor_alarmd_target_group_refresh_failed": 1,
 	}
 	for name, value := range want {
 		if values[name] != value {

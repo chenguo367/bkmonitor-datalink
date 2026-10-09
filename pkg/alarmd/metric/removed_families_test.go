@@ -62,6 +62,10 @@ var removedFamilies = []string{
 	// design's reading, run every Leader round and acted on by nothing.
 	"split_plan_total", "split_round_objects_total", "split_rounds_total", "shard_query_total",
 	"catalog_shardability_plans_total", "dimension_census_total", "dimension_census_values_total",
+	// Per-group failure detail of the target group store: a refresh reads
+	// every group or none, and the replica's dependencies say since when and
+	// why the refreshes fail.
+	"target_group_unanswered_reads_total", "target_group_oldest_failing_seconds",
 }
 
 // removedLabelValues are label values taken out of families that stay.

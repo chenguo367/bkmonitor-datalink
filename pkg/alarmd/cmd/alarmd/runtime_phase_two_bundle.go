@@ -671,7 +671,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if groupStore != nil {
 		go groupStore.Run(cmdbIndexCtx)
 		recorder.SetTargetGroupSource(func() metric.TargetGroupReading {
-			return targetGroupReading(groupStore.Health(), external.Now())
+			return targetGroupReading(groupStore.Health())
 		})
 	}
 	// The close of alerts whose target left the strategy's scope hears the

@@ -7,8 +7,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -17,12 +15,13 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 )
 
-// A replica's target group endpoint says, in one read, which groups it
-// serves past refreshes that could not read them, since when and why, and
-// its metrics count them: here a group whose key comes to hold another
-// type, which Redis answers WRONGTYPE. The group beside it is read as
-// usual and is not named. Read again, the group leaves the list.
-func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing.T) {
+// A replica's target group endpoint says, in one read, that its refreshes
+// fail, since when and why, and its metrics count every group it holds as
+// served past them: here a group whose key comes to hold another type,
+// which Redis answers WRONGTYPE. A refresh reads every group or none, so the
+// group beside it is served past the failure too. Read again, the failure
+// clears.
+func TestTheTargetGroupEndpointSaysSinceWhenAndWhyItsRefreshesFail(t *testing.T) {
 	_, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	cfg := config.Default()
@@ -57,7 +56,7 @@ func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing
 		return list[1].Writer
 	}
 	if writer := endpoint(time.Now()); writer == nil || !writer.Present || writer.Count != 2 || writer.State != targetGroupLoaded ||
-		len(writer.Failing) != 0 {
+		writer.FailingSinceAgeSeconds != nil || writer.FailingReason != "" {
 		t.Fatalf("evidence with every group read = %+v", writer)
 	}
 
@@ -72,15 +71,13 @@ func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing
 	}
 	at := time.Now().Add(90 * time.Second)
 	writer := endpoint(at)
-	if writer == nil || writer.State != targetGroupRefreshFailed || writer.Count != 2 || len(writer.Failing) != 1 ||
-		writer.Failing[0].ID != "2" || writer.Failing[0].Reason != "WRONGTYPE" || writer.FailingTotal != 1 ||
-		writer.Failing[0].SinceAgeSeconds < 89 || writer.Failing[0].SinceAgeSeconds > 120 {
-		t.Fatalf("evidence with group 2 unanswered = %+v", writer)
+	if writer == nil || writer.State != targetGroupRefreshFailed || writer.Count != 2 || writer.FailingReason != "WRONGTYPE" ||
+		writer.FailingSinceAgeSeconds == nil || *writer.FailingSinceAgeSeconds < 89 || *writer.FailingSinceAgeSeconds > 120 {
+		t.Fatalf("evidence with group 2 answered WRONGTYPE = %+v", writer)
 	}
-	reading := targetGroupReading(groups.Health(), at)
-	if reading.Groups["failing"] != 1 || reading.Groups["loaded"] != 2 || reading.Groups["referenced"] != 2 || !reading.RefreshFailed ||
-		reading.UnansweredReads != 1 || reading.OldestFailingSeconds != writer.Failing[0].SinceAgeSeconds {
-		t.Fatalf("metric reading with group 2 unanswered = %+v", reading)
+	reading := targetGroupReading(groups.Health())
+	if reading.Groups["failing"] != 2 || reading.Groups["loaded"] != 2 || reading.Groups["referenced"] != 2 || !reading.RefreshFailed {
+		t.Fatalf("metric reading with group 2 answered WRONGTYPE = %+v", reading)
 	}
 
 	if err := client.Del(ctx, prefix+"dynamic_group:2").Err(); err != nil {
@@ -92,38 +89,32 @@ func TestTheTargetGroupEndpointNamesEachGroupServedPastAFailedRefresh(t *testing
 	if err := groups.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if writer := endpoint(time.Now()); writer.State != targetGroupLoaded || len(writer.Failing) != 0 {
+	if writer := endpoint(time.Now()); writer.State != targetGroupLoaded || writer.FailingSinceAgeSeconds != nil || writer.FailingReason != "" {
 		t.Fatalf("evidence with group 2 read again = %+v", writer)
 	}
 }
 
 // Each count of the store's health lands under its own name, and the state
 // says a failed refresh before a store with nothing referenced: every count
-// differs here, so none can stand in for another. The oldest failing group is the one failing
-// longest, listed first here, not the last listed.
+// differs here, so none can stand in for another. While the refreshes fail
+// every group held is failing, and the evidence says since when and why.
 func TestTargetGroupHealthIsReadUnderItsOwnNames(t *testing.T) {
 	at := time.Unix(10_000, 0)
 	health := cmdbcache.GroupHealth{Referenced: 9, Loaded: 5, Unavailable: 2,
-		RefreshFailed: true, Unanswered: 7, UnansweredReads: 11,
-		Failing: []cmdbcache.GroupFailure{
-			{ID: "a", Since: at.Add(-300 * time.Second), Reason: "transport"},
-			{ID: "b", Since: at.Add(-30 * time.Second), Reason: "LOADING"},
-		}}
-	reading := targetGroupReading(health, at)
-	want := map[string]int{"referenced": 9, "loaded": 5, "unavailable": 2, "failing": 2}
+		RefreshFailed: true, FailingSince: at.Add(-300 * time.Second), FailureReason: "transport"}
+	reading := targetGroupReading(health)
+	want := map[string]int{"referenced": 9, "loaded": 5, "unavailable": 2, "failing": 7}
 	for state, count := range want {
 		if reading.Groups[state] != count {
 			t.Fatalf("%s = %d, want %d (%+v)", state, reading.Groups[state], count, reading)
 		}
 	}
-	if !reading.RefreshFailed || reading.UnansweredReads != 11 || reading.OldestFailingSeconds != 300 {
+	if !reading.RefreshFailed {
 		t.Fatalf("reading = %+v", reading)
 	}
 	evidence := targetGroupEvidence(health, at)
-	if evidence.State != targetGroupRefreshFailed || evidence.Count != 5 || !evidence.Present || len(evidence.Failing) != 2 ||
-		evidence.Failing[0].ID != "a" || evidence.Failing[0].SinceAgeSeconds != 300 || evidence.Failing[0].Reason != "transport" ||
-		evidence.Failing[1].ID != "b" || evidence.Failing[1].SinceAgeSeconds != 30 || evidence.FailingTotal != 2 ||
-		evidence.FailingReasons["transport"] != 1 || evidence.FailingReasons["LOADING"] != 1 {
+	if evidence.State != targetGroupRefreshFailed || evidence.Count != 5 || !evidence.Present || evidence.FailingReason != "transport" ||
+		evidence.FailingSinceAgeSeconds == nil || *evidence.FailingSinceAgeSeconds != 300 {
 		t.Fatalf("evidence = %+v", evidence)
 	}
 	for _, test := range []struct {
@@ -139,45 +130,5 @@ func TestTargetGroupHealthIsReadUnderItsOwnNames(t *testing.T) {
 		if evidence := targetGroupEvidence(test.health, at); evidence.State != test.state || evidence.Present != test.loaded {
 			t.Fatalf("%+v read %s present %v, want %s present %v", test.health, evidence.State, evidence.Present, test.state, test.loaded)
 		}
-	}
-}
-
-// Every group fails at once when Redis loads, and the evidence rides in
-// every replica's head: it names the groups failing longest, at most
-// fleet.MaxFailingCopiesListed of them oldest first, and counts all of them
-// by reason. Three hundred failing groups publish in a few hundred bytes.
-func TestTheTargetGroupEvidenceNamesTheLongestFailingAndCountsTheRest(t *testing.T) {
-	at := time.Unix(100_000, 0)
-	health := cmdbcache.GroupHealth{Referenced: 300, Loaded: 300, RefreshFailed: true}
-	for index := 0; index < 300; index++ {
-		reason := "LOADING"
-		if index%100 == 0 {
-			reason = "transport"
-		}
-		health.Failing = append(health.Failing, cmdbcache.GroupFailure{
-			ID: fmt.Sprintf("%06d", 100000+index), Since: at.Add(-time.Duration(index%50) * time.Minute), Reason: reason})
-	}
-	evidence := targetGroupEvidence(health, at)
-	if len(evidence.Failing) != fleet.MaxFailingCopiesListed || evidence.FailingTotal != 300 ||
-		evidence.FailingReasons["LOADING"] != 297 || evidence.FailingReasons["transport"] != 3 {
-		t.Fatalf("evidence names %d, counts %d by %v", len(evidence.Failing), evidence.FailingTotal, evidence.FailingReasons)
-	}
-	// Six groups have failed 49 minutes and six 48: the six, then two of
-	// the next, each age's groups by id.
-	for index, failure := range evidence.Failing {
-		want := 49 * 60.0
-		if index >= 6 {
-			want = 48 * 60
-		}
-		if failure.SinceAgeSeconds != want {
-			t.Fatalf("named %d is %+v, want a group failing %v seconds", index, failure, want)
-		}
-		if index > 0 && failure.SinceAgeSeconds == evidence.Failing[index-1].SinceAgeSeconds && failure.ID <= evidence.Failing[index-1].ID {
-			t.Fatalf("groups failing as long are named out of order: %+v", evidence.Failing)
-		}
-	}
-	encoded, err := json.Marshal(evidence)
-	if err != nil || len(encoded) > 1024 {
-		t.Fatalf("the evidence publishes as %d bytes, %v; want under 1 KiB", len(encoded), err)
 	}
 }
