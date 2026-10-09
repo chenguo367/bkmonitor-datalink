@@ -53,6 +53,10 @@ var removedFamilies = []string{
 	// answering and the established one kept only for what it declines.
 	"canonical_encoding_mode", "canonical_encoding_shadow_sample_stride", "canonical_encoding_shadow_total",
 	"canonical_encoding_covered_call_sites", "canonical_encoding_distinct_findings", "canonical_encoding_identity_part_total",
+	// The split dry run and the dimension census it read: a suspended
+	// design's reading, run every Leader round and acted on by nothing.
+	"split_plan_total", "split_round_objects_total", "split_rounds_total", "shard_query_total",
+	"catalog_shardability_plans_total", "dimension_census_total", "dimension_census_values_total",
 }
 
 // A removed family is registered nowhere, bound or not.

@@ -23,21 +23,6 @@ func TestStateTTLRejectsUnsatisfiedHardMaximum(t *testing.T) {
 	}
 }
 
-type fakeRouter struct {
-	target     StorageTarget
-	strategies []string
-	err        error
-}
-
-func (router *fakeRouter) Route(_ string, strategyID string) (StorageTarget, error) {
-	router.strategies = append(router.strategies, strategyID)
-	return router.target, router.err
-}
-
-func (router *fakeRouter) Targets() []StorageTarget {
-	return []StorageTarget{router.target}
-}
-
 type fakeBackend struct {
 	values      map[string][]byte
 	mgetBatches [][]string

@@ -212,20 +212,3 @@ func TestASupplementTakesItsScopeAndCountsWhatItLeaves(t *testing.T) {
 		t.Fatalf("facts %+v, want %+v", stream.supplement.facts, want)
 	}
 }
-
-// A supplement takes no census, however heavy its Query Group: its series
-// are a few late ones, not what the Query Group has. The same gate opens for
-// a Slot of that Query Group.
-func TestASupplementTakesNoCensus(t *testing.T) {
-	coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxRetainedBytes: 1 << 20}}
-	coordinator.censusPeaks.record("qg-heavy", coordinator.qgShareBytes())
-	slot := &streamedExecution{coordinator: coordinator}
-	slot.openCensusGate("qg-heavy")
-	supplement := &streamedExecution{coordinator: coordinator,
-		supplement: newSupplementRun(execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})}
-	supplement.openCensusGate("qg-heavy")
-	if !slot.censusCandidate || supplement.censusCandidate || supplement.censusShareBytes != 0 {
-		t.Fatalf("Slot candidate %v, supplement candidate %v share %d: want only the Slot's gate open",
-			slot.censusCandidate, supplement.censusCandidate, supplement.censusShareBytes)
-	}
-}
