@@ -299,6 +299,41 @@ func physicalFailureCategory(routes execution.ProviderRouteFacts) string {
 	return observability.QueryFailureCategoryProviderTransport
 }
 
+// backendDidNotAnswer says a query timed out waiting on the backend: its
+// last failed attempt went out, ran out its deadline with no answer or with
+// the answer stopping partway (QUERY_TIMEOUT on a transport or body detail),
+// and spent more of its window waiting on the backend than alarmd spent
+// before sending it and on what had arrived (execution.AttemptTiming). Such a
+// timeout is evidence for the degraded pool like a status the backend sent:
+// the same query times out again on the same backend, and each try holds a
+// query permit to its deadline, the costliest failure there is.
+//
+// A query begun late -- most of its window gone waiting for a permit or
+// behind alarmd's own work -- is not: a burst of this process's own load
+// would otherwise put healthy Query Groups in the pool. Neither is a timeout
+// that measured no timing, nor alarmd's own delivery running out the
+// deadline (a delivery detail), nor any transport failure other than a
+// timeout.
+func backendDidNotAnswer(routes execution.ProviderRouteFacts) bool {
+	for index := len(routes.Attempts) - 1; index >= 0; index-- {
+		attempt := routes.Attempts[index]
+		if attempt.Result != execution.RouteAttemptFailed && attempt.ReasonCode == "" {
+			continue
+		}
+		if attempt.ReasonCode != execution.ReasonCode(contract.ReasonQueryTimeout) || attempt.Timing == nil {
+			return false
+		}
+		switch attempt.Detail {
+		case execution.TransportRouteDetail(execution.TransportFailureTimeout), execution.BodyRouteDetail(execution.TransportFailureTimeout):
+		default:
+			return false
+		}
+		timing := attempt.Timing
+		return timing.ElapsedMillis-timing.LocalMillis > timing.StartLateMillis+timing.LocalMillis
+	}
+	return false
+}
+
 // unexplainedOutcomeFacts names a non-successful evaluation outcome that
 // carries no reason of its own. Without it the line normalises to
 // internal_unknown with no error text, which is how several Query Groups
