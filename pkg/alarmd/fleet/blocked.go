@@ -455,7 +455,7 @@ var dependencySignatures = []struct {
 // no failure: a normal object, or one whose data stopped, which is not
 // this deployment stuck anywhere.
 func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
-	if anomaly.Kind == KindNoData || anomaly.Kind == KindEmptyEveryRound || anomaly.Kind == KindQuiet || anomaly.Kind == KindRetainedShareApproaching ||
+	if anomaly.Kind == KindNoData || anomaly.Kind == KindEmptyEveryRound || anomaly.Kind == KindQuiet || anomaly.Kind == KindAnswerTruncated || anomaly.Kind == KindRetainedShareApproaching ||
 		anomaly.Kind == KindReadBeforeComplete || anomaly.Kind == KindReadHeld || anomaly.Kind == KindLatePastRound ||
 		anomaly.Kind == KindLateSeriesMissed {
 		return nil

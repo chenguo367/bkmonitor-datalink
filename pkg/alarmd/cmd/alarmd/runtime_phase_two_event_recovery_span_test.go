@@ -363,7 +363,9 @@ func TestAnEventCountAlertOpenAtTheReleaseRecoversOnlyWithoutAHole(t *testing.T)
 // the quiet that follows does not close it. On the consumer's protocol a
 // RECOVERY asks the open-alert gate; here a second process takes the Plan
 // over after the event's round, its copy of the consumer's set holds nothing
-// it did not send, and round 4's RECOVERY is held as no open alert. Past the
+// it did not send - no Console is configured, so the copy is untrusted and
+// answers from this process's own record of what it opened - and round 4's
+// RECOVERY is held as no open alert. Past the
 // range the group is not in the answer: nothing is decided, nothing is sent,
 // the alert is not closed by inference, and the rounds read quiet.
 func TestAHeldEventCountRecoveryLeavesTheAlertOpenThroughTheQuiet(t *testing.T) {

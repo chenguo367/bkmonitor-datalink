@@ -215,6 +215,16 @@ type StrategyRef struct {
 	BusinessID string `json:"business_id"`
 }
 
+// AnswerTruncation is a row's suspected cut: the query's source, the group-by
+// dimension whose terms level held the query service's bucket cap, since
+// when the answers have said so, and the latest Slot that did.
+type AnswerTruncation struct {
+	Source    string    `json:"source"`
+	Dimension string    `json:"dimension"`
+	Since     time.Time `json:"since"`
+	LastSlot  int64     `json:"last_slot,omitempty"`
+}
+
 // FailureFromPoolRecord marks a row's failure as the cooldown pool's reason,
 // not one this process observed (FailureRef.Source).
 const FailureFromPoolRecord = "pool_record"
@@ -1441,6 +1451,8 @@ type Anomaly struct {
 	// DemotedSince is when the object entered the demoted pool, on a row in
 	// it; zero elsewhere, and on rows from a publisher that predates it.
 	DemotedSince time.Time `json:"demoted_since,omitempty"`
+	// AnswerTruncation is the suspected cut on a KindAnswerTruncated row.
+	AnswerTruncation *AnswerTruncation `json:"answer_truncation,omitempty"`
 	// Internal is the last failure of this deployment's own making in the
 	// current run -- a contract or evaluation error -- kept beside the
 	// finding the column decided. The line is the column's; this is the

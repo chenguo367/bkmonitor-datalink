@@ -224,7 +224,9 @@ var checkWords = map[Check]wordPair{
 	// Not "data absent": the data arrived, outside the target.
 	CheckEmptyAfterTarget: {StateNotDetecting, ActionStrategyEdit},
 	// Detecting: an event count with no event to judge.
-	CheckQuiet:              {StateDetecting, ActionNone},
+	CheckQuiet: {StateDetecting, ActionNone},
+	// Detecting what came back; the grouping is the strategy's to narrow.
+	CheckAnswerTruncated:    {StateDetecting, ActionStrategyEdit},
 	CheckSeriesChurning:     {StateResultUntrusted, ActionStrategyEdit},
 	CheckPlanUnevaluable:    {StateStrategyInvalid, ActionStrategyEdit},
 	CheckQueryTargetMissing: {StateStrategyInvalid, ActionStrategyEdit},

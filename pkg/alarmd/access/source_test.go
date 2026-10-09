@@ -625,6 +625,9 @@ type fakeProvider struct {
 	empty        bool
 	reason       execution.ReasonCode
 	attempts     []execution.QueryAttempt
+	// truncation is the suspected cut the provider's answer names, as the
+	// query service client sets it on the route.
+	truncation *execution.ProviderTruncationFact
 }
 
 func (provider *fakeProvider) Execute(ctx context.Context, attempt execution.QueryAttempt, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
@@ -659,7 +662,7 @@ func (provider *fakeProvider) Execute(ctx context.Context, attempt execution.Que
 	}
 	return execution.ProviderCompletion{Ref: ref, PhysicalQuery: attempt.Spec.Digest, Completeness: completeness,
 		DataState: execution.DataStateData, Delivery: delivery,
-		RouteFacts: execution.ProviderRouteFacts{ProviderRouteRef: attempt.Spec.PlanFacts.ProviderRouteRef},
+		RouteFacts: execution.ProviderRouteFacts{ProviderRouteRef: attempt.Spec.PlanFacts.ProviderRouteRef, Truncation: provider.truncation},
 		Stats:      execution.ProviderStats{Series: 1, Records: 1}}, nil
 }
 
@@ -911,4 +914,29 @@ func (p *failAfterOneQueryPermits) AcquireRecoveryChannels(context.Context, exec
 }
 func (p deadlineCheckingQueryPermits) AcquireRecoveryChannels(context.Context, execution.SlotIdentity, execution.Operation, time.Time, int, func()) (RecoveryChannels, error) {
 	return testRecoveryChannels{p}, nil
+}
+
+// The cut the query service client named on its route reaches the Slot's
+// completion, so the worker projects it onto the query's line and the fleet
+// lists the object: the step between the client and the worker.
+func TestSourceCarriesTheProvidersSuspectedCut(t *testing.T) {
+	contractRef, frozen := frozenExecution(t)
+	cut := &execution.ProviderTruncationFact{Kind: execution.TruncationTermsCut, Dimension: "bk_target_ip", Cap: 10000, SourceSemantics: "custom/event"}
+	provider := &fakeProvider{truncation: cut}
+	source, err := NewSource(staticFrozenPlan{plan: frozen}, provider, &recordingQueryPermits{}, Config{MinReadyDelay: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.now = func() time.Time { return time.UnixMilli(2_000_000_000_000) }
+	source.wait = func(context.Context, time.Duration) error { return nil }
+	completion, err := source.Execute(context.Background(), execution.QueryExecutionRequest{
+		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1,
+	}, &recordingConsumer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completion.PhysicalQueries) != 1 || completion.PhysicalQueries[0].RouteFacts.Truncation == nil ||
+		*completion.PhysicalQueries[0].RouteFacts.Truncation != *cut {
+		t.Fatalf("physical queries = %+v, want the provider's cut %+v on the route", completion.PhysicalQueries, cut)
+	}
 }

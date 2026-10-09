@@ -207,7 +207,7 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// answered with no group - because such an object is detecting with
 	// nothing to judge, and the no-data lines would send its owner to a
 	// source that is only at rest (trigger review Dev 7).
-	if got := len(Checks()); got != 38 || len(checkAnswers) != 38 {
+	if got := len(Checks()); got != 39 || len(checkAnswers) != 39 {
 		t.Errorf("the check table has %d rows in order and %d answered, want 38: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
@@ -278,6 +278,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
 		CheckEmptyAfterTarget:    {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseOutsideTarget}},
 		CheckQuiet:               {Kind: KindQuiet},
+		CheckAnswerTruncated:     {Kind: KindAnswerTruncated},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,
 			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
