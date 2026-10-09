@@ -20,6 +20,7 @@ package cmdbcache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -547,8 +548,15 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// the two reads leaves the hashes newer than the time, so the facts read
 	// at most one round older than they are, never younger.
 	var published time.Time
-	if value, err := reader.client.Get(ctx, reader.publishedKey()).Result(); err == nil {
+	// A key that is not there is a writer that publishes no such time; one
+	// that cannot be read fails the load, which keeps the index before it,
+	// whose publish time goes on ageing - read as absent, a writer stopped
+	// for hours would read as fresh.
+	switch value, err := reader.client.Get(ctx, reader.publishedKey()).Result(); {
+	case err == nil:
 		published = parseEpochSeconds(value)
+	case !errors.Is(err, redis.Nil):
+		return nil, fmt.Errorf("alarmd cmdbcache: read the publish time: %w", err)
 	}
 
 	if err := reader.scan(ctx, reader.hostKey(), builder.addFields); err != nil {

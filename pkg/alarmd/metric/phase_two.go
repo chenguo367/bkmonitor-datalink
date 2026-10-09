@@ -1506,6 +1506,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorIncomplete), targetplan.ReasonMembersDropped},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
+		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
+		{targetplan.SelectorKindStatic, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeForeign},
 		{targetplan.SelectorKindStatic, string(targetplan.SelectorUnavailable), targetplan.ReasonModelUnresolved},

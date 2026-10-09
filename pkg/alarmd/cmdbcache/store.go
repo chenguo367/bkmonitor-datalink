@@ -203,9 +203,11 @@ type Health struct {
 	// host count for that reading.
 	ServiceInstances int
 	// Age is how long ago alarmd read the held index. PublishedAge is how
-	// long ago the writer published what it read, when the writer says;
-	// SourceAge is the other writer's last attempt, shown and not decided on.
+	// long ago the writer published what it read, when the writer says
+	// (Published); SourceAge is the other writer's last attempt, shown and
+	// not decided on.
 	Age            time.Duration
+	Published      bool
 	PublishedAge   time.Duration
 	SourceAge      time.Duration
 	Degraded       bool
@@ -248,7 +250,9 @@ func (store *Store) Health() Health {
 	health.Refused = store.index.Refused()
 	health.Age = now.Sub(store.index.BuiltAt())
 	if published := store.index.PublishedAt(); !published.IsZero() {
-		health.PublishedAge = now.Sub(published)
+		// As factsAge reads it: a writer clock ahead of this one is a
+		// publish just made.
+		health.Published, health.PublishedAge = true, max(now.Sub(published), 0)
 	}
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
 		health.SourceAge = now.Sub(source)

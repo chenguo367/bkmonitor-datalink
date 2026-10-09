@@ -16,6 +16,7 @@ package cmdbcache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -31,14 +32,51 @@ import (
 type markerClient struct {
 	*hashClient
 	strings map[string]string
+	failing map[string]error
 }
 
 func (client *markerClient) Get(_ context.Context, key string) *redis.StringCmd {
 	client.scans = append(client.scans, "GET "+key)
+	if err, failing := client.failing[key]; failing {
+		return redis.NewStringResult("", err)
+	}
 	if value, found := client.strings[key]; found {
 		return redis.NewStringResult(value, nil)
 	}
 	return redis.NewStringResult("", redis.Nil)
+}
+
+// A publish time that cannot be read fails the load, which keeps the index
+// before it and its publish time ageing; a key that is not there is a writer
+// that publishes none.
+func TestAPublishTimeThatCannotBeReadFailsTheLoad(t *testing.T) {
+	const published = "bk_monitorv3.ce.cache.cmdb_published_at.host_topo"
+	client := &markerClient{hashClient: &hashClient{hashes: map[string][]string{"bk_monitorv3.ce.cache.cmdb.host": {"501", hostUnderSet}}},
+		failing: map[string]error{published: errors.New("i/o timeout")}}
+	reader, err := NewReader(client, "bk_monitorv3.ce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Load(context.Background(), time.Unix(1700000300, 0)); err == nil {
+		t.Fatal("a load whose publish time could not be read succeeded")
+	}
+	client.failing = nil
+	if index, err := reader.Load(context.Background(), time.Unix(1700000300, 0)); err != nil || !index.PublishedAt().IsZero() {
+		t.Fatalf("a load with no publish time = %v, %v; want loaded, aged by its read", err, index.PublishedAt())
+	}
+}
+
+// A writer clock ahead of this one is a publish just made: Health says the
+// writer publishes, at age zero, never a negative age.
+func TestHealthReadsAPublishTimeAheadAsJustPublished(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	builder := newIndexBuilder(now)
+	builder.addFields([]string{"501", hostUnderSet})
+	builder.index.publishedAt = now.Add(time.Minute)
+	store := &Store{index: builder.index, now: func() time.Time { return now }, maxAge: 10 * time.Minute, publishedMaxAge: 15 * time.Minute}
+	if health := store.Health(); !health.Published || health.PublishedAge != 0 || health.Degraded {
+		t.Fatalf("health = %+v, want published at age zero", health)
+	}
 }
 
 // The writer's publish time is read from its own key, before the hashes, as
@@ -160,8 +198,10 @@ func TestEveryCallerReadsTheOneJudgementOnTheHostIndex(t *testing.T) {
 			if _, held := lookup.LookupHostBusiness("730001"); held != c.usable {
 				t.Errorf("LookupHostBusiness held = %v", held)
 			}
-			if _, placed := lookup.PlaceHostBusiness(map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"730001"`)}); placed != c.usable {
-				t.Errorf("PlaceHostBusiness placed = %v", placed)
+			// Attribution labels, and a held index places even past its
+			// bound: every row here holds the host.
+			if _, placed := lookup.PlaceHostBusiness(map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"730001"`)}); !placed {
+				t.Errorf("PlaceHostBusiness placed = %v, want the held index to place", placed)
 			}
 		})
 	}

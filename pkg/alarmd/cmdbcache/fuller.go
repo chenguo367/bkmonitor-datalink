@@ -28,6 +28,9 @@ import (
 // every time CMDB does.
 type HostTopologyFuller struct {
 	store *Store
+	// acceptStale places on an index past its staleness bound, for a reader
+	// that labels rather than decides (attribution); admission does not.
+	acceptStale bool
 }
 
 func NewHostTopologyFuller(store *Store) *HostTopologyFuller {
@@ -42,7 +45,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		return
 	}
 	index, unusable := fuller.store.Usable()
-	if unusable != "" {
+	if unusable != "" && !(fuller.acceptStale && unusable == IndexStale) {
 		// Never loaded, past the staleness bound, or empty (Store.judge). A
 		// filter that acts on "CMDB does not know this host" has to tell that
 		// apart from "CMDB was not asked": past the bound a host added since
@@ -225,7 +228,8 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 // overwritten values. Here those become facts: the topology attribute, the
 // host identity attribute and HostNaming change; the dimensions do not.
 type ServiceInstanceTopologyFuller struct {
-	store *Store
+	store       *Store
+	acceptStale bool
 }
 
 func NewServiceInstanceTopologyFuller(store *Store) *ServiceInstanceTopologyFuller {
@@ -254,7 +258,7 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		return
 	}
 	index, unusable := fuller.store.Usable()
-	if unusable != "" || index.ServiceInstances() == 0 {
+	if (unusable != "" && !(fuller.acceptStale && unusable == IndexStale)) || index.ServiceInstances() == 0 {
 		// The same reading as an empty host cache: a series that names an
 		// instance while the instance cache holds none is the signature of a
 		// cache nobody writes, not of a fleet without instances. Deciding on

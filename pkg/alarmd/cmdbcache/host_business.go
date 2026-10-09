@@ -36,16 +36,19 @@ func NewHostBusinessLookup(store *Store) *HostBusinessLookup {
 // then the host fuller (a true id, the agent, the address) and the
 // service-instance fuller, in Python's order (fullers.py:55-110). A record
 // they place on no host answers false, and so does one they could not place
-// because the index is unavailable or past its staleness bound: an event is
-// not attributed on facts admission would not decide on.
+// because no index is held or it is empty. An index past its staleness
+// bound still places: attribution is a label, not a verdict, and a host's
+// business a quarter of an hour on is almost always the same, while the
+// fallback - the strategy's own business - is certainly wrong for a host
+// target.
 func (lookup *HostBusinessLookup) PlaceHostBusiness(dimensions map[string]json.RawMessage) (string, bool) {
 	if lookup == nil || lookup.store == nil {
 		return "", false
 	}
 	facts := admission.Facts{Dimensions: dimensions}
 	admission.IdentityFuller{}.Fill(dimensions, &facts)
-	NewHostTopologyFuller(lookup.store).Fill(dimensions, &facts)
-	NewServiceInstanceTopologyFuller(lookup.store).Fill(dimensions, &facts)
+	(&HostTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
+	(&ServiceInstanceTopologyFuller{store: lookup.store, acceptStale: true}).Fill(dimensions, &facts)
 	if !facts.HostResolved || facts.HostFactsUnavailable || facts.HostBusinessID == "" {
 		return "", false
 	}
@@ -83,8 +86,10 @@ func (lookup *HostBusinessLookup) LookupAddressBusiness(tenantID, address string
 	if lookup == nil || lookup.store == nil {
 		return "", false
 	}
+	// Attribution's, so a held index past its bound still answers, as
+	// PlaceHostBusiness does.
 	index, unusable := lookup.store.Usable()
-	if unusable != "" {
+	if unusable != "" && unusable != IndexStale {
 		return "", false
 	}
 	host, count := index.AddressHost(tenantID, address)

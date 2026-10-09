@@ -37,6 +37,8 @@ func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T
 		"dynamic_group|Unavailable|stale",
 		"dynamic_group|Incomplete|members_dropped",
 		"dynamic_topology|Unavailable|index_unavailable",
+		"dynamic_topology|Unavailable|stale",
+		"static|Unavailable|stale",
 		"dynamic_topology|OKEmpty|node_missing",
 		"dynamic_topology|OKEmpty|node_in_other_business",
 		"static|Unavailable|model_representation_unresolved",

@@ -235,7 +235,7 @@ func endpointFactsSource(
 					// The writer's age is its publish time when it says, which
 					// staleness is judged on; else the other writer's last
 					// attempt, shown only.
-					if health.Loaded && health.PublishedAge > 0 {
+					if health.Loaded && health.Published {
 						age := health.PublishedAge.Seconds()
 						writer.AgeSeconds = &age
 					} else if health.Loaded && health.SourceAge > 0 {
