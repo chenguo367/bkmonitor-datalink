@@ -243,10 +243,12 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 // are read from: the platform's dynamic group hash of each tenant, under the
 // platform prefix the host index reads (cmdbcache.PlatformGroupStores), on
 // the host index's cadence and staleness bound. There is no coordinate of its
-// own: the platform keeps it beside the host hash.
-func buildScopeGroups(cfg config.Config, client redis.Cmdable) (*cmdbcache.PlatformGroupStores, error) {
+// own: the platform keeps it beside the host hash. One read holds at most
+// readBound bytes of group values, the bound the fork's group reader windows
+// by.
+func buildScopeGroups(cfg config.Config, client redis.Cmdable, readBound int) (*cmdbcache.PlatformGroupStores, error) {
 	return cmdbcache.NewPlatformGroupStores(client, cfg.PlatformKeyPrefix(), cmdbcache.GroupStoreOptions{
-		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound,
+		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound, ReadBound: readBound,
 	})
 }
 

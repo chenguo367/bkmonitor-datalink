@@ -34,10 +34,12 @@ const dynamicGroupCacheSuffix = "cache.cmdb.dynamic_group"
 // matched as.
 const platformGroupModel = "host"
 
-// platformGroupBatch is the most group ids one HMGET names. A host group's
-// value is its host ids, a few bytes each, so the bound on what one reply
-// holds is this count, not a byte budget read ahead of it.
-const platformGroupBatch = 64
+// platformGroupBatch is the most group ids one HMGET names, and
+// platformGroupLengthBatch the most one pipeline of HSTRLEN does.
+const (
+	platformGroupBatch       = 64
+	platformGroupLengthBatch = 512
+)
 
 // PlatformGroupReader reads the platform's dynamic group hash of one tenant.
 type PlatformGroupReader struct {
@@ -61,31 +63,79 @@ func NewPlatformGroupReader(client redis.Cmdable, prefix, tenant string) (*Platf
 	return &PlatformGroupReader{client: client, key: prefix + "." + dynamicGroupCacheSuffix}, nil
 }
 
-// Read reads the ids platformGroupBatch at a time, handing each id's value to
-// visit before the next batch is read; the byte bound a fork reader windows
-// by does not apply. A field the hash does not have, or a hash that is not
-// there, is an answer: the group is missing. A batch Redis answers with an
-// error - WRONGTYPE, LOADING - or that does not complete stops the read with
-// the error, as a fork read does.
-func (reader *PlatformGroupReader) Read(ctx context.Context, ids []string, _ int, visit func(id string, read GroupRead)) error {
-	for start := 0; start < len(ids); start += platformGroupBatch {
-		end := min(start+platformGroupBatch, len(ids))
-		values, err := reader.client.HMGet(ctx, reader.key, ids[start:end]...).Result()
+// Read reads the ids a window at a time, handing each id's value to visit
+// before the next window is read. A host group's value is its whole host
+// list - a few hundred bytes to megabytes - so a window is bounded as a fork
+// read's is: the values' lengths are read first (HSTRLEN, pipelined
+// platformGroupLengthBatch at a time), and one HMGET names the ids after the
+// last whose lengths add up to at most bound bytes, at most
+// platformGroupBatch of them, or the one value larger than bound alone. A
+// field the hash does not have, or a hash that is not there, is an answer:
+// the group is missing. A reply Redis answers with an error - WRONGTYPE,
+// LOADING - or that does not complete stops the read with the error, as a
+// fork read does.
+func (reader *PlatformGroupReader) Read(ctx context.Context, ids []string, bound int, visit func(id string, read GroupRead)) error {
+	for start := 0; start < len(ids); {
+		lengths, err := reader.lengths(ctx, ids[start:min(start+platformGroupLengthBatch, len(ids))])
 		if err != nil {
-			return fmt.Errorf("alarmd cmdbcache: read platform dynamic groups: %w", err)
+			return err
 		}
-		if len(values) != end-start {
-			return fmt.Errorf("alarmd cmdbcache: read platform dynamic groups: %d values for %d ids", len(values), end-start)
-		}
-		for offset, value := range values {
-			id := ids[start+offset]
-			text, held := value.(string)
-			if !held {
-				visit(id, GroupRead{Missing: true})
-				continue
+		for offset := 0; offset < len(lengths); {
+			end, held := offset, int64(0)
+			for end < len(lengths) && end-offset < platformGroupBatch && (end == offset || held+lengths[end] <= int64(bound)) {
+				held += lengths[end]
+				end++
 			}
-			visit(id, GroupRead{Payload: []byte(text)})
+			if err := reader.window(ctx, ids[start+offset:start+end], visit); err != nil {
+				return err
+			}
+			offset = end
 		}
+		start += len(lengths)
+	}
+	return nil
+}
+
+// lengths reads the values' lengths of ids in one pipeline; a field the hash
+// does not have is 0.
+func (reader *PlatformGroupReader) lengths(ctx context.Context, ids []string) ([]int64, error) {
+	commands := make([]*redis.Cmd, len(ids))
+	if _, err := reader.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for index, id := range ids {
+			// go-redis v8 has no HSTRLEN helper.
+			commands[index] = pipe.Do(ctx, "hstrlen", reader.key, id)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("alarmd cmdbcache: read platform dynamic group lengths: %w", err)
+	}
+	lengths := make([]int64, len(ids))
+	for index, command := range commands {
+		length, err := command.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("alarmd cmdbcache: read platform dynamic group lengths: %w", err)
+		}
+		lengths[index] = length
+	}
+	return lengths, nil
+}
+
+// window reads one window's values with one HMGET.
+func (reader *PlatformGroupReader) window(ctx context.Context, ids []string, visit func(id string, read GroupRead)) error {
+	values, err := reader.client.HMGet(ctx, reader.key, ids...).Result()
+	if err != nil {
+		return fmt.Errorf("alarmd cmdbcache: read platform dynamic groups: %w", err)
+	}
+	if len(values) != len(ids) {
+		return fmt.Errorf("alarmd cmdbcache: read platform dynamic groups: %d values for %d ids", len(values), len(ids))
+	}
+	for index, value := range values {
+		text, held := value.(string)
+		if !held {
+			visit(ids[index], GroupRead{Missing: true})
+			continue
+		}
+		visit(ids[index], GroupRead{Payload: []byte(text)})
 	}
 	return nil
 }
@@ -148,10 +198,9 @@ type PlatformGroupStores struct {
 }
 
 // NewPlatformGroupStores reads the platform's hashes under prefix with the
-// host index's cadence and staleness bound; ReadBound is not used, the reader
-// bounds each reply by count.
+// host index's cadence and staleness bound, one read holding at most
+// options.ReadBound bytes of group values (PlatformGroupReader.Read).
 func NewPlatformGroupStores(client redis.Cmdable, prefix string, options GroupStoreOptions) (*PlatformGroupStores, error) {
-	options.ReadBound = platformGroupBatch
 	stores := &PlatformGroupStores{client: client, prefix: prefix, options: options, tenants: make(map[string]*GroupStore)}
 	// The default tenant's store is built here so a coordinate or an option
 	// that cannot work is refused at start, not on a Slot.

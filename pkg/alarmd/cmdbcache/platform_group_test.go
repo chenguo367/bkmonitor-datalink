@@ -39,7 +39,12 @@ func platformGroupRedis(t *testing.T) *redis.Client {
 
 func platformGroupStores(t *testing.T, client redis.Cmdable, now func() time.Time) *PlatformGroupStores {
 	t.Helper()
-	stores, err := NewPlatformGroupStores(client, "bk_monitorv3.ce", GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: now})
+	return platformGroupStoresBound(t, client, now, 1<<20)
+}
+
+func platformGroupStoresBound(t *testing.T, client redis.Cmdable, now func() time.Time, bound int) *PlatformGroupStores {
+	t.Helper()
+	stores, err := NewPlatformGroupStores(client, "bk_monitorv3.ce", GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, ReadBound: bound, Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +53,16 @@ func platformGroupStores(t *testing.T, client redis.Cmdable, now func() time.Tim
 
 func hmgetCalls(t *testing.T, client *redis.Client) int64 {
 	t.Helper()
+	return commandCalls(t, client, "hmget")
+}
+
+func commandCalls(t *testing.T, client *redis.Client, command string) int64 {
+	t.Helper()
 	info, err := client.Info(context.Background(), "commandstats").Result()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, rest, found := strings.Cut(info, "cmdstat_hmget:calls=")
+	_, rest, found := strings.Cut(info, "cmdstat_"+command+":calls=")
 	if !found {
 		return 0
 	}
@@ -158,6 +168,56 @@ func TestAPlatformGroupPastAFailedRefreshIsAgedAndPastTheBoundIsStale(t *testing
 	}
 	if got := stores.ResolveScopeGroup(ctx, "", "g1", time.Minute); string(got.State) != "OK" || got.StaleAge != 0 || sortedMembers(got.Members) != "730003" {
 		t.Fatalf("after a refresh that read = %s [%s] stale %v", got.State, sortedMembers(got.Members), got.StaleAge)
+	}
+}
+
+// One read holds at most its bound of group values: the values' lengths are
+// read first, and one HMGET names the groups whose values add up to at most
+// the bound, or the one larger than the bound alone. The server's own
+// command counts.
+func TestAPlatformGroupReadHoldsAtMostItsBoundOfValues(t *testing.T) {
+	ctx := context.Background()
+	client := platformGroupRedis(t)
+	group := func(hosts, from int) string {
+		ids := make([]string, hosts)
+		for index := range ids {
+			ids[index] = strconv.Itoa(from + index)
+		}
+		return `{"bk_inst_ids":[` + strings.Join(ids, ",") + `],"bk_obj_id":"host"}`
+	}
+	values := map[string]string{"big": group(700, 700000)}
+	for index := range 5 {
+		values[fmt.Sprintf("g%d", index)] = group(137, 710000+index*1000)
+	}
+	small, big := len(values["g0"]), len(values["big"])
+	const bound = 2500
+	if 2*small > bound || 3*small <= bound || big <= bound {
+		t.Fatalf("the fixture's sizes do not set the windows: small %d, big %d, bound %d", small, big, bound)
+	}
+	for id, value := range values {
+		if err := client.HSet(ctx, platformGroupHash, id, value).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stores := platformGroupStoresBound(t, client, time.Now, bound)
+	for _, id := range []string{"big", "g0", "g1", "g2", "g3", "g4"} {
+		if got := stores.ResolveScopeGroup(ctx, "", id, time.Minute); string(got.State) != "OK" {
+			t.Fatalf("%s = %s %s", id, got.State, got.Reason)
+		}
+	}
+	hmget, hstrlen := hmgetCalls(t, client), commandCalls(t, client, "hstrlen")
+	if err := stores.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// big alone, then g0+g1, g2+g3, g4.
+	if calls := hmgetCalls(t, client) - hmget; calls != 4 {
+		t.Fatalf("a refresh within a %d-byte bound sent %d HMGET, want 4", bound, calls)
+	}
+	if calls := commandCalls(t, client, "hstrlen") - hstrlen; calls != 6 {
+		t.Fatalf("a refresh of 6 groups read %d lengths, want 6", calls)
+	}
+	if got := stores.ResolveScopeGroup(ctx, "", "big", time.Minute); got.Kept != 700 {
+		t.Fatalf("the group larger than the bound kept %d hosts, want 700", got.Kept)
 	}
 }
 

@@ -677,7 +677,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// own group hash beside the host hash, read on the same connection, as
 	// Python reads it when it matches such a target. Nothing is read until a
 	// strategy names a group.
-	scopeGroups, err := buildScopeGroups(cfg, redisForCaller(cmdbClient, redisfailure.CallerCMDBCache))
+	scopeGroups, err := buildScopeGroups(cfg, redisForCaller(cmdbClient, redisfailure.CallerCMDBCache), timelineCache.MaxBytes)
 	if err != nil {
 		return nil, err
 	}
