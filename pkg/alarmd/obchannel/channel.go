@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"io"
 	"math"
 	"net/http"
@@ -126,15 +127,21 @@ type Operation struct {
 	// DefaultOwnerParam selects an execution owner when no explicit target is
 	// supplied. The named domain field must be a required string identity.
 	DefaultOwnerParam string
-	Fields            map[string]Field
-	Required          []string
-	Examples          []Params
-	OutputSchema      any
-	Limits            any
-	Availability      func() Availability
-	InputRules        any
-	Validate          func(Params) error
-	Run               func(context.Context, Params) Outcome
+	// RouteWhenElsewhere is asked about an untargeted answer: the Query Group
+	// whose lease holder to ask the same read of, when the answering replica
+	// could only say which replica holds the answer. Only then is the read
+	// routed, so an answer any replica can give costs no extra hop; when the
+	// routed read fails, the local answer stands with the failure named.
+	RouteWhenElsewhere func(Params, any) (string, bool)
+	Fields             map[string]Field
+	Required           []string
+	Examples           []Params
+	OutputSchema       any
+	Limits             any
+	Availability       func() Availability
+	InputRules         any
+	Validate           func(Params) error
+	Run                func(context.Context, Params) Outcome
 }
 type Options struct {
 	Auth          Authorizer
@@ -497,6 +504,24 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
 	out := c.run(ctx, op, params, Target{}, meta)
+	if op.RouteWhenElsewhere != nil && c.options.Route != nil && out.Status != "error" {
+		if group, elsewhere := op.RouteWhenElsewhere(params, out.Result); elsewhere {
+			routed := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision,
+				Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: Target{OwnerQueryGroup: group}})
+			if routed.Status != "error" {
+				routed.Meta.Session = meta.Session
+				out = routed
+			} else {
+				reason := "routed read failed"
+				if routed.Error != nil {
+					reason = routed.Error.Code + ": " + observability.SanitizeErrorText(routed.Error.Message)
+				}
+				out.Evidence.Complete = false
+				out.Evidence.Limitations = append(out.Evidence.Limitations,
+					"The answer is held by another replica and the read routed to its lease holder failed ("+reason+"); tracked_by names the holder as of its latest snapshot.")
+			}
+		}
+	}
 	code := 200
 	if out.Status == "error" {
 		code = 502

@@ -134,6 +134,13 @@ func NativeOperations(handler http.Handler) []Operation {
 			ops[i].EvidenceScope = "shared_records_with_process_diagnostics"
 			ops[i].Targetable = true
 		}
+		if ops[i].ID == "object.get" {
+			// A healthy object's row lives only on the replica tracking it:
+			// targetable by its lease holder, and routed there on its own
+			// when the answering replica can only say which one holds it.
+			ops[i].Targetable = true
+			ops[i].RouteWhenElsewhere = objectElsewhere
+		}
 		if ops[i].ID == "strategy.get" {
 			ops[i].Examples = []Params{{"strategy_id": "1001"}}
 			f := ops[i].Fields["strategy_id"]
@@ -453,4 +460,19 @@ func invokeNative(ctx context.Context, handler http.Handler, path string, query 
 		}
 	}
 	return out
+}
+
+// objectElsewhere is the Query Group to route an object read to: one whose
+// answer carries no listed row and no row of the answering replica's own,
+// only the replica that holds it.
+func objectElsewhere(p Params, result any) (string, bool) {
+	body, ok := result.(map[string]any)
+	if !ok || body["anomaly"] != nil || body["tracked"] != nil {
+		return "", false
+	}
+	if holder, _ := body["tracked_by"].(string); holder == "" {
+		return "", false
+	}
+	group := p.String("query_group")
+	return group, group != ""
 }
