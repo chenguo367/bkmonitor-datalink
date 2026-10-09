@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -280,14 +281,150 @@ func TestAGapSkipAfterAnExpiredReplayStartsItsOwnSpan(t *testing.T) {
 func TestTheSkipRecordNamesAnExpiredReplayByItsWord(t *testing.T) {
 	at := time.Date(2026, 10, 1, 13, 0, 0, 0, time.UTC)
 	view := &View{GapSkips: map[string]SkippedSpan{
-		"qg-expired": {FirstSlot: 1, LastSlot: 1, Slots: 1, At: at.Add(-time.Hour), Reason: "SNAPSHOT_UNAVAILABLE"},
+		"qg-expired": {FirstSlot: 1, LastSlot: 1, Slots: 1, At: at.Add(-time.Hour), Kind: SkipKindExpiredReplay, Reason: "SNAPSHOT_UNAVAILABLE"},
 		"qg-skipped": {FirstSlot: 1, LastSlot: 1, Slots: 1, At: at.Add(-time.Hour), Reason: "QUERY_PERMIT_DEADLINE"},
+		// A gap skip whose Slot's snapshot read had kept failing: its Reason
+		// is that failure, and it is still a gap skip.
+		"qg-unread": {FirstSlot: 1, LastSlot: 1, Slots: 1, At: at.Add(-time.Hour), Reason: "SNAPSHOT_UNAVAILABLE"},
 	}}
 	codes := map[string]string{}
 	lossRecords(view, at, func(queryGroup string, _, _ Check, code string, _ SkippedSpan, _ Loss, _ bool) {
 		codes[queryGroup] = code
 	})
-	if codes["qg-expired"] != "SNAPSHOT_UNAVAILABLE" || codes["qg-skipped"] != "GAP_SKIPPED" {
+	if codes["qg-expired"] != "SNAPSHOT_UNAVAILABLE" || codes["qg-skipped"] != "GAP_SKIPPED" || codes["qg-unread"] != "GAP_SKIPPED" {
 		t.Fatalf("codes = %v, want the expired replay under SNAPSHOT_UNAVAILABLE and the gap skip under GAP_SKIPPED", codes)
+	}
+}
+
+// A range of Slots given up at once is on the record of what was never
+// evaluated, with its bounds and size, and is not a round: a healthy object
+// stays unlisted. A range that did not commit records nothing. A range past
+// the replay's reach is a gap skip and keeps that word.
+func TestAnExpiredRangeIsOnTheSkipRecordAndIsNotARound(t *testing.T) {
+	p := newPoolRows(t)
+	p.tick()
+	p.tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED", Trace: p.trace(60)})
+	rangeLine := func(result, kind string, committed uint32) {
+		p.tick()
+		p.tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageExpiredRangeReturned, Result: observability.ResultSuccess,
+			Trace: observability.TraceFields{QueryGroupKey: p.group},
+			ExpiredRange: &observability.ExpiredRangeFacts{Result: result, CommittedSlots: committed, FirstSlot: 120, LastSlot: 360,
+				Slots: 5, Kind: kind, Cause: "EXPIRED_REPLAY"},
+		})
+	}
+	rangeLine("retrying", "SNAPSHOT_UNAVAILABLE", 0)
+	if _, recorded := p.tracker.GapSkips()[p.group]; recorded {
+		t.Fatal("a range that did not commit was recorded")
+	}
+	rangeLine("committed", "SNAPSHOT_UNAVAILABLE", 5)
+	span, recorded := p.tracker.GapSkips()[p.group]
+	if !recorded || span.FirstSlot != 120 || span.LastSlot != 360 || span.Slots != 5 || span.Reason != "SNAPSHOT_UNAVAILABLE" {
+		t.Fatalf("span = %+v (recorded %t), want 120..360, five Slots, under SNAPSHOT_UNAVAILABLE", span, recorded)
+	}
+	if row := p.row(); row != nil {
+		t.Fatalf("a healthy object after a range commit is listed as %+v", row)
+	}
+	rangeLine("committed", "GAP_SKIPPED", 5)
+	if span := p.tracker.GapSkips()[p.group]; span.Reason != "" || span.Slots != 5 {
+		t.Fatalf("a range past the replay's reach: %+v, want a gap skip's span", span)
+	}
+}
+
+// The three paths that give Slots up - a gap skip, a Slot past its recovery
+// bound, a range of either - continue one span when they follow each other
+// with nothing evaluated between and are of one kind, and the span counts
+// every Slot. A round that is not a skip ends it, whichever path comes next.
+// The range's own strategies are recorded: after a restart its line may be
+// the first the tracker sees of the object.
+func TestTheSkipPathsContinueOneSpan(t *testing.T) {
+	rangeLine := func(p *poolRows, kind string, first, last int64, committed uint32) {
+		p.tick()
+		p.tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageExpiredRangeReturned, Result: observability.ResultSuccess,
+			Trace: observability.TraceFields{QueryGroupKey: p.group},
+			ExpiredRange: &observability.ExpiredRangeFacts{Result: "committed", CommittedSlots: committed, FirstSlot: first, LastSlot: last,
+				Slots: committed, Kind: kind, Cause: "EXPIRED_REPLAY",
+				Strategies: []observability.ExpiredRangeStrategy{{BusinessID: "2", StrategyID: "7"}}},
+		})
+	}
+	skip := func(p *poolRows, slot int64) {
+		p.tick()
+		p.tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN",
+			ProgressCompletionReason: "GAP_SKIPPED", Trace: p.trace(slot),
+		})
+	}
+	want := func(p *poolRows, first, last int64, slots int) {
+		t.Helper()
+		if span := p.tracker.GapSkips()[p.group]; span.FirstSlot != first || span.LastSlot != last || span.Slots != slots {
+			t.Fatalf("span = %+v, want %d..%d of %d Slots", span, first, last, slots)
+		}
+	}
+
+	single := newPoolRows(t)
+	skip(single, 60)
+	rangeLine(single, "GAP_SKIPPED", 120, 360, 5)
+	want(single, 60, 360, 6)
+
+	ranged := newPoolRows(t)
+	rangeLine(ranged, "GAP_SKIPPED", 120, 360, 5)
+	skip(ranged, 420)
+	want(ranged, 120, 420, 6)
+
+	expired := newPoolRows(t)
+	expired.expiredReplay(60)
+	rangeLine(expired, "SNAPSHOT_UNAVAILABLE", 120, 360, 5)
+	want(expired, 60, 360, 6)
+
+	ended := newPoolRows(t)
+	skip(ended, 60)
+	ended.tick()
+	ended.tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED", Trace: ended.trace(120)})
+	rangeLine(ended, "GAP_SKIPPED", 180, 360, 4)
+	want(ended, 180, 360, 4)
+
+	// A range that does not come after the span - one reaching back over
+	// Slots the span already holds - starts its own rather than counting
+	// those Slots twice.
+	overlapping := newPoolRows(t)
+	skip(overlapping, 360)
+	rangeLine(overlapping, "GAP_SKIPPED", 300, 420, 3)
+	want(overlapping, 300, 420, 3)
+
+	fresh := newPoolRows(t)
+	rangeLine(fresh, "SNAPSHOT_UNAVAILABLE", 120, 360, 5)
+	// The publisher fills a skip record's strategies from these.
+	if strategies := fresh.tracker.StrategiesFor(fresh.group); len(strategies) != 1 || strategies[0] != (StrategyRef{StrategyID: "7", BusinessID: "2"}) {
+		t.Fatalf("a range seen first: strategies %+v, want the range's own", strategies)
+	}
+}
+
+// A gap skip's span records the failure before the skip as its Reason, and
+// that failure can read SNAPSHOT_UNAVAILABLE - a snapshot store that kept
+// failing until the Slot fell past the replay's reach. The span is still a
+// gap skip: the expired replay after it starts its own, and the first keeps
+// its kind and that Reason.
+func TestAGapSkipAfterSnapshotFailuresStaysAGapSkip(t *testing.T) {
+	p := newPoolRows(t)
+	p.tick()
+	p.tracker.Observe(context.Background(), observability.Observation{
+		ExecuteOutcome: "error", ReasonCode: "SNAPSHOT_UNAVAILABLE", Err: errors.New("snapshot store down"),
+		QueryFailure: &observability.QueryFailureFacts{Stage: observability.QueryFailureStageProvider,
+			Category: observability.QueryFailureCategorySourceBackend, Code: "SNAPSHOT_UNAVAILABLE"},
+		Trace: p.trace(60),
+	})
+	p.tick()
+	p.tracker.Observe(context.Background(), observability.Observation{
+		ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN",
+		ProgressCompletionReason: "GAP_SKIPPED", Trace: p.trace(60),
+	})
+	first := p.tracker.GapSkips()[p.group]
+	if first.Kind != "" || first.Reason != "SNAPSHOT_UNAVAILABLE" {
+		t.Fatalf("the gap skip's span = %+v, want a gap skip whose Reason is the failure before it", first)
+	}
+	p.expiredReplay(120)
+	if span := p.tracker.GapSkips()[p.group]; span.Kind != SkipKindExpiredReplay || span.FirstSlot != 120 || span.Slots != 1 {
+		t.Fatalf("after the expired replay: %+v, want a span of its own from 120", span)
 	}
 }

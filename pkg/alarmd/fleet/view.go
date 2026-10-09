@@ -3962,6 +3962,10 @@ type PrunedSkip struct {
 // past the replay window: this deployment giving up on work it could not
 // catch up. Unlike a pruned span the Slots are countable -- each skip is a
 // completion of its own -- so the count is given.
+// SkipKindExpiredReplay is a span of Slots that came after their recovery
+// bound and were finalized without a query (SkippedSpan.Kind).
+const SkipKindExpiredReplay = "expired_replay"
+
 type SkippedSpan struct {
 	FirstSlot int64 `json:"first_slot"`
 	LastSlot  int64 `json:"last_slot"`
@@ -3980,6 +3984,13 @@ type SkippedSpan struct {
 	// that Slot's (the Slot fell past the replay bound with nothing tried).
 	Reason         string `json:"reason,omitempty"`
 	ReasonCategory string `json:"reason_category,omitempty"`
+	// Kind is how the span's Slots were given up: SkipKindExpiredReplay for
+	// Slots that came after their recovery bound, empty for gap skips past
+	// the replay's reach (and for a span from a publisher older than this
+	// field). Its own field because Reason means something else on each: the
+	// failure before the skip on a gap skip's span, which can itself read
+	// SNAPSHOT_UNAVAILABLE.
+	Kind string `json:"kind,omitempty"`
 	// IntervalSeconds is the object's evaluation period, from the due index
 	// as the publisher knew it; zero when the index had no entry. A loss in
 	// progress on a ten-second object is the scheduler's replay bound, a

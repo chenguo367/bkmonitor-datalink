@@ -3,6 +3,7 @@ package worker_test
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -202,5 +203,50 @@ func TestAnExpiredRangeRefusedForAStaleOwnerNamesTheHandover(t *testing.T) {
 	result, err := coordinator.Execute(ctx, request)
 	if refusal, refused := ownership.RefusalReason(err); result.Completed || !refused || refusal != contract.ReasonOwnershipStaleFence {
 		t.Fatalf("result=%+v err=%v, want the range refused carrying %s", result, err, contract.ReasonOwnershipStaleFence)
+	}
+}
+
+// A range commit writes no completion line of its own; its line carries the
+// range it gave up - the bounds, how many Slots, how they were finalized and
+// why - so the fleet can record Slots it never evaluated, many at once.
+func TestAnExpiredRangesLineCarriesTheRangeAndWhy(t *testing.T) {
+	ctx := context.Background()
+	request := workerRangeRequest(t)
+	now := time.UnixMilli(request.ExpiredRange.JudgedAtMillis)
+	activation := activePlanResult("state-v2", 2)
+	activation.Contract = request.Contract
+	fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{activation})
+	control := &rangeControl{}
+	store, err := progress.NewStore(progress.StoreOptions{Prefix: "alarmd", Control: control, Slots: rangeSlots{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := request.ExpiredRange.First.Contract
+	prior.Slot.EvaluationTime -= 60
+	if _, err := store.CommitProgress(ctx, execution.ProgressCommitRequest{Identity: execution.ProgressIdentity{QueryGroup: prior.Slot.QueryGroup}, OwnerFence: request.OwnerFence, ExpectedNextSlot: prior.Slot.EvaluationTime,
+		Completion: execution.SlotCompletion{Contract: prior, Kind: execution.CompletionFullEmpty, Result: observability.ResultSuccess, Primary: &execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateEmpty}}}); err != nil {
+		t.Fatal(err)
+	}
+	var lines []observability.Observation
+	ports := fixture.ports
+	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports, Finalization: ports, Activation: ports, Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness, Events: ports, State: ports, Progress: store,
+		Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+			if o.Stage == observability.StageExpiredRangeReturned {
+				lines = append(lines, o)
+			}
+		})}, worker.ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := coordinator.Execute(ctx, request); err != nil || !result.Completed {
+		t.Fatalf("Execute() = %+v, %v", result, err)
+	}
+	p := request.ExpiredRange
+	want := observability.ExpiredRangeFacts{Result: "committed", CommittedSlots: 3, ReasonCode: observability.ReasonCode(contract.ReasonSnapshotUnavailable),
+		FirstSlot: int64(p.First.Contract.Slot.EvaluationTime), LastSlot: int64(p.Last.Contract.Slot.EvaluationTime), Slots: 3,
+		Kind: string(execution.CompletionSnapshotUnavailable), Cause: string(execution.CauseExpiredReplay),
+		Strategies: []observability.ExpiredRangeStrategy{{BusinessID: planIdentity().BusinessID, StrategyID: planIdentity().StrategyID}}}
+	if len(lines) != 1 || lines[0].ExpiredRange == nil || !reflect.DeepEqual(*lines[0].ExpiredRange, want) {
+		t.Fatalf("range lines = %+v, want one carrying %+v", lines, want)
 	}
 }

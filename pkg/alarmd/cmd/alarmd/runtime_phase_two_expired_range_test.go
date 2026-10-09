@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -70,7 +71,13 @@ func testExpiredRangeSharesF2WithHealthyFull(t *testing.T, distance bool) {
 	var mixed atomic.Bool
 	var hot execution.QueryGroupIdentity
 	var slot int64
+	// The fleet's own reading of the run: the range commit writes no
+	// completion line, and its Slots reach the record of what was never
+	// evaluated only through the range's own line, its trace merged from the
+	// context as every observer does.
+	tracker := fleet.NewTracker(nil, "range-replica", time.Now)
 	observer := observability.ObserverFunc(func(ctx context.Context, o observability.Observation) {
+		tracker.Observe(ctx, o)
 		if mixed.Load() && o.Stage == observability.StageGapLoaded && observability.TraceFieldsFromContext(ctx).QueryGroupKey == string(hot) {
 			rangeOnce.Do(func() { close(rangeEntered) })
 			select {
@@ -164,6 +171,9 @@ func testExpiredRangeSharesF2WithHealthyFull(t *testing.T, distance bool) {
 	}
 	if distance && rp.CurrentOrRecentGap.Kind != execution.CompletionGapSkipped {
 		t.Fatalf("distance prefix lost cause: %+v", rp)
+	}
+	if span, recorded := tracker.GapSkips()[string(hot)]; !recorded || span.Slots < 2 || span.FirstSlot >= span.LastSlot {
+		t.Fatalf("the range's Slots on the fleet's skip record = %+v (recorded %t), want the committed range", span, recorded)
 	}
 	events := f.events.snapshot()
 	if len(events) != 1 || events[0].PlanRef.StrategyID != "1002" {

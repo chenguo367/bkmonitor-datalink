@@ -428,6 +428,12 @@ type queryGroupState struct {
 	// extension, cleared when it leaves. It stands for the object's failure
 	// until this process sees one of its own.
 	poolReason string
+	// skipSpanOpen is whether the current skip span may still be continued:
+	// set when Slots are added to it, cleared when a round that is not a
+	// skip completes. The two query-free paths add Slots without completing
+	// a round, so whether a round came between is this, not the last
+	// completion.
+	skipSpanOpen bool
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -961,7 +967,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
 		failure == nil && !outputFailed && !outputACKed && observation.QueryCooldown == nil && cursorAdvance == nil &&
 		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
-		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil {
+		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil && observation.ExpiredRange == nil {
 		return
 	}
 
@@ -1198,6 +1204,23 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal}
 		}
 	}
+	// A range of Slots given up at once past the replay's age or reach: the
+	// commit writes no completion line, only the range's own, and without
+	// this a takeover backlog that dropped many Slots in one commit was
+	// missing from the record of what was never evaluated. It is that
+	// record, not a round, whatever the range's kind: the Slots ran nothing.
+	if facts := observation.ExpiredRange; facts != nil {
+		if facts.Result == "committed" && facts.CommittedSlots > 0 {
+			tracker.extendSkipSpan(state, facts.FirstSlot, facts.LastSlot, int(facts.CommittedSlots),
+				facts.Kind == snapshotUnavailableCompletion, at)
+			// The range's own Plans: after a restart its line may be the
+			// first this tracker sees of the object.
+			for _, strategy := range facts.Strategies {
+				recordStrategy(state.strategies, StrategyRef{StrategyID: strategy.StrategyID, BusinessID: strategy.BusinessID})
+			}
+		}
+		return
+	}
 	// A Slot that came after its recovery bound is committed without a query,
 	// under SNAPSHOT_UNAVAILABLE and the cause EXPIRED_REPLAY. It ran nothing,
 	// so it says nothing about the query or any dependency, and it is not a
@@ -1210,29 +1233,14 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// until the bound (the dependency down it always read as). A line with no
 	// cause, from a build before causes, is read as it was.
 	if completion == snapshotUnavailableCompletion && observation.ProgressCompletionCause == string(model.CauseExpiredReplay) {
-		if state.gapSkip == nil || state.gapSkip.Reason != snapshotUnavailableCompletion ||
-			state.gapSkip.LastSlot >= trace.EvaluationTime {
-			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt,
-				Reason: snapshotUnavailableCompletion}
-		}
-		state.gapSkip.LastSlot = trace.EvaluationTime
-		state.gapSkip.Slots++
-		state.gapSkip.At = at
+		tracker.extendSkipSpan(state, trace.EvaluationTime, trace.EvaluationTime, 1, true, at)
 		state.gapSkip.HeldBy = heldByOf(observation)
 		tracker.noteSkipEvidence(queryGroup, state, at)
 		recordStrategy(state.strategies, StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID})
 		return
 	}
 	if completion == "GAP_SKIPPED" {
-		// A span of the other kind is not continued: an expired replay's
-		// commit does not move lastCompleted, so a skip after it would
-		// otherwise extend a span recorded under its reason.
-		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" || state.gapSkip.Reason == snapshotUnavailableCompletion {
-			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt}
-		}
-		state.gapSkip.LastSlot = trace.EvaluationTime
-		state.gapSkip.Slots++
-		state.gapSkip.At = at
+		tracker.extendSkipSpan(state, trace.EvaluationTime, trace.EvaluationTime, 1, false, at)
 		// What held the Slot before it was given up, as the completion says:
 		// the record's own fact, read for the loss ahead of where the object
 		// sits when the record is read.
@@ -1451,6 +1459,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.determined = true
 		state.lastCompleted = completion
 		state.lastRoundSlot = trace.EvaluationTime
+		state.skipSpanOpen = completion == "GAP_SKIPPED"
 		// Every completion, healthy or not, goes on the ring the holes are
 		// read against: a healthy round is exactly the one a later hole at
 		// its minute has to be matched to.
@@ -2125,6 +2134,32 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	sortStrategies(anomaly.Strategies)
 	return anomaly
+}
+
+// extendSkipSpan records Slots never evaluated, from any of the three paths
+// that give them up - a Slot skipped past the replay's reach, a Slot that came
+// after its recovery bound, a range of either committed at once. It continues
+// the current span only when the span is of the same kind (an expired
+// replay's, recorded under SNAPSHOT_UNAVAILABLE, or a gap skip's), the new
+// Slots come after it, and no round has completed since its last Slot: a
+// round that is not a skip ends a span. Otherwise it starts a new one. Slots
+// is the count the path gave up; each path sets HeldBy and evidence as it
+// knows them. Called with the lock held.
+func (tracker *Tracker) extendSkipSpan(state *queryGroupState, first, last int64, slots int, expired bool, at time.Time) {
+	span := state.gapSkip
+	continues := span != nil && state.skipSpanOpen && (span.Kind == SkipKindExpiredReplay) == expired &&
+		first > span.LastSlot
+	if !continues {
+		span = &SkippedSpan{FirstSlot: first, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt}
+		if expired {
+			span.Kind, span.Reason = SkipKindExpiredReplay, snapshotUnavailableCompletion
+		}
+		state.gapSkip = span
+	}
+	span.LastSlot = last
+	span.Slots += slots
+	span.At = at
+	state.skipSpanOpen = true
 }
 
 // rowFailure is the failure the row is read by: this process's own, or,
