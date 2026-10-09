@@ -52,7 +52,9 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 				"the consumer's open alerts for a strategy, reconciled against its index. Absent until one has."),
 		unavailable: descriptor("open_alert_set_unavailable_total",
 			"Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration "+
-				"failed, each time), location_unconfirmed (the link's Console has not named where the sets are) and "+
+				"failed, each time), too_large (a strategy's set larger than one read may hold - members, bytes or "+
+				"pages - each time; such a set is not read another way yet, and the first one counted is the trigger "+
+				"for reading it a member at a time), location_unconfirmed (the link's Console has not named where the sets are) and "+
 				"keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each "+
 				"counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while "+
 				"either lasts. A deployment without the Console counts nothing here.", "reason"),
@@ -63,7 +65,10 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 			"Lookups by how they were answered. index_member and index_absent are the consumer's index; "+
 				"recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for "+
 				"within its lag, the copy's word and not the consumer's; self_maintained and passed_through are "+
-				"the unavailable policy answering, and which of the two appears is the policy in force.", "answer"),
+				"the unavailable policy answering, and which of the two appears is the policy in force. index_stale "+
+				"is a set read once whose last successful read or calibration is older than 3 x (the index interval "+
+				"+ ceil(tracked strategies / read batch) x the refresh interval), answered by the same policy as a "+
+				"set never read; the bound grows with the strategies tracked, so it differs between deployments.", "answer"),
 		entries: descriptor("open_alert_set_entries",
 			"What the copy holds: member is fingerprints from the last publication, sent_open those this "+
 				"process sent ABNORMAL for within the local retention.", "kind"),

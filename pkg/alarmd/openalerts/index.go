@@ -32,6 +32,11 @@ type StrategySnapshot struct {
 	Members                   int
 	Loaded, Calibrated        bool
 	Reason                    string
+	// Stale says the set's last successful read, index or calibration, is
+	// older than StaleAfter, the bound in force for this copy: it no longer
+	// answers lookups (AnswerIndexStale).
+	Stale      bool
+	StaleAfter time.Duration
 }
 
 type indexEntry struct {
@@ -677,8 +682,13 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 	}
 	entry := job.entry
 	if err != nil {
-		entry.reason = "index_read_failed"
 		cache.refreshes["unavailable"]++
+		if errors.Is(err, ErrSetTooLarge) {
+			entry.reason = "index_too_large"
+			cache.unavailable[UnavailableTooLarge]++
+			return
+		}
+		entry.reason = "index_read_failed"
 		cache.unavailable[UnavailableReadError]++
 		return
 	}
@@ -777,6 +787,29 @@ func (cache *Cache) pruneOpened(key StrategyKey, entry *indexEntry, started time
 	}
 }
 
+// staleAfter is how old a set's last successful read may be before it stops
+// answering: three times the longest a key waits between two reads -
+// IndexInterval, plus one pass over every tracked key at ReadBatch keys a
+// cycle of RefreshInterval. It grows with the keys tracked, so a copy with
+// more keys tolerates a longer gap; a few cycles of failed reads, not a
+// configured age.
+func (state *indexState) staleAfter() time.Duration {
+	batch := max(1, state.options.ReadBatch)
+	cycles := (len(state.order) + batch - 1) / batch
+	return 3 * (state.options.IndexInterval + time.Duration(cycles)*state.options.RefreshInterval)
+}
+
+// stale is a set read once whose last successful read, index or
+// calibration, is older than the bound. A set never read is not stale: it is
+// a set not read yet.
+func (cache *Cache) stale(entry *indexEntry, now time.Time) bool {
+	last := entry.indexReadAt
+	if entry.calibratedAt.After(last) {
+		last = entry.calibratedAt
+	}
+	return !last.IsZero() && now.Sub(last) > cache.index.staleAfter()
+}
+
 func (cache *Cache) calibrated(entry *indexEntry, now time.Time) bool {
 	return entry != nil && !entry.calibratedAt.IsZero() && now.Sub(entry.calibratedAt) <= cache.index.options.CalibrationMaxAge
 }
@@ -786,15 +819,23 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 	answer := AnswerSelfMaintained
 	present := false
 	if entry != nil {
-		present = cache.setCarries(entry, m.fingerprint, now)
 		if !cache.calibrated(entry, now) {
 			entry.reconcileRequested = true
 		}
-		if !entry.indexReadAt.IsZero() || !entry.calibratedAt.IsZero() {
+		switch {
+		case cache.stale(entry, now):
+			// Past the bound the last read says nothing about now: answered
+			// below as a set never read is, by the unavailable policy.
+			answer = AnswerIndexStale
+			entry = nil
+		case !entry.indexReadAt.IsZero() || !entry.calibratedAt.IsZero():
+			present = cache.setCarries(entry, m.fingerprint, now)
 			answer = AnswerIndexAbsent
 			if present {
 				answer = AnswerIndexMember
 			}
+		default:
+			present = cache.setCarries(entry, m.fingerprint, now)
 		}
 	}
 	if added, ok := cache.added[m]; ok && (entry == nil || !cache.calibrated(entry, now) || now.Sub(added.at) <= cache.index.options.LocalRetention || !added.at.Before(entry.calibratedStarted)) {
@@ -828,7 +869,12 @@ func (cache *Cache) Snapshot(key StrategyKey) StrategySnapshot {
 			reason = "not_calibrated"
 		}
 	}
-	return StrategySnapshot{IndexReadAt: entry.indexReadAt, CalibratedAt: entry.calibratedAt, Members: len(cache.indexMembers(key)), Loaded: !entry.indexReadAt.IsZero(), Calibrated: cache.calibrated(entry, cache.now()), Reason: reason}
+	stale := cache.stale(entry, cache.now())
+	if stale {
+		reason = "index_stale"
+	}
+	return StrategySnapshot{IndexReadAt: entry.indexReadAt, CalibratedAt: entry.calibratedAt, Members: len(cache.indexMembers(key)), Loaded: !entry.indexReadAt.IsZero(), Calibrated: cache.calibrated(entry, cache.now()), Reason: reason,
+		Stale: stale, StaleAfter: cache.index.staleAfter()}
 }
 
 func (cache *Cache) Members(key StrategyKey) []string {
@@ -953,7 +999,8 @@ func (cache *Cache) indexStats() Stats {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	stats := Stats{CalibrationConfigured: cache.index.options.Reconciler != nil, Tracked: len(cache.index.entries), Added: len(cache.added), Evictions: cache.evictions,
-		Refreshes: map[string]uint64{}, Unavailable: map[UnavailableReason]uint64{}, Lookups: map[Answer]uint64{}}
+		Refreshes: map[string]uint64{}, Unavailable: map[UnavailableReason]uint64{}, Lookups: map[Answer]uint64{},
+		StaleAfter: cache.index.staleAfter()}
 	all := len(cache.index.entries) > 0
 	for _, entry := range cache.index.entries {
 		if !entry.indexReadAt.IsZero() {
@@ -983,6 +1030,9 @@ func (cache *Cache) indexStats() Stats {
 		}
 		if !entry.indexReadAt.IsZero() && (stats.IndexReadAt.IsZero() || entry.indexReadAt.Before(stats.IndexReadAt)) {
 			stats.IndexReadAt = entry.indexReadAt
+		}
+		if cache.stale(entry, cache.now()) {
+			stats.Stale++
 		}
 		if entry.dirty != entry.readGeneration {
 			stats.PendingReads++

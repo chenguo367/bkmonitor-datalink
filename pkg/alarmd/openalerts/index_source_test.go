@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -165,5 +166,55 @@ func TestRedisSubscriberAcknowledgesReconnectAndFiltersInvalidNotices(t *testing
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("subscriber did not close")
+	}
+}
+
+// The read's size bounds refuse a set as too large - more members than the
+// read may hold before or while it reads, more bytes, more pages - and a
+// member no alert id can be refuses it as incomplete only: the copy counts
+// the first apart (UnavailableTooLarge) and the second as a failed read.
+func TestASetBeyondTheReadsBoundsIsRefusedAsTooLarge(t *testing.T) {
+	client := indexRedis(t)
+	ctx := context.Background()
+	key := "test:index:" + keyA.TenantID + ":" + keyA.StrategyID
+	read := func(limits ReadLimits, members ...string) error {
+		t.Helper()
+		if err := client.Del(ctx, key).Err(); err != nil {
+			t.Fatal(err)
+		}
+		values := make([]any, 0, len(members))
+		for _, member := range members {
+			values = append(values, member)
+		}
+		if err := client.SAdd(ctx, key, values...).Err(); err != nil {
+			t.Fatal(err)
+		}
+		source, err := NewSetSource(client, "test:index", limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = source.ReadSet(ctx, keyA)
+		return err
+	}
+	wide := ReadLimits{MaxMembers: 10, MaxBytes: 1 << 20, MaxPages: 10, PageSize: 10}
+	paged := make([]string, 0, 200)
+	for index := 0; index < 200; index++ {
+		paged = append(paged, "member-"+strconv.Itoa(index))
+	}
+	for name, c := range map[string]struct {
+		limits   ReadLimits
+		members  []string
+		tooLarge bool
+	}{
+		"more members than the read holds": {ReadLimits{MaxMembers: 2, MaxBytes: 1 << 20, MaxPages: 10, PageSize: 10}, []string{"a", "b", "c"}, true},
+		"more bytes than the read holds":   {ReadLimits{MaxMembers: 10, MaxBytes: 4, MaxPages: 10, PageSize: 10}, []string{"abc", "def"}, true},
+		// Past the size a set is kept compact in, so a scan pages it.
+		"more pages than the read takes": {ReadLimits{MaxMembers: 1000, MaxBytes: 1 << 20, MaxPages: 1, PageSize: 1}, paged, true},
+		"a member no alert id can be":    {wide, []string{strings.Repeat("x", 4097)}, false},
+	} {
+		err := read(c.limits, c.members...)
+		if !errors.Is(err, ErrIncomplete) || errors.Is(err, ErrSetTooLarge) != c.tooLarge {
+			t.Errorf("%s: %v, want incomplete and too large %t", name, err, c.tooLarge)
+		}
 	}
 }

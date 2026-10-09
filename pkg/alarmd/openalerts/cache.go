@@ -34,11 +34,15 @@ const (
 	// event source was not read yet, keys by other fields, or is not in
 	// effect. Every lookup by our alert id would miss.
 	UnavailableKeyingUnconfirmed UnavailableReason = "keying_unconfirmed"
+	// UnavailableTooLarge: a strategy's set is larger than one read may hold
+	// (ErrSetTooLarge). Counted apart from a read that failed: it is the
+	// trigger for reading such a set one member at a time.
+	UnavailableTooLarge UnavailableReason = "too_large"
 )
 
 // UnavailableReasons lists every reason, for the metric that pre-creates
 // them all: a reason at zero has to be readable as "never happened".
-var UnavailableReasons = []UnavailableReason{UnavailableReadError, UnavailableLocationUnconfirmed, UnavailableKeyingUnconfirmed}
+var UnavailableReasons = []UnavailableReason{UnavailableReadError, UnavailableLocationUnconfirmed, UnavailableKeyingUnconfirmed, UnavailableTooLarge}
 
 // Answer is how a lookup was answered. Closed: a metric label. The index
 // members and absences are the consumer's word; the rest say the copy
@@ -59,10 +63,17 @@ const (
 	AnswerPassedThrough Answer = "passed_through"
 	AnswerIndexMember   Answer = "index_member"
 	AnswerIndexAbsent   Answer = "index_absent"
+	// AnswerIndexStale: the strategy's set was read once, and no read or
+	// calibration has succeeded since for longer than the bound the refresh
+	// cadence sets (indexState.staleAfter). The last read no longer answers;
+	// the lookup is answered as for a set never read, by the unavailable
+	// policy. Apart from self_maintained so a read outage is told from a
+	// cold start.
+	AnswerIndexStale Answer = "index_stale"
 )
 
 // Answers lists every Answer, for the metric that pre-creates them all.
-var Answers = []Answer{AnswerRecentlySent, AnswerSelfMaintained, AnswerPassedThrough, AnswerIndexMember, AnswerIndexAbsent}
+var Answers = []Answer{AnswerRecentlySent, AnswerSelfMaintained, AnswerPassedThrough, AnswerIndexMember, AnswerIndexAbsent, AnswerIndexStale}
 
 // UnavailablePolicy is what the copy answers while the publication is
 // unavailable. It is one decision point on purpose, because the two answers
@@ -101,16 +112,20 @@ type Stats struct {
 	// LoadedAt is the oldest calibration among the tracked sets; zero if none
 	// has been calibrated. A metric derived from it must not be emitted while
 	// zero.
-	LoadedAt                        time.Time
-	Tracked                         int
-	Loaded                          int
-	Members                         int
-	Added                           int
-	Evictions                       uint64
-	Refreshes                       map[string]uint64
-	Unavailable                     map[UnavailableReason]uint64
-	Lookups                         map[Answer]uint64
-	IndexReadAt                     time.Time
+	LoadedAt    time.Time
+	Tracked     int
+	Loaded      int
+	Members     int
+	Added       int
+	Evictions   uint64
+	Refreshes   map[string]uint64
+	Unavailable map[UnavailableReason]uint64
+	Lookups     map[Answer]uint64
+	IndexReadAt time.Time
+	// StaleAfter is the bound in force for a set's last successful read
+	// (indexState.staleAfter), and Stale how many tracked sets are past it.
+	StaleAfter                      time.Duration
+	Stale                           int
 	PendingReads, PendingReconciles int
 	OldestPendingAt                 time.Time
 	SubscriptionReady               bool
