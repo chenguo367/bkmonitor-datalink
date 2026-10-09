@@ -103,7 +103,7 @@ func observeSuspendedNoDataObjects(
 	report controlplane.WithheldReport,
 ) {
 	for index, line := range report.Lines {
-		facts := observability.SourceWithheldFacts{Disposition: string(controlplane.DispositionAccepted), Reason: line.Reason, Field: line.FieldPath}
+		facts := observability.SourceWithheldFacts{Disposition: string(line.Disposition), Reason: line.Reason, Field: line.FieldPath}
 		if index == len(report.Lines)-1 {
 			facts.Dropped = report.Dropped
 		}
