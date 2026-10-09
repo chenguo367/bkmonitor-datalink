@@ -970,8 +970,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetViewStreamSource(func() metric.ViewStreamCounts { return viewStreamCounts(viewServer.Stats()) })
 	// This Worker's side of the same stream: it finds the Leader from the
 	// lease and the Leader's registration, installs what it is sent, and
-	// asks the catalog whether the objects a view names are there. In the
-	// shadow step nothing executes off the installed view.
+	// asks the catalog whether the objects a view names are there.
 	incarnation, err := newViewStreamIncarnation()
 	if err != nil {
 		return nil, err

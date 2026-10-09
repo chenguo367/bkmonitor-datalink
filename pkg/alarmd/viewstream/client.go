@@ -24,13 +24,14 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
 
-// The Worker's side of the stream, in the shadow step of decision-016
-// section 7.1: it finds the Leader, connects, says Hello, installs what it
-// is sent -- whole snapshots and one-step deltas, each verified against its
-// digest before anything is installed -- and reports back per version.
-// Nothing executes off the installed view. A Leader that cannot be found,
+// The Worker's side of the stream (decision-016 section 7.1): it finds the
+// Leader, connects, says Hello, installs what it is sent -- whole snapshots
+// and one-step deltas, each verified against its digest before anything is
+// installed -- and reports back per version, with how many of the view's
+// Query Groups it executes from it (batch 4). A Leader that cannot be found,
 // refuses the stream, or sends something that does not verify costs this
-// Worker a log line and a counter and nothing else.
+// Worker a log line and a counter, and a Query Group the installed view
+// cannot answer for is read the control plane's way.
 
 // Reconnect pacing: exponential from ReconnectMin to ReconnectMax with full
 // jitter, so sixty-four Workers cut off by one Leader restart do not come
@@ -147,7 +148,7 @@ type ClientOptions struct {
 	Costs CostSource
 	// Switched is asked on every receipt for how many of the installed
 	// view's Query Groups this Worker executes from it; nil reports zero and
-	// never claims switched, which is the shadow step.
+	// never claims switched.
 	Switched SwitchedSource
 }
 
@@ -471,7 +472,7 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 		case *pb.LeaderMessage_Delta:
 			client.installDelta(ctx, body.Delta, send)
 		case *pb.LeaderMessage_Heartbeat, *pb.LeaderMessage_ObjectResult:
-			// Nothing to do with either in the shadow step.
+			// Nothing to do with either here.
 		}
 	}
 }
@@ -632,8 +633,7 @@ func receiptMessage(incarnation string, version Version, acked, installed bool, 
 
 // switchedReceipt is an installed receipt that also says how many of the
 // view's Query Groups the Worker executes from it, and switched when that is
-// all of them. Without a source it is the shadow step's receipt: zero, not
-// switched.
+// all of them. Without a source it is a receipt of zero, not switched.
 func (client *Client) switchedReceipt(view View, missing int, probed bool) *pb.WorkerMessage {
 	message := receiptMessage(client.identity.Incarnation, view.Version, true, true, "", missing, probed)
 	if client.switched == nil {

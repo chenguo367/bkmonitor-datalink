@@ -595,7 +595,7 @@ func TestHealthResponseCarriesTheStandingsTheVerdictIsDecidedOn(t *testing.T) {
 func TestBothRoutesCarryTheOwnershipSplit(t *testing.T) {
 	snapshots := healthySnapshots()
 	snapshots[0].Rebalance = &RebalanceFacts{PlannedAt: now.Add(-10 * time.Second), ReadyWorkers: 2, Assigned: 949, Target: 474,
-		MostOwned: 949, LeastOwned: 0, MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5, Shadow: true}
+		MostOwned: 949, LeastOwned: 0, MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5}
 	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"})
 
 	body := requestJSON(t, handler, "/api/health")
@@ -603,7 +603,7 @@ func TestBothRoutesCarryTheOwnershipSplit(t *testing.T) {
 		t.Fatalf("health = %v, want HEALTHY: the split is a line, not a degradation", body["health"])
 	}
 	rebalance, ok := body["rebalance"].(map[string]any)
-	if !ok || rebalance["planned_moves"] != 9.0 || rebalance["most_owned_by"] != "pod-a" || rebalance["shadow"] != true ||
+	if !ok || rebalance["planned_moves"] != 9.0 || rebalance["most_owned_by"] != "pod-a" ||
 		rebalance["stop_spread_percent"] != 5.0 || body["rebalance_replica"] != "pod-a" {
 		t.Fatalf("rebalance = %v from %v, want the leader's round whole", body["rebalance"], body["rebalance_replica"])
 	}

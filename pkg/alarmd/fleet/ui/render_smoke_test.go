@@ -1116,7 +1116,6 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// left; a shadow round on a build that only plans; a round that
 		// published nothing and says so; conflicts named beside the moves.
 		{"SENTENCE rebalance-paused ::", "但这一轮没发：就绪副本集刚变过，等它稳定（还剩 23 秒）再发"},
-		{"SENTENCE rebalance-shadow ::", "但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
 		{"SENTENCE rebalance-none ::", "这一轮一个都没发出去，3 个因指派记录同时被改本轮没发、下轮再算——若下一轮仍是 0"},
 		{"SENTENCE rebalance-conflicts ::", "已在移：本轮发出 6 个（每轮最多 9 个），最多与最少还差 75 个，3 个因指派记录同时被改本轮没发、下轮再算；看这一行的数在不在降"},
 		{"LOAD behind-permits ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
@@ -1723,7 +1722,6 @@ const round = {ready_workers: 2, assigned: 979, target: 489, most_owned: 527, le
   most_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-abcde', least_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-fghij'};
 for (const [name, extra] of Object.entries({
   'paused': {paused: true, paused_for_seconds: 22.4},
-  'shadow': {shadow: true},
   'none': {published_moves: 0, conflicts: 3},
   'conflicts': {published_moves: 6, conflicts: 3},
 })) {

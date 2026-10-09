@@ -1111,7 +1111,6 @@ function rebalanceStanding(r) {
   if (!r || !r.planned_moves) return '等再平衡';
   var gap = Math.max(0, (r.most_owned || 0) - (r.least_owned || 0));
   var plan = 'Leader 本轮计划移 ' + r.planned_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个）';
-  if (r.shadow) return plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动';
   if (r.paused) {
     return plan + '，但这一轮没发：就绪副本集刚变过，等它稳定'
       + (r.paused_for_seconds ? '（还剩 ' + Math.ceil(r.paused_for_seconds) + ' 秒）' : '') + '再发';

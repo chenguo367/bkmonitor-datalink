@@ -1394,8 +1394,8 @@ type productionPhaseTwoOwnership struct {
 	reconciler   *scheduler.Reconciler
 	flights      *scheduler.FlightCoordinator
 	// viewGate decides, per Slot read, whether a Query Group is executed
-	// from the installed view (decision-016 batch 4); nil is the shadow
-	// step, every read the control plane's way.
+	// from the installed view (decision-016 batch 4); nil reads every
+	// Query Group the control plane's way.
 	viewGate *viewExecutionGate
 	// takeovers is when this process took each Query Group over, shared by
 	// every Slot source it opens: a Query Group reopened here keeps the
@@ -2007,8 +2007,8 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	published := &fleet.RebalanceFacts{
 		PlannedAt: at, ReadyWorkers: plan.ReadyWorkers, Assigned: plan.Assigned, Target: plan.Target,
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
-		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent, Shadow: false,
-		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
+		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent,
+		PublishedMoves:    len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 	}
 	if len(plan.Moves) > 0 {
