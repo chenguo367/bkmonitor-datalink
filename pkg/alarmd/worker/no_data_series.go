@@ -326,7 +326,7 @@ func (stream *streamedExecution) evaluateNoData(
 		}
 		stream.noDataStateMutations += uint64(len(round.series))
 		stream.recordNoDataOutcome(ctx, due, round.outcome)
-		stream.observeNoDataAbsence(ctx, due, round)
+		stream.noDataJudged = append(stream.noDataJudged, noDataJudgment{due: due, round: round})
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
@@ -566,6 +566,47 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 			NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(outcome), Plans: plans},
 		})
 	}
+	// Each judging Plan's own line, for the judgements the Slot kept.
+	for _, judged := range stream.noDataJudged {
+		if index, filed := stream.noDataOutcomeIndex[judged.due.Key()]; filed && stream.noDataOutcomes[index] == nodata.OutcomeEvaluated {
+			stream.observeNoDataAbsence(ctx, judged.due, judged.round)
+		}
+	}
+}
+
+// noDataJudgment is one Plan's round that judged, held for its line.
+type noDataJudgment struct {
+	due   execution.DuePlan
+	round noDataRound
+}
+
+// closeNoDataBeyondSlotBudget settles the no-data side of a Slot whose own
+// output went past a per-Slot cap: nothing the Slot evaluated reaches State
+// or Events, so no Plan's no-data was decided whatever its round had filed,
+// and no memory is written for it -- a round whose verdicts were not said
+// must not record that it said them. Every no-data Plan lands on exactly one
+// outcome: SKIPPED_SLOT_BUDGET where it had none, or where it had filed
+// EVALUATED, which counts as a skip for its streak; a skip it had already
+// filed for another reason keeps that reason. The census is the Plans the
+// Slot had, counted here because the trip can come before they were seen.
+func (stream *streamedExecution) closeNoDataBeyondSlotBudget(ctx context.Context) {
+	stream.noDataMutations = nil
+	seen := 0
+	for _, due := range stream.header.DuePlans {
+		if due.CompiledPlan.NoData() == nil {
+			continue
+		}
+		seen++
+		index, filed := stream.noDataOutcomeIndex[due.Key()]
+		switch {
+		case !filed:
+			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
+		case stream.noDataOutcomes[index] == nodata.OutcomeEvaluated:
+			stream.noDataOutcomes[index] = nodata.OutcomeSkippedSlotBudget
+			stream.noteNoDataStreak(ctx, due, nodata.OutcomeSkippedSlotBudget)
+		}
+	}
+	stream.noDataPlansSeen = seen
 }
 
 // observeNoDataAbsence reports what one Plan's round decided about its groups,

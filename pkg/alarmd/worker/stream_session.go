@@ -46,6 +46,12 @@ type streamedExecution struct {
 	noData         execution.NoDataLoadResult
 	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
 	noDataOutcomes []nodata.SlotOutcome
+	// noDataOutcomeIndex is where each Plan's outcome sits in noDataOutcomes,
+	// so a Slot whose results are replaced can correct the one it filed.
+	noDataOutcomeIndex map[execution.PlanKey]int
+	// noDataJudged is the rounds that judged, held until the Slot's outcomes
+	// are final: a judgement the Slot then discards is not reported as made.
+	noDataJudged []noDataJudgment
 	// targetResolutions is what this Slot resolved each target-plan Plan's
 	// target to, by Plan. Absence and admission both read it, so one Slot
 	// cannot admit a record under one view of the target and judge absence
@@ -807,10 +813,18 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 		var exceeded *provisionalBudgetExceededError
 		// A supplement over its budget fails as it is: the replacement opens
 		// a gap on every Plan, and a supplement moves no marker.
-		if errors.As(err, &exceeded) && exceeded.slot && stream.supplement == nil {
-			return stream.completeBeyondSlotBudget(ctx)
+		if !errors.As(err, &exceeded) || !exceeded.slot || stream.supplement != nil {
+			return err
 		}
-		return err
+		if err := stream.completeBeyondSlotBudget(ctx); err != nil {
+			return err
+		}
+	}
+	// The no-data partition is reported once, when the Slot's results are
+	// final, on the replaced path as on the ordinary one: absence and the
+	// Plans without series were the Slot's to decide, never a supplement's.
+	if stream.supplement == nil {
+		stream.observeNoDataOutcomes(ctx)
 	}
 	return nil
 }
@@ -888,7 +902,6 @@ func (stream *streamedExecution) evaluateSeries(
 	if err := stream.evaluateNoData(ctx, preparedSeriesEvaluations, batchLimit); err != nil {
 		return err
 	}
-	stream.observeNoDataOutcomes(ctx)
 	if len(stream.evaluated.Plans) == 0 {
 		return stream.completeWithoutSeries(ctx, completion)
 	}
@@ -1459,10 +1472,7 @@ func (stream *streamedExecution) completeBeyondSlotBudget(ctx context.Context) e
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
 	stream.evaluated = execution.EvaluationResult{}
-	// The no-data memory those results decided goes with them. Applied, it
-	// would record decisions whose events are never sent, and the next round
-	// would decide from there.
-	stream.noDataMutations = nil
+	stream.closeNoDataBeyondSlotBudget(ctx)
 	reason := execution.ReasonCode(contract.ReasonExecutionBudgetExhausted)
 	for _, due := range stream.header.DuePlans {
 		mutation, err := stream.gapMutationForReasons(due, map[execution.GapScope]execution.ReasonCode{{}: reason})

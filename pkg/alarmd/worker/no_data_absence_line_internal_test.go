@@ -205,10 +205,13 @@ func TestARoundThatDidNotJudgeEmitsNoAbsenceLine(t *testing.T) {
 	}
 }
 
-// The line is emitted from the round's own pass, once for the Plan that
-// judged and not for the Plan the budget skipped: read through evaluateNoData
-// rather than the emitter, because a call site that was never wired reads the
-// same as one that was under a test that calls the emitter itself.
+// The line comes out of the round's own pass, once for the Plan that judged
+// and not for the Plan the budget skipped, and only when the Slot reports its
+// outcomes: read through evaluateNoData and the report, the two steps the
+// Slot runs, rather than the emitter, because a call site that was never
+// wired reads the same as one that was under a test that calls the emitter
+// itself. Before the report nothing is said: a judgement the Slot discards
+// is not reported as made.
 func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
 	first := noDataWiredPlan(t)
 	second := first
@@ -238,6 +241,12 @@ func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
 	if err := stream.evaluateNoData(context.Background(), nil, 16); err == nil {
 		t.Fatal("fixture: the batch was expected to fail, so its success means this read something else")
 	}
+	for _, observation := range recorded {
+		if observation.NoDataAbsence != nil {
+			t.Fatalf("an absence line came out before the Slot reported its outcomes: %+v", observation)
+		}
+	}
+	stream.observeNoDataOutcomes(context.Background())
 	lines := map[string]observability.NoDataAbsenceFacts{}
 	for _, observation := range recorded {
 		if observation.NoDataAbsence == nil {
@@ -262,5 +271,64 @@ func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
 	// absent, which is the reading a fresh Plan on an empty store gives.
 	if line.Outcome != string(nodata.OutcomeEvaluated) || line.Absent != 1 || line.Expected != 0 || line.Present != 0 {
 		t.Fatalf("line = %+v, want EVALUATED with the whole-item absence counted once", line)
+	}
+}
+
+// A Slot whose own output went past a per-Slot cap decided no Plan's no-data,
+// whatever the rounds had filed: every no-data Plan lands on exactly one
+// outcome, SKIPPED_SLOT_BUDGET where it had none and where it had filed
+// EVALUATED; the census counts the Plans the Slot had even when the cap
+// tripped before they were seen; the judging Plan's line is not reported and
+// its memory is not written.
+func TestASlotBeyondItsBudgetSettlesEveryNoDataPlanOnce(t *testing.T) {
+	first := noDataWiredPlan(t)
+	second := first
+	second.Identity.StrategyID = "8"
+	second.CompiledPlan = noDataPreflightPlan(t, "8", &contract.NoDataConfigV1{
+		Continuous: 1, Level: 2, AggDimension: []string{"bk_target_ip", "bk_target_cloud_id"},
+	})
+	duePlans := []execution.DuePlan{first, second}
+	for _, decidedFirst := range []bool{true, false} {
+		recorded := []observability.Observation{}
+		stream := &streamedExecution{
+			coordinator: &SlotExecutionCoordinator{
+				ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
+					Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+						recorded = append(recorded, observation)
+					})},
+				budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1},
+			},
+			header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
+		}
+		if err := stream.loadNoDataMemory(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if decidedFirst {
+			// The first Plan judges and files EVALUATED, the second is skipped by
+			// the no-data budget; then the cap trips.
+			_ = stream.evaluateNoData(context.Background(), nil, 16)
+			if len(stream.noDataOutcomes) != 2 {
+				t.Fatalf("fixture: %d outcomes filed before the trip, want both Plans", len(stream.noDataOutcomes))
+			}
+		}
+		stream.closeNoDataBeyondSlotBudget(context.Background())
+		stream.observeNoDataOutcomes(context.Background())
+		if stream.noDataMutations != nil {
+			t.Fatalf("decided first=%v: memory mutations %+v survived a replaced Slot", decidedFirst, stream.noDataMutations)
+		}
+		census, partition := 0, map[string]int{}
+		for _, observation := range recorded {
+			switch {
+			case observation.NoDataAbsence != nil:
+				t.Fatalf("decided first=%v: a replaced Slot reported a judgement: %+v", decidedFirst, observation.NoDataAbsence)
+			case observation.NoDataCensus != nil:
+				census = observation.NoDataCensus.Plans
+			case observation.NoDataSlot != nil:
+				partition[observation.NoDataSlot.Outcome] += observation.NoDataSlot.Plans
+			}
+		}
+		if census != 2 || len(partition) != 1 || partition[string(nodata.OutcomeSkippedSlotBudget)] != 2 {
+			t.Fatalf("decided first=%v: census=%d partition=%v, want both Plans and both on SKIPPED_SLOT_BUDGET", decidedFirst, census, partition)
+		}
 	}
 }
