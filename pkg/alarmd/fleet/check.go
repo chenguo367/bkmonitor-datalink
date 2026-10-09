@@ -166,14 +166,15 @@ const (
 	// the owner nobody acts for on the strength of the disposition alone.
 	CheckCapabilityUnlisted Check = "CAPABILITY_UNLISTED"
 	CheckConfigRejected     Check = "CONFIG_REJECTED"
-	// A strategy the source accepted with part of its configuration read as
-	// something other than what was written -- a time range that does not
-	// parse, read as the whole day the way the platform's own reader reads
-	// it. The Plan runs, wider than written; it is the strategy's to fix and
-	// it is not a refusal. It has its own line because the disposition was
+	// A strategy the source accepted with a note on its configuration: a
+	// part read as something other than what was written -- a time range
+	// that does not parse, read as the whole day the way the platform's own
+	// reader reads it -- or a part that runs as written and cannot do what
+	// it appears to. The Plan runs; it is the strategy's to fix and it is
+	// not a refusal. It has its own line because the disposition was
 	// otherwise dropped on the floor (sourceChecks did not know it, so the
 	// walk skipped it) while the page's hint counted it among the withheld.
-	CheckConfigNormalized Check = "CONFIG_NORMALIZED"
+	CheckConfigNoted Check = "CONFIG_NOTED"
 	// The source's active set dropping strategies and listing them again:
 	// the platform's list, read across rounds. One round's dispositions say
 	// REMOVED, which reads as a strategy deleted; the account across rounds
@@ -192,7 +193,7 @@ var sourceChecks = map[string]Check{
 	dispositionCapabilityUnsupported: CheckCapabilityUnsupported,
 	dispositionConfigRejected:        CheckConfigRejected,
 	dispositionStaleConfig:           CheckConfigRejected,
-	dispositionConfigNormalized:      CheckConfigNormalized,
+	dispositionConfigNoted:           CheckConfigNoted,
 }
 
 // DeclaredCapabilities is the closed list of reasons this build declares as
@@ -295,7 +296,7 @@ var checkAnswers = map[Check]struct {
 	CheckCapabilityUnsupported: {OwnerCapability, GroupByReasonCode},
 	CheckCapabilityUnlisted:    {OwnerAlarmd, GroupByReasonCode},
 	CheckConfigRejected:        {OwnerStrategy, GroupByReasonCode},
-	CheckConfigNormalized:      {OwnerStrategy, GroupByReasonCode},
+	CheckConfigNoted:           {OwnerStrategy, GroupByReasonCode},
 	CheckCutoverFailing:        {OwnerAlarmd, GroupByReasonCode},
 	CheckReplicaDegraded:       {OwnerAlarmd, GroupByDegradation},
 	CheckOwnershipSkewed:       {OwnerAlarmd, GroupByReplica},
@@ -406,7 +407,7 @@ var checkOrder = []Check{
 	CheckReadHeld,
 	// Last: the strategy runs. A reader who starts at the top meets every
 	// line that stops detection before the one that only widens it.
-	CheckConfigNormalized,
+	CheckConfigNoted,
 }
 
 // Standing is whether a check is a fact about the whole deployment rather
@@ -426,7 +427,7 @@ func (check Check) Standing() bool {
 func (check Check) SourceStanding() bool {
 	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted ||
 		check == CheckConfigRejected ||
-		check == CheckSourceSetFlapping || check == CheckConfigNormalized
+		check == CheckSourceSetFlapping || check == CheckConfigNoted
 }
 
 // Checks lists every check the table answers, in the order the page lists
@@ -1319,7 +1320,7 @@ func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now tim
 				}
 				group := &CheckGroup{Key: key, Strategies: withheld.Count, Replicas: []string{view.SourceReplica},
 					Disposition: withheld.Disposition, Samples: withheld.Samples}
-				if check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted || check == CheckConfigNormalized {
+				if check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted || check == CheckConfigNoted {
 					words := WithheldWordsOf(withheld.Reason)
 					group.Words = &words
 				} else if words, known := withheldReasonWords[withheld.Reason]; known {
@@ -1409,8 +1410,8 @@ func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now tim
 		if check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted {
 			report.Line = capabilityLine(report.Strategies, report.Groups)
 		}
-		if check == CheckConfigNormalized {
-			report.Owner = normalizedOwner(report.Groups)
+		if check == CheckConfigNoted {
+			report.Owner = notedOwner(report.Groups)
 		}
 		if check == CheckSourceSetFlapping && view != nil && view.Source != nil && view.Source.Set != nil {
 			// Newest hour first: the question is "is it still happening".
@@ -1854,14 +1855,14 @@ func sourceSetLine(strategies, hours int, set *SourceSetFacts) string {
 	return line + fmt.Sprintf("（账自 %s 起）", set.Since.UTC().Format("01-02 15:04Z"))
 }
 
-// normalizedOwner is whose the CONFIG_NORMALIZED line is: the strategy's when
+// notedOwner is whose the CONFIG_NOTED line is: the strategy's when
 // any of its reasons asks the strategy to change what it wrote, nobody's when
 // none does. The strategies under it are all detecting, and a line that asks
 // for an edit nobody should make teaches its reader to skip the line, the
 // reasons that do need one included. A reason with no action of its own is
 // taken as asking for the edit, which is what the line asked before reasons
 // carried one.
-func normalizedOwner(groups []CheckGroup) Owner {
+func notedOwner(groups []CheckGroup) Owner {
 	for _, group := range groups {
 		if group.Words == nil || group.Words.Action != ActionNone {
 			return OwnerStrategy

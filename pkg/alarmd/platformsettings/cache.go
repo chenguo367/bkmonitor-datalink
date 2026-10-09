@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 // Mode is the state of the process copy. It is a state, read at scrape and
@@ -335,6 +337,10 @@ func decodeHorizon(raw json.RawMessage) (int64, bool, error) {
 	var value int64
 	if err := json.Unmarshal(trimmed, &value); err != nil || value < 1 {
 		return 0, false, fmt.Errorf("%q is not a positive whole number of seconds", shorten(trimmed))
+	}
+	if value > contract.MaxNoDataTrackingHorizonSeconds {
+		return 0, false, fmt.Errorf("%q is past the largest horizon a lifetime can hold, %d seconds",
+			shorten(trimmed), contract.MaxNoDataTrackingHorizonSeconds)
 	}
 	return value, true, nil
 }

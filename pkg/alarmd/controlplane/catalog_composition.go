@@ -127,10 +127,11 @@ type CatalogComposition struct {
 	// is in Withheld under the reason that withheld it.
 	//
 	// The two together are one partition over the items that asked for no-data
-	// detection: a source here, or a reason there. NoDataPlansPartition states
-	// the sum, because a count of what is working answers nothing on its own -
-	// three sources adding to fewer items than are configured is the reading
-	// that matters, and it is only visible against what the other side holds.
+	// detection: a source here, or a reason there. Their sum is the reading
+	// that matters, because a count of what is working answers nothing on its
+	// own - three sources adding to fewer items than are configured is only
+	// visible against what the other side holds; the catalog gauges carry both
+	// halves and a reader sums them (METRICS.md, catalog_no_data_plans).
 	NoDataPlans map[nodata.RosterSource]int
 	// NoDataPlansUnclassified counts an accepted Plan whose expected set cannot
 	// be classified. The compiler refuses those, so this is zero and is here to
@@ -479,43 +480,17 @@ var AlwaysReportedWithheld = []WithheldKey{
 	// "No strategy's effective time was widened to the whole day because a
 	// range did not parse" is a claim a reader acts on: the widening is the
 	// direction of more detection, and the only way to see it is this pair.
-	{Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid},
+	{Disposition: DispositionConfigNoted, Reason: ReasonEffectiveTimeRangeInvalid},
 	// "No strategy here takes part in priority arbitration" is the zero that
 	// says every strategy detects exactly as it would alone on the platform.
-	{Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored},
+	{Disposition: DispositionConfigNoted, Reason: ReasonPriorityIgnored},
 	// "No strategy here runs a level on another level's trigger."
-	{Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed},
+	{Disposition: DispositionConfigNoted, Reason: ReasonLevelTriggerBorrowed},
 	// "No strategy here runs on a period it did not write."
-	{Disposition: DispositionConfigNormalized, Reason: ReasonAggIntervalDefaulted},
-}
-
-// NoDataReasons is the set of reasons that withhold a Plan from no-data
-// detection. The partition below sums over them.
-var NoDataReasons = []string{"NO_DATA_CONFIG_INVALID", "NO_DATA_ROSTER_UNSUPPORTED"}
-
-// NoDataPlansPartition is how many items asked for no-data detection: the ones
-// that got it, by source, plus the ones a no-data reason withheld.
-//
-// The withheld half is summed by reason across dispositions rather than read at
-// one of them. A strategy refused for the first time is CONFIG_REJECTED, and
-// the same strategy is STALE_CONFIG once a previous good Plan is retained for
-// it - same reason, different disposition, on different rounds. Reading only
-// CONFIG_REJECTED would make the total drop by one the round a strategy starts
-// running its last good Plan, which reads as a gauge that lost a count rather
-// than as a strategy that changed state.
-func (composition CatalogComposition) NoDataPlansPartition() int {
-	total := composition.NoDataPlansUnclassified
-	for _, count := range composition.NoDataPlans {
-		total += count
-	}
-	for key, count := range composition.Withheld {
-		for _, reason := range NoDataReasons {
-			if key.Reason == reason {
-				total += count
-			}
-		}
-	}
-	return total
+	{Disposition: DispositionConfigNoted, Reason: ReasonAggIntervalDefaulted},
+	// "No strategy here has a no-data trigger the tracking horizon stops
+	// before it can fire."
+	{Disposition: DispositionConfigNoted, Reason: ReasonNoDataTriggerBeyondHorizon},
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers
@@ -542,5 +517,5 @@ var CatalogDispositions = []Disposition{
 	DispositionRemoved,
 	DispositionUnsupported,
 	DispositionCompatibilityIgnored,
-	DispositionConfigNormalized,
+	DispositionConfigNoted,
 }

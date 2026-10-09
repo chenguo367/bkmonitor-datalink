@@ -85,7 +85,7 @@ func TestALevelWithoutItsOwnTriggerRunsOnTheFirstOne(t *testing.T) {
 		if recovery["consecutive_windows"] != float64(5) || recovery["enabled"] != true {
 			t.Fatalf("recovery=%v, want the platform's default five windows", recovery)
 		}
-		want := controlplane.ObjectDisposition{SourceID: "1", Scope: "LEVEL", LevelID: 2, Disposition: controlplane.DispositionConfigNormalized,
+		want := controlplane.ObjectDisposition{SourceID: "1", Scope: "LEVEL", LevelID: 2, Disposition: controlplane.DispositionConfigNoted,
 			Reason: controlplane.ReasonLevelTriggerBorrowed, Detail: "trigger_from_level=1"}
 		if records := borrowedRecords(catalog); len(records) != 1 || records[0] != want {
 			t.Fatalf("records=%#v, want one %#v", records, want)
@@ -172,7 +172,7 @@ func TestALevelWithoutItsOwnTriggerRunsOnTheFirstOne(t *testing.T) {
 		}
 	})
 
-	key := controlplane.WithheldKey{Disposition: controlplane.DispositionConfigNormalized, Reason: controlplane.ReasonLevelTriggerBorrowed}
+	key := controlplane.WithheldKey{Disposition: controlplane.DispositionConfigNoted, Reason: controlplane.ReasonLevelTriggerBorrowed}
 	if count, reported := controlplane.ComposeCatalog(build(t, `{"level":2,"trigger_config":{"count":1,"check_window":5}}`)).Withheld[key]; !reported || count != 0 {
 		t.Fatalf("LEVEL_TRIGGER_BORROWED reported=%v count=%d, want a published zero", reported, count)
 	}

@@ -66,16 +66,16 @@ import (
 // page's hint counted it among the withheld. Its own line, last, because it
 // is the one standing under which detection is not stopped.
 // A normalized item reaches the page as its own line: filed under
-// CONFIG_NORMALIZED and no other check, the strategy's to act on, with the
+// CONFIG_NOTED and no other check, the strategy's to act on, with the
 // detecting pair (the Plan runs) and the reason's words on the group. Before
 // this the walk skipped the disposition it did not know, and the strategy
 // appeared nowhere while the hint counted it among the withheld.
-func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
+func TestANotedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 2, "CONFIG_REJECTED": 1},
+	view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NOTED": 2, "CONFIG_REJECTED": 1},
 		[]WithheldObject{
-			{StrategyID: "4108", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
-			{StrategyID: "4109", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+			{StrategyID: "4108", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NOTED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+			{StrategyID: "4109", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_NOTED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
 			{StrategyID: "4110", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_REJECTED", Reason: "LEVEL_INVALID"},
 		}), SourceReplica: "pod-a"}
 	reports := ReportChecks(nil, nil, &view, at)
@@ -83,9 +83,9 @@ func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 	for _, report := range reports {
 		byCode[report.Code] = report
 	}
-	normalized, filed := byCode[CheckConfigNormalized]
+	normalized, filed := byCode[CheckConfigNoted]
 	if !filed || normalized.Strategies != 2 || len(normalized.Groups) != 1 || normalized.Owner != OwnerStrategy {
-		t.Fatalf("CONFIG_NORMALIZED report = %+v, want two strategies in one reason group, the strategy's", normalized)
+		t.Fatalf("CONFIG_NOTED report = %+v, want two strategies in one reason group, the strategy's", normalized)
 	}
 	if group := normalized.Groups[0]; group.Key != "EFFECTIVE_TIME_RANGE_INVALID" || group.Words == nil || group.Words.Kind != WithheldStrategyDefinition ||
 		!strings.Contains(group.Words.What, "比配置写的宽") {
@@ -94,11 +94,11 @@ func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 	if rejected := byCode[CheckConfigRejected]; rejected.Strategies != 1 {
 		t.Errorf("CONFIG_REJECTED counts %d strategies, want the one refused and not the two normalized", rejected.Strategies)
 	}
-	if pair := checkWords[CheckConfigNormalized]; pair.State != StateDetecting || pair.Action != ActionStrategyEdit {
+	if pair := checkWords[CheckConfigNoted]; pair.State != StateDetecting || pair.Action != ActionStrategyEdit {
 		t.Errorf("words = %+v, want detecting and the strategy's to edit", pair)
 	}
-	if !CheckConfigNormalized.SourceStanding() || Checks()[len(Checks())-1] != CheckConfigNormalized {
-		t.Errorf("CONFIG_NORMALIZED is a source standing and the last line; got standing %v, last %s", CheckConfigNormalized.SourceStanding(), Checks()[len(Checks())-1])
+	if !CheckConfigNoted.SourceStanding() || Checks()[len(Checks())-1] != CheckConfigNoted {
+		t.Errorf("CONFIG_NOTED is a source standing and the last line; got standing %v, last %s", CheckConfigNoted.SourceStanding(), Checks()[len(Checks())-1])
 	}
 }
 
@@ -106,17 +106,17 @@ func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 // source's listed count takes the strategy once. Counting the record as well
 // had the priority groups -- one record per accepted Plan -- report more
 // strategies listed than the source holds.
-func TestANormalizedRecordDoesNotListItsStrategyTwice(t *testing.T) {
+func TestANotedRecordDoesNotListItsStrategyTwice(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	source := NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 2, "CONFIG_REJECTED": 1},
+	source := NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NOTED": 2, "CONFIG_REJECTED": 1},
 		[]WithheldObject{
-			{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
-			{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+			{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "PRIORITY_IGNORED"},
+			{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "PRIORITY_IGNORED"},
 			{StrategyID: "13", Scope: "PLAN", Disposition: "CONFIG_REJECTED", Reason: "TRIGGER_CONFIG_MISSING"},
 		})
-	if source.Listed != 4 || source.Accepted != 3 || source.Objects["CONFIG_NORMALIZED"] != 2 {
+	if source.Listed != 4 || source.Accepted != 3 || source.Objects["CONFIG_NOTED"] != 2 {
 		t.Fatalf("listed=%d accepted=%d normalized=%d, want 4 listed: three accepted, two of them normalized, one refused",
-			source.Listed, source.Accepted, source.Objects["CONFIG_NORMALIZED"])
+			source.Listed, source.Accepted, source.Objects["CONFIG_NOTED"])
 	}
 	words := WithheldWordsOf("PRIORITY_IGNORED")
 	if words.Kind != WithheldStrategyDefinition || !strings.Contains(words.What, "不是被扣住") || !strings.Contains(words.Next, "不是这里的错关") {
@@ -124,35 +124,35 @@ func TestANormalizedRecordDoesNotListItsStrategyTwice(t *testing.T) {
 	}
 }
 
-// The CONFIG_NORMALIZED line takes its owner from its reasons. Every
+// The CONFIG_NOTED line takes its owner from its reasons. Every
 // strategy under it is detecting; a line of ignored priorities alone asks
 // nobody to act, and one that also holds a time range read as the whole day
 // still asks the strategy to fix what it wrote.
-func TestTheNormalizedLineAsksOnlyWhatItsReasonsAsk(t *testing.T) {
+func TestTheNotedLineAsksOnlyWhatItsReasonsAsk(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	ownerOf := func(withheld []WithheldObject) Owner {
-		view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": len(withheld)}, withheld), SourceReplica: "pod-a"}
+		view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NOTED": len(withheld)}, withheld), SourceReplica: "pod-a"}
 		for _, report := range ReportChecks(nil, nil, &view, at) {
-			if report.Code == CheckConfigNormalized {
+			if report.Code == CheckConfigNoted {
 				return report.Owner
 			}
 		}
-		t.Fatal("no CONFIG_NORMALIZED line")
+		t.Fatal("no CONFIG_NOTED line")
 		return ""
 	}
 	priority := []WithheldObject{
-		{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
-		{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+		{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "PRIORITY_IGNORED"},
+		{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "PRIORITY_IGNORED"},
 	}
 	if owner := ownerOf(priority); owner != OwnerNobody {
 		t.Errorf("a line of ignored priorities is %s's, want nobody's", owner)
 	}
 	mixed := append(append([]WithheldObject{}, priority...),
-		WithheldObject{StrategyID: "13", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"})
+		WithheldObject{StrategyID: "13", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NOTED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"})
 	if owner := ownerOf(mixed); owner != OwnerStrategy {
 		t.Errorf("a line that also holds a range to fix is %s's, want the strategy's", owner)
 	}
-	if owner := ownerOf([]WithheldObject{{StrategyID: "14", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "SOMETHING_NEW"}}); owner != OwnerStrategy {
+	if owner := ownerOf([]WithheldObject{{StrategyID: "14", Scope: "PLAN", Disposition: "CONFIG_NOTED", Reason: "SOMETHING_NEW"}}); owner != OwnerStrategy {
 		t.Errorf("a reason with no action of its own made the line %s's, want the strategy's as before", owner)
 	}
 }
@@ -332,8 +332,8 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 				{StrategyID: "10", Scope: "STRATEGY", Disposition: "STALE_CONFIG", Reason: "LEVEL_INVALID"}}), SourceReplica: "pod-a"},
 		// The normalized item: accepted, and read wider than written. Its
 		// group carries the reason's words like the capability line's do.
-		CheckConfigNormalized: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 1},
-			[]WithheldObject{{StrategyID: "12", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"}}), SourceReplica: "pod-a"},
+		CheckConfigNoted: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NOTED": 1},
+			[]WithheldObject{{StrategyID: "12", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NOTED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"}}), SourceReplica: "pod-a"},
 		// The set flapping: the leader's account across rounds, with one
 		// hour in which a dropped strategy was listed again.
 		CheckSourceSetFlapping: {Source: sourceFactsWithSet(at, &SourceSetFacts{Since: at.Add(-3 * time.Hour),

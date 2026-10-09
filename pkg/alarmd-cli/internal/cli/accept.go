@@ -738,7 +738,7 @@ func (run *acceptRun) checkDetecting(diagnosis diagnosisRun, covered bool) {
 		dispositions, _ := row["dispositions"].([]any)
 		for _, rawDisposition := range dispositions {
 			disposition, _ := rawDisposition.(map[string]any)
-			if word := stringField(disposition, "disposition"); word == "ACCEPTED" || word == "CONFIG_NORMALIZED" {
+			if word := stringField(disposition, "disposition"); word == "ACCEPTED" || word == "CONFIG_NOTED" {
 				continue
 			}
 			entry.Refusals = append(entry.Refusals, refusal{Scope: stringField(disposition, "scope"), LevelID: disposition["level_id"],

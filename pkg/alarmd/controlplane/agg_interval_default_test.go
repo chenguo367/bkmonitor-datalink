@@ -63,7 +63,7 @@ func TestAStrategysPeriodIsTheOnePythonComputes(t *testing.T) {
 			defaulted := false
 			for _, disposition := range catalog.Dispositions {
 				if disposition.Reason == controlplane.ReasonAggIntervalDefaulted {
-					defaulted = disposition.Disposition == controlplane.DispositionConfigNormalized && disposition.Scope == "PLAN"
+					defaulted = disposition.Disposition == controlplane.DispositionConfigNoted && disposition.Scope == "PLAN"
 				}
 			}
 			if defaulted != testCase.defaulted {

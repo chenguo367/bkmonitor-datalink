@@ -65,7 +65,7 @@ type WithheldReasonWords struct {
 	Kind WithheldKind `json:"kind"`
 	What string       `json:"what"`
 	Next string       `json:"next"`
-	// Action is set on the reasons under CONFIG_NORMALIZED, whose line
+	// Action is set on the reasons under CONFIG_NOTED, whose line
 	// holds strategies that are detecting: whether the reason asks the
 	// strategy to change what it wrote, or asks nothing. The line takes the
 	// most demanding of its reasons, so a line of ignored priorities alone
@@ -78,33 +78,41 @@ type WithheldReasonWords struct {
 // produced and not listed here reaches the page as unknown, which a test
 // against the control plane's literals keeps from lasting a release.
 var withheldReasonWords = map[string]WithheldReasonWords{
-	// The one reason under CONFIG_NORMALIZED: not withheld at all. The
+	// The one reason under CONFIG_NOTED: not withheld at all. The
 	// words say what was read instead of what was written, and that the
 	// strategy detects more than it asked for until the range is fixed.
 	"EFFECTIVE_TIME_RANGE_INVALID": {Kind: WithheldStrategyDefinition,
 		What:   "生效时间段的开始或结束时间格式不合法，已按平台自己的读法读：开始坏读作 00:00、结束坏读作 23:59——策略在检测，但检测的时段比配置写的宽，不是被扣住",
 		Next:   "策略负责人把该时间段改成 HH:MM；改好后下一轮刷新按写的时段检测，这一行消失",
 		Action: ActionStrategyEdit},
-	// The second reason under CONFIG_NORMALIZED, also not withheld: the
+	// The second reason under CONFIG_NOTED, also not withheld: the
 	// strategy runs, without the arbitration the platform applies between
 	// the strategies of one priority group.
 	"PRIORITY_IGNORED": {Kind: WithheldStrategyDefinition,
 		What:   "策略配了优先级分组。优先级是平台告警链路在同组策略之间做的抑制：同一目标上只留优先级最高的那条。这里按独立策略检测，不做这层抑制，所以同组的低优先级策略也会在同一目标上告警——策略在检测，不是被扣住",
 		Next:   "不需要处理。平台那边可能仍会按优先级关掉低优先级的告警，那是平台的规则，不是这里的错关",
 		Action: ActionNone},
-	// Under CONFIG_NORMALIZED as well: the level runs, on another level's
+	// Under CONFIG_NOTED as well: the level runs, on another level's
 	// trigger, the way the platform runs it.
 	"LEVEL_TRIGGER_BORROWED": {Kind: WithheldStrategyDefinition,
 		What:   "这一级别的算法没有配同级别的触发条件，已按平台的读法借用策略里第一条触发条件（次数、窗口、生效时间）来检测，恢复按平台默认的 5 个周期——策略在检测，不是被扣住",
 		Next:   "策略负责人把触发条件配到算法所在的级别上；改好后下一轮刷新按写的条件检测，这一行消失",
 		Action: ActionStrategyEdit},
-	// Under CONFIG_NORMALIZED too: the strategy runs, on the period Python
+	// Under CONFIG_NOTED too: the strategy runs, on the period Python
 	// gives a query config that carries none.
 	"AGG_INTERVAL_DEFAULTED": {Kind: WithheldStrategyDefinition,
 		What:   "策略的查询配置没有写聚合周期，或写的是 0，已按平台的读法按 60 秒作为检测周期——策略在检测，不是被扣住",
 		Next:   "策略负责人在查询配置里写上聚合周期；改好后下一轮刷新按写的周期检测，这一行消失",
 		Action: ActionStrategyEdit},
-	// The detect_interval readings, under CONFIG_NORMALIZED: the Plan runs,
+	// Under CONFIG_NOTED too, and not a reading at all: the no-data
+	// configuration runs as written and can never alert, because the
+	// tracking horizon stops each absence before the trigger has its count.
+	// The detail carries the numbers the owner chooses between.
+	"NO_DATA_TRIGGER_BEYOND_HORIZON": {Kind: WithheldStrategyDefinition,
+		What:   "无数据告警要连续缺席的时长达到或超过追踪期限：第 N 个连续缺席点出现在首次缺席后（连续周期数−1）×周期 秒，而追踪在缺席满追踪期限的那一轮停止且不出裁决，所以这条无数据永远发不出告警（详情里写明连续周期数、周期、最早可告警时刻、追踪期限及其来源）——策略在检测，阈值检测和无数据的追踪、停止、恢复都照常，不是被扣住",
+		Next:   "策略负责人把连续周期数调小，或调大追踪期限（来源是 STRATEGY 时改策略的无数据配置，是 PLATFORM 时改平台配置）；改好后下一轮刷新这一行消失",
+		Action: ActionStrategyEdit},
+	// The detect_interval readings, under CONFIG_NOTED: the Plan runs,
 	// at the step written or at the aggregation interval, and the words say
 	// which and what follows from it.
 	"ABOVE_AGG_INTERVAL": {Kind: WithheldStrategyDefinition,

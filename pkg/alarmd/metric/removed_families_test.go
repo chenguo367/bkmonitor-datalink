@@ -18,6 +18,9 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 )
 
 // removedFamilies are families taken out because nothing read them: their
@@ -87,6 +90,14 @@ var removedLabelValues = []struct {
 	{"absent_strategy_close_total", "outcome", "alert_closed", false},
 	{"absent_strategy_close_total", "outcome", "closed", true},
 	{"target_scope_close_total", "outcome", "closed", true},
+	// An item accepted with a note on its configuration was CONFIG_NORMALIZED,
+	// which says its configuration was read otherwise than written. A no-data
+	// trigger the tracking horizon stops first is noted with nothing read
+	// otherwise, so the word is CONFIG_NOTED for both, as a disposition and
+	// as the check line that folds it.
+	{"catalog_objects", "disposition", "CONFIG_NORMALIZED", false},
+	{"catalog_withheld_objects", "disposition", "CONFIG_NORMALIZED", false},
+	{"fleet_checks", "code", "CONFIG_NORMALIZED", false},
 }
 
 // A removed label value is emitted by no family, whatever its source
@@ -109,6 +120,28 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		return sides
 	})
 	r.SetTargetScopeCloseSource(everything)
+	// The catalog's and the fleet's families are filled by their producers'
+	// closed lists, so the guard drives those: an object recorded under a
+	// removed disposition is composed by the control plane, and the check
+	// lines are the fleet's whole table the way the process exports it.
+	var dispositions []controlplane.ObjectDisposition
+	for _, removed := range removedLabelValues {
+		if removed.family == "catalog_objects" || removed.family == "catalog_withheld_objects" {
+			dispositions = append(dispositions, controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN",
+				Disposition: controlplane.Disposition(removed.value), Reason: "ANY_REASON"})
+		}
+	}
+	composition := controlplane.ComposeCatalog(controlplane.Catalog{Dispositions: dispositions})
+	r.SetCatalogCompositionSource(func() *controlplane.CatalogComposition { return &composition })
+	if err := r.BindFleet(func() FleetVerdict {
+		verdict := FleetVerdict{Health: "HEALTHY"}
+		for _, code := range fleet.Checks() {
+			verdict.Checks = append(verdict.Checks, FleetCount{Value: string(code), Count: 1})
+		}
+		return verdict
+	}); err != nil {
+		t.Fatal(err)
+	}
 	families, err := r.registry.Gather()
 	if err != nil {
 		t.Fatal(err)

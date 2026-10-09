@@ -294,7 +294,12 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 		// the observed value would put a number on a page whose whole subject
 		// is that there was no number.
 		message.ExtraData.EvaluationFamily = evaluationFamilyNoData
-		message.ExtraData.NoDataPeriods = event.Observed.Values[contract.NoDataPeriodFactField]
+		// The period count only on an absence. A recovery's point carries
+		// zero by construction - the group reported - and a zero in this
+		// field would read as a count of zero periods without data.
+		if event.EventKind != contract.TriggerEventRecovery {
+			message.ExtraData.NoDataPeriods = event.Observed.Values[contract.NoDataPeriodFactField]
+		}
 	} else {
 		message.Values = observedValues(event.Observed)
 		message.ExtraData.Unit = event.Observed.Unit
@@ -545,6 +550,14 @@ func title(event *contract.TriggerEventV1, primary contract.LevelResultV1, actio
 func content(event *contract.TriggerEventV1, primary contract.LevelResultV1, noData bool) string {
 	window := primary.DecisionWindow.Trigger
 	if noData {
+		// A recovery is the group reporting again, which is what this point
+		// observed; its period count is zero by construction and saying "no
+		// data for 0 periods" would describe the opposite of the decision.
+		// The envelope only goes out while the consumer holds an open alert
+		// on the series, so "again" is the case it is sent in.
+		if event.EventKind == contract.TriggerEventRecovery {
+			return fmt.Sprintf("data reported again, as of %s", wireTime(event.RecordRef.SourceTime))
+		}
 		return fmt.Sprintf(
 			"no data for %s periods, as of %s",
 			noDataPeriods(event.Observed), wireTime(event.RecordRef.SourceTime),

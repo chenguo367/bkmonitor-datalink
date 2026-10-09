@@ -23,13 +23,6 @@ type alwaysEffectiveTimeTarget struct {
 	series   execution.SeriesIdentityDigest
 }
 
-func prepareAlwaysEffectiveTimeFacts(
-	ctx context.Context,
-	header execution.InternalExecutionHeader,
-) (map[execution.ConsumerRef]strategy.EffectiveTimeFact, error) {
-	return PrepareEffectiveTimeFacts(ctx, header, nil)
-}
-
 // PrepareEffectiveTimeFacts runs once per Plan/Slot, before binding real series.
 // legacy is consulted only by Plans without a complete frozen snapshot.
 func PrepareEffectiveTimeFacts(ctx context.Context, header execution.InternalExecutionHeader, legacy strategy.EffectiveTimeProvider) (map[execution.ConsumerRef]strategy.EffectiveTimeFact, error) {
@@ -52,59 +45,6 @@ func PrepareEffectiveTimeFacts(ctx context.Context, header execution.InternalExe
 			}
 			facts[execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}] = fact
 		}
-	}
-	return facts, nil
-}
-
-func prepareAlwaysEffectiveTimeFactsWithProvider(
-	ctx context.Context,
-	header execution.InternalExecutionHeader,
-	provider strategy.EffectiveTimeProvider,
-) (map[execution.ConsumerRef]strategy.EffectiveTimeFact, error) {
-	requestsByDigest := make(map[string]strategy.EffectiveTimeRequest)
-	requirementByConsumer := make(map[execution.ConsumerRef]string)
-	for _, due := range header.DuePlans {
-		if due.CompiledPlan == nil {
-			return nil, errors.New("alarmd worker: EffectiveTime target references an unknown Plan")
-		}
-		// Every level this Plan could be judged on this Slot, which is the
-		// declared ones and, when it detects no-data, that level too. This is a
-		// union rather than a choice: both kinds of series may arrive in the
-		// same Slot and each needs its own fact. Which levels a given series is
-		// judged against is decided elsewhere, once.
-		for _, level := range levelsNeedingEffectiveTime(due) {
-			requirement := level.EffectiveTimeRequirement()
-			if requirement.Kind() != strategy.EffectiveTimeAlways {
-				return nil, errors.New("alarmd worker: non-ALWAYS EffectiveTime requires a resolved series fact")
-			}
-			consumer := execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}
-			requirementByConsumer[consumer] = requirement.Digest()
-			requestsByDigest[requirement.Digest()] = strategy.EffectiveTimeRequest{
-				TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID,
-				EvaluationTime: int64(header.Contract.Slot.EvaluationTime), Requirement: requirement,
-			}
-		}
-	}
-	digests := make([]string, 0, len(requestsByDigest))
-	for digest := range requestsByDigest {
-		digests = append(digests, digest)
-	}
-	sort.Strings(digests)
-	requests := make([]strategy.EffectiveTimeRequest, len(digests))
-	for index, digest := range digests {
-		requests[index] = requestsByDigest[digest]
-	}
-	resolved, err := provider.Resolve(ctx, requests)
-	if err != nil {
-		return nil, err
-	}
-	factsByDigest := make(map[string]strategy.EffectiveTimeFact, len(resolved))
-	for index, fact := range resolved {
-		factsByDigest[digests[index]] = fact
-	}
-	facts := make(map[execution.ConsumerRef]strategy.EffectiveTimeFact, len(requirementByConsumer))
-	for consumer, digest := range requirementByConsumer {
-		facts[consumer] = factsByDigest[digest]
 	}
 	return facts, nil
 }

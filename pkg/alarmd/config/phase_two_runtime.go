@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -264,6 +265,10 @@ func (c PhaseTwoNoDataConfig) validate() error {
 		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d must be a positive number of "+
 			"seconds; omit the key entirely to leave absence tracked indefinitely",
 			*c.TrackingHorizonSeconds)
+	}
+	if c.TrackingHorizonSeconds != nil && *c.TrackingHorizonSeconds > contract.MaxNoDataTrackingHorizonSeconds {
+		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d is past the largest horizon a lifetime "+
+			"can hold, %d seconds", *c.TrackingHorizonSeconds, contract.MaxNoDataTrackingHorizonSeconds)
 	}
 	return nil
 }
