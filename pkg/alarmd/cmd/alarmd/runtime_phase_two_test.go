@@ -758,29 +758,45 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 	wake <- struct{}{}
 	// This is a 500-QG ordering test, not a one-second throughput contract.
 	// Keep a stalled-work watchdog and a separate total test bound; backlog
-	// progress alone must never substitute for normal reentry. The watchdog
-	// is a few seconds, not one: with the module testing beside it a run went
-	// a second without a backlog Query Group and failed as stalled while
-	// nothing was.
-	const stallBound = 5 * time.Second
-	stalled := time.NewTimer(stallBound)
-	defer stalled.Stop()
+	// progress alone must never substitute for normal reentry.
+	//
+	// The watchdog counts time this test was running, not wall time: ticks
+	// of a ticker, which delivers at most one tick to a reader that was not
+	// there to take them. A wall-clock timer read a pause of the whole
+	// process - the machine short of memory while the module tests beside
+	// it - as five seconds of dispatcher with nothing to show, and on resume
+	// the expired timer and the pending progress were both ready and the
+	// select took either. Stopping the process for six seconds mid-run
+	// reproduced that failure in three runs of six, with the dispatcher
+	// caught inside fillQueues, mid-sweep. A real stall still counts: this
+	// goroutine keeps running and keeps receiving ticks while the dispatcher
+	// does nothing. Progress also wins a tie with a tick, which the select
+	// alone does not promise.
+	const tick = 100 * time.Millisecond
+	const stallTicks = 50
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 	deadline := time.NewTimer(2 * signalWaitBound)
 	defer deadline.Stop()
+	idle := 0
 	for {
 		select {
 		case <-secondNormal:
 			return
 		case <-backlogProgress:
-			if !stalled.Stop() {
-				select {
-				case <-stalled.C:
-				default:
-				}
+			idle = 0
+		case <-ticker.C:
+			select {
+			case <-secondNormal:
+				return
+			case <-backlogProgress:
+				idle = 0
+				continue
+			default:
 			}
-			stalled.Reset(stallBound)
-		case <-stalled.C:
-			t.Fatal("normal reentry and backlog processing both stalled")
+			if idle++; idle >= stallTicks {
+				t.Fatalf("normal reentry and backlog processing both stalled for %d ticks of %s this test was running", idle, tick)
+			}
 		case <-deadline.C:
 			t.Fatal("normal Query Group did not reenter within bounded test window")
 		}
