@@ -193,9 +193,7 @@ func TestOnlyABodysTransportFailureIsNamed(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxBodyBytes, limits.MaxSeriesBytes = 64, 64
 	oversized := fixtureClient(t, http.StatusOK, `{"series":[`+bodyTestSeries+`]}`, limits)
-	if _, err := oversized.Execute(context.Background(), validAttempt(t), &collectingSink{}); !errors.Is(err, ErrResponseBytesExceeded) || errors.As(err, &failure) {
-		t.Fatalf("an oversized body = %v, want the response budget's own name", err)
-	}
+	wantLimitCompletion(t, oversized, "response=limit_response_bytes")
 
 	refusing := fixtureClient(t, http.StatusOK, `{"series":[`+bodyTestSeries+`],"is_partial":false}`, DefaultLimits())
 	past := validAttempt(t)

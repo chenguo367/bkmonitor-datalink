@@ -27,6 +27,10 @@ func TestUnavailableQueryAvailabilityRequiresBackendFailure(t *testing.T) {
 		{"backend status", execution.HTTPStatusRouteDetail(503), unavailable, execution.QueryAvailabilityUnavailable},
 		{"backend response", "response=status_table_not_found", unavailable, execution.QueryAvailabilityUnavailable},
 		{"target missing", "response=status_space_table_id_field_is_not_exists", targetMissing, execution.QueryAvailabilityUnavailable},
+		// An answer past a response limit is the same answer every time it is
+		// fetched, so it is evidence for the degraded pool like a backend
+		// status, not an unknown.
+		{"response limit", execution.ResponseRouteDetail(execution.ResponseFailureLimitTotalSeries), unavailable, execution.QueryAvailabilityUnavailable},
 		{"admission or unknown", "", unavailable, execution.QueryAvailabilityUnknown},
 		{"transport", execution.TransportRouteDetail(execution.TransportFailureTimeout), unavailable, execution.QueryAvailabilityUnknown},
 	} {

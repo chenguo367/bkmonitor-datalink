@@ -14,7 +14,12 @@ import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 // responseLimitError is a client-side response budget violation. It keeps the
 // historical sentinel text so errors.Is against the exported variables keeps
 // working, and exposes the budget name as a stable diagnostic code.
-type responseLimitError struct{ code string }
+type responseLimitError struct {
+	code string
+	// class is the limit's name in the response detail grammar
+	// (execution.ResponseFailureLimit*).
+	class string
+}
 
 func (e *responseLimitError) Error() string {
 	return "alarmd access uq: " + e.code

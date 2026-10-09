@@ -245,6 +245,15 @@ const (
 	// (for example "response=status_space_table_id_field_is_not_exists").
 	ResponseFailureStatusPrefix = "status_"
 	ResponseFailureStatusOther  = "other"
+	// The response limits a query's answer can be past: the whole body, one
+	// series, the series count and the record count. Each is a deterministic
+	// answer for the query, since the same query fetches the same answer
+	// again; none is a provider failure, and no retry makes the answer
+	// smaller.
+	ResponseFailureLimitResponseBytes = "limit_response_bytes"
+	ResponseFailureLimitSeriesBytes   = "limit_series_bytes"
+	ResponseFailureLimitTotalSeries   = "limit_total_series"
+	ResponseFailureLimitTotalRecords  = "limit_total_records"
 
 	TransportFailureTimeout           = "timeout"
 	TransportFailureConnectionRefused = "connection_refused"
@@ -285,7 +294,8 @@ func BodyRouteDetail(class string) string {
 // (for example a missing is_partial flag) as attempt detail.
 func ResponseRouteDetail(class string) string {
 	switch class {
-	case ResponseFailureIsPartialMissing, ResponseFailureOffRequestGrid:
+	case ResponseFailureIsPartialMissing, ResponseFailureOffRequestGrid,
+		ResponseFailureLimitResponseBytes, ResponseFailureLimitSeriesBytes, ResponseFailureLimitTotalSeries, ResponseFailureLimitTotalRecords:
 		return RouteDetailKindResponse + "=" + class
 	default:
 		return RouteDetailKindResponse + "=other"

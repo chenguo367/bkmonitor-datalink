@@ -77,10 +77,10 @@ var dataExistenceStatusCodes = map[string]struct{}{
 }
 
 var (
-	ErrResponseBytesExceeded error = &responseLimitError{code: "RESPONSE_BYTES_EXCEEDED"}
-	ErrSeriesBytesExceeded   error = &responseLimitError{code: "SERIES_BYTES_EXCEEDED"}
-	ErrTotalSeriesExceeded   error = &responseLimitError{code: "TOTAL_SERIES_EXCEEDED"}
-	ErrTotalRecordsExceeded  error = &responseLimitError{code: "TOTAL_RECORDS_EXCEEDED"}
+	ErrResponseBytesExceeded error = &responseLimitError{code: "RESPONSE_BYTES_EXCEEDED", class: execution.ResponseFailureLimitResponseBytes}
+	ErrSeriesBytesExceeded   error = &responseLimitError{code: "SERIES_BYTES_EXCEEDED", class: execution.ResponseFailureLimitSeriesBytes}
+	ErrTotalSeriesExceeded   error = &responseLimitError{code: "TOTAL_SERIES_EXCEEDED", class: execution.ResponseFailureLimitTotalSeries}
+	ErrTotalRecordsExceeded  error = &responseLimitError{code: "TOTAL_RECORDS_EXCEEDED", class: execution.ResponseFailureLimitTotalRecords}
 )
 
 type Limits struct {
@@ -642,7 +642,31 @@ func (client *Client) decode(ctx context.Context, reader io.Reader, attempt exec
 	return client.decodeQuery(ctx, reader, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo}, sink, nil)
 }
 
-func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (execution.ProviderCompletion, error) {
+func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (completion execution.ProviderCompletion, err error) {
+	var delivery execution.SeriesDelivery
+	// An answer past a response limit completes its query UNAVAILABLE, the
+	// limit named (response=limit_*), rather than failing it: the same query
+	// fetches the same answer again, so a failure was attempted again until
+	// the Slot's deadline, each attempt pulling the whole answer back past
+	// the same limit, and a failure that is not a completion never reached
+	// the degraded pool, which counts a named response as the backend's. As
+	// for a deterministic status below, series already handed to the sink are
+	// kept in the completion's delivery. A diagnostic read keeps the error,
+	// which its own answer names for the operator.
+	defer func() {
+		var limit *responseLimitError
+		if err == nil || scanned != nil || !errors.As(err, &limit) {
+			return
+		}
+		dataState := execution.DataStateEmpty
+		if delivery.Records > 0 {
+			dataState = execution.DataStateData
+		}
+		completion = client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
+			execution.ResponseRouteDetail(limit.class), dataState, delivery, nil,
+			execution.ProviderStats{Series: delivery.Series, Records: delivery.Records})
+		err = nil
+	}()
 	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
 	decodeStarted := client.now()
@@ -654,7 +678,6 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		return execution.ProviderCompletion{}, errors.New("alarmd access uq: response must be an object")
 	}
 	ref := providerResultRef(attempt)
-	var delivery execution.SeriesDelivery
 	var status *responseStatus
 	var isPartial *bool
 	var resultTableIDs []string
