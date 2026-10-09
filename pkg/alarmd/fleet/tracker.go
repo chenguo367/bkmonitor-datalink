@@ -1212,7 +1212,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			state.queryCooldown = &copy
 			state.cooldownExposed = true
-		case "recovered", "query_revision_changed", "disabled":
+		case "recovered", "query_revision_changed":
 			// Counted only on the way out of the pool, not on every event that
 			// could clear one. Demotion takes objects out of the health
 			// denominator, so the number that matters is not how big the pool is

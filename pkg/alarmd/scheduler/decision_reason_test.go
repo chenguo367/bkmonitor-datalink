@@ -65,13 +65,13 @@ func TestTheRangeGateAndReplayExpiryLinesCarryTheirWordAsTheReasonCode(t *testin
 // A cooldown transition is a line with a result and a reason, not a bare
 // event: entering and extending degrade the Query Group for QUERY_UNAVAILABLE,
 // a query that answers resumes it from that reason, and a configuration
-// change or the policy being switched off carry no reason at all -- none of
-// them reads _other or reason_not_reported.
+// change carries no reason at all -- none of them reads _other or
+// reason_not_reported.
 func TestACooldownTransitionCarriesAResultAndAReason(t *testing.T) {
 	now := time.Unix(100, 0)
 	var seen []observability.Observation
 	runner := &Runner{queryGroup: "qg", now: func() time.Time { return now }, flights: &FlightCoordinator{
-		limits:   RecoveryLimits{QueryUnavailableCooldown: true},
+		limits:   RecoveryLimits{},
 		observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { seen = append(seen, o) }),
 	}}
 	slot := frozenSlot("qg")
@@ -85,8 +85,6 @@ func TestACooldownTransitionCarriesAResultAndAReason(t *testing.T) {
 		slot.Contract.Slot.EvaluationTime++
 		runner.recordQueryAvailability(context.Background(), slot, unavailableResult(), 60)
 	}
-	runner.flights.limits.QueryUnavailableCooldown = false
-	runner.deferUnavailableQuery(context.Background(), slot)
 
 	want := []struct {
 		event  string
@@ -98,7 +96,6 @@ func TestACooldownTransitionCarriesAResultAndAReason(t *testing.T) {
 		{"recovered", observability.ResultResumed, observability.ReasonCode(contract.ReasonQueryUnavailable)},
 		// Back within the re-entry window of the exit above.
 		{"reentered", observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)},
-		{"disabled", observability.ResultSuccess, observability.ReasonNone},
 	}
 	var lines []observability.Observation
 	for _, observation := range seen {
@@ -135,7 +132,7 @@ func TestACooldownLineCarriesTheReasonItsQueryFailedWith(t *testing.T) {
 	var seen []observability.Observation
 	newRunner := func() *Runner {
 		runner := &Runner{queryGroup: "qg", now: func() time.Time { return now }, flights: &FlightCoordinator{
-			limits:   RecoveryLimits{QueryUnavailableCooldown: true},
+			limits:   RecoveryLimits{},
 			observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { seen = append(seen, o) }),
 		}}
 		runner = runner.WithQueryCooldownStore(store)

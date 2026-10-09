@@ -114,22 +114,20 @@ type PhaseTwoSchedulerConfig struct {
 	ActiveExecutionLimit int      `yaml:"-"`
 	TickInterval         Duration `yaml:"-"`
 	// Admission and queue depth are derived from the container's CPU budget.
-	ProcessQueryPermits      int      `yaml:"-"`
-	RecoveryQueryPermits     int      `yaml:"-"`
-	ReadyQueueCapacity       int      `yaml:"-"`
-	RecoveryQueueCapacity    int      `yaml:"-"`
-	MaxQueuedItemsPerQG      int      `yaml:"-"`
-	MaxReplaySlots           uint32   `yaml:"-"`
-	MaxReplayAge             Duration `yaml:"-"`
-	RetryMinDelay            Duration `yaml:"-"`
-	RetryMaxDelay            Duration `yaml:"-"`
-	QueryUnavailableCooldown bool     `yaml:"query_unavailable_cooldown"`
+	ProcessQueryPermits   int      `yaml:"-"`
+	RecoveryQueryPermits  int      `yaml:"-"`
+	ReadyQueueCapacity    int      `yaml:"-"`
+	RecoveryQueueCapacity int      `yaml:"-"`
+	MaxQueuedItemsPerQG   int      `yaml:"-"`
+	MaxReplaySlots        uint32   `yaml:"-"`
+	MaxReplayAge          Duration `yaml:"-"`
+	RetryMinDelay         Duration `yaml:"-"`
+	RetryMaxDelay         Duration `yaml:"-"`
 }
 
 func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits {
 	return scheduler.RecoveryLimits{
-		QueryUnavailableCooldown: config.QueryUnavailableCooldown,
-		ProcessQueryPermits:      config.ProcessQueryPermits, RecoveryQueryPermits: config.RecoveryQueryPermits,
+		ProcessQueryPermits: config.ProcessQueryPermits, RecoveryQueryPermits: config.RecoveryQueryPermits,
 		ReadyQueueCapacity: config.ReadyQueueCapacity, RecoveryQueueCapacity: config.RecoveryQueueCapacity,
 		MaxQueuedItemsPerQG: config.MaxQueuedItemsPerQG,
 		MaxReplaySlots:      config.MaxReplaySlots, MaxReplayAge: config.MaxReplayAge.Duration(),
@@ -299,7 +297,6 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			TickInterval:        Duration(time.Second),
 			MaxQueuedItemsPerQG: 16, MaxReplaySlots: 3, MaxReplayAge: Duration(10 * time.Minute),
 			RetryMinDelay: Duration(time.Second), RetryMaxDelay: Duration(30 * time.Second),
-			QueryUnavailableCooldown: true,
 		},
 		Access: PhaseTwoAccessConfig{
 			// The query source is the product's name on every unify-query

@@ -202,7 +202,6 @@ func phaseTwoRuntimeCapacity(cfg config.Config, inputs config.CapacityInputs) ob
 	timelineCache := config.DeriveControlTimelineCache(inputs)
 	goRuntime := config.DeriveGoRuntime(inputs)
 	return observability.RuntimeCapacityFacts{
-		QueryUnavailableCooldown:  s.QueryUnavailableCooldown,
 		DerivedActiveExecutions:   s.ActiveExecutionLimit,
 		EffectiveActiveExecutions: min(s.ActiveExecutionLimit, s.ReadyQueueCapacity),
 		QueryPermits:              s.ProcessQueryPermits, RecoveryQueryPermits: s.RecoveryQueryPermits,

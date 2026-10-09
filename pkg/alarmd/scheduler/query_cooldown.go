@@ -21,10 +21,9 @@ const QueryCooldownReentryWindow = 24 * time.Hour
 // The pool events, closed. entered and reentered put a Query Group in the
 // pool on this process's own failed queries; restored puts it back from its
 // persisted record, after a restart or a change of owner, without counting
-// an entry; extended is a failed probe. recovered, query_revision_changed
-// and disabled take it out, each on its own evidence: a query that
-// answered, a query that is no longer the one that failed, a deployment
-// that switched the pool off.
+// an entry; extended is a failed probe. recovered and query_revision_changed
+// take it out, each on its own evidence: a query that answered, and a query
+// that is no longer the one that failed.
 const (
 	QueryCooldownEntered              = "entered"
 	QueryCooldownReentered            = "reentered"
@@ -32,7 +31,6 @@ const (
 	QueryCooldownRestored             = "restored"
 	QueryCooldownRecovered            = "recovered"
 	QueryCooldownQueryRevisionChanged = "query_revision_changed"
-	QueryCooldownDisabled             = "disabled"
 )
 
 // This is per owned Runner, not per frozen Slot. No history or timers; what
@@ -187,19 +185,15 @@ func queryCooldownHeld(ctx context.Context) bool {
 }
 
 // queryCooldownHolds reports whether the pool holds this Query Group's
-// queries now: the cooldown is on and has not run out. The Slot's own
+// queries now: the cooldown has not run out. The Slot's own
 // checks (deferUnavailableQuery) can still let one through -- an expired
 // range, a Slot past its maintenance bound -- and none of them is a replay.
 func (runner *Runner) queryCooldownHolds() bool {
 	state := runner.queryCooldown
-	return runner.flights.limits.QueryUnavailableCooldown && !state.until.IsZero() && runner.now().Before(state.until)
+	return !state.until.IsZero() && runner.now().Before(state.until)
 }
 
 func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot) bool {
-	if !runner.flights.limits.QueryUnavailableCooldown {
-		runner.clearQueryCooldown(ctx, QueryCooldownDisabled)
-		return false
-	}
 	state := &runner.queryCooldown
 	switch {
 	case state.failures > 0 && state.queryRevision != slot.Contract.QueryRevision:
@@ -242,8 +236,7 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 }
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, result execution.SlotExecutionResult, intervalSeconds int64) {
-	if !runner.flights.limits.QueryUnavailableCooldown || !result.Completed ||
-		slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired {
+	if !result.Completed || slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired {
 		return
 	}
 	state := &runner.queryCooldown

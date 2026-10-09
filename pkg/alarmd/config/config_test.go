@@ -333,6 +333,7 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
 		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
 		{"phase_two:\n  linkd:\n    absent_close_send: true\n", "absent_close_send"},
+		{"phase_two:\n  scheduler:\n    query_unavailable_cooldown: false\n", "query_unavailable_cooldown"},
 		{"phase_two:\n  scheduler:\n    expired_range_enabled: false\n", "expired_range_enabled"},
 		// A derived value spelled run together, which an untagged field took.
 		{"phase_two:\n  scheduler:\n    maxreplayage: 1h\n", "maxreplayage"},

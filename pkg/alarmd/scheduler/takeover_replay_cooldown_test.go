@@ -114,7 +114,6 @@ func TestTheRunnerTellsItsSourceWhileThePoolHoldsItsQueries(t *testing.T) {
 		{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable},
 	}}
 	limits := testRecoveryLimits()
-	limits.QueryUnavailableCooldown = true
 	flights, err := NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
@@ -169,36 +168,5 @@ func TestReportedSlotsSurviveARebuildAndResetOnATakeover(t *testing.T) {
 	}
 	if !(*TakeoverClock)(nil).FirstClassification(group, 1, "replayed") || !clock.FirstClassification("qg-never-held", 1, "replayed") {
 		t.Fatal("a nil clock, or a Query Group it holds no takeover of, reports every classification")
-	}
-}
-
-// With the pool turned off a record restored from before still names a
-// future end, and the Runner lets the query run (deferUnavailableQuery
-// clears it); the source is not told the pool holds it, or a Slot due
-// before the takeover would be given up on while its query runs.
-func TestARestoredCooldownWithThePoolOffHoldsNothing(t *testing.T) {
-	now := time.Unix(100, 0)
-	inner := &fakeSlotSource{slot: frozenSlot("query-group-1"), facts: SlotDueFacts{IntervalSeconds: 10}}
-	inner.slot.EarliestQueryDeadlineUnixMilli = 150_000
-	source := &cooldownFlagSource{fakeSlotSource: inner}
-	executor := &scriptedExecutor{results: []execution.SlotExecutionResult{{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable}}}
-	limits := testRecoveryLimits()
-	limits.QueryUnavailableCooldown = false
-	flights, err := NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner, err := NewRunner("query-group-1", &fakeSession{fence: inner.slot.Dispatch.OwnerFence}, source, executor, flights, func() time.Time { return now })
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := newMemoryCooldownStore()
-	store.records["query-group-1"] = QueryCooldownRecord{QueryGroup: "query-group-1", Failures: 3, Until: now.Add(10 * time.Minute)}
-	runner.WithQueryCooldownStore(store)
-	if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
-		t.Fatalf("the query did not run with the pool off: %t %v", attempted, err)
-	}
-	if got := fmt.Sprint(source.held); got != "[false]" {
-		t.Fatalf("the source was told %s, want not held with the pool off", got)
 	}
 }

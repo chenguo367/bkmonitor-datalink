@@ -26,7 +26,7 @@ type QueryCooldownFacts struct {
 // QueryCooldownEvents is the pool's closed event vocabulary: the metric's
 // label values and every word the fleet tracker acts on.
 var QueryCooldownEvents = []string{"entered", "reentered", "extended", "restored",
-	"recovered", "query_revision_changed", "disabled"}
+	"recovered", "query_revision_changed"}
 
 func normalizeQueryCooldownFacts(facts *QueryCooldownFacts) *QueryCooldownFacts {
 	if facts == nil {
@@ -34,7 +34,7 @@ func normalizeQueryCooldownFacts(facts *QueryCooldownFacts) *QueryCooldownFacts 
 	}
 	copy := *facts
 	switch copy.Event {
-	case "entered", "reentered", "extended", "restored", "recovered", "query_revision_changed", "disabled":
+	case "entered", "reentered", "extended", "restored", "recovered", "query_revision_changed":
 	default:
 		copy.Event = "other"
 	}
