@@ -74,6 +74,11 @@ type absentCandidateTable struct {
 // absentCandidateRow is one strategy. execution points to facts that are
 // never changed once made - a later close replaces the pointer - so a page
 // copies rows without copying them.
+//
+// sends and firstSentAt count the closes of the strategy that went out this
+// term, and stay with it for as long as it stays a candidate: a close sent is
+// not a close made, and a strategy sent for again and again is one the link
+// is not closing.
 type absentCandidateRow struct {
 	key         absentalerts.Key
 	members     int
@@ -82,6 +87,8 @@ type absentCandidateRow struct {
 	outcomeAt   time.Time
 	absentSince time.Time
 	execution   *absentExecution
+	sends       int
+	firstSentAt time.Time
 }
 
 // absentExecution is what one close of a strategy found and did.
@@ -98,6 +105,11 @@ type absentExecution struct {
 	revision      int64
 	recordsRead   int
 	sampleAlertID string
+	// activeAfterSend is own, read by a close that came after an earlier one
+	// went out: how many of this deployment's alerts the link's reconcile
+	// still listed active once it had been sent their close. Nil before the
+	// first send and when the alerts were not read.
+	activeAfterSend *int
 }
 
 func newAbsentCandidateTable(limit int) *absentCandidateTable {
@@ -126,13 +138,13 @@ func (table *absentCandidateTable) rebuild(at time.Time, result absentalerts.Res
 	table.mu.Lock()
 	defer table.mu.Unlock()
 	previous := table.rows
-	previousAt := func(key absentalerts.Key) *absentExecution {
+	previousAt := func(key absentalerts.Key) absentCandidateRow {
 		for _, index := range table.byStrategy[key.StrategyID] {
 			if previous[index].key == key {
-				return previous[index].execution
+				return previous[index]
 			}
 		}
-		return nil
+		return absentCandidateRow{}
 	}
 	total := len(result.Decisions) + len(unreadable)
 	rows := make([]absentCandidateRow, 0, min(total, table.limit))
@@ -146,8 +158,9 @@ func (table *absentCandidateTable) rebuild(at time.Time, result absentalerts.Res
 		if j >= len(unreadable) || (i < len(decisions) && absentalerts.LessKey(decisions[i].Key, unreadable[j])) {
 			decision := decisions[i]
 			i++
+			before := previousAt(decision.Key)
 			row := absentCandidateRow{key: decision.Key, outcome: decision.Outcome, outcomeAt: at,
-				absentSince: decision.AbsentSince, execution: previousAt(decision.Key)}
+				absentSince: decision.AbsentSince, execution: before.execution, sends: before.sends, firstSentAt: before.firstSentAt}
 			row.members, row.readable = roster[decision.Key], true
 			if decision.Outcome == absentalerts.OutcomeCloseDecided {
 				row.execution = &absentExecution{decidedAt: at, word: fleet.AbsentExecutionNotRun}
@@ -170,14 +183,30 @@ func (table *absentCandidateTable) rebuild(at time.Time, result absentalerts.Res
 // executed records what a close of the strategy found. A strategy the
 // table did not keep has nowhere to record it, which rows_not_kept already
 // says.
+//
+// A close that reads the strategy's alerts after an earlier close of it went
+// out is the reading of whether that one took: the alerts the link still
+// lists active were sent their close and are open all the same.
 func (table *absentCandidateTable) executed(key absentalerts.Key, execution absentExecution) {
 	table.mu.Lock()
 	defer table.mu.Unlock()
 	for _, index := range table.byStrategy[key.StrategyID] {
-		if table.rows[index].key == key {
-			table.rows[index].execution = &execution
-			return
+		row := &table.rows[index]
+		if row.key != key {
+			continue
 		}
+		if row.sends > 0 && execution.alertsRead {
+			active := execution.own
+			execution.activeAfterSend = &active
+		}
+		if execution.word == absentalerts.OutcomeCloseSent {
+			if row.sends == 0 {
+				row.firstSentAt = execution.decidedAt
+			}
+			row.sends++
+		}
+		row.execution = &execution
+		return
 	}
 }
 
@@ -367,9 +396,17 @@ func absentRowFacts(row absentCandidateRow) fleet.AbsentCandidateRow {
 	if !row.absentSince.IsZero() {
 		facts.AbsentSince = row.absentSince.UTC().Format(time.RFC3339)
 	}
+	facts.Sends = row.sends
+	if row.sends > 0 {
+		facts.FirstSentAt = row.firstSentAt.UTC().Format(time.RFC3339)
+	}
 	if execution := row.execution; execution != nil {
 		facts.Execution = &fleet.AbsentExecutionFacts{DecidedAt: execution.decidedAt.UTC().Format(time.RFC3339),
 			Word: execution.word, Batch: execution.batch, SampleAlertID: execution.sampleAlertID}
+		if execution.activeAfterSend != nil {
+			active := *execution.activeAfterSend
+			facts.Execution.ActiveAfterSend = &active
+		}
 		if execution.alertsRead {
 			facts.Execution.Alerts = &fleet.AbsentAlertCounts{Own: execution.own, Foreign: execution.foreign, Unknown: execution.unknown}
 		}
