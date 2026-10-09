@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,8 +71,10 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 	const interval = int64(60)
 	base := time.Now().Unix()
 	base += interval - base%interval
-	var clock int64 = base * 1000
-	now := func() time.Time { return time.UnixMilli(clock) }
+	// Read by the bundle's own goroutines after Start: atomic.
+	clock := &atomic.Int64{}
+	clock.Store(base * 1000)
+	now := func() time.Time { return time.UnixMilli(clock.Load()) }
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var payload struct {
 			EndTime string `json:"end_time"`
@@ -79,7 +82,7 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 		_ = json.NewDecoder(request.Body).Decode(&payload)
 		end, err := strconv.ParseInt(payload.EndTime, 10, 64)
 		if err != nil || end <= 0 {
-			end = clock / 1000
+			end = clock.Load() / 1000
 		}
 		point := strconv.FormatInt((end-1)*1000, 10)
 		// Host 1 reports an address CMDB does not give it; host 2 its own.
@@ -125,7 +128,7 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
 	runner := settledRunner(bundle, bundle.queryGroups[0])
-	clock = (base+30)*1000 + 60*1000
+	clock.Store((base+30)*1000 + 60*1000)
 	if _, _, err := runner.RunOne(ctx); err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
