@@ -258,8 +258,13 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		// Not instance data; nothing here applies.
 		return
 	}
-	if facts.HostNaming.IDKey != "" && facts.HostResolved {
-		// Python's host-by-id branch returned before the instance was asked.
+	if facts.HostResolved {
+		// Python's fuller returns once it has placed a host, and the
+		// instance is not asked again: by id or by agent (fullers.py:61-74),
+		// the agent also when the record's bk_host_id is there but empty; or
+		// by address (fullers.py:92-110), which is reached only when no
+		// instance resolved - an empty instance cache among those, which
+		// would otherwise be marked unavailable here.
 		return
 	}
 	if fuller == nil || fuller.store == nil {

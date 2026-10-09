@@ -17,11 +17,17 @@ import (
 )
 
 func agentStore(agents map[string]string) *Store {
+	return agentStoreWithInstances(agents, nil)
+}
+
+// agentStoreWithInstances is agentStore with service instances beside the
+// hosts.
+func agentStoreWithInstances(agents map[string]string, instances []string) *Store {
 	spare := `{"bk_host_id":720001,"bk_host_innerip":"192.0.2.171","bk_cloud_id":0,"bk_biz_id":999,"bk_agent_id":"agent-spare",
 "bk_state":"备用机","display_name":"s","topo_link":{"module|85":[{"bk_obj_id":"module","bk_inst_id":85}]}}`
 	live := `{"bk_host_id":720002,"bk_host_innerip":"192.0.2.172","bk_cloud_id":0,"bk_biz_id":999,"bk_agent_id":"agent-live",
 "bk_state":"运营中[需告警]","display_name":"l","topo_link":{"module|91":[{"bk_obj_id":"module","bk_inst_id":91}]}}`
-	store := storeWith([]string{"720001", spare, "192.0.2.171|0", spare, "720002", live, "192.0.2.172|0", live}, nil)
+	store := storeWith([]string{"720001", spare, "192.0.2.171|0", spare, "720002", live, "192.0.2.172|0", live}, instances)
 	store.index.byAgent = agents
 	return store
 }
@@ -60,6 +66,26 @@ func TestAHostNamedByItsAgentIsPlacedAsPythonPlacesIt(t *testing.T) {
 	moved := chain.Enrich(jsonDims(t, `{"bk_agent_id":"agent-moved"}`))
 	if !moved.HostUnresolved {
 		t.Error("an agent the cache could not place is not marked unresolved: its rejection would be a verdict")
+	}
+}
+
+// A record whose bk_host_id is there but empty is placed by its agent, and
+// Python's fuller returns there (fullers.py:61-74): the service instance the
+// record also names is not asked, so its host - here a spare one, in another
+// module - neither replaces the agent's host's topology nor is the host whose
+// state is judged.
+func TestAHostPlacedByItsAgentIsNotReplacedByTheRecordsServiceInstance(t *testing.T) {
+	onSpare := `{"service_instance_id":7301,"bk_host_id":720001,"ip":"192.0.2.171","bk_cloud_id":0,` +
+		`"topo_link":{"module|85":[{"bk_obj_id":"module","bk_inst_id":85}]}}`
+	store := agentStoreWithInstances(map[string]string{"agent-live": "720002"}, []string{"7301", onSpare})
+	chain := instanceChain(t, store, "备用机")
+	record := `{"bk_host_id":"","bk_agent_id":"agent-live","bk_target_service_instance_id":"7301"}`
+	module91 := scopeOf(admission.TargetScopeTopoNode, admission.TargetScopeInclude, "module|91")
+	for _, plan := range []admission.PlanContext{{}, module91} {
+		facts := chain.Enrich(jsonDims(t, record))
+		if admit, filter, reason := chain.Admit(plan, &facts); !admit {
+			t.Errorf("rejected by %s/%s, want the agent's host's record admitted; topology %v", filter, reason, facts.Attributes)
+		}
 	}
 }
 
