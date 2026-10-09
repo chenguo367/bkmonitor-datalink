@@ -226,7 +226,7 @@ func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
 				})},
 			// One mutation for the whole Slot: the first Plan judges and its
 			// series fits, the second is skipped by the budget.
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1, MaxEvents: 1},
 		},
 		header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
 	}

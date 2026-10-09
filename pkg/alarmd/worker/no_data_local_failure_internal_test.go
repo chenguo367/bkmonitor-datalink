@@ -44,7 +44,7 @@ func TestANoDataRoundThatCannotBeDerivedIsThatPlansOutcome(t *testing.T) {
 	stream := &streamedExecution{
 		coordinator: &SlotExecutionCoordinator{
 			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
 		},
 		header: execution.InternalExecutionHeader{
 			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
@@ -99,7 +99,7 @@ func TestANoDataRoundThatCannotBeDerivedIsReportedTimed(t *testing.T) {
 		coordinator: &SlotExecutionCoordinator{
 			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
 				Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { observed = append(observed, o) })},
-			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8, MaxEvents: 8},
 		},
 		header: execution.InternalExecutionHeader{
 			Contract: noDataPreflightContract(t, []execution.DuePlan{failing}), DuePlans: []execution.DuePlan{failing},
