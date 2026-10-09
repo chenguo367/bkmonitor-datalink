@@ -17,7 +17,7 @@ var admissionResults = map[string]struct{}{"admitted": {}, "rejected": {}}
 // free-form reason turns one series into as many as there are strings.
 var admissionFilters = map[string]struct{}{"target_scope": {}, "target_plan": {}, "host_status": {}, "none": {}}
 var admissionReasons = map[string]struct{}{
-	"in_scope": {}, "out_of_scope": {}, "scope_empty": {}, "plan_not_indexed": {}, "none": {},
+	"in_scope": {}, "out_of_scope": {}, "scope_empty": {}, "none": {},
 	// Target scope on object identity: a record that built no identity is a
 	// defect on the writing or querying side every time, and an identity the
 	// target did not name is either a record outside the target or a target

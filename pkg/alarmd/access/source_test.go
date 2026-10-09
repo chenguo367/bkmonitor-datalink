@@ -580,6 +580,22 @@ func TestPrepareRejectsMissingOrMismatchedFrozenQueryPlanFacts(t *testing.T) {
 	}
 }
 
+// A series is admitted per Plan against the scopes indexed from the prepared
+// header's due Plans. Every Plan a prepared query feeds is one of them,
+// because Prepare refuses a requirement consumed by a Plan that is not due;
+// that is why admission has no branch for a Plan whose scope was not indexed.
+func TestPrepareRefusesAConsumerWhosePlanIsNotDue(t *testing.T) {
+	contractRef, frozen := frozenExecution(t)
+	stranger := frozen.Requirements[0].Consumers[0]
+	stranger.Consumer.Plan.StrategyID += "-not-due"
+	frozen.Requirements[0].Consumers = append(frozen.Requirements[0].Consumers, stranger)
+	contractRef = bindFrozenDueDigest(t, contractRef, frozen)
+	prepared, err := Prepare(contractRef, frozen, time.Second)
+	if err == nil {
+		t.Fatalf("Prepare admitted a consumer of a Plan that is not due: %d queries", len(prepared.Queries))
+	}
+}
+
 func TestDataBindingsShareFullImmutableViewAcrossConsumers(t *testing.T) {
 	_, frozen := frozenExecution(t)
 	requirement := frozen.Requirements[0]
