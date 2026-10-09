@@ -73,28 +73,57 @@ func TestAnAnswerNotFullIsSkippedAsNotFullEvenIfCut(t *testing.T) {
 	}
 }
 
-// A target that could not be resolved is named first: the cut says nothing
-// about which members exist, and the selector's own name is the one the
-// owner can act on.
-func TestAnUnresolvedTargetOutranksACutAnswer(t *testing.T) {
-	result, outcome, err := EvaluateSlot(SlotInput{
-		Plan:            targetPlanSlotPlan(hostTargetPlan("101"), []string{"bk_host_id"}),
-		EvaluationTime:  1000,
-		PeriodSeconds:   60,
-		Completeness:    execution.CompletenessFull,
-		AnswerTruncated: true,
+// What the expected set could not be built from is named first, whatever
+// the answer: an unresolved or incomplete target, or a host index this
+// process does not have. The cut says nothing about which members exist,
+// and a stall under the cut's name would send the owner to the query when
+// the cache is what is missing.
+func TestAnExpectedSetThatCouldNotBeBuiltOutranksACutAnswer(t *testing.T) {
+	plan := targetPlanSlotPlan(hostTargetPlan("101"), []string{"bk_host_id"})
+	for name, test := range map[string]struct {
+		input SlotInput
+		want  SlotOutcome
+	}{
+		"an unresolved target": {
+			input: SlotInput{Plan: plan},
+			want:  OutcomeSkippedTargetSelectorUnavailable,
+		},
+		"a target that dropped members": {
+			input: SlotInput{Plan: plan, TargetResolution: &TargetResolution{State: TargetResolutionIncomplete, Members: []string{"101"}}},
+			want:  OutcomeSkippedTargetMembersDropped,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			test.input.EvaluationTime, test.input.PeriodSeconds = 1000, 60
+			test.input.Completeness, test.input.AnswerTruncated = execution.CompletenessFull, true
+			result, outcome, err := EvaluateSlot(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome != test.want || len(result.Verdicts) != 0 {
+				t.Fatalf("outcome = %q with %d verdicts, want %q and none", outcome, len(result.Verdicts), test.want)
+			}
+		})
+	}
+	t.Run("a host index this process does not have", func(t *testing.T) {
+		input := planSlotInput(storedSnapshot(t, 940), presentSeries())
+		input.HostsResolved, input.KnownHosts, input.AnswerTruncated = false, nil, true
+		result, err := EvaluatePlanSlot(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Outcome != OutcomeSkippedHostsUnresolved {
+			t.Fatalf("outcome = %q, want %q", result.Outcome, OutcomeSkippedHostsUnresolved)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome != OutcomeSkippedTargetSelectorUnavailable || len(result.Verdicts) != 0 {
-		t.Fatalf("outcome = %q with %d verdicts, want %q and none", outcome, len(result.Verdicts),
-			OutcomeSkippedTargetSelectorUnavailable)
-	}
 }
 
-// The outcome is on the list a partition pre-creates from.
+// The outcome is on the list a partition pre-creates from, under the word
+// the metric, the stall line and the page read.
 func TestTheTruncatedOutcomeIsOnTheList(t *testing.T) {
+	if OutcomeSkippedAnswerTruncated != "SKIPPED_ANSWER_TRUNCATED" {
+		t.Fatalf("the outcome is %q, want SKIPPED_ANSWER_TRUNCATED", OutcomeSkippedAnswerTruncated)
+	}
 	for _, outcome := range SlotOutcomes {
 		if outcome == OutcomeSkippedAnswerTruncated {
 			return
