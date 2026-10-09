@@ -168,9 +168,15 @@ type HistoryWindowFact struct {
 	MissingTotal  uint32  `json:"missing_total"`
 	Unusable      []int64 `json:"unusable,omitempty"`
 	UnusableTotal uint32  `json:"unusable_total"`
-	Guarded       bool    `json:"guarded,omitempty"`
-	GuardReason   string  `json:"guard_reason,omitempty"`
-	Fresh         bool    `json:"fresh,omitempty"`
+	// Inactive are the listed holes whose own evaluation time the window's
+	// Level schedule says is outside its effective time. Absent on a window
+	// with none, on one whose holes the schedule could not answer for, and on
+	// every fact from a build before it was carried: in each a hole is not
+	// read as out of hours.
+	Inactive    []int64 `json:"inactive,omitempty"`
+	Guarded     bool    `json:"guarded,omitempty"`
+	GuardReason string  `json:"guard_reason,omitempty"`
+	Fresh       bool    `json:"fresh,omitempty"`
 }
 
 // Shortfall is how many points the worst window was missing. Zero when

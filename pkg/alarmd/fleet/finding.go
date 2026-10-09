@@ -12,7 +12,6 @@ package fleet
 import (
 	"strings"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	// Aliased: a test helper in this package is named execution.
 	routedetail "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -460,9 +459,13 @@ func outOfHoursLine(check Check) bool {
 }
 
 // outOfHoursEvidence says every short window is named and short only at
-// minutes whose round was outside the strategy's active hours. A short
-// window not named, a hole not named, or any hole at another minute says
-// nothing of it, and the row keeps the line it was on.
+// minutes its Level schedule puts outside the strategy's effective time, as
+// the Worker asked the schedule for each hole's own minute. What the round at
+// that minute did does not enter: out of hours, a round that answered empty,
+// could not query or was given up had nothing due to detect. A short window
+// not named, a hole not named, a hole in hours or one whose time the schedule
+// could not answer for says nothing of it, and the row keeps the line it was
+// on.
 func outOfHoursEvidence(coverage *HistoryCoverage) bool {
 	if coverage == nil || coverage.Short == 0 || uint32(len(coverage.Windows)) != coverage.Short {
 		return false
@@ -472,7 +475,7 @@ func outOfHoursEvidence(coverage *HistoryCoverage) bool {
 			return false
 		}
 		for _, hole := range window.Holes {
-			if hole.Reason != contract.ReasonEffectiveTimeInactive {
+			if !hole.OutsideEffectiveTime {
 				return false
 			}
 		}
