@@ -44,6 +44,14 @@ type SyntheticSeries struct {
 	// anomaly carries the same, and its record_id and anomaly_id are built
 	// from it.
 	SourceTime int64
+	// Closing says this is the one NORMAL that closes an absence on a group
+	// the roster has stopped expecting (AbsenceResult.Closing). The round
+	// forgets the group, so this close is the last word about it: the caller
+	// sends it past the open-alert gate, which would hold it while its copy
+	// of the consumer's set cannot vouch for the alert - after a restart or a
+	// handover - and so lose it. A close the consumer holds no alert for is
+	// an orphan there and changes nothing.
+	Closing bool
 }
 
 // IdentityFields returns what the event carries and what its identity is hashed
@@ -135,7 +143,7 @@ func SyntheticSeriesFor(input SyntheticInput) ([]SyntheticSeries, error) {
 			}
 			group = parsed
 		}
-		entry := SyntheticSeries{Group: group, SourceTime: sourceTime, Value: PresentValue}
+		entry := SyntheticSeries{Group: group, SourceTime: sourceTime, Value: PresentValue, Closing: input.Result.Closing[key]}
 		if input.Result.Verdicts[key] == VerdictAnomaly {
 			entry.Value = AbsentValue
 			entry.Periods = absentPeriods(input.Memory[key], input.EvaluationTime, input.PeriodSeconds)

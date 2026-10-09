@@ -1444,6 +1444,10 @@ type completedSeries struct {
 	series execution.SeriesIdentityDigest
 	inputs []execution.SeriesEvaluationInputRequest
 	item   execution.StatePreflightItem
+	// closing is a synthetic no-data series carrying the one close of a group
+	// the roster stopped expecting (nodata.SyntheticSeries.Closing): its
+	// recovery goes past the open-alert gate, see oneTimeClose.
+	closing bool
 }
 
 // kind is what this series is, read off its inputs rather than stored twice.
@@ -1623,6 +1627,9 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	if openAlerts := stream.coordinator.ports.OpenAlerts; openAlerts != nil {
 		openAlerts.TrackPlans(stream.header.Contract.Slot.QueryGroup, []execution.PlanIdentity{due.Identity})
 		request.OpenAlerts = openAlerts
+		if entry.closing {
+			request.OpenAlerts = oneTimeClose{}
+		}
 	}
 	started := time.Now()
 	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
@@ -2373,3 +2380,15 @@ type classifiedPhysicalCompletion struct {
 	execution.PhysicalQueryCompletion
 	sourceBackend bool
 }
+
+// oneTimeClose is the open alert set a no-data close is asked against when it
+// is the last word about its group: the round that decides it forgets the
+// group, so no later round will decide it again. The consumer's copy may not
+// vouch for the alert - a new owner after a restart or a handover answers from
+// what it sent, which is nothing about an alert another process raised - and
+// would hold the close, leaving the alert open for good. Here it is let
+// through: a close the consumer holds no alert for is an orphan there and
+// changes nothing, and there is one per group that leaves, not one per round.
+type oneTimeClose struct{}
+
+func (oneTimeClose) Contains(string, string, string) bool { return true }
