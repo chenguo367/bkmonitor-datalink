@@ -23,7 +23,12 @@ import (
 type openAlertSetFixture struct {
 	members map[string]bool
 	asked   []string
+	// oneTime marks the set a one-time close is asked against
+	// (contract.OneTimeCloseSet).
+	oneTime bool
 }
+
+func (set *openAlertSetFixture) OneTimeClose() bool { return set.oneTime }
 
 func (set *openAlertSetFixture) Contains(tenantID, strategyID, fingerprint string) bool {
 	key := tenantID + "/" + strategyID + "/" + fingerprint
@@ -75,6 +80,19 @@ func TestRecoveryEnvelopeGoesOnlyToAnOpenAlert(t *testing.T) {
 				return &openAlertSetFixture{members: map[string]bool{"default/1001/" + fingerprint(t): true}}
 			},
 			wantGate: RecoveryGateV2{OpenAlertGate: OpenAlertGatePassed},
+			envelope: true, asked: 1,
+		},
+		{
+			// The one close of a group the target dropped is let through by
+			// the set it is asked against, and named apart from a pass the
+			// consumer's copy vouched for: some of these are orphans at the
+			// consumer, and only a name of their own counts them.
+			name: "the one close of a dropped group: let through, named as such",
+			plan: func(t *testing.T) *strategy.CompiledPlan { return nativePlanV2(t, recovered, identity) },
+			set: func(t *testing.T) *openAlertSetFixture {
+				return &openAlertSetFixture{members: map[string]bool{"default/1001/" + fingerprint(t): true}, oneTime: true}
+			},
+			wantGate: RecoveryGateV2{OpenAlertGate: OpenAlertGatePassedOneTimeClose},
 			envelope: true, asked: 1,
 		},
 		{

@@ -2167,6 +2167,10 @@ type OpenAlertGateOutcome string
 const (
 	// OpenAlertGatePassed: the consumer holds an open alert; the envelope went.
 	OpenAlertGatePassed OpenAlertGateOutcome = "passed"
+	// OpenAlertGatePassedOneTimeClose: the one close of a group the target
+	// dropped, let through without the consumer's copy vouching for it; an
+	// orphan at the consumer where it holds no such alert.
+	OpenAlertGatePassedOneTimeClose OpenAlertGateOutcome = "passed_one_time_close"
 	// OpenAlertGateHeldNoOpenAlert: the consumer holds no alert on the series;
 	// nothing to resolve, no envelope.
 	OpenAlertGateHeldNoOpenAlert OpenAlertGateOutcome = "held_no_open_alert"
@@ -2186,7 +2190,7 @@ const (
 // OpenAlertGateOutcomes lists every outcome, for the metric that pre-creates
 // them all.
 var OpenAlertGateOutcomes = []OpenAlertGateOutcome{
-	OpenAlertGatePassed, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
+	OpenAlertGatePassed, OpenAlertGatePassedOneTimeClose, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
 	OpenAlertGateNotConfigured, OpenAlertGateProtocolNotGated,
 }
 
@@ -2765,7 +2769,7 @@ func normalizeOpenAlertGateFacts(observation Observation) []OpenAlertGateFact {
 			continue
 		}
 		switch fact.Outcome {
-		case OpenAlertGatePassed, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
+		case OpenAlertGatePassed, OpenAlertGatePassedOneTimeClose, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
 			OpenAlertGateNotConfigured, OpenAlertGateProtocolNotGated:
 			facts = append(facts, fact)
 		}

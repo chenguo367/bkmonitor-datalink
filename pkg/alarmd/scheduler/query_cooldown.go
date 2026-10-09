@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"time"
 
@@ -100,14 +101,21 @@ func QueryCooldownKey(prefix string, queryGroup execution.QueryGroupIdentity) st
 	return prefix + ":" + string(queryGroup)
 }
 
-// QueryCooldownStore keeps QueryCooldownRecords. A record that cannot be read
-// is no record: the Query Group starts outside the pool and is probed as
-// before, never refused. A save the store refuses because a later owner
+// QueryCooldownStore keeps QueryCooldownRecords. A record that does not
+// decode is no record (ErrQueryCooldownUndecodable): the Query Group starts
+// outside the pool and is probed as before, never refused. A read that fails
+// is read again on the Runner's next round, and the Runner writes nothing
+// before a read succeeds. A save the store refuses because a later owner
 // wrote the record is that owner's business, and nothing is retried.
 type QueryCooldownStore interface {
 	LoadQueryCooldown(ctx context.Context, queryGroup execution.QueryGroupIdentity) (QueryCooldownRecord, bool, error)
 	SaveQueryCooldown(ctx context.Context, fence execution.OwnerFence, record QueryCooldownRecord) error
 }
+
+// ErrQueryCooldownUndecodable is a record that is there and does not decode.
+// Reading it again gives the same bytes, so it is no record, and the next
+// write may replace it; a read that failed is not that.
+var ErrQueryCooldownUndecodable = errors.New("alarmd: query cooldown record does not decode")
 
 // WithQueryCooldownStore keeps this Runner's pool membership in store.
 func (runner *Runner) WithQueryCooldownStore(store QueryCooldownStore) *Runner {
@@ -117,19 +125,29 @@ func (runner *Runner) WithQueryCooldownStore(store QueryCooldownStore) *Runner {
 	return runner
 }
 
-// restoreQueryCooldown reads the persisted record once, on the Runner's first
+// restoreQueryCooldown reads the persisted record on the Runner's first
 // round that holds the Query Group: a Query Group in the pool comes back in it
-// with the time it entered, and one that left keeps its last exit.
+// with the time it entered, and one that left keeps its last exit. A read
+// that fails is made again on the next round, and until one succeeds nothing
+// is written (saveQueryCooldown): the memory a failed read leaves is empty,
+// and a write from it would replace the record under this owner's epoch -
+// the entry time today, the re-entries zero, an entry counted that was not
+// one - where the pool's identity is meant to survive restarts and owner
+// changes. A record that does not decode is read as none, as before.
 func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.OwnerFence) {
 	runner.cooldownFence = fence
 	if runner.cooldownLoaded {
 		return
 	}
-	runner.cooldownLoaded = true
 	if runner.cooldownStore == nil {
+		runner.cooldownLoaded = true
 		return
 	}
 	record, found, err := runner.cooldownStore.LoadQueryCooldown(ctx, runner.queryGroup)
+	if err != nil && !errors.Is(err, ErrQueryCooldownUndecodable) {
+		return
+	}
+	runner.cooldownLoaded = true
 	if err != nil || !found {
 		return
 	}
@@ -150,7 +168,7 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 // it -- an entry, an extension, an exit, a probe brought forward -- so its
 // cost is the pool's transitions, not its rounds.
 func (runner *Runner) saveQueryCooldown(ctx context.Context) {
-	if runner.cooldownStore == nil || runner.cooldownFence.OwnerEpoch == 0 {
+	if runner.cooldownStore == nil || runner.cooldownFence.OwnerEpoch == 0 || !runner.cooldownLoaded {
 		return
 	}
 	state, memory := runner.queryCooldown, runner.cooldownMemory

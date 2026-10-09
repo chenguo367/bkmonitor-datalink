@@ -1844,8 +1844,11 @@ type RecoveryGateCounts struct {
 // by could not be built. NotConfigured is a caller that passed no set, the
 // behaviour before the gate existed. ProtocolNotGated is a Plan that does
 // not publish the alert consumer's protocol, so the set was not asked.
+// PassedOneTimeClose is the one close of a group the target dropped, let
+// through by the set it was asked against; it produced its envelope.
 type OpenAlertGateCounts struct {
 	Passed                 uint64
+	PassedOneTimeClose     uint64
 	HeldNoOpenAlert        uint64
 	HeldFingerprintUnknown uint64
 	NotConfigured          uint64

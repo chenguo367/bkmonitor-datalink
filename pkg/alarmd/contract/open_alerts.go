@@ -36,3 +36,14 @@ type OpenAlertSet interface {
 	// under the strategy. It is a memory lookup and must not do I/O.
 	Contains(tenantID, strategyID, fingerprint string) bool
 }
+
+// OneTimeCloseSet is a set that answers for the one close of a group the
+// target dropped: the round that decides it forgets the group, so the close
+// is let through whatever the consumer's copy would say. A set that says so
+// lets the gate name that pass apart from one the consumer's copy vouched
+// for: some of these closes are orphans at the consumer, and only a name of
+// their own counts them. Optional: a set that does not implement it is the
+// consumer's copy.
+type OneTimeCloseSet interface {
+	OneTimeClose() bool
+}

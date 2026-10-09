@@ -691,10 +691,19 @@ func openAlertGateV2(gate RecoveryGateV2, request EvaluationRequestV2, strategyI
 		gate.Held, gate.Cause, gate.OpenAlertGate = true, RecoveryHeldFingerprintUnknown, OpenAlertGateHeldFingerprintUnknown
 	case !request.OpenAlerts.Contains(request.TenantID, strategyID, dedupeMD5):
 		gate.Held, gate.Cause, gate.OpenAlertGate = true, RecoveryHeldNoOpenAlert, OpenAlertGateHeldNoOpenAlert
+	case oneTimeClose(request.OpenAlerts):
+		gate.OpenAlertGate = OpenAlertGatePassedOneTimeClose
 	default:
 		gate.OpenAlertGate = OpenAlertGatePassed
 	}
 	return gate
+}
+
+// oneTimeClose is whether the set answers for the one close of a dropped
+// group (contract.OneTimeCloseSet).
+func oneTimeClose(set contract.OpenAlertSet) bool {
+	closer, ok := set.(contract.OneTimeCloseSet)
+	return ok && closer.OneTimeClose()
 }
 
 func aggregateRecordResultV2(results []contract.LevelResultV1) string {

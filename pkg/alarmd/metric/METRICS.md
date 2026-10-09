@@ -491,7 +491,7 @@ Activation header comparisons the due index made, by outcome; unchanged growing 
 
 Labels: `outcome`
 
-What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the broker acknowledged a close for; a close is sent at every level of the strategy (__ALL__), so no alert is left open for want of its level. The others count events: maintenance_busy is a close that could not take the Query Group's flight because a Slot was executing (one is nothing, a steady rate is a Query Group whose close never happens); close_precheck_failed is the owner or content check refusing before a send; close_send_failed is the producer not acknowledging; maintenance_plan_uncompilable is an activated Plan the maintenance could not compile and so cannot judge; unavailable is a Query Group whose Plans could not be read or whose owner is not accepting; effective_time_unknown, legacy_effective_time_unavailable and close_identity_invalid name the judgement that could not be made; calendar_deletion_unsettled is a close held back because a calendar the strategy reads deleted has not settled as a deletion: read deleted for too short a time, read present elsewhere, or every calendar this replica's strategies name read deleted at once, a calendar source gone. Every cell exists from the start so a zero is a reading and not an absence.
+What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the broker acknowledged a close for: the close was sent, at every level of the strategy (__ALL__); whether the alert closed is the consumer's to say. The others count events: maintenance_busy is a close that could not take the Query Group's flight because a Slot was executing (one is nothing, a steady rate is a Query Group whose close never happens); close_precheck_failed is the owner or content check refusing before a send; close_send_failed is the producer not acknowledging; maintenance_plan_uncompilable is an activated Plan the maintenance could not compile and so cannot judge; unavailable is a Query Group whose Plans could not be read or whose owner is not accepting; effective_time_unknown, legacy_effective_time_unavailable and close_identity_invalid name the judgement that could not be made; calendar_deletion_unsettled is a close held back because a calendar the strategy reads deleted has not settled as a deletion: read deleted for too short a time, read present elsewhere, or every calendar this replica's strategies name read deleted at once, a calendar source gone. Every cell exists from the start so a zero is a reading and not an absence.
 
 ## bkmonitor_alarmd_event_business_attribution_total
 
@@ -1073,6 +1073,12 @@ Labels: `answer`
 
 Lookups by how they were answered. index_member and index_absent are the consumer's index; recently_sent is a fingerprint the index does not carry yet that this process sent ABNORMAL for within its lag, the copy's word and not the consumer's; self_maintained and passed_through are the unavailable policy answering, and which of the two appears is the policy in force.
 
+## bkmonitor_alarmd_open_alert_set_notices_refused_total
+
+Labels: `reason`
+
+Change notices on the link's channel this process dropped, by why: oversized (past 64 KiB), undecodable (not a notice under the strict shape: a field this build does not know, a wrong type, content after it), invalid_key (the tenant or strategy it names is not a valid one). A dropped notice costs delay only: the strategy is read on the next periodic read. A steady rate is the link publishing a notice this build does not read. Read with alarmd-cli invoke metrics.get.
+
 ## bkmonitor_alarmd_open_alert_set_refresh_total
 
 Labels: `result`
@@ -1180,6 +1186,12 @@ Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, C
 Labels: `event`
 
 External source_backend query cooldown transitions and failed real probes by bounded event.
+
+## bkmonitor_alarmd_query_cooldown_loads_total
+
+Labels: `result`
+
+Reads of a Query Group's query cooldown pool record, made on a Runner's first round holding the Query Group, by result: found; absent; undecodable (the record is there and does not decode, read as none and replaced by the next write); failed (the runtime store did not answer: the Runner reads again on its next round and writes no pool record until a read succeeds, so its pool identity -- when it entered, how often it came back -- is not overwritten; this counts once per round while the store does not answer). Read with alarmd-cli invoke metrics.get.
 
 ## bkmonitor_alarmd_query_cooldown_saves_total
 
@@ -1675,7 +1687,7 @@ Selectors of target plans resolved, once per selector per Plan per Slot, by kind
 
 Labels: `outcome`
 
-RECOVERY records, by what the consumer's open alert set decided: passed (an open alert on the series; the envelope went), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against open_alert_set_lookup_total, whose self_maintained and passed_through answers are this process's own knowledge, not the consumer's.
+RECOVERY records, by what the consumer's open alert set decided: passed (an open alert on the series; the envelope went), passed_one_time_close (the one close of a group the target dropped, let through without the consumer's copy vouching for it: about one per dropped group, more only when that round's no-data memory write failed and the round ran again; an orphan at the consumer where it holds no such alert), held_no_open_alert (none; nothing to resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by could not be built; held and named rather than read as absent), not_configured (the evaluation ran without a set; the envelope went as before the gate -- on a production worker this is a wiring fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY message: the set was not asked and the envelope is not built; output_events_without_message_total counts it). It counts records per evaluation, not alerts. Which of passed and held_no_open_alert dominates says nothing on its own; read it against open_alert_set_lookup_total, whose self_maintained and passed_through answers are this process's own knowledge, not the consumer's.
 
 ## bkmonitor_alarmd_trigger_recovery_beside_level_total
 

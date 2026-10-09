@@ -49,7 +49,7 @@ func (s maintenanceTestIndex) Reconcile(ctx context.Context, key openalerts.Stra
 	members, _ := s.ReadSet(ctx, key)
 	return openalerts.Reconciliation{Members: members, Alerts: s.alerts}, nil
 }
-func (s maintenanceTestIndex) Watch(ctx context.Context, ready func(bool), _ func(openalerts.StrategyKey)) error {
+func (s maintenanceTestIndex) Watch(ctx context.Context, ready func(bool), _ func(openalerts.StrategyKey), _ func(openalerts.NoticeRefusal)) error {
 	ready(true)
 	<-ctx.Done()
 	return ctx.Err()

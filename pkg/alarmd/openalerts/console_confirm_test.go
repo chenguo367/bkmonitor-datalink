@@ -111,7 +111,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 		t.Fatalf("keyed %v known %v at %s, want a deleted source read as not keyed now", keyed, known, at)
 	}
 	cache, err := NewIndex(IndexOptions{Source: setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return nil, nil }),
-		Subscriber: subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey)) error {
+		Subscriber: subscriberFunc(func(ctx context.Context, ready func(bool), _ func(StrategyKey), _ func(NoticeRefusal)) error {
 			ready(true)
 			<-ctx.Done()
 			return ctx.Err()

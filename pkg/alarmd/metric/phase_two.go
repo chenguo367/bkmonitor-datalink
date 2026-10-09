@@ -158,6 +158,7 @@ type phaseTwoMetrics struct {
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
+	queryCooldownLoads              *prometheus.CounterVec
 	eventBusinessAttribution        *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
 	diagnosticRedisDialRetries      *prometheus.CounterVec
@@ -680,6 +681,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.queryStatus = newQueryStatusMetrics()
 	metrics.queryUnavailable = newQueryUnavailableMetrics()
 	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event."}, []string{"event"})
+	// Every event and other at zero from the start: a Runner restores its
+	// pool record on its first round, before the first scrape, and a series
+	// created by that restore would read as no increase.
+	for _, event := range observability.QueryCooldownEvents {
+		metrics.queryCooldown.WithLabelValues(event)
+	}
+	metrics.queryCooldown.WithLabelValues("other")
 	metrics.slotReadiness = newSlotReadinessMetrics()
 	metrics.slotTiming = newSlotTimingMetrics()
 	metrics.slotWait = newSlotWaitMetrics()
@@ -1173,7 +1181,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.openAlertGate = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "trigger_open_alert_gate_total",
 		Help: "RECOVERY records, by what the consumer's open alert set decided: " +
-			"passed (an open alert on the series; the envelope went), held_no_open_alert (none; nothing to " +
+			"passed (an open alert on the series; the envelope went), passed_one_time_close (the one close of a " +
+			"group the target dropped, let through without the consumer's copy vouching for it: about one per " +
+			"dropped group, more only when that round's no-data memory write failed and the round ran again; an " +
+			"orphan at the consumer where it holds no such alert), held_no_open_alert (none; nothing to " +
 			"resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by " +
 			"could not be built; held and named rather than read as absent), not_configured (the evaluation ran " +
 			"without a set; the envelope went as before the gate -- on a production worker this is a wiring " +
@@ -1214,6 +1225,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"result"})
 	for _, result := range QueryCooldownSaveResults {
 		metrics.queryCooldownSaves.WithLabelValues(result)
+	}
+	metrics.queryCooldownLoads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_loads_total",
+		Help: "Reads of a Query Group's query cooldown pool record, made on a Runner's first round holding the " +
+			"Query Group, by result: found; absent; undecodable (the record is there and does not decode, read as " +
+			"none and replaced by the next write); failed (the runtime store did not answer: the Runner reads " +
+			"again on its next round and writes no pool record until a read succeeds, so its pool identity -- " +
+			"when it entered, how often it came back -- is not overwritten; this counts once per round while the " +
+			"store does not answer). Read with alarmd-cli invoke metrics.get.",
+	}, []string{"result"})
+	for _, result := range QueryCooldownLoadResults {
+		metrics.queryCooldownLoads.WithLabelValues(result)
 	}
 	metrics.eventBusinessAttribution = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "event_business_attribution_total",
@@ -1656,7 +1679,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2472,6 +2495,9 @@ func readingOf(facts *observability.ExecutionEvidenceFacts) string {
 // QueryCooldownSaveResults is every result of a pool record write, closed.
 var QueryCooldownSaveResults = []string{"written", "superseded", "failed"}
 
+// QueryCooldownLoadResults is every result of a pool record read, closed.
+var QueryCooldownLoadResults = []string{"found", "absent", "undecodable", "failed"}
+
 // DiagnosticRedisClients are the diagnostic Redis clients whose failures are
 // counted by reason.
 var DiagnosticRedisClients = []string{"evidence", "auth", "lifecycle"}
@@ -2523,6 +2549,21 @@ func (r *Recorder) ObserveQueryCooldownSave(result string) {
 	for _, known := range QueryCooldownSaveResults {
 		if result == known {
 			r.phaseTwo.queryCooldownSaves.WithLabelValues(result).Inc()
+			return
+		}
+	}
+}
+
+// ObserveQueryCooldownLoad counts one pool record read by its result; a
+// result outside QueryCooldownLoadResults is dropped rather than creating a
+// series.
+func (r *Recorder) ObserveQueryCooldownLoad(result string) {
+	if r == nil || r.phaseTwo.queryCooldownLoads == nil {
+		return
+	}
+	for _, known := range QueryCooldownLoadResults {
+		if result == known {
+			r.phaseTwo.queryCooldownLoads.WithLabelValues(result).Inc()
 			return
 		}
 	}

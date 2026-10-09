@@ -435,6 +435,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
 	expected["bkmonitor_alarmd_open_alert_set_tracked_strategies"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_open_alert_set_evictions_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_header_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_renewal_conflict_total"] = "variableLabels: {reason}"
@@ -445,6 +446,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_query_cooldown_loads_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_diagnostic_redis_dial_retries_total"] = "variableLabels: {client,reason}"
@@ -835,7 +837,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("access_response_status_total"): 36,
 		// attempt, no_attempt_reason, no_attempts, other.
 		fqName("query_unavailable_attribution_total"): 4,
-		fqName("query_cooldown_events_total"):         6,
+		fqName("query_cooldown_events_total"):         len(observability.QueryCooldownEvents) + 1,
 		// Unlabelled, so one histogram: eleven buckets plus +Inf, sum and count.
 		fqName("slot_readiness_slack_seconds"): histogramSeries(1, len(slotReadinessSlackBuckets)),
 		// unified, mixed, none, OTHER.
@@ -995,6 +997,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_entries")] = 3
 	bounds[fqName("open_alert_set_tracked_strategies")] = 1
 	bounds[fqName("open_alert_set_evictions_total")] = 1
+	bounds[fqName("open_alert_set_notices_refused_total")] = len(openalerts.NoticeRefusals)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("activation_header_rebuild_total")] = len(controlplane.ActivationHeaderRebuildOutcomes)
 	bounds[fqName("activation_renewal_conflict_total")] = len(controlplane.ActivationRenewalConflicts)
@@ -1005,6 +1008,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
+	bounds[fqName("query_cooldown_loads_total")] = len(QueryCooldownLoadResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("diagnostic_redis_dial_retries_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
@@ -1262,6 +1266,31 @@ func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
 		if !seen[result] {
 			t.Fatalf("result %q not pre-created: %v", result, seen)
 		}
+	}
+}
+
+// The pool record reads are pre-created, and a result outside the closed
+// list creates no series.
+func TestQueryCooldownLoadResultsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.ObserveQueryCooldownLoad("failed")
+	r.ObserveQueryCooldownLoad("guessed")
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_query_cooldown_loads_total") {
+		counts[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if len(counts) != len(QueryCooldownLoadResults) || counts["failed"] != 1 || counts["found"] != 0 {
+		t.Fatalf("loads = %v, want every result present, failed at 1, nothing else", counts)
+	}
+}
+
+// close_acked is what the broker took, not what the consumer did with it:
+// whether an alert closed is the consumer's to say, so the help does not say
+// that none is left open.
+func TestTheEffectiveCloseHelpCountsSendsNotClosedAlerts(t *testing.T) {
+	help := newEffectiveCloseCollector().outcomes.String()
+	if strings.Contains(help, "left open") || !strings.Contains(help, "consumer") {
+		t.Fatalf("help = %s, want the sends counted and the closing left to the consumer", help)
 	}
 }
 

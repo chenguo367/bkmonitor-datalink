@@ -11,6 +11,7 @@ package metric
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -38,13 +39,14 @@ func TestOpenAlertGateCounterStartsAtZeroForEveryOutcomeAndAddsRecords(t *testin
 		OpenAlertGates: []observability.OpenAlertGateFact{
 			{Outcome: observability.OpenAlertGateHeldNoOpenAlert, Records: 3},
 			{Outcome: observability.OpenAlertGatePassed, Records: 1},
+			{Outcome: observability.OpenAlertGatePassedOneTimeClose, Records: 2},
 		},
 	})
 	got := map[string]float64{}
 	for _, m := range gatherFamily(t, r, name) {
 		got[m.Label[0].GetValue()] = m.GetCounter().GetValue()
 	}
-	if got["held_no_open_alert"] != 3 || got["passed"] != 1 || got["not_configured"] != 0 {
+	if got["held_no_open_alert"] != 3 || got["passed"] != 1 || got["passed_one_time_close"] != 2 || got["not_configured"] != 0 {
 		t.Fatalf("outcomes after observation = %v", got)
 	}
 }
@@ -55,7 +57,8 @@ func TestOpenAlertGateCounterStartsAtZeroForEveryOutcomeAndAddsRecords(t *testin
 func TestOpenAlertSetCollectorEmitsEveryWordAndTheAgeOnlyOnceCalibrated(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	stats := openalerts.Stats{Lookups: map[openalerts.Answer]uint64{openalerts.AnswerSelfMaintained: 4},
-		Unavailable: map[openalerts.UnavailableReason]uint64{openalerts.UnavailableReadError: 2}, Refreshes: map[string]uint64{"unavailable": 2}}
+		NoticesRefused: map[openalerts.NoticeRefusal]uint64{openalerts.NoticeUndecodable: 5},
+		Unavailable:    map[openalerts.UnavailableReason]uint64{openalerts.UnavailableReadError: 2}, Refreshes: map[string]uint64{"unavailable": 2}}
 	r.SetOpenAlertSetSource(func() openalerts.Stats { return stats })
 	now := time.Unix(1_700_000_600, 0)
 	r.phaseTwo.openAlertSet.now = func() time.Time { return now }
@@ -76,6 +79,14 @@ func TestOpenAlertSetCollectorEmitsEveryWordAndTheAgeOnlyOnceCalibrated(t *testi
 	}
 	if len(unavailable) != len(openalerts.UnavailableReasons) || unavailable["read_error"] != 2 || unavailable["location_unconfirmed"] != 0 {
 		t.Fatalf("unavailable = %v", unavailable)
+	}
+
+	refused := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_open_alert_set_notices_refused_total") {
+		refused[m.Label[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if want := map[string]float64{"oversized": 0, "undecodable": 5, "invalid_key": 0}; !reflect.DeepEqual(refused, want) {
+		t.Fatalf("refused notices = %v, want %v", refused, want)
 	}
 
 	stats.LoadedAt = now.Add(-90 * time.Second)

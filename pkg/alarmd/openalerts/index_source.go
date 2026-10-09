@@ -23,9 +23,32 @@ type IndexSource interface {
 	ReadSet(context.Context, StrategyKey) ([]string, error)
 }
 
+// Subscriber delivers the link's change notices: ready says whether the
+// subscription is acknowledged, changed names a strategy whose set changed,
+// and refused names a notice that was dropped and why, so a notice shape this
+// build does not read is a count and not a silence.
 type Subscriber interface {
-	Watch(context.Context, func(bool), func(StrategyKey)) error
+	Watch(ctx context.Context, ready func(bool), changed func(StrategyKey), refused func(NoticeRefusal)) error
 }
+
+// NoticeRefusal is why a change notice was dropped. Each drop costs only
+// delay: the strategy it named is read on the next periodic read. The set is
+// closed: it is a metric label.
+type NoticeRefusal string
+
+const (
+	// NoticeOversized: the payload is past the 64 KiB a notice may be.
+	NoticeOversized NoticeRefusal = "oversized"
+	// NoticeUndecodable: the payload does not decode as a notice under the
+	// strict shape - a field this build does not know, a wrong type, or
+	// content after the notice.
+	NoticeUndecodable NoticeRefusal = "undecodable"
+	// NoticeInvalidKey: the tenant or strategy it names is not a valid one.
+	NoticeInvalidKey NoticeRefusal = "invalid_key"
+)
+
+// NoticeRefusals is every refusal, for the metric that pre-creates them.
+var NoticeRefusals = []NoticeRefusal{NoticeOversized, NoticeUndecodable, NoticeInvalidKey}
 
 type ReadLimits struct {
 	MaxMembers int
@@ -122,7 +145,12 @@ func NewRedisSubscriber(client redis.UniversalClient, prefix string, retry time.
 	return &RedisSubscriber{client: client, channel: prefix + ":changes", retry: retry}, nil
 }
 
-func (subscriber *RedisSubscriber) Watch(ctx context.Context, ready func(bool), changed func(StrategyKey)) error {
+func (subscriber *RedisSubscriber) Watch(ctx context.Context, ready func(bool), changed func(StrategyKey), refused func(NoticeRefusal)) error {
+	refuse := func(reason NoticeRefusal) {
+		if refused != nil {
+			refused(reason)
+		}
+	}
 	for ctx.Err() == nil {
 		pubsub := subscriber.client.Subscribe(ctx, subscriber.channel)
 		done := make(chan struct{})
@@ -144,7 +172,11 @@ func (subscriber *RedisSubscriber) Watch(ctx context.Context, ready func(bool), 
 					ready(true)
 				}
 			case *redis.Message:
-				if message.Channel != subscriber.channel || len(message.Payload) > 64<<10 {
+				if message.Channel != subscriber.channel {
+					continue
+				}
+				if len(message.Payload) > 64<<10 {
+					refuse(NoticeOversized)
 					continue
 				}
 				var notice struct {
@@ -154,16 +186,20 @@ func (subscriber *RedisSubscriber) Watch(ctx context.Context, ready func(bool), 
 				decoder := json.NewDecoder(strings.NewReader(message.Payload))
 				decoder.DisallowUnknownFields()
 				if decoder.Decode(&notice) != nil {
+					refuse(NoticeUndecodable)
 					continue
 				}
 				var extra any
 				if decoder.Decode(&extra) != io.EOF {
+					refuse(NoticeUndecodable)
 					continue
 				}
 				key := StrategyKey{TenantID: notice.Tenant, StrategyID: notice.Strategy}
-				if validStrategyKey(key) {
-					changed(key)
+				if !validStrategyKey(key) {
+					refuse(NoticeInvalidKey)
+					continue
 				}
+				changed(key)
 			}
 		}
 		close(done)

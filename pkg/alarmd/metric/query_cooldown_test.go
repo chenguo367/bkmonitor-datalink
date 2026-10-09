@@ -23,7 +23,10 @@ func TestQueryCooldownMetricHasOnlyBoundedEvent(t *testing.T) {
 			continue
 		}
 		found = true
-		if len(family.Metric) != 5 {
+		// Every event of the closed list and other, created at zero before
+		// the first observation: a restore at start-up happens before the
+		// first scrape, and a series created by it would read as no increase.
+		if len(family.Metric) != len(observability.QueryCooldownEvents)+1 {
 			t.Fatalf("unexpected vocabulary: %v", family)
 		}
 		for _, m := range family.Metric {
@@ -56,5 +59,19 @@ func TestFleetCooldownCountRequiresEvidence(t *testing.T) {
 	count := 7
 	if got := gatherFleet(t, FleetVerdict{Health: "DEGRADED", QueryCooldown: &count})[name][""]; got != 7 {
 		t.Fatalf("cooldown population %v", got)
+	}
+}
+
+// The events are there, at zero, before anything happened.
+func TestQueryCooldownEventsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_query_cooldown_events_total") {
+		counts[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	for _, event := range append(append([]string(nil), observability.QueryCooldownEvents...), "other") {
+		if value, present := counts[event]; !present || value != 0 {
+			t.Fatalf("events before any observation = %v, want %q at zero", counts, event)
+		}
 	}
 }

@@ -1805,6 +1805,7 @@ func openAlertGateFacts(due execution.DuePlan, evaluated execution.EvaluationRes
 	var facts []observability.OpenAlertGateFact
 	for _, fact := range []observability.OpenAlertGateFact{
 		{Outcome: observability.OpenAlertGatePassed, Records: gate.Passed},
+		{Outcome: observability.OpenAlertGatePassedOneTimeClose, Records: gate.PassedOneTimeClose},
 		{Outcome: observability.OpenAlertGateHeldNoOpenAlert, Records: gate.HeldNoOpenAlert},
 		{Outcome: observability.OpenAlertGateHeldFingerprintUnknown, Records: gate.HeldFingerprintUnknown},
 		{Outcome: observability.OpenAlertGateNotConfigured, Records: gate.NotConfigured},
@@ -2388,7 +2389,11 @@ type classifiedPhysicalCompletion struct {
 // what it sent, which is nothing about an alert another process raised - and
 // would hold the close, leaving the alert open for good. Here it is let
 // through: a close the consumer holds no alert for is an orphan there and
-// changes nothing, and there is one per group that leaves, not one per round.
+// changes nothing, and there is about one per group that leaves, not one per
+// round. It says it is a one-time close, so the gate counts these passes
+// apart from the ones the consumer's copy vouched for.
 type oneTimeClose struct{}
 
 func (oneTimeClose) Contains(string, string, string) bool { return true }
+
+func (oneTimeClose) OneTimeClose() bool { return true }
