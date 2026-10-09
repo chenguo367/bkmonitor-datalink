@@ -327,7 +327,8 @@ func TestEffectiveMaintenanceSharesExecutionTrackingWithoutLosingACK(t *testing.
 	f.m.registerExecutedPlans(qg, []execution.PlanIdentity{plan})
 	fingerprint := strings.Repeat("b", 32)
 	f.m.cache.Acknowledged([]contract.TriggerEventV1{{EventKind: contract.TriggerEventAbnormal, TenantID: plan.TenantID, DedupeMD5: fingerprint,
-		PlanRef: contract.RuntimePlanRefV1{StrategyID: plan.StrategyID}, StrategyRef: &contract.StrategySnapshotRef{TenantID: plan.TenantID, BusinessID: 2, StrategyID: 123, Revision: 4}}})
+		PlanRef: contract.RuntimePlanRefV1{StrategyID: plan.StrategyID}, StrategyRef: &contract.StrategySnapshotRef{TenantID: plan.TenantID, BusinessID: 2, StrategyID: 123, Revision: 4},
+		LevelResults: []contract.LevelResultV1{{LevelID: 1, Priority: 1, Result: contract.LevelResultAbnormal}}}})
 	if !f.m.cache.Contains(plan.TenantID, plan.StrategyID, fingerprint) {
 		t.Fatal("first ACK was lost before maintenance tracking")
 	}

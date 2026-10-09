@@ -247,7 +247,7 @@ func TestIndexCalibrationDoesNotEraseConcurrentACKAndCanCorrectOldRecovery(t *te
 		if concurrent {
 			cache.Acknowledged([]contract.TriggerEventV1{abnormal(keyA, "new")})
 		}
-		return Reconciliation{Members: []string{"fp"}}, nil
+		return Reconciliation{Members: []string{"fp"}, Alerts: alertsAt("critical", "fp")}, nil
 	})
 	cache = mustIndex(t, options)
 	_ = cache.SetTracked([]StrategyKey{keyA})
@@ -277,7 +277,7 @@ func TestIndexFailedCalibrationDoesNotPermanentlySuppressAnAcknowledgedRecovery(
 		if fail {
 			return Reconciliation{}, ErrIncomplete
 		}
-		return Reconciliation{Members: []string{"fp"}}, nil
+		return Reconciliation{Members: []string{"fp"}, Alerts: alertsAt("critical", "fp")}, nil
 	})
 	cache := mustIndex(t, options)
 	_ = cache.TrackOwned(keyA)

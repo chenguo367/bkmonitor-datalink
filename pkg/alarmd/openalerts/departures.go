@@ -14,7 +14,7 @@ package openalerts
 // is sent again every round and stays; one that stops being sent leaves at
 // the next calibration after the retention, whether or not it recovered.
 // index.opened holds every alert it opened and has not sent the RECOVERY
-// for, and is what makes an alert "own" at the gate long after it left
+// for at the Level the alert stands at, and is what makes an alert "own" at the gate long after it left
 // added. A count that falls in added with no RECOVERY past the gate read as
 // alerts leaving without recovering, when it was alerts no longer re-sent
 // that are still open; counting each departure by its path tells the two
@@ -22,7 +22,8 @@ package openalerts
 
 // Why an alert left one of the two records, closed.
 const (
-	// DepartureRecoveryAcked is a RECOVERY for the alert that the broker took.
+	// DepartureRecoveryAcked is a RECOVERY for the alert, at the Level it
+	// stands at, that the broker took.
 	DepartureRecoveryAcked = "recovery_acked"
 	// DepartureNotResent is an alert whose ABNORMAL was not sent again within
 	// the local retention, pruned from added by a calibration or a refresh.

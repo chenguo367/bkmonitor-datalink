@@ -314,7 +314,7 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 	}
 	return Event{
 		EventID: event.EventID, AlertID: event.DedupeMD5, TenantID: event.TenantID, Payload: payload,
-		Severity: severityFor(primary), Action: action, SubjectKd: kind,
+		Severity: SeverityFor(primary), Action: action, SubjectKd: kind,
 	}, nil
 }
 
@@ -334,16 +334,11 @@ func (converter *Converter) evaluations(event *contract.TriggerEventV1) ([]wireE
 	evaluations := make([]wireEvaluation, 0, len(event.LevelResults))
 	seen := make(map[string]struct{}, len(event.LevelResults))
 	for _, level := range event.LevelResults {
-		action := ""
-		switch level.Result {
-		case contract.LevelResultAbnormal:
-			action = ActionTriggered
-		case contract.LevelResultRecovery:
-			action = ActionResolved
-		default:
+		action := LevelAction(level)
+		if action == "" {
 			continue
 		}
-		severity := severityFor(level)
+		severity := SeverityFor(level)
 		if !SeverityIsBuiltIn(level) && converter.onUnmappedSeverity != nil {
 			converter.onUnmappedSeverity(level.LevelID)
 		}
@@ -472,6 +467,20 @@ func soleObservedValue(observed contract.TriggerObservedV1) json.RawMessage {
 	return nil
 }
 
+// LevelAction is what the consumer is told about one level: triggered for
+// ABNORMAL, resolved for RECOVERY, and nothing ("") for a level that decided
+// nothing this round. See evaluations for why the last is left out; whoever
+// models what the consumer does with a message reads it through this too.
+func LevelAction(level contract.LevelResultV1) string {
+	switch level.Result {
+	case contract.LevelResultAbnormal:
+		return ActionTriggered
+	case contract.LevelResultRecovery:
+		return ActionResolved
+	}
+	return ""
+}
+
 // primaryLevel returns the level the event was aggregated to. The aggregation
 // already happened - lowest priority among the levels that agree with the
 // event's kind, then lowest level id - so this only has to find it again.
@@ -486,7 +495,7 @@ func primaryLevel(event *contract.TriggerEventV1) (contract.LevelResultV1, error
 	)
 }
 
-// severityFor names the level for the consumer.
+// SeverityFor names the level for the consumer.
 //
 // The three built-in levels are the platform's whole set today and their names
 // do not change. A level outside them is not rejected: levels are stated in the
@@ -495,7 +504,7 @@ func primaryLevel(event *contract.TriggerEventV1) (contract.LevelResultV1, error
 // identifier derived from the level. Neither case invents a business meaning -
 // a consumer that does not recognise the name maps it or falls back on its own
 // terms.
-func severityFor(level contract.LevelResultV1) string {
+func SeverityFor(level contract.LevelResultV1) string {
 	if name, builtIn := builtInSeverities[level.LevelID]; builtIn {
 		return name
 	}
