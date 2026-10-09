@@ -581,7 +581,18 @@ func TestAnAbsenceThatStoppedAtTheHorizonDoesNotReopenAClosedAlert(t *testing.T)
 	fixture.hasData.Store(true)
 	fixture.next(t)
 	fixture.hasData.Store(false)
-	wantRound(12, nil)
+	// The first silent round of the new absence opens nothing. The return
+	// above recovered the alert, and a copy with no Console answers from what
+	// this process sent, which keeps an alert it recovered answering open for
+	// a grace after its RECOVERY: the recovery may go out again here, an
+	// orphan at the consumer (at most grace / period of them). What must not
+	// come is an ABNORMAL.
+	for _, event := range noDataEventsOf(fixture.next(t)) {
+		if event.EventKind != contract.TriggerEventRecovery {
+			t.Fatalf("round 12: no-data decision %s on the first silent round of a new absence, want none or a repeated RECOVERY",
+				event.EventKind)
+		}
+	}
 	again := wantRound(13, []string{contract.TriggerEventAbnormal})
 	wantPythonIdentity(t, "the new absence", again[0], pythonWholeItemFingerprint, pythonWholeItemDimensionsMD5)
 }
