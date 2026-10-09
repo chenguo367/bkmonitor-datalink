@@ -3153,6 +3153,24 @@ func (bundle *phaseTwoWorkerBundle) ownedQueryGroups() []execution.QueryGroupIde
 	return owned
 }
 
+// ownedContentScope is the content the owned Query Group's Runner runs now,
+// as its lease's last acquire or renewal left it; empty for a Query Group
+// this process does not own or whose lease names no content.
+func (bundle *phaseTwoWorkerBundle) ownedContentScope(queryGroup execution.QueryGroupIdentity) string {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	lifecycle, owned := bundle.runners[queryGroup]
+	if !owned {
+		return ""
+	}
+	runner, ok := lifecycle.runner.(maintenanceRunner)
+	if !ok {
+		return ""
+	}
+	contentScope, _, _ := runner.maintenanceLease()
+	return contentScope
+}
+
 // ownedLeases is the owned Query Groups with the timeline revision each
 // lease names, read from memory, for the cost roster. A Runner without a
 // lease to read is owned and not accepting.

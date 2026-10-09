@@ -3406,11 +3406,18 @@ type PrimaryInputFact struct {
 	// EmptiedByTarget says a FULL, EMPTY primary was empty because every
 	// series its queries returned was withheld as outside the monitoring
 	// target: the data was there, the target selected none of it. Set by
-	// the worker from the query completions; never part of a durable record.
+	// the worker from the query completions.
 	EmptiedByTarget bool
 	// QuietWhenEmpty says a FULL, EMPTY primary is an event count of groups
 	// that came back with no group: no event in the range asked. Set by the
-	// worker the same way; never part of a durable record.
+	// worker the same way.
+	//
+	// Neither is part of the Slot's contract. The progress record's summary
+	// of the last round keeps a copy of both (EmptyRoundSummary) for the row
+	// a restarted replica restores, with the content the round ran under:
+	// they are the Plan's word - its source, grouping and lead - and the
+	// round's - its target - so they go stale when the content moves, and a
+	// reader trusts the copy only under the same content.
 	QuietWhenEmpty bool
 }
 
@@ -4157,6 +4164,24 @@ type LastCompletionSummary struct {
 	// Plans that have one. Omitted when none has, so a record written before
 	// the field existed re-encodes unchanged.
 	TargetResolutions []TargetResolutionSummary `json:"target_resolutions,omitempty"`
+	// Empty is what the round said about an empty answer. Written only for a
+	// whole, empty primary with one of its flags set, so every other record
+	// - and every record written before the field existed - re-encodes
+	// unchanged.
+	Empty *EmptyRoundSummary `json:"empty,omitempty"`
+}
+
+// EmptyRoundSummary is what a round whose primary was whole and empty said
+// about its emptiness: an event count of groups at rest (Quiet, from
+// PrimaryInputFact.QuietWhenEmpty), or every series withheld as outside the
+// monitoring target (EmptiedByTarget), with the content the round ran under
+// - the ContentScope its commit declared. The flags are the Plan's and the
+// round's word, so a reader trusts them only while the object runs the same
+// content, and a commit that declares no content writes none.
+type EmptyRoundSummary struct {
+	Quiet           bool   `json:"quiet,omitempty"`
+	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
+	ContentScope    string `json:"content_scope,omitempty"`
 }
 
 type UnfinishedSlotProjection struct {

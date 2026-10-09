@@ -132,6 +132,10 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 	if completedAt, err := time.Parse(time.RFC3339Nano, summary.CompletedAt); err == nil {
 		round.CompletedAt = completedAt
 	}
+	if empty := summary.Empty; empty != nil {
+		round.Empty = &fleet.RestoredEmptyRound{Quiet: empty.Quiet, EmptiedByTarget: empty.EmptiedByTarget,
+			ContentScope: empty.ContentScope}
+	}
 	for _, resolution := range summary.TargetResolutions {
 		restored := fleet.RestoredTargetResolution{StrategyID: resolution.StrategyID, State: resolution.State,
 			NodesMissing: resolution.NodesMissing, NodesForeign: resolution.NodesForeign, StaleAgeSeconds: resolution.StaleAgeSeconds}

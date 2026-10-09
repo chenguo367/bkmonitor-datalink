@@ -164,6 +164,11 @@ type fleetPublisher struct {
 	// until each completes one -- the behaviour a restart used to force.
 	// It reads a batch at a time, a state or an error per object, in order.
 	restore func(context.Context, []execution.QueryGroupIdentity) ([]fleet.RestoredState, []error)
+	// contentScope is the content the owned object's Runner runs now, from
+	// its lease: what a record's word about an empty round is restored
+	// against (fleet.RestoredState.ContentScopeNow). Nil, or empty for an
+	// object, restores none of it.
+	contentScope func(execution.QueryGroupIdentity) string
 	// staleAfter is how far behind an object's Progress cursor may be before
 	// its persisted completion stops being evidence about now.
 	staleAfter time.Duration
@@ -372,7 +377,11 @@ func (publisher *fleetPublisher) restoreOwned(ctx context.Context, owned []execu
 		switch {
 		case errs[index] == nil:
 			publisher.restoreAttempts[queryGroup] = fleetRestoreMaxAttempts
-			publisher.tracker.Restore(string(queryGroup), states[index], at, publisher.staleAfter)
+			state := states[index]
+			if publisher.contentScope != nil {
+				state.ContentScopeNow = publisher.contentScope(queryGroup)
+			}
+			publisher.tracker.Restore(string(queryGroup), state, at, publisher.staleAfter)
 		case errors.As(errs[index], &unread):
 		default:
 			publisher.restoreAttempts[queryGroup]++
