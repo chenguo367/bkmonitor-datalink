@@ -157,10 +157,13 @@ func startLifecycleFixtureOn(t *testing.T, address string, client *redis.Client,
 	if hostRecords == nil {
 		hostRecords = lifecycleHostRecords("")
 	}
-	hosts := cfg.PlatformKeyPrefix() + ".cache.cmdb.host"
-	for field, record := range hostRecords {
-		if err := client.HSet(ctx, hosts, field, record).Err(); err != nil {
-			t.Fatal(err)
+	// Under the strategy's tenant's CMDB key, where its Plans read the hosts,
+	// and under the default tenant's, which the replica waits on to be ready.
+	for _, hosts := range []string{cfg.PlatformKeyPrefix() + ".cache.cmdb.host", "tenant-a." + cfg.PlatformKeyPrefix() + ".cache.cmdb.host"} {
+		for field, record := range hostRecords {
+			if err := client.HSet(ctx, hosts, field, record).Err(); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	fixture.install(strategy)
