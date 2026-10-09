@@ -148,12 +148,12 @@ func TestAProcessThatCouldNotAskAtStartupMovesItsReadsWhenTheConsoleAnswers(t *t
 	}
 }
 
-// Only a failed startup discovery is asked again. An adopted location and a
-// stated connection are answers, and a Console that answers with a Redis this
+// Only a failed startup discovery is asked again. An adopted location is an
+// answer, and a Console that answers with a Redis this
 // process holds no connection to is an answer too: it is recorded and the
 // retry stops, rather than asking the same question forever.
 func TestOnlyAFailedDiscoveryIsAskedAgainAndAnAnswerEndsIt(t *testing.T) {
-	for _, outcome := range []string{fleet.LinkdDiscoveryAdopted, fleet.LinkdDiscoveryConnectionStated, fleet.LinkdDiscoveryNoHeldConnection} {
+	for _, outcome := range []string{fleet.LinkdDiscoveryAdopted, fleet.LinkdDiscoveryNoHeldConnection} {
 		calls := 0
 		location := &linkdLocationSwitch{discovery: fleet.LinkdDiscoveryFacts{Outcome: outcome}, replaced: make(chan struct{})}
 		location.retry(context.Background(), linkdLocationConfig(), func(context.Context, openalerts.HTTPReconcilerOptions) (openalerts.TargetBinding, error) {
@@ -170,8 +170,8 @@ func TestOnlyAFailedDiscoveryIsAskedAgainAndAnAnswerEndsIt(t *testing.T) {
 		calls++
 		return openalerts.TargetBinding{KeyPrefix: "hook:open", Address: "elsewhere:6379", Database: 2}, nil
 	}, time.Millisecond, time.Millisecond)
-	if facts := location.Discovery(); calls != 1 || facts.Outcome != fleet.LinkdDiscoveryNoHeldConnection {
-		t.Fatalf("calls %d facts %+v, want one call ending in no_held_connection", calls, facts)
+	if facts := location.Discovery(); calls != 1 || facts.Outcome != fleet.LinkdDiscoveryNoHeldConnection || facts.TargetCount != 1 {
+		t.Fatalf("calls %d facts %+v, want one call ending in no_held_connection, the one target listed", calls, facts)
 	}
 	if _, _, moved := location.Location(); moved {
 		t.Fatal("a location this process holds no connection to was moved to")

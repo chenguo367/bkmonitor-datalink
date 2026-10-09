@@ -1655,7 +1655,6 @@ var LINK_HEALTH = {
 // The startup question "where does the link write", and what came of it.
 var LINKD_DISCOVERY = {
   adopted: '已按 Console 给出的位置读取',
-  connection_stated: '部署自己配置了集合所在的 Redis，未向 Console 询问',
   no_held_connection: 'Console 给出的 Redis 不是本进程已持有连接的任何一个，仍按原位置读取，每轮对账会拒绝并写出两处位置',
   failed: '启动时向 Console 询问失败，仍按原位置读取'
 };

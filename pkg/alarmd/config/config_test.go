@@ -330,6 +330,13 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 		{"kafka:\n  initial_offset: \"\"\n", "initial_offset"},
 		{"limits:\n  reader:\n    max_envelope_bytes: 1\n", "reader"},
 		{"phase_two:\n  linkd:\n    absent_close_send: true\n", "absent_close_send"},
+		// The link's coordinates come from its Console; values keep only the
+		// Console's address and credentials.
+		{"phase_two:\n  linkd:\n    connection:\n      address: stated:6379\n", "connection"},
+		{"phase_two:\n  linkd:\n    key_prefix: stated\n", "key_prefix"},
+		{"phase_two:\n  linkd:\n    event_source_id: \"42\"\n", "event_source_id"},
+		{"phase_two:\n  linkd:\n    hook_name: active\n", "hook_name"},
+		{"phase_two:\n  linkd:\n    reconcile_interval: 10m\n", "reconcile_interval"},
 		{"phase_two:\n  scheduler:\n    query_unavailable_cooldown: false\n", "query_unavailable_cooldown"},
 		{"cli:\n  enabled: true\n", "enabled"},
 		{"input:\n  mode: go_access\n", "input"},

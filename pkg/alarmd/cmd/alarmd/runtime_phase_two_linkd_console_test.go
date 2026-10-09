@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +213,7 @@ func TestTheConsoleEntryCarriesTheResolvedTargetAndTheDiscovery(t *testing.T) {
 	endpoints := func() []fleet.Endpoint { return []fleet.Endpoint{{Role: fleet.EndpointLinkdConsole, Configured: true}} }
 	location := &linkdLocationSwitch{discovery: *discovery, replaced: make(chan struct{})}
 	entry := withLinkdConsole(endpoints, console, location, func() time.Time { return consoleTestNow })()[0]
-	if entry.Console == nil || entry.Console.Discovery == nil || *entry.Console.Discovery != *discovery || entry.Console.Target == nil ||
+	if entry.Console == nil || entry.Console.Discovery == nil || !reflect.DeepEqual(*entry.Console.Discovery, *discovery) || entry.Console.Target == nil ||
 		*entry.Console.Target != (fleet.LinkdTargetFacts{EventSourceID: "source", HookName: "active", Address: "192.0.2.10:6379", Database: 3, KeyPrefix: "test:active"}) ||
 		entry.Console.TargetAgeSeconds == nil || *entry.Console.TargetAgeSeconds != 0 {
 		t.Fatalf("console facts = %+v", entry.Console)

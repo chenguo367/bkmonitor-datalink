@@ -315,7 +315,16 @@ type LinkdDiscoveryFacts struct {
 	Attempts int               `json:"attempts"`
 	Error    string            `json:"error,omitempty"`
 	Target   *LinkdTargetFacts `json:"target,omitempty"`
+	// TargetCount and TargetNames are what the Console listed when it was
+	// asked: one on adoption, and on a refusal however many it listed, with
+	// their names (source/hook, the first MaxLinkdTargetNames of them), so a
+	// link that lists several is read in one step rather than from an error.
+	TargetCount int      `json:"target_count,omitempty"`
+	TargetNames []string `json:"target_names,omitempty"`
 }
+
+// MaxLinkdTargetNames bounds the target names a discovery carries.
+const MaxLinkdTargetNames = 16
 
 // The startup discovery outcomes, closed; the page's wording table is held
 // to this list.
@@ -323,9 +332,6 @@ const (
 	// LinkdDiscoveryAdopted: the link writes to a Redis this process already
 	// holds a connection to, and the sets are read there.
 	LinkdDiscoveryAdopted = "adopted"
-	// LinkdDiscoveryConnectionStated: the deployment states the link's Redis
-	// itself; the Console was not asked.
-	LinkdDiscoveryConnectionStated = "connection_stated"
 	// LinkdDiscoveryNoHeldConnection: the Console answered with a Redis this
 	// process holds no connection to. The sets are read where they would
 	// have been, and every reconciliation refuses with both places named.
@@ -336,8 +342,7 @@ const (
 )
 
 // LinkdDiscoveryOutcomes is every word Outcome can carry.
-var LinkdDiscoveryOutcomes = []string{LinkdDiscoveryAdopted, LinkdDiscoveryConnectionStated,
-	LinkdDiscoveryNoHeldConnection, LinkdDiscoveryFailed}
+var LinkdDiscoveryOutcomes = []string{LinkdDiscoveryAdopted, LinkdDiscoveryNoHeldConnection, LinkdDiscoveryFailed}
 
 // ConsoleCallFacts is one Console operation as this replica has called it.
 // Calls and Failures answer "how many" and are never omitted; the ages are
