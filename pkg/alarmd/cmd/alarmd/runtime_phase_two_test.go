@@ -722,22 +722,19 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 			"query-group-b-blocking": {runner: blocking},
 		},
 	}
-	backlogProgress := make(chan struct{}, 1)
 	for index := 0; index < 500; index++ {
 		queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("query-group-c-backlog-%03d", index))
 		bundle.runners[queryGroup] = &phaseTwoQueryGroupLifecycle{runner: &callbackPhaseTwoQueryGroup{
 			run: func(context.Context) (execution.SlotExecutionResult, bool, error) {
-				select {
-				case backlogProgress <- struct{}{}:
-				default:
-				}
 				return execution.SlotExecutionResult{}, false, nil
 			},
 		}}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	wake := make(chan struct{}, 1)
+	// Unbuffered, so a send returns exactly when the dispatcher takes the wake:
+	// every wake counted below is a pass the dispatcher ran.
+	wake := make(chan struct{})
 	done := make(chan error, 1)
 	go func() { done <- bundle.runScheduler(ctx, wake, false) }()
 	defer func() {
@@ -755,57 +752,52 @@ func TestPhaseTwoWorkerBundleNextTickReentersNormalQueryGroupBeforeSlowSweepComp
 	wake <- struct{}{}
 	waitSignal(t, firstNormal, "first normal Query Group run")
 	waitSignal(t, blockingStarted, "blocking Query Group")
-	wake <- struct{}{}
-	// This is a 500-QG ordering test, not a one-second throughput contract.
-	// Keep a stalled-work watchdog and a separate total test bound; backlog
-	// progress alone must never substitute for normal reentry.
+
+	// From here the wake is offered the way the deployment's ticker offers it,
+	// for as long as the normal Query Group has not run again, and each wake
+	// the dispatcher takes is counted. That count is the judgement: a pass
+	// the dispatcher ran, with the chance to begin a generation and queue the
+	// normal Query Group, is the unit, not time. The two bounds this test had
+	// before - wall clock, then ticks of this goroutine - both kept counting
+	// while the dispatcher was not scheduled, and both failed gates on loaded
+	// machines with the dispatcher doing nothing wrong. A process paused, or a
+	// dispatcher starved of the CPU, takes no wake and fails nothing; a
+	// dispatcher that keeps taking wakes and never serves the normal Query
+	// Group again - a sweep barrier, a generation that never begins - runs
+	// out of them and fails here, in as long as it takes to take them.
 	//
-	// The watchdog counts time this test was running, not wall time: ticks
-	// of a ticker, which delivers at most one tick to a reader that was not
-	// there to take them. A wall-clock timer read a pause of the whole
-	// process - the machine short of memory while the module tests beside
-	// it - as five seconds of dispatcher with nothing to show, and on resume
-	// the expired timer and the pending progress were both ready and the
-	// select took either. Stopping the process for six seconds mid-run
-	// reproduced that failure in three runs of six, with the dispatcher
-	// caught inside fillQueues, mid-sweep. A real stall still counts: this
-	// goroutine keeps running and keeps receiving ticks while the dispatcher
-	// does nothing. Progress also wins a tie with a tick, which the select
-	// alone does not promise.
-	//
-	// Ticks still count while the process runs but the dispatcher is not
-	// scheduled: with the machine's cores taken by the suites beside it, this
-	// goroutine wakes for its ticks and the dispatcher's sweep does not get
-	// the CPU to finish. Five seconds of that failed the gate on a machine at
-	// a load of thirty, and the test passed five runs of five alone. The
-	// stall bound is the one every event wait in this package gets.
-	const tick = 100 * time.Millisecond
-	const stallTicks = int(eventWatchdog / tick)
-	ticker := time.NewTicker(tick)
-	defer ticker.Stop()
-	deadline := time.NewTimer(2 * signalWaitBound)
-	defer deadline.Stop()
-	idle := 0
-	for {
-		select {
-		case <-secondNormal:
-			return
-		case <-backlogProgress:
-			idle = 0
-		case <-ticker.C:
+	// The allowance is ten passes per owned Query Group. The normal Query
+	// Group's turn comes within one walk of the owned set once a generation
+	// begins, and a pass takes at most one wake, so the allowance is a
+	// multiple of the most the dispatcher can need, not a tuning of it.
+	allowance := int32(10 * len(bundle.runners))
+	var taken atomic.Int32
+	exhausted := make(chan struct{})
+	go func() {
+		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-secondNormal:
 				return
-			case <-backlogProgress:
-				idle = 0
-				continue
-			default:
+			case wake <- struct{}{}:
+				if taken.Add(1) == allowance {
+					close(exhausted)
+					return
+				}
 			}
-			if idle++; idle >= stallTicks {
-				t.Fatalf("normal reentry and backlog processing both stalled for %d ticks of %s this test was running", idle, tick)
-			}
-		case <-deadline.C:
-			t.Fatal("normal Query Group did not reenter within bounded test window")
+		}
+	}()
+	// A dispatcher that takes no wake at all and runs nothing is a deadlock,
+	// not an ordering failure; the test binary's own timeout reports it, with
+	// every goroutine's stack.
+	select {
+	case <-secondNormal:
+	case <-exhausted:
+		select {
+		case <-secondNormal:
+		default:
+			t.Fatalf("the dispatcher took %d wakes and did not run the normal Query Group again", allowance)
 		}
 	}
 }
