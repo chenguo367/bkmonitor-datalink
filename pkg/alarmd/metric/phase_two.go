@@ -183,6 +183,7 @@ type phaseTwoMetrics struct {
 	canonicalEncoding               *canonicalEncodingCollector
 	algorithmInputs                 *prometheus.CounterVec
 	seriesAdmission                 *prometheus.CounterVec
+	cmdbAddressDiffers              *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
 	cmdbIndexBusinessMappings       *prometheus.GaugeVec
@@ -1357,6 +1358,26 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "series_admission_total",
 		Help: "Access-path admission decisions by filter, outcome and bounded reason.",
 	}, []string{"filter", "result", "reason"})
+	// Both cells exist from start: "about zero" is the reading this exists
+	// for, and a missing series is not a zero.
+	metrics.cmdbAddressDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_address_differs_total",
+		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own " +
+			"bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert " +
+			"identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that " +
+			"branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip=" +
+			"\"true\" these are the series whose alert identity differs from Python's. Counted per admitted series " +
+			"per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the " +
+			"pairs are about the rate times its period; it says whether this happens and roughly how much, and a " +
+			"non-zero true is followed by reading the objects. The address is compared exactly, as Python's dedupe " +
+			"sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. " +
+			"Read by the decision whether an alert's identity follows CMDB's address as Python's does, and by any " +
+			"migration from Python that needs alert continuity. Remove it once that decision is recorded, unless " +
+			"the decision keeps it as a migration check.",
+	}, []string{"grouped_by_target_ip"})
+	for _, grouped := range []string{"true", "false"} {
+		metrics.cmdbAddressDiffers.WithLabelValues(grouped)
+	}
 	metrics.cmdbIndexHosts = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_hosts",
 		Help: "Hosts in the in-memory CMDB index the target filter decides on.",
@@ -1687,7 +1708,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,

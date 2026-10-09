@@ -74,6 +74,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	if id := facts.HostNaming.IDKey; id != "" {
 		if host, found := index.Lookup(id); found {
 			placeByID(facts, id, host)
+			facts.ReportedAddressDiffers = reportedAddressDiffers(dimensions, host)
 			return
 		}
 		// An id CMDB does not know is a host CMDB does not know: the status
@@ -90,6 +91,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		}
 		if found {
 			placeByAgent(facts, host)
+			facts.ReportedAddressDiffers = reportedAddressDiffers(dimensions, host)
 			return
 		}
 	}
@@ -131,6 +133,23 @@ func (fuller *HostTopologyFuller) tenantStore(tenant string) *Store {
 // branch reached another way: the host's address and topology replace the
 // record's, and its id is written when the record has no bk_host_id
 // dimension at all (fullers.py:66-74).
+// reportedAddressDiffers is whether the record's own bk_target_ip is not the
+// address of the host CMDB placed it at by id or agent: another one, empty,
+// or missing. Python's fuller overwrites the dimension with the host's
+// address on that branch (fullers.py:57-74). Exact: the record's string
+// against CMDB's, as Python's dedupe would see them.
+func reportedAddressDiffers(dimensions map[string]json.RawMessage, host *HostFacts) bool {
+	raw, present := dimensions["bk_target_ip"]
+	if !present {
+		return true
+	}
+	var reported string
+	if err := json.Unmarshal(raw, &reported); err != nil {
+		return true
+	}
+	return reported != host.IP
+}
+
 func placeByAgent(facts *admission.Facts, host *HostFacts) {
 	naming := &facts.HostNaming
 	if !naming.NamedID {
