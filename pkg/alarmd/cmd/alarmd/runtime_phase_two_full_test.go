@@ -759,13 +759,12 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 		observations = append(observations, observation)
 	})
 	var controlBundle *phaseTwoWorkerBundle
-	var workerRuntime *phaseTwoRoleRuntime
 	if split {
 		controlBundle = openSplitControlForFullPipeline(t, cfg, now, additionalObserver, uqServer.Client())
 		cfg.Roles = roles.Set{roles.Worker}
 		cfg.HTTP.Listen = reserveBundleAddress()
-		workerRuntime = openRoleRuntimeForTest(t, cfg)
 	}
+	workerRuntime := openRoleRuntimeForTest(t, cfg)
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
 		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), observability.Discard(observability.ComponentRuntime),
 		newPhaseTwoApplicationHealth(),
