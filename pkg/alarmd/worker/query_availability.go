@@ -20,6 +20,8 @@ type queryAvailabilityEvidence struct {
 	// unproven.
 	primaryEmptiedOutside    bool
 	primaryWithheldOtherwise bool
+	// clock is the slowest primary query's budget and elapsed time.
+	clock *execution.PhysicalQueryClock
 }
 
 func (e *queryAvailabilityEvidence) observe(binding execution.NamedInputBinding, physical execution.PhysicalQueryCompletion, streamed, sourceBackend bool) {
@@ -27,6 +29,10 @@ func (e *queryAvailabilityEvidence) observe(binding execution.NamedInputBinding,
 		return
 	}
 	e.primarySeen = true
+	if physical.Clock != nil && (e.clock == nil || physical.Clock.ElapsedMillis > e.clock.ElapsedMillis) {
+		clock := *physical.Clock
+		e.clock = &clock
+	}
 	e.nonBackendFailure = e.nonBackendFailure || (physical.Completeness == execution.CompletenessUnavailable && !sourceBackend)
 	e.primaryNotUnavailable = e.primaryNotUnavailable || physical.Completeness != execution.CompletenessUnavailable
 	e.primaryDelivered = e.primaryDelivered || streamed

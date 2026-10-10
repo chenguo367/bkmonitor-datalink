@@ -63,6 +63,9 @@ type queryCooldownMemory struct {
 	exitedAt   time.Time
 	exitReason string
 	reentries  uint32
+	// lastProbe is the latest execution the pool let run, kept across the
+	// exit it may have caused.
+	lastProbe *observability.QueryCooldownProbe
 }
 
 // QueryCooldownRecord is one Query Group's place in the pool as it is kept
@@ -92,6 +95,10 @@ type QueryCooldownRecord struct {
 	// as none, which is what it had.
 	Timeouts       uint32    `json:"timeouts,omitempty"`
 	FirstTimeoutAt time.Time `json:"first_timeout_at"`
+	// LastProbe is the latest execution the pool let run: what its answer
+	// was, what budget it had and how long it took. A record written before
+	// it existed has none.
+	LastProbe *observability.QueryCooldownProbe `json:"last_probe,omitempty"`
 }
 
 // QueryCooldownKey is where a Query Group's record is kept under prefix. The
@@ -153,6 +160,7 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	}
 	memory := &runner.cooldownMemory
 	memory.exitedAt, memory.exitReason, memory.reentries = record.ExitedAt, record.ExitReason, record.Reentries
+	memory.lastProbe = record.LastProbe
 	if record.Until.IsZero() {
 		return
 	}
@@ -177,7 +185,7 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		EnteredAt: memory.enteredAt, Until: state.until, LastQueryAt: state.lastQueryAt, Failures: state.failures,
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
 		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
-		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
+		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, LastProbe: memory.lastProbe,
 	})
 }
 
@@ -267,11 +275,28 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	return true
 }
 
-func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, result execution.SlotExecutionResult, intervalSeconds int64) {
+// queryCooldownLetsRun reports whether an execution starting now runs while
+// the Query Group is in the pool: the pool let it through - its cooldown ran
+// out, or the Slot's own checks let it run (deferUnavailableQuery) - and its
+// answer decides whether the Query Group stays. Such an execution runs under
+// the budget a normal round has (execution.WithNormalQueryBudget), so the
+// pool is left only on an answer the Query Group's normal rounds can get too:
+// a retry or replay otherwise has its whole interval from its arrival, and a
+// backend slower than a normal round's budget answered it every time and was
+// let out, to time out again on the normal rounds and come back.
+func (runner *Runner) queryCooldownLetsRun() bool {
+	return !runner.queryCooldown.until.IsZero()
+}
+
+func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
+	result execution.SlotExecutionResult, intervalSeconds int64, decides bool) {
 	if !result.Completed || slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired {
 		return
 	}
 	state := &runner.queryCooldown
+	if decides {
+		runner.cooldownMemory.lastProbe = queryCooldownProbe(runner.now(), operation, result)
+	}
 	if result.QueryAvailability == execution.QueryAvailabilityUnknown {
 		// A probe that proved nothing either way. The Query Group stays in
 		// the pool, and the next probe waits a period instead of every Slot
@@ -367,7 +392,8 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
 			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
 			EnteredAt: memory.enteredAt, Source: memory.source,
-			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries},
+			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries,
+			LastProbe: memory.lastProbe},
 	})
 }
 
@@ -394,4 +420,19 @@ func queryCooldownOutcome(event string, failed execution.ReasonCode) (observabil
 	default:
 		return observability.ResultSuccess, observability.ReasonNone
 	}
+}
+
+// queryCooldownProbe is what one execution the pool let run proved and had.
+func queryCooldownProbe(at time.Time, operation execution.Operation, result execution.SlotExecutionResult) *observability.QueryCooldownProbe {
+	probe := &observability.QueryCooldownProbe{At: at, Operation: string(operation), Outcome: observability.QueryCooldownProbeUnknown}
+	switch result.QueryAvailability {
+	case execution.QueryAvailabilityAvailable:
+		probe.Outcome = observability.QueryCooldownProbeAnswered
+	case execution.QueryAvailabilityUnavailable:
+		probe.Outcome = observability.QueryCooldownProbeUnavailable
+	}
+	if clock := result.PrimaryQueryClock; clock != nil {
+		probe.Measured, probe.BudgetMillis, probe.ElapsedMillis = true, clock.BudgetMillis, clock.ElapsedMillis
+	}
+	return probe
 }

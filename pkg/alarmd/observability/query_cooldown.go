@@ -25,7 +25,34 @@ type QueryCooldownFacts struct {
 	LastExitAt     time.Time `json:"last_exit_at,omitempty"`
 	LastExitReason string    `json:"last_exit_reason,omitempty"`
 	Reentries      uint32    `json:"reentries,omitempty"`
+	// LastProbe is the latest execution the pool let run, the one whose
+	// answer decides whether the Query Group stays or leaves: kept across
+	// the exit it caused, so a reader sees what the leaving answer had and
+	// used. Nil before the pool let any run.
+	LastProbe *QueryCooldownProbe `json:"last_probe,omitempty"`
 }
+
+// QueryCooldownProbe is one execution the pool let run. Outcome is what its
+// primary query proved: answered, unavailable, or unknown (nothing either
+// way). BudgetMillis and ElapsedMillis are its slowest primary query's
+// budget from the send and time to come back, the budget being what a
+// normal round of the same Slot has; Measured is false when no primary
+// query was timed.
+type QueryCooldownProbe struct {
+	At            time.Time `json:"at"`
+	Operation     string    `json:"operation"`
+	Outcome       string    `json:"outcome"`
+	Measured      bool      `json:"measured"`
+	BudgetMillis  int64     `json:"budget_ms,omitempty"`
+	ElapsedMillis int64     `json:"elapsed_ms,omitempty"`
+}
+
+// The outcomes a QueryCooldownProbe records, closed.
+const (
+	QueryCooldownProbeAnswered    = "answered"
+	QueryCooldownProbeUnavailable = "unavailable"
+	QueryCooldownProbeUnknown     = "unknown"
+)
 
 // QueryCooldownEvents is the pool's closed event vocabulary: the metric's
 // label values and every word the fleet tracker acts on.

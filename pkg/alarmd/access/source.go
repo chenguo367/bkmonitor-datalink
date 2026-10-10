@@ -353,6 +353,17 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
 			budgetStart = recoveryStartedAt.UnixMilli()
+			// An execution the query cooldown pool let run decides whether
+			// the Query Group leaves it, so it gets what a normal round of
+			// this Slot has: from its arrival, the span from the query's
+			// readiness to its deadline as prepare plans both for the normal
+			// round. Not the whole interval a catch-up gets.
+			if execution.NormalQueryBudget(ctx) {
+				normal := recoveryStartedAt.Add(time.Duration(query.DeadlineUnixMilli-query.ReadyAtUnixMilli) * time.Millisecond)
+				if normal.Before(queryDeadline) {
+					queryDeadline = normal
+				}
+			}
 		}
 		permit, err := permits.AcquireQueryPermit(queryCtx, request.Contract.Slot, request.Operation, queryDeadline)
 		if err != nil {
@@ -388,6 +399,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		// starts, so a later query is judged by its deadline and not by an
 		// earlier one's that has passed.
 		execution.ExtendDeadline(ctx, queryDeadline, source.now())
+		// What the query has from its send to its deadline, read here on the
+		// dispatch loop just before it is sent.
+		budgetMillis := attempt.DeadlineUnixMilli - source.now().UnixMilli()
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()
@@ -398,6 +412,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				lookback: kept}
 			adapters[index] = adapter
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
+			// The time it took is the provider's own measure, from its
+			// request to its answer or failure; this goroutine reads no
+			// clock of the Source's, which the dispatch loop owns.
+			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: budgetMillis,
+				ElapsedMillis: int64(completion.Stats.QueryMillis)}
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {
@@ -441,6 +460,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			continue
 		}
 		completion = appendQueryCompletion(completion, query, result.completion, request.AttemptNo)
+		completion.PhysicalQueries[len(completion.PhysicalQueries)-1].Clock = result.clock
 	}
 	completion.AllRequiredCompleted = true
 	return completion, nil
@@ -494,6 +514,8 @@ type physicalQueryResult struct {
 	completion      execution.ProviderCompletion
 	invalid         bool
 	budgetExhausted bool
+	// clock is what the query had from its send and what it used.
+	clock *execution.PhysicalQueryClock
 }
 
 // queryPermitDeadlineError names a normal-operation permit wait that ended at
