@@ -74,15 +74,19 @@ const openSegmentReadBatch = 256
 // none open (retired, closed), is not visited: it runs nothing, which is
 // exactly what the answer is about.
 //
-// A timeline that does not decode is not left out. Taken for absent, a Query
-// Group of the current publication would pass for one to add, and the
-// cutover script, which adds only where no timeline is, would refuse the
-// write on every tick; and its records would vanish from the body written
-// next. It is refused by name instead: a Worker cannot run it either, and
-// deleting the key lets the next cutover open it again.
+// A timeline that does not decode is never taken for absent. Taken for
+// absent, a Query Group of the current publication would pass for one to
+// add, and the cutover script, which adds only where no timeline is, would
+// refuse the write on every tick. Without undecodable the read is refused by
+// name; with it, the Query Group and its bytes are handed there and the read
+// goes on with the rest - the caller names it as unread, never as absent.
+// Only a decode failure goes there: a read that fails, or a reply that is an
+// error, fails the read whichever is given, because it says nothing about
+// the timeline.
 func (repository *RedisCatalogRepository) readOpenSegments(
 	ctx context.Context, identities []execution.QueryGroupIdentity, version controlVersion,
 	visit func(execution.QueryGroupIdentity, persistedScheduleSegment) error,
+	undecodable func(execution.QueryGroupIdentity, []byte),
 ) error {
 	// Read live, not from the timeline cache: the cache is keyed by the
 	// activation header, and a timeline can be rewritten under an unchanged
@@ -127,6 +131,10 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 				return activationDependencyIO(err)
 			}
 			timeline, err := decodeScheduleTimeline(identity, payload)
+			if err != nil && undecodable != nil {
+				undecodable(identity, payload)
+				continue
+			}
 			if err != nil {
 				return &DeterministicScheduleError{Err: fmt.Errorf(
 					"the timeline of Query Group %s does not decode (%w); the activation cannot tell what it runs "+
@@ -150,12 +158,13 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 func (repository *RedisCatalogRepository) activeOpenSegmentsAt(
 	ctx context.Context, state ActivationState, version controlVersion,
 	visit func(execution.QueryGroupIdentity, persistedScheduleSegment) error,
+	undecodable func(execution.QueryGroupIdentity, []byte),
 ) error {
 	identities, err := repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
 	if err != nil {
 		return err
 	}
-	return repository.readOpenSegments(ctx, identities, version, visit)
+	return repository.readOpenSegments(ctx, identities, version, visit, undecodable)
 }
 
 // materializeActivationPlans gives a head body back its Plan records, from
@@ -166,11 +175,21 @@ func (repository *RedisCatalogRepository) activeOpenSegmentsAt(
 // A Query Group whose open Segment cannot be read contributes no records.
 // Held back and without an open Segment, it ran nothing before either; held
 // back with one, its records are on that Segment.
+//
+// A Query Group whose timeline does not decode contributes none either, and
+// is named in the state's SkippedTimelines and counted, so that one bad key
+// leaves the activation loadable for every other Query Group and the Leader
+// can see which one to rebuild (Ensure). A read that fails is not a timeline
+// that does not decode, and fails this as before.
 func (repository *RedisCatalogRepository) materializeActivationPlans(
 	ctx context.Context, state ActivationState, version controlVersion,
 ) (ActivationState, error) {
 	var plans []PlanActivationRecord
+	var skipped []SkippedTimeline
 	seen := make(map[execution.PlanKey]struct{})
+	undecodable := func(identity execution.QueryGroupIdentity, raw []byte) {
+		skipped = append(skipped, SkippedTimeline{QueryGroup: identity, Reason: skippedTimelineReason(raw)})
+	}
 	if err := repository.activeOpenSegmentsAt(ctx, state, version, func(_ execution.QueryGroupIdentity, segment persistedScheduleSegment) error {
 		for _, record := range segment.Plans {
 			if _, duplicate := seen[record.Fact.Key()]; duplicate {
@@ -181,12 +200,14 @@ func (repository *RedisCatalogRepository) materializeActivationPlans(
 			plans = append(plans, record)
 		}
 		return nil
-	}); err != nil {
+	}, undecodable); err != nil {
 		return ActivationState{}, err
 	}
 	sort.Slice(plans, func(i, j int) bool { return lessPlanIdentity(plans[i].Fact.Plan, plans[j].Fact.Plan) })
 	state.SchemaVersion = activationSchemaVersion
 	state.Plans = plans
+	state.SkippedTimelines = skipped
+	repository.skippedTimelines.note(skipped)
 	if err := validateActivationState(state); err != nil {
 		return ActivationState{}, &PersistedActivationCorruptError{Err: err}
 	}

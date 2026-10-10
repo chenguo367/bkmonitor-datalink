@@ -48,7 +48,7 @@ func TestOpenSegmentsAreVisitedBatchByBatch(t *testing.T) {
 					t.Fatalf("%s visited with %+v, want its open Segment", identity, segment.Schedule.Segment)
 				}
 				return nil
-			})
+			}, nil)
 		if err != nil || visited != count {
 			t.Fatalf("%d groups: visited %d, %v", count, visited, err)
 		}
@@ -69,7 +69,7 @@ func TestAFailedVisitStopsTheRead(t *testing.T) {
 		func(execution.QueryGroupIdentity, persistedScheduleSegment) error {
 			visited++
 			return stop
-		})
+		}, nil)
 	if err != stop || visited != 1 {
 		t.Fatalf("read = %v after %d visits, want the visit's error after the first", err, visited)
 	}
@@ -99,7 +99,7 @@ func TestARetiredTimelineIsNotVisited(t *testing.T) {
 		func(identity execution.QueryGroupIdentity, _ persistedScheduleSegment) error {
 			visited = append(visited, identity)
 			return nil
-		})
+		}, nil)
 	if err != nil || len(visited) != 1 || visited[0] != "qg-open" {
 		t.Fatalf("visited %v (%v), want only the open one", visited, err)
 	}
@@ -123,7 +123,7 @@ func TestOpenSegmentsRedisAnswersWithAnErrorVisitNothing(t *testing.T) {
 		func(execution.QueryGroupIdentity, persistedScheduleSegment) error {
 			visited++
 			return nil
-		})
+		}, nil)
 	var dependency *ActivationDependencyIOError
 	if !errors.As(err, &dependency) || visited != 0 {
 		t.Fatalf("a read Redis answered with errors visited %d and returned %v, want none and the dependency's", visited, err)

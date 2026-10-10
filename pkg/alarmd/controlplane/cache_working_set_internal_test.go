@@ -204,7 +204,7 @@ func TestEveryTimelineStorePathAnnouncesBeforeItReads(t *testing.T) {
 			err := repository.readOpenSegments(ctx, groups, version, func(execution.QueryGroupIdentity, persistedScheduleSegment) error {
 				visited++
 				return nil
-			})
+			}, nil)
 			if err == nil && visited != len(groups) {
 				return errors.New("an open Segment went unread")
 			}

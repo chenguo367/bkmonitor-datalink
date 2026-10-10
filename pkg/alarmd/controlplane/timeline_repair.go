@@ -322,6 +322,7 @@ func (repository *RedisCatalogRepository) RepairUnreadableTimelines(
 	cutover := newCutoverFacts()
 	cutover.contentSource = "timeline_repair"
 	updates := make([]scheduleTimelineUpdate, 0, len(candidates))
+	rewritten := make(map[execution.QueryGroupIdentity]struct{}, len(candidates))
 	for _, queryGroup := range candidates {
 		_, raw, readErr := repository.readScheduleTimeline(ctx, queryGroup)
 		cutover.read++
@@ -363,6 +364,7 @@ func (repository *RedisCatalogRepository) RepairUnreadableTimelines(
 			continue
 		}
 		updates = append(updates, opened.update)
+		rewritten[queryGroup] = struct{}{}
 		cutover.decided(cutoverRepaired)
 	}
 	if len(updates) == 0 {
@@ -372,6 +374,14 @@ func (repository *RedisCatalogRepository) RepairUnreadableTimelines(
 	next.RecordRevision = previous.RecordRevision + 1
 	next.Plans = append([]PlanActivationRecord(nil), previous.Plans...)
 	next.Draining = append([]DrainingQueryGroup(nil), previous.Draining...)
+	// What this process still could not read once the write lands: the
+	// timelines it rewrote are read back from now on, the rest stay named.
+	next.SkippedTimelines = nil
+	for _, skipped := range previous.SkippedTimelines {
+		if _, done := rewritten[skipped.QueryGroup]; !done {
+			next.SkippedTimelines = append(next.SkippedTimelines, skipped)
+		}
+	}
 	expected := ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
 	if err := validateActivationTransition(expected, next); err != nil {
 		return false, err
@@ -389,6 +399,9 @@ func (repository *RedisCatalogRepository) RepairUnreadableTimelines(
 		return false, persistErr
 	}
 	repository.timelineRepairs.add(TimelineRepairRewritten, len(updates))
+	if len(previous.SkippedTimelines) > 0 {
+		repository.skippedTimelines.stillUnread(previous.SkippedTimelines, rewritten)
+	}
 	return true, nil
 }
 
