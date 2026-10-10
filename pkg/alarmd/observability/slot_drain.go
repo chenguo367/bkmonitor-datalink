@@ -51,6 +51,40 @@ var SlotDrainOutcomes = []string{
 	SlotDrainIdle, SlotDrainFinished, SlotDrainLeaseEnded, SlotDrainDeadline, SlotDrainDeadlineUnreturned, SlotDrainStopped,
 }
 
+// StageExecutionHung names one execution found past its deadline and grace
+// and its Query Group declined on this replica, or such an execution
+// returning at last and the decline lifted (ExecutionHung).
+const StageExecutionHung = "execution_hung"
+
+// The hung-execution outcomes, closed.
+const (
+	ExecutionHungDeclined = "declined"
+	ExecutionHungReturned = "returned_after_decline"
+)
+
+// ExecutionHungOutcomes is every outcome, for closed label sets.
+var ExecutionHungOutcomes = []string{ExecutionHungDeclined, ExecutionHungReturned}
+
+// ExecutionHungFacts is one execution that ignored its deadline and its
+// cancellation (design 02 section 6.5): the stage it last entered - which
+// points at the call that did not return - its deadline and how far past it,
+// and on return how long its Query Group was declined.
+type ExecutionHungFacts struct {
+	Outcome           string `json:"outcome"`
+	Stage             string `json:"stage,omitempty"`
+	DeadlineUnixMilli int64  `json:"deadline_ms"`
+	PastDeadlineMS    int64  `json:"past_deadline_ms"`
+	HungMS            int64  `json:"hung_ms,omitempty"`
+}
+
+// DeclinedEverywhereSample is one Query Group every eligible worker
+// declines: how many did (Hops), and each as worker:stage.
+type DeclinedEverywhereSample struct {
+	QueryGroup string   `json:"query_group"`
+	Hops       int      `json:"hops"`
+	Stages     []string `json:"stages,omitempty"`
+}
+
 // SlotDrainFacts is one wait for in-flight Slots before a lease or a process
 // let go (design 02 §6.2, §6.6). A Slot that outlives the wait can have had
 // its events acknowledged and its State refused, and the next owner sends
