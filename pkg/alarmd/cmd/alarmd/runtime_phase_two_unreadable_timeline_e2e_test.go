@@ -42,7 +42,16 @@ func TestAnUnreadableTimelineIsReportedRewrittenAndDetectedAgain(t *testing.T) {
 	base := fixture.base
 	queryGroup := fixture.queryGroup
 	key := productionPhaseTwoPrefix(fixture.cfg.Redis.StatePrefix, "catalog") + ":schedule_timeline:" + string(queryGroup)
-	if err := fixture.redisClient.Do(ctx, "SET", key, "{not a timeline", "KEEPTTL").Err(); err != nil {
+	// The key keeps the life it had, as bytes gone bad in place would. Read
+	// and set again rather than SET KEEPTTL, which Redis 5 does not have.
+	life, err := fixture.redisClient.PTTL(ctx, key).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if life < 0 {
+		life = 0
+	}
+	if err := fixture.redisClient.Set(ctx, key, "{not a timeline", life).Err(); err != nil {
 		t.Fatal(err)
 	}
 	bundle := fixture.bundle
