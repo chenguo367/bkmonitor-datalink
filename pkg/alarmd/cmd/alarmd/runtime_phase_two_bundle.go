@@ -859,7 +859,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		client.AddHook(recorder.RedisHook("linkd"))
 		return client, true
 	}
-	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, external.Now)
+	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, external.Now, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -1335,7 +1335,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Bound whether or not a Console is configured: not_configured is a
 	// reading, and the absent_strategy families are missing there by
 	// construction.
-	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps,
+	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps, openalerts.ConsoleFailureClasses,
 		linkdConsoleReading(linkd.Console, external.Now))
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.

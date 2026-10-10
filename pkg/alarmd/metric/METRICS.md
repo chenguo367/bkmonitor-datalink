@@ -791,6 +791,12 @@ Labels: `op`, `result`
 
 Calls this replica made to the alert link's Console, by operation (roster, reconcile, alert_record) and result (ok, failed). Only the control leader walks the roster. An alert_record answered with 'no such alert' is ok. Every cell exists once the source is bound, so a zero is a reading.
 
+## bkmonitor_alarmd_linkd_console_failures_total
+
+Labels: `op`, `class`
+
+Failed calls to the alert link's Console, by operation and class: the transport's word for a request that got no answer (cancelled - the caller let go, timeout, connection_refused, connection_reset, dns, tls, eof, other - the same words a query provider's route detail uses), status (an answer other than 200) and incomplete (a body not read whole or not decoded). The classes of one operation add up to its result="failed" cell of linkd_console_calls_total; the latest one, with when, is the Console row's last_failure_class on the deployment's dependencies, and its start and every change of class write one console_call_failed line. Every cell exists once the source is bound.
+
 ## bkmonitor_alarmd_linkd_console_state
 
 Labels: `state`

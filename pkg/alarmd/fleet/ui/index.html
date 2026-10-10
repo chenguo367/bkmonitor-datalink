@@ -1667,6 +1667,12 @@ var CONSOLE_STATE = {
   reachable: '可达'
 };
 var CONSOLE_OP = { roster: '名册', reconcile: '校准对账', alert_record: '单条告警记录', event_source: '事件源键规则' };
+// Why a Console call failed, by the class the replica records: the
+// transport's words (the same a query provider's route detail uses), status
+// and incomplete.
+var CONSOLE_FAILURE_CLASS = { cancelled: '调用方先放弃了（进程退出或放手）', timeout: '超时', connection_refused: '连接被拒绝',
+  connection_reset: '连接被重置', dns: '域名解析失败', tls: 'TLS 握手或证书校验失败', eof: '连接被对端提前关闭',
+  other: '其他传输错误', status: '应答不是 200', incomplete: '应答体读不全或解析不了' };
 var LINK_HEALTH = {
   discovery_failing: '最近一次全量发现失败',
   discovery_never_succeeded: '从未成功完成全量发现',
@@ -1691,6 +1697,7 @@ function consoleWords(c) {
   if (c.state === 'unreadable') {
     var failing = (c.calls || []).filter(function (call) { return call.op === c.reason; })[0];
     words += '（' + (CONSOLE_OP[c.reason] || c.reason) + '最近一次失败'
+      + (failing && failing.last_failure_class ? '，原因：' + (CONSOLE_FAILURE_CLASS[failing.last_failure_class] || failing.last_failure_class) : '')
       + (failing && failing.last_failure ? '：' + failing.last_failure : '') + '）';
     // A link older than the roster answers every reconciliation and refuses
     // every browse; the status says which of the two this is.

@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
@@ -112,7 +114,8 @@ func TestAConsoleReadsAsNotCalledUnreadableUnhealthyOrReachable(t *testing.T) {
 	}
 	refused := consoleTestServer(t, http.NotFound)
 	readRoster(refused)
-	if facts := linkdConsoleFacts(refused, consoleTestNow); facts.State != fleet.LinkdConsoleUnreadable || facts.Reason != openalerts.ConsoleOpRoster {
+	if facts := linkdConsoleFacts(refused, consoleTestNow); facts.State != fleet.LinkdConsoleUnreadable || facts.Reason != openalerts.ConsoleOpRoster ||
+		facts.Calls[0].LastFailureClass != openalerts.ConsoleFailureStatus {
 		t.Fatalf("a refused roster reads as %+v", facts)
 	}
 	bound := absentCloseMaxLinkHealthAge
@@ -187,7 +190,8 @@ func TestTheConsoleMetricReadsTheSameStateAsTheEntry(t *testing.T) {
 	refused := consoleTestServer(t, http.NotFound)
 	readRoster(refused)
 	if reading := linkdConsoleReading(refused, clock)(); reading.State != fleet.LinkdConsoleUnreadable ||
-		reading.Calls[openalerts.ConsoleOpRoster].Failures != 1 {
+		reading.Calls[openalerts.ConsoleOpRoster].Failures != 1 ||
+		reading.Calls[openalerts.ConsoleOpRoster].FailuresByClass[openalerts.ConsoleFailureStatus] != 1 {
 		t.Fatalf("a refused roster's metric reading: %+v", reading)
 	}
 }
@@ -285,5 +289,36 @@ func TestTheConsoleFactsCarryTheKeyingOnceRead(t *testing.T) {
 	facts := linkdConsoleFacts(console, consoleTestNow)
 	if facts.EventSource == nil || facts.EventSource.FingerprintMode != "field" || facts.EventSource.FingerprintField != "source_alert_id" {
 		t.Fatalf("keying on the facts = %+v", facts.EventSource)
+	}
+}
+
+// The Console the process reads writes one console_call_failed line when an
+// operation's failures start, naming the operation and the transport's word
+// for why and never the address, and no second line while the same failure
+// lasts: the record and the failure counter count each one.
+func TestTheProcesssConsoleWritesALineWhenItsFailuresStart(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	address := server.URL
+	server.Close()
+	cfg := config.Default()
+	cfg.PhaseTwo.Linkd.ConsoleURL = address
+	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
+	var out bytes.Buffer
+	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, time.Now, observability.New("worker", &out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := openalerts.StrategyKey{TenantID: "tenant", StrategyID: "101"}
+	for i := 0; i < 3; i++ {
+		if _, err := index.Console.Reconcile(context.Background(), key); err == nil {
+			t.Fatal("a closed Console answered")
+		}
+	}
+	lines := strings.Count(out.String(), `"stage":"console_call_failed"`)
+	if lines != 1 || !strings.Contains(out.String(), `"class":"connection_refused"`) || !strings.Contains(out.String(), `"op":"reconcile"`) {
+		t.Fatalf("%d lines, want one naming the operation and connection_refused: %s", lines, out.String())
+	}
+	if host := strings.TrimPrefix(address, "http://"); strings.Contains(out.String(), host) || strings.Contains(out.String(), "secret") {
+		t.Fatalf("the line carries the address or the credentials: %s", out.String())
 	}
 }

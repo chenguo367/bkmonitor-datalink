@@ -355,6 +355,10 @@ type ConsoleCallFacts struct {
 	LastSuccessAgeSeconds *float64 `json:"last_success_age_seconds,omitempty"`
 	LastFailureAgeSeconds *float64 `json:"last_failure_age_seconds,omitempty"`
 	LastFailure           string   `json:"last_failure,omitempty"`
+	// LastFailureClass is why the last failure failed, one of the Console's
+	// failure classes (openalerts.ConsoleFailureClasses): the transport's
+	// word for a request that got no answer, status, incomplete or other.
+	LastFailureClass string `json:"last_failure_class,omitempty"`
 }
 
 // The Console states, closed. The page's wording table is held to this

@@ -935,11 +935,12 @@ func TestThePageHasWordingForEveryDependencyRoleAndConsoleReading(t *testing.T) 
 		}
 	}
 	tables := map[string][]string{
-		"ENDPOINT":        fleet.EndpointRoles,
-		"CONSOLE_STATE":   fleet.LinkdConsoleStates,
-		"CONSOLE_OP":      openalerts.ConsoleOps,
-		"LINK_HEALTH":     unhealthy,
-		"LINKD_DISCOVERY": fleet.LinkdDiscoveryOutcomes,
+		"ENDPOINT":              fleet.EndpointRoles,
+		"CONSOLE_STATE":         fleet.LinkdConsoleStates,
+		"CONSOLE_OP":            openalerts.ConsoleOps,
+		"LINK_HEALTH":           unhealthy,
+		"LINKD_DISCOVERY":       fleet.LinkdDiscoveryOutcomes,
+		"CONSOLE_FAILURE_CLASS": openalerts.ConsoleFailureClasses,
 	}
 	for table, words := range tables {
 		if len(words) == 0 {
