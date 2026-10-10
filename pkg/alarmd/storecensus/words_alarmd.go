@@ -963,6 +963,7 @@ var alarmdWords = []string{
 	"ping",
 	"pingserver",
 	"pipelined",
+	"placed",
 	"placement",
 	"places",
 	"plan",
