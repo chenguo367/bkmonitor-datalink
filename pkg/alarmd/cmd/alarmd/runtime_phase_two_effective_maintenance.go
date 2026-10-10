@@ -106,6 +106,7 @@ const (
 	closeOutcomeUnsupportedRunner    = string(observability.EffectiveCloseUnsupportedRunner)
 	closeOutcomeViewNotExecutable    = string(observability.EffectiveCloseViewNotExecutable)
 	closeOutcomeDeletionUnsettled    = string(observability.EffectiveCloseCalendarDeletionUnsettled)
+	closeOutcomeBoundaryActive       = string(observability.EffectiveCloseBoundaryActive)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -720,6 +721,9 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		sent, err := m.sendClose(ctx, qg, runner, plan, key, batch)
+		if planRecheckRefused(err) {
+			continue
+		}
 		if err != nil {
 			return
 		}
@@ -732,7 +736,8 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 
 // sendClose sends one batch under the Query Group's flight and owner check.
 // Each way it can not send is named: the flight busy, the owner check
-// refusing, the boundary having moved to active, the producer failing.
+// refusing, the Plan's boundary having moved to active or its effective
+// time unreadable at the send, the producer failing.
 func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan, key openalerts.StrategyKey, batch []linkdoutput.CloseRequest) (int, error) {
 	sent := 0
 	round, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -748,8 +753,13 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		}
 		now := m.bundle.dependencies.Now()
 		fact, err := plan.Compiled.ResolveEffectiveTimeWithProvider(round, now.Unix(), plan.Identity.BusinessID, m.legacy)
-		if err != nil || fact.Status() != strategy.EffectiveTimeInactive {
-			return nil
+		switch {
+		case err != nil:
+			return fmt.Errorf("%w: %w", errCloseTimeUnknown, err)
+		case fact.Status() == strategy.EffectiveTimeActive:
+			return errCloseBoundaryActive
+		case fact.Status() != strategy.EffectiveTimeInactive:
+			return errCloseTimeUnknown
 		}
 		// Sarama's synchronous ACK wait follows the existing producer timeout;
 		// a context deadline cannot cancel a message already handed to Kafka.
@@ -774,10 +784,14 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		m.observe(ctx, qg, closeOutcomePrecheckFailed, err, 0)
 	case errors.Is(err, errCloseSend):
 		m.observe(ctx, qg, closeOutcomeSendFailed, err, 0)
+	case errors.Is(err, errCloseBoundaryActive):
+		m.observe(ctx, qg, closeOutcomeBoundaryActive, nil, 0)
+	case errors.Is(err, errCloseTimeUnknown):
+		m.observe(ctx, qg, closeOutcomeEffectiveTimeUnknown, err, 0)
 	default:
 		m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
 	}
-	if err != nil && !errors.Is(err, errMaintenanceBusy) && !errors.Is(err, errCloseSend) {
+	if err != nil && !errors.Is(err, errMaintenanceBusy) && !errors.Is(err, errCloseSend) && !planRecheckRefused(err) {
 		// The owner check refused: the Plans were read under a lease that
 		// has moved. Read them again before the next judgement rather than
 		// judging on what an older lease authorized. A busy flight and a
@@ -790,7 +804,18 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 var (
 	errClosePrecheck = errors.New("inactive close: owner check before send")
 	errCloseSend     = errors.New("inactive close: send")
+	// The recheck of the one Plan a batch is for: its effective time active
+	// again, or not readable, at the send. Both are that Plan's alone.
+	errCloseBoundaryActive = errors.New("inactive close: the Plan is active again at the send")
+	errCloseTimeUnknown    = errors.New("inactive close: the Plan's effective time is unknown at the send")
 )
+
+// planRecheckRefused reports a send the recheck of its own Plan refused:
+// counted, and the step goes on to the Query Group's next Plan, which has
+// an effective time of its own; nothing about the lease moved.
+func planRecheckRefused(err error) bool {
+	return errors.Is(err, errCloseBoundaryActive) || errors.Is(err, errCloseTimeUnknown)
+}
 
 // refreshLegacy keeps the legacy entries of the Query Group's Plans warm:
 // every Plan on a schedule without a frozen snapshot, within one bounded

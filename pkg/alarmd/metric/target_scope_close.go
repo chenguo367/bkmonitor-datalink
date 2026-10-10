@@ -29,7 +29,9 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"were not all read or current, which are never closed; not_member definitive rejections whose "+
 				"fingerprint is not an open alert; set_unavailable decisions refused because the open set could "+
 				"not be judged (not calibrated, disjoint, unavailable); producer_foreign open alerts of another "+
-				"source; send_failed closes the producer refused; memory_full first observations past the "+
+				"source; send_failed closes the producer refused; close_identity_invalid closes whose request could "+
+				"not be built from the observation's facts (strategy id, business or revision unusable), nothing "+
+				"sent, the word the effective-time close uses for the same facts; memory_full first observations past the "+
 				"table's bound; fingerprint_unsupported definitive rejections of Plans fed by several inputs, "+
 				"whose alert fingerprint no single series carries; stale_deferred closes held back because the "+
 				"last observation was older than the freshness bound; indefinite rejections that are not a verdict on "+

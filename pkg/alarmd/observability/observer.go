@@ -3565,6 +3565,11 @@ const (
 	// at once, recently - the writer's calendar source gone, not a
 	// deletion. One per Plan with alerts to close, per step.
 	EffectiveCloseCalendarDeletionUnsettled ReasonCode = "calendar_deletion_unsettled"
+	// EffectiveCloseBoundaryActive is a Plan the recheck just before a send
+	// found active again: inactive at the step's first look, active by the
+	// time its batch was ready. The batch is not sent, and the step goes on
+	// to the Query Group's next Plan.
+	EffectiveCloseBoundaryActive ReasonCode = "close_boundary_active"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3573,7 +3578,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseAcked, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
-	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled,
+	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

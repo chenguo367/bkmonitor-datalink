@@ -73,6 +73,12 @@ const (
 	OutcomeProducerForeign = "producer_foreign"
 	// OutcomeSendFailed counts alerts whose close the producer refused.
 	OutcomeSendFailed = "send_failed"
+	// OutcomeIdentityInvalid is a close whose request could not be built
+	// from the facts the observation carried: the strategy id not a
+	// positive number, the business zero or not a number, the revision not
+	// positive. Nothing was sent, and the observation is forgotten. The same
+	// word the effective-time close counts the same facts under.
+	OutcomeIdentityInvalid = "close_identity_invalid"
 	// OutcomeMemoryFull counts first observations not recorded because the
 	// observation table was at its bound; the close for them may be delayed
 	// beyond the observation TTL, and is never made on less than two fresh
@@ -97,7 +103,7 @@ const (
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
-	OutcomeStaleDeferred, OutcomeIndefinite}
+	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid}
 
 // The bounds of what the facts carry.
 const (
@@ -410,9 +416,13 @@ func (closer *Closer) Step(ctx context.Context) {
 			closer.forget(ek, OutcomeProducerForeign)
 			continue
 		}
-		request, ok := closer.request(ek, alert, now)
-		if !ok {
-			closer.forget(ek, OutcomeSendFailed)
+		request, built := closer.request(ek, alert, now)
+		switch built {
+		case requestGone:
+			// Forgotten meanwhile, and counted where it was.
+			continue
+		case requestIdentityInvalid:
+			closer.forget(ek, OutcomeIdentityInvalid)
 			continue
 		}
 		batch = append(batch, request)
@@ -444,24 +454,34 @@ func (closer *Closer) fresh(ek entryKey, now time.Time) bool {
 	return e != nil && now.Sub(e.lastSeen) <= closer.options.Freshness
 }
 
-func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time) (linkdoutput.CloseRequest, bool) {
+// requestBuilt is what building a close request found: built, the entry
+// gone, or its identity facts unusable.
+type requestBuilt int
+
+const (
+	requestReady requestBuilt = iota
+	requestGone
+	requestIdentityInvalid
+)
+
+func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time) (linkdoutput.CloseRequest, requestBuilt) {
 	closer.mu.Lock()
 	e := closer.entries[ek]
 	closer.mu.Unlock()
 	if e == nil {
-		return linkdoutput.CloseRequest{}, false
+		return linkdoutput.CloseRequest{}, requestGone
 	}
 	strategyID, err := strconv.ParseInt(ek.key.StrategyID, 10, 64)
 	if err != nil || strategyID <= 0 {
-		return linkdoutput.CloseRequest{}, false
+		return linkdoutput.CloseRequest{}, requestIdentityInvalid
 	}
 	businessID, err := strconv.ParseInt(e.businessID, 10, 64)
 	if err != nil || businessID == 0 || e.revision <= 0 {
-		return linkdoutput.CloseRequest{}, false
+		return linkdoutput.CloseRequest{}, requestIdentityInvalid
 	}
 	return linkdoutput.CloseRequest{TenantID: ek.key.TenantID, Fingerprint: ek.fingerprint, AlertInstanceID: alert.AlertID,
 		StrategyID: strategyID, StrategyRevision: e.revision, BusinessID: businessID, OccurredAt: now,
-		Reason: linkdoutput.CloseReasonTargetOutOfScope}, true
+		Reason: linkdoutput.CloseReasonTargetOutOfScope}, requestReady
 }
 
 func (closer *Closer) forget(ek entryKey, outcome string) {
