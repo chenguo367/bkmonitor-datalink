@@ -258,6 +258,9 @@ type fleetPublisher struct {
 	// same source its readiness endpoint answers from. Nil-safe and optional
 	// like the two above.
 	readiness func() *fleet.ReadinessFacts
+	// declines reports the Query Groups this replica declines while an
+	// execution of each that hung here has not returned. Optional.
+	declines func() *fleet.DeclineFacts
 	// rebalance reports the control leader's latest rebalance planning
 	// round: how the ready replicas hold the objects and what the round
 	// would move. Nil on a follower; the aggregate takes the newest round
@@ -716,6 +719,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.readiness != nil {
 		snapshot.Readiness = publisher.readiness()
+	}
+	if publisher.declines != nil {
+		snapshot.Declines = publisher.declines()
 	}
 	if publisher.outputProtocol != nil {
 		facts := *publisher.outputProtocol

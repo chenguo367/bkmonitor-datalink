@@ -1961,6 +1961,10 @@ type Snapshot struct {
 	// Readiness is this replica's own readiness, bit by bit, as its readiness
 	// endpoint answers it. Absent on a build before this fact existed.
 	Readiness *ReadinessFacts `json:"readiness,omitempty"`
+	// Declines is the Query Groups this replica declines while an execution
+	// of each that hung here has not returned, with the execution slots it
+	// has. Absent while it declines none.
+	Declines *DeclineFacts `json:"declines,omitempty"`
 	// OutputProtocol is the wire format choice this process runs with, as it
 	// read it from its configuration. Absent on a build before this fact
 	// existed, which the aggregate keeps apart from any choice.
@@ -2043,6 +2047,32 @@ type ReadinessFacts struct {
 	// fault.
 	Draining bool `json:"draining"`
 }
+
+// DeclineFacts is the Query Groups a replica declines: an execution of each
+// ran a minute past its own deadline before it began its commit (gap marks,
+// output, State, no-data memory or Progress) without returning - a call that
+// does not answer its cancellation, a code defect - and the replica let the
+// Query Group go and will not run it again until that execution returns.
+// Each holds one of the replica's Fanout execution slots meanwhile, so at
+// Total == Fanout the replica executes nothing while it reads ready (a
+// declined Query Group counts as accounted for). Total is all of them;
+// QueryGroups the first MaxDeclineSamples by name, with the stage each hung
+// in and since when.
+type DeclineFacts struct {
+	Fanout      int                  `json:"fanout"`
+	Total       int                  `json:"total"`
+	QueryGroups []DeclinedQueryGroup `json:"query_groups,omitempty"`
+}
+
+// DeclinedQueryGroup is one Query Group a replica declines.
+type DeclinedQueryGroup struct {
+	QueryGroup string    `json:"query_group"`
+	Stage      string    `json:"stage"`
+	Since      time.Time `json:"since"`
+}
+
+// MaxDeclineSamples bounds DeclineFacts.QueryGroups.
+const MaxDeclineSamples = 8
 
 // copyReadiness is the facts as their own value, so a row cannot alias the
 // snapshot's.
@@ -2771,6 +2801,8 @@ type ReplicaView struct {
 	// answers. Absent when it published none (an older build), which is not
 	// "not ready": the count beside the rows leaves it out.
 	Readiness *ReadinessFacts `json:"readiness,omitempty"`
+	// Declines is this replica's own, as it published them (Snapshot).
+	Declines *DeclineFacts `json:"declines,omitempty"`
 	// OutputProtocol is the choice this replica runs with, as it published
 	// it. Absent when it published none (an older build), which the page says
 	// rather than filling in.
@@ -3424,6 +3456,12 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		perReplica.Readiness = copyReadiness(snapshot.Readiness)
 		if snapshot.Readiness != nil && !snapshot.Readiness.Ready {
 			view.ReplicasNotReady++
+		}
+		// And its declines, the same way.
+		if snapshot.Declines != nil {
+			declines := *snapshot.Declines
+			declines.QueryGroups = append([]DeclinedQueryGroup(nil), snapshot.Declines.QueryGroups...)
+			perReplica.Declines = &declines
 		}
 		// And the protocol choice it runs with, as its own value and grouped
 		// with the replicas that agree; a snapshot without it is an older

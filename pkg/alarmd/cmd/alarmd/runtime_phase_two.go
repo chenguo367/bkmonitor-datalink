@@ -1335,13 +1335,7 @@ func newPhaseTwoRunnerDispatcher(
 	oneShot bool,
 ) *phaseTwoRunnerDispatcher {
 	schedulerConfig := bundle.dependencies.Config.PhaseTwo.Scheduler
-	// The limit is derived from the container and validated positive, so the
-	// floor of one is reached only by a Config assembled field by field in a
-	// test. There is no unlimited fanout to fall back to.
-	fanout := max(schedulerConfig.ActiveExecutionLimit, 1)
-	if schedulerConfig.ReadyQueueCapacity > 0 && schedulerConfig.ReadyQueueCapacity < fanout {
-		fanout = schedulerConfig.ReadyQueueCapacity
-	}
+	fanout := phaseTwoDispatcherFanout(schedulerConfig)
 	// A fresh dispatcher starts with no bounds. Entries carried over from a
 	// previous one would be answers about a schedule nobody has looked at since,
 	// and starting empty reproduces exactly what the first tick does today.
@@ -3783,6 +3777,38 @@ func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 		Result: result, Direction: observability.DirectionInternal, ExecutionHung: &facts, Err: err,
 		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
+}
+
+// phaseTwoDispatcherFanout is how many execution slots the dispatcher runs:
+// one goroutine each, taking Slots off the queue. The limit is derived from
+// the container and validated positive, so the floor of one is reached only
+// by a Config assembled field by field in a test. There is no unlimited
+// fanout to fall back to.
+func phaseTwoDispatcherFanout(schedulerConfig config.PhaseTwoSchedulerConfig) int {
+	fanout := max(schedulerConfig.ActiveExecutionLimit, 1)
+	if schedulerConfig.ReadyQueueCapacity > 0 && schedulerConfig.ReadyQueueCapacity < fanout {
+		fanout = schedulerConfig.ReadyQueueCapacity
+	}
+	return fanout
+}
+
+// declineFleetFacts is what this replica publishes of its declines, from
+// the same set its registration names (declinedRegistration), with the
+// execution slots the dispatcher runs: each decline holds one until its
+// hung execution returns. Nil while it declines none.
+func (bundle *phaseTwoWorkerBundle) declineFleetFacts() *fleet.DeclineFacts {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	if len(bundle.declined) == 0 {
+		return nil
+	}
+	declined := make([]fleet.DeclinedQueryGroup, 0, len(bundle.declined))
+	for queryGroup, entry := range bundle.declined {
+		declined = append(declined, fleet.DeclinedQueryGroup{QueryGroup: string(queryGroup), Stage: entry.stage, Since: entry.since.UTC()})
+	}
+	sort.Slice(declined, func(left, right int) bool { return declined[left].QueryGroup < declined[right].QueryGroup })
+	return &fleet.DeclineFacts{Fanout: phaseTwoDispatcherFanout(bundle.dependencies.Config.PhaseTwo.Scheduler), Total: len(declined),
+		QueryGroups: declined[:min(len(declined), fleet.MaxDeclineSamples)]}
 }
 
 // declinedRegistration is the declined set as the registration names it,

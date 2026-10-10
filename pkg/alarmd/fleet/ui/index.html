@@ -180,6 +180,9 @@ details.group table{margin:6px 0 0 12px}
     <!-- A rollout in progress: the leader's latest planning round, read from
          the same rebalance fields fleet.get's summary names. -->
     <p class="note" id="rolloutNote" hidden></p>
+    <!-- Query Groups every replica declined: they run nowhere and have no
+         object row, so this sentence is the one place they appear. -->
+    <p class="note stuck" id="declinedNote" hidden></p>
     <!-- What produced every number below. One line when the replicas agree on
          a build; two or more when a rollout is in progress or stuck, and the
          totals are then a mix that no single build produced. -->
@@ -2864,6 +2867,9 @@ function renderDeployment(deployment) {
     var rollout = rolloutWords(deployment.rebalance);
     show('rolloutNote', !!rollout);
     text('rolloutNote', rollout);
+    var declinedEverywhere = declinedEverywhereWords(deployment.rebalance);
+    show('declinedNote', !!declinedEverywhere);
+    text('declinedNote', declinedEverywhere);
     text('expected', deployment.expected === null || deployment.expected === undefined ? '未知' : deployment.expected);
     text('covered', deployment.covered);
     text('determined', deployment.determined);
@@ -3792,6 +3798,16 @@ function renderReplicas(rows) {
     cell(rcap && rcap.cpu_cores ? (rcap.cpu_seconds !== undefined ? '上限 ' + rcap.cpu_cores + ' 核' : '—') : '—');
     cell(rcap ? (rcap.permits_held + ' / ' + rcap.permit_budget) : '—');
     host.appendChild(tr);
+    var declined = declineWords(replica.declines);
+    if (declined) {
+      var note = document.createElement('tr');
+      var td = document.createElement('td');
+      td.colSpan = tr.children.length;
+      td.className = 'stuck';
+      td.textContent = shortReplica(replica.replica) + '：' + declined;
+      note.appendChild(td);
+      host.appendChild(note);
+    }
   });
 }
 
@@ -3946,7 +3962,10 @@ function handoverWords(marker) {
 // the page and the CLI cannot read two different things; between rounds they
 // are the last round's, which the note says by naming it and its time.
 function rolloutWords(r) {
-  if (!r || !(r.replaced || r.replacements_deferred || r.unplaceable)) {
+  // unplaceable includes the Query Groups every replica declined, a cause of
+  // their own said by declinedEverywhereWords; the rest found no ready one.
+  var noReady = r ? Math.max(0, (r.unplaceable || 0) - (r.declined_everywhere || 0)) : 0;
+  if (!r || !(r.replaced || r.replacements_deferred || noReady)) {
     return '';
   }
   var at = new Date(r.planned_at);
@@ -3956,11 +3975,51 @@ function rolloutWords(r) {
     clauses.push('从不再合格的副本移走 ' + (r.replaced || 0) + ' 个对象，还有 ' + (r.replacements_deferred || 0)
       + ' 个留到后面的轮次（每轮最多交接 ' + (r.batch || 0) + ' 个）');
   }
-  if (r.unplaceable) {
-    clauses.push(r.unplaceable + ' 个这一轮没有就绪副本能接，留在原处——一直不为 0 说明新版本的副本不够或没就绪');
+  if (noReady) {
+    clauses.push(noReady + ' 个这一轮没有就绪副本能接，留在原处——一直不为 0 说明新版本的副本不够或没就绪');
   }
   // Done is both left-for-later and stuck at zero: one alone at zero is not.
   return round + '在滚动替换：' + clauses.join('；') + '。留到后面的与没人能接的都降到 0 才算换完';
+}
+
+// declinedEverywhereWords is the note for the Query Groups the leader's
+// latest round found every eligible replica declining - an execution of
+// each hung on every one in turn - or '' when there are none. They run
+// nowhere, no replica observes them, and readiness reads fine meanwhile.
+function declinedEverywhereWords(r) {
+  if (!r || !r.declined_everywhere) {
+    return '';
+  }
+  var at = new Date(r.planned_at);
+  var round = 'Leader 上一轮再平衡' + (isNaN(at.getTime()) ? '' : '（' + at.toLocaleTimeString() + '）');
+  var samples = (r.declined_everywhere_sample || []).map(function (s) {
+    return s.query_group + '（经过 ' + s.hops + ' 个副本' + ((s.stages || []).length ? '，卡在 ' + s.stages.join('、') : '') + '）';
+  });
+  return round + '：' + r.declined_everywhere + ' 个对象在每个副本上执行都卡死过，现在没有副本在跑它们。'
+    + '原因是执行在开始提交（写缺口标记、输出、状态或进度）之前，超过这次执行自己的期限一分钟仍没返回，是代码没响应取消（缺陷）' + (samples.length ? '：' + samples.join('；') : '') + '。'
+    + '放弃在那次执行返回、或放弃它的副本重启时解除；重启会把对象放回调度，同一条代码路径多半还会再卡——'
+    + '要修的是代码（按 execution_hung 日志里的步骤看），重启只为拿回执行位';
+}
+
+// declineWords is the sentence under a replica's row for the Query Groups it
+// declines, or '' when it declines none: each holds one of its execution
+// slots until the hung execution returns, and with every slot held the
+// replica executes nothing while it reads ready.
+function declineWords(d) {
+  if (!d || !d.total) {
+    return '';
+  }
+  var samples = (d.query_groups || []).map(function (q) {
+    var since = new Date(q.since);
+    return q.query_group + ' 卡在 ' + q.stage + (isNaN(since.getTime()) ? '' : '（自 ' + since.toLocaleTimeString() + '）');
+  });
+  var words = '执行位 ' + d.total + '/' + d.fanout + ' 被卡住的执行占着：' + samples.join('；')
+    + (d.total > samples.length ? ' 等 ' + d.total + ' 个' : '')
+    + '。执行在开始提交之前超过这次执行自己的期限一分钟仍没返回，是代码没响应取消（缺陷）；这些执行返回才放出执行位';
+  if (d.total >= d.fanout) {
+    words = '这个副本已经不执行任何对象，重启它才能放出执行位。' + words;
+  }
+  return words;
 }
 
 function renderLoad(load) {
