@@ -2367,6 +2367,10 @@ func compiledPlanForStrategyTest(t testing.TB, strategyID string) *strategy.Comp
 
 // compiledPlanWithTargetForTest is the test Plan carrying a target plan.
 func compiledPlanWithTargetForTest(t testing.TB, strategyID string, target *contract.TargetPlanV1) *strategy.CompiledPlan {
+	return compiledPlanWithTargetShapedForTest(t, strategyID, target, nil)
+}
+
+func compiledPlanWithTargetShapedForTest(t testing.TB, strategyID string, target *contract.TargetPlanV1, shape func(*contract.EvaluationPlanV2)) *strategy.CompiledPlan {
 	if t != nil {
 		t.Helper()
 	}
@@ -2404,6 +2408,9 @@ func compiledPlanWithTargetForTest(t testing.TB, strategyID string, target *cont
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)},
 			}},
 		},
+	}
+	if shape != nil {
+		shape(&plan)
 	}
 	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{
 		Plan: plan,

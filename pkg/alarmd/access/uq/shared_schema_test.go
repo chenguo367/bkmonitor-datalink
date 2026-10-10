@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 )
 
 func sharedTestSeries() responseSeries {
@@ -118,6 +119,52 @@ func TestSharedSchemaPreservesLegacyBusinessSemantics(t *testing.T) {
 				t.Fatalf("business completion differs: old=%+v new=%+v", oldDone, newDone)
 			}
 		})
+	}
+}
+
+type sharedLookbackSink struct {
+	read *lookback.Read
+	kept collectingSink
+}
+
+func (sink *sharedLookbackSink) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
+	sink.read.Series(batch.Dataset, batch.Delivery.Bytes)
+	return sink.kept.ConsumeProviderSeries(ctx, batch)
+}
+
+// The codec's conservative delivered bytes, including rows filtered at End,
+// must reach the existing lookback consumer without becoming wire-body bytes.
+func TestSharedSchemaLookbackReceivesExpandedDeliveryBytes(t *testing.T) {
+	client := fixtureClient(t, http.StatusOK, "", DefaultLimits())
+	client.now = func() time.Time { return time.Unix(1700125000, 0) }
+	attempt := validAttempt(t)
+	engine, err := lookback.New(lookback.Options{Now: client.now,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			return execution.ProviderCompletion{}, nil
+		}, Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns: func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &sharedLookbackSink{read: engine.Begin(lookback.Query{Contract: execution.FrozenExecutionContractRef{Slot: attempt.Slot},
+		Spec: attempt.Spec, Operation: execution.OperationNormal, AttemptNo: 1, Secondary: true})}
+	series := sharedTestSeries()
+	done, err := client.decodeShared(context.Background(), strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})),
+		queryIdentity{Spec: attempt.Spec, AttemptNo: 1}, sink)
+	sink.read.Complete(done, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expanded, err := expandedSeriesBytes(series, uint64(client.limits.MaxSeriesBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bytes uint64
+	for _, source := range engine.Stats().Sources {
+		bytes += source.FirstReadBytes
+	}
+	if bytes != expanded || done.Delivery.Bytes != expanded || len(sink.kept.batches) != 1 || done.Delivery.Records != 1 {
+		t.Fatalf("lookback=%d expanded=%d delivered=%+v", bytes, expanded, done.Delivery)
 	}
 }
 
@@ -299,6 +346,46 @@ func TestSharedSchemaDeterministicLimitsConserveDelivery(t *testing.T) {
 	client = fixtureClient(t, http.StatusOK, "", limits)
 	if done, err := client.decodeShared(context.Background(), strings.NewReader(sharedTestBody(t, []responseSeries{series}, map[string]any{"is_partial": false})), identity, &collectingSink{}); err != nil || done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_total_records" {
 		t.Fatal("raw end row escaped record budget", done, err)
+	}
+}
+
+func TestSharedSchemaHTTPBodyUsesConfiguredProductionLimit(t *testing.T) {
+	body := sharedTestBody(t, []responseSeries{sharedTestSeries()}, map[string]any{"is_partial": false})
+	for _, maximum := range []int64{int64(len(body)), int64(len(body) - 1)} {
+		t.Run(fmt.Sprint(maximum), func(t *testing.T) {
+			var posts atomic.Uint32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				posts.Add(1)
+				w.Header().Set("Content-Type", SharedSchemaMediaType)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			limits := DefaultLimits()
+			limits.MaxBodyBytes, limits.MaxSeriesBytes = maximum, maximum
+			client, err := NewClientWithOptions(server.URL, "alarmd", server.Client(), limits, ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sink := &collectingSink{}
+			done, err := client.Execute(context.Background(), validAttempt(t), sink)
+			var delivered execution.SeriesDelivery
+			for _, batch := range sink.batches {
+				delivered, err = execution.AccumulateSeriesDelivery(delivered, batch.Delivery)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err != nil || posts.Load() != 1 || done.Delivery != delivered {
+				t.Fatalf("body limit lost delivery or re-queried: done=%+v err=%v posts=%d", done, err, posts.Load())
+			}
+			if maximum == int64(len(body)) {
+				if done.Completeness != execution.CompletenessFull || len(sink.batches) != 1 {
+					t.Fatal("exact body bound rejected")
+				}
+			} else if done.Completeness != execution.CompletenessUnavailable || done.RouteFacts.Attempts[0].Detail != "response=limit_response_bytes" {
+				t.Fatal("body bound bypassed or not named", done)
+			}
+		})
 	}
 }
 
