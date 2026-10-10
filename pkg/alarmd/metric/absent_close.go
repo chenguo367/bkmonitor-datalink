@@ -33,7 +33,7 @@ type absentCloseCollector struct {
 var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_pages", "roster_complete",
 	"candidates", "snapshot_strategies", "remembered_identities",
 	"snapshot_age_seconds", "max_snapshot_age_seconds", "link_health_age_seconds", "max_link_health_age_seconds",
-	"link_pending", "writer_holds_last_good"}
+	"link_pending"}
 
 func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
@@ -51,9 +51,8 @@ func newAbsentCloseCollector() *absentCloseCollector {
 			"How each round of the difference ended: none is a round that decided, and the rest name the fact "+
 				"that was not good enough to decide on - link_unavailable (the alert link's roster could not be "+
 				"read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded "+
-				"recently), snapshot_unusable (the source was not observed this round), snapshot_empty, "+
-				"snapshot_stale and snapshot_shrunk (the strategy list itself lost a large share of its "+
-				"entries). Rounds, not strategies. none is the denominator the outcome family is read against.",
+				"recently), snapshot_unusable (the source was not observed this round), snapshot_empty and "+
+				"snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.",
 			[]string{"disposition"}, nil),
 		sides: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_difference"),
 			"The sizes the last round decided on: roster_strategies is the strategies the alert link listed "+
@@ -64,10 +63,7 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, "+
 				"link_health_age_seconds (since the link's last successful discovery) beside "+
 				"max_link_health_age_seconds - so a refused round can be read as the side falling behind rather "+
-				"than as a bound that does not fit. link_pending is the link's own refresh backlog. "+
-				"writer_holds_last_good is 1 when the strategy cache's writer stated, about the exact strategy list "+
-				"the round used, that a strategy leaves it only for a fact about the strategy itself and never because "+
-				"publishing it failed; the shrink gate (snapshot_shrunk) applies only while it is 0.",
+				"than as a bound that does not fit. link_pending is the link's own refresh backlog.",
 			[]string{"side"}, nil),
 	}
 }

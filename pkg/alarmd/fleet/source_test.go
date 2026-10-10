@@ -392,26 +392,3 @@ func TestTheVerdictRouteCarriesTheSourceStanding(t *testing.T) {
 		t.Errorf("health = %v, want HEALTHY: the objects run", health["health"])
 	}
 }
-
-// The verdict route carries the writer's statement as the round used it,
-// beside the source standing's verdict and not in it: why the statement is
-// or is not held, the bytes as stored, and the digests of the list it names
-// and of the list the round read.
-func TestTheSourceStandingCarriesTheWritersStatement(t *testing.T) {
-	source := NewSourceFacts(now.Add(-time.Minute), map[string]int{"ACCEPTED": 6}, nil)
-	source.WriterStatement = &WriterStatementFacts{Reason: "digest_mismatch", Statement: `{"version":1}`, LastUpdated: "1788868800",
-		StatementSHA256: strings.Repeat("a", 64), ReadSHA256: strings.Repeat("b", 64)}
-	snapshots := []Snapshot{{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Owned: 6, Determined: 6, Source: source}}
-	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 6, Known: true}, []string{"pod-a"})
-	_, health := get(t, handler, "/api/health")
-	standing, _ := health["source_standing"].(map[string]any)
-	statement, _ := standing["writer_statement"].(map[string]any)
-	if statement == nil || statement["held"] != false || statement["reason"] != "digest_mismatch" || statement["statement"] != `{"version":1}` ||
-		statement["last_updated"] != "1788868800" || statement["statement_strategy_ids_sha256"] != strings.Repeat("a", 64) ||
-		statement["strategy_ids_sha256"] != strings.Repeat("b", 64) {
-		t.Fatalf("source_standing = %v, want the writer's statement as the round used it", health["source_standing"])
-	}
-	if standing["kind"] != "ACCEPTING" || health["health"] != "HEALTHY" {
-		t.Errorf("standing %v health %v: the statement must not move the verdict", standing["kind"], health["health"])
-	}
-}

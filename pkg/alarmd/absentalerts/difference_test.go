@@ -12,7 +12,7 @@ var testNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
 func testBounds() Bounds {
 	return Bounds{Grace: 10 * time.Minute, MaxSnapshotAge: 30 * time.Minute, MaxLinkHealthAge: 15 * time.Minute,
-		MaxCloseStrategies: 4, MaxSnapshotShrinkRatio: 0.25, MinSnapshotForShrink: 10}
+		MaxCloseStrategies: 4}
 }
 
 func key(id string) Key { return Key{TenantID: "system", StrategyID: id} }
@@ -71,7 +71,7 @@ func roundFor(roster map[Key]struct{}, absences map[Key]Absence) Round {
 	}
 	return Round{LinkRead: true, Roster: members, RosterComplete: true, LinkLastSuccess: testNow.Add(-time.Minute),
 		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
-		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
+		FirstAbsent: absences, Now: testNow}
 }
 
 // The whole point, stated once: a strategy the link holds an unrecovered
@@ -192,12 +192,35 @@ func TestAnUnreadSnapshotClosesNothingAndKeepsItsDenominators(t *testing.T) {
 	}
 }
 
-func TestAnEmptySnapshotClosesNothing(t *testing.T) {
+// An empty list without the writer's statement is refused: nothing says it
+// is the writer's word rather than a list that lost its content.
+func TestAnEmptySnapshotWithoutTheWritersStatementClosesNothing(t *testing.T) {
 	k := key("10")
 	round := roundFor(set(k), ripe(k))
 	round.SnapshotStrategies = map[Key]struct{}{}
 	if result := Compute(round, testBounds()); result.Refusal != RefusalSnapshotEmpty || len(result.Close) != 0 {
 		t.Fatalf("an empty snapshot decided something: %+v", result)
+	}
+}
+
+// An empty list under the writer's statement, made about those very bytes,
+// is a fact: every strategy is gone. The round decides, and a candidate past
+// its grace under a second observation is closed like any other.
+func TestAnEmptySnapshotUnderTheWritersStatementIsDecidedOn(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.SnapshotStrategies = map[Key]struct{}{}
+	round.WriterHoldsLastGood = true
+	result := Compute(round, testBounds())
+	if result.Refusal != RefusalNone || result.Counts.Candidates != 6 {
+		t.Fatalf("an empty snapshot under the statement = %+v, want it decided with every listed strategy a candidate", result)
+	}
+	closed := false
+	for _, absent := range result.Close {
+		closed = closed || absent.Key == k
+	}
+	if !closed {
+		t.Fatalf("the ripe candidate was not closed: %+v", result.Close)
 	}
 }
 
@@ -214,59 +237,6 @@ func TestTheSnapshotAgeBoundIsABoundaryOnBothSides(t *testing.T) {
 	past.SnapshotAgeSeconds = int64((bounds.MaxSnapshotAge + time.Minute) / time.Second)
 	if result := Compute(past, bounds); result.Refusal != RefusalSnapshotStale || len(result.Close) != 0 {
 		t.Fatalf("a stale snapshot decided something: %+v", result)
-	}
-}
-
-// The gate that works is on the input. A snapshot that lost a large share of
-// its strategies is refused, and a snapshot that lost a share just inside
-// the ratio is not.
-func TestTheShrinkGateIsABoundaryOnBothSides(t *testing.T) {
-	k := key("10")
-	past := roundFor(set(k), ripe(k))
-	past.SnapshotStrategies = filled(74)
-	past.PreviousSnapshotStrategies = 100
-	result := Compute(past, testBounds())
-	if result.Refusal != RefusalSnapshotShrunk || len(result.Close) != 0 {
-		t.Fatalf("a snapshot that lost 26 percent of its strategies was decided on: %+v", result)
-	}
-	if result.Counts.PreviousSnapshotStrategies != 100 || result.Counts.SnapshotStrategies != 74 {
-		t.Fatalf("the refusal has to carry both sizes: %+v", result.Counts)
-	}
-	inside := roundFor(set(k), ripe(k))
-	inside.SnapshotStrategies = filled(76)
-	inside.PreviousSnapshotStrategies = 100
-	if result := Compute(inside, testBounds()); result.Refusal != RefusalNone {
-		t.Fatalf("a snapshot that lost 24 percent was refused: %+v", result)
-	}
-}
-
-// The writer's statement waives the shrink gate and nothing else: the same
-// shrink decides, while an empty or stale snapshot is refused as before.
-func TestTheWritersStatementWaivesOnlyTheShrinkGate(t *testing.T) {
-	k := key("10")
-	shrunk := roundFor(set(k), ripe(k))
-	shrunk.SnapshotStrategies = filled(40)
-	shrunk.PreviousSnapshotStrategies = 100
-	shrunk.WriterHoldsLastGood = true
-	result := Compute(shrunk, testBounds())
-	if result.Refusal != RefusalNone || len(result.Close) != 1 || !result.Counts.WriterHoldsLastGood {
-		t.Fatalf("a shrink the writer stated is deletions was not decided on: %+v", result)
-	}
-	shrunk.WriterHoldsLastGood = false
-	if result := Compute(shrunk, testBounds()); result.Refusal != RefusalSnapshotShrunk || result.Counts.WriterHoldsLastGood {
-		t.Fatalf("without the statement the gate has to hold: %+v", result)
-	}
-	empty := roundFor(set(k), ripe(k))
-	empty.SnapshotStrategies = map[Key]struct{}{}
-	empty.WriterHoldsLastGood = true
-	if result := Compute(empty, testBounds()); result.Refusal != RefusalSnapshotEmpty {
-		t.Fatalf("the statement waived the empty-snapshot refusal: %+v", result)
-	}
-	stale := roundFor(set(k), ripe(k))
-	stale.WriterHoldsLastGood = true
-	stale.SnapshotAgeSeconds = int64((testBounds().MaxSnapshotAge + time.Minute) / time.Second)
-	if result := Compute(stale, testBounds()); result.Refusal != RefusalSnapshotStale {
-		t.Fatalf("the statement waived the stale-snapshot refusal: %+v", result)
 	}
 }
 

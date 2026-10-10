@@ -106,10 +106,6 @@ type SourceRefreshResult struct {
 	// round's; see SourceReconciler.reusableFor. Empty on a round that failed
 	// before either.
 	Build SourceRefreshBuild
-	// WriterStatement is the publisher's statement as it applies to the
-	// observation this round holds: what was read, whether it holds and, when
-	// it does not, why. Nil from a source with no statement to read.
-	WriterStatement *WriterStatement
 	// ChangeSignalPresent says the source offered a change signal this round,
 	// and ChangeSignalAgeSeconds how long ago its publisher moved it, by this
 	// process's clock. A signal that stops moving while strategies keep being
@@ -156,11 +152,8 @@ type sourceRoundMemory struct {
 	// exact active set the cycle read (holdsLastGoodFor). It decides whether
 	// a strategy the set no longer lists serves the removal grace
 	// (BuildRequest.WriterHoldsLastGood), and a round that reuses the
-	// observation reuses it with the documents. statement is the
-	// same verdict as a reader sees it: what was read and why it does not
-	// hold; nil from a source with no statement to read.
+	// observation reuses it with the documents.
 	holdsLastGood bool
-	statement     *WriterStatement
 	// steady marks that the round which last used this observation ended
 	// UNCHANGED. Only a steady observation is reused: a round that published
 	// may have read a write half done, and a round that failed proves nothing
@@ -443,10 +436,6 @@ func (reconciler *SourceReconciler) Refresh(
 		}
 		result.ReadMode, result.ReadReason, result.StrategiesRead = read.mode, read.reason, read.strategies
 		result.ChangeSignalPresent, result.ChangeSignalAgeSeconds = read.signalPresent, read.signalAgeSeconds
-		if statement := reconciler.memory.statement; statement != nil {
-			copy := *statement
-			result.WriterStatement = &copy
-		}
 		reconciler.memory.steady = result.Status == SourceRefreshUnchanged
 		if result.Status == SourceRefreshUnchanged {
 			reconciler.reusable = reuseNext
@@ -631,9 +620,8 @@ func (reconciler *SourceReconciler) observe(ctx context.Context, source Strategy
 	if err != nil {
 		return observedCycle{}, sourceRead{}, err
 	}
-	holds := holdsLastGoodFor(signal, cycle)
 	reconciler.memory = &sourceRoundMemory{signal: signal, cycle: cycle, readAt: now,
-		holdsLastGood: holds, statement: writerStatementOf(signal, cycle, holds)}
+		holdsLastGood: holdsLastGoodFor(signal, cycle)}
 	read.mode, read.reason, read.strategies = SourceReadFull, reason, len(cycle.strategies)
 	return cycle, read, nil
 }
@@ -649,26 +637,6 @@ func (reconciler *SourceReconciler) observe(ctx context.Context, source Strategy
 // cannot name its bytes, or a statement without a digest, never matches.
 func holdsLastGoodFor(signal SourceChangeSignal, cycle observedCycle) bool {
 	return signal.HoldsLastGoodFor != "" && signal.HoldsLastGoodFor == cycle.activeSet
-}
-
-// writerStatementOf is the verdict holdsLastGoodFor reached, as a reader
-// sees it: the source's read of the statement, the digest of the bytes the
-// cycle read, and when it is not held the first check that failed -- the
-// source's, then whether the cycle could name its bytes, then whether they
-// are the ones the statement names. Nil from a source with no statement.
-func writerStatementOf(signal SourceChangeSignal, cycle observedCycle, held bool) *WriterStatement {
-	if signal.Statement == nil {
-		return nil
-	}
-	statement := &WriterStatement{SourceStatement: *signal.Statement, Held: held, ReadSHA256: cycle.activeSet}
-	switch {
-	case held, statement.Reason != "":
-	case cycle.activeSet == "":
-		statement.Reason = StatementSetUnnamed
-	default:
-		statement.Reason = StatementDigestMismatch
-	}
-	return statement
 }
 
 // fullReadReason names the condition that makes this round read every

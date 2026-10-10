@@ -1258,7 +1258,6 @@ var alarmdWords = []string{
 	"shared",
 	"shift",
 	"short",
-	"shrunk",
 	"shutdown",
 	"sibling",
 	"side",

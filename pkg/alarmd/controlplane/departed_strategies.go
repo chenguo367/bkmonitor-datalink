@@ -210,7 +210,8 @@ func (reconciler *SourceReconciler) DepartedStrategies() ([]DepartedStrategy, ui
 // list does not name left it for a fact about the strategy itself, not
 // because publishing it failed. It is true only when the statement names the
 // very strategy_ids bytes this observation was read from; see
-// sourceRoundMemory.holdsLastGood.
+// sourceRoundMemory.holdsLastGood. The absent close reads it for one thing:
+// whether an empty list is a fact it may decide on.
 type ObservedSnapshot struct {
 	Strategies    []DepartedStrategy
 	Observation   string

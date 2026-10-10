@@ -534,7 +534,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 	// returns, and a reader asking which data sources are running must not
 	// get an answer that depends on which one the round took.
 	composition := result.Composition
-	changeSignalPresent, changeSignalAge, writerStatement := result.ChangeSignalPresent, result.ChangeSignalAgeSeconds, result.WriterStatement
+	changeSignalPresent, changeSignalAge := result.ChangeSignalPresent, result.ChangeSignalAgeSeconds
 	defer func() {
 		// Delivered whenever this round composed a Catalog, not only when the
 		// round ended healthy.
@@ -554,7 +554,6 @@ func (runtime *productionPhaseTwoControl) refresh(
 		// that far leaves them nil rather than empty, and nothing is delivered.
 		refreshResult.Composition = publishedComposition(refreshErr, composition, refreshResult.Status)
 		refreshResult.ChangeSignalPresent, refreshResult.ChangeSignalAgeSeconds = changeSignalPresent, changeSignalAge
-		refreshResult.WriterStatement = writerStatement
 	}()
 	// Which strategies are behind the counts, once per change. Written here
 	// rather than at each return for the same reason the composition is: the

@@ -151,6 +151,13 @@ var removedLabelValues = []struct {
 	{"open_alert_set_unavailable_total", "reason", "members_disjoint", false},
 	// The ledger's entries went with the ledger.
 	{"open_alert_set_entries", "kind", "sent_closed", false},
+	// The absent close refused a round whose strategy list had lost more than
+	// a fifth of the round before's, unless the writer stated it holds the
+	// last good document. The list's writer is what decides a strategy is
+	// gone; the reader keeps no size gate, and no side saying whether it was
+	// waived.
+	{"absent_strategy_round_total", "disposition", "snapshot_shrunk", false},
+	{"absent_strategy_difference", "side", "writer_holds_last_good", false},
 }
 
 // A removed label value is emitted by no family, whatever its source

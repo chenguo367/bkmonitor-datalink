@@ -11,7 +11,9 @@ package controlplane
 
 import (
 	"sort"
+	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -104,9 +106,25 @@ func planGroupBy(query execution.QueryPlanFacts) ([]string, int) {
 		fields = fields[:planGroupByBound]
 	}
 	for index := range fields {
-		fields[index] = boundedStatementText(fields[index], planGroupByNameBound)
+		fields[index] = boundedText(fields[index], planGroupByNameBound)
 	}
 	return fields, total
+}
+
+// boundedText is text cut to at most limit bytes on a character boundary,
+// invalid bytes replaced, with a mark where it was cut. A dimension name
+// comes from the strategy document as the platform wrote it, so its length
+// is not this build's to assume.
+func boundedText(text string, limit int) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
 }
 
 // strategyIndex is one publication indexed by strategy id. Built once per

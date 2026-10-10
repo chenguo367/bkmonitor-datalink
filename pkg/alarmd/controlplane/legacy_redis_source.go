@@ -334,72 +334,48 @@ func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (Sour
 	}
 	payload, err := source.client.Get(ctx, source.lastUpdatedKey).Result()
 	if errors.Is(err, redis.Nil) {
-		return SourceChangeSignal{Statement: &SourceStatement{Reason: StatementSignalAbsent}}, nil
+		return SourceChangeSignal{}, nil
 	}
 	if err != nil {
 		return SourceChangeSignal{}, fmt.Errorf("alarmd controlplane: read legacy strategy change signal: %w", err)
 	}
 	seconds, parseErr := strconv.ParseInt(strings.TrimSpace(payload), 10, 64)
 	if parseErr != nil || seconds <= 0 {
-		return SourceChangeSignal{Statement: &SourceStatement{LastUpdated: boundedStatementText(payload, statementSignalBound),
-			Reason: StatementSignalAbsent}}, nil
+		return SourceChangeSignal{}, nil
 	}
-	holds, statement := source.holdsLastGoodFor(ctx, seconds)
-	statement.LastUpdated = boundedStatementText(payload, statementSignalBound)
 	return SourceChangeSignal{Present: true, Value: payload, WrittenAt: time.Unix(seconds, 0),
-		HoldsLastGoodFor: holds, Statement: &statement}, nil
+		HoldsLastGoodFor: source.holdsLastGoodFor(ctx, seconds)}, nil
 }
 
 // holdsLastGoodFor reads the writer's publication statement and returns the
 // strategy_ids digest it was made about, when it was made for this change
 // signal; empty otherwise. Every way the statement can be missing or
 // unreadable - no key, a failed read, a payload that does not decode, another
-// version, one written with a different last_updated, or one that does not
-// name the strategy_ids it is about - reads as "the writer did not say so",
-// which keeps every guard that exists because a strategy can leave the set by
-// mistake. The last_updated check is what makes a writer that stopped making
-// the statement read as one that never made it: an older writer that
-// publishes a change moves last_updated and leaves the statement behind, and
-// one that only renews lets it expire. The digest is what makes it hold only
-// for the set it was made about: an older writer can also rewrite
-// strategy_ids in place without moving last_updated, and the reconciler
-// compares the digest with the set its own read returned (observe).
-//
-// What was read is returned beside it, with the first check that failed, so a
-// reader can tell which of these it was.
+// version, one that does not say it holds the last good document, one written
+// with a different last_updated, or one that does not name the strategy_ids
+// it is about - reads as "the writer did not say so", and a strategy absent
+// from the set then serves the removal grace. The last_updated check is what
+// makes a writer that stopped making the statement read as one that never
+// made it: a writer without the statement that publishes a change moves
+// last_updated and leaves the statement behind, and one that only renews lets
+// it expire. The digest is what makes it hold only for the set it was made
+// about: such a writer can also rewrite strategy_ids in place without moving
+// last_updated, and the reconciler compares the digest with the set its own
+// read returned (observe).
 //
 // One GET of about a hundred bytes per change-signal read, on the control
 // leader only.
-func (source *LegacyRedisStrategySource) holdsLastGoodFor(ctx context.Context, lastUpdated int64) (string, SourceStatement) {
+func (source *LegacyRedisStrategySource) holdsLastGoodFor(ctx context.Context, lastUpdated int64) string {
 	payload, err := source.client.Get(ctx, source.publicationSemanticsKey).Bytes()
-	switch {
-	case errors.Is(err, redis.Nil):
-		return "", SourceStatement{Reason: StatementAbsent}
-	case err != nil:
-		return "", SourceStatement{Reason: StatementUnreadable}
+	if err != nil {
+		return ""
 	}
-	read := SourceStatement{Raw: boundedStatementText(string(payload), statementTextBound)}
 	var statement publicationSemantics
-	if json.Unmarshal(payload, &statement) != nil {
-		read.Reason = StatementShape
-		return "", read
+	if json.Unmarshal(payload, &statement) != nil || statement.Version != 1 || !statement.HoldLastGood ||
+		statement.LastUpdated != lastUpdated || !lowercaseSHA256Hex(statement.StrategyIDsSHA256) {
+		return ""
 	}
-	read.SetSHA256 = boundedStatementText(statement.StrategyIDsSHA256, 2*sha256.Size+statementSignalBound)
-	switch {
-	case statement.Version != 1:
-		read.Reason = StatementVersion
-	case !statement.HoldLastGood:
-		read.Reason = StatementDeclined
-	case statement.LastUpdated != lastUpdated:
-		read.Reason = StatementLastUpdatedMismatch
-	case statement.StrategyIDsSHA256 == "":
-		read.Reason = StatementDigestMissing
-	case !lowercaseSHA256Hex(statement.StrategyIDsSHA256):
-		read.Reason = StatementShape
-	default:
-		return statement.StrategyIDsSHA256, read
-	}
-	return "", read
+	return statement.StrategyIDsSHA256
 }
 
 // lowercaseSHA256Hex is whether text is a SHA-256 the way the statement has
