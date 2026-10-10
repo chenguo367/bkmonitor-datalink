@@ -94,6 +94,7 @@ func TestBuiltInPythonOutputUnreachableServiceRedisHoldsStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"series":[],"status":null,"trace_id":"unused","is_partial":false,"result_table_id":[]}`))
 	}))
 	defer uqServer.Close()

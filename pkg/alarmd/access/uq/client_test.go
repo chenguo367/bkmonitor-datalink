@@ -22,6 +22,7 @@ import (
 func TestClientUsesFinalPythonWireContractAndNormalizesMilliseconds(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		if request.URL.Path != "/query/ts" {
 			t.Errorf("path=%s", request.URL.Path)
 		}
@@ -267,6 +268,7 @@ func TestClientClassifiesQueryTsPartialStatus(t *testing.T) {
 
 func TestClientDeliversLargeResponseOneSeriesAtATime(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"series":[`))
 		for index := 0; index < 256; index++ {
 			if index > 0 {
@@ -565,6 +567,7 @@ func TestRequestPreservesPythonEmptyStringConditionValue(t *testing.T) {
 func fixtureClient(t *testing.T, status int, body string, limits Limits) *Client {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(status)
 		_, _ = writer.Write([]byte(body))
 	}))

@@ -77,6 +77,7 @@ func TestBoundedRunnerRecoveryWaitDoesNotBlockNormal(t *testing.T) {
 	var inflight atomic.Int64
 	var maxInflight atomic.Int64
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		raw, _ := io.ReadAll(request.Body)
 		uqCalls.Add(1)
 		current := inflight.Add(1)

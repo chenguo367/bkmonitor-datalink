@@ -98,13 +98,11 @@ func (limits Limits) validate() error {
 }
 
 type Client struct {
-	endpoint          string
-	httpClient        *http.Client
-	querySource       string
-	limits            Limits
-	now               func() time.Time
-	sharedQueryGroups map[execution.QueryGroupIdentity]struct{}
-	sharedAll         bool
+	endpoint    string
+	httpClient  *http.Client
+	querySource string
+	limits      Limits
+	now         func() time.Time
 }
 
 // markReplayable lets the transport send a query again, once, when the
@@ -156,7 +154,11 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		defer cancel()
 	}
 	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
-		SharedSchema: client.sharedFor(attempt),
+		// Ordinary Slot reads negotiate the shared format by default. The
+		// same response may still be legacy JSON; other entry points do not
+		// negotiate, nor do PromQL and polling Execute queries.
+		SharedSchema: attempt.Spec.PlanFacts.PromQL == nil &&
+			attempt.Spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1",
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
 			DeadlineUnixMilli: attempt.DeadlineUnixMilli}}, sink, nil)
 }

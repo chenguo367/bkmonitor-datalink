@@ -72,6 +72,7 @@ func startDynamicGroupFixture(t *testing.T, groups map[string]string) *dynamicGr
 	fixture.clock.Store(base * 1000)
 	now := func() time.Time { return time.UnixMilli(fixture.clock.Load()) }
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		var payload struct {
 			EndTime string `json:"end_time"`
 		}

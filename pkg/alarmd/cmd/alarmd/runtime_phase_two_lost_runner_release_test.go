@@ -77,6 +77,7 @@ func TestALostRunnersLateReleaseLeavesItsSuccessorRunning(t *testing.T) {
 	now := func() time.Time { return time.UnixMilli(clock.Load()) }
 	var queried atomic.Int64
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		queried.Add(1)
 		var payload struct {
 			EndTime string `json:"end_time"`

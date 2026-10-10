@@ -2573,7 +2573,6 @@ func NormalizeObservation(observation Observation) Observation {
 			observation.RuntimeConfig = nil
 		} else {
 			facts := *observation.RuntimeConfig
-			facts.UQCodec.QueryGroups = append([]string{}, facts.UQCodec.QueryGroups...)
 			observation.RuntimeConfig = &facts
 		}
 	}

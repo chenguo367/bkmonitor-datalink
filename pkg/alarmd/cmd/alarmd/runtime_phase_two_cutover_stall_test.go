@@ -148,6 +148,7 @@ func startCutoverFixtureOpened(
 	fixture.now = func() time.Time { return time.UnixMilli(fixture.clock.Load()) }
 
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		fixture.uqCalls.Add(1)
 		var payload struct {
 			StartTime    string `json:"start_time"`

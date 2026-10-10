@@ -205,7 +205,7 @@ func TestSharedSchemaFaultsDoNotCompleteOrRetry(t *testing.T) {
 				_, _ = io.WriteString(w, body)
 			}))
 			defer server.Close()
-			client, err := NewClientWithOptions(server.URL, "alarmd", server.Client(), DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: []string{"group"}})
+			client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -227,29 +227,34 @@ func TestSharedSchemaNegotiationPreservesRequestAndSameResponseFallback(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, groups := range [][]string{nil, {"other"}, {"group"}, {"*"}} {
-		t.Run(fmt.Sprint(groups), func(t *testing.T) {
+	for _, media := range []string{"application/json; charset=utf-8", ""} {
+		t.Run(media, func(t *testing.T) {
 			var posts atomic.Uint32
-			selected := len(groups) > 0 && (groups[0] == "group" || groups[0] == "*")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				posts.Add(1)
 				raw, _ := io.ReadAll(r.Body)
 				if !bytes.Equal(raw, original) || r.Header.Get("Content-Type") != "application/json" || r.Header.Get(headerTenant) != attempt.Spec.PlanFacts.TenantID || r.Header.Get(headerSpace) != attempt.Spec.PlanFacts.SpaceScope {
 					t.Error("codec changed request contract")
 				}
-				if (r.Header.Get("Accept") == sharedSchemaAccept) != selected {
+				if r.Header.Get("Accept") != sharedSchemaAccept {
 					t.Errorf("unexpected negotiation %q", r.Header.Get("Accept"))
 				}
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				if media != "" {
+					w.Header().Set("Content-Type", media)
+				} else {
+					// An old provider may omit Content-Type. Suppress net/http
+					// sniffing so the response really has no media type.
+					w.Header()["Content-Type"] = nil
+				}
 				_, _ = io.WriteString(w, `{"series":[],"is_partial":false}`)
 			}))
 			defer server.Close()
-			client, err := NewClientWithOptions(server.URL, "alarmd", server.Client(), DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: groups})
+			client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
 			done, err := client.Execute(context.Background(), attempt, &collectingSink{})
-			if err != nil || done.Completeness != execution.CompletenessFull || posts.Load() != 1 || done.Stats.SharedSchemaRequested != selected || done.Stats.ResponseCodec != "legacy_json" {
+			if err != nil || done.Completeness != execution.CompletenessFull || posts.Load() != 1 || !done.Stats.SharedSchemaRequested || done.Stats.ResponseCodec != "legacy_json" {
 				t.Fatalf("fallback=%+v err=%v posts=%d", done, err, posts.Load())
 			}
 		})
@@ -270,21 +275,103 @@ func TestSharedSchemaNegotiationPreservesRequestAndSameResponseFallback(t *testi
 			t.Fatal("unknown opted-in format accepted")
 		}
 	}
-	for _, groups := range [][]string{{"*", "group"}, {"group", "group"}, {""}, {"bad group"}, {"**"}} {
-		if _, err := NewClientWithOptions("http://example.test", "alarmd", http.DefaultClient, DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: groups}); err == nil {
-			t.Fatalf("invalid allowlist accepted %v", groups)
+}
+
+func TestSharedSchemaDefaultExecuteConsumesV1Once(t *testing.T) {
+	var posts atomic.Uint32
+	body := sharedTestBody(t, []responseSeries{sharedTestSeries()}, map[string]any{"is_partial": false})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		if r.Header.Get("Accept") != sharedSchemaAccept || r.URL.Path != "/query/ts" {
+			t.Errorf("ordinary Execute did not negotiate: %s %q", r.URL.Path, r.Header.Get("Accept"))
 		}
+		w.Header().Set("Content-Type", SharedSchemaMediaType)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "alarmd", server.Client())
+	if err != nil {
+		t.Fatal(err)
 	}
-	client, _ := NewClientWithOptions("http://example.test", "alarmd", http.DefaultClient, DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
-	copy := attempt
-	copy.Spec.PlanFacts.Normalization.Version = "uq-polling-normalization-v1"
-	if client.sharedFor(copy) {
-		t.Fatal("polling opted in")
+	sink := &collectingSink{}
+	done, err := client.Execute(context.Background(), validAttempt(t), sink)
+	if err != nil || done.Completeness != execution.CompletenessFull || posts.Load() != 1 ||
+		!done.Stats.SharedSchemaRequested || done.Stats.ResponseCodec != "shared_json_v1" ||
+		done.Delivery.Series != 1 || done.Delivery.Records != 1 || len(sink.batches) != 1 {
+		t.Fatalf("shared=%+v err=%v posts=%d delivered=%d", done, err, posts.Load(), len(sink.batches))
 	}
-	copy = attempt
-	copy.Spec.PlanFacts.PromQL = &execution.PromQLQuery{}
-	if client.sharedFor(copy) {
-		t.Fatal("promql opted in")
+}
+
+func TestSharedSchemaDefaultExecuteRejectsUnknownResponseWithoutRetry(t *testing.T) {
+	for _, media := range []string{"application/vnd.bkmonitor.uq.shared-schema.v2+ndjson", "application/octet-stream", "invalid/media; broken"} {
+		t.Run(media, func(t *testing.T) {
+			var posts atomic.Uint32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				posts.Add(1)
+				w.Header().Set("Content-Type", media)
+				_, _ = io.WriteString(w, `{"series":[],"is_partial":false}`)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, "alarmd", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			sink := &collectingSink{}
+			done, err := client.Execute(context.Background(), validAttempt(t), sink)
+			var named interface{ QueryFailure() (string, string) }
+			if err == nil || !errors.As(err, &named) || done.Ref != "" || posts.Load() != 1 || len(sink.batches) != 0 {
+				t.Fatalf("unknown response consumed or retried: done=%+v err=%v posts=%d", done, err, posts.Load())
+			}
+		})
+	}
+}
+
+func TestSharedSchemaExcludedExecuteEntriesRemainLegacy(t *testing.T) {
+	for _, entry := range []string{"promql", "polling"} {
+		t.Run(entry, func(t *testing.T) {
+			attempt := validAttempt(t)
+			facts := attempt.Spec.PlanFacts
+			facts.QueryRevision = ""
+			path := "/query/ts"
+			if entry == "promql" {
+				facts.QueryList, facts.MetricMerge = nil, ""
+				facts.PromQL = &execution.PromQLQuery{Expression: "up", Match: "{job='fixture'}"}
+				facts.Normalization.DatasetContract.IdentityFields = []string{}
+				facts.Normalization.DatasetContract.DynamicDimensions = true
+				path = "/query/ts/promql"
+			} else {
+				facts.Normalization.Version = "uq-polling-normalization-v1"
+			}
+			var err error
+			facts, err = execution.BuildQueryPlanFacts(facts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := attempt.Spec
+			spec.Digest, spec.PlanFacts = "", facts
+			attempt.Spec, err = execution.BuildPhysicalQuerySpec(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var posts atomic.Uint32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				posts.Add(1)
+				if r.Header.Get("Accept") != "" || r.URL.Path != path {
+					t.Errorf("excluded Execute negotiated: %s %q", r.URL.Path, r.Header.Get("Accept"))
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"series":[],"is_partial":false}`)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, "alarmd", server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			done, err := client.Execute(context.Background(), attempt, &collectingSink{})
+			if err != nil || done.Completeness != execution.CompletenessFull || done.Stats.SharedSchemaRequested || posts.Load() != 1 {
+				t.Fatalf("excluded entry=%+v err=%v posts=%d", done, err, posts.Load())
+			}
+		})
 	}
 }
 
@@ -362,7 +449,7 @@ func TestSharedSchemaHTTPBodyUsesConfiguredProductionLimit(t *testing.T) {
 			defer server.Close()
 			limits := DefaultLimits()
 			limits.MaxBodyBytes, limits.MaxSeriesBytes = maximum, maximum
-			client, err := NewClientWithOptions(server.URL, "alarmd", server.Client(), limits, ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+			client, err := NewClientWithLimits(server.URL, "alarmd", server.Client(), limits)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -414,7 +501,7 @@ func TestSharedSchemaCallerCancelStopsDeliveryAndReleasesHTTP(t *testing.T) {
 		close(released)
 	}))
 	defer server.Close()
-	client, _ := NewClientWithOptions(server.URL, "alarmd", server.Client(), DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: []string{"group"}})
+	client, _ := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sink := &cancelSharedSink{cancel: cancel}
@@ -440,7 +527,7 @@ func TestSharedSchemaRecheckAndRangeRemainLegacy(t *testing.T) {
 		_, _ = io.WriteString(w, `{"series":[],"is_partial":false}`)
 	}))
 	defer server.Close()
-	client, _ := NewClientWithOptions(server.URL, "alarmd", server.Client(), DefaultLimits(), ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+	client, _ := NewClientWithLimits(server.URL, "alarmd", server.Client(), DefaultLimits())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := client.Recheck(ctx, validAttempt(t).Spec, &collectingSink{}); err != nil {

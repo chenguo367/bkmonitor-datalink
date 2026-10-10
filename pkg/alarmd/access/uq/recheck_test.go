@@ -29,6 +29,7 @@ func TestARecheckIsTheFormalReadAgain(t *testing.T) {
 	var bodies [][]byte
 	var headers []http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		raw, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		bodies, headers = append(bodies, raw), append(headers, r.Header.Clone())
@@ -59,6 +60,9 @@ func TestARecheckIsTheFormalReadAgain(t *testing.T) {
 		if headers[0].Get(name) != headers[1].Get(name) {
 			t.Fatalf("header %s differs: %q vs %q", name, headers[0].Get(name), headers[1].Get(name))
 		}
+	}
+	if headers[0].Get("Accept") != sharedSchemaAccept || headers[1].Get("Accept") != "" {
+		t.Fatal("recheck changed the Execute-only negotiation scope")
 	}
 	if len(formal.batches) != 2 || len(again.batches) != 2 {
 		t.Fatalf("series formal %d recheck %d, want 2 and 2", len(formal.batches), len(again.batches))

@@ -645,9 +645,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	queryClient, err := accessuq.NewClientWithOptions(
+	queryClient, err := accessuq.NewClientWithLimits(
 		cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource, external.HTTPClient, phaseTwoUQLimits(cfg),
-		accessuq.ClientOptions{SharedSchemaQueryGroups: cfg.PhaseTwo.Access.UQSharedSchemaQueryGroups},
 	)
 	if err != nil {
 		return nil, err

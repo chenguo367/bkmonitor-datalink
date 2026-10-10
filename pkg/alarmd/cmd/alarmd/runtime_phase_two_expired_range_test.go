@@ -222,6 +222,7 @@ func newExpiredRangeProductionBundle(t *testing.T, response http.HandlerFunc, ob
 	clock.Store(base * 1000)
 	var queries atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		queries.Add(1)
 		if response == nil {
 			w.WriteHeader(http.StatusInternalServerError)

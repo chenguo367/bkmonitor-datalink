@@ -235,6 +235,7 @@ func startFollowsFixture(t *testing.T, maxStateMutations uint64) *followsFixture
 	now := func() time.Time { return time.UnixMilli(fixture.clock.Load()) }
 
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		var payload struct {
 			EndTime string `json:"end_time"`
 		}

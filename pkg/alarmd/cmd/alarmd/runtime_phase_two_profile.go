@@ -155,7 +155,7 @@ func phaseTwoRuntimeProfile(cfg config.Config, cpuSource string, procs int) (obs
 			PlatformSettingsKeyPrefix: cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix,
 		},
 		Linkd:     observability.RuntimeLinkdFacts{ConsoleConfigured: cfg.PhaseTwo.Linkd.ConsoleURL != ""},
-		UQCodec:   phaseTwoUQCodecFacts(cfg),
+		UQCodec:   phaseTwoUQCodecFacts(),
 		Retention: phaseTwoRuntimeRetention(cfg),
 	}
 	// Digest the exact logged safe values, with the digest field still empty.
@@ -164,13 +164,8 @@ func phaseTwoRuntimeProfile(cfg config.Config, cpuSource string, procs int) (obs
 	return facts, err
 }
 
-func phaseTwoUQCodecFacts(cfg config.Config) observability.RuntimeUQCodecFacts {
-	groups := append([]string{}, cfg.PhaseTwo.Access.UQSharedSchemaQueryGroups...)
-	mode := "legacy"
-	if len(groups) > 0 {
-		mode = "shared_schema_opt_in"
-	}
-	return observability.RuntimeUQCodecFacts{Mode: mode, QueryGroups: groups, Scope: "ordinary_execute_non_polling"}
+func phaseTwoUQCodecFacts() observability.RuntimeUQCodecFacts {
+	return observability.RuntimeUQCodecFacts{Mode: "shared_schema", Scope: "ordinary_execute_non_polling"}
 }
 
 // phaseTwoRuntimeRetention is the retention lengths from the functions the

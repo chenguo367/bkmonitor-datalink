@@ -40,6 +40,7 @@ func partialBodyServer(t *testing.T, cut bool, delay time.Duration) *httptest.Se
 			_ = buffered.Flush()
 			return
 		}
+		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte(head))
 		writer.(http.Flusher).Flush()

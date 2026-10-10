@@ -207,6 +207,7 @@ func lifecycleHostRecords(topoLink string) map[string]string {
 // answerQuery is the query service: one series per reporting host, at the
 // window's last second, with the fixture's value; partial when the case says.
 func (fixture *lifecycleFixture) answerQuery(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "application/json")
 	fixture.mu.Lock()
 	intercept := fixture.intercept
 	fixture.mu.Unlock()

@@ -127,7 +127,7 @@ func TestSharedCodecWorkerNeverFinalizesDamagedOrOverRetainedInput(t *testing.T)
 				_, _ = io.WriteString(w, sample.body)
 			}))
 			defer server.Close()
-			client, err := uq.NewClientWithOptions(server.URL, "alarmd", server.Client(), uq.DefaultLimits(), uq.ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+			client, err := uq.NewClientWithLimits(server.URL, "alarmd", server.Client(), uq.DefaultLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,7 +177,7 @@ func TestSharedCodecUsesRealEvaluatorAndSameWorkerBusinessResult(t *testing.T) {
 			}
 		}))
 		defer server.Close()
-		client, err := uq.NewClientWithOptions(server.URL, "alarmd", server.Client(), uq.DefaultLimits(), uq.ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+		client, err := uq.NewClientWithLimits(server.URL, "alarmd", server.Client(), uq.DefaultLimits())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +266,7 @@ func TestSharedCodecWorkerFiveOfFiveAndRecoveryThree(t *testing.T) {
 			_, _ = io.WriteString(w, body)
 		}))
 		defer server.Close()
-		client, err := uq.NewClientWithOptions(server.URL, "alarmd", server.Client(), uq.DefaultLimits(), uq.ClientOptions{SharedSchemaQueryGroups: []string{"*"}})
+		client, err := uq.NewClientWithLimits(server.URL, "alarmd", server.Client(), uq.DefaultLimits())
 		if err != nil {
 			t.Fatal(err)
 		}

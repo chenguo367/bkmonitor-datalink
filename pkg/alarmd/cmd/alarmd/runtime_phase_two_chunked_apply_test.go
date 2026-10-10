@@ -81,6 +81,7 @@ func TestProductionPhaseTwoBundleReRunsChunkedSlotIdempotently(t *testing.T) {
 	response := body.Bytes()
 	var uqCalls atomic.Int64
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		uqCalls.Add(1)
 		_, _ = writer.Write(response)
 	}))

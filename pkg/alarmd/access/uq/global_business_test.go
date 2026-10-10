@@ -45,6 +45,7 @@ func captureRequest(t *testing.T, attempt execution.QueryAttempt) capturedReques
 	t.Helper()
 	var captured capturedRequest
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		captured.header = request.Header.Clone()
 		if err := json.NewDecoder(request.Body).Decode(&captured.body); err != nil {
 			t.Error(err)

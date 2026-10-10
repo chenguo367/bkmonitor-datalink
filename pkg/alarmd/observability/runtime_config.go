@@ -58,12 +58,11 @@ type RuntimeConfigFacts struct {
 	Digest    string                `json:"runtime_config_digest"`
 }
 
-// This is effective startup scope, not a server capability claim. The list
-// controls eligible ordinary production Execute only; other entry points stay legacy.
+// This is the startup negotiation scope, not a server capability claim.
+// Ordinary production Execute negotiates by default; other entry points stay legacy.
 type RuntimeUQCodecFacts struct {
-	Mode        string   `json:"mode"`
-	QueryGroups []string `json:"query_groups"`
-	Scope       string   `json:"scope"`
+	Mode  string `json:"mode"`
+	Scope string `json:"scope"`
 }
 
 // RuntimeRetentionFacts are the retention lengths, in seconds, and their

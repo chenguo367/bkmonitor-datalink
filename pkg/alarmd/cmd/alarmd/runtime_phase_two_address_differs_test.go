@@ -77,6 +77,7 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 	clock.Store(base * 1000)
 	now := func() time.Time { return time.UnixMilli(clock.Load()) }
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		var payload struct {
 			EndTime string `json:"end_time"`
 		}

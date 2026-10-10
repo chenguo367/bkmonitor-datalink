@@ -322,6 +322,7 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 	for _, retired := range []struct{ yaml, name string }{
 		{"phase_two:\n  control:\n    legacy_query_runtime:\n      access_bk_data: true\n", "legacy_query_runtime"},
 		{"phase_two:\n  access:\n    host_disable_monitor_states: [a]\n", "host_disable_monitor_states"},
+		{"phase_two:\n  access:\n    uq_shared_schema_query_groups: []\n", "uq_shared_schema_query_groups"},
 		{"phase_two:\n  observation:\n    memory_percent: 30\n", "observation"},
 		{"phase_two:\n  canonical:\n    mode: stream\n", "canonical"},
 		{"kafka:\n  allowed_output_topics: [a]\n", "allowed_output_topics"},

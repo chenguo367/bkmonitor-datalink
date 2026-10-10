@@ -208,6 +208,7 @@ func startIdentityFixture(t *testing.T, protocol string, shape noDataFixtureShap
 	value.Store(identityFixtureAbnormalValue)
 
 	uqServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
 		var payload struct {
 			EndTime string `json:"end_time"`
 		}
