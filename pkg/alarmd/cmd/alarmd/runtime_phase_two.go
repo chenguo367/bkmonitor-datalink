@@ -534,10 +534,6 @@ type phaseTwoQueryGroupLifecycle struct {
 	// that waits on idle waits for exactly the Slots already running.
 	inflight int
 	idle     chan struct{}
-	// slotDeadline is the deadline of the Slot in flight, zero when none is
-	// or it has none; under the bundle's lock. An execution past it by
-	// executionPastDeadlineGrace has ignored its cancellation.
-	slotDeadline time.Time
 }
 
 // declinedQueryGroup is a Query Group this replica will not run while the
@@ -567,13 +563,16 @@ type phaseTwoQueryGroupRuntime interface {
 	NextDeadline() time.Time
 	MaintainLease(context.Context, time.Duration, time.Duration) error
 	Release(context.Context) error
-	// InFlight is the stage the Slot in flight last entered
-	// (execution.SlotStages) and that Slot's own deadline, read by the
-	// watchdog that finds an execution hung past its deadline: the deadline
-	// to judge it by, and the stage to name where it is stuck. Required,
-	// like NextDeadline: a runtime without it would leave the watchdog the
-	// dispatcher's estimate alone, which a fresh Runner does not have.
-	InFlight() (string, time.Time)
+	// DeclineHung claims the execution in flight as hung when it is past
+	// its own deadline by more than grace and has not begun to commit, and
+	// returns the stage it is stuck in (execution.SlotStages) and the
+	// deadline it overran; a claimed execution writes nothing more. The
+	// deadline is the execution's own, set as it runs - a normal Slot's
+	// query deadline, a recovery's from its arrival - and is the only one
+	// the watchdog judges by: the dispatcher's deadline is the frozen Slot's
+	// first attempt's, minutes gone for a replay. Required, like
+	// NextDeadline.
+	DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool)
 }
 
 type phaseTwoWorkerBundleDependencies struct {
@@ -2490,7 +2489,6 @@ func (bundle *phaseTwoWorkerBundle) enterScheduledRunner(scheduled phaseTwoSched
 	lifecycle := scheduled.lifecycle
 	if lifecycle.inflight == 0 {
 		lifecycle.idle = make(chan struct{})
-		lifecycle.slotDeadline = scheduled.place.deadline
 	}
 	lifecycle.inflight++
 	bundle.slotsRunning++
@@ -2506,7 +2504,6 @@ func (bundle *phaseTwoWorkerBundle) exitScheduledRunner(lifecycle *phaseTwoQuery
 	if lifecycle.inflight == 0 {
 		close(lifecycle.idle)
 		lifecycle.idle = nil
-		lifecycle.slotDeadline = time.Time{}
 		// The hung execution has returned: the replica no longer has a
 		// reason to decline its Query Group.
 		for queryGroup, declined := range bundle.declined {
@@ -3682,17 +3679,25 @@ func (bundle *phaseTwoWorkerBundle) outputSinkChanged(state outputSinkState) {
 // the Worker: they are scoped by scopeControlError, keep already-owned Query
 // Groups running and are retried on the next tick. Only invariant violations
 // and cancellation are returned to Run.
-// declineHungExecutions finds the Slots still running past their deadline by
-// executionPastDeadlineGrace - an execution that ignored its cancellation,
-// which only a code bug produces - and lets each one's Query Group go
-// (design 02 section 6.5): the lifecycle is detached so nothing starts on it,
-// its lease is released at once without waiting on the hung Slot, whose
-// later writes the fence refuses, and the Query Group is declined - named
-// on this replica's registration so a leader places it elsewhere and never
-// back here - until the hung execution returns. The grace is the liveness
-// probe's: past the query deadline a Slot has at most its commit boundary
-// left, one output batch with its retries and the State write, which a
-// minute covers.
+// declineHungExecutions finds the executions still running past their own
+// deadline by executionPastDeadlineGrace without having begun to commit - an
+// execution that ignored its cancellation, which only a code bug produces -
+// and lets each one's Query Group go (design 02 section 6.5): the execution
+// is claimed so it writes nothing more, the lifecycle is detached so nothing
+// starts on it, its lease is released at once without waiting on it, and the
+// Query Group is declined - named on this replica's registration so a leader
+// places it elsewhere and never back here - until the hung execution
+// returns.
+//
+// The deadline is the one the execution runs under (DeclineHung): a normal
+// Slot's query deadline, a replay's, retry's or probe's derived from its own
+// arrival - never the frozen Slot's first-attempt deadline, which a replay of
+// a taken-over Slot is minutes past by design. Only the stages before the
+// commit are judged, where past its deadline an execution has only its
+// evaluation left, which the grace (the liveness probe's minute) covers. An
+// execution that has begun to write output is never declined: its State and
+// Progress writes run under their own bounded timeouts, and releasing the
+// lease between them would leave acknowledged output unapplied.
 func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 	type hung struct {
 		queryGroup execution.QueryGroupIdentity
@@ -3708,14 +3713,11 @@ func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
 		if lifecycle.inflight == 0 {
 			continue
 		}
-		// The frozen Slot's own deadline when the Runner has one; the
-		// dispatcher's estimate otherwise. A Slot still being frozen has
-		// neither and is not judged: its reads are bounded by their clients.
-		stage, deadline := lifecycle.runner.InFlight()
-		if deadline.IsZero() {
-			deadline = lifecycle.slotDeadline
-		}
-		if deadline.IsZero() || !now.After(deadline.Add(executionPastDeadlineGrace)) {
+		// An execution with no deadline of its own yet - in its source, or
+		// a recovery before access derived its deadline - is not judged: its
+		// reads are bounded by their clients.
+		stage, deadline, claimed := lifecycle.runner.DeclineHung(now, executionPastDeadlineGrace)
+		if !claimed {
 			continue
 		}
 		entry := &declinedQueryGroup{lifecycle: lifecycle, stage: stage, deadline: deadline, since: now}

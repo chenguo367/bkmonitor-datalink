@@ -2084,7 +2084,9 @@ func (runtime *recordingPhaseTwoQueryGroupRuntime) DueBound() scheduler.RunnerDu
 	return scheduler.RunnerDueBound{}
 }
 
-func (*recordingPhaseTwoQueryGroupRuntime) InFlight() (string, time.Time) { return "", time.Time{} }
+func (*recordingPhaseTwoQueryGroupRuntime) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
 
 func (runtime *recordingPhaseTwoQueryGroupRuntime) MaintainLease(ctx context.Context, interval, ttl time.Duration) error {
 	return runtime.next.MaintainLease(ctx, interval, ttl)

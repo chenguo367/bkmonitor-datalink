@@ -2799,13 +2799,13 @@ func (runtime *productionPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound
 	return runtime.runner.DueBound()
 }
 
-// InFlight is the Runner's: where its Slot in flight has got to, and that
-// Slot's deadline.
-func (runtime *productionPhaseTwoQueryGroup) InFlight() (string, time.Time) {
+// DeclineHung is the Runner's: it judges the execution in flight by the
+// execution's own deadline.
+func (runtime *productionPhaseTwoQueryGroup) DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool) {
 	if runtime == nil || runtime.runner == nil {
-		return "", time.Time{}
+		return "", time.Time{}, false
 	}
-	return runtime.runner.InFlight()
+	return runtime.runner.DeclineHung(now, grace)
 }
 
 func (runtime *productionPhaseTwoQueryGroup) NextDeadline() time.Time {

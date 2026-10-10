@@ -94,11 +94,19 @@ type lifecycleFixture struct {
 	value     float64
 	partial   bool
 	byHostID  bool
+	// intercept, when set, sees each query before it is answered and
+	// answers it itself by returning true: a case that holds a query on a
+	// gate, or fails it, sets it with interceptQueries.
+	intercept func(http.ResponseWriter, *http.Request) bool
 
 	bundle     *phaseTwoWorkerBundle
 	runner     phaseTwoQueryGroupRuntime
 	queryGroup execution.QueryGroupIdentity
 	workerID   string
+	// queryGroups is how many Query Groups a bundle the fixture opens owns
+	// once it is ready; zero is one. runner and queryGroup are the first of
+	// them in identity order.
+	queryGroups int
 
 	observationsMu sync.Mutex
 	observations   []observability.Observation
@@ -199,6 +207,12 @@ func lifecycleHostRecords(topoLink string) map[string]string {
 // answerQuery is the query service: one series per reporting host, at the
 // window's last second, with the fixture's value; partial when the case says.
 func (fixture *lifecycleFixture) answerQuery(writer http.ResponseWriter, request *http.Request) {
+	fixture.mu.Lock()
+	intercept := fixture.intercept
+	fixture.mu.Unlock()
+	if intercept != nil && intercept(writer, request) {
+		return
+	}
 	var payload struct {
 		EndTime string `json:"end_time"`
 	}
@@ -224,6 +238,14 @@ func (fixture *lifecycleFixture) answerQuery(writer http.ResponseWriter, request
 	}
 	_, _ = writer.Write([]byte(`{"series":[` + strings.Join(series, ",") + `],"status":null,"trace_id":"no-data-lifecycle",` +
 		`"is_partial":` + strconv.FormatBool(partial) + `,"result_table_id":["system.cpu"]}`))
+}
+
+// interceptQueries puts intercept in front of the query service from now on;
+// nil takes it away.
+func (fixture *lifecycleFixture) interceptQueries(intercept func(http.ResponseWriter, *http.Request) bool) {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	fixture.intercept = intercept
 }
 
 // serve sets what the query service answers from now on.
@@ -337,19 +359,25 @@ func (fixture *lifecycleFixture) open(workerID string, client *http.Client) {
 	// The Query Group is owned once the Leader has placed it on this Worker
 	// and the Worker holds its lease, which the bundle's own loops do on the
 	// wall clock.
+	want := max(fixture.queryGroups, 1)
 	deadline := time.Now().Add(lifecycleWatchdog)
 	for {
 		bundle.mu.RLock()
 		groups := append([]execution.QueryGroupIdentity(nil), bundle.queryGroups...)
 		bundle.mu.RUnlock()
-		if len(groups) == 1 {
-			if runner := settledRunner(bundle, groups[0]); runner != nil {
-				fixture.queryGroup, fixture.runner = groups[0], runner
+		sort.Slice(groups, func(left, right int) bool { return groups[left] < groups[right] })
+		if len(groups) == want {
+			settled := true
+			for _, group := range groups {
+				settled = settled && settledRunner(bundle, group) != nil
+			}
+			if settled {
+				fixture.queryGroup, fixture.runner = groups[0], settledRunner(bundle, groups[0])
 				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the bundle of %s owns %v after %s, want the one Query Group", workerID, groups, lifecycleWatchdog)
+			t.Fatalf("the bundle of %s owns %v after %s, want %d Query Groups", workerID, groups, lifecycleWatchdog, want)
 		}
 		if err := bundle.refreshAndReconcile(ctx, true); err != nil {
 			t.Fatalf("reconcile the bundle of %s: %v", workerID, err)

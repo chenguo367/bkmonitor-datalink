@@ -520,9 +520,13 @@ func (coordinator *FlightCoordinator) tryAcquireAs(queryGroup execution.QueryGro
 // Runner is bound to one owned Query Group. normal, retry, replay and probe use
 // this same single-flight path and the same frozen Slot contract.
 type Runner struct {
-	// stage is where the Slot in flight has got to: the Runner enters the
-	// source and the execution, the coordinator the phases inside it. Read
-	// from the watchdog's goroutine while the Slot runs.
+	// stage is the execution in flight under this Runner's flight: where it
+	// has got to (the Runner enters the source and the execution, the
+	// coordinator the phases inside it), the deadline it runs under, and
+	// whether it has begun to commit. Cleared when the execution returns, so
+	// a round still waiting for the flight, or a supplement holding it, is
+	// never judged by the last execution's deadline. Read from the
+	// watchdog's goroutine.
 	stage          execution.StageMarker
 	queryGroup     execution.QueryGroupIdentity
 	session        OwnerSession
@@ -720,20 +724,22 @@ func (runner *Runner) NextDeadline() time.Time {
 	return runner.now().Add(time.Duration(bound.IntervalSeconds) * time.Second)
 }
 
-// NextReadyAt reports when the Runner can make its next QG-local attempt.
-// A zero value means there is no active source or execution backoff.
-// InFlight is the stage the Slot in flight last entered - source, execute,
-// or the coordinator's phase inside the execution - and that Slot's
-// deadline, zero while it is still being frozen. Meaningful only while a
-// Slot is in flight; a watchdog that finds one past its deadline names it by
-// this.
-func (runner *Runner) InFlight() (string, time.Time) {
+// DeclineHung claims the execution in flight as hung when it is past its own
+// deadline by more than grace and has not begun to commit
+// (execution.StageMarker.Decline), and returns the stage it is stuck in and
+// the deadline it overran. A claimed execution writes nothing more. An
+// execution with no deadline yet - in the source, or a recovery before access
+// has derived its deadline - is not judged, nor is one inside its commit
+// boundary.
+func (runner *Runner) DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool) {
 	if runner == nil {
-		return "", time.Time{}
+		return "", time.Time{}, false
 	}
-	return runner.stage.Stage(), runner.stage.Deadline()
+	return runner.stage.Decline(now, grace)
 }
 
+// NextReadyAt reports when the Runner can make its next QG-local attempt.
+// A zero value means there is no active source or execution backoff.
 func (runner *Runner) NextReadyAt() time.Time {
 	if runner == nil {
 		return time.Time{}
@@ -857,6 +863,10 @@ func (runner *Runner) runOneTracked(
 		return execution.SlotExecutionResult{}, false, &SlotInFlightError{HeldBy: heldBy}
 	}
 	defer release()
+	// Under the flight, which is what makes the marker this execution's
+	// alone; cleared before the flight is released.
+	runner.stage.Begin(execution.SlotStageSource)
+	defer runner.stage.Clear()
 	ctx = context.WithValue(ctx, rangeFlightContextKey{}, runner.queryGroup)
 
 	// The local backoff decision comes first because it needs nothing from the
@@ -883,7 +893,6 @@ func (runner *Runner) runOneTracked(
 	ctx = withVerifiedOwnership(ctx, runner.queryGroup, confirmedAssignment, confirmedFence)
 	runner.restoreQueryCooldown(ctx, confirmedFence)
 	decision = "source_next"
-	runner.stage.Begin(execution.SlotStageSource, 0)
 	slot, due, facts, err := runner.source.Next(withQueryCooldownHeld(ctx, runner.queryCooldownHolds()), runner.queryGroup)
 	sourceFacts = facts
 	if err != nil {
@@ -976,7 +985,13 @@ func (runner *Runner) runOneTracked(
 	}
 	decision = "execute"
 	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
-	runner.stage.Begin(execution.SlotStageExecute, slot.EarliestQueryDeadlineUnixMilli)
+	runner.stage.Enter(execution.SlotStageExecute)
+	if operation == execution.OperationNormal {
+		// A normal execution runs under its frozen Slot's query deadline.
+		// A replay, retry or probe does not - its budget starts at its
+		// arrival - and has no deadline until access derives that one.
+		runner.stage.Extend(time.UnixMilli(slot.EarliestQueryDeadlineUnixMilli), runner.now())
+	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
 	result, err := runner.executor.Execute(executeCtx, request)

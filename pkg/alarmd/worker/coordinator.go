@@ -1157,6 +1157,13 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 				}
 			}
 		}
+		// Gap marks are written for the output and State that follow them,
+		// and the store takes them by contract, not by owner fence: a
+		// declined execution writing them would be a second writer of the
+		// markers the next holder is writing for the same Slot.
+		if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
+			return err
+		}
 		chunkStarted := time.Now()
 		result, err := coordinator.ports.GapGuard.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: contractRef, Items: chunkItems, Retention: retention})
 		var reason execution.ReasonCode
@@ -1472,7 +1479,6 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			held.settle(acceptedBytes)
 			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
-			execution.MarkStage(ctx, execution.SlotStageOutput)
 			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {
 				if notWritten, partial := outputNotWritten(err); partial {
 					// The sink wrote the batch but for some events it would
@@ -1535,7 +1541,6 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				}
 			}
 			if len(accepted) > 0 {
-				execution.MarkStage(ctx, execution.SlotStageState)
 				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 				if err != nil {
 					coordinator.observeOutputUnapplied(planCtx, request.Operation, accepted, eventsByState, withoutMessageByState, err)
@@ -1702,6 +1707,9 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	completion execution.SlotCompletion,
 	completionCause execution.CompletionAttribution,
 ) (execution.SlotExecutionResult, error) {
+	if err := execution.EnterCommit(ctx, execution.SlotStageProgress); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
 	if request.ExpiredRange != nil {
 		return coordinator.commitExpiredRange(ctx, request, completion)
 	}
@@ -1714,7 +1722,6 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	if err := progressRequest.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid progress commit: %w", err)
 	}
-	execution.MarkStage(ctx, execution.SlotStageProgress)
 	progress, err := coordinator.ports.Progress.CommitProgress(ctx, progressRequest)
 	if err == nil {
 		err = progress.Validate()
@@ -1861,6 +1868,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 ) error {
 	if len(events) == 0 && len(withoutMessage) == 0 {
 		return nil
+	}
+	if err := execution.EnterCommit(ctx, execution.SlotStageOutput); err != nil {
+		return err
 	}
 	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{StrategyID: plan.StrategyID, BusinessID: plan.BusinessID})
 	// The sink's own count of what it handed the broker, for the line: a
@@ -2216,6 +2226,9 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	mutations []execution.StateMutation,
 	encodedBytes []admittedState,
 ) (map[execution.StateKeyIdentity]execution.ReasonCode, error) {
+	if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	fenced, ok := coordinator.ports.State.(execution.FencedStateStore)
 	useFence := ok && fence.Validate(contractRef) == nil

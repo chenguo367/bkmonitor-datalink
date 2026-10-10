@@ -527,7 +527,7 @@ Marks left by an attempt that wrote state and then could not write its Slot down
 
 Labels: `outcome`
 
-Executions found running past their Slot deadline by a minute - ignoring their cancellation, which only a call without a deadline or a deadlock does - by what followed. declined: the replica let the Query Group's lease go at once, the hung execution still running (its later writes are refused by the fence), and named the Query Group on its registration so a leader places it on another worker and not back here. returned_after_decline: the hung execution returned at last and the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a Query Group every worker declines is the leader round's declined_everywhere. Both series exist from startup.
+Executions found running a minute past their own deadline before writing any output - ignoring their cancellation, which only a call without a deadline or a deadlock does - by what followed. Their own deadline is a normal Slot's query deadline, or a replay's, retry's or probe's counted from its own arrival, never its frozen Slot's first attempt's; an execution writing its gap marks, output, State or Progress is never counted. declined: the replica let the Query Group's lease go at once, the hung execution still running and writing nothing more, and named the Query Group on its registration so a leader places it on another worker and not back here. returned_after_decline: the hung execution returned at last and the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a Query Group every worker declines is the leader round's declined_everywhere. Both series exist from startup.
 
 ## bkmonitor_alarmd_executions_past_deadline
 

@@ -66,9 +66,11 @@ const (
 var ExecutionHungOutcomes = []string{ExecutionHungDeclined, ExecutionHungReturned}
 
 // ExecutionHungFacts is one execution that ignored its deadline and its
-// cancellation (design 02 section 6.5): the stage it last entered - which
-// points at the call that did not return - its deadline and how far past it,
-// and on return how long its Query Group was declined.
+// cancellation before it began to commit (design 02 section 6.5): the stage
+// it last entered - execute, query or evaluate, which points at the call that
+// did not return - the deadline it ran under (its own: a normal Slot's query
+// deadline, a recovery's counted from its arrival) and how far past it, and
+// on return how long its Query Group was declined.
 type ExecutionHungFacts struct {
 	Outcome           string `json:"outcome"`
 	Stage             string `json:"stage,omitempty"`

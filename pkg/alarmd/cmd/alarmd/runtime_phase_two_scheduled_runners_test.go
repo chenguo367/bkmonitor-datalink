@@ -122,7 +122,9 @@ func (runner walkRunner) NextReadyAt() time.Time { return runner.readyAt }
 func (runner walkRunner) DueBound() scheduler.RunnerDueBound { return runner.bound }
 func (runner walkRunner) NextDeadline() time.Time            { return time.Time{} }
 
-func (walkRunner) InFlight() (string, time.Time) { return "", time.Time{} }
+func (walkRunner) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
 
 func (walkRunner) MaintainLease(context.Context, time.Duration, time.Duration) error { return nil }
 

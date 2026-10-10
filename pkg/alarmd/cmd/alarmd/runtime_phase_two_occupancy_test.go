@@ -35,7 +35,9 @@ func (r occupancyRunner) NextReadyAt() time.Time { return time.Time{} }
 
 func (r occupancyRunner) DueBound() scheduler.RunnerDueBound { return scheduler.RunnerDueBound{} }
 func (r occupancyRunner) NextDeadline() time.Time            { return time.Time{} }
-func (occupancyRunner) InFlight() (string, time.Time)        { return "", time.Time{} }
+func (occupancyRunner) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
 
 func (r occupancyRunner) MaintainLease(context.Context, time.Duration, time.Duration) error {
 	return nil

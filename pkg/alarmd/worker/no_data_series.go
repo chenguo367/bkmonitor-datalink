@@ -441,6 +441,9 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	if err != nil {
 		return err
 	}
+	if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
+		return err
+	}
 	result, err := coordinator.ports.NoData.ApplyNoData(ctx, execution.NoDataApplyRequest{
 		Contract: request.Contract, Items: mutations, Retention: retention,
 	})

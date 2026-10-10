@@ -66,6 +66,20 @@ type followsSink struct {
 	attempted []contract.TriggerEventV1
 	written   []contract.TriggerEventV1
 	closed    bool
+	// gate, when set, keeps WriteBatch from going on until it is closed,
+	// after saying so on entered: a case that needs a Slot held inside its
+	// output write sets both with holdWrites. The hold does not watch the
+	// write's context, as an acknowledgement already on its way does not.
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+// holdWrites holds every WriteBatch from now on until gate is closed,
+// telling entered (without blocking) each time one is held.
+func (sink *followsSink) holdWrites(gate, entered chan struct{}) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.gate, sink.entered = gate, entered
 }
 
 const (
@@ -93,6 +107,19 @@ func (sink *followsSink) setMode(mode string) {
 }
 
 func (sink *followsSink) WriteBatch(_ context.Context, events []contract.TriggerEventV1) error {
+	sink.mu.Lock()
+	gate, entered := sink.gate, sink.entered
+	sink.mu.Unlock()
+	if gate != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-gate:
+		case <-time.After(lifecycleWatchdog):
+		}
+	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	sink.attempted = append(sink.attempted, events...)
