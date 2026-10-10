@@ -398,6 +398,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
 	}
+	execution.MarkStage(ctx, execution.SlotStageQuery)
 	completion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
 	if err != nil {
 		if isReadinessDeferred(err) {
@@ -1156,6 +1157,13 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 				}
 			}
 		}
+		// Gap marks are written for the output and State that follow them,
+		// and the store takes them by contract, not by owner fence: a
+		// declined execution writing them would be a second writer of the
+		// markers the next holder is writing for the same Slot.
+		if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
+			return err
+		}
 		chunkStarted := time.Now()
 		result, err := coordinator.ports.GapGuard.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: contractRef, Items: chunkItems, Retention: retention})
 		var reason execution.ReasonCode
@@ -1699,6 +1707,9 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	completion execution.SlotCompletion,
 	completionCause execution.CompletionAttribution,
 ) (execution.SlotExecutionResult, error) {
+	if err := execution.EnterCommit(ctx, execution.SlotStageProgress); err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
 	if request.ExpiredRange != nil {
 		return coordinator.commitExpiredRange(ctx, request, completion)
 	}
@@ -1857,6 +1868,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 ) error {
 	if len(events) == 0 && len(withoutMessage) == 0 {
 		return nil
+	}
+	if err := execution.EnterCommit(ctx, execution.SlotStageOutput); err != nil {
+		return err
 	}
 	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{StrategyID: plan.StrategyID, BusinessID: plan.BusinessID})
 	// The sink's own count of what it handed the broker, for the line: a
@@ -2212,6 +2226,9 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	mutations []execution.StateMutation,
 	encodedBytes []admittedState,
 ) (map[execution.StateKeyIdentity]execution.ReasonCode, error) {
+	if err := execution.EnterCommit(ctx, execution.SlotStageState); err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	fenced, ok := coordinator.ports.State.(execution.FencedStateStore)
 	useFence := ok && fence.Validate(contractRef) == nil

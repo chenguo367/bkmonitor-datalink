@@ -1879,6 +1879,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
+		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
 		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
 		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}
@@ -1908,6 +1909,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		PublishedMoves:    len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 		Replaced: settlement.Replaced, Deferred: settlement.Deferred, Unplaceable: settlement.Unplaceable,
+		DeclinedEverywhere: settlement.DeclinedEverywhere, DeclinedEverywhereSample: declinedEverywhereSamples(settlement),
 	}
 	if len(plan.Moves) > 0 {
 		// The pair the round chose, from the round's own first move rather
@@ -2797,6 +2799,15 @@ func (runtime *productionPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound
 	return runtime.runner.DueBound()
 }
 
+// DeclineHung is the Runner's: it judges the execution in flight by the
+// execution's own deadline.
+func (runtime *productionPhaseTwoQueryGroup) DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool) {
+	if runtime == nil || runtime.runner == nil {
+		return "", time.Time{}, false
+	}
+	return runtime.runner.DeclineHung(now, grace)
+}
+
 func (runtime *productionPhaseTwoQueryGroup) NextDeadline() time.Time {
 	if runtime == nil || runtime.runner == nil {
 		return time.Time{}
@@ -3051,4 +3062,22 @@ func (runtime *productionPhaseTwoOwnership) ReleaseControlLeader(ctx context.Con
 		return nil
 	}
 	return err
+}
+
+// declinedEverywhereSamples is the round's declined-everywhere sample in the
+// shape the round's line and the fleet snapshot carry: each decliner as
+// worker:stage.
+func declinedEverywhereSamples(settlement scheduler.RoundSettlement) []observability.DeclinedEverywhereSample {
+	if len(settlement.DeclinedEverywhereSample) == 0 {
+		return nil
+	}
+	samples := make([]observability.DeclinedEverywhereSample, 0, len(settlement.DeclinedEverywhereSample))
+	for _, declined := range settlement.DeclinedEverywhereSample {
+		sample := observability.DeclinedEverywhereSample{QueryGroup: declined.QueryGroup, Hops: declined.Hops}
+		for _, stage := range declined.Stages {
+			sample.Stages = append(sample.Stages, stage.Worker+":"+stage.Stage)
+		}
+		samples = append(samples, sample)
+	}
+	return samples
 }

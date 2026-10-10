@@ -23,6 +23,7 @@ type handoverMetrics struct {
 	drains          *prometheus.CounterVec
 	drainSeconds    prometheus.Histogram
 	outputUnapplied *prometheus.CounterVec
+	executionsHung  *prometheus.CounterVec
 }
 
 // The waits are a Slot's commit boundary at the short end and a lease's
@@ -58,6 +59,23 @@ func newHandoverMetrics() handoverMetrics {
 				"the store. ownership_refusals_total{site=\"state_apply\"} counts every refused State write, with or " +
 				"without events before it; this is the subset that sent something. Every refusal has a series at startup.",
 		}, []string{"refusal"}),
+		executionsHung: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "executions_hung_total",
+			Help: "Executions found running a minute past their own deadline before writing any output - ignoring " +
+				"their cancellation, which only a call without a deadline or a deadlock does - by what followed. " +
+				"Their own deadline is a normal Slot's query deadline, or a replay's, retry's or probe's counted " +
+				"from its own arrival, never its frozen Slot's first attempt's; an execution writing its gap marks, " +
+				"output, State or Progress is never counted. declined: the replica let the Query Group's lease go " +
+				"at once, the hung execution still running and writing nothing more, and named the Query Group on " +
+				"its registration so a leader places it on another worker and not back here. " +
+				"returned_after_decline: the hung execution returned at last and " +
+				"the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a " +
+				"Query Group every worker declines is the leader round's declined_everywhere. Both series exist " +
+				"from startup.",
+		}, []string{"outcome"}),
+	}
+	for _, outcome := range observability.ExecutionHungOutcomes {
+		metrics.executionsHung.WithLabelValues(outcome)
 	}
 	for _, outcome := range handoverDrainOutcomes() {
 		metrics.drains.WithLabelValues(outcome)
@@ -81,7 +99,7 @@ func handoverDrainOutcomes() []string {
 }
 
 func (m handoverMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied}
+	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied, m.executionsHung}
 }
 
 // RecordHandoverDrain counts one planned handover's wait for its Slot.
@@ -91,4 +109,12 @@ func (r *Recorder) RecordHandoverDrain(outcome string, wait time.Duration) {
 	}
 	r.phaseTwo.handover.drains.WithLabelValues(outcome).Inc()
 	r.phaseTwo.handover.drainSeconds.Observe(wait.Seconds())
+}
+
+// RecordExecutionHung counts one hung execution declined or returned.
+func (r *Recorder) RecordExecutionHung(outcome string) {
+	if r == nil || !knownLabel(observability.ExecutionHungOutcomes, outcome) {
+		return
+	}
+	r.phaseTwo.handover.executionsHung.WithLabelValues(outcome).Inc()
 }

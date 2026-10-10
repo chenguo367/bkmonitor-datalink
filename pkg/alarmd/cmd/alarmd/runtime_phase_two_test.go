@@ -2593,6 +2593,10 @@ func (runner *callbackPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound {
 	return runner.dueBound()
 }
 
+func (*callbackPhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
+
 func (*callbackPhaseTwoQueryGroup) MaintainLease(ctx context.Context, _, _ time.Duration) error {
 	<-ctx.Done()
 	return ctx.Err()
@@ -3056,3 +3060,7 @@ func waitPhaseTwoCondition(t *testing.T, timeout time.Duration, name string, con
 // property each one guards - the event comes at all while the test holds
 // the rest still - is the same at ten seconds.
 const eventWatchdog = 10 * time.Second
+
+func (*fakePhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}

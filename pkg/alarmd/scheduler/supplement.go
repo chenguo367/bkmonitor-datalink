@@ -208,6 +208,10 @@ func (runner *Runner) Supplement(
 		ExpectedNextSlot: slot.ExpectedNextSlot, ContentScope: slot.Dispatch.ContentScope, Supplement: &scope,
 	}
 	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
+	// Not on the Runner's stage marker: a supplement is not a scheduled
+	// execution the watchdog watches, and its frozen Slot's deadline - long
+	// past, since it supplements a Slot already completed - is not a deadline
+	// it runs under. The marker stays clear while it holds the flight.
 	result, err := runner.executor.Execute(execution.ContextWithLeaseAuthority(ctx, runner.session), request)
 	if err != nil {
 		return execution.SupplementFacts{}, err

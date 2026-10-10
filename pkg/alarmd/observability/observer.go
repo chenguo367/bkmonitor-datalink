@@ -1424,6 +1424,12 @@ type RebalanceFacts struct {
 	Replaced    int `json:"replaced"`
 	Deferred    int `json:"replacements_deferred"`
 	Unplaceable int `json:"unplaceable"`
+	// DeclinedEverywhere is the part of Unplaceable whose every eligible
+	// worker declines it - an execution of it hung on each in turn, the
+	// Query Group's own bug (design 02 section 6.5) - and the first few by
+	// name, with how many workers declined each and the stage each hung in.
+	DeclinedEverywhere       int                        `json:"declined_everywhere"`
+	DeclinedEverywhereSample []DeclinedEverywhereSample `json:"declined_everywhere_sample,omitempty"`
 	// Bytes is the same round's byte-constraint planning (decision-020
 	// section 5.7), which runs before the count correction above.
 	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`
@@ -2431,6 +2437,9 @@ type Observation struct {
 	// SlotDrain is one wait for in-flight Slots: a handover's, on
 	// handover_drained, or a stop's, on the shutdown line.
 	SlotDrain *SlotDrainFacts
+	// ExecutionHung is one execution past its deadline and grace declined,
+	// or returning, on execution_hung.
+	ExecutionHung *ExecutionHungFacts
 	// AwaitingView says a round the executable view refused was refused only
 	// because the view has not carried its Query Group yet while the Worker
 	// already holds its lease: the record arrives by renewal and the view by
@@ -3452,7 +3461,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentRuntime, StageAuthStore},
 	{ComponentScheduler, StageQueryCooldown}, {ComponentScheduler, StageRunnerReturned}, {ComponentScheduler, StageDispatcherSnapshot}, {ComponentScheduler, StageQueryPermitWait},
 	{ComponentScheduler, StageExpiredRangeReturned},
-	{ComponentScheduler, StageDispatchTurnaway},
+	{ComponentScheduler, StageDispatchTurnaway}, {ComponentScheduler, StageExecutionHung},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
 	{ComponentScheduler, StageReplayTakeover},

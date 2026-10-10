@@ -226,6 +226,10 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	}
 	recoveryDeadline, budgetErr := deriveRecoveryQueryDeadline(request, frozen, recoveryStartedAt)
 	source.observeQueryTiming(ctx, request, frozen, prepared, recoveryStartedAt, recoveryDeadline)
+	// The deadline this recovery runs under, from here on: its channel wait
+	// and its queries are bounded by it, not by the frozen Slot's first
+	// attempt's, which is minutes gone for a replay of a taken-over Slot.
+	execution.ExtendDeadline(ctx, recoveryDeadline, recoveryStartedAt)
 	if budgetErr != nil || (!recoveryDeadline.IsZero() && !recoveryDeadline.After(source.now())) {
 		if err := consumer.Begin(ctx, prepared.Header); err != nil {
 			return execution.QueryExecutionCompletion{}, err
@@ -380,6 +384,10 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		}
 		kept := source.config.Lookback.Begin(lookbackQuery(ctx, request, query.Spec, attempt.AttemptNo, query.ReadyAtUnixMilli,
 			queryIndex != firstRead))
+		// Each query raises the execution's deadline to its own as it
+		// starts, so a later query is judged by its deadline and not by an
+		// earlier one's that has passed.
+		execution.ExtendDeadline(ctx, queryDeadline, source.now())
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()

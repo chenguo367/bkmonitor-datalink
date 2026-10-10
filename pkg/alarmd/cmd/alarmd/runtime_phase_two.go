@@ -536,6 +536,15 @@ type phaseTwoQueryGroupLifecycle struct {
 	idle     chan struct{}
 }
 
+// declinedQueryGroup is a Query Group this replica will not run while the
+// execution of it that hung here has not returned (design 02 section 6.5).
+type declinedQueryGroup struct {
+	lifecycle *phaseTwoQueryGroupLifecycle
+	stage     string
+	deadline  time.Time
+	since     time.Time
+}
+
 type phaseTwoQueryGroupRuntime interface {
 	RunOne(context.Context) (execution.SlotExecutionResult, bool, error)
 	RunOneAdmitted(context.Context, scheduler.ExecutionAdmission) (execution.SlotExecutionResult, bool, bool, error)
@@ -554,6 +563,16 @@ type phaseTwoQueryGroupRuntime interface {
 	NextDeadline() time.Time
 	MaintainLease(context.Context, time.Duration, time.Duration) error
 	Release(context.Context) error
+	// DeclineHung claims the execution in flight as hung when it is past
+	// its own deadline by more than grace and has not begun to commit, and
+	// returns the stage it is stuck in (execution.SlotStages) and the
+	// deadline it overran; a claimed execution writes nothing more. The
+	// deadline is the execution's own, set as it runs - a normal Slot's
+	// query deadline, a recovery's from its arrival - and is the only one
+	// the watchdog judges by: the dispatcher's deadline is the frozen Slot's
+	// first attempt's, minutes gone for a replay. Required, like
+	// NextDeadline.
+	DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool)
 }
 
 type phaseTwoWorkerBundleDependencies struct {
@@ -727,6 +746,11 @@ type phaseTwoWorkerBundle struct {
 	handoverDrain      observability.SlotDrainFacts
 	shutdownDrainFacts *observability.SlotDrainFacts
 	slotsRunning       int
+	// declined is the Query Groups whose execution hung here past its
+	// deadline and grace; under mu. Each holds one execution slot until its
+	// execution returns, when it is lifted, so it never has more entries
+	// than the dispatcher has slots.
+	declined map[execution.QueryGroupIdentity]*declinedQueryGroup
 	// dependencyDegraded is set while a control or Ownership Store call fails
 	// transiently. dependencyFailureSeq counts those failures so a reconcile
 	// pass only clears the flag when no new failure happened during the pass.
@@ -2473,12 +2497,26 @@ func (bundle *phaseTwoWorkerBundle) enterScheduledRunner(scheduled phaseTwoSched
 
 func (bundle *phaseTwoWorkerBundle) exitScheduledRunner(lifecycle *phaseTwoQueryGroupLifecycle) {
 	bundle.mu.Lock()
-	defer bundle.mu.Unlock()
 	lifecycle.inflight--
 	bundle.slotsRunning--
+	var lifted execution.QueryGroupIdentity
+	var entry *declinedQueryGroup
 	if lifecycle.inflight == 0 {
 		close(lifecycle.idle)
 		lifecycle.idle = nil
+		// The hung execution has returned: the replica no longer has a
+		// reason to decline its Query Group.
+		for queryGroup, declined := range bundle.declined {
+			if declined.lifecycle == lifecycle {
+				lifted, entry = queryGroup, declined
+				delete(bundle.declined, queryGroup)
+				break
+			}
+		}
+	}
+	bundle.mu.Unlock()
+	if entry != nil {
+		bundle.recordHungExecution(lifted, entry, observability.ExecutionHungReturned, nil)
 	}
 }
 
@@ -2710,6 +2748,7 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 	if err != nil {
 		return err
 	}
+	registration.Declined = bundle.declinedRegistration()
 	if err := bundle.dependencies.Ownership.RegisterWorker(ctx, registration); err != nil {
 		return fmt.Errorf("phase-two register worker as %s: %w", readiness, err)
 	}
@@ -3075,7 +3114,11 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 	bundle.setOwnedQueryGroupsLocked()
 	missing := make([]execution.QueryGroupIdentity, 0, len(desired))
 	for queryGroup := range desired {
-		if _, open := bundle.runners[queryGroup]; !open {
+		_, open := bundle.runners[queryGroup]
+		// A declined Query Group stays desired until a leader places it
+		// elsewhere; it is not opened here again while its execution hangs.
+		_, declined := bundle.declined[queryGroup]
+		if !open && !declined {
 			missing = append(missing, queryGroup)
 		}
 	}
@@ -3547,14 +3590,23 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	// A replica that has not yet read its Assignment holds none, which is not
 	// the same as having been assigned none: startup that could not read it
 	// waits for the tick that does, not ready meanwhile.
-	assignmentReady := bundle.assignmentRead && !bundle.draining && !bundle.closed && len(bundle.runners) == len(bundle.assigned)
+	// A declined Query Group still assigned here counts as accounted for: it
+	// is let go on purpose and waits for a leader to place it elsewhere, and
+	// reporting the replica not ready for it would move all the others too.
+	assignmentReady := bundle.assignmentRead && !bundle.draining && !bundle.closed
 	if assignmentReady {
+		open := 0
 		for queryGroup := range bundle.assigned {
-			if _, open := bundle.runners[queryGroup]; !open {
+			if _, running := bundle.runners[queryGroup]; running {
+				open++
+				continue
+			}
+			if _, declined := bundle.declined[queryGroup]; !declined {
 				assignmentReady = false
 				break
 			}
 		}
+		assignmentReady = assignmentReady && open == len(bundle.runners)
 	}
 	controlDegraded := bundle.controlDegraded
 	controlReason := bundle.controlReason
@@ -3627,7 +3679,130 @@ func (bundle *phaseTwoWorkerBundle) outputSinkChanged(state outputSinkState) {
 // the Worker: they are scoped by scopeControlError, keep already-owned Query
 // Groups running and are retried on the next tick. Only invariant violations
 // and cancellation are returned to Run.
+// declineHungExecutions finds the executions still running past their own
+// deadline by executionPastDeadlineGrace without having begun to commit - an
+// execution that ignored its cancellation, which only a code bug produces -
+// and lets each one's Query Group go (design 02 section 6.5): the execution
+// is claimed so it writes nothing more, the lifecycle is detached so nothing
+// starts on it, its lease is released at once without waiting on it, and the
+// Query Group is declined - named on this replica's registration so a leader
+// places it elsewhere and never back here - until the hung execution
+// returns.
+//
+// The deadline is the one the execution runs under (DeclineHung): a normal
+// Slot's query deadline, a replay's, retry's or probe's derived from its own
+// arrival - never the frozen Slot's first-attempt deadline, which a replay of
+// a taken-over Slot is minutes past by design. Only the stages before the
+// commit are judged, where past its deadline an execution has only its
+// evaluation left, which the grace (the liveness probe's minute) covers. An
+// execution that has begun to write output is never declined: its State and
+// Progress writes run under their own bounded timeouts, and releasing the
+// lease between them would leave acknowledged output unapplied.
+func (bundle *phaseTwoWorkerBundle) declineHungExecutions(now time.Time) {
+	type hung struct {
+		queryGroup execution.QueryGroupIdentity
+		entry      *declinedQueryGroup
+	}
+	var found []hung
+	bundle.mu.Lock()
+	if bundle.draining || bundle.closed {
+		bundle.mu.Unlock()
+		return
+	}
+	for queryGroup, lifecycle := range bundle.runners {
+		if lifecycle.inflight == 0 {
+			continue
+		}
+		// An execution with no deadline of its own yet - in its source, or
+		// a recovery before access derived its deadline - is not judged: its
+		// reads are bounded by their clients.
+		stage, deadline, claimed := lifecycle.runner.DeclineHung(now, executionPastDeadlineGrace)
+		if !claimed {
+			continue
+		}
+		entry := &declinedQueryGroup{lifecycle: lifecycle, stage: stage, deadline: deadline, since: now}
+		bundle.removeRunnerLocked(queryGroup)
+		if bundle.declined == nil {
+			bundle.declined = make(map[execution.QueryGroupIdentity]*declinedQueryGroup)
+		}
+		bundle.declined[queryGroup] = entry
+		bundle.maintenanceWG.Add(1)
+		found = append(found, hung{queryGroup, entry})
+	}
+	bundle.mu.Unlock()
+	for _, hung := range found {
+		go bundle.declineQueryGroup(hung.queryGroup, hung.entry)
+	}
+}
+
+// declineQueryGroup lets go of a Query Group whose execution is hung here:
+// renewal stops, the lease is released without waiting on the Slot, and the
+// registration is written at once so the leader learns of the decline on its
+// next round rather than at the next renewal.
+func (bundle *phaseTwoWorkerBundle) declineQueryGroup(queryGroup execution.QueryGroupIdentity, entry *declinedQueryGroup) {
+	defer bundle.maintenanceWG.Done()
+	bound := bundle.dependencies.Config.ShutdownTimeout.Duration()
+	lifecycle := entry.lifecycle
+	lifecycle.cancel()
+	select {
+	case <-lifecycle.done:
+	case <-time.After(bound):
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	releaseErr := lifecycle.runner.Release(ctx)
+	bundle.recordHungExecution(queryGroup, entry, observability.ExecutionHungDeclined, releaseErr)
+	if err := bundle.register(ctx, ownership.WorkerReady); err != nil {
+		bundle.markControlDependencyDegraded()
+	}
+	bundle.updateReadiness()
+}
+
+// recordHungExecution counts one hung execution's decline or return and
+// writes its line: which Query Group, the stage it is stuck in, how far past
+// its deadline, and on return how long it was hung.
+func (bundle *phaseTwoWorkerBundle) recordHungExecution(
+	queryGroup execution.QueryGroupIdentity,
+	entry *declinedQueryGroup,
+	outcome string,
+	err error,
+) {
+	now := bundle.dependencies.Now()
+	facts := observability.ExecutionHungFacts{Outcome: outcome, Stage: entry.stage,
+		DeadlineUnixMilli: entry.deadline.UnixMilli(), PastDeadlineMS: now.Sub(entry.deadline).Milliseconds()}
+	if outcome == observability.ExecutionHungReturned {
+		facts.HungMS = now.Sub(entry.since).Milliseconds()
+	}
+	bundle.dependencies.Recorder.RecordExecutionHung(outcome)
+	result := observability.Result(observability.ResultFailed)
+	if outcome == observability.ExecutionHungReturned {
+		result = observability.ResultSuccess
+	}
+	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageExecutionHung,
+		Result: result, Direction: observability.DirectionInternal, ExecutionHung: &facts, Err: err,
+		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
+	})
+}
+
+// declinedRegistration is the declined set as the registration names it,
+// in Query Group order.
+func (bundle *phaseTwoWorkerBundle) declinedRegistration() []ownership.DeclinedQueryGroup {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	if len(bundle.declined) == 0 {
+		return nil
+	}
+	declined := make([]ownership.DeclinedQueryGroup, 0, len(bundle.declined))
+	for queryGroup, entry := range bundle.declined {
+		declined = append(declined, ownership.DeclinedQueryGroup{QueryGroup: string(queryGroup), Stage: entry.stage})
+	}
+	sort.Slice(declined, func(left, right int) bool { return declined[left].QueryGroup < declined[right].QueryGroup })
+	return declined
+}
+
 func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, refresh bool) error {
+	bundle.declineHungExecutions(bundle.dependencies.Now())
 	failureSeq := bundle.controlDependencyFailureSeq()
 	var queryGroups []execution.QueryGroupIdentity
 	var err error

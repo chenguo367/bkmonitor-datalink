@@ -2099,6 +2099,11 @@ type RebalanceFacts struct {
 	Replaced    int `json:"replaced,omitempty"`
 	Deferred    int `json:"replacements_deferred,omitempty"`
 	Unplaceable int `json:"unplaceable,omitempty"`
+	// DeclinedEverywhere is the part of Unplaceable whose every eligible
+	// worker declines it (an execution of it hung on each in turn), and the
+	// first few by name with their hops and each decliner's hang stage.
+	DeclinedEverywhere       int                                      `json:"declined_everywhere,omitempty"`
+	DeclinedEverywhereSample []observability.DeclinedEverywhereSample `json:"declined_everywhere_sample,omitempty"`
 	// Bytes is the same round's byte-constraint planning (decision-020
 	// section 5.7): each judged Worker's sum of its Query Groups' per-Slot
 	// retained-byte peaks, who was over the share, and what moved for it.
