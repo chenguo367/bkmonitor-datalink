@@ -994,6 +994,10 @@ func (runner *Runner) runOneTracked(
 	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
+	decidesPool := runner.queryCooldownLetsRun()
+	if decidesPool {
+		executeCtx = execution.WithNormalQueryBudget(executeCtx)
+	}
 	result, err := runner.executor.Execute(executeCtx, request)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
@@ -1020,7 +1024,7 @@ func (runner *Runner) runOneTracked(
 	if err == nil {
 		runner.nextDeadline = time.Time{}
 		runner.recordResult(slot, result, runner.now())
-		runner.recordQueryAvailability(ctx, slot, result, sourceFacts.IntervalSeconds)
+		runner.recordQueryAvailability(ctx, slot, operation, result, sourceFacts.IntervalSeconds, decidesPool)
 	}
 	decision = "execution_returned"
 	return result, true, err

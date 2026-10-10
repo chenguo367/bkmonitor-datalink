@@ -253,6 +253,9 @@ type PhysicalQueryCompletion struct {
 	// the request's facts, from the spec that was sent. Nil from a source
 	// that does not name it.
 	Range *PhysicalQueryRange `json:",omitempty"`
+	// Clock is what the query had of its time from the moment it was sent
+	// and what it used. Nil from a source that does not measure it.
+	Clock *PhysicalQueryClock `json:",omitempty"`
 }
 
 // PhysicalQueryRange is a physical query's asked and accepted range lengths

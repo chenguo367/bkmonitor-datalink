@@ -1669,6 +1669,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
 		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
+		result.PrimaryQueryClock = query.clock
 	}
 	return result, err
 }

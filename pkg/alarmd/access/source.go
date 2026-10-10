@@ -353,6 +353,17 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
 			budgetStart = recoveryStartedAt.UnixMilli()
+			// An execution the query cooldown pool let run decides whether
+			// the Query Group leaves it, so it gets what a normal round of
+			// this Slot has: from its arrival, the span from the query's
+			// readiness to its deadline as prepare plans both for the normal
+			// round. Not the whole interval a catch-up gets.
+			if execution.NormalQueryBudget(ctx) {
+				normal := recoveryStartedAt.Add(time.Duration(query.DeadlineUnixMilli-query.ReadyAtUnixMilli) * time.Millisecond)
+				if normal.Before(queryDeadline) {
+					queryDeadline = normal
+				}
+			}
 		}
 		permit, err := permits.AcquireQueryPermit(queryCtx, request.Contract.Slot, request.Operation, queryDeadline)
 		if err != nil {
@@ -397,7 +408,10 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
 				lookback: kept}
 			adapters[index] = adapter
+			sent := source.now()
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
+			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: attempt.DeadlineUnixMilli - sent.UnixMilli(),
+				ElapsedMillis: source.now().Sub(sent).Milliseconds()}
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {
@@ -441,6 +455,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			continue
 		}
 		completion = appendQueryCompletion(completion, query, result.completion, request.AttemptNo)
+		completion.PhysicalQueries[len(completion.PhysicalQueries)-1].Clock = result.clock
 	}
 	completion.AllRequiredCompleted = true
 	return completion, nil
@@ -494,6 +509,8 @@ type physicalQueryResult struct {
 	completion      execution.ProviderCompletion
 	invalid         bool
 	budgetExhausted bool
+	// clock is what the query had from its send and what it used.
+	clock *execution.PhysicalQueryClock
 }
 
 // queryPermitDeadlineError names a normal-operation permit wait that ended at
