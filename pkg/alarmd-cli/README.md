@@ -14,8 +14,8 @@ shell。二者也支持 `-`，且不能与参数 JSON 同时消费 stdin。`--in
 保持兼容，与 `--params-file` 互斥。
 
 调用前读取 describe 的权限、请求字节上限和 `execution_timeout_ms`，请求期限为
-操作期限加 5 秒传输余量；旧服务端未声明期限时保留 30 秒。每次执行只发送一次
-invoke，执行权限请求遇到超时或会话失效时由用户检查已有回执后明确重试。结果沿用
+操作期限加 `request_limits` 声明的 admission 与传输余量；未声明余量时用 5 秒，旧服务端未声明期限时保留 30 秒。每次执行只发送一次
+invoke，执行请求遇到超时、断连或损坏回执时返回 `remote_state_unknown`，并保存带请求摘要和目标的脱敏结果文件；用户先检查已有执行事实再明确重试。结果沿用
 脱敏、原子写入的私有 `meta.result_file`，保留服务端返回的目标和远端执行状态。
 
 面向运维取证的独立 Go 客户端。服务端负责操作目录、输入合同、预算和证据判定；客户端只处理环境登录、通道调用、凭据与输出。没有内置业务 operation，也不访问 K8s、Redis 或任意内部 URL。
@@ -203,7 +203,7 @@ HTTPS 默认使用系统信任库。私有 CA 可通过 `auth login --ca-cert /a
 
 凭据位于平台用户配置目录下的 `alarmd-cli/profiles.json`；`ALARMD_CLI_CONFIG_DIR` 可指定独立目录。目录权限 0700、凭据/锁/结果文件 0600。响应在 `results/` 下保留，客户端不自动删除证据。勿把凭据配置目录上传到工单或公开仓库。
 
-固定边界：invoke 网络期限取 describe 的操作期限加 5 秒，旧服务端为 30 秒；服务端响应最大 8 MiB，超限拒绝解码；输入文件最大 1 MiB，并落实 describe 的请求和 stdin 上限；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
+固定边界：invoke 网络期限取 describe 的操作期限、admission 期限和传输余量之和，旧服务端为 30 秒；服务端响应最大 8 MiB，超限拒绝解码；输入文件最大 1 MiB，并落实 describe 的请求和 stdin 上限；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
 
 ## 构建与验证
 

@@ -31,6 +31,12 @@ const sessionScope = "deployment_ops_readonly"
 const execScope = "deployment_ops_exec"
 const maxResponse = 8 << 20
 
+// requestNotSent marks failures that happen before the channel can receive
+// an invocation. All other transport or response failures leave exec unknown.
+type requestNotSent struct{ error }
+
+func notSent(message string) error { return &requestNotSent{errors.New(message)} }
+
 func validScope(scope string) bool { return scope == sessionScope || scope == execScope }
 func allowsScope(granted, required string) bool {
 	return validScope(granted) && (granted == required || (granted == execScope && required == sessionScope))
@@ -128,7 +134,7 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 	client, u, release, err := a.environmentClient(p)
 	defer release()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, &requestNotSent{err}
 	}
 	client.Timeout = timeout
 	u.Path += endpoint
@@ -136,12 +142,12 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 	if body != nil {
 		payload, err = json.Marshal(body)
 		if err != nil {
-			return nil, 0, errors.New("cannot encode request")
+			return nil, 0, notSent("cannot encode request")
 		}
 	}
 	req, err := http.NewRequest(method, u.String(), bytes.NewReader(payload))
 	if err != nil {
-		return nil, 0, errors.New("cannot construct request")
+		return nil, 0, notSent("cannot construct request")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -160,15 +166,15 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 		var timeout net.Error
 		switch {
 		case errors.As(err, &dns):
-			return nil, 0, errors.New("DNS resolution failed; check the deployment hostname and DNS access")
+			return nil, 0, notSent("DNS resolution failed; check the deployment hostname and DNS access")
 		case errors.Is(err, syscall.ECONNREFUSED):
-			return nil, 0, errors.New("connection refused; check the deployment address, port and listener")
+			return nil, 0, notSent("connection refused; check the deployment address, port and listener")
 		case errors.As(err, &hostname):
-			return nil, 0, errors.New("TLS certificate hostname mismatch; check the entry URL or log in with --insecure-tls for this environment")
+			return nil, 0, notSent("TLS certificate hostname mismatch; check the entry URL or log in with --insecure-tls for this environment")
 		case errors.As(err, &authority):
-			return nil, 0, errors.New("TLS certificate is not trusted; log in with --ca-cert or --insecure-tls for this environment")
+			return nil, 0, notSent("TLS certificate is not trusted; log in with --ca-cert or --insecure-tls for this environment")
 		case errors.As(err, &certificate):
-			return nil, 0, errors.New("TLS certificate is invalid; check its validity or log in with --insecure-tls for this environment")
+			return nil, 0, notSent("TLS certificate is invalid; check its validity or log in with --insecure-tls for this environment")
 		case errors.As(err, &timeout) && timeout.Timeout():
 			return nil, 0, errors.New("request timed out; check the deployment network and service availability")
 		}

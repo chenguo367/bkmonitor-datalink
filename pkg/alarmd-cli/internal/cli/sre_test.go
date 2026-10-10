@@ -47,18 +47,18 @@ func TestScriptFileUsesRegisteredStdinAndDescribeDeadline(t *testing.T) {
 				mode := stringField(body, "mode")
 				modes = append(modes, mode)
 				if mode == "describe" {
-					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope, "execution_timeout_ms": 35000, "request_max_bytes": 65536, "input_schema": map[string]any{"properties": map[string]any{"stdin": map[string]any{"type": "string", "parameter_source": "stdin", "maxLength": 32768}}}}), 200), nil
+					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope, "execution_timeout_ms": 35000, "request_limits": map[string]any{"admission_timeout_ms": 3000, "transport_margin_ms": 5000}, "request_max_bytes": 65536, "input_schema": map[string]any{"properties": map[string]any{"stdin": map[string]any{"type": "string", "parameter_source": "stdin", "maxLength": 32768}}}}), 200), nil
 				}
 				deadline, ok := r.Context().Deadline()
 				remaining := time.Until(deadline)
-				if !ok || remaining < 39*time.Second || remaining > 40*time.Second {
+				if !ok || remaining < 42*time.Second || remaining > 43*time.Second {
 					t.Errorf("wrong invoke deadline: %v %s", ok, remaining)
 				}
 				params := objectField(body, "params")
 				if params["stdin"] != script || objectField(params, "target")["pod"] != "fixture" {
 					t.Errorf("file input lost: %+v", params)
 				}
-				return jsonHTTP(envelope(p, "ok", map[string]any{"remote_state": "exited", "stdout": "literal output", "exit_code": 0, "target": map[string]any{"pod_uid": "uid"}, "password": "must redact"}), 200), nil
+				return jsonHTTP(envelope(p, "ok", map[string]any{"remote_state": "remote_completed", "stdout": "literal output", "exit_code": 0, "target": map[string]any{"pod_uid": "uid"}, "password": "must redact"}), 200), nil
 			})}
 			code, out, _, _ := run(t, store, client, "", "invoke", "pod.exec", "--env", p.EnvironmentID, "--params-file", paramsFile, source, scriptFile)
 			if code != 0 || strings.Join(modes, ",") != "describe,invoke" {

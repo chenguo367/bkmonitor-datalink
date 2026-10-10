@@ -508,7 +508,23 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 			if !ok || err != nil || v < 1 || v > 120000 {
 				return a.fail("protocol_error", "Operation execution timeout is invalid.", 1)
 			}
-			timeout = time.Duration(v)*time.Millisecond + 5*time.Second
+			admissionMS, marginMS := int64(0), int64(5000)
+			limits := objectField(contract, "request_limits")
+			for _, budget := range []struct {
+				key     string
+				maximum int64
+				value   *int64
+			}{{"admission_timeout_ms", 10000, &admissionMS}, {"transport_margin_ms", 30000, &marginMS}} {
+				if declared, exists := limits[budget.key]; exists {
+					number, ok := declared.(json.Number)
+					ms, err := number.Int64()
+					if !ok || err != nil || ms < 1 || ms > budget.maximum {
+						return a.fail("protocol_error", "Operation "+budget.key+" is invalid.", 1)
+					}
+					*budget.value = ms
+				}
+			}
+			timeout = time.Duration(v+admissionMS+marginMS) * time.Millisecond
 		}
 		if o.stdinFile != "" {
 			if err := a.attachStdin(contract, params, o.stdinFile); err != nil {
@@ -529,8 +545,13 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 		}
 	}
 	fmt.Fprintln(a.Err, "Calling the OB channel...")
+	started := time.Now().UTC()
 	m, status, err := a.channelRequestTimeout(mode, operation, params, revision, p, timeout)
 	if err != nil {
+		var unsent *requestNotSent
+		if exec && !errors.As(err, &unsent) {
+			return a.unknownExecution(operation, params, revision, p, started, m, status, err.Error())
+		}
 		return a.fail("request_failed", err.Error(), 1)
 	}
 	// A session the server ended before its local expiry is renewed once from
@@ -541,6 +562,19 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 			m, status, err = a.channelRequestTimeout(mode, operation, params, revision, p, timeout)
 			if err != nil {
 				return a.fail("request_failed", err.Error(), 1)
+			}
+		}
+	}
+	if exec && status != http.StatusUnauthorized {
+		// A named channel rejection before execution needs no receipt. A
+		// gateway failure or malformed execution answer cannot prove that the
+		// remote process did not start, even when its HTTP status is an error.
+		if !confirmedExecRejection(m, status) {
+			if err := validateChannel(m, p); err != nil {
+				return a.unknownExecution(operation, params, revision, p, started, m, status, err.Error())
+			}
+			if err := validateExecReceipt(operation, m); err != nil {
+				return a.unknownExecution(operation, params, revision, p, started, m, status, err.Error())
 			}
 		}
 	}
@@ -564,7 +598,7 @@ func (a *App) channelRequestTimeout(mode, operation string, params map[string]an
 		return m, status, nil
 	}
 	if err := validateChannel(m, p); err != nil {
-		return nil, status, protocolError(err)
+		return m, status, protocolError(err)
 	}
 	s := objectField(objectField(m, "meta"), "session")
 	if err := a.Store.updateExpiry(p, stringField(s, "expires_at")); err != nil {
