@@ -1214,6 +1214,7 @@ type productionPhaseTwoSlotCatalog interface {
 	ReadScheduleRetirement(context.Context, execution.QueryGroupIdentity) (execution.EvaluationTime, bool, error)
 	NextSlotAfter(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.EvaluationTime, error)
 	FreezeSlotContract(context.Context, execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error)
+	ReadSegmentRepair(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.SegmentRepair, bool, error)
 }
 
 type productionPhaseTwoProgressReader interface {
@@ -1277,6 +1278,12 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// (decision-020 section 5.7). Nil is a runtime that judges nothing and
 	// reports every ready Worker as not judged.
 	Costs *scheduler.CostLedger
+	// TimelineRepairs is where the round leaves the Query Groups the ready
+	// Workers name as having an unreadable Schedule timeline, for the
+	// activation reconciler to read again (controlplane.TimelineRepairSource).
+	// Nil is a runtime that collects nothing; a timeline is then rewritten
+	// only when a cutover reads it.
+	TimelineRepairs *controlplane.TimelineRepairRequests
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1408,6 +1415,38 @@ func (runtime *productionPhaseTwoOwnership) TryAcquireControlLeader(
 	return err == nil, err
 }
 
+// collectUnreadableTimelines hands the activation reconciler the Query
+// Groups the ready Workers name as having an unreadable timeline, among the
+// ones the round runs. It is the registrations the round has just read, so
+// it costs no read of its own; the names are replaced whole each round, and
+// a Query Group no Worker names any more is no longer looked at.
+func (runtime *productionPhaseTwoOwnership) collectUnreadableTimelines(
+	workers []ownership.WorkerRegistration,
+	active []execution.QueryGroupIdentity,
+) {
+	if runtime.dependencies.TimelineRepairs == nil {
+		return
+	}
+	running := make(map[execution.QueryGroupIdentity]struct{}, len(active))
+	for _, queryGroup := range active {
+		running[queryGroup] = struct{}{}
+	}
+	named := make(map[execution.QueryGroupIdentity]struct{})
+	for _, worker := range workers {
+		for _, name := range worker.UnreadableTimelines {
+			queryGroup := execution.QueryGroupIdentity(name)
+			if _, runs := running[queryGroup]; runs {
+				named[queryGroup] = struct{}{}
+			}
+		}
+	}
+	list := make([]execution.QueryGroupIdentity, 0, len(named))
+	for queryGroup := range named {
+		list = append(list, queryGroup)
+	}
+	runtime.dependencies.TimelineRepairs.Replace(list)
+}
+
 // contentScopesFor is the round's content policy. Declaring needs the
 // current content in hand; a failed read is reported and the round leaves
 // scopes as they are, because a round that withdrew on a read failure would
@@ -1464,6 +1503,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		return err
 	}
 	round.done(fleet.LeaderRoundStageReadyWorkers)
+	runtime.collectUnreadableTimelines(workers, ordered)
 	// The content contract's gate, decided once per round on the same ready
 	// set the placements use: every ready worker declares it, and the round
 	// brings each record to the content its Query Group is published with;

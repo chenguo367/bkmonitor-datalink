@@ -1220,10 +1220,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// normally now -- what happened is in its past and is permanent, which is
 	// exactly why nothing that describes the current round can carry it.
 	if cursorAdvance != nil {
-		if cursorAdvance.Status == observability.CursorAdvanceApplied {
+		// Under the word it was recorded under: every skip used to be filed
+		// as pruned, so a span lost with a timeline that would not decode read
+		// as retention, and one the Plan was simply absent for read as a loss
+		// at all. A skip whose word the checks read as normal is no loss and
+		// is not kept as one.
+		if cursorAdvance.Status == observability.CursorAdvanceApplied && !codeChecks[cursorAdvance.Reason].normal {
 			state.prunedSkip = &PrunedSkip{
 				From: cursorAdvance.From, To: cursorAdvance.To, At: at,
 				DiscardedSlot: cursorAdvance.InFlightSlot, Replica: tracker.replica,
+				Reason: cursorAdvance.Reason,
+			}
+			if cursorAdvance.RepairedAtUnixMilli > 0 {
+				rewritten := time.UnixMilli(cursorAdvance.RepairedAtUnixMilli).UTC()
+				state.prunedSkip.RewrittenAt = &rewritten
 			}
 		}
 		if completion == "" && runOutcome == "" && executeOutcome == "" && failure == nil &&

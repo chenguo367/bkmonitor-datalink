@@ -163,3 +163,48 @@ func TestAGapSummaryEitherCountsItsSlotsOrSaysItCannot(t *testing.T) {
 		}
 	}
 }
+
+// The skip into a rewritten timeline's Segment is a forward skip like the two
+// beside it: the same uncounted shape, no anchor behind it, and its own word,
+// so a reader is sent to a timeline that would not decode rather than to
+// retention. A request may carry any forward skip's word and no other.
+func TestTheRepairedSkipIsAForwardSkipWithItsOwnWord(t *testing.T) {
+	repaired := ScheduleProgress{Identity: ProgressIdentity{QueryGroup: "q"}, NextSlot: 600,
+		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: ScheduleRepairedSkipGap(120, 600)}
+	if err := repaired.Validate(); err != nil {
+		t.Fatalf("a repaired skip does not validate: %v", err)
+	}
+	if !repaired.SkippedPrunedRange() {
+		t.Fatal("a repaired skip is not a forward skip, so navigation would anchor inside Segments that no longer exist")
+	}
+	if anchor, ok := repaired.ContinuityAnchor(); ok || anchor != 0 {
+		t.Fatalf("repaired skip anchor = (%d, %v), want none", anchor, ok)
+	}
+	gap := repaired.CurrentOrRecentGap
+	if gap.ReasonCode != ReasonCode(contract.ReasonScheduleRepaired) || gap.FirstSlot != 120 || gap.ResumedAt != 600 ||
+		!gap.Uncounted || gap.Count != 0 {
+		t.Fatalf("repaired skip = %+v, want an uncounted skip from 120 resumed at 600 under its own word", gap)
+	}
+	request := ProgressSkipPrunedRequest{Identity: ProgressIdentity{QueryGroup: "q"},
+		OwnerFence:       OwnerFence{QueryGroup: "q", OwnerID: "worker", OwnerEpoch: 1, LeaseToken: "lease"},
+		ExpectedNextSlot: 120, ResumeAt: 600}
+	for _, reason := range append([]ReasonCode{""}, ForwardSkipReasons...) {
+		request.Reason = reason
+		if err := request.Validate(); err != nil {
+			t.Fatalf("a skip under %q was refused: %v", reason, err)
+		}
+	}
+	if got := (ProgressSkipPrunedRequest{ExpectedNextSlot: 120, ResumeAt: 600}).SkipGap().ReasonCode; got != ReasonCode(contract.ReasonSchedulePruned) {
+		t.Fatalf("a skip without a word records %q, want SCHEDULE_PRUNED as before", got)
+	}
+	request.Reason = ReasonCode(contract.ReasonGapSkipped)
+	if err := request.Validate(); err == nil {
+		t.Fatal("a skip under a word that is not a forward skip's validated")
+	}
+	if reason, known := (SegmentRepair{Kind: SegmentRepairUnreadable}).ReasonCode(); !known || reason != ReasonCode(contract.ReasonScheduleRepaired) {
+		t.Fatalf("an unreadable repair's word = %q (%v), want SCHEDULE_REPAIRED", reason, known)
+	}
+	if _, known := (SegmentRepair{Kind: "from-a-later-build"}).ReasonCode(); known {
+		t.Fatal("a repair kind this build does not know was given a word")
+	}
+}

@@ -164,6 +164,20 @@ const (
 	// carries PLAN_REACTIVATED below: the other half of this skip. The two
 	// words tell one story at its two Slots, and neither is the whole of it.
 	ReasonPlanNotActive = "PLAN_NOT_ACTIVE"
+	// ReasonScheduleRepaired names Slots the cursor moved past because the
+	// Query Group's Schedule timeline stopped decoding and the Control Leader
+	// rewrote it: the new timeline opens one Segment at the moment of the
+	// rewrite, so the times between the cursor and that Segment are on no
+	// timeline any more and no read will ever find them.
+	//
+	// Separate from SCHEDULE_PRUNED, which the same jump would otherwise look
+	// like, because the two send a reader to opposite places. Pruned is
+	// retention doing what it was configured to do; this is a timeline this
+	// deployment could not read, which is a defect of its own - something
+	// wrote bytes the reader cannot decode - and the rewrite is what ended it.
+	// Without a word of its own the stretch was silent: the cursor jumped from
+	// inside the lost Segment to the rewrite with no record at all.
+	ReasonScheduleRepaired = "SCHEDULE_REPAIRED"
 	// ReasonPlanReactivated names a Slot that ran while its Plan's activation
 	// changed under it with the Plan itself unchanged: the same identity,
 	// schedule revision and state generation, only the activation epoch

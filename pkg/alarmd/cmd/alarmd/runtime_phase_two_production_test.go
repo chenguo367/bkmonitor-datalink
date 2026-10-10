@@ -2490,6 +2490,10 @@ func (unavailableSlotCatalog) NextSlotAfter(context.Context, execution.QueryGrou
 	return 0, errors.New("unexpected schedule read")
 }
 
+func (unavailableSlotCatalog) ReadSegmentRepair(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.SegmentRepair, bool, error) {
+	return execution.SegmentRepair{}, false, errors.New("unexpected schedule read")
+}
+
 func (unavailableSlotCatalog) FreezeSlotContract(context.Context, execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error) {
 	return execution.FrozenSlotContractFact{}, errors.New("unexpected schedule freeze")
 }

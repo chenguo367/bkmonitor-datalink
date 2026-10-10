@@ -97,6 +97,18 @@ type WorkerRegistration struct {
 	// from a binary that does not decline, and ignored by a leader from
 	// before it, which leaves the Query Group where it is as before.
 	Declined []DeclinedQueryGroup `json:"declined,omitempty"`
+	// UnreadableTimelines names the Query Groups whose last round here met a
+	// Schedule timeline that does not decode (SCHEDULE_UNREADABLE), the
+	// first MaxReportedUnreadableTimelines of them in Query Group order, and
+	// UnreadableTimelinesTotal how many there are in all. A leader reads each
+	// named timeline again and rewrites the ones it cannot decode either;
+	// before this, nothing told it and the Query Group ran nothing for as
+	// long as the timeline's key lived. A name is dropped by the first later
+	// round of that Query Group that runs a Slot. Absent from a binary that
+	// does not report, and ignored by a leader from before it, which leaves
+	// the timeline as it is until a cutover reads it.
+	UnreadableTimelines      []string `json:"unreadable_timelines,omitempty"`
+	UnreadableTimelinesTotal int      `json:"unreadable_timelines_total,omitempty"`
 }
 
 // DeclinedQueryGroup is one Query Group a worker declines, and the stage its
@@ -115,6 +127,12 @@ func (worker WorkerRegistration) Declines(queryGroup execution.QueryGroupIdentit
 	}
 	return false
 }
+
+// MaxReportedUnreadableTimelines bounds the names a registration carries. A
+// fleet-wide decode failure - a rollout whose new timelines the old build
+// cannot read - would otherwise put every owned Query Group on every
+// heartbeat; the total still says how many.
+const MaxReportedUnreadableTimelines = 64
 
 // AppliedControlFacts says which version of each versioned control fact the
 // worker executes by. ActivationRecordRevision is the record revision of the

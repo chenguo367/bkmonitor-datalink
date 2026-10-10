@@ -137,13 +137,16 @@ type RedisCatalogRepository struct {
 	activationCache parsedActivationCache
 	// lastGood is the activation last served under a known header, kept for
 	// RebuildActivationBody; see lastGoodActivation.
-	lastGood      lastGoodActivation
-	rebuilds      activationRebuildCounts
-	header        activationHeaderStanding
-	blocked       blockedCounts
-	objectCatalog objectCatalogState
-	catalogIndex  catalogIndex
-	contentMemo   publishedContentMemo
+	lastGood lastGoodActivation
+	rebuilds activationRebuildCounts
+	// timelineRepairs is every unreadable timeline this process was asked
+	// to look at, by what became of it; read at scrape time.
+	timelineRepairs timelineRepairCounts
+	header          activationHeaderStanding
+	blocked         blockedCounts
+	objectCatalog   objectCatalogState
+	catalogIndex    catalogIndex
+	contentMemo     publishedContentMemo
 	// objectCache is read through objects(): an atomic pointer, so the
 	// cache can be configured, or configured again, while readers are
 	// running. See ConfigureObjectCache.
