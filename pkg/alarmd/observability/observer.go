@@ -1746,13 +1746,14 @@ type CursorAdvanceFacts struct {
 	InFlightSlot int64 `json:"in_flight_slot,omitempty"`
 	// Reason is the word the skip is recorded under in the Progress: why the
 	// Slots between From and To went unevaluated (SCHEDULE_PRUNED,
-	// PLAN_NOT_ACTIVE, SCHEDULE_REPAIRED). Every skip used to be read as a
+	// PLAN_NOT_ACTIVE, SCHEDULE_REPAIRED, SCHEDULE_REOPENED). Every skip used to be read as a
 	// pruned one, so a span lost to a timeline that would not decode was
 	// filed under retention, and one where the Plan was simply not active
 	// was filed as a loss at all.
 	Reason string `json:"reason,omitempty"`
 	// RepairedAtUnixMilli is when the Control Leader rewrote the timeline
-	// the skip lands in, for a SCHEDULE_REPAIRED skip; zero otherwise.
+	// the skip lands in, for a SCHEDULE_REPAIRED or SCHEDULE_REOPENED skip;
+	// zero otherwise.
 	RepairedAtUnixMilli int64 `json:"repaired_at_unix_ms,omitempty"`
 }
 

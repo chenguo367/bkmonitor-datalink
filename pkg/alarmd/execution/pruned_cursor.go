@@ -80,7 +80,7 @@ func (request ProgressSkipPrunedRequest) Validate() error {
 // leave the Progress with no completion to anchor on (SkippedPrunedRange).
 var ForwardSkipReasons = []ReasonCode{
 	ReasonCode(contract.ReasonSchedulePruned), ReasonCode(contract.ReasonPlanNotActive),
-	ReasonCode(contract.ReasonScheduleRepaired),
+	ReasonCode(contract.ReasonScheduleRepaired), ReasonCode(contract.ReasonScheduleReopened),
 }
 
 func forwardSkipReason(reason ReasonCode) bool {

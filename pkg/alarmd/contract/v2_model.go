@@ -178,6 +178,16 @@ const (
 	// Without a word of its own the stretch was silent: the cursor jumped from
 	// inside the lost Segment to the rewrite with no record at all.
 	ReasonScheduleRepaired = "SCHEDULE_REPAIRED"
+	// ReasonScheduleReopened names Slots the cursor moved past because the
+	// Query Group's Schedule timeline key was gone - evicted, expired, deleted
+	// - and the cutover opened a new one at its boundary: the times between
+	// the cursor and that Segment were on the timeline the key held.
+	//
+	// The same shape as SCHEDULE_REPAIRED and kept apart from it because the
+	// two send a reader to different places: bytes this deployment could not
+	// read, against a key the store no longer had. Before it the jump was
+	// silent, which made a missing key the one loss that passed for benign.
+	ReasonScheduleReopened = "SCHEDULE_REOPENED"
 	// ReasonPlanReactivated names a Slot that ran while its Plan's activation
 	// changed under it with the Plan itself unchanged: the same identity,
 	// schedule revision and state generation, only the activation epoch

@@ -342,3 +342,43 @@ func TestALaterCutoverHandlesANamedTimelineThatDecodes(t *testing.T) {
 		t.Fatalf("rewritten = %d, want 0", got)
 	}
 }
+
+// A timeline whose key is gone is opened again by the cutover, as before,
+// and now marked as such, so the Worker whose cursor stood in it records
+// the Slots it lost under SCHEDULE_REOPENED instead of jumping past them;
+// and its revision goes one above what the Assignment record names, so a
+// body cached under the old timeline's revision is never served for it.
+func TestAReopenedTimelineIsMarkedAndMovesTheRevisionForward(t *testing.T) {
+	fixture, recordKey := repairFixture(t, "alarmd:control:reopen-marked")
+	first := cutoverCatalog(t, 80, nil)
+	second := cutoverCatalog(t, 90, nil)
+	_, gone := splitEdited(t, first, second)
+	fixture.publish(t, first, 60)
+	if err := fixture.client.HSet(fixture.ctx, recordKey(gone.Identity), "desired_worker_id", "w1",
+		"timeline_record_revision", "4").Err(); err != nil {
+		t.Fatal(err)
+	}
+	records := recordsOf(fixture.activation(t), gone)
+	if err := fixture.client.Del(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(gone.Identity)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatalf("a timeline whose key was gone failed the publication: %v", err)
+	}
+	if !reflect.DeepEqual(sortedRecords(recordsOf(fixture.activation(t), gone)), sortedRecords(records)) {
+		t.Fatal("the reopened Query Group's records changed")
+	}
+	repair, marked, err := fixture.runtime.ReadSegmentRepair(fixture.ctx, gone.Identity, 120)
+	if err != nil || !marked || repair.Kind != execution.SegmentRepairAbsent || repair.AtUnixMilli != 120_000 {
+		t.Fatalf("the reopened Segment's mark = %+v marked %v (%v), want an absent-key reopen at 120", repair, marked, err)
+	}
+	if got := fixture.persistedRevision(t, gone.Identity); got != 5 {
+		t.Fatalf("the reopened timeline is at revision %d, want 5: one above what the Assignment record named", got)
+	}
+	if stamped, err := fixture.client.HGet(fixture.ctx, recordKey(gone.Identity), "timeline_record_revision").Result(); err != nil || stamped != "5" {
+		t.Fatalf("the Assignment record names timeline revision %q (%v), want 5", stamped, err)
+	}
+	if _, _, reopened := fixture.repository.ActivationBlockedCounts(); reopened != 1 {
+		t.Fatalf("reopened = %d, want 1", reopened)
+	}
+}

@@ -204,6 +204,15 @@ func TestTheRepairedSkipIsAForwardSkipWithItsOwnWord(t *testing.T) {
 	if reason, known := (SegmentRepair{Kind: SegmentRepairUnreadable}).ReasonCode(); !known || reason != ReasonCode(contract.ReasonScheduleRepaired) {
 		t.Fatalf("an unreadable repair's word = %q (%v), want SCHEDULE_REPAIRED", reason, known)
 	}
+	if reason, known := (SegmentRepair{Kind: SegmentRepairAbsent}).ReasonCode(); !known || reason != ReasonCode(contract.ReasonScheduleReopened) {
+		t.Fatalf("an absent-key reopen's word = %q (%v), want SCHEDULE_REOPENED", reason, known)
+	}
+	reopened := ScheduleProgress{Identity: ProgressIdentity{QueryGroup: "q"}, NextSlot: 600,
+		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: (ProgressSkipPrunedRequest{ExpectedNextSlot: 120, ResumeAt: 600,
+			Reason: ReasonCode(contract.ReasonScheduleReopened)}).SkipGap()}
+	if err := reopened.Validate(); err != nil || !reopened.SkippedPrunedRange() {
+		t.Fatalf("a reopened skip validates %v and is a forward skip %v, want both", err, reopened.SkippedPrunedRange())
+	}
 	if _, known := (SegmentRepair{Kind: "from-a-later-build"}).ReasonCode(); known {
 		t.Fatal("a repair kind this build does not know was given a word")
 	}

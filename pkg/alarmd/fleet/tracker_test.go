@@ -1993,6 +1993,7 @@ func TestALostSpanIsFiledUnderTheWordItWasRecordedUnder(t *testing.T) {
 		})
 	}
 	advance("qg-rewritten", "SCHEDULE_REPAIRED", rewrittenAt)
+	advance("qg-reopened", "SCHEDULE_REOPENED", rewrittenAt)
 	advance("qg-absent-plan", "PLAN_NOT_ACTIVE", 0)
 	advance("qg-legacy", "", 0)
 
@@ -2021,7 +2022,12 @@ func TestALostSpanIsFiledUnderTheWordItWasRecordedUnder(t *testing.T) {
 	if legacy, listed := rows["qg-legacy"]; !listed || legacy.ReasonCode != "SCHEDULE_PRUNED" || legacy.Blocked.Class != ClassRetention {
 		t.Fatalf("the word-less span's row = %+v, want it read as retention as before", legacy)
 	}
-	if refs := prunedSkipList(skips); len(refs) != 2 {
-		t.Fatalf("listed spans = %+v, want the rewritten and the pruned one", refs)
+	// A span lost with a key the store no longer had names the store.
+	if reopened, listed := rows["qg-reopened"]; !listed || reopened.ReasonCode != "SCHEDULE_REOPENED" || reopened.Blocked == nil ||
+		reopened.Blocked.Dependency != DependencyRedis || reopened.Skip == nil || reopened.Skip.RewrittenAt == nil {
+		t.Fatalf("the reopened timeline's row = %+v, want it under its own word, naming the store, carrying when", reopened)
+	}
+	if refs := prunedSkipList(skips); len(refs) != 3 {
+		t.Fatalf("listed spans = %+v, want the rewritten, the reopened and the pruned one", refs)
 	}
 }

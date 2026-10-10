@@ -155,6 +155,7 @@ func TestSkipPrunedRangePersistsTheReasonItWasGiven(t *testing.T) {
 	for given, want := range map[execution.ReasonCode]string{
 		"": "SCHEDULE_PRUNED", "SCHEDULE_PRUNED": "SCHEDULE_PRUNED",
 		"PLAN_NOT_ACTIVE": "PLAN_NOT_ACTIVE", "SCHEDULE_REPAIRED": "SCHEDULE_REPAIRED",
+		"SCHEDULE_REOPENED": "SCHEDULE_REOPENED",
 	} {
 		t.Run(want+"/"+string(given), func(t *testing.T) {
 			current := execution.ScheduleProgress{Identity: identity, NextSlot: 120, LastFullSlot: 60, LastCompletionKind: execution.CompletionFull}

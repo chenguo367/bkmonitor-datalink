@@ -16,6 +16,9 @@ const (
 	// SegmentRepairUnreadable: the timeline was there and its bytes did not
 	// decode. Every Segment it held is gone with it.
 	SegmentRepairUnreadable SegmentRepairKind = "unreadable"
+	// SegmentRepairAbsent: the timeline's key was gone - evicted, expired,
+	// deleted - and the cutover opened a new timeline in its place.
+	SegmentRepairAbsent SegmentRepairKind = "absent"
 )
 
 // SegmentRepair marks a Schedule Segment the Control Leader opened in place of
@@ -37,6 +40,8 @@ func (repair SegmentRepair) ReasonCode() (ReasonCode, bool) {
 	switch repair.Kind {
 	case SegmentRepairUnreadable:
 		return ReasonCode(contract.ReasonScheduleRepaired), true
+	case SegmentRepairAbsent:
+		return ReasonCode(contract.ReasonScheduleReopened), true
 	default:
 		return "", false
 	}

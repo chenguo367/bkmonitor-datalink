@@ -110,3 +110,53 @@ func TestAnUnreadableTimelineIsReportedRewrittenAndDetectedAgain(t *testing.T) {
 		t.Fatalf("after a Slot ran the Worker still names %v (%d)", names, total)
 	}
 }
+
+// A timeline whose key went missing - evicted, expired, deleted - is opened
+// again by the next cutover, and the Worker whose cursor stood in the lost
+// timeline records the Slots it lost under SCHEDULE_REOPENED before it
+// detects again, through the production wiring against Redis. The jump used
+// to be silent, which made a missing key the one loss that passed for
+// benign.
+func TestAMissingTimelineIsReopenedAndItsLostSlotsAreRecorded(t *testing.T) {
+	fixture := startCutoverFixture(t, nil)
+	ctx := context.Background()
+	base := fixture.base
+	queryGroup := fixture.queryGroup
+	key := productionPhaseTwoPrefix(fixture.cfg.Redis.StatePrefix, "catalog") + ":schedule_timeline:" + string(queryGroup)
+	if err := fixture.redisClient.Del(ctx, key).Err(); err != nil {
+		t.Fatal(err)
+	}
+	// A publication that changes the sibling strategy: its cutover meets the
+	// missing key. The first refresh publishes, the second activates.
+	installCutoverStallStrategies(t, ctx, fixture.redisClient, "system.disk", 1725000600)
+	fixture.clock.Store((base + 90) * 1000)
+	for round := 0; round < 2; round++ {
+		if err := fixture.bundle.refreshAndReconcile(ctx, true); err != nil {
+			t.Fatalf("publication round %d: %v", round, err)
+		}
+	}
+	reopened, err := fixture.production.dependencies.Catalog.ReadFrozenSchedule(ctx, queryGroup, execution.EvaluationTime(base+120))
+	if err != nil || reopened.Segment.Start != execution.EvaluationTime(base+90) || reopened.Segment.End != nil {
+		t.Fatalf("the reopened timeline holds %+v (%v), want one open Segment from the cutover's boundary %d", reopened.Segment, err, base+90)
+	}
+
+	fixture.clock.Store((base + 121) * 1000)
+	if err := runScheduledOnceSettled(ctx, fixture.bundle); err != nil {
+		t.Fatalf("the round after the reopen: %v", err)
+	}
+	if after := fixture.progress(ctx); after.LastFullSlot != execution.EvaluationTime(base+120) {
+		t.Fatalf("Progress after the reopen = %+v, want the new Segment's first Slot %d completed", after, base+120)
+	}
+	var skip *observability.CursorAdvanceFacts
+	for _, observation := range fixture.observed() {
+		if observation.Stage == observability.StageScheduleCursorAdvanced && observation.Trace.QueryGroupKey == string(queryGroup) &&
+			observation.CursorAdvance != nil && observation.CursorAdvance.Status == observability.CursorAdvanceApplied {
+			facts := *observation.CursorAdvance
+			skip = &facts
+		}
+	}
+	if skip == nil || skip.Reason != "SCHEDULE_REOPENED" || skip.From != base+60 || skip.To != base+120 ||
+		skip.RepairedAtUnixMilli != (base+90)*1000 {
+		t.Fatalf("the skip over the lost Slots = %+v, want SCHEDULE_REOPENED from %d to %d naming the reopen at %d", skip, base+60, base+120, base+90)
+	}
+}

@@ -4080,13 +4080,15 @@ type PrunedSkip struct {
 	// Strategies and IntervalSeconds, as on SkippedSpan.
 	Strategies      []StrategyRef `json:"strategies,omitempty"`
 	IntervalSeconds int64         `json:"interval_seconds,omitempty"`
-	// Reason is the word the skip was recorded under: SCHEDULE_PRUNED, or
+	// Reason is the word the skip was recorded under: SCHEDULE_PRUNED,
 	// SCHEDULE_REPAIRED for a span lost with a timeline that would not decode
-	// and was rewritten. Empty from a publisher older than the field, which
-	// recorded every skip as pruned (Code).
+	// and was rewritten, or SCHEDULE_REOPENED for one lost with a timeline
+	// whose key was gone and was opened again. Empty from a publisher older
+	// than the field, which recorded every skip as pruned (Code).
 	Reason string `json:"reason,omitempty"`
-	// RewrittenAt is when the Control Leader rewrote the timeline a
-	// SCHEDULE_REPAIRED skip landed in; nil for every other skip.
+	// RewrittenAt is when the Control Leader rewrote or reopened the
+	// timeline a SCHEDULE_REPAIRED or SCHEDULE_REOPENED skip landed in; nil
+	// for every other skip.
 	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
 }
 

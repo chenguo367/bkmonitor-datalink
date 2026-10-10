@@ -560,27 +560,20 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 			// The candidate records say which publication the Segment names: the
 			// new one when the content changed, the one the carried records were
 			// activated under when it did not - its content is the same, and the
-			// records are kept as they were.
-			openPublication, openGroup, openNamed := published.content.Publication, newGroup, published.content.Groups[queryGroup]
-			if carriedPublication, ok := candidatePublication(candidate, newGroup); ok && carriedPublication != openPublication {
-				group, groupErr := repository.loadPublishedQueryGroup(ctx, carriedPublication, queryGroup)
-				if groupErr != nil {
-					return groupErr
-				}
-				content, contentErr := repository.LoadPublishedContent(ctx, carriedPublication)
-				if contentErr != nil {
-					return contentErr
-				}
-				openPublication, openGroup, openNamed = carriedPublication, group, content.Groups[queryGroup]
-			}
-			opened, openErr := repository.openQueryGroupTimeline(ctx, openPublication, openGroup, openNamed, boundary, candidate, now, cutover)
+			// records are kept as they were (segmentContentFor). The Segment is
+			// marked, so the Worker whose cursor stood in the lost timeline
+			// records the Slots it lost under SCHEDULE_REOPENED rather than
+			// jumping past them: a key that went missing is named, never taken
+			// for benign. Written only while the key is still absent.
+			opened, openErr := repository.repairedQueryGroupTimeline(ctx, published, candidate, newGroup, boundary, nil,
+				execution.SegmentRepair{Kind: execution.SegmentRepairAbsent, AtUnixMilli: int64(boundary) * 1000})
 			if openErr != nil {
 				return openErr
 			}
 			updates = append(updates, opened.update)
 			plans = append(plans, opened.records...)
 			reopened++
-			cutover.redecided(cutoverAdded, cutoverReopened)
+			cutover.decided(cutoverReopened)
 			continue
 		}
 		var unreadable *DeterministicScheduleError

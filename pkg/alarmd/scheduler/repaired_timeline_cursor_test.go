@@ -90,6 +90,24 @@ func TestTheJumpIntoARewrittenTimelineIsRecorded(t *testing.T) {
 		}
 	})
 
+	t.Run("a Segment opened for a key that was gone is recorded under its own word", func(t *testing.T) {
+		reopened := map[execution.EvaluationTime]execution.SegmentRepair{
+			600: {Kind: execution.SegmentRepairAbsent, AtUnixMilli: rewrittenAt},
+		}
+		_, reader, observations, source := repairedCursorFixture(t, reopened, execution.ProgressSkipResult{Status: execution.ProgressCommitted})
+		slot, due, _, err := source.Next(context.Background(), "query-group-1")
+		if err != nil || !due || slot.Contract.Slot.EvaluationTime != 600 {
+			t.Fatalf("Next() = (slot %d, due %v, error %v), want the Slot at 600", slot.Contract.Slot.EvaluationTime, due, err)
+		}
+		if len(reader.requests) != 1 || reader.requests[0].Reason != "SCHEDULE_REOPENED" || reader.requests[0].ExpectedNextSlot != 120 ||
+			reader.requests[0].ResumeAt != 600 {
+			t.Fatalf("skip requests = %+v, want one from 120 to 600 under SCHEDULE_REOPENED", reader.requests)
+		}
+		if facts := cursorAdvances(*observations); len(facts) != 1 || facts[0].Reason != "SCHEDULE_REOPENED" || facts[0].RepairedAtUnixMilli != rewrittenAt {
+			t.Fatalf("cursor advance reports = %+v, want the reopen named", facts)
+		}
+	})
+
 	t.Run("an unmarked Segment is continued into as before", func(t *testing.T) {
 		// The retirement's hole and the pruned prefix: the same shape, no mark.
 		_, reader, observations, source := repairedCursorFixture(t, nil, execution.ProgressSkipResult{Status: execution.ProgressCommitted})
