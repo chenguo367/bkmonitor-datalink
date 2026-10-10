@@ -126,6 +126,28 @@ func TestRunRejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+func TestRunRoleFlagOverridesYAMLBeforeDependencyValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alarmd.yaml")
+	contents := "roles: [control]\nredis:\n  address: 127.0.0.1:6379\nphase_two:\n  worker:\n    id: channel-fixture\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []string{"channel", "", "unknown", "worker,worker"} {
+		t.Run(selected, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runWithRuntimeModeDependencies(context.Background(),
+				[]string{"--check-config", "--config", path, "--roles=" + selected}, &stdout, &stderr, runtimeModeDependencies{})
+			if selected == "channel" {
+				if code != 0 {
+					t.Fatalf("role override failed: code=%d stderr=%s", code, &stderr)
+				}
+			} else if code != 2 || !strings.Contains(stderr.String(), "roles") {
+				t.Fatalf("invalid roles were accepted: code=%d stderr=%s", code, &stderr)
+			}
+		})
+	}
+}
+
 func validGoAccessApplicationYAML() string {
 	return `http:
   listen: 127.0.0.1:8080

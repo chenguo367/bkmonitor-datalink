@@ -3165,6 +3165,7 @@ type headFacts struct {
 	cut         map[string]bool
 	coverage    func(counted []string) *Disagreement
 	rowsDecided bool
+	control     controlRead
 }
 
 func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas []string, now time.Time, freshness time.Duration,
@@ -3346,72 +3347,8 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 				view.PlatformSettingFields.Differing = replica
 			}
 		}
-		if snapshot.ControlSource != nil {
-			if snapshot.ControlSource.StaleBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlSourceStale, Replica: replica,
-					Stage: snapshot.ControlSource.LastFailureExit, Text: snapshot.ControlSource.LastFailure})
-			}
-			if snapshot.ControlSource.LeaderAbsentBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlLeaderAbsent, Replica: replica})
-			}
-		}
-		if snapshot.Activation != nil {
-			// The leader's standing is the deployment's: only one replica
-			// attempts activation, and what it reports is what every replica
-			// executes. Kept whole, not summarised, so the page can say which
-			// publication is running and which one is not.
-			view.Activation = snapshot.Activation
-			view.ActivationReplica = replica
-			if snapshot.Activation.BehindBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBehind, Replica: replica})
-			}
-			if snapshot.Activation.BlockedQueryGroups > 0 {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBlocked, Replica: replica,
-					Text: fmt.Sprintf("%d held back (%s): %s; timeline keys to delete: %s", snapshot.Activation.BlockedQueryGroups,
-						snapshot.Activation.BlockedReasons, snapshot.Activation.BlockedSamples, snapshot.Activation.BlockedKeys)})
-			}
-		}
-		if header := snapshot.ActivationHeader; header != nil {
-			age := header.MissingSeconds
-			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationHeaderMissing, Replica: replica,
-				Text: "last rebuild: " + header.LastRebuild, AgeSeconds: &age})
-		}
-		if snapshot.Rebalance != nil && (view.Rebalance == nil || snapshot.Rebalance.PlannedAt.After(view.Rebalance.PlannedAt)) {
-			facts := *snapshot.Rebalance
-			view.Rebalance, view.RebalanceReplica = &facts, replica
-		}
-		if snapshot.AssignmentScope != nil && (view.AssignmentScope == nil || snapshot.AssignmentScope.At.After(view.AssignmentScope.At)) {
-			facts := *snapshot.AssignmentScope
-			view.AssignmentScope, view.AssignmentScopeReplica = &facts, replica
-		}
-		if snapshot.AssignmentSweep != nil && (view.AssignmentSweep == nil || snapshot.AssignmentSweep.At.After(view.AssignmentSweep.At)) {
-			facts := *snapshot.AssignmentSweep
-			view.AssignmentSweep, view.AssignmentSweepReplica = &facts, replica
-		}
-		if snapshot.LeaderRound != nil && (view.LeaderRound == nil || snapshot.LeaderRound.At.After(view.LeaderRound.At)) {
-			facts := *snapshot.LeaderRound
-			view.LeaderRound, view.LeaderRoundReplica = &facts, replica
-		}
-		if snapshot.ViewStream != nil && snapshot.ViewStream.Leading {
-			if snapshot.ViewStream.PublishFailingBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationViewPublishFailing, Replica: replica,
-					Text: snapshot.ViewStream.PublishFailureReason})
-			}
-			if snapshot.ViewStream.NoSessionsBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationViewStreamNoSessions, Replica: replica})
-			}
-		}
-		if snapshot.ViewStream != nil && viewStreamPreferred(view.ViewStream, snapshot.ViewStream) {
-			facts := *snapshot.ViewStream
-			// A copy that stays a list: appending nothing to a nil slice is
-			// nil, and nil is null on the wire, which a page reading
-			// lagging.length cannot use. Nobody lagging is an empty list.
-			facts.Lagging = append(make([]ViewStreamLagging, 0, len(snapshot.ViewStream.Lagging)), snapshot.ViewStream.Lagging...)
-			view.ViewStream, view.ViewStreamReplica = &facts, replica
-		}
-		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
-			facts := *snapshot.Source
-			view.Source, view.SourceReplica = &facts, replica
+		if heads == nil || !heads.control.authoritative {
+			mergeControlFacts(&view, controlFactsOf(snapshot))
 		}
 		if len(snapshot.Dependencies) > 0 {
 			view.DependenciesReplicas++
@@ -3656,6 +3593,14 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		Attribute(view.LateSeries, now)
 	}
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
+	if heads != nil {
+		if heads.control.facts != nil {
+			mergeControlFacts(&view, *heads.control.facts)
+		}
+		if heads.control.err != nil {
+			view.Gaps = append(view.Gaps, Gap{Kind: GapControlFactsUnavailable, Detail: gapDetail(heads.control.err)})
+		}
+	}
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
 	// round each, of which only the newest says what the source is now. And

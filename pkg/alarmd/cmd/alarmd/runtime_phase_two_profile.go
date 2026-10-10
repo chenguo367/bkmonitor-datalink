@@ -158,6 +158,9 @@ func phaseTwoRuntimeProfile(cfg config.Config, cpuSource string, procs int) (obs
 		UQCodec:   phaseTwoUQCodecFacts(),
 		Retention: phaseTwoRuntimeRetention(cfg),
 	}
+	for _, role := range cfg.EffectiveRoles() {
+		facts.Roles = append(facts.Roles, string(role))
+	}
 	// Digest the exact logged safe values, with the digest field still empty.
 	digest, err := contract.DeriveCanonicalDigestV2("alarmd-runtime-config-v2", facts)
 	facts.Digest = digest

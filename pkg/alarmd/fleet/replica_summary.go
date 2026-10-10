@@ -91,9 +91,14 @@ func headOf(snapshot Snapshot) Snapshot {
 // whole set, and the lists name the objects as Aggregate names them.
 func AggregateSummaries(expectation Expectation, expected SetDigest, summaries []ReplicaSummary, expectedReplicas []string,
 	now time.Time, freshness time.Duration, ownedSets func(replicas []string) ([][]string, bool)) (View, ReplicaPart) {
+	return aggregateSummaries(expectation, expected, summaries, expectedReplicas, now, freshness, ownedSets, controlRead{})
+}
+
+func aggregateSummaries(expectation Expectation, expected SetDigest, summaries []ReplicaSummary, expectedReplicas []string,
+	now time.Time, freshness time.Duration, ownedSets func(replicas []string) ([][]string, bool), control controlRead) (View, ReplicaPart) {
 	heads := make([]Snapshot, 0, len(summaries))
 	byReplica := make(map[string]*ReplicaSummary, len(summaries))
-	facts := &headFacts{cut: make(map[string]bool, len(summaries))}
+	facts := &headFacts{cut: make(map[string]bool, len(summaries)), control: control}
 	for index := range summaries {
 		summary := &summaries[index]
 		heads = append(heads, summary.Head)

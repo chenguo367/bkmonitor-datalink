@@ -2559,7 +2559,7 @@ var QueryCooldownLoadResults = []string{"found", "absent", "undecodable", "faile
 
 // DiagnosticRedisClients are the diagnostic Redis clients whose failures are
 // counted by reason.
-var DiagnosticRedisClients = []string{"evidence", "auth", "lifecycle"}
+var DiagnosticRedisClients = []string{"evidence", "auth", "lifecycle", "instance"}
 
 // ObserveDiagnosticRedisFailure counts one unanswered call of a diagnostic
 // client by its reason; a client or reason outside the closed sets is

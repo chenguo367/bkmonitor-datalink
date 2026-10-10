@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -333,6 +334,7 @@ type productionScheduleProjection interface {
 }
 
 type productionPhaseTwoControlDependencies struct {
+	Roles      roles.Set
 	Source     controlplane.StrategySource
 	Planner    controlplane.PrimaryQueryCompiler
 	Reconciler productionSourceReconciler
@@ -374,10 +376,18 @@ func (runtime *productionPhaseTwoControl) recordControlFactUnavailable(fact, rea
 func newProductionPhaseTwoControl(
 	dependencies productionPhaseTwoControlDependencies,
 ) (*productionPhaseTwoControl, error) {
-	if dependencies.Source == nil || dependencies.Planner == nil || dependencies.Reconciler == nil ||
-		dependencies.Activator == nil || dependencies.Repository == nil || dependencies.Schedules == nil ||
+	selected, err := roles.Resolve(dependencies.Roles)
+	if err != nil {
+		return nil, err
+	}
+	dependencies.Roles = selected
+	if dependencies.Repository == nil || dependencies.Schedules == nil ||
 		dependencies.Progress == nil || dependencies.MaxReplayAge < 0 {
 		return nil, errors.New("phase-two production Control dependencies are incomplete")
+	}
+	if selected.Has(roles.Control) && (dependencies.Source == nil || dependencies.Planner == nil ||
+		dependencies.Reconciler == nil || dependencies.Activator == nil) {
+		return nil, errors.New("phase-two production Control publication dependencies are incomplete")
 	}
 	if dependencies.Observer == nil {
 		dependencies.Observer = observability.NopObserver{}
@@ -402,6 +412,10 @@ func (runtime *productionPhaseTwoControl) Refresh(
 ) (phaseTwoControlRefreshResult, error) {
 	if runtime == nil {
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
+	}
+	selected, _ := roles.Resolve(runtime.dependencies.Roles)
+	if !selected.Has(roles.Control) {
+		return phaseTwoControlRefreshResult{}, errors.New("control_role_required: strategy refresh requires control role")
 	}
 	return completeControlResult(runtime.refresh(ctx))
 }
@@ -438,7 +452,9 @@ func (runtime *productionPhaseTwoControl) LoadActive(
 	}
 	// This tick runs as a follower: whatever this process published in an
 	// earlier term is not its to answer from any more.
-	runtime.dependencies.Reconciler.StepDown()
+	if runtime.dependencies.Reconciler != nil {
+		runtime.dependencies.Reconciler.StepDown()
+	}
 	state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
 		reason := "read_failed"
@@ -1221,6 +1237,9 @@ type productionPhaseTwoProgressReader interface {
 }
 
 type productionPhaseTwoOwnershipDependencies struct {
+	// Roles is omitted by legacy callers for the shared process. A Control
+	// process has no local executor or flight coordinator.
+	Roles roles.Set
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
@@ -1363,22 +1382,35 @@ func (runtime *productionPhaseTwoOwnership) rebalanceStabilisation() time.Durati
 func newProductionPhaseTwoOwnership(
 	dependencies productionPhaseTwoOwnershipDependencies,
 ) (*productionPhaseTwoOwnership, error) {
+	selected, err := roles.Resolve(dependencies.Roles)
+	if err != nil {
+		return nil, err
+	}
+	dependencies.Roles = selected
 	if dependencies.Store == nil || dependencies.WorkerID == "" || dependencies.Catalog == nil ||
-		dependencies.Progress == nil || dependencies.Executor == nil || dependencies.Now == nil ||
-		dependencies.ControlLeaderTTL <= 0 || dependencies.Observer == nil || dependencies.Reconcile == nil ||
-		dependencies.Flights == nil || dependencies.RecoveryLimits.Validate() != nil {
+		dependencies.Progress == nil || dependencies.Now == nil || dependencies.Observer == nil {
 		return nil, errors.New("phase-two production ownership dependencies are incomplete")
 	}
-	if dependencies.PostRecoveryTerminalDelay <= 0 || dependencies.QueryDeadlineReserve <= 0 ||
-		dependencies.SnapshotRetention <= 0 || dependencies.PublicationDelayAllowance <= 0 ||
-		dependencies.SettlingWait <= 0 {
-		return nil, errors.New("phase-two post-recovery terminal delay is required")
+	if selected.Has(roles.Worker) {
+		if dependencies.Executor == nil || dependencies.Flights == nil || dependencies.RecoveryLimits.Validate() != nil {
+			return nil, errors.New("phase-two production Worker execution dependencies are incomplete")
+		}
+		if dependencies.PostRecoveryTerminalDelay <= 0 || dependencies.QueryDeadlineReserve <= 0 ||
+			dependencies.SnapshotRetention <= 0 || dependencies.PublicationDelayAllowance <= 0 ||
+			dependencies.SettlingWait <= 0 {
+			return nil, errors.New("phase-two post-recovery terminal delay is required")
+		}
 	}
-	if dependencies.LeaseTTL <= 0 || dependencies.ReconcileInterval <= 0 {
-		return nil, errors.New("phase-two rebalance stabilisation inputs are required")
-	}
-	if dependencies.ContentScopes == nil {
-		return nil, errors.New("phase-two content scope reader is required")
+	if selected.Has(roles.Control) {
+		if dependencies.ControlLeaderTTL <= 0 || dependencies.Reconcile == nil {
+			return nil, errors.New("phase-two production Control coordination dependencies are incomplete")
+		}
+		if dependencies.LeaseTTL <= 0 || dependencies.ReconcileInterval <= 0 {
+			return nil, errors.New("phase-two rebalance stabilisation inputs are required")
+		}
+		if dependencies.ContentScopes == nil {
+			return nil, errors.New("phase-two content scope reader is required")
+		}
 	}
 	return &productionPhaseTwoOwnership{
 		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
@@ -1393,6 +1425,9 @@ func (runtime *productionPhaseTwoOwnership) RegisterWorker(
 	if runtime == nil {
 		return errors.New("phase-two production ownership is not initialized")
 	}
+	if !runtime.hasRole(roles.Worker) {
+		return errors.New("worker_role_required: worker registration requires worker role")
+	}
 	if registration.WorkerID != runtime.dependencies.WorkerID {
 		return errors.New("phase-two worker registration identity mismatch")
 	}
@@ -1406,6 +1441,9 @@ func (runtime *productionPhaseTwoOwnership) TryAcquireControlLeader(
 ) (bool, error) {
 	if runtime == nil || at.IsZero() || ttl != runtime.dependencies.ControlLeaderTTL {
 		return false, errors.New("phase-two production Control Leader acquisition is invalid")
+	}
+	if !runtime.hasRole(roles.Control) {
+		return false, errors.New("phase-two Control Leader acquisition requires control role")
 	}
 	_, err := runtime.ensureControlAuthority(ctx, at)
 	if errors.Is(err, ownership.ErrLeaseBusy) {
@@ -1479,6 +1517,9 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 ) (err error) {
 	if runtime == nil || at.IsZero() {
 		return newPhaseTwoInvariantError("phase-two production Assignment reconcile is invalid")
+	}
+	if !runtime.hasRole(roles.Control) {
+		return errors.New("phase-two Assignment publication requires control role")
 	}
 	round := newLeaderRoundTimer(at)
 	authority, err := runtime.ensureControlAuthority(ctx, at)
@@ -2493,6 +2534,9 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if runtime == nil {
 		return nil, errors.New("phase-two production ownership is not initialized")
 	}
+	if !runtime.hasRole(roles.Worker) {
+		return nil, errors.New("phase-two Query Group execution requires worker role")
+	}
 	session, err := ownership.OpenSession(ctx, runtime.dependencies.Store, queryGroup, runtime.dependencies.WorkerID, at, ttl)
 	if err != nil {
 		return nil, err
@@ -2569,6 +2613,11 @@ func (runtime *productionPhaseTwoOwnership) Close() error {
 		return nil
 	}
 	return runtime.dependencies.Store.Close()
+}
+
+func (runtime *productionPhaseTwoOwnership) hasRole(role roles.Role) bool {
+	selected, _ := roles.Resolve(runtime.dependencies.Roles)
+	return selected.Has(role)
 }
 
 func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(

@@ -15,6 +15,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -322,12 +323,18 @@ func (c *Config) resolvePhaseTwoWorkerIDFromEnvironment() {
 	}
 }
 
-func (c PhaseTwoRuntimeConfig) validate() error {
+func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 	// Neither half of the old check survives: the deployment profile is derived
 	// from the run mode rather than configured, and the target flow selection is
 	// no longer configuration at all.
 	if !canonicalText(c.Worker.ID) {
 		return errors.New("phase_two worker identity must be canonical text")
+	}
+	if !ttlExceedsRenew(c.Worker.RegistrationTTL, c.Worker.RegistrationRenewInterval) {
+		return errors.New("phase_two worker registration_ttl must exceed registration_renew_interval")
+	}
+	if !selected.Has(roles.Control) && !selected.Has(roles.Worker) {
+		return nil
 	}
 	switch c.Output.protocol() {
 	case OutputProtocolAuto, OutputProtocolLegacy, OutputProtocolNative:
@@ -337,15 +344,14 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 			c.Output.Protocol, OutputProtocolAuto, OutputProtocolLegacy, OutputProtocolNative,
 		)
 	}
-	if !ttlExceedsRenew(c.Worker.RegistrationTTL, c.Worker.RegistrationRenewInterval) {
-		return errors.New("phase_two worker registration_ttl must exceed registration_renew_interval")
-	}
-	if !canonicalText(c.Control.StrategyCachePrefix) || !canonicalText(c.Control.ProviderRoute) ||
-		!canonicalText(c.Control.Timezone) {
-		return errors.New("phase_two control source, provider route and timezone must be canonical text")
-	}
-	if _, err := time.LoadLocation(c.Control.Timezone); err != nil {
-		return errors.New("phase_two control timezone is invalid")
+	if selected.Has(roles.Control) {
+		if !canonicalText(c.Control.StrategyCachePrefix) || !canonicalText(c.Control.ProviderRoute) ||
+			!canonicalText(c.Control.Timezone) {
+			return errors.New("phase_two control source, provider route and timezone must be canonical text")
+		}
+		if _, err := time.LoadLocation(c.Control.Timezone); err != nil {
+			return errors.New("phase_two control timezone is invalid")
+		}
 	}
 	if err := platformsettings.ValidateKeyPrefix(c.PlatformSettings.RedisKeyPrefix); err != nil {
 		return fmt.Errorf("phase_two platform_settings.redis_key_prefix: %w", err)
@@ -362,9 +368,11 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 			return fmt.Errorf("phase_two platform_settings.%s must be canonical text", name)
 		}
 	}
-	if c.Control.RefreshInterval.Duration() <= 0 || c.Control.ReconcileInterval.Duration() <= 0 ||
-		c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() {
-		return errors.New("phase_two control refresh, reconcile and catalog TTL are invalid")
+	if selected.Has(roles.Control) {
+		if c.Control.RefreshInterval.Duration() <= 0 || c.Control.ReconcileInterval.Duration() <= 0 ||
+			c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() {
+			return errors.New("phase_two control refresh, reconcile and catalog TTL are invalid")
+		}
 	}
 	if !ttlExceedsRenew(c.Ownership.ControlLeaderTTL, c.Ownership.ControlLeaderRenewInterval) ||
 		!ttlExceedsRenew(c.Ownership.LeaseTTL, c.Ownership.LeaseRenewInterval) {
@@ -375,6 +383,14 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 	// here that turns the bound off.
 	if c.Scheduler.ActiveExecutionLimit <= 0 || c.Scheduler.TickInterval.Duration() <= 0 || c.Scheduler.RecoveryLimits().Validate() != nil {
 		return errors.New("phase_two scheduler cadence and recovery limits are invalid")
+	}
+	// The compiler freezes completion offsets using this reserve, so Control
+	// needs it even though only Worker performs the downstream UQ request.
+	if c.Access.DownstreamExecutionReserve.Duration() <= 0 {
+		return errors.New("phase_two access downstream_execution_reserve must be positive")
+	}
+	if !selected.Has(roles.Worker) {
+		return nil
 	}
 	endpoint, err := url.Parse(c.Access.UQEndpoint)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" ||

@@ -63,7 +63,10 @@ type WorkerRegistration struct {
 	DependencyStatus    DependencyStatus    `json:"dependency_status"`
 	DeploymentProfile   string              `json:"deployment_profile"`
 	CapabilitiesDigest  string              `json:"capabilities_digest"`
-	ExpiresAt           time.Time           `json:"expires_at"`
+	// ExecutionContractDigest describes execution capabilities independently
+	// of resource budgets and role composition. Empty on older registrations.
+	ExecutionContractDigest string    `json:"execution_contract_digest,omitempty"`
+	ExpiresAt               time.Time `json:"expires_at"`
 	// Capabilities names the control contracts this binary takes part in,
 	// by word (CapabilityContentScope, ...). A leader writes a contract's
 	// facts only once every ready worker declares it: the digest above says
@@ -178,8 +181,9 @@ func (load *WorkerLoad) validate() error {
 // Rendezvous routing. It deliberately excludes runtime health and Worker
 // identity so dependency degradation does not cause ownership churn.
 type WorkerCompatibility struct {
-	DeploymentProfile  string
-	CapabilitiesDigest string
+	DeploymentProfile       string
+	CapabilitiesDigest      string
+	ExecutionContractDigest string
 }
 
 func (compatibility WorkerCompatibility) Validate() error {
@@ -192,7 +196,21 @@ func (compatibility WorkerCompatibility) Validate() error {
 func (worker WorkerRegistration) Compatibility() WorkerCompatibility {
 	return WorkerCompatibility{
 		DeploymentProfile: worker.DeploymentProfile, CapabilitiesDigest: worker.CapabilitiesDigest,
+		ExecutionContractDigest: worker.ExecutionContractDigest,
 	}
+}
+
+// Matches compares the execution contract when both peers declare it. Mixed
+// versions use the existing capability digest; a declared contract mismatch
+// never falls back to that legacy comparison.
+func (compatibility WorkerCompatibility) Matches(other WorkerCompatibility) bool {
+	if compatibility.DeploymentProfile != other.DeploymentProfile {
+		return false
+	}
+	if compatibility.ExecutionContractDigest != "" && other.ExecutionContractDigest != "" {
+		return compatibility.ExecutionContractDigest == other.ExecutionContractDigest
+	}
+	return compatibility.CapabilitiesDigest == other.CapabilitiesDigest
 }
 
 func (worker WorkerRegistration) Validate() error {

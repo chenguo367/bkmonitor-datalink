@@ -33,6 +33,7 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
@@ -685,10 +686,13 @@ func testProductionPhaseTwoStrandedLatest(
 }
 
 func TestProductionPhaseTwoBundleExecutesFullNonEmptySlotEndToEnd(t *testing.T) {
-	testProductionFullTargetFlow(t, false)
+	testProductionFullTargetFlow(t, false, false)
 }
-func TestTargetFlowProductionFullSequence(t *testing.T) { testProductionFullTargetFlow(t, true) }
-func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
+func TestTargetFlowProductionFullSequence(t *testing.T) { testProductionFullTargetFlow(t, true, false) }
+func TestSplitControlAndWorkerExecuteFullNonEmptySlotEndToEnd(t *testing.T) {
+	testProductionFullTargetFlow(t, false, true)
+}
+func testProductionFullTargetFlow(t *testing.T, diagnostic, split bool) {
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	strategyDocument, err := os.ReadFile("testdata/g1_full_threshold_strategy.json")
@@ -754,6 +758,14 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
 		defer observationsMu.Unlock()
 		observations = append(observations, observation)
 	})
+	var controlBundle *phaseTwoWorkerBundle
+	var workerRuntime *phaseTwoRoleRuntime
+	if split {
+		controlBundle = openSplitControlForFullPipeline(t, cfg, now, additionalObserver, uqServer.Client())
+		cfg.Roles = roles.Set{roles.Worker}
+		cfg.HTTP.Listen = reserveBundleAddress()
+		workerRuntime = openRoleRuntimeForTest(t, cfg)
+	}
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(
 		ctx, cfg, metric.NewRecorder(metric.BuildInfo{}), observability.Discard(observability.ComponentRuntime),
 		newPhaseTwoApplicationHealth(),
@@ -761,7 +773,8 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
 		},
 		phaseTwoProductionExternalDependencies{
-			Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: additionalObserver,
+			RoleRuntime: workerRuntime,
+			Now:         now, HTTPClient: uqServer.Client(), AdditionalObserver: additionalObserver,
 			PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 				return events, nil
 			}),
@@ -772,6 +785,17 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
 	}
 	if err := bundle.Start(ctx); err != nil {
 		t.Fatalf("phase-two production Start() error = %v", err)
+	}
+	if split {
+		if err := controlBundle.refreshAndReconcile(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := bundle.refreshAndReconcile(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		if len(bundle.runners) != 1 || len(controlBundle.runners) != 0 {
+			t.Fatal("split control/worker placement did not keep execution on Worker")
+		}
 	}
 	if diagnostic {
 		f, e := observability.NewTargetFlow(observability.New("runtime", &flowOutput))
