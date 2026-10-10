@@ -399,6 +399,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		// starts, so a later query is judged by its deadline and not by an
 		// earlier one's that has passed.
 		execution.ExtendDeadline(ctx, queryDeadline, source.now())
+		// What the query has from its send to its deadline, read here on the
+		// dispatch loop just before it is sent.
+		budgetMillis := attempt.DeadlineUnixMilli - source.now().UnixMilli()
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()
@@ -408,10 +411,12 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
 				lookback: kept}
 			adapters[index] = adapter
-			sent := source.now()
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
-			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: attempt.DeadlineUnixMilli - sent.UnixMilli(),
-				ElapsedMillis: source.now().Sub(sent).Milliseconds()}
+			// The time it took is the provider's own measure, from its
+			// request to its answer or failure; this goroutine reads no
+			// clock of the Source's, which the dispatch loop owns.
+			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: budgetMillis,
+				ElapsedMillis: int64(completion.Stats.QueryMillis)}
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {

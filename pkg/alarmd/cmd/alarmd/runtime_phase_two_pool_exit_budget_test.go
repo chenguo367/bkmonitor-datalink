@@ -253,9 +253,11 @@ func TestThePoolIsLeftOnlyOnAnAnswerInsideANormalRoundsBudget(t *testing.T) {
 				t.Fatalf("minute %d: a backend answering in %s made %q, want %q", minute, test.latency, event.Event, test.event)
 			}
 			probe := event.LastProbe
+			// The elapsed time is the query service client's own measure, on
+			// the wall clock; this backend's latency is on the test's, so only
+			// its bound is read here (the access package pins the value).
 			if probe == nil || probe.Outcome != test.outcome || !probe.Measured ||
-				probe.BudgetMillis != request.remaining.Milliseconds() || probe.ElapsedMillis > probe.BudgetMillis ||
-				(test.outcome == observability.QueryCooldownProbeAnswered && probe.ElapsedMillis != test.latency.Milliseconds()) {
+				probe.BudgetMillis != request.remaining.Milliseconds() || probe.ElapsedMillis < 0 || probe.ElapsedMillis > probe.BudgetMillis {
 				t.Fatalf("the transition's probe = %+v, want %s with budget %d ms and the time it took", probe, test.outcome, request.remaining.Milliseconds())
 			}
 			// The record a restart or the next owner reads back says the same.
