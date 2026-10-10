@@ -19,23 +19,29 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// differingAddressFuller stands for CMDB placing the record's host by id at
-// another address than the record's own.
-type differingAddressFuller struct{}
+// placementFuller stands for CMDB placing the record's host: by id at
+// another address than the record's own, by id at the record's address, or
+// by the address itself.
+type placementFuller struct{ byID, differs bool }
 
-func (differingAddressFuller) Name() string { return "differing_address" }
-func (differingAddressFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
-	facts.ReportedAddressDiffers = true
+func (placementFuller) Name() string { return "placement" }
+func (fuller placementFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
+	facts.PlacedByHostID, facts.ReportedAddressDiffers = fuller.byID, fuller.differs
 }
 
-// A series whose host CMDB placed by id at another address than the record's
-// is counted once for every Plan that admits it, under whether the query's
-// grouping holds bk_target_ip - the grouping every Plan of the query builds
-// its alert identity from, and the one Python's rewrite of that dimension
-// reaches. A Plan that turns the series away raises no alert for it and is
-// not counted.
-func TestADifferingAddressIsCountedPerAdmittingPlanByItsGrouping(t *testing.T) {
-	count := func(identityFields []string) []bool {
+// placement is one observed series: the Plan's grouping, and whether its
+// address differed from its host's.
+type placement struct{ grouped, differs bool }
+
+// A series whose host CMDB placed by id or agent is reported once for every
+// Plan that admits it - the count a differing address is read against - with
+// whether its address differs, under whether the query's grouping holds
+// bk_target_ip: the grouping every Plan of the query builds its alert
+// identity from, and the one Python's rewrite of that dimension reaches. A
+// Plan that turns the series away raises no alert for it and is not
+// counted, and a series placed by its address is not on that branch at all.
+func TestAPlacementByIDIsCountedPerAdmittingPlanByItsGrouping(t *testing.T) {
+	count := func(identityFields []string, fuller placementFuller) []placement {
 		t.Helper()
 		_, frozen := frozenExecution(t)
 		requirement := frozen.Requirements[0]
@@ -49,14 +55,14 @@ func TestADifferingAddressIsCountedPerAdmittingPlanByItsGrouping(t *testing.T) {
 		}
 		query := plannedQueryForTest(requirement)
 		query.Spec.PlanFacts.Normalization.DatasetContract.IdentityFields = identityFields
-		var counted []bool
+		var counted []placement
 		adapter := &seriesAdapter{
 			consumer:  &admissionConsumer{},
 			query:     query,
 			attemptNo: 1,
-			admission: admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, differingAddressFuller{}},
+			admission: admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, fuller},
 				[]admission.Filter{admission.TargetScopeFilter{}}),
-			addressDiffers: func(grouped bool) { counted = append(counted, grouped) },
+			hostPlacement: func(grouped, differs bool) { counted = append(counted, placement{grouped, differs}) },
 			scopes: planScopes{
 				admitted: {StrategyID: admitted.StrategyID},
 				another:  {StrategyID: another.StrategyID},
@@ -73,10 +79,17 @@ func TestADifferingAddressIsCountedPerAdmittingPlanByItsGrouping(t *testing.T) {
 		}
 		return counted
 	}
-	if got := count([]string{"bk_target_cloud_id", "bk_target_ip"}); !reflect.DeepEqual(got, []bool{true, true}) {
-		t.Fatalf("grouped by bk_target_ip: counted %v, want the two admitting Plans under true and the outside one not at all", got)
+	byIP := []string{"bk_target_cloud_id", "bk_target_ip"}
+	if got := count(byIP, placementFuller{byID: true, differs: true}); !reflect.DeepEqual(got, []placement{{true, true}, {true, true}}) {
+		t.Fatalf("grouped by bk_target_ip, another address: counted %v, want the two admitting Plans, differing, and the outside one not at all", got)
 	}
-	if got := count([]string{"bk_agent_id"}); !reflect.DeepEqual(got, []bool{false, false}) {
+	if got := count(byIP, placementFuller{byID: true}); !reflect.DeepEqual(got, []placement{{true, false}, {true, false}}) {
+		t.Fatalf("grouped by bk_target_ip, the host's address: counted %v, want the two admitting Plans, not differing", got)
+	}
+	if got := count([]string{"bk_agent_id"}, placementFuller{byID: true, differs: true}); !reflect.DeepEqual(got, []placement{{false, true}, {false, true}}) {
 		t.Fatalf("grouped by bk_agent_id: counted %v, want the two admitting Plans under false", got)
+	}
+	if got := count(byIP, placementFuller{}); len(got) != 0 {
+		t.Fatalf("placed by its address: counted %v, want nothing", got)
 	}
 }

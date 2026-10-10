@@ -18,28 +18,36 @@ import "testing"
 func TestARecordPlacedByIDWhoseAddressIsNotTheHostsIsMarked(t *testing.T) {
 	store := agentStore(map[string]string{"agent-live": "720002"})
 	chain := instanceChain(t, store)
+	// placed is the branch Python's fuller rewrites bk_target_ip on - the
+	// host found by bk_host_id or bk_agent_id - whatever the address: the
+	// count the marked ones are read against, so a zero of the marked can
+	// tell "always the host's address" from "never placed that way".
 	for _, c := range []struct {
 		name   string
 		record string
 		marked bool
+		placed bool
 	}{
-		{"by id, the host's address", `{"bk_host_id":"720002","bk_target_ip":"192.0.2.172"}`, false},
-		{"by id, another address", `{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`, true},
-		{"by id, an empty address", `{"bk_host_id":"720002","bk_target_ip":""}`, true},
-		{"by id, no address", `{"bk_host_id":"720002"}`, true},
+		{"by id, the host's address", `{"bk_host_id":"720002","bk_target_ip":"192.0.2.172"}`, false, true},
+		{"by id, another address", `{"bk_host_id":"720002","bk_target_ip":"198.51.100.9"}`, true, true},
+		{"by id, an empty address", `{"bk_host_id":"720002","bk_target_ip":""}`, true, true},
+		{"by id, no address", `{"bk_host_id":"720002"}`, true, true},
 		// Not a string at all: Python writes CMDB's string over it.
-		{"by id, an address that is not a string", `{"bk_host_id":"720002","bk_target_ip":192}`, true},
-		{"by agent, another address", `{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`, true},
-		{"by agent, the host's address", `{"bk_agent_id":"agent-live","bk_target_ip":"192.0.2.172"}`, false},
+		{"by id, an address that is not a string", `{"bk_host_id":"720002","bk_target_ip":192}`, true, true},
+		{"by agent, another address", `{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`, true, true},
+		{"by agent, the host's address", `{"bk_agent_id":"agent-live","bk_target_ip":"192.0.2.172"}`, false, true},
 		// Escaped in the JSON, the host's address once decoded: the same
 		// string Python's dedupe sees, so not marked.
-		{"by id, the host's address escaped", `{"bk_host_id":"720002","bk_target_ip":"192.0.2.\u0031\u0037\u0032"}`, false},
-		{"by address", `{"bk_target_ip":"192.0.2.172","bk_target_cloud_id":0}`, false},
-		{"an id CMDB does not know", `{"bk_host_id":"720999","bk_target_ip":"198.51.100.9"}`, false},
+		{"by id, the host's address escaped", `{"bk_host_id":"720002","bk_target_ip":"192.0.2.\u0031\u0037\u0032"}`, false, true},
+		{"by address", `{"bk_target_ip":"192.0.2.172","bk_target_cloud_id":0}`, false, false},
+		{"an id CMDB does not know", `{"bk_host_id":"720999","bk_target_ip":"198.51.100.9"}`, false, false},
 	} {
 		facts := chain.Enrich(jsonDims(t, c.record))
 		if facts.ReportedAddressDiffers != c.marked {
 			t.Errorf("%s: marked %t, want %t", c.name, facts.ReportedAddressDiffers, c.marked)
+		}
+		if facts.PlacedByHostID != c.placed {
+			t.Errorf("%s: placed by id or agent %t, want %t", c.name, facts.PlacedByHostID, c.placed)
 		}
 	}
 }

@@ -30,11 +30,12 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// Through the production bundle: a series whose host CMDB places by its
-// bk_host_id at another address than the series reports is counted under
-// its Plan's grouping - here grouped by bk_target_ip, the grouping Python's
-// rewrite of that dimension reaches. A series reporting its host's own
-// address is not counted.
+// Through the production bundle: every series whose host CMDB places by its
+// bk_host_id is counted as placed under its Plan's grouping - here grouped
+// by bk_target_ip, the grouping Python's rewrite of that dimension reaches -
+// and the one at another address than the series reports is counted as
+// differing too. The series reporting its host's own address is placed and
+// not differing: the count a zero of the differing ones is read against.
 func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
@@ -137,18 +138,24 @@ func TestADifferingAddressIsCountedThroughTheProductionBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	counts := map[string]float64{}
-	for _, family := range families {
-		if !strings.HasSuffix(family.GetName(), "admission_cmdb_address_differs_total") {
-			continue
-		}
-		for _, series := range family.GetMetric() {
-			for _, label := range series.GetLabel() {
-				counts[label.GetValue()] += series.GetCounter().GetValue()
+	counted := func(suffix string) map[string]float64 {
+		counts := map[string]float64{}
+		for _, family := range families {
+			if !strings.HasSuffix(family.GetName(), suffix) {
+				continue
+			}
+			for _, series := range family.GetMetric() {
+				for _, label := range series.GetLabel() {
+					counts[label.GetValue()] += series.GetCounter().GetValue()
+				}
 			}
 		}
+		return counts
 	}
-	if counts["true"] != 1 || counts["false"] != 0 {
-		t.Fatalf("counted %v, want the one series whose address is not its host's, under grouped_by_target_ip=true", counts)
+	if counts := counted("admission_cmdb_address_differs_total"); counts["true"] != 1 || counts["false"] != 0 {
+		t.Fatalf("differing: counted %v, want the one series whose address is not its host's, under grouped_by_target_ip=true", counts)
+	}
+	if counts := counted("admission_cmdb_placed_by_host_id_total"); counts["true"] != 2 || counts["false"] != 0 {
+		t.Fatalf("placed: counted %v, want both series CMDB placed by bk_host_id, under grouped_by_target_ip=true", counts)
 	}
 }

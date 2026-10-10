@@ -69,13 +69,18 @@ func (r *Recorder) RecordSeriesAdmission(filter, result, reason string) {
 	r.phaseTwo.seriesAdmission.WithLabelValues(filter, result, reason).Inc()
 }
 
-// RecordAddressDiffers counts one admitted series a Plan read whose host
-// CMDB placed by id at another address than the record's.
-func (r *Recorder) RecordAddressDiffers(groupedByTargetIP bool) {
+// RecordHostPlacement counts one admitted series a Plan read whose host CMDB
+// placed by id or agent, and, when its own address is not that host's, one
+// whose address differs.
+func (r *Recorder) RecordHostPlacement(groupedByTargetIP, addressDiffers bool) {
 	if r == nil {
 		return
 	}
-	r.phaseTwo.cmdbAddressDiffers.WithLabelValues(strconv.FormatBool(groupedByTargetIP)).Inc()
+	grouped := strconv.FormatBool(groupedByTargetIP)
+	r.phaseTwo.cmdbPlacedByHostID.WithLabelValues(grouped).Inc()
+	if addressDiffers {
+		r.phaseTwo.cmdbAddressDiffers.WithLabelValues(grouped).Inc()
+	}
 }
 
 var cmdbIndexReasons = map[string]struct{}{

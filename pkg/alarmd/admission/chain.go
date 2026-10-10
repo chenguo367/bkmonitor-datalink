@@ -119,6 +119,13 @@ type Facts struct {
 	// not acted on, until it is decided whether alert identity follows
 	// CMDB's address as Python's does.
 	ReportedAddressDiffers bool
+	// PlacedByHostID records that CMDB placed the record's host by its
+	// bk_host_id or bk_agent_id: the branch Python's fuller overwrites
+	// bk_target_ip on, whatever the record's own address. The count the
+	// records whose address differs (ReportedAddressDiffers, a part of
+	// these) are read against: without it a zero of those cannot tell
+	// "always the host's address" from "never placed that way".
+	PlacedByHostID bool
 	// HostState is the CMDB operational state, for the filter that acts on it.
 	HostState string
 	// HostBusinessID is the business the resolved host belongs to.

@@ -269,6 +269,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_legacy_pod_cache_total":                       "variableLabels: {result}",
 		"bkmonitor_alarmd_series_admission_total":                       "variableLabels: {filter,result,reason}",
 		"bkmonitor_alarmd_admission_cmdb_address_differs_total":         "variableLabels: {grouped_by_target_ip}",
+		"bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total":       "variableLabels: {grouped_by_target_ip}",
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
@@ -792,8 +793,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("control_cache_audit_total"):  4,
 		fqName("legacy_pod_cache_total"):     3,
 		// Filters and reasons are closed vocabularies in the recorder.
-		fqName("series_admission_total"):               len(admissionFilters) * len(admissionResults) * len(admissionReasons),
-		fqName("admission_cmdb_address_differs_total"): 2,
+		fqName("series_admission_total"):                 len(admissionFilters) * len(admissionResults) * len(admissionReasons),
+		fqName("admission_cmdb_address_differs_total"):   2,
+		fqName("admission_cmdb_placed_by_host_id_total"): 2,
 		// Levels 1..64 plus "other". Empty in a healthy build: the platform's
 		// three levels all have names here, so a series appearing at all is the
 		// signal.
