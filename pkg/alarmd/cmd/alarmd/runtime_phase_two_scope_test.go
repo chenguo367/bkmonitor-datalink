@@ -313,6 +313,8 @@ func (*schedulerRunnerQueryGroup) DeclineHung(time.Time, time.Duration) (string,
 	return "", time.Time{}, false
 }
 
+func (*schedulerRunnerQueryGroup) ExecutionDeadline() time.Time { return time.Time{} }
+
 func (*schedulerRunnerQueryGroup) MaintainLease(ctx context.Context, _, _ time.Duration) error {
 	<-ctx.Done()
 	return ctx.Err()

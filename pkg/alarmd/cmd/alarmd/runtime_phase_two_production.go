@@ -2808,6 +2808,15 @@ func (runtime *productionPhaseTwoQueryGroup) DeclineHung(now time.Time, grace ti
 	return runtime.runner.DeclineHung(now, grace)
 }
 
+// ExecutionDeadline is the Runner's: the deadline its execution in flight
+// runs under.
+func (runtime *productionPhaseTwoQueryGroup) ExecutionDeadline() time.Time {
+	if runtime == nil || runtime.runner == nil {
+		return time.Time{}
+	}
+	return runtime.runner.ExecutionDeadline()
+}
+
 func (runtime *productionPhaseTwoQueryGroup) NextDeadline() time.Time {
 	if runtime == nil || runtime.runner == nil {
 		return time.Time{}

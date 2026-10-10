@@ -573,6 +573,11 @@ type phaseTwoQueryGroupRuntime interface {
 	// first attempt's, minutes gone for a replay. Required, like
 	// NextDeadline.
 	DeclineHung(now time.Time, grace time.Duration) (string, time.Time, bool)
+	// ExecutionDeadline is the deadline the execution in flight runs under,
+	// as DeclineHung judges it, without claiming anything; zero when none is
+	// in flight or it has none yet. The liveness probe reads it beside the
+	// dispatcher's deadline.
+	ExecutionDeadline() time.Time
 }
 
 type phaseTwoWorkerBundleDependencies struct {
@@ -1452,7 +1457,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 	}
 	func() {
 		defer dispatcher.changeExecuting(-1)
-		token := dispatcher.bundle.liveness.executionStarted(scheduled.place.deadline)
+		token := dispatcher.bundle.liveness.executionStarted(scheduled.place.deadline, scheduled.lifecycle.runner.ExecutionDeadline)
 		defer dispatcher.bundle.liveness.executionReturned(token)
 		if ctx.Err() == nil && dispatcher.bundle.enterScheduledRunner(scheduled) {
 			result.ran = true

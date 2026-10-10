@@ -126,6 +126,8 @@ func (walkRunner) DeclineHung(time.Time, time.Duration) (string, time.Time, bool
 	return "", time.Time{}, false
 }
 
+func (walkRunner) ExecutionDeadline() time.Time { return time.Time{} }
+
 func (walkRunner) MaintainLease(context.Context, time.Duration, time.Duration) error { return nil }
 
 func (walkRunner) Release(context.Context) error { return nil }
