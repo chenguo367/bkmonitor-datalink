@@ -139,6 +139,12 @@ func (a *App) ensureSession(env string, force bool) (Profile, error) {
 
 type pairingGone struct{ code string }
 
+type scopeUnavailable struct{}
+
+func (*scopeUnavailable) Error() string {
+	return "This authorization instance does not declare deployment_ops_exec support; the local pairing was preserved. Retry explicitly against a capable channel instance."
+}
+
 func (e *pairingGone) Error() string {
 	if e.code == "renewal_admin_key_rotated" {
 		return "the deployment's administrator key changed since this CLI was paired"
@@ -200,6 +206,16 @@ func (a *App) renew(p Profile) (Profile, error) {
 		return Profile{}, fmt.Errorf("session renewal failed: %w", err)
 	}
 	if status == http.StatusUnauthorized {
+		if p.Scope == execScope {
+			supported := false
+			scopes, _ := result["supported_scopes"].([]any)
+			for _, scope := range scopes {
+				supported = supported || scope == execScope
+			}
+			if !supported {
+				return Profile{}, &scopeUnavailable{}
+			}
+		}
 		return Profile{}, &pairingGone{code: stringField(objectField(result, "error"), "code")}
 	}
 	if status < 200 || status >= 300 {
@@ -390,6 +406,12 @@ func (a *App) exchange(code string, expected Profile, verifier string, rebind bo
 		return nil, "environment_mismatch", "the code is for another entry"
 	}
 	p := expected
+	if p.Scope == "" {
+		p.Scope = sessionScope
+	}
+	if b.Scope != p.Scope {
+		return nil, "scope_mismatch", "the code does not grant the explicitly requested scope; obtain a new login code"
+	}
 	p.EnvironmentID, p.EnvironmentName, p.PublicBaseURL = b.EnvironmentID, b.EnvironmentName, b.PublicBaseURL
 	if err := a.Store.checkBinding(p, rebind); err != nil {
 		return nil, "configuration_error", err.Error()
@@ -426,7 +448,7 @@ func (a *App) exchange(code string, expected Profile, verifier string, rebind bo
 	if err := a.Store.save(session, rebind); err != nil {
 		return nil, "configuration_error", err.Error()
 	}
-	return map[string]any{"environment_id": session.EnvironmentID, "expires_at": session.ExpiresAt, "session_id": session.SessionID, "pairing": pairing}, "", ""
+	return map[string]any{"environment_id": session.EnvironmentID, "expires_at": session.ExpiresAt, "session_id": session.SessionID, "pairing": pairing, "scope": session.Scope}, "", ""
 }
 
 // listen runs one loopback login and returns its exit code.
@@ -454,6 +476,10 @@ func (a *App) listen(o options) int {
 		p = Profile{PublicBaseURL: entry, CACert: o.caCert, InsecureTLS: o.insecureTLS}
 	default:
 		return a.fail("invalid_input", "auth listen requires --env <environment_id> or --url <entry URL>", 2)
+	}
+	p.Scope = o.scope
+	if p.Scope == "" {
+		p.Scope = sessionScope
 	}
 	port, err := strconv.Atoi(o.port)
 	if err != nil || port < 1024 || port > 65535 {

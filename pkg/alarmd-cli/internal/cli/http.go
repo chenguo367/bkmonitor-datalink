@@ -28,7 +28,13 @@ import (
 
 const channelVersion = "alarmd-ob/v1"
 const sessionScope = "deployment_ops_readonly"
+const execScope = "deployment_ops_exec"
 const maxResponse = 8 << 20
+
+func validScope(scope string) bool { return scope == sessionScope || scope == execScope }
+func allowsScope(granted, required string) bool {
+	return validScope(granted) && (granted == required || (granted == execScope && required == sessionScope))
+}
 
 func baseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
@@ -115,11 +121,16 @@ func (a *App) environmentClient(p Profile) (client http.Client, u *url.URL, rele
 }
 
 func (a *App) request(p Profile, method, endpoint string, body any) (map[string]any, int, error) {
+	return a.requestTimeout(p, method, endpoint, body, 30*time.Second)
+}
+
+func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeout time.Duration) (map[string]any, int, error) {
 	client, u, release, err := a.environmentClient(p)
 	defer release()
 	if err != nil {
 		return nil, 0, err
 	}
+	client.Timeout = timeout
 	u.Path += endpoint
 	var payload []byte
 	if body != nil {
@@ -256,8 +267,12 @@ func validateExchange(m map[string]any, p Profile) (Profile, error) {
 	out.AccessToken = stringField(m, "access_token")
 	u, err := normalizedURL(out.PublicBaseURL)
 	expected, _ := normalizedURL(p.PublicBaseURL)
-	if err != nil || u != expected || out.EnvironmentID != p.EnvironmentID || out.EnvironmentName == "" || out.SessionID == "" || out.Scope != sessionScope {
-		return Profile{}, errors.New("session environment, entry URL or readonly scope does not match")
+	expectedScope := p.Scope
+	if expectedScope == "" {
+		expectedScope = sessionScope
+	}
+	if err != nil || u != expected || out.EnvironmentID != p.EnvironmentID || out.EnvironmentName == "" || out.SessionID == "" || !validScope(out.Scope) || out.Scope != expectedScope {
+		return Profile{}, errors.New("session environment, entry URL or requested scope does not match")
 	}
 	if _, err := time.Parse(time.RFC3339, out.ExpiresAt); err != nil {
 		return Profile{}, errors.New("server returned an invalid session expiry")
@@ -272,8 +287,8 @@ func validateExchange(m map[string]any, p Profile) (Profile, error) {
 }
 
 func validateStatus(m map[string]any, p Profile) (string, error) {
-	if stringField(m, "environment_id") != p.EnvironmentID || stringField(m, "scope") != sessionScope || stringField(m, "session_id") != p.SessionID {
-		return "", errors.New("session status environment, readonly scope or session ID does not match")
+	if stringField(m, "environment_id") != p.EnvironmentID || stringField(m, "scope") != p.Scope || !validScope(p.Scope) || stringField(m, "session_id") != p.SessionID {
+		return "", errors.New("session status environment, scope or session ID does not match")
 	}
 	expiry := stringField(m, "expires_at")
 	if _, err := time.Parse(time.RFC3339, expiry); err != nil {

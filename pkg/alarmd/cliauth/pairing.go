@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,7 +133,7 @@ func renewalFailure() *Error {
 
 // Refresh spends a renewal credential.
 func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, error) {
-	if !validSecret(refreshToken) {
+	if !validRenewalSecret(refreshToken) {
 		m.count(CountRenewalExpired)
 		return Renewal{}, renewalFailure()
 	}
@@ -143,6 +144,9 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 	next, err := randomSecret()
 	if err != nil {
 		return Renewal{}, err
+	}
+	if strings.HasPrefix(refreshToken, execRenewalPrefix) {
+		next = execRenewalPrefix + next
 	}
 	id, err := randomSecret()
 	if err != nil {
@@ -156,7 +160,7 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 		[]string{pairingKey(m.prefix, refreshToken), pairingKey(m.prefix, next), m.prefix + "session:" + digest(token), m.pairingsKey(), m.epochKey(),
 			m.prefix + "spent:" + digest(refreshToken)},
 		m.environmentID, ScopeReadonly, m.adminBinding(), id, SessionLifetime.Milliseconds(), PairingIdleLifetime.Milliseconds(),
-		sealed, RenewalReplayGrace.Milliseconds())
+		sealed, RenewalReplayGrace.Milliseconds(), ScopeExec)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return Renewal{}, err
@@ -195,8 +199,8 @@ func (m *Manager) Upgrade(ctx context.Context, bearer string) (string, string, e
 		return "", "", err
 	}
 	result, err := m.run(ctx, upgradeScript,
-		[]string{m.prefix + "session:" + digest(bearer), pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey()},
-		m.environmentID, ScopeReadonly, id, m.adminBinding(), PairingIdleLifetime.Milliseconds(), MaxPairings)
+		[]string{m.prefix + "session:" + digest(bearer), pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey(), pairingKey(m.prefix, execRenewalPrefix+refresh)},
+		m.environmentID, ScopeReadonly, id, m.adminBinding(), PairingIdleLifetime.Milliseconds(), MaxPairings, ScopeExec)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return "", "", err
@@ -208,8 +212,12 @@ func (m *Manager) Upgrade(ctx context.Context, bearer string) (string, string, e
 		m.count(CountPairingsRefused)
 		return "", "", pairingsFull()
 	}
-	if _, _, err := m.resultRecord(result); err != nil {
+	record, _, err := m.resultRecord(result)
+	if err != nil {
 		return "", "", err
+	}
+	if record.Scope == ScopeExec {
+		refresh = execRenewalPrefix + refresh
 	}
 	m.count(CountPairingsIssued)
 	return refresh, id, nil
@@ -221,7 +229,7 @@ func pairingsFull() *Error {
 
 // Forget revokes one renewal credential: its holder logging out.
 func (m *Manager) Forget(ctx context.Context, refreshToken string) error {
-	if !validSecret(refreshToken) {
+	if !validRenewalSecret(refreshToken) {
 		return nil
 	}
 	result, err := m.run(ctx, forgetScript, []string{pairingKey(m.prefix, refreshToken), m.pairingsKey()}, m.environmentID)

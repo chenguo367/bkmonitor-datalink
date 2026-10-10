@@ -1,5 +1,23 @@
 # alarmd-cli
 
+登录默认授予 `deployment_ops_readonly`。需要 Pod 运维执行时，从授权页
+`?scope=deployment_ops_exec` 明确申请，并使用页面生成的带
+`--scope deployment_ops_exec` 的 `auth listen` 或 `auth login` 命令。
+普通续期保留初次授予的权限，已有只读配对继续只读。
+执行续期凭据带 `exec-v1.` 版本前缀；旧授权实例会在访问共享 Redis 前拒绝它。
+CLI 返回 `capability_unavailable` 并保留本地配对，用户可明确重试到支持该能力的实例。
+
+`invoke` 可用 `--params-file path.json` 传入嵌套 JSON 参数；`--params-file -`
+从 stdin 读取。`--stdin-file script.txt` 与 `--script-file script.txt` 等价，只把
+文件内容填入 describe 登记的 `parameter_source: stdin` 字符串参数，CLI 不执行本地
+shell。二者也支持 `-`，且不能与参数 JSON 同时消费 stdin。`--input JSON|@file`
+保持兼容，与 `--params-file` 互斥。
+
+调用前读取 describe 的权限、请求字节上限和 `execution_timeout_ms`，请求期限为
+操作期限加 5 秒传输余量；旧服务端未声明期限时保留 30 秒。每次执行只发送一次
+invoke，执行权限请求遇到超时或会话失效时由用户检查已有回执后明确重试。结果沿用
+脱敏、原子写入的私有 `meta.result_file`，保留服务端返回的目标和远端执行状态。
+
 面向运维取证的独立 Go 客户端。服务端负责操作目录、输入合同、预算和证据判定；客户端只处理环境登录、通道调用、凭据与输出。没有内置业务 operation，也不访问 K8s、Redis 或任意内部 URL。
 
 ## 安装
@@ -117,7 +135,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 ### 5. 安全边界
 
-- 所有操作都是只读取证，不修改部署或策略。
+- 以 describe 的 `effect` 和 `required_scope` 为准：默认只读授权执行取证操作，Pod 运维执行需要人明确授予 `deployment_ops_exec`。
 - 不要把凭据写进命令参数、对话、日志或证据。CLI 的输出不含凭据。
 - 配置目录（默认是用户配置目录下的 `alarmd-cli/`，可由 `ALARMD_CLI_CONFIG_DIR` 指定）里的 `profiles.json` 含会话和续期凭据，不要读取、复制或外传。
 - `results/` 下的结果文件是脱敏后的响应，但仍含策略、运行对象、查询条件等部署内部信息。只引用需要的片段，不要整目录外传或提交到公开仓库。
@@ -185,7 +203,7 @@ HTTPS 默认使用系统信任库。私有 CA 可通过 `auth login --ca-cert /a
 
 凭据位于平台用户配置目录下的 `alarmd-cli/profiles.json`；`ALARMD_CLI_CONFIG_DIR` 可指定独立目录。目录权限 0700、凭据/锁/结果文件 0600。响应在 `results/` 下保留，客户端不自动删除证据。勿把凭据配置目录上传到工单或公开仓库。
 
-固定边界：网络期限 30 秒；服务端响应最大 8 MiB，超限拒绝解码；参数 JSON 最大 1 MiB；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
+固定边界：invoke 网络期限取 describe 的操作期限加 5 秒，旧服务端为 30 秒；服务端响应最大 8 MiB，超限拒绝解码；输入文件最大 1 MiB，并落实 describe 的请求和 stdin 上限；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
 
 ## 构建与验证
 

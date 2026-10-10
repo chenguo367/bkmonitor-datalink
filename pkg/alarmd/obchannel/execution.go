@@ -88,6 +88,9 @@ func (c *EvidenceExecutor) ExecuteEvidence(ctx context.Context, invocation Invoc
 	if !ok {
 		return fail("unknown_operation", "Operation is not registered on the target.")
 	}
+	if op.Effect != "read" || op.RequiredScope != "deployment_ops_readonly" || op.ExecutionPool != "evidence" {
+		return fail("operation_not_internal_evidence", "Internal Worker RPC accepts only registered readonly evidence operations.")
+	}
 	if invocation.OperationContractRevision != "" && invocation.OperationContractRevision != c.OperationContractRevision(op.ID) {
 		return fail("target_operation_contract_mismatch", "The target operation execution contract differs; this invocation did not execute.")
 	}
@@ -122,7 +125,16 @@ func (c *EvidenceExecutor) run(ctx context.Context, op Operation, params Params,
 	}
 	out := op.Run(ctx, params)
 	if ctx.Err() != nil {
-		return failure(meta, "request_timeout", "Evidence execution exceeded its request context; no complete result is returned.")
+		if op.Effect != "exec" || out.Value == nil {
+			return failure(meta, "request_timeout", "Evidence execution exceeded its request context; no complete result is returned.")
+		}
+		// A cancelled exec may already have run remotely. Preserve the
+		// Provider's receipt, including termination/unknown-state evidence.
+		out.Complete = false
+		if out.Error == nil {
+			out.Error = &Failure{Code: "remote_state_unknown", Message: "Execution context ended; consult the returned remote-state receipt before explicitly retrying."}
+		}
+		out.Limitations = append(out.Limitations, "execution_context_ended")
 	}
 	status := "ok"
 	if !out.Complete {

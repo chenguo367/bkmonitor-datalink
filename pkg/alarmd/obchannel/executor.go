@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
@@ -20,6 +21,7 @@ import (
 type ExecutorOptions struct {
 	EnvironmentID, Replica, Build, Incarnation string
 	Concurrency                                int
+	SREConcurrency, ExecConcurrency            int
 	Operations                                 []Operation
 	Now                                        func() time.Time
 	Roles                                      roles.Set
@@ -34,6 +36,8 @@ type EvidenceExecutor struct {
 	revision  string
 	contracts map[string]string
 	slots     chan struct{}
+	sreSlots  chan struct{}
+	execSlots chan struct{}
 }
 
 func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
@@ -49,7 +53,16 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 	if options.Concurrency > 4 {
 		options.Concurrency = 4
 	}
-	e := &EvidenceExecutor{options: options, ops: make(map[string]Operation), contracts: make(map[string]string), slots: make(chan struct{}, options.Concurrency)}
+	if options.SREConcurrency <= 0 {
+		options.SREConcurrency = 1
+	}
+	if options.ExecConcurrency <= 0 {
+		options.ExecConcurrency = 1
+	}
+	if options.SREConcurrency > 4 || options.ExecConcurrency > 4 {
+		return nil, errors.New("SRE and exec concurrency must be at most four per process")
+	}
+	e := &EvidenceExecutor{options: options, ops: make(map[string]Operation), contracts: make(map[string]string), slots: make(chan struct{}, options.Concurrency), sreSlots: make(chan struct{}, options.SREConcurrency), execSlots: make(chan struct{}, options.ExecConcurrency)}
 	for _, op := range options.Operations {
 		if op.ID == "" || op.Run == nil || op.Summary == "" {
 			return nil, errors.New("invalid OB operation registration")
@@ -62,6 +75,39 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 		}
 		if op.EvidenceScope == "" {
 			op.EvidenceScope = "deployment"
+		}
+		if op.Effect == "" {
+			op.Effect = "read"
+		}
+		if op.RequiredScope == "" {
+			op.RequiredScope = cliauth.ScopeReadonly
+			if op.Effect == "exec" {
+				op.RequiredScope = cliauth.ScopeExec
+			}
+		}
+		if op.ExecutionPool == "" {
+			op.ExecutionPool = "evidence"
+			if op.Effect == "exec" {
+				op.ExecutionPool = "exec"
+			}
+		}
+		if op.ExecutionTimeout == 0 {
+			op.ExecutionTimeout = RequestTimeout
+		}
+		if op.RequestMaxBytes == 0 {
+			op.RequestMaxBytes = MaxRequestBytes
+		}
+		if (op.Effect != "read" && op.Effect != "exec") || !cliauth.ValidScope(op.RequiredScope) ||
+			(op.Effect == "exec" && (op.RequiredScope != cliauth.ScopeExec || op.ExecutionPool != "exec" || op.Targetable || op.RouteWhenElsewhere != nil || op.DefaultControlLeader)) ||
+			(op.Effect == "read" && op.ExecutionPool != "evidence" && op.ExecutionPool != "sre") ||
+			(op.ExecutionPool != "evidence" && (op.Targetable || op.RouteWhenElsewhere != nil || op.DefaultControlLeader)) ||
+			op.ExecutionTimeout < time.Millisecond || op.ExecutionTimeout > MaxExecutionTimeout || op.RequestMaxBytes < 1 || op.RequestMaxBytes > EnvelopeMaxBytes {
+			return nil, fmt.Errorf("invalid execution contract for %q", op.ID)
+		}
+		for name, field := range op.Fields {
+			if err := validateFieldDefinition(field); err != nil {
+				return nil, fmt.Errorf("operation %q field %q: %w", op.ID, name, err)
+			}
 		}
 		if op.Targetable {
 			for name := range targetFields() {
@@ -92,6 +138,18 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 		for _, key := range []string{"summary", "examples", "time_semantics"} {
 			delete(contract, key)
 		}
+		// The original evidence contract digest stays valid across upgrades.
+		// New limits are execution semantics only when they differ from its
+		// historical readonly, evidence-pool, three-second, 64KiB defaults.
+		if op.ExecutionTimeout == RequestTimeout {
+			delete(contract, "execution_timeout_ms")
+		}
+		if op.ExecutionPool == "evidence" {
+			delete(contract, "execution_pool")
+		}
+		if op.RequestMaxBytes == MaxRequestBytes {
+			delete(contract, "request_max_bytes")
+		}
 		digest, err := contractDigest(contract)
 		if err != nil {
 			return nil, err
@@ -106,6 +164,24 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 	var err error
 	e.revision, err = contractDigest(catalog)
 	return e, err
+}
+
+func (e *EvidenceExecutor) executionSlots(op Operation) chan struct{} {
+	if op.ExecutionPool == "exec" {
+		return e.execSlots
+	}
+	if op.ExecutionPool == "sre" {
+		return e.sreSlots
+	}
+	return e.slots
+}
+
+func (e *EvidenceExecutor) requestLimits(op Operation) map[string]any {
+	return map[string]any{"request_max_bytes": op.RequestMaxBytes, "response_max_bytes": MaxResponseBytes,
+		"execution_timeout_ms": op.ExecutionTimeout.Milliseconds(), "transport_margin_ms": TransportMargin.Milliseconds(),
+		"admission_timeout_ms": RequestTimeout.Milliseconds(), "concurrency": cap(e.executionSlots(op)),
+		"execution_pool": op.ExecutionPool, "budget_scope": "process", "http_request_slots": 4,
+		"invokes_per_session_per_minute": InvokesPerSessionPerMinute}
 }
 
 func contractDigest(value any) (string, error) {

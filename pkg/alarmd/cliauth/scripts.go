@@ -30,7 +30,7 @@ local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if record.environment_id ~= ARGV[1] or record.scope ~= ARGV[3] or record.expires_at_ms <= now then
+if record.environment_id ~= ARGV[1] or (record.scope ~= ARGV[3] and record.scope ~= ARGV[10]) or record.expires_at_ms <= now then
   return {0}
 end
 -- A grant made for a loopback login answers only the verifier's holder. A
@@ -67,9 +67,11 @@ if not redis.call('SET', KEYS[2], encoded, 'PX', ARGV[4], 'NX') then
 end
 redis.call('DEL', KEYS[1])
 if paired == 1 then
-  local pairing = cjson.encode({pairing_id = ARGV[5], environment_id = ARGV[1], scope = ARGV[3], epoch = epoch,
+  local pairing_key = KEYS[3]
+  if record.scope == ARGV[10] then pairing_key = KEYS[6] end
+  local pairing = cjson.encode({pairing_id = ARGV[5], environment_id = ARGV[1], scope = record.scope, epoch = epoch,
     admin_binding = ARGV[8], created_at_ms = now, last_used_at_ms = now})
-  redis.call('SET', KEYS[3], pairing, 'PX', ARGV[6])
+  redis.call('SET', pairing_key, pairing, 'PX', ARGV[6])
   redis.call('ZADD', KEYS[4], now, ARGV[5])
 end
 return {1, encoded, 0, paired, bound}
@@ -82,7 +84,7 @@ local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
-if record.environment_id ~= ARGV[1] or record.scope ~= ARGV[4] or record.expires_at_ms <= now then
+if record.environment_id ~= ARGV[1] or (record.scope ~= ARGV[4] and record.scope ~= ARGV[7]) or record.expires_at_ms <= now then
   return {0}
 end
 -- A session from before the environment's last revocation is revoked with it.
@@ -124,7 +126,7 @@ if not raw then
 end
 local pairing = cjson.decode(raw)
 local epoch = tonumber(redis.call('GET', KEYS[5]) or '0')
-if pairing.environment_id ~= ARGV[1] or pairing.scope ~= ARGV[2] or (tonumber(pairing.epoch) or 0) ~= epoch then
+if pairing.environment_id ~= ARGV[1] or (pairing.scope ~= ARGV[2] and pairing.scope ~= ARGV[9]) or (tonumber(pairing.epoch) or 0) ~= epoch then
   redis.call('DEL', KEYS[1])
   redis.call('ZREM', KEYS[4], pairing.pairing_id or '')
   return {0}
@@ -135,7 +137,7 @@ if pairing.admin_binding ~= ARGV[3] then
   return {4}
 end
 pairing.last_used_at_ms = now
-local session = cjson.encode({session_id = ARGV[4], environment_id = ARGV[1], scope = ARGV[2], epoch = epoch,
+local session = cjson.encode({session_id = ARGV[4], environment_id = ARGV[1], scope = pairing.scope, epoch = epoch,
   pairing_id = pairing.pairing_id, expires_at_ms = now + tonumber(ARGV[5])})
 if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then return {2} end
 redis.call('DEL', KEYS[1])
@@ -158,18 +160,20 @@ local raw = redis.call('GET', KEYS[1])
 if not raw then return {0} end
 local record = cjson.decode(raw)
 local epoch = tonumber(redis.call('GET', KEYS[4]) or '0')
-if record.environment_id ~= ARGV[1] or record.scope ~= ARGV[2] or record.expires_at_ms <= now or (tonumber(record.epoch) or 0) ~= epoch then
+if record.environment_id ~= ARGV[1] or (record.scope ~= ARGV[2] and record.scope ~= ARGV[7]) or record.expires_at_ms <= now or (tonumber(record.epoch) or 0) ~= epoch then
   return {0}
 end
 if record.pairing_id and record.pairing_id ~= '' then return {5} end
 redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - tonumber(ARGV[5]))
 if tonumber(redis.call('ZCARD', KEYS[3])) >= tonumber(ARGV[6]) then return {3} end
-if redis.call('EXISTS', KEYS[2]) == 1 then return {2} end
+local pairing_key = KEYS[2]
+if record.scope == ARGV[7] then pairing_key = KEYS[5] end
+if redis.call('EXISTS', pairing_key) == 1 then return {2} end
 record.pairing_id = ARGV[3]
 record.epoch = epoch
 local encoded = cjson.encode(record)
 redis.call('SET', KEYS[1], encoded, 'PX', record.expires_at_ms - now, 'XX')
-redis.call('SET', KEYS[2], cjson.encode({pairing_id = ARGV[3], environment_id = ARGV[1], scope = ARGV[2], epoch = epoch,
+redis.call('SET', pairing_key, cjson.encode({pairing_id = ARGV[3], environment_id = ARGV[1], scope = record.scope, epoch = epoch,
   admin_binding = ARGV[4], created_at_ms = now, last_used_at_ms = now}), 'PX', ARGV[5])
 redis.call('ZADD', KEYS[3], now, ARGV[3])
 return {1, encoded, 0, ARGV[3]}

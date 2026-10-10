@@ -33,6 +33,11 @@ const (
 	MaxRequestBytes  = 64 << 10
 	MaxResponseBytes = 2 << 20
 	RequestTimeout   = 3 * time.Second
+	// EnvelopeMaxBytes is the transport ceiling. Each operation keeps its
+	// own smaller request bound; existing reads remain at MaxRequestBytes.
+	EnvelopeMaxBytes    = 1 << 20
+	TransportMargin     = 5 * time.Second
+	MaxExecutionTimeout = 2 * time.Minute
 	// InvokesPerSessionPerMinute is one session's budget of executed
 	// invocations in a clock minute. Every native invocation is one whole
 	// fleet snapshot read on the replica that answers, bounded only per
@@ -60,20 +65,24 @@ type Authorizer interface {
 }
 
 // Field defines both the advertised schema and the input validation. These
-// operations intentionally have small, flat inputs, not a scripting language.
+// validation recursively covers the same object/array shape describe exposes.
 type Field struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description"`
-	Source      string   `json:"parameter_source,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-	Minimum     *int64   `json:"minimum,omitempty"`
-	Maximum     *int64   `json:"maximum,omitempty"`
-	MaxLength   int      `json:"maxLength,omitempty"`
-	MinLength   int      `json:"minLength,omitempty"`
-	Pattern     string   `json:"pattern,omitempty"`
-	MaxItems    int      `json:"maxItems,omitempty"`
-	UniqueItems bool     `json:"uniqueItems,omitempty"`
-	Items       *Field   `json:"items,omitempty"`
+	Type                 string           `json:"type"`
+	Description          string           `json:"description"`
+	Source               string           `json:"parameter_source,omitempty"`
+	Enum                 []string         `json:"enum,omitempty"`
+	Minimum              *int64           `json:"minimum,omitempty"`
+	Maximum              *int64           `json:"maximum,omitempty"`
+	MaxLength            int              `json:"maxLength,omitempty"`
+	MinLength            int              `json:"minLength,omitempty"`
+	Pattern              string           `json:"pattern,omitempty"`
+	MaxItems             int              `json:"maxItems,omitempty"`
+	MinItems             int              `json:"minItems,omitempty"`
+	UniqueItems          bool             `json:"uniqueItems,omitempty"`
+	Items                *Field           `json:"items,omitempty"`
+	Properties           map[string]Field `json:"properties,omitempty"`
+	Required             []string         `json:"required,omitempty"`
+	AdditionalProperties bool             `json:"additionalProperties,omitempty"`
 }
 
 type Params map[string]any
@@ -119,6 +128,14 @@ type Availability struct {
 }
 type Operation struct {
 	ID string
+	// Zero values retain the original readonly, three-second contract.
+	Effect           string
+	RequiredScope    string
+	ExecutionTimeout time.Duration
+	RequestMaxBytes  int
+	// ExecutionPool is evidence, sre or exec. Exec cannot enter an internal
+	// Worker route; SRE providers use their own local admission budget.
+	ExecutionPool string
 	// ContractVersion versions execution semantics not expressed by schemas.
 	// Bump it when validation or execution changes without a schema change.
 	ContractVersion string
@@ -154,6 +171,8 @@ type Options struct {
 	Replica              string
 	Build                string
 	Concurrency          int
+	SREConcurrency       int
+	ExecConcurrency      int
 	Operations           []Operation
 	Now                  func() time.Time
 	Incarnation          string
@@ -281,7 +300,7 @@ func New(options Options) (*Channel, error) {
 	if executor == nil {
 		var err error
 		executor, err = NewEvidenceExecutor(ExecutorOptions{EnvironmentID: options.EnvironmentID, Replica: options.Replica, Build: options.Build,
-			Incarnation: options.Incarnation, Concurrency: options.Concurrency, Operations: options.Operations, Now: options.Now, Roles: options.Roles})
+			Incarnation: options.Incarnation, Concurrency: options.Concurrency, SREConcurrency: options.SREConcurrency, ExecConcurrency: options.ExecConcurrency, Operations: options.Operations, Now: options.Now, Roles: options.Roles})
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +323,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
-	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout))
+	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout + TransportMargin))
 	admitted := false
 	// The slot and deadlines include draining and flushing, not just the
 	// handler body. Global deadlines would break the shared h2c streams.
@@ -348,13 +367,18 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failAuth(err, "Session unavailable; run auth login if expired or revoked.")
 		return
 	}
-	if session.EnvironmentID != c.options.EnvironmentID || session.Scope != cliauth.ScopeReadonly {
+	if session.EnvironmentID != c.options.EnvironmentID || !cliauth.ValidScope(session.Scope) {
 		fail(403, "permission_denied", "Session does not authorize this deployment.")
 		return
 	}
 	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt}
 	var req request
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, EnvelopeMaxBytes))
+	if err != nil {
+		fail(400, "invalid_input", "Request exceeds the transport byte limit or could not be read.")
+		return
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
@@ -369,12 +393,16 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(400, "unsupported_channel_version", "This server supports "+Version)
 		return
 	}
+	if req.Mode != "invoke" && len(body) > MaxRequestBytes {
+		fail(400, "invalid_input", "Discovery and description exceed the request byte limit.")
+		return
+	}
 	switch req.Mode {
 	case "discover":
 		rows := make([]any, 0, len(c.ordered))
 		for _, id := range c.ordered {
 			op := c.ops[id]
-			rows = append(rows, map[string]any{"operation": id, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "authorized": true, "availability": available(op), "next_call": map[string]string{"mode": "describe", "operation": id}})
+			rows = append(rows, map[string]any{"operation": id, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": op.Effect, "required_scope": op.RequiredScope, "authorized": cliauth.AllowsScope(session.Scope, op.RequiredScope), "availability": available(op), "next_call": map[string]string{"mode": "describe", "operation": id}})
 		}
 		c.write(w, 200, Response{Status: "ok", Summary: "Discover operations, describe one, then invoke it in this environment.",
 			Result:   map[string]any{"operations": rows, "budget": map[string]any{"invokes_per_session_per_minute": InvokesPerSessionPerMinute}},
@@ -394,7 +422,17 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		value := describe(op)
 		value["operation_contract_revision"] = c.OperationContractRevision(op.ID)
 		value["availability"] = available(op)
+		value["authorized"] = cliauth.AllowsScope(session.Scope, op.RequiredScope)
+		value["request_limits"] = c.requestLimits(op)
 		c.write(w, 200, Response{Status: "ok", Summary: op.Summary, Result: value, Evidence: Evidence{Complete: true}, Meta: meta})
+		return
+	}
+	if !cliauth.AllowsScope(session.Scope, op.RequiredScope) {
+		fail(403, "permission_denied", "This operation requires "+op.RequiredScope+"; log in with an explicitly granted scope.")
+		return
+	}
+	if len(body) > op.RequestMaxBytes {
+		fail(400, "invalid_input", "Request exceeds this operation's described byte limit.")
 		return
 	}
 	if req.Revision != c.revision {
@@ -412,6 +450,14 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !target.Explicit() && c.options.RequireWorkerTarget[op.ID] {
 		fail(400, "worker_target_required", "This operation requires an explicit business Worker target on this channel instance.")
 		return
+	}
+	// Input/authentication retains its short admission deadline. Execution
+	// starts from the request's original context so a longer operation is not
+	// accidentally capped by the legacy three-second context.
+	executionContext := func() (context.Context, context.CancelFunc) {
+		_ = controller.SetReadDeadline(time.Time{})
+		_ = controller.SetWriteDeadline(time.Now().Add(op.ExecutionTimeout + TransportMargin))
+		return context.WithTimeout(r.Context(), op.ExecutionTimeout)
 	}
 	// The session's own budget, spent only by an invocation that would
 	// execute, here or on the replica it targets: a refused input, an
@@ -434,6 +480,10 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(503, "target_routing_unavailable", "Targeted evidence routing is not configured.")
 			return
 		}
+		if op.ExecutionPool != "evidence" || op.Effect != "read" {
+			fail(403, "operation_not_internal_evidence", "Internal Worker routes allow only registered evidence reads.")
+			return
+		}
 		if overBudget() {
 			return
 		}
@@ -444,7 +494,13 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failAuth(err, "Session unavailable at routing admission.")
 			return
 		}
-		out := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID), Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
+		if !cliauth.AllowsScope(session.Scope, op.RequiredScope) || ctx.Err() != nil {
+			fail(403, "permission_denied", "Routing admission ended or no longer authorizes this operation.")
+			return
+		}
+		routeCtx, routeCancel := executionContext()
+		defer routeCancel()
+		out := c.options.Route(routeCtx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID), Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
 		out.Meta.Revision = c.revision
 		out.Meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
 		code := 200
@@ -462,9 +518,10 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if overBudget() {
 		return
 	}
+	pool := c.executionSlots(op)
 	select {
-	case c.slots <- struct{}{}:
-		defer func() { <-c.slots }()
+	case pool <- struct{}{}:
+		defer func() { <-pool }()
 	default:
 		fail(429, "request_budget_exceeded", "OB evidence readers are busy; retry this read later.")
 		return
@@ -477,10 +534,20 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
-	out := c.run(ctx, op, params, Target{}, meta)
+	if ctx.Err() != nil {
+		fail(408, "request_timeout", "Admission context ended before operation execution.")
+		return
+	}
+	if !cliauth.AllowsScope(session.Scope, op.RequiredScope) {
+		fail(403, "permission_denied", "The admitted session does not authorize this operation.")
+		return
+	}
+	execCtx, execCancel := executionContext()
+	defer execCancel()
+	out := c.run(execCtx, op, params, Target{}, meta)
 	if op.RouteWhenElsewhere != nil && c.options.Route != nil && out.Status != "error" {
 		if group, elsewhere := op.RouteWhenElsewhere(params, out.Result); elsewhere {
-			routed := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID),
+			routed := c.options.Route(execCtx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID),
 				Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: Target{OwnerQueryGroup: group}})
 			if routed.Status != "error" {
 				routed.Meta.Revision = c.revision
@@ -594,7 +661,7 @@ func describe(op Operation) map[string]any {
 		}
 		input["allOf"] = rules
 	}
-	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "contract_version": op.ContractVersion, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "contract_version": op.ContractVersion, "effect": op.Effect, "required_scope": op.RequiredScope, "execution_timeout_ms": op.ExecutionTimeout.Milliseconds(), "execution_pool": op.ExecutionPool, "request_max_bytes": op.RequestMaxBytes, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
 	if op.DefaultOwnerParam != "" {
 		value["default_owner_parameter"] = op.DefaultOwnerParam
 	}
@@ -660,16 +727,57 @@ func validateField(f Field, value any) error {
 		if _, ok := value.(bool); !ok {
 			return errors.New("must be a boolean")
 		}
+	case "number":
+		n, ok := value.(json.Number)
+		if !ok {
+			return errors.New("must be a number")
+		}
+		v, err := n.Float64()
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || (f.Minimum != nil && v < float64(*f.Minimum)) || (f.Maximum != nil && v > float64(*f.Maximum)) {
+			return errors.New("number is outside the described range")
+		}
+	case "object":
+		values, ok := value.(map[string]any)
+		if !ok {
+			return errors.New("must be an object")
+		}
+		for _, name := range f.Required {
+			if _, exists := values[name]; !exists {
+				return fmt.Errorf("required property: %s", name)
+			}
+		}
+		for name, item := range values {
+			field, known := f.Properties[name]
+			if !known {
+				if !f.AdditionalProperties {
+					return fmt.Errorf("unknown property: %s", name)
+				}
+				continue
+			}
+			if err := validateField(field, item); err != nil {
+				return fmt.Errorf("%s: %s", name, err)
+			}
+		}
 	case "array":
 		values, ok := value.([]any)
-		if !ok || (f.MaxItems > 0 && len(values) > f.MaxItems) {
+		if !ok || len(values) < f.MinItems || (f.MaxItems > 0 && len(values) > f.MaxItems) {
 			return errors.New("array exceeds the described limit or has the wrong type")
 		}
 		if f.Items != nil {
-			for _, item := range values {
+			for i, item := range values {
 				if err := validateField(*f.Items, item); err != nil {
-					return err
+					return fmt.Errorf("item %d: %s", i, err)
 				}
+			}
+		}
+		if f.UniqueItems {
+			seen := map[string]bool{}
+			for _, item := range values {
+				encoded, err := json.Marshal(item)
+				if err != nil || seen[string(encoded)] {
+					return errors.New("array items must be unique")
+				}
+				seen[string(encoded)] = true
 			}
 		}
 	default:

@@ -14,8 +14,8 @@ details{margin:8px 0}summary{cursor:pointer;color:#1769c2;font-size:14px}details
 </style>
 </head>
 <body><main>
-<h1>授权 alarmd CLI 读取此环境</h1>
-<p class="lead muted">让本机的 alarmd-cli 读取本部署的运维只读取证（策略配置、运行证据和受限的 Redis 数据）。只需配对一次，之后 CLI 自动续期。</p>
+<h1 id="permission-title">授权 alarmd CLI 读取此环境</h1>
+<p id="permission-lead" class="lead muted">让本机的 alarmd-cli 读取本部署的运维只读取证（策略配置、运行证据和受限的 Redis 数据）。只需配对一次，之后 CLI 自动续期。</p>
 <ol class="steps">
 <li id="step-command" class="current">
 <h2>在本机终端运行命令</h2>
@@ -50,7 +50,7 @@ details{margin:8px 0}summary{cursor:pointer;color:#1769c2;font-size:14px}details
 <p class="muted">先完成上面第 2 步核对环境，再生成授权码。</p>
 <button id="issue" type="button">生成授权码</button>
 <section id="grant" hidden>
-<p>在 CLI 所在机器的终端运行 <code>alarmd-cli auth login</code>，按提示粘贴下方授权码。授权码 5 分钟内有效且仅能兑换一次；不要放入聊天记录、工单或命令参数。</p>
+<p>在 CLI 所在机器的终端运行 <code id="manual-login-command">alarmd-cli auth login</code>，按提示粘贴下方授权码。授权码 5 分钟内有效且仅能兑换一次；不要放入聊天记录、工单或命令参数。</p>
 <label for="code">一次性授权码</label><textarea id="code" readonly autocomplete="off" spellcheck="false"></textarea>
 <button id="copy" type="button">复制授权码</button>
 <p id="expiry" class="muted"></p>
@@ -74,6 +74,18 @@ base.search = ''; base.hash = '';
 const api = path => new URL('api/cli/auth/' + path, base);
 document.getElementById('back').href = base.href;
 const $ = id => document.getElementById(id);
+const requestedScope = new URL(location.href).searchParams.get('scope') || 'deployment_ops_readonly';
+const execScope = requestedScope === 'deployment_ops_exec';
+const scopeValid = execScope || requestedScope === 'deployment_ops_readonly';
+const scopeArgs = execScope ? ' --scope deployment_ops_exec' : '';
+const scopeBody = execScope ? {scope:requestedScope} : {};
+const scopeLabel = execScope ? '部署级运维执行：只读取证与声明目标内的 Pod 脚本执行' : '部署级运维只读取证';
+if (execScope) {
+  $('permission-title').textContent = '授权 alarmd CLI 在此环境执行运维操作';
+  $('permission-lead').textContent = '本次明确授予 deployment_ops_exec：CLI 可在部署声明的目标范围内执行 Pod 命令和脚本，并读取运维证据。配对与续期保留本次权限；已有只读配对继续只读。';
+  $('authorize').textContent = '明确授权本机 CLI 执行运维操作';
+  $('manual-login-command').textContent += scopeArgs;
+}
 const issue = $('issue');
 const authorize = $('authorize');
 const revoke = $('revoke');
@@ -125,7 +137,7 @@ function randomText(bytes) {
 const port = 49152 + (crypto.getRandomValues(new Uint16Array(1))[0] % 16000);
 const state = randomText(32);
 const loopback = path => 'http://127.0.0.1:' + port + path;
-$('listen-command').textContent = `alarmd-cli auth listen --url ${base.href} --port ${port} --state ${state}`;
+$('listen-command').textContent = `alarmd-cli auth listen --url ${base.href} --port ${port} --state ${state}${scopeArgs}`;
 // What to do, for each way the routes can refuse. The server's own sentence
 // is English and says what went wrong; the operator reading this page needs
 // where to look, so every code the routes and the CLI can return has a line.
@@ -141,6 +153,8 @@ const HINTS = {
   not_found: 'alarmd 没有开启 CLI，或入口没有把 /api/cli/ 转发到 alarmd：确认镜像版本、values 的 alarmd.cli 段，以及 Ingress 按前缀整体转发。',
   unreachable: '授权接口没有返回 alarmd 的应答：入口没有把 /api/cli/ 转发到 alarmd，或 alarmd 没有开启 CLI。确认 Ingress 按前缀整体转发、不加登录认证，以及 values 的 alarmd.cli 段。',
   invalid_code_challenge: '本机 CLI 给出的校验值不合规：请重新执行上面的命令。',
+  invalid_scope: '权限参数无效：请使用 deployment_ops_readonly 或 deployment_ops_exec。',
+  scope_mismatch: 'CLI 申请权限与授权码不一致：请复制本页生成的完整命令重新登录。',
   state_mismatch: '本机 CLI 等的不是这个页面：请复制上面这条命令重新执行（每次打开页面命令都不同）。',
   already_completed: '本机 CLI 已经完成过一次登录并退出：如需重新配对，请重新执行上面的命令。',
   cli_unreachable: '连不上本机 CLI：请确认上面的命令还在运行、没有超时退出，并且浏览器和 CLI 在同一台机器上；否则改用复制授权码。'
@@ -238,7 +252,9 @@ inspect.addEventListener('click', async () => {
   try {
     const value = await request('GET', 'grants', adminKey.value);
     if (currentRevision !== revision) return;
-    preview.textContent = `环境：${value.environment_name} (${value.environment_id})\n入口：${value.public_base_url}\n权限：部署级运维只读取证`;
+    if (!scopeValid) throw new Error(HINTS.invalid_scope);
+    if (execScope && !value.supported_scopes?.includes(requestedScope)) throw new Error('此服务端未声明运维执行授权能力，请升级 alarmd 后重新申请。');
+    preview.textContent = `环境：${value.environment_name} (${value.environment_id})\n入口：${value.public_base_url}\n权限：${scopeLabel}`;
     configuredEntry = new URL(value.public_base_url).origin + new URL(value.public_base_url).pathname;
     // Generation checks that this page's origin is the configured entry's.
     // Said here, before the button, rather than as a refusal after it.
@@ -258,7 +274,7 @@ authorize.addEventListener('click', async () => {
   authorize.disabled = true; message('authorize-status', '正在授权本机 CLI…', false);
   let grant;
   try {
-    grant = await request('POST', 'grants', adminKey.value, {confirm:true, code_challenge:challenge, code_challenge_method:'S256'});
+    grant = await request('POST', 'grants', adminKey.value, {confirm:true, ...scopeBody, code_challenge:challenge, code_challenge_method:'S256'});
   } catch (error) { message('authorize-status', error.message, true); offer(); return; }
   let response, value;
   try {
@@ -275,7 +291,7 @@ issue.addEventListener('click', async () => {
   const currentRevision = revision;
   issuing = true; issue.disabled = true; inspect.disabled = true; adminKey.disabled = true; clearCode(); message('issue-status', '正在生成…', false);
   try {
-    const value = await request('POST', 'grants', adminKey.value, {confirm:true});
+    const value = await request('POST', 'grants', adminKey.value, {confirm:true, ...scopeBody});
     if (currentRevision !== revision) return;
     code.value = value.authorization_code;
     $('grant').hidden = false;

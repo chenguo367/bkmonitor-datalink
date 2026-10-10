@@ -27,11 +27,13 @@ import (
 )
 
 const (
-	ScopeReadonly    = "deployment_ops_readonly"
-	GrantLifetime    = 5 * time.Minute
-	SessionLifetime  = time.Hour
-	RenewalThreshold = 10 * time.Minute
-	redisTimeout     = time.Second
+	ScopeReadonly     = "deployment_ops_readonly"
+	ScopeExec         = "deployment_ops_exec"
+	execRenewalPrefix = "exec-v1."
+	GrantLifetime     = 5 * time.Minute
+	SessionLifetime   = time.Hour
+	RenewalThreshold  = 10 * time.Minute
+	redisTimeout      = time.Second
 	// PairingIdleLifetime is how long a renewal credential lives unused. A
 	// credential is spent and replaced at every renewal, so this bounds only a
 	// device that stopped asking: a month covers a holiday and not a
@@ -41,6 +43,13 @@ const (
 	// it an exchange still logs in, without renewal, and says so.
 	MaxPairings = 64
 )
+
+// ValidScope is the closed set of deployment permissions. Exec includes the
+// existing read permission, and is granted only by an explicit new login.
+func ValidScope(scope string) bool { return scope == ScopeReadonly || scope == ScopeExec }
+func AllowsScope(granted, required string) bool {
+	return ValidScope(granted) && (granted == required || (granted == ScopeExec && required == ScopeReadonly))
+}
 
 // Options uses an independently budgeted Redis client supplied by the caller.
 // Now only controls the process-local HTTP rate window; all credentials use
@@ -226,6 +235,12 @@ func validSecret(secret string) bool {
 	return err == nil && len(decoded) == 32
 }
 
+// Old readonly instances reject this credential before touching Redis,
+// rather than deleting a pairing whose scope their Lua cannot understand.
+func validRenewalSecret(secret string) bool {
+	return validSecret(secret) || (strings.HasPrefix(secret, execRenewalPrefix) && validSecret(strings.TrimPrefix(secret, execRenewalPrefix)))
+}
+
 type storedRecord struct {
 	SessionID     string `json:"session_id,omitempty"`
 	EnvironmentID string `json:"environment_id"`
@@ -307,7 +322,7 @@ func (m *Manager) Admit(ctx context.Context, session Session, renew bool) (Sessi
 
 func (m *Manager) sessionOperation(ctx context.Context, hash, expectedID, action string) (Session, error) {
 	result, err := m.run(ctx, sessionScript, []string{m.prefix + "session:" + hash, m.epochKey()},
-		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds())
+		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds(), ScopeExec)
 	if err != nil {
 		return Session{}, err
 	}
