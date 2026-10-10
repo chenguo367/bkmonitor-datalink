@@ -250,10 +250,18 @@ const (
 	// answer for the query, since the same query fetches the same answer
 	// again; none is a provider failure, and no retry makes the answer
 	// smaller.
-	ResponseFailureLimitResponseBytes = "limit_response_bytes"
-	ResponseFailureLimitSeriesBytes   = "limit_series_bytes"
-	ResponseFailureLimitTotalSeries   = "limit_total_series"
-	ResponseFailureLimitTotalRecords  = "limit_total_records"
+	ResponseFailureLimitResponseBytes  = "limit_response_bytes"
+	ResponseFailureLimitSeriesBytes    = "limit_series_bytes"
+	ResponseFailureLimitTotalSeries    = "limit_total_series"
+	ResponseFailureLimitTotalRecords   = "limit_total_records"
+	ResponseFailureLimitFrameBytes     = "limit_frame_bytes"
+	ResponseFailureLimitFrameSeries    = "limit_frame_series"
+	ResponseFailureLimitDictionary     = "limit_dictionary"
+	ResponseFailureFormatUnsupported   = "format_unsupported"
+	ResponseFailureFrameInvalid        = "frame_invalid"
+	ResponseFailureSchemaInvalid       = "schema_invalid"
+	ResponseFailureFooterMissing       = "footer_missing"
+	ResponseFailureFooterCountMismatch = "footer_count_mismatch"
 
 	TransportFailureTimeout           = "timeout"
 	TransportFailureConnectionRefused = "connection_refused"
@@ -295,7 +303,10 @@ func BodyRouteDetail(class string) string {
 func ResponseRouteDetail(class string) string {
 	switch class {
 	case ResponseFailureIsPartialMissing, ResponseFailureOffRequestGrid,
-		ResponseFailureLimitResponseBytes, ResponseFailureLimitSeriesBytes, ResponseFailureLimitTotalSeries, ResponseFailureLimitTotalRecords:
+		ResponseFailureLimitResponseBytes, ResponseFailureLimitSeriesBytes, ResponseFailureLimitTotalSeries, ResponseFailureLimitTotalRecords,
+		ResponseFailureLimitFrameBytes, ResponseFailureLimitFrameSeries, ResponseFailureLimitDictionary,
+		ResponseFailureFormatUnsupported, ResponseFailureFrameInvalid, ResponseFailureSchemaInvalid,
+		ResponseFailureFooterMissing, ResponseFailureFooterCountMismatch:
 		return RouteDetailKindResponse + "=" + class
 	default:
 		return RouteDetailKindResponse + "=other"
@@ -421,11 +432,13 @@ type InputQualityFact struct {
 // ProviderStats are log-only physical query facts. They are never digested or
 // compared, so adding a counter does not change any conservation proof.
 type ProviderStats struct {
-	Series       uint64
-	Records      uint64
-	Bytes        uint64
-	QueryMillis  uint64
-	DecodeMillis uint64
+	ResponseCodec         string `json:",omitempty"`
+	SharedSchemaRequested bool   `json:",omitempty"`
+	Series                uint64
+	Records               uint64
+	Bytes                 uint64
+	QueryMillis           uint64
+	DecodeMillis          uint64
 	// NullIdentityFields counts (series, identity field) pairs whose declared
 	// identity dimension was absent from the provider series and was bound to
 	// JSON null, as Python binds an absent dimension to None. It is a bounded

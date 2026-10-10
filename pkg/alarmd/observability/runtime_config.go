@@ -47,7 +47,8 @@ type RuntimeConfigFacts struct {
 	// credential-free: whether the Console is configured, which is what
 	// turns the alert closes on, is otherwise readable only from the
 	// configuration file it was started with.
-	Linkd RuntimeLinkdFacts `json:"linkd"`
+	Linkd   RuntimeLinkdFacts   `json:"linkd"`
+	UQCodec RuntimeUQCodecFacts `json:"uq_codec"`
 	// Retention is how long this deployment keeps what a Slot reads again,
 	// beside every input each length is derived from. Whether a sixty-hour
 	// strategy's content outlives its period was a question for the
@@ -55,6 +56,14 @@ type RuntimeConfigFacts struct {
 	// admission's once came from two different formulas, and nothing said so.
 	Retention RuntimeRetentionFacts `json:"retention"`
 	Digest    string                `json:"runtime_config_digest"`
+}
+
+// This is effective startup scope, not a server capability claim. The list
+// controls eligible ordinary production Execute only; other entry points stay legacy.
+type RuntimeUQCodecFacts struct {
+	Mode        string   `json:"mode"`
+	QueryGroups []string `json:"query_groups"`
+	Scope       string   `json:"scope"`
 }
 
 // RuntimeRetentionFacts are the retention lengths, in seconds, and their

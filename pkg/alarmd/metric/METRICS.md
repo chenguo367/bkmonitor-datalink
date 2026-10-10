@@ -25,6 +25,12 @@ Labels: `disposition`
 
 How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded recently), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
 
+## bkmonitor_alarmd_access_response_codec_total
+
+Labels: `codec`, `negotiation`, `completion`
+
+Completed physical HTTP responses by bounded wire codec, client negotiation and completeness. Opt-in legacy is same-response compatibility, not proof of the server fallback cause.
+
 ## bkmonitor_alarmd_access_response_status_total
 
 Labels: `code`, `outcome`

@@ -2395,6 +2395,7 @@ type Observation struct {
 	RuntimeConfig       *RuntimeConfigFacts
 	QueryFailure        *QueryFailureFacts
 	QueryStatus         []QueryStatusFacts
+	QueryCodec          []QueryCodecFacts
 	// QueryTruncation is every physical query of the completion whose
 	// answer may have been cut by the query service's terms cap.
 	QueryTruncation []QueryTruncationFacts
@@ -2563,6 +2564,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
 	observation.QueryFailure = normalizeQueryFailure(observation.Component, observation.Stage, observation.QueryFailure)
 	observation.QueryStatus = normalizeQueryStatus(observation.Component, observation.Stage, observation.QueryStatus)
+	observation.QueryCodec = normalizeQueryCodec(observation.Component, observation.Stage, observation.QueryCodec)
 	observation.QueryTruncation = normalizeQueryTruncation(observation.QueryTruncation)
 	observation.QueryUnavailable = normalizeQueryUnavailable(observation.Component, observation.Stage, observation.QueryUnavailable)
 	observation.SlotReadiness = normalizeSlotReadiness(observation.SlotReadiness)
@@ -2571,6 +2573,7 @@ func NormalizeObservation(observation Observation) Observation {
 			observation.RuntimeConfig = nil
 		} else {
 			facts := *observation.RuntimeConfig
+			facts.UQCodec.QueryGroups = append([]string{}, facts.UQCodec.QueryGroups...)
 			observation.RuntimeConfig = &facts
 		}
 	}
