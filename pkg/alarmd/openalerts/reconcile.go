@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // Reconciliation is a complete alert-store observation. Missing and Suppressed
@@ -95,6 +97,11 @@ type HTTPReconcilerOptions struct {
 	// KeyingEvery is how often a reconciliation reads the event source's
 	// keying again; zero reads it only until it has answered once.
 	KeyingEvery time.Duration
+	// OnFailure is told of an operation's failure when a run of failures
+	// starts and when its class changes, not on every failure while it
+	// lasts, with the operation's failures so far; outside the record's
+	// lock. Nil tells no one.
+	OnFailure func(op, class string, failures uint64)
 }
 
 // HTTPReconciler reads the link's Console. Which target is this deployment's
@@ -151,7 +158,7 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	req.SetBasicAuth(reader.options.Username, reader.options.Password)
 	response, err := reader.options.Client.Do(req)
 	if err != nil {
-		return errors.New("alarmd openalerts: Console request failed")
+		return transportError(execution.ClassifyTransportFailure(err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -359,6 +366,16 @@ func (reader *HTTPReconciler) reconcile(ctx context.Context, key StrategyKey) (R
 		}
 	}
 	return result, nil
+}
+
+// transportError is a Console request that got no answer, named by the
+// transport word for why (execution.ClassifyTransportFailure). The text is
+// this package's own and carries the word only, never the address the
+// client's error would.
+type transportError string
+
+func (class transportError) Error() string {
+	return "alarmd openalerts: Console request failed (" + string(class) + ")"
 }
 
 // statusError is a Console answer other than 200. It keeps the code so a

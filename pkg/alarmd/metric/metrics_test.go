@@ -499,6 +499,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
+	expected["bkmonitor_alarmd_linkd_console_failures_total"] = "variableLabels: {op,class}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
@@ -1038,6 +1039,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// Five states; three operations by two results.
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
+	// Every Console operation by every failure class.
+	bounds[fqName("linkd_console_failures_total")] = len(openalerts.ConsoleOps) * len(openalerts.ConsoleFailureClasses)
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
 	bounds[fqName("control_source_last_good_identity_changed_total")] = 1
 	// The supported data sources, plus other for one the compiler started

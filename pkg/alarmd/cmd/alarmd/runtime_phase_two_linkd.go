@@ -1,11 +1,13 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/go-redis/redis/v8"
 )
@@ -30,8 +32,20 @@ type linkdIndex struct {
 	Location *linkdLocationSwitch
 }
 
+// consoleFailureLine writes the console_call_failed line: an operation's
+// failures starting, or changing class, with the class and the failures so
+// far, never the address. The record and linkd_console_failures_total
+// count every one.
+func consoleFailureLine(logger *observability.Logger) func(op, class string, failures uint64) {
+	return func(op, class string, failures uint64) {
+		logger.Warn("console_call_failed", "failed", 0, 0, slog.String("op", op), slog.String("class", class),
+			slog.Uint64("failures", failures))
+	}
+}
+
 func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig,
-	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), now func() time.Time) (linkdIndex, error) {
+	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), now func() time.Time,
+	logger *observability.Logger) (linkdIndex, error) {
 	capacity := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	settings := cfg.PhaseTwo.Linkd
 	// One read cannot monopolize the allowance for the whole worker. These
@@ -65,7 +79,7 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
 			Now: now, Index: index, LocationConfirmed: adopted, OnLocationMismatch: location.relocate,
-			KeyingEvery: config.LinkdCalibrationInterval})
+			KeyingEvery: config.LinkdCalibrationInterval, OnFailure: consoleFailureLine(logger)})
 		if err != nil {
 			return linkdIndex{}, err
 		}

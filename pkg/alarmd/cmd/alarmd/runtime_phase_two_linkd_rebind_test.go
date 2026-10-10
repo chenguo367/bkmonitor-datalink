@@ -67,7 +67,7 @@ func newRebindFixture(t *testing.T) *rebindFixture {
 		}
 		return redis.NewClient(&redis.Options{Addr: connection.Address, DB: connection.DB}), true
 	}
-	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), startup, open, time.Now)
+	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), startup, open, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

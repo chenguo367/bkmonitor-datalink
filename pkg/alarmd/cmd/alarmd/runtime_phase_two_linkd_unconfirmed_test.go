@@ -184,7 +184,7 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 		return redis.NewClient(&redis.Options{Addr: connection.Address, DB: connection.DB}), true
 	}
 	startup := &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryAdopted, Attempts: 1}
-	index, err := newLinkdIndex(cfg, runtimeClient, adopted, startup, open, time.Now)
+	index, err := newLinkdIndex(cfg, runtimeClient, adopted, startup, open, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestACopyWithoutAConsoleReadsNothingAndCountsNothing(t *testing.T) {
 	}
 	setCommands := redisCommandsOn(t, runtimeAddress, "alarmd:open_alerts")
 	open := func(config.RedisConnectionConfig) (redis.UniversalClient, bool) { return runtimeClient, false }
-	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), nil, open, time.Now)
+	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), nil, open, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

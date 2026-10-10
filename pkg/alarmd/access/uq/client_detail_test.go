@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -199,6 +200,7 @@ func TestClassifyTransportFailureUsesErrorTypesOnly(t *testing.T) {
 		{"nil", nil, execution.TransportFailureOther},
 		{"deadline", wrap(context.DeadlineExceeded), execution.TransportFailureTimeout},
 		{"dns", wrap(&net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host", Name: "uq.example.test"}}), execution.TransportFailureDNS},
+		{"dns that used up the deadline", wrap(fmt.Errorf("%w: %w", &net.DNSError{Err: "lookup", Name: "uq.example.test"}, context.DeadlineExceeded)), execution.TransportFailureTimeout},
 		{"tls", wrap(x509.UnknownAuthorityError{}), execution.TransportFailureTLS},
 		{"refused", wrap(&net.OpError{Op: "dial", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}), execution.TransportFailureConnectionRefused},
 		{"reset", wrap(&net.OpError{Op: "read", Err: &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET}}), execution.TransportFailureConnectionReset},
@@ -208,10 +210,10 @@ func TestClassifyTransportFailureUsesErrorTypesOnly(t *testing.T) {
 		{"other", wrap(errors.New("something else")), execution.TransportFailureOther},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := classifyTransportFailure(test.err); got != test.want {
-				t.Fatalf("classifyTransportFailure(%v) = %q, want %q", test.err, got, test.want)
+			if got := execution.ClassifyTransportFailure(test.err); got != test.want {
+				t.Fatalf("execution.ClassifyTransportFailure(%v) = %q, want %q", test.err, got, test.want)
 			}
-			if detail := execution.TransportRouteDetail(classifyTransportFailure(test.err)); detail != "transport="+test.want {
+			if detail := execution.TransportRouteDetail(execution.ClassifyTransportFailure(test.err)); detail != "transport="+test.want {
 				t.Fatalf("detail=%q", detail)
 			}
 		})

@@ -3,17 +3,13 @@ package uq
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -254,7 +250,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			reason = execution.ReasonCode(contract.ReasonQueryTimeout)
 		}
-		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(classifyTransportFailure(err)))
+		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(execution.ClassifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
@@ -328,7 +324,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 			category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
 		}
 	case broken:
-		class := classifyTransportFailure(body.failed)
+		class := execution.ClassifyTransportFailure(body.failed)
 		if class != execution.TransportFailureTimeout {
 			code = contract.ReasonQueryUnavailable
 		}
@@ -381,54 +377,6 @@ func (client *Client) unavailableCompletion(attempt queryIdentity, reason execut
 			}},
 		},
 	}
-}
-
-// classifyTransportFailure maps an http.Client.Do error onto the bounded
-// transport failure enum. It inspects error types only and never copies the
-// error text, which may embed the endpoint URL.
-func classifyTransportFailure(err error) string {
-	if err == nil {
-		return execution.TransportFailureOther
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return execution.TransportFailureTimeout
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return execution.TransportFailureDNS
-	}
-	if isTLSFailure(err) {
-		return execution.TransportFailureTLS
-	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
-		return execution.TransportFailureConnectionRefused
-	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		return execution.TransportFailureConnectionReset
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return execution.TransportFailureEOF
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return execution.TransportFailureTimeout
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return execution.TransportFailureConnectionRefused
-	}
-	return execution.TransportFailureOther
-}
-
-func isTLSFailure(err error) bool {
-	var recordHeader tls.RecordHeaderError
-	var alert tls.AlertError
-	var certificate *tls.CertificateVerificationError
-	var unknownAuthority x509.UnknownAuthorityError
-	var hostname x509.HostnameError
-	var certificateInvalid x509.CertificateInvalidError
-	return errors.As(err, &recordHeader) || errors.As(err, &alert) || errors.As(err, &certificate) ||
-		errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &certificateInvalid)
 }
 
 func providerResultRef(attempt queryIdentity) execution.ProviderResultRef {
