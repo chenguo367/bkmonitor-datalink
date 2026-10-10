@@ -14,8 +14,14 @@ import (
 // out the unknown ones as well, so while a rollout mixes builds, a group of
 // an old replica that is not listed can read as holding nothing.
 type ReadHoldFacts struct {
-	Unknown             bool   `json:"unknown,omitempty"`
-	Millis              int64  `json:"read_hold_ms"`
+	Unknown bool  `json:"unknown,omitempty"`
+	Millis  int64 `json:"read_hold_ms"`
+	// BaseMillis is the hold the next Slot outside a transition uses, and
+	// TransitionMillis the part of Millis a Plan's transition (or a
+	// predecessor's bound standing in for an unread hold) froze above it,
+	// which falls back by itself and suggests no time_delay.
+	BaseMillis          int64  `json:"base_ms"`
+	TransitionMillis    int64  `json:"transition_ms,omitempty"`
 	ArrivalAgeMillis    int64  `json:"arrival_age_ms"`
 	LimitMillis         int64  `json:"limit_ms"`
 	AtLimit             bool   `json:"at_limit"`

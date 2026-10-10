@@ -18,10 +18,13 @@ type lookbackGroupReading struct {
 	QueryGroup     execution.QueryGroupIdentity `json:"query_group"`
 	HoldKnown      bool                         `json:"hold_known"`
 	ReadHoldMillis int64                        `json:"read_hold_ms"`
-	ReadHold       *readhold.Record             `json:"read_hold,omitempty"`
-	Annotation     string                       `json:"annotation,omitempty"`
-	Supplement     *lookback.SupplementReading  `json:"supplement,omitempty"`
-	Counters       *lookback.GroupReading       `json:"counters,omitempty"`
+	// BaseMillis and TransitionMillis are fleet.ReadHoldFacts'.
+	BaseMillis       int64                       `json:"base_ms"`
+	TransitionMillis int64                       `json:"transition_ms,omitempty"`
+	ReadHold         *readhold.Record            `json:"read_hold,omitempty"`
+	Annotation       string                      `json:"annotation,omitempty"`
+	Supplement       *lookback.SupplementReading `json:"supplement,omitempty"`
+	Counters         *lookback.GroupReading      `json:"counters,omitempty"`
 }
 
 type lookbackGroupPage struct {
@@ -50,12 +53,12 @@ func (holds *productionReadHolds) groupPage(engine *lookback.Engine, after strin
 		// A record that did not decode says nothing until the group's next
 		// write replaces it.
 		record := inspection.Record
-		millis, known := inspection.Hold()
+		base, known := inspection.Hold()
 		row := lookbackGroupReading{QueryGroup: qg, HoldKnown: known}
 		if known {
 			row.ReadHold = &record
-			row.ReadHoldMillis = millis
-			row.Annotation = "alarmd 当前自动推后 " + strconv.FormatFloat(float64(row.ReadHoldMillis)/1000, 'f', -1, 64) + " 秒"
+			reading := frozenHoldOf(record, base)
+			row.ReadHoldMillis, row.BaseMillis, row.TransitionMillis, row.Annotation = reading.millis, base, reading.transition, reading.annotation
 		}
 		if engine != nil {
 			if reading, found := engine.GroupReading(qg); found {
@@ -232,7 +235,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 			continue
 		}
 		inspection := holds.controller.Inspect(qg)
-		millis, known := inspection.Hold()
+		base, known := inspection.Hold()
 		if !known {
 			// Listed as such: left out, the group would read as holding
 			// nothing (fleet.ReadHoldFacts).
@@ -245,23 +248,65 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 			continue
 		}
 		record := inspection.Record
-		entry := fleet.ReadHoldFacts{Millis: millis, ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
+		reading := frozenHoldOf(record, base)
+		millis := reading.millis
+		entry := fleet.ReadHoldFacts{Millis: millis, BaseMillis: base, TransitionMillis: reading.transition,
+			ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
 			AtLimit: record.AtLimit, RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
 			Buckets:    append([]int64(nil), record.Buckets[:min(len(record.Buckets), fleet.MaxReadEarlyBuckets)]...),
-			Annotation: "alarmd 当前自动推后 " + strconv.FormatFloat(float64(millis)/1000, 'f', -1, 64) + " 秒"}
+			Annotation: reading.annotation}
 		if record.HoldMillis > 0 {
 			entry.HeldSince = int64(record.SinceSlot)
 		}
 		if basis := bases[qg]; basis.known {
 			entry.DelaySeconds = int64(basis.delay / time.Second)
 			entry.SettlingWaitSeconds = int64(basis.settlingWait / time.Second)
-			if millis > 0 {
+			// The suggestion is about the hold going on: the base the next
+			// Slot outside a transition uses. A base chosen and not yet
+			// frozen suggests as one frozen does, the suggestion resting on
+			// the measured arrival age and not on a Slot; a base of none
+			// suggests nothing, whatever the latest Slot got - a transition
+			// alone, or a hold since lowered to none.
+			if base > 0 {
 				entry.SuggestedDelaySeconds = basis.suggestion(record)
 			}
 		}
 		facts[string(qg)] = entry
 	}
 	return facts
+}
+
+// frozenHold is what a group's record says its latest frozen Slot got: the
+// hold (HoldMillis at SinceSlot, the clamp already applied), and the part of
+// it a Plan's transition, or a predecessor's bound standing in for a hold
+// nobody could read, froze above the base the next Slot outside a
+// transition uses. Facts of the record, not recomputed: holdAt reckons from
+// a Slot's own time, and the clamp is slotHoldOf's to apply once.
+type frozenHold struct {
+	millis, transition int64
+	annotation         string
+}
+
+// frozenHoldOf reads it, base being the record's current hold (the pending
+// one when one is pending). A pending base with no transition in the record
+// is a lowering or a raise chosen and not yet frozen, said as the next
+// Slot's hold, not as a transition.
+func frozenHoldOf(record readhold.Record, base int64) frozenHold {
+	reading := frozenHold{millis: record.HoldMillis}
+	seconds := func(millis int64) string { return strconv.FormatFloat(float64(millis)/1000, 'f', -1, 64) }
+	switch {
+	// Frozen above the base only while a base is pending: with none the
+	// base is HoldMillis itself.
+	case record.HoldMillis > base && len(record.Transitions) > 0:
+		reading.transition = record.HoldMillis - base
+		reading.annotation = "alarmd 最近一个 Slot 推后 " + seconds(record.HoldMillis) + " 秒，其中 " + seconds(reading.transition) +
+			" 秒来自 Plan 换组时的过渡（或前驱读不到时的上限），到期自动回落，这一部分不给 time_delay 建议"
+	case base != record.HoldMillis:
+		reading.annotation = "alarmd 最近一个 Slot 推后 " + seconds(record.HoldMillis) + " 秒，已定从下一个 Slot 起推后 " + seconds(base) + " 秒"
+	default:
+		reading.annotation = "alarmd 当前自动推后 " + seconds(record.HoldMillis) + " 秒"
+	}
+	return reading
 }
 
 // readHoldBasis is what a Query Group's spec says of its reads: the

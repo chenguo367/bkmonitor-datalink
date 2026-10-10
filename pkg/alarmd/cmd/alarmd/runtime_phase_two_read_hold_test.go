@@ -8,13 +8,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
 )
@@ -301,19 +304,27 @@ func TestRuntimeReadHoldGroupsCountWhatTheGroupPageKnows(t *testing.T) {
 // after a lowering, whose arrival age rests on three matching earlier
 // reads. A hold with no measured arrival age, a predecessor's bound,
 // suggests nothing; nor does a group holding nothing, or one whose query is
-// not known yet. The hold's first frozen Slot rides beside it.
+// not known yet. Nor does one whose next Slot holds nothing - its latest
+// Slot frozen above none by a transition alone, or a lowering to none
+// chosen - whatever its latest Slot got: the suggestion is about the hold
+// going on, and a READ_HELD row stands only on a suggestion. The hold's
+// first frozen Slot rides beside it.
 func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 	h, c, at := runtimeTestHolds(t)
-	chosen := int64(99_000)
+	chosen, zero := int64(99_000), int64(0)
+	plan := execution.PlanKey{PlanIdentity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "business", StrategyID: "strategy"}}
 	records := map[execution.QueryGroupIdentity]readhold.Record{
-		"measured":   {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
-		"limited":    {SinceSlot: 1_790_000_000, HoldMillis: 600_000, ArrivalAgeMillis: 990_000, AtLimit: true, LimitMillis: 600_000},
-		"lowered":    {SinceSlot: 1_790_000_000, HoldMillis: 40_000, ArrivalAgeMillis: 130_000, Lowered: true},
-		"fallback":   {SinceSlot: 1_790_000_000, HoldMillis: 600_000},
-		"inherited":  {SinceSlot: 1_790_000_000, HoldMillis: 120_000, ArrivalAgeMillis: 80_000},
-		"chosen":     {SinceSlot: 1_790_000_000, PendingHoldMillis: &chosen, ArrivalAgeMillis: 189_000},
-		"idle":       {SinceSlot: 1_790_000_000, ArrivalAgeMillis: 50_000},
-		"unprepared": {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
+		"measured":  {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
+		"limited":   {SinceSlot: 1_790_000_000, HoldMillis: 600_000, ArrivalAgeMillis: 990_000, AtLimit: true, LimitMillis: 600_000},
+		"lowered":   {SinceSlot: 1_790_000_000, HoldMillis: 40_000, ArrivalAgeMillis: 130_000, Lowered: true},
+		"fallback":  {SinceSlot: 1_790_000_000, HoldMillis: 600_000},
+		"inherited": {SinceSlot: 1_790_000_000, HoldMillis: 120_000, ArrivalAgeMillis: 80_000},
+		"chosen":    {SinceSlot: 1_790_000_000, PendingHoldMillis: &chosen, ArrivalAgeMillis: 189_000},
+		"transitiononly": {SinceSlot: 1_790_000_000, HoldMillis: 120_000, PendingHoldMillis: &zero, ArrivalAgeMillis: 189_000,
+			Transitions: []readhold.Transition{{Key: plan, DeadlineMillis: 1_790_000_200_000}}},
+		"lowertozero": {SinceSlot: 1_790_000_000, HoldMillis: 40_000, PendingHoldMillis: &zero, ArrivalAgeMillis: 130_000, Lowered: true},
+		"idle":        {SinceSlot: 1_790_000_000, ArrivalAgeMillis: 50_000},
+		"unprepared":  {SinceSlot: 1_790_000_000, HoldMillis: 99_000, ArrivalAgeMillis: 189_000},
 	}
 	var groups []execution.QueryGroupIdentity
 	for qg, record := range records {
@@ -347,10 +358,15 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 		"fallback": {600_000, 1_790_000_000, 60, 0},
 		// A hold not from this arrival age -- an inherited bound -- beside
 		// one that needs no more than the delay: nothing to move it to.
-		"inherited":  {120_000, 1_790_000_000, 60, 0},
-		"chosen":     {99_000, 0, 60, 180},
-		"idle":       {0, 0, 60, 0},
-		"unprepared": {99_000, 1_790_000_000, 0, 0},
+		"inherited": {120_000, 1_790_000_000, 60, 0},
+		// Chosen and not yet frozen: no Slot has held, so the hold read is
+		// the last Slot's none; the suggestion already stands.
+		"chosen": {0, 0, 60, 180},
+		// The next Slot holds nothing: no time_delay to move it to.
+		"transitiononly": {120_000, 1_790_000_000, 60, 0},
+		"lowertozero":    {40_000, 1_790_000_000, 60, 0},
+		"idle":           {0, 0, 60, 0},
+		"unprepared":     {99_000, 1_790_000_000, 0, 0},
 	} {
 		got, found := facts[qg]
 		settling := int64(30)
@@ -361,6 +377,24 @@ func TestRuntimeAMeasuredHoldSuggestsTheTimeDelayThatNeedsNone(t *testing.T) {
 			got.SettlingWaitSeconds != settling {
 			t.Errorf("%s: facts %+v (found %t), want hold %d since %d delay %d suggested %d", qg, got, found, want.millis, want.since, want.delay, want.suggested)
 		}
+	}
+	// The rows the replica's tracker makes of these facts, every group seen
+	// evaluating here.
+	tracker := fleet.NewTracker(nil, "worker", func() time.Time { return *at })
+	for _, qg := range groups {
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
+			ExecuteOutcome: "COMPLETED", Result: observability.ResultSuccess,
+			Trace: observability.TraceFields{QueryGroupKey: string(qg), StrategyID: "101", BusinessID: "2", EvaluationTime: at.Unix()},
+		})
+	}
+	var held []string
+	for _, row := range tracker.ReadHeld(facts) {
+		held = append(held, row.QueryGroup)
+	}
+	sort.Strings(held)
+	if want := []string{"limited", "lowered", "measured"}; !reflect.DeepEqual(held, want) {
+		t.Fatalf("READ_HELD rows for %v, want %v: none for a group whose next Slot holds nothing", held, want)
 	}
 }
 
