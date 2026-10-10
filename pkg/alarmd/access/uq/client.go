@@ -98,11 +98,13 @@ func (limits Limits) validate() error {
 }
 
 type Client struct {
-	endpoint    string
-	httpClient  *http.Client
-	querySource string
-	limits      Limits
-	now         func() time.Time
+	endpoint          string
+	httpClient        *http.Client
+	querySource       string
+	limits            Limits
+	now               func() time.Time
+	sharedQueryGroups map[execution.QueryGroupIdentity]struct{}
+	sharedAll         bool
 }
 
 // markReplayable lets the transport send a query again, once, when the
@@ -154,6 +156,7 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		defer cancel()
 	}
 	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
+		SharedSchema: client.sharedFor(attempt),
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
 			DeadlineUnixMilli: attempt.DeadlineUnixMilli}}, sink, nil)
 }
@@ -161,8 +164,9 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
 // not invent a Slot operation or a production recovery permit.
 type queryIdentity struct {
-	Spec      execution.PhysicalQuerySpec
-	AttemptNo uint32
+	Spec         execution.PhysicalQuerySpec
+	AttemptNo    uint32
+	SharedSchema bool
 	// Budget is the Slot query's, which a failure is timed against; zero
 	// for a read that is not a Slot's, which then reports no timing.
 	Budget queryBudget
@@ -235,6 +239,9 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: build request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if attempt.SharedSchema {
+		request.Header.Set("Accept", sharedSchemaAccept)
+	}
 	request.Header.Set(headerQuerySource, client.querySource)
 	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
 		request.Header.Set(name, value)
@@ -276,7 +283,17 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		return completion, nil
 	}
 	counted := &countingReader{reader: response.Body, now: client.now}
-	completion, err := client.decodeQuery(ctx, &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}, attempt, sink, scanned)
+	shared, err := selectSharedDecoder(response.Header.Get("Content-Type"), attempt.SharedSchema)
+	if err != nil {
+		return execution.ProviderCompletion{}, err
+	}
+	bounded := &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}
+	var completion execution.ProviderCompletion
+	if shared {
+		completion, err = client.decodeShared(ctx, bounded, attempt, sink)
+	} else {
+		completion, err = client.decodeQuery(ctx, bounded, attempt, sink, scanned)
+	}
 	if scanned != nil {
 		scanned.Bytes = counted.bytes
 		scanned.Complete = err == nil
@@ -286,6 +303,11 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	}
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+	completion.Stats.ResponseCodec = "legacy_json"
+	if shared {
+		completion.Stats.ResponseCodec = "shared_json_v1"
+	}
+	completion.Stats.SharedSchemaRequested = attempt.SharedSchema
 	return completion, nil
 }
 
@@ -591,120 +613,61 @@ func (client *Client) decode(ctx context.Context, reader io.Reader, attempt exec
 }
 
 func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (completion execution.ProviderCompletion, err error) {
-	var delivery execution.SeriesDelivery
-	// An answer past a response limit completes its query UNAVAILABLE, the
-	// limit named (response=limit_*), rather than failing it: the same query
-	// fetches the same answer again, so a failure was attempted again until
-	// the Slot's deadline, each attempt pulling the whole answer back past
-	// the same limit, and a failure that is not a completion never reached
-	// the degraded pool, which counts a named response as the backend's. As
-	// for a deterministic status below, series already handed to the sink are
-	// kept in the completion's delivery. A diagnostic read keeps the error,
-	// which its own answer names for the operator.
-	defer func() {
-		var limit *responseLimitError
-		if err == nil || scanned != nil || !errors.As(err, &limit) {
-			return
-		}
-		dataState := execution.DataStateEmpty
-		if delivery.Records > 0 {
-			dataState = execution.DataStateData
-		}
-		completion = client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
-			execution.ResponseRouteDetail(limit.class), dataState, delivery, nil,
-			execution.ProviderStats{Series: delivery.Series, Records: delivery.Records})
-		err = nil
-	}()
+	session := client.newSeriesDecoder(attempt, sink, scanned)
+	defer session.limitCompletion(&completion, &err)
 	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
-	decodeStarted := client.now()
 	opening, err := decoder.Token()
 	if err != nil {
-		return execution.ProviderCompletion{}, err
+		return completion, err
 	}
 	if opening != json.Delim('{') {
-		return execution.ProviderCompletion{}, errors.New("alarmd access uq: response must be an object")
+		return completion, errors.New("alarmd access uq: response must be an object")
 	}
-	ref := providerResultRef(attempt)
 	var status *responseStatus
 	var isPartial *bool
 	var resultTableIDs []string
-	var totalSeries, totalRecords, nullIdentityFields uint64
-	cut := newTermsCutCounter(attempt.Spec)
-	// offGrid is a series of an unaligned query that came back bucketed on
-	// some grid other than its request's own (errOffRequestGrid).
-	offGrid := false
-	receivedAt := client.now().Unix()
+	session.receivedAt = client.now().Unix()
 	for decoder.More() {
 		if err := ctx.Err(); err != nil {
-			return execution.ProviderCompletion{}, err
+			return completion, err
 		}
 		keyToken, err := decoder.Token()
 		if err != nil {
-			return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: decode field: %w", err)
+			return completion, fmt.Errorf("alarmd access uq: decode field: %w", err)
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return execution.ProviderCompletion{}, errors.New("alarmd access uq: response field name is invalid")
+			return completion, errors.New("alarmd access uq: response field name is invalid")
 		}
 		switch key {
 		case "series":
 			start, err := decoder.Token()
 			if err != nil || start != json.Delim('[') {
-				return execution.ProviderCompletion{}, errors.New("alarmd access uq: series must be an array")
+				return completion, errors.New("alarmd access uq: series must be an array")
 			}
 			for decoder.More() {
 				var raw json.RawMessage
 				if err := decoder.Decode(&raw); err != nil {
-					return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: decode series payload: %w", err)
+					return completion, fmt.Errorf("alarmd access uq: decode series payload: %w", err)
 				}
 				if int64(len(raw)) > client.limits.MaxSeriesBytes {
-					return execution.ProviderCompletion{}, ErrSeriesBytesExceeded
+					return completion, ErrSeriesBytesExceeded
 				}
 				var series responseSeries
 				if err := json.Unmarshal(raw, &series); err != nil {
-					return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: decode series: %w", err)
+					return completion, fmt.Errorf("alarmd access uq: decode series: %w", err)
 				}
-				totalSeries++
-				cut.add(series)
-				if scanned != nil {
-					scanned.Series = totalSeries
-					scanned.Records += uint64(len(series.Values))
-				}
-				if totalSeries > client.limits.MaxSeries {
-					return execution.ProviderCompletion{}, ErrTotalSeriesExceeded
-				}
-				if uint64(len(series.Values)) > client.limits.MaxRecords-totalRecords {
-					return execution.ProviderCompletion{}, ErrTotalRecordsExceeded
-				}
-				totalRecords += uint64(len(series.Values))
-				batch, nullFields, err := normalizeSeries(attempt.Spec, ref, series, receivedAt)
-				if errors.Is(err, errOffRequestGrid) {
-					offGrid = true
-					continue
-				}
-				if err != nil {
-					return execution.ProviderCompletion{}, err
-				}
-				nullIdentityFields += nullFields
-				batch.Delivery.Bytes = uint64(len(raw))
-				if batch.Dataset.Len() == 0 {
-					continue
-				}
-				if err := sink.ConsumeProviderSeries(ctx, batch); err != nil {
-					return execution.ProviderCompletion{}, err
-				}
-				delivery, err = execution.AccumulateSeriesDelivery(delivery, batch.Delivery)
-				if err != nil {
-					return execution.ProviderCompletion{}, err
+				if err := session.accept(ctx, series, uint64(len(raw))); err != nil {
+					return completion, err
 				}
 			}
 			if _, err := decoder.Token(); err != nil {
-				return execution.ProviderCompletion{}, err
+				return completion, err
 			}
 		case "status":
 			if err := decoder.Decode(&status); err != nil {
-				return execution.ProviderCompletion{}, err
+				return completion, err
 			}
 			if scanned != nil && status != nil {
 				scanned.statusCode = status.Code
@@ -712,100 +675,30 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		case "is_partial":
 			var value bool
 			if err := decoder.Decode(&value); err != nil {
-				return execution.ProviderCompletion{}, err
+				return completion, err
 			}
 			isPartial = &value
 		case "result_table_id":
 			if err := decoder.Decode(&resultTableIDs); err != nil {
-				return execution.ProviderCompletion{}, err
+				return completion, err
 			}
 		default:
 			var ignored json.RawMessage
 			if err := decoder.Decode(&ignored); err != nil {
-				return execution.ProviderCompletion{}, err
+				return completion, err
 			}
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
-		return execution.ProviderCompletion{}, err
+		return completion, err
 	}
 	if token, err := decoder.Token(); err != io.EOF {
 		if err != nil {
-			return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: decode trailing payload: %w", err)
+			return completion, fmt.Errorf("alarmd access uq: decode trailing payload: %w", err)
 		}
-		return execution.ProviderCompletion{}, fmt.Errorf("alarmd access uq: unexpected trailing token %v", token)
+		return completion, fmt.Errorf("alarmd access uq: unexpected trailing token %v", token)
 	}
-	dataState := execution.DataStateEmpty
-	if delivery.Records > 0 {
-		dataState = execution.DataStateData
-	}
-	stats := execution.ProviderStats{Series: delivery.Series, Records: delivery.Records, NullIdentityFields: nullIdentityFields,
-		DecodeMillis: uint64(client.now().Sub(decodeStarted).Milliseconds())}
-	passthroughDetail := ""
-	var passthroughStatus *execution.ProviderStatusFact
-	if status != nil && status.Code != "" && status.Code != queryTSPartial {
-		if !usableDespiteStatus(status.Code, delivery) {
-			// A non-partial status code is a deterministic answer for this table
-			// and field. Completing it as UNAVAILABLE lets the Slot finish with a
-			// Plan gap instead of failing and re-querying UQ on every attempt
-			// until the Slot ages out. UQ writes the series array before status,
-			// so series decoded before the status token have already reached the
-			// sink; the completion keeps their DataState and Delivery only so
-			// that delivery conservation holds. The consumer never receives them:
-			// every binding of an UNAVAILABLE completion is UNKNOWN.
-			// A table or field that does not route in the space is named for
-			// what it is: the strategy's data is not where it points, which no
-			// retry and no backend recovery changes.
-			reason := execution.ReasonCode(contract.ReasonQueryUnavailable)
-			if _, targetMissing := dataExistenceStatusCodes[status.Code]; targetMissing {
-				reason = execution.ReasonCode(contract.ReasonQueryTargetMissing)
-			}
-			unavailable := client.responseContractUnavailable(attempt, reason, execution.ResponseStatusRouteDetail(status.Code),
-				dataState, delivery, resultTableIDs, stats)
-			unavailable.RouteFacts.Status = &execution.ProviderStatusFact{Code: status.Code}
-			return unavailable, nil
-		}
-		// The code is kept on the succeeded attempt because this is now the only
-		// place it exists. Before, a code always produced an UNAVAILABLE
-		// completion, so it was visible by making the Slot fail loudly; letting
-		// the series through removes that, and nothing in alarmd counts UQ status
-		// codes. Dropping it here would turn the failure this fixes into a silent
-		// one: a result table that is genuinely renamed would route nowhere, the
-		// fallback would answer 100, and the strategy would report itself healthy
-		// forever with nothing to look at. A loud wrong answer is discoverable -
-		// this whole defect was found because 34 hours of nothing was
-		// conspicuous.
-		passthroughDetail = execution.ResponseStatusRouteDetail(status.Code)
-		passthroughStatus = &execution.ProviderStatusFact{Code: status.Code, Allowed: true}
-	}
-	if offGrid {
-		// No point of it is used: a bucket starting anywhere but where the
-		// window starts covers part of the window and part of another, and
-		// reads as a detection at the wrong time. The strategy's step cannot
-		// be read from this table's storage.
-		return client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonDetectIntervalStorageNotSliding),
-			execution.ResponseRouteDetail(execution.ResponseFailureOffRequestGrid), dataState, delivery, resultTableIDs, stats), nil
-	}
-	if isPartial == nil {
-		return client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
-			execution.ResponseRouteDetail(execution.ResponseFailureIsPartialMissing), dataState, delivery, resultTableIDs, stats), nil
-	}
-	completeness := execution.CompletenessFull
-	if *isPartial || status != nil && status.Code == queryTSPartial {
-		completeness = execution.CompletenessPartial
-	}
-	var truncation *execution.ProviderTruncationFact
-	if dimension, suspected := cut.suspected(); suspected {
-		truncation = &execution.ProviderTruncationFact{Kind: execution.TruncationTermsCut, Dimension: dimension, Cap: esTermsCap,
-			SourceSemantics: cut.source}
-	}
-	return execution.ProviderCompletion{Ref: ref, PhysicalQuery: attempt.Spec.Digest,
-		Completeness: completeness, DataState: dataState, Delivery: delivery,
-		RouteFacts: execution.ProviderRouteFacts{ProviderRouteRef: attempt.Spec.PlanFacts.ProviderRouteRef,
-			ResultTableIDs: append([]string(nil), resultTableIDs...), Status: passthroughStatus, Truncation: truncation,
-			Attempts: []execution.RouteAttemptFact{{AttemptNo: attempt.AttemptNo,
-				Endpoint: client.endpoint, Result: execution.RouteAttemptSucceeded, Detail: passthroughDetail}}},
-		Stats: stats}, nil
+	return session.finish(status, isPartial, resultTableIDs)
 }
 
 // usableDespiteStatus reports whether a response carrying code should still be

@@ -184,7 +184,7 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: result,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: reason, Duration: time.Since(started),
-		QueryFailure: facts, QueryStatus: providerStatusFacts(completion),
+		QueryFailure: facts, QueryStatus: providerStatusFacts(completion), QueryCodec: providerCodecFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
 		QueryRanges: providerRangeFacts(completion),
 	}
@@ -202,6 +202,22 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 // query per Plan, so a Query Group with several Plans reports several, and
 // reporting only the first would undercount by however many Plans share the
 // group.
+func providerCodecFacts(completion execution.QueryExecutionCompletion) []observability.QueryCodecFacts {
+	var facts []observability.QueryCodecFacts
+	for _, item := range completion.PhysicalQueries {
+		if item.Stats.ResponseCodec == "" {
+			continue
+		}
+		negotiation := "disabled"
+		if item.Stats.SharedSchemaRequested {
+			negotiation = "opt_in"
+		}
+		facts = append(facts, observability.QueryCodecFacts{Codec: item.Stats.ResponseCodec,
+			Negotiation: negotiation, Completion: strings.ToLower(string(item.Completeness))})
+	}
+	return facts
+}
+
 func providerStatusFacts(completion execution.QueryExecutionCompletion) []observability.QueryStatusFacts {
 	var facts []observability.QueryStatusFacts
 	for _, item := range completion.PhysicalQueries {

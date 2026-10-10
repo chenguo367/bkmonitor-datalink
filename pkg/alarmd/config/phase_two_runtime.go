@@ -138,6 +138,8 @@ func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits 
 
 type PhaseTwoAccessConfig struct {
 	UQEndpoint string `yaml:"uq_endpoint"`
+	// Empty preserves legacy JSON. A sole "*" selects every eligible Execute.
+	UQSharedSchemaQueryGroups []string `yaml:"uq_shared_schema_query_groups"`
 	// QuerySource defaults to DefaultQuerySource.
 	QuerySource string `yaml:"query_source"`
 	// SelfMetricsSpaceUID is where this deployment's own metrics can be read
@@ -377,6 +379,9 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 		return errors.New("phase_two scheduler cadence and recovery limits are invalid")
 	}
 	endpoint, err := url.Parse(c.Access.UQEndpoint)
+	if err := validateSharedSchemaGroups(c.Access.UQSharedSchemaQueryGroups); err != nil {
+		return err
+	}
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" ||
 		!canonicalText(c.Access.UQEndpoint) || !canonicalText(c.Access.QuerySource) ||
 		c.Access.MinReadyDelay.Duration() <= 0 || c.Access.DownstreamExecutionReserve.Duration() <= 0 {

@@ -499,6 +499,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	attributes = appendObservationCounts(attributes, observation.Counts)
 	attributes = appendEnvelopePassCounts(attributes, observation)
 	attributes = appendTraceFields(attributes, observation.Trace)
+	if len(observation.QueryCodec) > 0 {
+		attributes = append(attributes, slog.Any("query_codecs", observation.QueryCodec))
+	}
 	if f := observation.QueryFailure; f != nil {
 		attributes = append(attributes, slog.String("failure_stage", f.Stage), slog.String("failure_category", f.Category), slog.String("failure_code", f.Code))
 		if f.Detail != "" {
