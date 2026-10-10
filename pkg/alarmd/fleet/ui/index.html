@@ -177,6 +177,9 @@ details.group table{margin:6px 0 0 12px}
     <!-- While an object is held by more than one replica, the numbers here
          are the replicas' own counts added, and each holder counts it. -->
     <p class="note" id="handoverNote" hidden></p>
+    <!-- A rollout in progress: the leader's latest planning round, read from
+         the same rebalance fields fleet.get's summary names. -->
+    <p class="note" id="rolloutNote" hidden></p>
     <!-- What produced every number below. One line when the replicas agree on
          a build; two or more when a rollout is in progress or stuck, and the
          totals are then a mix that no single build produced. -->
@@ -2848,6 +2851,9 @@ function renderDeployment(deployment) {
     text('handoverNote', handover);
     show('loadHandover', !!handover && !restricted);
     text('loadHandover', handover);
+    var rollout = rolloutWords(deployment.rebalance);
+    show('rolloutNote', !!rollout);
+    text('rolloutNote', rollout);
     text('expected', deployment.expected === null || deployment.expected === undefined ? '未知' : deployment.expected);
     text('covered', deployment.covered);
     text('determined', deployment.determined);
@@ -3921,6 +3927,30 @@ function handoverWords(marker) {
   }
   var held = marker.objects === null || marker.objects === undefined ? '无法判断有多少' : marker.objects + ' 个';
   return '交接中：' + held + '对象被多个副本同时持有，本时刻计数可能偏多、在途损失可能误判为进行中';
+}
+
+// rolloutWords is the note for a rollout the leader's latest planning round
+// is replacing Query Groups for, or '' when that round replaced, deferred and
+// left none. The numbers are that round's - replaced, replacements_deferred,
+// unplaceable, batch, planned_at - the fields fleet.get's summary names, so
+// the page and the CLI cannot read two different things; between rounds they
+// are the last round's, which the note says by naming it and its time.
+function rolloutWords(r) {
+  if (!r || !(r.replaced || r.replacements_deferred || r.unplaceable)) {
+    return '';
+  }
+  var at = new Date(r.planned_at);
+  var round = 'Leader 上一轮再平衡' + (isNaN(at.getTime()) ? '' : '（' + at.toLocaleTimeString() + '）');
+  var clauses = [];
+  if (r.replaced || r.replacements_deferred) {
+    clauses.push('从不再合格的副本移走 ' + (r.replaced || 0) + ' 个对象，还有 ' + (r.replacements_deferred || 0)
+      + ' 个留到后面的轮次（每轮最多交接 ' + (r.batch || 0) + ' 个）');
+  }
+  if (r.unplaceable) {
+    clauses.push(r.unplaceable + ' 个这一轮没有就绪副本能接，留在原处——一直不为 0 说明新版本的副本不够或没就绪');
+  }
+  // Done is both left-for-later and stuck at zero: one alone at zero is not.
+  return round + '在滚动替换：' + clauses.join('；') + '。留到后面的与没人能接的都降到 0 才算换完';
 }
 
 function renderLoad(load) {

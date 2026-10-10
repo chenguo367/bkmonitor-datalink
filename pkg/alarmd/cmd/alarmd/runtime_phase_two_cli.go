@@ -108,7 +108,8 @@ func cliRedisOptions(connection config.RedisConnectionConfig, name string, retri
 // cliLifecycleOperation reads every replica's start and stop record, which
 // outlives the Pods it describes.
 func cliLifecycleOperation(client redis.UniversalClient, key string) obchannel.Operation {
-	return obchannel.Operation{ID: "lifecycle.get", Summary: "读取各副本最近的启动与停止记录（含停止原因、错误），以及同名副本两次启动之间没写停止的次数（OOM、SIGKILL 这类不干净退出）；Pod 被删后仍可读。",
+	return obchannel.Operation{ID: "lifecycle.get", Summary: "读取各副本最近的启动与停止记录（含停止原因、错误），以及同名副本两次启动之间没写停止的次数（OOM、SIGKILL 这类不干净退出）；Pod 被删后仍可读。" +
+		"停止记录的 drain 是停止时等在途 Slot 的结果：outcome（idle 没有在跑的、finished 都返回了、deadline 到停止时限取消了还在跑的、deadline_unreturned 取消后仍有没返回的）、waited 开始等时在跑几个、cancelled 到时限还在跑被取消几个、unreturned 取消后没返回几个、wait_ms 等了多久；deadline 与 deadline_unreturned 时这些 Slot 的事件可能已发出而状态写入被拒，下一任属主会再发一次。",
 		EvidenceScope: "deployment", Fields: map[string]obchannel.Field{}, OutputSchema: obchannel.SchemaOf(lifecycleReading{}),
 		Limits: map[string]any{"entries": lifecycleRecordEntries, "redis_commands": 1},
 		Run: func(ctx context.Context, _ obchannel.Params) obchannel.Outcome {

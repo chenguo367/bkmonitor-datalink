@@ -75,7 +75,8 @@ func NativeOperations(handler http.Handler) []Operation {
 		}}
 	}
 	ops := []Operation{
-		makeOp("fleet.get", "读取部署健康、覆盖、依赖和执行能力；业务异常与取证失败分开。", map[string]Field{}, nil, fleet.HealthResponse{}, func(Params) (string, url.Values) { return "/api/health", nil }),
+		makeOp("fleet.get", "读取部署健康、覆盖、依赖和执行能力；业务异常与取证失败分开。"+
+			"rebalance 是 Leader 上一轮再平衡（planned_at 那一轮，不是实时数）：滚动发布时 replaced 是这一轮从不再合格的副本移走的对象数、replacements_deferred 是因每轮交接上限（batch）留到后面轮次的、unplaceable 是这一轮没有就绪副本能接而留在原处的；replacements_deferred 与 unplaceable 都降到 0 才算换完（只有一个为 0 不算）。", map[string]Field{}, nil, fleet.HealthResponse{}, func(Params) (string, url.Values) { return "/api/health", nil }),
 		makeOp("strategy.list", "按服务端状态/行动词列出需要关注的策略；不是全量源目录。", map[string]Field{
 			"state":  enumField("状态词，从 words 或 describe 获取。", fleet.StateWords),
 			"action": enumField("行动词，从 words 或 describe 获取。", fleet.ActionWords),
