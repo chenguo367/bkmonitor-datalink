@@ -172,8 +172,8 @@ func TestAnEmptyListRemovesEveryStrategy(t *testing.T) {
 			t.Fatalf("plans after the writer published an empty list under its statement = %v, want none", plans)
 		}
 		observed, ok := harness.reconciler.ObservedSnapshot()
-		if !ok || len(observed.Strategies) != 0 || observed.Observation == "" {
-			t.Fatalf("ObservedSnapshot() of an empty list = (%+v, %v), want an observation of nothing", observed, ok)
+		if !ok || len(observed.Strategies) != 0 || observed.Observation == "" || !observed.HoldsLastGood {
+			t.Fatalf("ObservedSnapshot() of an empty list = (%+v, %v), want an observation of nothing under the statement", observed, ok)
 		}
 	})
 	t.Run("without a statement", func(t *testing.T) {

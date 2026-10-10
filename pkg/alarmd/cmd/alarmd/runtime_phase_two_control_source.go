@@ -263,11 +263,6 @@ func sourceFactsOf(result phaseTwoControlRefreshResult, at time.Time) *fleet.Sou
 		age := result.ChangeSignalAgeSeconds
 		facts.ChangeSignalAgeSeconds = &age
 	}
-	if statement := result.WriterStatement; statement != nil {
-		facts.WriterStatement = &fleet.WriterStatementFacts{Held: statement.Held, Reason: statement.Reason,
-			Statement: statement.Raw, LastUpdated: statement.LastUpdated,
-			StatementSHA256: statement.SetSHA256, ReadSHA256: statement.ReadSHA256}
-	}
 	return facts
 }
 

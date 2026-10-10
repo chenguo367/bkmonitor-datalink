@@ -7,8 +7,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,7 +20,6 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -126,35 +123,5 @@ func TestProductionPhaseTwoRefreshReusesItsObservationWhileTheSourceSignalsNoCha
 		facts.ReadReason != observability.SourceReadChanged || facts.StrategiesRead != 1 ||
 		!facts.ChangeSignalPresent || facts.ChangeSignalAgeSeconds != 0 {
 		t.Fatalf("refresh line after the signal moved = %+v, want a full read for a changed signal", facts)
-	}
-
-	// The writer's statement as the round used it travels with the refresh
-	// into the source facts: none stored here, then one stored with the next
-	// signal about the very bytes of the list.
-	listed := sha256.Sum256([]byte(`[1001]`))
-	listedHex := hex.EncodeToString(listed[:])
-	statementOf := func() *fleet.WriterStatementFacts {
-		result, err := control.Refresh(ctx)
-		if err != nil || result.Status != phaseTwoControlHealthy {
-			t.Fatalf("Refresh() = (%+v, %v), want healthy", result, err)
-		}
-		return sourceFactsOf(result, time.Unix(nowUnix.Load(), 0)).WriterStatement
-	}
-	if statement := statementOf(); statement == nil || statement.Held || statement.Reason != controlplane.StatementAbsent ||
-		statement.LastUpdated != strconv.FormatInt(nowUnix.Load(), 10) || statement.ReadSHA256 != listedHex {
-		t.Fatalf("writer statement with none stored = %+v, want it absent beside the signal %d and the list read %s", statement, nowUnix.Load(), listedHex)
-	}
-	nowUnix.Add(10)
-	signal := strconv.FormatInt(nowUnix.Load(), 10)
-	if err := redisClient.Set(ctx, "alarm-config.publication_semantics",
-		`{"hold_last_good":true,"last_updated":`+signal+`,"strategy_ids_sha256":"`+listedHex+`","version":1}`, 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if err := redisClient.Set(ctx, "alarm-config.last_updated", signal, 0).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if statement := statementOf(); statement == nil || !statement.Held || statement.Reason != "" ||
-		statement.StatementSHA256 != listedHex || statement.ReadSHA256 != listedHex || statement.LastUpdated != signal {
-		t.Fatalf("writer statement stored with the signal = %+v, want it held, naming the list read", statement)
 	}
 }

@@ -26,7 +26,7 @@ func diagnoseNative(t *testing.T, page map[string]any) http.Handler {
 		case "/api/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"health": "DEGRADED", "expected": 83, "determined": 83,
 				"dependencies": []any{}, "per_replica": []any{"not kept"},
-				"source_standing": map[string]any{"kind": "ACCEPTING", "writer_statement": map[string]any{"held": false, "reason": "absent"}},
+				"source_standing": map[string]any{"kind": "ACCEPTING", "writer_age_seconds": 30},
 				"overdue":         map[string]any{"total": 0, "period_unknown": 1, "period_unknown_objects": []any{map[string]any{"query_group": "qg-unread"}}},
 				"platform_setting_fields": map[string]any{"replica": "pod-a", "differing": "pod-b",
 					"fields": []any{map[string]any{"field": "is_access_bk_data", "source": "VALUES", "enabled": true}}}})
@@ -87,11 +87,11 @@ func TestDiagnoseEnvironmentAddsTheDeploymentToTheFirstPage(t *testing.T) {
 	if fleetFacts["health"] != "DEGRADED" || fleetFacts["per_replica"] != nil {
 		t.Errorf("fleet = %v, want the kept keys only", fleetFacts)
 	}
-	// The source's standing comes whole, with the writer's statement as the
-	// round used it: the one step a reader takes to see why it is not held.
+	// The source's standing comes whole, with what it carries beside the
+	// verdict.
 	if standing, _ := fleetFacts["source_standing"].(map[string]any); standing == nil ||
-		standing["writer_statement"].(map[string]any)["reason"] != "absent" {
-		t.Errorf("source_standing = %v, want it with the writer's statement", fleetFacts["source_standing"])
+		standing["kind"] != "ACCEPTING" || standing["writer_age_seconds"] != 30.0 {
+		t.Errorf("source_standing = %v, want it whole", fleetFacts["source_standing"])
 	}
 	// And the overdue facts, which name the objects without a period.
 	if overdue, _ := fleetFacts["overdue"].(map[string]any); overdue == nil || overdue["period_unknown"] != 1.0 {

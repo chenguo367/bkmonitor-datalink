@@ -25,8 +25,10 @@
 // alerts have nothing left to recover them. The cache is not read twice or
 // reinterpreted here; the snapshot is the control plane's own read of it. What
 // is added is only what one read cannot say: that the read was a good one
-// (read at all, not empty, not old, not suddenly much smaller than the last),
-// and that the strategy stayed missing - for the grace, across two reads.
+// (read at all, not old, and not empty unless the writer states it), and that
+// the strategy stayed missing - for the grace, across two reads. How much smaller a list is than the one
+// before is not judged: a strategy leaves the list when it is gone, and a
+// writer that drops strategies on error is the writer's to fix.
 //
 // The roster can only err by missing a strategy or listing one twice, which
 // costs a close and never makes one; and a close the link receives for an
@@ -95,14 +97,10 @@ type Round struct {
 	SnapshotAgeSeconds  int64
 	// WriterHoldsLastGood is the writer's statement, made about this very
 	// list, that a strategy leaves it only for a fact about the strategy
-	// itself and never because publishing it failed. Then a smaller list is
-	// strategies that are gone, and the shrink gate - which exists because a
-	// writer could drop strategies that failed to publish - does not apply.
+	// itself and never because publishing it failed. It decides one thing
+	// here: an empty list under it is a fact, every strategy gone, and is
+	// decided on; an empty list without it is refused (RefusalSnapshotEmpty).
 	WriterHoldsLastGood bool
-	// PreviousSnapshotStrategies is how large the snapshot was when this
-	// loop last decided on one. Zero means there is no round to compare
-	// against, which is the first round of a leader term.
-	PreviousSnapshotStrategies int
 	// Identities is what the catalog remembers about the strategies it let
 	// go. A candidate not here is still closed; its identity is read from its
 	// alerts.
@@ -155,27 +153,21 @@ const (
 	// unread snapshot is not an empty one, and reading it as empty would
 	// close every unrecovered alert in the deployment.
 	RefusalSnapshotUnusable = "snapshot_unusable"
-	// RefusalSnapshotEmpty: the snapshot was observed and lists no strategy
-	// at all. The catalog takes that list as written and removes every
-	// strategy; this loop closes nothing on it, because on it every
-	// unrecovered alert in the deployment would be a candidate at once.
+	// RefusalSnapshotEmpty: the snapshot was observed, lists no strategy at
+	// all, and the writer made no statement about it. On it every
+	// unrecovered alert in the deployment would be a candidate at once, and
+	// nothing says the list is the writer's word rather than one that lost
+	// its content. Under the writer's statement (Round.WriterHoldsLastGood)
+	// an empty list is a fact and the round decides.
 	RefusalSnapshotEmpty = "snapshot_empty"
 	// RefusalSnapshotStale: the observation is older than this round may
 	// decide on. Strategies created since it was read would read as absent.
 	RefusalSnapshotStale = "snapshot_stale"
-	// RefusalSnapshotShrunk: the snapshot itself lost a large share of its
-	// strategies since the round before. The gate is on the input and not on the difference: the
-	// difference is an output filtered by "still holds an unrecovered
-	// alert", so a badly truncated snapshot whose lost strategies happened
-	// to have no open alerts produces a small difference and reads as a
-	// healthy round, while an honest backlog of deleted strategies - the
-	// state this capability exists for - produces a large one.
-	RefusalSnapshotShrunk = "snapshot_shrunk"
 )
 
 // Refusals is the closed list of whole-round refusals.
 var Refusals = []string{RefusalNone, RefusalLinkUnavailable, RefusalLinkUnhealthy, RefusalSnapshotUnusable,
-	RefusalSnapshotEmpty, RefusalSnapshotStale, RefusalSnapshotShrunk}
+	RefusalSnapshotEmpty, RefusalSnapshotStale}
 
 // The per-strategy outcomes of the decision. Every candidate the round did
 // not close lands on one of these, and every one of them is counted.
@@ -253,13 +245,9 @@ var Outcomes = []string{OutcomeCloseDecided, OutcomeWithinGrace, OutcomeUnconfir
 // absent, or nothing was decided - and without them a reader cannot tell a
 // healthy deployment from a difference that never ran.
 type Counts struct {
-	Roster                     int
-	RosterUnreadable           int
-	SnapshotStrategies         int
-	PreviousSnapshotStrategies int
-	// WriterHoldsLastGood is the round's WriterHoldsLastGood: whether the
-	// shrink gate was in force or waived by the writer's statement.
-	WriterHoldsLastGood bool
+	Roster             int
+	RosterUnreadable   int
+	SnapshotStrategies int
 	// Candidates is the difference this round acts on: listed by the link,
 	// not listed by the snapshot.
 	Candidates   int
@@ -282,13 +270,6 @@ type Bounds struct {
 	// discovery may be. Older, the link's maintenance has stopped and its
 	// roster is not current.
 	MaxLinkHealthAge time.Duration
-	// MaxSnapshotShrinkRatio is how much smaller this round's snapshot may
-	// be than the round before's before the round is refused.
-	MaxSnapshotShrinkRatio float64
-	// MinSnapshotForShrink is the size below which the shrink ratio says
-	// nothing: on a deployment with four strategies one deletion is
-	// twenty-five percent.
-	MinSnapshotForShrink int
 	// MaxCloseStrategies bounds how many strategies one round closes, so a
 	// backlog is worked off over rounds instead of in one batch.
 	MaxCloseStrategies int
@@ -316,9 +297,7 @@ type Result struct {
 // decision reads it, without the decision itself mutating memory.
 func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	counts := Counts{Roster: len(round.Roster), RosterUnreadable: round.RosterUnreadable,
-		SnapshotStrategies:         len(round.SnapshotStrategies),
-		PreviousSnapshotStrategies: round.PreviousSnapshotStrategies,
-		WriterHoldsLastGood:        round.WriterHoldsLastGood}
+		SnapshotStrategies: len(round.SnapshotStrategies)}
 	if !round.LinkRead {
 		return nil, counts, RefusalLinkUnavailable
 	}
@@ -328,19 +307,11 @@ func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	if !round.SnapshotUsable || round.SnapshotObservation == "" {
 		return nil, counts, RefusalSnapshotUnusable
 	}
-	if len(round.SnapshotStrategies) == 0 {
+	if len(round.SnapshotStrategies) == 0 && !round.WriterHoldsLastGood {
 		return nil, counts, RefusalSnapshotEmpty
 	}
 	if bounds.MaxSnapshotAge > 0 && time.Duration(round.SnapshotAgeSeconds)*time.Second > bounds.MaxSnapshotAge {
 		return nil, counts, RefusalSnapshotStale
-	}
-	// The shrink gate guesses: it cannot tell a writer that dropped strategies
-	// from one whose owners deleted many, and once a large deletion is
-	// refused it compares every later round against the size before it.
-	// A writer that states it never drops a strategy on failure removes the
-	// reason to guess.
-	if !round.WriterHoldsLastGood && shrunk(counts, bounds) {
-		return nil, counts, RefusalSnapshotShrunk
 	}
 	// Presence is decided by the strategy id alone. The snapshot lists a
 	// strategy whose source document lost its tenant with an empty one, while
@@ -463,21 +434,6 @@ func LinkHealthWord(lastSuccess time.Time, linkError string, now time.Time, maxA
 		return LinkDiscoveryStale
 	}
 	return LinkHealthy
-}
-
-// shrunk gates on the input: the strategy list itself, against what it was
-// the round before.
-func shrunk(counts Counts, bounds Bounds) bool {
-	if bounds.MaxSnapshotShrinkRatio <= 0 {
-		return false
-	}
-	against := func(before int) bool {
-		if before < max(bounds.MinSnapshotForShrink, 1) || counts.SnapshotStrategies >= before {
-			return false
-		}
-		return float64(before-counts.SnapshotStrategies)/float64(before) > bounds.MaxSnapshotShrinkRatio
-	}
-	return against(counts.PreviousSnapshotStrategies)
 }
 
 func sortKeys(keys []Key) {

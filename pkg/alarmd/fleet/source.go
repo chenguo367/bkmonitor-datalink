@@ -48,10 +48,6 @@ type SourceFacts struct {
 	// Absent age with a present marker is a marker this build could not read.
 	ChangeSignalPresent    bool   `json:"change_signal_present"`
 	ChangeSignalAgeSeconds *int64 `json:"change_signal_age_seconds,omitempty"`
-	// WriterStatement is the writer's statement that it holds the last good
-	// document, as it applies to the observation the round holds; absent from
-	// a source with no statement to read, and on a build before it.
-	WriterStatement *WriterStatementFacts `json:"writer_statement,omitempty"`
 	// Plans is how many Plans the round's Catalog holds and RevisionedPlans
 	// how many of them carry an authoritative strategy revision -- the fact
 	// that decides, under the automatic protocol choice, whether any event
@@ -73,21 +69,6 @@ type SourceFacts struct {
 	// and since when, and how often the set drops strategies and lists them
 	// again, by the hour. Absent on a build before it.
 	Set *SourceSetFacts `json:"set,omitempty"`
-}
-
-// WriterStatementFacts is the writer's statement as the round used it: the
-// bytes as stored and the change signal as stored, both bounded; the digest of
-// the strategy list the statement names, and of the one the round read;
-// whether it held for the round's observation and, when it did not, the first
-// check it failed (controlplane.Statement*). It carries the writer's flags,
-// integers and digests and nothing of the strategies.
-type WriterStatementFacts struct {
-	Held            bool   `json:"held"`
-	Reason          string `json:"reason,omitempty"`
-	Statement       string `json:"statement,omitempty"`
-	LastUpdated     string `json:"last_updated,omitempty"`
-	StatementSHA256 string `json:"statement_strategy_ids_sha256,omitempty"`
-	ReadSHA256      string `json:"strategy_ids_sha256,omitempty"`
 }
 
 // WithheldGroup is one (disposition, reason) pair the round withheld
@@ -334,10 +315,6 @@ type SourceStanding struct {
 	// change marker, when it has one. Evidence of when something was last
 	// written, and only that: it is carried beside the verdict, not into it.
 	WriterAgeSeconds *int64 `json:"writer_age_seconds,omitempty"`
-	// WriterStatement is the writer's statement that it holds the last good
-	// document, as the round used it (SourceFacts.WriterStatement): carried
-	// beside the verdict, like the writer's age, and not into it.
-	WriterStatement *WriterStatementFacts `json:"writer_statement,omitempty"`
 	// Run is the sentence about detection, Cache the sentence about the
 	// configuration source. Composed here so the page and any other reader
 	// say the same thing.
@@ -354,7 +331,7 @@ func sourceStandingOf(source *SourceFacts, executing int) *SourceStanding {
 	standing := &SourceStanding{Listed: source.Listed, Accepted: source.Accepted,
 		Incomplete: source.WithheldCount(dispositionSourceIncomplete),
 		Noted:      source.WithheldCount(dispositionConfigNoted), Executing: executing,
-		WriterAgeSeconds: source.ChangeSignalAgeSeconds, WriterStatement: source.WriterStatement}
+		WriterAgeSeconds: source.ChangeSignalAgeSeconds}
 	switch {
 	case source.Listed == 0:
 		standing.Kind = SourceNothingListed

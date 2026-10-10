@@ -72,9 +72,6 @@ type absentStrategyClose struct {
 	writer  closeWriter
 	tracker *absentalerts.Tracker
 	bounds  absentalerts.Bounds
-	// previousSnapshot is how large the last snapshot this loop decided on
-	// was, which is what the next one's size is judged against.
-	previousSnapshot int
 	// lastDecided is the last strategy a round decided to close, where the
 	// next round's walk over the candidates starts.
 	lastDecided absentalerts.Key
@@ -143,12 +140,8 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseCon
 			// reader's own cadence refuses every round on a deployment whose
 			// source is slower than whatever number was written here. Five
 			// reads' worth of slack.
-			MaxSnapshotAge:   5 * controlplane.SourceFullReadInterval,
-			MaxLinkHealthAge: absentCloseMaxLinkHealthAge,
-			// A strategy list that lost a fifth of its entries is the fact;
-			// see RefusalSnapshotShrunk. Only against a writer that has not
-			// stated it holds failed strategies (Round.WriterHoldsLastGood).
-			MaxSnapshotShrinkRatio: 0.2, MinSnapshotForShrink: 20,
+			MaxSnapshotAge:     5 * controlplane.SourceFullReadInterval,
+			MaxLinkHealthAge:   absentCloseMaxLinkHealthAge,
 			MaxCloseStrategies: 8,
 		},
 		counts: make(map[string]uint64),
@@ -196,8 +189,7 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"remembered_identities": last.identities,
 		"snapshot_age_seconds":  last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
 		"link_health_age_seconds": last.linkAge, "max_link_health_age_seconds": int(loop.bounds.MaxLinkHealthAge / time.Second),
-		"link_pending":           last.linkPending,
-		"writer_holds_last_good": boolSide(last.counts.WriterHoldsLastGood),
+		"link_pending": last.linkPending,
 	}
 }
 
@@ -251,7 +243,6 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 			// observed under a term it no longer holds.
 			loop.tracker.Forget()
 			loop.table.forget()
-			loop.previousSnapshot = 0
 		}
 		loop.wasLeader = false
 		loop.count(absentalerts.OutcomeNotLeader, 1)
@@ -265,8 +256,8 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	round := absentalerts.Round{
 		Identities:         identitiesByKey(departed),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
-		SnapshotObservation: observed.Observation, PreviousSnapshotStrategies: loop.previousSnapshot,
-		After: loop.lastDecided, Now: now,
+		SnapshotObservation: observed.Observation,
+		After:               loop.lastDecided, Now: now,
 	}
 	round.WriterHoldsLastGood = haveSnapshot && observed.HoldsLastGood
 	sizes := absentRoundSizes{identities: len(round.Identities)}
@@ -282,9 +273,6 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 		sizes.linkAge = int(now.Sub(health.LastSuccess) / time.Second)
 	}
 	result := loop.tracker.Round(round, loop.bounds)
-	if haveSnapshot && result.Refusal == absentalerts.RefusalNone {
-		loop.previousSnapshot = result.Counts.SnapshotStrategies
-	}
 	if len(result.Close) > 0 {
 		loop.lastDecided = result.Close[len(result.Close)-1].Key
 	}
