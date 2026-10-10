@@ -1398,6 +1398,18 @@ func (coverage *HistoryCoverage) Persistent() bool {
 }
 
 // Anomaly is one object that is not making progress as expected.
+// MemoryGap is the part of an object's short windows this replica cannot
+// read: positions before the first round it remembers for the object, after
+// it restarted or since the object moved here. Since is that first round;
+// Until is when the window will have slid past it - that round plus the
+// window's span from where it starts to its newest position, in the
+// window's own step - absent when the window did not say where it starts.
+// The row's line is unchanged; the gap closes by itself as the window slides.
+type MemoryGap struct {
+	Since time.Time  `json:"since"`
+	Until *time.Time `json:"until,omitempty"`
+}
+
 // AwaitingView is how long a Query Group has waited for its Worker's view to
 // carry it: since its first round of this wait, how long that is, and the
 // bound a wait the design expects stays under. The bound is the deployment's
@@ -1486,6 +1498,10 @@ type Anomaly struct {
 	DemotedSince time.Time `json:"demoted_since,omitempty"`
 	// AnswerTruncation is the suspected cut on a KindAnswerTruncated row.
 	AnswerTruncation *AnswerTruncation `json:"answer_truncation,omitempty"`
+	// MemoryGap is a short window reaching back before the first round this
+	// replica remembers for the object (BEFORE_THIS_PROCESS holes): since
+	// that round, and until the window has slid past it.
+	MemoryGap *MemoryGap `json:"memory_gap,omitempty"`
 	// AwaitingView is the wait on a blocked row whose every round so far
 	// the view refused only because it had not carried the Query Group yet.
 	AwaitingView *AwaitingView `json:"awaiting_view,omitempty"`
