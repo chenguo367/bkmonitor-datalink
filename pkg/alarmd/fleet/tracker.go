@@ -2169,6 +2169,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	anomaly.StateAdmissionRefusal = latestStateRefusal(state)
 	anomaly.NoDataTracking = noDataTrackingRows(state, tracker.replica, tracker.startedAt)
 	anomaly.WireFormats = wireFormatRows(state)
+	anomaly.MemoryGap = memoryGapOf(state)
 	// Set only by a blocked round and cleared wherever a blocked run ends,
 	// so a row with a wait is a blocked run.
 	if !state.awaitingViewSince.IsZero() {
@@ -2294,6 +2295,31 @@ func (tracker *Tracker) noteQueryRanges(queryGroup string, observation observabi
 		ranges = ranges[:MaxQueryRanges]
 	}
 	state.queryRanges = &QueryRanges{Slot: slot, Total: total, Ranges: ranges}
+}
+
+// memoryGapOf is the object's MemoryGap, when one of its short windows reaches
+// before the first round this process remembers for it.
+func memoryGapOf(state *queryGroupState) *MemoryGap {
+	coverage := state.coverage
+	if coverage == nil {
+		return nil
+	}
+	before := coverage.UnlistedHolesBeforeThisProcess
+	for _, window := range coverage.Windows {
+		before = before || window.HolesBy.BeforeThisProcess > 0
+	}
+	since := rememberedSince(state)
+	if !before || since <= 0 {
+		return nil
+	}
+	gap := &MemoryGap{Since: time.Unix(since, 0).UTC()}
+	// The window's span from where it starts to its newest position, in its
+	// own step: the newest remembered round's minute less the start.
+	if n := len(state.rounds); n > 0 && state.windowStart > 0 && state.rounds[n-1].end > state.windowStart {
+		until := time.Unix(since+state.rounds[n-1].end-state.windowStart, 0).UTC()
+		gap.Until = &until
+	}
+	return gap
 }
 
 // QueryRanges is what the object's latest round's primary queries were sent

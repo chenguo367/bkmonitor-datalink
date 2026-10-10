@@ -461,6 +461,14 @@ func (check Check) SourceStanding() bool {
 		check == CheckSourceSetFlapping || check == CheckConfigNoted
 }
 
+// timeOrNil is a time for a JSON field that is absent when unset.
+func timeOrNil(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	return &at
+}
+
 // Checks lists every check the table answers, in the order the page lists
 // them, for the tests that walk it and for the page's completeness check.
 func Checks() []Check {
@@ -657,6 +665,11 @@ type CheckReport struct {
 	// pool; the line has to say so of its own objects, or the two read as
 	// different verdicts on the same strategies.
 	Demoted int `json:"demoted,omitempty"`
+	// MemoryGap is how many of Current carry a MemoryGap - short at
+	// positions before this replica's memory of them, after a restart or a
+	// handover - and MemoryGapUntil the latest any of them settles by.
+	MemoryGap      int        `json:"memory_gap,omitempty"`
+	MemoryGapUntil *time.Time `json:"memory_gap_until,omitempty"`
 	// Current and Retained split Objects into what is wrong now and what was
 	// lost in the past and is kept on record. A line that added the two read
 	// as 393 objects to act on when 10 were anomalous and 383 were records of
@@ -1014,17 +1027,21 @@ type checkTally struct {
 	// columns is the columns its rows came from, a bit per position in
 	// columnNames: the line is a sample when any of them was published cut,
 	// on any replica, whichever replica its own rows came from.
-	columns    uint8
-	demoted    int
-	current    int
-	retained   int
-	lastHour   int
-	newest     time.Time
-	activation *ActivationFacts
-	replica    string
-	rebalance  *RebalanceFacts
-	skipped    *Consequence
-	reasons    map[string]int
+	columns uint8
+	demoted int
+	// memoryGap counts the current objects carrying a MemoryGap, and
+	// memoryGapUntil is the latest any of them settles by.
+	memoryGap      int
+	memoryGapUntil time.Time
+	current        int
+	retained       int
+	lastHour       int
+	newest         time.Time
+	activation     *ActivationFacts
+	replica        string
+	rebalance      *RebalanceFacts
+	skipped        *Consequence
+	reasons        map[string]int
 	// recovered is the objects that recovered from this line within the
 	// retention, recoveredLast the latest of them.
 	recovered     int
@@ -1137,6 +1154,12 @@ func checkRowsOf(columns [][]Anomaly, view *View, now time.Time) checkTallies {
 			entry.current++
 			if columnIndex < len(columnNames) && columnNames[columnIndex] == ColumnDemoted {
 				entry.demoted++
+			}
+			if gap := anomaly.MemoryGap; gap != nil {
+				entry.memoryGap++
+				if gap.Until != nil && gap.Until.After(entry.memoryGapUntil) {
+					entry.memoryGapUntil = *gap.Until
+				}
 			}
 			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 		}
@@ -1395,7 +1418,8 @@ func reportChecksFrom(tallies checkTallies, truncated uint8, view *View, now tim
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
-			Partial: entry.columns&truncated != 0, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
+			Partial: entry.columns&truncated != 0, Demoted: entry.demoted, MemoryGap: entry.memoryGap, MemoryGapUntil: timeOrNil(entry.memoryGapUntil),
+			Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
 			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance,
 			Recovered: entry.recovered, Onsets: onsetFold(entry.onsets, entry.withoutOnset)}

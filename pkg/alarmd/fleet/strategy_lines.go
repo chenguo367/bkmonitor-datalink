@@ -263,7 +263,11 @@ func evidenceClause(row Anomaly) string {
 	case groups.Unknown > 0:
 		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟说不出是谁的", groups.Unknown)
 	case groups.Before > 0:
-		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟早于本副本接手这个对象，窗口滑过后再判", groups.Before)
+		settles := ""
+		if row.MemoryGap != nil && row.MemoryGap.Until != nil {
+			settles = "（最晚 " + row.MemoryGap.Until.UTC().Format(time.RFC3339) + " 前）"
+		}
+		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟早于本副本接手这个对象，窗口滑过后再判%s", groups.Before, settles)
 	default:
 		return clause + fmt.Sprintf("，缺的 %d 分钟查询都正常返回、序列不在结果里", groups.Data)
 	}

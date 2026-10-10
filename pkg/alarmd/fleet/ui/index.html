@@ -1078,6 +1078,12 @@ function checkSentence(report, count) {
   // because the pool card says it of the pool and the two must agree.
   var demoted = report.demoted && count === (report.current || 0)
     ? '；其中 ' + report.demoted + ' 个已降级，不再反复查' : '';
+  // Short at positions before this replica's memory of them - after a
+  // restart or a handover - and settling by themselves as the window slides.
+  if (report.memory_gap && count === (report.current || 0)) {
+    demoted += '；其中 ' + report.memory_gap + ' 个是本副本接手（重启或交接）后还没看满一个窗口'
+      + (report.memory_gap_until ? '，最晚 ' + momentLabel(report.memory_gap_until) + ' 前会定下来' : '，窗口滑过后会定下来');
+  }
   return rebalanceWords(words, report.rebalance).replace('{n}', String(count))
     .replace('{g}', String(currentGroups(report).length))
     .replace('{s}', String(report.strategies || 0))
