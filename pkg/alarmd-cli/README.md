@@ -86,7 +86,7 @@ alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 
 调用节奏：
 
-- 一次只发一个调用，不要并发。服务端每个进程同一时刻只执行一个取证读取，忙时返回 `request_budget_exceeded`；每个会话每分钟最多 30 次 invoke，超出返回 `rate_limited`。遇到这两种，稍后重试同一个调用。
+- 一次只发一个调用。服务端的既有取证、SRE 读取和执行使用各自的进程内预算，具体范围以 describe 的 `execution_pool` 与 limits 为准；忙时返回 `request_budget_exceeded`，会话限额返回 `rate_limited`。先核对回执确认请求未执行，再决定重试。
 - `catalog_changed`：操作目录在 describe 与 invoke 之间变了，这次调用没有执行。重新 describe 该操作，按新的 schema 核对参数后再 invoke。
 
 ### 3. 读结果
@@ -108,6 +108,16 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 ### 4. 常用排障路径
 
 `diagnose` 和 `accept` 是 CLI 内置的组合命令，直接运行；其余都通过 `invoke <operation>` 调用。下面每条写成"问题 → 调用 → 看哪些字段"。
+
+**鲸眼 Pod / 原生 UQ 取证**
+
+1. `describe pod.targets` 后发现部署声明范围内的目标，继续用 `pod.get` 的真实 UID、containerID 和 imageID；日志和执行必须使用完整身份。省略 SRE 配置时操作具名不可用。
+2. `pod.logs` 有界读取并复核前后身份。`pod.exec` 使用明确授予的执行 scope，参数文件提供 `target`、`argv`、`timeout_ms`、`output_bytes`；脚本经 `--script-file` 填入 stdin。例如 argv 可为目标实际存在的 `python3 -` 或 `/bin/sh -s`。目标声明 `python3_process_group_v1` 和绝对 Python 路径后才能执行。
+3. 执行回执中的 `remote_completed`、`exit_code`、输出截断与前后身份各自解释；操作成功不代表脚本成功。连接异常时 `remote_state_unknown` 表示远端事实待核对，禁止自动重试；执行完成但事后身份读取失败仍是部分证据。
+4. `uq.egresses` 返回部署登记的原生出口。`uq.query` 必须使用登记端点、允许的 tenant/space 和从实际页面取证得到的 QueryTs JSON。首版支持结构化 metric/log QueryTs；拒绝直接 SQL、物理存储覆盖和 BKData 旁路，不接受调用方 URL 或身份头。
+5. UQ 回执保留 actual_url、tenant/space、原始请求摘要与 HTTP/业务状态。metric 保留脱敏 native JSON 与游标；log/原始行在主题脱敏前只保留状态、数量和摘要，省略正文/携值游标并标记部分证据，内容取鲸眼业务脱敏投影。时间戳使用登记单位的 10 位秒或 13 位毫秒字符串，查询窗最多 24 小时。请求摘要用于核对这次请求，跨语言摘要须先核对序列化方式。
+
+页面业务装配与授权证据由鲸眼诊断入口提供；部署级查询授权不代表受影响页面用户的权限。排查流程见 ai-docs 的 `kingeye-sre-diagnosis` 技能。
 
 **某条策略为什么没告警**
 

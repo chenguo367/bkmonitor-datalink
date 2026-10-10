@@ -17,6 +17,8 @@ import (
 
 const (
 	TimeoutContract        = "python3_process_group_v1"
+	VerificationTimeout    = 3 * time.Second
+	TerminationGrace       = 4 * time.Second
 	RemoteNotStarted       = "remote_not_started"
 	RemoteCompleted        = "remote_completed"
 	RemoteTimedOut         = "remote_timeout_confirmed"

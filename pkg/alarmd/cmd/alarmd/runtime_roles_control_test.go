@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/publicsurface"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
@@ -92,8 +93,10 @@ func TestProductionControlRoleBundleCompilesWithoutWorkerDependencies(t *testing
 	request := httptest.NewRequest("GET", "/api/objects?scope=strategies", nil)
 	response := httptest.NewRecorder()
 	bundle.dependencies.FleetAPI.ServeHTTP(response, request)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), "1001") {
-		t.Fatalf("control directory response = %d %s", response.Code, response.Body.String())
+	// Business-role processes expose directory evidence through authenticated
+	// channel routing. An anonymous request must not bypass that boundary.
+	if response.Code != 403 || !strings.Contains(response.Body.String(), publicsurface.RestrictedCode) {
+		t.Fatalf("control exposed its private directory = %d %s", response.Code, response.Body.String())
 	}
 	if err := bundle.Shutdown(ctx); err != nil {
 		t.Fatal(err)

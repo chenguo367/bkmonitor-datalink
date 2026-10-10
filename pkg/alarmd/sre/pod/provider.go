@@ -467,7 +467,7 @@ func (p *Provider) postObserve(ctx context.Context, target Target) (*Observation
 	if ctx.Err() != nil {
 		return nil, false, "post_observation_unavailable"
 	}
-	ctx, cancel := p.readContext(ctx)
+	ctx, cancel := context.WithTimeout(ctx, VerificationTimeout)
 	defer cancel()
 	observed, _, err := p.resolve(ctx, target, true)
 	if err != nil {

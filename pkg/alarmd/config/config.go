@@ -291,6 +291,7 @@ type Config struct {
 	Roles         roles.Set             `yaml:"roles,omitempty"`
 	HTTP          HTTPConfig            `yaml:"http"`
 	CLI           CLIConfig             `yaml:"cli"`
+	SRE           SREConfig             `yaml:"sre,omitempty"`
 	Kafka         KafkaConfig           `yaml:"kafka"`
 	Redis         RedisConfig           `yaml:"redis"`
 	PlatformCache PlatformCacheConfig   `yaml:"platform_cache"`
@@ -771,6 +772,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateCommon(); err != nil {
+		return err
+	}
+	if err := c.SRE.Validate(); err != nil {
 		return err
 	}
 

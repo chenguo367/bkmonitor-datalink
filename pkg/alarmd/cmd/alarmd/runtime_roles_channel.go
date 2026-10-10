@@ -127,10 +127,14 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	providers := &channelProviders{binding: binding}
 	var clients []redis.UniversalClient
 	var closeQuery func()
+	var closeSRE func()
 	var closeOnce sync.Once
 	var closeErr error
 	closeClients := func() error {
 		closeOnce.Do(func() {
+			if closeSRE != nil {
+				closeSRE()
+			}
 			if closeQuery != nil {
 				closeQuery()
 			}
@@ -229,6 +233,14 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		}))
 	}
 	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime), Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient, LatestPublication: cliLatestPublication(catalog)})...)
+	if binding.Roles.Has(roles.Channel) {
+		var sreOps []obchannel.Operation
+		sreOps,closeSRE,err = channelSREOperations(cfg)
+		if err != nil {
+			return nil,err
+		}
+		ops = append(ops,sreOps...)
+	}
 	diagnose := obchannel.DiagnoseOperation(providers, ops)
 	diagnose.Targetable, diagnose.DefaultControlLeader = true, true
 	ops = append(ops, diagnose)

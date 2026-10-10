@@ -79,7 +79,7 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	}{request.Argv, request.Stdin})
 	digest := sha256.Sum256(encoded)
 	result.ScriptDigest = "sha256:" + hex.EncodeToString(digest[:])
-	verifyCtx, verifyCancel := p.readContext(ctx)
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, VerificationTimeout)
 	observation, scope, err := p.resolve(verifyCtx, request.Target, true)
 	verifyCancel()
 	if err != nil {
@@ -111,7 +111,7 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	protocol := newProtocolWriter(nonce, limit)
 	// Additional time permits TERM/KILL and the terminal receipt. The command
 	// deadline itself is enforced inside the target, independently of this timer.
-	execCtx, execCancel := context.WithTimeout(ctx, timeout+4*time.Second)
+	execCtx, execCancel := context.WithTimeout(ctx, timeout+TerminationGrace)
 	transport, streamErr := p.options.Executor.Stream(execCtx, StreamRequest{Target: request.Target, Argv: remoteArgv, Stdin: strings.NewReader(request.Stdin), Stdout: protocol, Stderr: &discardBounded{limit: 4096}})
 	execCancel()
 	state := protocol.snapshot()

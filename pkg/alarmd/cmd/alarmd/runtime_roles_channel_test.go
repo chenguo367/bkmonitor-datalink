@@ -396,7 +396,13 @@ func TestSplitChannelReadsAuthlessWorkerThroughRegisteredGRPC(t *testing.T) {
 	for _, operation := range []string{"fleet.get", "runtime.get"} {
 		out := invoke(session.AccessToken, operation, obchannel.Params{"replica": "worker", "expected_incarnation": "worker-boot"})
 		raw, _ := json.Marshal(out.Result)
-		if out.Status != "ok" || out.Meta.AnsweredBy != "worker" || out.Meta.Incarnation != "worker-boot" || !out.Meta.Roles.Has(roles.Worker) || out.Meta.Roles.Has(roles.Channel) ||
+		wantStatus := "ok"
+		if operation == "runtime.get" {
+			// This fixture omits PlatformSettings; runtime.get requires both
+			// Config and PlatformSettings for a complete response.
+			wantStatus = "partial"
+		}
+		if out.Status != wantStatus || out.Meta.AnsweredBy != "worker" || out.Meta.Incarnation != "worker-boot" || !out.Meta.Roles.Has(roles.Worker) || out.Meta.Roles.Has(roles.Channel) ||
 			out.Meta.EnvironmentID != cfg.CLI.EnvironmentID || out.Meta.Revision != revision || out.Meta.Session == nil || strings.Join(out.Meta.Via, ",") != "channel" {
 			t.Fatalf("%s lost split target/session metadata: %+v", operation, out)
 		}
