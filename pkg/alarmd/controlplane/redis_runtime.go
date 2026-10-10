@@ -442,6 +442,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 	// repaired counts the timelines this cutover rewrites because they did
 	// not decode; they are counted rewritten once the write lands.
 	repaired := 0
+	repairedGroups := make(map[execution.QueryGroupIdentity]struct{})
 	var previousPublished *PublishedContent
 	previousPlansOf := func(group execution.QueryGroupIdentity) ([]execution.PlanKey, execution.ObjectDigest, []execution.OutputContextRef, error) {
 		if earlier, ok := previousBlocked[group]; ok {
@@ -456,6 +457,24 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 		}
 		entry := previousPublished.Groups[group]
 		return entry.Plans, entry.Digest, entry.Refs, nil
+	}
+	// unreadKeys is the Plans of the Query Groups the activation read left out
+	// because their timelines did not decode: they have no record in
+	// previous, which is the read's gap, not an activation that dropped them.
+	unreadKeys := make(map[execution.PlanKey]struct{})
+	for _, skipped := range previous.SkippedTimelines {
+		if _, existed := oldGroups[skipped.QueryGroup]; !existed {
+			continue
+		}
+		keys, _, _, keysErr := previousPlansOf(skipped.QueryGroup)
+		if keysErr != nil {
+			return keysErr
+		}
+		for _, key := range keys {
+			if _, held := carried[key]; !held {
+				unreadKeys[key] = struct{}{}
+			}
+		}
 	}
 	settle := func(group execution.QueryGroupIdentity, remains bool, reason, detail string,
 		openDigest execution.ObjectDigest, openRefs []execution.OutputContextRef) error {
@@ -601,6 +620,7 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 					updates = append(updates, opened.update)
 					plans = append(plans, opened.records...)
 					repaired++
+					repairedGroups[queryGroup] = struct{}{}
 					cutover.decided(cutoverRepaired)
 					continue
 				}
@@ -769,8 +789,24 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 		}
 		updates = append(updates, scheduleTimelineUpdate{expected: raw, next: timeline})
 	}
-	if readAll && len(coveredPrevious) != len(carried) {
-		return fmt.Errorf("%w: current activation names Plans no open Segment carries", ErrActivationRecordMissing)
+	if readAll {
+		// Both ways round: every record the activation holds is carried by an
+		// open Segment, and every Plan an open Segment carries has a record -
+		// but for the Plans of a Query Group the activation read could not
+		// decode, whose records are what this cutover writes back.
+		covered := 0
+		for key := range coveredPrevious {
+			if _, held := carried[key]; held {
+				covered++
+				continue
+			}
+			if _, unread := unreadKeys[key]; !unread {
+				return fmt.Errorf("%w: an open Segment carries Plan %v the current activation has no record for", ErrActivationRecordMissing, key)
+			}
+		}
+		if covered != len(carried) {
+			return fmt.Errorf("%w: current activation names Plans no open Segment carries", ErrActivationRecordMissing)
+		}
 	}
 	newIdentities := make([]execution.QueryGroupIdentity, 0, len(activeGroups))
 	for identity := range activeGroups {
@@ -865,6 +901,9 @@ func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActiva
 		return err
 	}
 	repository.timelineRepairs.add(TimelineRepairRewritten, repaired)
+	if len(previous.SkippedTimelines) > 0 {
+		repository.skippedTimelines.stillUnread(previous.SkippedTimelines, repairedGroups)
+	}
 	repository.blocked.record(blockedNow, previousContent.accounting, reopened, repository.scheduleTimelineKey)
 	if readAll {
 		repository.contentCutoverVerified.Store(true)

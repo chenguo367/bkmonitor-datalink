@@ -645,6 +645,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	// ActivationBlocked is the Control Leader's last cutover as far as the
 	// Query Groups it held back go; nil where there is no repository.
 	ActivationBlocked func() controlplane.ActivationBlockedReading
+	// ActivationSkipped is the timelines the Control Leader's activation
+	// read left out because they did not decode; nil leaves the row without
+	// them.
+	ActivationSkipped func() controlplane.SkippedTimelinesReading
 	CloseResources    func(context.Context) error
 	Now               func() time.Time
 

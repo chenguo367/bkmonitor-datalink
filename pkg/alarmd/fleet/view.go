@@ -2260,6 +2260,14 @@ type ActivationFacts struct {
 	BlockedReasons     string `json:"blocked_reasons,omitempty"`
 	BlockedSamples     string `json:"blocked_samples,omitempty"`
 	BlockedKeys        string `json:"blocked_keys,omitempty"`
+	// SkippedTimelines is how many Query Groups the leader's last read of
+	// the activation left out because their timelines did not decode; the
+	// rest of the activation loaded and was cut over. SkippedNamed says
+	// which and why, as query_group:reason in Query Group order, at most
+	// 64: undecodable ones are rebuilt and rewritten, newer_format ones,
+	// written by another schema, are left alone.
+	SkippedTimelines int    `json:"skipped_timelines,omitempty"`
+	SkippedNamed     string `json:"skipped_named,omitempty"`
 }
 
 // ActivationHeaderFacts is a missing activation header as the control leader

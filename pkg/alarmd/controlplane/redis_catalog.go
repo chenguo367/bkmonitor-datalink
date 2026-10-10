@@ -122,6 +122,12 @@ type ActivationState struct {
 	// key of its own. A reader that does not know them ignores them.
 	BlockedCount  int    `json:"blocked_count,omitempty"`
 	BlockedDigest string `json:"blocked_digest,omitempty"`
+	// SkippedTimelines is the Query Groups the read that gave a head body its
+	// records back left out, because their timelines did not decode. Never
+	// persisted: it is what this process could not read, not a fact of the
+	// activation. Their records are missing from Plans, which is not their
+	// removal (see Ensure).
+	SkippedTimelines []SkippedTimeline `json:"-"`
 }
 
 type ActivationExpectation struct {
@@ -142,11 +148,14 @@ type RedisCatalogRepository struct {
 	// timelineRepairs is every unreadable timeline this process was asked
 	// to look at, by what became of it; read at scrape time.
 	timelineRepairs timelineRepairCounts
-	header          activationHeaderStanding
-	blocked         blockedCounts
-	objectCatalog   objectCatalogState
-	catalogIndex    catalogIndex
-	contentMemo     publishedContentMemo
+	// skippedTimelines is every timeline the activation read left out, by
+	// reason, and the ones its last read left out.
+	skippedTimelines skippedTimelineState
+	header           activationHeaderStanding
+	blocked          blockedCounts
+	objectCatalog    objectCatalogState
+	catalogIndex     catalogIndex
+	contentMemo      publishedContentMemo
 	// objectCache is read through objects(): an atomic pointer, so the
 	// cache can be configured, or configured again, while readers are
 	// running. See ConfigureObjectCache.

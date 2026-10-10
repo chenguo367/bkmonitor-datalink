@@ -867,6 +867,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
+	recorder.SetActivationSkippedTimelinesSource(repository.SkippedTimelinesReading)
 	recorder.SetActivationHeaderSource(repository.ActivationHeaderReading)
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
@@ -1238,6 +1239,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		Lookback:          lookbackEngine,
 		ReadHolds:         readHolds,
 		ActivationBlocked: repository.ActivationBlockedReading,
+		ActivationSkipped: repository.SkippedTimelinesReading,
 		ActivationHeader:  repository.ActivationHeaderReading,
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,

@@ -158,6 +158,15 @@ func (bundle *phaseTwoWorkerBundle) activationFleetFacts() *fleet.ActivationFact
 			facts.BlockedKeys = strings.Join(reading.Keys, ",")
 		}
 	}
+	if bundle.dependencies.ActivationSkipped != nil {
+		reading := bundle.dependencies.ActivationSkipped()
+		facts.SkippedTimelines = reading.Total
+		named := make([]string, 0, len(reading.Named))
+		for _, skipped := range reading.Named {
+			named = append(named, string(skipped.QueryGroup)+":"+string(skipped.Reason))
+		}
+		facts.SkippedNamed = strings.Join(named, ",")
+	}
 	if !state.failingSince.IsZero() {
 		failing := now.Sub(state.failingSince).Seconds()
 		facts.FailingSecondsThisProcess = &failing

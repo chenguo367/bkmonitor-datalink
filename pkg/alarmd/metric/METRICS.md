@@ -83,6 +83,12 @@ Renewals of the current activation's objects that wrote nothing, by why. header_
 
 Timelines a cutover opened again because their key was gone. This used to fail every publication under a word that said a dependency did not answer.
 
+## bkmonitor_alarmd_activation_timelines_skipped_total
+
+Labels: `reason`
+
+Schedule timelines the Control Leader left out when it read the activation's Plan records back from the open Segments, by why: one per Query Group per activation it read. The rest of the activation loads and is cut over as usual. undecodable: the bytes do not decode; the Leader rebuilds that Query Group's records from the publication it runs and rewrites the timeline (timeline_repairs_total). newer_format: the bytes are a timeline of another schema version, written by a build that reads them, and are left alone. A read that fails is never counted here: it fails the activation read as before. The fleet's activation row names the Query Groups. Counted by the Leader; read it summed over replicas.
+
 ## bkmonitor_alarmd_active_qg_set_object_bytes
 
 Encoded bytes in the current immutable Active Set.

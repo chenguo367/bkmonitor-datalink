@@ -281,6 +281,28 @@ func TestActivationStandingNamesQueryGroupsTheCutoverHeldBack(t *testing.T) {
 	}
 }
 
+// The standing names the Query Groups the leader's activation read left out
+// because their timelines did not decode - how many, and which with why -
+// from the repository's reading, in one step for the CLI; and says nothing
+// when none are.
+func TestActivationStandingNamesTheTimelinesTheActivationReadLeftOut(t *testing.T) {
+	bundle := mustPhaseTwoWorkerBundle(t, validGoAccessRuntimeConfig(), newPhaseTwoApplicationHealth(), &fakePhaseTwoControl{}, &fakePhaseTwoOwnership{})
+	reading := controlplane.SkippedTimelinesReading{Total: 3, Named: []controlplane.SkippedTimeline{
+		{QueryGroup: "qg-a", Reason: controlplane.SkippedTimelineUndecodable},
+		{QueryGroup: "qg-b", Reason: controlplane.SkippedTimelineNewerFormat},
+	}}
+	bundle.dependencies.ActivationSkipped = func() controlplane.SkippedTimelinesReading { return reading }
+	bundle.activation.attempted = true
+	facts := bundle.activationFleetFacts()
+	if facts == nil || facts.SkippedTimelines != 3 || facts.SkippedNamed != "qg-a:undecodable,qg-b:newer_format" {
+		t.Fatalf("facts = %+v, want three skipped and the two named with why", facts)
+	}
+	reading = controlplane.SkippedTimelinesReading{}
+	if facts := bundle.activationFleetFacts(); facts.SkippedTimelines != 0 || facts.SkippedNamed != "" {
+		t.Fatalf("nothing skipped, facts = %+v", facts)
+	}
+}
+
 // The publisher puts the leader's round, stage by stage, on the snapshot,
 // and none on a replica that led none.
 func TestFleetPublisherCarriesTheLeaderRound(t *testing.T) {

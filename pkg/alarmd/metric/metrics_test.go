@@ -445,6 +445,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_timeline_repairs_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_activation_timelines_skipped_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_timeline_unreadable_reports_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_activation_header_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_renewal_conflict_total"] = "variableLabels: {reason}"
@@ -1018,6 +1019,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_notices_refused_total")] = len(openalerts.NoticeRefusals)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("timeline_repairs_total")] = len(controlplane.TimelineRepairOutcomes)
+	bounds[fqName("activation_timelines_skipped_total")] = len(controlplane.SkippedTimelineReasons)
 	bounds[fqName("timeline_unreadable_reports_total")] = 1
 	bounds[fqName("activation_header_rebuild_total")] = len(controlplane.ActivationHeaderRebuildOutcomes)
 	bounds[fqName("activation_renewal_conflict_total")] = len(controlplane.ActivationRenewalConflicts)

@@ -116,5 +116,6 @@ func (entry *parsedActivation) cloneState() ActivationState {
 	}
 	state.Plans = slices.Clone(state.Plans)
 	state.Draining = slices.Clone(state.Draining)
+	state.SkippedTimelines = slices.Clone(state.SkippedTimelines)
 	return state
 }

@@ -167,6 +167,24 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		return ActivationState{}, fmt.Errorf("alarmd controlplane: activation schema %q is not one this build activates from", previous.SchemaVersion)
 	}
 	reported := reconciler.reportedTimelines()
+	// A Query Group the activation read left out because its timeline did
+	// not decode is named as the Workers name theirs: its records are not in
+	// previous.Plans, which says it is unread, never that it left. Under the
+	// current publication only the undecodable ones are rebuilt and
+	// rewritten below; a cutover to a new publication reads every one of
+	// them and rewrites only the undecodable ones, leaving one another
+	// schema wrote as it is.
+	undecodable := undecodableSkipped(previous.SkippedTimelines)
+	if len(previous.SkippedTimelines) > 0 {
+		merged := make(map[execution.QueryGroupIdentity]struct{}, len(reported)+len(previous.SkippedTimelines))
+		for queryGroup := range reported {
+			merged[queryGroup] = struct{}{}
+		}
+		for _, skipped := range previous.SkippedTimelines {
+			merged[skipped.QueryGroup] = struct{}{}
+		}
+		reported = merged
+	}
 	if previous.Current == publication {
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
 		active, loadErr := reconciler.repository.LoadActiveQueryGroupSet(ctx, previous.ActiveQGSetRef)
@@ -178,13 +196,18 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		// held reactivation below then starts from whatever this wrote; the
 		// two are separate writes because they answer separate facts, and a
 		// round has both only while both are pending.
-		if len(reported) > 0 {
+		repairing := withoutNewerFormat(reported, previous.SkippedTimelines)
+		if len(repairing) > 0 {
 			failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassDependencyIO
 			boundary := execution.EvaluationTime(reconciler.now().Unix())
 			if boundary <= 0 {
 				return ActivationState{}, errors.New("alarmd controlplane: Schedule activation clock must produce a positive Unix second")
 			}
-			if _, repairErr := reconciler.repository.RepairUnreadableTimelines(ctx, previous, active, reported, boundary); repairErr != nil {
+			candidate, rebuildErr := reconciler.rebuildSkippedRecords(ctx, previous, active, undecodable, boundary)
+			if rebuildErr != nil {
+				return ActivationState{}, rebuildErr
+			}
+			if _, repairErr := reconciler.repository.RepairUnreadableTimelines(ctx, candidate, active, repairing, boundary); repairErr != nil {
 				return ActivationState{}, repairErr
 			}
 			// Whatever the repair did - wrote, lost to another writer, or
@@ -282,9 +305,26 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 			changedPlans[plan.Key()] = changedPlan{plan: plan, group: group.Identity, dataset: group.QueryPlan.Normalization.DatasetContract}
 		}
 	}
+	// A Query Group the activation read left out has no previous records, which
+	// is not having left: when its content is the one it was activated with,
+	// its Plans' generations are the ones it ran, and it is as continuously
+	// active as any carried one - it does not warm again.
+	unreadContinuing := make(map[execution.PlanKey]struct{})
+	for _, skipped := range previous.SkippedTimelines {
+		entry, remains := published.content.Groups[skipped.QueryGroup]
+		if digest, known := previousContent.digests[skipped.QueryGroup]; !remains || !known || digest != entry.Digest {
+			continue
+		}
+		for _, plan := range entry.Plans {
+			unreadContinuing[plan] = struct{}{}
+		}
+	}
 	carries := make(map[int]*execution.StateCarry)
 	for index := range records {
 		previousRecord, continuouslyActive := previousRecords[records[index].Fact.Key()]
+		if _, unread := unreadContinuing[records[index].Fact.Key()]; unread && !continuouslyActive {
+			previousRecord, continuouslyActive = records[index], true
+		}
 		if !continuouslyActive ||
 			previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
 			records[index].Fact.Selected.ForceWarming = true
@@ -526,4 +566,105 @@ func activationReconciliationCounts(
 		ReappearedQueryGroupSamples:          append([]execution.QueryGroupIdentity(nil), samples...),
 		ReappearedQueryGroupSamplesTruncated: truncated,
 	}
+}
+
+// withoutNewerFormat is named without the Query Groups the activation read
+// left out because another schema wrote their timelines: the repair under
+// the current publication would only read them again to leave them alone.
+func withoutNewerFormat(named map[execution.QueryGroupIdentity]struct{}, skipped []SkippedTimeline) map[execution.QueryGroupIdentity]struct{} {
+	var newer map[execution.QueryGroupIdentity]struct{}
+	for _, entry := range skipped {
+		if entry.Reason == SkippedTimelineNewerFormat {
+			if newer == nil {
+				newer = make(map[execution.QueryGroupIdentity]struct{}, len(skipped))
+			}
+			newer[entry.QueryGroup] = struct{}{}
+		}
+	}
+	if len(newer) == 0 {
+		return named
+	}
+	kept := make(map[execution.QueryGroupIdentity]struct{}, len(named))
+	for queryGroup := range named {
+		if _, isNewer := newer[queryGroup]; !isNewer {
+			kept[queryGroup] = struct{}{}
+		}
+	}
+	return kept
+}
+
+// rebuildSkippedRecords is previous with records for the active Query Groups
+// of undecodable compiled again from the publication the activation runs:
+// their records went with the bytes the activation read could not decode,
+// and the repair that rewrites those timelines needs records to carry. Only
+// those Query Groups' records are added; every other record is previous's.
+//
+// The rebuilt records are the lost ones in all but the epoch, and they do
+// not warm again. The state generation is the compiled Plan's
+// StateCompatibilityHash, and compiling refuses one that differs from the
+// generation the publication stores for the Plan; the Query Group's content
+// has not changed since it was activated, or a cutover would have rewritten
+// the timeline. So the State on file is read on as before, and the event
+// identity, which carries the generation, and the alert's dedupe, which does
+// not, are the ones the Query Group already had: an ABNORMAL folds into the
+// alert it had, and an open alert recovers from the next evaluation that
+// finds the series normal. The epoch is the current publication's, which a
+// carried record may have had older; a newer epoch only orders writes after
+// the old ones. The Slots between the Worker's cursor and the rewrite are
+// recorded as the rewrite's skip, as for a timeline whose records were read.
+//
+// A Query Group whose content cannot be compiled gets no records and is left
+// to the repair, which counts it as failed and names it; the others go
+// ahead. Reading the publication is the store's and fails the round as any
+// read does.
+func (reconciler *ScheduleActivationReconciler) rebuildSkippedRecords(
+	ctx context.Context,
+	previous ActivationState,
+	active []execution.QueryGroupIdentity,
+	undecodable map[execution.QueryGroupIdentity]struct{},
+	boundary execution.EvaluationTime,
+) (ActivationState, error) {
+	if len(undecodable) == 0 {
+		return previous, nil
+	}
+	published, err := reconciler.repository.loadPublishedGroups(ctx, previous.Current)
+	if err != nil {
+		return ActivationState{}, err
+	}
+	rebuilt := make([]execution.QueryGroupIdentity, 0, len(undecodable))
+	for _, queryGroup := range active {
+		if _, skipped := undecodable[queryGroup]; !skipped {
+			continue
+		}
+		if _, published := published.groups[queryGroup]; published {
+			rebuilt = append(rebuilt, queryGroup)
+		}
+	}
+	if len(rebuilt) == 0 {
+		return previous, nil
+	}
+	sort.Slice(rebuilt, func(i, j int) bool { return rebuilt[i] < rebuilt[j] })
+	if err := reconciler.repository.materialize(ctx, published, rebuilt); err != nil {
+		return ActivationState{}, err
+	}
+	candidate := previous
+	candidate.Plans = append([]PlanActivationRecord(nil), previous.Plans...)
+	for _, queryGroup := range rebuilt {
+		groups, loadErr := published.loaded([]execution.QueryGroupIdentity{queryGroup})
+		if loadErr != nil {
+			reconciler.repository.observeTimelineRepairFailure(ctx, queryGroup, loadErr)
+			continue
+		}
+		records, _, compileErr := compilePublishedGroups(ctx, reconciler.compiler, reconciler.stateSemantics, previous.Current,
+			groups, published.content.Groups, boundary)
+		if compileErr != nil {
+			reconciler.repository.observeTimelineRepairFailure(ctx, queryGroup, compileErr)
+			continue
+		}
+		candidate.Plans = append(candidate.Plans, records...)
+	}
+	sort.Slice(candidate.Plans, func(i, j int) bool {
+		return lessPlanIdentity(candidate.Plans[i].Fact.Plan, candidate.Plans[j].Fact.Plan)
+	})
+	return candidate, nil
 }
