@@ -13,6 +13,7 @@ import (
 	"reflect"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -941,6 +942,9 @@ func TestThePageHasWordingForEveryDependencyRoleAndConsoleReading(t *testing.T) 
 		"LINK_HEALTH":           unhealthy,
 		"LINKD_DISCOVERY":       fleet.LinkdDiscoveryOutcomes,
 		"CONSOLE_FAILURE_CLASS": openalerts.ConsoleFailureClasses,
+		// Why an object has a span nothing evaluated: each reason its own
+		// cause and next step on the deployment line.
+		"TIMELINE_LOSS": {contract.ReasonSchedulePruned, contract.ReasonScheduleRepaired, contract.ReasonScheduleReopened},
 	}
 	for table, words := range tables {
 		if len(words) == 0 {
