@@ -140,6 +140,11 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 	switch {
 	case anomaly.Stalled:
 		return CheckRoundsStalled, true, false
+	case anomaly.AwaitingView != nil:
+		// The view's one wait, past what the design expects of it: its own
+		// line, ahead of the code table, which files VIEW_NOT_EXECUTABLE as
+		// a dependency that is down.
+		return CheckAwaitingView, true, false
 	case schedule == ScheduleOverdue, anomaly.Kind == KindOverdueWake:
 		return CheckSlotsOverdue, true, false
 	case anomaly.Kind == KindNoData:

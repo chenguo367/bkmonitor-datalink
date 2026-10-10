@@ -70,6 +70,13 @@ const (
 	// the family of detection that stopped, not of defects: the Plan runs,
 	// and only its absence detection is silently gone.
 	CheckNoDataMemoryRefused Check = "NO_DATA_MEMORY_REFUSED"
+	// AwaitingView is a Query Group whose Worker's view has not carried it
+	// for longer than a wait the design expects: every round refused only
+	// because the view did not list it yet. Not a dependency that is down
+	// -- the view is the deployment's own control plane -- and kept apart
+	// from DEPENDENCY_DOWN, where every Worker start and every move used to
+	// put a batch of objects for the seconds the view took to arrive.
+	CheckAwaitingView        Check = "AWAITING_VIEW"
 	CheckDependencyDown      Check = "DEPENDENCY_DOWN"
 	CheckDefect              Check = "DEFECT"
 	CheckObservationGap      Check = "OBSERVATION_GAP"
@@ -319,9 +326,12 @@ var checkAnswers = map[Check]struct {
 	CheckTimelinePruned:        {OwnerAlarmd, GroupByLoss},
 	CheckBookkeepingAbandoned:  {OwnerAlarmd, GroupByReplica},
 	CheckNoDataMemoryRefused:   {OwnerAlarmd, GroupByReasonCode},
-	CheckDependencyDown:        {OwnerAlarmd, GroupByBlocked},
-	CheckDefect:                {OwnerAlarmd, GroupByBlocked},
-	CheckObservationGap:        {OwnerAlarmd, GroupByGapKind},
+	// Folded by replica: one Worker waiting is its view stream, every Worker
+	// waiting is the Leader not publishing.
+	CheckAwaitingView:   {OwnerAlarmd, GroupByReplica},
+	CheckDependencyDown: {OwnerAlarmd, GroupByBlocked},
+	CheckDefect:         {OwnerAlarmd, GroupByBlocked},
+	CheckObservationGap: {OwnerAlarmd, GroupByGapKind},
 	// Folded on the rule the counts broke (the detail fold reads it).
 	CheckCoverageReadingRefused: {OwnerAlarmd, GroupByDetail},
 
@@ -390,6 +400,7 @@ var checkOrder = []Check{
 	CheckTimelinePruned,
 	CheckBookkeepingAbandoned,
 	CheckNoDataMemoryRefused,
+	CheckAwaitingView,
 	CheckDependencyDown,
 	CheckDefect,
 	CheckObservationGap,

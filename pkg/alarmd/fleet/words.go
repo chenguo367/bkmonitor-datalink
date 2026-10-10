@@ -198,17 +198,20 @@ var checkWords = map[Check]wordPair{
 	// Detecting, because the Plan runs. The action here is the line's when a
 	// reason asks for an edit; a line whose reasons ask nothing is nobody's
 	// (notedOwner), and each reason carries its own action.
-	CheckConfigNoted:            {StateDetecting, ActionStrategyEdit},
-	CheckCutoverFailing:         {StateResultUntrusted, ActionServiceFix},
-	CheckReplicaDegraded:        {StateResultUntrusted, ActionServiceFix},
-	CheckOwnershipSkewed:        {StateDetecting, ActionNone},
-	CheckSlotsOverdue:           {StateNotDetecting, ActionServiceFix},
-	CheckNeverEvaluated:         {StateNotDetecting, ActionServiceFix},
-	CheckRoundsStalled:          {StateNotDetecting, ActionServiceFix},
-	CheckDetectionAbandoned:     {StateNotDetecting, ActionServiceFix},
-	CheckTimelinePruned:         {StateNotDetecting, ActionServiceFix},
-	CheckBookkeepingAbandoned:   {StateDetecting, ActionServiceFix},
-	CheckNoDataMemoryRefused:    {StateResultUntrusted, ActionServiceFix},
+	CheckConfigNoted:          {StateDetecting, ActionStrategyEdit},
+	CheckCutoverFailing:       {StateResultUntrusted, ActionServiceFix},
+	CheckReplicaDegraded:      {StateResultUntrusted, ActionServiceFix},
+	CheckOwnershipSkewed:      {StateDetecting, ActionNone},
+	CheckSlotsOverdue:         {StateNotDetecting, ActionServiceFix},
+	CheckNeverEvaluated:       {StateNotDetecting, ActionServiceFix},
+	CheckRoundsStalled:        {StateNotDetecting, ActionServiceFix},
+	CheckDetectionAbandoned:   {StateNotDetecting, ActionServiceFix},
+	CheckTimelinePruned:       {StateNotDetecting, ActionServiceFix},
+	CheckBookkeepingAbandoned: {StateDetecting, ActionServiceFix},
+	CheckNoDataMemoryRefused:  {StateResultUntrusted, ActionServiceFix},
+	// Not detecting while the view does not carry it, and alarmd's own to
+	// fix: the view is its control plane, not a dependency.
+	CheckAwaitingView:           {StateNotDetecting, ActionServiceFix},
 	CheckDependencyDown:         {StateDependencyUnanswered, ActionServiceFix},
 	CheckDefect:                 {StateDefect, ActionServiceFix},
 	CheckObservationGap:         {StateResultUntrusted, ActionWatch},

@@ -483,6 +483,12 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			if reading.dependency != "" {
 				blocked.Dependency, blocked.DependencyEvidence = reading.dependency, dependencyByCode
 			}
+			// The view's wait names no dependency: the view is the
+			// deployment's own control plane, and nothing it depends on
+			// failed.
+			if anomaly.AwaitingView != nil {
+				blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
+			}
 			break
 		}
 		if blocked.Code == "" {

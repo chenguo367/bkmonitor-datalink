@@ -1398,6 +1398,17 @@ func (coverage *HistoryCoverage) Persistent() bool {
 }
 
 // Anomaly is one object that is not making progress as expected.
+// AwaitingView is how long a Query Group has waited for its Worker's view to
+// carry it: since its first round of this wait, how long that is, and the
+// bound a wait the design expects stays under. The bound is the deployment's
+// own timings (the Leader's lease, the refresh and renewal intervals, the
+// reconcile interval), not a setting.
+type AwaitingView struct {
+	Since         time.Time `json:"since"`
+	WaitedSeconds int64     `json:"waited_seconds"`
+	BoundSeconds  int64     `json:"bound_seconds"`
+}
+
 type Anomaly struct {
 	QueryCooldown *observability.QueryCooldownFacts `json:"query_cooldown,omitempty"`
 	QueryGroup    string                            `json:"query_group"`
@@ -1475,6 +1486,9 @@ type Anomaly struct {
 	DemotedSince time.Time `json:"demoted_since,omitempty"`
 	// AnswerTruncation is the suspected cut on a KindAnswerTruncated row.
 	AnswerTruncation *AnswerTruncation `json:"answer_truncation,omitempty"`
+	// AwaitingView is the wait on a blocked row whose every round so far
+	// the view refused only because it had not carried the Query Group yet.
+	AwaitingView *AwaitingView `json:"awaiting_view,omitempty"`
 	// Internal is the last failure of this deployment's own making in the
 	// current run -- a contract or evaluation error -- kept beside the
 	// finding the column decided. The line is the column's; this is the
