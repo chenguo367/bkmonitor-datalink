@@ -1639,7 +1639,6 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		}
 	}
 	started := time.Now()
-	execution.MarkStage(ctx, execution.SlotStageEvaluate)
 	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
 	stream.spend(slotPhaseEvaluate, started)
 	if err != nil {

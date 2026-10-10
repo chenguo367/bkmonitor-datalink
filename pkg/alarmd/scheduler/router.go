@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -20,12 +19,6 @@ import (
 )
 
 var ErrNoEligibleWorker = errors.New("alarmd scheduler: no eligible worker")
-
-// ErrDeclinedEverywhere is ErrNoEligibleWorker when the workers that were
-// eligible all decline the Query Group: an execution of it hung on each of
-// them in turn, which is the Query Group's own bug and not any worker's
-// (design 02 section 6.5). It is ErrNoEligibleWorker to every errors.Is.
-var ErrDeclinedEverywhere = fmt.Errorf("%w: every eligible worker declines it", ErrNoEligibleWorker)
 
 type WorkerEligibility interface {
 	Eligible(execution.QueryGroupIdentity, ownership.WorkerRegistration, time.Time) bool
@@ -68,7 +61,7 @@ func (router *Router) Select(
 	}
 	var selected ownership.WorkerRegistration
 	var selectedScore [sha256.Size]byte
-	found, declined := false, false
+	found := false
 	seen := make(map[string]struct{}, len(workers))
 	for _, worker := range workers {
 		if err := worker.Validate(); err != nil {
@@ -84,21 +77,12 @@ func (router *Router) Select(
 		if router.additionalEligibility != nil && !router.additionalEligibility.Eligible(queryGroup, worker, at) {
 			continue
 		}
-		if worker.Declines(queryGroup) {
-			// It has an execution of this Query Group hung and let it go
-			// (design 02 section 6.5): never placed back while it says so.
-			declined = true
-			continue
-		}
 		score := sha256.Sum256([]byte(string(queryGroup) + "\x00" + worker.WorkerID))
 		if !found || bytes.Compare(score[:], selectedScore[:]) > 0 {
 			selected, selectedScore, found = worker, score, true
 		}
 	}
 	if !found {
-		if declined {
-			return ownership.WorkerRegistration{}, ErrDeclinedEverywhere
-		}
 		return ownership.WorkerRegistration{}, ErrNoEligibleWorker
 	}
 	return selected, nil
@@ -147,29 +131,12 @@ func indexReadyWorkers(workers []ownership.WorkerRegistration) readyWorkerIndex 
 }
 
 // alive says the worker is in the ready set with a valid, READY registration
-// that has not expired and does not decline the Query Group: everything
-// incumbentEligibleIn asks except the additional eligibility. A holder like
-// that is still running the Query Group, so moving it is a handover; one
-// that declines it has let it go and is not.
-func (index readyWorkerIndex) alive(queryGroup execution.QueryGroupIdentity, workerID string, at time.Time) bool {
+// that has not expired: everything incumbentEligibleIn asks except the
+// additional eligibility. A holder like that is still running its Query
+// Groups, so moving one is a handover.
+func (index readyWorkerIndex) alive(workerID string, at time.Time) bool {
 	worker, found := index.byID[workerID]
-	return found && worker.Validate() == nil && worker.AssignmentReadiness == ownership.WorkerReady && worker.ExpiresAt.After(at) &&
-		!worker.Declines(queryGroup)
-}
-
-// declinedBy is which workers of the ready set decline queryGroup, and the
-// stage each one's execution hung in.
-func (index readyWorkerIndex) declinedBy(queryGroup execution.QueryGroupIdentity) DeclinedEverywhere {
-	facts := DeclinedEverywhere{QueryGroup: string(queryGroup)}
-	for _, worker := range index.ordered {
-		for _, declined := range worker.Declined {
-			if declined.QueryGroup == string(queryGroup) {
-				facts.Hops++
-				facts.Stages = append(facts.Stages, DeclinerStage{Worker: worker.WorkerID, Stage: declined.Stage})
-			}
-		}
-	}
-	return facts
+	return found && worker.Validate() == nil && worker.AssignmentReadiness == ownership.WorkerReady && worker.ExpiresAt.After(at)
 }
 
 func (router *Router) incumbentEligibleIn(
@@ -185,8 +152,7 @@ func (router *Router) incumbentEligibleIn(
 	if !found {
 		return false
 	}
-	if worker.Validate() != nil || worker.AssignmentReadiness != ownership.WorkerReady || !worker.ExpiresAt.After(at) ||
-		worker.Declines(queryGroup) {
+	if worker.Validate() != nil || worker.AssignmentReadiness != ownership.WorkerReady || !worker.ExpiresAt.After(at) {
 		return false
 	}
 	return router.additionalEligibility == nil || router.additionalEligibility.Eligible(queryGroup, worker, at)
@@ -443,31 +409,6 @@ type RoundSettlement struct {
 	// round. Each keeps the record it had, or stays without one; the round
 	// goes on with the rest.
 	Unplaceable int
-	// DeclinedEverywhere is the part of Unplaceable that is unplaceable
-	// because every worker that could take it declines it - its execution
-	// hung on each in turn, the Query Group's own bug - with, for the first
-	// few, how many workers declined it and the stage each hung in.
-	DeclinedEverywhere       int
-	DeclinedEverywhereSample []DeclinedEverywhere
-}
-
-// MaxDeclinedEverywhereSamples bounds the Query Groups a round names.
-const MaxDeclinedEverywhereSamples = 8
-
-// DeclinedEverywhere is one Query Group every eligible worker declines.
-type DeclinedEverywhere struct {
-	QueryGroup string `json:"query_group"`
-	// Hops is how many workers declined it: how far it walked the fleet.
-	Hops int `json:"hops"`
-	// Stages is each decliner and the stage its execution hung in.
-	Stages []DeclinerStage `json:"stages,omitempty"`
-}
-
-// DeclinerStage is one worker declining a Query Group and the stage its
-// execution of it hung in.
-type DeclinerStage struct {
-	Worker string `json:"worker"`
-	Stage  string `json:"stage,omitempty"`
 }
 
 // ReconcileRoundSettling is ReconcileRoundWithScopes with the round's
@@ -511,14 +452,8 @@ func (reconciler *Reconciler) ReconcileRoundSettling(
 			settlement.Replaced++
 		case settleDeferred:
 			settlement.Deferred++
-		case settleUnplaceable, settleDeclinedEverywhere:
+		case settleUnplaceable:
 			settlement.Unplaceable++
-			if outcome == settleDeclinedEverywhere {
-				settlement.DeclinedEverywhere++
-				if len(settlement.DeclinedEverywhereSample) < MaxDeclinedEverywhereSamples {
-					settlement.DeclinedEverywhereSample = append(settlement.DeclinedEverywhereSample, index.declinedBy(queryGroup))
-				}
-			}
 			if !hasCurrent {
 				continue
 			}
@@ -544,9 +479,6 @@ const (
 	settleDeferred
 	// settleUnplaceable: no ready worker can take it; kept as it was.
 	settleUnplaceable
-	// settleDeclinedEverywhere: unplaceable because every worker that could
-	// take it declines it.
-	settleDeclinedEverywhere
 )
 
 // settle is the placement decision itself, over a record the caller has
@@ -585,9 +517,6 @@ func (reconciler *Reconciler) settle(
 		return record, settleKept, err
 	}
 	selected, err := reconciler.router.Select(queryGroup, workers.ordered, at)
-	if errors.Is(err, ErrDeclinedEverywhere) {
-		return current, settleDeclinedEverywhere, nil
-	}
 	if errors.Is(err, ErrNoEligibleWorker) {
 		// Nobody can take it this round; one Query Group's answer is its
 		// own (design 016 §4.1), and the rest of the round goes on.
@@ -597,7 +526,7 @@ func (reconciler *Reconciler) settle(
 		return ownership.AssignmentRecord{}, settlePlaced, err
 	}
 	outcome := settlePlaced
-	if hasCurrent && workers.alive(queryGroup, current.DesiredWorkerID, at) {
+	if hasCurrent && workers.alive(current.DesiredWorkerID, at) {
 		if budget != nil && *budget <= 0 {
 			return current, settleDeferred, nil
 		}

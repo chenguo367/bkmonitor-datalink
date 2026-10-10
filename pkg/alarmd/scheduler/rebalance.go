@@ -204,9 +204,6 @@ func (router *Router) PlanRebalanceWithin(
 		if router.additionalEligibility != nil && !router.additionalEligibility.Eligible(queryGroup, destination, at) {
 			continue
 		}
-		if destination.Declines(queryGroup) {
-			continue
-		}
 		peak := readings.Peak[queryGroup]
 		if !readings.fits(least, destinationSum, peak) {
 			continue

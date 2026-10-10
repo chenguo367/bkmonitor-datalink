@@ -87,33 +87,6 @@ type WorkerRegistration struct {
 	// unknown and never as lagging or idle. Nothing in routing reads them.
 	Applied *AppliedControlFacts `json:"applied,omitempty"`
 	Load    *WorkerLoad          `json:"load,omitempty"`
-	// Declined names the Query Groups this worker will not run while an
-	// execution of theirs is hung here - past its deadline and its grace,
-	// ignoring its cancellation (design 02 section 6.5) - with the stage it
-	// is stuck in. The worker let each one's lease go; a leader places it on
-	// another worker and never back here while it is named. Each entry holds
-	// one of the worker's execution slots until its execution returns, so
-	// there are never more than the worker's ActiveExecutionLimit. Absent
-	// from a binary that does not decline, and ignored by a leader from
-	// before it, which leaves the Query Group where it is as before.
-	Declined []DeclinedQueryGroup `json:"declined,omitempty"`
-}
-
-// DeclinedQueryGroup is one Query Group a worker declines, and the stage its
-// hung execution last entered (execution.SlotStages).
-type DeclinedQueryGroup struct {
-	QueryGroup string `json:"query_group"`
-	Stage      string `json:"stage,omitempty"`
-}
-
-// Declines says whether the worker declines queryGroup.
-func (worker WorkerRegistration) Declines(queryGroup execution.QueryGroupIdentity) bool {
-	for _, declined := range worker.Declined {
-		if declined.QueryGroup == string(queryGroup) {
-			return true
-		}
-	}
-	return false
 }
 
 // AppliedControlFacts says which version of each versioned control fact the

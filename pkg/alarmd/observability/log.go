@@ -791,7 +791,6 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("rebalance_replaced", facts.Replaced),
 			slog.Int("rebalance_replacements_deferred", facts.Deferred),
 			slog.Int("rebalance_unplaceable", facts.Unplaceable),
-			slog.Int("rebalance_declined_everywhere", facts.DeclinedEverywhere),
 			slog.Bool("rebalance_paused", facts.Paused),
 			slog.Float64("rebalance_paused_for_seconds", facts.PausedForSeconds),
 			slog.Bool("rebalance_owned_truncated", facts.Truncated),
@@ -834,15 +833,6 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	}
 	if observation.AwaitingView {
 		attributes = append(attributes, slog.Bool("awaiting_view", true))
-	}
-	if facts := observation.ExecutionHung; facts != nil {
-		attributes = append(attributes,
-			slog.String("hung_outcome", facts.Outcome),
-			slog.String("hung_stage", facts.Stage),
-			slog.Int64("hung_deadline_ms", facts.DeadlineUnixMilli),
-			slog.Int64("hung_past_deadline_ms", facts.PastDeadlineMS),
-			slog.Int64("hung_ms", facts.HungMS),
-		)
 	}
 	if facts := observation.SlotDrain; facts != nil {
 		attributes = append(attributes,

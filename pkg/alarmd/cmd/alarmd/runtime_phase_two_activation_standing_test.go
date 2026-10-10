@@ -11,7 +11,6 @@ package main
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -162,7 +161,7 @@ func TestFleetPublisherCarriesTheRebalanceRound(t *testing.T) {
 		owned:     func() []execution.QueryGroupIdentity { return nil },
 		rebalance: func() *fleet.RebalanceFacts { return facts },
 	}
-	if snapshot := publisher.snapshot(context.Background()); snapshot.Rebalance == nil || !reflect.DeepEqual(*snapshot.Rebalance, *facts) {
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Rebalance == nil || *snapshot.Rebalance != *facts {
 		t.Fatalf("snapshot rebalance = %+v, want the round as given", snapshot.Rebalance)
 	}
 	publisher.rebalance = func() *fleet.RebalanceFacts { return nil }
@@ -179,7 +178,7 @@ func TestBundleReadsTheRebalanceRoundOnlyFromARuntimeThatPlans(t *testing.T) {
 	facts := &fleet.RebalanceFacts{PlannedMoves: 1, MostOwnedBy: "a", LeastOwnedBy: "b"}
 	planning := &planningOwnershipRuntime{fakePhaseTwoOwnership: &fakePhaseTwoOwnership{}, last: facts}
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Ownership: planning}}
-	if got := bundle.rebalanceFleetFacts(); got == nil || !reflect.DeepEqual(*got, *facts) {
+	if got := bundle.rebalanceFleetFacts(); got == nil || *got != *facts {
 		t.Fatalf("rebalanceFleetFacts() = %+v, want the runtime's round", got)
 	}
 	bundle.dependencies.Ownership = &fakePhaseTwoOwnership{}
