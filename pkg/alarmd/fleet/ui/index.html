@@ -4982,6 +4982,19 @@ function loadRecords(queryGroup) {
 // many Slots are inside it cannot be known, because the parts of the timeline
 // that would have counted them are the parts that were removed. The page says
 // that rather than printing a number that would read as measured.
+// Why an object has a span nothing evaluated, and what to look at for it,
+// by the reason its skip was recorded under. A skip from a publisher older
+// than the reason is a pruned one, as PrunedSkip.Code reads it.
+var TIMELINE_LOSS = {
+  SCHEDULE_PRUNED: '游标曾经指向已经被裁掉的时间线，被移到了时间线还留着的最早一个时间点',
+  SCHEDULE_REPAIRED: '时间线的字节解不开，Leader 把它重写成从边界起的一段',
+  SCHEDULE_REOPENED: '时间线在 Redis 里的键没了，Leader 从边界把它重开'
+};
+var TIMELINE_LOSS_NEXT = {
+  SCHEDULE_PRUNED: '要查的是游标为什么落到了保留期之外',
+  SCHEDULE_REPAIRED: '这是本部署的缺陷：看这些对象的 SCHEDULE_UNREADABLE 行和 timeline_repairs_total',
+  SCHEDULE_REOPENED: '要查运行态 Redis 在那个时刻前后有没有逐出（maxmemory 策略、evicted_keys）或删除，不是 alarmd 的保留期'
+};
 function renderPrunedSkips(skips, total) {
   show('prunedSkips', skips.length > 0);
   if (!skips.length) return;
@@ -4989,15 +5002,33 @@ function renderPrunedSkips(skips, total) {
   // The list carries the longest few; the total is how many there are. A
   // build before the total existed sends every one and no total.
   var count = total || skips.length;
-  var parts = ['有 ' + count + ' 个对象存在一段"从来没有被检测过"的时间'
-    + '——它们的游标曾经指向已经被裁掉的时间线，被移到了时间线还留着的最早一个时间点。'
-    + '那一段里的时间点没有被评估过，也不会补跑。'];
+  var parts = ['有 ' + count + ' 个对象存在一段"从来没有被检测过"的时间，那一段里的时间点没有被评估过，也不会补跑'];
+  // Counted over the listed spans only: a cut list does not say how the
+  // rest divide.
+  var reasons = {}, rewritten = {};
+  skips.forEach(function (skip) {
+    var reason = skip.reason || 'SCHEDULE_PRUNED';
+    reasons[reason] = (reasons[reason] || 0) + 1;
+    // By instant, not by text: RFC 3339 with fractions trimmed or a zone
+    // offset does not sort as its time does.
+    if (skip.rewritten_at && (!rewritten[reason] || Date.parse(skip.rewritten_at) > Date.parse(rewritten[reason]))) rewritten[reason] = skip.rewritten_at;
+  });
+  var byReason = [];
+  ['SCHEDULE_PRUNED', 'SCHEDULE_REPAIRED', 'SCHEDULE_REOPENED'].concat(Object.keys(reasons).filter(function (r) {
+    return !TIMELINE_LOSS[r];
+  })).forEach(function (reason) {
+    if (!reasons[reason]) return;
+    byReason.push(reasons[reason] + ' 段是' + (TIMELINE_LOSS[reason] || reason)
+      + (rewritten[reason] ? '（最近一次在 ' + momentLabel(rewritten[reason]) + '）' : '')
+      + (TIMELINE_LOSS_NEXT[reason] ? '，' + TIMELINE_LOSS_NEXT[reason] : ''));
+  });
+  parts.push((count > skips.length ? '列出的 ' + skips.length + ' 段里，' : '') + byReason.join('；'));
   parts.push('最长的一段是 ' + shortId(longest.query_group) + '，跨度 '
     + elapsedLabel(longest.span_seconds) + '，发生在 ' + momentLabel(longest.at));
   if (longest.discarded_slot) {
     parts.push('其中有一个时间点当时正在跑，被一起丢掉了');
   }
-  parts.push('跨度里有多少个时间点无法得知：能数它们的那部分时间线正是被裁掉的那部分。'
+  parts.push('跨度里有多少个时间点无法得知：能数它们的那部分时间线正是丢掉的那部分。'
     + '所以这里只给时间跨度，不给个数——给个数就会被当成数出来的');
   parts.push('这些对象现在通常是正常的，上面每一栏都会这么报，而且都没报错。'
     + '要处理的不是它们此刻的状态，是那一段没有告警覆盖的时间');
