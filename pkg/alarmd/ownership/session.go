@@ -186,12 +186,25 @@ func (session *Session) Maintain(ctx context.Context, interval, ttl time.Duratio
 	}
 }
 
+// Deadline is the instant, on this process's clock, until which the Session
+// admits work on its lease: zero once it has stopped accepting - released,
+// or its renewal refused by the store - whatever the last renewal had left.
+// It is the authority the output sink admits a batch against
+// (execution.LeaseAuthority), and a Slot can outlive its lease: a hung
+// execution whose Query Group was declined, or one running when the store
+// refused the renewal. Answering the stale deadline there admitted that
+// Slot's output while the next owner could already hold the lease, and the
+// next owner sent the same events again; admittedLease already refused the
+// same Session its fence check.
 func (session *Session) Deadline() time.Time {
 	if session == nil {
 		return time.Time{}
 	}
 	session.mu.RLock()
 	defer session.mu.RUnlock()
+	if !session.accepting {
+		return time.Time{}
+	}
 	return session.lease.Deadline
 }
 
