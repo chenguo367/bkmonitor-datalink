@@ -398,6 +398,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryRequest := execution.QueryExecutionRequest{
 		Contract: request.Contract, Operation: request.Operation, AttemptNo: request.AttemptNo,
 	}
+	execution.MarkStage(ctx, execution.SlotStageQuery)
 	completion, err := coordinator.ports.Query.Execute(ctx, queryRequest, stream)
 	if err != nil {
 		if isReadinessDeferred(err) {
@@ -1471,6 +1472,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			held.settle(acceptedBytes)
 			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
+			execution.MarkStage(ctx, execution.SlotStageOutput)
 			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {
 				if notWritten, partial := outputNotWritten(err); partial {
 					// The sink wrote the batch but for some events it would
@@ -1533,6 +1535,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				}
 			}
 			if len(accepted) > 0 {
+				execution.MarkStage(ctx, execution.SlotStageState)
 				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 				if err != nil {
 					coordinator.observeOutputUnapplied(planCtx, request.Operation, accepted, eventsByState, withoutMessageByState, err)
@@ -1711,6 +1714,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	if err := progressRequest.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid progress commit: %w", err)
 	}
+	execution.MarkStage(ctx, execution.SlotStageProgress)
 	progress, err := coordinator.ports.Progress.CommitProgress(ctx, progressRequest)
 	if err == nil {
 		err = progress.Validate()

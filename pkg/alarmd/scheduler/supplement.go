@@ -208,7 +208,8 @@ func (runner *Runner) Supplement(
 		ExpectedNextSlot: slot.ExpectedNextSlot, ContentScope: slot.Dispatch.ContentScope, Supplement: &scope,
 	}
 	runner.session.NoteContentScope(slot.Dispatch.ContentScope)
-	result, err := runner.executor.Execute(execution.ContextWithLeaseAuthority(ctx, runner.session), request)
+	runner.stage.Begin(execution.SlotStageExecute, slot.EarliestQueryDeadlineUnixMilli)
+	result, err := runner.executor.Execute(execution.WithStageMarker(execution.ContextWithLeaseAuthority(ctx, runner.session), &runner.stage), request)
 	if err != nil {
 		return execution.SupplementFacts{}, err
 	}

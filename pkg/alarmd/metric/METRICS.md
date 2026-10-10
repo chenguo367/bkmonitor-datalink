@@ -523,6 +523,12 @@ Labels: `result`
 
 Marks left by an attempt that wrote state and then could not write its Slot down, by result. It is the only sign the mark-writing works: nothing downstream fails when it does not, so without this a deployment where every such write fails looks exactly like one that never needed a mark. A failure here does not fail the Slot -- it means a later query-free completion will have no evidence and record a gap it does not owe.
 
+## bkmonitor_alarmd_executions_hung_total
+
+Labels: `outcome`
+
+Executions found running past their Slot deadline by a minute - ignoring their cancellation, which only a call without a deadline or a deadlock does - by what followed. declined: the replica let the Query Group's lease go at once, the hung execution still running (its later writes are refused by the fence), and named the Query Group on its registration so a leader places it on another worker and not back here. returned_after_decline: the hung execution returned at last and the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a Query Group every worker declines is the leader round's declined_everywhere. Both series exist from startup.
+
 ## bkmonitor_alarmd_executions_past_deadline
 
 Slot executions that have run more than a minute past their deadline and not returned. An execution that honours its context returns at the deadline, so anything here ignored it. When every execution slot holds one for five minutes the liveness probe fails.
