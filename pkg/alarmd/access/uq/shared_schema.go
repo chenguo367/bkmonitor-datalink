@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -43,7 +44,15 @@ func (e *sharedProtocolError) QueryFailureDetail() string {
 func protocolError(class string) error { return &sharedProtocolError{class: class} }
 
 func wireUnsigned(raw json.RawMessage, value *uint64) bool {
-	return len(raw) > 0 && raw[0] >= '0' && raw[0] <= '9' && json.Unmarshal(raw, value) == nil
+	if len(raw) == 0 || raw[0] < '0' || raw[0] > '9' || len(raw) > 1 && raw[0] == '0' {
+		return false
+	}
+	parsed, err := strconv.ParseUint(string(raw), 10, 64)
+	if err != nil {
+		return false
+	}
+	*value = parsed
+	return true
 }
 
 type sharedSchema struct {
@@ -209,15 +218,15 @@ func (client *Client) decodeShared(ctx context.Context, reader io.Reader, attemp
 				if err := ctx.Err(); err != nil {
 					return completion, err
 				}
-				fields, err := wireObject(raw)
+				fields, err := sharedSeriesFields(raw)
 				if err != nil {
 					return completion, err
 				}
 				var id uint64
 				var groups []json.RawMessage
 				var rows [][]json.RawMessage
-				if !wireUnsigned(fields["s"], &id) || id >= uint64(len(schemas)) ||
-					fields["g"] == nil || json.Unmarshal(fields["g"], &groups) != nil || fields["r"] == nil || json.Unmarshal(fields["r"], &rows) != nil {
+				if !wireUnsigned(fields[0], &id) || id >= uint64(len(schemas)) ||
+					fields[1] == nil || json.Unmarshal(fields[1], &groups) != nil || fields[2] == nil || json.Unmarshal(fields[2], &rows) != nil {
 					return completion, protocolError(execution.ResponseFailureSchemaInvalid)
 				}
 				schema := schemas[id]
