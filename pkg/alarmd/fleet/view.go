@@ -4080,6 +4080,25 @@ type PrunedSkip struct {
 	// Strategies and IntervalSeconds, as on SkippedSpan.
 	Strategies      []StrategyRef `json:"strategies,omitempty"`
 	IntervalSeconds int64         `json:"interval_seconds,omitempty"`
+	// Reason is the word the skip was recorded under: SCHEDULE_PRUNED,
+	// SCHEDULE_REPAIRED for a span lost with a timeline that would not decode
+	// and was rewritten, or SCHEDULE_REOPENED for one lost with a timeline
+	// whose key was gone and was opened again. Empty from a publisher older
+	// than the field, which recorded every skip as pruned (Code).
+	Reason string `json:"reason,omitempty"`
+	// RewrittenAt is when the Control Leader rewrote or reopened the
+	// timeline a SCHEDULE_REPAIRED or SCHEDULE_REOPENED skip landed in; nil
+	// for every other skip.
+	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
+}
+
+// Code is the word the span is filed under: its Reason, SCHEDULE_PRUNED when
+// it carries none.
+func (skip PrunedSkip) Code() string {
+	if skip.Reason == "" {
+		return "SCHEDULE_PRUNED"
+	}
+	return skip.Reason
 }
 
 // SkippedSpan is a run of Slots one object skipped because they had fallen
@@ -4154,6 +4173,9 @@ type SkippedSpan struct {
 	// Absent when the anchor is unknown.
 	RestartOffsetSeconds  *float64 `json:"restart_offset_seconds,omitempty"`
 	TakeoverOffsetSeconds *float64 `json:"takeover_offset_seconds,omitempty"`
+	// RewrittenAt is when the Control Leader rewrote the timeline whose loss
+	// this span is (a SCHEDULE_REPAIRED record); nil on every other span.
+	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
 }
 
 // ExecutionEvidence is one completion's reading of an earlier attempt, as

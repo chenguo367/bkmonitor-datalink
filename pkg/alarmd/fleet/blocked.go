@@ -187,6 +187,14 @@ var failureFacets = map[string]facets{
 	// what decided it was the active set - which Plans this deployment was
 	// told to run.
 	"PLAN_NOT_ACTIVE": {StageSchedule, ClassConfig, DependencyNone},
+	// The scheduler's span again, lost because the timeline stopped decoding
+	// and was rewritten: CONTRACT, as the unreadable timeline itself is -
+	// this deployment could not read what it had written - and not retention.
+	"SCHEDULE_REPAIRED": {StageSchedule, ClassContract, DependencyNone},
+	// And lost because the timeline's key was gone from the store and a new
+	// one was opened: the store did not have what this deployment had
+	// written, so the word names it, as ACTIVATION_MISSING does.
+	"SCHEDULE_REOPENED": {StageSchedule, ClassUnavailable, DependencyRedis},
 
 	// The stores and infrastructure this deployment depends on.
 	"REDIS_UNAVAILABLE": {StageCommit, ClassUnavailable, DependencyRedis},

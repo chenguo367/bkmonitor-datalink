@@ -588,6 +588,14 @@ var codeChecks = map[string]verdict{
 	// itself, and it is the retention's doing rather than the capacity's.
 	"GAP_SKIPPED":     lands(CheckDetectionAbandoned),
 	"SCHEDULE_PRUNED": lands(CheckTimelinePruned),
+	// A span the timeline lost too - the record line for those - but lost
+	// because the timeline stopped decoding and the Leader rewrote it. Its
+	// own word, so the row says that and not retention; the defect behind it
+	// is SCHEDULE_UNREADABLE's, which is filed as one while it lasts.
+	"SCHEDULE_REPAIRED": lands(CheckTimelinePruned),
+	// The same record line, for a span lost because the timeline's key was
+	// gone and the cutover opened a new one.
+	"SCHEDULE_REOPENED": lands(CheckTimelinePruned),
 	// Under no line. The Plan was not in the active set while those Slots went
 	// by, so there was nothing to run and nothing was lost: replaying them
 	// would produce alerts for a strategy that did not exist at the time.

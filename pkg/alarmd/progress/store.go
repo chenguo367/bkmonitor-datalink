@@ -771,7 +771,10 @@ func (store *Store) SkipPrunedRange(ctx context.Context, request execution.Progr
 	}
 	next := execution.ScheduleProgress{
 		Identity: request.Identity, NextSlot: request.ResumeAt, LastCompletionKind: execution.CompletionGapSkipped,
-		CurrentOrRecentGap: execution.PrunedSkipGap(request.ExpectedNextSlot, request.ResumeAt),
+		// Under the reason the caller decided. This wrote SCHEDULE_PRUNED for
+		// every skip, so a skip the Worker made for another reason was
+		// persisted as retention loss.
+		CurrentOrRecentGap: request.SkipGap(),
 	}
 	// The pruned skip drops the continuity anchors on purpose: the Slots
 	// before the cursor are gone from the timeline. The two facts about

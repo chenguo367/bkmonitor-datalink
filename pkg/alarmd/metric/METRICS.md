@@ -1717,6 +1717,16 @@ Labels: `kind`, `state`, `reason`
 
 Selectors of target plans resolved, once per selector per Plan per Slot, by kind, state and the closed reason: key_missing, json_invalid, structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, node_in_other_business, members_dropped, source_unwired, model_representation_unresolved, tenant_mismatch, address_unresolved, address_ambiguous, index_incomplete, excluded_absent. OKEmpty with node_missing is a topology reference to a node the topology cache does not list; OKEmpty with node_in_other_business is one whose node is listed but hosts machines under another business only; static Unavailable with model_representation_unresolved is a model_inst_id plan whose members the host cache knows no host for - a non-host model without a model_match, or a host cache without the canonical identity on its records. A group whose writer states member_list [] is OKEmpty. The last three are ip_cloud plans: tenant_mismatch is a referenced group of another tenant, address_unresolved a selector none of whose hosts has an address inside the plan's tenant yet, address_ambiguous members left out because another host of the tenant shares their address. An unavailable exclusion blocks the whole target; excluded_absent is a normal no-op from a complete host snapshot.
 
+## bkmonitor_alarmd_timeline_repairs_total
+
+Labels: `outcome`
+
+Schedule timelines the Control Leader looked at because a Worker reported them unreadable (SCHEDULE_UNREADABLE), or because a cutover read bytes that did not decode, by what became of each. rewritten: still unreadable, rewritten as one Segment from the Leader's boundary on the content and the activation records the Query Group runs, marked so its Worker records the Slots lost with the old timeline (SCHEDULE_REPAIRED). decodes_again: the Leader decoded it and left it; a Worker's report outlives the rewrite until its next Slot runs, and a Worker of another build may report a timeline this one reads. conflict: the rewrite lost its compare-and-set and wrote nothing; the report stands and the next round tries again. failed: the replacement could not be built; a line names the Query Group and why. other_schema: the bytes are a timeline of another schema version, written by a build that reads them, and left alone. Counted by the Leader; read it summed over replicas.
+
+## bkmonitor_alarmd_timeline_unreadable_reports_total
+
+Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline that does not decode (SCHEDULE_UNREADABLE): one per Query Group each time it goes from unnamed to named. The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this replica. A leader reads each named timeline again and rewrites it (timeline_repairs_total). A count that keeps rising for the same Query Groups is a rewrite that does not take.
+
 ## bkmonitor_alarmd_trigger_open_alert_gate_total
 
 Labels: `outcome`

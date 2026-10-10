@@ -221,6 +221,10 @@ const (
 	// cutoverReopened: the Query Group's timeline key was gone; a new
 	// timeline was opened for it as for a new Query Group.
 	cutoverReopened contentCutoverDecision = "reopened"
+	// cutoverRepaired: the Query Group's timeline did not decode; it was
+	// rewritten with one Segment from the boundary on the content and the
+	// records it runs, marked so its Worker records the Slots lost with it.
+	cutoverRepaired contentCutoverDecision = "repaired"
 	// cutoverRetiredUnwritten: a Query Group leaving the publication whose
 	// timeline failed a precondition; it leaves the activation, and its
 	// timeline is left as it is.

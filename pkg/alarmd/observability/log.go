@@ -910,7 +910,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("cursor_advance_status", facts.Status),
 			slog.String("cursor_advance_refusal", facts.Refusal),
 			slog.Int64("cursor_advance_in_flight_slot", facts.InFlightSlot),
+			slog.String("cursor_advance_reason", facts.Reason),
 		)
+		if facts.RepairedAtUnixMilli > 0 {
+			attributes = append(attributes, slog.Int64("cursor_advance_repaired_at_ms", facts.RepairedAtUnixMilli))
+		}
 	}
 	if facts := observation.SourceRefresh; facts != nil {
 		attributes = append(attributes,

@@ -68,6 +68,14 @@ type persistedScheduleSegment struct {
 	Schedule         execution.FrozenQueryGroupSchedule `json:"schedule"`
 	Plans            []PlanActivationRecord             `json:"plans"`
 	ReactivatedAfter *execution.EvaluationTime          `json:"reactivated_after,omitempty"`
+	// Repair marks the Segment the Control Leader opened in place of a
+	// timeline it could not carry on (execution.SegmentRepair): the Worker
+	// whose cursor stood in the lost Segments records the jump to it under
+	// the mark's word. Omitted on every other Segment, and ignored by a build
+	// without the field - its decode is not strict - which jumps silently as
+	// before. It travels with the Segment through later cutovers and prunes,
+	// so a closed repaired Segment still says what it was.
+	Repair *execution.SegmentRepair `json:"repair,omitempty"`
 }
 
 type persistedScheduleTimeline struct {
@@ -287,6 +295,22 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	next ActivationState,
 	boundary execution.EvaluationTime,
 	progress ScheduleActivationProgressReader,
+) error {
+	return repository.compareAndSetPublicationScheduleActivation(ctx, expected, next, boundary, progress, nil)
+}
+
+// compareAndSetPublicationScheduleActivation is the cutover with the Query
+// Groups the Workers report an unreadable timeline for (reported, may be
+// nil): each of them is read even when the manifest shows it unchanged, so
+// the cutover that follows a report rewrites the timeline rather than
+// trusting the manifest past it.
+func (repository *RedisCatalogRepository) compareAndSetPublicationScheduleActivation(
+	ctx context.Context,
+	expected ActivationExpectation,
+	next ActivationState,
+	boundary execution.EvaluationTime,
+	progress ScheduleActivationProgressReader,
+	reported map[execution.QueryGroupIdentity]struct{},
 ) (err error) {
 	if repository == nil || repository.client == nil || boundary <= 0 {
 		return fmt.Errorf("%w: publication schedule activation is required", ErrCutoverRequest)
@@ -415,6 +439,9 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	var blockedPlans []PlanActivationRecord
 	blockedGroups := make(map[execution.QueryGroupIdentity]struct{})
 	reopened := 0
+	// repaired counts the timelines this cutover rewrites because they did
+	// not decode; they are counted rewritten once the write lands.
+	repaired := 0
 	var previousPublished *PublishedContent
 	previousPlansOf := func(group execution.QueryGroupIdentity) ([]execution.PlanKey, execution.ObjectDigest, []execution.OutputContextRef, error) {
 		if earlier, ok := previousBlocked[group]; ok {
@@ -461,9 +488,15 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	// in pipelined batches a window ahead of the walk (cutoverTimelines): a
 	// process's first cutover reads every open Segment, and one round trip
 	// each is what made it tens of seconds on a few thousand Query Groups.
+	// A Query Group a Worker reports an unreadable timeline for is read
+	// whatever the manifest says: the manifest says nothing about the bytes.
+	// It needs no content loaded for that (needed above): unchanged, its
+	// records name the publication they were activated under, and a rewrite
+	// takes that publication's content (segmentContentFor).
 	keptWithoutRead := func(queryGroup execution.QueryGroupIdentity) bool {
 		newGroup, remains := newGroups[queryGroup]
-		if _, wasBlocked := previousBlocked[queryGroup]; !remains || readAll || wasBlocked {
+		_, named := reported[queryGroup]
+		if _, wasBlocked := previousBlocked[queryGroup]; !remains || readAll || wasBlocked || named {
 			return false
 		}
 		previousRefs, known := previousContent.refsFor(newGroup)
@@ -527,38 +560,66 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			// The candidate records say which publication the Segment names: the
 			// new one when the content changed, the one the carried records were
 			// activated under when it did not - its content is the same, and the
-			// records are kept as they were.
-			openPublication, openGroup, openNamed := published.content.Publication, newGroup, published.content.Groups[queryGroup]
-			if carriedPublication, ok := candidatePublication(candidate, newGroup); ok && carriedPublication != openPublication {
-				group, groupErr := repository.loadPublishedQueryGroup(ctx, carriedPublication, queryGroup)
-				if groupErr != nil {
-					return groupErr
-				}
-				content, contentErr := repository.LoadPublishedContent(ctx, carriedPublication)
-				if contentErr != nil {
-					return contentErr
-				}
-				openPublication, openGroup, openNamed = carriedPublication, group, content.Groups[queryGroup]
-			}
-			opened, openErr := repository.openQueryGroupTimeline(ctx, openPublication, openGroup, openNamed, boundary, candidate, now, cutover)
+			// records are kept as they were (segmentContentFor). The Segment is
+			// marked, so the Worker whose cursor stood in the lost timeline
+			// records the Slots it lost under SCHEDULE_REOPENED rather than
+			// jumping past them: a key that went missing is named, never taken
+			// for benign. Written only while the key is still absent.
+			opened, openErr := repository.repairedQueryGroupTimeline(ctx, published, candidate, newGroup, boundary, nil,
+				execution.SegmentRepair{Kind: execution.SegmentRepairAbsent, AtUnixMilli: int64(boundary) * 1000})
 			if openErr != nil {
 				return openErr
 			}
 			updates = append(updates, opened.update)
 			plans = append(plans, opened.records...)
 			reopened++
-			cutover.redecided(cutoverAdded, cutoverReopened)
+			cutover.decided(cutoverReopened)
 			continue
 		}
 		var unreadable *DeterministicScheduleError
 		if errors.As(err, &unreadable) {
-			if err := settle(queryGroup, remains, CutoverReasonTimelineMissing, "timeline unreadable: "+err.Error(), "", nil); err != nil {
+			// Bytes that do not decode: nothing in them can be carried on, and
+			// holding the Query Group back with them left it running nothing
+			// until somebody deleted the key by hand. A Query Group that stays
+			// gets the timeline a rewrite gives it - one Segment from the
+			// boundary on the content and records it runs, marked, fenced on
+			// these bytes. One that leaves, or whose bytes another schema
+			// wrote, or whose replacement cannot be built, is settled as
+			// before.
+			detail := "timeline unreadable: " + err.Error()
+			if remains && !writtenByAnotherSchema(raw) {
+				opened, repairErr := repository.repairedQueryGroupTimeline(ctx, published, candidate, newGroup, boundary, raw,
+					execution.SegmentRepair{Kind: execution.SegmentRepairUnreadable, AtUnixMilli: int64(boundary) * 1000})
+				if repairErr == nil {
+					keys, _, _, keysErr := previousPlansOf(queryGroup)
+					if keysErr != nil {
+						return keysErr
+					}
+					for _, key := range keys {
+						coveredPrevious[key] = struct{}{}
+					}
+					updates = append(updates, opened.update)
+					plans = append(plans, opened.records...)
+					repaired++
+					cutover.decided(cutoverRepaired)
+					continue
+				}
+				repository.timelineRepairs.add(TimelineRepairFailed, 1)
+				repository.observeTimelineRepairFailure(ctx, queryGroup, repairErr)
+				detail += "; rewrite failed: " + repairErr.Error()
+			} else if remains {
+				repository.timelineRepairs.add(TimelineRepairOtherSchema, 1)
+			}
+			if err := settle(queryGroup, remains, CutoverReasonTimelineMissing, detail, "", nil); err != nil {
 				return err
 			}
 			continue
 		}
 		if err != nil {
 			return err
+		}
+		if _, named := reported[queryGroup]; named {
+			repository.timelineRepairs.add(TimelineRepairDecodesAgain, 1)
 		}
 		cutover.read++
 		last := len(timeline.Segments) - 1
@@ -798,8 +859,12 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		return err
 	}
 	if err := repository.persistCutoverActivation(ctx, expected, next, updates, cutover, blockedPayload); err != nil {
+		if errors.Is(err, ErrActivationConflict) {
+			repository.timelineRepairs.add(TimelineRepairConflict, repaired)
+		}
 		return err
 	}
+	repository.timelineRepairs.add(TimelineRepairRewritten, repaired)
 	repository.blocked.record(blockedNow, previousContent.accounting, reopened, repository.scheduleTimelineKey)
 	if readAll {
 		repository.contentCutoverVerified.Store(true)
@@ -820,11 +885,12 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 //
 // Each is decoded as the one read the cutover used to make would have:
 // absent is ErrScheduleUnavailable, bytes that do not decode are a
-// DeterministicScheduleError, and the bytes are the expectation the write
-// is fenced on. A read that fails fails the cutover, as the single read it
-// replaces did, and so does a window Redis answered any key of with an
-// error (LOADING, BUSY, a key of another type; redisbatch.UnansweredError):
-// that says nothing about the timeline, and the cutover writes nothing.
+// DeterministicScheduleError returned beside those bytes, and the bytes are
+// the expectation the write is fenced on. A read that fails fails the
+// cutover, as the single read it replaces did, and so does a window Redis
+// answered any key of with an error (LOADING, BUSY, a key of another type;
+// redisbatch.UnansweredError): that says nothing about the timeline, and the
+// cutover writes nothing.
 type cutoverTimelines struct {
 	identities []execution.QueryGroupIdentity
 	windows    *redisbatch.Windows
@@ -871,7 +937,9 @@ func (timelines *cutoverTimelines) timeline(ctx context.Context, queryGroup exec
 	}
 	timeline, err := decodeScheduleTimeline(queryGroup, value.Raw)
 	if err != nil {
-		return persistedScheduleTimeline{}, nil, err
+		// The bytes go back with the decode failure: a rewrite of the
+		// timeline is fenced on exactly them.
+		return persistedScheduleTimeline{}, value.Raw, err
 	}
 	return timeline, value.Raw, nil
 }
@@ -2063,6 +2131,34 @@ func (runtime *RedisCatalogRuntime) NextSlotAfter(
 		segment = successor
 		containsCompletion = false
 	}
+}
+
+// ReadSegmentRepair says whether the Segment of the Query Group's timeline
+// that starts at segmentStart carries the Control Leader's repair mark. A
+// Segment that is not there carries none: the question is only asked of a
+// Segment navigation has just read.
+func (runtime *RedisCatalogRuntime) ReadSegmentRepair(
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+	segmentStart execution.EvaluationTime,
+) (execution.SegmentRepair, bool, error) {
+	if runtime == nil || runtime.repository == nil || queryGroup == "" || segmentStart <= 0 {
+		return execution.SegmentRepair{}, false, errors.New("alarmd controlplane: valid Segment repair read is required")
+	}
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
+	if err != nil {
+		return execution.SegmentRepair{}, false, err
+	}
+	for _, segment := range timeline.Segments {
+		if segment.Schedule.Segment.Start != segmentStart {
+			continue
+		}
+		if segment.Repair == nil {
+			return execution.SegmentRepair{}, false, nil
+		}
+		return *segment.Repair, true, nil
+	}
+	return execution.SegmentRepair{}, false, nil
 }
 
 // readPersistedSegmentAfter returns the earliest Segment that starts after

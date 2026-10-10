@@ -332,6 +332,14 @@ func (catalog *viewGatedCatalog) NextSlotAfter(ctx context.Context, queryGroup e
 	return catalog.next.NextSlotAfter(ctx, queryGroup, at)
 }
 
+func (catalog *viewGatedCatalog) ReadSegmentRepair(ctx context.Context, queryGroup execution.QueryGroupIdentity, segmentStart execution.EvaluationTime) (execution.SegmentRepair, bool, error) {
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return execution.SegmentRepair{}, false, err
+	}
+	return catalog.next.ReadSegmentRepair(ctx, queryGroup, segmentStart)
+}
+
 func (catalog *viewGatedCatalog) FreezeSlotContract(ctx context.Context, request execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error) {
 	ctx, err := catalog.gated(ctx)
 	if err != nil {

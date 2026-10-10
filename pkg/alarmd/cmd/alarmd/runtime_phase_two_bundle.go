@@ -622,6 +622,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// What the leader's round reads off the registrations and the next
+	// activation reads: the Query Groups the Workers report an unreadable
+	// timeline for.
+	timelineRepairs := &controlplane.TimelineRepairRequests{}
+	activator.WithTimelineRepairs(timelineRepairs)
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
 		Source: strategySource, Planner: planner, Reconciler: reconciler, Activator: activator,
 		Repository: repository, Schedules: catalog, Progress: progressStore,
@@ -861,6 +866,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	openAlertCopy := linkd.Cache
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
+	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
 	recorder.SetActivationHeaderSource(repository.ActivationHeaderReading)
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
@@ -978,6 +984,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes:             currentContentScopes(repository),
 		ViewStream:                viewServer, ViewSource: repository, Costs: costs,
+		TimelineRepairs: timelineRepairs,
 	})
 	if err != nil {
 		return nil, err

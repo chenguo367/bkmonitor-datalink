@@ -25,6 +25,10 @@ type ScheduleActivationReconciler struct {
 	// what before the cutover is written (decision-016 batch 3). See
 	// ContentScopeWriter and WithContentScopeWriter.
 	scopes ContentScopeWriter
+	// repairs, when set, names the Query Groups the Workers report meeting
+	// an unreadable timeline for; the reconciler reads each again and
+	// rewrites the ones it cannot decode either. See WithTimelineRepairs.
+	repairs TimelineRepairSource
 }
 
 type ScheduleActivationProgressReader interface {
@@ -162,10 +166,36 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
 		return ActivationState{}, fmt.Errorf("alarmd controlplane: activation schema %q is not one this build activates from", previous.SchemaVersion)
 	}
+	reported := reconciler.reportedTimelines()
 	if previous.Current == publication {
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
-		if _, loadErr := reconciler.repository.LoadActiveQueryGroupSet(ctx, previous.ActiveQGSetRef); loadErr != nil {
+		active, loadErr := reconciler.repository.LoadActiveQueryGroupSet(ctx, previous.ActiveQGSetRef)
+		if loadErr != nil {
 			return ActivationState{}, loadErr
+		}
+		// A reported unreadable timeline is looked at first, on the current
+		// publication: without a new one nothing else reads it again. The
+		// held reactivation below then starts from whatever this wrote; the
+		// two are separate writes because they answer separate facts, and a
+		// round has both only while both are pending.
+		if len(reported) > 0 {
+			failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassDependencyIO
+			boundary := execution.EvaluationTime(reconciler.now().Unix())
+			if boundary <= 0 {
+				return ActivationState{}, errors.New("alarmd controlplane: Schedule activation clock must produce a positive Unix second")
+			}
+			if _, repairErr := reconciler.repository.RepairUnreadableTimelines(ctx, previous, active, reported, boundary); repairErr != nil {
+				return ActivationState{}, repairErr
+			}
+			// Whatever the repair did - wrote, lost to another writer, or
+			// found nothing to write - the activation is read back, so the
+			// reactivation is fenced on the one that is there.
+			if previous, err = reconciler.repository.LoadActivation(ctx); err != nil {
+				return ActivationState{}, err
+			}
+			if previous.Current != publication {
+				return previous, nil
+			}
 		}
 		if len(previous.Draining) == 0 {
 			return previous, nil
@@ -316,8 +346,8 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		}
 	}
 	failureStage, failureClass = ActivationFailureStageScheduleCutover, ActivationFailureClassScheduleConflict
-	if applyErr := reconciler.repository.CompareAndSetPublicationScheduleActivation(
-		ctx, expected, next, boundary, reconciler.progress,
+	if applyErr := reconciler.repository.compareAndSetPublicationScheduleActivation(
+		ctx, expected, next, boundary, reconciler.progress, reported,
 	); applyErr != nil {
 		failureStage, failureClass = ActivationFailureStagePersist, ActivationFailureClassDependencyIO
 		winner, loadErr := reconciler.repository.LoadActivation(ctx)

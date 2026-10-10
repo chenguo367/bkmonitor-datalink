@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -178,6 +179,15 @@ type SlotCatalogReader interface {
 	ReadScheduleRetirement(context.Context, execution.QueryGroupIdentity) (execution.EvaluationTime, bool, error)
 	NextSlotAfter(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.EvaluationTime, error)
 	FreezeSlotContract(context.Context, execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error)
+	// ReadSegmentRepair says whether the Segment starting at segmentStart was
+	// opened by the Control Leader in place of a timeline it could not carry
+	// on, and how and when; false for every other Segment. It is how the source
+	// tells the one jump navigation makes into such a Segment from the jumps of
+	// the same shape that are not losses of this deployment's making (a
+	// retirement's hole, a pruned prefix). In the interface rather than behind
+	// a type assertion: a catalog that quietly did not answer it would leave
+	// that jump unrecorded with every test green.
+	ReadSegmentRepair(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (execution.SegmentRepair, bool, error)
 }
 
 type ScheduleProgressReader interface {
@@ -416,7 +426,15 @@ func NewProductionSlotSource(
 func (source *ProductionSlotSource) Next(
 	ctx context.Context,
 	queryGroup execution.QueryGroupIdentity,
-) (FrozenSlot, bool, SlotDueFacts, error) {
+) (_ FrozenSlot, _ bool, _ SlotDueFacts, nextErr error) {
+	// A timeline whose bytes do not decode blocks the source by that name
+	// whichever read met it first. Navigation already said so; the
+	// retirement check before it, the first Segment's read and the recovery
+	// classification returned the failure raw, so for a Query Group with
+	// Progress - nearly every one - the round failed unclassified and the
+	// Worker never named it SCHEDULE_UNREADABLE, the word its registration
+	// reports the timeline to the leader by.
+	defer func() { nextErr = blockUndecodableTimeline(nextErr) }()
 	if source == nil || queryGroup == "" || queryGroup != source.queryGroup {
 		return FrozenSlot{}, false, SlotDueFacts{}, errors.New("alarmd scheduler: SlotSource Query Group mismatch")
 	}
@@ -490,9 +508,12 @@ func (source *ProductionSlotSource) Next(
 			source.prepareRetiredReadHold(ctx, initialFence)
 			return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 		}
-		schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, *load.Progress)
+		// navigated is the Progress the Slot below was navigated from: the
+		// loaded one, or the one a pruned advance left.
+		navigated := *load.Progress
+		schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, navigated)
 		if err != nil {
-			resumed, advanced, advanceErr := source.advancePrunedCursor(ctx, *load.Progress, initialFence, err)
+			resumed, advanced, advanceErr := source.advancePrunedCursor(ctx, navigated, initialFence, err)
 			if advanceErr != nil {
 				return FrozenSlot{}, false, SlotDueFacts{}, advanceErr
 			}
@@ -506,7 +527,20 @@ func (source *ProductionSlotSource) Next(
 					source.prepareRetiredReadHold(ctx, initialFence)
 					return FrozenSlot{}, false, SlotDueFacts{Retired: true}, nil
 				}
+				navigated = resumed
 				schedule, nextSlot, err = source.nextSlotAfterProgress(ctx, resumed)
+			}
+		}
+		if err == nil {
+			resumed, skipped, skipErr := source.skipIntoRepairedSegment(ctx, navigated, schedule, nextSlot, initialFence)
+			if skipErr != nil {
+				return FrozenSlot{}, false, SlotDueFacts{}, skipErr
+			}
+			if skipped {
+				// What the store now holds: the Slot below is frozen against the
+				// cursor the skip set, and nothing of the discarded one is
+				// carried into its read hold or its range.
+				load.Progress = &resumed
 			}
 		}
 	}
@@ -1390,6 +1424,11 @@ func (source *ProductionSlotSource) nextSlotAfterProgress(
 // read, or a reader without the write side leaves the original error in
 // place. The advance is reported whatever its outcome; a conflict or a
 // stale owner leaves the cursor for the next attempt.
+//
+// In production this is reached by a cursor with no completion behind it: a
+// cursor anchored on a completion is continued by the catalog at the first
+// Segment after the anchor (NextSlotAfter) and never fails here for a
+// missing Segment.
 func (source *ProductionSlotSource) advancePrunedCursor(
 	ctx context.Context,
 	progress execution.ScheduleProgress,
@@ -1407,9 +1446,9 @@ func (source *ProductionSlotSource) advancePrunedCursor(
 	// never evaluated and no later read makes them evaluable - pruned because
 	// the timeline dropped them, plan-not-active because replaying them would
 	// alert for a strategy that was not there while they passed.
-	skipGap := execution.PrunedSkipGap
+	reason := execution.ReasonCode(contract.ReasonSchedulePruned)
 	if errors.Is(cause, ErrNoPlanDueInSegment) {
-		skipGap = execution.PlanNotActiveSkipGap
+		reason = execution.ReasonCode(contract.ReasonPlanNotActive)
 	}
 	advancer, ok := source.progress.(PrunedCursorAdvancer)
 	if !ok {
@@ -1424,17 +1463,134 @@ func (source *ProductionSlotSource) advancePrunedCursor(
 	// Slot navigation can begin at rather than on a segment start that may
 	// hold no due Slot. A retired boundary reached on the way is a valid
 	// resume point too: the caller sees the retirement at the new cursor.
-	_, earliest, _, err := source.firstAvailableSchedule(ctx, initial)
+	landing, earliest, _, err := source.firstAvailableSchedule(ctx, initial)
 	if err != nil || earliest <= progress.NextSlot {
+		return progress, false, nil
+	}
+	// The cursor's Segments were not pruned when the Segment it lands in was
+	// opened by a rewrite of the whole timeline: they went with the timeline
+	// the rewrite replaced, and the skip says so rather than blaming retention.
+	var repairedAt int64
+	if reason != execution.ReasonCode(contract.ReasonPlanNotActive) {
+		if repaired, at, marked, markErr := source.repairedLanding(ctx, progress, landing); markErr == nil && marked {
+			reason, repairedAt = repaired, at
+		}
+	}
+	request := execution.ProgressSkipPrunedRequest{
+		Identity: execution.ProgressIdentity{QueryGroup: source.queryGroup}, OwnerFence: fence,
+		ExpectedNextSlot: progress.NextSlot, ResumeAt: earliest, Reason: reason,
+	}
+	result, err := advancer.SkipPrunedRange(ctx, request)
+	if source.observeCursorAdvance(ctx, request, result, err, repairedAt) != observability.CursorAdvanceApplied {
+		return progress, false, nil
+	}
+	return skippedProgress(progress, request), true, nil
+}
+
+// skipIntoRepairedSegment records the one jump navigation makes without a
+// record of its own: from a cursor inside Segments a rewritten timeline no
+// longer holds, to the first Slot of the Segment the rewrite opened.
+//
+// The catalog continues an anchored cursor at the first Segment after the
+// anchor when no Segment holds it (NextSlotAfter), which is right for the two
+// other ways a timeline comes to lack the cursor's time - the hole a
+// retirement leaves and a pruned prefix - and those keep that behaviour. A
+// rewrite is not either: the Slots between the cursor and the new Segment
+// were on the timeline and were lost with it, and continuing silently there
+// left the stretch on no record at all. So when the Slot navigation chose
+// lies in a Segment that starts after the cursor and carries the rewrite's
+// mark, the cursor is first moved there under the owner's fence with the
+// span recorded under the mark's word, the same uncounted shape a pruned skip
+// has. Once per rewrite: after it the cursor stands inside the new Segment.
+//
+// A skip the store does not apply is retried on the next round rather than
+// passed over, because passing over it is the silent jump this exists to
+// end. A reader without the write side keeps the old behaviour.
+func (source *ProductionSlotSource) skipIntoRepairedSegment(
+	ctx context.Context,
+	progress execution.ScheduleProgress,
+	schedule execution.FrozenQueryGroupSchedule,
+	next execution.EvaluationTime,
+	fence execution.OwnerFence,
+) (execution.ScheduleProgress, bool, error) {
+	if next <= progress.NextSlot {
+		return progress, false, nil
+	}
+	reason, repairedAt, marked, err := source.repairedLanding(ctx, progress, schedule)
+	if err != nil {
+		return progress, false, failClosedScheduleNavigation(err)
+	}
+	if !marked {
+		return progress, false, nil
+	}
+	advancer, ok := source.progress.(PrunedCursorAdvancer)
+	if !ok {
 		return progress, false, nil
 	}
 	request := execution.ProgressSkipPrunedRequest{
 		Identity: execution.ProgressIdentity{QueryGroup: source.queryGroup}, OwnerFence: fence,
-		ExpectedNextSlot: progress.NextSlot, ResumeAt: earliest,
+		ExpectedNextSlot: progress.NextSlot, ResumeAt: next, Reason: reason,
 	}
 	result, err := advancer.SkipPrunedRange(ctx, request)
-	facts := &observability.CursorAdvanceFacts{From: int64(progress.NextSlot), To: int64(earliest),
-		Refusal: string(result.Refusal), InFlightSlot: int64(result.InFlightSlot)}
+	if source.observeCursorAdvance(ctx, request, result, err, repairedAt) != observability.CursorAdvanceApplied {
+		if err == nil {
+			err = ErrRepairSkipUnrecorded
+		}
+		return progress, false, &SourceRetryError{Err: err}
+	}
+	return skippedProgress(progress, request), true, nil
+}
+
+// ErrRepairSkipUnrecorded is a skip into a rewritten timeline's Segment the
+// store did not apply - the cursor moved, the compare-and-set lost, the
+// owner changed. The round is retried; the Slot is not run past the skip.
+var ErrRepairSkipUnrecorded = errors.New("alarmd scheduler: the skip into a rewritten timeline was not recorded")
+
+// repairedLanding says whether landing is a Segment a rewrite of the whole
+// timeline opened after the cursor, and under which word and since when the
+// skip into it is recorded. A mark of a kind this build does not know reads
+// as no mark.
+func (source *ProductionSlotSource) repairedLanding(
+	ctx context.Context,
+	progress execution.ScheduleProgress,
+	landing execution.FrozenQueryGroupSchedule,
+) (execution.ReasonCode, int64, bool, error) {
+	if landing.Segment.Start <= progress.NextSlot {
+		return "", 0, false, nil
+	}
+	repair, marked, err := source.catalog.ReadSegmentRepair(ctx, source.queryGroup, landing.Segment.Start)
+	if err != nil || !marked {
+		return "", 0, false, err
+	}
+	reason, known := repair.ReasonCode()
+	if !known {
+		return "", 0, false, nil
+	}
+	return reason, repair.AtUnixMilli, true, nil
+}
+
+// skippedProgress is what the store wrote for an applied skip: a skip keeps
+// both facts about records and drops every continuity anchor.
+func skippedProgress(progress execution.ScheduleProgress, request execution.ProgressSkipPrunedRequest) execution.ScheduleProgress {
+	return execution.ScheduleProgress{
+		Identity: request.Identity, NextSlot: request.ResumeAt, LastCompletionKind: execution.CompletionGapSkipped,
+		CurrentOrRecentGap: request.SkipGap(),
+		LastDataSlot:       progress.LastDataSlot, EmptyRunSinceSlot: progress.EmptyRunSinceSlot,
+	}
+}
+
+// observeCursorAdvance reports one skip attempt whatever its outcome and
+// returns the outcome's word.
+func (source *ProductionSlotSource) observeCursorAdvance(
+	ctx context.Context,
+	request execution.ProgressSkipPrunedRequest,
+	result execution.ProgressSkipResult,
+	err error,
+	repairedAt int64,
+) string {
+	facts := &observability.CursorAdvanceFacts{From: int64(request.ExpectedNextSlot), To: int64(request.ResumeAt),
+		Refusal: string(result.Refusal), InFlightSlot: int64(result.InFlightSlot),
+		Reason: string(request.SkipGap().ReasonCode), RepairedAtUnixMilli: repairedAt}
 	observed := observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageScheduleCursorAdvanced,
 		Operation: observability.OperationWrite, Direction: observability.DirectionInternal,
@@ -1460,16 +1616,20 @@ func (source *ProductionSlotSource) advancePrunedCursor(
 	if source.observer != nil {
 		source.observer.Observe(ctx, observed)
 	}
-	if facts.Status != observability.CursorAdvanceApplied {
-		return progress, false, nil
+	return facts.Status
+}
+
+// blockUndecodableTimeline is a source error that is a timeline which does
+// not decode, as a blocked source; every other error as it is. A refusal the
+// source already classified keeps its classification.
+func blockUndecodableTimeline(err error) error {
+	var undecodable *controlplane.DeterministicScheduleError
+	var blocked *SourceBlockedError
+	var retry *SourceRetryError
+	if err == nil || !errors.As(err, &undecodable) || errors.As(err, &blocked) || errors.As(err, &retry) {
+		return err
 	}
-	resumed := execution.ScheduleProgress{
-		Identity: request.Identity, NextSlot: earliest, LastCompletionKind: execution.CompletionGapSkipped,
-		CurrentOrRecentGap: skipGap(progress.NextSlot, earliest),
-		// What the store wrote: a skip keeps both facts about records.
-		LastDataSlot: progress.LastDataSlot, EmptyRunSinceSlot: progress.EmptyRunSinceSlot,
-	}
-	return resumed, true, nil
+	return &SourceBlockedError{Err: err}
 }
 
 func failClosedScheduleNavigation(err error) error {

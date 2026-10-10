@@ -543,10 +543,17 @@ func TestAHeldBackQueryGroupWhoseContentChangedIsCutOnceRepaired(t *testing.T) {
 	}
 }
 
-// A timeline that does not decode is held back like a rewritten one: the
-// rest of the publication goes ahead.
-func TestAnUnreadableTimelineIsHeldBack(t *testing.T) {
+// A timeline that does not decode is rewritten by the cutover
+// (TestTheFirstCutoverRewritesAnUnreadableTimeline). One whose replacement
+// cannot be built - here the Assignment record the new revision is read from
+// is not a record - is held back as before, named and counted, and the rest
+// of the publication goes ahead.
+func TestAnUnreadableTimelineWhoseRewriteFailsIsHeldBack(t *testing.T) {
 	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-unreadable")
+	recordKey := func(queryGroup execution.QueryGroupIdentity) string {
+		return fixture.prefix + ":assignment:" + string(queryGroup)
+	}
+	fixture.repository.WithAssignmentRecordKey(recordKey)
 	first := cutoverCatalog(t, 80, nil)
 	second := cutoverCatalog(t, 90, nil)
 	_, untouched := splitEdited(t, first, second)
@@ -554,13 +561,19 @@ func TestAnUnreadableTimelineIsHeldBack(t *testing.T) {
 	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(untouched.Identity), "{not a timeline", 0).Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.client.Set(fixture.ctx, recordKey(untouched.Identity), "not a hash", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
 		t.Fatalf("an unreadable timeline failed the whole publication: %v", err)
 	}
 	blocked := fixture.blocked(t)
 	if len(blocked) != 1 || blocked[0].QueryGroup != untouched.Identity || blocked[0].Reason != controlplane.CutoverReasonTimelineMissing ||
-		!strings.Contains(blocked[0].Detail, "unreadable") || blocked[0].OpenDigest != "" {
-		t.Fatalf("blocked = %+v, want the unreadable timeline held back with nothing to run", blocked)
+		!strings.Contains(blocked[0].Detail, "unreadable") || !strings.Contains(blocked[0].Detail, "rewrite failed") || blocked[0].OpenDigest != "" {
+		t.Fatalf("blocked = %+v, want the unreadable timeline held back, naming the failed rewrite", blocked)
+	}
+	if got := fixture.repository.TimelineRepairCounts()[controlplane.TimelineRepairFailed]; got != 1 {
+		t.Fatalf("failed = %d, want 1", got)
 	}
 }
 

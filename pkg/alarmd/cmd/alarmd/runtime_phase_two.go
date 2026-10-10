@@ -751,6 +751,13 @@ type phaseTwoWorkerBundle struct {
 	// execution returns, when it is lifted, so it never has more entries
 	// than the dispatcher has slots.
 	declined map[execution.QueryGroupIdentity]*declinedQueryGroup
+	// unreadableTimelines is the owned Query Groups whose last round that
+	// asked for a Slot met a Schedule timeline that does not decode; under mu.
+	// The registration names them so a leader reads them again
+	// (ownership.WorkerRegistration.UnreadableTimelines). An entry goes with
+	// the first later round of its Query Group that runs a Slot, and with its
+	// Runner, so the set is never larger than the owned set.
+	unreadableTimelines map[execution.QueryGroupIdentity]struct{}
 	// dependencyDegraded is set while a control or Ownership Store call fails
 	// transiently. dependencyFailureSeq counts those failures so a reconcile
 	// pass only clears the flag when no new failure happened during the pass.
@@ -804,6 +811,9 @@ type phaseTwoScheduledResult struct {
 	scheduled       phaseTwoScheduledRunner
 	attempted       bool
 	admissionDenied bool
+	// outcome is what the round's Runner returned; read for the words that
+	// say what the round met (noteTimelineReading).
+	outcome execution.SlotExecutionResult
 	// ran says the Runner was actually entered. A dispatch that found the
 	// context cancelled or the lifecycle replaced returns without running, and
 	// the bound such a return would carry belongs to the previous round.
@@ -1459,7 +1469,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 			func() {
 				defer dispatcher.bundle.exitScheduledRunner(scheduled.lifecycle)
 				defer startSlotTiming(runCtx, dispatcher.bundle.dependencies.Observer, observability.StageRunnerCompleted, time.Now)()
-				_, result.attempted, result.admissionDenied, result.err =
+				result.outcome, result.attempted, result.admissionDenied, result.err =
 					scheduled.lifecycle.runner.RunOneAdmitted(runCtx, func(execution.Operation) (func(), bool) {
 						// A positive F is an emergency guard; zero has no Runner gate.
 						// P/R belong only to actual Query admission in Access.
@@ -2089,6 +2099,9 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 	scheduled := result.scheduled
 	if dispatcher.active[scheduled.queryGroup] == scheduled.lifecycle {
 		delete(dispatcher.active, scheduled.queryGroup)
+	}
+	if result.ran {
+		dispatcher.bundle.noteTimelineReading(scheduled.queryGroup, result.attempted, result.outcome)
 	}
 	dispatcher.recordDueBound(result)
 	if dispatcher.oneShotTargets[scheduled.queryGroup] == scheduled.lifecycle {
@@ -2743,6 +2756,7 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 		return err
 	}
 	registration.Declined = bundle.declinedRegistration()
+	registration.UnreadableTimelines, registration.UnreadableTimelinesTotal = bundle.unreadableTimelinesRegistration()
 	if err := bundle.dependencies.Ownership.RegisterWorker(ctx, registration); err != nil {
 		return fmt.Errorf("phase-two register worker as %s: %w", readiness, err)
 	}
@@ -3563,6 +3577,8 @@ func (bundle *phaseTwoWorkerBundle) setRunnerLocked(
 
 func (bundle *phaseTwoWorkerBundle) removeRunnerLocked(queryGroup execution.QueryGroupIdentity) {
 	delete(bundle.runners, queryGroup)
+	// Not owned here any more: its timeline is its next owner's to report.
+	delete(bundle.unreadableTimelines, queryGroup)
 	bundle.setOwnedQueryGroupsLocked()
 	// A Query Group no longer owned is no longer rechecked. The lookback
 	// never takes the bundle's lock under its own, so this order is safe.
@@ -3667,6 +3683,63 @@ func (bundle *phaseTwoWorkerBundle) outputSinkChanged(state outputSinkState) {
 		bundle.observe(context.Background(), observability.ComponentRuntime, observability.StageStartup,
 			observability.ResultDegraded, errors.New("output sink is not open: "+state.LastFailure))
 	}
+}
+
+// noteTimelineReading keeps the unreadable-timeline names in step with what
+// this replica's rounds meet. A round that asked for a Slot and met a
+// timeline that does not decode (SCHEDULE_UNREADABLE) names its Query Group;
+// a later round of it that ran a Slot - the source read the timeline to
+// freeze it - drops the name. A round that did not ask the source (not due,
+// backing off) or that the source refused for another reason, before or
+// beside the timeline, says nothing about the bytes and leaves the name as
+// it is: dropping it there would have the name come and go between
+// heartbeats while the timeline stayed unreadable. Only an owned Query
+// Group is named.
+func (bundle *phaseTwoWorkerBundle) noteTimelineReading(queryGroup execution.QueryGroupIdentity, attempted bool, outcome execution.SlotExecutionResult) {
+	if !attempted {
+		return
+	}
+	unreadable := outcome.ReasonCode == execution.ReasonCode(contract.ReasonScheduleUnreadable)
+	if !unreadable && outcome.SourceRetry {
+		return
+	}
+	bundle.mu.Lock()
+	_, named := bundle.unreadableTimelines[queryGroup]
+	_, owned := bundle.runners[queryGroup]
+	switch {
+	case unreadable && !named && owned:
+		if bundle.unreadableTimelines == nil {
+			bundle.unreadableTimelines = make(map[execution.QueryGroupIdentity]struct{})
+		}
+		bundle.unreadableTimelines[queryGroup] = struct{}{}
+	case !unreadable && named:
+		delete(bundle.unreadableTimelines, queryGroup)
+	}
+	bundle.mu.Unlock()
+	if unreadable && !named && owned {
+		bundle.dependencies.Recorder.RecordTimelineUnreadableReported()
+	}
+}
+
+// unreadableTimelinesRegistration is the names the registration carries -
+// the first ownership.MaxReportedUnreadableTimelines in Query Group order -
+// and how many there are in all.
+func (bundle *phaseTwoWorkerBundle) unreadableTimelinesRegistration() ([]string, int) {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	if len(bundle.unreadableTimelines) == 0 {
+		return nil, 0
+	}
+	names := make([]string, 0, len(bundle.unreadableTimelines))
+	for queryGroup := range bundle.unreadableTimelines {
+		names = append(names, string(queryGroup))
+	}
+	sort.Strings(names)
+	total := len(names)
+	if total > ownership.MaxReportedUnreadableTimelines {
+		names = names[:ownership.MaxReportedUnreadableTimelines]
+	}
+	return names, total
 }
 
 // refreshAndReconcile runs one control tick. Dependency failures never stop

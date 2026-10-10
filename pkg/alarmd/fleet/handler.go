@@ -1736,6 +1736,11 @@ type PrunedSkipRef struct {
 	SpanSeconds   int64     `json:"span_seconds"`
 	At            time.Time `json:"at"`
 	DiscardedSlot int64     `json:"discarded_slot,omitempty"`
+	// Reason is the word the span was lost under (PrunedSkip.Code): a pruned
+	// timeline, or one that would not decode and was rewritten at
+	// RewrittenAt.
+	Reason      string     `json:"reason,omitempty"`
+	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
 }
 
 // prunedSkipList orders the lost spans longest first, because the length of the
@@ -1748,7 +1753,7 @@ func prunedSkipList(skips map[string]PrunedSkip) []PrunedSkipRef {
 	for queryGroup, skip := range skips {
 		list = append(list, PrunedSkipRef{
 			QueryGroup: queryGroup, SpanSeconds: int64(skip.Spanning() / time.Second),
-			At: skip.At, DiscardedSlot: skip.DiscardedSlot,
+			At: skip.At, DiscardedSlot: skip.DiscardedSlot, Reason: skip.Code(), RewrittenAt: skip.RewrittenAt,
 		})
 	}
 	sort.Slice(list, func(left, right int) bool { return prunedSkipBefore(list[left], list[right]) })

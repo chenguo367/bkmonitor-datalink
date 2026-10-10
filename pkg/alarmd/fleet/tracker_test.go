@@ -1972,3 +1972,62 @@ func TestAnObjectRefusedEveryRoundStandsOnTheRefusalsLine(t *testing.T) {
 		t.Fatalf("check = %q under %v, want the refusal's line", check, under)
 	}
 }
+
+// A lost span is filed under the word it was recorded under. Every applied
+// skip used to be kept as a pruned one, so a span lost with a timeline that
+// stopped decoding - rewritten by the Leader - read as retention, and a span
+// the Plan was simply not in the active set for read as a loss at all. The
+// rewritten one keeps its own word, its facets and when the timeline was
+// rewritten; the absent-Plan one is not kept; a record from a publisher that
+// sent no word is still read as pruned.
+func TestALostSpanIsFiledUnderTheWordItWasRecordedUnder(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	rewrittenAt := now.Add(-time.Minute).UnixMilli()
+	advance := func(queryGroup, reason string, rewritten int64) {
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageScheduleCursorAdvanced,
+			Trace: observability.TraceFields{QueryGroupKey: queryGroup}, Result: observability.ResultSuccess,
+			CursorAdvance: &observability.CursorAdvanceFacts{From: 120, To: 600, Status: observability.CursorAdvanceApplied,
+				Reason: reason, RepairedAtUnixMilli: rewritten},
+		})
+	}
+	advance("qg-rewritten", "SCHEDULE_REPAIRED", rewrittenAt)
+	advance("qg-reopened", "SCHEDULE_REOPENED", rewrittenAt)
+	advance("qg-absent-plan", "PLAN_NOT_ACTIVE", 0)
+	advance("qg-legacy", "", 0)
+
+	skips := tracker.PrunedSkips()
+	rewritten, kept := skips["qg-rewritten"]
+	if !kept || rewritten.Code() != "SCHEDULE_REPAIRED" || rewritten.RewrittenAt == nil || rewritten.RewrittenAt.UnixMilli() != rewrittenAt {
+		t.Fatalf("the rewritten timeline's span = %+v (kept %v), want it under SCHEDULE_REPAIRED with when it was rewritten", rewritten, kept)
+	}
+	if _, kept := skips["qg-absent-plan"]; kept {
+		t.Fatal("a span the Plan was absent for was kept as a loss")
+	}
+	if legacy, kept := skips["qg-legacy"]; !kept || legacy.Code() != "SCHEDULE_PRUNED" {
+		t.Fatalf("a span without a word = %+v (kept %v), want it read as pruned", legacy, kept)
+	}
+
+	view := &View{PrunedSkips: skips}
+	rows := map[string]Anomaly{}
+	for _, row := range UnderCheck(CheckTimelinePruned, "", view, now) {
+		rows[row.QueryGroup] = row
+	}
+	row, listed := rows["qg-rewritten"]
+	if !listed || row.ReasonCode != "SCHEDULE_REPAIRED" || row.Blocked == nil || row.Blocked.Class == ClassRetention ||
+		row.Skip == nil || row.Skip.RewrittenAt == nil {
+		t.Fatalf("the rewritten timeline's row = %+v, want it under its own word, not read as retention, carrying when", row)
+	}
+	if legacy, listed := rows["qg-legacy"]; !listed || legacy.ReasonCode != "SCHEDULE_PRUNED" || legacy.Blocked.Class != ClassRetention {
+		t.Fatalf("the word-less span's row = %+v, want it read as retention as before", legacy)
+	}
+	// A span lost with a key the store no longer had names the store.
+	if reopened, listed := rows["qg-reopened"]; !listed || reopened.ReasonCode != "SCHEDULE_REOPENED" || reopened.Blocked == nil ||
+		reopened.Blocked.Dependency != DependencyRedis || reopened.Skip == nil || reopened.Skip.RewrittenAt == nil {
+		t.Fatalf("the reopened timeline's row = %+v, want it under its own word, naming the store, carrying when", reopened)
+	}
+	if refs := prunedSkipList(skips); len(refs) != 3 {
+		t.Fatalf("listed spans = %+v, want the rewritten, the reopened and the pruned one", refs)
+	}
+}

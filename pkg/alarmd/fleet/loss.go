@@ -245,7 +245,19 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 		each(queryGroup, check, code, skip)
 	}
 	for queryGroup, pruned := range view.PrunedSkips {
-		each(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED", SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To,
-			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies, IntervalSeconds: pruned.IntervalSeconds})
+		// The record's own word decides where it is filed, so a span lost to
+		// a rewritten timeline carries SCHEDULE_REPAIRED and its facets, not
+		// retention's; both are spans the timeline lost, on the same line.
+		code := pruned.Code()
+		check := CheckTimelinePruned
+		if verdict, known := codeChecks[code]; known {
+			if verdict.normal {
+				continue
+			}
+			check = verdict.check
+		}
+		each(queryGroup, check, code, SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To,
+			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies, IntervalSeconds: pruned.IntervalSeconds,
+			RewrittenAt: pruned.RewrittenAt})
 	}
 }

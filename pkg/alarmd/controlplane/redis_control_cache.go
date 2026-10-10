@@ -859,6 +859,8 @@ func (repository *RedisCatalogRepository) loadScheduleTimelineAt(
 // readScheduleTimeline reads and decodes one timeline live. The bytes come
 // back with it because a compare-and-set needs the exact persisted value it is
 // replacing, and re-marshalling the decoded object would not reproduce it.
+// They come back with a decode failure too: the rewrite of a timeline that
+// does not decode is fenced on the bytes that did not.
 func (repository *RedisCatalogRepository) readScheduleTimeline(
 	ctx context.Context,
 	queryGroup execution.QueryGroupIdentity,
@@ -872,7 +874,7 @@ func (repository *RedisCatalogRepository) readScheduleTimeline(
 	}
 	timeline, err := decodeScheduleTimeline(queryGroup, payload)
 	if err != nil {
-		return persistedScheduleTimeline{}, nil, err
+		return persistedScheduleTimeline{}, payload, err
 	}
 	return timeline, payload, nil
 }
