@@ -548,3 +548,28 @@ func TestReportersOfOneStrategyAreSummedAndTheirRetriesAreNot(t *testing.T) {
 		t.Fatalf("the strategy's own count = %d, want 12", got)
 	}
 }
+
+// A close whose request cannot be built - the strategy's revision not
+// positive, or its business zero - is counted as close_identity_invalid,
+// the word the effective-time close uses for the same facts, and not as a
+// send that failed: nothing was sent. It is forgotten, as before: those
+// facts change only when the writer's data does.
+func TestACloseWhoseIdentityCannotBeBuiltIsNamedNotSendFailed(t *testing.T) {
+	for name, mutate := range map[string]func(*Drop){
+		"revision not positive": func(d *Drop) { d.StrategyRevision = 0 },
+		"business zero":         func(d *Drop) { d.BusinessID = "0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			member := fp(1)
+			f := newFixture(openSet(ownSrc, member), nil)
+			d := drop(member, 0)
+			mutate(&d)
+			f.slot(1700000000, d)
+			f.slot(1700000060, d)
+			f.want(t, name, map[string]uint64{OutcomeUnconfirmed: 1, OutcomeIdentityInvalid: 1})
+			if len(f.writer.batches) != 0 {
+				t.Fatalf("sent %v, want nothing", f.writer.batches)
+			}
+		})
+	}
+}

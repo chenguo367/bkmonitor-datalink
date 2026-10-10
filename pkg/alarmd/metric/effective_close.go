@@ -42,7 +42,9 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"close_identity_invalid name the judgement that could not be made; calendar_deletion_unsettled is a "+
 				"close held back because a calendar the strategy reads deleted has not settled as a deletion: read "+
 				"deleted for too short a time, read present elsewhere, or every calendar this replica's strategies "+
-				"name read deleted at once, a calendar source gone. Every cell exists from the "+
+				"name read deleted at once, a calendar source gone; close_boundary_active is a Plan the recheck just "+
+				"before a send found active again, its batch not sent while the Query Group's other Plans go on "+
+				"(effective_time_unknown counts the same recheck finding the time unreadable). Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }
