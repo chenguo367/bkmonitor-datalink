@@ -2597,6 +2597,8 @@ func (*callbackPhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string
 	return "", time.Time{}, false
 }
 
+func (*callbackPhaseTwoQueryGroup) ExecutionDeadline() time.Time { return time.Time{} }
+
 func (*callbackPhaseTwoQueryGroup) MaintainLease(ctx context.Context, _, _ time.Duration) error {
 	<-ctx.Done()
 	return ctx.Err()
@@ -3064,3 +3066,5 @@ const eventWatchdog = 10 * time.Second
 func (*fakePhaseTwoQueryGroup) DeclineHung(time.Time, time.Duration) (string, time.Time, bool) {
 	return "", time.Time{}, false
 }
+
+func (*fakePhaseTwoQueryGroup) ExecutionDeadline() time.Time { return time.Time{} }

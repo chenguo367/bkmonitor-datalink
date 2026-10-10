@@ -39,6 +39,8 @@ func (occupancyRunner) DeclineHung(time.Time, time.Duration) (string, time.Time,
 	return "", time.Time{}, false
 }
 
+func (occupancyRunner) ExecutionDeadline() time.Time { return time.Time{} }
+
 func (r occupancyRunner) MaintainLease(context.Context, time.Duration, time.Duration) error {
 	return nil
 }

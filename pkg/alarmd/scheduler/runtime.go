@@ -738,6 +738,16 @@ func (runner *Runner) DeclineHung(now time.Time, grace time.Duration) (string, t
 	return runner.stage.Decline(now, grace)
 }
 
+// ExecutionDeadline is the deadline the execution in flight runs under, as
+// DeclineHung judges it, zero when none is in flight or it has none yet. It
+// claims nothing.
+func (runner *Runner) ExecutionDeadline() time.Time {
+	if runner == nil {
+		return time.Time{}
+	}
+	return runner.stage.Deadline()
+}
+
 // NextReadyAt reports when the Runner can make its next QG-local attempt.
 // A zero value means there is no active source or execution backoff.
 func (runner *Runner) NextReadyAt() time.Time {

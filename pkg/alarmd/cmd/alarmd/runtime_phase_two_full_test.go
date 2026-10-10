@@ -2088,6 +2088,8 @@ func (*recordingPhaseTwoQueryGroupRuntime) DeclineHung(time.Time, time.Duration)
 	return "", time.Time{}, false
 }
 
+func (*recordingPhaseTwoQueryGroupRuntime) ExecutionDeadline() time.Time { return time.Time{} }
+
 func (runtime *recordingPhaseTwoQueryGroupRuntime) MaintainLease(ctx context.Context, interval, ttl time.Duration) error {
 	return runtime.next.MaintainLease(ctx, interval, ttl)
 }
