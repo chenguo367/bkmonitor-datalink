@@ -75,6 +75,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	if id := facts.HostNaming.IDKey; id != "" {
 		if host, found := index.Lookup(id); found {
 			placeByID(facts, id, host)
+			facts.PlacedByHostID = true
 			facts.ReportedAddressDiffers = reportedAddressDiffers(dimensions, host)
 			return
 		}
@@ -92,6 +93,7 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		}
 		if found {
 			placeByAgent(facts, host)
+			facts.PlacedByHostID = true
 			facts.ReportedAddressDiffers = reportedAddressDiffers(dimensions, host)
 			return
 		}

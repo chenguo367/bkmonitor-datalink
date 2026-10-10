@@ -12,26 +12,36 @@ package metric
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// Both cells read zero before anything is counted - "about zero" is the
-// reading the counter exists for, and a missing series is not one - and a
-// count lands under whether the Plan groups by bk_target_ip.
-func TestADifferingAddressIsCountedUnderItsGrouping(t *testing.T) {
+// Every cell of both counters reads zero before anything is counted - "about
+// zero" is the reading they exist for, and a missing series is not one. A
+// placement by id or agent counts under the Plan's grouping, and counts as
+// differing too only when its address differs: the differing ones are a
+// part of the placed ones, never more.
+func TestAPlacementByIDIsCountedAndADifferingAddressWithinIt(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	// Counted before anything here asks for a cell, which would create it.
-	if cells := testutil.CollectAndCount(r.phaseTwo.cmdbAddressDiffers); cells != 2 {
-		t.Fatalf("%d cells from start, want both", cells)
+	for name, vec := range map[string]*prometheus.CounterVec{"placed": r.phaseTwo.cmdbPlacedByHostID, "differs": r.phaseTwo.cmdbAddressDiffers} {
+		if cells := testutil.CollectAndCount(vec); cells != 2 {
+			t.Fatalf("%s: %d cells from start, want both", name, cells)
+		}
 	}
-	grouped, ungrouped := r.phaseTwo.cmdbAddressDiffers.WithLabelValues("true"), r.phaseTwo.cmdbAddressDiffers.WithLabelValues("false")
-	if testutil.ToFloat64(grouped) != 0 || testutil.ToFloat64(ungrouped) != 0 {
-		t.Fatal("the two cells do not start at zero")
+	placed := func(grouped string) float64 {
+		return testutil.ToFloat64(r.phaseTwo.cmdbPlacedByHostID.WithLabelValues(grouped))
 	}
-	r.RecordAddressDiffers(true)
-	r.RecordAddressDiffers(true)
-	r.RecordAddressDiffers(false)
-	if testutil.ToFloat64(grouped) != 2 || testutil.ToFloat64(ungrouped) != 1 {
-		t.Fatalf("grouped %v, ungrouped %v; want 2 and 1", testutil.ToFloat64(grouped), testutil.ToFloat64(ungrouped))
+	differs := func(grouped string) float64 {
+		return testutil.ToFloat64(r.phaseTwo.cmdbAddressDiffers.WithLabelValues(grouped))
+	}
+	if placed("true") != 0 || placed("false") != 0 || differs("true") != 0 || differs("false") != 0 {
+		t.Fatal("the cells do not start at zero")
+	}
+	r.RecordHostPlacement(true, true)
+	r.RecordHostPlacement(true, false)
+	r.RecordHostPlacement(false, false)
+	if placed("true") != 2 || placed("false") != 1 || differs("true") != 1 || differs("false") != 0 {
+		t.Fatalf("placed %v/%v, differing %v/%v; want 2/1 and 1/0", placed("true"), placed("false"), differs("true"), differs("false"))
 	}
 }

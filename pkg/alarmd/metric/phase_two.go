@@ -184,6 +184,7 @@ type phaseTwoMetrics struct {
 	algorithmInputs                 *prometheus.CounterVec
 	seriesAdmission                 *prometheus.CounterVec
 	cmdbAddressDiffers              *prometheus.CounterVec
+	cmdbPlacedByHostID              *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
 	cmdbIndexBusinessMappings       *prometheus.GaugeVec
@@ -1375,14 +1376,26 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"\"true\" these are the series whose alert identity differs from Python's. Counted per admitted series " +
 			"per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the " +
 			"pairs are about the rate times its period; it says whether this happens and roughly how much, and a " +
-			"non-zero true is followed by reading the objects. The address is compared exactly, as Python's dedupe " +
+			"non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, " +
+			"the count these are a part of, which tells a zero here from a branch never taken. The address is " +
+			"compared exactly, as Python's dedupe " +
 			"sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. " +
 			"Read by the decision whether an alert's identity follows CMDB's address as Python's does, and by any " +
 			"migration from Python that needs alert continuity. Remove it once that decision is recorded, unless " +
 			"the decision keeps it as a migration check.",
 	}, []string{"grouped_by_target_ip"})
+	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
+		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own " +
+			"bk_target_ip, by whether the Plan's alert identity groups by bk_target_ip: the branch Python's fuller " +
+			"overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at " +
+			"the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells " +
+			"\"placed this way and the address always the host's\" (this one rising) from \"never placed this way\" " +
+			"(this one zero too). Retired with it.",
+	}, []string{"grouped_by_target_ip"})
 	for _, grouped := range []string{"true", "false"} {
 		metrics.cmdbAddressDiffers.WithLabelValues(grouped)
+		metrics.cmdbPlacedByHostID.WithLabelValues(grouped)
 	}
 	metrics.cmdbIndexHosts = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_hosts",
@@ -1714,7 +1727,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
