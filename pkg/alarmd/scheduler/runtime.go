@@ -47,7 +47,8 @@ func (err *SourceBlockedError) Error() string {
 func (err *SourceBlockedError) Unwrap() error { return err.Err }
 
 // ReasonCode is the word a blocked round is named by: SCHEDULE_UNREADABLE
-// when what blocked it is a schedule timeline that does not decode, and
+// when what blocked it is a schedule timeline that does not decode,
+// SCHEDULE_MISSING when the timeline's key is not there at all, and
 // BLOCKED_EXACT_SET_UNAVAILABLE for the rest. The timeline case used to read
 // as the other word, which says the control plane handed nothing to run;
 // told apart, a rollout's old build that cannot read its new timelines is a
@@ -56,6 +57,9 @@ func (err *SourceBlockedError) ReasonCode() execution.ReasonCode {
 	var undecodable *controlplane.DeterministicScheduleError
 	if err != nil && errors.As(err.Err, &undecodable) {
 		return execution.ReasonCode(contract.ReasonScheduleUnreadable)
+	}
+	if err != nil && errors.Is(err.Err, controlplane.ErrScheduleTimelineAbsent) {
+		return execution.ReasonCode(contract.ReasonScheduleMissing)
 	}
 	return execution.ReasonBlockedExactSetUnavailable
 }

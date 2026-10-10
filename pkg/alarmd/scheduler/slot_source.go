@@ -433,7 +433,8 @@ func (source *ProductionSlotSource) Next(
 	// classification returned the failure raw, so for a Query Group with
 	// Progress - nearly every one - the round failed unclassified and the
 	// Worker never named it SCHEDULE_UNREADABLE, the word its registration
-	// reports the timeline to the leader by.
+	// reports the timeline to the leader by. A timeline key that is not there
+	// at all is blocked the same way, by SCHEDULE_MISSING.
 	defer func() { nextErr = blockUndecodableTimeline(nextErr) }()
 	if source == nil || queryGroup == "" || queryGroup != source.queryGroup {
 		return FrozenSlot{}, false, SlotDueFacts{}, errors.New("alarmd scheduler: SlotSource Query Group mismatch")
@@ -1620,13 +1621,15 @@ func (source *ProductionSlotSource) observeCursorAdvance(
 }
 
 // blockUndecodableTimeline is a source error that is a timeline which does
-// not decode, as a blocked source; every other error as it is. A refusal the
-// source already classified keeps its classification.
+// not decode, or a timeline key that is not there at all, as a blocked
+// source; every other error as it is. A refusal the source already
+// classified keeps its classification.
 func blockUndecodableTimeline(err error) error {
 	var undecodable *controlplane.DeterministicScheduleError
 	var blocked *SourceBlockedError
 	var retry *SourceRetryError
-	if err == nil || !errors.As(err, &undecodable) || errors.As(err, &blocked) || errors.As(err, &retry) {
+	timeline := errors.As(err, &undecodable) || errors.Is(err, controlplane.ErrScheduleTimelineAbsent)
+	if err == nil || !timeline || errors.As(err, &blocked) || errors.As(err, &retry) {
 		return err
 	}
 	return &SourceBlockedError{Err: err}

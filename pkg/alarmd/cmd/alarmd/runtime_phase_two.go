@@ -3768,7 +3768,8 @@ func (bundle *phaseTwoWorkerBundle) outputSinkChanged(state outputSinkState) {
 
 // noteTimelineReading keeps the unreadable-timeline names in step with what
 // this replica's rounds meet. A round that asked for a Slot and met a
-// timeline that does not decode (SCHEDULE_UNREADABLE) names its Query Group;
+// timeline that does not decode (SCHEDULE_UNREADABLE), or a timeline key
+// that is not there at all (SCHEDULE_MISSING), names its Query Group;
 // a later round of it that ran a Slot - the source read the timeline to
 // freeze it - drops the name. A round that did not ask the source (not due,
 // backing off) or that the source refused for another reason, before or
@@ -3780,7 +3781,8 @@ func (bundle *phaseTwoWorkerBundle) noteTimelineReading(queryGroup execution.Que
 	if !attempted {
 		return
 	}
-	unreadable := outcome.ReasonCode == execution.ReasonCode(contract.ReasonScheduleUnreadable)
+	unreadable := outcome.ReasonCode == execution.ReasonCode(contract.ReasonScheduleUnreadable) ||
+		outcome.ReasonCode == execution.ReasonCode(contract.ReasonScheduleMissing)
 	if !unreadable && outcome.SourceRetry {
 		return
 	}

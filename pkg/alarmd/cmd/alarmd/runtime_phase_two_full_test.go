@@ -351,9 +351,19 @@ func TestProductionPhaseTwoBundleRebuildsExpiredSnapshotReferencedByPersistentAc
 	if err != nil {
 		t.Fatalf("recovered activation error = %v", err)
 	}
-	if newActivation.Current != oldActivation.Current || newActivation.RecordRevision != oldActivation.RecordRevision {
-		t.Fatalf("expired publication restoration mutated frozen Activation: old=%+v new=%+v",
-			oldActivation, newActivation)
+	// The restoration keeps the publication the activation runs. The keys
+	// deleted above take the Query Group's timeline too, and a missing
+	// timeline is named and opened again under that same publication: the
+	// one write that moves the activation's record revision, by one, and
+	// nothing else.
+	reopened := recoveredControl.dependencies.Repository.(*controlplane.RedisCatalogRepository).TimelineRepairCounts()[controlplane.TimelineRepairReopened]
+	if newActivation.Current != oldActivation.Current || newActivation.RecordRevision != oldActivation.RecordRevision+1 || reopened != 1 {
+		t.Fatalf("expired publication restoration mutated frozen Activation: old=%+v new=%+v reopened=%d, "+
+			"want the same publication and one revision for the reopened timeline", oldActivation, newActivation, reopened)
+	}
+	timelineKey := catalogPrefix + ":schedule_timeline:" + string(recovered.queryGroups[0])
+	if exists, err := redisClient.Exists(ctx, timelineKey).Result(); err != nil || exists != 1 {
+		t.Fatalf("the missing timeline was not opened again: exists=%d error=%v", exists, err)
 	}
 	if _, err := loadPublishedSnapshot(ctx, recoveredControl.dependencies.Repository, newActivation.Current); err != nil {
 		t.Fatalf("recovered active Snapshot is unreadable: %v", err)
