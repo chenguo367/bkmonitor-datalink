@@ -10,8 +10,6 @@ package obchannel
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +17,6 @@ import (
 	"math"
 	"net/http"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +25,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
 const (
@@ -120,13 +118,20 @@ type Availability struct {
 	Reason    string `json:"reason,omitempty"`
 }
 type Operation struct {
-	ID            string
-	Summary       string
-	EvidenceScope string
-	Targetable    bool
+	ID string
+	// ContractVersion versions execution semantics not expressed by schemas.
+	// Bump it when validation or execution changes without a schema change.
+	ContractVersion string
+	Summary         string
+	EvidenceScope   string
+	Targetable      bool
 	// DefaultOwnerParam selects an execution owner when no explicit target is
 	// supplied. The named domain field must be a required string identity.
 	DefaultOwnerParam string
+	// DefaultControlLeader identifies operations whose complete untargeted
+	// answer requires the control Leader's in-memory facts. An ingress may
+	// enable this route when it does not host the business runtime.
+	DefaultControlLeader bool
 	// RouteWhenElsewhere is asked about an untargeted answer: the Query Group
 	// whose lease holder to ask the same read of, when the answering replica
 	// could only say which replica holds the answer. Only then is the read
@@ -144,22 +149,23 @@ type Operation struct {
 	Run                func(context.Context, Params) Outcome
 }
 type Options struct {
-	Auth          Authorizer
-	EnvironmentID string
-	Replica       string
-	Build         string
-	Concurrency   int
-	Operations    []Operation
-	Now           func() time.Time
-	Incarnation   string
-	Route         func(context.Context, Invocation) Response
+	Auth                 Authorizer
+	EnvironmentID        string
+	Replica              string
+	Build                string
+	Concurrency          int
+	Operations           []Operation
+	Now                  func() time.Time
+	Incarnation          string
+	Route                func(context.Context, Invocation) Response
+	Executor             *EvidenceExecutor
+	RouteControlDefaults bool
+	RequireWorkerTarget  map[string]bool
+	Roles                roles.Set
 }
 type Channel struct {
+	*EvidenceExecutor
 	options   Options
-	ops       map[string]Operation
-	ordered   []string
-	revision  string
-	slots     chan struct{}
 	httpSlots chan struct{}
 	// windows is each session's spend of its invocation budget in the
 	// current clock minute, keyed by session ID; see allowInvoke.
@@ -231,6 +237,7 @@ type Meta struct {
 	RespondedAt   time.Time    `json:"responded_at"`
 	Session       *SessionMeta `json:"session,omitempty"`
 	Incarnation   string       `json:"incarnation,omitempty"`
+	Roles         roles.Set    `json:"roles,omitempty"`
 	Via           []string     `json:"via,omitempty"`
 	Owner         *OwnerMeta   `json:"owner,omitempty"`
 	// ControlLeader is the lease a control_leader read was resolved from:
@@ -270,60 +277,18 @@ func New(options Options) (*Channel, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.Concurrency <= 0 {
-		options.Concurrency = 1
+	executor := options.Executor
+	if executor == nil {
+		var err error
+		executor, err = NewEvidenceExecutor(ExecutorOptions{EnvironmentID: options.EnvironmentID, Replica: options.Replica, Build: options.Build,
+			Incarnation: options.Incarnation, Concurrency: options.Concurrency, Operations: options.Operations, Now: options.Now, Roles: options.Roles})
+		if err != nil {
+			return nil, err
+		}
+	} else if executor.options.EnvironmentID != options.EnvironmentID || executor.options.Replica != options.Replica || executor.options.Incarnation != options.Incarnation {
+		return nil, errors.New("OB channel and evidence executor identities must match")
 	}
-	if options.Concurrency > 4 {
-		options.Concurrency = 4
-	}
-	c := &Channel{options: options, ops: make(map[string]Operation), slots: make(chan struct{}, options.Concurrency), httpSlots: make(chan struct{}, 4),
-		windows: make(map[string]*sessionWindow)}
-	for _, op := range options.Operations {
-		if op.ID == "" || op.Run == nil || op.Summary == "" {
-			return nil, errors.New("invalid OB operation registration")
-		}
-		if _, found := c.ops[op.ID]; found {
-			return nil, fmt.Errorf("duplicate OB operation %q", op.ID)
-		}
-		if op.EvidenceScope == "" {
-			op.EvidenceScope = "deployment"
-		}
-		if op.Targetable {
-			for name := range targetFields() {
-				if _, found := op.Fields[name]; found {
-					return nil, fmt.Errorf("operation %q uses reserved targeting field %q", op.ID, name)
-				}
-			}
-		}
-		if op.DefaultOwnerParam != "" {
-			field, exists := op.Fields[op.DefaultOwnerParam]
-			required := false
-			for _, name := range op.Required {
-				required = required || name == op.DefaultOwnerParam
-			}
-			if !op.Targetable || !exists || field.Type != "string" || !required {
-				return nil, fmt.Errorf("invalid default owner field for %q", op.ID)
-			}
-		}
-		for _, name := range op.Required {
-			if _, ok := op.Fields[name]; !ok {
-				return nil, fmt.Errorf("unknown required field %q", name)
-			}
-		}
-		c.ops[op.ID] = op
-		c.ordered = append(c.ordered, op.ID)
-	}
-	sort.Strings(c.ordered)
-	contracts := make([]any, 0, len(c.ordered))
-	for _, id := range c.ordered {
-		contracts = append(contracts, describe(c.ops[id]))
-	}
-	encoded, err := json.Marshal(contracts)
-	if err != nil {
-		return nil, err
-	}
-	digest := sha256.Sum256(encoded)
-	c.revision = hex.EncodeToString(digest[:])
+	c := &Channel{EvidenceExecutor: executor, options: options, httpSlots: make(chan struct{}, 4), windows: make(map[string]*sessionWindow)}
 	return c, nil
 }
 
@@ -427,6 +392,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Mode == "describe" {
 		value := describe(op)
+		value["operation_contract_revision"] = c.OperationContractRevision(op.ID)
 		value["availability"] = available(op)
 		c.write(w, 200, Response{Status: "ok", Summary: op.Summary, Result: value, Evidence: Evidence{Complete: true}, Meta: meta})
 		return
@@ -438,6 +404,13 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	params, target, err := invocationParams(op, req.Params)
 	if err != nil {
 		fail(400, "invalid_input", err.Error())
+		return
+	}
+	if !target.Explicit() && c.options.RouteControlDefaults && op.DefaultControlLeader {
+		target.ControlLeader = true
+	}
+	if !target.Explicit() && c.options.RequireWorkerTarget[op.ID] {
+		fail(400, "worker_target_required", "This operation requires an explicit business Worker target on this channel instance.")
 		return
 	}
 	// The session's own budget, spent only by an invocation that would
@@ -471,7 +444,8 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failAuth(err, "Session unavailable at routing admission.")
 			return
 		}
-		out := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
+		out := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID), Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
+		out.Meta.Revision = c.revision
 		out.Meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
 		code := 200
 		if out.Status == "error" {
@@ -506,9 +480,10 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out := c.run(ctx, op, params, Target{}, meta)
 	if op.RouteWhenElsewhere != nil && c.options.Route != nil && out.Status != "error" {
 		if group, elsewhere := op.RouteWhenElsewhere(params, out.Result); elsewhere {
-			routed := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision,
+			routed := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID),
 				Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: Target{OwnerQueryGroup: group}})
 			if routed.Status != "error" {
+				routed.Meta.Revision = c.revision
 				routed.Meta.Session = meta.Session
 				out = routed
 			} else {
@@ -547,7 +522,7 @@ func (c *Channel) write(w http.ResponseWriter, status int, response Response) {
 	_, _ = w.Write(encoded)
 }
 
-func (c *Channel) prepareResponse(response Response) Response {
+func (c *EvidenceExecutor) prepareResponse(response Response) Response {
 	if response.Meta.RespondedAt.IsZero() {
 		response.Meta.RespondedAt = c.options.Now().UTC()
 	}
@@ -619,9 +594,12 @@ func describe(op Operation) map[string]any {
 		}
 		input["allOf"] = rules
 	}
-	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "contract_version": op.ContractVersion, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
 	if op.DefaultOwnerParam != "" {
 		value["default_owner_parameter"] = op.DefaultOwnerParam
+	}
+	if op.DefaultControlLeader {
+		value["default_control_leader"] = true
 	}
 	return value
 }

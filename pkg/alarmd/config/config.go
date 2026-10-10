@@ -28,6 +28,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
@@ -285,6 +286,9 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 }
 
 type Config struct {
+	// Roles is omitted for the default shared process. An explicit selection
+	// is validated before dependencies are checked.
+	Roles         roles.Set             `yaml:"roles,omitempty"`
 	HTTP          HTTPConfig            `yaml:"http"`
 	CLI           CLIConfig             `yaml:"cli"`
 	Kafka         KafkaConfig           `yaml:"kafka"`
@@ -613,8 +617,22 @@ func (c *Config) resolveCompatibilityServiceTimeouts() {
 }
 
 func Load(path string) (Config, error) {
+	return LoadWithRoles(path, nil)
+}
+
+// LoadWithRoles applies a CLI selection before validating dependencies. A nil
+// override keeps the file's selection; a non-nil empty override is refused.
+func LoadWithRoles(path string, override roles.Set) (Config, error) {
 	cfg := Default().WithContainerCapacity()
 	if path == "" {
+		if override != nil {
+			cfg.Roles = append(roles.Set{}, override...)
+		}
+		selected, err := roles.Resolve(cfg.Roles)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Roles = selected
 		cfg.resolvePlatformCacheRedis()
 		cfg.resolveCompatibilityServiceTimeouts()
 		cfg.resolveCompatibilityPodCache()
@@ -652,6 +670,11 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	// yaml.v3 decodes an explicit null as nil, just like omission. Preserve
+	// the declaration so roles: null cannot silently enable every role.
+	if cfg.Roles == nil && yamlRolesDeclared(&document) {
+		cfg.Roles = roles.Set{}
+	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -660,21 +683,75 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 
+	if override != nil {
+		cfg.Roles = append(roles.Set{}, override...)
+	}
+	selected, err := roles.Resolve(cfg.Roles)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Roles = selected
 	cfg.resolvePlatformCacheRedis()
 	cfg.resolveCompatibilityServiceTimeouts()
 	cfg.resolveCompatibilityPodCache()
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
-	if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
-		return Config{}, err
+	if cfg.HasRole(roles.Control) || cfg.HasRole(roles.Worker) {
+		if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
+			return Config{}, err
+		}
 	}
-	if err := cfg.CLI.resolveAdminKeyFromEnvironment(); err != nil {
-		return Config{}, err
+	if cfg.HasRole(roles.Channel) {
+		if err := cfg.CLI.resolveAdminKeyFromEnvironment(); err != nil {
+			return Config{}, err
+		}
+		cfg.CLI.resolveAdminKeySecret()
 	}
-	cfg.CLI.resolveAdminKeySecret()
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func yamlRolesDeclared(node *yaml.Node) bool {
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		return yamlRolesDeclared(node.Content[0])
+	}
+	if node.Kind == yaml.AliasNode {
+		return yamlRolesDeclared(node.Alias)
+	}
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == "roles" {
+			return true
+		}
+		if node.Content[index].Value == "<<" {
+			merged := node.Content[index+1]
+			if yamlRolesDeclared(merged) {
+				return true
+			}
+			if merged.Kind == yaml.SequenceNode {
+				for _, entry := range merged.Content {
+					if yamlRolesDeclared(entry) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// EffectiveRoles returns the resolved roles of a valid configuration without
+// exposing its backing slice. Invalid selections return no effective roles.
+func (c Config) EffectiveRoles() roles.Set {
+	selected, _ := roles.Resolve(c.Roles)
+	return selected
+}
+
+func (c Config) HasRole(role roles.Role) bool {
+	return c.EffectiveRoles().Has(role)
 }
 
 // PublicSurfaceRestrictionRequested is the configuration's half of the one
@@ -686,10 +763,13 @@ func Load(path string) (Config, error) {
 // restricting without it would leave no way in. No separate setting exists,
 // so the two cannot disagree.
 func (c Config) PublicSurfaceRestrictionRequested() bool {
-	return c.CLI.Enabled()
+	return c.HasRole(roles.Channel) && c.CLI.Enabled()
 }
 
 func (c Config) Validate() error {
+	if _, err := roles.Resolve(c.Roles); err != nil {
+		return err
+	}
 	if err := c.validateCommon(); err != nil {
 		return err
 	}
@@ -781,26 +861,44 @@ func (c Config) validateCommon() error {
 }
 
 func (c Config) validateGoAccessRuntime() error {
-	if err := c.PhaseTwo.Linkd.Validate(); err != nil {
+	selected := c.EffectiveRoles()
+	business := selected.Has(roles.Control) || selected.Has(roles.Worker)
+	if business {
+		// Control emits source-driven global closes; Worker emits execution
+		// results. Both therefore retain the output and alert-link contracts.
+		if err := c.PhaseTwo.Linkd.Validate(); err != nil {
+			return err
+		}
+		if err := validatePhaseTwoKafkaOutput(c.Kafka); err != nil {
+			return fmt.Errorf("trigger event configuration: %w", err)
+		}
+		if err := c.Kafka.validateCompatibilityOutput(); err != nil {
+			return fmt.Errorf("compatibility output configuration: %w", err)
+		}
+	}
+	if err := c.validateRedis(); err != nil {
 		return err
 	}
-	if err := validatePhaseTwoKafkaOutput(c.Kafka); err != nil {
-		return fmt.Errorf("trigger event configuration: %w", err)
+	if business {
+		if err := c.Limits.validate(); err != nil {
+			return err
+		}
 	}
-	if err := c.Kafka.validateCompatibilityOutput(); err != nil {
-		return fmt.Errorf("compatibility output configuration: %w", err)
-	}
-	if err := c.validateSharedRuntime(); err != nil {
+	if err := c.PhaseTwo.validateRoles(selected); err != nil {
 		return err
 	}
-	if err := c.PhaseTwo.validate(); err != nil {
-		return err
+	if !business {
+		return c.CLI.validateEnabled()
 	}
+	// Worker still reads legacy effective-time facts from the strategy
+	// connection even when it does not own strategy ingestion or compilation.
 	if err := c.StrategySourceRedis().validate("platform_cache.strategy"); err != nil {
 		return err
 	}
-	if err := c.CMDBCacheRedis().validate("platform_cache.cmdb"); err != nil {
-		return err
+	if selected.Has(roles.Worker) {
+		if err := c.CMDBCacheRedis().validate("platform_cache.cmdb"); err != nil {
+			return err
+		}
 	}
 	if prefix, rendered := c.DynamicGroupKeyPrefix(); rendered && strings.TrimSpace(prefix) == "" {
 		return errors.New("platform_cache.dynamic_group_key_prefix is rendered but empty; leave it out where no dynamic group cache is written")
@@ -808,13 +906,23 @@ func (c Config) validateGoAccessRuntime() error {
 	if c.PlatformCache.TargetGroup != nil && c.PlatformCache.DynamicGroupKeyPrefix == nil {
 		return errors.New("platform_cache.target_group requires platform_cache.dynamic_group_key_prefix")
 	}
-	if connection, configured := c.TargetGroupRedis(); configured {
-		if err := connection.validate("platform_cache.target_group"); err != nil {
+	if selected.Has(roles.Worker) {
+		if connection, configured := c.TargetGroupRedis(); configured {
+			if err := connection.validate("platform_cache.target_group"); err != nil {
+				return err
+			}
+		}
+	}
+	if selected.Has(roles.Control) {
+		if err := validateRuntimePrefixIsolation(c.Redis.StatePrefix, c.PhaseTwo.Control.StrategyCachePrefix); err != nil {
 			return err
 		}
 	}
-	if err := validateRuntimePrefixIsolation(c.Redis.StatePrefix, c.PhaseTwo.Control.StrategyCachePrefix); err != nil {
-		return err
+	if c.Limits.Trigger.MaxEvidenceBytesPerEvent > c.Kafka.TriggerEvent.MaxMessageBytes {
+		return errors.New("trigger_event max_message_bytes cannot admit maximum trigger evidence")
+	}
+	if !selected.Has(roles.Worker) {
+		return nil
 	}
 	// A replayed Slot recognises its own earlier write and reports it as
 	// already applied instead of emitting the same events twice. That only
@@ -852,19 +960,6 @@ func (c Config) validateGoAccessRuntime() error {
 	if budget.MaxRetainedBytes > math.MaxInt64 ||
 		budget.MaxSeries > math.MaxUint64/c.Limits.Detect.MaxRecordsPerSeries {
 		return errors.New("phase_two provider budgets overflow production limits")
-	}
-	if c.Limits.Trigger.MaxEvidenceBytesPerEvent > c.Kafka.TriggerEvent.MaxMessageBytes {
-		return errors.New("trigger_event max_message_bytes cannot admit maximum trigger evidence")
-	}
-	return nil
-}
-
-func (c Config) validateSharedRuntime() error {
-	if err := c.validateRedis(); err != nil {
-		return err
-	}
-	if err := c.Limits.validate(); err != nil {
-		return err
 	}
 	return nil
 }

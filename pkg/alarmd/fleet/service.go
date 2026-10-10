@@ -92,6 +92,7 @@ type Service struct {
 	expectations     ExpectationSource
 	registry         ReplicaRegistry
 	snapshots        SnapshotReader
+	control          ControlFactsSource
 	freshness        time.Duration
 	now              func() time.Time
 
@@ -318,7 +319,8 @@ func (service *Service) View(ctx context.Context) View {
 		snapshots = nil
 	}
 
-	view := Aggregate(expectation, snapshots, replicas, at, service.freshness)
+	view := aggregate(expectation, snapshots, replicas, at, service.freshness,
+		&headFacts{control: service.readControl(ctx, at)})
 	readFailed(&view, snapshotsErr, expectationErr)
 	return view
 }
@@ -487,7 +489,8 @@ func (service *Service) summarize(ctx context.Context, stallAfter time.Duration)
 		}
 		return sets, whole
 	}
-	view, part := AggregateSummaries(expectation, expected, summaries, replicas, at, service.freshness, ownedSets)
+	view, part := aggregateSummaries(expectation, expected, summaries, replicas, at, service.freshness, ownedSets,
+		service.readControl(ctx, at))
 	if fallbackErr != nil {
 		unread := make(map[string]bool, len(missing))
 		for _, replica := range missing {

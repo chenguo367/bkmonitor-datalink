@@ -27,10 +27,11 @@ var CPUSources = []string{CPUSourceQuota, CPUSourceQuotaMinimum, CPUSourceEnviro
 // RuntimeConfigFacts is a fixed, credential-free startup evidence surface.
 // It is not a WorkerCompatibility or business identity contract.
 type RuntimeConfigFacts struct {
-	Profile    string `json:"profile"`
-	Source     string `json:"source"`
-	CPUSource  string `json:"cpu_source"`
-	GOMAXPROCS int    `json:"gomaxprocs"`
+	Roles      []string `json:"roles,omitempty"`
+	Profile    string   `json:"profile"`
+	Source     string   `json:"source"`
+	CPUSource  string   `json:"cpu_source"`
+	GOMAXPROCS int      `json:"gomaxprocs"`
 	// The memory limit and where it was read from travel with the budgets
 	// derived from it: a table produced outside the Pod says so itself
 	// instead of passing a fallback off as the container's limit.

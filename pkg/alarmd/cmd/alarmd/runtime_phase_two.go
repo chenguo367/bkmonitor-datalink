@@ -33,6 +33,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/storecensus"
@@ -85,7 +86,9 @@ type phaseTwoApplicationDependencies struct {
 		*observability.Logger,
 		*phaseTwoApplicationHealth,
 	) (*phaseTwoWorkerBundle, error)
-	newHTTP func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
+	openRoles      func(config.Config, *metric.Recorder, *observability.RuntimeConfigFacts) (*phaseTwoRoleRuntime, error)
+	openRoleBundle func(context.Context, config.Config, *metric.Recorder, *observability.Logger, *phaseTwoApplicationHealth, *phaseTwoRoleRuntime) (*phaseTwoWorkerBundle, error)
+	newHTTP        func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
 	// lifecycle opens the process's start/stop record; nil records nothing.
 	lifecycle func(config.Config) *lifecycleRecord
 }
@@ -115,6 +118,7 @@ func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 	return phaseTwoApplicationDependencies{
 		configureCPU: configurePhaseTwoCPU, lifecycle: newLifecycleRecord,
 		run: runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
+		openRoles: openPhaseTwoRoleRuntime, openRoleBundle: openProductionRoleBundle,
 		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
 			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal),
 				httpservice.WithAdminKeySecret(surface.AdminKeySecret)}
@@ -143,7 +147,9 @@ func newPhaseTwoApplication(cfg config.Config) (*phaseTwoApplication, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate phase-two application configuration: %w", err)
 	}
-	return &phaseTwoApplication{health: newPhaseTwoApplicationHealth()}, nil
+	health := newPhaseTwoApplicationHealth()
+	health.selectedRoles = cfg.EffectiveRoles()
+	return &phaseTwoApplication{health: health}, nil
 }
 
 func runPhaseTwoApplication(
@@ -165,7 +171,7 @@ func runPhaseTwoApplicationWithDependencies(
 	if ctx == nil || recorder == nil {
 		return errors.New("phase-two application requires context and metric recorder")
 	}
-	if dependencies.openBundle == nil {
+	if dependencies.openBundle == nil && dependencies.openRoleBundle == nil {
 		return errPhaseTwoWorkerBundleNotAssembled
 	}
 	if dependencies.newHTTP == nil {
@@ -244,7 +250,25 @@ func runPhaseTwoApplicationWithDependencies(
 	}
 	defer lifecycle.close()
 	lifecycle.start()
-	bundle, err := dependencies.openBundle(runtimeContext, cfg, recorder, logger, application.health)
+	var roleRuntime *phaseTwoRoleRuntime
+	if dependencies.openRoles != nil {
+		roleRuntime, err = dependencies.openRoles(cfg, recorder, &profile)
+		if err == nil {
+			defer roleRuntime.Close()
+			server.SetPublicSurfaceRestricted(roleRuntime.Channel.Restricted)
+			server.SetAPI(roleRuntime.Channel.Handler)
+			server.SetGRPC(roleRuntime.EvidenceServer)
+			roleRuntime.Start(runtimeContext, application.health)
+		}
+	}
+	var bundle *phaseTwoWorkerBundle
+	if err == nil {
+		if dependencies.openRoleBundle != nil {
+			bundle, err = dependencies.openRoleBundle(runtimeContext, cfg, recorder, logger, application.health, roleRuntime)
+		} else {
+			bundle, err = dependencies.openBundle(runtimeContext, cfg, recorder, logger, application.health)
+		}
+	}
 	if err == nil && bundle != nil {
 		// Publish startup facts before making the evidence handler reachable.
 		bundle.runtimeConfig = &profile
@@ -271,8 +295,20 @@ func runPhaseTwoApplicationWithDependencies(
 		httpErr := waitRuntimeComponent(httpDone, time.Now().Add(cfg.ShutdownTimeout.Duration()))
 		return errors.Join(err, normalizeRuntimeShutdownError(httpErr, false))
 	}
+	if bundle == nil && roleRuntime == nil {
+		cancelRuntime()
+		cancelHTTP()
+		_ = waitRuntimeComponent(httpDone, time.Now().Add(cfg.ShutdownTimeout.Duration()))
+		return errPhaseTwoWorkerBundleNotAssembled
+	}
 	bundleDone := make(chan error, 1)
-	go func() { bundleDone <- bundle.Run(runtimeContext) }()
+	go func() {
+		if bundle != nil {
+			bundleDone <- bundle.Run(runtimeContext)
+			return
+		}
+		bundleDone <- roleRuntime.Run(runtimeContext, application.health)
+	}()
 
 	var runErr, httpErr error
 	bundleFinished := false
@@ -318,7 +354,11 @@ func runPhaseTwoApplicationWithDependencies(
 	// drained: a stop that cancelled Slots at the deadline is one whose
 	// events may be sent again by the next owner, and this record is the
 	// one reading of it that outlives the Pod.
-	lifecycle.stop(stopReason, stopErr, bundle.shutdownDrain())
+	var drain *observability.SlotDrainFacts
+	if bundle != nil {
+		drain = bundle.shutdownDrain()
+	}
+	lifecycle.stop(stopReason, stopErr, drain)
 	result := errors.Join(
 		normalizeRuntimeShutdownError(runErr, bundleStoppedEarly),
 		normalizeRuntimeShutdownError(httpErr, httpStoppedEarly),
@@ -1115,6 +1155,11 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 			bundle.markControlFollower(err)
 		}
 	}
+	if !bundle.dependencies.Config.HasRole(roles.Worker) {
+		bundle.startMaintenance()
+		bundle.updateReadiness()
+		return nil
+	}
 	assigned, err := bundle.dependencies.Ownership.AssignedQueryGroups(ctx, queryGroups)
 	if err != nil {
 		return bundle.startWithoutAssignment(ctx, fmt.Errorf("phase-two read Assignment: %w", err))
@@ -1200,6 +1245,9 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), bundle.dependencies.Config.ShutdownTimeout.Duration())
 		defer cancel()
 		return errors.Join(err, bundle.Shutdown(shutdownCtx))
+	}
+	if !bundle.dependencies.Config.HasRole(roles.Worker) {
+		return bundle.runControlRole(ctx)
 	}
 	scheduleTicker := time.NewTicker(bundle.dependencies.Config.PhaseTwo.Scheduler.TickInterval.Duration())
 	refreshTicker := time.NewTicker(bundle.dependencies.Config.PhaseTwo.Control.RefreshInterval.Duration())
@@ -2719,10 +2767,15 @@ func markPhaseTwoFatal(
 	health.Update(phaseTwoReadiness{
 		State: observability.HealthFatal, Reasons: []observability.ReasonCode{observability.ReasonInternalUnknown},
 	})
-	bundle.observe(ctx, observability.ComponentRuntime, observability.Stage(observability.StageFatal), observability.ResultFailed, err)
+	if bundle != nil {
+		bundle.observe(ctx, observability.ComponentRuntime, observability.Stage(observability.StageFatal), observability.ResultFailed, err)
+	}
 }
 
 func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness ownership.AssignmentReadiness) error {
+	if !bundle.dependencies.Config.HasRole(roles.Worker) {
+		return nil
+	}
 	bundle.registrationMu.Lock()
 	defer bundle.registrationMu.Unlock()
 	if readiness == ownership.WorkerReady {
@@ -2814,12 +2867,17 @@ func phaseTwoWorkerRegistration(
 	if err != nil {
 		return ownership.WorkerRegistration{}, fmt.Errorf("phase-two derive worker capabilities: %w", err)
 	}
+	executionDigest, err := phaseTwoExecutionContractDigest()
+	if err != nil {
+		return ownership.WorkerRegistration{}, err
+	}
 	registration := ownership.WorkerRegistration{
 		WorkerID: cfg.PhaseTwo.Worker.ID, AssignmentReadiness: readiness,
 		DependencyStatus: ownership.DependencyHealthy, DeploymentProfile: cfg.DeploymentProfile(),
-		CapabilitiesDigest: capabilitiesDigest,
-		ExpiresAt:          at.Add(cfg.PhaseTwo.Worker.RegistrationTTL.Duration()),
-		Applied:            applied, Load: load,
+		CapabilitiesDigest:      capabilitiesDigest,
+		ExecutionContractDigest: executionDigest,
+		ExpiresAt:               at.Add(cfg.PhaseTwo.Worker.RegistrationTTL.Duration()),
+		Applied:                 applied, Load: load,
 		// The control contracts this binary takes part in. The leader
 		// starts a contract only when every ready worker declares it.
 		Capabilities: []string{ownership.CapabilityContentScope, ownership.CapabilityShardAware},
@@ -2863,8 +2921,10 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 			runLookback(bundle.maintenanceCtx, bundle.dependencies.Lookback)
 		}()
 	}
-	bundle.maintenanceWG.Add(1)
-	go bundle.maintainRegistration()
+	if bundle.dependencies.Config.HasRole(roles.Worker) {
+		bundle.maintenanceWG.Add(1)
+		go bundle.maintainRegistration()
+	}
 	if bundle.dependencies.PublishFleet != nil {
 		bundle.maintenanceWG.Add(1)
 		go bundle.publishFleetSnapshots()
@@ -2971,6 +3031,9 @@ func (bundle *phaseTwoWorkerBundle) publishFleetSnapshots() {
 }
 
 func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context) (bool, error) {
+	if !bundle.dependencies.Config.HasRole(roles.Control) {
+		return false, nil
+	}
 	bundle.mu.RLock()
 	if bundle.controlLeader {
 		bundle.mu.RUnlock()
@@ -3608,7 +3671,7 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	// A declined Query Group still assigned here counts as accounted for: it
 	// is let go on purpose and waits for a leader to place it elsewhere, and
 	// reporting the replica not ready for it would move all the others too.
-	assignmentReady := bundle.assignmentRead && !bundle.draining && !bundle.closed
+	assignmentReady := (bundle.assignmentRead || !bundle.dependencies.Config.HasRole(roles.Worker)) && !bundle.draining && !bundle.closed
 	if assignmentReady {
 		open := 0
 		for queryGroup := range bundle.assigned {
@@ -3629,7 +3692,20 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	dependencyDegraded := bundle.dependencyDegraded
 	lastRecoveryAt := bundle.lastControlRecoveryAt
 	sinkReady := bundle.outputSinkReady
+	draining := bundle.draining || bundle.closed
 	bundle.mu.RUnlock()
+	if bundle.dependencies.Config.HasRole(roles.Control) {
+		controlState := observability.HealthReady
+		switch {
+		case draining:
+			controlState = observability.HealthDraining
+		case !factsSeen || !sinkReady:
+			controlState = observability.HealthNotReady
+		case controlDegraded || dependencyDegraded:
+			controlState = observability.HealthDegraded
+		}
+		bundle.dependencies.Health.controlState.Store(&controlState)
+	}
 	state := observability.HealthReady
 	var reasons []observability.ReasonCode
 	if !sinkReady {
@@ -3987,6 +4063,11 @@ func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, ref
 			bundle.markControlFollower(err)
 		}
 	}
+	if !bundle.dependencies.Config.HasRole(roles.Worker) {
+		bundle.clearControlDependencyDegraded(ctx, failureSeq)
+		bundle.updateReadiness()
+		return nil
+	}
 	assigned, err := bundle.dependencies.Ownership.AssignedQueryGroups(ctx, queryGroups)
 	if err != nil {
 		return bundle.scopeControlError(ctx, observability.ComponentOwnership, observability.StageAssignmentAcquired, err)
@@ -4289,7 +4370,10 @@ type phaseTwoReadiness struct {
 }
 
 type phaseTwoApplicationHealth struct {
-	tracker *observability.HealthTracker
+	tracker       *observability.HealthTracker
+	selectedRoles roles.Set
+	channelState  atomic.Pointer[observability.HealthState]
+	controlState  atomic.Pointer[observability.HealthState]
 }
 
 func newPhaseTwoApplicationHealth() *phaseTwoApplicationHealth {
@@ -4314,7 +4398,38 @@ func (h *phaseTwoApplicationHealth) HealthSnapshot() observability.HealthSnapsho
 	if h == nil || h.tracker == nil {
 		return observability.NormalizeHealthSnapshot(observability.HealthSnapshot{PhaseTwo: true})
 	}
-	return observability.NormalizeHealthSnapshot(h.tracker.HealthSnapshot())
+	snapshot := observability.NormalizeHealthSnapshot(h.tracker.HealthSnapshot())
+	if len(h.selectedRoles) != 0 {
+		snapshot.RoleReadiness = make(map[string]string, len(h.selectedRoles))
+		for _, role := range h.selectedRoles {
+			state := snapshot.State
+			if role == roles.Control {
+				state = h.controlReadiness(snapshot.State)
+			}
+			if role == roles.Channel && state != observability.HealthFatal && state != observability.HealthDraining {
+				state = h.channelReadiness()
+			}
+			snapshot.RoleReadiness[string(role)] = string(state)
+		}
+	}
+	return snapshot
+}
+
+func (h *phaseTwoApplicationHealth) channelReadiness() observability.HealthState {
+	if state := h.channelState.Load(); state != nil {
+		return *state
+	}
+	return observability.HealthStarting
+}
+
+func (h *phaseTwoApplicationHealth) controlReadiness(overall observability.HealthState) observability.HealthState {
+	if overall == observability.HealthFatal || overall == observability.HealthDraining {
+		return overall
+	}
+	if state := h.controlState.Load(); state != nil {
+		return *state
+	}
+	return observability.HealthStarting
 }
 
 func diagnosticTimeMS(t time.Time) int64 {

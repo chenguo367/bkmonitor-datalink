@@ -67,7 +67,9 @@ type Options struct {
 	// instance record at a time.
 	CMDBCache RedisBinding
 	Catalog   *controlplane.RedisCatalogRepository
-	Progress  *progress.Store
+	Progress  interface {
+		ObservationKey(execution.QueryGroupIdentity) (string, error)
+	}
 }
 type Service struct{ options Options }
 
