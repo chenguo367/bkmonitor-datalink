@@ -25,6 +25,12 @@ Labels: `disposition`
 
 How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded recently), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
 
+## bkmonitor_alarmd_access_inplace_readiness_waits_total
+
+Labels: `wait`
+
+Slot executions that waited in place, holding their execution slot, for a later query of the Slot to become readable, by their total wait. A Slot whose queries become readable at different times is not deferred as a whole; its dispatch waits for each later query while keeping its slot, its prepared plan and the input its earlier queries delivered. Its slot_completed line carries the wait (inplace_wait_ms, inplace_waits, inplace_longest_ms, inplace_sent_before, inplace_wait_before_any_sent_ms) and what it held: inplace_held_input_bytes is exact, from the Slot's own retention accounting; inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they reference, which is shared and held without the wait. Every cell exists from the start.
+
 ## bkmonitor_alarmd_access_response_codec_total
 
 Labels: `codec`, `negotiation`, `completion`

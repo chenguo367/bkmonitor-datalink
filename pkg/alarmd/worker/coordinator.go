@@ -436,7 +436,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		// budgets it used beside an empty clock would read as a Slot that was
 		// never measured rather than one that found nothing to decide.
 		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason,
-			Usage: stream.budgetUsage(), Timing: stream.timing()}, nil
+			Usage: stream.budgetUsage(), Timing: stream.timing(), InPlaceWait: completion.InPlaceWait}, nil
 	}
 
 	var result execution.SlotExecutionResult
@@ -455,6 +455,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			if convergeErr != nil {
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: converge changed activation: %w", convergeErr)
 			}
+			result.InPlaceWait = completion.InPlaceWait
 			return result, nil
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
@@ -464,6 +465,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// rather than a usage of zero, and the two must not arrive as one number.
 	result.Usage = stream.budgetUsage()
 	result.Timing = stream.timing()
+	result.InPlaceWait = completion.InPlaceWait
 	return result, nil
 }
 

@@ -79,6 +79,7 @@ type phaseTwoMetrics struct {
 	frozenStateRenewals            *prometheus.CounterVec
 	frozenStateCensus              *prometheus.CounterVec
 	segmentContent                 *prometheus.CounterVec
+	inPlaceWaits                   *prometheus.CounterVec
 	sourceWithheldLines            *prometheus.CounterVec
 	activeQGSetCount               prometheus.Gauge
 	activeQGSetBytes               prometheus.Gauge
@@ -532,6 +533,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"releases were spent proving from the call graph that every hop carries the section " +
 				"while production read zero at the end of it.",
 		}, []string{"hop"}),
+		inPlaceWaits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_inplace_readiness_waits_total",
+			Help: "Slot executions that waited in place, holding their execution slot, for a later query of the Slot to become readable, by their total wait. " +
+				"A Slot whose queries become readable at different times is not deferred as a whole; its dispatch waits for each later query while keeping its " +
+				"slot, its prepared plan and the input its earlier queries delivered. Its slot_completed line carries the wait (inplace_wait_ms, inplace_waits, " +
+				"inplace_longest_ms, inplace_sent_before, inplace_wait_before_any_sent_ms) and what it held: inplace_held_input_bytes is exact, from the Slot's own retention accounting; " +
+				"inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they " +
+				"reference, which is shared and held without the wait. Every cell exists from the start.",
+		}, []string{"wait"}),
 		segmentContent: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "segment_content_freshness_total",
 			Help: "Slots frozen against a Segment, by whether that Segment names the execution object the " +
@@ -1672,6 +1682,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, state := range controlplane.SegmentContentStates {
 		metrics.segmentContent.WithLabelValues(state)
 	}
+	for _, bucket := range observability.InPlaceWaitBuckets {
+		metrics.inPlaceWaits.WithLabelValues(bucket)
+	}
+
 	return metrics
 }
 
@@ -1722,7 +1736,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -2082,6 +2096,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	m.observeNoDataCensus(observation)
 	if facts := observation.SegmentContent; facts != nil {
 		m.segmentContent.WithLabelValues(facts.State).Inc()
+	}
+	if facts := observation.InPlaceWait; facts != nil {
+		m.inPlaceWaits.WithLabelValues(observability.InPlaceWaitBucket(time.Duration(facts.TotalMillis) * time.Millisecond)).Inc()
 	}
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {
