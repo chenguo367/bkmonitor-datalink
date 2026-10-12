@@ -1178,12 +1178,7 @@ func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	if source.settlingWait <= 0 {
 		return false, nil
 	}
-	// The Slot's read hold is in its deadline, and is not budget for the
-	// settling wait: access chooses the wait within the schedule's own
-	// budget and reads that much later, and so does this estimate.
-	queryBudget := time.Duration(deadline-int64(evaluationTime)*1000-hold) * time.Millisecond
-	readyAt := time.Unix(int64(evaluationTime), 0).
-		Add(execution.SettlingWaitWithinQueryBudget(queryBudget, source.settlingWait)).UnixMilli() + hold
+	readyAt := source.replayReadyAtUnixMilli(evaluationTime, deadline, hold)
 	// The boundary is never earlier than the next grid point while the distance
 	// is still inside the limit, so a read that lands before that point cannot
 	// outlast the boundary and the walk below is not worth its reads. This is
@@ -1218,6 +1213,18 @@ func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	facts.ReadyAtUnixMilli = readyAt
 	facts.DistanceBoundaryUnixMilli = boundaryMilli
 	return true, nil
+}
+
+// replayReadyAtUnixMilli is when access will read the Slot: the group's read
+// wait (execution.ReadWaitWithinQueryBudget, the call access makes) within
+// the query budget the deadline leaves, then the hold. The Slot's read hold is
+// in its deadline and is not budget for the wait: access chooses the wait
+// within the schedule's own budget and reads that much later, and so does
+// this estimate.
+func (source *ProductionSlotSource) replayReadyAtUnixMilli(evaluationTime execution.EvaluationTime, deadline, hold int64) int64 {
+	queryBudget := time.Duration(deadline-int64(evaluationTime)*1000-hold) * time.Millisecond
+	return time.Unix(int64(evaluationTime), 0).
+		Add(execution.ReadWaitWithinQueryBudget(source.queryGroup, queryBudget, source.settlingWait)).UnixMilli() + hold
 }
 
 // replayDistanceBoundary is the grid point at which this Slot's replay

@@ -625,3 +625,68 @@ func (fact FrozenSlotContractFact) validateAgainst(request FreezeSlotContractReq
 	}
 	return nil
 }
+
+// ReadWaitWithinQueryBudget is how long after its window closes a Query
+// Group's Slot is read: the settling wait, then the group's own phase.
+//
+// Without the phase every group on a schedule is read in the same second.
+// Measured on a deployment where 88% of groups run every minute, about 80% of
+// a minute's queries became ready at second 30: every query permit was held
+// and a further 160 to 184 queries waited for one, for four to five seconds,
+// while the fleet held permits 11.7% of the minute. The downstream answered
+// that second at twice its usual latency. Nothing was short of capacity; the
+// reads were synchronized.
+//
+// The phase spreads each schedule's groups over readPhaseSpread. It only ever
+// delays a read - the settling wait stays the floor, so no window is read
+// before the deployment says its data has landed - and it is a pure function
+// of the group and its budget, so a restarted process and the replica a group
+// is handed to read it at the same moment, with nothing stored.
+//
+// Every place that asks when a Slot is read asks here: access to read it, the
+// scheduler to judge whether a replay can still be read inside its distance,
+// and the read holds to measure lateness from the moment the group actually
+// reads. A place that added the settling wait itself would disagree with the
+// read by up to the phase.
+func ReadWaitWithinQueryBudget(queryGroup QueryGroupIdentity, queryBudget, configured time.Duration) time.Duration {
+	settle := SettlingWaitWithinQueryBudget(queryBudget, configured)
+	return settle + readPhase(queryGroup, readPhaseSpread(queryBudget, settle))
+}
+
+// Of the budget left after the settling wait, a phase takes at most two
+// fifths. The rest is the query's and the evaluation's: the slow groups
+// already answer close to the whole budget, and half would leave a one-minute
+// group 12.5 seconds where it has 25 today.
+const (
+	readPhaseBudgetShareNumerator   = 2
+	readPhaseBudgetShareDenominator = 5
+)
+
+// readPhaseSpread is how far a schedule's phases spread: two fifths of what
+// the settling wait leaves of the budget, and never more than the settling
+// wait itself, so a long schedule's first read is at most twice as late as
+// its data needs rather than a third of its period. A one-minute schedule
+// spreads over 10 seconds, a 30-second one over 6, anything of two minutes or
+// more over 30; an inert schedule, whose settling wait already exceeds its
+// budget, not at all.
+func readPhaseSpread(queryBudget, settle time.Duration) time.Duration {
+	if queryBudget <= settle {
+		return 0
+	}
+	return min((queryBudget-settle)*readPhaseBudgetShareNumerator/readPhaseBudgetShareDenominator, settle)
+}
+
+// readPhase is the group's place in the spread, to the millisecond: FNV-1a
+// of its identity, computed inline so the call allocates nothing.
+func readPhase(queryGroup QueryGroupIdentity, spread time.Duration) time.Duration {
+	millis := uint64(spread / time.Millisecond)
+	if millis == 0 {
+		return 0
+	}
+	hash := uint64(14695981039346656037)
+	for i := 0; i < len(queryGroup); i++ {
+		hash ^= uint64(queryGroup[i])
+		hash *= 1099511628211
+	}
+	return time.Duration(hash%millis) * time.Millisecond
+}

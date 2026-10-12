@@ -47,8 +47,20 @@ const minimumSettlingWait = execution.MinimumSettlingWait
 // the strategy serializer accepts any of them -- it validates agg_interval
 // only as a non-negative integer, with no tier list behind it.
 func settlingWaitWithinBudget(schedule execution.ScheduleSpec, configured, reserve time.Duration) time.Duration {
-	budget := time.Duration(schedule.CompletionOffsetSeconds())*time.Second - reserve
-	return execution.SettlingWaitWithinQueryBudget(budget, configured)
+	return execution.SettlingWaitWithinQueryBudget(queryBudgetOf(schedule, reserve), configured)
+}
+
+// readWaitWithinBudget is how long after its query window closes the group's
+// Slot is read for the schedule one of its Plans carries: the settling wait
+// and the group's phase (execution.ReadWaitWithinQueryBudget).
+func readWaitWithinBudget(queryGroup execution.QueryGroupIdentity, schedule execution.ScheduleSpec, configured, reserve time.Duration) time.Duration {
+	return execution.ReadWaitWithinQueryBudget(queryGroup, queryBudgetOf(schedule, reserve), configured)
+}
+
+// queryBudgetOf is a Plan's schedule in the readiness rule's terms: the
+// completion offset less the downstream execution reserve.
+func queryBudgetOf(schedule execution.ScheduleSpec, reserve time.Duration) time.Duration {
+	return time.Duration(schedule.CompletionOffsetSeconds())*time.Second - reserve
 }
 
 // lookbackQuery is a physical query as the lookback sees it before it is
@@ -896,7 +908,7 @@ func frozenConsumerReadyAt(
 	// Source delay selects an older data window; it must not move the
 	// scheduler's global readiness boundary earlier by the same amount.
 	window.End += sourceDelaySeconds
-	ready, err := frozenRequirementReadyAt(requirement, window, settlingWaitWithinBudget(schedule, configuredDelay, reserve))
+	ready, err := frozenRequirementReadyAt(requirement, window, readWaitWithinBudget(contractRef.Slot.QueryGroup, schedule, configuredDelay, reserve))
 	if err != nil {
 		return 0, err
 	}
