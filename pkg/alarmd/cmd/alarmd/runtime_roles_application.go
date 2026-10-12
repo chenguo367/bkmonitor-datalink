@@ -71,7 +71,7 @@ func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts
 	runtime.Channel, err = openProductionRoleChannel(cfg, ChannelBinding{
 		Roles: cfg.EffectiveRoles(), InstanceID: cfg.PhaseTwo.Worker.ID, EnvironmentID: cfg.CLI.EnvironmentID,
 		Facts:    func() *observability.RuntimeConfigFacts { return facts },
-		SREAudit: sreAuditSink(logger, recorder),
+		SREAudit: sreAuditSink(logger, recorder), SRERolloutEnded: sreRolloutSink(logger, recorder), SRERolloutsWatched: recorder.SetSRERolloutsWatched,
 		Control: cliControlBinding{Incarnation: incarnation, StreamToken: identity.Token, Metrics: recorder.Gatherer(),
 			RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry},
 	})

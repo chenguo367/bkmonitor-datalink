@@ -1617,7 +1617,17 @@ Strategy documents source refresh rounds asked the source for. A skipped round a
 
 Labels: `op`, `result`
 
-Execution, management and Secret-read calls the SRE channel made, by operation (pod.exec, pod.delete, workload.restart, workload.scale, secret.get, configmap.get) and result: done; target_changed (the Pod or workload was replaced since it was read, and nothing was changed); forbidden (the apiserver refused the ServiceAccount); refused (an invalid or unsupported request, a busy provider, or a command that could not start - nothing ran); failed (an apiserver or transport failure); unknown (an execution whose remote end is unconfirmed). Each call also writes one sre_action line naming the session, the request, the namespace and object and the result. Every cell exists once the channel is wired: six operations by six results, 36 series. A secret.get line names the Secret and whether its values were revealed, never a value.
+Execution, management and Secret-read calls the SRE channel made, by operation (pod.exec, pod.delete, workload.restart, workload.scale, secret.get, configmap.get, workload.set_image, and workload.revert - a revert the channel wrote itself when a changed image did not become ready) and result: done; target_changed (the Pod or workload was replaced since it was read, and nothing was changed); forbidden (the apiserver refused the ServiceAccount); refused (an invalid or unsupported request, a busy provider, or a command that could not start - nothing ran); failed (an apiserver or transport failure); unknown (an execution whose remote end is unconfirmed). Each call also writes one sre_action line naming the session, the request, the namespace and object and the result. Every cell exists once the channel is wired: eight operations by six results, 48 series. A secret.get line names the Secret and whether its values were revealed, never a value.
+
+## bkmonitor_alarmd_sre_rollouts_total
+
+Labels: `state`
+
+Image changes made through the SRE channel that ended, by final state, counted by the process that ended them: unchanged (the container already ran the image), not_applied (the image was not written), complete, reverted (the new image did not become ready and the previous one is back), revert_failed (the previous image did not become ready either), superseded (someone else changed the image; left as it is), target_changed (the Deployment was replaced or deleted). Each also writes one sre_rollout line with the receipt, both images and who ended it. Reader: the operator after an image change, through /metrics; workload.rollout reads one receipt.
+
+## bkmonitor_alarmd_sre_rollouts_watched
+
+Image-change receipts this process is watching now: zero but in one process during a rollout. Summed over the processes, more than the changes in progress would be a receipt watched twice.
 
 ## bkmonitor_alarmd_startup_dependency_wait_total
 
