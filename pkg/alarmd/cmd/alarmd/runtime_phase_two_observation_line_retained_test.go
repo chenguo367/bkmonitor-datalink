@@ -80,6 +80,6 @@ func TestTheProductionLineReservesTheRetainedPoolByItsMeasuredPeak(t *testing.T)
 	bundle.workerCosts.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{queryGroup} })
 	bundle.workerCosts.Costs()
 	if got := retained(); got != 5000 {
-		t.Fatalf("with the one owned Query Group's peak at 4000 the retained budget is %v, want 5000", got)
+		t.Fatalf("with the one owned Query Group's peak at 4000 the retained budget is %v, want 5000 at once from the unmeasured ceiling", got)
 	}
 }

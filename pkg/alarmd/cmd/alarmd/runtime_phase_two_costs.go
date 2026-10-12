@@ -72,6 +72,13 @@ type workerCostSource struct {
 	// peaks is the roster's summed retained peak as the last ask read it,
 	// for the observation memory line's retained reservation.
 	peaks atomic.Pointer[rosterRetainedPeak]
+	// reservation is the retained reservation last answered and when, which
+	// the next answer lowers from gradually.
+	reservationMu sync.Mutex
+	reservation   uint64
+	reservationAt time.Time
+	// reservationMeasured is whether the last answer came from a reading.
+	reservationMeasured bool
 }
 
 // rosterRetainedPeak is the owned Query Groups' retained peaks summed, at
@@ -91,6 +98,11 @@ const (
 	// Leader's stream, which is what asks; a stream that stopped asking is
 	// one whose roster nobody vouches for.
 	rosterPeakStale = 3 * viewstream.HeartbeatInterval
+	// retainedReservationLowering is how long the reservation takes to come
+	// down the whole ceiling: it rises at once and falls by at most the
+	// ceiling over this span, so one light Slot - the census holds each
+	// group's latest Slot, not its largest - cannot drop it in one step.
+	retainedReservationLowering = 10 * time.Minute
 )
 
 // RetainedReservation is what the observation memory line reserves for the
@@ -99,20 +111,50 @@ const (
 // (RetainedPeakCensus), and a quarter more; never less than the pool holds
 // now and never more than its ceiling. Until every owned Query Group has a
 // reading - after a start or a takeover, before its first Slot here - or
-// when the reading is stale, it is the ceiling.
+// when the reading is stale, it is the ceiling. It rises at once and comes
+// down gradually (retainedReservationLowering) from a measured reservation;
+// from the unmeasured ceiling it drops to the first complete reading.
+//
+// Its input does not move with it: the reservation only decides what
+// observation reads may take, and the coordinator admits the Slots'
+// retained bytes against its own ceiling, never against this.
+//
+// The known edge: a Query Group whose retained bytes jump past its measured
+// peak and the quarter (new series, a merged strategy) is still admitted by
+// the coordinator up to the ceiling, and observation reads admitted on the
+// old sum share that room for a while. The Go soft memory limit, half the
+// container, takes that as collection pressure, not as running out of
+// memory.
 func (source *workerCostSource) RetainedReservation(ceiling, held uint64) uint64 {
 	if source == nil {
 		return ceiling
 	}
+	now := source.now()
+	want := ceiling
 	reading := source.peaks.Load()
-	if reading == nil || !reading.complete || source.now().Sub(reading.at) > rosterPeakStale {
-		return ceiling
+	measured := reading != nil && reading.complete && now.Sub(reading.at) <= rosterPeakStale
+	if measured {
+		want = reading.sum + reading.sum/retainedReservationMarginDivisor
+		if want < reading.sum {
+			want = ceiling
+		}
+		want = min(ceiling, want)
 	}
-	want := reading.sum + reading.sum/retainedReservationMarginDivisor
-	if want < reading.sum {
-		want = ceiling
+	source.reservationMu.Lock()
+	defer source.reservationMu.Unlock()
+	// Up to want at once; down by the ceiling's share of the time since the
+	// last answer - but only from a reservation a reading set. From the
+	// ceiling held for want of one (a start, a takeover) it drops to the
+	// first complete reading at once: that ceiling was not measured, and
+	// holding it would defer page reads for ten minutes after every rollout.
+	step := ceiling
+	if source.reservationMeasured {
+		elapsed := now.Sub(source.reservationAt)
+		step = uint64(float64(ceiling) * min(1, max(0, elapsed.Seconds()/retainedReservationLowering.Seconds())))
 	}
-	return min(ceiling, max(held, want))
+	source.reservation = max(want, source.reservation-min(step, source.reservation))
+	source.reservationAt, source.reservationMeasured = now, measured
+	return min(ceiling, max(held, source.reservation))
 }
 
 // reportedCost is what was last sent for one Query Group.
