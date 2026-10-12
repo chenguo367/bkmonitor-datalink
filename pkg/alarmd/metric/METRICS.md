@@ -1283,9 +1283,9 @@ Actual query admission call wall duration including immediate grants and failure
 
 ## bkmonitor_alarmd_query_unavailable_attribution_total
 
-Labels: `attribution`
+Labels: `attribution`, `http_class`
 
-Physical queries that completed UNAVAILABLE, by where their reason code came from: attempt (an attempt named the reason; the code means what it says), no_attempt_reason (attempts were made and none was classified; the code is a fallback guess about a provider that was reached), no_attempts (nothing was sent; the code says nothing about the provider). QUERY_UNAVAILABLE reads as a provider fault and sends a reader to the provider, and two of these three would send them somewhere there is nothing to find; this is the only reading that tells them apart. One increment per physical query, so a Query Group with several Plans counts once per Plan.
+Physical queries that completed UNAVAILABLE, by where their reason code came from: attempt (an attempt named the reason; the code means what it says), no_attempt_reason (attempts were made and none was classified; the code is a fallback guess about a provider that was reached), no_attempts (nothing was sent; the code says nothing about the provider). QUERY_UNAVAILABLE reads as a provider fault and sends a reader to the provider, and two of these three would send them somewhere there is nothing to find; this is the only reading that tells them apart. One increment per physical query, so a Query Group with several Plans counts once per Plan. http_class is the last failed attempt's HTTP answer: 4xx (the backend refused the query), 5xx (it failed), other (a status of neither kind), none (no HTTP answer: a transport failure, a timeout, a query never sent).
 
 ## bkmonitor_alarmd_range_gate_total
 

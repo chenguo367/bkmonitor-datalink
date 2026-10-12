@@ -311,6 +311,10 @@ type FailureRef struct {
 	// Timing is the failed query read against its budget, when the attempt
 	// measured it. See observability.QueryTiming.
 	Timing *observability.QueryTiming `json:"timing,omitempty"`
+	// HTTPStatus is the backend's non-success HTTP status, zero where the
+	// failure got no HTTP answer. Detail spells it for a person; this is
+	// the number readings decide on.
+	HTTPStatus int `json:"http_status,omitempty"`
 }
 
 // NoDataMemoryRefusal is what the store said when it would not take a Plan's

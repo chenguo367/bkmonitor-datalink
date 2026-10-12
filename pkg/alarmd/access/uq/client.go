@@ -280,6 +280,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, errorBodyRead))
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
+		completion.RouteFacts.Attempts[0].HTTPStatus = response.StatusCode
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
