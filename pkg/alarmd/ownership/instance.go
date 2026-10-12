@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisatomic"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
@@ -153,42 +154,51 @@ func (store *RedisStore) RegisterInstance(ctx context.Context, instance Instance
 	// trip. The score is the record's own expiry, so the index never says a
 	// record is live longer than the record is.
 	//
-	// A preferred record and its entry are one transaction: a record written
+	// A preferred record and its entry are one atomic write: a record written
 	// without its entry would be a live preferred process a fallback cannot
 	// see and takes the lease in front of. A fallback's are only pipelined:
 	// a fallback missing from its index makes a preferred process that is
 	// not yet stable contend at once, which is the behaviour without
 	// fallbacks and the safe side, and a Worker's renewal then costs one
 	// command more rather than three.
-	write := func(pipe redis.Pipeliner) error {
-		pipe.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl)
-		pipe.ZAdd(ctx, index, &redis.Z{
-			Score: float64(instance.ExpiresAt.UnixMilli()), Member: instance.InstanceID,
-		})
-		return nil
-	}
 	if instance.ControlCandidacy == ControlCandidacyPreferred {
 		// Each index is pruned on read, and in the steady state nothing reads
 		// it: a fallback lists only while the lease is free, a preferred
 		// process only while it is not yet stable. A Worker or control pod
 		// that rolls leaves its old name behind, so the preferred renewal,
 		// a handful of processes every few seconds, also drops the expired
-		// entries of both - two commands in the round trip it already makes,
-		// none added to a Worker's renewal.
+		// entries of both - two commands inside the one script it already
+		// runs, none added to a Worker's renewal.
 		at := strconv.FormatInt(instance.ExpiresAt.Add(-ttl).UnixMilli(), 10)
-		_, err = store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			if err := write(pipe); err != nil {
-				return err
-			}
-			pipe.ZRemRangeByScore(ctx, store.preferredCandidatesKey(), "-inf", at)
-			pipe.ZRemRangeByScore(ctx, store.fallbackCandidatesKey(), "-inf", at)
-			return nil
-		})
-	} else {
-		_, err = store.client.Pipelined(ctx, write)
+		return registerPreferredInstanceWrite.Run(ctx, store.client,
+			[]string{store.instanceKey(instance.InstanceID), store.preferredCandidatesKey(), store.fallbackCandidatesKey()},
+			payload, registrationTTLMillis(ttl), instance.ExpiresAt.UnixMilli(), instance.InstanceID, at)
 	}
+	_, err = store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl)
+		pipe.ZAdd(ctx, index, &redis.Z{
+			Score: float64(instance.ExpiresAt.UnixMilli()), Member: instance.InstanceID,
+		})
+		return nil
+	})
 	return err
 }
+
+// registerPreferredInstanceWrite stores a preferred candidate's record with
+// its life, names it in the preferred index scored by its expiry, and drops
+// the entries of both indexes that expired by the record's write time, as
+// one script rather than a MULTI/EXEC (see redisatomic for why). The prune
+// counts are not read, as they were not before. The record and the two
+// indexes share no hash tag: like the activation scripts
+// (controlplane/activation_rebuild.go) this runs on a standalone or Sentinel
+// server, and the configuration refuses Cluster (config/redis.go).
+var registerPreferredInstanceWrite = redisatomic.New(`
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[5])
+redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', ARGV[5])
+return 1
+`)
 
 // preferredCandidatesKey indexes the processes that stand as preferred
 // Control Leader candidates, scored by their record's expiry. Only the
