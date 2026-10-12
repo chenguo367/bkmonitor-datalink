@@ -167,9 +167,9 @@ func TestLoadRejectsLegacyAndPhaseTwoFields(t *testing.T) {
 		"state CAS":     {contents: "state_cas: true\n", field: "state_cas"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Load(writeConfig(t, testCase.contents))
+			_, err := LoadWithRoles(writeConfig(t, testCase.contents), nil)
 			if err == nil || !strings.Contains(err.Error(), testCase.field) {
-				t.Fatalf("Load() error = %v, want strict rejection of %q", err, testCase.field)
+				t.Fatalf("LoadWithRoles(, nil) error = %v, want strict rejection of %q", err, testCase.field)
 			}
 		})
 	}
@@ -261,9 +261,9 @@ func TestTheDynamicGroupKeyPrefixIsAbsentOrSpelledAsTheWriterSpellsIt(t *testing
 func TestLoadRejectsRetiredModeKey(t *testing.T) {
 	for _, mode := range []string{"shadow", "owner"} {
 		t.Run(mode, func(t *testing.T) {
-			_, err := Load(writeConfig(t, "mode: "+mode+"\n"))
+			_, err := LoadWithRoles(writeConfig(t, "mode: "+mode+"\n"), nil)
 			if err == nil || !strings.Contains(err.Error(), "mode") {
-				t.Fatalf("Load() error = %v, want retired key rejection", err)
+				t.Fatalf("LoadWithRoles(, nil) error = %v, want retired key rejection", err)
 			}
 		})
 	}
@@ -280,8 +280,8 @@ func TestLoadRejectsInvalidHTTPAndTimeout(t *testing.T) {
 
 	for name, contents := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, contents)); err == nil {
-				t.Fatalf("Load() accepted invalid %s", name)
+			if _, err := LoadWithRoles(writeConfig(t, contents), nil); err == nil {
+				t.Fatalf("LoadWithRoles(, nil) accepted invalid %s", name)
 			}
 		})
 	}
@@ -346,7 +346,7 @@ func TestRetiredKeysAreRefusedByName(t *testing.T) {
 		{"phase_two:\n  scheduler:\n    maxreplayage: 1h\n", "maxreplayage"},
 		{"phase_two:\n  scheduler:\n    processquerypermits: 999\n", "processquerypermits"},
 	} {
-		_, err := Load(writeConfig(t, retired.yaml))
+		_, err := LoadWithRoles(writeConfig(t, retired.yaml), nil)
 		if err == nil || !strings.Contains(err.Error(), "field "+retired.name+" not found") {
 			t.Errorf("values carrying %s loaded with %v, want it refused by name", retired.name, err)
 		}
@@ -461,7 +461,7 @@ func TestWithResolvedRedisPoolSizeResolvesEveryConnection(t *testing.T) {
 // error - it returns nothing, which reads back as "no strategies" or "no
 // hosts". Each therefore has its own stated location.
 func TestEachPlatformCacheIsReadWhereThePlatformWritesIt(t *testing.T) {
-	loaded, err := Load(writeConfig(t, platformCacheConfigContents(`
+	loaded, err := LoadWithRoles(writeConfig(t, platformCacheConfigContents(`
 platform_cache:
   strategy:
     mode: standalone
@@ -471,9 +471,9 @@ platform_cache:
     mode: standalone
     address: cmdb-cache:6379
     db: 8
-`)))
+`)), nil)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v", err)
 	}
 	if got := loaded.StrategySourceRedis().Address; got != "strategy-cache:6379" {
 		t.Fatalf("strategy source = %q, want the stated strategy cache", got)
@@ -504,9 +504,9 @@ platform_cache:
 // resolved configuration a release check reads says where each read went
 // instead of saying "inherited".
 func TestAnUnstatedPlatformCacheResolvesToTheTopLevelConnection(t *testing.T) {
-	loaded, err := Load(writeConfig(t, platformCacheConfigContents("")))
+	loaded, err := LoadWithRoles(writeConfig(t, platformCacheConfigContents("")), nil)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v", err)
 	}
 	if loaded.PlatformCache.Strategy == nil || loaded.PlatformCache.CMDB == nil {
 		t.Fatalf("platform cache = %+v, want both resolved rather than left unstated", loaded.PlatformCache)
@@ -584,12 +584,12 @@ func TestTheResolvedDestinationNamesCoordinatesAndNoCredentials(t *testing.T) {
 // keys stayed under the key it moved away from, so accepting it quietly would
 // write to the new instance with the old instance's shape.
 func TestTheRemovedRuntimeRedisKeyIsRefusedRatherThanIgnored(t *testing.T) {
-	_, err := Load(writeConfig(t, platformCacheConfigContents("")+`  runtime_redis:
+	_, err := LoadWithRoles(writeConfig(t, platformCacheConfigContents("")+`  runtime_redis:
     mode: standalone
     address: somewhere-else:6379
-`))
+`), nil)
 	if err == nil || !strings.Contains(err.Error(), "runtime_redis") {
-		t.Fatalf("Load() error = %v, want the removed key named", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v, want the removed key named", err)
 	}
 }
 

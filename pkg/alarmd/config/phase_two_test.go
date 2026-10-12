@@ -178,9 +178,9 @@ func TestGoAccessRequiresCompletePhaseTwoProductionCoordinates(t *testing.T) {
 
 func TestLoadPhaseTwoWorkerIdentityUsesDeploymentEnvironmentBeforeYAML(t *testing.T) {
 	t.Setenv(PhaseTwoWorkerIDEnvironment, "alarmd-phase-two-7d9f8")
-	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker")))
+	cfg, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker")), nil)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v", err)
 	}
 	if cfg.PhaseTwo.Worker.ID != "alarmd-phase-two-7d9f8" {
 		t.Fatalf("worker ID = %q, want deployment identity", cfg.PhaseTwo.Worker.ID)
@@ -202,7 +202,7 @@ func TestLoadRefusesWrittenCapacityBudgets(t *testing.T) {
 		"tick interval":   "  scheduler:\n    tick_interval: 1s\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("worker")+written)); err == nil {
+			if _, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("worker")+written), nil); err == nil {
 				t.Fatal("a written capacity budget must be refused, not obeyed")
 			}
 		})
@@ -253,9 +253,9 @@ func TestLoadPhaseTwoWorkerIdentityFallsBackToYAML(t *testing.T) {
 		}
 		_ = os.Unsetenv(PhaseTwoWorkerIDEnvironment)
 	})
-	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker")))
+	cfg, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker")), nil)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v", err)
 	}
 	if cfg.PhaseTwo.Worker.ID != "yaml-worker" {
 		t.Fatalf("worker ID = %q, want YAML fallback", cfg.PhaseTwo.Worker.ID)
@@ -264,9 +264,9 @@ func TestLoadPhaseTwoWorkerIdentityFallsBackToYAML(t *testing.T) {
 
 func TestLoadPhaseTwoWorkerIdentityRejectsNonCanonicalDeploymentEnvironment(t *testing.T) {
 	t.Setenv(PhaseTwoWorkerIDEnvironment, " alarmd-phase-two-0 ")
-	if _, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker"))); err == nil ||
+	if _, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("yaml-worker")), nil); err == nil ||
 		!strings.Contains(err.Error(), "worker identity") {
-		t.Fatalf("Load() error = %v, want deployment identity rejection", err)
+		t.Fatalf("LoadWithRoles(, nil) error = %v, want deployment identity rejection", err)
 	}
 }
 

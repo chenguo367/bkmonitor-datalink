@@ -617,10 +617,6 @@ func (c *Config) resolveCompatibilityServiceTimeouts() {
 	}
 }
 
-func Load(path string) (Config, error) {
-	return LoadWithRoles(path, nil)
-}
-
 // LoadWithRoles applies a CLI selection before validating dependencies. A nil
 // override keeps the file's selection; a non-nil empty override is refused.
 func LoadWithRoles(path string, override roles.Set) (Config, error) {
