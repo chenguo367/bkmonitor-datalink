@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -381,54 +380,51 @@ func writeConfig(t *testing.T, contents string) string {
 	return path
 }
 
-// Zero no longer means "unset and invalid": it means the pool follows the CPU
-// budget the container was given. The cases below pin the floor a one-core
-// deployment keeps, the production sizes, and the ceiling that stops one Worker
-// from opening an unreasonable number of connections to a shared Redis.
-func TestDeriveRedisPoolSizeFollowsCPUBudget(t *testing.T) {
-	tests := []struct {
-		name      string
-		cpuBudget int
-		want      int
-	}{
-		{"a single core keeps the floor", 1, 64},
-		{"the floor still covers four cores", 4, 64},
-		{"the production budget scales past the floor", 8, 128},
-		{"a larger budget keeps scaling", 16, 256},
-		{"the ceiling bounds the connection count", 64, 512},
-		{"an unreported budget still yields a usable pool", 0, 64},
+// Zero no longer means "unset and invalid": it means the pool covers every
+// execution slot the container can run, plus a floor for what runs outside a
+// slot. The cases pin that across container sizes; the cores beside them do
+// not move it.
+func TestDeriveRedisPoolSizeCoversTheExecutionCeiling(t *testing.T) {
+	for _, inputs := range []CapacityInputs{
+		{CPUBudget: 1, MemoryLimitBytes: 256 << 20},
+		{CPUBudget: 4, MemoryLimitBytes: 4 << 30},
+		{CPUBudget: 64, MemoryLimitBytes: 4 << 30},
+		{CPUBudget: 8, MemoryLimitBytes: 32 << 30},
+		{},
+	} {
+		ceiling := DeriveScheduler(inputs).ActiveExecutionCeiling
+		if got := DeriveRedisPoolSize(inputs); got != ceiling+redisPoolMinimum {
+			t.Fatalf("%d MiB, %d CPU: pool %d, want the %d execution slots and the %d floor",
+				inputs.MemoryLimitBytes>>20, inputs.CPUBudget, got, ceiling, redisPoolMinimum)
+		}
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := DeriveRedisPoolSize(test.cpuBudget); got != test.want {
-				t.Fatalf("DeriveRedisPoolSize(%d) = %d, want %d", test.cpuBudget, got, test.want)
-			}
-		})
+	if got := DeriveRedisPoolSize(CapacityInputs{MemoryLimitBytes: 4 << 30}); got != 341+redisPoolMinimum {
+		t.Fatalf("4 GiB pool = %d, want 341 slots and the floor", got)
 	}
 }
 
 func TestEffectivePoolSizeKeepsExplicitOverride(t *testing.T) {
+	inputs := CapacityInputs{CPUBudget: 8, MemoryLimitBytes: 4 << 30}
 	connection := RedisConnectionConfig{PoolSize: 3}
-	if got := connection.EffectivePoolSize(8); got != 3 {
+	if got := connection.EffectivePoolSize(inputs); got != 3 {
 		t.Fatalf("explicit pool_size was not honoured: got %d", got)
 	}
 	connection.PoolSize = 0
-	if got := connection.EffectivePoolSize(8); got != 128 {
+	if got := connection.EffectivePoolSize(inputs); got != DeriveRedisPoolSize(inputs) {
 		t.Fatalf("zero pool_size did not derive: got %d", got)
 	}
 }
 
 // The pool exists so that queueing for a connection never becomes the process's
-// execution gate. The Slot source reads the control plane for every ready
-// runner without holding a query permit, so covering the permits is necessary
-// but nowhere near sufficient; the derived pool must clear them with room left
-// for that fan-out at every budget a container can be given.
+// execution gate: it has to clear every execution slot and every permit the
+// container can have, with room for the reads made outside a slot.
 func TestDerivedRedisPoolClearsAdmittedConcurrencyWithRoom(t *testing.T) {
-	cfg := Default()
-	admitted := cfg.AdmittedQueryConcurrency()
-	for cpuBudget := 0; cpuBudget <= 64; cpuBudget++ {
-		if got := DeriveRedisPoolSize(cpuBudget); got <= admitted {
-			t.Fatalf("pool %d at %d CPU does not exceed admitted concurrency %d", got, cpuBudget, admitted)
+	for memory := uint64(64 << 20); memory <= 512<<30; memory *= 2 {
+		inputs := CapacityInputs{MemoryLimitBytes: memory}
+		derived := DeriveScheduler(inputs)
+		if got := DeriveRedisPoolSize(inputs); got < derived.ActiveExecutionCeiling+redisPoolMinimum || got <= derived.AdmittedConcurrency() {
+			t.Fatalf("pool %d at %d MiB does not clear %d slots and %d permits", got, memory>>20,
+				derived.ActiveExecutionCeiling, derived.AdmittedConcurrency())
 		}
 	}
 }
@@ -439,7 +435,7 @@ func TestWithResolvedRedisPoolSizeResolvesEveryConnection(t *testing.T) {
 	cfg.PlatformCache.Strategy = &platformCache
 	cfg.PlatformCache.CMDB = &platformCache
 	resolved := cfg.WithResolvedRedisPoolSize()
-	want := DeriveRedisPoolSize(runtime.GOMAXPROCS(0))
+	want := DeriveRedisPoolSize(DetectCapacityInputs())
 	if resolved.Redis.PoolSize != want {
 		t.Fatalf("own store pool size = %d, want %d", resolved.Redis.PoolSize, want)
 	}

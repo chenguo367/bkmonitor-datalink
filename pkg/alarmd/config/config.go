@@ -18,7 +18,6 @@ import (
 	"net"
 	"os"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -340,10 +339,11 @@ func Default() Config {
 }
 
 // withDerivedCapacity sizes admission, queueing and the Coordinator budgets
-// from one container's CPU and memory.
+// from one container's memory.
 func (c Config) withDerivedCapacity(inputs CapacityInputs) Config {
 	derived := DeriveScheduler(inputs)
 	c.PhaseTwo.Scheduler.ActiveExecutionLimit = derived.ActiveExecutions
+	c.PhaseTwo.Scheduler.ActiveExecutionCeiling = derived.ActiveExecutionCeiling
 	c.PhaseTwo.Scheduler.ProcessQueryPermits = derived.ProcessQueryPermits
 	c.PhaseTwo.Scheduler.RecoveryQueryPermits = derived.RecoveryQueryPermits
 	c.PhaseTwo.Scheduler.ReadyQueueCapacity = derived.ReadyQueueCapacity
@@ -390,26 +390,24 @@ func (c Config) AdmittedQueryConcurrency() int {
 	return s.ProcessQueryPermits + s.RecoveryQueryPermits
 }
 
-// redisPoolCPUBudget is the CPU budget the pool derives from. automaxprocs has
-// already resolved GOMAXPROCS from the container's cgroup quota by the time the
-// configuration is read, so this reports what the container was actually given
-// rather than the host's core count.
-func redisPoolCPUBudget() int {
-	return runtime.GOMAXPROCS(0)
+// redisPoolCapacityInputs is the container the pool derives from: the one this
+// process was given.
+func redisPoolCapacityInputs() CapacityInputs {
+	return DetectCapacityInputs()
 }
 
 // WithResolvedRedisPoolSize returns a copy whose Redis pool sizes are concrete
 // positive numbers, so the resolved value can be reported as a startup fact
 // rather than staying implicit in the client.
 func (c Config) WithResolvedRedisPoolSize() Config {
-	cpuBudget := redisPoolCPUBudget()
-	c.Redis.PoolSize = c.Redis.Connection().EffectivePoolSize(cpuBudget)
+	inputs := redisPoolCapacityInputs()
+	c.Redis.PoolSize = c.Redis.Connection().EffectivePoolSize(inputs)
 	for _, platform := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig, &c.PlatformCache.TargetGroup} {
 		if *platform == nil {
 			continue
 		}
 		resolved := (*platform).clone()
-		resolved.PoolSize = resolved.EffectivePoolSize(cpuBudget)
+		resolved.PoolSize = resolved.EffectivePoolSize(inputs)
 		*platform = &resolved
 	}
 	return c
@@ -423,10 +421,10 @@ func (c Config) RedisBackendOptions() state.RedisBackendOptions {
 		// Resolve here as well as in the runtime path: WithResolvedRedisPoolSize
 		// carries the authoritative value into the startup facts, but options can
 		// also be built by paths that never ran it, and a zero must never reach a
-		// client. Both paths derive from the CPU budget so they cannot disagree;
+		// client. Both paths derive from the same container so they cannot disagree;
 		// passing the admitted concurrency here used to produce a different pool
 		// than the one the process reported.
-		PoolSize: c.Redis.Connection().EffectivePoolSize(redisPoolCPUBudget()),
+		PoolSize: c.Redis.Connection().EffectivePoolSize(redisPoolCapacityInputs()),
 	}
 }
 

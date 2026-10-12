@@ -1335,6 +1335,12 @@ Query Groups whose own read hold record did not decode: read as missing, the hol
 
 Retired Query Groups whose read hold closing failed; they retire all the same, and a successor reads the unclosed record as the hold bound.
 
+## bkmonitor_alarmd_read_hold_seeds_total
+
+Labels: `origin`
+
+Query Groups with no read-hold record of their own that started from a seeded arrival age, by where it came from: peer (the 90th percentile of what the groups reading the same tables and data sources measured) or cold_start (no peer had measured: the deployment's ready delay, as the group's schedule allowed it). A seed that would hold nothing is not counted: such a group starts at no hold and keeps no record. Read cold_start against peer: a fleet seeding mostly cold start is one whose new strategies read later than their sources need until they measure their own.
+
 ## bkmonitor_alarmd_read_hold_transition_clamped_total
 
 Labels: `source`

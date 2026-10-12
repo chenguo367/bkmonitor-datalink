@@ -123,21 +123,34 @@ func phaseTwoUQDialer() *net.Dialer {
 // newPhaseTwoUQHTTPClient returns the client used for query provider
 // requests. The zero-value http.Client kept only two idle connections per
 // host, so with P concurrent Slot queries most connections were torn down and
-// re-established after every request. The pool below covers the P/R profiles
-// in use with headroom. Requests are bounded by the per-attempt context
+// re-established after every request. The idle pool covers every query this
+// process can have in flight - the permits never exceed the container's
+// execution ceiling (config.DeriveScheduler) - and the lookback's one more,
+// so a connection a query returns is kept for the next rather than redialed.
+// It was written as 64 per host for the permit tiers of its day, and a budget
+// derived above that would have redialed on every request past it with
+// nothing reporting why. Requests are bounded by the per-attempt context
 // deadline, so no client-level or response-header timeout is set.
 func newPhaseTwoUQHTTPClient() *http.Client {
 	dialer := phaseTwoUQDialer()
+	idle := phaseTwoUQIdleConnections(config.DetectCapacityInputs())
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
-		MaxIdleConns:          128,
-		MaxIdleConnsPerHost:   64,
+		MaxIdleConns:          idle,
+		MaxIdleConnsPerHost:   idle,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 0,
 	}}
+}
+
+// phaseTwoUQIdleConnections is the idle connections kept to the query
+// service: one per query the container can have in flight, and one for the
+// lookback.
+func phaseTwoUQIdleConnections(inputs config.CapacityInputs) int {
+	return config.DeriveScheduler(inputs).ActiveExecutionCeiling + 1
 }
 
 func openProductionPhaseTwoBundle(
@@ -1079,6 +1092,7 @@ func openProductionPhaseTwoBundleAssembly(
 	surface := publicSurfaceStandingOf(cfg, publicRestricted)
 	surface.warn(logger)
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Flights:           flights,
 		Lookback:          lookbackEngine,
 		ReadHolds:         readHolds,
 		ActivationBlocked: repository.ActivationBlockedReading,
@@ -1231,7 +1245,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// that cannot complete has already been promised an end, so a Progress
 		// cursor older than that describes an object that stopped rather than
 		// one between rounds.
-		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally),
+		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
 		readHolds: readHolds.fleetFacts,
 		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
@@ -1657,10 +1671,14 @@ func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
 	if defaults := accessuq.DefaultLimits(); defaults.MaxSeriesBytes < maximumSeries {
 		maximumSeries = defaults.MaxSeriesBytes
 	}
-	maximumRecords := cfg.PhaseTwo.Coordinator.MaxSeries * cfg.Limits.Detect.MaxRecordsPerSeries
+	// The counts in one answer are what its bytes can hold at the smallest a
+	// series and a record encode: the body cap governs, and these stop only an
+	// answer whose counting has gone wrong. The record cap was once the
+	// coordinator's series count times the detector's records per series,
+	// two numbers that bound other things.
 	return accessuq.Limits{
 		MaxBodyBytes: maximumBody, MaxSeriesBytes: maximumSeries,
-		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRecords: maximumRecords,
+		MaxSeries: max(uint64(maximumBody)/config.MinimumSeriesBytes, 1), MaxRecords: max(uint64(maximumBody)/config.MinimumRecordBytes, 1),
 	}
 }
 

@@ -24,7 +24,7 @@ var readPhaseBudgets = []time.Duration{5 * time.Second, 25 * time.Second, 55 * t
 func TestAReadNeverComesBeforeItsSettlingWaitAndLeavesMostOfTheBudget(t *testing.T) {
 	const configured = 30 * time.Second
 	for _, budget := range readPhaseBudgets {
-		settle := SettlingWaitWithinQueryBudget(budget, configured)
+		settle := min(SettlingWaitWithinQueryBudget(budget, configured), MinimumSettlingWait)
 		spread := min((budget-settle)*2/5, settle)
 		for i := 0; i < 2000; i++ {
 			queryGroup := QueryGroupIdentity(fmt.Sprintf("qg-%d", i))
@@ -54,10 +54,11 @@ func TestTheSixtySecondPeriodSpreadsOverTenSeconds(t *testing.T) {
 	for i := 0; i < 2000; i++ {
 		latest = max(latest, ReadWaitWithinQueryBudget(QueryGroupIdentity(fmt.Sprintf("qg-%d", i)), 55*time.Second, configured))
 	}
-	// Two thousand groups over ten thousand milliseconds: the latest lands
-	// in the last half second unless the spread is narrower than designed.
-	if latest < 39500*time.Millisecond || latest >= 40*time.Second {
-		t.Fatalf("latest read of a 60s group = %v, want just under 40s", latest)
+	// Two thousand groups over ten thousand milliseconds after the 10 s
+	// floor: the latest lands in the last half second unless the spread is
+	// narrower than designed.
+	if latest < 19500*time.Millisecond || latest >= 20*time.Second {
+		t.Fatalf("latest read of a 60s group = %v, want just under 20s", latest)
 	}
 }
 
@@ -81,7 +82,7 @@ func TestReadPhasesSpreadEvenlyOverTheirSeconds(t *testing.T) {
 	const groups = 10000
 	var buckets [10]int
 	for i := 0; i < groups; i++ {
-		phase := ReadWaitWithinQueryBudget(QueryGroupIdentity(fmt.Sprintf("bk_monitor/time_series/%d", i)), 55*time.Second, 30*time.Second) - 30*time.Second
+		phase := ReadWaitWithinQueryBudget(QueryGroupIdentity(fmt.Sprintf("bk_monitor/time_series/%d", i)), 55*time.Second, 30*time.Second) - MinimumSettlingWait
 		buckets[phase/time.Second]++
 	}
 	for second, count := range buckets {
@@ -99,4 +100,17 @@ func TestReadingTheReadWaitAllocatesNothing(t *testing.T) {
 }
 
 // readPhasePinned is the read wait of qg:tenant/2/1001 on a 60-second schedule.
-const readPhasePinned = 31311 * time.Millisecond
+const readPhasePinned = 11311 * time.Millisecond
+
+// The deployment's wait is the floor only when it is shorter than the
+// product's: a deployment that says its data lands in a millisecond is read
+// then, and one that says thirty seconds is read at the floor, its groups
+// held the rest by what they measure.
+func TestTheSettlingFloorIsTheShorterOfTheDeploymentsAndTheProducts(t *testing.T) {
+	if got := ReadWaitWithinQueryBudget("qg", 55*time.Second, time.Millisecond); got >= MinimumSettlingWait {
+		t.Fatalf("a 1 ms deployment wait read at %v", got)
+	}
+	if got := ReadWaitWithinQueryBudget("qg", 55*time.Second, 30*time.Second); got < MinimumSettlingWait || got >= 2*MinimumSettlingWait {
+		t.Fatalf("a 30 s deployment wait read at %v, want the 10 s floor and a phase", got)
+	}
+}

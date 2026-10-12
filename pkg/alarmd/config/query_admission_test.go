@@ -36,8 +36,8 @@ func TestExecutionGuardIsNotAnEnvironmentKnob(t *testing.T) {
 	// Machine-independent half: whatever container this ran on, the resolved
 	// guard and the resolved permits have to have come from the same
 	// derivation. A file that reached either one alone would break this.
-	if cfg.PhaseTwo.Scheduler.ActiveExecutionLimit !=
-		cfg.PhaseTwo.Scheduler.ProcessQueryPermits*activeExecutionsPerQueryPermit {
+	if derived := DeriveScheduler(DetectCapacityInputs()); cfg.PhaseTwo.Scheduler.ActiveExecutionLimit != derived.ActiveExecutionCeiling ||
+		cfg.PhaseTwo.Scheduler.ProcessQueryPermits != derived.ProcessQueryPermits {
 		t.Fatalf("resolved guard %d and resolved permits %d did not come from one derivation",
 			cfg.PhaseTwo.Scheduler.ActiveExecutionLimit, cfg.PhaseTwo.Scheduler.ProcessQueryPermits)
 	}

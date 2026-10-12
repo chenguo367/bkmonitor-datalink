@@ -26,11 +26,21 @@ func readWaitOf(cfg config.Config, queryGroup execution.QueryGroupIdentity, inte
 	return execution.ReadWaitWithinQueryBudget(queryGroup, budget, cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 }
 
+// firstReadWaitOf is how long after its evaluation time a group nothing has
+// measured is first read: its read wait, or the deployment's ready delay as
+// its schedule's budget allows it if later - the cold-start arrival its read
+// hold is seeded with, on a source no peer has measured and a query with no
+// time_delay.
+func firstReadWaitOf(cfg config.Config, queryGroup execution.QueryGroupIdentity, intervalSeconds int64) time.Duration {
+	budget := time.Duration(intervalSeconds)*time.Second - cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
+	return max(readWaitOf(cfg, queryGroup, intervalSeconds), execution.SettlingWaitWithinQueryBudget(budget, cfg.PhaseTwo.Access.MinReadyDelay.Duration()))
+}
+
 // roundReadAtMillis is the instant a harness runs a round: half the interval
 // after the evaluation time, as the harnesses always have, or the group's
 // read if that is later.
 func roundReadAtMillis(cfg config.Config, queryGroup execution.QueryGroupIdentity, evaluationAt, intervalSeconds int64) int64 {
-	return evaluationAt*1000 + max(intervalSeconds*1000/2, readWaitOf(cfg, queryGroup, intervalSeconds).Milliseconds())
+	return evaluationAt*1000 + max(intervalSeconds*1000/2, firstReadWaitOf(cfg, queryGroup, intervalSeconds).Milliseconds())
 }
 
 // latestRoundReadAtMillis is the instant a harness runs a round of every

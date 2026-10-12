@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,14 +39,18 @@ type readHoldCatalog interface {
 // Read holds share the ownership store and schedule timeline. Nothing here
 // changes a Plan's state generation or the window its Slot reads.
 type productionReadHolds struct {
-	controller  *readhold.Controller
-	cfg         config.Config
-	repository  readHoldCatalog
-	catalog     readHoldTimeline
-	now         func() time.Time
-	logger      *observability.Logger
-	mu          sync.Mutex
-	groups      map[execution.QueryGroupIdentity]*productionReadHoldGroup
+	controller *readhold.Controller
+	cfg        config.Config
+	repository readHoldCatalog
+	catalog    readHoldTimeline
+	now        func() time.Time
+	logger     *observability.Logger
+	mu         sync.Mutex
+	groups     map[execution.QueryGroupIdentity]*productionReadHoldGroup
+	// sources indexes the owned groups by the data they read
+	// (productionReadHoldGroup.querySource), so a new group's seed walks its
+	// peers and not every owned group.
+	sources     map[string]map[execution.QueryGroupIdentity]struct{}
 	nextRenew   time.Time
 	transitions atomic.Uint64
 	overtaken   atomic.Uint64
@@ -71,7 +76,11 @@ type productionReadHoldGroup struct {
 	lastTransition execution.EvaluationTime
 	predecessors   []execution.QueryGroupIdentity
 	queryRoute     string
-	queryDelay     time.Duration
+	// querySource names the data the query reads (readHoldSource): the
+	// groups that share it are the peers a new group's first hold is seeded
+	// from.
+	querySource string
+	queryDelay  time.Duration
 	// queryStep is the query's data step, the one the lookback aligns its
 	// suggestion to, and settlingWait the newest prepared Segment's spec's,
 	// cached with the delay for the time_delay a measured hold suggests
@@ -126,7 +135,31 @@ func (holds *productionReadHolds) owner(qg execution.QueryGroupIdentity) (readho
 func (holds *productionReadHolds) bind(qg execution.QueryGroupIdentity, session *ownership.Session) {
 	holds.mu.Lock()
 	defer holds.mu.Unlock()
+	holds.indexSourceLocked(qg, "")
 	holds.groups[qg] = &productionReadHoldGroup{session: session}
+}
+
+// indexSourceLocked moves the group in the source index from the source it
+// was under to source; empty takes it out. Called with holds.mu held.
+func (holds *productionReadHolds) indexSourceLocked(qg execution.QueryGroupIdentity, source string) {
+	if previous := holds.groups[qg]; previous != nil && previous.querySource != "" {
+		if peers := holds.sources[previous.querySource]; peers != nil {
+			delete(peers, qg)
+			if len(peers) == 0 {
+				delete(holds.sources, previous.querySource)
+			}
+		}
+	}
+	if source == "" {
+		return
+	}
+	if holds.sources == nil {
+		holds.sources = make(map[string]map[execution.QueryGroupIdentity]struct{})
+	}
+	if holds.sources[source] == nil {
+		holds.sources[source] = make(map[execution.QueryGroupIdentity]struct{})
+	}
+	holds.sources[source][qg] = struct{}{}
 }
 
 // forget releases the binding a Runner made, and only that one: the session
@@ -150,6 +183,7 @@ func (holds *productionReadHolds) forget(qg execution.QueryGroupIdentity, sessio
 	if group == nil || group.session != session {
 		return
 	}
+	holds.indexSourceLocked(qg, "")
 	delete(holds.groups, qg)
 	holds.controller.Forget(qg)
 }
@@ -248,11 +282,76 @@ func (holds *productionReadHolds) queryBasis(ctx context.Context, schedule execu
 	step = time.Duration(object.QueryPlan.StepMillis) * time.Millisecond
 	holds.mu.Lock()
 	if owned != nil && holds.groups[qg] == owned {
+		source := readHoldSource(object.QueryPlan, route)
+		holds.indexSourceLocked(qg, source)
+		owned.querySource = source
 		owned.queryRoute, owned.queryDelay, owned.queryStep = route, delay, step
 		owned.queryUnaligned = object.QueryPlan.NotTimeAlign
 	}
 	holds.mu.Unlock()
 	return route, delay, step, nil
+}
+
+// readHoldSource names the data a query reads: its result tables and data
+// sources, in order, or for a query that names none (a PromQL one) its route.
+// Groups that read the same data see it land at the same time, which is what
+// seeding a new group from its peers rests on.
+func readHoldSource(facts execution.QueryPlanFacts, route string) string {
+	var names []string
+	for _, clause := range facts.QueryList {
+		if clause.TableID != "" || clause.DataSource != "" {
+			names = append(names, clause.DataSource+"/"+clause.TableID)
+		}
+	}
+	if len(names) == 0 {
+		return "route:" + route
+	}
+	slices.Sort(names)
+	return strings.Join(slices.Compact(names), ",")
+}
+
+// A group on a data source no group here has measured starts from the
+// deployment's ready delay (MinReadyDelay): the wait every group read at
+// before the wait came down to its floor and the rest was measured per
+// source, so a new source reads no earlier than every source read before,
+// and its own early reads take it down from there. It is the cold-start value
+// of a new source.
+
+// readHoldPeerPercentile is how high in its peers' measured arrivals a new
+// group starts: high enough that few of them would have read incomplete.
+const readHoldPeerPercentile = 0.9
+
+// seedArrival is where a group with no record of its own starts: the
+// readHoldPeerPercentile of the arrival ages its peers on the same data
+// measured, each net of its own time_delay, with the group's time_delay added;
+// or coldStart on a source none of them has measured.
+func (holds *productionReadHolds) seedArrival(qg execution.QueryGroupIdentity, delay, coldStart time.Duration) (time.Duration, string) {
+	type peer struct {
+		group execution.QueryGroupIdentity
+		delay time.Duration
+	}
+	var peers []peer
+	holds.mu.Lock()
+	if owned := holds.groups[qg]; owned != nil && owned.querySource != "" {
+		for group := range holds.sources[owned.querySource] {
+			if other := holds.groups[group]; group != qg && other != nil {
+				peers = append(peers, peer{group, other.queryDelay})
+			}
+		}
+	}
+	holds.mu.Unlock()
+	var arrivals []time.Duration
+	for _, p := range peers {
+		if arrival, seed := holds.controller.Arrival(p.group); arrival > 0 && seed == "" {
+			arrivals = append(arrivals, time.Duration(arrival)*time.Millisecond-p.delay)
+		}
+	}
+	if len(arrivals) == 0 {
+		return delay + coldStart, readhold.SeedColdStart
+	}
+	slices.Sort(arrivals)
+	index := min(int(float64(len(arrivals))*readHoldPeerPercentile), len(arrivals)-1)
+	return delay + max(arrivals[index], 0), readhold.SeedPeer
 }
 
 func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (readhold.GroupSpec, error) {
@@ -266,16 +365,30 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	// aggregates, whose schedule is shorter than its data step, would never
 	// have its hold lowered if this were the schedule's.
 	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule), Step: step}
+	var coldStart time.Duration
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key()})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
 		// The group reads at its own moment, settling wait plus phase, and a
 		// hold is how much later than that it must read: measured from the
 		// settling wait alone it would hold the group its phase too long.
-		wait := execution.ReadWaitWithinQueryBudget(schedule.Segment.QueryGroup, offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+		budget := offset - holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
+		wait := execution.ReadWaitWithinQueryBudget(schedule.Segment.QueryGroup, budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+		// The cold start is where the group was read before the wait came
+		// down to its floor: the deployment's wait as its schedule's budget
+		// allowed it - a ten-second period was read at ten seconds then too.
+		previous := execution.SettlingWaitWithinQueryBudget(budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
 		}
+		if len(spec.Plans) == 1 || previous < coldStart {
+			coldStart = previous
+		}
+	}
+	// Only a group with no record of its own is ever seeded: one with a
+	// record skips the walk of its peers, at a rollout as in steady state.
+	if !holds.controller.HasOwnRecord(schedule.Segment.QueryGroup) {
+		spec.SeedArrivalAge, spec.SeedOrigin = holds.seedArrival(schedule.Segment.QueryGroup, delay, coldStart)
 	}
 	return spec, nil
 }

@@ -352,6 +352,11 @@ func (coordinator *FlightCoordinator) acquireProcessQueryPermit(
 	// this caller did or did not have to wait. Anything downstream reading the
 	// two gauges instead sees the moment after it resolved.
 	coordinator.permitAcquires++
+	if recovery {
+		coordinator.recoveryAcquires++
+	} else {
+		coordinator.normalRequests.Add(coordinator.now())
+	}
 	if queued {
 		coordinator.permitQueued++
 		// A formal query waits: no lookback read may be why.
@@ -446,6 +451,7 @@ func (coordinator *FlightCoordinator) releaseQueryPermit(operation execution.Ope
 		delete(coordinator.heldPermits, permitID)
 		if elapsed := coordinator.now().Sub(held.since); elapsed > 0 && coordinator.permitSecondsByOp != nil {
 			coordinator.permitSecondsByOp[held.operation] += elapsed.Seconds()
+			coordinator.recordHoldLocked(held.operation, elapsed)
 		}
 	}
 	coordinator.dispatchQueryPermitsLocked()

@@ -40,6 +40,10 @@ import (
 const (
 	poolBudgetSettle  = 30 * time.Second
 	poolBudgetReserve = 5 * time.Second
+	// poolSlowerThanANormalRound is a backend that answers past every
+	// normal round's budget - the minute less the reserve and a read wait of
+	// at least the 10 s floor, at most 45 s - and inside a replay's 55 s.
+	poolSlowerThanANormalRound = 50 * time.Second
 	// poolPassSlack is how far past a Slot's readiness a round's pass runs:
 	// at the instant itself the Slot is not yet due.
 	poolPassSlack = 500 * time.Millisecond
@@ -193,19 +197,20 @@ func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness 
 }
 
 // readWait is how long after its Slot the harness's one Query Group is read:
-// the settling wait and the group's phase.
+// the deployment's ready delay, at which its seeded read hold puts the read.
 func (h *poolProbeHarness) readWait() time.Duration {
 	h.t.Helper()
 	if len(h.bundle.queryGroups) != 1 {
 		h.t.Fatalf("Query Groups = %v, want one", h.bundle.queryGroups)
 	}
-	return readWaitOf(h.cfg, h.bundle.queryGroups[0], 60)
+	return firstReadWaitOf(h.cfg, h.bundle.queryGroups[0], 60)
 }
 
 // normalBudget is what a normal round's query has from its read to its
-// deadline: the minute less the reserve and the read wait.
+// deadline: the minute less the reserve and the read wait before its hold,
+// since the hold moves the deadline with the read.
 func (h *poolProbeHarness) normalBudget() time.Duration {
-	return time.Minute - poolBudgetReserve - h.readWait()
+	return time.Minute - poolBudgetReserve - readWaitOf(h.cfg, h.bundle.queryGroups[0], 60)
 }
 
 // round runs the minute's round half a second after its Slot is ready, and
@@ -287,9 +292,17 @@ func (h *poolProbeHarness) runnerReadyAt() int64 {
 func (h *poolProbeHarness) afterCooldown() int64 {
 	h.t.Helper()
 	at := h.poolRecord().Until.UnixMilli() + 1
-	deadline := (time.Minute - poolBudgetReserve).Milliseconds()
-	if second := (at - h.base*1000) % time.Minute.Milliseconds(); second >= h.readWait().Milliseconds() && second < deadline {
-		at += deadline - second + 1
+	// A round's own window runs from its read to its deadline, which its
+	// read hold moves with the read and can carry past the next minute's
+	// start: outside every such window, a Slot still held is a replay.
+	hold := h.readWait() - readWaitOf(h.cfg, h.bundle.queryGroups[0], 60)
+	deadline := (time.Minute - poolBudgetReserve + hold).Milliseconds()
+	minute := time.Minute.Milliseconds()
+	for slot := (at-h.base*1000)/minute - 1; slot <= (at-h.base*1000)/minute; slot++ {
+		start := h.base*1000 + slot*minute
+		if at >= start+h.readWait().Milliseconds() && at < start+deadline {
+			at = start + deadline + 1
+		}
 	}
 	return at
 }
@@ -352,25 +365,28 @@ func (h *poolProbeHarness) decide(late time.Duration) (replays []poolRequest, de
 
 // Only the Query Group's next normal round decides the pool, at its own
 // second and late as it is: one that queued for its permit until 13 s of its
-// budget were left has 13 s. A backend answering in 22 s - which a replay at the cooldown's end,
-// with no queue, answers - keeps the Query Group in; one answering in 10 s
-// takes it out. The held Slot is replayed first, with a replay's 55 s from its
+// budget were left has 13 s. A backend answering just past a normal round's
+// whole budget - which a replay at the cooldown's end, with its 55 s,
+// answers - keeps the Query Group in; one answering in 10 s takes it out. The held Slot is replayed first, with a replay's 55 s from its
 // arrival, for its data, and decides nothing. The probe line says what the
 // deciding round had and used.
 func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 	for _, test := range []struct {
 		name    string
-		latency time.Duration
+		latency func(h *poolProbeHarness) time.Duration
 		event   string
 		outcome string
 	}{
-		{"a backend answering in 22 s", 22 * time.Second, "extended", observability.QueryCooldownProbeUnavailable},
-		{"a backend answering in 10 s", 10 * time.Second, "recovered", observability.QueryCooldownProbeAnswered},
+		{"a backend answering just past a normal round", func(h *poolProbeHarness) time.Duration { return h.normalBudget() + time.Second },
+			"extended", observability.QueryCooldownProbeUnavailable},
+		{"a backend answering in 10 s", func(*poolProbeHarness) time.Duration { return 10 * time.Second },
+			"recovered", observability.QueryCooldownProbeAnswered},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			h := newPoolProbeHarness(t, 30*time.Second)
+			h := newPoolProbeHarness(t, poolSlowerThanANormalRound)
 			h.enterPool()
-			h.backend.latency.Store(test.latency.Milliseconds())
+			latency := test.latency(h)
+			h.backend.latency.Store(latency.Milliseconds())
 			late := h.normalBudget() - poolPassSlack - 13*time.Second
 			replays, decider, event, atEnd := h.decide(late)
 			// The held Slot is replayed, and the next round decides.
@@ -387,7 +403,7 @@ func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 				t.Fatalf("the deciding round had %s, want its normal round's %s less %s late", decider.remaining, h.normalBudget(), late)
 			}
 			if event.Event != test.event {
-				t.Fatalf("a backend answering in %s made %q, want %q", test.latency, event.Event, test.event)
+				t.Fatalf("a backend answering in %s made %q, want %q", latency, event.Event, test.event)
 			}
 			probe := event.LastProbe
 			// The elapsed time is the query service client's own measure, on
@@ -413,7 +429,7 @@ func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 // the normal round that decides times out and extends the pool, one failure
 // more each time, with no exit and no re-entry.
 func TestABackendSlowerThanANormalRoundStaysInThePoolWithoutReentering(t *testing.T) {
-	h := newPoolProbeHarness(t, 30*time.Second)
+	h := newPoolProbeHarness(t, poolSlowerThanANormalRound)
 	h.enterPool()
 	failures := h.poolRecord().Failures
 	for cooldown := 0; cooldown < 3; cooldown++ {
@@ -505,7 +521,7 @@ func (h *poolProbeHarness) readyAfter(at int64) int64 {
 // decides nothing; the next round, with nothing of its own ahead of it,
 // answers and takes the Query Group out.
 func TestARoundLateBehindThePoolsOwnReplayDoesNotKeepTheQueryGroupIn(t *testing.T) {
-	h := newPoolProbeHarness(t, 30*time.Second)
+	h := newPoolProbeHarness(t, poolSlowerThanANormalRound)
 	h.enterPool()
 	entered := h.poolRecord()
 	end := h.afterCooldown()
@@ -539,7 +555,7 @@ func TestARoundLateBehindThePoolsOwnReplayDoesNotKeepTheQueryGroupIn(t *testing.
 // as good as out of the pool with no answer to show for it. After the one
 // excused round, the next deciding round extends the cooldown.
 func TestOnlyOneRoundIsExcusedForEachCooldownsEnd(t *testing.T) {
-	h := newPoolProbeHarness(t, 30*time.Second)
+	h := newPoolProbeHarness(t, poolSlowerThanANormalRound)
 	h.enterPool()
 	h.backend.latency.Store((5 * time.Minute).Milliseconds())
 	entered := h.poolRecord()
@@ -586,7 +602,7 @@ func anyReplayAnswered(requests []poolRequest) bool {
 // against a backend slower than the budget, each the only query in flight,
 // are three uncontended timeouts.
 func TestTheProductionBundleCountsDownstreamDistressByContention(t *testing.T) {
-	h := newPoolProbeHarness(t, 30*time.Second)
+	h := newPoolProbeHarness(t, poolSlowerThanANormalRound)
 	h.enterPool()
 	families, err := h.recorder.Gatherer().Gather()
 	if err != nil {
@@ -607,5 +623,52 @@ func TestTheProductionBundleCountsDownstreamDistressByContention(t *testing.T) {
 	}
 	if counts["class=timeout contended=false "] != 3 || counts["class=timeout contended=true "] != 0 || len(counts) != 8 {
 		t.Fatalf("distress counted %v, want three uncontended timeouts among eight series", counts)
+	}
+}
+
+// The production dispatcher counts each Slot it queues as made ready, the
+// peak the execution slots are sized from: a round that ran its Query Group
+// left one in the busiest second.
+func TestTheProductionDispatcherCountsTheSlotsItMakesReady(t *testing.T) {
+	h := newPoolProbeHarness(t, 10*time.Millisecond)
+	requests, _ := h.round(0)
+	if len(requests) != 1 {
+		t.Fatalf("minute 0 sent %+v, want one query", requests)
+	}
+	shaper := h.bundle.shaper
+	shaper.mu.Lock()
+	peak := shaper.ready.Peak(shaper.now())
+	shaper.mu.Unlock()
+	if peak < 1 {
+		t.Fatalf("a round ran and the ready peak is %d", peak)
+	}
+}
+
+// A new Query Group on a source nobody here has measured starts from the
+// cold start, and the production bundle's metrics say so by origin: its
+// first Slot is held to the deployment's ready delay and counted once as
+// cold_start, never as peer.
+func TestTheProductionBundleCountsHowEachGroupWasSeeded(t *testing.T) {
+	h := newPoolProbeHarness(t, 10*time.Millisecond)
+	if requests, _ := h.round(0); len(requests) != 1 {
+		t.Fatalf("minute 0 sent %+v, want one query", requests)
+	}
+	families, err := h.recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeds := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_read_hold_seeds_total" {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			for _, label := range series.GetLabel() {
+				seeds[label.GetValue()] = series.GetCounter().GetValue()
+			}
+		}
+	}
+	if seeds["cold_start"] != 1 || seeds["peer"] != 0 || len(seeds) != 2 {
+		t.Fatalf("seeds counted %v, want one cold start and no peer", seeds)
 	}
 }

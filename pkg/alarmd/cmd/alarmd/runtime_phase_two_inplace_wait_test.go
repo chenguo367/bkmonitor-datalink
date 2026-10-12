@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -51,7 +52,9 @@ func TestAnInPlaceReadinessWaitIsOnTheSlotLineAndCounted(t *testing.T) {
 	var waits []observability.InPlaceWaitFacts
 	completed := 0
 	cfg := controlledG4RuntimeConfig(address, "http://controlled-uq", "alarmd-inplace-wait")
-	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(poolBudgetSettle)
+	// At the settling floor, so no read hold is seeded: a held Slot is
+	// deferred until its last query is ready and never waits in place.
+	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(execution.MinimumSettlingWait)
 	cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(poolBudgetReserve)
 	recorder := metric.NewRecorder(metric.BuildInfo{})
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(ctx, cfg, recorder,
@@ -90,7 +93,7 @@ func TestAnInPlaceReadinessWaitIsOnTheSlotLineAndCounted(t *testing.T) {
 		if len(bundle.queryGroups) != 1 {
 			t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 		}
-		backend.clock.Store((base+minute*60)*1000 + (readWaitOf(cfg, bundle.queryGroups[0], 60) - beforePrimaryReady).Milliseconds())
+		backend.clock.Store((base+minute*60)*1000 + (firstReadWaitOf(cfg, bundle.queryGroups[0], 60) - beforePrimaryReady).Milliseconds())
 		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 			t.Fatalf("minute %d: %v", minute, err)
 		}

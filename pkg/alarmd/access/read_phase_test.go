@@ -22,7 +22,7 @@ func TestQueryGroupsOnOneScheduleAreReadAtTheirOwnMoments(t *testing.T) {
 	requirement := frozen.Requirements[0]
 	spec := execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Timezone: "UTC"}
 	window := execution.QueryWindow{Start: int64(ref.Slot.EvaluationTime) - 60, End: int64(ref.Slot.EvaluationTime)}
-	settled := window.End*1000 + 30_000
+	settled := window.End*1000 + execution.MinimumSettlingWait.Milliseconds()
 	moments := map[int64]bool{}
 	for i := 0; i < 50; i++ {
 		ref.Slot.QueryGroup = execution.QueryGroupIdentity(fmt.Sprintf("group-%d", i))
@@ -31,7 +31,7 @@ func TestQueryGroupsOnOneScheduleAreReadAtTheirOwnMoments(t *testing.T) {
 			t.Fatal(err)
 		}
 		if ready < settled || ready >= settled+10_000 {
-			t.Fatalf("%s ready %d ms after its window, want [30000, 40000)", ref.Slot.QueryGroup, ready-window.End*1000)
+			t.Fatalf("%s ready %d ms after its window, want [10000, 20000)", ref.Slot.QueryGroup, ready-window.End*1000)
 		}
 		if want := window.End*1000 + execution.ReadWaitWithinQueryBudget(ref.Slot.QueryGroup, 55*time.Second, 30*time.Second).Milliseconds(); ready != want {
 			t.Fatalf("%s ready %d, the shared rule says %d", ref.Slot.QueryGroup, ready, want)
