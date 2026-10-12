@@ -265,3 +265,14 @@ func (bundle *phaseTwoWorkerBundle) recordControlTakeover() {
 		bundle.dependencies.Recorder.RecordControlLeaderTransition(ownership.ControlCandidacyFallback, "fallback_takeover")
 	}
 }
+
+// absentCloseWired is whether this process runs the deleted-strategy close
+// loop: on every control-lease candidate, preferred or fallback, when the
+// alert link's Console is configured. Closing the alerts of a strategy that
+// no longer exists is alert correctness and belongs to the core control a
+// fallback Leader carries; a fallback that led without it left those alerts
+// open for as long as it led. The round itself does nothing on a process
+// that does not hold the lease.
+func absentCloseWired(cfg config.Config, consoleConfigured bool) bool {
+	return consoleConfigured && phaseTwoControlCandidacy(cfg) != ""
+}

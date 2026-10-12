@@ -165,3 +165,36 @@ func TestAHandbackWaitsForAWholeWindowOfUnbrokenReadiness(t *testing.T) {
 		})
 	}
 }
+
+// Closing the alerts of a strategy that no longer exists is alert
+// correctness, the core control a fallback Leader carries: every candidate
+// runs the loop when the link's Console is configured, so a Worker that
+// leads while the control process is gone closes them too. A process that
+// cannot lead, or a deployment without the Console, does not.
+func TestEveryControlCandidateRunsTheDeletedStrategyClose(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		roles   roles.Set
+		blank   bool
+		console bool
+		want    bool
+	}{
+		{name: "default all-roles form", console: true, want: true},
+		{name: "control only", roles: roles.Set{roles.Control}, console: true, want: true},
+		{name: "worker only, a fallback candidate", roles: roles.Set{roles.Worker}, console: true, want: true},
+		{name: "worker without control inputs", roles: roles.Set{roles.Worker}, blank: true, console: true, want: false},
+		{name: "channel only", roles: roles.Set{roles.Channel}, console: true, want: false},
+		{name: "no Console", roles: roles.Set{roles.Worker}, console: false, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := validGoAccessRuntimeConfig()
+			cfg.Roles = testCase.roles
+			if testCase.blank {
+				cfg.PhaseTwo.Control.StrategyCachePrefix = ""
+			}
+			if got := absentCloseWired(cfg, testCase.console); got != testCase.want {
+				t.Fatalf("absentCloseWired() = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}

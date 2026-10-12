@@ -20,12 +20,14 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
@@ -67,6 +69,8 @@ type electionFixture struct {
 	// case moves the injected clock in large steps with no real time for
 	// the renewals to restate the Leader's deadline on it.
 	controlLeaderTTL time.Duration
+	// configure, when set, edits every process's configuration last.
+	configure func(*config.Config)
 	// completed is, by evaluation time, the Query Groups a Slot completed
 	// for, on any process.
 	mu        sync.Mutex
@@ -175,6 +179,9 @@ func (fixture *electionFixture) configFor(name string, selected roles.Set) confi
 	cfg.PhaseTwo.Ownership.LeaseRenewInterval = config.Duration(time.Second)
 	if !selected.Has(roles.Worker) && len(selected) != 0 {
 		cfg.PhaseTwo.Coordinator.MaxEvents++ // a control process's resources differ from a Worker's
+	}
+	if fixture.configure != nil {
+		fixture.configure(&cfg)
 	}
 	return cfg
 }
@@ -757,5 +764,80 @@ func TestTheDefaultFormElectsAsBeforeButNeverAProcessThatIsStartingOrStopping(t 
 	}
 	if got := fixture.transitions("fallback", "fallback_takeover"); got != 0 {
 		t.Fatalf("fallback takeovers in the default form = %v, want 0", got)
+	}
+}
+
+// TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose configures the
+// alert link's Console on two Workers and no control process. Closing the
+// alerts of a deleted strategy is core control, so both Workers wire the loop;
+// the one that holds the lease runs its rounds as the Leader - it reads the
+// link's roster and decides on the deleted strategy the roster still lists -
+// and the other counts its rounds as not_leader.
+func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
+	fixture := newElectionFixture(t, 2, "alarmd:phase-two:election-absent-close")
+	// The lifecycle fixture's Console, naming the runtime redis-server as
+	// the link's target, with the one route it does not answer: the roster,
+	// which lists a strategy the strategy cache no longer has.
+	link := lifecycleConsole(fixture.address, fixture.redis)
+	target := openalerts.TargetBinding{EventSourceID: "source", HookName: "active", KeyPrefix: lifecycleLinkPrefix,
+		Address: fixture.address, Database: 0, Sources: []string{"source"}}
+	const deletedTenant, deletedStrategy = "system", "9999"
+	var rosterReads atomic.Int64
+	console := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/local-api/strategy-index/browse" {
+			link(w, r)
+			return
+		}
+		rosterReads.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"target": target, "nextCursor": nil, "phase": "sets",
+			"health": map[string]any{"lastSuccess": fixture.now().Format(time.RFC3339Nano), "lastAttempt": nil, "error": nil, "pendingCount": 0},
+			"rows": []any{map[string]any{"tenantId": deletedTenant, "strategyId": deletedStrategy,
+				"key": lifecycleLinkPrefix + ":" + deletedTenant + ":" + deletedStrategy, "members": 1}}})
+	}))
+	t.Cleanup(console.Close)
+	fixture.configure = func(cfg *config.Config) {
+		cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+		cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
+	}
+	leading := fixture.open("absent-worker-1", roles.Set{roles.Worker}, true)
+	following := fixture.open("absent-worker-2", roles.Set{roles.Worker}, true)
+	if leader, _ := fixture.leader(); leader != leading || leading.bundle.candidacy != ownership.ControlCandidacyFallback {
+		t.Fatalf("leader with no control process = %v (candidacy %q), want %s as the fallback", leader, leading.bundle.candidacy, leading.name)
+	}
+	for _, process := range []*electionProcess{leading, following} {
+		if process.bundle.dependencies.RunAbsentClose == nil {
+			t.Fatalf("%s, a fallback candidate with the Console configured, has no deleted-strategy close loop", process.name)
+		}
+	}
+	outcome := func(process *electionProcess, word string) float64 {
+		return counterValue(t, process.recorder, "bkmonitor_alarmd_absent_strategy_close_total", map[string]string{"outcome": word})
+	}
+	rounds := func(process *electionProcess) float64 {
+		total := 0.0
+		for _, refusal := range absentalerts.Refusals {
+			total += counterValue(t, process.recorder, "bkmonitor_alarmd_absent_strategy_round_total", map[string]string{"disposition": refusal})
+		}
+		return total
+	}
+	// Each loop takes its first round when the process starts; the next is
+	// five minutes away. Both have run by the time the counts move.
+	waitPhaseTwoCondition(t, 10*time.Second, "the Leader's first deleted-strategy round", func() bool {
+		return rounds(leading) >= 1 && outcome(following, absentalerts.OutcomeNotLeader) >= 1
+	})
+	if got := outcome(leading, absentalerts.OutcomeNotLeader); got != 0 {
+		t.Fatalf("the fallback Leader counted %v rounds as not_leader", got)
+	}
+	if rosterReads.Load() == 0 {
+		t.Fatal("the fallback Leader's round never read the link's roster")
+	}
+	if got := counterValue(t, leading.recorder, "bkmonitor_alarmd_absent_strategy_difference", map[string]string{"side": "roster_strategies"}); got != 1 {
+		t.Fatalf("roster strategies the Leader's round read = %v, want the deleted strategy", got)
+	}
+	if decided := outcome(leading, absentalerts.OutcomeWithinGrace) + outcome(leading, absentalerts.OutcomeCloseDecided); decided < 1 {
+		t.Fatalf("the deleted strategy was not decided on by the Leader's round: round %v, within_grace %v, close_decided %v",
+			rounds(leading), outcome(leading, absentalerts.OutcomeWithinGrace), outcome(leading, absentalerts.OutcomeCloseDecided))
+	}
+	if got := rounds(following); got != 0 {
+		t.Fatalf("the Worker that does not lead ran %v rounds of the difference", got)
 	}
 }
