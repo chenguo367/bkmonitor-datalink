@@ -104,3 +104,47 @@ func TestARoundPastTheSourceBackoffLeavesNoReadyTimeBehind(t *testing.T) {
 		t.Fatalf("after a round past its backoff the Runner is ready again at %d, %s ago", ready.Unix(), clock.Now().Sub(ready))
 	}
 }
+
+// The execution backoff is the other half of NextReadyAt and is spent the
+// same way: a failed Slot's backoff that the round is past must not outlive
+// a round that never reaches the Slot - a source error of no named kind, or
+// an ownership the session no longer confirms - as a ready time already gone.
+func TestARoundPastTheExecutionBackoffLeavesNoReadyTimeBehind(t *testing.T) {
+	for name, fail := range map[string]func(*fakeSlotSource, *fakeSession){
+		"source error": func(source *fakeSlotSource, _ *fakeSession) {
+			source.err = errors.New("a source failure of no named kind")
+		},
+		"ownership rejected": func(_ *fakeSlotSource, session *fakeSession) {
+			session.err = errors.New("the lease is not this Worker's")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := newMutableClock(time.Unix(200, 0))
+			slot := frozenSlot("query-group-1")
+			flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := &fakeSlotSource{slot: slot}
+			session := &fakeSession{fence: slot.Dispatch.OwnerFence}
+			runner, err := NewRunner("query-group-1", session, source, &failingExecutor{err: errors.New("commit progress: redis timeout"), failures: -1}, flights, clock.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, attempted, err := runner.RunOne(context.Background()); err == nil || !attempted {
+				t.Fatalf("the Slot's execution attempted=%t err=%v, want a failed attempt", attempted, err)
+			}
+			if runner.NextReadyAt().IsZero() {
+				t.Fatal("a failed execution set no backoff")
+			}
+			clock.Advance(runner.NextReadyAt().Sub(clock.Now()) + time.Second)
+			fail(source, session)
+			if _, _, err := runner.RunOne(context.Background()); err == nil {
+				t.Fatal("the round's error was not returned")
+			}
+			if ready := runner.NextReadyAt(); !ready.IsZero() {
+				t.Fatalf("after a round past its execution backoff the Runner is ready again at %d, %s ago", ready.Unix(), clock.Now().Sub(ready))
+			}
+		})
+	}
+}
