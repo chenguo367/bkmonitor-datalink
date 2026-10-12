@@ -225,8 +225,8 @@ func TestTheSchedulerShapeFollowsTheDemand(t *testing.T) {
 	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
 	demand := SchedulerDemand{PeakQueriesPerSecond: 58, ReplayQueriesPerSecond: 0.5, PeakSlotsPerSecond: 15,
 		Hold: 90 * time.Millisecond, Execution: 1500 * time.Millisecond, OwnedQueryGroups: 700, MaxQueuedItemsPerQG: 16}
-	got := DeriveSchedulerShape(ceiling, demand)
-	want := DerivedScheduler{ProcessQueryPermits: 11, RecoveryQueryPermits: 1, ActiveExecutions: 45,
+	got := DeriveSchedulerShape(ceiling, demand, DerivedScheduler{}, 0)
+	want := DerivedScheduler{ProcessQueryPermits: 11, RecoveryQueryPermits: 1, ActiveExecutions: ceiling.ActiveExecutionCeiling,
 		ReadyQueueCapacity: 700*16 + 1, RecoveryQueueCapacity: 700*16 + 1, ActiveExecutionCeiling: ceiling.ActiveExecutionCeiling}
 	if got != want {
 		t.Fatalf("shape %+v, want %+v", got, want)
@@ -234,7 +234,7 @@ func TestTheSchedulerShapeFollowsTheDemand(t *testing.T) {
 	// A slower service does not raise the budget: the hold is the caller's
 	// lowest hourly median, and the same demand at the same hold is the same
 	// shape however slow the last answers were.
-	if again := DeriveSchedulerShape(ceiling, demand); again != got {
+	if again := DeriveSchedulerShape(ceiling, demand, DerivedScheduler{}, 0); again != got {
 		t.Fatalf("the same demand derived %+v and then %+v", got, again)
 	}
 }
@@ -247,12 +247,12 @@ func TestTheSchedulerShapeFollowsTheDemand(t *testing.T) {
 // slots that feed them.
 func TestTheSchedulerShapeStaysInsideItsBounds(t *testing.T) {
 	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
-	floor := DeriveSchedulerShape(ceiling, SchedulerDemand{MaxQueuedItemsPerQG: 16})
-	if floor.RecoveryQueryPermits != 1 || floor.ProcessQueryPermits != 2 || floor.ActiveExecutions != 4 || floor.ReadyQueueCapacity != 17 {
-		t.Fatalf("no demand derived %+v, want 1/2/4 and a queue of 17", floor)
+	floor := DeriveSchedulerShape(ceiling, SchedulerDemand{MaxQueuedItemsPerQG: 16}, DerivedScheduler{}, 0)
+	if floor.RecoveryQueryPermits != 1 || floor.ProcessQueryPermits != 2 || floor.ActiveExecutions != ceiling.ActiveExecutionCeiling || floor.ReadyQueueCapacity != 17 {
+		t.Fatalf("no demand from nothing derived %+v, want 1/2, the slot ceiling and a queue of 17", floor)
 	}
 	flood := DeriveSchedulerShape(ceiling, SchedulerDemand{PeakQueriesPerSecond: 1e9, ReplayQueriesPerSecond: 1e9,
-		PeakSlotsPerSecond: 1e9, Hold: time.Second, Execution: time.Second, OwnedQueryGroups: 10, MaxQueuedItemsPerQG: 16})
+		PeakSlotsPerSecond: 1e9, Hold: time.Second, Execution: time.Second, OwnedQueryGroups: 10, MaxQueuedItemsPerQG: 16}, DerivedScheduler{}, 0)
 	top := ceiling.ActiveExecutionCeiling
 	if flood.ActiveExecutions != top || flood.RecoveryQueryPermits+flood.ProcessQueryPermits != top-1 {
 		t.Fatalf("a flood derived %+v against a ceiling of %d, want every slot and all but one permit at it", flood, top)
@@ -267,7 +267,7 @@ func TestTheSchedulerShapeStaysInsideItsBounds(t *testing.T) {
 	}
 	// Until a hold is measured a query is taken to hold its permit for half a
 	// second.
-	cold := DeriveSchedulerShape(ceiling, SchedulerDemand{PeakQueriesPerSecond: 10, MaxQueuedItemsPerQG: 16})
+	cold := DeriveSchedulerShape(ceiling, SchedulerDemand{PeakQueriesPerSecond: 10, MaxQueuedItemsPerQG: 16}, DerivedScheduler{}, 0)
 	if cold.ProcessQueryPermits != 10 {
 		t.Fatalf("10 queries a second with no measured hold derived %d permits, want 10", cold.ProcessQueryPermits)
 	}
@@ -446,5 +446,49 @@ func TestTheSeriesCountNeverBindsBeforeTheBytes(t *testing.T) {
 		if light := budgets.MaxRetainedBytes / 200; light > budgets.MaxSeries {
 			t.Fatalf("%d MiB: %d series of 200 bytes fit the bytes but not the count %d", inputs.MemoryLimitBytes>>20, light, budgets.MaxSeries)
 		}
+	}
+}
+
+// Execution slots are the memory ceiling, whatever the demand: they bound
+// how many executions can be parked in memory at once, which is what the
+// ceiling measures, and an execution slot is a goroutine waiting on Redis or
+// the query service. Sized from demand they hid the demand: fewer slots ran
+// fewer Slots, which asked for fewer permits, which read as less demand.
+func TestExecutionSlotsStayAtTheMemoryCeiling(t *testing.T) {
+	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
+	for _, demand := range []SchedulerDemand{
+		{MaxQueuedItemsPerQG: 16},
+		{PeakQueriesPerSecond: 60, PeakSlotsPerSecond: 580, Hold: 54 * time.Millisecond, Execution: 4 * time.Millisecond, MaxQueuedItemsPerQG: 16},
+	} {
+		if got := DeriveSchedulerShape(ceiling, demand, DerivedScheduler{}, 0).ActiveExecutions; got != ceiling.ActiveExecutionCeiling {
+			t.Fatalf("demand %+v derived %d execution slots, want the %d ceiling", demand, got, ceiling.ActiveExecutionCeiling)
+		}
+	}
+}
+
+// The permit budget comes down by at most half a derivation and never below
+// the permits held now: a minute that measured little - a replica just
+// started, a lull - does not take the budget from a full one to its floor in
+// one step, and lowering never takes back what is running.
+func TestThePermitBudgetComesDownByHalvesAndNotBelowWhatIsHeld(t *testing.T) {
+	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
+	previous := ceiling
+	previous.ProcessQueryPermits = 64
+	idle := SchedulerDemand{Hold: 50 * time.Millisecond, MaxQueuedItemsPerQG: 16}
+	if got := DeriveSchedulerShape(ceiling, idle, previous, 0).ProcessQueryPermits; got != 32 {
+		t.Fatalf("an idle minute after 64 permits derived %d, want 32", got)
+	}
+	if got := DeriveSchedulerShape(ceiling, idle, previous, 40).ProcessQueryPermits; got != 40 {
+		t.Fatalf("with 40 permits held an idle minute derived %d, want 40", got)
+	}
+	busy := idle
+	busy.PeakQueriesPerSecond = 1000
+	if got := DeriveSchedulerShape(ceiling, busy, previous, 0).ProcessQueryPermits; got != 100 {
+		t.Fatalf("1000 queries a second at 50 ms derived %d permits, want 100 at once", got)
+	}
+	// The recovery permits come down the same way.
+	previous.RecoveryQueryPermits = 16
+	if got := DeriveSchedulerShape(ceiling, idle, previous, 0).RecoveryQueryPermits; got != 8 {
+		t.Fatalf("an idle minute after 16 recovery permits derived %d, want 8", got)
 	}
 }

@@ -654,8 +654,18 @@ func (fact FrozenSlotContractFact) validateAgainst(request FreezeSlotContractReq
 // takes to land is measured per group and read as its read hold (readhold),
 // which starts a group nothing has measured at the deployment's wait.
 func ReadWaitWithinQueryBudget(queryGroup QueryGroupIdentity, queryBudget, configured time.Duration) time.Duration {
-	settle := min(SettlingWaitWithinQueryBudget(queryBudget, configured), MinimumSettlingWait)
+	settle := SettlingFloorWithinQueryBudget(queryBudget, configured)
 	return settle + readPhase(queryGroup, readPhaseSpread(queryBudget, settle))
+}
+
+// SettlingFloorWithinQueryBudget is the settling wait every group reads
+// past: the floor, MinimumSettlingWait, or the deployment's wait as the
+// budget allows it when that is shorter. A group's read hold is reckoned
+// from it - how much later than the floor the group's data lands - and the
+// group's phase comes after both, so groups whose data lands at one moment
+// still read at their own seconds.
+func SettlingFloorWithinQueryBudget(queryBudget, configured time.Duration) time.Duration {
+	return min(SettlingWaitWithinQueryBudget(queryBudget, configured), MinimumSettlingWait)
 }
 
 // Of the budget left after the settling wait, a phase takes at most two

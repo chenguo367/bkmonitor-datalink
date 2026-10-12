@@ -27,13 +27,15 @@ func readWaitOf(cfg config.Config, queryGroup execution.QueryGroupIdentity, inte
 }
 
 // firstReadWaitOf is how long after its evaluation time a group nothing has
-// measured is first read: its read wait, or the deployment's ready delay as
-// its schedule's budget allows it if later - the cold-start arrival its read
-// hold is seeded with, on a source no peer has measured and a query with no
-// time_delay.
+// measured is first read: where its data is taken to land - the settling
+// floor, or the deployment's ready delay as its schedule's budget allows it
+// if later, the cold start its read hold is seeded with - and its phase
+// after that.
 func firstReadWaitOf(cfg config.Config, queryGroup execution.QueryGroupIdentity, intervalSeconds int64) time.Duration {
 	budget := time.Duration(intervalSeconds)*time.Second - cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
-	return max(readWaitOf(cfg, queryGroup, intervalSeconds), execution.SettlingWaitWithinQueryBudget(budget, cfg.PhaseTwo.Access.MinReadyDelay.Duration()))
+	floor := execution.SettlingFloorWithinQueryBudget(budget, cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+	landing := max(floor, execution.SettlingWaitWithinQueryBudget(budget, cfg.PhaseTwo.Access.MinReadyDelay.Duration()))
+	return landing + readWaitOf(cfg, queryGroup, intervalSeconds) - floor
 }
 
 // roundReadAtMillis is the instant a harness runs a round: half the interval

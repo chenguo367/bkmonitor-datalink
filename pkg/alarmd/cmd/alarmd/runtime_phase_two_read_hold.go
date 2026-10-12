@@ -369,11 +369,8 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key()})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
-		// The group reads at its own moment, settling wait plus phase, and a
-		// hold is how much later than that it must read: measured from the
-		// settling wait alone it would hold the group its phase too long.
 		budget := offset - holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
-		wait := execution.ReadWaitWithinQueryBudget(schedule.Segment.QueryGroup, budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+		wait := holds.holdBase(schedule.Segment.QueryGroup, budget)
 		// The cold start is where the group was read before the wait came
 		// down to its floor: the deployment's wait as its schedule's budget
 		// allowed it - a ten-second period was read at ten seconds then too.
@@ -391,6 +388,19 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 		spec.SeedArrivalAge, spec.SeedOrigin = holds.seedArrival(schedule.Segment.QueryGroup, delay, coldStart)
 	}
 	return spec, nil
+}
+
+// holdBase is where a group's read hold is reckoned from, for one of its
+// Plans' query budgets.
+//
+// The settling floor, not the group's whole read wait: the hold is how much
+// later than the floor the group's data lands, and the phase is added after
+// it (read = window end + max(floor, landing) + phase). Reckoned from the
+// floor plus the phase, the hold absorbed the phase, and every group whose
+// data lands at one moment - every group seeded the cold start at a rollout,
+// every group on one source once measured - read in the same second again.
+func (holds *productionReadHolds) holdBase(_ execution.QueryGroupIdentity, budget time.Duration) time.Duration {
+	return execution.SettlingFloorWithinQueryBudget(budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 }
 
 // holdLimit is the most a Slot of the schedule may be held: the replay age,

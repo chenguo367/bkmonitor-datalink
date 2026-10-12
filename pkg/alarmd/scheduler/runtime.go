@@ -297,7 +297,7 @@ type FlightCoordinator struct {
 	limits          RecoveryLimits
 	now             func() time.Time
 	// holds is the last day's normal permit holds (HoldReference).
-	holds HourlyMedian
+	holds HourlyDurations
 	// recoveryAcquires is the part of permitAcquires asked by a recovery
 	// operation; normalRequests the normal ones by second.
 	recoveryAcquires       uint64
