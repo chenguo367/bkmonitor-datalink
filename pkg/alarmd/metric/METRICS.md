@@ -575,6 +575,12 @@ Labels: `code`
 
 The first screen's check lines, by closed code, carrying the count each line prints: objects currently under an object check, replicas under one of the two deployment standings (CUTOVER_FAILING, REPLICA_DEGRADED), which have no objects. Every code is emitted, zero when the line is down, so > 0 is exactly 'this line is on the first screen' and an absent series is a build without this family, not a clear line. Records of past loss retained under DETECTION_ABANDONED and TIMELINE_PRUNED are not current and are not counted; the JSON todo carries those. Each replica counts its own objects at the moment it publishes its summary, and every replica's scrape adds the same summaries up: a code that changes from round to round can differ between replicas within one scrape interval, and for those the comparison is within one replica over time. While an object is handed over, both holders count it (fleet_handover_objects). Aggregate with max, not sum.
 
+## bkmonitor_alarmd_fleet_control_facts_writes_total
+
+Labels: `result`
+
+Writes of the Control Leader's fleet control record, by result: written; invalid (the record lacked its identity or term and was not sent); oversized (past the fleet byte budget, refused whole); failed (the store did not take it). While the Leader writes none, views fall back to the control facts in the replicas' snapshots or the previous term's record.
+
 ## bkmonitor_alarmd_fleet_degradations
 
 Labels: `kind`
