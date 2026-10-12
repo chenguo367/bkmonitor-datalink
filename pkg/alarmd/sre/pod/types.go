@@ -1,9 +1,12 @@
 // Copyright (C) 2017-2025 Tencent. All rights reserved.
 // Licensed under the MIT License.
 
-// Package pod provides scoped Pod evidence and bounded, non-TTY execution.
-// It does not authenticate callers: the channel must require a distinct exec
-// scope before invoking Exec. Existing Worker k8sread operations are separate.
+// Package pod provides Pod evidence, bounded non-TTY execution and a few
+// workload management actions in any namespace the ServiceAccount may reach.
+// It does not authenticate callers; the channel admits them. A request names
+// one namespace (this process's own by default) and a label selector; a
+// target is pinned by Pod UID, container ID and image ID. Existing Worker
+// k8sread operations are separate.
 package pod
 
 import (
@@ -16,9 +19,23 @@ import (
 )
 
 const (
-	TimeoutContract     = "python3_process_group_v1"
-	VerificationTimeout = 3 * time.Second
-	TerminationGrace    = 4 * time.Second
+	// TimeoutContract is the remote supervisor's: Python 3's standard
+	// library and POSIX process groups, started as python3 from the target
+	// image's own PATH through /bin/sh.
+	TimeoutContract = "python3_process_group_v1"
+	// ReleaseLabel is the label a target's release is read from.
+	ReleaseLabel = "app.kubernetes.io/instance"
+	// DefaultModuleLabel is the label a target's module is read from when
+	// the deployment names no other (Options.ModuleLabel).
+	DefaultModuleLabel = "app.kubernetes.io/component"
+	// The start failures of an execution that never reached the command.
+	// StartNotExecutable is exit 126: the runtime found the shell or python3
+	// and could not execute it, or (depending on the runtime) found no shell
+	// at all; which one the code alone does not say.
+	StartNotExecutable      = "not_executable"
+	StartPython3Unavailable = "python3_unavailable"
+	VerificationTimeout     = 3 * time.Second
+	TerminationGrace        = 4 * time.Second
 	// StartupAllowance bounds connection setup and the supervisor's start
 	// before its started report. With VerificationTimeout before and after,
 	// the longest execution fits the exec operation's 45 s budget:
@@ -50,26 +67,6 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
-// Scope is server configuration, never supplied by an execution request.
-// MatchLabels is the mandatory, authoritative label constraint. Release/Module
-// are optional discovery index values, so custom module conventions are usable.
-type Scope struct {
-	Namespace   string            `yaml:"namespace" json:"namespace"`
-	MatchLabels map[string]string `yaml:"match_labels" json:"match_labels"`
-	Release     string            `yaml:"release,omitempty" json:"release,omitempty"`
-	Module      string            `yaml:"module,omitempty" json:"module,omitempty"`
-	Workloads   []Workload        `yaml:"workloads,omitempty" json:"workloads,omitempty"`
-	Timeout     RuntimeContract   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-}
-
-// RuntimeContract declares a tested capability of the selected target image.
-// PythonPath must be absolute. The wrapper uses Python 3 standard-library POSIX
-// process groups; descendants that deliberately detach are outside this contract.
-type RuntimeContract struct {
-	Contract   string `yaml:"contract" json:"contract"`
-	PythonPath string `yaml:"python_path" json:"python_path"`
-}
-
 type Workload struct {
 	Kind string `json:"kind" yaml:"kind"`
 	Name string `json:"name" yaml:"name"`
@@ -89,6 +86,18 @@ type OwnerResource struct {
 	Labels                     map[string]string
 	Owners                     []metav1.OwnerReference
 	Selector                   *metav1.LabelSelector
+	// Replicas is spec.replicas, nil where the kind has none.
+	Replicas *int32
+}
+
+// Manager is the Kubernetes writes the management actions make. Every write
+// carries the identity it was decided on: a Pod deletion its UID as a
+// precondition, a workload patch its UID in metadata, so a replaced object
+// is refused by the apiserver rather than changed.
+type Manager interface {
+	DeletePod(ctx context.Context, namespace, name, uid string) error
+	GetWorkload(ctx context.Context, namespace, kind, name string) (OwnerResource, error)
+	PatchWorkload(ctx context.Context, namespace, kind, name string, patch []byte) error
 }
 
 // Executor transports one exec. It must honor context cancellation, never
@@ -106,9 +115,20 @@ type StreamRequest struct {
 type StreamResult struct{ ExitCode *int }
 
 type Options struct {
-	Scopes                        []Scope
-	Client                        Client
-	Executor                      Executor
+	Client   Client
+	Manager  Manager
+	Executor Executor
+	// Secrets reads the Secrets the deployment's whitelist names; nil
+	// leaves secret.get unavailable.
+	Secrets SecretReader
+	// ConfigMaps reads ConfigMaps; nil leaves configmap.get unavailable.
+	ConfigMaps ConfigMapReader
+	// DefaultNamespace is the namespace a request that names none reads:
+	// this process's own. Empty means a request must name one.
+	DefaultNamespace string
+	// ModuleLabel is the label key a target's module is read from and a
+	// discovery's module filter matches; DefaultModuleLabel when empty.
+	ModuleLabel                   string
 	Concurrency                   int
 	DefaultTimeout, MaxTimeout    time.Duration
 	MaxOutputBytes, MaxStdinBytes int64
@@ -170,11 +190,13 @@ type Limits struct {
 }
 type DiscoverRequest struct {
 	Namespace string `json:"namespace"`
-	Release   string `json:"release,omitempty"`
-	Module    string `json:"module,omitempty"`
-	Workload  string `json:"workload,omitempty"`
-	Continue  string `json:"continue,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	// Selector is a Kubernetes label selector, handed to the apiserver.
+	Selector string `json:"selector,omitempty"`
+	Release  string `json:"release,omitempty"`
+	Module   string `json:"module,omitempty"`
+	Workload string `json:"workload,omitempty"`
+	Continue string `json:"continue,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
 }
 type DiscoverReceipt struct {
 	Targets    []Observation `json:"targets"`
@@ -211,18 +233,53 @@ type ExecRequest struct {
 	OutputBytes int64    `json:"output_bytes,omitempty"`
 }
 type ExecReceipt struct {
-	RequestID         string       `json:"request_id"`
-	Target            Target       `json:"target"`
-	ObservedAfter     *Observation `json:"observed_after,omitempty"`
-	ScriptDigest      string       `json:"script_digest"`
-	StartedAt         time.Time    `json:"started_at"`
-	FinishedAt        time.Time    `json:"finished_at"`
-	Stdout            string       `json:"stdout"`
-	Stderr            string       `json:"stderr"`
-	ExitCode          *int         `json:"exit_code,omitempty"`
-	Truncated         bool         `json:"truncated"`
-	RemoteState       string       `json:"remote_state"`
-	TargetChanged     bool         `json:"target_changed"`
-	EvidenceScope     string       `json:"evidence_scope"`
-	RedactionContract string       `json:"redaction_contract"`
+	RequestID     string       `json:"request_id"`
+	Target        Target       `json:"target"`
+	ObservedAfter *Observation `json:"observed_after,omitempty"`
+	ScriptDigest  string       `json:"script_digest"`
+	StartedAt     time.Time    `json:"started_at"`
+	FinishedAt    time.Time    `json:"finished_at"`
+	Stdout        string       `json:"stdout"`
+	Stderr        string       `json:"stderr"`
+	ExitCode      *int         `json:"exit_code,omitempty"`
+	Truncated     bool         `json:"truncated"`
+	RemoteState   string       `json:"remote_state"`
+	// StartFailure says what the target lacked when the command never
+	// started: StartNotExecutable or StartPython3Unavailable.
+	StartFailure      string `json:"start_failure,omitempty"`
+	TargetChanged     bool   `json:"target_changed"`
+	EvidenceScope     string `json:"evidence_scope"`
+	RedactionContract string `json:"redaction_contract"`
+}
+
+// DeleteRequest deletes one Pod for its controller to recreate. Target names
+// the Pod and its UID; OwnerUID, when given, is the controller the caller saw
+// own it, and a Pod now owned by another is not deleted.
+type DeleteRequest struct {
+	Target   Target `json:"target"`
+	OwnerUID string `json:"owner_uid,omitempty"`
+}
+
+// WorkloadRequest names one workload by kind, name and the UID the caller saw.
+// Replicas is the new count for a scale.
+type WorkloadRequest struct {
+	Namespace string `json:"namespace"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	Replicas  *int32 `json:"replicas,omitempty"`
+}
+
+// ActionReceipt is what one management action did.
+type ActionReceipt struct {
+	Op               string    `json:"op"`
+	Namespace        string    `json:"namespace"`
+	Kind             string    `json:"kind"`
+	Name             string    `json:"name"`
+	UID              string    `json:"uid"`
+	PreviousReplicas *int32    `json:"previous_replicas,omitempty"`
+	Replicas         *int32    `json:"replicas,omitempty"`
+	RestartedAt      string    `json:"restarted_at,omitempty"`
+	Applied          bool      `json:"applied"`
+	At               time.Time `json:"at"`
 }

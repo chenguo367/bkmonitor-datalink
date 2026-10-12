@@ -39,7 +39,7 @@ func New(in io.Reader, out, stderr io.Writer, version string) *App {
 
 type options struct {
 	env, input, caCert           string
-	paramsFile, stdinFile, scope string
+	paramsFile, stdinFile string
 	url, port, state             string
 	timeout                      time.Duration
 	expectBuild                  string
@@ -57,7 +57,7 @@ func parse(args []string) (options, error) {
 		arg := args[i]
 		name, value, equal := strings.Cut(arg, "=")
 		if name == "--env" || name == "--input" || name == "--ca-cert" || name == "--url" || name == "--port" || name == "--state" || name == "--timeout" ||
-			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--scope" {
+			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" {
 			if seen[name] {
 				return o, errors.New("flags may only be provided once")
 			}
@@ -74,11 +74,6 @@ func parse(args []string) (options, error) {
 			}
 			if name == "--expect-build" {
 				o.expectBuild = value
-			} else if name == "--scope" {
-				if !validScope(value) {
-					return o, errors.New("--scope must be deployment_ops_readonly or deployment_ops_exec")
-				}
-				o.scope = value
 			} else if name == "--params-file" {
 				o.paramsFile = value
 			} else if name == "--stdin-file" || name == "--script-file" {
@@ -178,9 +173,6 @@ func (a *App) Run(args []string) int {
 	if (o.paramsFile != "" || o.stdinFile != "") && command != "invoke" {
 		return a.fail("invalid_input", "--params-file, --stdin-file and --script-file are only valid with invoke", 2)
 	}
-	if o.scope != "" && command != "auth login" && command != "auth listen" {
-		return a.fail("invalid_input", "--scope is only valid with auth login or auth listen", 2)
-	}
 	login := command == "auth login" || (command == "auth listen" && o.url != "")
 	if o.caCert != "" && (!login || !filepath.IsAbs(o.caCert)) {
 		return a.fail("invalid_input", "--ca-cert requires an absolute PEM file path and is only valid with auth login or auth listen --url", 2)
@@ -253,10 +245,6 @@ func (a *App) Run(args []string) int {
 		renewed, err := a.ensureSession(o.env, false)
 		if err != nil {
 			var gone *pairingGone
-			var unsupported *scopeUnavailable
-			if errors.As(err, &unsupported) {
-				return a.fail("capability_unavailable", unsupported.Error(), 1)
-			}
 			if errors.As(err, &gone) {
 				// The stored profile still says where the environment is;
 				// the failed renewal returned none.
@@ -390,14 +378,9 @@ func (a *App) login(o options) int {
 	if o.env != "" && o.env != b.EnvironmentID {
 		return a.fail("invalid_input", "--env does not match authorization code", 2)
 	}
-	scope := o.scope
-	if scope == "" {
-		scope = sessionScope
-	}
-	if b.Scope != scope {
-		return a.fail("scope_mismatch", "Authorization code does not grant the requested --scope; request a new explicitly authorized login.", 1)
-	}
-	p := Profile{EnvironmentID: b.EnvironmentID, EnvironmentName: b.EnvironmentName, PublicBaseURL: b.PublicBaseURL, Scope: scope, CACert: o.caCert, InsecureTLS: o.insecureTLS}
+	// The session is what the code grants: the one operations session, or an
+	// execution session an earlier server granted.
+	p := Profile{EnvironmentID: b.EnvironmentID, EnvironmentName: b.EnvironmentName, PublicBaseURL: b.PublicBaseURL, Scope: b.Scope, CACert: o.caCert, InsecureTLS: o.insecureTLS}
 	entry, _ := baseURL(p.PublicBaseURL)
 	if entry.Scheme == "http" && (o.insecureTLS || o.caCert != "") {
 		return a.fail("invalid_input", "TLS options apply only to HTTPS environments", 2)
@@ -500,7 +483,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 		exec = effect == "exec"
 		required := stringField(contract, "required_scope")
 		if required != "" && !allowsScope(p.Scope, required) {
-			return a.fail("permission_denied", "Operation requires "+required+"; obtain a new explicit --scope login.", 1)
+			return a.fail("permission_denied", "Operation requires "+required+", which this earlier server grants only on a separate login; authorize again from its page.", 1)
 		}
 		if advertised, exists := contract["execution_timeout_ms"]; exists {
 			ms, ok := advertised.(json.Number)

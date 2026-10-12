@@ -29,7 +29,6 @@ Commands:
                                             a code bound to this process's PKCE verifier; exits after one login.
   auth login [--env <id>] [--rebind]        Import code from hidden input or protected stdin (fallback when
                                             the browser and the CLI are on different machines).
-             [--scope deployment_ops_exec] Request the explicitly granted execution scope for login/listen.
                                             Default login is deployment_ops_readonly; renewal preserves it.
   A login pairs this machine: the session renews itself from a rolling renewal credential kept in the
   0600 profile, until the pairing is unused for 30 days, revoked, or the administrator key is rotated.

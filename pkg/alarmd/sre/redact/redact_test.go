@@ -37,3 +37,17 @@ func TestFlattenedSpanCredentialFields(t *testing.T) {
 		}
 	}
 }
+
+// URL userinfo is a credential under any scheme; an address without a
+// scheme, such as a mail address, is not a URL and is kept.
+func TestURLUserinfoIsACredentialUnderAnyScheme(t *testing.T) {
+	out := New().Text("redis://user:redis-credential@192.0.2.10:6379 mysql://root:mysql-credential@db:3306/x http://u:http-credential@example.test/ owner ops@example.test")
+	for _, credential := range []string{"redis-credential", "mysql-credential", "http-credential"} {
+		if strings.Contains(out, credential) {
+			t.Errorf("URL credential retained: %s in %s", credential, out)
+		}
+	}
+	if !strings.Contains(out, "ops@example.test") || !strings.Contains(out, "192.0.2.10:6379") {
+		t.Fatalf("non-credential text changed: %s", out)
+	}
+}

@@ -23,7 +23,21 @@ import (
 //go:embed remote.py
 var remoteSupervisor string
 
-// Exec runs one command behind the declared remote supervisor. Output is capped
+// supervisorLaunch starts the remote supervisor as python3 from the target
+// image's own PATH, through /bin/sh. The supervisor's source is $0 and its
+// arguments follow, so nothing is interpolated into the shell text.
+const supervisorLaunch = `exec python3 -u -c "$0" "$@"`
+
+// Exit codes the target reports when the command never started: something
+// found could not be executed (126 - the shell or python3; some runtimes
+// report a missing shell this way too), or /bin/sh found no python3 on PATH
+// (127). Either comes before the supervisor's first frame.
+const (
+	exitCannotExecute = 126
+	exitNotFound      = 127
+)
+
+// Exec runs one command behind the remote supervisor. Output is capped
 // remotely and locally while control frames continue after output truncation.
 // A canceled connection returns unknown; the supervisor retains its own timer.
 func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, error) {
@@ -80,7 +94,7 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	digest := sha256.Sum256(encoded)
 	result.ScriptDigest = "sha256:" + hex.EncodeToString(digest[:])
 	verifyCtx, verifyCancel := context.WithTimeout(ctx, VerificationTimeout)
-	observation, scope, err := p.resolve(verifyCtx, request.Target, true)
+	observation, err := p.resolve(verifyCtx, request.Target, true)
 	verifyCancel()
 	if err != nil {
 		var failure *Error
@@ -96,10 +110,6 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 		finish()
 		return result, &Error{Code: CodeTargetNotRunning, Message: "target container has no running identity"}
 	}
-	if scope.Timeout.Contract != TimeoutContract {
-		finish()
-		return result, &Error{Code: CodeTimeoutUnsupported, Message: "target scope has no declared Python process-group timeout contract"}
-	}
 	result.EvidenceScope = "identity_verified_before"
 	nonce, err := randomID()
 	if err != nil {
@@ -107,7 +117,7 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 		return result, err
 	}
 	argvJSON, _ := json.Marshal(request.Argv)
-	remoteArgv := []string{scope.Timeout.PythonPath, "-u", "-c", remoteSupervisor, nonce, strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64), strconv.FormatInt(limit, 10), string(argvJSON)}
+	remoteArgv := []string{"/bin/sh", "-c", supervisorLaunch, remoteSupervisor, nonce, strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64), strconv.FormatInt(limit, 10), string(argvJSON)}
 	protocol := newProtocolWriter(nonce, limit)
 	execCtx, execCancel := context.WithCancel(ctx)
 	streamDone := make(chan struct{})
@@ -127,7 +137,15 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 			result.RemoteState = RemoteNotStarted
 			result.EvidenceScope = "wrapper_failed_before_command"
 			finish()
-			return result, &Error{Code: CodeTimeoutUnsupported, Message: "declared supervisor could not start on the target"}
+			switch *transport.ExitCode {
+			case exitCannotExecute:
+				result.StartFailure = StartNotExecutable
+				return result, &Error{Code: CodeCommandStartFailed, Message: "exec exit 126: the shell or python3 could not be executed on the target"}
+			case exitNotFound:
+				result.StartFailure = StartPython3Unavailable
+				return result, &Error{Code: CodeCommandStartFailed, Message: "the target image has no python3 on PATH for the supervisor"}
+			}
+			return result, &Error{Code: CodeTimeoutUnsupported, Message: "the supervisor could not start on the target"}
 		}
 	} else {
 		switch state.event {

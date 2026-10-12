@@ -32,7 +32,7 @@ func TestNativeTraceDiscoveryDispatchAndSpanCredentialRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queries.Close()
-	operations := SREOperations(nil, queries, redact.New("runtime-credential"), "")
+	operations := SREOperations(SREOptions{Queries: queries, Scrubber: redact.New("runtime-credential")})
 	c := testChannel(t, &testAuth{}, operations...)
 	_, description := call(t, c, envelope(c, "describe", "uq.trace", nil))
 	desc := description.Result.(map[string]any)
@@ -83,7 +83,7 @@ func TestNativeTraceStaysUnavailableWithoutRegisteredApplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queries.Close()
-	c := testChannel(t, &testAuth{}, SREOperations(nil, queries, nil, "")...)
+	c := testChannel(t, &testAuth{}, SREOperations(SREOptions{Queries: queries})...)
 	_, out := call(t, c, envelope(c, "describe", "uq.trace", nil))
 	if out.Error != nil || out.Result.(map[string]any)["availability"].(map[string]any)["available"] != false {
 		t.Fatalf("unregistered Trace target was available: %+v", out)

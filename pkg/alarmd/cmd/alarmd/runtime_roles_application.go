@@ -52,7 +52,7 @@ func (server *roleEvidenceServer) ReadEvidence(ctx context.Context, request *pb.
 	return server.handler(ctx, request)
 }
 
-func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts *observability.RuntimeConfigFacts) (_ *phaseTwoRoleRuntime, resultErr error) {
+func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts *observability.RuntimeConfigFacts, logger *observability.Logger) (_ *phaseTwoRoleRuntime, resultErr error) {
 	identity, err := newViewStreamIdentity(cfg.HTTP.Listen, viewStreamRoutes(cfg.RuntimeStoreRedis())...)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,8 @@ func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts
 	}()
 	runtime.Channel, err = openProductionRoleChannel(cfg, ChannelBinding{
 		Roles: cfg.EffectiveRoles(), InstanceID: cfg.PhaseTwo.Worker.ID, EnvironmentID: cfg.CLI.EnvironmentID,
-		Facts: func() *observability.RuntimeConfigFacts { return facts },
+		Facts:    func() *observability.RuntimeConfigFacts { return facts },
+		SREAudit: sreAuditSink(logger, recorder),
 		Control: cliControlBinding{Incarnation: incarnation, StreamToken: identity.Token, Metrics: recorder.Gatherer(),
 			RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry},
 	})

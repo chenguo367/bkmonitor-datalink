@@ -27,8 +27,17 @@ import (
 )
 
 const (
-	ScopeReadonly     = "deployment_ops_readonly"
-	ScopeExec         = "deployment_ops_exec"
+	// ScopeReadonly is the one scope a session is granted: this deployment's
+	// operations session, for every operation the channel offers, execution
+	// and management included. The identifier is historical; sessions and
+	// pairings already stored carry it, and renaming it would mean migrating
+	// them for no difference in behaviour.
+	ScopeReadonly = "deployment_ops_readonly"
+	// legacyScopeExec and execRenewalPrefix are what earlier builds issued
+	// for a separately requested execution session. They are no longer
+	// issued; a session or pairing carrying them is still read, and is
+	// allowed everything the one scope allows, so no device pairs again.
+	legacyScopeExec   = "deployment_ops_exec"
 	execRenewalPrefix = "exec-v1."
 	GrantLifetime     = 5 * time.Minute
 	SessionLifetime   = time.Hour
@@ -44,11 +53,14 @@ const (
 	MaxPairings = 64
 )
 
-// ValidScope is the closed set of deployment permissions. Exec includes the
-// existing read permission, and is granted only by an explicit new login.
-func ValidScope(scope string) bool { return scope == ScopeReadonly || scope == ScopeExec }
+// ValidScope is whether an operation may require scope: there is one.
+func ValidScope(scope string) bool { return scope == ScopeReadonly }
+
+// AllowsScope is whether a session granted granted may run an operation
+// requiring required. A session an earlier build granted as an execution
+// session is the same session now.
 func AllowsScope(granted, required string) bool {
-	return ValidScope(granted) && (granted == required || (granted == ScopeExec && required == ScopeReadonly))
+	return (granted == ScopeReadonly || granted == legacyScopeExec) && ValidScope(required)
 }
 
 // Options uses an independently budgeted Redis client supplied by the caller.
@@ -322,7 +334,7 @@ func (m *Manager) Admit(ctx context.Context, session Session, renew bool) (Sessi
 
 func (m *Manager) sessionOperation(ctx context.Context, hash, expectedID, action string) (Session, error) {
 	result, err := m.run(ctx, sessionScript, []string{m.prefix + "session:" + hash, m.epochKey()},
-		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds(), ScopeExec)
+		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds(), legacyScopeExec)
 	if err != nil {
 		return Session{}, err
 	}

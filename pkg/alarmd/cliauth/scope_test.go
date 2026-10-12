@@ -11,22 +11,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-redis/redis/v8"
 )
 
-func TestExplicitExecGrantAndRefreshPreserveInitialScope(t *testing.T) {
+// A grant is the one deployment operations session, whether the page or CLI
+// asks for nothing or, as an earlier build did, for the execution session:
+// the code names no scope, the renewal credential has no prefix, and the
+// session renews as the one scope.
+func TestEveryGrantIsTheOneOperationsSession(t *testing.T) {
 	m := newTestManager(t, startRedis(t))
-	for _, scope := range []string{ScopeReadonly, ScopeExec} {
-		t.Run(scope, func(t *testing.T) {
-			body := `{"confirm":true}`
-			if scope == ScopeExec {
-				body = `{"confirm":true,"scope":"deployment_ops_exec"}`
-			}
+	for _, body := range []string{`{"confirm":true}`, `{"confirm":true,"scope":"deployment_ops_exec"}`} {
+		t.Run(body, func(t *testing.T) {
 			issued := authRequest(m, http.MethodPost, grantsPath, body, true)
 			var grant struct {
-				AuthorizationCode string `json:"authorization_code"`
-				Scope             string `json:"scope"`
+				AuthorizationCode string   `json:"authorization_code"`
+				Scope             string   `json:"scope"`
+				SupportedScopes   []string `json:"supported_scopes"`
 			}
-			if issued.Code != 200 || json.Unmarshal(issued.Body.Bytes(), &grant) != nil || grant.Scope != scope {
+			if issued.Code != 200 || json.Unmarshal(issued.Body.Bytes(), &grant) != nil || grant.Scope != ScopeReadonly ||
+				len(grant.SupportedScopes) != 1 || grant.SupportedScopes[0] != ScopeReadonly {
 				t.Fatalf("grant: %d %s", issued.Code, issued.Body)
 			}
 			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(grant.AuthorizationCode, "alarmd-login-v1."))
@@ -34,65 +38,71 @@ func TestExplicitExecGrantAndRefreshPreserveInitialScope(t *testing.T) {
 				t.Fatal(err)
 			}
 			var code authorizationPackage
-			if json.Unmarshal(raw, &code) != nil {
-				t.Fatal("invalid code")
-			}
-			if scope == ScopeReadonly && strings.Contains(string(raw), `"scope"`) {
-				t.Fatal("readonly code schema broke old CLI")
-			}
-			if scope == ScopeExec && code.Scope != ScopeExec {
-				t.Fatal("exec code did not declare explicit scope")
+			if json.Unmarshal(raw, &code) != nil || strings.Contains(string(raw), `"scope"`) {
+				t.Fatalf("the code names a scope: %s", raw)
 			}
 			login := decodeLogin(t, exchange(m, code))
-			if scope == ScopeExec && (!strings.HasPrefix(login.RefreshToken, execRenewalPrefix) || validSecret(login.RefreshToken)) {
-				t.Fatal("old instance can admit exec renewal secret")
-			}
-			if scope == ScopeReadonly && !validSecret(login.RefreshToken) {
-				t.Fatal("readonly renewal format changed")
-			}
-			session, err := m.Authenticate(context.Background(), login.AccessToken)
-			if err != nil || session.Scope != scope {
-				t.Fatalf("session: %+v %v", session, err)
-			}
-			upgraded := authRequest(m, http.MethodPost, refreshPath, `{"environment_id":"test-env","refresh_token":"`+login.RefreshToken+`","scope":"deployment_ops_exec"}`, false)
-			if upgraded.Code != 400 || errorCode(t, upgraded) != "invalid_request" {
-				t.Fatal("refresh accepted requested scope")
+			if !validSecret(login.RefreshToken) || strings.HasPrefix(login.RefreshToken, execRenewalPrefix) {
+				t.Fatalf("renewal credential %q, want one without a prefix", login.RefreshToken)
 			}
 			next := decodeLogin(t, refresh(m, login.RefreshToken))
 			renewed, err := m.Authenticate(context.Background(), next.AccessToken)
-			if err != nil || renewed.Scope != scope {
-				t.Fatalf("renewed scope: %+v %v", renewed, err)
-			}
-			if AllowsScope(renewed.Scope, ScopeExec) != (scope == ScopeExec) {
-				t.Fatal("refresh raised readonly permission")
-			}
-			replay := decodeLogin(t, refresh(m, login.RefreshToken))
-			replayed, err := m.Authenticate(context.Background(), replay.AccessToken)
-			if err != nil || replayed.Scope != scope || replay.AccessToken != next.AccessToken {
-				t.Fatal("replayed renewal changed authorization")
+			if err != nil || renewed.Scope != ScopeReadonly || !AllowsScope(renewed.Scope, ScopeReadonly) {
+				t.Fatalf("renewed: %+v %v", renewed, err)
 			}
 		})
 	}
 }
 
-func TestLegacyReadonlySessionPairingCannotAcquireExec(t *testing.T) {
+// An execution pairing an earlier build issued - its credential carrying the
+// prefix, its record stored under the prefixed key - still renews here, and
+// its successor is issued without the prefix and renews again; the session it
+// buys is allowed every operation. No device has to pair again.
+func TestAnEarlierExecutionCredentialStillRenews(t *testing.T) {
+	m := newTestManager(t, startRedis(t))
+	ctx := context.Background()
+	refreshSecret, _ := randomSecret()
+	old := execRenewalPrefix + refreshSecret
+	now := time.Now().UnixMilli()
+	pairing, _ := json.Marshal(map[string]any{"pairing_id": "earlier-device", "environment_id": m.environmentID, "scope": legacyScopeExec, "epoch": 0,
+		"admin_binding": m.adminBinding(), "created_at_ms": now, "last_used_at_ms": now})
+	if err := m.client.Set(ctx, pairingKey(m.prefix, old), pairing, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.client.ZAdd(ctx, m.pairingsKey(), &redis.Z{Score: float64(now), Member: "earlier-device"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	renewal, err := m.Refresh(ctx, old)
+	if err != nil {
+		t.Fatalf("an earlier execution credential did not renew: %v", err)
+	}
+	if strings.HasPrefix(renewal.RefreshToken, execRenewalPrefix) || !validSecret(renewal.RefreshToken) {
+		t.Fatalf("successor %q still carries the prefix", renewal.RefreshToken)
+	}
+	if !AllowsScope(renewal.Session.Scope, ScopeReadonly) {
+		t.Fatalf("the renewed session %q is not allowed the operations", renewal.Session.Scope)
+	}
+	again, err := m.Refresh(ctx, renewal.RefreshToken)
+	if err != nil || !AllowsScope(again.Session.Scope, ScopeReadonly) {
+		t.Fatalf("the successor did not renew: %+v %v", again.Session, err)
+	}
+}
+
+// A session an earlier build granted as an execution session authenticates
+// and is allowed every operation, as the one scope is.
+func TestAnEarlierExecutionSessionIsTheOneSession(t *testing.T) {
 	m := newTestManager(t, startRedis(t))
 	token, _ := randomSecret()
-	record := storedRecord{SessionID: "legacy", EnvironmentID: m.environmentID, Scope: ScopeReadonly, ExpiresAtMS: time.Now().Add(time.Hour).UnixMilli()}
+	record := storedRecord{SessionID: "earlier", EnvironmentID: m.environmentID, Scope: legacyScopeExec, ExpiresAtMS: time.Now().Add(time.Hour).UnixMilli()}
 	raw, _ := json.Marshal(record)
 	if err := m.client.Set(context.Background(), m.prefix+"session:"+digest(token), raw, time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	refreshToken, _, err := m.Upgrade(context.Background(), token)
-	if err != nil {
-		t.Fatal(err)
+	session, err := m.Authenticate(context.Background(), token)
+	if err != nil || !AllowsScope(session.Scope, ScopeReadonly) {
+		t.Fatalf("earlier execution session: %+v %v", session, err)
 	}
-	next, err := m.Refresh(context.Background(), refreshToken)
-	if err != nil || next.Session.Scope != ScopeReadonly || AllowsScope(next.Session.Scope, ScopeExec) {
-		t.Fatalf("legacy pairing elevated: %+v %v", next.Session, err)
-	}
-	admitted, err := m.Admit(context.Background(), next.Session, true)
-	if err != nil || admitted.Scope != ScopeReadonly {
-		t.Fatalf("admission changed legacy scope: %+v %v", admitted, err)
+	if AllowsScope("", ScopeReadonly) || AllowsScope("other", ScopeReadonly) || ValidScope(legacyScopeExec) {
+		t.Fatal("a scope that is neither the one nor the earlier execution scope is allowed, or an operation may require the earlier one")
 	}
 }

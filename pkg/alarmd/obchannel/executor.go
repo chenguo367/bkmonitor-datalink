@@ -81,9 +81,6 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 		}
 		if op.RequiredScope == "" {
 			op.RequiredScope = cliauth.ScopeReadonly
-			if op.Effect == "exec" {
-				op.RequiredScope = cliauth.ScopeExec
-			}
 		}
 		if op.ExecutionPool == "" {
 			op.ExecutionPool = "evidence"
@@ -98,7 +95,7 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 			op.RequestMaxBytes = MaxRequestBytes
 		}
 		if (op.Effect != "read" && op.Effect != "exec") || !cliauth.ValidScope(op.RequiredScope) ||
-			(op.Effect == "exec" && (op.RequiredScope != cliauth.ScopeExec || op.ExecutionPool != "exec" || op.Targetable || op.RouteWhenElsewhere != nil || op.DefaultControlLeader)) ||
+			(op.Effect == "exec" && (op.ExecutionPool != "exec" || op.Targetable || op.RouteWhenElsewhere != nil || op.DefaultControlLeader)) ||
 			(op.Effect == "read" && op.ExecutionPool != "evidence" && op.ExecutionPool != "sre") ||
 			(op.ExecutionPool != "evidence" && (op.Targetable || op.RouteWhenElsewhere != nil || op.DefaultControlLeader)) ||
 			op.ExecutionTimeout < time.Millisecond || op.ExecutionTimeout > MaxExecutionTimeout || op.RequestMaxBytes < 1 || op.RequestMaxBytes > EnvelopeMaxBytes {

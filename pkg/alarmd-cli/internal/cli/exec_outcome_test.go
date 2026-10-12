@@ -28,14 +28,14 @@ func TestDispatchedExecFailuresSaveUnknownOutcomeWithoutRetry(t *testing.T) {
 	for _, name := range []string{"timeout", "EOF", "body read", "oversize", "invalid JSON", "invalid envelope", "missing receipt", "missing remote state", "missing exit code", "gateway", "server response budget"} {
 		t.Run(name, func(t *testing.T) {
 			p := fixtureProfile("http://fixture.test")
-			p.Scope, p.RefreshToken = execScope, "refresh-fixture-secret"
+			p.Scope, p.RefreshToken = legacyExecScope, "refresh-fixture-secret"
 			store := Store{t.TempDir()}
 			_ = store.save(p, false)
 			calls := 0
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
 				if calls == 1 {
-					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope}), 200), nil
+					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope}), 200), nil
 				}
 				valid := envelope(p, "ok", map[string]any{"remote_state": "remote_completed", "exit_code": 0, "password": "sensitive-fixture", "stdout": p.AccessToken})
 				switch name {
@@ -97,7 +97,7 @@ func TestExecDisconnectAfterActualServerAdmissionIsUnknown(t *testing.T) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body["mode"] == "describe" {
-			writeJSON(t, w, envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope}))
+			writeJSON(t, w, envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope}))
 			return
 		}
 		invokes.Add(1)
@@ -110,7 +110,7 @@ func TestExecDisconnectAfterActualServerAdmissionIsUnknown(t *testing.T) {
 	}))
 	defer s.Close()
 	p = fixtureProfile(s.URL)
-	p.Scope = execScope
+	p.Scope = legacyExecScope
 	store := Store{t.TempDir()}
 	_ = store.save(p, false)
 	code, out, _, _ := run(t, store, s.Client(), "", "invoke", "pod.exec", "--env", p.EnvironmentID)
@@ -123,7 +123,7 @@ func TestExecPreAdmissionRejectionsRetainTheirErrors(t *testing.T) {
 	for _, name := range []string{"describe failure", "permission", "connection refused", "server denial", "provider unavailable", "auth store unavailable"} {
 		t.Run(name, func(t *testing.T) {
 			p := fixtureProfile("http://fixture.test")
-			p.Scope = execScope
+			p.Scope = legacyExecScope
 			if name == "permission" {
 				p.Scope = sessionScope
 			}
@@ -136,7 +136,7 @@ func TestExecPreAdmissionRejectionsRetainTheirErrors(t *testing.T) {
 					return nil, errors.New("unavailable")
 				}
 				if calls == 1 {
-					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope}), 200), nil
+					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope}), 200), nil
 				}
 				if name == "connection refused" {
 					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
@@ -167,14 +167,14 @@ func TestExecPreAdmissionRejectionsRetainTheirErrors(t *testing.T) {
 
 func TestDescribeDeadlineIncludesAdmissionAndTransport(t *testing.T) {
 	p := fixtureProfile("http://fixture.test")
-	p.Scope = execScope
+	p.Scope = legacyExecScope
 	store := Store{t.TempDir()}
 	_ = store.save(p, false)
 	calls := 0
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope, "execution_timeout_ms": 20, "request_limits": map[string]any{"admission_timeout_ms": 30, "transport_margin_ms": 20}}), 200), nil
+			return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope, "execution_timeout_ms": 20, "request_limits": map[string]any{"admission_timeout_ms": 30, "transport_margin_ms": 20}}), 200), nil
 		}
 		deadline, ok := r.Context().Deadline()
 		if remaining := time.Until(deadline); !ok || remaining <= 60*time.Millisecond || remaining > 70*time.Millisecond {

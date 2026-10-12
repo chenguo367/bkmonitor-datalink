@@ -27,30 +27,38 @@ func (a *scopedTestAuth) Authenticate(ctx context.Context, token string) (cliaut
 	return s, err
 }
 
-func TestExecPermissionIsCheckedBeforeAdmissionAndInternalRPC(t *testing.T) {
-	auth := &scopedTestAuth{scope: cliauth.ScopeReadonly}
+// An execution operation runs for the deployment's one operations session -
+// and for a session an earlier build granted as an execution session - with
+// no further scope; a session with no scope the channel knows is refused
+// before admission; and the internal Worker route never reaches it.
+func TestExecRunsForTheOperationsSessionAndNeverThroughInternalRPC(t *testing.T) {
+	auth := &scopedTestAuth{scope: ""}
 	var runs atomic.Int32
 	op := Operation{ID: "pod.exec", Summary: "Execute", Effect: "exec", Run: func(context.Context, Params) Outcome { runs.Add(1); return Outcome{Complete: true} }}
 	c, err := New(Options{Auth: auth, EnvironmentID: "test", Replica: "worker", Operations: []Operation{op}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, discovery := call(t, c, envelope(c, "discover", "", nil))
-	row := discovery.Result.(map[string]any)["operations"].([]any)[0].(map[string]any)
-	if row["authorized"] != false || row["required_scope"] != cliauth.ScopeExec {
-		t.Fatalf("misleading permission: %+v", row)
-	}
 	status, response := call(t, c, envelope(c, "invoke", op.ID, nil))
 	if status != 403 || response.Error.Code != "permission_denied" || runs.Load() != 0 || auth.calls.Load() != 0 {
-		t.Fatalf("readonly execution admitted: %+v", response)
+		t.Fatalf("a session without a known scope was admitted: %+v", response)
 	}
-	auth.scope = cliauth.ScopeExec
-	status, response = call(t, c, envelope(c, "invoke", op.ID, nil))
-	if status != 200 || runs.Load() != 1 {
-		t.Fatalf("explicit exec scope refused: %+v", response)
+	auth.scope = cliauth.ScopeReadonly
+	_, discovery := call(t, c, envelope(c, "discover", "", nil))
+	row := discovery.Result.(map[string]any)["operations"].([]any)[0].(map[string]any)
+	if row["authorized"] != true || row["required_scope"] != cliauth.ScopeReadonly {
+		t.Fatalf("the operations session is not shown as authorized: %+v", row)
 	}
+	for _, scope := range []string{cliauth.ScopeReadonly, "deployment_ops_exec"} {
+		auth.scope = scope
+		before := runs.Load()
+		if status, response := call(t, c, envelope(c, "invoke", op.ID, nil)); status != 200 || runs.Load() != before+1 {
+			t.Fatalf("session %q refused: %+v", scope, response)
+		}
+	}
+	runsBefore := runs.Load()
 	response = c.ExecuteEvidence(context.Background(), Invocation{EnvironmentID: "test", Version: Version, Revision: c.revision, Operation: op.ID, Target: Target{Replica: "worker"}})
-	if response.Error == nil || response.Error.Code != "operation_not_internal_evidence" || runs.Load() != 1 {
+	if response.Error == nil || response.Error.Code != "operation_not_internal_evidence" || runs.Load() != runsBefore {
 		t.Fatalf("internal exec bypass: %+v", response)
 	}
 }
@@ -84,7 +92,7 @@ func TestNestedObjectAndArrayBoundaries(t *testing.T) {
 }
 
 func TestProviderPoolsDoNotBlockShortEvidenceReads(t *testing.T) {
-	auth := &scopedTestAuth{scope: cliauth.ScopeExec}
+	auth := &scopedTestAuth{scope: cliauth.ScopeReadonly}
 	run := func(ctx context.Context, _ Params) Outcome {
 		<-ctx.Done()
 		return Outcome{Value: map[string]any{"remote_state": "unknown"}}
@@ -123,7 +131,7 @@ func (w *requestDeadlineRecorder) SetWriteDeadline(t time.Time) error {
 }
 
 func TestOperationDeadlineAndExecReceiptSurviveCancellation(t *testing.T) {
-	auth := &scopedTestAuth{scope: cliauth.ScopeExec}
+	auth := &scopedTestAuth{scope: cliauth.ScopeReadonly}
 	// The operation's deadline is read off its context and judged against
 	// two instants the test takes around the call - after the request starts
 	// and once it has returned - never against how much time was left when
@@ -169,7 +177,7 @@ func TestRequestBytesAndInvalidRegistration(t *testing.T) {
 	if status, out := call(t, c, envelope(c, "invoke", op.ID, Params{"text": strings.Repeat("x", 512)})); status != 400 || out.Error.Code != "invalid_input" {
 		t.Fatal("per-operation request limit omitted")
 	}
-	for _, change := range []func(*Operation){func(o *Operation) { o.ExecutionTimeout = MaxExecutionTimeout + time.Second }, func(o *Operation) { o.Effect = "exec"; o.RequiredScope = cliauth.ScopeReadonly }, func(o *Operation) { o.ExecutionPool = "unknown" }, func(o *Operation) {
+	for _, change := range []func(*Operation){func(o *Operation) { o.ExecutionTimeout = MaxExecutionTimeout + time.Second }, func(o *Operation) { o.Effect = "exec"; o.RequiredScope = "deployment_ops_exec" }, func(o *Operation) { o.ExecutionPool = "unknown" }, func(o *Operation) {
 		o.Fields = map[string]Field{"body": {Type: "object", Required: []string{"missing"}}}
 	}} {
 		invalid := op

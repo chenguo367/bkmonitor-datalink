@@ -367,7 +367,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failAuth(err, "Session unavailable; run auth login if expired or revoked.")
 		return
 	}
-	if session.EnvironmentID != c.options.EnvironmentID || !cliauth.ValidScope(session.Scope) {
+	if session.EnvironmentID != c.options.EnvironmentID || !cliauth.AllowsScope(session.Scope, cliauth.ScopeReadonly) {
 		fail(403, "permission_denied", "Session does not authorize this deployment.")
 		return
 	}
@@ -544,6 +544,8 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	execCtx, execCancel := executionContext()
 	defer execCancel()
+	// Who asked, for the audit record of an execution or management call.
+	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID})
 	out := c.run(execCtx, op, params, Target{}, meta)
 	if op.RouteWhenElsewhere != nil && c.options.Route != nil && out.Status != "error" {
 		if group, elsewhere := op.RouteWhenElsewhere(params, out.Result); elsewhere {

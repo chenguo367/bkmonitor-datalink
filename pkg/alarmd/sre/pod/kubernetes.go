@@ -8,12 +8,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	typedcore "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
@@ -26,12 +29,19 @@ type KubernetesClient struct {
 	owners dynamic.Interface
 }
 
+// serviceAccountNamespace is where the kubelet writes the Pod's own namespace.
+const serviceAccountNamespace = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
 // NewInCluster constructs the production adapters from the ServiceAccount.
 // Availability errors can be reported by the channel without blocking its auth
-// lifecycle. No Pod, logs or execution requests are made during construction.
+// lifecycle. No Pod, logs, execution or list requests are made during
+// construction: a client and its connection pool, no informer. The default
+// namespace is the Pod's own unless options name one.
 func NewInCluster(options Options) (*Provider, error) {
-	if err := ValidateScopes(options.Scopes); err != nil {
-		return nil, err
+	if options.DefaultNamespace == "" {
+		if own, err := os.ReadFile(serviceAccountNamespace); err == nil {
+			options.DefaultNamespace = strings.TrimSpace(string(own))
+		}
 	}
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -46,6 +56,9 @@ func NewInCluster(options Options) (*Provider, error) {
 		return nil, err
 	}
 	options.Client = client
+	options.Manager = client
+	options.Secrets = client
+	options.ConfigMaps = client
 	options.Executor = executor
 	return New(options)
 }
@@ -112,7 +125,48 @@ func (c *KubernetesClient) GetOwner(ctx context.Context, namespace string, ref m
 			return OwnerResource{}, err
 		}
 	}
+	if replicas, found, err := unstructured.NestedInt64(obj.Object, "spec", "replicas"); err == nil && found {
+		count := int32(replicas)
+		result.Replicas = &count
+	}
 	return result, nil
+}
+
+// GetConfigMap reads one ConfigMap by name.
+func (c *KubernetesClient) GetConfigMap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
+	return c.core.ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// GetSecret reads one Secret by name.
+func (c *KubernetesClient) GetSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+	return c.core.Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// DeletePod deletes one Pod with its UID as a precondition: a Pod recreated
+// under the same name since the caller saw it is not deleted.
+func (c *KubernetesClient) DeletePod(ctx context.Context, namespace, name, uid string) error {
+	precondition := types.UID(uid)
+	return c.core.Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &precondition}})
+}
+
+// GetWorkload reads one workload as an owner of its kind is read.
+func (c *KubernetesClient) GetWorkload(ctx context.Context, namespace, kind, name string) (OwnerResource, error) {
+	resource, ok := ownerResources[kind]
+	if !ok {
+		return OwnerResource{}, denied("unsupported workload kind")
+	}
+	return c.GetOwner(ctx, namespace, metav1.OwnerReference{APIVersion: resource.Group + "/" + resource.Version, Kind: kind, Name: name})
+}
+
+// PatchWorkload applies one JSON merge patch to a workload. The patch carries
+// metadata.uid, which the apiserver checks against the live object.
+func (c *KubernetesClient) PatchWorkload(ctx context.Context, namespace, kind, name string, patch []byte) error {
+	resource, ok := ownerResources[kind]
+	if !ok {
+		return denied("unsupported workload kind")
+	}
+	_, err := c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
 }
 
 type KubernetesExecutor struct {

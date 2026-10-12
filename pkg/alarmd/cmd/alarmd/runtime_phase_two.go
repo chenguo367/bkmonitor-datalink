@@ -86,7 +86,7 @@ type phaseTwoApplicationDependencies struct {
 		*observability.Logger,
 		*phaseTwoApplicationHealth,
 	) (*phaseTwoWorkerBundle, error)
-	openRoles      func(config.Config, *metric.Recorder, *observability.RuntimeConfigFacts) (*phaseTwoRoleRuntime, error)
+	openRoles      func(config.Config, *metric.Recorder, *observability.RuntimeConfigFacts, *observability.Logger) (*phaseTwoRoleRuntime, error)
 	openRoleBundle func(context.Context, config.Config, *metric.Recorder, *observability.Logger, *phaseTwoApplicationHealth, *phaseTwoRoleRuntime) (*phaseTwoWorkerBundle, error)
 	newHTTP        func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
 	// lifecycle opens the process's start/stop record; nil records nothing.
@@ -252,7 +252,7 @@ func runPhaseTwoApplicationWithDependencies(
 	lifecycle.start()
 	var roleRuntime *phaseTwoRoleRuntime
 	if dependencies.openRoles != nil {
-		roleRuntime, err = dependencies.openRoles(cfg, recorder, &profile)
+		roleRuntime, err = dependencies.openRoles(cfg, recorder, &profile, logger)
 		if err == nil {
 			defer roleRuntime.Close()
 			server.SetPublicSurfaceRestricted(roleRuntime.Channel.Restricted)

@@ -27,8 +27,15 @@ import (
 )
 
 const channelVersion = "alarmd-ob/v1"
+// sessionScope is the one scope a server grants: the deployment's operations
+// session, execution and management included. The identifier is historical.
 const sessionScope = "deployment_ops_readonly"
-const execScope = "deployment_ops_exec"
+
+// legacyExecScope is what an earlier server granted for a separately
+// requested execution session. A profile carrying it still loads; against an
+// earlier server that still describes an operation as requiring it, only such
+// a profile is allowed it.
+const legacyExecScope = "deployment_ops_exec"
 const maxResponse = 8 << 20
 
 // requestNotSent marks failures that happen before the channel can receive
@@ -37,9 +44,9 @@ type requestNotSent struct{ error }
 
 func notSent(message string) error { return &requestNotSent{errors.New(message)} }
 
-func validScope(scope string) bool { return scope == sessionScope || scope == execScope }
+func validScope(scope string) bool { return scope == sessionScope || scope == legacyExecScope }
 func allowsScope(granted, required string) bool {
-	return validScope(granted) && (granted == required || (granted == execScope && required == sessionScope))
+	return validScope(granted) && (required == sessionScope || granted == required)
 }
 
 func baseURL(raw string) (*url.URL, error) {

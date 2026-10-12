@@ -20,7 +20,10 @@ const RedactionContract = "credential_fields_v1"
 
 var credentialAssignment = regexp.MustCompile(`(?i)(["']?(?:access[_-]?token|api[_-]?key|token|password|secret|client[_-]?secret|authorization|cookie)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)`)
 var authCredential = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+`)
-var urlCredential = regexp.MustCompile(`(https?://)[^\s/@]+(?::[^\s/@]*)?@`)
+
+// urlCredential is URL userinfo under any scheme - redis://, mysql://,
+// amqp:// as well as http(s):// - since connection strings carry it there.
+var urlCredential = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+(?::[^\s/@]*)?@`)
 var privateKey = regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z ]+ )?PRIVATE KEY-----|$)`)
 
 type redactor struct{ secrets []string }

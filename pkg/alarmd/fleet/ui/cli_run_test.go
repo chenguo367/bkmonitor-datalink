@@ -176,7 +176,11 @@ func TestTheAuthorizationPageCopiesAndLeadsToTheCheck(t *testing.T) {
 	}
 }
 
-func TestExplicitExecutionAuthorizationAndLegacyServer(t *testing.T) {
+// The page offers the deployment's one operations session whatever scope
+// the link carries - none, the earlier execution scope, against a server that
+// never declared it, or an unknown one: one grant, naming no scope, a command
+// without --scope, and a label that says the session executes and manages.
+func TestThePageOffersTheOneOperationsSession(t *testing.T) {
 	raw := runLoginPage(t)
 	for _, name := range []string{"scope_readonly", "scope_exec", "scope_old_server", "scope_invalid"} {
 		var got struct {
@@ -189,19 +193,8 @@ func TestExplicitExecutionAuthorizationAndLegacyServer(t *testing.T) {
 		if err := json.Unmarshal(raw[name], &got); err != nil {
 			t.Fatal(err)
 		}
-		switch name {
-		case "scope_readonly":
-			if len(got.Posts) != 1 || got.Posts[0]["scope"] != nil || strings.Contains(got.Command, "--scope") {
-				t.Fatalf("default grants changed: %+v", got)
-			}
-		case "scope_exec":
-			if len(got.Posts) != 1 || got.Posts[0]["scope"] != "deployment_ops_exec" || !strings.Contains(got.Command, "--scope deployment_ops_exec") || !strings.Contains(got.Label, "Pod 脚本执行") {
-				t.Fatalf("exec not explicit: %+v", got)
-			}
-		default:
-			if len(got.Posts) != 0 || !got.Error {
-				t.Fatalf("unsupported scope reached issuance: %+v", got)
-			}
+		if got.Error || len(got.Posts) != 1 || got.Posts[0]["scope"] != nil || strings.Contains(got.Command, "--scope") || !strings.Contains(got.Label, "Pod 命令执行") {
+			t.Fatalf("%s: %+v, want the one session", name, got)
 		}
 	}
 }
@@ -387,7 +380,7 @@ async function inspect(pageURL, respond, then) {
     const e = page.elements;
     e['admin-key'].value = 'k'.repeat(40);
     await e.inspect.listeners.click();
-    if (['scope_readonly','scope_exec'].includes(name)) await e.issue.listeners.click();
+    await e.issue.listeners.click();
     runs[name] = { ...shown(e), command:e['listen-command'].textContent, label:e.preview.textContent, posts };
   }
   let callbackBody;
