@@ -244,3 +244,24 @@ func TestAnUnsupervisedExecReceiptNeedsAnEnd(t *testing.T) {
 		})
 	}
 }
+
+// A remote_state this client does not know - one a newer server reports -
+// is shown as the server wrote it.
+func TestAnUnknownRemoteStateIsShownRaw(t *testing.T) {
+	p := fixtureProfile("http://fixture.test")
+	p.Scope = legacyExecScope
+	store := Store{t.TempDir()}
+	_ = store.save(p, false)
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope}), 200), nil
+		}
+		return jsonHTTP(envelope(p, "ok", map[string]any{"remote_state": "remote_some_future_state", "detail": "kept"}), 200), nil
+	})}
+	code, out, _, _ := run(t, store, client, "", "invoke", "pod.exec", "--env", p.EnvironmentID)
+	if code != 0 || calls != 2 || stringField(objectField(out, "result"), "remote_state") != "remote_some_future_state" {
+		t.Fatalf("exit %d after %d calls: %+v", code, calls, out)
+	}
+}
