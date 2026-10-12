@@ -457,6 +457,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_fleet_control_facts_writes_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_loads_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
@@ -1032,6 +1033,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
+	bounds[fqName("fleet_control_facts_writes_total")] = len(ControlFactsWriteResults)
 	bounds[fqName("query_cooldown_loads_total")] = len(QueryCooldownLoadResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
@@ -1292,6 +1294,21 @@ func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
 		if !seen[result] {
 			t.Fatalf("result %q not pre-created: %v", result, seen)
 		}
+	}
+}
+
+// The fleet control record writes are pre-created, and a result outside the
+// closed list creates no series.
+func TestControlFactsWriteResultsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.ObserveControlFactsWrite("oversized")
+	r.ObserveControlFactsWrite("guessed")
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_fleet_control_facts_writes_total") {
+		counts[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if len(counts) != len(ControlFactsWriteResults) || counts["oversized"] != 1 || counts["written"] != 0 {
+		t.Fatalf("writes = %v, want every result present, oversized at 1, nothing else", counts)
 	}
 }
 

@@ -33,11 +33,11 @@ func TestControlStoreUsesIndependentNamespaceRetentionAndBudget(t *testing.T) {
 	if err := store.PublishControl(ctx, facts); err != nil {
 		t.Fatal(err)
 	}
-	got, found, err := store.LoadControl(ctx, facts.Replica)
+	got, found, err := store.LoadControl(ctx)
 	if err != nil || !found || !reflect.DeepEqual(got, facts) || client.lastTTL != time.Minute {
 		t.Fatalf("LoadControl() = (%+v, %v, %v), TTL %s", got, found, err, client.lastTTL)
 	}
-	if store.controlKey(facts.Replica) == store.snapshotKey(facts.Replica) {
+	if store.controlKey() == store.snapshotKey(facts.Replica) {
 		t.Fatal("control and worker keys collide")
 	}
 	if workers, err := store.Load(ctx, []string{facts.Replica}); err != nil || len(workers) != 0 {
@@ -45,36 +45,44 @@ func TestControlStoreUsesIndependentNamespaceRetentionAndBudget(t *testing.T) {
 	}
 	large := facts
 	large.ControlSource = &ControlSourceFacts{LastFailure: strings.Repeat("x", 4096)}
-	if err := store.PublishControl(ctx, large); err == nil {
-		t.Fatal("oversized control facts accepted")
+	if err := store.PublishControl(ctx, large); ControlPublishResult(err) != "oversized" {
+		t.Fatalf("oversized control facts = %v", err)
 	}
 	invalid := facts
 	invalid.Incarnation = ""
-	if err := store.PublishControl(ctx, invalid); err == nil {
-		t.Fatal("control facts without incarnation accepted")
+	if err := store.PublishControl(ctx, invalid); ControlPublishResult(err) != "invalid" {
+		t.Fatalf("control facts without incarnation = %v", err)
 	}
-	client.values[store.controlKey(facts.Replica)] = "broken-json"
-	if _, _, err := store.LoadControl(ctx, facts.Replica); err == nil {
+	if ControlPublishResult(nil) != "written" || ControlPublishResult(errors.New("redis down")) != "failed" {
+		t.Fatal("write results misnamed")
+	}
+	client.values[store.controlKey()] = "broken-json"
+	if _, _, err := store.LoadControl(ctx); err == nil {
 		t.Fatal("corrupt control facts accepted")
 	}
-	client.values[store.controlKey(facts.Replica)] = strings.Repeat("x", 4097)
-	if _, _, err := store.LoadControl(ctx, facts.Replica); err == nil {
+	client.values[store.controlKey()] = strings.Repeat("x", 4097)
+	if _, _, err := store.LoadControl(ctx); err == nil {
 		t.Fatal("oversized stored facts accepted")
 	}
-	delete(client.values, store.controlKey(facts.Replica))
-	if _, found, err := store.LoadControl(ctx, facts.Replica); err != nil || found {
+	delete(client.values, store.controlKey())
+	if _, found, err := store.LoadControl(ctx); err != nil || found {
 		t.Fatalf("expired/missing control facts = (%v, %v)", found, err)
 	}
 }
 
 type stubControlFacts struct {
 	facts ControlFacts
+	term  ControlTerm
 	found bool
 	err   error
 }
 
-func (source stubControlFacts) ControlFacts(context.Context, time.Time) (ControlFacts, bool, error) {
-	return source.facts, source.found, source.err
+func (source stubControlFacts) ControlFacts(context.Context, time.Time) (ControlFactsReading, bool, error) {
+	term := source.term
+	if term == "" {
+		term = ControlTermCurrent
+	}
+	return ControlFactsReading{Facts: source.facts, Term: term}, source.found, source.err
 }
 
 func TestIndependentControlFactsReachViewSummaryAndHealthWithoutCountingAsWorker(t *testing.T) {
@@ -113,9 +121,14 @@ func TestIndependentControlFactsReachViewSummaryAndHealthWithoutCountingAsWorker
 		health.LeaderRoundReplica != facts.Replica || health.ViewStreamReplica != facts.Replica || health.Health != view.Health {
 		t.Fatalf("health route lost control facts: %+v", health)
 	}
+	for _, standing := range []*ControlFactsStanding{view.ControlFacts, summary.ControlFacts, health.ControlFacts} {
+		if standing == nil || standing.Source != ControlFactsFromRecord || standing.Replica != facts.Replica || standing.Unavailable != "" {
+			t.Fatalf("control facts standing = %+v", standing)
+		}
+	}
 }
 
-func TestControlReadFailureAndStalenessDoNotFallBackToFormerLeader(t *testing.T) {
+func TestControlReadFailureAndStalenessFallBackToEmbeddedFacts(t *testing.T) {
 	for name, source := range map[string]stubControlFacts{
 		"unreadable": {err: errors.New("control registry failed")},
 		"stale":      {facts: controlFixture(now.Add(-2 * time.Minute)), found: true},
@@ -129,11 +142,68 @@ func TestControlReadFailureAndStalenessDoNotFallBackToFormerLeader(t *testing.T)
 			view := service.View(context.Background())
 			summary, _ := service.Summarized(context.Background(), time.Minute)
 			for _, got := range []View{view, summary} {
-				if got.Health != HealthUnknown || !hasGap(got, GapControlFactsUnavailable) || got.Source != nil || got.Covered != 949 {
-					t.Fatalf("failed control facts = health %s source %+v gaps %+v covered %d", got.Health, got.Source, got.Gaps, got.Covered)
+				if got.Health != HealthHealthy || hasGap(got, GapControlFactsUnavailable) || got.Source == nil ||
+					got.Source.Accepted != 12 || got.SourceReplica != workers[0].Replica || got.Covered != 949 {
+					t.Fatalf("fallback = health %s source %+v gaps %+v covered %d", got.Health, got.Source, got.Gaps, got.Covered)
+				}
+				if got.ControlFacts == nil || got.ControlFacts.Source != ControlFactsFromEmbedded || got.ControlFacts.Unavailable == "" {
+					t.Fatalf("control facts standing = %+v", got.ControlFacts)
 				}
 			}
 		})
+	}
+}
+
+func TestControlFactsUnavailableOnlyWhenNoSourceHasThem(t *testing.T) {
+	for name, source := range map[string]stubControlFacts{
+		"unreadable": {err: errors.New("control registry failed")},
+		"stale":      {facts: controlFixture(now.Add(-2 * time.Minute)), found: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Worker-only snapshots: a follower's own control-source view and
+			// activation are not the Leader's facts.
+			workers := healthySnapshots()
+			workers[0].ControlSource = &ControlSourceFacts{Role: "follower", Mode: "healthy"}
+			workers[0].ViewStream = &ViewStreamFacts{Leading: false}
+			service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+				stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: workers})
+			service.SetControlFactsSource(source)
+			view := service.View(context.Background())
+			summary, _ := service.Summarized(context.Background(), time.Minute)
+			for _, got := range []View{view, summary} {
+				if got.Health != HealthUnknown || !hasGap(got, GapControlFactsUnavailable) || got.Source != nil ||
+					got.ControlFacts == nil || got.ControlFacts.Source != ControlFactsFromNone {
+					t.Fatalf("no control facts = health %s gaps %+v standing %+v", got.Health, got.Gaps, got.ControlFacts)
+				}
+			}
+		})
+	}
+}
+
+func TestPreviousTermRecordStandsInUntilTheNewLeaderWrites(t *testing.T) {
+	facts := controlFixture(now.Add(-90 * time.Second))
+	facts.Activation = nil
+	workers := healthySnapshots()
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: workers})
+	service.SetControlFactsSource(stubControlFacts{facts: facts, term: ControlTermPrevious, found: true})
+	view := service.View(context.Background())
+	summary, _ := service.Summarized(context.Background(), time.Minute)
+	for _, got := range []View{view, summary} {
+		if got.Health != HealthHealthy || hasGap(got, GapControlFactsUnavailable) || got.SourceReplica != facts.Replica ||
+			got.ControlFacts == nil || got.ControlFacts.Source != ControlFactsFromPreviousTerm ||
+			got.ControlFacts.Replica != facts.Replica || got.ControlFacts.Unavailable == "" {
+			t.Fatalf("previous term = health %s gaps %+v standing %+v source replica %s", got.Health, got.Gaps, got.ControlFacts, got.SourceReplica)
+		}
+	}
+	// Embedded Leader facts outrank the previous term's record.
+	workers[1].LeaderRound = &LeaderRoundFacts{At: now}
+	service = mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: workers})
+	service.SetControlFactsSource(stubControlFacts{facts: facts, term: ControlTermPrevious, found: true})
+	if got := service.View(context.Background()); got.ControlFacts == nil || got.ControlFacts.Source != ControlFactsFromEmbedded ||
+		got.SourceReplica == facts.Replica {
+		t.Fatalf("embedded over previous term = standing %+v source replica %s", got.ControlFacts, got.SourceReplica)
 	}
 }
 
@@ -177,7 +247,8 @@ func TestLegacyControlSourceFallbackPreservesEmbeddedFacts(t *testing.T) {
 		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: workers})
 	service.SetControlFactsSource(stubControlFacts{})
 	view := service.View(context.Background())
-	if view.Source == nil || view.Source.Accepted != 12 || view.SourceReplica != workers[0].Replica || view.Health != HealthHealthy {
+	if view.Source == nil || view.Source.Accepted != 12 || view.SourceReplica != workers[0].Replica || view.Health != HealthHealthy ||
+		view.ControlFacts == nil || view.ControlFacts.Source != ControlFactsFromEmbedded {
 		t.Fatalf("legacy fallback = %+v", view)
 	}
 }
@@ -212,7 +283,7 @@ type stubControlReader struct {
 	err   error
 }
 
-func (reader stubControlReader) LoadControl(context.Context, string) (ControlFacts, bool, error) {
+func (reader stubControlReader) LoadControl(context.Context) (ControlFacts, bool, error) {
 	return reader.facts, reader.found, reader.err
 }
 
@@ -221,8 +292,9 @@ func TestControlFactsSourceChecksLeaseRoleIncarnationAndTakeover(t *testing.T) {
 		mutate func(*stubControlRegistry, *stubControlReader)
 		legacy bool
 		fails  bool
+		term   ControlTerm
 	}{
-		"current control":      {},
+		"current control":      {term: ControlTermCurrent},
 		"legacy":               {mutate: func(registry *stubControlRegistry, _ *stubControlReader) { registry.present = false }, legacy: true},
 		"no active lease":      {mutate: func(registry *stubControlRegistry, _ *stubControlReader) { registry.leaders = nil }, fails: true},
 		"registration expired": {mutate: func(registry *stubControlRegistry, _ *stubControlReader) { registry.instance.ExpiresAt = now }, fails: true},
@@ -233,7 +305,17 @@ func TestControlFactsSourceChecksLeaseRoleIncarnationAndTakeover(t *testing.T) {
 		"previous incarnation": {mutate: func(_ *stubControlRegistry, reader *stubControlReader) { reader.facts.Incarnation = "previous-process" }, fails: true},
 		"previous epoch": {mutate: func(_ *stubControlRegistry, reader *stubControlReader) {
 			reader.facts.ControlEpoch = 4
+			reader.facts.Replica, reader.facts.Incarnation = "former-control", "former-process"
 			reader.facts.ViewStream = nil
+		}, term: ControlTermPrevious},
+		"later epoch than the lease": {mutate: func(_ *stubControlRegistry, reader *stubControlReader) {
+			reader.facts.ControlEpoch = 6
+			reader.facts.ViewStream = nil
+		}, fails: true},
+		"previous epoch, takeover during read": {mutate: func(registry *stubControlRegistry, reader *stubControlReader) {
+			reader.facts.ControlEpoch = 4
+			reader.facts.ViewStream = nil
+			registry.leaders = append(registry.leaders, ownership.QueryGroupOwner{OwnerID: "new-control", OwnerEpoch: 6})
 		}, fails: true},
 		"takeover during read": {mutate: func(registry *stubControlRegistry, _ *stubControlReader) {
 			registry.leaders = append(registry.leaders, ownership.QueryGroupOwner{OwnerID: "new-control", OwnerEpoch: 6})
@@ -253,7 +335,7 @@ func TestControlFactsSourceChecksLeaseRoleIncarnationAndTakeover(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, found, err := source.ControlFacts(context.Background(), now)
-			if (err != nil) != test.fails || found == (test.legacy || test.fails) {
+			if (err != nil) != test.fails || found == (test.legacy || test.fails) || got.Term != test.term {
 				t.Fatalf("ControlFacts() = (%+v, %v, %v)", got, found, err)
 			}
 		})
