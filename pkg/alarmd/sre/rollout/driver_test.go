@@ -171,11 +171,22 @@ func TestASelfUpdateIsFinishedByTheProcessThatTakesItOver(t *testing.T) {
 	waitDriving(t, successor, 1)
 	cluster.set(finish)
 	final := waitState(t, store, receipt.ID, StateComplete)
+	// The final callback runs after the state is written: wait for it.
+	waitFinals(t, ended, 1)
 	if final.Previous != "app:1" || final.Image != "app:2" || len(cluster.imageWrites()) != 1 || ended.count() != 1 {
 		t.Fatalf("final %+v, writes %v, finals %d", final, cluster.imageWrites(), ended.count())
 	}
 	if entry, _ := store.Get(context.Background(), receipt.ID); entry.DrivenBy != "pod-b/1" {
 		t.Fatalf("finished by %q, want the successor", entry.DrivenBy)
+	}
+}
+
+// waitFinals waits for the final callback to have run n times.
+func waitFinals(t *testing.T, f *finals, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.count() < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
