@@ -569,6 +569,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_platform_settings_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_platform_settings_unavailable_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_platform_settings_change_total"] = "variableLabels: {field}"
+	expected["bkmonitor_alarmd_platform_settings_read_retry_total"] = "variableLabels: {}"
 
 	descriptions := make(chan string)
 	go func() {
@@ -1207,6 +1208,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("platform_settings_refresh_total")] = 2
 	bounds[fqName("platform_settings_unavailable_total")] = len(platformsettings.UnavailableReasons)
 	bounds[fqName("platform_settings_change_total")] = len(platformsettings.Fields)
+	bounds[fqName("platform_settings_read_retry_total")] = 1
 	return bounds
 }
 

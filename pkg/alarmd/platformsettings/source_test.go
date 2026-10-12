@@ -229,10 +229,18 @@ func TestATornDistributionReadIsReadAgainOnceAndThenRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hook.tears = 1
 	publication, err := source.Read(ctx, Fields)
+	if err != nil || publication.Retried || len(hook.pipelines) != 1 {
+		t.Fatalf("a stable read = %+v, %v after %d tries; want one try, not retried", publication, err, len(hook.pipelines))
+	}
+
+	hook.tears, hook.pipelines = 1, nil
+	publication, err = source.Read(ctx, Fields)
 	if err != nil || !publication.Published || publication.Revision != "r1" || string(publication.Values[FieldIsAccessBKData]) != `true` {
 		t.Fatalf("one torn read then a stable one = %+v, %v; want the stable read's publication", publication, err)
+	}
+	if !publication.Retried {
+		t.Fatalf("one torn read then a stable one = %+v; want it to say it was read again", publication)
 	}
 	if len(hook.pipelines) != 2 {
 		t.Fatalf("pipelines %v, want the torn read and one more", hook.pipelines)
@@ -245,8 +253,8 @@ func TestATornDistributionReadIsReadAgainOnceAndThenRefused(t *testing.T) {
 
 	hook.tears, hook.pipelines = 2, nil
 	publication, err = source.Read(ctx, Fields)
-	if !errors.Is(err, ErrRevisionMoved) || publication.Published || len(publication.Values) != 0 {
-		t.Fatalf("two torn reads = %+v, %v; want ErrRevisionMoved and nothing", publication, err)
+	if !errors.Is(err, ErrRevisionMoved) || publication.Published || len(publication.Values) != 0 || !publication.Retried {
+		t.Fatalf("two torn reads = %+v, %v; want ErrRevisionMoved, nothing, and retried", publication, err)
 	}
 	if len(hook.pipelines) != 2 {
 		t.Fatalf("pipelines %v, want two tries and no third", hook.pipelines)
@@ -258,7 +266,7 @@ func TestATornDistributionReadIsReadAgainOnceAndThenRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook.tears, hook.pipelines = 1, nil
-	if publication, err := source.Read(ctx, Fields); err != nil || publication.Published || len(hook.pipelines) != 2 {
+	if publication, err := source.Read(ctx, Fields); err != nil || publication.Published || !publication.Retried || len(hook.pipelines) != 2 {
 		t.Fatalf("a revision appearing mid-read = %+v, %v after %d tries; want it read again, then unpublished", publication, err, len(hook.pipelines))
 	}
 }

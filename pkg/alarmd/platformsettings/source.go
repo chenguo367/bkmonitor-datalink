@@ -26,15 +26,21 @@ import (
 // Published is false when the revision key does not exist. The protocol
 // says that means nothing was ever published; the values read beside it
 // are then not the platform's word, and the cache does not use them.
+//
+// Retried says the first try was torn -- its revision moved during the read
+// -- and the read was tried again. It is set whatever the second try came
+// to, an error included, so a reader counts every torn first try.
 type Publication struct {
 	Published bool
 	Revision  string
 	Values    map[Field]json.RawMessage
+	Retried   bool
 }
 
 // Source reads the distribution. A non-nil error is a read that did not
 // happen; a read that happened and found nothing published is a
-// Publication with Published false.
+// Publication with Published false. Beside an error, only Retried is
+// meaningful.
 type Source interface {
 	Read(ctx context.Context, fields []Field) (Publication, error)
 }
@@ -91,11 +97,12 @@ func (source *RedisSource) Read(ctx context.Context, fields []Field) (Publicatio
 	// than a round trip, and is a failed read rather than a third try.
 	for attempt := 0; attempt < 2; attempt++ {
 		publication, stable, err := source.read(ctx, fields, keys)
+		publication.Retried = attempt > 0
 		if err != nil || stable {
 			return publication, err
 		}
 	}
-	return Publication{}, ErrRevisionMoved
+	return Publication{Retried: true}, ErrRevisionMoved
 }
 
 // ErrRevisionMoved is a read of the distribution whose revision changed
