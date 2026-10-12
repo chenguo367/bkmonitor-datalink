@@ -154,6 +154,10 @@ type fleetPublisher struct {
 	build fleet.BuildFacts
 	owned func() []execution.QueryGroupIdentity
 	now   func() time.Time
+	// ownedSince is when each owned object first appeared in this replica's
+	// owned set, by the bundle's clock - the same clock its wake is on - kept
+	// while it is owned. A restart starts it over, which is the takeover.
+	ownedSince map[string]time.Time
 	// observe reports each publish outcome. A failure is retried on the next
 	// tick rather than propagated: the snapshot is diagnostics, and diagnostics
 	// must not be able to stop the pipeline whose facts they describe.
@@ -652,7 +656,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	parked, overdue := publisherOverdue(publisher.overdue, at, publisher.replica, publisher.strategies)
 	publisher.notePeriodUnknown(overdue, at)
 	anomalies = append(anomalies, onlyUnlisted(parked, anomalies, demoted)...)
-	awaiting, awaitingTotal := publisher.awaitingFirstRound(owned, at)
+	awaiting, awaitingTotal, undetermined, undeterminedTotal := publisher.awaitingFirstRound(owned, at)
 	snapshot := fleet.Snapshot{
 		Replica:   publisher.replica,
 		TakenAt:   at,
@@ -666,6 +670,8 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		// The undetermined objects that are only waiting for their first
 		// round, which the aggregate says as such rather than as unknown.
 		AwaitingFirstRound: awaiting, AwaitingFirstRoundTotal: awaitingTotal,
+		// And the rest of the undetermined: which objects unknown counts.
+		Undetermined: undetermined, UndeterminedTotal: undeterminedTotal,
 		// Which objects, not only how many. A sum cannot tell two replicas
 		// holding distinct shares from two replicas holding the same object,
 		// and that ambiguity sat unresolved on a running deployment for over a
@@ -874,23 +880,42 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 // hundred objects, so the list is tens of kilobytes against the snapshot's
 // megabyte budget.
 // awaitingFirstRound names the owned objects without a conclusion that are
-// only waiting for their first round (fleet.AwaitingFirstRound), soonest due
-// first and bounded, with the total. Nothing is exempted without a schedule
-// to ask.
-func (publisher *fleetPublisher) awaitingFirstRound(owned []execution.QueryGroupIdentity, at time.Time) ([]fleet.FirstRoundWait, int) {
+// only waiting for their first round since this replica took them over
+// (fleet.AwaitingFirstRound), soonest due first and bounded, with the total;
+// and the rest of the undetermined - the objects unknown counts - longest
+// owned first and bounded, with theirs. Nothing is exempted without a
+// schedule to ask. It also keeps when each owned object was taken over.
+func (publisher *fleetPublisher) awaitingFirstRound(owned []execution.QueryGroupIdentity, at time.Time) ([]fleet.FirstRoundWait, int, []fleet.UndeterminedObject, int) {
+	held := make(map[string]time.Time, len(owned))
+	for _, queryGroup := range owned {
+		id := string(queryGroup)
+		since, known := publisher.ownedSince[id]
+		if !known {
+			since = at
+		}
+		held[id] = since
+	}
+	publisher.ownedSince = held
 	if publisher.schedule == nil {
-		return nil, 0
+		return nil, 0, nil, 0
 	}
 	var waits []fleet.FirstRoundWait
+	var undetermined []fleet.UndeterminedObject
 	for _, queryGroup := range owned {
 		id := string(queryGroup)
 		if publisher.tracker.HasConclusion(id) {
 			continue
 		}
 		wake := publisher.schedule.WakeOf(id)
-		if fleet.AwaitingFirstRound(wake, at) {
+		if fleet.AwaitingFirstRound(wake, held[id], at) {
 			waits = append(waits, fleet.FirstRoundWait{QueryGroup: id, IntervalSeconds: wake.IntervalSeconds, DueAt: wake.DueAt})
+			continue
 		}
+		object := fleet.UndeterminedObject{QueryGroup: id, IntervalSeconds: wake.IntervalSeconds, OwnedSince: held[id]}
+		if wake.Known {
+			object.NextDue = wake.DueAt
+		}
+		undetermined = append(undetermined, object)
 	}
 	total := len(waits)
 	sort.Slice(waits, func(i, j int) bool {
@@ -902,7 +927,17 @@ func (publisher *fleetPublisher) awaitingFirstRound(owned []execution.QueryGroup
 	if len(waits) > fleet.MaxFirstRoundWaits {
 		waits = waits[:fleet.MaxFirstRoundWaits]
 	}
-	return waits, total
+	undeterminedTotal := len(undetermined)
+	sort.Slice(undetermined, func(i, j int) bool {
+		if !undetermined[i].OwnedSince.Equal(undetermined[j].OwnedSince) {
+			return undetermined[i].OwnedSince.Before(undetermined[j].OwnedSince)
+		}
+		return undetermined[i].QueryGroup < undetermined[j].QueryGroup
+	})
+	if len(undetermined) > fleet.MaxUndeterminedObjects {
+		undetermined = undetermined[:fleet.MaxUndeterminedObjects]
+	}
+	return waits, total, undetermined, undeterminedTotal
 }
 
 func ownedObjectIDs(owned []execution.QueryGroupIdentity) []string {

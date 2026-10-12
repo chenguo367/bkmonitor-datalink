@@ -1771,8 +1771,13 @@ type Snapshot struct {
 	// whole deployment at UNKNOWN for as long. Bounded; the total counts all.
 	AwaitingFirstRound      []FirstRoundWait `json:"awaiting_first_round,omitempty"`
 	AwaitingFirstRoundTotal int              `json:"awaiting_first_round_total,omitempty"`
-	Anomalies               []Anomaly        `json:"anomalies"`
-	TotalAnomalies          int              `json:"total_anomalies"`
+	// Undetermined names the owned objects with no conclusion that are not
+	// awaiting their first round (UndeterminedObject), longest owned first
+	// and bounded; the total counts them all. Omitted when there are none.
+	Undetermined      []UndeterminedObject `json:"undetermined,omitempty"`
+	UndeterminedTotal int                  `json:"undetermined_total,omitempty"`
+	Anomalies         []Anomaly            `json:"anomalies"`
+	TotalAnomalies    int                  `json:"total_anomalies"`
 	// Demoted are the objects held back because their backend kept answering
 	// unavailable. They are published apart from Anomalies, not folded into
 	// them, because they answer a different question: Anomalies is what this
@@ -2915,6 +2920,10 @@ type View struct {
 	// not in Unknown and do not make the verdict UNKNOWN; they are said here
 	// instead, so a reader sees how many and until when.
 	AwaitingFirstRound *FirstRoundWaits `json:"awaiting_first_round,omitempty"`
+	// Undetermined is which objects Unknown counts, across the replicas,
+	// longest owned first and bounded; UndeterminedTotal counts them all.
+	Undetermined      []UndeterminedObject `json:"undetermined_objects,omitempty"`
+	UndeterminedTotal int                  `json:"undetermined_objects_total,omitempty"`
 	// Degradations are replica-level conditions that make the verdict
 	// DEGRADED on their own, beside the anomalies: what is wrong is a replica's
 	// standing, not any object it evaluates.
@@ -3517,6 +3526,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateSchedule(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
+	aggregateUndetermined(&view, counted)
 
 	// Owning an object is not knowing about it. A replica that has just restarted
 	// owns everything and has observed nothing, so its empty anomaly list is not
