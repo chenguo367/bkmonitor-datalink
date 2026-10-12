@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/racedetector"
 )
 
 // A shared-schema response reads through a pooled frame buffer: the 256 KiB a
@@ -16,7 +17,7 @@ import (
 // response here allocates a few KB to decode, against the 256 KiB a reader of
 // its own would cost.
 func TestASharedResponseDoesNotAllocateItsFrameBuffer(t *testing.T) {
-	if raceEnabled {
+	if racedetector.Enabled {
 		t.Skip("the race detector's sync.Pool drops a quarter of what is put back")
 	}
 	client := fixtureClient(t, http.StatusOK, "", DefaultLimits())
