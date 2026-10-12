@@ -230,13 +230,14 @@ type SchedulerDemand struct {
 	// ReplayQueriesPerSecond is the rate of queries replays and retries ask
 	// a recovery permit for.
 	ReplayQueriesPerSecond float64
-	// PeakSlotsPerSecond is the most Slots made ready in one second.
+	// PeakSlotsPerSecond is the most Slots made ready in one second. It is
+	// reported, not sized from: the slots are the memory ceiling.
 	PeakSlotsPerSecond float64
 	// Hold is how long a query holds its permit when the query service is
 	// not under pressure (the lowest hourly median); zero before any.
 	Hold time.Duration
 	// Execution is how long a Slot's execution runs, its Redis round trips
-	// included; zero before any.
+	// included; zero before any. Reported, not sized from.
 	Execution time.Duration
 	// OwnedQueryGroups is how many Query Groups the process owns.
 	OwnedQueryGroups int
@@ -250,41 +251,44 @@ type SchedulerDemand struct {
 // queue at half load waits less than one service time.
 const demandHeadroom = 2
 
-// DeriveSchedulerShape sizes the bounds from the work: each is the demand's
-// rate times how long one unit of it holds the bound (Little's law), times
-// the headroom, inside the container's ceiling.
+// DeriveSchedulerShape sizes the bounds from the work, given the shape in
+// force (previous) and the permits held now (held).
 //
-//   - Process permits: peak queries a second times the hold.
+//   - Execution slots stay at the container's ceiling. They bound how many
+//     executions are parked in memory at once, which is what the ceiling
+//     measures; an execution slot is a goroutine waiting on Redis or the query
+//     service. Sized from demand they hid the demand: fewer slots ran fewer
+//     Slots, which asked for fewer permits, which read as less demand - a
+//     bound whose input its own output gated, stuck at its floor on a
+//     production deployment within a minute of starting.
+//   - Process permits: peak queries a second times the hold, twice over. The
+//     queries are counted where they ask for a permit, before the permit
+//     budget gates them, and with the slots at the ceiling nothing upstream
+//     gates them either.
 //   - Recovery permits: replay queries a second times the hold, at least one.
-//   - Executions: peak Slots a second times an execution's length, never
-//     fewer than the permits they feed.
-//   - Queues: every owned Query Group queued as deep as one may be. A queue
-//     holds references; deeper than that it can never fill.
+//   - Neither comes down by more than half in one derivation, nor below what
+//     is held now: a minute that measured little does not take a full budget
+//     to its floor, and lowering never takes back what is running.
+//   - Queues: every owned Query Group queued as deep as one may be.
 //
 // The hold is the lowest hourly median, not the latest: a hold that followed
 // the query service as it slowed would raise the budget and put more queries
 // at once on a service that is already slow.
-func DeriveSchedulerShape(ceiling DerivedScheduler, demand SchedulerDemand) DerivedScheduler {
-	hold, execution := demand.Hold, demand.Execution
+func DeriveSchedulerShape(ceiling DerivedScheduler, demand SchedulerDemand, previous DerivedScheduler, held int) DerivedScheduler {
+	hold := demand.Hold
 	if hold <= 0 {
 		hold = coldStartHold
 	}
-	if execution <= 0 {
-		execution = coldStartExecution
-	}
 	top := max(ceiling.ActiveExecutionCeiling, minimumActiveExecutions)
+	gradual := func(derived, before int) int { return max(derived, before/2, held) }
 	// Normal rounds first: recovery permits stay below the process permits,
-	// as the coordinator requires, and the two together inside the ceiling.
-	// The slots stay above the permits: an execution also waits on Redis
-	// before and after its query, and a profile of full slots found 77.5 of
-	// 128 there.
-	permits := min(max(concurrency(demand.PeakQueriesPerSecond, hold), 2), top-2)
-	recovery := min(max(concurrency(demand.ReplayQueriesPerSecond, hold), 1), permits-1, top-1-permits)
-	active := min(max(concurrency(demand.PeakSlotsPerSecond, execution), permits+recovery+1), top)
+	// as the coordinator requires, and the two together under the slots.
+	permits := min(max(gradual(concurrency(demand.PeakQueriesPerSecond, hold), previous.ProcessQueryPermits), 2), top-2)
+	recovery := min(max(concurrency(demand.ReplayQueriesPerSecond, hold), previous.RecoveryQueryPermits/2, 1), permits-1, top-1-permits)
 	queued := max(demand.MaxQueuedItemsPerQG, 1)
 	queue := max(demand.OwnedQueryGroups, 1)*queued + 1
 	return DerivedScheduler{
-		ActiveExecutions:       active,
+		ActiveExecutions:       top,
 		ProcessQueryPermits:    permits,
 		RecoveryQueryPermits:   recovery,
 		ReadyQueueCapacity:     queue,

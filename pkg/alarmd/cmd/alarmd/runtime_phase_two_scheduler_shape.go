@@ -43,8 +43,12 @@ type schedulerShapeReading struct {
 type schedulerShaper struct {
 	flights *scheduler.FlightCoordinator
 	ceiling config.DerivedScheduler
-	limits  scheduler.RecoveryLimits
-	now     func() time.Time
+	// startedAt is when the shaper began counting: the first derivation is
+	// a full window of measurement later, never on the counts of a process
+	// that has not yet run a minute.
+	startedAt time.Time
+	limits    scheduler.RecoveryLimits
+	now       func() time.Time
 
 	mu sync.Mutex
 	// executions is the last day's Slot execution lengths, and ready the
@@ -62,7 +66,7 @@ type schedulerShaper struct {
 
 func newSchedulerShaper(flights *scheduler.FlightCoordinator, cfg config.Config, now func() time.Time) *schedulerShaper {
 	s := cfg.PhaseTwo.Scheduler
-	shaper := &schedulerShaper{flights: flights, limits: s.RecoveryLimits(), now: now,
+	shaper := &schedulerShaper{flights: flights, limits: s.RecoveryLimits(), now: now, startedAt: now(),
 		ceiling: config.DerivedScheduler{ActiveExecutions: s.ActiveExecutionLimit, ProcessQueryPermits: s.ProcessQueryPermits,
 			RecoveryQueryPermits: s.RecoveryQueryPermits, ReadyQueueCapacity: s.ReadyQueueCapacity,
 			RecoveryQueueCapacity: s.RecoveryQueueCapacity, ActiveExecutionCeiling: max(s.ActiveExecutionCeiling, s.ActiveExecutionLimit)}}
@@ -117,7 +121,11 @@ func (shaper *schedulerShaper) due() bool {
 	}
 	shaper.mu.Lock()
 	defer shaper.mu.Unlock()
-	return shaper.last.at.IsZero() || shaper.now().Sub(shaper.last.at) >= schedulerShapeInterval
+	since := shaper.last.at
+	if since.IsZero() {
+		since = shaper.startedAt
+	}
+	return shaper.now().Sub(since) >= schedulerShapeInterval
 }
 
 // derive sizes the shape from what the last minute asked of this process
@@ -146,7 +154,12 @@ func (shaper *schedulerShaper) derive(owned int) schedulerShapeReading {
 		PeakQueriesPerSecond: float64(shaper.flights.PeakNormalRequestsPerSecond()), ReplayQueriesPerSecond: replayRate,
 		Hold: shaper.flights.HoldReference(), Execution: execution,
 		OwnedQueryGroups: owned, MaxQueuedItemsPerQG: shaper.limits.MaxQueuedItemsPerQG}
-	shape := config.DeriveSchedulerShape(shaper.ceiling, demand)
+	occupancy := shaper.flights.QueryPermitOccupancy()
+	held := occupancy.LookbackInflight
+	for _, count := range occupancy.Inflight {
+		held += count
+	}
+	shape := config.DeriveSchedulerShape(shaper.ceiling, demand, shaper.shape(), held)
 	limits := shaper.limits
 	limits.ProcessQueryPermits, limits.RecoveryQueryPermits = shape.ProcessQueryPermits, shape.RecoveryQueryPermits
 	limits.ReadyQueueCapacity, limits.RecoveryQueueCapacity = shape.ReadyQueueCapacity, shape.RecoveryQueueCapacity
