@@ -303,7 +303,11 @@ func runtimeProvider(t *testing.T) (*Provider, *fixtureClient, Target) {
 		t.Skip("python3 on PATH is the remote supervisor's contract")
 	}
 	client, target := fixture()
-	return mustProvider(t, Options{Client: client, Executor: localExecutor{}, LiteralSecrets: []string{"literalcredential"}}), client, target
+	// These tests are about what a run reports, not how long its start may
+	// take: a loaded machine can take seconds to start python3, so the start
+	// is given far more than the production allowance. The bound itself is
+	// tested with a stream whose timing the test controls.
+	return mustProvider(t, Options{Client: client, Executor: localExecutor{}, LiteralSecrets: []string{"literalcredential"}, startupAllowance: time.Minute}), client, target
 }
 
 func TestRemoteNonzeroExitStdinAndOutputSpoof(t *testing.T) {
