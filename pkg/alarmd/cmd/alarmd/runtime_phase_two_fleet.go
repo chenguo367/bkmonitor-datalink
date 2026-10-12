@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
 // controlPlaneExpectation reads the authoritative object set from the control
@@ -236,6 +237,9 @@ type fleetPublisher struct {
 	// addressDiffers is this replica's latest records whose address is not
 	// their host's; nil publishes none.
 	addressDiffers func() []fleet.AddressDiffersSample
+	// effectiveTimeUnread is the effective-time dependencies this replica
+	// could not read and no longer trusts; nil publishes none.
+	effectiveTimeUnread func() ([]strategycache.EffectiveTimeUnread, int)
 	// restoreAttempts is scoped to current ownership. The maximum also marks
 	// successful reads (including missing/stale history) as finished.
 	restoreAttempts map[execution.QueryGroupIdentity]int
@@ -865,8 +869,14 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.dispatch != nil {
 		snapshot.Dispatch = publisher.dispatch()
 	}
+	if dropped := publisher.tracker.Dropped(); dropped.Lost() {
+		snapshot.TrackerDropped = &dropped
+	}
 	if publisher.addressDiffers != nil {
 		snapshot.AddressDiffers = publisher.addressDiffers()
+	}
+	if publisher.effectiveTimeUnread != nil {
+		snapshot.EffectiveTimeUnread, snapshot.EffectiveTimeUnreadTotal = publisher.effectiveTimeUnread()
 	}
 	return snapshot
 }

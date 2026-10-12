@@ -245,6 +245,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
 	fleetTracker := fleet.NewTracker(baseObserver, cfg.PhaseTwo.Worker.ID, external.Now)
+	recorder.SetFleetTrackerSource(fleetTracker.Dropped)
 	// How long a Query Group may wait for this Worker's view to carry it
 	// before the wait is listed: the old Leader's lease running out, a
 	// candidate taking the lead (and publishing) on a refresh tick, the
@@ -704,6 +705,8 @@ func openProductionPhaseTwoBundleAssembly(
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	legacyTime := strategycache.NewLegacyEffectiveTime(redisForCaller(controlClient, redisfailure.CallerLegacyEffectiveTime),
 		redisForCaller(cmdbClient, redisfailure.CallerLegacyEffectiveTime), cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
+	legacyTime.SetFailureLine(effectiveTimeFailureLine(logger))
+	recorder.SetEffectiveTimeRefreshSource(legacyTime.RefreshCounts)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a
 	// test on this function: the port is allowed to be nil, and a production
 	// runtime that left it nil would lose every query-free completion's
@@ -749,8 +752,13 @@ func openProductionPhaseTwoBundleAssembly(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
+	// Sized by what the owned Query Groups were measured to retain, once
+	// every one of them has been: the cost source reads the census for the
+	// Leader's heartbeat, and the reservation from the same reading.
+	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
 	observationMemory.Reserve("retained", func() (uint64, uint64) {
-		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes, worker.RetainedReserved(coordinator)
+		held := worker.RetainedReserved(coordinator)
+		return workerCosts.RetainedReservation(cfg.PhaseTwo.Coordinator.MaxRetainedBytes, held), held
 	})
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
@@ -847,7 +855,6 @@ func openProductionPhaseTwoBundleAssembly(
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
 	viewGate.retryWithin = cfg.PhaseTwo.Ownership.LeaseRenewInterval.Duration()
-	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
@@ -1260,23 +1267,24 @@ func openProductionPhaseTwoBundleAssembly(
 		// Whether anything can be parked at all, from the same bundle. The
 		// overdue count above is only readable next to this: on a build that
 		// suppresses nothing it can only be zero.
-		dispatch:         bundle.dispatchSuppressionFacts,
-		addressDiffers:   addressDiffers.Latest,
-		restore:          progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
-		staleAfter:       stallAfter,
-		restoreBudget:    fleetRestoreBudgetPerPublish,
-		openAlerts:       openAlertFacts,
-		controlSource:    bundle.controlSourceFleetFacts,
-		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
-		publicSurface:    surface,
-		activation:       bundle.activationFleetFacts,
-		activationHeader: bundle.activationHeaderFleetFacts,
-		rebalance:        bundle.rebalanceFleetFacts,
-		assignmentScope:  bundle.assignmentScopeFleetFacts,
-		assignmentSweep:  bundle.assignmentSweepFleetFacts,
-		leaderRound:      bundle.leaderRoundFleetFacts,
-		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
-		source:           bundle.sourceFleetFacts,
+		dispatch:            bundle.dispatchSuppressionFacts,
+		addressDiffers:      addressDiffers.Latest,
+		effectiveTimeUnread: legacyTime.Unread,
+		restore:             progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
+		staleAfter:          stallAfter,
+		restoreBudget:       fleetRestoreBudgetPerPublish,
+		openAlerts:          openAlertFacts,
+		controlSource:       bundle.controlSourceFleetFacts,
+		platformSettings:    platformSettingsFactsSource(platformSettings, external.Now),
+		publicSurface:       surface,
+		activation:          bundle.activationFleetFacts,
+		activationHeader:    bundle.activationHeaderFleetFacts,
+		rebalance:           bundle.rebalanceFleetFacts,
+		assignmentScope:     bundle.assignmentScopeFleetFacts,
+		assignmentSweep:     bundle.assignmentSweepFleetFacts,
+		leaderRound:         bundle.leaderRoundFleetFacts,
+		viewStream:          viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
+		source:              bundle.sourceFleetFacts,
 		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex.Default(), platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
 			linkd.Console, linkd.Location, external.Now), groupStore, external.Now),
@@ -1295,6 +1303,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// snapshot publishes, from the same sources.
 	observationRefresh.owned = bundle.ownedLeases
 	workerCosts.boundByOwned(bundle.ownedQueryGroups)
+	bundle.workerCosts = workerCosts
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
 	// The first attempt runs now, so a broker that answers is open before the
@@ -1624,6 +1633,15 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 		facts.IndexReadAgeSeconds = &age
 	}
 	facts.IndexStaleAfterSeconds, facts.StaleSets = stats.StaleAfter.Seconds(), stats.Stale
+	facts.CalibrationNeeded, facts.CalibrationCapacity, facts.CalibrationShort = stats.CalibrationNeeded, stats.CalibrationCapacity, stats.CalibrationShort
+	for _, large := range stats.TooLarge {
+		facts.TooLarge = append(facts.TooLarge, fleet.TooLargeSetRow{TenantID: large.Strategy.TenantID, StrategyID: large.Strategy.StrategyID,
+			Members: large.Refusal.Members, Bytes: large.Refusal.Bytes, MaxMembers: large.Refusal.MaxMembers, MaxBytes: large.Refusal.MaxBytes})
+	}
+	for _, over := range stats.CalibrationOverAge {
+		facts.CalibrationOverAge = append(facts.CalibrationOverAge, fleet.CalibrationOverAgeRow{TenantID: over.Strategy.TenantID,
+			StrategyID: over.Strategy.StrategyID, AgeSeconds: over.Age.Seconds()})
+	}
 	if !stats.LoadedAt.IsZero() {
 		age := at.Sub(stats.LoadedAt).Seconds()
 		facts.AuthoritativeAgeSeconds = &age

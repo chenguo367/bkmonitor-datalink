@@ -832,6 +832,10 @@ type phaseTwoWorkerBundle struct {
 	// shaper sizes the query budget, execution slots and queues from the
 	// work this bundle owns; nil keeps the startup shape.
 	shaper *schedulerShaper
+	// workerCosts is the census reading the heartbeat carries and the
+	// observation line's retained reservation is sized by; kept so a test
+	// can drive it through the production assembly.
+	workerCosts *workerCostSource
 }
 
 type phaseTwoScheduledRunner struct {

@@ -200,9 +200,10 @@ func TestPlanOutputsFollowTheFrozenPlan(t *testing.T) {
 	compiled := compilePlanWithTargetPlan(t, "2002", nil)
 	consumer := execution.DataRequirementConsumer{Consumer: execution.ConsumerRef{Plan: identity}}
 	one := []PlannedQuery{{Requirements: []execution.DataRequirement{{RequirementID: "a", Consumers: []execution.DataRequirementConsumer{consumer}}}}}
-	outputs := buildPlanOutputs([]execution.DuePlan{{Identity: identity, CompiledPlan: compiled}}, one)
+	outputs := buildPlanOutputs([]execution.DuePlan{{Identity: identity, CompiledPlan: compiled, ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 1200}}}, one)
 	output, found := outputs[identity]
-	if !found || output.multiInput || output.strategyID != compiled.StrategyRef().StrategyID || output.revision != int64(compiled.StrategyRef().SnapshotRevision) {
+	if !found || output.multiInput || output.strategyID != compiled.StrategyRef().StrategyID || output.revision != int64(compiled.StrategyRef().SnapshotRevision) ||
+		output.intervalSeconds != 1200 {
 		t.Fatalf("output = %+v", output)
 	}
 	if compiled.StrategyRef().SnapshotRevision == 0 && output.fingerprint("2", map[string]json.RawMessage{"host": json.RawMessage(`"a"`)}) != "" {
@@ -429,5 +430,20 @@ func TestWithoutASinkTheAdmissionStepKeepsNothing(t *testing.T) {
 	}
 	if adapter.scopeScreens != nil || adapter.scopeTallies != nil {
 		t.Fatalf("screens %v tallies %v, want none without a sink", adapter.scopeScreens, adapter.scopeTallies)
+	}
+}
+
+// A drop carries when its strategy's next observation can come: the Plan's
+// period, and how long after its round the Slot was frozen to read - the
+// close waits that long for the second, not a fixed half hour.
+func TestADropCarriesThePeriodAndTheReadOffset(t *testing.T) {
+	sink := &recordingSink{}
+	output := scopeOutput
+	output.intervalSeconds = 1200
+	adapter, _ := scopeDropAdapter(t, targetChain(), hostPlanContext(true), sink, output)
+	adapter.query.ReadyAtUnixMilli = (adapter.round + 8*60) * 1000
+	deliverSeries(t, adapter, hostDims("102"))
+	if len(sink.observed) != 1 || sink.observed[0].IntervalSeconds != 1200 || sink.observed[0].ReadOffset != 8*time.Minute {
+		t.Fatalf("observed %+v, want the 20 min period and an 8 min read offset", sink.observed)
 	}
 }

@@ -529,6 +529,12 @@ Labels: `outcome`
 
 What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the broker acknowledged a close for: the close was sent, at every level of the strategy (__ALL__); whether the alert closed is the consumer's to say. The others count events: maintenance_busy is a close that could not take the Query Group's flight because a Slot was executing (one is nothing, a steady rate is a Query Group whose close never happens); close_precheck_failed is the owner or content check refusing before a send; close_send_failed is the producer not acknowledging; maintenance_plan_uncompilable is an activated Plan the maintenance could not compile and so cannot judge; unavailable is a Query Group whose Plans could not be read or whose owner is not accepting; effective_time_unknown, legacy_effective_time_unavailable and close_identity_invalid name the judgement that could not be made; calendar_deletion_unsettled is a close held back because a calendar the strategy reads deleted has not settled as a deletion: read deleted for too short a time, read present elsewhere, or every calendar this replica's strategies name read deleted at once, a calendar source gone; close_boundary_active is a Plan the recheck just before a send found active again, its batch not sent while the Query Group's other Plans go on (effective_time_unknown counts the same recheck finding the time unreadable). Every cell exists from the start so a zero is a reading and not an absence.
 
+## bkmonitor_alarmd_effective_time_refresh_total
+
+Labels: `result`
+
+Reads of the business timezones and calendars that legacy effective times are resolved from, by result: ok, timeout (the read ran out of the time its caller could spare), error. Only reads that were due count. A dependency that keeps failing past the two-minute trust window resolves EFFECTIVE_TIME_UNKNOWN for every Plan naming it; fleet.get lists those as effective_time_unread. Every result exists from the start.
+
 ## bkmonitor_alarmd_event_business_attribution_total
 
 Labels: `source`
@@ -693,6 +699,12 @@ Objects whose rounds stopped finishing for longer than the deployment's own budg
 
 Bytes of the fleet summary this replica last published beside its snapshot. A summarized fleet view reads every replica's summary, so one costs about the sum of this across the fleet.
 
+## bkmonitor_alarmd_fleet_tracker_dropped_total
+
+Labels: `what`
+
+Facts the replica's fleet object table dropped because it was full, by what: observation (a new object's round never recorded), truncation, range. The table holds four times the objects the replica owns, at least 16384; anything here is an object the page and fleet.get cannot speak for, and fleet.get names the latest of them. Every kind exists from the start.
+
 ## bkmonitor_alarmd_fleet_view_owned_bytes_total
 
 Bytes of owned lists this replica read for summarized fleet views.
@@ -814,6 +826,12 @@ Level verdicts of ABNORMAL, by whether the detection window they were reached on
 Labels: `outcome`, `reason`
 
 Level outcomes the evaluation concluded, by outcome kind and, for UNKNOWN and TERMINAL, by reason. NORMAL, ABNORMAL and RECOVERY carry no reason. UNKNOWN by reason is the reading for a Level that was not judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over every cell for its share.
+
+## bkmonitor_alarmd_linkd_calibration_coverage
+
+Labels: `state`
+
+Tracked strategies by whether calibration at the Console's measured pace reaches them within the calibration interval: covered, or short. A round calibrates enough strategies to cover every tracked one with a quarter to spare, bounded by how many calls the Console answers in half a refresh cycle (from the latest calls' p90); short is the strategies an interval at that bound cannot reach, whose open-alert sets go unjudged and so unclosed. fleet.get names the strategies past their calibration age. Absent without a Console.
 
 ## bkmonitor_alarmd_linkd_console_calls_total
 
@@ -1089,7 +1107,7 @@ What a detection budget holds now, by budget, in the charge its size is in.
 
 Labels: `budget`
 
-A detection budget's size as the line reads it, by budget: retained (the Slots' retained-bytes ceiling), timeline_cache and object_cache (each cache's working set - what it holds and an entry at its largest charge for each one a reader is about to store, up to its ceiling - the object cache charged decoded). Its size less its held bytes is what it holds observation off with; a cache whose size stays well above what it holds between reads is a reader that did not settle.
+A detection budget's size as the line reads it, by budget: retained (the owned Query Groups' measured retained peaks summed and a quarter more, within the Slots' retained-bytes ceiling; the ceiling until every owned Query Group has a reading), timeline_cache and object_cache (each cache's working set - what it holds and an entry at its largest charge for each one a reader is about to store, up to its ceiling - the object cache charged decoded). Its size less its held bytes is what it holds observation off with; a cache whose size stays well above what it holds between reads is a reader that did not settle.
 
 ## bkmonitor_alarmd_observation_memory_headroom_bytes
 
@@ -1157,7 +1175,7 @@ Strategies the copy reads on each refresh: those evaluated by this worker within
 
 Labels: `reason`
 
-Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration failed, each time), too_large (a strategy's set larger than one read may hold - members, bytes or pages - each time; such a set is not read another way yet, and the first one counted is the trigger for reading it a member at a time), location_unconfirmed (the link's Console has not named where the sets are) and keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while either lasts. A deployment without the Console counts nothing here.
+Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration failed, each time), too_large (a strategy's set larger than this process's read budget - members or bytes, from its memory - each time, refused before it is scanned once a member's weight is known; fleet.get names these strategies), location_unconfirmed (the link's Console has not named where the sets are) and keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while either lasts. A deployment without the Console counts nothing here.
 
 ## bkmonitor_alarmd_operation_total
 
@@ -1763,7 +1781,7 @@ Target plans resolved, once per Plan per Slot, by the composed state the admissi
 
 Labels: `outcome`
 
-What the close of alerts whose target left the strategy's monitoring scope decided, by outcome. unconfirmed is a fingerprint of an open alert turned away by one Slot, waiting for a second; close_sent counts alerts a close was sent for, acknowledged by the broker, not alerts the link closed. cache_unavailable counts rejections decided on facts that were not all read or current, which are never closed; not_member definitive rejections whose fingerprint is not an open alert; set_unavailable decisions refused because the open set could not be judged (not calibrated, disjoint, unavailable); producer_foreign open alerts of another source; send_failed closes the producer refused; close_identity_invalid closes whose request could not be built from the observation's facts (strategy id, business or revision unusable), nothing sent, the word the effective-time close uses for the same facts; memory_full first observations past the table's bound; fingerprint_unsupported definitive rejections of Plans fed by several inputs, whose alert fingerprint no single series carries; stale_deferred closes held back because the last observation was older than the freshness bound; indefinite rejections that are not a verdict on the record's place at all (a key or object identity that could not be built), apart from cache_unavailable, which is a verdict reached without its facts. Every cell exists from the start so a zero is a reading and not an absence.
+What the close of alerts whose target left the strategy's monitoring scope decided, by outcome. unconfirmed is a fingerprint of an open alert turned away by one Slot, waiting for a second; close_sent counts alerts a close was sent for, acknowledged by the broker, not alerts the link closed. cache_unavailable counts rejections decided on facts that were not all read or current, which are never closed; not_member definitive rejections whose fingerprint is not an open alert; set_unavailable decisions refused because the open set could not be judged (not calibrated, disjoint, unavailable); producer_foreign open alerts of another source; send_failed closes the producer refused; close_identity_invalid closes whose request could not be built from the observation's facts (strategy id, business or revision unusable), nothing sent, the word the effective-time close uses for the same facts; memory_full first observations past the table's bound; fingerprint_unsupported definitive rejections of Plans fed by several inputs, whose alert fingerprint no single series carries; stale_deferred closes held back because the last observation was older than the freshness bound; indefinite rejections that are not a verdict on the record's place at all (a key or object identity that could not be built), apart from cache_unavailable, which is a verdict reached without its facts; observation_expired first observations whose second did not arrive within two of the strategy's periods plus its Slot's read offset (at least half an hour), forgotten - the strategies counted there are ones this close could not reach, named in its facts. Every cell exists from the start so a zero is a reading and not an absence.
 
 ## bkmonitor_alarmd_target_selector_resolutions_total
 
