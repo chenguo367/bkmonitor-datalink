@@ -1613,6 +1613,12 @@ Phase-two source refresh outcomes by fixed status.
 
 Strategy documents source refresh rounds asked the source for. A skipped round adds nothing; a full read adds the whole active set.
 
+## bkmonitor_alarmd_sre_actions_total
+
+Labels: `op`, `result`
+
+Execution, management and Secret-read calls the SRE channel made, by operation (pod.exec, pod.delete, workload.restart, workload.scale, secret.get, configmap.get) and result: done; target_changed (the Pod or workload was replaced since it was read, and nothing was changed); forbidden (the apiserver refused the ServiceAccount); refused (an invalid or unsupported request, a busy provider, or a command that could not start - nothing ran); failed (an apiserver or transport failure); unknown (an execution whose remote end is unconfirmed). Each call also writes one sre_action line naming the session, the request, the namespace and object and the result. Every cell exists once the channel is wired: six operations by six results, 36 series. A secret.get line names the Secret and whether its values were revealed, never a value.
+
 ## bkmonitor_alarmd_startup_dependency_wait_total
 
 Labels: `dependency`

@@ -109,7 +109,7 @@ func TestTraceRejectedBodiesDoNoIO(t *testing.T) {
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer s.Close()
-	p, err := New(traceFixture(s.URL, true), nil)
+	p, err := NewWithQuerySource(traceFixture(s.URL, true), nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestTraceRawResponseFailuresAndPartialPages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, tc.body) }))
 			defer s.Close()
-			p, _ := New(traceFixture(s.URL, false), nil)
+			p, _ := NewWithQuerySource(traceFixture(s.URL, false), nil, "alarmd-sre")
 			defer p.Close()
 			r := traceRequest(false)
 			r.Body["from"] = tc.from
@@ -232,7 +232,7 @@ func TestTraceTargetConfigurationAndDiscoveryCopies(t *testing.T) {
 		}
 	}
 	cfg := traceFixture("http://native.invalid", false)
-	p, err := New(cfg, nil)
+	p, err := NewWithQuerySource(cfg, nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestTraceAndOldQueryShareTransportBudgetButKeepLogProjection(t *testing.T) 
 		_, _ = io.WriteString(w, `{"list":[{"message":"unmasked-log"}],"total":1}`)
 	}))
 	defer s.Close()
-	p, _ := New(traceFixture(s.URL, false), nil)
+	p, _ := NewWithQuerySource(traceFixture(s.URL, false), nil, "alarmd-sre")
 	defer p.Close()
 	done := make(chan error, 1)
 	go func() { _, err := p.Trace(context.Background(), traceRequest(false)); done <- err }()

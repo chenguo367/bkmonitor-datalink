@@ -20,7 +20,7 @@ import (
 
 func openRoleRuntimeForTest(t *testing.T, cfg config.Config) *phaseTwoRoleRuntime {
 	t.Helper()
-	runtime, err := openPhaseTwoRoleRuntime(cfg, metric.NewRecorder(metric.BuildInfo{}), nil)
+	runtime, err := openPhaseTwoRoleRuntime(cfg, metric.NewRecorder(metric.BuildInfo{}), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

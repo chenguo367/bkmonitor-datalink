@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,12 +40,41 @@ type fixtureClient struct {
 	logs        string
 	listError   error
 	ownerError  error
+	listNS      string
+	deleted     []string
+	patches     []string
+	writeError  error
+}
+
+func (f *fixtureClient) DeletePod(ctx context.Context, namespace, name, uid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.writeError != nil {
+		return f.writeError
+	}
+	f.deleted = append(f.deleted, namespace+"/"+name+"@"+uid)
+	return nil
+}
+func (f *fixtureClient) GetWorkload(ctx context.Context, namespace, kind, name string) (OwnerResource, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.owners[name], f.ownerError
+}
+func (f *fixtureClient) PatchWorkload(ctx context.Context, namespace, kind, name string, patch []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.writeError != nil {
+		return f.writeError
+	}
+	f.patches = append(f.patches, namespace+"/"+kind+"/"+name+" "+string(patch))
+	return nil
 }
 
 func (f *fixtureClient) ListPods(ctx context.Context, namespace string, options metav1.ListOptions) (*corev1.PodList, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listOptions = options
+	f.listNS = namespace
 	return &corev1.PodList{Items: []corev1.Pod{*f.pod.DeepCopy()}}, f.listError
 }
 func (f *fixtureClient) GetPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
@@ -80,14 +109,13 @@ func controllerRef(kind, name, uid string) metav1.OwnerReference {
 	}
 	return metav1.OwnerReference{APIVersion: group, Kind: kind, Name: name, UID: types.UID(uid), Controller: &yes}
 }
-func fixture() (*fixtureClient, Scope, Target) {
+func fixture() (*fixtureClient, Target) {
 	labels := map[string]string{"app": "web", "app.kubernetes.io/instance": "release", "app.kubernetes.io/component": "fusion"}
 	client := &fixtureClient{pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "web-abc", UID: "pod-uid", Labels: labels, OwnerReferences: []metav1.OwnerReference{controllerRef("ReplicaSet", "web-rs", "rs-uid")}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "web:v1", Env: []corev1.EnvVar{{Name: "PASSWORD", Value: "never-return-env"}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "web", ContainerID: "containerd://cid", ImageID: "sha256:image", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}, owners: map[string]OwnerResource{}, logs: "hello"}
 	client.owners["web-rs"] = OwnerResource{Kind: "ReplicaSet", Namespace: "tenant", Name: "web-rs", UID: "rs-uid", Labels: labels, Owners: []metav1.OwnerReference{controllerRef("Deployment", "web", "deployment-uid")}, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}
 	client.owners["web"] = OwnerResource{Kind: "Deployment", Namespace: "tenant", Name: "web", UID: "deployment-uid", Labels: labels, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}
-	scope := Scope{Namespace: "tenant", MatchLabels: map[string]string{"app": "web"}, Release: "release", Module: "fusion", Workloads: []Workload{{Kind: "Deployment", Name: "web"}}}
 	target := Target{Namespace: "tenant", Pod: "web-abc", UID: "pod-uid", Container: "web", ContainerID: "containerd://cid", ImageID: "sha256:image"}
-	return client, scope, target
+	return client, target
 }
 func requireCode(t *testing.T, err error, code string) {
 	t.Helper()
@@ -105,37 +133,39 @@ func mustProvider(t *testing.T, options Options) *Provider {
 	return provider
 }
 
-func TestScopeValidationAndYAML(t *testing.T) {
-	var scopes []Scope
-	if err := yaml.Unmarshal([]byte("- namespace: tenant\n  match_labels:\n    app: web\n  timeout:\n    contract: python3_process_group_v1\n    python_path: /usr/bin/python3\n  workloads:\n  - kind: Deployment\n    name: web\n"), &scopes); err != nil {
-		t.Fatal(err)
+// The provider needs a client and nothing a deployment declares: the
+// namespace a request names none of and the module label key are optional,
+// and must be a namespace name and a label key when given.
+func TestOptionsNeedOnlyAClient(t *testing.T) {
+	client, _ := fixture()
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("a provider without a client")
 	}
-	if err := ValidateScopes(scopes); err != nil {
-		t.Fatal(err)
+	if provider := mustProvider(t, Options{Client: client}); provider.ModuleLabel() != DefaultModuleLabel || provider.DefaultNamespace() != "" {
+		t.Fatalf("defaults: module label %q default namespace %q", provider.ModuleLabel(), provider.DefaultNamespace())
 	}
-	if scopes[0].Timeout.PythonPath != "/usr/bin/python3" {
-		t.Fatalf("yaml tags not applied: %+v", scopes)
-	}
-	if err := ValidateScopes(nil); err != nil {
-		t.Fatal(err)
-	}
-	for _, scope := range []Scope{{Namespace: "tenant"}, {Namespace: "../tenant", MatchLabels: map[string]string{"app": "web"}}, {Namespace: "tenant", MatchLabels: map[string]string{"app": "web"}, Timeout: RuntimeContract{Contract: TimeoutContract, PythonPath: "python3"}}, {Namespace: "tenant", MatchLabels: map[string]string{"app": "web"}, Timeout: RuntimeContract{PythonPath: "/python3"}}} {
-		requireCode(t, ValidateScopes([]Scope{scope}), CodeInvalidRequest)
+	for _, options := range []Options{{Client: client, DefaultNamespace: "../tenant"}, {Client: client, ModuleLabel: "not a key"}} {
+		requireCode(t, func() error { _, err := New(options); return err }(), CodeInvalidRequest)
 	}
 }
 
 func TestDiscoverInspectOnlySafeFields(t *testing.T) {
-	client, scope, target := fixture()
-	provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}})
-	result, err := provider.Discover(context.Background(), DiscoverRequest{Namespace: "tenant", Release: "release", Module: "fusion", Limit: 1})
+	client, target := fixture()
+	provider := mustProvider(t, Options{Client: client})
+	result, err := provider.Discover(context.Background(), DiscoverRequest{Namespace: "tenant", Selector: "app=web", Release: "release", Module: "fusion", Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Targets) != 1 || result.Targets[0].Target != target || result.Targets[0].Workload.Name != "web" || len(result.Targets[0].OwnerChain) != 2 {
 		t.Fatalf("discover: %+v", result)
 	}
-	if !strings.Contains(client.listOptions.LabelSelector, "app=web") || client.listOptions.Limit != 1 {
-		t.Fatalf("unbounded selector: %+v", client.listOptions)
+	for _, part := range []string{"app=web", ReleaseLabel + "=release", DefaultModuleLabel + "=fusion"} {
+		if !strings.Contains(client.listOptions.LabelSelector, part) {
+			t.Fatalf("selector %q lacks %q", client.listOptions.LabelSelector, part)
+		}
+	}
+	if client.listOptions.Limit != 1 || result.Targets[0].Release != "release" || result.Targets[0].Module != "fusion" {
+		t.Fatalf("unbounded list or labels unread: %+v %+v", client.listOptions, result.Targets[0])
 	}
 	encoded, _ := json.Marshal(result)
 	if strings.Contains(string(encoded), "never-return-env") || strings.Contains(string(encoded), "PASSWORD") {
@@ -147,44 +177,63 @@ func TestDiscoverInspectOnlySafeFields(t *testing.T) {
 	}
 }
 
-func TestRejectNamespaceLabelsOwnerAndContainer(t *testing.T) {
-	tests := map[string]func(*fixtureClient, *Scope, *Target){
-		"namespace":  func(c *fixtureClient, s *Scope, target *Target) { target.Namespace = "other" },
-		"pod labels": func(c *fixtureClient, s *Scope, target *Target) { c.pod.Labels = map[string]string{"app": "other"} },
-		"owner labels": func(c *fixtureClient, s *Scope, target *Target) {
-			owner := c.owners["web"]
-			owner.Labels = map[string]string{"app": "other"}
-			c.owners["web"] = owner
-		},
-		"owner UID": func(c *fixtureClient, s *Scope, target *Target) {
+// Any Pod in any namespace can be read, but only through a verified owner
+// chain: an owner whose UID or selector does not match the live resource, an
+// owner kind outside the supported chain, or a container the Pod does not
+// run is refused.
+func TestRejectOwnerChainAndContainer(t *testing.T) {
+	tests := map[string]func(*fixtureClient, *Target){
+		"owner UID": func(c *fixtureClient, target *Target) {
 			owner := c.owners["web-rs"]
 			owner.UID = "replacement"
 			c.owners["web-rs"] = owner
 		},
-		"selector": func(c *fixtureClient, s *Scope, target *Target) {
+		"selector": func(c *fixtureClient, target *Target) {
 			owner := c.owners["web"]
 			owner.Selector.MatchLabels = map[string]string{"app": "other"}
 			c.owners["web"] = owner
 		},
-		"workload":      func(c *fixtureClient, s *Scope, target *Target) { s.Workloads[0].Name = "other" },
-		"unknown owner": func(c *fixtureClient, s *Scope, target *Target) { c.pod.OwnerReferences[0].Kind = "CustomWorkload" },
-		"container":     func(c *fixtureClient, s *Scope, target *Target) { target.Container = "sidecar" },
+		"unknown owner": func(c *fixtureClient, target *Target) { c.pod.OwnerReferences[0].Kind = "CustomWorkload" },
+		"container":     func(c *fixtureClient, target *Target) { target.Container = "sidecar" },
 	}
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {
-			client, scope, target := fixture()
-			change(client, &scope, &target)
-			provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}})
+			client, target := fixture()
+			change(client, &target)
+			provider := mustProvider(t, Options{Client: client})
 			_, err := provider.Inspect(context.Background(), TargetRequest{Target: target})
 			requireCode(t, err, CodeNotInScope)
 		})
 	}
 }
 
+// A request reads the one namespace it names, or this process's own when it
+// names none; with neither it is refused, and a listing across namespaces is
+// not something a request can ask for.
+func TestOneNamespacePerRequest(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client, DefaultNamespace: "own"})
+	if _, err := provider.Discover(context.Background(), DiscoverRequest{}); err != nil || client.listNS != "own" {
+		t.Fatalf("no namespace: read %q err=%v, want own", client.listNS, err)
+	}
+	if _, err := provider.Discover(context.Background(), DiscoverRequest{Namespace: "kube-system"}); err != nil || client.listNS != "kube-system" {
+		t.Fatalf("named namespace: read %q err=%v", client.listNS, err)
+	}
+	for _, namespace := range []string{"*", "a,b", "Kube-System"} {
+		_, err := provider.Discover(context.Background(), DiscoverRequest{Namespace: namespace})
+		requireCode(t, err, CodeInvalidRequest)
+	}
+	unknown := mustProvider(t, Options{Client: client})
+	_, err := unknown.Discover(context.Background(), DiscoverRequest{})
+	requireCode(t, err, CodeInvalidRequest)
+	_, err = provider.Discover(context.Background(), DiscoverRequest{Selector: "app in (web"})
+	requireCode(t, err, CodeInvalidRequest)
+}
+
 func TestRejectStaleIdentityBeforeExec(t *testing.T) {
 	for _, field := range []string{"uid", "container", "image"} {
 		t.Run(field, func(t *testing.T) {
-			client, scope, target := fixture()
+			client, target := fixture()
 			switch field {
 			case "uid":
 				target.UID = "old"
@@ -194,7 +243,7 @@ func TestRejectStaleIdentityBeforeExec(t *testing.T) {
 				target.ImageID = "old"
 			}
 			calls := 0
-			provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
+			provider := mustProvider(t, Options{Client: client, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
 				calls++
 				return StreamResult{}, nil
 			})})
@@ -208,11 +257,11 @@ func TestRejectStaleIdentityBeforeExec(t *testing.T) {
 }
 
 func TestLogsBoundRedactionAndTargetChanged(t *testing.T) {
-	client, scope, target := fixture()
+	client, target := fixture()
 	client.logs = "password=visible\nsecretliteral\n" + strings.Repeat("x", 100)
 	client.changeAt = 2
 	client.change = func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].ContainerID = "new" }
-	provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}, LiteralSecrets: []string{"secretliteral"}})
+	provider := mustProvider(t, Options{Client: client, LiteralSecrets: []string{"secretliteral"}})
 	result, err := provider.Logs(context.Background(), LogsRequest{Target: target, Previous: true, SinceSeconds: 60, OutputBytes: 64})
 	requireCode(t, err, CodeTargetChanged)
 	if !result.Truncated || !result.TargetChanged || result.ObservedAfter == nil || strings.Contains(result.Output, "visible") || strings.Contains(result.Output, "secretliteral") || len(result.Output) > 64 || !client.logOptions.Previous || client.logOptions.Follow {
@@ -250,13 +299,11 @@ func (localExecutor) Stream(ctx context.Context, request StreamRequest) (StreamR
 }
 func runtimeProvider(t *testing.T) (*Provider, *fixtureClient, Target) {
 	t.Helper()
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("Python 3 required for the declared remote contract")
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 on PATH is the remote supervisor's contract")
 	}
-	client, scope, target := fixture()
-	scope.Timeout = RuntimeContract{Contract: TimeoutContract, PythonPath: python}
-	return mustProvider(t, Options{Client: client, Scopes: []Scope{scope}, Executor: localExecutor{}, LiteralSecrets: []string{"literalcredential"}}), client, target
+	client, target := fixture()
+	return mustProvider(t, Options{Client: client, Executor: localExecutor{}, LiteralSecrets: []string{"literalcredential"}}), client, target
 }
 
 func TestRemoteNonzeroExitStdinAndOutputSpoof(t *testing.T) {
@@ -364,28 +411,41 @@ func TestRemoteTimeoutKillsTERMResistantGroup(t *testing.T) {
 	}
 }
 
-func TestRemoteUnsupportedAndCommandStartFailure(t *testing.T) {
+func TestRemoteStartFailuresNameWhatTheTargetLacks(t *testing.T) {
 	provider, client, target := runtimeProvider(t)
 	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/no/such/command"}})
 	requireCode(t, err, CodeCommandStartFailed)
-	if result.RemoteState != RemoteNotStarted {
+	if result.RemoteState != RemoteNotStarted || result.StartFailure != "" {
 		t.Fatalf("launch failure: %+v", result)
 	}
-	scope := provider.options.Scopes[0]
-	scope.Timeout.PythonPath = "/no/such/python3"
-	missing := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
-		code := 127
-		return StreamResult{ExitCode: &code}, nil
-	})})
-	result, err = missing.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
-	requireCode(t, err, CodeTimeoutUnsupported)
-	if result.RemoteState != RemoteNotStarted {
-		t.Fatalf("unsupported: %+v", result)
+	for _, c := range []struct {
+		exit int
+		want string
+	}{{126, StartNotExecutable}, {127, StartPython3Unavailable}} {
+		exit := c.exit
+		var argv []string
+		missing := mustProvider(t, Options{Client: client, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
+			argv = request.Argv
+			return StreamResult{ExitCode: &exit}, nil
+		})})
+		result, err := missing.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
+		requireCode(t, err, CodeCommandStartFailed)
+		if result.RemoteState != RemoteNotStarted || result.StartFailure != c.want {
+			t.Fatalf("exit %d: %+v, want not started for %s", c.exit, result, c.want)
+		}
+		if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" || argv[2] != supervisorLaunch || argv[3] != remoteSupervisor {
+			t.Fatalf("the supervisor was not launched through /bin/sh from PATH: %q", argv[:min(len(argv), 3)])
+		}
 	}
-	scope.Timeout = RuntimeContract{}
-	missing = mustProvider(t, Options{Client: client, Scopes: []Scope{scope}, Executor: localExecutor{}})
-	_, err = missing.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
+	other := 3
+	odd := mustProvider(t, Options{Client: client, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
+		return StreamResult{ExitCode: &other}, nil
+	})})
+	result, err = odd.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
 	requireCode(t, err, CodeTimeoutUnsupported)
+	if result.StartFailure != "" {
+		t.Fatalf("an unexplained supervisor exit named a cause: %+v", result)
+	}
 }
 
 func TestTargetReplacementAfterExecution(t *testing.T) {
@@ -454,7 +514,7 @@ func TestStandardExecIsPOSTNonTTYAndNeverRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, target := fixture()
+	_, target := fixture()
 	_, err = executor.Stream(context.Background(), StreamRequest{Target: target, Argv: []string{"python3", "-c", "script"}, Stdout: io.Discard, Stderr: io.Discard})
 	if err == nil || calls != 1 {
 		t.Fatalf("exec err=%v calls=%d", err, calls)
@@ -543,8 +603,8 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 // same, and the supervisor still reports how it ended rather than dying
 // without a report, which Exec could only answer as unknown.
 func TestSupervisorReportsWhenTheEndedGroupRefusesSignals(t *testing.T) {
-	provider, _, _ := runtimeProvider(t)
-	python := provider.options.Scopes[0].Timeout.PythonPath
+	runtimeProvider(t)
+	python, _ := exec.LookPath("python3")
 	refusing := "import os, sys\n" +
 		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
 		"os.killpg = refused\n" +
@@ -579,8 +639,8 @@ func TestSupervisorReportsWhenTheEndedGroupRefusesSignals(t *testing.T) {
 // complete: the deadline's TERM and KILL are refused, and the supervisor's
 // own wait after its last KILL ends in an unknown report.
 func TestSupervisorReportsUnknownWhenTheLiveGroupRefusesSignals(t *testing.T) {
-	provider, _, _ := runtimeProvider(t)
-	python := provider.options.Scopes[0].Timeout.PythonPath
+	runtimeProvider(t)
+	python, _ := exec.LookPath("python3")
 	pidPath := filepath.Join(t.TempDir(), "command-pid")
 	refusing := "import os, sys\n" +
 		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
@@ -620,8 +680,8 @@ func TestSupervisorReportsUnknownWhenTheLiveGroupRefusesSignals(t *testing.T) {
 }
 
 func TestSupervisorBrokenOutputPipeRetainsDeadline(t *testing.T) {
-	provider, _, _ := runtimeProvider(t)
-	python := provider.options.Scopes[0].Timeout.PythonPath
+	runtimeProvider(t)
+	python, _ := exec.LookPath("python3")
 	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "0.15", "128", `["/bin/sh","-c","while true; do printf output; sleep 0.01; done"]`)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -649,7 +709,7 @@ func TestSupervisorBrokenOutputPipeRetainsDeadline(t *testing.T) {
 }
 
 func TestContainerAndProbeStatusWithoutMessages(t *testing.T) {
-	client, scope, target := fixture()
+	client, target := fixture()
 	client.pod.Spec.NodeName = "node-a"
 	deleted := metav1.Now()
 	client.pod.DeletionTimestamp = &deleted
@@ -658,7 +718,7 @@ func TestContainerAndProbeStatusWithoutMessages(t *testing.T) {
 	status.RestartCount = 3
 	status.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "secret=hidden"}}
 	status.LastTerminationState.Terminated = &corev1.ContainerStateTerminated{Reason: "OOMKilled", ExitCode: 137, Signal: 9}
-	provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope}})
+	provider := mustProvider(t, Options{Client: client})
 	observed, err := provider.Inspect(context.Background(), TargetRequest{Target: target})
 	if err != nil {
 		t.Fatal(err)
@@ -672,33 +732,31 @@ func TestContainerAndProbeStatusWithoutMessages(t *testing.T) {
 	}
 }
 
-func TestKingeyeModuleScopesSelectByActualLabels(t *testing.T) {
-	client, scope, _ := fixture()
-	scope.Release = ""
-	scope.Module = ""
-	scope.MatchLabels = map[string]string{"app.kubernetes.io/instance": "release", "kingeye.app/module": "fusion"}
-	client.pod.Labels["kingeye.app/module"] = "fusion"
-	second := scope
-	second.MatchLabels = map[string]string{"app.kubernetes.io/instance": "release", "kingeye.app/module": "uq"}
-	provider := mustProvider(t, Options{Client: client, Scopes: []Scope{scope, second}})
-	scopes := provider.Scopes()
-	if scopes[0].Module != "fusion" || scopes[0].Release != "release" {
-		t.Fatalf("scope indices: %+v", scopes)
-	}
+// The module label key is the deployment's: discovery filters on it and
+// targets read their module from it. Under the default key a label of another
+// key is not a module.
+func TestTheModuleLabelKeyIsTheDeployments(t *testing.T) {
+	client, _ := fixture()
+	client.pod.Labels["example.com/module"] = "fusion"
+	delete(client.pod.Labels, DefaultModuleLabel)
+	provider := mustProvider(t, Options{Client: client, ModuleLabel: "example.com/module"})
 	result, err := provider.Discover(context.Background(), DiscoverRequest{Namespace: "tenant", Module: "fusion"})
 	if err != nil || len(result.Targets) != 1 || result.Targets[0].Module != "fusion" {
-		t.Fatalf("kingeye discovery: %+v err=%v", result, err)
+		t.Fatalf("discovery by the deployment's key: %+v err=%v", result, err)
 	}
-	if strings.Contains(client.listOptions.LabelSelector, "app.kubernetes.io/component") {
-		t.Fatal("forced an undeclared component label")
+	if !strings.Contains(client.listOptions.LabelSelector, "example.com/module=fusion") || strings.Contains(client.listOptions.LabelSelector, DefaultModuleLabel) {
+		t.Fatalf("selector %q", client.listOptions.LabelSelector)
 	}
-	_, err = provider.Discover(context.Background(), DiscoverRequest{Namespace: "tenant"})
-	requireCode(t, err, CodeInvalidRequest)
+	plain := mustProvider(t, Options{Client: client})
+	result, err = plain.Discover(context.Background(), DiscoverRequest{Namespace: "tenant"})
+	if err != nil || len(result.Targets) != 1 || result.Targets[0].Module != "" {
+		t.Fatalf("default key read another key's module: %+v err=%v", result, err)
+	}
 }
 
 func TestRemoteDeadlineSurvivesOutputBackpressure(t *testing.T) {
-	provider, _, _ := runtimeProvider(t)
-	python := provider.options.Scopes[0].Timeout.PythonPath
+	runtimeProvider(t)
+	python, _ := exec.LookPath("python3")
 	pidPath := filepath.Join(t.TempDir(), "child-pid")
 	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "echo $$ > \"$1\"; while true; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done", "cmd", pidPath})
 	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "2.0", "524288", string(argv))
@@ -765,5 +823,24 @@ func TestInvalidProtocolCannotClaimNotStarted(t *testing.T) {
 	requireCode(t, err, RemoteUnknown)
 	if result.RemoteState != RemoteUnknown {
 		t.Fatalf("invalid receipt claimed no command ran: %+v", result)
+	}
+}
+
+// The output policy masks URL userinfo under any scheme, as its contract
+// says, and keeps an address that is not a URL.
+func TestOutputPolicyMasksURLUserinfoUnderAnyScheme(t *testing.T) {
+	out, _ := newRedactor(nil).bounded("redis://user:redis-credential@192.0.2.10:6379 amqp://guest:amqp-credential@mq/ ops@example.test", 4096)
+	if strings.Contains(out, "redis-credential") || strings.Contains(out, "amqp-credential") || !strings.Contains(out, "ops@example.test") {
+		t.Fatalf("policy output %q", out)
+	}
+}
+
+// A Provider printed into a log line names its settings, never the literal
+// credentials it redacts.
+func TestAFormattedProviderCarriesNoCredential(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client, LiteralSecrets: []string{"literalcredential"}})
+	if out := fmt.Sprintf("%v %+v", provider, provider); strings.Contains(out, "literalcredential") {
+		t.Fatalf("formatted provider %q", out)
 	}
 }

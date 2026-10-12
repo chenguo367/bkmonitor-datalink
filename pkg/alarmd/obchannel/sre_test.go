@@ -27,12 +27,12 @@ func TestRegisteredNativeQueryPreservesScopeFailureAndScrubsReceipt(t *testing.T
 		_, _ = io.WriteString(w, `{"result":false,"trace_id":"fixture-private-value","data":{"api_key":"native-credential"},"message":"password=another-credential"}`)
 	}))
 	defer backend.Close()
-	queries, err := uq.New([]uq.Egress{{Name: "native", URL: backend.URL, Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil)
+	queries, err := uq.NewWithQuerySource([]uq.Egress{{Name: "native", URL: backend.URL, Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer queries.Close()
-	c := testChannel(t, &testAuth{}, SREOperations(nil, queries, redact.New("fixture-private-value"), "")...)
+	c := testChannel(t, &testAuth{}, SREOperations(SREOptions{Queries: queries, Scrubber: redact.New("fixture-private-value")})...)
 	params := Params{"egress": "native", "endpoint": "/query/ts/", "tenant": "tenant-fixture", "space": "space-fixture", "body": map[string]any{"start_time": "1700000000", "end_time": "1700000060", "query_list": []any{map[string]any{"table_id": "fixture.metric", "field_name": "value"}}}}
 	status, out := call(t, c, envelope(c, "invoke", "uq.query", params))
 	if status != http.StatusBadGateway || out.Error == nil || out.Error.Code != "uq_query_error" || out.Evidence.Complete || calls.Load() != 1 {
@@ -56,7 +56,7 @@ func TestRegisteredNativeQueryPreservesScopeFailureAndScrubsReceipt(t *testing.T
 }
 
 func TestUnconfiguredSREOperationsStayDiscoverableAndDoNoIO(t *testing.T) {
-	ops := SREOperations(nil, nil, nil, "")
+	ops := SREOperations(SREOptions{})
 	c := testChannel(t, &testAuth{}, ops...)
 	for _, op := range ops {
 		if op.Targetable {
@@ -67,9 +67,10 @@ func TestUnconfiguredSREOperationsStayDiscoverableAndDoNoIO(t *testing.T) {
 			t.Fatalf("unconfigured capability was hidden or available: %+v", out)
 		}
 		if op.ID == "pod.exec" {
-			_, out = call(t, c, envelope(c, "invoke", op.ID, Params{}))
-			if out.Error == nil || out.Error.Code != "permission_denied" {
-				t.Fatalf("readonly scope crossed execution boundary: %+v", out)
+			params := Params{"target": map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "u", "container": "web", "container_id": "c", "image_id": "i"}, "argv": []any{"true"}}
+			_, out = call(t, c, envelope(c, "invoke", op.ID, params))
+			if out.Error == nil || out.Error.Code != "operation_unavailable" {
+				t.Fatalf("an execution without a Pod provider was not refused as unavailable: %+v", out)
 			}
 		}
 	}

@@ -125,10 +125,6 @@ func Validate(egresses []Egress) error {
 	return nil
 }
 
-func New(egresses []Egress, client *http.Client) (*Provider, error) {
-	return NewWithQuerySource(egresses, client, "alarmd-sre")
-}
-
 // NewWithQuerySource reuses the deployment's existing alarmd UQ source label.
 // Native Trace and metric/log queries share the same transport and budget.
 func NewWithQuerySource(egresses []Egress, client *http.Client, querySource string) (*Provider, error) {

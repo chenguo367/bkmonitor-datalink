@@ -4,14 +4,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/uq"
 )
@@ -27,7 +31,7 @@ func TestSREProvidersAreRegisteredOnlyByTheChannelRole(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer runtime.Close()
-			for _, operation := range []string{"pod.targets", "pod.get", "pod.logs", "pod.exec", "uq.egresses", "uq.query", "uq.trace"} {
+			for _, operation := range []string{"pod.targets", "pod.get", "pod.logs", "pod.exec", "pod.delete", "workload.restart", "workload.scale", "secret.get", "configmap.get", "uq.egresses", "uq.query", "uq.trace"} {
 				present := runtime.Executor.OperationContractRevision(operation) != ""
 				if present != cfg.HasRole(roles.Channel) {
 					t.Fatalf("%s registered in roles %v: %v", operation, selected, present)
@@ -51,7 +55,7 @@ func TestSREQueryReusesCurrentUQEndpointAndSource(t *testing.T) {
 	cfg.PhaseTwo.Access.UQEndpoint = backend.URL + "/prefix"
 	cfg.PhaseTwo.Access.QuerySource = ""
 	cfg.SRE.UQ.Egresses = []uq.Egress{{Name: "current", Tenants: []string{"tenant-fixture"}, Spaces: []string{"scope-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}
-	operations, closeProvider, err := channelSREOperations(cfg)
+	operations, closeProvider, err := channelSREOperations(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,4 +71,80 @@ func TestSREQueryReusesCurrentUQEndpointAndSource(t *testing.T) {
 		return
 	}
 	t.Fatal("UQ query operation is missing")
+}
+
+// The audit sink writes one sre_action line per call, Info when it was done
+// and Warn otherwise, with who, what and where, and counts it under its
+// operation and result; every cell of the count exists once it is wired.
+func TestTheSREAuditSinkWritesALineAndCountsTheCall(t *testing.T) {
+	var out bytes.Buffer
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	sink := sreAuditSink(observability.New("channel", &out), recorder)
+	sink(obchannel.SREAction{Op: "pod.delete", Namespace: "fixture", Kind: "Pod", Name: "web-0", UID: "pod-uid", Result: obchannel.SREResultTargetChanged, Code: "target_changed", SessionID: "session-1", RequestID: "request-1", DurationMS: 5})
+	line := out.String()
+	for _, part := range []string{`"stage":"sre_action"`, `"level":"WARN"`, `"op":"pod.delete"`, `"namespace":"fixture"`, `"session_id":"session-1"`, `"request_id":"request-1"`, `"result":"target_changed"`} {
+		if !strings.Contains(line, part) {
+			t.Fatalf("line lacks %s: %s", part, line)
+		}
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cells, counted := 0, 0.0
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_sre_actions_total" {
+			continue
+		}
+		for _, series := range family.Metric {
+			cells++
+			labels := map[string]string{}
+			for _, pair := range series.Label {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			if labels["op"] == "pod.delete" && labels["result"] == "target_changed" {
+				counted = series.GetCounter().GetValue()
+			}
+		}
+	}
+	if cells != len(obchannel.SREActionOps)*len(obchannel.SREActionResults) || counted != 1 {
+		t.Fatalf("cells %d counted %v, want every cell and the call once", cells, counted)
+	}
+}
+
+// The credentials the deployment holds are the redaction's literal secrets:
+// the CLI administrator key, the link Console password, and every Redis
+// connection's password and Sentinel password - the runtime store, each
+// platform cache on a Redis of its own (strategy, CMDB, dynamic config,
+// target groups) and the compatibility service Redis.
+func TestTheRedactionKnowsEveryCredentialTheDeploymentHolds(t *testing.T) {
+	cfg := config.Default()
+	cfg.CLI.AdminKey = "fixture-admin-key"
+	cfg.PhaseTwo.Linkd.Password = "fixture-linkd-password"
+	cfg.Redis.Password = "fixture-redis-password"
+	cfg.Redis.SentinelPassword = "fixture-sentinel-password"
+	// Every platform cache on a Redis of its own, and the compatibility
+	// service and pod cache Redis, each with its own credentials.
+	own := func(name string) *config.RedisConnectionConfig {
+		return &config.RedisConnectionConfig{Address: name + ".example.test:6379", Password: "fixture-" + name + "-password", SentinelPassword: "fixture-" + name + "-sentinel"}
+	}
+	cfg.PlatformCache.Strategy, cfg.PlatformCache.CMDB = own("strategy"), own("cmdb")
+	cfg.PlatformCache.DynamicConfig, cfg.PlatformCache.TargetGroup = own("dynamic"), own("group")
+	prefix := "fixture-groups"
+	cfg.PlatformCache.DynamicGroupKeyPrefix = &prefix
+	cfg.Kafka.LegacyAdapter.ServiceRedis = *own("service")
+	cfg.Kafka.LegacyAdapter.PodCache = &config.LegacyPodCacheConfig{Connection: *own("pods")}
+	known := map[string]bool{}
+	for _, value := range sreDeploymentSecrets(cfg) {
+		known[value] = true
+	}
+	want := []string{"fixture-admin-key", "fixture-linkd-password", "fixture-redis-password", "fixture-sentinel-password"}
+	for _, name := range []string{"strategy", "cmdb", "dynamic", "group", "service", "pods"} {
+		want = append(want, "fixture-"+name+"-password", "fixture-"+name+"-sentinel")
+	}
+	for _, want := range want {
+		if !known[want] {
+			t.Fatalf("the redaction does not know %q: %v", want, known)
+		}
+	}
 }

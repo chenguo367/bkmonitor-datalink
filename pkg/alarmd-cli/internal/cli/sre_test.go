@@ -28,7 +28,7 @@ func TestScriptFileUsesRegisteredStdinAndDescribeDeadline(t *testing.T) {
 	for _, source := range []string{"--stdin-file", "--script-file"} {
 		t.Run(source, func(t *testing.T) {
 			p := fixtureProfile("http://fixture.test")
-			p.Scope = execScope
+			p.Scope = legacyExecScope
 			store := Store{t.TempDir()}
 			if err := store.save(p, false); err != nil {
 				t.Fatal(err)
@@ -47,7 +47,7 @@ func TestScriptFileUsesRegisteredStdinAndDescribeDeadline(t *testing.T) {
 				mode := stringField(body, "mode")
 				modes = append(modes, mode)
 				if mode == "describe" {
-					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope, "execution_timeout_ms": 35000, "request_limits": map[string]any{"admission_timeout_ms": 3000, "transport_margin_ms": 5000}, "request_max_bytes": 65536, "input_schema": map[string]any{"properties": map[string]any{"stdin": map[string]any{"type": "string", "parameter_source": "stdin", "maxLength": 32768}}}}), 200), nil
+					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope, "execution_timeout_ms": 35000, "request_limits": map[string]any{"admission_timeout_ms": 3000, "transport_margin_ms": 5000}, "request_max_bytes": 65536, "input_schema": map[string]any{"properties": map[string]any{"stdin": map[string]any{"type": "string", "parameter_source": "stdin", "maxLength": 32768}}}}), 200), nil
 				}
 				deadline, ok := r.Context().Deadline()
 				remaining := time.Until(deadline)
@@ -80,7 +80,7 @@ func TestParamsFromStdinLegacyDescribeAndNoExecRetry(t *testing.T) {
 		t.Run("effect="+effect, func(t *testing.T) {
 			p := fixtureProfile("http://fixture.test")
 			if effect == "exec" {
-				p.Scope = execScope
+				p.Scope = legacyExecScope
 				p.RefreshToken = "refresh-credential"
 			}
 			store := Store{t.TempDir()}
@@ -155,74 +155,66 @@ func TestLocalInputBoundariesRejectBeforeInvocation(t *testing.T) {
 	}
 }
 
-func TestExplicitExecLoginAndRefreshScopeEquality(t *testing.T) {
-	p := fixtureProfile("http://fixture.test")
-	p.Scope = execScope
-	b := loginBundle{Version: "alarmd-login/v1", EnvironmentID: p.EnvironmentID, EnvironmentName: p.EnvironmentName, PublicBaseURL: p.PublicBaseURL, GrantSecret: testGrant, GrantExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), Scope: execScope}
-	data, _ := json.Marshal(b)
-	codeText := "alarmd-login-v1." + base64.RawURLEncoding.EncodeToString(data)
-	calls := 0
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { calls++; return jsonHTTP(sessionResponse(p), 200), nil })}
+// A login takes the session the code grants: the one operations session
+// from a code naming none, or the execution session an earlier server's code
+// names. There is no scope to ask for, and a renewal never changes the
+// session's scope.
+func TestLoginTakesTheSessionTheCodeGrants(t *testing.T) {
+	for _, scope := range []string{"", legacyExecScope} {
+		t.Run("code scope "+scope, func(t *testing.T) {
+			p := fixtureProfile("http://fixture.test")
+			p.Scope = sessionScope
+			if scope != "" {
+				p.Scope = scope
+			}
+			b := loginBundle{Version: "alarmd-login/v1", EnvironmentID: p.EnvironmentID, EnvironmentName: p.EnvironmentName, PublicBaseURL: p.PublicBaseURL, GrantSecret: testGrant, GrantExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339), Scope: scope}
+			data, _ := json.Marshal(b)
+			codeText := "alarmd-login-v1." + base64.RawURLEncoding.EncodeToString(data)
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return jsonHTTP(sessionResponse(p), 200), nil })}
+			store := Store{t.TempDir()}
+			if code, out, _, _ := run(t, store, client, codeText, "auth", "login"); code != 0 || stringField(objectField(out, "session"), "scope") != p.Scope {
+				t.Fatalf("login: %+v", out)
+			}
+		})
+	}
 	store := Store{t.TempDir()}
-	if code, out, _, _ := run(t, store, client, codeText, "auth", "login"); code != 1 || stringField(objectField(out, "error"), "code") != "scope_mismatch" || calls != 0 {
-		t.Fatal("default login implicitly acquired exec")
+	if code, _, _, _ := run(t, store, http.DefaultClient, "", "auth", "login", "--scope", legacyExecScope); code != 2 {
+		t.Fatalf("--scope is still accepted (exit %d)", code)
 	}
-	if code, out, _, _ := run(t, store, client, codeText, "auth", "login", "--scope", execScope); code != 0 || calls != 1 || stringField(objectField(out, "session"), "scope") != execScope {
-		t.Fatalf("explicit exec login failed: %+v", out)
-	}
-	for _, scope := range []string{sessionScope, execScope} {
-		original := p
+	for _, scope := range []string{sessionScope, legacyExecScope} {
+		original := fixtureProfile("http://fixture.test")
 		original.Scope = scope
 		response := sessionResponse(original)
 		if _, err := validateExchange(response, original); err != nil {
 			t.Fatal(err)
 		}
-		response["scope"] = execScope
-		if scope == execScope {
+		response["scope"] = legacyExecScope
+		if scope == legacyExecScope {
 			response["scope"] = sessionScope
 		}
 		if _, err := validateExchange(response, original); err == nil {
-			t.Fatal("renewal changed initial scope")
+			t.Fatal("renewal changed the session's scope")
 		}
+	}
+	if !allowsScope(sessionScope, sessionScope) || !allowsScope(legacyExecScope, sessionScope) || allowsScope(sessionScope, legacyExecScope) || !allowsScope(legacyExecScope, legacyExecScope) {
+		t.Fatal("scope rule: the one session runs everything a current server requires; only the earlier execution session runs what an earlier server requires it for")
 	}
 }
 
 func TestInvokeTimeoutDoesNotRetry(t *testing.T) {
 	p := fixtureProfile("http://fixture.test")
-	p.Scope = execScope
+	p.Scope = legacyExecScope
 	store := Store{t.TempDir()}
 	_ = store.save(p, false)
 	calls := 0
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
-			return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": execScope, "execution_timeout_ms": 1000}), 200), nil
+			return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope, "execution_timeout_ms": 1000}), 200), nil
 		}
 		return nil, context.DeadlineExceeded
 	})}
 	if code, _, _, _ := run(t, store, client, "", "invoke", "pod.exec", "--env", p.EnvironmentID); code != 1 || calls != 2 {
 		t.Fatalf("timeout retried: exit%d calls%d", code, calls)
-	}
-}
-
-func TestLegacyInstanceCannotClearExecPairing(t *testing.T) {
-	p := fixtureProfile("http://fixture.test")
-	p.Scope = execScope
-	p.RefreshToken = "exec-v1.credential"
-	p.ExpiresAt = time.Now().Add(-time.Hour).Format(time.RFC3339)
-	store := Store{t.TempDir()}
-	_ = store.save(p, false)
-	calls := 0
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		return jsonHTTP(map[string]any{"status": "error", "error": map[string]any{"code": "renewal_expired_or_revoked"}}, 401), nil
-	})}
-	code, out, _, _ := run(t, store, client, "", "discover", "--env", p.EnvironmentID)
-	if code != 1 || calls != 1 || stringField(objectField(out, "error"), "code") != "capability_unavailable" {
-		t.Fatalf("old instance rejection unrecognized: %+v calls%d", out, calls)
-	}
-	saved, err := store.get(p.EnvironmentID)
-	if err != nil || saved.RefreshToken != p.RefreshToken || saved.Scope != execScope || saved.AccessToken != p.AccessToken {
-		t.Fatalf("legacy response lost pairing: %+v %v", saved, err)
 	}
 }

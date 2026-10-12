@@ -17,6 +17,10 @@ const Contract = "deployment_known_credentials_and_common_fields/v1"
 var assignment = regexp.MustCompile(`(?i)(["']?(?:password|passwd|secret|client_secret|api_key|private_key|admin_key|access_token|refresh_token|authorization|cookie)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,\s}\]]+)`)
 var bearer = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_.=-]+`)
 
+// urlCredential is URL userinfo under any scheme: a connection string's
+// credentials (redis://, mysql://, http://) sit there.
+var urlCredential = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@"]+(?::[^\s/@"]*)?@`)
+
 type Scrubber struct{ values []string }
 
 func New(values ...string) *Scrubber {
@@ -34,6 +38,7 @@ func (s *Scrubber) Text(value string) string {
 		value = strings.ReplaceAll(value, secret, "[REDACTED]")
 	}
 	value = bearer.ReplaceAllString(value, "[REDACTED credential]")
+	value = urlCredential.ReplaceAllString(value, "${1}[REDACTED]@")
 	return assignment.ReplaceAllString(value, `${1}"[REDACTED]"`)
 }
 

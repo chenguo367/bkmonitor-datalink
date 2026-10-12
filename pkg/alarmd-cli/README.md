@@ -1,11 +1,9 @@
 # alarmd-cli
 
-登录默认授予 `deployment_ops_readonly`。需要 Pod 运维执行时，从授权页
-`?scope=deployment_ops_exec` 明确申请，并使用页面生成的带
-`--scope deployment_ops_exec` 的 `auth listen` 或 `auth login` 命令。
-普通续期保留初次授予的权限，已有只读配对继续只读。
-执行续期凭据带 `exec-v1.` 版本前缀；旧授权实例会在访问共享 Redis 前拒绝它。
-CLI 返回 `capability_unavailable` 并保留本地配对，用户可明确重试到支持该能力的实例。
+登录得到本部署的运维会话（标识沿用 `deployment_ops_readonly`）：取证读取、Pod 命令执行与
+工作负载管理都在这一个会话里，不再另行申请执行权限。早先单独申请的执行会话和带 `exec-v1.`
+前缀的续期凭据照常可用、照常续期，续出来的新凭据不再带前缀。每次执行和管理操作都在服务端
+留一条审计记录（`sre_action` 日志与 `sre_actions_total` 计数）。
 
 `invoke` 可用 `--params-file path.json` 传入嵌套 JSON 参数；`--params-file -`
 从 stdin 读取。`--stdin-file script.txt` 与 `--script-file script.txt` 等价，只把
@@ -109,16 +107,17 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 `diagnose` 和 `accept` 是 CLI 内置的组合命令，直接运行；其余都通过 `invoke <operation>` 调用。下面每条写成"问题 → 调用 → 看哪些字段"。
 
-**鲸眼 Pod / 原生 UQ 取证**
+**Pod / 原生 UQ 取证与运维**
 
-1. `describe pod.targets` 后发现部署声明范围内的目标，继续用 `pod.get` 的真实 UID、containerID 和 imageID；日志和执行必须使用完整身份。省略 SRE 配置时操作具名不可用。
-2. `pod.logs` 有界读取并复核前后身份。`pod.exec` 使用明确授予的执行 scope，参数文件提供 `target`、`argv`、`timeout_ms`、`output_bytes`；脚本经 `--script-file` 填入 stdin。例如 argv 可为目标实际存在的 `python3 -` 或 `/bin/sh -s`。目标声明 `python3_process_group_v1` 和绝对 Python 路径后才能执行。
+1. `describe pod.targets` 后在一个命名空间里按标签选择器发现目标（`namespace` 不填时是 alarmd 所在的命名空间；不支持跨命名空间列举），继续用 `pod.get` 的真实 UID、containerID 和 imageID；日志、执行和删除必须使用完整身份。`k8s.workloads` 也可以用 `namespace` 指定任意一个命名空间。
+2. `pod.logs` 有界读取并复核前后身份。`pod.exec` 的参数文件提供 `target`、`argv`、`timeout_ms`、`output_bytes`；脚本经 `--script-file` 填入 stdin。例如 argv 可为目标实际存在的 `python3 -` 或 `/bin/sh -s`。远端监督进程用目标镜像 PATH 上的 `python3` 经 `/bin/sh` 启动；镜像缺 `/bin/sh` 或 `python3` 时回执的 `start_failure` 写明缺哪一个。
+   管理操作：`pod.delete`（按发现时的 UID 删除，Pod 已被替换时不删）、`workload.restart`（与 kubectl rollout restart 相同）、`workload.scale`（回执写明原副本数），都按发现时的 UID 写入，目标已被替换时返回 `pod_target_changed`。
 3. 执行回执中的 `remote_completed`、`exit_code`、输出截断与前后身份各自解释；操作成功不代表脚本成功。连接异常时 `remote_state_unknown` 表示远端事实待核对，禁止自动重试；启动阶段超时（未收到监督进程的启动回执）同样返回 `remote_state_unknown`，命令仍可能在远端运行，最长到它自己的超时；执行完成但事后身份读取失败仍是部分证据。
-4. `uq.egresses` 返回部署登记的原生出口。`uq.query` 必须使用登记端点、允许的 tenant/space 和从实际页面取证得到的 QueryTs JSON。首版支持结构化 metric/log QueryTs；拒绝直接 SQL、物理存储覆盖和 BKData 旁路，不接受调用方 URL 或身份头。
-5. UQ 回执保留 actual_url、tenant/space、原始请求摘要与 HTTP/业务状态。metric 保留脱敏 native JSON 与游标；log/原始行在主题脱敏前只保留状态、数量和摘要，省略正文/携值游标并标记部分证据，内容取鲸眼业务脱敏投影。时间戳使用登记单位的 10 位秒或 13 位毫秒字符串，查询窗最多 24 小时。请求摘要用于核对这次请求，跨语言摘要须先核对序列化方式。
+4. `uq.egresses` 返回原生出口：部署没有登记时，是一个继承当前 UQ 地址、tenant/space 按请求校验的默认出口。`uq.query` 必须使用登记端点、允许的 tenant/space 和从实际页面取证得到的 QueryTs JSON。首版支持结构化 metric/log QueryTs；拒绝直接 SQL、物理存储覆盖和 BKData 旁路，不接受调用方 URL 或身份头。
+5. UQ 回执保留 actual_url、tenant/space、原始请求摘要与 HTTP/业务状态。metric 保留脱敏 native JSON 与游标；log/原始行在主题脱敏前只保留状态、数量和摘要，省略正文/携值游标并标记部分证据，内容取页面业务脱敏后的投影。时间戳使用登记单位的 10 位秒或 13 位毫秒字符串，查询窗最多 24 小时。请求摘要用于核对这次请求，跨语言摘要须先核对序列化方式。
 6. 普通 Trace 先从 `uq.egresses` 选择登记的 `trace_targets`，再 `describe uq.trace`，以 egress、target、body 调用。原生请求使用 `bkapm`、实际登记 table_id、`time_field: start_time`、秒字符串窗口、显式 limit（1–1000）和非负 from；共享表保留业务/应用的单值 eq AND 条件。返回脱敏原始 Span，时间与耗时保持微秒；`trace_page` 描述固定窗口、投影、returned/total/more，后续页显式读取。该操作沿用当前 UQ 直连，出口 URL 省略时继承 runtime UQ 地址，查询来源沿用当前 query_source。
 
-页面业务装配与授权证据由鲸眼诊断入口提供；部署级查询授权不代表受影响页面用户的权限。排查流程见 ai-docs 的 `kingeye-sre-diagnosis` 技能。
+页面业务装配与授权证据由页面所在系统的诊断入口提供；部署级查询授权不代表受影响页面用户的权限。
 
 **某条策略为什么没告警**
 
@@ -146,7 +145,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 ### 5. 安全边界
 
-- 以 describe 的 `effect` 和 `required_scope` 为准：默认只读授权执行取证操作，Pod 运维执行需要人明确授予 `deployment_ops_exec`。
+- 以 describe 的 `effect` 为准：`exec` 是执行或管理操作，会改变集群里的对象，每次调用都留审计记录；不要自动重试。
 - 不要把凭据写进命令参数、对话、日志或证据。CLI 的输出不含凭据。
 - 配置目录（默认是用户配置目录下的 `alarmd-cli/`，可由 `ALARMD_CLI_CONFIG_DIR` 指定）里的 `profiles.json` 含会话和续期凭据，不要读取、复制或外传。
 - `results/` 下的结果文件是脱敏后的响应，但仍含策略、运行对象、查询条件等部署内部信息。只引用需要的片段，不要整目录外传或提交到公开仓库。

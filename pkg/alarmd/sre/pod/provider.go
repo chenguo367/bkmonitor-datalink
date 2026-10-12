@@ -8,15 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -26,15 +25,28 @@ type Provider struct {
 	redactor *redactor
 }
 
-// Scopes exposes a copy of safe deployment declarations, never credentials.
-func (p *Provider) Scopes() []Scope { scopes, _ := normalizeScopes(p.options.Scopes); return scopes }
+// DefaultNamespace is the namespace a request that names none reads.
+func (p *Provider) DefaultNamespace() string { return p.options.DefaultNamespace }
+
+// ModuleLabel is the label key modules are read from.
+func (p *Provider) ModuleLabel() string { return p.options.ModuleLabel }
+
 func (p *Provider) Limits() Limits {
 	return Limits{Concurrency: p.options.Concurrency, DefaultTimeoutMS: p.options.DefaultTimeout.Milliseconds(), MaxTimeoutMS: p.options.MaxTimeout.Milliseconds(), MaxOutputBytes: p.options.MaxOutputBytes, MaxStdinBytes: p.options.MaxStdinBytes, MaxPods: p.options.MaxPods}
 }
 
 func New(options Options) (*Provider, error) {
-	if options.Client == nil || len(options.Scopes) == 0 {
-		return nil, invalid("a client and explicit scopes are required")
+	if options.Client == nil {
+		return nil, invalid("a Kubernetes client is required")
+	}
+	if options.ModuleLabel == "" {
+		options.ModuleLabel = DefaultModuleLabel
+	}
+	if len(validation.IsQualifiedName(options.ModuleLabel)) != 0 {
+		return nil, invalid("module label is not a label key")
+	}
+	if options.DefaultNamespace != "" && len(validation.IsDNS1123Label(options.DefaultNamespace)) != 0 {
+		return nil, invalid("default namespace is not a namespace name")
 	}
 	if options.Concurrency == 0 {
 		options.Concurrency = 1
@@ -60,62 +72,8 @@ func New(options Options) (*Provider, error) {
 	if options.Concurrency < 1 || options.Concurrency > 64 || options.DefaultTimeout <= 0 || options.DefaultTimeout > options.MaxTimeout || options.MaxTimeout > 30*time.Second || options.MaxOutputBytes < 1 || options.MaxOutputBytes > 512<<10 || options.MaxStdinBytes < 1 || options.MaxStdinBytes > 32<<10 || options.MaxPods < 1 || options.MaxPods > 128 {
 		return nil, invalid("provider budgets exceed supported bounds")
 	}
-	// Freeze caller-owned configuration, including maps, before concurrent reads.
-	scopes, err := normalizeScopes(options.Scopes)
-	if err != nil {
-		return nil, err
-	}
-	options.Scopes = scopes
 	options.LiteralSecrets = append([]string(nil), options.LiteralSecrets...)
 	return &Provider{options: options, permits: make(chan struct{}, options.Concurrency), redactor: newRedactor(options.LiteralSecrets)}, nil
-}
-
-// ValidateScopes checks configuration without a Kubernetes client or any I/O.
-// An empty slice disables this optional provider at the composition root.
-func ValidateScopes(scopes []Scope) error { _, err := normalizeScopes(scopes); return err }
-
-func normalizeScopes(input []Scope) ([]Scope, error) {
-	scopes := make([]Scope, len(input))
-	for i, scope := range input {
-		if len(validation.IsDNS1123Label(scope.Namespace)) != 0 || len(scope.MatchLabels) == 0 {
-			return nil, invalid("each scope needs a valid namespace and nonempty labels")
-		}
-		copyLabels := map[string]string{}
-		for key, value := range scope.MatchLabels {
-			copyLabels[key] = value
-		}
-		if len(validation.IsValidLabelValue(scope.Release)) != 0 || len(validation.IsValidLabelValue(scope.Module)) != 0 {
-			return nil, invalid("invalid release/module index")
-		}
-		for key, value := range copyLabels {
-			if len(validation.IsQualifiedName(key)) != 0 || len(validation.IsValidLabelValue(value)) != 0 {
-				return nil, invalid("invalid scope label")
-			}
-		}
-		if scope.Timeout.Contract == "" && scope.Timeout.PythonPath != "" || scope.Timeout.Contract != "" && (scope.Timeout.Contract != TimeoutContract || !filepath.IsAbs(scope.Timeout.PythonPath) || strings.ContainsRune(scope.Timeout.PythonPath, '\x00')) {
-			return nil, invalid("unsupported remote timeout contract")
-		}
-		for _, workload := range scope.Workloads {
-			if !rootKind(workload.Kind) || len(validation.IsDNS1123Subdomain(workload.Name)) != 0 {
-				return nil, invalid("invalid workload allowlist")
-			}
-		}
-		scope.MatchLabels = copyLabels
-		moduleKey := "app.kubernetes.io/component"
-		if _, exists := copyLabels["kingeye.app/module"]; exists {
-			moduleKey = "kingeye.app/module"
-		}
-		for _, index := range []struct{ value, key string }{{scope.Release, "app.kubernetes.io/instance"}, {scope.Module, moduleKey}} {
-			if actual, exists := copyLabels[index.key]; exists && index.value != "" && actual != index.value {
-				return nil, invalid("release/module index conflicts with its declared label")
-			}
-		}
-		scope.Release = scopeRelease(scope)
-		scope.Module = scopeModule(scope)
-		scope.Workloads = append([]Workload(nil), scope.Workloads...)
-		scopes[i] = scope
-	}
-	return scopes, nil
 }
 
 func invalid(message string) error { return &Error{Code: CodeInvalidRequest, Message: message} }
@@ -154,22 +112,22 @@ func (p *Provider) acquire(ctx context.Context) (func(), error) {
 func (p *Provider) readContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, p.options.MaxTimeout)
 }
+
+// namespace is the one namespace a request reads: the one it names, or
+// this process's own. A request reads one namespace at a time - a listing
+// across the cluster is not offered, since on a large cluster one would be
+// hundreds of megabytes on the apiserver and here, paged or not.
 func (p *Provider) namespace(value string) (string, error) {
 	if value == "" {
-		for _, scope := range p.options.Scopes {
-			if value == "" {
-				value = scope.Namespace
-			} else if scope.Namespace != value {
-				return "", invalid("namespace is required for multiple namespace scopes")
-			}
-		}
+		value = p.options.DefaultNamespace
 	}
-	for _, scope := range p.options.Scopes {
-		if scope.Namespace == value {
-			return value, nil
-		}
+	if value == "" {
+		return "", invalid("namespace is required: this process does not know its own namespace")
 	}
-	return "", denied("namespace is outside the deployment scope")
+	if len(validation.IsDNS1123Label(value)) != 0 {
+		return "", invalid("namespace must be one Kubernetes namespace name")
+	}
+	return value, nil
 }
 
 func (p *Provider) Discover(ctx context.Context, request DiscoverRequest) (DiscoverReceipt, error) {
@@ -192,24 +150,21 @@ func (p *Provider) Discover(ctx context.Context, request DiscoverRequest) (Disco
 	if limit < 1 || limit > p.options.MaxPods || len(request.Continue) > 4096 {
 		return result, invalid("invalid discovery limit or continuation")
 	}
-	// One scope per page avoids combining Kubernetes continuation tokens. When
-	// more than one selector is declared for a namespace, choose it explicitly
-	// by the configured release/module. Identical selectors are equivalent.
-	var selected *Scope
-	for i := range p.options.Scopes {
-		scope := &p.options.Scopes[i]
-		if scope.Namespace != namespace || request.Release != "" && scopeRelease(*scope) != request.Release || request.Module != "" && scopeModule(*scope) != request.Module {
+	selector, err := labels.Parse(request.Selector)
+	if err != nil || len(request.Selector) > 1024 {
+		return result, invalid("selector is not a Kubernetes label selector")
+	}
+	for _, index := range []struct{ key, value string }{{ReleaseLabel, request.Release}, {p.options.ModuleLabel, request.Module}} {
+		if index.value == "" {
 			continue
 		}
-		if selected != nil && labels.Set(selected.MatchLabels).String() != labels.Set(scope.MatchLabels).String() {
-			return result, invalid("release/module is required to select one discovery scope")
+		requirement, err := labels.NewRequirement(index.key, selection.Equals, []string{index.value})
+		if err != nil {
+			return result, invalid("release/module is not a label value")
 		}
-		selected = scope
+		selector = selector.Add(*requirement)
 	}
-	if selected == nil {
-		return result, denied("release/module is outside the deployment scope")
-	}
-	pods, err := p.options.Client.ListPods(ctx, namespace, metav1.ListOptions{LabelSelector: labels.Set(selected.MatchLabels).String(), Limit: int64(limit), Continue: request.Continue})
+	pods, err := p.options.Client.ListPods(ctx, namespace, metav1.ListOptions{LabelSelector: selector.String(), Limit: int64(limit), Continue: request.Continue})
 	if err != nil {
 		return result, apiError(err)
 	}
@@ -219,7 +174,7 @@ func (p *Provider) Discover(ctx context.Context, request DiscoverRequest) (Disco
 	}
 	for i := range pods.Items {
 		obj := &pods.Items[i]
-		observations, _, err := p.observe(ctx, obj, "")
+		observations, err := p.observe(ctx, obj, "")
 		if err != nil {
 			var failure *Error
 			if errors.As(err, &failure) && failure.Code == CodeNotInScope {
@@ -249,8 +204,7 @@ func (p *Provider) Inspect(ctx context.Context, request TargetRequest) (Observat
 	defer release()
 	ctx, cancel := p.readContext(ctx)
 	defer cancel()
-	observed, _, err := p.resolve(ctx, request.Target, false)
-	return observed, err
+	return p.resolve(ctx, request.Target, false)
 }
 
 func validateTarget(target Target, strict bool) error {
@@ -262,76 +216,39 @@ func validateTarget(target Target, strict bool) error {
 	}
 	return nil
 }
-func (p *Provider) resolve(ctx context.Context, target Target, strict bool) (Observation, Scope, error) {
+func (p *Provider) resolve(ctx context.Context, target Target, strict bool) (Observation, error) {
 	if err := validateTarget(target, strict); err != nil {
-		return Observation{}, Scope{}, err
-	}
-	if _, err := p.namespace(target.Namespace); err != nil {
-		return Observation{}, Scope{}, err
+		return Observation{}, err
 	}
 	obj, err := p.options.Client.GetPod(ctx, target.Namespace, target.Pod)
 	if err != nil {
-		return Observation{}, Scope{}, apiError(err)
+		return Observation{}, apiError(err)
 	}
-	observations, scope, err := p.observe(ctx, obj, target.Container)
+	observations, err := p.observe(ctx, obj, target.Container)
 	if err != nil {
-		return Observation{}, Scope{}, err
+		return Observation{}, err
 	}
 	observed := observations[0]
 	if target.UID != "" && target.UID != observed.Target.UID || target.ContainerID != "" && target.ContainerID != observed.Target.ContainerID || target.ImageID != "" && target.ImageID != observed.Target.ImageID {
-		return observed, scope, &Error{Code: CodeTargetChanged, Message: "pod or container identity differs from discovery"}
+		return observed, &Error{Code: CodeTargetChanged, Message: "pod or container identity differs from discovery"}
 	}
-	return observed, scope, nil
+	return observed, nil
 }
-func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container string) ([]Observation, Scope, error) {
-	var matching []Scope
-	for _, scope := range p.options.Scopes {
-		if scope.Namespace == obj.Namespace && labels.SelectorFromSet(scope.MatchLabels).Matches(labels.Set(obj.Labels)) {
-			matching = append(matching, scope)
-		}
-	}
-	if len(matching) == 0 {
-		return nil, Scope{}, denied("pod labels are outside the deployment scope")
-	}
-	chain, ownerLabels, err := p.ownerChain(ctx, obj)
+
+// observe reads a Pod's containers with the owner chain verified against
+// the live resources. The release and module are the Pod's own labels.
+func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container string) ([]Observation, error) {
+	chain, _, err := p.ownerChain(ctx, obj)
 	if err != nil {
-		return nil, Scope{}, err
+		return nil, err
 	}
 	root := chain[len(chain)-1]
-	var scope Scope
-	found := false
-	for _, candidate := range matching {
-		owned := true
-		for _, ownerLabel := range ownerLabels {
-			if !labels.SelectorFromSet(candidate.MatchLabels).Matches(labels.Set(ownerLabel)) {
-				owned = false
-				break
-			}
-		}
-		if !owned {
-			continue
-		}
-		allowed := len(candidate.Workloads) == 0
-		for _, workload := range candidate.Workloads {
-			if workload.Kind == root.Kind && workload.Name == root.Name && (workload.UID == "" || workload.UID == root.UID) {
-				allowed = true
-			}
-		}
-		if allowed {
-			scope = candidate
-			found = true
-			break
-		}
-	}
-	if !found {
-		return nil, Scope{}, denied("owner workload is outside the deployment scope")
-	}
 	var observations []Observation
 	for _, spec := range obj.Spec.Containers {
 		if container != "" && container != spec.Name {
 			continue
 		}
-		observation := Observation{Target: Target{Namespace: obj.Namespace, Pod: obj.Name, UID: string(obj.UID), Container: spec.Name}, Release: scopeRelease(scope), Module: scopeModule(scope), Workload: root, OwnerChain: chain, Image: spec.Image, Phase: string(obj.Status.Phase), Conditions: []Condition{}, NodeName: obj.Spec.NodeName, ObservedAt: p.options.Now().UTC()}
+		observation := Observation{Target: Target{Namespace: obj.Namespace, Pod: obj.Name, UID: string(obj.UID), Container: spec.Name}, Release: obj.Labels[ReleaseLabel], Module: obj.Labels[p.options.ModuleLabel], Workload: root, OwnerChain: chain, Image: spec.Image, Phase: string(obj.Status.Phase), Conditions: []Condition{}, NodeName: obj.Spec.NodeName, ObservedAt: p.options.Now().UTC()}
 		if obj.DeletionTimestamp != nil {
 			deletedAt := obj.DeletionTimestamp.Time.UTC()
 			observation.DeletionTimestamp = &deletedAt
@@ -360,25 +277,9 @@ func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container strin
 		observations = append(observations, observation)
 	}
 	if len(observations) == 0 {
-		return nil, Scope{}, denied("container is not a regular container of this pod")
+		return nil, denied("container is not a regular container of this pod")
 	}
-	return observations, scope, nil
-}
-
-func scopeRelease(scope Scope) string {
-	if scope.Release != "" {
-		return scope.Release
-	}
-	return scope.MatchLabels["app.kubernetes.io/instance"]
-}
-func scopeModule(scope Scope) string {
-	if scope.Module != "" {
-		return scope.Module
-	}
-	if module := scope.MatchLabels["kingeye.app/module"]; module != "" {
-		return module
-	}
-	return scope.MatchLabels["app.kubernetes.io/component"]
+	return observations, nil
 }
 func boundedStatus(value string) string {
 	if len(value) > 128 {
@@ -469,7 +370,7 @@ func (p *Provider) postObserve(ctx context.Context, target Target) (*Observation
 	}
 	ctx, cancel := context.WithTimeout(ctx, VerificationTimeout)
 	defer cancel()
-	observed, _, err := p.resolve(ctx, target, true)
+	observed, err := p.resolve(ctx, target, true)
 	if err != nil {
 		var failure *Error
 		if errors.As(err, &failure) && (failure.Code == CodeTargetChanged || failure.Code == CodeNotFound || failure.Code == CodeNotInScope) {
@@ -502,8 +403,7 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 	if err != nil {
 		return result, err
 	}
-	_, _, err = p.resolve(ctx, request.Target, true)
-	if err != nil {
+	if _, err = p.resolve(ctx, request.Target, true); err != nil {
 		return result, err
 	}
 	// Ask for one sentinel byte beyond the returned budget so an API-side cap
@@ -536,6 +436,8 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 	return result, nil
 }
 
+// String keeps a formatted Provider to its two plain settings: printed with
+// %v, the struct would carry the redactor's literal credentials.
 func (p *Provider) String() string {
-	return fmt.Sprintf("pod provider (%d deployment scopes)", len(p.options.Scopes))
+	return fmt.Sprintf("pod provider (default namespace %q, module label %q)", p.options.DefaultNamespace, p.options.ModuleLabel)
 }

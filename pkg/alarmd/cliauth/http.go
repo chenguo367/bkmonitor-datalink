@@ -142,7 +142,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	}
 	preview := grantPreview{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName,
 		PublicBaseURL: m.publicBaseURL, Scope: ScopeReadonly,
-		SupportedScopes: []string{ScopeReadonly, ScopeExec},
+		SupportedScopes: []string{ScopeReadonly},
 		GrantTTLSeconds: int(GrantLifetime.Seconds()), SessionTTLSeconds: int(SessionLifetime.Seconds())}
 	if r.Method == http.MethodGet {
 		return writeJSON(w, preview)
@@ -165,11 +165,13 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if !input.Confirm {
 		return failure("invalid_request", "Explicit authorization confirmation is required.", 400)
 	}
-	if input.Scope == "" {
+	// An earlier page or CLI asking for the execution session gets the one
+	// session, which now carries execution.
+	if input.Scope == "" || input.Scope == legacyScopeExec {
 		input.Scope = ScopeReadonly
 	}
 	if !ValidScope(input.Scope) {
-		return failure("invalid_scope", "Request deployment_ops_readonly or deployment_ops_exec explicitly.", 400)
+		return failure("invalid_scope", "Request deployment_ops_readonly, the one deployment operations scope.", 400)
 	}
 	preview.Scope = input.Scope
 	if (input.CodeChallenge != "" || input.CodeChallengeMethod != "") && (input.CodeChallengeMethod != "S256" || !validSecret(input.CodeChallenge)) {
@@ -193,11 +195,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	}
 	m.count(CountGrantsIssued)
 	expiresAt := time.UnixMilli(issued.ExpiresAtMS).UTC()
-	packageScope := ""
-	if input.Scope == ScopeExec {
-		packageScope = input.Scope
-	}
-	code, _ := json.Marshal(authorizationPackage{Version: "alarmd-login/v1", EnvironmentID: m.environmentID, Scope: packageScope,
+	code, _ := json.Marshal(authorizationPackage{Version: "alarmd-login/v1", EnvironmentID: m.environmentID,
 		EnvironmentName: m.environmentName, PublicBaseURL: m.publicBaseURL,
 		GrantSecret: secret, GrantExpiresAt: expiresAt})
 	return writeJSON(w, struct {
@@ -283,7 +281,7 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		[]string{m.prefix + "grant:" + digest(input.GrantSecret), m.prefix + "session:" + digest(token),
 			pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey(), pairingKey(m.prefix, execRenewalPrefix+refresh)},
 		m.environmentID, id, ScopeReadonly, SessionLifetime.Milliseconds(),
-		pairingID, PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), challenge, ScopeExec)
+		pairingID, PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), challenge, legacyScopeExec)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return err
@@ -313,7 +311,9 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		refresh = ""
 	} else {
 		m.count(CountPairingsIssued)
-		if record.Scope == ScopeExec {
+		// A grant an earlier build issued as an execution grant is still
+		// stored under its prefixed pairing key.
+		if record.Scope == legacyScopeExec {
 			refresh = execRenewalPrefix + refresh
 		}
 	}
@@ -511,5 +511,5 @@ func writeError(w http.ResponseWriter, err error) {
 		Status          string   `json:"status"`
 		Error           *Error   `json:"error"`
 		SupportedScopes []string `json:"supported_scopes"`
-	}{"error", public, []string{ScopeReadonly, ScopeExec}})
+	}{"error", public, []string{ScopeReadonly}})
 }

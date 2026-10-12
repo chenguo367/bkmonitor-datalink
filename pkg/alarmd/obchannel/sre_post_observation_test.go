@@ -23,7 +23,7 @@ import (
 type postObservationAuth struct{}
 
 func (postObservationAuth) Authenticate(context.Context, string) (cliauth.Session, error) {
-	return cliauth.Session{ID: "post-observation-session", EnvironmentID: "test", Scope: cliauth.ScopeExec, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	return cliauth.Session{ID: "post-observation-session", EnvironmentID: "test", Scope: cliauth.ScopeReadonly, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 func (postObservationAuth) Admit(_ context.Context, session cliauth.Session, _ bool) (cliauth.Session, error) {
@@ -96,11 +96,11 @@ func TestSREPostObservationUnavailablePreservesCompletedEvidence(t *testing.T) {
 					Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "web", ContainerID: "containerd://fixture", ImageID: "sha256:fixture", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
 				}}
 				executor := &postObservationExecutor{}
-				provider, err := pod.New(pod.Options{Client: client, Executor: executor, Scopes: []pod.Scope{{Namespace: "fixture", MatchLabels: map[string]string{"app": "web"}, Workloads: []pod.Workload{{Kind: "StatefulSet", Name: "web", UID: "workload-uid"}}, Timeout: pod.RuntimeContract{Contract: pod.TimeoutContract, PythonPath: "/usr/bin/python3"}}}})
+				provider, err := pod.New(pod.Options{Client: client, Executor: executor, DefaultNamespace: "fixture"})
 				if err != nil {
 					t.Fatal(err)
 				}
-				channel, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1", Operations: SREOperations(provider, nil, nil, "")})
+				channel, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1", Operations: SREOperations(SREOptions{Pods: provider})})
 				if err != nil {
 					t.Fatal(err)
 				}

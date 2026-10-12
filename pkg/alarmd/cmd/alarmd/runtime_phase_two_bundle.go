@@ -170,7 +170,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// Startup opens the role runtime, starts it, then opens the bundle with
 	// it (runPhaseTwoApplication); a caller that passes none gets the same.
-	runtime, err := openPhaseTwoRoleRuntime(cfg, recorder, nil)
+	runtime, err := openPhaseTwoRoleRuntime(cfg, recorder, nil, logger)
 	if err != nil {
 		return nil, err
 	}

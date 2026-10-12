@@ -38,7 +38,7 @@ func TestRoleAuthReadinessIsIndependentOfLegacyBusinessReadiness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtime, err := openPhaseTwoRoleRuntime(cfg, metric.NewRecorder(metric.BuildInfo{}), nil)
+			runtime, err := openPhaseTwoRoleRuntime(cfg, metric.NewRecorder(metric.BuildInfo{}), nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,8 +99,8 @@ func TestApplicationInstallsChannelWhileBusinessStartupWaits(t *testing.T) {
 	waiting := make(chan struct{})
 	listener := make(chan *httpservice.Server, 1)
 	deps := phaseTwoApplicationDependencies{
-		openRoles: func(cfg config.Config, recorder *metric.Recorder, facts *observability.RuntimeConfigFacts) (*phaseTwoRoleRuntime, error) {
-			runtime, err := openPhaseTwoRoleRuntime(cfg, recorder, facts)
+		openRoles: func(cfg config.Config, recorder *metric.Recorder, facts *observability.RuntimeConfigFacts, logger *observability.Logger) (*phaseTwoRoleRuntime, error) {
+			runtime, err := openPhaseTwoRoleRuntime(cfg, recorder, facts, logger)
 			if err == nil {
 				opened <- runtime
 			}

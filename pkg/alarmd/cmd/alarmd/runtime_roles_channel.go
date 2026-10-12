@@ -41,6 +41,8 @@ type ChannelBinding struct {
 	Control                   cliControlBinding
 	Roles                     roles.Set
 	InstanceID, EnvironmentID string
+	// SREAudit hears every SRE execution and management call; nil hears none.
+	SREAudit func(obchannel.SREAction)
 }
 
 type roleChannelRuntime struct {
@@ -235,7 +237,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime), Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient, LatestPublication: cliLatestPublication(catalog)})...)
 	if binding.Roles.Has(roles.Channel) {
 		var sreOps []obchannel.Operation
-		sreOps, closeSRE, err = channelSREOperations(cfg)
+		sreOps, closeSRE, err = channelSREOperations(cfg, binding.SREAudit)
 		if err != nil {
 			return nil, err
 		}

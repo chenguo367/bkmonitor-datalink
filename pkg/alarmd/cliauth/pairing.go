@@ -14,7 +14,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"strings"
 	"sync"
 	"time"
 
@@ -145,9 +144,9 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 	if err != nil {
 		return Renewal{}, err
 	}
-	if strings.HasPrefix(refreshToken, execRenewalPrefix) {
-		next = execRenewalPrefix + next
-	}
+	// An execution credential an earlier build issued is spent like any
+	// other (its pairing is stored under the prefixed key it names) and its
+	// successor is issued without the prefix.
 	id, err := randomSecret()
 	if err != nil {
 		return Renewal{}, err
@@ -160,7 +159,7 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 		[]string{pairingKey(m.prefix, refreshToken), pairingKey(m.prefix, next), m.prefix + "session:" + digest(token), m.pairingsKey(), m.epochKey(),
 			m.prefix + "spent:" + digest(refreshToken)},
 		m.environmentID, ScopeReadonly, m.adminBinding(), id, SessionLifetime.Milliseconds(), PairingIdleLifetime.Milliseconds(),
-		sealed, RenewalReplayGrace.Milliseconds(), ScopeExec)
+		sealed, RenewalReplayGrace.Milliseconds(), legacyScopeExec)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return Renewal{}, err
@@ -200,7 +199,7 @@ func (m *Manager) Upgrade(ctx context.Context, bearer string) (string, string, e
 	}
 	result, err := m.run(ctx, upgradeScript,
 		[]string{m.prefix + "session:" + digest(bearer), pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey(), pairingKey(m.prefix, execRenewalPrefix+refresh)},
-		m.environmentID, ScopeReadonly, id, m.adminBinding(), PairingIdleLifetime.Milliseconds(), MaxPairings, ScopeExec)
+		m.environmentID, ScopeReadonly, id, m.adminBinding(), PairingIdleLifetime.Milliseconds(), MaxPairings, legacyScopeExec)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return "", "", err
@@ -216,7 +215,7 @@ func (m *Manager) Upgrade(ctx context.Context, bearer string) (string, string, e
 	if err != nil {
 		return "", "", err
 	}
-	if record.Scope == ScopeExec {
+	if record.Scope == legacyScopeExec {
 		refresh = execRenewalPrefix + refresh
 	}
 	m.count(CountPairingsIssued)

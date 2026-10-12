@@ -32,7 +32,7 @@ func TestNativeTraceDiscoveryDispatchAndSpanCredentialRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer queries.Close()
-	operations := SREOperations(nil, queries, redact.New("runtime-credential"), "")
+	operations := SREOperations(SREOptions{Queries: queries, Scrubber: redact.New("runtime-credential")})
 	c := testChannel(t, &testAuth{}, operations...)
 	_, description := call(t, c, envelope(c, "describe", "uq.trace", nil))
 	desc := description.Result.(map[string]any)
@@ -78,12 +78,12 @@ func TestNativeTraceDiscoveryDispatchAndSpanCredentialRedaction(t *testing.T) {
 }
 
 func TestNativeTraceStaysUnavailableWithoutRegisteredApplication(t *testing.T) {
-	queries, err := uq.New([]uq.Egress{{Name: "native", URL: "http://native.invalid", Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil)
+	queries, err := uq.NewWithQuerySource([]uq.Egress{{Name: "native", URL: "http://native.invalid", Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer queries.Close()
-	c := testChannel(t, &testAuth{}, SREOperations(nil, queries, nil, "")...)
+	c := testChannel(t, &testAuth{}, SREOperations(SREOptions{Queries: queries})...)
 	_, out := call(t, c, envelope(c, "describe", "uq.trace", nil))
 	if out.Error != nil || out.Result.(map[string]any)["availability"].(map[string]any)["available"] != false {
 		t.Fatalf("unregistered Trace target was available: %+v", out)
