@@ -964,6 +964,12 @@ func (runner *Runner) runOneTracked(
 		if err == nil && !due {
 			runner.attempt = nil
 			runner.nextDeadline = time.Time{}
+			// The source answered, so its backoff is over, as it is below for
+			// a due Slot. Kept, its ready time passes while the next Slot is
+			// still in the future, and a Runner ready since then is queued
+			// again on every return until that Slot runs.
+			runner.sourceFailures = 0
+			runner.sourceNextAt = time.Time{}
 		}
 		return execution.SlotExecutionResult{}, false, err
 	}
