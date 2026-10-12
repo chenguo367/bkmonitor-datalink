@@ -563,11 +563,12 @@ type phaseTwoQueryGroupLifecycle struct {
 	runner phaseTwoQueryGroupRuntime
 	cancel context.CancelFunc
 	done   chan struct{}
-	// inflight counts this Query Group's Slots that are executing, and idle
-	// is closed when it falls back to zero; both under the bundle's lock. A
-	// Slot is counted in the same step that finds its lifecycle current, so
-	// once a lifecycle is detached no Slot can start on it, and a release
-	// that waits on idle waits for exactly the Slots already running.
+	// inflight counts this Query Group's Slots that are executing, and the
+	// other work acting on its lease (enterOwnedWork), and idle is closed
+	// when it falls back to zero; both under the bundle's lock. Each is
+	// counted in the same step that finds its lifecycle current, so once a
+	// lifecycle is detached nothing can start on it, and a release that
+	// waits on idle waits for exactly what is already running.
 	inflight int
 	idle     chan struct{}
 }
@@ -2556,8 +2557,44 @@ func (bundle *phaseTwoWorkerBundle) enterScheduledRunner(scheduled phaseTwoSched
 
 func (bundle *phaseTwoWorkerBundle) exitScheduledRunner(lifecycle *phaseTwoQueryGroupLifecycle) {
 	bundle.mu.Lock()
-	lifecycle.inflight--
 	bundle.slotsRunning--
+	bundle.leaveLifecycleAndUnlock(lifecycle)
+}
+
+// enterOwnedWork is enterScheduledRunner for the work other than a Slot
+// that acts on the Query Group's lease: a lookback supplement, which writes
+// events, and an inactive-time close, which sends closes. It is counted on
+// the Query Group's current lifecycle under the same lock that finds it
+// current, refused once the lifecycle is detached or the replica draining,
+// and a handover's drain waits for it before the lease is released. Left
+// uncounted, a handover released the lease while such a send was in flight
+// and the next owner, free to acquire at once, could send the same window
+// again. Not a Slot: runningSlots does not count it.
+func (bundle *phaseTwoWorkerBundle) enterOwnedWork(queryGroup execution.QueryGroupIdentity) (*phaseTwoQueryGroupLifecycle, bool) {
+	bundle.mu.Lock()
+	defer bundle.mu.Unlock()
+	lifecycle, owned := bundle.runners[queryGroup]
+	if bundle.draining || bundle.closed || !owned || lifecycle == nil {
+		return nil, false
+	}
+	if lifecycle.inflight == 0 {
+		lifecycle.idle = make(chan struct{})
+	}
+	lifecycle.inflight++
+	return lifecycle, true
+}
+
+func (bundle *phaseTwoWorkerBundle) exitOwnedWork(lifecycle *phaseTwoQueryGroupLifecycle) {
+	bundle.mu.Lock()
+	bundle.leaveLifecycleAndUnlock(lifecycle)
+}
+
+// leaveLifecycleAndUnlock takes one piece of work off its lifecycle, with
+// the bundle's lock held, and releases the lock. The last one out closes
+// idle, and lifts the Query Group's decline when that lifecycle's hung
+// execution was what it waited for.
+func (bundle *phaseTwoWorkerBundle) leaveLifecycleAndUnlock(lifecycle *phaseTwoQueryGroupLifecycle) {
+	lifecycle.inflight--
 	var lifted execution.QueryGroupIdentity
 	var entry *declinedQueryGroup
 	if lifecycle.inflight == 0 {
@@ -2579,8 +2616,9 @@ func (bundle *phaseTwoWorkerBundle) exitScheduledRunner(lifecycle *phaseTwoQuery
 	}
 }
 
-// slotsInFlight is how many Slots of a lifecycle are running, and the
-// channel closed when none is; nil when none is now.
+// slotsInFlight is how many Slots of a lifecycle are running, with the
+// other work counted on it (enterOwnedWork), and the channel closed when
+// none is; nil when none is now.
 func (bundle *phaseTwoWorkerBundle) slotsInFlight(lifecycle *phaseTwoQueryGroupLifecycle) (int, <-chan struct{}) {
 	bundle.mu.RLock()
 	defer bundle.mu.RUnlock()
@@ -2641,6 +2679,20 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		bundle.mu.Unlock()
 		maintenanceErr := waitPhaseTwoGroup(ctx, &bundle.maintenanceWG)
 		result = append(result, maintenanceErr)
+		// What is counted on a lifecycle besides the dispatcher's Slots - a
+		// supplement, a close send - is waited for before its lease goes, as
+		// a handover waits for it; skipped, as the scheduler's group is, when
+		// the drain already left Slots it cancelled unreturned.
+		if drain := bundle.shutdownDrain(); drain == nil || drain.Unreturned == 0 {
+			for _, lifecycle := range runners {
+				if _, idle := bundle.slotsInFlight(lifecycle); idle != nil {
+					select {
+					case <-idle:
+					case <-ctx.Done():
+					}
+				}
+			}
+		}
 		for index, lifecycle := range runners {
 			releaseErr := lifecycle.runner.Release(ctx)
 			result = append(result, releaseErr)
