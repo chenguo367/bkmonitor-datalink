@@ -63,6 +63,7 @@ var alarmdWords = []string{
 	"alias",
 	"all",
 	"allocation",
+	"allowance",
 	"allowed",
 	"already",
 	"ambiguous",
