@@ -7,6 +7,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -71,5 +72,35 @@ func TestASourceReadThatFindsNothingDueEndsTheSourceBackoff(t *testing.T) {
 				t.Fatalf("a refusal after a successful read waits %s, want the first step %s", wait, limits.RetryMinDelay)
 			}
 		})
+	}
+}
+
+// The same holds for a round that ends some other way once the backoff is
+// past: an error the source names neither a retry nor a block sets no
+// backoff of its own, and must not leave the spent one behind as a ready
+// time already gone.
+func TestARoundPastTheSourceBackoffLeavesNoReadyTimeBehind(t *testing.T) {
+	limits := testRecoveryLimits()
+	clock := newMutableClock(time.Unix(200, 0))
+	fence := execution.OwnerFence{QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "token-1"}
+	source := &fakeSlotSource{err: &SourceRetryError{Err: context.DeadlineExceeded}}
+	flights, err := NewFlightCoordinatorWithRecovery(limits, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: fence}, source, &blockingExecutor{}, flights, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runner.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(runner.NextReadyAt().Sub(clock.Now()) + time.Second)
+	source.err = errors.New("a source failure of no named kind")
+	if _, _, err := runner.RunOne(context.Background()); err == nil {
+		t.Fatal("the source's error was not returned")
+	}
+	if ready := runner.NextReadyAt(); !ready.IsZero() {
+		t.Fatalf("after a round past its backoff the Runner is ready again at %d, %s ago", ready.Unix(), clock.Now().Sub(ready))
 	}
 }

@@ -918,6 +918,11 @@ func (runner *Runner) runOneTracked(
 		diagnosticReadyAt = runner.sourceNextAt.UnixMilli()
 		return execution.SlotExecutionResult{}, false, nil
 	}
+	// A backoff this round is past is spent. Whatever the round returns sets
+	// a new one or none; one left behind would be a ready time already gone,
+	// and the dispatcher queues a Runner ready since then again on every
+	// return, without asking the index.
+	runner.sourceNextAt = time.Time{}
 	// This stays the Runner's own gate rather than moving into the source. It
 	// is what separates losing the Query Group from failing to read it: an
 	// ownership rejection surfaced from inside Next would be counted as a Slot
@@ -964,12 +969,9 @@ func (runner *Runner) runOneTracked(
 		if err == nil && !due {
 			runner.attempt = nil
 			runner.nextDeadline = time.Time{}
-			// The source answered, so its backoff is over, as it is below for
-			// a due Slot. Kept, its ready time passes while the next Slot is
-			// still in the future, and a Runner ready since then is queued
-			// again on every return until that Slot runs.
+			// The source answered, so the failures that grew its backoff are
+			// over, as they are below for a due Slot.
 			runner.sourceFailures = 0
-			runner.sourceNextAt = time.Time{}
 		}
 		return execution.SlotExecutionResult{}, false, err
 	}
