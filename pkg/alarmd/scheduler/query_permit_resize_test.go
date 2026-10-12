@@ -189,3 +189,32 @@ func TestHoldsTooShortToMeasureStillReadAsAHold(t *testing.T) {
 		t.Fatalf("hold reference %v after 100 microsecond holds, want the 1 ms floor", got)
 	}
 }
+
+// An hour that has only begun does not set the reference: a few fast holds
+// at its start would read as the lowest and pull the budget down until the
+// hour filled. It counts once it holds a tenth of the busiest hour.
+func TestAnHourThatHasOnlyBegunDoesNotSetTheHoldReference(t *testing.T) {
+	clock := newMutableClock(time.Unix(3600*100, 0))
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := func(d time.Duration, n int) {
+		for i := 0; i < n; i++ {
+			permit := acquireNormal(t, flights, "a", clock.Now().Add(time.Hour))
+			clock.Advance(d)
+			permit.Release()
+		}
+	}
+	hold(700*time.Millisecond, 200)
+	full := flights.HoldReference()
+	clock.Advance(time.Hour)
+	hold(50*time.Millisecond, 3)
+	if got := flights.HoldReference(); got != full {
+		t.Fatalf("three holds at the start of an hour moved the reference from %v to %v", full, got)
+	}
+	hold(50*time.Millisecond, 17)
+	if got := flights.HoldReference(); got != 50*time.Millisecond {
+		t.Fatalf("an hour holding a tenth of the busiest reads %v, want its own 50 ms", got)
+	}
+}
