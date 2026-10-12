@@ -44,6 +44,12 @@ import (
 // holding the Query Group back. The Leader decodes for itself and rewrites
 // only what it cannot read either: a Worker of an older build that cannot
 // read a newer timeline names it, and the Leader finds it decodes.
+//
+// Retire when: the upstream snapshot after the one that adds the repair is
+// merged, the older-build case above is gone: every Worker an upgrade then
+// meets reads the timelines this build writes. The repair itself and
+// decodes_again stay, for corrupt bytes and for a name that outlives its
+// rewrite.
 
 // TimelineRepairOutcome is what became of one Query Group named as having an
 // unreadable timeline.

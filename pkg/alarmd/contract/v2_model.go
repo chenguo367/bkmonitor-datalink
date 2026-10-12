@@ -285,6 +285,10 @@ const (
 	// whose new content the previous build cannot run). Until the timeline is
 	// rewritten or the Query Group moves to a build that reads it, every round
 	// meets the same bytes.
+	//
+	// Retire when: the upstream snapshot after the one that adds this word is
+	// merged, the previous-build case is gone; the word stays for corrupt
+	// bytes.
 	ReasonScheduleUnreadable = "SCHEDULE_UNREADABLE"
 	// ReasonViewNotExecutable names a round the Worker did not run because
 	// its installed executable view does not yet agree with the Assignment

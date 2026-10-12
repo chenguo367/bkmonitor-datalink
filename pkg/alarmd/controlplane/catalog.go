@@ -154,9 +154,10 @@ type BuildRequest struct {
 // better than the program. What it costs is that a strategy really removed
 // runs for up to ten minutes longer.
 //
-// Transition code. Retire when bk-monitor's strategy cache stops deleting
-// enabled strategies on a missing business
-// (alarm_backends/core/cache/strategy.py:780-784).
+// Transition code. Retire when: bk-monitor's strategy cache stops deleting
+// enabled strategies on a missing business (StrategyCacheManager.refresh_strategy_ids
+// in alarm_backends/core/cache/strategy.py, which still adds them to
+// invalid_strategy_ids).
 const AbsenceGracePeriod = 10 * time.Minute
 
 type FrozenPlan struct {

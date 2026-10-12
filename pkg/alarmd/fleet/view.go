@@ -292,6 +292,10 @@ type FailureRef struct {
 	// read identically for an afternoon; they were then told apart by the
 	// error's words, which a Redis's EOF could pass as Kafka's. Empty on
 	// other stages and on rows from a publisher that predates it.
+	//
+	// Retire when: the upstream snapshot after the one that adds Kind and At
+	// is merged, every publisher an upgrade meets sets both, and the readings
+	// of a row from a publisher that predates them can go.
 	Kind string `json:"kind,omitempty"`
 	// At is when this failure was observed. The reference is kept until a
 	// healthy completion, so on a row whose latest round ended some other
