@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,9 +47,12 @@ type indexEntry struct {
 	indexReadAt, calibratedAt, calibratedStarted time.Time
 	lastReadAttempt, lastReconcileAttempt        time.Time
 	index, missing, suppressed                   map[string]struct{}
-	alerts                                       []Alert
-	reconcileRequested                           bool
-	reason                                       string
+	// tooLarge is the last refusal of this set for its size, nil when the
+	// last read was not refused so.
+	tooLarge           *SetTooLargeError
+	alerts             []Alert
+	reconcileRequested bool
+	reason             string
 }
 
 type indexState struct {
@@ -60,7 +64,10 @@ type indexState struct {
 	// ring of calibrationSamples; calibrationNext is where the next goes.
 	calibrations    []time.Duration
 	calibrationNext int
-	refreshMu       sync.Mutex
+	// largeRead is a set being read on its own: at most one at a time, so
+	// one long scan of the link's Redis never runs beside another.
+	largeRead atomic.Bool
+	refreshMu sync.Mutex
 	// wake is coalesced: only ownership/ACK starts work promptly. Notices are
 	// deliberately batched on the maintenance cadence, not one request each.
 	wake           chan struct{}
@@ -661,6 +668,11 @@ func (cache *Cache) refreshIndex(ctx context.Context) {
 				cache.applyCalibration(job, started, result, err)
 			} else {
 				members, err := state.options.Source.ReadSet(callCtx, job.key)
+				var large *LargeSetError
+				if errors.As(err, &large) {
+					cache.readLarge(ctx, job, large.Budget)
+					continue
+				}
 				cache.applyIndex(job, members, err)
 			}
 		}
@@ -734,6 +746,23 @@ func (cache *Cache) admitEntry(key StrategyKey, candidate *indexEntry) bool {
 	return true
 }
 
+// readLarge reads a set on its own, with its own budget, unless another set
+// is being read so; then it is left for a later round. ctx is the refresh
+// loop's, not the round's.
+func (cache *Cache) readLarge(ctx context.Context, job indexJob, budget time.Duration) {
+	state := cache.index
+	if !state.largeRead.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer state.largeRead.Store(false)
+		readCtx, cancel := context.WithTimeout(WithLargeRead(ctx), budget)
+		defer cancel()
+		members, err := state.options.Source.ReadSet(readCtx, job.key)
+		cache.applyIndex(job, members, err)
+	}()
+}
+
 func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -745,6 +774,11 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 		cache.refreshes["unavailable"]++
 		if errors.Is(err, ErrSetTooLarge) {
 			entry.reason = "index_too_large"
+			entry.tooLarge = &SetTooLargeError{}
+			if sized := (*SetTooLargeError)(nil); errors.As(err, &sized) {
+				refusal := *sized
+				entry.tooLarge = &refusal
+			}
 			cache.unavailable[UnavailableTooLarge]++
 			return
 		}
@@ -764,7 +798,7 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 	if next.dirty == job.generation {
 		next.dirtySince = time.Time{}
 	}
-	next.reason = ""
+	next.reason, next.tooLarge = "", nil
 	*entry = next
 	cache.refreshes["index"]++
 }
@@ -1081,6 +1115,20 @@ func (cache *Cache) indexStats() Stats {
 		if len(stats.CalibrationOverAge) > MaxCalibrationOverAge {
 			stats.CalibrationOverAge = stats.CalibrationOverAge[:MaxCalibrationOverAge]
 		}
+	}
+	for key, entry := range cache.index.entries {
+		if entry.tooLarge != nil {
+			stats.TooLarge = append(stats.TooLarge, TooLargeSet{Strategy: key, Refusal: *entry.tooLarge})
+		}
+	}
+	sort.Slice(stats.TooLarge, func(i, j int) bool {
+		if stats.TooLarge[i].Refusal.Members != stats.TooLarge[j].Refusal.Members {
+			return stats.TooLarge[i].Refusal.Members > stats.TooLarge[j].Refusal.Members
+		}
+		return stats.TooLarge[i].Strategy.StrategyID < stats.TooLarge[j].Strategy.StrategyID
+	})
+	if len(stats.TooLarge) > MaxTooLargeSets {
+		stats.TooLarge = stats.TooLarge[:MaxTooLargeSets]
 	}
 	all := len(cache.index.entries) > 0
 	for _, entry := range cache.index.entries {

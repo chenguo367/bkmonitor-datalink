@@ -53,9 +53,9 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 				"the consumer's open alerts for a strategy, reconciled against its index. Absent until one has."),
 		unavailable: descriptor("open_alert_set_unavailable_total",
 			"Why the copy could not answer from the consumer's sets: read_error (an index read or a calibration "+
-				"failed, each time), too_large (a strategy's set larger than one read may hold - members, bytes or "+
-				"pages - each time; such a set is not read another way yet, and the first one counted is the trigger "+
-				"for reading it a member at a time), location_unconfirmed (the link's Console has not named where the sets are) and "+
+				"failed, each time), too_large (a strategy's set larger than this process's read budget - members or "+
+				"bytes, from its memory - each time, refused before it is scanned once a member's weight is known; "+
+				"fleet.get names these strategies), location_unconfirmed (the link's Console has not named where the sets are) and "+
 				"keying_unconfirmed (it has not said they are keyed by the alert ids this process sends), each "+
 				"counted once on entering the state; fleet health degrades with OPEN_ALERT_SET_UNCONFIRMED while "+
 				"either lasts. A deployment without the Console counts nothing here.", "reason"),

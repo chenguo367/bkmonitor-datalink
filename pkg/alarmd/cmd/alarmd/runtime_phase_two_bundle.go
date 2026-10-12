@@ -1624,6 +1624,10 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 	}
 	facts.IndexStaleAfterSeconds, facts.StaleSets = stats.StaleAfter.Seconds(), stats.Stale
 	facts.CalibrationNeeded, facts.CalibrationCapacity, facts.CalibrationShort = stats.CalibrationNeeded, stats.CalibrationCapacity, stats.CalibrationShort
+	for _, large := range stats.TooLarge {
+		facts.TooLarge = append(facts.TooLarge, fleet.TooLargeSetRow{TenantID: large.Strategy.TenantID, StrategyID: large.Strategy.StrategyID,
+			Members: large.Refusal.Members, Bytes: large.Refusal.Bytes, MaxMembers: large.Refusal.MaxMembers, MaxBytes: large.Refusal.MaxBytes})
+	}
 	for _, over := range stats.CalibrationOverAge {
 		facts.CalibrationOverAge = append(facts.CalibrationOverAge, fleet.CalibrationOverAgeRow{TenantID: over.Strategy.TenantID,
 			StrategyID: over.Strategy.StrategyID, AgeSeconds: over.Age.Seconds()})

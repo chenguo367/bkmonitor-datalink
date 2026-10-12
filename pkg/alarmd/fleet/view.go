@@ -2423,6 +2423,16 @@ type GateLookupFact struct {
 	InOtherSets []string  `json:"in_other_sets,omitempty"`
 }
 
+// TooLargeSetRow is a strategy whose set was refused for its size.
+type TooLargeSetRow struct {
+	TenantID   string `json:"tenant_id"`
+	StrategyID string `json:"strategy_id"`
+	Members    int64  `json:"members"`
+	Bytes      int64  `json:"bytes,omitempty"`
+	MaxMembers int    `json:"max_members"`
+	MaxBytes   int    `json:"max_bytes"`
+}
+
 // CalibrationOverAgeRow is a strategy past the calibration age and how long
 // since its last calibration.
 type CalibrationOverAgeRow struct {
@@ -2488,6 +2498,10 @@ type OpenAlertSetFacts struct {
 	CalibrationCapacity int                     `json:"calibration_capacity,omitempty"`
 	CalibrationShort    int                     `json:"calibration_short,omitempty"`
 	CalibrationOverAge  []CalibrationOverAgeRow `json:"calibration_over_age,omitempty"`
+	// TooLarge names the strategies whose open-alert sets were refused for
+	// their size, largest first and bounded: members, bytes and the budget.
+	// Their sets go unread, and so unjudged and unclosed.
+	TooLarge []TooLargeSetRow `json:"too_large,omitempty"`
 	// GateOwnLookups is Lookups for the gate's lookups of this replica's
 	// own open alerts, every answer word present; GateOwnHeld how many of
 	// those the gate answered "not open". A healthy series asks the gate

@@ -50,7 +50,8 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	settings := cfg.PhaseTwo.Linkd
 	// One read cannot monopolize the allowance for the whole worker. These
 	// are scan bounds, not an assertion that an oversized SET was empty.
-	limits := openalerts.ReadLimits{MaxMembers: max(1, capacity.Members/4), MaxBytes: max(1, capacity.Bytes/4), MaxPages: 100, PageSize: 256}
+	limits := openalerts.ReadLimits{MaxMembers: max(1, capacity.Members/4), MaxBytes: max(1, capacity.Bytes/4), PageSize: 256,
+		MaxLargeRead: config.LinkdCalibrationInterval / 4}
 	// The sets are read only where the Console named them: a connection its
 	// target named at startup (adopted), or one the deployment stated, which
 	// the first reconciliation then confirms or not. Otherwise nothing is

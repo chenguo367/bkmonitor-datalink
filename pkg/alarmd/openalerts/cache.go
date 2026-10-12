@@ -97,8 +97,17 @@ const (
 )
 
 // Stats is the copy's state and cumulative counts, read for metrics.
-// MaxCalibrationOverAge bounds the over-age strategies Stats names.
-const MaxCalibrationOverAge = 16
+// MaxCalibrationOverAge and MaxTooLargeSets bound the strategies Stats names.
+const (
+	MaxCalibrationOverAge = 16
+	MaxTooLargeSets       = 16
+)
+
+// TooLargeSet is a strategy whose set was refused for its size.
+type TooLargeSet struct {
+	Strategy StrategyKey
+	Refusal  SetTooLargeError
+}
 
 // CalibrationAge is a strategy past CalibrationMaxAge and how long since its
 // last calibration.
@@ -146,8 +155,11 @@ type Stats struct {
 	// last calibration.
 	CalibrationNeeded, CalibrationCapacity, CalibrationShort int
 	CalibrationOverAge                                       []CalibrationAge
-	OldestPendingAt                                          time.Time
-	SubscriptionReady                                        bool
+	// TooLarge names the strategies whose sets were last refused for their
+	// size, largest first and bounded: members, bytes and the budget.
+	TooLarge          []TooLargeSet
+	OldestPendingAt   time.Time
+	SubscriptionReady bool
 	// NoticesRefused is the change notices dropped, by why, since the copy
 	// was built: counted here and not on the subscriber, which a move of the
 	// link's location replaces.
