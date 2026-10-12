@@ -140,12 +140,27 @@ func (history *HourlyDurations) MeanReference(at time.Time) time.Duration {
 	return history.lowest(at, (*holdHour).mean)
 }
 
+// lowest reads the lowest value among the hours that hold at least a tenth
+// as many durations as the busiest hour of the day. An hour that has only
+// begun - a few fast holds in its first minute - says little about the
+// service, and as the lowest it would pull the budget down until it filled.
+// Relative to the busiest hour, so a quiet deployment's hours all count and
+// the first hour after a start counts on its own.
 func (history *HourlyDurations) lowest(at time.Time, read func(*holdHour) time.Duration) time.Duration {
 	now := at.Unix() / 3600
+	live := func(hour *holdHour) bool {
+		return hour.count > 0 && hour.start > now-int64(len(history.hours)) && hour.start <= now
+	}
+	var busiest uint64
+	for index := range history.hours {
+		if hour := &history.hours[index]; live(hour) {
+			busiest = max(busiest, hour.count)
+		}
+	}
 	var lowest time.Duration
 	for index := range history.hours {
 		hour := &history.hours[index]
-		if hour.count == 0 || hour.start <= now-int64(len(history.hours)) || hour.start > now {
+		if !live(hour) || hour.count*holdHourQuorumDivisor < busiest {
 			continue
 		}
 		if value := read(hour); lowest == 0 || value < lowest {
@@ -154,6 +169,10 @@ func (history *HourlyDurations) lowest(at time.Time, read func(*holdHour) time.D
 	}
 	return lowest
 }
+
+// holdHourQuorumDivisor: an hour counts toward the lowest once it holds a
+// tenth of the busiest hour's durations.
+const holdHourQuorumDivisor = 10
 
 // mean is never below a millisecond, the histogram's own floor: a zero
 // would read as no hold at all, and the shape would size from the
