@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,7 +122,15 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	protocol := newProtocolWriter(nonce, limit)
 	execCtx, execCancel := context.WithCancel(ctx)
 	streamDone := make(chan struct{})
-	go bindStream(execCancel, protocol.started, streamDone, timeout)
+	// cut is a stream this side ended at its bound: unknown however the
+	// transport answers, which for a local process killed by its context is
+	// an exit code with no error.
+	var cut atomic.Bool
+	allowance := p.options.startupAllowance
+	if allowance <= 0 {
+		allowance = StartupAllowance
+	}
+	go bindStream(execCancel, &cut, protocol.started, streamDone, allowance, timeout)
 	transport, streamErr := p.options.Executor.Stream(execCtx, StreamRequest{Target: request.Target, Argv: remoteArgv, Stdin: strings.NewReader(request.Stdin), Stdout: protocol, Stderr: &discardBounded{limit: 4096}})
 	close(streamDone)
 	execCancel()
@@ -131,9 +140,14 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	remaining := limit - int64(len(result.Stdout))
 	result.Stderr, stderrCut = p.redactor.bounded(state.stderr, remaining)
 	result.Truncated = state.truncated || stdoutCut || stderrCut
+	// A cut on its own decides nothing: the end is unknown only when the
+	// complete record, the stream or the exit says so, and a run whose
+	// complete record arrived and whose transport ended cleanly completed
+	// even if the bound fired in between. A cut does decide that a run
+	// without a started record is not known never to have started.
 	if streamErr != nil || state.invalid || !state.finished || transport.ExitCode == nil || *transport.ExitCode != 0 {
 		result.RemoteState = RemoteUnknown
-		if streamErr == nil && !state.started && !state.invalid && transport.ExitCode != nil {
+		if !cut.Load() && streamErr == nil && !state.started && !state.invalid && transport.ExitCode != nil {
 			result.RemoteState = RemoteNotStarted
 			result.EvidenceScope = "wrapper_failed_before_command"
 			finish()
@@ -187,12 +201,13 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 // then runs to its own timeout; past the deadline
 // TerminationGrace covers TERM, KILL and the terminal report. The command
 // deadline itself is enforced inside the target, independently of this timer.
-func bindStream(cancel context.CancelFunc, started, done <-chan struct{}, timeout time.Duration) {
-	startup := time.NewTimer(StartupAllowance)
+func bindStream(cancel context.CancelFunc, cut *atomic.Bool, started, done <-chan struct{}, allowance, timeout time.Duration) {
+	startup := time.NewTimer(allowance)
 	defer startup.Stop()
 	select {
 	case <-started:
 	case <-startup.C:
+		cut.Store(true)
 		cancel()
 		return
 	case <-done:
@@ -202,6 +217,7 @@ func bindStream(cancel context.CancelFunc, started, done <-chan struct{}, timeou
 	defer remote.Stop()
 	select {
 	case <-remote.C:
+		cut.Store(true)
 		cancel()
 	case <-done:
 	}

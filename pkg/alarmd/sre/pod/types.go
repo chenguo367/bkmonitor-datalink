@@ -137,6 +137,9 @@ type Options struct {
 	// Secrets stay in memory and are never included in an observation or receipt.
 	LiteralSecrets []string
 	Now            func() time.Time
+	// startupAllowance replaces StartupAllowance when set; only tests about
+	// what a run reports, not how long its start may take, set it.
+	startupAllowance time.Duration
 }
 
 // Target is the identity a caller received from Discover or Inspect. All six

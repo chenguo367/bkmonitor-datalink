@@ -16,7 +16,13 @@ import (
 type frameExecutor struct {
 	beforeStart, beforeComplete time.Duration
 	neverStart, neverComplete   bool
-	invoked, startedAt, gaveUp  time.Time
+	// exitOnCancel answers a cancelled stream as a local process killed by
+	// its context does: an exit code and no error.
+	exitOnCancel bool
+	// holdAfterComplete keeps the stream open after the complete record
+	// until it is cut, then ends it cleanly.
+	holdAfterComplete          bool
+	invoked, startedAt, gaveUp time.Time
 }
 
 func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (StreamResult, error) {
@@ -37,6 +43,10 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 		}
 	}
 	if err := wait(f.beforeStart, f.neverStart); err != nil {
+		if f.exitOnCancel {
+			killed := -1
+			return StreamResult{ExitCode: &killed}, nil
+		}
 		return StreamResult{}, err
 	}
 	f.startedAt = time.Now()
@@ -45,6 +55,10 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 		return StreamResult{}, err
 	}
 	io.WriteString(request.Stdout, fmt.Sprintf(`{"nonce":%q,"event":"complete","exit_code":0}`+"\n", nonce))
+	if f.holdAfterComplete {
+		<-ctx.Done()
+		f.gaveUp = time.Now()
+	}
 	zero := 0
 	return StreamResult{ExitCode: &zero}, nil
 }
@@ -57,6 +71,7 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 func TestTheExecBoundCountsFromTheSupervisorStart(t *testing.T) {
 	t.Parallel()
 	provider, _, target := runtimeProvider(t)
+	provider.options.startupAllowance = 0
 	executor := &frameExecutor{beforeStart: StartupAllowance - 500*time.Millisecond, beforeComplete: time.Second}
 	provider.options.Executor = executor
 	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: 100})
@@ -71,6 +86,7 @@ func TestTheExecBoundCountsFromTheSupervisorStart(t *testing.T) {
 func TestTheExecBoundEndsAtTheDeadlinePlusGrace(t *testing.T) {
 	t.Parallel()
 	provider, _, target := runtimeProvider(t)
+	provider.options.startupAllowance = 0
 	executor := &frameExecutor{neverComplete: true}
 	provider.options.Executor = executor
 	timeout := 100 * time.Millisecond
@@ -90,6 +106,7 @@ func TestTheExecBoundEndsAtTheDeadlinePlusGrace(t *testing.T) {
 func TestTheExecStartupIsBounded(t *testing.T) {
 	t.Parallel()
 	provider, _, target := runtimeProvider(t)
+	provider.options.startupAllowance = 0
 	executor := &frameExecutor{neverStart: true}
 	provider.options.Executor = executor
 	timeout := 10 * time.Second
@@ -101,5 +118,38 @@ func TestTheExecStartupIsBounded(t *testing.T) {
 	held := executor.gaveUp.Sub(executor.invoked)
 	if held < StartupAllowance || held >= timeout {
 		t.Fatalf("unstarted stream given up after %v, want from %v and before the command's %v", held, StartupAllowance, timeout)
+	}
+}
+
+// A stream this side cut before the supervisor reported started is unknown,
+// however the transport answers the cut: a local process killed by its
+// context answers with an exit code and no error, which read as a
+// supervisor that could not start on the target - a claim that it never
+// ran, when it may have been about to.
+func TestAStartupCutIsUnknownWhateverTheTransportAnswers(t *testing.T) {
+	t.Parallel()
+	provider, _, target := runtimeProvider(t)
+	provider.options.startupAllowance = 200 * time.Millisecond
+	provider.options.Executor = &frameExecutor{neverStart: true, exitOnCancel: true}
+	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: 5000})
+	requireCode(t, err, RemoteUnknown)
+	if result.RemoteState != RemoteUnknown {
+		t.Fatalf("a startup cut read as %+v", result)
+	}
+}
+
+// A run whose complete record arrived is complete even when the bound fires
+// before its stream ends: the cut cannot make a known end unknown.
+func TestACutAfterTheCompleteRecordKeepsTheRunComplete(t *testing.T) {
+	t.Parallel()
+	provider, _, target := runtimeProvider(t)
+	executor := &frameExecutor{holdAfterComplete: true}
+	provider.options.Executor = executor
+	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: 100})
+	if err != nil || result.RemoteState != RemoteCompleted || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("a completed run cut afterwards read as %+v %v", result, err)
+	}
+	if executor.gaveUp.IsZero() {
+		t.Fatal("the stream was never cut: the test did not reach the case")
 	}
 }
