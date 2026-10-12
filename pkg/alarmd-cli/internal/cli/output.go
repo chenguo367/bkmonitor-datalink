@@ -116,8 +116,22 @@ func validateExecReceipt(operation string, response map[string]any) error {
 		if _, err := exit.Int64(); !ok || err != nil {
 			return errors.New("completed Pod execution is missing its exit code")
 		}
+	case "remote_unsupervised":
+		// Nothing in the target could end it: it ended with an exit code,
+		// or this side cut its stream at the deadline.
+		if exit, ok := receipt["exit_code"].(json.Number); ok {
+			if _, err := exit.Int64(); err != nil {
+				return errors.New("unsupervised Pod execution has an invalid exit code")
+			}
+		} else if receipt["stream_cut"] != true {
+			return errors.New("unsupervised Pod execution has neither an exit code nor a cut stream")
+		}
+	case "":
+		return errors.New("Pod execution receipt has no remote_state")
 	default:
-		return errors.New("Pod execution receipt has an invalid remote_state")
+		// A state a newer server reports and this client does not know yet is
+		// shown as the server wrote it, not refused: the receipt is still a
+		// receipt, and refusing it would save a known execution as unknown.
 	}
 	return nil
 }

@@ -46,10 +46,36 @@ func channelSREOperations(cfg config.Config, binding ChannelBinding, client redi
 	if err != nil {
 		return nil, nil, err
 	}
+	// Every action's receipt goes to the deployment's shared list beside its
+	// audit line, so sre.receipts on any replica reads them all.
+	var receipts *obchannel.SREReceipts
+	receiptsReason := "receipts_unavailable: the channel has no runtime store connection"
+	if client != nil {
+		receipts = obchannel.NewSREReceipts(client, sreKeyPrefix(cfg, binding)+"receipts", nil, binding.SREReceiptWritten)
+		receiptsReason = ""
+	}
+	binding.SREAudit = auditWithReceipts(binding.SREAudit, receipts)
 	rollouts, rolloutReason, stopRollouts := channelRollouts(cfg, binding, client)
 	ops := obchannel.SREOperations(obchannel.SREOptions{Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason,
-		Rollouts: rollouts, RolloutReason: rolloutReason, Audit: binding.SREAudit})
+		Rollouts: rollouts, RolloutReason: rolloutReason, Audit: binding.SREAudit, Receipts: receipts, ReceiptsReason: receiptsReason})
 	return ops, func() { stopRollouts(); queries.Close() }, nil
+}
+
+// auditWithReceipts hears each action as audit does and records its
+// receipt; a nil audit or store is skipped.
+func auditWithReceipts(audit func(obchannel.SREAction), receipts *obchannel.SREReceipts) func(obchannel.SREAction) {
+	return func(action obchannel.SREAction) {
+		if audit != nil {
+			audit(action)
+		}
+		receipts.Record(action)
+	}
+}
+
+// sreKeyPrefix is where the SRE channel's shared state lives: image-change
+// receipts and action receipts, one hash slot per environment.
+func sreKeyPrefix(cfg config.Config, binding ChannelBinding) string {
+	return cfg.Redis.StatePrefix + ".sre:{" + binding.EnvironmentID + "}:"
 }
 
 // channelRollouts starts the image-change driver: it takes over receipts
@@ -66,7 +92,7 @@ func channelRollouts(cfg config.Config, binding ChannelBinding, client redis.Uni
 	}
 	audit := binding.SREAudit
 	driver := rollout.NewDriver(rollout.DriverOptions{
-		Store:   rollout.NewStore(client, cfg.Redis.StatePrefix+".sre:{"+binding.EnvironmentID+"}:"),
+		Store:   rollout.NewStore(client, sreKeyPrefix(cfg, binding)),
 		Cluster: rollout.NewKubernetesCluster(dynamicClient),
 		Owner:   binding.InstanceID + "/" + binding.Control.Incarnation,
 		Final:   binding.SRERolloutEnded,

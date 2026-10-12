@@ -22,6 +22,8 @@ type sreActionMetrics struct {
 	states   []string
 	rollouts *prometheus.CounterVec
 	watched  prometheus.Gauge
+	// receipts counts the receipt writes that sre.receipts reads back.
+	receipts *prometheus.CounterVec
 }
 
 func newSREActionMetrics() *sreActionMetrics {
@@ -48,12 +50,35 @@ func newSREActionMetrics() *sreActionMetrics {
 				"line with the receipt, both images and who ended it. Reader: the operator after an image change, " +
 				"through /metrics; workload.rollout reads one receipt.",
 		}, []string{"state"}),
+		receipts: func() *prometheus.CounterVec {
+			v := prometheus.NewCounterVec(prometheus.CounterOpts{
+				Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_receipts_write_total",
+				Help: "Receipts of SRE actions written to the shared store sre.receipts reads, by result: ok, or error (the " +
+					"store refused or did not answer within its half second; the action itself went ahead, and its sre_action " +
+					"line is the only record). Both cells exist from the start.",
+			}, []string{"result"})
+			v.WithLabelValues("ok")
+			v.WithLabelValues("error")
+			return v
+		}(),
 		watched: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_rollouts_watched",
 			Help: "Image-change receipts this process is watching now: zero but in one process during a rollout. Summed " +
 				"over the processes, more than the changes in progress would be a receipt watched twice.",
 		}),
 	}
+}
+
+// RecordSREReceiptWrite counts one receipt write by whether it landed.
+func (r *Recorder) RecordSREReceiptWrite(ok bool) {
+	if r == nil || r.phaseTwo.sreActions == nil {
+		return
+	}
+	result := "error"
+	if ok {
+		result = "ok"
+	}
+	r.phaseTwo.sreActions.receipts.WithLabelValues(result).Inc()
 }
 
 // PresetSRERollouts binds the final states and creates every cell.

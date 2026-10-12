@@ -48,6 +48,9 @@ type ChannelBinding struct {
 	// SRERolloutsWatched how many it watches; nil hears none.
 	SRERolloutEnded    func(rollout.Record)
 	SRERolloutsWatched func(int)
+	// SREReceiptWritten hears whether each receipt write landed; nil hears
+	// none.
+	SREReceiptWritten func(ok bool)
 }
 
 type roleChannelRuntime struct {
