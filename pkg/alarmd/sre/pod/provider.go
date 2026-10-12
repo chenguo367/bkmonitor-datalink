@@ -436,6 +436,8 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 	return result, nil
 }
 
+// String keeps a formatted Provider to its two plain settings: printed with
+// %v, the struct would carry the redactor's literal credentials.
 func (p *Provider) String() string {
 	return fmt.Sprintf("pod provider (default namespace %q, module label %q)", p.options.DefaultNamespace, p.options.ModuleLabel)
 }

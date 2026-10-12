@@ -78,7 +78,7 @@ func TestNativeTraceDiscoveryDispatchAndSpanCredentialRedaction(t *testing.T) {
 }
 
 func TestNativeTraceStaysUnavailableWithoutRegisteredApplication(t *testing.T) {
-	queries, err := uq.New([]uq.Egress{{Name: "native", URL: "http://native.invalid", Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil)
+	queries, err := uq.NewWithQuerySource([]uq.Egress{{Name: "native", URL: "http://native.invalid", Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}

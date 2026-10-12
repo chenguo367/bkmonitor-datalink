@@ -45,7 +45,7 @@ func TestNativeWireAndReceipt(t *testing.T) {
 		_, _ = io.WriteString(w, `{"series":[],"trace_id":"synthetic-trace","next_cursor":"next-page"}`)
 	}))
 	defer s.Close()
-	p, err := New(fixture(s.URL+"/prefix"), nil)
+	p, err := NewWithQuerySource(fixture(s.URL+"/prefix"), nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestNativeLogProjectionPrecedesReceiptOnSuccessAndFailure(t *testing.T) {
 			defer server.Close()
 			cfg := fixture(server.URL)
 			cfg[0].Endpoints[0].Path = tc.path
-			provider, err := New(cfg, nil)
+			provider, err := NewWithQuerySource(cfg, nil, "alarmd-sre")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +111,7 @@ func TestRejectedRequestsNeverReachEgress(t *testing.T) {
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
 	defer s.Close()
-	p, err := New(fixture(s.URL), nil)
+	p, err := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestNativeScrollAndSearchAfterAreRetained(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":[],"status":[],"result_table_options":{"cursor":["next"]}}`)
 	}))
 	defer s.Close()
-	p, _ := New(fixture(s.URL), nil)
+	p, _ := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 	defer p.Close()
 	r := request()
 	r.Body["scroll"] = "1m"
@@ -199,7 +199,7 @@ func TestResponseFailuresKeepNativeEvidence(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer s.Close()
-			p, _ := New(fixture(s.URL), nil)
+			p, _ := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 			defer p.Close()
 			receipt, err := p.Query(context.Background(), request())
 			if code(err) != tc.code || receipt.Complete || receipt.HTTPStatus != tc.status {
@@ -220,7 +220,7 @@ func TestRedirectDoesNotForwardScope(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer s.Close()
-	p, _ := New(fixture(s.URL), s.Client())
+	p, _ := NewWithQuerySource(fixture(s.URL), s.Client(), "alarmd-sre")
 	defer p.Close()
 	receipt, err := p.Query(context.Background(), request())
 	if err == nil || receipt.HTTPStatus != 307 || calls.Load() != 0 {
@@ -237,7 +237,7 @@ func TestIsolatedBudgetAndCancellation(t *testing.T) {
 		_, _ = io.WriteString(w, `{}`)
 	}))
 	defer s.Close()
-	p, _ := New(fixture(s.URL), nil)
+	p, _ := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 	defer p.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -260,7 +260,7 @@ func TestMillisecondsAndTimeout(t *testing.T) {
 	defer close(release)
 	e := fixture(s.URL)
 	e[0].Endpoints[0].TimeUnit = "ms"
-	p, _ := New(e, nil)
+	p, _ := NewWithQuerySource(e, nil, "alarmd-sre")
 	defer p.Close()
 	r := request()
 	r.Body["start_time"] = "1700000000000"
@@ -279,7 +279,7 @@ func TestMillisecondsCannotHideAnActualSecondsLongWindow(t *testing.T) {
 	defer s.Close()
 	e := fixture(s.URL)
 	e[0].Endpoints[0].TimeUnit = "ms"
-	p, _ := New(e, nil)
+	p, _ := NewWithQuerySource(e, nil, "alarmd-sre")
 	defer p.Close()
 	r := request()
 	r.Body["end_time"] = "1702592000" // 30 days under UQ's real 10-digit seconds rule.

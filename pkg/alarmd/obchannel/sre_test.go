@@ -27,7 +27,7 @@ func TestRegisteredNativeQueryPreservesScopeFailureAndScrubsReceipt(t *testing.T
 		_, _ = io.WriteString(w, `{"result":false,"trace_id":"fixture-private-value","data":{"api_key":"native-credential"},"message":"password=another-credential"}`)
 	}))
 	defer backend.Close()
-	queries, err := uq.New([]uq.Egress{{Name: "native", URL: backend.URL, Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil)
+	queries, err := uq.NewWithQuerySource([]uq.Egress{{Name: "native", URL: backend.URL, Tenants: []string{"tenant-fixture"}, Spaces: []string{"space-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}, nil, "alarmd-sre")
 	if err != nil {
 		t.Fatal(err)
 	}

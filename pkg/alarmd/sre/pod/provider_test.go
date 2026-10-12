@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -831,5 +832,15 @@ func TestOutputPolicyMasksURLUserinfoUnderAnyScheme(t *testing.T) {
 	out, _ := newRedactor(nil).bounded("redis://user:redis-credential@192.0.2.10:6379 amqp://guest:amqp-credential@mq/ ops@example.test", 4096)
 	if strings.Contains(out, "redis-credential") || strings.Contains(out, "amqp-credential") || !strings.Contains(out, "ops@example.test") {
 		t.Fatalf("policy output %q", out)
+	}
+}
+
+// A Provider printed into a log line names its settings, never the literal
+// credentials it redacts.
+func TestAFormattedProviderCarriesNoCredential(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client, LiteralSecrets: []string{"literalcredential"}})
+	if out := fmt.Sprintf("%v %+v", provider, provider); strings.Contains(out, "literalcredential") {
+		t.Fatalf("formatted provider %q", out)
 	}
 }
