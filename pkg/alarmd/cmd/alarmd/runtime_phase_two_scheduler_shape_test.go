@@ -190,3 +190,32 @@ func TestAThrottledBudgetStillSeesTheDemandItHolds(t *testing.T) {
 		t.Fatalf("the budget stayed at %d with fifty queries asking", reading.Shape.ProcessQueryPermits)
 	}
 }
+
+// The shaper reads what is held when it derives: a minute without new
+// demand does not lower the budget under the permits still in use.
+func TestTheShaperKeepsTheBudgetAtWhatIsHeld(t *testing.T) {
+	clock := &atomic.Int64{}
+	clock.Store(time.Unix(3600*100, 0).UnixMilli())
+	shaper, flights, _ := shaperForTest(t, clock)
+	budget := shaper.shape().ProcessQueryPermits
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deadline := time.UnixMilli(clock.Load()).Add(time.Hour)
+	for i := 0; i < budget; i++ {
+		permit, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: execution.QueryGroupIdentity(fmt.Sprintf("g%d", i)), EvaluationTime: 60},
+			execution.OperationNormal, deadline)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer permit.Release()
+	}
+	// The busiest second is out of the window by the time it derives.
+	clock.Add(2 * time.Minute.Milliseconds())
+	reading := shaper.derive(10)
+	if reading.Demand.PeakQueriesPerSecond != 0 {
+		t.Fatalf("the derivation read %v queries a second, want an idle minute", reading.Demand.PeakQueriesPerSecond)
+	}
+	if reading.Shape.ProcessQueryPermits < budget {
+		t.Fatalf("with %d permits held an idle minute derived a budget of %d", budget, reading.Shape.ProcessQueryPermits)
+	}
+}

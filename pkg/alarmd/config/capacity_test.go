@@ -486,4 +486,9 @@ func TestThePermitBudgetComesDownByHalvesAndNotBelowWhatIsHeld(t *testing.T) {
 	if got := DeriveSchedulerShape(ceiling, busy, previous, 0).ProcessQueryPermits; got != 100 {
 		t.Fatalf("1000 queries a second at 50 ms derived %d permits, want 100 at once", got)
 	}
+	// The recovery permits come down the same way.
+	previous.RecoveryQueryPermits = 16
+	if got := DeriveSchedulerShape(ceiling, idle, previous, 0).RecoveryQueryPermits; got != 8 {
+		t.Fatalf("an idle minute after 16 recovery permits derived %d, want 8", got)
+	}
 }

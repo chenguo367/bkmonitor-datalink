@@ -170,3 +170,22 @@ func TestTheHoldReferenceCountsTheSlowAnswersOfItsHour(t *testing.T) {
 		t.Fatalf("hold reference %v, want the mean hold %v", got, want)
 	}
 }
+
+// Holds too short to measure still read as a hold: a mean of zero would
+// read as no hold at all, and the shape would size from the cold-start
+// guess instead.
+func TestHoldsTooShortToMeasureStillReadAsAHold(t *testing.T) {
+	clock := newMutableClock(time.Unix(3600*100, 0))
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		permit := acquireNormal(t, flights, "a", clock.Now().Add(time.Hour))
+		clock.Advance(100 * time.Microsecond)
+		permit.Release()
+	}
+	if got := flights.HoldReference(); got != time.Millisecond {
+		t.Fatalf("hold reference %v after 100 microsecond holds, want the 1 ms floor", got)
+	}
+}
