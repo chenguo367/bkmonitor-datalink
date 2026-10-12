@@ -2423,6 +2423,14 @@ type GateLookupFact struct {
 	InOtherSets []string  `json:"in_other_sets,omitempty"`
 }
 
+// CalibrationOverAgeRow is a strategy past the calibration age and how long
+// since its last calibration.
+type CalibrationOverAgeRow struct {
+	TenantID   string  `json:"tenant_id"`
+	StrategyID string  `json:"strategy_id"`
+	AgeSeconds float64 `json:"age_seconds"`
+}
+
 type OpenAlertSetFacts struct {
 	// CalibrationConfigured is whether a reconciler is bound; false is a
 	// reading, not an absence: with the index protocol and no calibration,
@@ -2470,6 +2478,16 @@ type OpenAlertSetFacts struct {
 	LocationConfirmed  bool       `json:"location_confirmed"`
 	KeyedByAlertID     *bool      `json:"keyed_by_alert_id,omitempty"`
 	KeyedByAlertIDAsOf *time.Time `json:"keyed_by_alert_id_as_of,omitempty"`
+	// CalibrationNeeded is how many strategies a calibration round must take
+	// to cover every tracked one within the calibration interval, and
+	// CalibrationCapacity how many the Console answers in a round; a positive
+	// CalibrationShort is the strategies an interval at that capacity cannot
+	// reach, whose sets go unjudged and unclosed. CalibrationOverAge names the
+	// strategies past the calibration age, oldest first and bounded.
+	CalibrationNeeded   int                     `json:"calibration_needed,omitempty"`
+	CalibrationCapacity int                     `json:"calibration_capacity,omitempty"`
+	CalibrationShort    int                     `json:"calibration_short,omitempty"`
+	CalibrationOverAge  []CalibrationOverAgeRow `json:"calibration_over_age,omitempty"`
 	// GateOwnLookups is Lookups for the gate's lookups of this replica's
 	// own open alerts, every answer word present; GateOwnHeld how many of
 	// those the gate answered "not open". A healthy series asks the gate

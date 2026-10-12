@@ -6,6 +6,7 @@ package openalerts
 import (
 	"context"
 	"errors"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -55,7 +56,11 @@ type indexState struct {
 	entries                     map[StrategyKey]*indexEntry
 	order                       []StrategyKey
 	readCursor, reconcileCursor int
-	refreshMu                   sync.Mutex
+	// calibrations is the duration of the latest successful calibrations, a
+	// ring of calibrationSamples; calibrationNext is where the next goes.
+	calibrations    []time.Duration
+	calibrationNext int
+	refreshMu       sync.Mutex
 	// wake is coalesced: only ownership/ACK starts work promptly. Notices are
 	// deliberately batched on the maintenance cadence, not one request each.
 	wake           chan struct{}
@@ -522,6 +527,60 @@ type indexJob struct {
 	generation uint64
 }
 
+// calibrationSamples is how many calibration durations the capacity is read
+// from, and calibrationMargin the share above an even spread a round plans
+// for: a slow call or a failed one is caught up within the period.
+const (
+	calibrationSamples = 64
+	calibrationMargin  = 1.25
+)
+
+// calibrationPlan is how many strategies each round calibrates. Needed is
+// what covers every tracked strategy within ReconcileInterval, with the
+// margin; capacity is what the Console answers inside a round's half of the
+// cycle, read from the latest calls' p90 - the round slows when the Console
+// does, and does not press it harder to catch up. ReconcileBatch is the floor,
+// and the capacity before any call has been timed. Calls stay serial.
+// Called with the lock held.
+func (state *indexState) calibrationPlan(tracked int) (needed, capacity int) {
+	floor := max(1, state.options.ReconcileBatch)
+	needed = max(floor, int(math.Ceil(float64(tracked)*calibrationMargin/float64(state.calibrationRounds()))))
+	capacity = floor
+	if p90 := state.calibrationP90(); p90 > 0 {
+		capacity = max(floor, int((state.options.CycleTimeout/2)/p90))
+	}
+	return needed, capacity
+}
+
+// calibrationRounds is how many rounds ReconcileInterval holds.
+func (state *indexState) calibrationRounds() int {
+	if refresh := state.options.RefreshInterval; refresh > 0 && state.options.ReconcileInterval > refresh {
+		return int(state.options.ReconcileInterval / refresh)
+	}
+	return 1
+}
+
+// calibrationP90 is the 90th percentile of the timed calibrations, zero
+// before any.
+func (state *indexState) calibrationP90() time.Duration {
+	if len(state.calibrations) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), state.calibrations...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[(len(sorted)*9+9)/10-1]
+}
+
+// noteCalibration times one successful calibration. Called with the lock held.
+func (state *indexState) noteCalibration(took time.Duration) {
+	if len(state.calibrations) < calibrationSamples {
+		state.calibrations = append(state.calibrations, took)
+		return
+	}
+	state.calibrations[state.calibrationNext] = took
+	state.calibrationNext = (state.calibrationNext + 1) % calibrationSamples
+}
+
 func (cache *Cache) jobs(calibration bool) []indexJob {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -529,7 +588,8 @@ func (cache *Cache) jobs(calibration bool) []indexJob {
 	now := cache.now()
 	cursor, limit := &state.readCursor, state.options.ReadBatch
 	if calibration {
-		cursor, limit = &state.reconcileCursor, state.options.ReconcileBatch
+		needed, capacity := state.calibrationPlan(len(state.order))
+		cursor, limit = &state.reconcileCursor, min(needed, capacity)
 	}
 	result := make([]indexJob, 0, min(limit, len(state.order)))
 	for seen := 0; seen < len(state.order) && len(result) < limit; seen++ {
@@ -712,6 +772,9 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Reconciliation, err error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	if err == nil {
+		cache.index.noteCalibration(cache.now().Sub(started))
+	}
 	// The calibration resolved the target first: a move it found, and the
 	// agreement a later one finds, can open and close an unconfirmed state
 	// inside one round, which is still an entry.
@@ -1001,6 +1064,24 @@ func (cache *Cache) indexStats() Stats {
 	stats := Stats{CalibrationConfigured: cache.index.options.Reconciler != nil, Tracked: len(cache.index.entries), Added: len(cache.added), Evictions: cache.evictions,
 		Refreshes: map[string]uint64{}, Unavailable: map[UnavailableReason]uint64{}, Lookups: map[Answer]uint64{},
 		StaleAfter: cache.index.staleAfter()}
+	if stats.CalibrationConfigured {
+		stats.CalibrationNeeded, stats.CalibrationCapacity = cache.index.calibrationPlan(len(cache.index.order))
+		stats.CalibrationShort = max(0, len(cache.index.order)-stats.CalibrationCapacity*cache.index.calibrationRounds())
+		for key, entry := range cache.index.entries {
+			if !entry.calibratedAt.IsZero() && !cache.calibrated(entry, cache.now()) {
+				stats.CalibrationOverAge = append(stats.CalibrationOverAge, CalibrationAge{Strategy: key, Age: cache.now().Sub(entry.calibratedAt)})
+			}
+		}
+		sort.Slice(stats.CalibrationOverAge, func(i, j int) bool {
+			if stats.CalibrationOverAge[i].Age != stats.CalibrationOverAge[j].Age {
+				return stats.CalibrationOverAge[i].Age > stats.CalibrationOverAge[j].Age
+			}
+			return stats.CalibrationOverAge[i].Strategy.StrategyID < stats.CalibrationOverAge[j].Strategy.StrategyID
+		})
+		if len(stats.CalibrationOverAge) > MaxCalibrationOverAge {
+			stats.CalibrationOverAge = stats.CalibrationOverAge[:MaxCalibrationOverAge]
+		}
+	}
 	all := len(cache.index.entries) > 0
 	for _, entry := range cache.index.entries {
 		if !entry.indexReadAt.IsZero() {
