@@ -6,6 +6,7 @@ package rollout
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -139,6 +140,23 @@ func waitState(t *testing.T, store *Store, id, state string) Record {
 	}
 	entry, err := store.Get(context.Background(), id)
 	t.Fatalf("receipt %s never reached %s: %+v %v", id, state, entry.Record, err)
+	return Record{}
+}
+
+// waitStateIn waits for a receipt to reach any of the states, by reading the
+// store: for a state the driver may pass through between two reads, name
+// the states that follow it too.
+func waitStateIn(t *testing.T, store *Store, id string, states ...string) Record {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry, err := store.Get(context.Background(), id); err == nil && slices.Contains(states, entry.Record.State) {
+			return entry.Record
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	entry, err := store.Get(context.Background(), id)
+	t.Fatalf("receipt %s never reached any of %v: %+v %v", id, states, entry.Record, err)
 	return Record{}
 }
 
@@ -348,12 +366,16 @@ func TestARevertThatFailsToo(t *testing.T) {
 // rollout is watched; not written, the receipt ends not_applied. A write
 // the apiserver failed for another reason ends not_applied at once.
 func TestAPendingReceiptIsDecidedByTheImage(t *testing.T) {
+	// A watched rollout can pass rolling_out before any poll sees it, so the
+	// written case accepts it or where a watched rollout goes next; the other
+	// two are final.
 	for _, tc := range []struct {
-		name, image, state string
+		name, image string
+		states      []string
 	}{
-		{"written", "app:2", StateRollingOut},
-		{"not written", "app:1", StateNotApplied},
-		{"someone else's", "app:3", StateSuperseded},
+		{"written", "app:2", []string{StateRollingOut, StateComplete}},
+		{"not written", "app:1", []string{StateNotApplied}},
+		{"someone else's", "app:3", []string{StateSuperseded}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestStore(t, LeaseDuration)
@@ -365,7 +387,7 @@ func TestAPendingReceiptIsDecidedByTheImage(t *testing.T) {
 			_ = store.Release(context.Background(), "r1", "pod-a/1")
 			d, _ := testDriver(t, store, cluster, "pod-b/1")
 			run(t, d)
-			waitState(t, store, "r1", tc.state)
+			waitStateIn(t, store, "r1", tc.states...)
 		})
 	}
 	store := newTestStore(t, LeaseDuration)
