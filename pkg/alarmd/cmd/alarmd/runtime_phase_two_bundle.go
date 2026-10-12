@@ -272,6 +272,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// bounded diagnostic; the census is every owned Query Group's peak for
 	// the heartbeat, which has to be a census.
 	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
+	// A Query Group's last Slot peak is held for two of its own periods and
+	// the replay age, so an hourly or daily one stays a reading between Slots.
+	retainedPeaks.SetReplayAge(cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
 	// Each member named, so that a panic in one is counted under it while the
 	// others still receive the observation.
 	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),

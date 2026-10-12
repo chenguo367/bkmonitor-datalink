@@ -2844,6 +2844,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
 		InPlaceWait:     inPlaceWaitFacts(result.InPlaceWait),
+		FollowingSlot:   int64(execution.FollowingSlotOf(ctx)),
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err
