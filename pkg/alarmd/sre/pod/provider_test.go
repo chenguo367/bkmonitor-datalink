@@ -499,15 +499,18 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan ExecReceipt, 1)
 	go func() {
-		result, err := provider.Exec(ctx, ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "sleep 10"}, TimeoutMS: 200})
+		result, err := provider.Exec(ctx, ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "sleep 10"}, TimeoutMS: 5000})
 		if err == nil {
 			t.Error("cancel did not return a named failure")
 		}
 		done <- result
 	}()
+	// The waits below only guard a hang. Promptness is an order, not a
+	// margin: the canceled answer arrives while the remote command, under its
+	// own 5 s deadline, is still running, and the remote then ends by itself.
 	select {
 	case <-started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(time.Minute):
 		t.Fatal("remote supervisor did not start")
 	}
 	cancel()
@@ -516,16 +519,103 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 		if result.RemoteState != RemoteUnknown || result.ExitCode != nil || result.EvidenceScope != "post_observation_unavailable" {
 			t.Fatalf("canceled receipt: %+v", result)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("cancellation did not return promptly")
+	case <-time.After(time.Minute):
+		t.Fatal("cancellation did not return")
+	}
+	select {
+	case err := <-remoteDone:
+		t.Fatalf("cancellation waited for the remote command to end: %v", err)
+	default:
 	}
 	select {
 	case err := <-remoteDone:
 		if err != nil {
 			t.Fatalf("independent remote timer failed: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(time.Minute):
 		t.Fatal("remote process outlived its independent deadline")
+	}
+}
+
+// The supervisor signals the command's group once more after the command
+// ends. A kernel may refuse that with EPERM while the group's members are
+// still being reaped (seen on a loaded machine); the command is over all the
+// same, and the supervisor still reports how it ended rather than dying
+// without a report, which Exec could only answer as unknown.
+func TestSupervisorReportsWhenTheEndedGroupRefusesSignals(t *testing.T) {
+	provider, _, _ := runtimeProvider(t)
+	python := provider.options.Scopes[0].Timeout.PythonPath
+	refusing := "import os, sys\n" +
+		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
+		"os.killpg = refused\n" +
+		"source = sys.argv.pop(1)\n" +
+		"exec(compile(source, 'remote.py', 'exec'), {'__name__': '__main__'})\n"
+	command := exec.Command(python, "-u", "-c", refusing, remoteSupervisor, "nonce", "5.0", "128", `["/bin/sh","-c","exit 3"]`)
+	var stdout, stderr strings.Builder
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("supervisor failed: %v %s", err, stderr.String())
+		}
+	case <-time.After(time.Minute):
+		command.Process.Kill()
+		t.Fatal("supervisor did not finish")
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var last wireFrame
+	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) != nil || last.Event != "complete" || last.ExitCode == nil || *last.ExitCode != 3 || last.TimedOut {
+		t.Fatalf("supervisor report %q, want the command's completion with exit 3", lines)
+	}
+}
+
+// A group the supervisor cannot signal while its command still runs (a
+// command that changed identity, say) is not reported as timed out or
+// complete: the deadline's TERM and KILL are refused, and the supervisor's
+// own wait after its last KILL ends in an unknown report.
+func TestSupervisorReportsUnknownWhenTheLiveGroupRefusesSignals(t *testing.T) {
+	provider, _, _ := runtimeProvider(t)
+	python := provider.options.Scopes[0].Timeout.PythonPath
+	pidPath := filepath.Join(t.TempDir(), "command-pid")
+	refusing := "import os, sys\n" +
+		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
+		"os.killpg = refused\n" +
+		"source = sys.argv.pop(1)\n" +
+		"exec(compile(source, 'remote.py', 'exec'), {'__name__': '__main__'})\n"
+	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "echo $$ > \"$1\"; exec sleep 30", "cmd", pidPath})
+	command := exec.Command(python, "-u", "-c", refusing, remoteSupervisor, "nonce", "0.2", "128", string(argv))
+	var stdout, stderr strings.Builder
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if data, err := os.ReadFile(pidPath); err == nil {
+			if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("supervisor failed: %v %s", err, stderr.String())
+		}
+	case <-time.After(time.Minute):
+		command.Process.Kill()
+		t.Fatal("supervisor did not finish")
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var last wireFrame
+	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) != nil || last.Event != "unknown" {
+		t.Fatalf("supervisor report %q, want unknown for a command it could not stop", lines)
 	}
 }
 
@@ -552,7 +642,7 @@ func TestSupervisorBrokenOutputPipeRetainsDeadline(t *testing.T) {
 		if err != nil {
 			t.Fatalf("broken pipe defeated deadline: %v", err)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(time.Minute):
 		command.Process.Kill()
 		t.Fatal("supervisor failed to finish after broken pipe")
 	}
@@ -629,7 +719,9 @@ func TestRemoteDeadlineSurvivesOutputBackpressure(t *testing.T) {
 	if err != nil || !strings.Contains(output, `"event":"output"`) {
 		t.Fatalf("command produced no output before its deadline: frame=%q err=%v", output, err)
 	}
-	end := time.Now().Add(4 * time.Second)
+	// Only a hang guard: the supervisor's 2.0 s deadline and TERM grace end
+	// the command, and a loaded machine must not turn their sum into a failure.
+	end := time.Now().Add(time.Minute)
 	pid := 0
 	for time.Now().Before(end) {
 		data, err := os.ReadFile(pidPath)

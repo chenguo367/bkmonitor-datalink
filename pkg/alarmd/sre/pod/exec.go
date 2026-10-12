@@ -109,10 +109,11 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	argvJSON, _ := json.Marshal(request.Argv)
 	remoteArgv := []string{scope.Timeout.PythonPath, "-u", "-c", remoteSupervisor, nonce, strconv.FormatFloat(timeout.Seconds(), 'f', 6, 64), strconv.FormatInt(limit, 10), string(argvJSON)}
 	protocol := newProtocolWriter(nonce, limit)
-	// Additional time permits TERM/KILL and the terminal receipt. The command
-	// deadline itself is enforced inside the target, independently of this timer.
-	execCtx, execCancel := context.WithTimeout(ctx, timeout+TerminationGrace)
+	execCtx, execCancel := context.WithCancel(ctx)
+	streamDone := make(chan struct{})
+	go bindStream(execCancel, protocol.started, streamDone, timeout)
 	transport, streamErr := p.options.Executor.Stream(execCtx, StreamRequest{Target: request.Target, Argv: remoteArgv, Stdin: strings.NewReader(request.Stdin), Stdout: protocol, Stderr: &discardBounded{limit: 4096}})
+	close(streamDone)
 	execCancel()
 	state := protocol.snapshot()
 	var stdoutCut, stderrCut bool
@@ -159,6 +160,35 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	return result, nil
 }
 
+// bindStream bounds one exec stream by the request's own deadline, counted
+// from the supervisor's start: the supervisor arms its timer before it
+// reports started, so the remote deadline never precedes that report.
+// Connection setup and interpreter start on a loaded node are bounded by
+// StartupAllowance and do not consume the command's time - a stream cut
+// there answers unknown, since the target may still start the command, which
+// then runs to its own timeout; past the deadline
+// TerminationGrace covers TERM, KILL and the terminal report. The command
+// deadline itself is enforced inside the target, independently of this timer.
+func bindStream(cancel context.CancelFunc, started, done <-chan struct{}, timeout time.Duration) {
+	startup := time.NewTimer(StartupAllowance)
+	defer startup.Stop()
+	select {
+	case <-started:
+	case <-startup.C:
+		cancel()
+		return
+	case <-done:
+		return
+	}
+	remote := time.NewTimer(timeout + TerminationGrace)
+	defer remote.Stop()
+	select {
+	case <-remote.C:
+		cancel()
+	case <-done:
+	}
+}
+
 func randomID() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -189,10 +219,11 @@ type protocolWriter struct {
 	pending        []byte
 	stdout, stderr bytes.Buffer
 	state          protocolState
+	started        chan struct{}
 }
 
 func newProtocolWriter(nonce string, limit int64) *protocolWriter {
-	return &protocolWriter{nonce: nonce, limit: limit}
+	return &protocolWriter{nonce: nonce, limit: limit, started: make(chan struct{})}
 }
 func (w *protocolWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
@@ -232,6 +263,7 @@ func (w *protocolWriter) frame(data []byte) error {
 			return fmt.Errorf("duplicate supervisor start")
 		}
 		w.state.started = true
+		close(w.started)
 	case "output":
 		if !w.state.started {
 			return fmt.Errorf("output preceded supervisor start")

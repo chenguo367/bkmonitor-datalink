@@ -40,6 +40,7 @@ func SREOperations(pods *pod.Provider, queries *uq.Provider, scrubber *redact.Sc
 	podLimits := map[string]any{"max_timeout_ms": maxTimeout, "max_output_bytes": maxOutput, "max_stdin_bytes": 32 << 10, "max_targets_per_page": 32, "scope": "deployment_declared_namespace_labels_and_owner_chain", "retry": "explicit_only; canceled or unknown executions must be inspected before retry", "non_tty": true}
 	podLimits["verification_timeout_ms"] = pod.VerificationTimeout.Milliseconds()
 	podLimits["termination_grace_ms"] = pod.TerminationGrace.Milliseconds()
+	podLimits["startup_allowance_ms"] = pod.StartupAllowance.Milliseconds()
 	if pods != nil {
 		podLimits["target_scopes"] = pods.Scopes()
 		podLimits["provider_limits"] = pods.Limits()
