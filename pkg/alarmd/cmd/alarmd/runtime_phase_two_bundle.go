@@ -752,8 +752,13 @@ func openProductionPhaseTwoBundleAssembly(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
+	// Sized by what the owned Query Groups were measured to retain, once
+	// every one of them has been: the cost source reads the census for the
+	// Leader's heartbeat, and the reservation from the same reading.
+	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
 	observationMemory.Reserve("retained", func() (uint64, uint64) {
-		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes, worker.RetainedReserved(coordinator)
+		held := worker.RetainedReserved(coordinator)
+		return workerCosts.RetainedReservation(cfg.PhaseTwo.Coordinator.MaxRetainedBytes, held), held
 	})
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
@@ -849,7 +854,6 @@ func openProductionPhaseTwoBundleAssembly(
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
 	viewGate.retryWithin = cfg.PhaseTwo.Ownership.LeaseRenewInterval.Duration()
-	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
@@ -1298,6 +1302,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// snapshot publishes, from the same sources.
 	observationRefresh.owned = bundle.ownedLeases
 	workerCosts.boundByOwned(bundle.ownedQueryGroups)
+	bundle.workerCosts = workerCosts
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
 	// The first attempt runs now, so a broker that answers is open before the

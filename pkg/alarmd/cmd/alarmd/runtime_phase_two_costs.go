@@ -1,8 +1,10 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -67,6 +69,50 @@ type workerCostSource struct {
 	// were taken across.
 	lastAsked time.Time
 	now       func() time.Time
+	// peaks is the roster's summed retained peak as the last ask read it,
+	// for the observation memory line's retained reservation.
+	peaks atomic.Pointer[rosterRetainedPeak]
+}
+
+// rosterRetainedPeak is the owned Query Groups' retained peaks summed, at
+// one ask: complete only when every one of them had a reading.
+type rosterRetainedPeak struct {
+	sum      uint64
+	complete bool
+	at       time.Time
+}
+
+const (
+	// retainedReservationMargin is the share above the measured peak the
+	// reservation keeps, as a fraction: a quarter.
+	retainedReservationMarginDivisor = 4
+	// rosterPeakStale is how old the summed peak may be and still size the
+	// reservation: three heartbeats. The roster can only change through the
+	// Leader's stream, which is what asks; a stream that stopped asking is
+	// one whose roster nobody vouches for.
+	rosterPeakStale = 3 * viewstream.HeartbeatInterval
+)
+
+// RetainedReservation is what the observation memory line reserves for the
+// retained-byte pool: the Query Groups this replica owns can retain at most
+// their summed peak, each held for two of its periods and the replay age
+// (RetainedPeakCensus), and a quarter more; never less than the pool holds
+// now and never more than its ceiling. Until every owned Query Group has a
+// reading - after a start or a takeover, before its first Slot here - or
+// when the reading is stale, it is the ceiling.
+func (source *workerCostSource) RetainedReservation(ceiling, held uint64) uint64 {
+	if source == nil {
+		return ceiling
+	}
+	reading := source.peaks.Load()
+	if reading == nil || !reading.complete || source.now().Sub(reading.at) > rosterPeakStale {
+		return ceiling
+	}
+	want := reading.sum + reading.sum/retainedReservationMarginDivisor
+	if want < reading.sum {
+		want = ceiling
+	}
+	return min(ceiling, max(held, want))
 }
 
 // reportedCost is what was last sent for one Query Group.
@@ -156,15 +202,28 @@ func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
 	source.mu.Lock()
 	owned := source.owned
 	source.mu.Unlock()
+	roster := -1
 	if owned != nil {
-		roster := owned()
-		keys := make([]string, len(roster))
-		for index, group := range roster {
+		groups := owned()
+		keys := make([]string, len(groups))
+		for index, group := range groups {
 			keys[index] = string(group)
 		}
 		source.census.Retain(keys)
+		roster = len(keys)
 	}
 	peaks := source.census.RetainedPeaks()
+	// The census was just pruned to the roster, so every reading is an owned
+	// Query Group's and as many readings as owned groups is all of them.
+	var sum uint64
+	for _, peak := range peaks {
+		if sum+peak.RetainedBytesPeak < sum {
+			sum = math.MaxUint64
+		} else {
+			sum += peak.RetainedBytesPeak
+		}
+	}
+	source.peaks.Store(&rosterRetainedPeak{sum: sum, complete: roster > 0 && len(peaks) == roster, at: source.now()})
 	if source.meter != nil {
 		// After the pruning, so the size is what the census holds for the
 		// roster rather than what it held before it was cut to it.
