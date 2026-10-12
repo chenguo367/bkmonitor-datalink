@@ -748,6 +748,8 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 	if !owned {
 		err := fmt.Errorf("%w: %w", errClosePrecheck, errCloseNotHeld)
 		m.observe(ctx, qg, closeOutcomePrecheckFailed, err, 0)
+		// Also on a replica that is only draining and still holds the group:
+		// the judgment it drops is made again by whoever holds it next.
 		delete(m.groups, qg)
 		return 0, err
 	}

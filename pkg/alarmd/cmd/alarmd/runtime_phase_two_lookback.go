@@ -122,8 +122,12 @@ func lookbackSupplement(
 				return lookback.SupplementOutcome{Refused: lookback.DirectedFailed}
 			}
 			started := now()
-			facts, err := runner.Supplement(ctx, job.EvaluationTime, job.ReadHoldMillis, scope)
-			done()
+			var facts execution.SupplementFacts
+			var err error
+			func() {
+				defer done()
+				facts, err = runner.Supplement(ctx, job.EvaluationTime, job.ReadHoldMillis, scope)
+			}()
 			// A call that was not refused for the flight held it this long:
 			// the time the Query Group's own Slot waited behind it.
 			held := now().Sub(started)
