@@ -729,6 +729,11 @@ func TestTheDefaultFormElectsAsBeforeButNeverAProcessThatIsStartingOrStopping(t 
 	if leader, _ := fixture.leader(); leader != first {
 		t.Fatalf("leader once the first process started = %v", leader)
 	}
+	// It led at once although it had not been ready for a window: with no
+	// fallback candidate in this form there is nobody to wait for.
+	if first.bundle.controlCandidacyStable(fixture.now()) {
+		t.Fatal("the first process reads as stable the moment it started")
+	}
 	if record, _, _ := first.runtime.store.ReadInstance(fixture.ctx, first.name); !record.ControlCandidacyReady {
 		t.Fatalf("record of a started process = %+v, want ready", record)
 	}
@@ -844,5 +849,120 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 	}
 	if got := rounds(following); got != 0 {
 		t.Fatalf("the Worker that does not lead ran %v rounds of the difference", got)
+	}
+}
+
+// TestAControlProcessInACrashLoopLeavesTheLeaseToAFallbackUntilItIsSteady
+// is the split form with a control process that restarts every 20 s, each
+// time a new incarnation, and two Workers. A control process that has just
+// started holds no fallback off and does not take a free lease while a ready
+// fallback is there, so a Worker leads from the first tick the lease is free
+// and keeps leading through the restarts, and the Workers keep completing
+// every Slot. When the control process stops restarting, the fallback hands
+// the lease back once, after it has been ready for the window, and the
+// control process takes it under the next epoch. No instant has two Leaders.
+func TestAControlProcessInACrashLoopLeavesTheLeaseToAFallbackUntilItIsSteady(t *testing.T) {
+	const queryGroups, restartEvery = 4, 20 * time.Second
+	fixture := newElectionFixture(t, queryGroups, "alarmd:phase-two:election-crash-loop")
+	const controlName = "crash-loop-control"
+	control := fixture.open(controlName, roles.Set{roles.Control}, true)
+	workers := []*electionProcess{
+		fixture.open("crash-loop-worker-1", roles.Set{roles.Worker}, true),
+		fixture.open("crash-loop-worker-2", roles.Set{roles.Worker}, true),
+	}
+	leader, firstEpoch := fixture.leader()
+	if leader != control {
+		t.Fatalf("leader after start = %v, want the control process", leader)
+	}
+	fixture.balance(queryGroups)
+	if got := fixture.pass(1, true, queryGroups); got != queryGroups {
+		t.Fatalf("Slot 0 with the control process up: %d of %d Query Groups completed", got, queryGroups)
+	}
+	// One round at a time on the injected clock, with a beat of real time
+	// for the lease renewals to restate their deadlines on it.
+	round := func() {
+		fixture.advance(5 * time.Second)
+		time.Sleep(1200 * time.Millisecond)
+		fixture.tick()
+	}
+	restart := func() {
+		fixture.crash(control)
+		control = fixture.open(controlName, roles.Set{roles.Control}, true)
+	}
+
+	// The control process dies holding the lease, and its next incarnation
+	// starts once the lease has run out on the Redis clock: it finds the
+	// lease free, has not been ready for a window, and a ready fallback is
+	// there, so it leaves the lease to the fallback.
+	fixture.renewRecords()
+	fixture.crash(control)
+	time.Sleep(3500 * time.Millisecond)
+	control = fixture.open(controlName, roles.Set{roles.Control}, true)
+	if leader, _ := fixture.leader(); leader != nil {
+		t.Fatalf("%s took the free lease on starting; a control process not yet stable waits for a ready fallback", leader.name)
+	}
+	round()
+	fallbackLeader, fallbackEpoch := fixture.leader()
+	if fallbackLeader == nil || fallbackLeader == control || fallbackEpoch <= firstEpoch {
+		t.Fatalf("leader one round after the lease came free = %v epoch %d, want a Worker after epoch %d", fallbackLeader, fallbackEpoch, firstEpoch)
+	}
+	sinceRestart := 5 * time.Second
+	for restarts := 0; restarts < 5; restarts++ {
+		for ; sinceRestart < restartEvery; sinceRestart += 5 * time.Second {
+			round()
+			if leader, epoch := fixture.leader(); leader != fallbackLeader || epoch != fallbackEpoch {
+				t.Fatalf("leader while the control process keeps restarting = %v epoch %d, want %s epoch %d",
+					leader, epoch, fallbackLeader.name, fallbackEpoch)
+			}
+		}
+		restart()
+		sinceRestart = 0
+	}
+	if got := fixture.pass(2, false, queryGroups); got != queryGroups {
+		t.Fatalf("Slot 1 while the control process keeps restarting: %d of %d Query Groups completed", got, queryGroups)
+	}
+	// The pass moved the clock a whole period; a restart now starts the
+	// window again rather than letting the jump count as readiness.
+	restart()
+	if fixture.transitions("preferred", "handback") != 0 {
+		t.Fatalf("handbacks while the control process kept restarting = %v, want 0", fixture.transitions("preferred", "handback"))
+	}
+
+	// It stops restarting. The fallback keeps the lease until the control
+	// process has been ready for the window, then gives it back once.
+	window := controlCandidacyWindow(control.bundle.dependencies.Config)
+	for elapsed := time.Duration(0); fixture.transitions("preferred", "handback") == 0; elapsed += 5 * time.Second {
+		if elapsed > window+30*time.Second {
+			t.Fatalf("no handback %s after the control process stopped restarting", elapsed)
+		}
+		round()
+		if fixture.transitions("preferred", "handback") == 0 && elapsed+5*time.Second < window {
+			if leader, epoch := fixture.leader(); leader != fallbackLeader || epoch != fallbackEpoch {
+				t.Fatalf("leader %s into the window = %v epoch %d, want the fallback still", elapsed, leader, epoch)
+			}
+		}
+	}
+	round()
+	preferredLeader, preferredEpoch := fixture.leader()
+	if preferredLeader != control || preferredEpoch <= fallbackEpoch {
+		t.Fatalf("leader after the handback = %v epoch %d, want %s after epoch %d", preferredLeader, preferredEpoch, control.name, fallbackEpoch)
+	}
+	for step := 0; step < 4; step++ {
+		round()
+	}
+	if leader, epoch := fixture.leader(); leader != control || epoch != preferredEpoch {
+		t.Fatalf("leader after the election settled = %v epoch %d, want %s epoch %d", leader, epoch, control.name, preferredEpoch)
+	}
+	if fixture.transitions("preferred", "handback") != 1 || fixture.transitions("fallback", "fallback_takeover") != 1 {
+		t.Fatalf("transitions = takeover %v handback %v, want 1 and 1",
+			fixture.transitions("fallback", "fallback_takeover"), fixture.transitions("preferred", "handback"))
+	}
+	if got := fixture.pass(3, false, queryGroups); got != queryGroups {
+		t.Fatalf("Slot 2 after the handback: %d of %d Query Groups completed", got, queryGroups)
+	}
+	for _, worker := range workers {
+		if !worker.alive {
+			t.Fatalf("%s did not stay up", worker.name)
+		}
 	}
 }

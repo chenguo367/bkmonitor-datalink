@@ -92,15 +92,44 @@ func controlContentionAllowed(class string, ready, leaseLive, preferredPresent b
 }
 
 // preferredCandidatePresent says some preferred process other than this one
-// has a record that is live at the instant and says it is ready.
-func preferredCandidatePresent(candidates []ownership.InstanceRegistration, self string, at time.Time) bool {
+// has a record that is live at the instant, says it is ready, and has said
+// so for a whole window. Only a stable preferred process holds a fallback
+// off: one that keeps restarting is ready for a moment in every incarnation,
+// and if each of those moments counted, a control process in a crash loop
+// would leave a split deployment with no Leader at all -- the state the
+// fallback exists for.
+func preferredCandidatePresent(candidates []ownership.InstanceRegistration, self string, at time.Time, window time.Duration) bool {
 	for _, candidate := range candidates {
 		if candidate.InstanceID != self && candidate.CandidacyClass() == ownership.ControlCandidacyPreferred &&
+			candidate.CandidacyStable(at, window) {
+			return true
+		}
+	}
+	return false
+}
+
+// readyFallbackPresent says some fallback candidate other than this process
+// has a record that is live at the instant and says it is ready.
+func readyFallbackPresent(candidates []ownership.InstanceRegistration, self string, at time.Time) bool {
+	for _, candidate := range candidates {
+		if candidate.InstanceID != self && candidate.CandidacyClass() == ownership.ControlCandidacyFallback &&
 			candidate.ControlCandidacyReady && candidate.ExpiresAt.After(at) {
 			return true
 		}
 	}
 	return false
+}
+
+// preferredContentionAllowed is whether a preferred process takes a lease it
+// found free. A stable one takes it at once. One that has not yet been ready
+// for a whole window takes it only when no ready fallback is there to lead
+// meanwhile: otherwise the fallback takes it, and hands it back once this
+// process has been stable for the window -- the same hysteresis a handback
+// has, so a process that keeps restarting never holds the lease long enough
+// to drop it again. With no fallback at all, as in the default all-roles
+// form, a preferred process takes a free lease at once, as it always did.
+func preferredContentionAllowed(stable, leaseLive, fallbackReady bool) bool {
+	return !leaseLive && (stable || !fallbackReady)
 }
 
 // controlHandbackWatch is what a fallback Leader remembers between rounds
@@ -166,6 +195,7 @@ func (watch *controlHandbackWatch) reset() {
 type phaseTwoControlCandidateReader interface {
 	ReadActiveControlLeader(context.Context) (ownership.QueryGroupOwner, bool, error)
 	ListPreferredControlCandidates(context.Context, time.Time) ([]ownership.InstanceRegistration, error)
+	ListFallbackControlCandidates(context.Context, time.Time) ([]ownership.InstanceRegistration, error)
 }
 
 // phaseTwoHeldControlLeaderReleaser gives the lease up and says whether
@@ -214,8 +244,49 @@ func (bundle *phaseTwoWorkerBundle) fallbackMayContend(ctx context.Context) (boo
 	if err != nil {
 		return false, err
 	}
-	present := preferredCandidatePresent(candidates, bundle.dependencies.Config.PhaseTwo.Worker.ID, at)
+	present := preferredCandidatePresent(candidates, bundle.dependencies.Config.PhaseTwo.Worker.ID, at,
+		controlCandidacyWindow(bundle.dependencies.Config))
 	return controlContentionAllowed(bundle.candidacy, true, false, present), nil
+}
+
+// controlCandidacyStable is whether this process's own record has said ready
+// for a whole window, by the ready-since time its writer keeps.
+func (bundle *phaseTwoWorkerBundle) controlCandidacyStable(at time.Time) bool {
+	if bundle.dependencies.Health == nil || !bundle.controlCandidacyReady() {
+		return false
+	}
+	since := bundle.dependencies.Health.candidacyReadySince.Load()
+	return since != 0 && !at.Before(time.UnixMilli(since).Add(controlCandidacyWindow(bundle.dependencies.Config)))
+}
+
+// preferredMayContend is what a preferred process reads before it tries the
+// lease when it is not yet stable: whether the lease is live, and if it is
+// not, whether a ready fallback is there. A stable process reads neither and
+// asks the acquire script, as before, so the steady state costs what it did.
+func (bundle *phaseTwoWorkerBundle) preferredMayContend(ctx context.Context) (bool, error) {
+	at := bundle.dependencies.Now()
+	if bundle.controlCandidacyStable(at) {
+		return true, nil
+	}
+	reader, ok := bundle.dependencies.Ownership.(phaseTwoControlCandidateReader)
+	if !ok {
+		// Nothing to wait for that this runtime could see: contend as a
+		// preferred process always did.
+		return true, nil
+	}
+	_, live, err := reader.ReadActiveControlLeader(ctx)
+	if err != nil {
+		return false, err
+	}
+	if live {
+		return false, nil
+	}
+	fallbacks, err := reader.ListFallbackControlCandidates(ctx, at)
+	if err != nil {
+		return false, err
+	}
+	ready := readyFallbackPresent(fallbacks, bundle.dependencies.Config.PhaseTwo.Worker.ID, at)
+	return preferredContentionAllowed(false, false, ready), nil
 }
 
 // considerHandback is a fallback Leader's check, at the end of a round that

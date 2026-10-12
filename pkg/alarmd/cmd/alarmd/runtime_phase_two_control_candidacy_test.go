@@ -79,24 +79,87 @@ func preferredRecordForTest(id, incarnation string, ready bool, expiresAt time.T
 		ExpiresAt: expiresAt, ControlCandidacy: ownership.ControlCandidacyPreferred, ControlCandidacyReady: ready}
 }
 
-func TestAPreferredProcessHoldsAFallbackOffOnlyWhileItsRecordIsLiveAndReady(t *testing.T) {
+// readySinceForTest is a preferred record that has said ready since the
+// time given.
+func readySinceForTest(record ownership.InstanceRegistration, since time.Time) ownership.InstanceRegistration {
+	record.ControlCandidacyReadySince = &since
+	return record
+}
+
+func TestOnlyAStablePreferredProcessHoldsAFallbackOff(t *testing.T) {
+	const window = time.Minute
 	at := time.Unix(1_800_000_000, 0)
+	stable := func(id string, ready bool, expiresAt time.Time) ownership.InstanceRegistration {
+		return readySinceForTest(preferredRecordForTest(id, "1", ready, expiresAt), at.Add(-window))
+	}
 	for _, testCase := range []struct {
 		name       string
 		candidates []ownership.InstanceRegistration
 		want       bool
 	}{
 		{name: "none registered"},
-		{name: "live and ready", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", true, at.Add(time.Second))}, want: true},
+		{name: "live, ready for the whole window", candidates: []ownership.InstanceRegistration{stable("c", true, at.Add(time.Second))}, want: true},
+		// A process that keeps restarting is ready for a moment in each
+		// incarnation and never for a window: it holds nobody off.
+		{name: "live, ready for less than the window", candidates: []ownership.InstanceRegistration{
+			readySinceForTest(preferredRecordForTest("c", "1", true, at.Add(time.Minute)), at.Add(-window+time.Second))}},
+		{name: "ready with no ready-since time, as an older record", candidates: []ownership.InstanceRegistration{
+			preferredRecordForTest("c", "1", true, at.Add(time.Minute))}},
 		{name: "live, not ready", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", false, at.Add(time.Minute))}},
-		{name: "ready, expired", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", true, at)}},
-		{name: "itself", candidates: []ownership.InstanceRegistration{preferredRecordForTest("self", "1", true, at.Add(time.Minute))}},
+		{name: "stable, expired", candidates: []ownership.InstanceRegistration{stable("c", true, at)}},
+		{name: "itself", candidates: []ownership.InstanceRegistration{stable("self", true, at.Add(time.Minute))}},
 		{name: "a control record from before candidacy is not ready", candidates: []ownership.InstanceRegistration{
 			{InstanceID: "old", Roles: roles.Set{roles.Control}, Incarnation: "1", ExpiresAt: at.Add(time.Minute)}}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := preferredCandidatePresent(testCase.candidates, "self", at); got != testCase.want {
+			if got := preferredCandidatePresent(testCase.candidates, "self", at, window); got != testCase.want {
 				t.Fatalf("preferredCandidatePresent() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestAPreferredProcessThatIsNotYetStableLeavesAFreeLeaseToAReadyFallback(t *testing.T) {
+	for _, testCase := range []struct {
+		name                             string
+		stable, leaseLive, fallbackReady bool
+		want                             bool
+	}{
+		{name: "stable, free lease, a ready fallback", stable: true, fallbackReady: true, want: true},
+		{name: "stable, free lease, no fallback", stable: true, want: true},
+		// The default all-roles form: no fallback exists, so a process
+		// that has just started takes a free lease at once, as before.
+		{name: "not yet stable, free lease, no ready fallback", want: true},
+		{name: "not yet stable, free lease, a ready fallback", fallbackReady: true},
+		{name: "stable, lease live", stable: true, leaseLive: true},
+		{name: "not yet stable, lease live", leaseLive: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := preferredContentionAllowed(testCase.stable, testCase.leaseLive, testCase.fallbackReady); got != testCase.want {
+				t.Fatalf("preferredContentionAllowed() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+	at := time.Unix(1_800_000_000, 0)
+	fallback := func(id string, ready bool, expiresAt time.Time) ownership.InstanceRegistration {
+		return ownership.InstanceRegistration{InstanceID: id, Roles: roles.Set{roles.Worker}, Incarnation: "1", ExpiresAt: expiresAt,
+			ControlCandidacy: ownership.ControlCandidacyFallback, ControlCandidacyReady: ready}
+	}
+	for _, testCase := range []struct {
+		name       string
+		candidates []ownership.InstanceRegistration
+		want       bool
+	}{
+		{name: "none registered"},
+		{name: "live and ready", candidates: []ownership.InstanceRegistration{fallback("w", true, at.Add(time.Second))}, want: true},
+		{name: "live, not ready", candidates: []ownership.InstanceRegistration{fallback("w", false, at.Add(time.Minute))}},
+		{name: "ready, expired", candidates: []ownership.InstanceRegistration{fallback("w", true, at)}},
+		{name: "itself", candidates: []ownership.InstanceRegistration{fallback("self", true, at.Add(time.Minute))}},
+		{name: "a preferred record is no fallback", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", true, at.Add(time.Minute))}},
+	} {
+		t.Run("fallback "+testCase.name, func(t *testing.T) {
+			if got := readyFallbackPresent(testCase.candidates, "self", at); got != testCase.want {
+				t.Fatalf("readyFallbackPresent() = %v, want %v", got, testCase.want)
 			}
 		})
 	}

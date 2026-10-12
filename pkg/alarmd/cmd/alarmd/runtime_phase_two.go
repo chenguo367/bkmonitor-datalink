@@ -3133,6 +3133,17 @@ func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context)
 	if !controlContentionAllowed(bundle.candidacy, ready, false, false) {
 		return false, nil
 	}
+	if bundle.candidacy == ownership.ControlCandidacyPreferred {
+		allowed, err := bundle.preferredMayContend(ctx)
+		if err != nil {
+			bundle.noteControlRole(false, err)
+			return false, err
+		}
+		if !allowed {
+			bundle.noteControlRole(false, nil)
+			return false, nil
+		}
+	}
 	if bundle.candidacy == ownership.ControlCandidacyFallback {
 		allowed, err := bundle.fallbackMayContend(ctx)
 		if err != nil {
@@ -4494,6 +4505,11 @@ type phaseTwoApplicationHealth struct {
 	// contend for the Control Leader lease, for the instance record. False
 	// until the bundle has started, and again once it drains.
 	candidacyReady atomic.Bool
+	// candidacyReadySince is the record writer's word back: when this
+	// incarnation's record first said ready, in Unix milliseconds, or 0
+	// while it does not. The bundle judges its own stability by it, so the
+	// process and the fallbacks that read its record judge by one time.
+	candidacyReadySince atomic.Int64
 }
 
 func newPhaseTwoApplicationHealth() *phaseTwoApplicationHealth {

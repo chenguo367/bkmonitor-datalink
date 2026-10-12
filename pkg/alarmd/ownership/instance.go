@@ -45,6 +45,14 @@ type InstanceRegistration struct {
 	// does not contend, and a preferred one that is not ready does not hold
 	// a fallback off.
 	ControlCandidacyReady bool `json:"control_candidacy_ready,omitempty"`
+	// ControlCandidacyReadySince is when this incarnation's record first
+	// said ready, kept while it stays ready and dropped the first time it
+	// does not. A candidate is stable once it has been ready for a whole
+	// candidacy window (CandidacyStable). A process that keeps restarting
+	// never is: every incarnation starts again from its own first ready
+	// write. Absent in records from before it existed, which read as not
+	// stable.
+	ControlCandidacyReadySince *time.Time `json:"control_candidacy_ready_since,omitempty"`
 }
 
 // The two candidacy classes. Derived from the roles, never configured: the
@@ -66,6 +74,9 @@ func (instance InstanceRegistration) Validate() error {
 		if !instance.Roles.Has(role) || status == "" {
 			return errors.New("alarmd ownership: status requires a declared role and nonempty value")
 		}
+	}
+	if instance.ControlCandidacyReadySince != nil && !instance.ControlCandidacyReady {
+		return errors.New("alarmd ownership: a candidacy ready-since time requires a ready candidacy")
 	}
 	switch instance.ControlCandidacy {
 	case "":
@@ -92,6 +103,14 @@ func (instance InstanceRegistration) Validate() error {
 // not the role alone, to accept that process as the Leader it talks to.
 func (instance InstanceRegistration) ControlCapable() bool {
 	return instance.Roles.Has(roles.Control) || instance.ControlCandidacy == ControlCandidacyFallback
+}
+
+// CandidacyStable says the record is live at the instant, says ready, and
+// has said so since at least window before it. A record without a ready-since
+// time is not stable, whatever else it says.
+func (instance InstanceRegistration) CandidacyStable(at time.Time, window time.Duration) bool {
+	return instance.ControlCandidacyReady && instance.ExpiresAt.After(at) && instance.ControlCandidacyReadySince != nil &&
+		!at.Before(instance.ControlCandidacyReadySince.Add(window))
 }
 
 // CandidacyClass is the class the record stands in, reading a record from
@@ -126,21 +145,33 @@ func (store *RedisStore) RegisterInstance(ctx context.Context, instance Instance
 	if err != nil {
 		return fmt.Errorf("alarmd ownership: encode instance registration: %w", err)
 	}
-	if instance.ControlCandidacy != ControlCandidacyPreferred {
+	index := store.candidatesKey(instance.ControlCandidacy)
+	if index == "" {
 		return store.client.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl).Err()
 	}
-	// A preferred candidate is also named in the index a fallback reads, in
-	// the same transaction: a record written without its index entry would
-	// be a live preferred process a fallback cannot see, free to take a lease
-	// that is about to be wanted back. The score is the record's own expiry,
-	// so the index never says a record is live longer than the record is.
-	_, err = store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+	// A candidate is also named in its class's index, in the same round
+	// trip. The score is the record's own expiry, so the index never says a
+	// record is live longer than the record is.
+	//
+	// A preferred record and its entry are one transaction: a record written
+	// without its entry would be a live preferred process a fallback cannot
+	// see and takes the lease in front of. A fallback's are only pipelined:
+	// a fallback missing from its index makes a preferred process that is
+	// not yet stable contend at once, which is the behaviour without
+	// fallbacks and the safe side, and a Worker's renewal then costs one
+	// command more rather than three.
+	write := func(pipe redis.Pipeliner) error {
 		pipe.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl)
-		pipe.ZAdd(ctx, store.preferredCandidatesKey(), &redis.Z{
+		pipe.ZAdd(ctx, index, &redis.Z{
 			Score: float64(instance.ExpiresAt.UnixMilli()), Member: instance.InstanceID,
 		})
 		return nil
-	})
+	}
+	if instance.ControlCandidacy == ControlCandidacyPreferred {
+		_, err = store.client.TxPipelined(ctx, write)
+	} else {
+		_, err = store.client.Pipelined(ctx, write)
+	}
 	return err
 }
 
@@ -153,6 +184,24 @@ func (store *RedisStore) preferredCandidatesKey() string {
 	return store.prefix + ":control-preferred-candidates"
 }
 
+// fallbackCandidatesKey indexes the Workers that stand as fallback
+// candidates, the same way. It is read only by a preferred process that finds
+// the lease free before it has itself been ready for a whole window, to ask
+// whether a ready fallback is there to take the lease meanwhile.
+func (store *RedisStore) fallbackCandidatesKey() string {
+	return store.prefix + ":control-fallback-candidates"
+}
+
+func (store *RedisStore) candidatesKey(class string) string {
+	switch class {
+	case ControlCandidacyPreferred:
+		return store.preferredCandidatesKey()
+	case ControlCandidacyFallback:
+		return store.fallbackCandidatesKey()
+	}
+	return ""
+}
+
 // ListPreferredControlCandidates reads every preferred candidate whose record
 // is live at the given instant, ready or not; the caller judges readiness.
 // One round trip prunes the index and reads it, a second reads the records.
@@ -163,10 +212,22 @@ func (store *RedisStore) preferredCandidatesKey() string {
 // as "no preferred process is there" -- the one answer that lets it contend
 // against a preferred process that is.
 func (store *RedisStore) ListPreferredControlCandidates(ctx context.Context, at time.Time) ([]InstanceRegistration, error) {
+	return store.listControlCandidates(ctx, at, ControlCandidacyPreferred)
+}
+
+// ListFallbackControlCandidates reads every fallback candidate whose record
+// is live at the instant, ready or not, under the same rules: the caller is a
+// preferred process deciding whether to wait for one, and a short list would
+// read as "no fallback is there".
+func (store *RedisStore) ListFallbackControlCandidates(ctx context.Context, at time.Time) ([]InstanceRegistration, error) {
+	return store.listControlCandidates(ctx, at, ControlCandidacyFallback)
+}
+
+func (store *RedisStore) listControlCandidates(ctx context.Context, at time.Time, class string) ([]InstanceRegistration, error) {
 	if store == nil || store.client == nil || at.IsZero() {
 		return nil, errors.New("alarmd ownership: candidate listing needs a store and an instant")
 	}
-	key := store.preferredCandidatesKey()
+	key := store.candidatesKey(class)
 	cutoff := strconv.FormatInt(at.UnixMilli(), 10)
 	var listed *redis.StringSliceCmd
 	if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -207,7 +268,7 @@ func (store *RedisStore) ListPreferredControlCandidates(ctx context.Context, at 
 		if err := instance.Validate(); err != nil {
 			return nil, err
 		}
-		if instance.InstanceID != ids[index] || instance.CandidacyClass() != ControlCandidacyPreferred || !instance.ExpiresAt.After(at) {
+		if instance.InstanceID != ids[index] || instance.CandidacyClass() != class || !instance.ExpiresAt.After(at) {
 			continue
 		}
 		candidates = append(candidates, instance)

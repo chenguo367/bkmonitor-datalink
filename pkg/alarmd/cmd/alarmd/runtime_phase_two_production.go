@@ -2642,6 +2642,7 @@ func (runtime *productionPhaseTwoOwnership) controlCapable() bool {
 type productionControlCandidateStore interface {
 	ReadActiveControlLeader(context.Context) (ownership.QueryGroupOwner, bool, error)
 	ListPreferredControlCandidates(context.Context, time.Time) ([]ownership.InstanceRegistration, error)
+	ListFallbackControlCandidates(context.Context, time.Time) ([]ownership.InstanceRegistration, error)
 }
 
 // ReadActiveControlLeader passes the store's live lease read through. A
@@ -2662,6 +2663,16 @@ func (runtime *productionPhaseTwoOwnership) ListPreferredControlCandidates(ctx c
 		return nil, errors.New("phase-two ownership store cannot list control candidates")
 	}
 	return store.ListPreferredControlCandidates(ctx, at)
+}
+
+// ListFallbackControlCandidates passes the store's fallback listing through,
+// under the same rule.
+func (runtime *productionPhaseTwoOwnership) ListFallbackControlCandidates(ctx context.Context, at time.Time) ([]ownership.InstanceRegistration, error) {
+	store, ok := runtime.dependencies.Store.(productionControlCandidateStore)
+	if !ok {
+		return nil, errors.New("phase-two ownership store cannot list control candidates")
+	}
+	return store.ListFallbackControlCandidates(ctx, at)
 }
 
 func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(

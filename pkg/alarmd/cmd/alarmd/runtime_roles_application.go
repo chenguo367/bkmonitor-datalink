@@ -44,6 +44,10 @@ type phaseTwoRoleRuntime struct {
 	// candidacy is the class the record states for the Control Leader
 	// lease; readiness is the bundle's, read from the health it updates.
 	candidacy string
+	// readySince is when this incarnation's record first said ready, zero
+	// while it does not; see InstanceRegistration.ControlCandidacyReadySince.
+	readySinceMu sync.Mutex
+	readySince   time.Time
 }
 
 type roleEvidenceServer struct {
@@ -163,11 +167,29 @@ func (runtime *phaseTwoRoleRuntime) writeInstance(ctx context.Context, health *p
 	// drain would hold a fallback off a process that is leaving.
 	candidacyReady := runtime.candidacy != "" && health.candidacyReady.Load() &&
 		snapshot.State != observability.HealthDraining && snapshot.State != observability.HealthFatal
+	// The first write that says ready starts the incarnation's ready-since
+	// time; every later one keeps it; the first that does not drops it, so
+	// readiness that broke starts again rather than counting from before.
+	var readySince *time.Time
+	runtime.readySinceMu.Lock()
+	if !candidacyReady {
+		runtime.readySince = time.Time{}
+	} else if runtime.readySince.IsZero() {
+		runtime.readySince = runtime.now()
+	}
+	if candidacyReady {
+		since := runtime.readySince
+		readySince = &since
+		health.candidacyReadySince.Store(since.UnixMilli())
+	} else {
+		health.candidacyReadySince.Store(0)
+	}
+	runtime.readySinceMu.Unlock()
 	registration := ownership.InstanceRegistration{InstanceID: runtime.config.PhaseTwo.Worker.ID,
 		Roles: runtime.config.EffectiveRoles(), Endpoint: runtime.StreamIdentity.Endpoint,
 		Incarnation: runtime.Incarnation, InternalToken: runtime.StreamIdentity.Token,
 		ExpiresAt: runtime.now().Add(runtime.config.PhaseTwo.Worker.RegistrationTTL.Duration()), RoleStatus: statuses,
-		ControlCandidacy: runtime.candidacy, ControlCandidacyReady: candidacyReady}
+		ControlCandidacy: runtime.candidacy, ControlCandidacyReady: candidacyReady, ControlCandidacyReadySince: readySince}
 	round, stop := context.WithTimeout(ctx, time.Second)
 	err := runtime.store.RegisterInstance(round, registration)
 	stop()

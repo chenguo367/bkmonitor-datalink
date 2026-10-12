@@ -6,6 +6,7 @@ package ownership
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,5 +178,68 @@ func TestAPreferredCandidateIsListedOnlyWhileItsRecordIsLive(t *testing.T) {
 	}
 	if _, err := store.ListPreferredControlCandidates(ctx, at); err == nil {
 		t.Fatal("an unreadable preferred record was answered with a short list")
+	}
+}
+
+func TestACandidateIsStableOnlyAfterAWholeWindowOfReadinessFromItsOwnRecord(t *testing.T) {
+	at := time.Unix(1_800_000_000, 0)
+	since := at.Add(-time.Minute)
+	record := InstanceRegistration{InstanceID: "c", Roles: roles.Set{roles.Control}, Incarnation: "p", ExpiresAt: at.Add(time.Minute),
+		ControlCandidacy: ControlCandidacyPreferred, ControlCandidacyReady: true, ControlCandidacyReadySince: &since}
+	if err := record.Validate(); err != nil || !record.CandidacyStable(at, time.Minute) {
+		t.Fatalf("a record ready for the whole window: valid %v, stable %v", err, record.CandidacyStable(at, time.Minute))
+	}
+	if record.CandidacyStable(at.Add(-time.Second), time.Minute) {
+		t.Fatal("stable a second before the window had passed")
+	}
+	if expired := record; expired.CandidacyStable(at.Add(time.Minute), time.Minute) {
+		t.Fatal("an expired record reads as stable")
+	}
+	older := record
+	older.ControlCandidacyReadySince = nil
+	if older.CandidacyStable(at, time.Minute) {
+		t.Fatal("a record without a ready-since time reads as stable")
+	}
+	notReady := record
+	notReady.ControlCandidacyReady = false
+	if err := notReady.Validate(); err == nil {
+		t.Fatal("a ready-since time on a record that is not ready was accepted")
+	}
+	payload, _ := json.Marshal(older)
+	if strings.Contains(string(payload), "control_candidacy_ready_since") {
+		t.Fatalf("a record with no ready-since time writes the field: %s", payload)
+	}
+}
+
+func TestAFallbackCandidateIsListedFromItsOwnIndex(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	for _, instance := range []InstanceRegistration{
+		{InstanceID: "worker-b", Roles: roles.Set{roles.Worker}, Incarnation: "b", ExpiresAt: at.Add(time.Minute),
+			ControlCandidacy: ControlCandidacyFallback, ControlCandidacyReady: true},
+		{InstanceID: "worker-a", Roles: roles.Set{roles.Worker}, Incarnation: "a", ExpiresAt: at.Add(10 * time.Second),
+			ControlCandidacy: ControlCandidacyFallback},
+		{InstanceID: "control", Roles: roles.Set{roles.Control}, Incarnation: "c", ExpiresAt: at.Add(time.Minute),
+			ControlCandidacy: ControlCandidacyPreferred, ControlCandidacyReady: true},
+		{InstanceID: "plain-worker", Roles: roles.Set{roles.Worker}, Incarnation: "w", ExpiresAt: at.Add(time.Minute)},
+	} {
+		if err := store.RegisterInstance(ctx, instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed, err := store.ListFallbackControlCandidates(ctx, at)
+	if err != nil || len(listed) != 2 || listed[0].InstanceID != "worker-a" || listed[1].InstanceID != "worker-b" || !listed[1].ControlCandidacyReady {
+		t.Fatalf("fallback candidates = (%+v, %v), want worker-a and worker-b and nothing else", listed, err)
+	}
+	if preferred, err := store.ListPreferredControlCandidates(ctx, at); err != nil || len(preferred) != 1 || preferred[0].InstanceID != "control" {
+		t.Fatalf("preferred candidates = (%+v, %v), want only the control process", preferred, err)
+	}
+	listed, err = store.ListFallbackControlCandidates(ctx, at.Add(20*time.Second))
+	if err != nil || len(listed) != 1 || listed[0].InstanceID != "worker-b" {
+		t.Fatalf("fallback candidates past worker-a's expiry = (%+v, %v)", listed, err)
+	}
+	if members := store.client.ZRange(ctx, store.fallbackCandidatesKey(), 0, -1).Val(); len(members) != 1 || members[0] != "worker-b" {
+		t.Fatalf("fallback index after the read = %v, want the lapsed entry pruned", members)
 	}
 }
