@@ -125,7 +125,11 @@ func (c *RetainedPeakCensus) heldPeak(s censusSlot, now time.Time) uint64 {
 // later Slot replaces the held one; the same Slot, or an earlier one being
 // replayed, keeps the larger. A Slot's period is the distance to the Slot
 // after it, from the completion when it carries it and otherwise learned
-// from two Slots read in turn.
+// from two Slots read in turn. A learned period is not corrected: two Slots
+// that straddle a skipped round learn a multiple of it and hold the peak
+// longer, which reads a Worker heavier for a while rather than lighter - the
+// direction that does not send a move to it. Any completion carrying the
+// Slot after it sets the period exactly.
 func (c *RetainedPeakCensus) holdSlot(s *censusSlot, evaluation, following int64, peak uint64, now time.Time) {
 	// A hold that has run out reads nothing more, but its Slot still says
 	// where the next one is from, so the period can be learned across it.
