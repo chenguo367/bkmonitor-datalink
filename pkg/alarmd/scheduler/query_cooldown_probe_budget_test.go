@@ -14,59 +14,89 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// budgetSeeingExecutor answers every execution available and keeps whether
-// each ran marked to a normal round's budget.
-type budgetSeeingExecutor struct {
-	marked []bool
+// operationSeeingExecutor answers every execution with availability and
+// keeps the operation each ran as.
+type operationSeeingExecutor struct {
+	availability execution.QueryAvailability
+	operations   []execution.Operation
 }
 
-func (executor *budgetSeeingExecutor) Execute(ctx context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
-	executor.marked = append(executor.marked, execution.NormalQueryBudget(ctx))
-	return execution.SlotExecutionResult{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable}, nil
+func (executor *operationSeeingExecutor) Execute(_ context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	executor.operations = append(executor.operations, request.Operation)
+	result := execution.SlotExecutionResult{Completed: true, QueryAvailability: executor.availability}
+	if executor.availability == execution.QueryAvailabilityUnavailable {
+		result.QueryUnavailableReason = execution.ReasonCode(contract.ReasonQueryTimeout)
+	}
+	return result, nil
 }
 
-// An execution the pool lets run before its cooldown has run out - here a
-// retry of the Slot already in flight, which deferUnavailableQuery does not
-// hold back - decides the pool as much as the first one after the cooldown:
-// its answer takes the Query Group out. It runs marked to a normal round's
-// budget too. The same retry outside the pool is not marked.
-func TestEveryExecutionThePoolLetsRunHasANormalRoundsBudget(t *testing.T) {
-	for _, pooled := range []bool{true, false} {
-		now := time.Unix(100, 0)
-		store := newMemoryCooldownStore()
-		source := &fakeSlotSource{slot: frozenSlot("query-group-1"), facts: SlotDueFacts{IntervalSeconds: 10}}
-		source.slot.EarliestQueryDeadlineUnixMilli = 150_000
-		if pooled {
+// Only a normal execution decides the pool. A retry of the Slot in flight,
+// which the pool lets run before its cooldown has run out, runs, and the
+// Query Group stays in as it was whether the retry answered or timed out:
+// the retry ran when its backoff said, not at the Slot's own second with the
+// Query Groups its normal rounds queue behind, so it neither takes the Query
+// Group out nor counts a failure or extends the cooldown. With the cooldown
+// run out, the Slot runs as a normal execution and its answer takes the
+// Query Group out, with the probe kept.
+func TestOnlyANormalExecutionDecidesThePool(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		operation    execution.Operation
+		availability execution.QueryAvailability
+		decides      bool
+	}{
+		{"a retry in flight that answers", execution.OperationRetry, execution.QueryAvailabilityAvailable, false},
+		{"a retry in flight that times out", execution.OperationRetry, execution.QueryAvailabilityUnavailable, false},
+		{"the cooldown run out", execution.OperationNormal, execution.QueryAvailabilityAvailable, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(100, 0)
+			store := newMemoryCooldownStore()
+			source := &fakeSlotSource{slot: frozenSlot("query-group-1"), facts: SlotDueFacts{IntervalSeconds: 10}}
+			source.slot.EarliestQueryDeadlineUnixMilli = 150_000
+			until := now.Add(time.Minute)
+			if test.decides {
+				until = now.Add(-time.Second)
+			}
 			store.records["query-group-1"] = QueryCooldownRecord{QueryGroup: "query-group-1", OwnerEpoch: 1,
-				EnteredAt: now.Add(-time.Minute), Until: now.Add(time.Minute), Failures: 3,
+				EnteredAt: now.Add(-time.Minute), Until: until, Failures: 3,
 				QueryRevision: source.slot.Contract.QueryRevision, ScheduleRevision: source.slot.Contract.ScheduleRevision,
 				SegmentStart: source.slot.Contract.ScheduleSegmentStart}
-		}
-		executor := &budgetSeeingExecutor{}
-		flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), func() time.Time { return now })
-		if err != nil {
-			t.Fatal(err)
-		}
-		runner, err := NewRunner("query-group-1", &fakeSession{fence: source.slot.Dispatch.OwnerFence}, source, executor, flights, func() time.Time { return now })
-		if err != nil {
-			t.Fatal(err)
-		}
-		runner.WithQueryCooldownStore(store)
-		// A retry of this Slot is already in flight and due.
-		runner.attempt = &recoveryAttempt{contract: source.slot.Contract, failures: 1, next: execution.OperationRetry, nextAt: now}
-		if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
-			t.Fatalf("pooled %t: RunOne = (attempted %t, %v), want the Slot run", pooled, attempted, err)
-		}
-		if len(executor.marked) != 1 || executor.marked[0] != pooled {
-			t.Fatalf("pooled %t: executions marked %v, want [%t]", pooled, executor.marked, pooled)
-		}
-		if pooled && (!runner.queryCooldown.until.IsZero() || runner.cooldownMemory.lastProbe == nil) {
-			t.Fatalf("the marked execution answered: pool %+v, probe %+v, want it left with the probe kept", runner.queryCooldown, runner.cooldownMemory.lastProbe)
-		}
+			executor := &operationSeeingExecutor{availability: test.availability}
+			flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner, err := NewRunner("query-group-1", &fakeSession{fence: source.slot.Dispatch.OwnerFence}, source, executor, flights, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.WithQueryCooldownStore(store)
+			if !test.decides {
+				runner.attempt = &recoveryAttempt{contract: source.slot.Contract, failures: 1, next: execution.OperationRetry, nextAt: now}
+			}
+			if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
+				t.Fatalf("RunOne = (attempted %t, %v), want the Slot run", attempted, err)
+			}
+			if len(executor.operations) != 1 || executor.operations[0] != test.operation {
+				t.Fatalf("operations %v, want [%s]", executor.operations, test.operation)
+			}
+			if !test.decides && (!runner.queryCooldown.until.Equal(until) || runner.queryCooldown.failures != 3) {
+				t.Fatalf("after a retry %v: pool %+v, want it left as it was (until %s, 3 failures)", test.availability, runner.queryCooldown, until)
+			}
+			left := runner.queryCooldown.until.IsZero()
+			probe := runner.cooldownMemory.lastProbe
+			if left != test.decides || (probe != nil) != test.decides ||
+				(probe != nil && (probe.Operation != string(execution.OperationNormal) || probe.Outcome != observability.QueryCooldownProbeAnswered)) {
+				t.Fatalf("after %v from a %s: pool %+v, probe %+v; want left %t with a normal probe only if it decided",
+					test.availability, test.operation, runner.queryCooldown, probe, test.decides)
+			}
+		})
 	}
 }
 

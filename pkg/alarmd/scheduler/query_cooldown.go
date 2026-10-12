@@ -275,17 +275,19 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	return true
 }
 
-// queryCooldownLetsRun reports whether an execution starting now runs while
-// the Query Group is in the pool: the pool let it through - its cooldown ran
-// out, or the Slot's own checks let it run (deferUnavailableQuery) - and its
-// answer decides whether the Query Group stays. Such an execution runs under
-// the budget a normal round has (execution.WithNormalQueryBudget), so the
-// pool is left only on an answer the Query Group's normal rounds can get too:
-// a retry or replay otherwise has its whole interval from its arrival, and a
-// backend slower than a normal round's budget answered it every time and was
-// let out, to time out again on the normal rounds and come back.
-func (runner *Runner) queryCooldownLetsRun() bool {
-	return !runner.queryCooldown.until.IsZero()
+// queryCooldownDecidedBy reports whether an execution of operation, starting
+// now while the Query Group is in the pool, decides whether it stays: only a
+// normal one does. A normal execution runs at its Slot's own second, under its
+// frozen deadline, and queues for its permit with every other Query Group due
+// then, so an answer to it is one the Query Group's normal rounds get. The
+// first execution after the cooldown runs out is usually the held Slot's
+// replay instead: it starts when the cooldown ends, away from the burst its
+// normal rounds queue in, and a backend that answered it in 22 s was let out
+// to time out on the next normal round, with 13 s left, and come back. The
+// replay still runs, for its Slot's data, under a replay's budget; its answer
+// neither takes the Query Group out nor keeps it in.
+func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool {
+	return !runner.queryCooldown.until.IsZero() && operation == execution.OperationNormal
 }
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
@@ -294,6 +296,11 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 		return
 	}
 	state := &runner.queryCooldown
+	if !state.until.IsZero() && !decides {
+		// A replay or retry the pool let run: its answer is its Slot's, not
+		// the pool's (queryCooldownDecidedBy).
+		return
+	}
 	if decides {
 		runner.cooldownMemory.lastProbe = queryCooldownProbe(runner.now(), operation, result)
 	}

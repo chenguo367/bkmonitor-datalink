@@ -1008,10 +1008,7 @@ func (runner *Runner) runOneTracked(
 	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
-	decidesPool := runner.queryCooldownLetsRun()
-	if decidesPool {
-		executeCtx = execution.WithNormalQueryBudget(executeCtx)
-	}
+	decidesPool := runner.queryCooldownDecidedBy(operation)
 	result, err := runner.executor.Execute(executeCtx, request)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
