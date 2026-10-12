@@ -246,6 +246,10 @@ func verifiedOwnershipFrom(
 // no metric would separate that from a deployment where the index is simply
 // not helping.
 type SlotDueFacts struct {
+	// NextSlotUnix is the evaluation time of the Slot a not-due return waits
+	// for, or of the Slot frozen and waiting for its data: the grid point,
+	// as against NotDueUntilUnix, when it becomes runnable. Zero where none.
+	NextSlotUnix int64
 	// NotDueUntilUnix is the wall-clock second before which the facts this call
 	// read say Next cannot return a due Slot. It is filled in only on a not-due
 	// return; zero means the call carries no bound and the Query Group must be
@@ -616,6 +620,13 @@ type RunnerDueBound struct {
 	// Executed says this round resolved a frozen Slot and went on to run it.
 	Executed bool
 	Verdict  DueVerdict
+	// NextSlotUnix is the evaluation time of the Slot the bound waits for:
+	// the grid point, where NotDueUntilUnix is when it becomes runnable.
+	// Zero where the bound names no Slot.
+	NextSlotUnix int64
+	// ReadinessHold says a Deferred bound is a frozen Slot waiting for its
+	// data, not a failure's backoff.
+	ReadinessHold bool
 }
 
 // DueBound reports what the last completed round concluded. A Runner that has
@@ -641,7 +652,7 @@ func (runner *Runner) recordDueBound(decision string, facts SlotDueFacts) {
 		// The source read the authoritative cursor and the Slot is in the future,
 		// or the schedule is retired. This is the bound worth having.
 		bound.Verdict = DueVerdictNotDue
-		bound.NotDueUntilUnix, bound.Retired = facts.NotDueUntilUnix, facts.Retired
+		bound.NotDueUntilUnix, bound.Retired, bound.NextSlotUnix = facts.NotDueUntilUnix, facts.Retired, facts.NextSlotUnix
 	case "source_backoff":
 		// The local gate answered before any store read. The Query Group is not
 		// due for a reason of its own, which is exactly what deferred means.
@@ -656,6 +667,7 @@ func (runner *Runner) recordDueBound(decision string, facts SlotDueFacts) {
 	case "query_readiness_deferred":
 		bound.Verdict, bound.Executed, bound.Deferred = DueVerdictDue, true, true
 		bound.NotDueUntilUnix = runnerBoundSecond(runner.NextReadyAt())
+		bound.NextSlotUnix, bound.ReadinessHold = facts.NextSlotUnix, true
 	case "query_cooldown":
 		bound.Verdict = DueVerdictDue
 		bound.QueryCooldown = true
@@ -1035,6 +1047,7 @@ func (runner *Runner) runOneTracked(
 		var deferred interface{ ReadinessReadyAt() time.Time }
 		if errors.As(err, &deferred) {
 			decision = "query_readiness_deferred"
+			sourceFacts.NextSlotUnix = int64(slot.Contract.Slot.EvaluationTime)
 			readyAt := deferred.ReadinessReadyAt()
 			if readyAt.After(runner.now()) {
 				runner.sourceNextAt = readyAt

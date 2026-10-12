@@ -372,6 +372,13 @@ type HealthResponse struct {
 	// which strategy, Query Group and host, and both addresses. The count
 	// admission_cmdb_address_differs_total says how often.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
+	// AwaitingFirstRound is the objects only waiting for their first round
+	// since their replica took them over, by period; they are covered and not
+	// counted in unknown. Undetermined names the objects unknown does count,
+	// longest owned first and bounded, with the total.
+	AwaitingFirstRound *FirstRoundWaits     `json:"awaiting_first_round,omitempty"`
+	Undetermined       []UndeterminedObject `json:"undetermined_objects,omitempty"`
+	UndeterminedTotal  int                  `json:"undetermined_objects_total,omitempty"`
 	// Schedule is the census the first sentence of the page is built from:
 	// waiting, late, overdue, never yet evaluated, and the on-time rates over
 	// two windows. Absent when no replica has a due index, and the page then
@@ -1007,6 +1014,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
 		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers,
+		AwaitingFirstRound: view.AwaitingFirstRound, Undetermined: view.Undetermined, UndeterminedTotal: view.UndeterminedTotal,
 		Gaps: view.Gaps, Capacity: view.Capacity,
 		Load: part.Load(view),
 	}

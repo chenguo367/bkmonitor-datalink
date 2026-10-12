@@ -584,7 +584,7 @@ func (source *ProductionSlotSource) Next(
 	dueInterval := minimumAlignedInterval(schedule, nextSlot)
 	if at.Unix() < int64(nextSlot) {
 		decision = "future_slot"
-		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
+		return FrozenSlot{}, false, SlotDueFacts{NotDueUntilUnix: int64(nextSlot), NextSlotUnix: int64(nextSlot), IntervalSeconds: dueInterval}, nil
 	}
 	decision = "read_hold"
 	hold, err := source.slotReadHoldMillis(ctx, schedule, load.Progress, nextSlot, initialFence)
