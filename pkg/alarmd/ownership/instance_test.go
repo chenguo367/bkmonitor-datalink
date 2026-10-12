@@ -6,6 +6,7 @@ package ownership
 import (
 	"context"
 	"encoding/json"
+	"github.com/go-redis/redis/v8"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +242,43 @@ func TestAFallbackCandidateIsListedFromItsOwnIndex(t *testing.T) {
 	}
 	if members := store.client.ZRange(ctx, store.fallbackCandidatesKey(), 0, -1).Val(); len(members) != 1 || members[0] != "worker-b" {
 		t.Fatalf("fallback index after the read = %v, want the lapsed entry pruned", members)
+	}
+}
+
+// The indexes are pruned on read, and in the steady state nothing reads
+// them; the preferred renewal also drops their expired entries, so names a
+// rollout left behind do not pile up under a control process that never
+// restarts. A Worker's renewal adds nothing for it.
+func TestAPreferredRenewalDropsTheExpiredEntriesOfBothIndexes(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for key, members := range map[string][]string{
+		store.fallbackCandidatesKey():  {"rolled-worker-1", "rolled-worker-2"},
+		store.preferredCandidatesKey(): {"rolled-control"},
+	} {
+		for _, member := range members {
+			if err := store.client.ZAdd(ctx, key, &redis.Z{Score: float64(now.Add(-time.Hour).UnixMilli()), Member: member}).Err(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	worker := InstanceRegistration{InstanceID: "worker-live", Roles: roles.Set{roles.Worker}, Incarnation: "w", ExpiresAt: now.Add(time.Minute),
+		ControlCandidacy: ControlCandidacyFallback}
+	if err := store.RegisterInstance(ctx, worker); err != nil {
+		t.Fatal(err)
+	}
+	if n := store.client.ZCard(ctx, store.fallbackCandidatesKey()).Val(); n != 3 {
+		t.Fatalf("a Worker's renewal pruned the fallback index: %d entries, want the two expired and its own", n)
+	}
+	control := InstanceRegistration{InstanceID: "control-live", Roles: roles.Set{roles.Control}, Incarnation: "c", ExpiresAt: now.Add(time.Minute),
+		ControlCandidacy: ControlCandidacyPreferred}
+	if err := store.RegisterInstance(ctx, control); err != nil {
+		t.Fatal(err)
+	}
+	fallbacks := store.client.ZRange(ctx, store.fallbackCandidatesKey(), 0, -1).Val()
+	preferred := store.client.ZRange(ctx, store.preferredCandidatesKey(), 0, -1).Val()
+	if len(fallbacks) != 1 || fallbacks[0] != "worker-live" || len(preferred) != 1 || preferred[0] != "control-live" {
+		t.Fatalf("after a preferred renewal: fallbacks %v, preferred %v, want only the live ones", fallbacks, preferred)
 	}
 }

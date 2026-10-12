@@ -168,7 +168,22 @@ func (store *RedisStore) RegisterInstance(ctx context.Context, instance Instance
 		return nil
 	}
 	if instance.ControlCandidacy == ControlCandidacyPreferred {
-		_, err = store.client.TxPipelined(ctx, write)
+		// Each index is pruned on read, and in the steady state nothing reads
+		// it: a fallback lists only while the lease is free, a preferred
+		// process only while it is not yet stable. A Worker or control pod
+		// that rolls leaves its old name behind, so the preferred renewal,
+		// a handful of processes every few seconds, also drops the expired
+		// entries of both - two commands in the round trip it already makes,
+		// none added to a Worker's renewal.
+		at := strconv.FormatInt(instance.ExpiresAt.Add(-ttl).UnixMilli(), 10)
+		_, err = store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			if err := write(pipe); err != nil {
+				return err
+			}
+			pipe.ZRemRangeByScore(ctx, store.preferredCandidatesKey(), "-inf", at)
+			pipe.ZRemRangeByScore(ctx, store.fallbackCandidatesKey(), "-inf", at)
+			return nil
+		})
 	} else {
 		_, err = store.client.Pipelined(ctx, write)
 	}
