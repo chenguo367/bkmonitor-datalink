@@ -52,7 +52,10 @@ def main():
     def group_signal(sig):
         try:
             os.killpg(child.pid, sig)
-        except ProcessLookupError:
+        # A group whose members have all exited is refused with ESRCH, or on
+        # some kernels with EPERM while they are still being reaped; either
+        # way nothing of the command is left to signal, and the report follows.
+        except (ProcessLookupError, PermissionError):
             pass
 
     # The deadline must remain active even if writing an output/control frame
