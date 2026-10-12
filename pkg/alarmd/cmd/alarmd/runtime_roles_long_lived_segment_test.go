@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +74,16 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 	defer uqServer.Close()
 
 	events := &recordingPhaseTwoEventSink{}
+	var completionsMu sync.Mutex
+	var completions []observability.Observation
+	completionObserver := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		if observation.Stage != observability.StageSlotCompleted {
+			return
+		}
+		completionsMu.Lock()
+		defer completionsMu.Unlock()
+		completions = append(completions, observation)
+	})
 	configFor := func(replica string) config.Config {
 		cfg := validGoAccessRuntimeConfig()
 		cfg.Redis.Address = address
@@ -86,7 +97,10 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 		cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(time.Millisecond)
 		// The injected clock jumps a period per round within a second of real
 		// time, faster than any renewal ticks: registrations and leases are
-		// given hours so a jump does not read as an expiry.
+		// given hours so a jump does not read as an expiry. So the takeover
+		// below is a graceful one - the first replica's Shutdown releases and
+		// the next takes over at once - and this test says nothing about a
+		// takeover by expiry after a crash.
 		cfg.PhaseTwo.Worker.RegistrationTTL = config.Duration(6 * time.Hour)
 		cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(6 * time.Hour)
 		cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(6 * time.Hour)
@@ -102,7 +116,7 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 				return controlplane.NewLegacyRedisStrategySource(client, prefix)
 			},
 			phaseTwoProductionExternalDependencies{
-				Now: now, HTTPClient: uqServer.Client(),
+				Now: now, HTTPClient: uqServer.Client(), AdditionalObserver: completionObserver,
 				PrepareEvents: preparedEvents(func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
 					return events, nil
 				}),
@@ -220,10 +234,25 @@ func TestALongLivedSegmentKeepsDetectingAcrossASnapshotChangeAndATakeover(t *tes
 	}
 	// Published one second into round 2's window, the second strategy's
 	// Segment is queried from round 2, but that window opened before the
-	// strategy existed and reports nothing; it is detected from round 3, the
-	// first whole window after the publication, and every round after it
-	// exactly once, on either side of the takeover. This pins what the
-	// pipeline does today.
+	// Segment started, so the Slot completes with a partial gap under
+	// CONFIG_DRIFT rather than judging a window the strategy did not cover.
+	// Named here so a change that drops the round silently fails this test.
+	// It is detected from round 3, the first whole window after the
+	// publication, and every round after it exactly once, on either side of
+	// the takeover.
+	roundTwo := base + 2*period
+	var drift []observability.Observation
+	completionsMu.Lock()
+	for _, completion := range completions {
+		if completion.Trace.EvaluationTime == roundTwo && completion.Trace.ScheduleSegmentStart > roundTwo-period {
+			drift = append(drift, completion)
+		}
+	}
+	completionsMu.Unlock()
+	if len(drift) != 1 || drift[0].Result != observability.ResultDegraded || drift[0].ReasonCode != "CONFIG_DRIFT" ||
+		drift[0].SlotCompletionKind != "COMPLETED_WITH_PARTIAL_GAP" {
+		t.Fatalf("second strategy's round-2 completions = %+v, want one degraded CONFIG_DRIFT completion with a partial gap", drift)
+	}
 	if got := detected("1002"); !equalTimes(got, want[3:]) {
 		t.Fatalf("strategy 1002 detections = %v, want each round from its first whole window exactly once %v", got, want[3:])
 	}
