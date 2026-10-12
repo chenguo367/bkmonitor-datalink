@@ -163,6 +163,7 @@ type phaseTwoMetrics struct {
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
+	controlFactsWrites              *prometheus.CounterVec
 	queryCooldownLoads              *prometheus.CounterVec
 	eventBusinessAttribution        *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
@@ -1246,6 +1247,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range QueryCooldownSaveResults {
 		metrics.queryCooldownSaves.WithLabelValues(result)
 	}
+	metrics.controlFactsWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_control_facts_writes_total",
+		Help: "Writes of the Control Leader's fleet control record, by result: written; invalid (the record " +
+			"lacked its identity or term and was not sent); oversized (past the fleet byte budget, refused whole); " +
+			"failed (the store did not take it). While the Leader writes none, views fall back to the control facts " +
+			"in the replicas' snapshots or the previous term's record.",
+	}, []string{"result"})
+	for _, result := range ControlFactsWriteResults {
+		metrics.controlFactsWrites.WithLabelValues(result)
+	}
 	metrics.queryCooldownLoads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_loads_total",
 		Help: "Reads of a Query Group's query cooldown pool record, made on a Runner's first round holding the " +
@@ -1733,7 +1744,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.handover.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2596,6 +2607,25 @@ func (r *Recorder) ObserveDiagnosticRedisDialRetry(client, reason string) {
 		reason = redisfailure.Other
 	}
 	r.phaseTwo.diagnosticRedisDialRetries.WithLabelValues(client, reason).Inc()
+}
+
+// ControlFactsWriteResults is every result of a fleet control record write,
+// closed.
+var ControlFactsWriteResults = []string{"written", "invalid", "oversized", "failed"}
+
+// ObserveControlFactsWrite counts one fleet control record write by its
+// result; a result outside ControlFactsWriteResults is dropped rather than
+// creating a series.
+func (r *Recorder) ObserveControlFactsWrite(result string) {
+	if r == nil || r.phaseTwo.controlFactsWrites == nil {
+		return
+	}
+	for _, known := range ControlFactsWriteResults {
+		if result == known {
+			r.phaseTwo.controlFactsWrites.WithLabelValues(result).Inc()
+			return
+		}
+	}
 }
 
 // ObserveQueryCooldownSave counts one pool record write by its result; a

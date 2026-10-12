@@ -327,6 +327,9 @@ type HealthResponse struct {
 	// whether the cache can update the run, and the two sentences the first
 	// screen shows for the run and for the cache. Absent without a round.
 	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
+	// ControlFacts is where the Control Leader's facts came from, and why the
+	// current term's record was not it.
+	ControlFacts *ControlFactsStanding `json:"control_facts,omitempty"`
 	// NoDataTracking is the fleet's one line on the no-data tracking horizon:
 	// how many Plans decide against which kind of horizon and what their last
 	// deciding rounds counted, summed over the counted replicas. Absent when
@@ -994,7 +997,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
 		LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
 		ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
-		Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
+		Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding, ControlFacts: view.ControlFacts,
 		NoDataTracking: view.NoDataTracking,
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,

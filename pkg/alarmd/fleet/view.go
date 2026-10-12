@@ -3124,6 +3124,10 @@ type View struct {
 	// SourceStanding is Source read against what the deployment executes,
 	// with the two sentences for the first screen. Nil without a round.
 	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
+	// ControlFacts says where the Control Leader's facts above came from: its
+	// record of this term, the replicas' snapshots, the previous term's
+	// record, or none (with the gap). Nil where no control record is wired.
+	ControlFacts *ControlFactsStanding `json:"control_facts,omitempty"`
 	// Dependencies is what one counted replica resolved its external systems
 	// to, and DependenciesReplica which one: the newest snapshot's. Every
 	// replica renders the same coordinates; what differs is what each has
@@ -3174,6 +3178,9 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		Undecidable: []Anomaly{}, ByDesign: []Anomaly{},
 		Replicas: []string{}, PerReplica: []ReplicaView{}, Builds: []BuildGroup{}}
 	ownedByReplica := make([]string, 0, len(expectedReplicas))
+	// embeddedLeaderFacts: some snapshot carried what only a Control Leader
+	// fills, so the view has the Leader's facts without the control record.
+	embeddedLeaderFacts := false
 	// The snapshots this view is willing to speak for. Every other number below
 	// is built from these and not from the argument, because the argument
 	// contains snapshots that were rejected: one too old to describe the
@@ -3347,8 +3354,10 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 				view.PlatformSettingFields.Differing = replica
 			}
 		}
-		if heads == nil || !heads.control.authoritative {
-			mergeControlFacts(&view, controlFactsOf(snapshot))
+		if heads == nil || heads.control.current == nil {
+			embedded := controlFactsOf(snapshot)
+			mergeControlFacts(&view, embedded)
+			embeddedLeaderFacts = embeddedLeaderFacts || carriesLeaderControlFacts(embedded)
 		}
 		if len(snapshot.Dependencies) > 0 {
 			view.DependenciesReplicas++
@@ -3593,13 +3602,8 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		Attribute(view.LateSeries, now)
 	}
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
-	if heads != nil {
-		if heads.control.facts != nil {
-			mergeControlFacts(&view, *heads.control.facts)
-		}
-		if heads.control.err != nil {
-			view.Gaps = append(view.Gaps, Gap{Kind: GapControlFactsUnavailable, Detail: gapDetail(heads.control.err)})
-		}
+	if heads != nil && heads.control.wired {
+		view.ControlFacts = settleControlFacts(&view, heads.control, embeddedLeaderFacts)
 	}
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
@@ -3620,6 +3624,29 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	sortOutputProtocolGroups(view.OutputProtocols)
 	sortRetentionGroups(view.Retentions)
 	return view
+}
+
+// settleControlFacts picks the view's control facts, in order: the current
+// term's record; the facts the replicas' snapshots carry, already merged;
+// the previous term's record, while a new Leader has not written; and only
+// when none of them is there, the gap. So an ordinary takeover, which leaves
+// the old Leader's snapshot or record readable, never makes the view UNKNOWN.
+func settleControlFacts(view *View, read controlRead, embeddedLeaderFacts bool) *ControlFactsStanding {
+	switch {
+	case read.current != nil:
+		mergeControlFacts(view, *read.current)
+		return &ControlFactsStanding{Source: ControlFactsFromRecord, Replica: read.current.Replica}
+	case embeddedLeaderFacts:
+		return &ControlFactsStanding{Source: ControlFactsFromEmbedded, Unavailable: read.unavailable()}
+	case read.previous != nil:
+		mergeControlFacts(view, *read.previous)
+		return &ControlFactsStanding{Source: ControlFactsFromPreviousTerm, Replica: read.previous.Replica,
+			Unavailable: read.unavailable()}
+	}
+	if read.err != nil {
+		view.Gaps = append(view.Gaps, Gap{Kind: GapControlFactsUnavailable, Detail: gapDetail(read.err)})
+	}
+	return &ControlFactsStanding{Source: ControlFactsFromNone, Unavailable: read.unavailable()}
 }
 
 // executingObjects is how many objects the deployment runs, for the source

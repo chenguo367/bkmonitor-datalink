@@ -38,7 +38,9 @@ func publishRoleControlFacts(ctx context.Context, bundle *phaseTwoWorkerBundle, 
 		Rebalance: bundle.rebalanceFleetFacts(), AssignmentScope: bundle.assignmentScopeFleetFacts(),
 		AssignmentSweep: bundle.assignmentSweepFleetFacts(), LeaderRound: bundle.leaderRoundFleetFacts(),
 		ViewStream: viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, bundle.dependencies.Now)()}
-	if err := store.PublishControl(ctx, facts); err != nil {
+	err := store.PublishControl(ctx, facts)
+	bundle.dependencies.Recorder.ObserveControlFactsWrite(fleet.ControlPublishResult(err))
+	if err != nil {
 		bundle.observe(ctx, "fleet", "control_facts", "failed", err)
 	}
 }
