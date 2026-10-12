@@ -118,10 +118,21 @@ func TestAHandbackWaitsForAWholeWindowOfUnbrokenReadiness(t *testing.T) {
 		reset      bool
 		want       bool
 	}
+	// Rounds that returned early read nothing: the watch has gone 40 s
+	// without a reading at +60, past two reconcile rounds, so the readiness
+	// it last saw at 0 is not counted as unbroken through them; read every
+	// round from +60, the window is due a full window later.
+	gapSteps := []step{{seconds: 0, candidates: ready(0, "1")}, {seconds: 60, candidates: ready(60, "1")}}
+	for seconds := 65; seconds < 120; seconds += 5 {
+		gapSteps = append(gapSteps, step{seconds: seconds, candidates: ready(seconds, "1")})
+	}
+	gapSteps = append(gapSteps, step{seconds: 120, candidates: ready(120, "1"), want: true})
 	for _, testCase := range []struct {
-		name  string
-		steps []step
+		name   string
+		maxGap time.Duration
+		steps  []step
 	}{
+		{name: "rounds nobody read are a break", maxGap: 10 * time.Second, steps: gapSteps},
 		{name: "ready for the whole window", steps: []step{
 			{seconds: 0, candidates: ready(0, "1")}, {seconds: 30, candidates: ready(30, "1")},
 			{seconds: 59, candidates: ready(59, "1")}, {seconds: 60, candidates: ready(60, "1"), want: true},
@@ -157,7 +168,7 @@ func TestAHandbackWaitsForAWholeWindowOfUnbrokenReadiness(t *testing.T) {
 					watch.reset()
 					continue
 				}
-				successor, due := watch.observe(step.candidates, "fallback-self", at(step.seconds), window)
+				successor, due := watch.observe(step.candidates, "fallback-self", at(step.seconds), window, testCase.maxGap)
 				if due != step.want || (due && successor != "control") {
 					t.Fatalf("at +%ds: observe() = (%q, %v), want due %v", step.seconds, successor, due, step.want)
 				}
@@ -196,5 +207,13 @@ func TestEveryControlCandidateRunsTheDeletedStrategyClose(t *testing.T) {
 				t.Fatalf("absentCloseWired() = %t, want %t", got, testCase.want)
 			}
 		})
+	}
+}
+
+// The gap a handback watch allows between readings is two reconcile rounds.
+func TestTheHandbackGapIsTwoReconcileRounds(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	if got, want := controlHandbackMaxGap(cfg), 2*cfg.PhaseTwo.Control.ReconcileInterval.Duration(); got != want || got <= 0 {
+		t.Fatalf("controlHandbackMaxGap() = %s, want %s", got, want)
 	}
 }

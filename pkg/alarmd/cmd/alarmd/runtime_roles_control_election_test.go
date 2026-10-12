@@ -167,7 +167,10 @@ func (fixture *electionFixture) configFor(name string, selected roles.Set) confi
 	cfg.HTTP.Listen = reserveBundleAddress()
 	cfg.PhaseTwo.Worker.ID = name
 	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Second)
-	cfg.PhaseTwo.Control.ReconcileInterval = config.Duration(time.Second)
+	// The test clock moves 5 s per tick, a reconcile round as production
+	// runs it; the handback watch counts a reading more than two rounds
+	// after the last as a break, so the interval has to be the tick.
+	cfg.PhaseTwo.Control.ReconcileInterval = config.Duration(5 * time.Second)
 	cfg.PhaseTwo.Access.UQEndpoint = fixture.uq.URL
 	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(time.Millisecond)
 	cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(time.Millisecond)
@@ -494,7 +497,9 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	fixture.tick()
 	firstSeen := fixture.now()
 	window := controlCandidacyWindow(returned.bundle.dependencies.Config)
-	for _, offset := range []time.Duration{10 * time.Second, 30 * time.Second, window - 5*time.Second} {
+	// One reconcile round at a time, as production reads: rounds skipped
+	// would read as a break in the window and start it again.
+	for offset := 5 * time.Second; offset < window; offset += 5 * time.Second {
 		fixture.clockMillis.Store(firstSeen.Add(offset).UnixMilli())
 		time.Sleep(1200 * time.Millisecond)
 		fixture.tick()

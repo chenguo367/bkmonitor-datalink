@@ -68,6 +68,13 @@ func controlCandidacyWindow(cfg config.Config) time.Duration {
 	return cfg.PhaseTwo.Worker.RegistrationTTL.Duration()
 }
 
+// controlHandbackMaxGap is how long a handback watch may go without a
+// reading before its windows start again: two reconcile rounds, so one
+// round that returned early is not a break but a run of them is.
+func controlHandbackMaxGap(cfg config.Config) time.Duration {
+	return 2 * cfg.PhaseTwo.Control.ReconcileInterval.Duration()
+}
+
 // controlContentionAllowed is whether a candidate tries the acquire script
 // this round. leaseLive and preferredPresent are what a fallback reads
 // before deciding; a preferred candidate does not need them, because the
@@ -101,8 +108,15 @@ func preferredCandidatePresent(candidates []ownership.InstanceRegistration, self
 // break. A process is one incarnation, so a restart starts its window again,
 // and any round that does not see it ready -- not ready, gone, or unreadable
 // -- forgets it. Only the reconcile loop touches it.
+//
+// A round that returns before it reads the candidates (a refresh that
+// failed, an assignment publish that failed, the degraded path) neither
+// observes nor forgets; observedAt is when one last did, and a reading
+// that comes more than the allowed gap after it starts every window again
+// rather than counting rounds nobody read as unbroken readiness.
 type controlHandbackWatch struct {
 	readySince map[string]time.Time
+	observedAt time.Time
 }
 
 func controlHandbackKey(instance ownership.InstanceRegistration) string {
@@ -112,8 +126,12 @@ func controlHandbackKey(instance ownership.InstanceRegistration) string {
 // observe takes one round's reading of the preferred candidates and says
 // whether one of them has now been ready for the whole window, and which.
 func (watch *controlHandbackWatch) observe(candidates []ownership.InstanceRegistration, self string, at time.Time,
-	window time.Duration,
+	window, maxGap time.Duration,
 ) (string, bool) {
+	if !watch.observedAt.IsZero() && maxGap > 0 && at.Sub(watch.observedAt) > maxGap {
+		watch.readySince = nil
+	}
+	watch.observedAt = at
 	seen := make(map[string]time.Time, len(candidates))
 	for _, candidate := range candidates {
 		if candidate.InstanceID == self || candidate.CandidacyClass() != ownership.ControlCandidacyPreferred ||
@@ -140,7 +158,7 @@ func (watch *controlHandbackWatch) observe(candidates []ownership.InstanceRegist
 // reset forgets every window: a round that could not read the candidates
 // knows of no unbroken readiness, and a new term starts watching afresh.
 func (watch *controlHandbackWatch) reset() {
-	watch.readySince = nil
+	watch.readySince, watch.observedAt = nil, time.Time{}
 }
 
 // phaseTwoControlCandidateReader is what contending by class reads; the
@@ -217,7 +235,7 @@ func (bundle *phaseTwoWorkerBundle) considerHandback(ctx context.Context) {
 		return
 	}
 	successor, due := bundle.handback.observe(candidates, bundle.dependencies.Config.PhaseTwo.Worker.ID, at,
-		controlCandidacyWindow(bundle.dependencies.Config))
+		controlCandidacyWindow(bundle.dependencies.Config), controlHandbackMaxGap(bundle.dependencies.Config))
 	if !due {
 		return
 	}

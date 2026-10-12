@@ -130,9 +130,11 @@ func (store *RedisStore) RegisterInstance(ctx context.Context, instance Instance
 		return store.client.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl).Err()
 	}
 	// A preferred candidate is also named in the index a fallback reads, in
-	// the same round trip. The score is the record's own expiry, so the
-	// index never says a record is live longer than the record is.
-	_, err = store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+	// the same transaction: a record written without its index entry would
+	// be a live preferred process a fallback cannot see, free to take a lease
+	// that is about to be wanted back. The score is the record's own expiry,
+	// so the index never says a record is live longer than the record is.
+	_, err = store.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Set(ctx, store.instanceKey(instance.InstanceID), payload, ttl)
 		pipe.ZAdd(ctx, store.preferredCandidatesKey(), &redis.Z{
 			Score: float64(instance.ExpiresAt.UnixMilli()), Member: instance.InstanceID,
