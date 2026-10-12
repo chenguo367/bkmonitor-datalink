@@ -27,6 +27,7 @@ import (
 )
 
 const channelVersion = "alarmd-ob/v1"
+
 // sessionScope is the one scope a server grants: the deployment's operations
 // session, execution and management included. The identifier is historical.
 const sessionScope = "deployment_ops_readonly"

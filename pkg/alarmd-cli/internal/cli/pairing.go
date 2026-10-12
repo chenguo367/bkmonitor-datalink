@@ -139,7 +139,6 @@ func (a *App) ensureSession(env string, force bool) (Profile, error) {
 
 type pairingGone struct{ code string }
 
-
 func (e *pairingGone) Error() string {
 	if e.code == "renewal_admin_key_rotated" {
 		return "the deployment's administrator key changed since this CLI was paired"

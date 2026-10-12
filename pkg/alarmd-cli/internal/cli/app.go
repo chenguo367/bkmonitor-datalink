@@ -38,16 +38,16 @@ func New(in io.Reader, out, stderr io.Writer, version string) *App {
 }
 
 type options struct {
-	env, input, caCert           string
+	env, input, caCert    string
 	paramsFile, stdinFile string
-	url, port, state             string
-	timeout                      time.Duration
-	expectBuild                  string
-	window                       time.Duration
-	hasWindow                    bool
-	hasInput, rebind             bool
-	insecureTLS                  bool
-	args                         []string
+	url, port, state      string
+	timeout               time.Duration
+	expectBuild           string
+	window                time.Duration
+	hasWindow             bool
+	hasInput, rebind      bool
+	insecureTLS           bool
+	args                  []string
 }
 
 func parse(args []string) (options, error) {
