@@ -122,6 +122,10 @@ type poolProbeHarness struct {
 	base    int64
 	mu      sync.Mutex
 	events  []observability.QueryCooldownFacts
+	// completed counts the Slots completed since the last pass took it: a
+	// held Slot closed without a query moves the Query Group on as much as
+	// one that sent a query.
+	completed int
 }
 
 func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness {
@@ -144,6 +148,12 @@ func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness 
 	cfg := controlledG4RuntimeConfig(address, "http://controlled-uq", "alarmd-pool-budget")
 	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(poolBudgetSettle)
 	cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(poolBudgetReserve)
+	// The clock jumps minutes within a second of real time, faster than any
+	// renewal ticks: registrations and leases are given hours so a cooldown's
+	// worth of jumps does not read as the owner having gone.
+	cfg.PhaseTwo.Worker.RegistrationTTL = config.Duration(6 * time.Hour)
+	cfg.PhaseTwo.Ownership.ControlLeaderTTL = config.Duration(6 * time.Hour)
+	cfg.PhaseTwo.Ownership.LeaseTTL = config.Duration(6 * time.Hour)
 	h.cfg = cfg
 	bundle, err := openProductionPhaseTwoBundleWithDependencies(ctx, cfg, metric.NewRecorder(metric.BuildInfo{}),
 		observability.Discard(observability.ComponentRuntime), newPhaseTwoApplicationHealth(),
@@ -152,6 +162,11 @@ func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness 
 		}, phaseTwoProductionExternalDependencies{
 			Now: h.backend.now, HTTPClient: &http.Client{Transport: controlledRoundTripper(h.backend.roundTrip)},
 			AdditionalObserver: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+				if o.Stage == observability.StageSlotCompleted {
+					h.mu.Lock()
+					h.completed++
+					h.mu.Unlock()
+				}
 				if o.QueryCooldown == nil {
 					return
 				}
@@ -210,16 +225,40 @@ func (h *poolProbeHarness) enterPool() int64 {
 // pass runs one scheduler pass at the given unix millisecond, and returns
 // the queries it sent and the pool transitions it made.
 func (h *poolProbeHarness) pass(at int64) ([]poolRequest, []observability.QueryCooldownFacts) {
+	requests, events, _ := h.passCounting(at)
+	return requests, events
+}
+
+// passCounting is pass, and how many Slots it completed.
+func (h *poolProbeHarness) passCounting(at int64) ([]poolRequest, []observability.QueryCooldownFacts, int) {
 	h.t.Helper()
 	h.backend.clock.Store(at)
 	if err := runScheduledOnceSettled(h.ctx, h.bundle); err != nil {
 		h.t.Fatalf("pass at base+%d ms: %v", at-h.base*1000, err)
 	}
 	h.mu.Lock()
-	events := h.events
-	h.events = nil
+	events, completed := h.events, h.completed
+	h.events, h.completed = nil, 0
 	h.mu.Unlock()
-	return h.backend.take(), events
+	return h.backend.take(), events, completed
+}
+
+// runnerReadyAt is when the Query Group's Runner can next make an attempt of
+// its own - a retry's backoff - in unix milliseconds; 0 when it can now.
+func (h *poolProbeHarness) runnerReadyAt() int64 {
+	h.t.Helper()
+	h.bundle.mu.RLock()
+	defer h.bundle.mu.RUnlock()
+	for _, lifecycle := range h.bundle.runners {
+		group, ok := lifecycle.runner.(*productionPhaseTwoQueryGroup)
+		if !ok {
+			h.t.Fatalf("the Query Group runs as %T, not a production Query Group", lifecycle.runner)
+		}
+		if ready := group.runner.NextReadyAt(); !ready.IsZero() {
+			return ready.UnixMilli()
+		}
+	}
+	return 0
 }
 
 // afterCooldown is the first instant after the Query Group's cooldown runs
@@ -250,21 +289,36 @@ func (h *poolProbeHarness) afterCooldown() int64 {
 func (h *poolProbeHarness) decide(late time.Duration) (replays []poolRequest, decider poolRequest, event observability.QueryCooldownFacts, atEnd bool) {
 	h.t.Helper()
 	at := h.afterCooldown()
+	// A one-shot pass advances the Query Group one Slot, where production's
+	// dispatcher takes it again on its next turn while it is due. So the
+	// passes go on, each a millisecond after the last answer - or at the
+	// Runner's own next readiness, a retry's, when that is later: a one-shot
+	// pass waits for a later one on the wall clock, which the test's clock
+	// never moves - as long as each completes a Slot (a held Slot past the
+	// replay distance completes without a query), and stop at the first that
+	// completes none. A Runner next ready at or past a Slot's own readiness
+	// is ready for that Slot's normal round, which is the round below.
 	for i := 0; ; i++ {
-		requests, events := h.pass(at)
+		if ready := h.runnerReadyAt(); ready > at {
+			if ready >= h.readyAfter(at) {
+				break
+			}
+			at = ready
+		}
+		requests, events, completed := h.passCounting(at)
 		if len(events) != 0 {
 			if len(requests) != 1 || len(events) != 1 {
 				h.t.Fatalf("at the cooldown's end %+v sent and %+v made, want one round and its transition", requests, events)
 			}
 			return replays, requests[0], events[0], true
 		}
-		if len(requests) == 0 {
+		replays = append(replays, requests...)
+		if completed == 0 {
 			break
 		}
-		if i == 8 {
-			h.t.Fatalf("still replaying after %d passes", i)
+		if i == 32 {
+			h.t.Fatalf("still completing held Slots after %d passes", i)
 		}
-		replays = append(replays, requests...)
 		at = h.backend.clock.Load() + 1
 	}
 	minute := (at/1000 - h.base) / 60
@@ -336,28 +390,30 @@ func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 // A backend that answers in 30 s, past a normal round's 25 s and inside a
 // replay's 55 s: the shape that went in and out of the pool every few
 // minutes, each exit an answer the next normal rounds could not get. Now the
-// Query Group enters once and stays: the cooldown's end replays the held
-// Slots, and the backend answers them for their data; the normal round that
-// decides times out and extends the pool, with no exit and no re-entry. One
-// cooldown only: after an extension this harness's one-shot passes do not
-// dispatch the Query Group again (seen on the shared head before this change
-// too), so a second cooldown cannot be driven here.
+// Query Group enters once and stays, cooldown after cooldown: each cooldown's
+// end replays the held Slots, and the backend answers them for their data;
+// the normal round that decides times out and extends the pool, one failure
+// more each time, with no exit and no re-entry.
 func TestABackendSlowerThanANormalRoundStaysInThePoolWithoutReentering(t *testing.T) {
 	h := newPoolProbeHarness(t, 30*time.Second)
 	h.enterPool()
-	replays, decider, event, atEnd := h.decide(0)
-	if atEnd {
-		t.Fatal("a held Slot's replay decided the pool")
-	}
-	if !anyReplayAnswered(replays) {
-		t.Fatalf("the held Slots' executions %+v, want the held Slot replayed with 55 s and answered in 30", replays)
-	}
-	probe := event.LastProbe
-	if decider.answered || decider.remaining != poolNormalBudget-poolPassSlack ||
-		event.Event != "extended" || event.Reentries != 0 ||
-		probe == nil || probe.Operation != string(execution.OperationNormal) || probe.Outcome != observability.QueryCooldownProbeUnavailable {
-		t.Fatalf("the deciding round %+v made %+v (probe %+v), want a normal round that timed out and the pool extended",
-			decider, event, probe)
+	failures := h.poolRecord().Failures
+	for cooldown := 0; cooldown < 3; cooldown++ {
+		replays, decider, event, atEnd := h.decide(0)
+		if atEnd {
+			t.Fatalf("cooldown %d: a held Slot's replay decided the pool", cooldown)
+		}
+		if !anyReplayAnswered(replays) {
+			t.Fatalf("cooldown %d: the held Slots' executions %+v, want the held Slot replayed with 55 s and answered in 30", cooldown, replays)
+		}
+		probe := event.LastProbe
+		if decider.answered || decider.remaining != poolNormalBudget-poolPassSlack ||
+			event.Event != "extended" || event.Reentries != 0 || event.Failures != failures+1 ||
+			probe == nil || probe.Operation != string(execution.OperationNormal) || probe.Outcome != observability.QueryCooldownProbeUnavailable {
+			t.Fatalf("cooldown %d: the deciding round %+v made %+v (probe %+v), want a normal round that timed out and the pool extended on failure %d",
+				cooldown, decider, event, probe, failures+1)
+		}
+		failures++
 	}
 }
 
