@@ -23,11 +23,50 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+// A test binary started as "setsid" is the setsid utility: it makes a new
+// session, and so a process group, and runs the rest of its arguments - the
+// stand-in for the one images carry, which this machine has not.
+func init() {
+	if filepath.Base(os.Args[0]) != "setsid" || len(os.Args) < 2 {
+		return
+	}
+	syscall.Setsid()
+	path, err := exec.LookPath(os.Args[1])
+	if err != nil {
+		os.Exit(127)
+	}
+	syscall.Exec(path, os.Args[1:], os.Environ())
+	os.Exit(126)
+}
+
+// withSetsid is a PATH with the setsid stand-in first.
+func withSetsid(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(dir, "setsid")); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
 // supervise runs remoteSupervisor under the local /bin/sh as the target's
 // would: it returns the supervisor's stderr records and the command's output.
 func supervise(t *testing.T, seconds string, argv ...string) (records []string, stdout, stderr string) {
 	t.Helper()
-	command := exec.Command("/bin/sh", append([]string{"-c", remoteSupervisor, supervisorName, "N0NCE", seconds}, argv...)...)
+	return superviseUnder(t, "/bin/sh", "", seconds, argv...)
+}
+
+// superviseUnder runs remoteSupervisor under shell, with PATH when given.
+func superviseUnder(t *testing.T, shell, path, seconds string, argv ...string) (records []string, stdout, stderr string) {
+	t.Helper()
+	command := exec.Command(shell, append([]string{"-c", remoteSupervisor, supervisorName, "N0NCE", seconds}, argv...)...)
+	if path != "" {
+		command.Env = append(os.Environ(), "PATH="+path)
+	}
 	var out strings.Builder
 	errPipe, err := command.StderrPipe()
 	if err != nil {
@@ -59,8 +98,8 @@ func supervise(t *testing.T, seconds string, argv ...string) (records []string, 
 func TestTheShellSupervisorReportsTheCommandsEnd(t *testing.T) {
 	runtimeProvider(t)
 	records, stdout, stderr := supervise(t, "5", "/bin/sh", "-c", "printf 'out\\n'; printf 'last line' >&2; exit 4")
-	if len(records) != 2 || records[0] != "started 1" || records[1] != "complete 4" {
-		t.Fatalf("records %q, want started in a group and complete 4", records)
+	if fmt.Sprint(records) != "[started group 1 complete 4]" {
+		t.Fatalf("records %q, want started, in a group, complete 4", records)
 	}
 	if stdout != "out\n" || stderr != "last line" {
 		t.Fatalf("stdout %q stderr %q", stdout, stderr)
@@ -75,7 +114,7 @@ func TestTheShellSupervisorEndsTheWholeGroupAtItsDeadline(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), "grandchild")
 	started := time.Now()
 	records, _, _ := supervise(t, "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
-	if len(records) != 3 || records[1] != "expired" || records[2] != "complete 143" {
+	if fmt.Sprint(records) != "[started group 1 expired complete 143]" {
 		t.Fatalf("records %q, want expired then complete 143", records)
 	}
 	if elapsed := time.Since(started); elapsed >= 30*time.Second {
@@ -98,7 +137,7 @@ func TestTheShellSupervisorKillsACommandThatIgnoresTERM(t *testing.T) {
 	runtimeProvider(t)
 	launched := time.Now()
 	records, _, _ := supervise(t, "1", "/bin/sh", "-c", "trap '' TERM; while true; do sleep 1; done")
-	if len(records) != 3 || records[1] != "expired" || records[2] != "complete 137" {
+	if fmt.Sprint(records) != "[started group 1 expired complete 137]" {
 		t.Fatalf("records %q, want expired then complete 137", records)
 	}
 	if elapsed := time.Since(launched); elapsed < 3*time.Second {
@@ -133,7 +172,7 @@ func TestTheShellSupervisorsDeadlineSurvivesAClosedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { command.Process.Kill(); command.Wait() }()
-	if line, err := bufio.NewReader(errPipe).ReadString('\n'); err != nil || line != "N0NCE started 1\n" {
+	if line, err := bufio.NewReader(errPipe).ReadString('\n'); err != nil || line != "N0NCE started\n" {
 		t.Fatalf("first record %q %v", line, err)
 	}
 	errPipe.Close()
@@ -197,7 +236,10 @@ func TestExecUnderTheShellSupervisor(t *testing.T) {
 		t.Fatalf("timed out run: %+v %v", result, err)
 	}
 	result, err = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/no/such/command"}})
-	if err != nil || result.RemoteState != RemoteCompleted || result.Supervision != SupervisionShGroup || result.ExitCode == nil || *result.ExitCode != 127 || result.UnsupervisedReason != "" {
+	// It ends before the supervisor looks for its group, so whether it led
+	// one is moot; what matters is that the shell supervised it.
+	if err != nil || result.RemoteState != RemoteCompleted || (result.Supervision != SupervisionShGroup && result.Supervision != SupervisionShPID) ||
+		result.ExitCode == nil || *result.ExitCode != 127 || result.UnsupervisedReason != "" {
 		t.Fatalf("missing command in an sh container: %+v %v", result, err)
 	}
 }
@@ -233,7 +275,7 @@ func TestTheExitCodeDecidesBetweenATimeoutAndARace(t *testing.T) {
 		exit, state string
 		raced       bool
 	}{{"143", RemoteTimedOut, false}, {"137", RemoteTimedOut, false}, {"0", RemoteCompleted, true}, {"2", RemoteCompleted, true}} {
-		provider.options.Executor = recordExecutor("NONCE started 1\n", "partial", "\nNONCE expired\n", "\nNONCE complete "+c.exit+"\n")
+		provider.options.Executor = recordExecutor("NONCE started\n", "\nNONCE group 1\n", "partial", "\nNONCE expired\n", "\nNONCE complete "+c.exit+"\n")
 		result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
 		if err != nil || result.RemoteState != c.state || result.DeadlineRaced != c.raced || result.ExitCode == nil || strconv.Itoa(*result.ExitCode) != c.exit || result.Stderr != "partial" {
 			t.Fatalf("exit %s: %+v %v, want %s raced=%v", c.exit, result, err, c.state, c.raced)
@@ -340,7 +382,7 @@ func TestTheControlParserKeepsTheCommandsStderrWhole(t *testing.T) {
 	sink := newOutputSink(1<<20, func() {})
 	parser := newControlParser("N", sink, true)
 	long := strings.Repeat("y", maxControlLine+10)
-	for _, chunk := range []string{"N sta", "rted 0\n", "a\n", long + "\n", "M complete 0\n", "tail", "\nN exp", "ired\n", "\nN complete 9\n"} {
+	for _, chunk := range []string{"N sta", "rted\n", "\nN gro", "up 0\n", "a\n", long + "\n", "M complete 0\n", "tail", "\nN exp", "ired\n", "\nN complete 9\n"} {
 		parser.Write([]byte(chunk))
 	}
 	state := parser.snapshot()
@@ -370,7 +412,7 @@ func TestTheShellSupervisorEndsTheGroupWhenTheCommandEnds(t *testing.T) {
 	runtimeProvider(t)
 	started := time.Now()
 	records, _, _ := supervise(t, "30", "/bin/sh", "-c", "sleep 30 & exit 0")
-	if len(records) != 2 || records[1] != "complete 0" || time.Since(started) > 10*time.Second {
+	if fmt.Sprint(records) != "[started group 1 complete 0]" || time.Since(started) > 10*time.Second {
 		t.Fatalf("records %q after %v, want complete 0 without waiting for the child", records, time.Since(started))
 	}
 }
@@ -396,7 +438,7 @@ func TestAShellWithoutSleepRunsTheCommandUnsupervised(t *testing.T) {
 func TestALineLongerThanARecordIsTheCommands(t *testing.T) {
 	parser := newControlParser("N", newOutputSink(1<<20, func() {}), true)
 	long := "N complete " + strings.Repeat("9", maxControlLine)
-	parser.Write([]byte("N started 1\n" + long + "\n"))
+	parser.Write([]byte("N started\n" + long + "\n"))
 	if state := parser.snapshot(); state.invalid || state.finished || state.stderr != long+"\n" {
 		t.Fatalf("state %+v", state)
 	}
@@ -463,7 +505,7 @@ func TestTheDeadlineIsRoundedUpToWholeSeconds(t *testing.T) {
 	var seconds string
 	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
 		seconds = request.Argv[5]
-		return recordExecutor("NONCE started 1\n", "\nNONCE complete 0\n").Stream(ctx, request)
+		return recordExecutor("NONCE started\n", "\nNONCE group 1\n", "\nNONCE complete 0\n").Stream(ctx, request)
 	})
 	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: 1500})
 	if err != nil || seconds != "2" || result.EnforcedTimeoutSeconds != 2 || result.DeclaredTimeoutMS != 1500 {
@@ -496,5 +538,85 @@ func TestAStoppedTimerLeavesNoSleep(t *testing.T) {
 		if strings.TrimSpace(line) == "sleep 47" {
 			t.Fatal("the stopped timer's sleep is still running")
 		}
+	}
+}
+
+// dashOrSkip is the local dash, the /bin/sh of Debian-based images.
+func dashOrSkip(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/bin/dash"); err != nil {
+		t.Skip("no dash here")
+	}
+}
+
+// dash without a tty turns job control off although set -m succeeds, as an
+// exec's shell does in a Debian-based image: the supervisor finds no
+// process group and says so. A command that ends by itself is still
+// reported, and one past its deadline is still ended - itself, not its
+// children, which the receipt's sh_pid says.
+func TestUnderDashWithoutSetsidTheCommandHasNoGroupAndSaysSo(t *testing.T) {
+	runtimeProvider(t)
+	dashOrSkip(t)
+	if records, _, _ := superviseUnder(t, "/bin/dash", "", "5", "/bin/sh", "-c", "exit 4"); fmt.Sprint(records) != "[started group 0 complete 4]" {
+		t.Fatalf("records %q, want no group and complete 4", records)
+	}
+	pidPath := filepath.Join(t.TempDir(), "pids")
+	records, _, _ := superviseUnder(t, "/bin/dash", "", "1", "/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $$ $! > \"$1\"; wait", "cmd", pidPath)
+	data, _ := os.ReadFile(pidPath)
+	var command, child int
+	fmt.Sscan(string(data), &command, &child)
+	t.Cleanup(func() { syscall.Kill(child, syscall.SIGKILL) })
+	if fmt.Sprint(records) != "[started group 0 expired complete 143]" || command == 0 {
+		t.Fatalf("records %q (pids %q), want no group, expired, complete 143", records, data)
+	}
+	if err := syscall.Kill(command, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the command outlived its deadline (kill -0: %v)", err)
+	}
+}
+
+// With setsid the command has its own group under any shell: under dash, and
+// under a shell with job control, a command that ends by itself is reported
+// in its group, and one past its deadline is ended with its children's
+// children.
+func TestUnderSetsidTheCommandsGroupIsEndedWhole(t *testing.T) {
+	runtimeProvider(t)
+	path := withSetsid(t)
+	shells := []string{"/bin/sh"}
+	if _, err := os.Stat("/bin/dash"); err == nil {
+		shells = append(shells, "/bin/dash")
+	}
+	for _, shell := range shells {
+		if records, _, _ := superviseUnder(t, shell, path, "5", "/bin/sh", "-c", "exit 4"); fmt.Sprint(records) != "[started group 1 complete 4]" {
+			t.Fatalf("%s: records %q, want a group and complete 4", shell, records)
+		}
+		pidPath := filepath.Join(t.TempDir(), "grandchild")
+		records, _, _ := superviseUnder(t, shell, path, "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
+		if fmt.Sprint(records) != "[started group 1 expired complete 143]" {
+			t.Fatalf("%s: records %q, want a group, expired, complete 143", shell, records)
+		}
+		data, _ := os.ReadFile(pidPath)
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		if pid == 0 {
+			t.Fatalf("%s: the command did not record its child", shell)
+		}
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("%s: the command's child outlived the deadline (kill -0: %v)", shell, err)
+		}
+	}
+}
+
+// Through the provider, a dash target without setsid: the run is timed out
+// and named sh_pid.
+func TestExecUnderDashWithoutSetsidIsShPID(t *testing.T) {
+	provider, _, target := runtimeProvider(t)
+	dashOrSkip(t)
+	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
+		argv := append([]string{"/bin/dash"}, request.Argv[1:]...)
+		return localExecutor{}.Stream(ctx, StreamRequest{Target: request.Target, Argv: argv, Stdin: request.Stdin, Stdout: request.Stdout, Stderr: request.Stderr})
+	})
+	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "sleep 30"}, TimeoutMS: 300})
+	if err != nil || result.RemoteState != RemoteTimedOut || result.Supervision != SupervisionShPID {
+		t.Fatalf("dash run: %+v %v", result, err)
 	}
 }

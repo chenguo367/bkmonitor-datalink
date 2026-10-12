@@ -50,7 +50,7 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 		return StreamResult{}, err
 	}
 	f.startedAt = time.Now()
-	io.WriteString(request.Stderr, fmt.Sprintf("%s started 1\n", nonce))
+	io.WriteString(request.Stderr, fmt.Sprintf("%s started\n\n%s group 1\n", nonce, nonce))
 	if err := wait(f.beforeComplete, f.neverComplete); err != nil {
 		return StreamResult{}, err
 	}

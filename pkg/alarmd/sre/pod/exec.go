@@ -169,9 +169,13 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 		return result, &Error{Code: CodeTimeoutUnsupported, Message: "the supervisor could not start on the target"}
 	}
 	result.EnforcedTimeoutSeconds = seconds
-	result.Supervision = SupervisionShPID
-	if state.group {
-		result.Supervision = SupervisionShGroup
+	// What the supervisor found after the launch; a run cut before it said
+	// leaves the supervision unnamed.
+	if state.groupKnown {
+		result.Supervision = SupervisionShPID
+		if state.group {
+			result.Supervision = SupervisionShGroup
+		}
 	}
 	switch {
 	case run.err != nil || state.invalid || !state.finished || run.transport.ExitCode == nil || *run.transport.ExitCode != 0:
@@ -430,6 +434,7 @@ type protocolState struct {
 	stdout, stderr                   string
 	bootstrap                        string
 	started, nosleep, group, expired bool
+	groupKnown                       bool
 	finished, invalid, truncated     bool
 	exitCode                         int
 	written                          int64
@@ -499,14 +504,17 @@ func (c *controlParser) record(line string) bool {
 		return false
 	}
 	switch {
-	case fields[1] == "started" && len(fields) == 3 && !c.state.started && !c.state.nosleep:
-		c.state.started, c.state.group = true, fields[2] == "1"
+	case fields[1] == "started" && len(fields) == 2 && !c.state.started && !c.state.nosleep:
+		c.state.started = true
 		c.held = false
 		c.startOnce.Do(func() { close(c.started) })
 	case fields[1] == "nosleep" && len(fields) == 2 && !c.state.started && !c.state.nosleep:
 		c.state.nosleep = true
 		c.held = false
 		c.startOnce.Do(func() { close(c.started) })
+	case fields[1] == "group" && len(fields) == 3 && c.state.started && !c.state.groupKnown:
+		c.state.groupKnown, c.state.group = true, fields[2] == "1"
+		c.held = false
 	case fields[1] == "expired" && len(fields) == 2 && c.state.started:
 		c.state.expired = true
 		c.held = false

@@ -19,12 +19,14 @@ import (
 )
 
 const (
-	// TimeoutContract is the remote supervisor's: a POSIX shell job, in its
-	// own process group where the shell supports job control, ended at its
-	// deadline by a sleep and kill timer in the target. Where the target has
+	// TimeoutContract is the remote supervisor's: the target's /bin/sh runs
+	// the command in its own process group - under setsid where the image has
+	// it, else as a job under the shell's job control, which dash and busybox
+	// ash turn off without a tty - and a sleep and kill timer ends it at its
+	// deadline; whether a group exists is checked, not assumed. Where the target has
 	// no /bin/sh, or no sleep, the command runs unsupervised and the receipt
 	// says so.
-	TimeoutContract = "posix_sh_job_v1"
+	TimeoutContract = "posix_sh_group_v1"
 	// ReleaseLabel is the label a target's release is read from.
 	ReleaseLabel = "app.kubernetes.io/instance"
 	// DefaultModuleLabel is the label a target's module is read from when
@@ -33,9 +35,10 @@ const (
 	// StartCommandUnavailable is a command the target's runtime refused to
 	// start, in a container run without a shell.
 	StartCommandUnavailable = "command_unavailable"
-	// How a run was supervised: a shell job in its own process group, a
-	// shell job whose shell has no job control (only the job itself is
-	// ended, its descendants may stay), or not at all.
+	// How a run was supervised: the command led a process group of its own
+	// (it is ended with its descendants), it did not - the shell had no job
+	// control and the image no setsid, so only the command itself is ended
+	// and its descendants may stay - or not at all.
 	SupervisionShGroup = "sh_group"
 	SupervisionShPID   = "sh_pid"
 	SupervisionNone    = "none"

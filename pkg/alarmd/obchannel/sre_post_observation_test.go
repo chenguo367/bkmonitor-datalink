@@ -67,7 +67,7 @@ func (e *postObservationExecutor) Stream(_ context.Context, request pod.StreamRe
 	// Simulate the supervisor's records and the command's output; no local
 	// or remote command runs.
 	nonce := request.Argv[4]
-	fmt.Fprintf(request.Stderr, "%s started 1\n", nonce)
+	fmt.Fprintf(request.Stderr, "%s started\n\n%s group 1\n", nonce, nonce)
 	io.WriteString(request.Stdout, "completed command output\n")
 	io.WriteString(request.Stderr, "command diagnostic\n")
 	fmt.Fprintf(request.Stderr, "\n%s complete 19\n", nonce)

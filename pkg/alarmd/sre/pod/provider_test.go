@@ -426,7 +426,7 @@ type startedWriter struct {
 
 func (w *startedWriter) Write(data []byte) (int, error) {
 	n, err := w.destination.Write(data)
-	if strings.Contains(string(data), " started ") {
+	if strings.Contains(string(data), " started\n") {
 		w.once.Do(func() { close(w.started) })
 	}
 	return n, err
