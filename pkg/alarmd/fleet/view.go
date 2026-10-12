@@ -4210,6 +4210,10 @@ type SkippedSpan struct {
 	// Absent when the anchor is unknown.
 	RestartOffsetSeconds  *float64 `json:"restart_offset_seconds,omitempty"`
 	TakeoverOffsetSeconds *float64 `json:"takeover_offset_seconds,omitempty"`
+	// RecentWindowSeconds is how long this record is read as still
+	// happening (RecentWindow of its object's period), filled when it is
+	// read.
+	RecentWindowSeconds int64 `json:"recent_window_seconds,omitempty"`
 	// RewrittenAt is when the Control Leader rewrote the timeline whose loss
 	// this span is (a SCHEDULE_REPAIRED record); nil on every other span.
 	RewrittenAt *time.Time `json:"rewritten_at,omitempty"`
