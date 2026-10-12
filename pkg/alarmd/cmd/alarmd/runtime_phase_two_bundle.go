@@ -227,14 +227,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// bounded diagnostic; the census is every owned Query Group's peak for
 	// the heartbeat, which has to be a census.
 	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
-	// Each member named, so that a panic in one is counted under it while the
-	// others still receive the observation.
-	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),
-		observability.Named(observability.ObserverAdditional, external.AdditionalObserver),
-		observability.Named(observability.ObserverTargetFlow, targetFlow),
-		observability.Named(observability.ObserverRejectionTally, rejectionTally),
-		observability.Named(observability.ObserverCostSummary, costSummary),
-		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks))
+	// Each member on its own, so that a panic in one leaves the others their
+	// observation.
+	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary,
+		retainedPeaks)
 	observer = phaseTwoRuntimeObserver(observer)
 	compiler, err := newPlanCompiler(cfg)
 	if err != nil {
@@ -711,15 +707,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
-		MinReadyDelay:        cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
-		Now:                  external.Now,
-		Observer:             observer,
-		Admission:            seriesAdmission,
-		ObserveAdmission:     recorder.RecordSeriesAdmission,
-		ObserveHostPlacement: recorder.RecordHostPlacement,
-		ScopeDrops:           scopeDrops,
-		ObserveSeriesPulled:  seriesPullTally.Add,
-		Lookback:             lookbackEngine,
+		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
+		Now:                 external.Now,
+		Observer:            observer,
+		Admission:           seriesAdmission,
+		ObserveAdmission:    recorder.RecordSeriesAdmission,
+		ScopeDrops:          scopeDrops,
+		ObserveSeriesPulled: seriesPullTally.Add,
+		Lookback:            lookbackEngine,
 	})
 	if err != nil {
 		return nil, err
@@ -867,7 +862,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
-	recorder.SetActivationSkippedTimelinesSource(repository.SkippedTimelinesReading)
 	recorder.SetActivationHeaderSource(repository.ActivationHeaderReading)
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
@@ -1337,7 +1331,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Bound whether or not a Console is configured: not_configured is a
 	// reading, and the absent_strategy families are missing there by
 	// construction.
-	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps, openalerts.ConsoleFailureClasses,
+	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps,
 		linkdConsoleReading(linkd.Console, external.Now))
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.

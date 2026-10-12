@@ -16,13 +16,13 @@ import (
 )
 
 // observeRuntime hands one observation to the runtime's observer. A panic
-// is recovered and counted: inside the fan-out under the member that raised
-// it, and anywhere before it - normalization, an observer handed over
-// directly - under the entry.
+// is recovered: inside the fan-out by the member that raised it, and
+// anywhere before it - normalization, an observer handed over directly -
+// here.
 func observeRuntime(ctx context.Context, observer observability.Observer, observation observability.Observation) {
 	if observer == nil {
 		return
 	}
-	defer observability.RecoverObserverPanic(observability.ObserverEntry)
+	defer observability.RecoverObserverPanic()
 	observer.Observe(ctx, observation)
 }

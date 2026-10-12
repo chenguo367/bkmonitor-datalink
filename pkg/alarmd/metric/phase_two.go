@@ -29,7 +29,6 @@ type phaseTwoMetrics struct {
 	workflow                       workflowMetrics
 	shortPeriod                    shortPeriodMetrics
 	queryStatus                    queryStatusMetrics
-	queryCodec                     queryCodecMetrics
 	queryTruncation                queryTruncationMetrics
 	queryUnavailable               queryUnavailableMetrics
 	queryCooldown                  *prometheus.CounterVec
@@ -146,15 +145,12 @@ type phaseTwoMetrics struct {
 	openAlertSet                    *openAlertSetCollector
 	activationRebuild               *activationRebuildCollector
 	timelineRepair                  *timelineRepairCollector
-	activationSkippedTimelines      *activationSkippedTimelinesCollector
-	timelineUnreadableReports       prometheus.Counter
 	activationHeader                *activationHeaderCollector
 	activationBlocked               *activationBlockedCollector
 	roundMemory                     *roundMemoryCollector
 	targetGroup                     *targetGroupCollector
 	effectiveClose                  *effectiveCloseCollector
 	logLines                        *logLinesCollector
-	observerPanics                  *observerPanicsCollector
 	absentClose                     *absentCloseCollector
 	targetScopeClose                *targetScopeCloseCollector
 	linkdConsole                    *linkdConsoleCollector
@@ -185,8 +181,6 @@ type phaseTwoMetrics struct {
 	canonicalEncoding               *canonicalEncodingCollector
 	algorithmInputs                 *prometheus.CounterVec
 	seriesAdmission                 *prometheus.CounterVec
-	cmdbAddressDiffers              *prometheus.CounterVec
-	cmdbPlacedByHostID              *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
 	cmdbIndexBusinessMappings       *prometheus.GaugeVec
@@ -206,7 +200,6 @@ type phaseTwoMetrics struct {
 	cmdbIndexAge                    *prometheus.GaugeVec
 	cmdbIndexDegraded               *prometheus.GaugeVec
 	dueIndex                        dueIndexMetrics
-	handover                        handoverMetrics
 	controlFacts                    controlFactsMetrics
 	startupDependencyWaits          *prometheus.CounterVec
 	liveness                        *livenessCollector
@@ -670,7 +663,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"reason=other is a reason nobody named here. Every combination has a label at startup.",
 	}, []string{"status", "reason", "progress"})
 	metrics.dueIndex = newDueIndexMetrics()
-	metrics.handover = newHandoverMetrics()
 	metrics.controlFacts = newControlFactsMetrics()
 	metrics.startupDependencyWaits = newStartupDependencyWaits()
 	metrics.liveness = newLivenessCollector()
@@ -687,7 +679,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.canonicalEncoding = newCanonicalEncodingCollector()
 	metrics.shortPeriod = newShortPeriodMetrics()
 	metrics.queryStatus = newQueryStatusMetrics()
-	metrics.queryCodec = newQueryCodecMetrics()
 	metrics.queryTruncation = newQueryTruncationMetrics()
 	metrics.queryUnavailable = newQueryUnavailableMetrics()
 	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event."}, []string{"event"})
@@ -1175,15 +1166,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.openAlertSet = newOpenAlertSetCollector()
 	metrics.activationRebuild = newActivationRebuildCollector()
 	metrics.timelineRepair = newTimelineRepairCollector()
-	metrics.activationSkippedTimelines = newActivationSkippedTimelinesCollector()
-	metrics.timelineUnreadableReports = newTimelineUnreadableReports()
 	metrics.activationHeader = newActivationHeaderCollector()
 	metrics.activationBlocked = newActivationBlockedCollector()
 	metrics.roundMemory = newRoundMemoryCollector()
 	metrics.targetGroup = newTargetGroupCollector()
 	metrics.effectiveClose = newEffectiveCloseCollector()
 	metrics.logLines = newLogLinesCollector()
-	metrics.observerPanics = newObserverPanicsCollector()
 	metrics.absentClose = newAbsentCloseCollector()
 	metrics.targetScopeClose = newTargetScopeCloseCollector()
 	metrics.linkdConsole = newLinkdConsoleCollector()
@@ -1330,38 +1318,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "series_admission_total",
 		Help: "Access-path admission decisions by filter, outcome and bounded reason.",
 	}, []string{"filter", "result", "reason"})
-	// Both cells exist from start: "about zero" is the reading this exists
-	// for, and a missing series is not a zero.
-	metrics.cmdbAddressDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_address_differs_total",
-		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own " +
-			"bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert " +
-			"identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that " +
-			"branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip=" +
-			"\"true\" these are the series whose alert identity differs from Python's. Counted per admitted series " +
-			"per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the " +
-			"pairs are about the rate times its period; it says whether this happens and roughly how much, and a " +
-			"non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, " +
-			"the count these are a part of, which tells a zero here from a branch never taken. The address is " +
-			"compared exactly, as Python's dedupe " +
-			"sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. " +
-			"Read by the decision whether an alert's identity follows CMDB's address as Python's does, and by any " +
-			"migration from Python that needs alert continuity. Remove it once that decision is recorded, unless " +
-			"the decision keeps it as a migration check.",
-	}, []string{"grouped_by_target_ip"})
-	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
-		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own " +
-			"bk_target_ip, by whether the Plan's alert identity groups by bk_target_ip: the branch Python's fuller " +
-			"overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at " +
-			"the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells " +
-			"\"placed this way and the address always the host's\" (this one rising) from \"never placed this way\" " +
-			"(this one zero too). Retired with it.",
-	}, []string{"grouped_by_target_ip"})
-	for _, grouped := range []string{"true", "false"} {
-		metrics.cmdbAddressDiffers.WithLabelValues(grouped)
-		metrics.cmdbPlacedByHostID.WithLabelValues(grouped)
-	}
 	metrics.cmdbIndexHosts = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_hosts",
 		Help: "Hosts in the in-memory CMDB index the target filter decides on.",
@@ -1644,7 +1600,6 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
 		m.queryStatus.responses,
-		m.queryCodec.responses,
 		m.queryTruncation.truncated,
 		m.queryUnavailable.attributions,
 		m.queryCooldown,
@@ -1665,11 +1620,11 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
-	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.handover.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.timelineRepair, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
@@ -1680,7 +1635,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	m.workflow.observe(observation)
 	m.shortPeriod.observe(observation)
 	m.queryStatus.observe(observation)
-	m.queryCodec.observe(observation)
 	m.queryTruncation.observe(observation)
 	m.queryUnavailable.observe(observation)
 	if facts := observation.QueryCooldown; facts != nil {
@@ -2031,9 +1985,6 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if site := ownershipRefusalSite(observation); site != "" {
 		m.ownershipRefusals.WithLabelValues(site, string(observation.ReasonCode)).Inc()
-	}
-	if observation.Stage == observability.StageOutputUnapplied && isOwnershipRefusalReason(observation.ReasonCode) {
-		m.handover.outputUnapplied.WithLabelValues(string(observation.ReasonCode)).Inc()
 	}
 	if facts := observation.StateWriteReuse; facts != nil && !facts.Empty() {
 		for key, count := range facts.Counts {

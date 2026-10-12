@@ -34,8 +34,7 @@ type linkdIndex struct {
 
 // consoleFailureLine writes the console_call_failed line: an operation's
 // failures starting, or changing class, with the class and the failures so
-// far, never the address. The record and linkd_console_failures_total
-// count every one.
+// far, never the address. The record counts every one.
 func consoleFailureLine(logger *observability.Logger) func(op, class string, failures uint64) {
 	return func(op, class string, failures uint64) {
 		logger.Warn("console_call_failed", "failed", 0, 0, slog.String("op", op), slog.String("class", class),

@@ -266,8 +266,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_control_cache_audit_total":                    "variableLabels: {object,result}",
 		"bkmonitor_alarmd_legacy_pod_cache_total":                       "variableLabels: {result}",
 		"bkmonitor_alarmd_series_admission_total":                       "variableLabels: {filter,result,reason}",
-		"bkmonitor_alarmd_admission_cmdb_address_differs_total":         "variableLabels: {grouped_by_target_ip}",
-		"bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total":       "variableLabels: {grouped_by_target_ip}",
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
@@ -306,7 +304,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_short_period_slot_completions_total":          "variableLabels: {cohort,operation,completion_kind}",
 		"bkmonitor_alarmd_query_cooldown_events_total":                  "variableLabels: {event}",
 		"bkmonitor_alarmd_access_response_status_total":                 "variableLabels: {code,outcome}",
-		"bkmonitor_alarmd_access_response_codec_total":                  "variableLabels: {codec,negotiation,completion}",
 		"bkmonitor_alarmd_uq_answer_truncated_total":                    "variableLabels: {source_semantics}",
 		"bkmonitor_alarmd_query_unavailable_attribution_total":          "variableLabels: {attribution}",
 		"bkmonitor_alarmd_slot_readiness_slack_seconds":                 "variableLabels: {}",
@@ -384,10 +381,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_shard_unaware_ready_replicas":                 "variableLabels: {}",
 		"bkmonitor_alarmd_rebalance_gap":                                "variableLabels: {}",
 		"bkmonitor_alarmd_dispatch_queue_turnaways_total":               "variableLabels: {outcome,cohort}",
-		"bkmonitor_alarmd_handover_drains_total":                        "variableLabels: {outcome}",
-		"bkmonitor_alarmd_handover_drain_seconds":                       "variableLabels: {}",
-		"bkmonitor_alarmd_output_unapplied_total":                       "variableLabels: {refusal}",
-		"bkmonitor_alarmd_executions_hung_total":                        "variableLabels: {outcome}",
 		"bkmonitor_alarmd_assignment_moves_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_rebalance_paused_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_control_read_round_trips_total":               "variableLabels: {read}",
@@ -433,7 +426,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
 	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_log_lines_total"] = "variableLabels: {stage,admission}"
-	expected["bkmonitor_alarmd_observer_panics_total"] = "variableLabels: {observer}"
 	expected["bkmonitor_alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_difference"] = "variableLabels: {side}"
@@ -444,8 +436,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_timeline_repairs_total"] = "variableLabels: {outcome}"
-	expected["bkmonitor_alarmd_activation_timelines_skipped_total"] = "variableLabels: {reason}"
-	expected["bkmonitor_alarmd_timeline_unreadable_reports_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_activation_header_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_renewal_conflict_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
@@ -499,7 +489,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
-	expected["bkmonitor_alarmd_linkd_console_failures_total"] = "variableLabels: {op,class}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
@@ -795,9 +784,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("control_cache_audit_total"):  4,
 		fqName("legacy_pod_cache_total"):     3,
 		// Filters and reasons are closed vocabularies in the recorder.
-		fqName("series_admission_total"):                 len(admissionFilters) * len(admissionResults) * len(admissionReasons),
-		fqName("admission_cmdb_address_differs_total"):   2,
-		fqName("admission_cmdb_placed_by_host_id_total"): 2,
+		fqName("series_admission_total"): len(admissionFilters) * len(admissionResults) * len(admissionReasons),
 		// Levels 1..64 plus "other". Empty in a healthy build: the platform's
 		// three levels all have names here, so a series appearing at all is the
 		// signal.
@@ -845,7 +832,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
 		fqName("access_response_status_total"): 36,
-		fqName("access_response_codec_total"):  3 * 3 * 4,
 		// One per source answered through Elasticsearch terms.
 		fqName("uq_answer_truncated_total"): 4,
 		// attempt, no_attempt_reason, no_attempts, other.
@@ -952,10 +938,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("shard_unaware_ready_replicas"):        1,
 		fqName("rebalance_gap"):                       1,
 		fqName("dispatch_queue_turnaways_total"):      len(dispatchTurnawayOutcomes) * len(dispatchTurnawayCohorts),
-		fqName("handover_drains_total"):               len(handoverDrainOutcomes()),
-		fqName("handover_drain_seconds"):              histogramSeries(1, len(handoverDrainBuckets)),
-		fqName("output_unapplied_total"):              len(ownership.RefusalReasons),
-		fqName("executions_hung_total"):               len(observability.ExecutionHungOutcomes),
 		fqName("assignment_moves_total"):              1,
 		fqName("rebalance_paused_total"):              1,
 		fqName("control_read_round_trips_total"):      len(ControlReadKinds),
@@ -1006,7 +988,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
 	// Every stage of the closed list, _other among them, written and limited.
 	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
-	bounds[fqName("observer_panics_total")] = len(observability.ObserverNames)
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
@@ -1017,8 +998,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_notices_refused_total")] = len(openalerts.NoticeRefusals)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("timeline_repairs_total")] = len(controlplane.TimelineRepairOutcomes)
-	bounds[fqName("activation_timelines_skipped_total")] = len(controlplane.SkippedTimelineReasons)
-	bounds[fqName("timeline_unreadable_reports_total")] = 1
 	bounds[fqName("activation_header_rebuild_total")] = len(controlplane.ActivationHeaderRebuildOutcomes)
 	bounds[fqName("activation_renewal_conflict_total")] = len(controlplane.ActivationRenewalConflicts)
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
@@ -1040,7 +1019,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
 	// Every Console operation by every failure class.
-	bounds[fqName("linkd_console_failures_total")] = len(openalerts.ConsoleOps) * len(openalerts.ConsoleFailureClasses)
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
 	bounds[fqName("control_source_last_good_identity_changed_total")] = 1
 	// The supported data sources, plus other for one the compiler started
@@ -1436,37 +1414,5 @@ func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 		if values[cell] != value {
 			t.Fatalf("gauge = %v, want %v", values, want)
 		}
-	}
-}
-
-// observer_panics_total names every observer of the closed list from the
-// first scrape, and a panic a fan-out recovered moves its observer's series.
-func TestObserverPanicsAreExportedForEveryObserver(t *testing.T) {
-	recorder := NewRecorder(BuildInfo{})
-	read := func() map[string]float64 {
-		t.Helper()
-		families, err := recorder.Gatherer().Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
-		values := map[string]float64{}
-		for _, family := range families {
-			if family.GetName() != "bkmonitor_alarmd_observer_panics_total" {
-				continue
-			}
-			for _, m := range family.GetMetric() {
-				values[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
-			}
-		}
-		return values
-	}
-	before := read()
-	if len(before) != len(observability.ObserverNames) {
-		t.Fatalf("observer_panics_total names %d observers, want %d", len(before), len(observability.ObserverNames))
-	}
-	observability.Multi(observability.Named(observability.ObserverCostSummary, observability.ObserverFunc(
-		func(context.Context, observability.Observation) { panic("observer defect") }))).Observe(context.Background(), observability.Observation{})
-	if after := read(); after[observability.ObserverCostSummary] != before[observability.ObserverCostSummary]+1 {
-		t.Fatalf("a recovered panic did not move its observer's series: %v -> %v", before, after)
 	}
 }
