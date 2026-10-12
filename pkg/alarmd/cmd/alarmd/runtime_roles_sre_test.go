@@ -124,7 +124,7 @@ func TestTheRedactionKnowsEveryCredentialTheDeploymentHolds(t *testing.T) {
 	cfg.Redis.Password = "fixture-redis-password"
 	cfg.Redis.SentinelPassword = "fixture-sentinel-password"
 	// Every platform cache on a Redis of its own, and the compatibility
-	// service Redis, each with its own credentials.
+	// service and pod cache Redis, each with its own credentials.
 	own := func(name string) *config.RedisConnectionConfig {
 		return &config.RedisConnectionConfig{Address: name + ".example.test:6379", Password: "fixture-" + name + "-password", SentinelPassword: "fixture-" + name + "-sentinel"}
 	}
@@ -133,12 +133,13 @@ func TestTheRedactionKnowsEveryCredentialTheDeploymentHolds(t *testing.T) {
 	prefix := "fixture-groups"
 	cfg.PlatformCache.DynamicGroupKeyPrefix = &prefix
 	cfg.Kafka.LegacyAdapter.ServiceRedis = *own("service")
+	cfg.Kafka.LegacyAdapter.PodCache = &config.LegacyPodCacheConfig{Connection: *own("pods")}
 	known := map[string]bool{}
 	for _, value := range sreDeploymentSecrets(cfg) {
 		known[value] = true
 	}
 	want := []string{"fixture-admin-key", "fixture-linkd-password", "fixture-redis-password", "fixture-sentinel-password"}
-	for _, name := range []string{"strategy", "cmdb", "dynamic", "group", "service"} {
+	for _, name := range []string{"strategy", "cmdb", "dynamic", "group", "service", "pods"} {
 		want = append(want, "fixture-"+name+"-password", "fixture-"+name+"-sentinel")
 	}
 	for _, want := range want {

@@ -69,5 +69,10 @@ func sreDeploymentSecrets(cfg config.Config) []string {
 	if connection, ok := cfg.DynamicConfigRedis(); ok {
 		values = append(values, connection.Password, connection.SentinelPassword)
 	}
+	// The pod cache's connection keeps its own credentials; only its
+	// timeouts are taken from the runtime Redis.
+	if cache := cfg.Kafka.LegacyAdapter.PodCache; cache != nil {
+		values = append(values, cache.Connection.Password, cache.Connection.SentinelPassword)
+	}
 	return values
 }
