@@ -520,13 +520,16 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	// The latest records whose address is not their host's, for fleet.get to
+	// name beside the count.
+	addressDiffers := &fleet.AddressDiffersSamples{}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:        cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                  external.Now,
 		Observer:             observer,
 		Admission:            seriesAdmission,
 		ObserveAdmission:     recorder.RecordSeriesAdmission,
-		ObserveHostPlacement: recorder.RecordHostPlacement,
+		ObserveHostPlacement: hostPlacementObserver(recorder, addressDiffers, external.Now),
 		ScopeDrops:           scopeDrops,
 		ObserveSeriesPulled:  seriesPullTally.Add,
 		Lookback:             lookbackEngine,
@@ -1140,6 +1143,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	bundle.addressDiffers = addressDiffers
 	lookbackOwner.bind(bundle)
 	// A Slot a supplement or maintenance turned away from its flight runs as
 	// soon as the hold ends, not at its next turn.
@@ -1238,6 +1242,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// overdue count above is only readable next to this: on a build that
 		// suppresses nothing it can only be zero.
 		dispatch:         bundle.dispatchSuppressionFacts,
+		addressDiffers:   addressDiffers.Latest,
 		restore:          progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
 		staleAfter:       stallAfter,
 		restoreBudget:    fleetRestoreBudgetPerPublish,

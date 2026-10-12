@@ -5,7 +5,11 @@
 
 package metric
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
+)
 
 // Series admission is on the hot path - once per series per plan - so it is
 // counted directly rather than through an observation per decision. Only the
@@ -71,15 +75,17 @@ func (r *Recorder) RecordSeriesAdmission(filter, result, reason string) {
 
 // RecordHostPlacement counts one admitted series a Plan read whose host CMDB
 // placed by id or agent, and, when its own address is not that host's, one
-// whose address differs.
-func (r *Recorder) RecordHostPlacement(groupedByTargetIP, addressDiffers bool) {
+// whose address differs, by how (admission.AddressCauses). The same address,
+// or a cause outside the set, counts as placed only.
+func (r *Recorder) RecordHostPlacement(groupedByTargetIP bool, cause string) {
 	if r == nil {
 		return
 	}
 	grouped := strconv.FormatBool(groupedByTargetIP)
 	r.phaseTwo.cmdbPlacedByHostID.WithLabelValues(grouped).Inc()
-	if addressDiffers {
-		r.phaseTwo.cmdbAddressDiffers.WithLabelValues(grouped).Inc()
+	switch cause {
+	case admission.AddressDiffers, admission.AddressMissing, admission.AddressUndecodable:
+		r.phaseTwo.cmdbAddressDiffers.WithLabelValues(grouped, cause).Inc()
 	}
 }
 

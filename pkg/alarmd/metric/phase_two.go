@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -1370,9 +1371,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"the count these are a part of, which tells a zero here from a branch never taken. The address is " +
 			"compared exactly, as Python's dedupe " +
 			"sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. " +
+			"cause says how it differs: differs (another address), missing (none, or empty), undecodable (not a " +
+			"string); fleet.get address_differs_samples names the latest such records, with the strategy, Query " +
+			"Group, host and both addresses. " +
 			"Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read " +
 			"through /metrics on each deployment it waits on.",
-	}, []string{"grouped_by_target_ip"})
+	}, []string{"grouped_by_target_ip", "cause"})
 	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
 		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own " +
@@ -1383,7 +1387,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"(this one zero too). Reader: the same decision, through /metrics. Retired with it.",
 	}, []string{"grouped_by_target_ip"})
 	for _, grouped := range []string{"true", "false"} {
-		metrics.cmdbAddressDiffers.WithLabelValues(grouped)
+		for _, cause := range admission.AddressCauses {
+			metrics.cmdbAddressDiffers.WithLabelValues(grouped, cause)
+		}
 		metrics.cmdbPlacedByHostID.WithLabelValues(grouped)
 	}
 	metrics.cmdbIndexHosts = prometheus.NewGauge(prometheus.GaugeOpts{

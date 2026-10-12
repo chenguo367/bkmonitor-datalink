@@ -811,6 +811,9 @@ type phaseTwoWorkerBundle struct {
 	// become due. It lives on the bundle rather than on the dispatcher so a
 	// reader outside the dispatch loop can ask it which objects are overdue.
 	dueIndex *phaseTwoDueIndex
+	// addressDiffers is the latest records whose address is not their
+	// host's, as the fleet snapshot publishes them.
+	addressDiffers *fleet.AddressDiffersSamples
 }
 
 type phaseTwoScheduledRunner struct {

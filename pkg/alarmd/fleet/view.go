@@ -1890,6 +1890,9 @@ type Snapshot struct {
 	// TestSnapshotOmitsDispatchOnAReplicaThatDoesNotSuppress rather than a note
 	// here: it asserts on the encoded form, which is where the page reads this.
 	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
+	// AddressDiffers is this replica's latest records whose address is not
+	// their host's (AddressDiffersSamples); omitted when it has none.
+	AddressDiffers []AddressDiffersSample `json:"address_differs,omitempty"`
 	// AppliedActivationRecordRevision is the Activation this replica executes
 	// by, as its record revision. Zero means the replica did not report it,
 	// which the aggregate keeps apart from any lag.
@@ -2937,8 +2940,11 @@ type View struct {
 	Schedule *ScheduleCensus `json:"schedule,omitempty"`
 	// Suppression says whether anything in this deployment can be parked at
 	// all. See DispatchSuppression: its absence, not its value, is the answer.
-	Dispatch  *DispatchSuppression `json:"dispatch,omitempty"`
-	Anomalies []Anomaly            `json:"anomalies"`
+	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
+	// AddressDiffers is every replica's latest records whose address is not
+	// their host's, newest first and bounded.
+	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
+	Anomalies      []Anomaly              `json:"anomalies"`
 	// Healthy is Determined minus the listed columns. It is computed here
 	// rather than left to the page because it is the column a reader trusts
 	// most, and a page that derives it by subtraction can be made to show a
@@ -3510,6 +3516,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateOverdue(&view, counted)
 	aggregateSchedule(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
+	aggregateAddressDiffers(&view, counted)
 
 	// Owning an object is not knowing about it. A replica that has just restarted
 	// owns everything and has observed nothing, so its empty anomaly list is not

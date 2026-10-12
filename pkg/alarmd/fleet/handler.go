@@ -367,6 +367,11 @@ type HealthResponse struct {
 	// above is unreadable: a build that suppresses nothing reports the same zero
 	// as one where every object is being reached on time.
 	Dispatch *DispatchSuppression `json:"dispatch"`
+	// AddressDiffers names the latest records, across the replicas, whose
+	// host CMDB placed by id or agent at another address than their own:
+	// which strategy, Query Group and host, and both addresses. The count
+	// admission_cmdb_address_differs_total says how often.
+	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
 	// Schedule is the census the first sentence of the page is built from:
 	// waiting, late, overdue, never yet evaluated, and the on-time rates over
 	// two windows. Absent when no replica has a due index, and the page then
@@ -1001,7 +1006,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		NoDataTracking: view.NoDataTracking,
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
-		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
+		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers,
 		Gaps: view.Gaps, Capacity: view.Capacity,
 		Load: part.Load(view),
 	}
