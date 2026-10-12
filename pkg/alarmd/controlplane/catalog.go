@@ -989,6 +989,20 @@ func (cache *CandidateCache) endRound() {
 	cache.seen = nil
 }
 
+// forget empties the cache and its identity, so the next round compiles
+// every strategy as a first round would.
+func (cache *CandidateCache) forget() {
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.entries = make(map[string]cachedCandidate)
+	cache.protocol, cache.compiler, cache.sources, cache.noDataPolicy = "", "", "", ""
+	cache.seen = nil
+	cache.compiled, cache.reused = 0, 0
+}
+
 // Stats reports how many strategies the last round compiled and how many it
 // took from an earlier round. The two add up to the strategies the round
 // asked the compiler about, which excludes the ones the source itself

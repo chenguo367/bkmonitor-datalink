@@ -297,10 +297,12 @@ type productionSourceReconciler interface {
 		controlplane.StrategySource,
 		controlplane.PrimaryQueryCompiler,
 	) (controlplane.SourceRefreshResult, error)
-	// StepDown forgets the catalog memory a Leader answers strategy
-	// lookups from. Called on every follower tick, so a process that lost
-	// the lease stops answering from its old term.
-	StepDown()
+	// ForgetTerm forgets the catalog memory a Leader answers strategy
+	// lookups from and releases everything else it kept only to lead.
+	// Called on every follower tick, on the goroutine that runs Refresh, so
+	// a process that lost the lease stops answering from its old term and
+	// stops carrying the Leader's working set.
+	ForgetTerm()
 }
 
 type productionInitialScheduleActivator interface {
@@ -456,9 +458,9 @@ func (runtime *productionPhaseTwoControl) LoadActive(
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
 	}
 	// This tick runs as a follower: whatever this process published in an
-	// earlier term is not its to answer from any more.
+	// earlier term is not its to answer from any more, nor its to hold.
 	if runtime.dependencies.Reconciler != nil {
-		runtime.dependencies.Reconciler.StepDown()
+		runtime.dependencies.Reconciler.ForgetTerm()
 	}
 	state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
