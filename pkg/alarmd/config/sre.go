@@ -19,6 +19,18 @@ type SREUQConfig struct {
 	Egresses []uq.Egress `yaml:"egresses,omitempty"`
 }
 
+// WithUQEndpoint reuses the current runtime endpoint for explicitly registered
+// SRE scopes. It does not create an egress or change the source configuration.
+func (c SREConfig) WithUQEndpoint(endpoint string) SREConfig {
+	c.UQ.Egresses = append([]uq.Egress(nil), c.UQ.Egresses...)
+	for i := range c.UQ.Egresses {
+		if c.UQ.Egresses[i].URL == "" {
+			c.UQ.Egresses[i].URL = endpoint
+		}
+	}
+	return c
+}
+
 func (c SREConfig) Validate() error {
 	if err := pod.ValidateScopes(c.Pods); err != nil {
 		return err

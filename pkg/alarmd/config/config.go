@@ -774,7 +774,7 @@ func (c Config) Validate() error {
 	if err := c.validateCommon(); err != nil {
 		return err
 	}
-	if err := c.SRE.Validate(); err != nil {
+	if err := c.SRE.WithUQEndpoint(c.PhaseTwo.Access.UQEndpoint).Validate(); err != nil {
 		return err
 	}
 

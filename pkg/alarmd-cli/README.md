@@ -116,6 +116,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 3. 执行回执中的 `remote_completed`、`exit_code`、输出截断与前后身份各自解释；操作成功不代表脚本成功。连接异常时 `remote_state_unknown` 表示远端事实待核对，禁止自动重试；执行完成但事后身份读取失败仍是部分证据。
 4. `uq.egresses` 返回部署登记的原生出口。`uq.query` 必须使用登记端点、允许的 tenant/space 和从实际页面取证得到的 QueryTs JSON。首版支持结构化 metric/log QueryTs；拒绝直接 SQL、物理存储覆盖和 BKData 旁路，不接受调用方 URL 或身份头。
 5. UQ 回执保留 actual_url、tenant/space、原始请求摘要与 HTTP/业务状态。metric 保留脱敏 native JSON 与游标；log/原始行在主题脱敏前只保留状态、数量和摘要，省略正文/携值游标并标记部分证据，内容取鲸眼业务脱敏投影。时间戳使用登记单位的 10 位秒或 13 位毫秒字符串，查询窗最多 24 小时。请求摘要用于核对这次请求，跨语言摘要须先核对序列化方式。
+6. 普通 Trace 先从 `uq.egresses` 选择登记的 `trace_targets`，再 `describe uq.trace`，以 egress、target、body 调用。原生请求使用 `bkapm`、实际登记 table_id、`time_field: start_time`、秒字符串窗口、显式 limit（1–1000）和非负 from；共享表保留业务/应用的单值 eq AND 条件。返回脱敏原始 Span，时间与耗时保持微秒；`trace_page` 描述固定窗口、投影、returned/total/more，后续页显式读取。该操作沿用当前 UQ 直连，出口 URL 省略时继承 runtime UQ 地址，查询来源沿用当前 query_source。
 
 页面业务装配与授权证据由鲸眼诊断入口提供；部署级查询授权不代表受影响页面用户的权限。排查流程见 ai-docs 的 `kingeye-sre-diagnosis` 技能。
 

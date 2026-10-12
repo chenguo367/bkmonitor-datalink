@@ -22,7 +22,11 @@ func channelSREOperations(cfg config.Config) ([]obchannel.Operation, func(), err
 			podReason = "pod_provider_unavailable: ServiceAccount configuration could not be opened"
 		}
 	}
-	queries, err := uq.New(cfg.SRE.UQ.Egresses, nil)
+	querySource := cfg.PhaseTwo.Access.QuerySource
+	if querySource == "" {
+		querySource = config.DefaultQuerySource
+	}
+	queries, err := uq.NewWithQuerySource(cfg.SRE.WithUQEndpoint(cfg.PhaseTwo.Access.UQEndpoint).UQ.Egresses, nil, querySource)
 	if err != nil {
 		return nil, nil, err
 	}
