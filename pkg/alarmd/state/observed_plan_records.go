@@ -64,14 +64,3 @@ func ObservedNoDataHeader(raw []byte) (ObservedPlanRecord, execution.PlanNoDataI
 		ScheduleRevision: string(header.ScheduleRevision), PresentAsOf: header.PresentAsOf,
 		TrackingExhaustedAt: header.TrackingExhaustedAt}, header.Identity, nil
 }
-
-// ObservedNoDataWhole reads a whole-record no-data memory, the shape this
-// build reads and no longer writes, with the identity it names.
-func ObservedNoDataWhole(raw []byte) (ObservedPlanRecord, execution.PlanNoDataIdentity, error) {
-	var envelope noDataEnvelope
-	if json.Unmarshal(raw, &envelope) != nil || envelope.Schema != executionNoDataSchema {
-		return ObservedPlanRecord{}, execution.PlanNoDataIdentity{}, ErrObservedRecordInvalid
-	}
-	return ObservedPlanRecord{MarkerRevision: envelope.MarkerRevision, EvaluationTime: int64(envelope.ApplyVersion.EvaluationTime),
-		ScheduleRevision: string(envelope.ScheduleRevision), Groups: len(envelope.Groups)}, envelope.Identity, nil
-}

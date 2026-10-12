@@ -92,17 +92,6 @@ func (seen *effectiveTimeSeen) note(plan execution.PlanIdentity, digests []strin
 	return since
 }
 
-// size is how many entries are held; for tests and diagnostics.
-func (seen *effectiveTimeSeen) size() int {
-	seen.mu.Lock()
-	defer seen.mu.Unlock()
-	total := 0
-	for _, byDigest := range seen.entries {
-		total += len(byDigest)
-	}
-	return total
-}
-
 // markOutOfHours sets, on each named window of the round, the listed holes
 // whose own evaluation time the window's Level schedule says is outside its
 // effective time.

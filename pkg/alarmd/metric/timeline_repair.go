@@ -74,7 +74,8 @@ func newTimelineUnreadableReports() prometheus.Counter {
 			"time it goes from unnamed to named. " +
 			"The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this " +
 			"replica. A leader reads each named timeline again and rewrites or reopens it (timeline_repairs_total). A count that " +
-			"keeps rising for the same Query Groups is a rewrite that does not take.",
+			"keeps rising for the same Query Groups is a rewrite that does not take." +
+			" Reader: the release acceptance, from /metrics after each deploy.",
 	})
 }
 

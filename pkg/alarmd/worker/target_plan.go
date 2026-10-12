@@ -214,10 +214,11 @@ func newResolvedTarget(resolution *targetplan.Resolution) *resolvedTarget {
 	target.absence.Members = resolution.Members()
 	// A topology reference to a node the topology cache does not list, or to
 	// one under another business, is a resolved, empty answer for that
-	// reference (decision-017 section 3.2, the leader's ruling): it adds no
-	// member and takes none away, so the plan's other memberships are as
-	// definitive as they would be without it. Only facts that were not read
-	// in full and fresh hold the verdict back.
+	// reference (decision-017 section 3.2): a node the full and fresh
+	// topology does not have is a fact about the topology, not a gap in it.
+	// It adds no member and takes none away, so the plan's other memberships
+	// are as definitive as they would be without it. Only facts that were not
+	// read in full and fresh hold the verdict back.
 	target.definitive = resolution.State == targetplan.ResolutionComplete && resolution.StaleAge == 0 &&
 		len(resolution.Failures) == 0
 	// One union, read twice: the absence view lists it and the filter

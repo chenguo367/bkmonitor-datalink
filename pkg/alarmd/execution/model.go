@@ -834,20 +834,13 @@ type RuntimeLevelStateView struct {
 }
 
 // StateRepresentation names the on-disk shape a Runtime State record was read
-// in. Two shapes coexist while records migrate from the JSON envelope to the
-// framed record: the envelope lives under the runtime key, the framed record
-// under runtime3, and a series may hold either or both. The renewal path
-// needs to know which key holds the record it is keeping alive, and the page
-// needs to know how far the migration has gone; the write path does not
-// branch on it - every write is a whole framed record under runtime3.
+// in. The framed record under runtime3 is the only one read or written; the
+// renewal path refuses a view that does not say so rather than renew a key it
+// guessed.
 type StateRepresentation string
 
-const (
-	// StateRepresentationEnvelope is the JSON envelope under the runtime key.
-	StateRepresentationEnvelope StateRepresentation = "envelope"
-	// StateRepresentationFramed is the framed record under runtime3.
-	StateRepresentationFramed StateRepresentation = "framed"
-)
+// StateRepresentationFramed is the framed record under runtime3.
+const StateRepresentationFramed StateRepresentation = "framed"
 
 type RuntimeStateView struct {
 	Identity     StateKeyIdentity
@@ -889,67 +882,6 @@ type StatePreflightResult struct {
 	// is what lets a state read reach 86 MB per Slot unremarked and then arrive
 	// as a dependency outage.
 	LoadedBytes int64
-	// EnvelopeReads is how many series this preflight had to read the older
-	// representation for, because the framed record was missing or could not
-	// be read on its own. It is a cost: how much the second pass is still
-	// being asked to do.
-	//
-	// It is deliberately not the migration indicator, though it was used as
-	// one. A series with no record at all has no frame either, so it lands
-	// here and keeps landing here for ever: a deployment that creates series
-	// can never drive this to zero, migrated or not. On the release that first
-	// carried it a round read 131 of 256 this way, and nothing in the number
-	// said how many of the 131 were the older representation.
-	//
-	// What it is good for is an identity over the five below, which are a
-	// partition of the second pass:
-	//
-	//	EnvelopeReads - (the five) = envelopes this round did not get back
-	//
-	// A batch whose read fails classifies every one of its items as a failure
-	// and never reaches the split, so the difference is the only name that
-	// shape has. Zero difference says the five account for the pass; a
-	// standing difference says reads are failing, and neither is visible in
-	// any of the five alone.
-	EnvelopeReads int
-	// The four the second pass splits into. Only EnvelopeAnswered ever ends,
-	// which is the whole reason the total above cannot answer for them.
-	//
-	// EnvelopeAnswered: no frame, and the older record answered -- the
-	// migration stock, the one count that must reach zero before the
-	// compatibility read can go.
-	//
-	// EnvelopeCorrupt: no frame, and the older key held bytes that did not
-	// read. A damaged record of the older representation, and a defect. It has
-	// its own name because the alternative was to fold it in beside the series
-	// that never had a record -- which is the same mistake this split exists
-	// to undo, made on the other side: a damaged envelope would have been
-	// indistinguishable from a new series, exactly as a damaged frame was.
-	//
-	// NoRecordYet: no frame and the older key held nothing at all -- a series
-	// with no record yet. Normal for ever on any deployment where series
-	// appear, and the reason the total above can never reach zero.
-	//
-	// FrameCorruptRescued and FrameCorruptLost: the frame's bytes were there
-	// and did not read. Both are corruption, not a writer of the older
-	// representation, and both should be zero -- they are named for the defect
-	// rather than for the branch that found them, because a reader meeting one
-	// has a damaged record and not a migration to wait out. They were
-	// invisible while one count covered the pass: a corrupt frame the older
-	// record rescued read exactly like a new series arriving. FrameCorruptLost
-	// does not separate an absent envelope from an unreadable one, because the
-	// record is lost either way and the frame has already named the defect.
-	EnvelopeAnswered    int
-	EnvelopeCorrupt     int
-	NoRecordYet         int
-	FrameCorruptRescued int
-	FrameCorruptLost    int
-	// Unclassified is a shape the split does not know. It is unreachable as
-	// the five stand and is carried anyway, because the alternative is that a
-	// sixth shape added later is silently dropped from all of them -- and a
-	// test cannot catch that, having no data for a shape nobody has written
-	// yet. Non-zero means the five stopped being a partition.
-	Unclassified int
 	// The carry pass: series with no record of their own whose Plan carries
 	// history from another generation, by what that generation held for
 	// them. Found is handed to the Worker on the view (Carried); the other
@@ -1006,16 +938,8 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 	// The byte count travels with the classified result: it is the store's
 	// own reading of what the preflight moved, and dropping it here left the
 	// preflight line reporting zero bytes on every successful round.
-	// EnvelopeReads travels for the same reason: it is the store's count of
-	// the series that still needed the older representation, and it is the
-	// number a deployment reads to learn whether the compatibility pass is
-	// still buying anything.
 	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)),
-		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads,
-		EnvelopeAnswered: result.EnvelopeAnswered, EnvelopeCorrupt: result.EnvelopeCorrupt,
-		NoRecordYet:         result.NoRecordYet,
-		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost,
-		Unclassified: result.Unclassified,
+		LoadedBytes: result.LoadedBytes,
 		// The carry pass's split travels too: dropped here, the round's
 		// reading of how much history crossed a moved generation would be
 		// zero on every round that carried any.
@@ -1716,22 +1640,10 @@ type NoDataGroupDelta struct {
 type PlanNoDataMutation struct {
 	Identity      PlanNoDataIdentity
 	SchemaVersion NoDataMemorySchema
-	// DerivedFrom is the representation this round read the memory out of.
-	//
-	// A marker revision belongs to the record that issued it, and the two
-	// representations keep separate ones. A statement derived from the
-	// whole-memory record therefore has no revision to expect of the per-group
-	// record, and must not be compared against one: the first deployment that
-	// did compare them refused every write in the fleet -- the per-group record
-	// did not exist yet, the expected revision came off the blob, and the
-	// mismatch read as "the record vanished" on every round forever.
-	//
-	// It also decides what the statement is. A delta describes the difference
-	// from the record it was derived against, so a delta derived from the blob
-	// is meaningless to the hash: the groups it leaves out are the ones that
-	// did not change since the blob, and they are not in the hash at all. Only
-	// a statement derived from the per-group record is a delta; every other
-	// one carries the whole memory and replaces what is stored.
+	// DerivedFrom is the representation this round read the memory out of,
+	// and it decides what the statement is. Only a statement derived from the
+	// per-group record is a delta against that record's revision; one derived
+	// from no record carries the whole memory and replaces what is stored.
 	DerivedFrom            NoDataRepresentation
 	ExpectedMarkerRevision uint64
 	// LoadedApplyVersion is the apply version of the record this statement was
@@ -3347,23 +3259,6 @@ func (item *StateApplyItemResult) MarkVersionConflict(kind StateVersionConflictK
 
 type StateApplyResult struct {
 	Items []StateApplyItemResult
-	// EnvelopeReads is how many of this apply's items had their outcome
-	// decided by the older representation: the record the write was compared
-	// against came from the envelope key, or an envelope that did not read
-	// refused the write with no frame beside it.
-	//
-	// Only the per-key path can count any. It reads both keys of every series
-	// it writes, so reading the envelope is not the event - the envelope
-	// deciding something is. Kept apart from the preflight's count because
-	// the two are two consumers of one key: the envelope can be deleted only
-	// when neither of them still depends on it, and one number summed from
-	// both could not say which one had not reached zero.
-	//
-	// A request that fails part-way - a pipeline that could not be added to
-	// or flushed - returns no result at all, so the items the envelope
-	// decided before the failure, including ones already written, are not
-	// counted. The count is a lower bound for such a round, never more.
-	EnvelopeReads int
 }
 
 func (result StateApplyResult) Validate() error {

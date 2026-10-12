@@ -141,22 +141,13 @@ func boundedGroupStore(t *testing.T, backend *casMemoryBackend, groups int) *Exe
 	return store
 }
 
-// A write goes to the per-group record and leaves the whole-memory one exactly
-// as it found it.
-//
-// That asymmetry is the coexistence rule, and it is what makes the old record
-// safe to enumerate and delete later: nothing this build writes can put a Plan
-// back on it. A build that wrote both would leave two records per Plan with no
-// rule for which is the memory.
+// A write goes to the per-group record and leaves a single-value record an
+// older build left exactly as it found it, to expire on its own.
 func TestApplyWritesTheHashAndNeverTheWholeMemoryRecord(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
 	store := generationStore(t, backend)
-	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A whole-memory record an older build left behind, large enough that the
-	// write path would have refused it had it still been reading it.
+	blobKey := legacyNoDataKey(t)
+	// A single-value record an older build left behind.
 	backend.values[blobKey] = make([]byte, 5000)
 
 	applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{Retention: execution.GenerationRetention{Unknown: true},
@@ -171,7 +162,7 @@ func TestApplyWritesTheHashAndNeverTheWholeMemoryRecord(t *testing.T) {
 		t.Fatalf("apply = %+v, want the write to have gone through to the hash", applied.Items[0])
 	}
 	if len(backend.values[blobKey]) != 5000 {
-		t.Fatal("the write touched the whole-memory record, which this build only reads")
+		t.Fatal("the write touched the single-value record, which nothing writes")
 	}
 	if len(backend.hashes[noDataHashKey(t)]) == 0 {
 		t.Fatal("the write did not reach the per-group record")

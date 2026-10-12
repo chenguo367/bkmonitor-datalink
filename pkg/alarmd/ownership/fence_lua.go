@@ -97,14 +97,14 @@ const ContentSwitchMargin = 5 * time.Second
 //	    would otherwise come back with CONTENT_MOVED in hand, keep the Query
 //	    Group and re-read, and the lost lease would never be reported.
 //
-// The content scope comparison is optional on both sides on purpose. A
-// caller that passes an empty scope -- every binary built before this field
-// existed -- gets the five comparisons it always had; a record that names no
-// scope -- every record written by a leader from before it -- authorizes
-// whatever the caller declares, as it always did. The comparison binds only
-// once a leader has written a scope and a writer declares one, so the two
-// argument shapes and the two record shapes coexist through a rolling
-// restart in either order.
+// The content scope comparison is optional on both sides on purpose, and
+// both empty shapes are live, not only left over from builds before the
+// field: a caller that passes an empty scope -- the Control Leader's own
+// fence check and any fenced write that executes no content -- gets the five
+// comparisons it always had; a record that names no scope -- one the Control
+// Leader wrote with no scope to state, or withdrew the scope from --
+// authorizes whatever the caller declares. The comparison binds only once
+// the Control Leader has written a scope and a writer declares one.
 //
 // TIME is a non-deterministic command. Redis before 5 refused a write after
 // one unless the script had opted into effects replication, and Redis from 5

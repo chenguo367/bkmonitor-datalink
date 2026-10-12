@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 	"testing"
 	"time"
 
@@ -86,92 +85,18 @@ func TestTheDefaultGroupBoundIsTakenOnBothSidesOnARealServer(t *testing.T) {
 	}
 }
 
-// paddedWholeMemoryRecord is a single-value record of exactly size bytes: a
-// real record, its one group's key lengthened until the encoding is the size.
-func paddedWholeMemoryRecord(t *testing.T, size int) []byte {
-	t.Helper()
-	group := func(key string) []byte {
-		return wholeMemoryRecord(t, 4, coexistenceApplyVersion(0),
-			execution.NoDataGroupMemory{GroupKey: key, LastSeen: 900, FirstAbsent: 940})
-	}
-	base := len(group("g"))
-	record := group("g" + strings.Repeat("x", size-base))
-	if len(record) != size {
-		t.Fatalf("setup: the padded record is %d bytes, want %d", len(record), size)
-	}
-	return record
-}
-
-// A record the store cannot read is TERMINAL on a real server: bytes that are
-// not a record, fields that are not part of one, and a single-value record
-// over the value bound. The bound is taken on both sides.
+// A record the store cannot read is TERMINAL on a real server: fields that are
+// not part of one.
 //
 // decision-008 section 3: a field that is neither the header nor a group, or a
 // group value that is neither present nor an absence, refuses the whole record
 // rather than reading the rest of it -- nothing is guessed. The store's word for
 // a record no build can read is TERMINAL with STATE_CORRUPT, kept apart from
 // UNREADABLE, which is a record a newer build wrote (decision-018 section 1.2).
-// Section 0 names the value bound, 512 KiB, which the single-value record still
-// has when it is read: a record of exactly 524288 bytes is inside it and is
-// read, one byte more is not.
 func TestARecordTheStoreCannotReadIsTerminalOnARealServer(t *testing.T) {
-	const bound = 512 << 10
 	server := startNoDataServer(t)
 	ctx := context.Background()
-	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, arm := range []struct {
-		size   int
-		reason string
-	}{
-		{size: bound - 1}, {size: bound}, {size: bound + 1, reason: contract.ReasonStateBudgetExceeded},
-	} {
-		t.Run(fmt.Sprintf("a single-value record of %d bytes", arm.size), func(t *testing.T) {
-			if err := server.client.FlushAll(ctx).Err(); err != nil {
-				t.Fatal(err)
-			}
-			record := paddedWholeMemoryRecord(t, arm.size)
-			if err := server.client.Set(ctx, blobKey, record, time.Hour).Err(); err != nil {
-				t.Fatal(err)
-			}
-			snapshot := loadOneNoDataMemory(t, server.store(t))
-			if arm.reason == "" {
-				if snapshot.Status != execution.NoDataMemoryFound || len(snapshot.Groups) != 1 ||
-					snapshot.Representation != execution.NoDataRepresentationWholeMemory {
-					t.Fatalf("load = %+v, want the record read: %d bytes is within the %d-byte bound",
-						snapshot, arm.size, bound)
-				}
-				return
-			}
-			if snapshot.Status != execution.NoDataMemoryTerminal || snapshot.ReasonCode != execution.ReasonCode(arm.reason) {
-				t.Fatalf("load = %+v, want TERMINAL with %s: %d bytes is over the bound", snapshot, arm.reason, arm.size)
-			}
-		})
-	}
-
 	corrupt := execution.ReasonCode(contract.ReasonStateCorrupt)
-	for name, value := range map[string]string{
-		"single-value bytes that are not JSON":      "{",
-		"a single-value record of another kind":     `{"schema":"alarmd-plan-gap-v2","version":1}`,
-		"a single-value record that names no shape": `{"schema":"` + executionNoDataSchema + `"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := server.client.FlushAll(ctx).Err(); err != nil {
-				t.Fatal(err)
-			}
-			if err := server.client.Set(ctx, blobKey, value, time.Hour).Err(); err != nil {
-				t.Fatal(err)
-			}
-			if snapshot := loadOneNoDataMemory(t, server.store(t)); snapshot.Status != execution.NoDataMemoryTerminal ||
-				snapshot.ReasonCode != corrupt {
-				t.Fatalf("load = %+v, want TERMINAL with %s", snapshot, corrupt)
-			}
-		})
-	}
-
 	for name, fields := range map[string]map[string]string{
 		"a header that is not JSON":                 {noDataHeaderField: "{"},
 		"a field that is neither header nor group":  {"stray": "1"},
@@ -260,15 +185,12 @@ func TestTheTrackingFactsSurviveTheStoreOnARealServer(t *testing.T) {
 
 // Deleting a Plan's last group leaves a record whose header still reads, and
 // an older single-value record beside that emptied record is not read back,
-// on a real server.
+// on a real server - nor once the per-group record is gone.
 //
 // The no-data tracking proposal section 3: the header stays when every group
-// is gone, keeping the version and the idempotence, and also so that the hash
-// never disappears and lets the old single-value record be read again; its
-// section 9 lists "emptied leaves the header" and "the old record does not
-// come back" among the storage checks. The last step deletes the per-group
-// record outright to show what the header is preventing: without it the old
-// record is the memory again.
+// is gone, keeping the version and the idempotence; its section 9 lists
+// "emptied leaves the header" and "the old record does not come back" among
+// the storage checks.
 func TestAnEmptiedRecordKeepsItsHeaderAndHidesAnOlderWholeMemoryOnARealServer(t *testing.T) {
 	server := startNoDataServer(t)
 	store := server.store(t)
@@ -299,22 +221,16 @@ func TestAnEmptiedRecordKeepsItsHeaderAndHidesAnOlderWholeMemoryOnARealServer(t 
 	}
 	readsEmpty(t, "alone")
 
-	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := wholeMemoryRecord(t, 7, coexistenceApplyVersion(0), absentGroup("from-the-old-record"))
-	if err := server.client.Set(ctx, blobKey, old, time.Hour).Err(); err != nil {
+	old := legacyWholeMemoryRecord(t, coexistenceApplyVersion(0), absentGroup("from-the-old-record"))
+	if err := server.client.Set(ctx, legacyNoDataKey(t), old, time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
 	readsEmpty(t, "beside an older single-value record")
 
 	server.client.Del(ctx, key)
-	snapshot := loadOneNoDataMemory(t, store)
-	if snapshot.Status != execution.NoDataMemoryFound || len(snapshot.Groups) != 1 ||
-		snapshot.Groups[0].GroupKey != "from-the-old-record" {
-		t.Fatalf("with the per-group record gone the load read %+v; setup expects the old record to come back, "+
-			"which is what the header is there to prevent", snapshot)
+	if snapshot := loadOneNoDataMemory(t, store); snapshot.Status != execution.NoDataMemoryMissing {
+		t.Fatalf("with the per-group record gone the load read %+v, want no memory: the older single-value "+
+			"record is not read", snapshot)
 	}
 }
 

@@ -87,9 +87,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverTimelineMax     prometheus.Gauge
 	scheduleTimelineBytes          prometheus.Histogram
 	scheduleSegmentsPruned         prometheus.Counter
-	envelopePass                   *prometheus.CounterVec
 	retainedShareApproaching       prometheus.Counter
-	envelopeApply                  prometheus.Counter
 	schedulePruneSkipped           *prometheus.CounterVec
 	scheduleCutoverDuration        *prometheus.HistogramVec
 	scheduleCutovers               *prometheus.CounterVec
@@ -615,15 +613,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.noDataMemoryReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_reads_total",
 		Help: "One per Plan per round that read its absence memory, by which stored shape it came " +
-			"from. WHOLE_MEMORY is the single-value record this build reads and no longer writes, " +
-			"PER_GROUP is the one it writes, NONE is a Plan with no memory yet or one whose read " +
-			"failed. It is the only signal that says how far the change of representation has got: " +
-			"every other one looks the same either way, and WHOLE_MEMORY at zero across a rolling " +
-			"window is the condition the one-shot cleanup waits for. WHOLE_MEMORY rising again after " +
-			"reaching zero is a Plan that went back to an older build, which is the one case where " +
-			"deleting the old records would lose rounds. The three add up to the Plans that were " +
-			"asked for, so the sum is checkable rather than assumed, and every label exists at " +
-			"startup so a zero is a zero rather than a label nothing wrote.",
+			"from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one " +
+			"whose read failed. The two add up to the Plans that were asked for, so the sum is " +
+			"checkable rather than assumed, and every label exists at startup so a zero is a zero " +
+			"rather than a label nothing wrote.",
 	}, []string{"representation"})
 	metrics.noDataMemoryRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_renewals_total",
@@ -720,28 +713,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.scheduleCutoverTimelineMax = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_timeline_bytes_max", Help: "Largest Schedule timeline written by the last publication cutover. Rising across cutovers means some timeline is never pruned."})
 	metrics.scheduleTimelineBytes = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_timeline_bytes", Help: "Schedule timeline sizes as written by publication cutovers.", Buckets: scheduleTimelineBytesBuckets})
 	metrics.scheduleSegmentsPruned = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_segments_pruned_total", Help: "Closed Schedule Segments dropped by publication cutovers because no Slot in them is read anymore."})
-	// The state preflight's second pass, split by what it found. Pre-created
-	// at zero for every outcome, because this family is read for its zeros:
-	// the compatibility read may go when old_representation has been zero
-	// across the fleet, and the three defect outcomes are read to confirm they
-	// are zero. A label value nobody pre-created is absent, and absent and
-	// zero are the two readings this has to keep apart.
-	//
-	// A counter and not the log line it is also written to: the preflight line
-	// is rate-limited like every other workflow stage, so a busy deployment
-	// merges most of them away. A sampled line can carry a non-zero -- wait
-	// and one appears -- but "zero everywhere, always" cannot be established
-	// from a sample at all, and that is the reading the deletion waits on.
-	metrics.envelopePass = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
-		Name: "state_envelope_pass_series_total",
-		Help: "Series a state preflight's second pass classified, by what it found. old_representation is the migration " +
-			"stock and the only outcome that ends; no_record_yet is a series with no record at all and never ends. " +
-			"envelope_corrupt, frame_corrupt_rescued and frame_corrupt_lost are damaged records, not writers, and " +
-			"should be zero. The sum is below state_preflight's envelope_reads by the series whose read failed and " +
-			"never reached the split."}, []string{"outcome"})
-	for _, outcome := range observability.EnvelopePassOutcomes {
-		metrics.envelopePass.WithLabelValues(outcome)
-	}
 	// Completed Slots at or past the threshold of their one-object share of
 	// the retained pool. A counter, not a gauge per object: the objects are
 	// named on the page and in fleet.get, and a label per Query Group would
@@ -754,20 +725,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"retained pool they were admitted under. A Slot past the share is refused as QG_BUDGET_SHARE_EXCEEDED " +
 			"every round and its strategy stops; these are the Slots before that. The objects are listed by name " +
 			"under RETAINED_SHARE_APPROACHING on the page and in fleet.get."})
-	// The envelope's other consumer: the per-key write path, which reads both
-	// keys of every series it writes and which no preflight count can see. A
-	// counter for the reason the pass's family is one - its log key is on the
-	// state_applied line, which is sampled like every workflow stage and
-	// omitted at zero, and "zero for a whole window" is the one reading the
-	// deletion waits on. No label, so the series exists at zero from the first
-	// scrape.
-	metrics.envelopeApply = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
-		Name: "state_envelope_apply_items_total",
-		Help: "State writes on the per-key path whose outcome the older envelope representation decided: the record " +
-			"the write was classified against came from the envelope, or an unreadable envelope with no frame refused " +
-			"it. The envelope can be deleted only when this and state_envelope_pass_series_total{outcome=\"old_representation\"} " +
-			"have both stayed at zero for a whole retention window. A write request that fails part-way reports no " +
-			"items, so its round is under-counted, never over-counted."})
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: scheduleCutoverDurationBuckets}, []string{"result"})
 	metrics.scheduleCutoverFirstSeen = new(atomic.Bool)
@@ -1386,6 +1343,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"filter", "result", "reason"})
 	// Both cells exist from start: "about zero" is the reading this exists
 	// for, and a missing series is not a zero.
+	//
+	// Retire when: the last deployment reading that decision waits on is in
+	// and the decision is recorded; both counters go together, unless the
+	// decision keeps them as a migration check.
 	metrics.cmdbAddressDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_address_differs_total",
 		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own " +
@@ -1399,9 +1360,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"the count these are a part of, which tells a zero here from a branch never taken. The address is " +
 			"compared exactly, as Python's dedupe " +
 			"sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. " +
-			"Read by the decision whether an alert's identity follows CMDB's address as Python's does, and by any " +
-			"migration from Python that needs alert continuity. Remove it once that decision is recorded, unless " +
-			"the decision keeps it as a migration check.",
+			"Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read " +
+			"through /metrics on each deployment it waits on.",
 	}, []string{"grouped_by_target_ip"})
 	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
@@ -1410,7 +1370,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at " +
 			"the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells " +
 			"\"placed this way and the address always the host's\" (this one rising) from \"never placed this way\" " +
-			"(this one zero too). Retired with it.",
+			"(this one zero too). Reader: the same decision, through /metrics. Retired with it.",
 	}, []string{"grouped_by_target_ip"})
 	for _, grouped := range []string{"true", "false"} {
 		metrics.cmdbAddressDiffers.WithLabelValues(grouped)
@@ -1660,10 +1620,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		metrics.frozenStateRenewals.WithLabelValues(frozenRenewalLabel(outcome))
 	}
 	for _, representation := range execution.NoDataRepresentations {
-		// Pre-created, because the reading this family exists for is a zero:
-		// WHOLE_MEMORY reaching zero and staying there is what says every Plan
-		// has moved, and a series that is absent rather than zero cannot say
-		// the difference between "none left" and "nobody looked".
+		// Pre-created, so a zero is a zero rather than a label nothing wrote.
 		metrics.noDataMemoryReads.WithLabelValues(string(representation))
 	}
 	for _, refusal := range execution.NoDataRefusals {
@@ -1697,27 +1654,6 @@ const (
 	sourceWithheldLineDropped = "dropped"
 )
 
-// observeEnvelopePass records one preflight's second pass, by outcome.
-//
-// Every outcome has its label pre-created at zero, so a fleet that has
-// finished migrating reads as zero rather than as absent -- which is the
-// distinction this family exists to make, and the one a log line cannot make
-// because the preflight line is sampled.
-func (m phaseTwoMetrics) observeEnvelopePass(counts observability.Counts) {
-	for outcome, value := range map[string]int64{
-		observability.EnvelopePassOldRepresentation: counts.EnvelopeAnswered,
-		observability.EnvelopePassNoRecordYet:       counts.NoRecordYet,
-		observability.EnvelopePassEnvelopeCorrupt:   counts.EnvelopeCorrupt,
-		observability.EnvelopePassFrameCorruptSaved: counts.FrameCorruptRescued,
-		observability.EnvelopePassFrameCorruptLost:  counts.FrameCorruptLost,
-		observability.EnvelopePassUnclassified:      counts.Unclassified,
-	} {
-		if value > 0 {
-			m.envelopePass.WithLabelValues(outcome).Add(float64(value))
-		}
-	}
-}
-
 func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
@@ -1735,7 +1671,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
 		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
@@ -1890,15 +1826,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStatePreflight {
 		result, reason := observability.NormalizeStatePreflight(observation.Result, observation.ReasonCode)
 		m.statePreflights.WithLabelValues(string(result), string(reason)).Inc()
-		m.observeEnvelopePass(observation.Counts)
 	}
 	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateAdmission {
 		result, reason := observability.NormalizeStateAdmission(observation.Result, observation.ReasonCode)
 		m.stateAdmissions.WithLabelValues(string(result), string(reason)).Inc()
-	}
-	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateApplied &&
-		observation.Counts.EnvelopeReadsApply > 0 {
-		m.envelopeApply.Add(float64(observation.Counts.EnvelopeReadsApply))
 	}
 	if observation.Stage == observability.StageSlotCompleted && observation.Err == nil &&
 		observation.Operation != observability.OperationSupplement {

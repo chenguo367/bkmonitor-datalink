@@ -285,6 +285,10 @@ const (
 	// whose new content the previous build cannot run). Until the timeline is
 	// rewritten or the Query Group moves to a build that reads it, every round
 	// meets the same bytes.
+	//
+	// Retire when: the upstream snapshot after the one that adds this word is
+	// merged, the previous-build case is gone; the word stays for corrupt
+	// bytes.
 	ReasonScheduleUnreadable = "SCHEDULE_UNREADABLE"
 	// ReasonScheduleMissing names a round the Slot source could not take
 	// because the Query Group's schedule timeline key is not there at all -

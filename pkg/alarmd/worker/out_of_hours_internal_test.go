@@ -163,8 +163,8 @@ func TestAHoleWhoseTimeIsNotKnownToBeUnderTheScheduleIsNotJudged(t *testing.T) {
 		coordinator := &SlotExecutionCoordinator{}
 		coverage := windowWithHoles(identity, clock(4, 4, 30), holes...)
 		coordinator.markOutOfHours(context.Background(), outOfHoursHeader(always, clock(4, 5, 0), day), &coverage)
-		if got := coverage.Windows[0].Inactive; len(got) != 0 || coordinator.effectiveSeen.size() != 0 {
-			t.Fatalf("out of hours = %v, %d remembered, want none for a Plan always in effect", got, coordinator.effectiveSeen.size())
+		if got, remembered := coverage.Windows[0].Inactive, len(coordinator.effectiveSeen.entries); len(got) != 0 || remembered != 0 {
+			t.Fatalf("out of hours = %v, %d Plans remembered, want none for a Plan always in effect", got, remembered)
 		}
 	})
 }
@@ -188,17 +188,22 @@ func TestTheFirstSeenRecordIsReplacedOnAnEditAndDroppedWhenAPlanLeaves(t *testin
 	if since := seen.note(plan, []string{"a"}, 50, now); since["a"] != 100 {
 		t.Fatalf("since=%v after a replay of an earlier Slot, want the first Slot seen kept", since)
 	}
-	if since := seen.note(plan, []string{"b"}, 300, now); since["b"] != 300 || seen.size() != 1 {
-		t.Fatalf("since=%v size=%d, want the edited requirement from its own first Slot and the old one dropped", since, seen.size())
+	if since := seen.note(plan, []string{"b"}, 300, now); since["b"] != 300 || len(since) != 1 {
+		t.Fatalf("since=%v, want only the edited requirement, from its own first Slot", since)
 	}
-	seen.note(other, []string{"c"}, 300, now)
-	if seen.size() != 2 {
-		t.Fatalf("size=%d, want two Plans' requirements", seen.size())
+	if since := seen.note(other, []string{"c"}, 300, now); since["c"] != 300 {
+		t.Fatalf("since=%v, want the second Plan from its own first Slot", since)
+	}
+	if since := seen.note(plan, []string{"b"}, 350, now); since["b"] != 300 {
+		t.Fatalf("since=%v, want the first Plan kept beside the second", since)
+	}
+	if since := seen.note(other, []string{"c"}, 350, now); since["c"] != 300 {
+		t.Fatalf("since=%v, want the second Plan kept beside the first", since)
 	}
 	later := now.Add(effectiveTimeSeenTTL + time.Minute)
 	seen.note(plan, []string{"b"}, 400, later)
-	if seen.size() != 1 {
-		t.Fatalf("size=%d after the TTL, want the Plan that stopped coming dropped", seen.size())
+	if since := seen.note(other, []string{"c"}, 500, later); since["c"] != 500 {
+		t.Fatalf("since=%v after the TTL, want the Plan that stopped coming dropped and seen afresh", since)
 	}
 }
 

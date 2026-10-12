@@ -158,14 +158,8 @@ const (
 	// as a refused one does, and a reader with only the refusal lines cannot
 	// tell a Plan that recovered from one that started losing races instead.
 	StageNoDataMemoryWritten = "no_data_memory_written"
-	// StageNoDataMemoryRead names which of the two stored shapes one Plan's
-	// memory was read from.
-	//
-	// It is the only signal that says how far the change of representation has
-	// got. Every other one looks the same either way -- the memory is read, the
-	// Plan evaluates, the write goes through -- and the count of Plans still on
-	// the old record is what the one-shot cleanup waits for. Without it that
-	// wait is somebody's guess about how long a rollout takes.
+	// StageNoDataMemoryRead names whether one Plan's memory was read from the
+	// per-group record or from none.
 	StageNoDataMemoryRead = "no_data_memory_read"
 	// StageNoDataMemoryRenewed names one renewal of a Plan's absence-memory
 	// key that actually reached the store.
@@ -395,35 +389,11 @@ type Counts struct {
 	Bytes      int64
 	Keys       int64
 	StateBytes int64
-	// EnvelopeReads is how many of a state preflight's series had to be read
-	// from the older representation as well, because the framed record could
-	// not answer for them. It is the second pass's cost, and it is not the
-	// migration indicator: a series with no record at all has no frame, so it
-	// lands here for ever.
-	EnvelopeReads int64
-	// The four EnvelopeReads splits into; see execution.StatePreflightResult
-	// for the table. EnvelopeAnswered is the only one that ends, and reading
-	// it as zero is the whole point of having it -- so all four go on the line
-	// at every value, zero included. A count that exists to answer "how many"
-	// has its answer erased by omitting its zero.
-	EnvelopeAnswered    int64
-	EnvelopeCorrupt     int64
-	NoRecordYet         int64
-	FrameCorruptRescued int64
-	FrameCorruptLost    int64
-	Unclassified        int64
 	// StateFetchMillis and StateDecodeMillis split a state preflight's time
 	// into the store's reads and this process's decoding of what they
 	// returned; see execution.PreflightTiming.
 	StateFetchMillis  int64
 	StateDecodeMillis int64
-	// EnvelopeReadsApply is how many items of a state apply had their outcome
-	// decided by the older representation on the per-key write path, which
-	// reads both keys and which none of the preflight's counts can see. The
-	// other consumer of the envelope beside EnvelopeAnswered: the envelope
-	// can be deleted only when both have stayed at zero for a whole retention
-	// window, and a sum could not say which one had not.
-	EnvelopeReadsApply int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:
@@ -614,9 +584,9 @@ type NoDataMemoryWriteFacts struct {
 	// two sides were, and none of it left the store. The reason code cannot
 	// carry it either, because a conflict is not a rejection and has none.
 	Conflict *NoDataMemoryConflictFacts
-	// DerivedFrom is the record the refused statement was built from. It is
-	// what tells a conflict during a rollout -- a Plan still writing from the
-	// whole-memory record -- from one between two writers of the same record.
+	// DerivedFrom is the record the refused statement was built from: none,
+	// for a statement that replaces the whole record, or the per-group record
+	// for a delta.
 	DerivedFrom string
 }
 
@@ -2961,26 +2931,6 @@ func normalizeDrainingQGFacts(facts *DrainingQGFacts) *DrainingQGFacts {
 
 // SchedulePruneSkipReasons is the closed vocabulary of ScheduleCutoverFacts.PrunesSkipped.
 var SchedulePruneSkipReasons = []string{"progress_unavailable", "progress_missing"}
-
-// The outcomes a state preflight's second pass splits into, as the closed set
-// the counter pre-creates. Only OldRepresentation ends; NoRecordYet never
-// does; the three corrupt ones should be zero and are read to confirm it.
-//
-// Pre-created because this family is read for its zeros, and an outcome nobody
-// pre-created is absent -- which reads the same as zero and means the opposite.
-const (
-	EnvelopePassOldRepresentation = "old_representation"
-	EnvelopePassNoRecordYet       = "no_record_yet"
-	EnvelopePassEnvelopeCorrupt   = "envelope_corrupt"
-	EnvelopePassFrameCorruptSaved = "frame_corrupt_rescued"
-	EnvelopePassFrameCorruptLost  = "frame_corrupt_lost"
-	// EnvelopePassUnclassified is a shape the split does not know: unreachable
-	// today, carried so that a sixth one is counted rather than dropped.
-	EnvelopePassUnclassified = "unclassified"
-)
-
-var EnvelopePassOutcomes = []string{EnvelopePassOldRepresentation, EnvelopePassNoRecordYet,
-	EnvelopePassEnvelopeCorrupt, EnvelopePassFrameCorruptSaved, EnvelopePassFrameCorruptLost, EnvelopePassUnclassified}
 
 func normalizeScheduleCutoverFacts(facts *ScheduleCutoverFacts) *ScheduleCutoverFacts {
 	if facts == nil {

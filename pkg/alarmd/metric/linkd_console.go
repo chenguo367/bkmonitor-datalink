@@ -63,7 +63,8 @@ func newLinkdConsoleCollector() *linkdConsoleCollector {
 				"200) and incomplete (a body not read whole or not decoded). The classes of one operation add up to "+
 				"its result=\"failed\" cell of linkd_console_calls_total; the latest one, with when, is the Console "+
 				"row's last_failure_class on the deployment's dependencies, and its start and every change of class "+
-				"write one console_call_failed line. Every cell exists once the source is bound.",
+				"write one console_call_failed line. Every cell exists once the source is bound."+
+				" Reader: the release acceptance, from /metrics after each deploy.",
 			[]string{"op", "class"}, nil),
 	}
 }

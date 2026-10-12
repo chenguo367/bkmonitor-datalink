@@ -29,7 +29,7 @@ How each round of the difference ended: none is a round that decided, and the re
 
 Labels: `codec`, `negotiation`, `completion`
 
-Completed physical HTTP responses by bounded wire codec, client negotiation and completeness. Opt-in legacy is same-response compatibility, not proof of the server fallback cause.
+Completed physical HTTP responses by bounded wire codec, client negotiation and completeness. Opt-in legacy is same-response compatibility, not proof of the server fallback cause. Reader: the shared-JSON reading of the codec mix, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_access_response_status_total
 
@@ -93,7 +93,7 @@ Timelines a cutover opened again because their key was gone. This used to fail e
 
 Labels: `reason`
 
-Schedule timelines the Control Leader left out when it read the activation's Plan records back from the open Segments, by why: one per Query Group per activation it read. The rest of the activation loads and is cut over as usual. undecodable: the bytes do not decode; the Leader rebuilds that Query Group's records from the publication it runs and rewrites the timeline (timeline_repairs_total). newer_format: the bytes are a timeline of another schema version, written by a build that reads them, and are left alone. A read that fails is never counted here: it fails the activation read as before. The fleet's activation row names the Query Groups. Counted by the Leader; read it summed over replicas.
+Schedule timelines the Control Leader left out when it read the activation's Plan records back from the open Segments, by why: one per Query Group per activation it read. The rest of the activation loads and is cut over as usual. undecodable: the bytes do not decode; the Leader rebuilds that Query Group's records from the publication it runs and rewrites the timeline (timeline_repairs_total). newer_format: the bytes are a timeline of another schema version, written by a build that reads them, and are left alone. A read that fails is never counted here: it fails the activation read as before. The fleet's activation row names the Query Groups. Counted by the Leader; read it summed over replicas. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_active_qg_set_object_bytes
 
@@ -113,13 +113,13 @@ Active Set Redis operation duration.
 
 Labels: `grouped_by_target_ip`
 
-Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip="true" these are the series whose alert identity differs from Python's. Counted per admitted series per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the pairs are about the rate times its period; it says whether this happens and roughly how much, and a non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, the count these are a part of, which tells a zero here from a branch never taken. The address is compared exactly, as Python's dedupe sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. Read by the decision whether an alert's identity follows CMDB's address as Python's does, and by any migration from Python that needs alert continuity. Remove it once that decision is recorded, unless the decision keeps it as a migration check.
+Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip="true" these are the series whose alert identity differs from Python's. Counted per admitted series per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the pairs are about the rate times its period; it says whether this happens and roughly how much, and a non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, the count these are a part of, which tells a zero here from a branch never taken. The address is compared exactly, as Python's dedupe sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read through /metrics on each deployment it waits on.
 
 ## bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total
 
 Labels: `grouped_by_target_ip`
 
-Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own bk_target_ip, by whether the Plan's alert identity groups by bk_target_ip: the branch Python's fuller overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells "placed this way and the address always the host's" (this one rising) from "never placed this way" (this one zero too). Retired with it.
+Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own bk_target_ip, by whether the Plan's alert identity groups by bk_target_ip: the branch Python's fuller overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells "placed this way and the address always the host's" (this one rising) from "never placed this way" (this one zero too). Reader: the same decision, through /metrics. Retired with it.
 
 ## bkmonitor_alarmd_algorithm_evaluation_total
 
@@ -539,7 +539,7 @@ Marks left by an attempt that wrote state and then could not write its Slot down
 
 Labels: `outcome`
 
-Executions found running a minute past their own deadline before writing any output - ignoring their cancellation, which only a call without a deadline or a deadlock does - by what followed. Their own deadline is a normal Slot's query deadline, or a replay's, retry's or probe's counted from its own arrival, never its frozen Slot's first attempt's; an execution writing its gap marks, output, State or Progress is never counted. declined: the replica let the Query Group's lease go at once, the hung execution still running and writing nothing more, and named the Query Group on its registration so a leader places it on another worker and not back here. returned_after_decline: the hung execution returned at last and the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a Query Group every worker declines is the leader round's declined_everywhere. Both series exist from startup.
+Executions found running a minute past their own deadline before writing any output - ignoring their cancellation, which only a call without a deadline or a deadlock does - by what followed. Their own deadline is a normal Slot's query deadline, or a replay's, retry's or probe's counted from its own arrival, never its frozen Slot's first attempt's; an execution writing its gap marks, output, State or Progress is never counted. declined: the replica let the Query Group's lease go at once, the hung execution still running and writing nothing more, and named the Query Group on its registration so a leader places it on another worker and not back here. returned_after_decline: the hung execution returned at last and the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a Query Group every worker declines is the leader round's declined_everywhere. Both series exist from startup. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_executions_past_deadline
 
@@ -713,13 +713,13 @@ Replicas the fleet view counted, by whether they have applied the Activation the
 
 ## bkmonitor_alarmd_handover_drain_seconds
 
-How long a planned handover waited for the moved Query Group's running Slot before releasing its lease; 0 for one with nothing running. The next owner cannot start the Query Group for this long.
+How long a planned handover waited for the moved Query Group's running Slot before releasing its lease; 0 for one with nothing running. The next owner cannot start the Query Group for this long. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_handover_drains_total
 
 Labels: `outcome`
 
-Planned handovers - a Query Group this Worker is no longer desired for - by how the wait for its running Slot ended before the lease was released. idle: nothing was running, the release did not wait. finished: the Slot returned and the lease was released after its commit boundary. lease_ended: the lease stopped renewing first (the grace the move gave it ran out, or the store refused it), so the Slot's later writes are refused and the next owner may send its events again. stopped: the process began stopping while it waited, and the Slot was waited for within the shutdown timeout. Every outcome has a series at startup. Read finished against lease_ended for whether handovers complete inside the grace; output_unapplied_total says whether a duplicate followed.
+Planned handovers - a Query Group this Worker is no longer desired for - by how the wait for its running Slot ended before the lease was released. idle: nothing was running, the release did not wait. finished: the Slot returned and the lease was released after its commit boundary. lease_ended: the lease stopped renewing first (the grace the move gave it ran out, or the store refused it), so the Slot's later writes are refused and the next owner may send its events again. stopped: the process began stopping while it waited, and the Slot was waited for within the shutdown timeout. Every outcome has a series at startup. Read finished against lease_ended for whether handovers complete inside the grace; output_unapplied_total says whether a duplicate followed. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_heap_inuse_live_bytes
 
@@ -813,7 +813,7 @@ Calls this replica made to the alert link's Console, by operation (roster, recon
 
 Labels: `op`, `class`
 
-Failed calls to the alert link's Console, by operation and class: the transport's word for a request that got no answer (cancelled - the caller let go, timeout, connection_refused, connection_reset, dns, tls, eof, other - the same words a query provider's route detail uses), status (an answer other than 200) and incomplete (a body not read whole or not decoded). The classes of one operation add up to its result="failed" cell of linkd_console_calls_total; the latest one, with when, is the Console row's last_failure_class on the deployment's dependencies, and its start and every change of class write one console_call_failed line. Every cell exists once the source is bound.
+Failed calls to the alert link's Console, by operation and class: the transport's word for a request that got no answer (cancelled - the caller let go, timeout, connection_refused, connection_reset, dns, tls, eof, other - the same words a query provider's route detail uses), status (an answer other than 200) and incomplete (a body not read whole or not decoded). The classes of one operation add up to its result="failed" cell of linkd_console_calls_total; the latest one, with when, is the Console row's last_failure_class on the deployment's dependencies, and its start and every change of class write one console_call_failed line. Every cell exists once the source is bound. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_linkd_console_state
 
@@ -1103,7 +1103,7 @@ Bounded alarmd observations by pipeline stage and result.
 
 Labels: `observer`
 
-Panics an observer raised and the fan-out recovered, by observer; every other observer still received the observation. entry is a panic before any member. Any count is a defect.
+Panics an observer raised and the fan-out recovered, by observer; every other observer still received the observation. entry is a panic before any member. Any count is a defect. Reader: the release acceptance, at +5 and +15 minutes after each deploy (its observer_panics column).
 
 ## bkmonitor_alarmd_open_alert_set_authoritative_age_seconds
 
@@ -1185,7 +1185,7 @@ Events decided that the protocol has no message for, by the event's resolved wir
 
 Labels: `refusal`
 
-Slots whose events the broker acknowledged and whose State write the ownership store then refused, by the refusal: the Slot stops there, Progress does not move, and the next owner redoes it from Progress and sends the same events again (same event identities). Counted where the Slot holds both facts, once per Slot. A planned handover or stop that waits for the Slot keeps this at zero; what is left is a Slot that outlived its lease - a crash, a hung Slot, a drain deadline - and a lease lost to the store. ownership_refusals_total{site="state_apply"} counts every refused State write, with or without events before it; this is the subset that sent something. Every refusal has a series at startup.
+Slots whose events the broker acknowledged and whose State write the ownership store then refused, by the refusal: the Slot stops there, Progress does not move, and the next owner redoes it from Progress and sends the same events again (same event identities). Counted where the Slot holds both facts, once per Slot. A planned handover or stop that waits for the Slot keeps this at zero; what is left is a Slot that outlived its lease - a crash, a hung Slot, a drain deadline - and a lease lost to the store. ownership_refusals_total{site="state_apply"} counts every refused State write, with or without events before it; this is the subset that sent something. Every refusal has a series at startup. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_ownership_refusals_total
 
@@ -1625,16 +1625,6 @@ Labels: `site`, `kind`
 
 Runtime State mutations found already on disk, by where that was decided and how. site: preflight is the view the Slot loaded before evaluating, apply is the bytes the CAS met when it tried to write. kind: stable is the ordinary retry that read the stored revision and found its own statement there; revision_skew is the same statement -- same ApplyVersion, same digest -- found at a revision the mutation did not expect, which is a write that landed while its reply was lost or was sent twice, and which used to be classified STATE_VERSION_CONFLICT and send the Slot into a retry that could not succeed. revision_skew is the only reading that says whether such re-sends happen in production: non-zero and aligned with conflict bursts confirms the mechanism, a steady zero says something else writes the key. Every pair is published at zero so absent and zero read apart. Population is mutations, not Redis commands.
 
-## bkmonitor_alarmd_state_envelope_apply_items_total
-
-State writes on the per-key path whose outcome the older envelope representation decided: the record the write was classified against came from the envelope, or an unreadable envelope with no frame refused it. The envelope can be deleted only when this and state_envelope_pass_series_total{outcome="old_representation"} have both stayed at zero for a whole retention window. A write request that fails part-way reports no items, so its round is under-counted, never over-counted.
-
-## bkmonitor_alarmd_state_envelope_pass_series_total
-
-Labels: `outcome`
-
-Series a state preflight's second pass classified, by what it found. old_representation is the migration stock and the only outcome that ends; no_record_yet is a series with no record at all and never ends. envelope_corrupt, frame_corrupt_rescued and frame_corrupt_lost are damaged records, not writers, and should be zero. The sum is below state_preflight's envelope_reads by the series whose read failed and never reached the split.
-
 ## bkmonitor_alarmd_state_generation_carry_total
 
 Labels: `scope`, `result`
@@ -1749,7 +1739,7 @@ Schedule timelines the Control Leader looked at because a Worker reported them u
 
 ## bkmonitor_alarmd_timeline_unreadable_reports_total
 
-Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline that does not decode or whose key is gone (SCHEDULE_UNREADABLE, SCHEDULE_MISSING): one per Query Group each time it goes from unnamed to named. The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this replica. A leader reads each named timeline again and rewrites or reopens it (timeline_repairs_total). A count that keeps rising for the same Query Groups is a rewrite that does not take.
+Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline that does not decode or whose key is gone (SCHEDULE_UNREADABLE, SCHEDULE_MISSING): one per Query Group each time it goes from unnamed to named. The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this replica. A leader reads each named timeline again and rewrites or reopens it (timeline_repairs_total). A count that keeps rising for the same Query Groups is a rewrite that does not take. Reader: the release acceptance, from /metrics after each deploy.
 
 ## bkmonitor_alarmd_trigger_open_alert_gate_total
 
@@ -1927,7 +1917,7 @@ Groups of the Plans that detect no-data, summed over every Slot that judged them
 
 Labels: `representation`
 
-One per Plan per round that read its absence memory, by which stored shape it came from. WHOLE_MEMORY is the single-value record this build reads and no longer writes, PER_GROUP is the one it writes, NONE is a Plan with no memory yet or one whose read failed. It is the only signal that says how far the change of representation has got: every other one looks the same either way, and WHOLE_MEMORY at zero across a rolling window is the condition the one-shot cleanup waits for. WHOLE_MEMORY rising again after reaching zero is a Plan that went back to an older build, which is the one case where deleting the old records would lose rounds. The three add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
+One per Plan per round that read its absence memory, by which stored shape it came from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one whose read failed. The two add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
 
 ## bkmonitor_alarmd_worker_no_data_memory_refusals_total
 

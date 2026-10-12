@@ -140,21 +140,6 @@ func TestAMissingRenewalCapabilityReportsTheSameReason(t *testing.T) {
 	if got := gapResult.Items[0]; got.Status != execution.GapTerminal || got.ReasonCode != want {
 		t.Fatalf("gap load = %+v, want a terminal %s", got, want)
 	}
-
-	noDataKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend.values[noDataKey] = []byte("{}")
-	noDataResult, err := store.LoadNoData(context.Background(), execution.NoDataLoadRequest{
-		Contract: frozenRef(), Items: []execution.PlanNoDataLoadItem{noDataLoadItemV2()},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := noDataResult.Items[0]; got.Status != execution.NoDataMemoryTerminal || got.ReasonCode != want {
-		t.Fatalf("no-data load = %+v, want a terminal %s", got, want)
-	}
 }
 
 // A routing failure keeps the retryable reading it always had. The two used to

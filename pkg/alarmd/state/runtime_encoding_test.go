@@ -19,11 +19,25 @@ import (
 // The encoders below build runtime state in the representations the store
 // reads, for tests that prepare stored records directly.
 
-// encodeRuntime writes the JSON envelope: what every binary before the framed
-// record wrote under the runtime key. No production path writes it any more;
-// it stays so a test can seed the key an earlier binary would have left, and
-// so the baseline that records what the envelope costs keeps measuring the
-// real thing.
+// executionStateSchemaV2 and runtimeEnvelope are the JSON envelope every
+// binary before the framed record wrote under the older runtime key. Nothing
+// writes or reads it any more; the shape stays here only so the baselines that
+// compare its size with the framed record's keep measuring the real thing.
+const executionStateSchemaV2 = "alarmd-runtime-state-v2"
+
+type runtimeEnvelope struct {
+	Schema         string                                `json:"schema"`
+	Identity       execution.StateKeyIdentity            `json:"identity"`
+	BlobRevision   uint64                                `json:"blob_revision"`
+	ApplyVersion   execution.ApplyVersion                `json:"apply_version"`
+	MutationDigest execution.MutationDigest              `json:"mutation_digest"`
+	LastEventTime  int64                                 `json:"last_event_time"`
+	SeriesGuard    *execution.StateGuardFact             `json:"series_guard,omitempty"`
+	Levels         []execution.RuntimeLevelStateMutation `json:"levels"`
+	History        []execution.StateHistoryPoint         `json:"history"`
+}
+
+// encodeRuntime writes the JSON envelope, for the size baselines only.
 func encodeRuntime(mutation execution.StateMutation, revision uint64) ([]byte, error) {
 	levels := append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
 	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })

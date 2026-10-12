@@ -41,12 +41,14 @@ func newHandoverMetrics() handoverMetrics {
 				"the Slot's later writes are refused and the next owner may send its events again. stopped: the " +
 				"process began stopping while it waited, and the Slot was waited for within the shutdown timeout. " +
 				"Every outcome has a series at startup. Read finished against lease_ended for whether handovers " +
-				"complete inside the grace; output_unapplied_total says whether a duplicate followed.",
+				"complete inside the grace; output_unapplied_total says whether a duplicate followed." +
+				" Reader: the release acceptance, from /metrics after each deploy.",
 		}, []string{"outcome"}),
 		drainSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "handover_drain_seconds",
 			Help: "How long a planned handover waited for the moved Query Group's running Slot before releasing its " +
-				"lease; 0 for one with nothing running. The next owner cannot start the Query Group for this long.",
+				"lease; 0 for one with nothing running. The next owner cannot start the Query Group for this long." +
+				" Reader: the release acceptance, from /metrics after each deploy.",
 			Buckets: append([]float64(nil), handoverDrainBuckets...),
 		}),
 		outputUnapplied: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -57,7 +59,8 @@ func newHandoverMetrics() handoverMetrics {
 				"facts, once per Slot. A planned handover or stop that waits for the Slot keeps this at zero; what is " +
 				"left is a Slot that outlived its lease - a crash, a hung Slot, a drain deadline - and a lease lost to " +
 				"the store. ownership_refusals_total{site=\"state_apply\"} counts every refused State write, with or " +
-				"without events before it; this is the subset that sent something. Every refusal has a series at startup.",
+				"without events before it; this is the subset that sent something. Every refusal has a series at startup." +
+				" Reader: the release acceptance, from /metrics after each deploy.",
 		}, []string{"refusal"}),
 		executionsHung: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "executions_hung_total",
@@ -71,7 +74,8 @@ func newHandoverMetrics() handoverMetrics {
 				"returned_after_decline: the hung execution returned at last and " +
 				"the decline was lifted. The execution_hung line names the Query Group and the stage it hung in; a " +
 				"Query Group every worker declines is the leader round's declined_everywhere. Both series exist " +
-				"from startup.",
+				"from startup." +
+				" Reader: the release acceptance, from /metrics after each deploy.",
 		}, []string{"outcome"}),
 	}
 	for _, outcome := range observability.ExecutionHungOutcomes {

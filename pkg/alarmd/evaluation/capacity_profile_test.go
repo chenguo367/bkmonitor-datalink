@@ -210,7 +210,7 @@ func TestCapacityProfileLegalSeries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				key, err := state.RuntimeStateKeyV2("capacity", one.State.Items[0].Identity)
+				key, err := state.RuntimeStateKeyV3("capacity", one.State.Items[0].Identity)
 				if err != nil {
 					t.Fatal(err)
 				}

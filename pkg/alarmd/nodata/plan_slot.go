@@ -162,10 +162,9 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 	}
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
 		Identity: input.Identity,
-		// Which record the revision and the loaded groups below came out of.
-		// Without it the statement claims to be a delta against the per-group
-		// record whatever it was actually derived from, and a Plan still on
-		// the whole-memory record can never write one.
+		// Which record the revision and the loaded groups below came out of:
+		// a statement derived from no record replaces the whole record rather
+		// than claiming to be a delta against one.
 		DerivedFrom:            input.Snapshot.Representation,
 		LoadedApplyVersion:     input.Snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: input.Snapshot.MarkerRevision,

@@ -31,7 +31,8 @@ func newActivationSkippedTimelinesCollector() *activationSkippedTimelinesCollect
 			"from the publication it runs and rewrites the timeline (timeline_repairs_total). newer_format: the bytes "+
 			"are a timeline of another schema version, written by a build that reads them, and are left alone. A read "+
 			"that fails is never counted here: it fails the activation read as before. The fleet's activation row names "+
-			"the Query Groups. Counted by the Leader; read it summed over replicas.",
+			"the Query Groups. Counted by the Leader; read it summed over replicas."+
+			" Reader: the release acceptance, from /metrics after each deploy.",
 		[]string{"reason"}, nil)}
 }
 
