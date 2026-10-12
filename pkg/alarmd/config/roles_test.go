@@ -20,12 +20,12 @@ func TestLegacyConfigSelectsDefaultSharedRoles(t *testing.T) {
 			t.Fatalf("legacy EffectiveRoles() = %v", got)
 		}
 	}
-	cfg, err := Load(writeConfig(t, validGoAccessRuntimeConfigYAML("legacy-instance")))
+	cfg, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("legacy-instance")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(cfg.Roles, roles.Set{roles.Control, roles.Worker, roles.Channel}) {
-		t.Fatalf("Load() default roles = %v", cfg.Roles)
+		t.Fatalf("LoadWithRoles(, nil) default roles = %v", cfg.Roles)
 	}
 	copy := cfg.EffectiveRoles()
 	copy[0] = roles.Channel
@@ -49,9 +49,9 @@ phase_two:
 	} {
 		t.Run(selected.String(), func(t *testing.T) {
 			contents := "roles: [" + selected.String() + "]\n" + validGoAccessRuntimeConfigYAML("instance")
-			cfg, err := Load(writeConfig(t, contents))
+			cfg, err := LoadWithRoles(writeConfig(t, contents), nil)
 			if err != nil || !reflect.DeepEqual(cfg.Roles, selected) {
-				t.Fatalf("Load() = roles %v, error %v; want %v", cfg.Roles, err, selected)
+				t.Fatalf("LoadWithRoles(, nil) = roles %v, error %v; want %v", cfg.Roles, err, selected)
 			}
 		})
 	}
@@ -83,13 +83,13 @@ phase_two:
 func TestLoadRejectsExplicitInvalidRoles(t *testing.T) {
 	for _, selection := range []string{"[]", "null", "", "[unknown]", "[worker,worker]", "[' worker']", "['']"} {
 		contents := "roles: " + selection + "\n" + validGoAccessRuntimeConfigYAML("instance")
-		if _, err := Load(writeConfig(t, contents)); err == nil || !strings.Contains(err.Error(), "roles") {
+		if _, err := LoadWithRoles(writeConfig(t, contents), nil); err == nil || !strings.Contains(err.Error(), "roles") {
 			t.Fatalf("roles: %s error = %v, want named rejection", selection, err)
 		}
 	}
 	// An explicit null supplied by a legal YAML merge also remains explicit.
 	merged := "<<: &defaults {roles: null}\n" + validGoAccessRuntimeConfigYAML("instance")
-	if _, err := Load(writeConfig(t, merged)); err == nil || !strings.Contains(err.Error(), "roles") {
+	if _, err := LoadWithRoles(writeConfig(t, merged), nil); err == nil || !strings.Contains(err.Error(), "roles") {
 		t.Fatalf("merged null roles error = %v", err)
 	}
 }
@@ -197,7 +197,7 @@ phase_two:
 `
 	t.Setenv(CLIAdminKeyEnvironment, "")
 	t.Setenv(LinkdConsoleUsernameEnvironment, "from-environment")
-	if _, err := Load(writeConfig(t, channel)); err != nil {
+	if _, err := LoadWithRoles(writeConfig(t, channel), nil); err != nil {
 		t.Fatalf("unused Linkd credentials blocked channel: %v", err)
 	}
 }
