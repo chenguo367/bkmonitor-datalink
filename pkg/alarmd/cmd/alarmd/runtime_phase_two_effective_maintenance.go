@@ -742,6 +742,18 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 	sent := 0
 	round, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	// Counted in flight on the Query Group's lifecycle, as a Slot is: a
+	// handover waits for the send before releasing the lease it is under.
+	lifecycle, owned := m.bundle.enterOwnedWork(qg)
+	if !owned {
+		err := fmt.Errorf("%w: %w", errClosePrecheck, errCloseNotHeld)
+		m.observe(ctx, qg, closeOutcomePrecheckFailed, err, 0)
+		// Also on a replica that is only draining and still holds the group:
+		// the judgment it drops is made again by whoever holds it next.
+		delete(m.groups, qg)
+		return 0, err
+	}
+	defer m.bundle.exitOwnedWork(lifecycle)
 	err := runner.withMaintenance(round, func(round context.Context, check func(context.Context) error) error {
 		// Recheck current ownership and rules immediately before side effects;
 		// never retry an old inactive judgment across an active boundary.
@@ -803,6 +815,7 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 
 var (
 	errClosePrecheck = errors.New("inactive close: owner check before send")
+	errCloseNotHeld  = errors.New("the Query Group is no longer held here, or the replica is draining")
 	errCloseSend     = errors.New("inactive close: send")
 	// The recheck of the one Plan a batch is for: its effective time active
 	// again, or not readable, at the send. Both are that Plan's alone.
