@@ -574,6 +574,51 @@ func TestSupervisorReportsWhenTheEndedGroupRefusesSignals(t *testing.T) {
 	}
 }
 
+// A group the supervisor cannot signal while its command still runs (a
+// command that changed identity, say) is not reported as timed out or
+// complete: the deadline's TERM and KILL are refused, and the supervisor's
+// own wait after its last KILL ends in an unknown report.
+func TestSupervisorReportsUnknownWhenTheLiveGroupRefusesSignals(t *testing.T) {
+	provider, _, _ := runtimeProvider(t)
+	python := provider.options.Scopes[0].Timeout.PythonPath
+	pidPath := filepath.Join(t.TempDir(), "command-pid")
+	refusing := "import os, sys\n" +
+		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
+		"os.killpg = refused\n" +
+		"source = sys.argv.pop(1)\n" +
+		"exec(compile(source, 'remote.py', 'exec'), {'__name__': '__main__'})\n"
+	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "echo $$ > \"$1\"; exec sleep 30", "cmd", pidPath})
+	command := exec.Command(python, "-u", "-c", refusing, remoteSupervisor, "nonce", "0.2", "128", string(argv))
+	var stdout, stderr strings.Builder
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if data, err := os.ReadFile(pidPath); err == nil {
+			if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("supervisor failed: %v %s", err, stderr.String())
+		}
+	case <-time.After(time.Minute):
+		command.Process.Kill()
+		t.Fatal("supervisor did not finish")
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var last wireFrame
+	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) != nil || last.Event != "unknown" {
+		t.Fatalf("supervisor report %q, want unknown for a command it could not stop", lines)
+	}
+}
+
 func TestSupervisorBrokenOutputPipeRetainsDeadline(t *testing.T) {
 	provider, _, _ := runtimeProvider(t)
 	python := provider.options.Scopes[0].Timeout.PythonPath

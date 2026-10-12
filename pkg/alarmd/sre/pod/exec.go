@@ -164,7 +164,9 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 // from the supervisor's start: the supervisor arms its timer before it
 // reports started, so the remote deadline never precedes that report.
 // Connection setup and interpreter start on a loaded node are bounded by
-// StartupAllowance and do not consume the command's time; past the deadline
+// StartupAllowance and do not consume the command's time - a stream cut
+// there answers unknown, since the target may still start the command, which
+// then runs to its own timeout; past the deadline
 // TerminationGrace covers TERM, KILL and the terminal report. The command
 // deadline itself is enforced inside the target, independently of this timer.
 func bindStream(cancel context.CancelFunc, started, done <-chan struct{}, timeout time.Duration) {
