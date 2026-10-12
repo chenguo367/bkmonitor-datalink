@@ -195,9 +195,10 @@ func TestAPeerSeedStaysInsideTheGroupsOwnReadBudget(t *testing.T) {
 		values[qg] = raw
 		groups[qg] = &productionReadHoldGroup{querySource: "bk_monitor/system.cpu"}
 	}
-	for _, qg := range []execution.QueryGroupIdentity{"ten-second", "one-minute", "both"} {
+	for _, qg := range []execution.QueryGroupIdentity{"ten-second", "one-minute", "both", "inert"} {
 		groups[qg] = &productionReadHoldGroup{querySource: "bk_monitor/system.cpu"}
 	}
+	groups["alone-both"] = &productionReadHoldGroup{querySource: "bk_monitor/system.disk"}
 	controller, err := readhold.NewController(readhold.Options{Control: seedControl{values}, Prefix: "schedule", MaxHold: 10 * time.Minute,
 		Owner: func(execution.QueryGroupIdentity) (readhold.Owner, error) { return readhold.Owner{}, nil }})
 	if err != nil {
@@ -237,6 +238,19 @@ func TestAPeerSeedStaysInsideTheGroupsOwnReadBudget(t *testing.T) {
 		if origin != readhold.SeedPeer || seed != c.want {
 			t.Fatalf("%s on %v s schedules seeded %v from %q, want %v from its peers", c.qg, c.periods, seed, origin, c.want)
 		}
+	}
+	// A schedule whose budget does not reach past the floor has no room at
+	// all: its peer seed is its own time_delay, never less.
+	inert := seedCeilingSchedule(t, "inert", 60)
+	inert.Plans[0].Spec.CompletionDeadlineOffsetSeconds = 12
+	if seed, origin := holds.seedFor("inert", 7*time.Second, inert); origin != readhold.SeedPeer || seed != 7*time.Second {
+		t.Fatalf("a schedule with no room past its floor seeded %v from %q, want its own 7 s time_delay", seed, origin)
+	}
+	// The cold start is taken from the tightest Plan too: a source nobody
+	// measured starts a group with a one-minute and a ten-second Plan at the
+	// ten-second one's 10 s, not the one-minute one's 30 s.
+	if seed, origin := holds.seedFor("alone-both", 0, seedCeilingSchedule(t, "alone-both", 60, 10)); origin != readhold.SeedColdStart || seed != 10*time.Second {
+		t.Fatalf("a group on unmeasured data with 60 s and 10 s Plans seeded %v from %q, want the 10 s cold start", seed, origin)
 	}
 }
 
