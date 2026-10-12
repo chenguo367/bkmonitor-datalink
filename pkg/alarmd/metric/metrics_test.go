@@ -534,6 +534,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
+	expected["bkmonitor_alarmd_access_inplace_readiness_waits_total"] = "variableLabels: {wait}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
@@ -1134,6 +1135,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// One per state a Segment can be in against the latest publication, and
 	// no more: the label is written only from the list controlplane publishes.
 	bounds[fqName("segment_content_freshness_total")] = len(controlplane.SegmentContentStates)
+	bounds[fqName("access_inplace_readiness_waits_total")] = len(observability.InPlaceWaitBuckets)
 	// Every reason under failure, and one success. Success carries no reason
 	// because there is nothing to explain; the label is empty there.
 	bounds[fqName("schedule_cutover_total")] = len(controlplane.CutoverReasons) + 1
@@ -1485,5 +1487,20 @@ func TestObserverPanicsAreExportedForEveryObserver(t *testing.T) {
 		func(context.Context, observability.Observation) { panic("observer defect") }))).Observe(context.Background(), observability.Observation{})
 	if after := read(); after[observability.ObserverCostSummary] != before[observability.ObserverCostSummary]+1 {
 		t.Fatalf("a recovered panic did not move its observer's series: %v -> %v", before, after)
+	}
+}
+
+// The in-place wait buckets are pre-created: every bucket reads 0 before any
+// execution waits, so a zero is a count and not a series nobody registered.
+func TestInPlaceWaitBucketsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	seen := map[string]bool{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_access_inplace_readiness_waits_total") {
+		seen[m.GetLabel()[0].GetValue()] = true
+	}
+	for _, bucket := range observability.InPlaceWaitBuckets {
+		if !seen[bucket] {
+			t.Fatalf("bucket %q not pre-created: %v", bucket, seen)
+		}
 	}
 }

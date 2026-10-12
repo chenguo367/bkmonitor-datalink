@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -327,6 +328,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		pending[index] = index
 	}
 	var dispatchErr error
+	var inPlace *execution.InPlaceWaitFacts
+	var sent uint32
 	for len(pending) != 0 {
 		if err := queryCtx.Err(); err != nil {
 			dispatchErr = err
@@ -341,7 +344,15 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			continue
 		}
 		if delay := time.UnixMilli(query.ReadyAtUnixMilli).Sub(source.now()); delay > 0 {
-			if err := source.wait(queryCtx, delay); err != nil {
+			// Waiting here keeps this execution's slot, its prepared plan and
+			// what its earlier queries already delivered: measured, so which
+			// Slots do it and what they hold across the wait can be read.
+			inPlace = noteInPlaceWait(inPlace, delay, sent, consumer, frozen, prepared)
+			err := source.wait(queryCtx, delay)
+			// The queries sent before the wait answer during it: read what
+			// the execution holds again at its end.
+			noteHeldInput(inPlace, consumer)
+			if err != nil {
 				dispatchErr = err
 				break
 			}
@@ -391,6 +402,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		// What the query has from its send to its deadline, read here on the
 		// dispatch loop just before it is sent.
 		budgetMillis := attempt.DeadlineUnixMilli - source.now().UnixMilli()
+		sent++
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()
@@ -452,6 +464,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		completion.PhysicalQueries[len(completion.PhysicalQueries)-1].Clock = result.clock
 	}
 	completion.AllRequiredCompleted = true
+	completion.InPlaceWait = inPlace
 	return completion, nil
 }
 
@@ -1223,4 +1236,63 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// noteInPlaceWait adds one in-place readiness wait of delay to facts. The
+// first one notes how many queries were already sent and the estimate of the
+// copies this execution made for itself (inPlacePreparedBytes); every one
+// adds to the wait before any query was sent while none was, and raises the
+// input held to what the consumer retains now, exactly, when it can say.
+func noteInPlaceWait(facts *execution.InPlaceWaitFacts, delay time.Duration, sent uint32,
+	consumer execution.QueryExecutionConsumer, frozen FrozenPlan, prepared PreparedExecution) *execution.InPlaceWaitFacts {
+	if facts == nil {
+		facts = &execution.InPlaceWaitFacts{SentBeforeFirstWait: sent, HeldPreparedBytes: inPlacePreparedBytes(frozen, prepared)}
+	}
+	millis := delay.Milliseconds()
+	facts.Waits++
+	facts.TotalMillis += millis
+	facts.LongestMillis = max(facts.LongestMillis, millis)
+	if sent == 0 {
+		facts.BeforeAnySentMillis += millis
+	}
+	noteHeldInput(facts, consumer)
+	return facts
+}
+
+// noteHeldInput raises facts' held input to what the execution retains now,
+// read at each end of an in-place wait.
+func noteHeldInput(facts *execution.InPlaceWaitFacts, consumer execution.QueryExecutionConsumer) {
+	if reporter, ok := consumer.(execution.RetainedInputReporter); ok {
+		facts.HeldInputBytes = max(facts.HeldInputBytes, reporter.RetainedInputBytesNow())
+	}
+}
+
+// inPlacePreparedBytes estimates what an execution keeps alive across an
+// in-place wait that it built for itself: the slice and map shells of the
+// frozen plan copied for this execution and the prepared queries, by struct
+// size. What those shells reference - the cached plan's requirements,
+// consumers and query facts - is shared with every other execution of the
+// Query Group and would be held without the wait, so it is not counted; the
+// query specs' own strings and slices built per execution are not counted
+// either, so this is a lower bound.
+func inPlacePreparedBytes(frozen FrozenPlan, prepared PreparedExecution) uint64 {
+	size := uintptr(len(frozen.DuePlans))*unsafe.Sizeof(execution.DuePlan{}) +
+		uintptr(len(frozen.Requirements))*unsafe.Sizeof(execution.DataRequirement{}) +
+		uintptr(len(frozen.QueryFacts))*(unsafe.Sizeof(execution.LogicalQueryRef(""))+unsafe.Sizeof(execution.QueryPlanFacts{})) +
+		unsafe.Sizeof(prepared.Header) + uintptr(len(prepared.Queries))*unsafe.Sizeof(PlannedQuery{})
+	for _, query := range prepared.Queries {
+		size += uintptr(len(query.Requirements)+len(query.ReadinessInvalidRequirements)) * unsafe.Sizeof(execution.DataRequirement{})
+	}
+	return uint64(size)
+}
+
+// RetainedInputBytesNow passes the wrapped consumer's reading through, so an
+// in-place wait sees the input the execution holds; zero when the wrapped
+// consumer cannot say. Not under the mutex: the reading is the consumer's own
+// to make safe from any goroutine (execution.RetainedInputReporter).
+func (consumer *serializedQueryConsumer) RetainedInputBytesNow() uint64 {
+	if reporter, ok := consumer.QueryExecutionConsumer.(execution.RetainedInputReporter); ok {
+		return reporter.RetainedInputBytesNow()
+	}
+	return 0
 }

@@ -2327,25 +2327,28 @@ type Observation struct {
 	// the result -- the data's; one missing from a round whose query did not
 	// answer was never asked for -- this side's. Nil when the completion
 	// carried no primary fact (a Slot skipped without a query).
-	PrimaryInput        *PrimaryInputFacts
-	Dispatcher          *DispatcherFacts
-	DispatchTurnaway    *DispatchTurnawayFacts
-	PermitWait          *PermitWaitFacts
-	ExpiredRange        *ExpiredRangeFacts
-	Component           Component
-	Stage               Stage
-	Result              Result
-	Operation           Operation
-	Direction           Direction
-	ReasonCode          ReasonCode
-	Duration            time.Duration
-	Counts              Counts
-	Trace               TraceFields
-	Err                 error
-	CapacityBudget      CapacityBudget
-	CapacityRejection   *CapacityRejectionFacts
-	SlotBudgetUsage     *SlotBudgetUsageFacts
-	SlotTiming          *SlotTimingFacts
+	PrimaryInput      *PrimaryInputFacts
+	Dispatcher        *DispatcherFacts
+	DispatchTurnaway  *DispatchTurnawayFacts
+	PermitWait        *PermitWaitFacts
+	ExpiredRange      *ExpiredRangeFacts
+	Component         Component
+	Stage             Stage
+	Result            Result
+	Operation         Operation
+	Direction         Direction
+	ReasonCode        ReasonCode
+	Duration          time.Duration
+	Counts            Counts
+	Trace             TraceFields
+	Err               error
+	CapacityBudget    CapacityBudget
+	CapacityRejection *CapacityRejectionFacts
+	SlotBudgetUsage   *SlotBudgetUsageFacts
+	SlotTiming        *SlotTimingFacts
+	// InPlaceWait is the Slot's in-place readiness wait, on its
+	// slot_completed line; nil when it did not wait.
+	InPlaceWait         *InPlaceWaitFacts
 	SourceKind          SourceKind
 	QueryPermit         *QueryPermitFacts
 	NoDataSlot          *NoDataSlotFacts

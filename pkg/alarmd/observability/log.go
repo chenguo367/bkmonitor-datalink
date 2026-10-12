@@ -471,6 +471,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.SlotBudgetUsage; f != nil {
 		attributes = append(attributes, slog.Any("slot_budget_usage", f))
 	}
+	// Flat, so a log query can filter and group on them.
+	if f := observation.InPlaceWait; f != nil {
+		attributes = append(attributes,
+			slog.Uint64("inplace_waits", uint64(f.Waits)),
+			slog.Int64("inplace_wait_ms", f.TotalMillis),
+			slog.Int64("inplace_longest_ms", f.LongestMillis),
+			slog.Uint64("inplace_sent_before", uint64(f.SentBeforeFirstWait)),
+			slog.Int64("inplace_wait_before_any_sent_ms", f.BeforeAnySentMillis),
+			slog.Uint64("inplace_held_input_bytes", f.HeldInputBytes),
+			slog.Uint64("inplace_held_prepared_bytes_estimate", f.HeldPreparedBytes))
+	}
 	// Flat keys rather than an object, under its own condition: the two
 	// answer different questions and a row can carry either without the
 	// other.

@@ -4342,6 +4342,9 @@ type SlotExecutionResult struct {
 	// with QueryAvailability by the query cooldown pool, which keeps what
 	// the execution that decided its membership had and used.
 	PrimaryQueryClock *PhysicalQueryClock
+	// InPlaceWait is the execution's in-place readiness wait, as access
+	// measured it; nil when it did not wait.
+	InPlaceWait *InPlaceWaitFacts
 	// Set only after a successful Progress commit, not inferred from Result.
 	CompletionKind CompletionKind
 	Completed      bool

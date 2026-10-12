@@ -2843,6 +2843,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
+		InPlaceWait:     inPlaceWaitFacts(result.InPlaceWait),
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err
@@ -3177,4 +3178,15 @@ func declinedEverywhereSamples(settlement scheduler.RoundSettlement) []observabi
 		samples = append(samples, sample)
 	}
 	return samples
+}
+
+// inPlaceWaitFacts is the Slot's in-place readiness wait for its line; nil
+// when it did not wait.
+func inPlaceWaitFacts(wait *execution.InPlaceWaitFacts) *observability.InPlaceWaitFacts {
+	if wait == nil {
+		return nil
+	}
+	return &observability.InPlaceWaitFacts{Waits: wait.Waits, TotalMillis: wait.TotalMillis, LongestMillis: wait.LongestMillis,
+		SentBeforeFirstWait: wait.SentBeforeFirstWait, BeforeAnySentMillis: wait.BeforeAnySentMillis,
+		HeldInputBytes: wait.HeldInputBytes, HeldPreparedBytes: wait.HeldPreparedBytes}
 }
