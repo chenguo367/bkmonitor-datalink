@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -540,4 +541,90 @@ func TestAnotherHandsImageThatCompletesIsNotOurs(t *testing.T) {
 	receipt, _ := d.Start(context.Background(), request())
 	cluster.set(func(dep *Deployment) { dep.Containers[0].Image = "app:3"; dep.Generation++; finish(dep) })
 	waitState(t, store, receipt.ID, StateSuperseded)
+}
+
+// hangingCluster's reads hang until their context ends, once hang is set.
+type hangingCluster struct {
+	*fakeCluster
+	hang  atomic.Bool
+	reads atomic.Int32
+}
+
+func (c *hangingCluster) GetDeployment(ctx context.Context, namespace, name string) (Deployment, error) {
+	if c.hang.Load() {
+		c.reads.Add(1)
+		<-ctx.Done()
+		return Deployment{}, ctx.Err()
+	}
+	return c.fakeCluster.GetDeployment(ctx, namespace, name)
+}
+
+// A hung apiserver read does not hold the driver past its lease: each read
+// is bounded, the driver renews between them, and the receipt stays its own
+// rather than lapsing to another process while it waits.
+func TestAHungReadDoesNotHoldTheDriverPastItsLease(t *testing.T) {
+	store := newTestStore(t, 300*time.Millisecond)
+	cluster := &hangingCluster{fakeCluster: newFakeCluster()}
+	d, _ := testDriver(t, store, cluster, "pod-a/1")
+	d.renew, d.callTimeout = 50*time.Millisecond, 30*time.Millisecond
+	run(t, d)
+	receipt, err := d.Start(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster.hang.Store(true)
+	time.Sleep(700 * time.Millisecond)
+	entry, _ := store.Get(context.Background(), receipt.ID)
+	if entry.DrivenBy != "pod-a/1" || entry.LeaseExpired() || cluster.reads.Load() < 3 {
+		t.Fatalf("after a hung read: driven by %q, lease expired %v, %d reads", entry.DrivenBy, entry.LeaseExpired(), cluster.reads.Load())
+	}
+	cluster.hang.Store(false)
+	cluster.set(finish)
+	waitState(t, store, receipt.ID, StateComplete)
+}
+
+// A pause is written when it starts and when it ends, not on every poll
+// while it lasts: the stored record does not change during the pause.
+func TestAPauseIsWrittenOnceNotEveryPoll(t *testing.T) {
+	store := newTestStore(t, LeaseDuration)
+	cluster := newFakeCluster()
+	d, _ := testDriver(t, store, cluster, "pod-a/1")
+	d.margin = time.Hour
+	run(t, d)
+	receipt, _ := d.Start(context.Background(), request())
+	cluster.set(func(dep *Deployment) { dep.Paused = true })
+	deadline := time.Now().Add(5 * time.Second)
+	var paused Record
+	for time.Now().Before(deadline) {
+		if entry, _ := store.Get(context.Background(), receipt.ID); entry.Record.Paused {
+			paused = entry.Record
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !paused.Paused {
+		t.Fatal("the pause was never written")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if entry, _ := store.Get(context.Background(), receipt.ID); entry.Record.LastProgressAt != paused.LastProgressAt {
+		t.Fatalf("the record was rewritten during the pause: %d then %d", paused.LastProgressAt, entry.Record.LastProgressAt)
+	}
+	cluster.set(func(dep *Deployment) { dep.Paused = false })
+	time.Sleep(100 * time.Millisecond)
+	if entry, _ := store.Get(context.Background(), receipt.ID); entry.Record.Paused || entry.Record.LastProgressAt <= paused.LastProgressAt {
+		t.Fatalf("the resume was not written: %+v", entry.Record)
+	}
+}
+
+// The apiserver refusing the service account is named, not an api_error.
+func TestAForbiddenImageWriteIsNamed(t *testing.T) {
+	store := newTestStore(t, LeaseDuration)
+	cluster := newFakeCluster()
+	cluster.refuseWrite = ErrForbidden
+	d, _ := testDriver(t, store, cluster, "pod-a/1")
+	_, err := d.Start(context.Background(), request())
+	var named *Error
+	if !errors.As(err, &named) || named.Code != CodeForbidden {
+		t.Fatalf("a forbidden write = %v, want %s", err, CodeForbidden)
+	}
 }

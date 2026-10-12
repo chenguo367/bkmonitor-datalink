@@ -58,8 +58,19 @@ type Cluster interface {
 // Deployment, the container or its image was not what the write expected.
 var ErrImageChanged = errors.New("the deployment changed before the image write")
 
+// ErrForbidden is a call the apiserver refused the ServiceAccount: the
+// channel's role does not reach this Deployment.
+var ErrForbidden = errors.New("the apiserver refused this deployment to the service account")
+
 // ErrDeploymentGone is a Deployment that no longer exists.
 var ErrDeploymentGone = errors.New("the deployment no longer exists")
+
+// CallTimeout bounds each Kubernetes call the driver makes. It is shorter
+// than the lease less a renewal, so a hung apiserver call cannot hold the
+// loop past the lease: the driver renews between calls, and a process that
+// lost the receipt finds out at its next write rather than acting on a
+// record it no longer holds.
+const CallTimeout = 5 * time.Second
 
 // fallbackMargin is added to the progress deadline before the driver
 // judges, by its own clock, a rollout that has not moved as failed: the
@@ -79,8 +90,8 @@ type Driver struct {
 	// poll, renew and scan are how often a rollout is read, a lease renewed
 	// and the in-progress receipts scanned for one nobody holds.
 	poll, renew, scan time.Duration
-	// margin is fallbackMargin; tests shorten it.
-	margin time.Duration
+	// margin is fallbackMargin and callTimeout CallTimeout; tests shorten them.
+	margin, callTimeout time.Duration
 	// final hears each receipt that reached a final state here; revert each
 	// revert written. Either may be nil.
 	final  func(Record)
@@ -116,7 +127,7 @@ const (
 func NewDriver(options DriverOptions) *Driver {
 	d := &Driver{store: options.Store, cluster: options.Cluster, owner: options.Owner, now: options.Now,
 		poll: options.Poll, renew: options.Renew, scan: options.Scan, final: options.Final, revert: options.Revert,
-		driving: map[string]bool{}, margin: fallbackMargin}
+		driving: map[string]bool{}, margin: fallbackMargin, callTimeout: CallTimeout}
 	if d.now == nil {
 		d.now = time.Now
 	}
@@ -259,9 +270,23 @@ func (d *Driver) drive(ctx context.Context, record Record) {
 // whether it changed. A revert is written here, after the record says it is
 // reverting: a write the store refuses stops this process before it
 // touches the Deployment.
+// getDeployment and setImage are the cluster calls, each bounded by
+// callTimeout.
+func (d *Driver) getDeployment(ctx context.Context, namespace, name string) (Deployment, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.callTimeout)
+	defer cancel()
+	return d.cluster.GetDeployment(ctx, namespace, name)
+}
+
+func (d *Driver) setImage(ctx context.Context, record Record, index int, expected, image string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.callTimeout)
+	defer cancel()
+	return d.cluster.SetImage(ctx, record.Namespace, record.Name, record.UID, index, record.Container, expected, image)
+}
+
 func (d *Driver) step(ctx context.Context, record Record) (Record, bool) {
 	now := d.now()
-	dep, err := d.cluster.GetDeployment(ctx, record.Namespace, record.Name)
+	dep, err := d.getDeployment(ctx, record.Namespace, record.Name)
 	if errors.Is(err, ErrDeploymentGone) {
 		return end(record, StateTargetChanged, "the deployment no longer exists", now), true
 	}
@@ -335,7 +360,7 @@ func (d *Driver) sendRevert(ctx context.Context, record Record, dep Deployment, 
 		case image != record.Image || index < 0:
 			return end(record, StateSuperseded, "the image was changed by someone else before the revert", now), true
 		}
-		generation, err := d.cluster.SetImage(ctx, record.Namespace, record.Name, record.UID, index, record.Container, record.Image, record.Previous)
+		generation, err := d.setImage(ctx, record, index, record.Image, record.Previous)
 		if err == nil {
 			record.RevertSent, record.Generation, record.LastProgressAt = true, generation, now.UnixMilli()
 			if d.revert != nil {
@@ -347,7 +372,7 @@ func (d *Driver) sendRevert(ctx context.Context, record Record, dep Deployment, 
 			// Not written; the next poll tries again.
 			return record, false
 		}
-		if dep, err = d.cluster.GetDeployment(ctx, record.Namespace, record.Name); err != nil {
+		if dep, err = d.getDeployment(ctx, record.Namespace, record.Name); err != nil {
 			return record, false
 		}
 		if dep.UID != record.UID {
@@ -370,10 +395,14 @@ func complete(dep Deployment, generation int64) bool {
 func progressed(record Record, dep Deployment, now time.Time) (Record, bool) {
 	seen := Progress{Updated: dep.Updated, Available: dep.Available, Progressing: dep.Progressing.LastUpdate}
 	moved := seen != record.Progress
-	if moved || dep.Paused {
-		record.Progress, record.LastProgressAt = seen, now.UnixMilli()
+	toggled := dep.Paused != record.Paused
+	if moved || toggled || dep.Paused {
+		// While paused, the time without progress restarts at every poll in
+		// memory, and the record is written only when the pause starts or
+		// ends (or the rollout moves): the bound counts from the resume.
+		record.Progress, record.LastProgressAt, record.Paused = seen, now.UnixMilli(), dep.Paused
 	}
-	return record, moved || dep.Paused
+	return record, moved || toggled
 }
 
 // failed is a rollout that will not finish: the controller says its

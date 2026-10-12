@@ -36,6 +36,9 @@ func (c *KubernetesCluster) GetDeployment(ctx context.Context, namespace, name s
 	if apierrors.IsNotFound(err) {
 		return Deployment{}, ErrDeploymentGone
 	}
+	if apierrors.IsForbidden(err) {
+		return Deployment{}, ErrForbidden
+	}
 	if err != nil {
 		return Deployment{}, err
 	}
@@ -60,6 +63,9 @@ func (c *KubernetesCluster) SetImage(ctx context.Context, namespace, name, uid s
 	object, err := c.client.Resource(deployments).Namespace(namespace).Patch(ctx, name, types.JSONPatchType, patch, metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return 0, ErrDeploymentGone
+	}
+	if apierrors.IsForbidden(err) {
+		return 0, ErrForbidden
 	}
 	if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
 		return 0, ErrImageChanged

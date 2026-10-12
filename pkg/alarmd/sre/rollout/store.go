@@ -75,6 +75,9 @@ type Record struct {
 	LastProgressAt int64 `json:"last_progress_at_ms,omitempty"`
 	// Progress is the rollout as last read, to tell a move from none.
 	Progress Progress `json:"progress"`
+	// Paused is the Deployment paused as last read; the record is written
+	// when that changes, not on every poll of a pause.
+	Paused bool `json:"paused,omitempty"`
 	// Detail says why a final state was reached, in a few words.
 	Detail string `json:"detail,omitempty"`
 }
@@ -184,8 +187,15 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
 end
 local lease = tonumber(redis.call('HGET', KEYS[1], 'lease') or '0')
 if lease > now then return false end
+-- A final receipt is never driven again, whatever left it in the set.
+local doc = redis.call('HGET', KEYS[1], 'doc')
+local state = cjson.decode(doc)['state']
+if state ~= 'pending' and state ~= 'rolling_out' and state ~= 'reverting' then
+  redis.call('SREM', KEYS[2], ARGV[3])
+  return false
+end
 redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'lease', now + tonumber(ARGV[2]))
-return redis.call('HGET', KEYS[1], 'doc')
+return doc
 `)
 
 // release: KEYS record; ARGV owner. Ends the holder's lease so a successor

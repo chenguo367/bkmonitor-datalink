@@ -123,3 +123,25 @@ func TestAFinalReceiptLeavesTheActiveListAndTheLatestIsReadableByName(t *testing
 		t.Fatalf("get of a missing receipt = %v", err)
 	}
 }
+
+// A final receipt left in the in-progress set is never taken over again: the
+// take drops it from the set instead.
+func TestAFinalReceiptIsNeverTakenAgain(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, time.Minute)
+	final := testRecord("r1")
+	if err := store.Create(ctx, final, "pod-a/1"); err != nil {
+		t.Fatal(err)
+	}
+	final.State = StateComplete
+	if err := store.Put(ctx, final, "pod-a/1"); err != nil {
+		t.Fatal(err)
+	}
+	store.client.SAdd(ctx, store.activeKey(), "r1")
+	if _, ok, err := store.Take(ctx, "r1", "pod-b/1"); ok || err != nil {
+		t.Fatalf("a final receipt was taken: %v %v", ok, err)
+	}
+	if active, _ := store.Active(ctx); len(active) != 0 {
+		t.Fatalf("active %v, want the final receipt dropped", active)
+	}
+}

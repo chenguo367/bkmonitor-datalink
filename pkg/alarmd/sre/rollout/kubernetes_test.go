@@ -103,3 +103,18 @@ func TestTheImageWriteTestsWhatItExpects(t *testing.T) {
 		t.Fatalf("a write to a missing deployment = %v", err)
 	}
 }
+
+// The apiserver refusing the service account reads as ErrForbidden.
+func TestAForbiddenCallReadsAsForbidden(t *testing.T) {
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), fakeDeployment())
+	client.PrependReactor("*", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "app", errors.New("not allowed"))
+	})
+	cluster := NewKubernetesCluster(client)
+	if _, err := cluster.GetDeployment(context.Background(), "ns", "app"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a forbidden read = %v", err)
+	}
+	if _, err := cluster.SetImage(context.Background(), "ns", "app", "uid-1", 1, "app", "app:1", "app:2"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a forbidden write = %v", err)
+	}
+}

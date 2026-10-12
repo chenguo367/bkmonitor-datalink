@@ -21,6 +21,7 @@ const (
 	CodeAPIError      = "api_error"
 	CodeStore         = "receipt_store_unavailable"
 	CodeNotFound      = "receipt_not_found"
+	CodeForbidden     = "forbidden"
 )
 
 // Error names why an image change was refused or failed.
@@ -66,9 +67,12 @@ func (d *Driver) Start(ctx context.Context, request Request) (Receipt, error) {
 	if err := validRequest(request); err != nil {
 		return Receipt{}, err
 	}
-	dep, err := d.cluster.GetDeployment(ctx, request.Namespace, request.Name)
+	dep, err := d.getDeployment(ctx, request.Namespace, request.Name)
 	if errors.Is(err, ErrDeploymentGone) {
 		return Receipt{}, &Error{Code: CodeTargetChanged, Message: "the deployment by this name does not exist"}
+	}
+	if errors.Is(err, ErrForbidden) {
+		return Receipt{}, &Error{Code: CodeForbidden, Message: "the apiserver refused this deployment to the channel's service account"}
 	}
 	if err != nil {
 		return Receipt{}, &Error{Code: CodeAPIError, Message: "the deployment could not be read"}
@@ -95,7 +99,7 @@ func (d *Driver) Start(ctx context.Context, request Request) (Receipt, error) {
 	if err := d.store.Create(ctx, record, d.owner); err != nil {
 		return Receipt{}, &Error{Code: CodeStore, Message: "the receipt could not be stored, so the image was not changed"}
 	}
-	generation, err := d.cluster.SetImage(ctx, request.Namespace, request.Name, request.UID, index, request.Container, previous, request.Image)
+	generation, err := d.setImage(ctx, record, index, previous, request.Image)
 	if err != nil {
 		state, code, message := StateNotApplied, CodeAPIError, "the image write failed"
 		if errors.Is(err, ErrImageChanged) {
@@ -103,6 +107,9 @@ func (d *Driver) Start(ctx context.Context, request Request) (Receipt, error) {
 		}
 		if errors.Is(err, ErrDeploymentGone) {
 			state, code, message = StateTargetChanged, CodeTargetChanged, "the deployment was deleted before the write"
+		}
+		if errors.Is(err, ErrForbidden) {
+			code, message = CodeForbidden, "the apiserver refused the image write to the channel's service account"
 		}
 		record = end(record, state, message, d.now())
 		_ = d.store.Put(ctx, record, d.owner)

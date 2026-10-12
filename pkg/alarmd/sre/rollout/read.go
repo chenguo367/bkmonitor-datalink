@@ -56,7 +56,7 @@ func (d *Driver) Read(ctx context.Context, id, namespace, name string) (View, er
 	}
 	view := View{Record: entry.Record, DrivenBy: entry.DrivenBy, LeaseUntil: entry.LeaseUntil.UTC(),
 		LeaseExpired: !Final(entry.Record.State) && entry.LeaseExpired()}
-	dep, err := d.cluster.GetDeployment(ctx, entry.Record.Namespace, entry.Record.Name)
+	dep, err := d.getDeployment(ctx, entry.Record.Namespace, entry.Record.Name)
 	switch {
 	case errors.Is(err, ErrDeploymentGone):
 		view.LiveError = "the deployment no longer exists"

@@ -76,6 +76,8 @@ func sreResult(err error) (string, string) {
 			return SREResultTargetChanged, change.Code
 		case rollout.CodeInvalid:
 			return SREResultRefused, change.Code
+		case rollout.CodeForbidden:
+			return SREResultForbidden, change.Code
 		}
 		return SREResultFailed, change.Code
 	}
@@ -341,7 +343,7 @@ func SREOperations(options SREOptions) []Operation {
 		}
 		return out
 	}
-	ops = append(ops, Operation{ID: OpSetImage, Summary: "把一个 Deployment 的一个容器换成另一个镜像，并盯滚动到结束：新镜像起不来（Deployment 自己判定超过进展期限，或进展停了超过期限 30 s）就自动换回原镜像。回执先写进 Redis 再改镜像，立即返回 receipt_id；改的是本服务自己的 Deployment 时，被替换的进程交出回执，由其他进程接着盯。用 workload.rollout 读结果。每次调用和每次自动回退都留审计记录。",
+	ops = append(ops, Operation{ID: OpSetImage, Summary: "把一个 Deployment 的一个容器换成另一个镜像，并盯滚动到结束：新镜像起不来（Deployment 自己判定超过进展期限，或进展停了超过期限 30 s）就自动换回原镜像。回执先写进 Redis 再改镜像，立即返回 receipt_id；改的是本服务自己的 Deployment 时，被替换的进程交出回执，由其他进程接着盯。用 workload.rollout 读结果。能改哪些 Deployment 由通道 ServiceAccount 的集群级角色决定（与 workload.restart 同一个 patch 权限，用户裁定的集群范围管理）；apiserver 拒绝时返回 rollout_forbidden。每次调用和每次自动回退都留审计记录。",
 		Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: rolloutAvailable, Limits: rolloutLimits,
 		Fields:   map[string]Field{"namespace": text, "name": text, "uid": text, "container": text, "image": {Type: "string", MinLength: 1, MaxLength: rollout.MaxImageBytes}},
 		Required: []string{"name", "uid", "container", "image"}, OutputSchema: SchemaOf(rollout.Receipt{}),

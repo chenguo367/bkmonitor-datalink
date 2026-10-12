@@ -120,3 +120,11 @@ func TestImageChangesAreUnavailableWithoutADriver(t *testing.T) {
 		}
 	}
 }
+
+// An image change the apiserver refused the service account is counted as
+// forbidden, as every other SRE write is.
+func TestARefusedImageChangeIsForbidden(t *testing.T) {
+	if result, code := sreResult(&rollout.Error{Code: rollout.CodeForbidden}); result != SREResultForbidden || code != rollout.CodeForbidden {
+		t.Fatalf("forbidden reads as %s/%s", result, code)
+	}
+}
