@@ -4,8 +4,13 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -13,6 +18,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/uq"
 )
 
@@ -20,8 +26,11 @@ import (
 // provider needs nothing the deployment declares: in a cluster it reads any
 // namespace a request names, this Pod's own by default, through the Pod's
 // ServiceAccount; out of one its operations say they are unavailable and why.
-// audit hears every execution and management call.
-func channelSREOperations(cfg config.Config, audit func(obchannel.SREAction)) ([]obchannel.Operation, func(), error) {
+// binding.SREAudit hears every execution and management call. Image changes
+// keep their receipts in client, under the deployment's prefix, and are
+// watched by this process until they end or it stops: stopping hands them
+// back for another process to take over.
+func channelSREOperations(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) ([]obchannel.Operation, func(), error) {
 	secrets := sreDeploymentSecrets(cfg)
 	podReason := ""
 	pods, err := pod.NewInCluster(pod.Options{ModuleLabel: cfg.SRE.ModuleLabel, LiteralSecrets: secrets})
@@ -37,7 +46,65 @@ func channelSREOperations(cfg config.Config, audit func(obchannel.SREAction)) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	return obchannel.SREOperations(obchannel.SREOptions{Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason, Audit: audit}), queries.Close, nil
+	rollouts, rolloutReason, stopRollouts := channelRollouts(cfg, binding, client)
+	ops := obchannel.SREOperations(obchannel.SREOptions{Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason,
+		Rollouts: rollouts, RolloutReason: rolloutReason, Audit: binding.SREAudit})
+	return ops, func() { stopRollouts(); queries.Close() }, nil
+}
+
+// channelRollouts starts the image-change driver: it takes over receipts
+// another process left and watches those this one starts. Out of a cluster
+// there is none, and the reason says why.
+func channelRollouts(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) (*rollout.Driver, string, func()) {
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, "rollout_unavailable: in-cluster configuration is unavailable", func() {}
+	}
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, "rollout_unavailable: " + err.Error(), func() {}
+	}
+	audit := binding.SREAudit
+	driver := rollout.NewDriver(rollout.DriverOptions{
+		Store:   rollout.NewStore(client, cfg.Redis.StatePrefix+".sre:{"+binding.EnvironmentID+"}:"),
+		Cluster: rollout.NewKubernetesCluster(dynamicClient),
+		Owner:   binding.InstanceID + "/" + binding.Control.Incarnation,
+		Final:   binding.SRERolloutEnded,
+		Revert: func(record rollout.Record) {
+			if audit != nil {
+				audit(obchannel.SREAction{Op: obchannel.OpRevert, Namespace: record.Namespace, Kind: "Deployment", Name: record.Name, UID: record.UID,
+					Detail: "receipt " + record.ID + " container " + record.Container + ": " + record.Image + " -> " + record.Previous,
+					Result: obchannel.SREResultDone, SessionID: record.SessionID, RequestID: record.RequestID})
+			}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		driver.Run(ctx)
+	}()
+	if watched := binding.SRERolloutsWatched; watched != nil {
+		go func() {
+			ticker := time.NewTicker(rollout.DefaultScan)
+			defer ticker.Stop()
+			for {
+				watched(driver.Driving())
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+	return driver, "", func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	}
 }
 
 // sreAuditSink writes each execution or management call's sre_action line
@@ -55,6 +122,24 @@ func sreAuditSink(logger *observability.Logger, recorder *metric.Recorder) func(
 			return
 		}
 		logger.Warn("sre_action", action.Result, 0, duration, attrs...)
+	}
+}
+
+// sreRolloutSink writes each image change this process ended as one
+// sre_rollout line and counts it by final state.
+func sreRolloutSink(logger *observability.Logger, recorder *metric.Recorder) func(rollout.Record) {
+	recorder.PresetSRERollouts(rollout.FinalStates)
+	return func(record rollout.Record) {
+		recorder.RecordSRERollout(record.State)
+		duration := time.Duration(record.EndedAt-record.StartedAt) * time.Millisecond
+		attrs := []slog.Attr{slog.String("receipt_id", record.ID), slog.String("namespace", record.Namespace), slog.String("name", record.Name),
+			slog.String("container", record.Container), slog.String("previous_image", record.Previous), slog.String("image", record.Image),
+			slog.String("detail", record.Detail), slog.String("session_id", record.SessionID)}
+		if record.State == rollout.StateComplete || record.State == rollout.StateUnchanged {
+			logger.Info("sre_rollout", record.State, 0, duration, attrs...)
+			return
+		}
+		logger.Warn("sre_rollout", record.State, 0, duration, attrs...)
 	}
 }
 

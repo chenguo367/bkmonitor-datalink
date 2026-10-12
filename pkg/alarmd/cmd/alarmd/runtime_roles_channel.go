@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
 
@@ -43,6 +44,10 @@ type ChannelBinding struct {
 	InstanceID, EnvironmentID string
 	// SREAudit hears every SRE execution and management call; nil hears none.
 	SREAudit func(obchannel.SREAction)
+	// SRERolloutEnded hears every image change this process ended, and
+	// SRERolloutsWatched how many it watches; nil hears none.
+	SRERolloutEnded    func(rollout.Record)
+	SRERolloutsWatched func(int)
 }
 
 type roleChannelRuntime struct {
@@ -237,7 +242,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime), Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient, LatestPublication: cliLatestPublication(catalog)})...)
 	if binding.Roles.Has(roles.Channel) {
 		var sreOps []obchannel.Operation
-		sreOps, closeSRE, err = channelSREOperations(cfg, binding.SREAudit)
+		sreOps, closeSRE, err = channelSREOperations(cfg, binding, clientFor("sre")(cfg.RuntimeStoreRedis()))
 		if err != nil {
 			return nil, err
 		}

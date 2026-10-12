@@ -12,6 +12,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/uq"
 )
 
@@ -49,8 +50,17 @@ const (
 
 // SREActionOps and SREActionResults are the closed label values of the
 // action count: six operations by six results.
+// The image-change operations: the change a caller asks for, the revert the
+// driver writes when the new image does not become ready, and the receipt
+// read.
+const (
+	OpSetImage = "workload.set_image"
+	OpRevert   = "workload.revert"
+	OpRollout  = "workload.rollout"
+)
+
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap}
+	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -58,6 +68,18 @@ var (
 func sreResult(err error) (string, string) {
 	if err == nil {
 		return SREResultDone, ""
+	}
+	var change *rollout.Error
+	if errors.As(err, &change) {
+		switch change.Code {
+		case rollout.CodeTargetChanged:
+			return SREResultTargetChanged, change.Code
+		case rollout.CodeInvalid:
+			return SREResultRefused, change.Code
+		case rollout.CodeForbidden:
+			return SREResultForbidden, change.Code
+		}
+		return SREResultFailed, change.Code
 	}
 	var named *pod.Error
 	if !errors.As(err, &named) {
@@ -103,8 +125,12 @@ type SREOptions struct {
 	Queries   *uq.Provider
 	Scrubber  *redact.Scrubber
 	PodReason string
-	Audit     func(SREAction)
-	Now       func() time.Time
+	// Rollouts changes images and reads their receipts; nil leaves both
+	// operations unavailable, for RolloutReason.
+	Rollouts      *rollout.Driver
+	RolloutReason string
+	Audit         func(SREAction)
+	Now           func() time.Time
 }
 
 // SREOperations runs on the channel. These operations do not accept a Worker
@@ -292,6 +318,65 @@ func SREOperations(options SREOptions) []Operation {
 				return wrapPod(v, err, err == nil && !v.Truncated)
 			}},
 	}
+	rollouts := options.Rollouts
+	rolloutAvailable := func() Availability {
+		if rollouts == nil {
+			reason := options.RolloutReason
+			if reason == "" {
+				reason = "rollout_unavailable: this process is not running in a cluster"
+			}
+			return Availability{Reason: reason}
+		}
+		return Availability{Available: true}
+	}
+	rolloutLimits := map[string]any{"kind": "Deployment", "receipt_ttl_hours": int64(rollout.RecordTTL / time.Hour), "lease_ms": rollout.LeaseDuration.Milliseconds(),
+		"takeover_scan_ms": rollout.DefaultScan.Milliseconds(), "max_image_bytes": rollout.MaxImageBytes,
+		"failure": "the Deployment's ProgressDeadlineExceeded, or no progress for progressDeadlineSeconds + 30 s since the last progress; a paused Deployment is never reverted",
+		"revert":  "automatic, only while the image is still the one written; someone else's image is left as it is (superseded)"}
+	wrapRollout := func(value any, err error) Outcome {
+		out := Outcome{Value: value, Complete: err == nil}
+		var named *rollout.Error
+		if errors.As(err, &named) {
+			out.Error = &Failure{Code: "rollout_" + named.Code, Message: named.Message}
+		} else if err != nil {
+			out.Error = &Failure{Code: "rollout_failed", Message: "The image change did not complete."}
+		}
+		return out
+	}
+	ops = append(ops, Operation{ID: OpSetImage, Summary: "把一个 Deployment 的一个容器换成另一个镜像，并盯滚动到结束：新镜像起不来（Deployment 自己判定超过进展期限，或进展停了超过期限 30 s）就自动换回原镜像。回执先写进 Redis 再改镜像，立即返回 receipt_id；改的是本服务自己的 Deployment 时，被替换的进程交出回执，由其他进程接着盯。用 workload.rollout 读结果。能改哪些 Deployment 由通道 ServiceAccount 的集群级角色决定（与 workload.restart 同一个 patch 权限，用户裁定的集群范围管理）；apiserver 拒绝时返回 rollout_forbidden。每次调用和每次自动回退都留审计记录。",
+		Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: rolloutAvailable, Limits: rolloutLimits,
+		Fields:   map[string]Field{"namespace": text, "name": text, "uid": text, "container": text, "image": {Type: "string", MinLength: 1, MaxLength: rollout.MaxImageBytes}},
+		Required: []string{"name", "uid", "container", "image"}, OutputSchema: SchemaOf(rollout.Receipt{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			started := now()
+			caller := CallerFrom(ctx)
+			namespace := p.String("namespace")
+			if namespace == "" && pods != nil {
+				namespace = pods.DefaultNamespace()
+			}
+			v, err := rollouts.Start(ctx, rollout.Request{Namespace: namespace, Name: p.String("name"), UID: p.String("uid"), Container: p.String("container"),
+				Image: p.String("image"), SessionID: caller.SessionID, RequestID: caller.RequestID})
+			audit(ctx, started, SREAction{Op: OpSetImage, Namespace: namespace, Kind: "Deployment", Name: p.String("name"), UID: p.String("uid"),
+				Detail: "receipt " + v.ID + " container " + p.String("container") + ": " + v.Previous + " -> " + p.String("image") + " " + v.State}, err)
+			out := wrapRollout(v, err)
+			if v.ID != "" {
+				out.Next = append(out.Next, Call{Operation: OpRollout, Params: Params{"receipt_id": v.ID}, Reason: "读这次换镜像的滚动进度与结果。"})
+			}
+			return out
+		}}, Operation{ID: OpRollout, Summary: "按 receipt_id，或按 namespace+name 取这个 Deployment 最近一张回执：原镜像、目标镜像、状态（pending/rolling_out/reverting 进行中；unchanged/not_applied/complete/reverted/revert_failed/superseded/target_changed 结束），以及 Deployment 现在的镜像、副本进度、是否暂停和由哪个进程在盯；进行中却没人持有时 lease_expired 为真。",
+		EvidenceScope: "sre_manage", Availability: rolloutAvailable, Limits: rolloutLimits,
+		Fields: map[string]Field{"receipt_id": text, "namespace": text, "name": text}, OutputSchema: SchemaOf(rollout.View{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			namespace := p.String("namespace")
+			if namespace == "" && pods != nil {
+				namespace = pods.DefaultNamespace()
+			}
+			if p.String("receipt_id") == "" && p.String("name") == "" {
+				return Outcome{Error: &Failure{Code: "invalid_input", Message: "receipt_id, or the deployment's name, is required"}}
+			}
+			v, err := rollouts.Read(ctx, p.String("receipt_id"), namespace, p.String("name"))
+			return wrapRollout(v, err)
+		}})
 	queryAvailable := func() Availability {
 		if queries == nil || len(queries.Egresses()) == 0 {
 			return Availability{Reason: "uq_provider_unconfigured: no UQ endpoint is configured (phase_two.access.uq_endpoint) and no sre.uq.egresses are registered"}

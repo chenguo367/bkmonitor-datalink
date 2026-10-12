@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/uq"
 )
 
@@ -55,7 +56,7 @@ func TestSREQueryReusesCurrentUQEndpointAndSource(t *testing.T) {
 	cfg.PhaseTwo.Access.UQEndpoint = backend.URL + "/prefix"
 	cfg.PhaseTwo.Access.QuerySource = ""
 	cfg.SRE.UQ.Egresses = []uq.Egress{{Name: "current", Tenants: []string{"tenant-fixture"}, Spaces: []string{"scope-fixture"}, Endpoints: []uq.Endpoint{{Path: "/query/ts/", StartField: "start_time", EndField: "end_time", TimeUnit: "s"}}}}
-	operations, closeProvider, err := channelSREOperations(cfg, nil)
+	operations, closeProvider, err := channelSREOperations(cfg, ChannelBinding{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +110,42 @@ func TestTheSREAuditSinkWritesALineAndCountsTheCall(t *testing.T) {
 	}
 	if cells != len(obchannel.SREActionOps)*len(obchannel.SREActionResults) || counted != 1 {
 		t.Fatalf("cells %d counted %v, want every cell and the call once", cells, counted)
+	}
+}
+
+// An image change that ended writes one sre_rollout line - Warn unless it
+// completed - with the receipt and both images, and counts under its final
+// state; every final state has its cell once it is wired.
+func TestTheRolloutSinkWritesALineAndCountsTheEnd(t *testing.T) {
+	var out bytes.Buffer
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	sink := sreRolloutSink(observability.New("channel", &out), recorder)
+	sink(rollout.Record{ID: "receipt-1", Namespace: "fixture", Name: "web", Container: "web", Previous: "web:v1", Image: "web:v2",
+		State: rollout.StateReverted, SessionID: "session-1", StartedAt: 1000, EndedAt: 61000})
+	line := out.String()
+	for _, part := range []string{`"stage":"sre_rollout"`, `"level":"WARN"`, `"receipt_id":"receipt-1"`, `"previous_image":"web:v1"`, `"image":"web:v2"`, `"result":"reverted"`} {
+		if !strings.Contains(line, part) {
+			t.Fatalf("line lacks %s: %s", part, line)
+		}
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cells, counted := 0, 0.0
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_sre_rollouts_total" {
+			continue
+		}
+		for _, series := range family.Metric {
+			cells++
+			if series.Label[0].GetValue() == rollout.StateReverted {
+				counted = series.GetCounter().GetValue()
+			}
+		}
+	}
+	if cells != len(rollout.FinalStates) || counted != 1 {
+		t.Fatalf("cells %d counted %v, want every final state and the end once", cells, counted)
 	}
 }
 
