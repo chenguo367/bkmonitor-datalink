@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
 // Maintenance uses the existing per-QG flight and lease, not a second owner or
@@ -839,7 +840,7 @@ func (m *effectiveMaintenance) refreshLegacy(ctx context.Context, qg execution.Q
 	if m.legacyCache == nil || len(plans) == 0 {
 		return
 	}
-	round, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	round, cancel := context.WithTimeout(ctx, strategycache.RefreshDeadline(ctx))
 	defer cancel()
 	start := m.legacyCursor[qg]
 	for n := 0; n < len(plans); n++ {

@@ -705,6 +705,8 @@ func openProductionPhaseTwoBundleAssembly(
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	legacyTime := strategycache.NewLegacyEffectiveTime(redisForCaller(controlClient, redisfailure.CallerLegacyEffectiveTime),
 		redisForCaller(cmdbClient, redisfailure.CallerLegacyEffectiveTime), cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
+	legacyTime.SetFailureLine(effectiveTimeFailureLine(logger))
+	recorder.SetEffectiveTimeRefreshSource(legacyTime.RefreshCounts)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a
 	// test on this function: the port is allowed to be nil, and a production
 	// runtime that left it nil would lose every query-free completion's
@@ -1260,23 +1262,24 @@ func openProductionPhaseTwoBundleAssembly(
 		// Whether anything can be parked at all, from the same bundle. The
 		// overdue count above is only readable next to this: on a build that
 		// suppresses nothing it can only be zero.
-		dispatch:         bundle.dispatchSuppressionFacts,
-		addressDiffers:   addressDiffers.Latest,
-		restore:          progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
-		staleAfter:       stallAfter,
-		restoreBudget:    fleetRestoreBudgetPerPublish,
-		openAlerts:       openAlertFacts,
-		controlSource:    bundle.controlSourceFleetFacts,
-		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
-		publicSurface:    surface,
-		activation:       bundle.activationFleetFacts,
-		activationHeader: bundle.activationHeaderFleetFacts,
-		rebalance:        bundle.rebalanceFleetFacts,
-		assignmentScope:  bundle.assignmentScopeFleetFacts,
-		assignmentSweep:  bundle.assignmentSweepFleetFacts,
-		leaderRound:      bundle.leaderRoundFleetFacts,
-		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
-		source:           bundle.sourceFleetFacts,
+		dispatch:            bundle.dispatchSuppressionFacts,
+		addressDiffers:      addressDiffers.Latest,
+		effectiveTimeUnread: legacyTime.Unread,
+		restore:             progressRestoreSource(progressStore, observationAdmit(observationMemory, memoryline.ConsumerFleetRestore)),
+		staleAfter:          stallAfter,
+		restoreBudget:       fleetRestoreBudgetPerPublish,
+		openAlerts:          openAlertFacts,
+		controlSource:       bundle.controlSourceFleetFacts,
+		platformSettings:    platformSettingsFactsSource(platformSettings, external.Now),
+		publicSurface:       surface,
+		activation:          bundle.activationFleetFacts,
+		activationHeader:    bundle.activationHeaderFleetFacts,
+		rebalance:           bundle.rebalanceFleetFacts,
+		assignmentScope:     bundle.assignmentScopeFleetFacts,
+		assignmentSweep:     bundle.assignmentSweepFleetFacts,
+		leaderRound:         bundle.leaderRoundFleetFacts,
+		viewStream:          viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
+		source:              bundle.sourceFleetFacts,
 		endpoints: withTargetGroups(withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex.Default(), platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
 			linkd.Console, linkd.Location, external.Now), groupStore, external.Now),

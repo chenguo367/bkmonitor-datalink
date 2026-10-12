@@ -27,6 +27,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
 // Health is the answer to "does someone need to look at this".
@@ -1898,6 +1899,12 @@ type Snapshot struct {
 	// TrackerDropped is what this replica's table lost because it was full,
 	// omitted while it has lost nothing.
 	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
+	// EffectiveTimeUnread is the effective-time dependencies this replica
+	// could not read and no longer trusts, so the Plans naming them resolve
+	// EFFECTIVE_TIME_UNKNOWN; at most strategycache.MaxEffectiveTimeUnread,
+	// with the total.
+	EffectiveTimeUnread      []strategycache.EffectiveTimeUnread `json:"effective_time_unread,omitempty"`
+	EffectiveTimeUnreadTotal int                                 `json:"effective_time_unread_total,omitempty"`
 	// AddressDiffers is this replica's latest records whose address is not
 	// their host's (AddressDiffersSamples); omitted when it has none.
 	AddressDiffers []AddressDiffersSample `json:"address_differs,omitempty"`
@@ -2989,6 +2996,10 @@ type View struct {
 	// full: the counts summed, and the latest objects named with their
 	// replica. Nil while none has lost anything.
 	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
+	// EffectiveTimeUnread is every replica's unread effective-time
+	// dependencies, each once (aggregateEffectiveTimeUnread).
+	EffectiveTimeUnread      []strategycache.EffectiveTimeUnread `json:"effective_time_unread,omitempty"`
+	EffectiveTimeUnreadTotal int                                 `json:"effective_time_unread_total,omitempty"`
 	// AddressDiffers is every replica's latest records whose address is not
 	// their host's, newest first and bounded.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
@@ -3566,6 +3577,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
 	aggregateTrackerDropped(&view, counted)
+	aggregateEffectiveTimeUnread(&view, counted)
 	aggregateUndetermined(&view, counted)
 
 	// Owning an object is not knowing about it. A replica that has just restarted

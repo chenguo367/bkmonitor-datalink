@@ -523,6 +523,12 @@ Labels: `outcome`
 
 What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the broker acknowledged a close for: the close was sent, at every level of the strategy (__ALL__); whether the alert closed is the consumer's to say. The others count events: maintenance_busy is a close that could not take the Query Group's flight because a Slot was executing (one is nothing, a steady rate is a Query Group whose close never happens); close_precheck_failed is the owner or content check refusing before a send; close_send_failed is the producer not acknowledging; maintenance_plan_uncompilable is an activated Plan the maintenance could not compile and so cannot judge; unavailable is a Query Group whose Plans could not be read or whose owner is not accepting; effective_time_unknown, legacy_effective_time_unavailable and close_identity_invalid name the judgement that could not be made; calendar_deletion_unsettled is a close held back because a calendar the strategy reads deleted has not settled as a deletion: read deleted for too short a time, read present elsewhere, or every calendar this replica's strategies name read deleted at once, a calendar source gone; close_boundary_active is a Plan the recheck just before a send found active again, its batch not sent while the Query Group's other Plans go on (effective_time_unknown counts the same recheck finding the time unreadable). Every cell exists from the start so a zero is a reading and not an absence.
 
+## bkmonitor_alarmd_effective_time_refresh_total
+
+Labels: `result`
+
+Reads of the business timezones and calendars that legacy effective times are resolved from, by result: ok, timeout (the read ran out of the time its caller could spare), error. Only reads that were due count. A dependency that keeps failing past the two-minute trust window resolves EFFECTIVE_TIME_UNKNOWN for every Plan naming it; fleet.get lists those as effective_time_unread. Every result exists from the start.
+
 ## bkmonitor_alarmd_event_business_attribution_total
 
 Labels: `source`

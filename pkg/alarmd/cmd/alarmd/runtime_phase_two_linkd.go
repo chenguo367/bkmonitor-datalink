@@ -43,6 +43,16 @@ func consoleFailureLine(logger *observability.Logger) func(op, class string, fai
 	}
 }
 
+// effectiveTimeFailureLine writes a failed effective-time read, at most
+// once a minute for each business timezone or calendar, with the failures
+// since the last line.
+func effectiveTimeFailureLine(logger *observability.Logger) func(dependency, class string, failures uint64) {
+	return func(dependency, class string, failures uint64) {
+		logger.Warn("effective_time_refresh_failed", "failed", 0, 0, slog.String("dependency", dependency),
+			slog.String("class", class), slog.Uint64("failures", failures))
+	}
+}
+
 func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig,
 	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), now func() time.Time,
 	logger *observability.Logger) (linkdIndex, error) {

@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
 // Paging is mandatory rather than optional. An endpoint that returns everything
@@ -376,6 +378,13 @@ type HealthResponse struct {
 	// were full: rounds, truncations and ranges never recorded, with the
 	// latest objects named. Absent while nothing was lost.
 	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
+	// EffectiveTimeUnread is the business timezones and calendars that
+	// could not be read and are no longer trusted: every Plan naming one
+	// resolves EFFECTIVE_TIME_UNKNOWN and is not judged. Oldest failure
+	// first, with the class of the latest failure and the last good read;
+	// effective_time_refresh_total counts the reads.
+	EffectiveTimeUnread      []strategycache.EffectiveTimeUnread `json:"effective_time_unread,omitempty"`
+	EffectiveTimeUnreadTotal int                                 `json:"effective_time_unread_total,omitempty"`
 	// AwaitingFirstRound is the objects only waiting for their first round
 	// since their replica took them over, by period; they are covered and not
 	// counted in unknown. Undetermined names the objects unknown does count,
@@ -1018,6 +1027,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
 		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers, TrackerDropped: view.TrackerDropped,
+		EffectiveTimeUnread: view.EffectiveTimeUnread, EffectiveTimeUnreadTotal: view.EffectiveTimeUnreadTotal,
 		AwaitingFirstRound: view.AwaitingFirstRound, Undetermined: view.Undetermined, UndeterminedTotal: view.UndeterminedTotal,
 		Gaps: view.Gaps, Capacity: view.Capacity,
 		Load: part.Load(view),

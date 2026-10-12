@@ -33,6 +33,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
@@ -447,6 +448,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_calibration_coverage"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_fleet_tracker_dropped_total"] = "variableLabels: {what}"
+	expected["bkmonitor_alarmd_effective_time_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_timeline_repairs_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_timelines_skipped_total"] = "variableLabels: {reason}"
@@ -1030,6 +1032,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// covered and short.
 	bounds[fqName("linkd_calibration_coverage")] = 2
 	bounds[fqName("fleet_tracker_dropped_total")] = len(fleet.TrackerDroppedKinds)
+	bounds[fqName("effective_time_refresh_total")] = len(strategycache.EffectiveTimeRefreshResults)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("timeline_repairs_total")] = len(controlplane.TimelineRepairOutcomes)
 	bounds[fqName("activation_timelines_skipped_total")] = len(controlplane.SkippedTimelineReasons)
