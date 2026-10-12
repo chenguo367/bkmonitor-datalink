@@ -738,6 +738,16 @@ type phaseTwoWorkerBundle struct {
 	controlRunning   bool
 	controlEpoch     uint64
 	controlDegraded  bool
+	// candidacy is the class this process stands for the Control Leader
+	// lease in (phaseTwoControlCandidacy), fixed at assembly; empty is no
+	// candidate. candidacyReady is set once Start has read the control facts
+	// it can, and with draining and closed it decides whether the process
+	// contends: one still starting, or already stopping, does not.
+	candidacy      string
+	candidacyReady bool
+	// handback is a fallback Leader's memory of the preferred processes it
+	// has seen ready, round to round. The reconcile loop alone touches it.
+	handback controlHandbackWatch
 	// controlFactsSeen says a control round has told this replica which Query
 	// Groups exist at least once. Until then the replica registers as
 	// starting rather than ready and reports not ready: it is up, its
@@ -1056,6 +1066,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		return nil, err
 	}
 	bundle := &phaseTwoWorkerBundle{dependencies: dependencies, outputSinkReady: true,
+		candidacy:      phaseTwoControlCandidacy(dependencies.Config),
 		flightReleased: make(chan execution.QueryGroupIdentity, flightReleasedNotices),
 		assigned:       make(map[execution.QueryGroupIdentity]struct{}),
 		runners:        make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
@@ -1092,26 +1103,39 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	if err := bundle.registerAtStartup(ctx, ownership.WorkerStarting); err != nil {
 		return err
 	}
+	// The starting read is a follower's, whatever this process will become.
+	// Only once it is made does the process count as having finished
+	// starting and contend for the Control Leader lease, so a replica still
+	// opening its dependencies never leads (006, section 2.1). It contends
+	// here rather than on the first reconcile tick, so a deployment nobody
+	// leads has a Leader as soon as its first process is up. A process that
+	// takes the lease starts from its own first round instead, exactly as
+	// before: the follower's read only stood in until it knew which it was.
+	followerResult, followerErr := bundle.dependencies.Control.LoadActive(ctx)
+	if followerErr != nil && ctx.Err() != nil {
+		return followerErr
+	}
+	bundle.mu.Lock()
+	bundle.candidacyReady = true
+	bundle.mu.Unlock()
+	bundle.publishControlCandidacy()
 	leader, err := bundle.tryAcquireControlLeader(ctx)
 	if err != nil {
 		// Not knowing whether this replica holds the lease is not the same as
-		// not holding it, but the work is: read what somebody else published
-		// and ask again on the reconcile tick. Ending startup here turned a
-		// store that was still loading its dataset into a crash loop, and a
-		// crash loop is the one state from which this replica can do nothing
-		// at all.
+		// not holding it, but the work is: go on with what was read above and
+		// ask again on the reconcile tick. Ending startup here turned a store
+		// that was still loading its dataset into a crash loop, and a crash
+		// loop is the one state from which this replica can do nothing at all.
 		bundle.dependencies.Recorder.RecordControlFactUnavailable("leader_lease", "read_failed")
 		leader = false
 	} else {
 		bundle.dependencies.Recorder.RecordControlFactRead("leader_lease")
 	}
-	var controlResult phaseTwoControlRefreshResult
-	controlFactsAvailable := true
+	controlResult, err := followerResult, followerErr
 	if leader {
 		controlResult, err = bundle.dependencies.Control.InitialRefresh(ctx)
-	} else {
-		controlResult, err = bundle.dependencies.Control.LoadActive(ctx)
 	}
+	controlFactsAvailable := true
 	if err != nil {
 		if ctx.Err() != nil {
 			return err
@@ -2710,7 +2734,13 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		// still writing, and releasing then would let the next leader start
 		// while the old one writes - the overlap the lease exists to prevent.
 		// Left to expire, as it always was, in that case.
-		if releaser, ok := bundle.dependencies.Ownership.(phaseTwoControlLeaderReleaser); ok && maintenanceErr == nil {
+		if releaser, ok := bundle.dependencies.Ownership.(phaseTwoHeldControlLeaderReleaser); ok && maintenanceErr == nil {
+			released, releaseErr := releaser.ReleaseHeldControlLeader(ctx)
+			if released {
+				bundle.dependencies.Recorder.RecordControlLeaderTransition("none", "release")
+			}
+			result = append(result, releaseErr)
+		} else if releaser, ok := bundle.dependencies.Ownership.(phaseTwoControlLeaderReleaser); ok && maintenanceErr == nil {
 			result = append(result, releaser.ReleaseControlLeader(ctx))
 		}
 		if bundle.dependencies.CloseResources != nil {
@@ -2746,6 +2776,7 @@ func (bundle *phaseTwoWorkerBundle) beginDraining(ctx context.Context) error {
 		bundle.mu.Lock()
 		bundle.draining = true
 		bundle.mu.Unlock()
+		bundle.publishControlCandidacy()
 		bundle.dependencies.Health.Update(phaseTwoReadiness{State: observability.HealthDraining})
 		bundle.drainErr = bundle.register(ctx, ownership.WorkerDraining)
 	})
@@ -3085,7 +3116,7 @@ func (bundle *phaseTwoWorkerBundle) publishFleetSnapshots() {
 }
 
 func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context) (bool, error) {
-	if !bundle.dependencies.Config.HasRole(roles.Control) {
+	if bundle.candidacy == "" {
 		return false, nil
 	}
 	bundle.mu.RLock()
@@ -3097,7 +3128,22 @@ func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context)
 		bundle.mu.RUnlock()
 		return false, nil
 	}
+	ready := bundle.candidacyReady && !bundle.draining && !bundle.closed
 	bundle.mu.RUnlock()
+	if !controlContentionAllowed(bundle.candidacy, ready, false, false) {
+		return false, nil
+	}
+	if bundle.candidacy == ownership.ControlCandidacyFallback {
+		allowed, err := bundle.fallbackMayContend(ctx)
+		if err != nil {
+			bundle.noteControlRole(false, err)
+			return false, err
+		}
+		if !allowed {
+			bundle.noteControlRole(false, nil)
+			return false, nil
+		}
+	}
 	leader, err := bundle.dependencies.Ownership.TryAcquireControlLeader(
 		ctx, bundle.dependencies.Now(), bundle.dependencies.Config.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 	)
@@ -3105,6 +3151,8 @@ func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context)
 	if err != nil || !leader {
 		return leader, err
 	}
+	bundle.recordControlTakeover()
+	bundle.handback.reset()
 	bundle.startControlMaintenance()
 	// A new term: publish the stored view before this round's refresh, so a
 	// Worker without a view does not wait for the whole refresh to get one.
@@ -3784,6 +3832,7 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 		State: state, Reasons: reasons, SnapshotReady: true, AssignmentReady: assignmentReady,
 		RuntimeStateReady: true, OutputSinkReady: sinkReady, LastRecoveryAt: lastRecoveryAt,
 	})
+	bundle.publishControlCandidacy()
 }
 
 // phaseTwoOutputSinkReason is the readiness reason while the output sink is
@@ -4034,7 +4083,23 @@ func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, ref
 	var err error
 	bundle.mu.RLock()
 	factsSeenBefore := bundle.controlFactsSeen
+	leadingBefore := bundle.controlLeader
 	bundle.mu.RUnlock()
+	// A candidate contends on every reconcile tick, not only on the refresh
+	// tick, so a lease that ran out or was given back has a holder within one
+	// reconcile interval. A tick that takes it runs as a refresh: a new term
+	// starts by reading its source. Not knowing the lease is not a reason to
+	// skip the rest of the tick, which is this replica's own Assignment.
+	if !refresh && !leadingBefore && bundle.candidacy != "" {
+		acquired, acquireErr := bundle.tryAcquireControlLeader(ctx)
+		if acquireErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			bundle.dependencies.Recorder.RecordControlFactUnavailable("leader_lease", "read_failed")
+		}
+		refresh = acquired
+	}
 	if refresh {
 		leader, acquireErr := bundle.tryAcquireControlLeader(ctx)
 		if acquireErr != nil {
@@ -4107,6 +4172,11 @@ func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, ref
 				return bundle.scopeControlError(ctx, observability.ComponentOwnership, observability.StageAssignmentAcquired, err)
 			}
 			bundle.markControlFollower(err)
+		} else if bundle.candidacy == ownership.ControlCandidacyFallback {
+			// The round has published; a fallback Leader gives the lease back
+			// here, between rounds, once a preferred process has been ready
+			// for the whole window.
+			bundle.considerHandback(ctx)
 		}
 	}
 	if !bundle.dependencies.Config.HasRole(roles.Worker) {
@@ -4420,6 +4490,10 @@ type phaseTwoApplicationHealth struct {
 	selectedRoles roles.Set
 	channelState  atomic.Pointer[observability.HealthState]
 	controlState  atomic.Pointer[observability.HealthState]
+	// candidacyReady is the bundle's word on whether this process may
+	// contend for the Control Leader lease, for the instance record. False
+	// until the bundle has started, and again once it drains.
+	candidacyReady atomic.Bool
 }
 
 func newPhaseTwoApplicationHealth() *phaseTwoApplicationHealth {

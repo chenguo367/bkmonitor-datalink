@@ -41,6 +41,9 @@ type phaseTwoRoleRuntime struct {
 	// production; the bundle's clock where one is injected, so the record
 	// expires on the same clock its readers judge it by.
 	now func() time.Time
+	// candidacy is the class the record states for the Control Leader
+	// lease; readiness is the bundle's, read from the health it updates.
+	candidacy string
 }
 
 type roleEvidenceServer struct {
@@ -63,6 +66,7 @@ func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts
 	}
 	runtime := &phaseTwoRoleRuntime{StreamIdentity: identity, Incarnation: incarnation, config: cfg, now: time.Now,
 		failed: func(err error) { recorder.ObserveDiagnosticRedisFailure("instance", redisfailure.Reason(err)) }}
+	runtime.candidacy = phaseTwoControlCandidacy(cfg)
 	defer func() {
 		if resultErr != nil {
 			_ = runtime.Close()
@@ -128,27 +132,7 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 				health.Update(phaseTwoReadiness{State: state, Reasons: reasons, SnapshotReady: true,
 					AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true})
 			}
-			statuses := make(map[roles.Role]string)
-			snapshot := health.HealthSnapshot()
-			for _, role := range runtime.config.EffectiveRoles() {
-				statuses[role] = string(snapshot.State)
-				if role == roles.Control {
-					statuses[role] = string(health.controlReadiness(snapshot.State))
-				}
-				if role == roles.Channel {
-					statuses[role] = string(channelState)
-				}
-			}
-			registration := ownership.InstanceRegistration{InstanceID: runtime.config.PhaseTwo.Worker.ID,
-				Roles: runtime.config.EffectiveRoles(), Endpoint: runtime.StreamIdentity.Endpoint,
-				Incarnation: runtime.Incarnation, InternalToken: runtime.StreamIdentity.Token,
-				ExpiresAt: runtime.now().Add(runtime.config.PhaseTwo.Worker.RegistrationTTL.Duration()), RoleStatus: statuses}
-			round, stop := context.WithTimeout(ctx, time.Second)
-			err := runtime.store.RegisterInstance(round, registration)
-			stop()
-			if err != nil && ctx.Err() == nil {
-				runtime.failed(err)
-			}
+			runtime.writeInstance(ctx, health, channelState)
 			select {
 			case <-ctx.Done():
 				return
@@ -156,6 +140,40 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 			}
 		}
 	}()
+}
+
+// writeInstance writes this process's instance record once: its roles, each
+// role's readiness and its Control Leader candidacy, under the record TTL.
+func (runtime *phaseTwoRoleRuntime) writeInstance(ctx context.Context, health *phaseTwoApplicationHealth,
+	channelState observability.HealthState,
+) {
+	statuses := make(map[roles.Role]string)
+	snapshot := health.HealthSnapshot()
+	for _, role := range runtime.config.EffectiveRoles() {
+		statuses[role] = string(snapshot.State)
+		if role == roles.Control {
+			statuses[role] = string(health.controlReadiness(snapshot.State))
+		}
+		if role == roles.Channel {
+			statuses[role] = string(channelState)
+		}
+	}
+	// Ready only while the bundle says so and the process is neither
+	// stopping nor failed: a record that kept saying ready through a
+	// drain would hold a fallback off a process that is leaving.
+	candidacyReady := runtime.candidacy != "" && health.candidacyReady.Load() &&
+		snapshot.State != observability.HealthDraining && snapshot.State != observability.HealthFatal
+	registration := ownership.InstanceRegistration{InstanceID: runtime.config.PhaseTwo.Worker.ID,
+		Roles: runtime.config.EffectiveRoles(), Endpoint: runtime.StreamIdentity.Endpoint,
+		Incarnation: runtime.Incarnation, InternalToken: runtime.StreamIdentity.Token,
+		ExpiresAt: runtime.now().Add(runtime.config.PhaseTwo.Worker.RegistrationTTL.Duration()), RoleStatus: statuses,
+		ControlCandidacy: runtime.candidacy, ControlCandidacyReady: candidacyReady}
+	round, stop := context.WithTimeout(ctx, time.Second)
+	err := runtime.store.RegisterInstance(round, registration)
+	stop()
+	if err != nil && ctx.Err() == nil {
+		runtime.failed(err)
+	}
 }
 
 func (runtime *phaseTwoRoleRuntime) Run(ctx context.Context, health *phaseTwoApplicationHealth) error {

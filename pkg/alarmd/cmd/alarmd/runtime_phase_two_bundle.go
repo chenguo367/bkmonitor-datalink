@@ -788,6 +788,7 @@ func openProductionPhaseTwoBundleAssembly(
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		Roles:               cfg.EffectiveRoles(),
+		ControlCandidate:    phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,

@@ -103,3 +103,79 @@ func TestInstanceReadReturnsExpiryAndRejectsCorruptIdentity(t *testing.T) {
 		t.Fatal("record under another identity was accepted")
 	}
 }
+
+func TestControlCandidacyIsCheckedAgainstTheRolesTheRecordDeclares(t *testing.T) {
+	at := time.Now().Add(time.Minute)
+	for _, accepted := range []InstanceRegistration{
+		{InstanceID: "all", Roles: roles.Set{roles.Control, roles.Worker}, Incarnation: "p", ExpiresAt: at,
+			ControlCandidacy: ControlCandidacyPreferred, ControlCandidacyReady: true},
+		{InstanceID: "control", Roles: roles.Set{roles.Control}, Incarnation: "p", ExpiresAt: at, ControlCandidacy: ControlCandidacyPreferred},
+		{InstanceID: "worker", Roles: roles.Set{roles.Worker}, Incarnation: "p", ExpiresAt: at,
+			ControlCandidacy: ControlCandidacyFallback, ControlCandidacyReady: true},
+		{InstanceID: "old-control", Roles: roles.Set{roles.Control}, Incarnation: "p", ExpiresAt: at},
+	} {
+		if err := accepted.Validate(); err != nil {
+			t.Fatalf("Validate(%+v) = %v", accepted, err)
+		}
+	}
+	for _, refused := range []InstanceRegistration{
+		{InstanceID: "worker", Roles: roles.Set{roles.Worker}, Incarnation: "p", ExpiresAt: at, ControlCandidacy: ControlCandidacyPreferred},
+		{InstanceID: "control", Roles: roles.Set{roles.Control}, Incarnation: "p", ExpiresAt: at, ControlCandidacy: ControlCandidacyFallback},
+		{InstanceID: "channel", Roles: roles.Set{roles.Channel}, Incarnation: "p", ExpiresAt: at, ControlCandidacy: ControlCandidacyFallback},
+		{InstanceID: "worker", Roles: roles.Set{roles.Worker}, Incarnation: "p", ExpiresAt: at, ControlCandidacyReady: true},
+		{InstanceID: "worker", Roles: roles.Set{roles.Worker}, Incarnation: "p", ExpiresAt: at, ControlCandidacy: "standby"},
+	} {
+		if err := refused.Validate(); err == nil {
+			t.Fatalf("Validate(%+v) accepted a candidacy its roles do not allow", refused)
+		}
+	}
+	old := InstanceRegistration{InstanceID: "old-control", Roles: roles.Set{roles.Control}, Incarnation: "p", ExpiresAt: at}
+	if old.CandidacyClass() != ControlCandidacyPreferred || !old.ControlCapable() {
+		t.Fatalf("a control record from before candidacy reads as %q (capable %v), want preferred", old.CandidacyClass(), old.ControlCapable())
+	}
+	worker := InstanceRegistration{InstanceID: "w", Roles: roles.Set{roles.Worker}, Incarnation: "p", ExpiresAt: at}
+	if worker.CandidacyClass() != "" || worker.ControlCapable() {
+		t.Fatal("a Worker record without candidacy reads as a control candidate")
+	}
+}
+
+func TestAPreferredCandidateIsListedOnlyWhileItsRecordIsLive(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	for _, instance := range []InstanceRegistration{
+		{InstanceID: "control-b", Roles: roles.Set{roles.Control}, Incarnation: "b", ExpiresAt: at.Add(time.Minute),
+			ControlCandidacy: ControlCandidacyPreferred, ControlCandidacyReady: true},
+		{InstanceID: "control-a", Roles: roles.Set{roles.Control}, Incarnation: "a", ExpiresAt: at.Add(10 * time.Second),
+			ControlCandidacy: ControlCandidacyPreferred},
+		{InstanceID: "worker", Roles: roles.Set{roles.Worker}, Incarnation: "w", ExpiresAt: at.Add(time.Minute),
+			ControlCandidacy: ControlCandidacyFallback, ControlCandidacyReady: true},
+	} {
+		if err := store.RegisterInstance(ctx, instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed, err := store.ListPreferredControlCandidates(ctx, at)
+	if err != nil || len(listed) != 2 || listed[0].InstanceID != "control-a" || listed[0].ControlCandidacyReady ||
+		listed[1].InstanceID != "control-b" || !listed[1].ControlCandidacyReady {
+		t.Fatalf("preferred candidates = (%+v, %v), want control-a not ready and control-b ready, and no Worker", listed, err)
+	}
+	// Past control-a's record expiry it is no longer listed, and the index
+	// forgets it; a record that went before the index noticed is skipped.
+	if err := store.client.Del(ctx, store.instanceKey("control-b")).Err(); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = store.ListPreferredControlCandidates(ctx, at.Add(20*time.Second))
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("preferred candidates after expiry = (%+v, %v), want none", listed, err)
+	}
+	if members := store.client.ZRange(ctx, store.preferredCandidatesKey(), 0, -1).Val(); len(members) != 1 || members[0] != "control-b" {
+		t.Fatalf("index after the read = %v, want only the entry whose score is still live", members)
+	}
+	if err := store.client.Set(ctx, store.instanceKey("control-b"), "broken-json", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListPreferredControlCandidates(ctx, at); err == nil {
+		t.Fatal("an unreadable preferred record was answered with a short list")
+	}
+}

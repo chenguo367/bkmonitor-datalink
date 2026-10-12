@@ -20,7 +20,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
@@ -398,7 +397,7 @@ func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.Lea
 			if discovery.now != nil {
 				at = discovery.now()
 			}
-			if instance.InstanceID != leader.OwnerID || !instance.ExpiresAt.After(at) || !instance.Roles.Has(roles.Control) {
+			if instance.InstanceID != leader.OwnerID || !instance.ExpiresAt.After(at) || !instance.ControlCapable() {
 				return viewstream.LeaderEndpoint{}, viewstream.MissLeaderUnregistered, nil
 			}
 			if instance.Endpoint == "" {

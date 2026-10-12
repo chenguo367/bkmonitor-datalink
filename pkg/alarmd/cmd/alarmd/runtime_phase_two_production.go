@@ -357,6 +357,11 @@ type productionPhaseTwoControlDependencies struct {
 	// Nil Now means the wall clock; zero MaxReplayAge never retires by age.
 	Now          func() time.Time
 	MaxReplayAge time.Duration
+
+	// ControlCandidate is a process without the control role that stands as
+	// a fallback Control Leader candidate: its rounds refresh and publish
+	// when it holds the lease, exactly as a control process's do.
+	ControlCandidate bool
 }
 
 type productionPhaseTwoControl struct {
@@ -385,7 +390,7 @@ func newProductionPhaseTwoControl(
 		dependencies.Progress == nil || dependencies.MaxReplayAge < 0 {
 		return nil, errors.New("phase-two production Control dependencies are incomplete")
 	}
-	if selected.Has(roles.Control) && (dependencies.Source == nil || dependencies.Planner == nil ||
+	if (selected.Has(roles.Control) || dependencies.ControlCandidate) && (dependencies.Source == nil || dependencies.Planner == nil ||
 		dependencies.Reconciler == nil || dependencies.Activator == nil) {
 		return nil, errors.New("phase-two production Control publication dependencies are incomplete")
 	}
@@ -414,7 +419,7 @@ func (runtime *productionPhaseTwoControl) Refresh(
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
 	}
 	selected, _ := roles.Resolve(runtime.dependencies.Roles)
-	if !selected.Has(roles.Control) {
+	if !selected.Has(roles.Control) && !runtime.dependencies.ControlCandidate {
 		return phaseTwoControlRefreshResult{}, errors.New("control_role_required: strategy refresh requires control role")
 	}
 	return completeControlResult(runtime.refresh(ctx))
@@ -1240,6 +1245,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// Roles is omitted by legacy callers for the shared process. A Control
 	// process has no local executor or flight coordinator.
 	Roles roles.Set
+	// ControlCandidate is a Worker without the control role that stands as
+	// a fallback Control Leader candidate: it takes the lease and publishes
+	// Assignments under it like a control process, and needs the same
+	// coordination dependencies.
+	ControlCandidate bool
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
@@ -1401,7 +1411,7 @@ func newProductionPhaseTwoOwnership(
 			return nil, errors.New("phase-two post-recovery terminal delay is required")
 		}
 	}
-	if selected.Has(roles.Control) {
+	if selected.Has(roles.Control) || dependencies.ControlCandidate {
 		if dependencies.ControlLeaderTTL <= 0 || dependencies.Reconcile == nil {
 			return nil, errors.New("phase-two production Control coordination dependencies are incomplete")
 		}
@@ -1442,7 +1452,7 @@ func (runtime *productionPhaseTwoOwnership) TryAcquireControlLeader(
 	if runtime == nil || at.IsZero() || ttl != runtime.dependencies.ControlLeaderTTL {
 		return false, errors.New("phase-two production Control Leader acquisition is invalid")
 	}
-	if !runtime.hasRole(roles.Control) {
+	if !runtime.controlCapable() {
 		return false, errors.New("phase-two Control Leader acquisition requires control role")
 	}
 	_, err := runtime.ensureControlAuthority(ctx, at)
@@ -1518,7 +1528,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if runtime == nil || at.IsZero() {
 		return newPhaseTwoInvariantError("phase-two production Assignment reconcile is invalid")
 	}
-	if !runtime.hasRole(roles.Control) {
+	if !runtime.controlCapable() {
 		return errors.New("phase-two Assignment publication requires control role")
 	}
 	round := newLeaderRoundTimer(at)
@@ -2620,6 +2630,40 @@ func (runtime *productionPhaseTwoOwnership) hasRole(role roles.Role) bool {
 	return selected.Has(role)
 }
 
+// controlCapable says this process may hold the Control Leader lease: it
+// has the control role, or it is a fallback candidate.
+func (runtime *productionPhaseTwoOwnership) controlCapable() bool {
+	return runtime.hasRole(roles.Control) || runtime.dependencies.ControlCandidate
+}
+
+// productionControlCandidateStore is what contending for the lease by class
+// reads beyond acquiring it: whether a live lease is held, judged on the
+// store's clock, and which preferred candidates are registered.
+type productionControlCandidateStore interface {
+	ReadActiveControlLeader(context.Context) (ownership.QueryGroupOwner, bool, error)
+	ListPreferredControlCandidates(context.Context, time.Time) ([]ownership.InstanceRegistration, error)
+}
+
+// ReadActiveControlLeader passes the store's live lease read through. A
+// store that cannot answer it says so as an error, never as "nobody leads".
+func (runtime *productionPhaseTwoOwnership) ReadActiveControlLeader(ctx context.Context) (ownership.QueryGroupOwner, bool, error) {
+	store, ok := runtime.dependencies.Store.(productionControlCandidateStore)
+	if !ok {
+		return ownership.QueryGroupOwner{}, false, errors.New("phase-two ownership store cannot read the control lease")
+	}
+	return store.ReadActiveControlLeader(ctx)
+}
+
+// ListPreferredControlCandidates passes the store's candidate listing
+// through, under the same rule.
+func (runtime *productionPhaseTwoOwnership) ListPreferredControlCandidates(ctx context.Context, at time.Time) ([]ownership.InstanceRegistration, error) {
+	store, ok := runtime.dependencies.Store.(productionControlCandidateStore)
+	if !ok {
+		return nil, errors.New("phase-two ownership store cannot list control candidates")
+	}
+	return store.ListPreferredControlCandidates(ctx, at)
+}
+
 func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(
 	ctx context.Context,
 	at time.Time,
@@ -3146,21 +3190,29 @@ func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts
 // Not holding the lease, or finding it no longer this process's, is not an
 // error: there is nothing to give up.
 func (runtime *productionPhaseTwoOwnership) ReleaseControlLeader(ctx context.Context) error {
+	_, err := runtime.ReleaseHeldControlLeader(ctx)
+	return err
+}
+
+// ReleaseHeldControlLeader is ReleaseControlLeader that also says whether
+// this call is what gave the lease up, which is what a count of lease moves
+// has to be taken from: a process that had already lost it moved nothing.
+func (runtime *productionPhaseTwoOwnership) ReleaseHeldControlLeader(ctx context.Context) (bool, error) {
 	if runtime == nil || runtime.dependencies.Store == nil {
-		return nil
+		return false, nil
 	}
 	runtime.mu.Lock()
 	authority := runtime.authority
 	runtime.mu.Unlock()
 	if authority.Fence.QueryGroup == "" {
-		return nil
+		return false, nil
 	}
 	err := runtime.dependencies.Store.Release(ctx, authority.Fence)
 	runtime.clearControlAuthority(authority)
 	if errors.Is(err, ownership.ErrStaleFence) {
-		return nil
+		return false, nil
 	}
-	return err
+	return err == nil, err
 }
 
 // declinedEverywhereSamples is the round's declined-everywhere sample in the
