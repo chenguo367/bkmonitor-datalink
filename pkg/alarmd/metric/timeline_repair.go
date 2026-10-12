@@ -63,3 +63,24 @@ func (c *timelineRepairCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.repairs, prometheus.CounterValue, float64(counts[outcome]), string(outcome))
 	}
 }
+
+func newTimelineUnreadableReports() prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "timeline_unreadable_reports_total",
+		Help: "Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline " +
+			"that does not decode (SCHEDULE_UNREADABLE): one per Query Group each time it goes from unnamed to named. " +
+			"The name is dropped by the first later round of that Query Group that runs a Slot, or when it leaves this " +
+			"replica. A leader reads each named timeline again and rewrites it (timeline_repairs_total). A count that " +
+			"keeps rising for the same Query Groups is a rewrite that does not take." +
+			" Reader: the release acceptance, from /metrics after each deploy.",
+	})
+}
+
+// RecordTimelineUnreadableReported counts one Query Group newly named as
+// having an unreadable timeline.
+func (r *Recorder) RecordTimelineUnreadableReported() {
+	if r == nil || r.phaseTwo.timelineUnreadableReports == nil {
+		return
+	}
+	r.phaseTwo.timelineUnreadableReports.Inc()
+}

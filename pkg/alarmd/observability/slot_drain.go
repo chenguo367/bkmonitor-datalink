@@ -91,7 +91,7 @@ type DeclinedEverywhereSample struct {
 // let go (design 02 §6.2, §6.6). A Slot that outlives the wait can have had
 // its events acknowledged and its State refused, and the next owner sends
 // those events again: lease_ended and deadline are where that can happen,
-// and the output_unapplied line names it when it does.
+// and output_unapplied_total counts it when it does.
 type SlotDrainFacts struct {
 	Site    string `json:"site"`
 	Outcome string `json:"outcome"`

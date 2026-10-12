@@ -3433,8 +3433,9 @@ func channelClosed(signal <-chan struct{}) bool {
 	}
 }
 
-// recordHandoverDrain writes one handover's wait as its line.
+// recordHandoverDrain counts one handover's wait and writes its line.
 func (bundle *phaseTwoWorkerBundle) recordHandoverDrain(queryGroup execution.QueryGroupIdentity, drain observability.SlotDrainFacts) {
+	bundle.dependencies.Recorder.RecordHandoverDrain(drain.Outcome, time.Duration(drain.WaitMS)*time.Millisecond)
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageHandoverDrained,
 		Result: observability.ResultSuccess, Operation: observability.OperationTransition,
@@ -3709,6 +3710,9 @@ func (bundle *phaseTwoWorkerBundle) noteTimelineReading(queryGroup execution.Que
 		delete(bundle.unreadableTimelines, queryGroup)
 	}
 	bundle.mu.Unlock()
+	if unreadable && !named && owned {
+		bundle.dependencies.Recorder.RecordTimelineUnreadableReported()
+	}
 }
 
 // unreadableTimelinesRegistration is the names the registration carries -
@@ -3815,8 +3819,8 @@ func (bundle *phaseTwoWorkerBundle) declineQueryGroup(queryGroup execution.Query
 	bundle.updateReadiness()
 }
 
-// recordHungExecution writes the line of one hung execution's decline or
-// return: which Query Group, the stage it is stuck in, how far past
+// recordHungExecution counts one hung execution's decline or return and
+// writes its line: which Query Group, the stage it is stuck in, how far past
 // its deadline, and on return how long it was hung.
 func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 	queryGroup execution.QueryGroupIdentity,
@@ -3830,6 +3834,7 @@ func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 	if outcome == observability.ExecutionHungReturned {
 		facts.HungMS = now.Sub(entry.since).Milliseconds()
 	}
+	bundle.dependencies.Recorder.RecordExecutionHung(outcome)
 	result := observability.Result(observability.ResultFailed)
 	if outcome == observability.ExecutionHungReturned {
 		result = observability.ResultSuccess

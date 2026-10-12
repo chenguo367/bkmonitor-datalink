@@ -190,7 +190,8 @@ func TestTheConsoleMetricReadsTheSameStateAsTheEntry(t *testing.T) {
 	refused := consoleTestServer(t, http.NotFound)
 	readRoster(refused)
 	if reading := linkdConsoleReading(refused, clock)(); reading.State != fleet.LinkdConsoleUnreadable ||
-		reading.Calls[openalerts.ConsoleOpRoster].Failures != 1 {
+		reading.Calls[openalerts.ConsoleOpRoster].Failures != 1 ||
+		reading.Calls[openalerts.ConsoleOpRoster].FailuresByClass[openalerts.ConsoleFailureStatus] != 1 {
 		t.Fatalf("a refused roster's metric reading: %+v", reading)
 	}
 }

@@ -141,8 +141,13 @@ func linkdConsoleReading(console *openalerts.HTTPReconciler, now func() time.Tim
 	return func() metric.LinkdConsoleReading {
 		facts := linkdConsoleFacts(console, now())
 		reading := metric.LinkdConsoleReading{State: facts.State, Calls: make(map[string]metric.LinkdConsoleCalls, len(facts.Calls))}
+		var record openalerts.ConsoleRecord
+		if console != nil {
+			record = console.Record()
+		}
 		for _, call := range facts.Calls {
-			reading.Calls[call.Op] = metric.LinkdConsoleCalls{Calls: call.Calls, Failures: call.Failures}
+			reading.Calls[call.Op] = metric.LinkdConsoleCalls{Calls: call.Calls, Failures: call.Failures,
+				FailuresByClass: record.Calls[call.Op].FailuresByClass}
 		}
 		return reading
 	}

@@ -306,6 +306,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_short_period_slot_completions_total":          "variableLabels: {cohort,operation,completion_kind}",
 		"bkmonitor_alarmd_query_cooldown_events_total":                  "variableLabels: {event}",
 		"bkmonitor_alarmd_access_response_status_total":                 "variableLabels: {code,outcome}",
+		"bkmonitor_alarmd_access_response_codec_total":                  "variableLabels: {codec,negotiation,completion}",
 		"bkmonitor_alarmd_uq_answer_truncated_total":                    "variableLabels: {source_semantics}",
 		"bkmonitor_alarmd_query_unavailable_attribution_total":          "variableLabels: {attribution}",
 		"bkmonitor_alarmd_slot_readiness_slack_seconds":                 "variableLabels: {}",
@@ -383,6 +384,10 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_shard_unaware_ready_replicas":                 "variableLabels: {}",
 		"bkmonitor_alarmd_rebalance_gap":                                "variableLabels: {}",
 		"bkmonitor_alarmd_dispatch_queue_turnaways_total":               "variableLabels: {outcome,cohort}",
+		"bkmonitor_alarmd_handover_drains_total":                        "variableLabels: {outcome}",
+		"bkmonitor_alarmd_handover_drain_seconds":                       "variableLabels: {}",
+		"bkmonitor_alarmd_output_unapplied_total":                       "variableLabels: {refusal}",
+		"bkmonitor_alarmd_executions_hung_total":                        "variableLabels: {outcome}",
 		"bkmonitor_alarmd_assignment_moves_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_rebalance_paused_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_control_read_round_trips_total":               "variableLabels: {read}",
@@ -439,6 +444,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_notices_refused_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_timeline_repairs_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_activation_timelines_skipped_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_timeline_unreadable_reports_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_activation_header_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_activation_renewal_conflict_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
@@ -492,6 +499,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
+	expected["bkmonitor_alarmd_linkd_console_failures_total"] = "variableLabels: {op,class}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
@@ -837,6 +845,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
 		fqName("access_response_status_total"): 36,
+		fqName("access_response_codec_total"):  3 * 3 * 4,
 		// One per source answered through Elasticsearch terms.
 		fqName("uq_answer_truncated_total"): 4,
 		// attempt, no_attempt_reason, no_attempts, other.
@@ -943,6 +952,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("shard_unaware_ready_replicas"):        1,
 		fqName("rebalance_gap"):                       1,
 		fqName("dispatch_queue_turnaways_total"):      len(dispatchTurnawayOutcomes) * len(dispatchTurnawayCohorts),
+		fqName("handover_drains_total"):               len(handoverDrainOutcomes()),
+		fqName("handover_drain_seconds"):              histogramSeries(1, len(handoverDrainBuckets)),
+		fqName("output_unapplied_total"):              len(ownership.RefusalReasons),
+		fqName("executions_hung_total"):               len(observability.ExecutionHungOutcomes),
 		fqName("assignment_moves_total"):              1,
 		fqName("rebalance_paused_total"):              1,
 		fqName("control_read_round_trips_total"):      len(ControlReadKinds),
@@ -1004,6 +1017,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_notices_refused_total")] = len(openalerts.NoticeRefusals)
 	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("timeline_repairs_total")] = len(controlplane.TimelineRepairOutcomes)
+	bounds[fqName("activation_timelines_skipped_total")] = len(controlplane.SkippedTimelineReasons)
+	bounds[fqName("timeline_unreadable_reports_total")] = 1
 	bounds[fqName("activation_header_rebuild_total")] = len(controlplane.ActivationHeaderRebuildOutcomes)
 	bounds[fqName("activation_renewal_conflict_total")] = len(controlplane.ActivationRenewalConflicts)
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
@@ -1025,6 +1040,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
 	// Every Console operation by every failure class.
+	bounds[fqName("linkd_console_failures_total")] = len(openalerts.ConsoleOps) * len(openalerts.ConsoleFailureClasses)
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
 	bounds[fqName("control_source_last_good_identity_changed_total")] = 1
 	// The supported data sources, plus other for one the compiler started

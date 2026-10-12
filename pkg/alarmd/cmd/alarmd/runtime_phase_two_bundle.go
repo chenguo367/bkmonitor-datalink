@@ -867,6 +867,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	recorder.SetTimelineRepairSource(repository.TimelineRepairCounts)
+	recorder.SetActivationSkippedTimelinesSource(repository.SkippedTimelinesReading)
 	recorder.SetActivationHeaderSource(repository.ActivationHeaderReading)
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
@@ -1336,7 +1337,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Bound whether or not a Console is configured: not_configured is a
 	// reading, and the absent_strategy families are missing there by
 	// construction.
-	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps,
+	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps, openalerts.ConsoleFailureClasses,
 		linkdConsoleReading(linkd.Console, external.Now))
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
