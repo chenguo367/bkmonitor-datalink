@@ -93,25 +93,17 @@ func forwardSkipReason(reason ReasonCode) bool {
 }
 
 // SkipGap is the gap summary of a forward skip from cursor to resumeAt under
-// reason, empty meaning SCHEDULE_PRUNED: the one shape every forward skip
-// has (PrunedSkipGap says why it is uncounted), with the reason the caller
-// decided.
-func (request ProgressSkipPrunedRequest) SkipGap() *ProgressGapSummary {
-	reason := request.Reason
-	if reason == "" {
-		reason = ReasonCode(contract.ReasonSchedulePruned)
-	}
-	return forwardSkipGap(reason, request.ExpectedNextSlot, request.ResumeAt)
-}
-
-// PrunedSkipGap is the gap summary a pruned skip from cursor to resumeAt
-// records.
+// reason, empty meaning SCHEDULE_PRUNED. Every forward skip has this one shape;
+// only the reason differs, and it has to, because a reader asking "where did
+// these rounds go" is sent to retention by SCHEDULE_PRUNED, to the active set
+// by PLAN_NOT_ACTIVE, and to a timeline that would not decode by
+// SCHEDULE_REPAIRED.
 //
-// Two things this has to say and one it must not. The span is real and known:
-// every Slot from the old cursor up to the one the timeline still holds went
-// unevaluated and will not be revisited. How many Slots that is, is not known
-// and cannot become known -- the segments that would have counted them are the
-// segments that were pruned.
+// Two things the shape has to say and one it must not. The span is real and
+// known: every Slot from the old cursor up to the one the timeline still holds
+// went unevaluated and will not be revisited. How many Slots that is, is not
+// known and cannot become known -- for a pruned skip, the segments that would
+// have counted them are the segments that were pruned.
 //
 // So Count is zero with Uncounted set, rather than one. Count means Slots in
 // every other gap, and a 1 here was read as one Slot by everything that adds
@@ -126,8 +118,12 @@ func (request ProgressSkipPrunedRequest) SkipGap() *ProgressGapSummary {
 // stated without the population being invented: the first skipped Slot is
 // known, where the cursor landed is known, and how many lie between them is
 // exactly what the pruned segments took with them.
-func PrunedSkipGap(cursor, resumeAt EvaluationTime) *ProgressGapSummary {
-	return forwardSkipGap(ReasonCode(contract.ReasonSchedulePruned), cursor, resumeAt)
+func (request ProgressSkipPrunedRequest) SkipGap() *ProgressGapSummary {
+	reason := request.Reason
+	if reason == "" {
+		reason = ReasonCode(contract.ReasonSchedulePruned)
+	}
+	return forwardSkipGap(reason, request.ExpectedNextSlot, request.ResumeAt)
 }
 
 func forwardSkipGap(reason ReasonCode, cursor, resumeAt EvaluationTime) *ProgressGapSummary {
@@ -138,25 +134,6 @@ func forwardSkipGap(reason ReasonCode, cursor, resumeAt EvaluationTime) *Progres
 		Kind: CompletionGapSkipped, ReasonCode: reason,
 		FirstSlot: cursor, LastSlot: cursor, ResumedAt: resumeAt, Uncounted: true,
 	}
-}
-
-// PlanNotActiveSkipGap is the same forward skip for Slots no Plan was due at.
-//
-// Same shape as the pruned skip and deliberately so: both move the cursor past
-// Slots that were never evaluated and carry no completion to navigate from.
-// Only the reason differs, and it has to, because a reader asking "where did
-// these rounds go" gets sent to retention by one and to the active set by the
-// other.
-func PlanNotActiveSkipGap(cursor, resumeAt EvaluationTime) *ProgressGapSummary {
-	return forwardSkipGap(ReasonCode(contract.ReasonPlanNotActive), cursor, resumeAt)
-}
-
-// ScheduleRepairedSkipGap is the same forward skip for Slots lost with a
-// timeline that would not decode and was rewritten: the cursor stood inside
-// a Segment the rewrite did not keep, and resumes at the first Slot of the
-// Segment the rewrite opened.
-func ScheduleRepairedSkipGap(cursor, resumeAt EvaluationTime) *ProgressGapSummary {
-	return forwardSkipGap(ReasonCode(contract.ReasonScheduleRepaired), cursor, resumeAt)
 }
 
 // SkippedPrunedRange reports whether the Progress currently sits on a forward

@@ -92,7 +92,21 @@ func TestAReassignedQueryGroupWithNoSlotInFlightIsReleasedAtOnce(t *testing.T) {
 		assigned: []execution.QueryGroupIdentity{"query-group-1"},
 		runners:  map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime{"query-group-1": first},
 	}
-	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, owner)
+	var drainMu sync.Mutex
+	var drains []observability.SlotDrainFacts
+	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Config: cfg, Health: newPhaseTwoApplicationHealth(), Control: control, Ownership: owner, Now: time.Now,
+		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			if observation.Stage == observability.Stage(observability.StageHandoverDrained) && observation.SlotDrain != nil {
+				drainMu.Lock()
+				drains = append(drains, *observation.SlotDrain)
+				drainMu.Unlock()
+			}
+		}),
+	})
+	if err != nil {
+		t.Fatalf("newPhaseTwoWorkerBundle() error = %v", err)
+	}
 	if err := bundle.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -110,8 +124,11 @@ func TestAReassignedQueryGroupWithNoSlotInFlightIsReleasedAtOnce(t *testing.T) {
 	if released := first.releaseCount(); released != 1 {
 		t.Fatalf("release calls = %d, want 1", released)
 	}
-	if drain := bundle.lastHandoverDrain(); drain.Outcome != "idle" || drain.Waited != 0 {
-		t.Fatalf("handover drain = %+v, want idle with nothing waited", drain)
+	drainMu.Lock()
+	observed := append([]observability.SlotDrainFacts(nil), drains...)
+	drainMu.Unlock()
+	if len(observed) != 1 || observed[0].Outcome != observability.SlotDrainIdle || observed[0].Waited != 0 {
+		t.Fatalf("handover drains observed = %+v, want one idle with nothing waited", observed)
 	}
 }
 

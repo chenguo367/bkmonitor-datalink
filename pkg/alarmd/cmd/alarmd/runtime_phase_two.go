@@ -746,9 +746,8 @@ type phaseTwoWorkerBundle struct {
 	shutdownErr    error
 	drainOnce      sync.Once
 	drainErr       error
-	// handoverDrain is the last planned handover's wait and shutdownDrain the
-	// stop's, for the lifecycle record and the tests; under mu.
-	handoverDrain      observability.SlotDrainFacts
+	// shutdownDrainFacts is the stop's wait, for the lifecycle record and the
+	// tests; under mu.
 	shutdownDrainFacts *observability.SlotDrainFacts
 	slotsRunning       int
 	// declined is the Query Groups whose execution hung here past its
@@ -3436,9 +3435,6 @@ func channelClosed(signal <-chan struct{}) bool {
 
 // recordHandoverDrain counts one handover's wait and writes its line.
 func (bundle *phaseTwoWorkerBundle) recordHandoverDrain(queryGroup execution.QueryGroupIdentity, drain observability.SlotDrainFacts) {
-	bundle.mu.Lock()
-	bundle.handoverDrain = drain
-	bundle.mu.Unlock()
 	bundle.dependencies.Recorder.RecordHandoverDrain(drain.Outcome, time.Duration(drain.WaitMS)*time.Millisecond)
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageHandoverDrained,
@@ -3446,13 +3442,6 @@ func (bundle *phaseTwoWorkerBundle) recordHandoverDrain(queryGroup execution.Que
 		Direction: observability.DirectionInternal, SlotDrain: &drain,
 		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
-}
-
-// lastHandoverDrain is the last planned handover's wait.
-func (bundle *phaseTwoWorkerBundle) lastHandoverDrain() observability.SlotDrainFacts {
-	bundle.mu.RLock()
-	defer bundle.mu.RUnlock()
-	return bundle.handoverDrain
 }
 
 func (bundle *phaseTwoWorkerBundle) stopLostQueryGroup(

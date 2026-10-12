@@ -11,12 +11,17 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
+// skipGap is the gap the production skip records: the request's own SkipGap.
+func skipGap(reason ReasonCode, cursor, resumeAt EvaluationTime) *ProgressGapSummary {
+	return ProgressSkipPrunedRequest{ExpectedNextSlot: cursor, ResumeAt: resumeAt, Reason: reason}.SkipGap()
+}
+
 // A pruned skip leaves the cursor standing on its own: no continuity anchor
 // is derived from Slots that no longer exist, while every other Progress
 // keeps deriving its next Slot from the last completion it carries.
 func TestScheduleProgressContinuityAnchorIgnoresAPrunedSkip(t *testing.T) {
 	skipped := ScheduleProgress{Identity: ProgressIdentity{QueryGroup: "q"}, NextSlot: 600,
-		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: PrunedSkipGap(120, 180)}
+		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap("", 120, 180)}
 	if err := skipped.Validate(); err != nil {
 		t.Fatalf("a pruned skip does not validate: %v", err)
 	}
@@ -32,7 +37,7 @@ func TestScheduleProgressContinuityAnchorIgnoresAPrunedSkip(t *testing.T) {
 	// reason here would have navigation resume inside the stretch it just
 	// moved past. The reasons differ, and only the reasons.
 	inactive := ScheduleProgress{Identity: ProgressIdentity{QueryGroup: "q"}, NextSlot: 600,
-		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: PlanNotActiveSkipGap(120, 180)}
+		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap(ReasonCode(contract.ReasonPlanNotActive), 120, 180)}
 	if err := inactive.Validate(); err != nil {
 		t.Fatalf("a plan-not-active skip does not validate: %v", err)
 	}
@@ -57,7 +62,7 @@ func TestScheduleProgressContinuityAnchorIgnoresAPrunedSkip(t *testing.T) {
 			LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: &ProgressGapSummary{Kind: CompletionGapSkipped,
 				ReasonCode: ReasonCode(contract.ReasonGapSkipped), FirstSlot: 660, LastSlot: 720, Count: 2}}, want: 720, anchored: true},
 		{name: "a completion after the skip anchors again", progress: ScheduleProgress{NextSlot: 660, LastFullSlot: 600,
-			LastCompletionKind: CompletionFull, CurrentOrRecentGap: PrunedSkipGap(120, 180)}, want: 600, anchored: true},
+			LastCompletionKind: CompletionFull, CurrentOrRecentGap: skipGap("", 120, 180)}, want: 600, anchored: true},
 		{name: "nothing completed yet has no anchor", progress: ScheduleProgress{NextSlot: 60}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -104,7 +109,7 @@ func TestProgressSkipPrunedRequestValidation(t *testing.T) {
 // The two shapes are mutually exclusive by construction, which is what stops a
 // later edit from putting a plausible number back beside the flag.
 func TestAPrunedSkipDoesNotReportASlotCountItCannotHave(t *testing.T) {
-	gap := PrunedSkipGap(120, 600)
+	gap := skipGap("", 120, 600)
 	if gap.Count != 0 || !gap.Uncounted {
 		t.Fatalf("pruned skip = count %d uncounted %v, want no count and the flag: a number here is "+
 			"read as Slots, and the Slots are exactly what cannot be known", gap.Count, gap.Uncounted)
@@ -142,7 +147,7 @@ func TestAGapSummaryEitherCountsItsSlotsOrSaysItCannot(t *testing.T) {
 	}{
 		{"counted", ProgressGapSummary{Kind: CompletionGapSkipped,
 			ReasonCode: ReasonCode(contract.ReasonGapSkipped), FirstSlot: 120, LastSlot: 180, Count: 2}, true},
-		{"uncounted", *PrunedSkipGap(120, 600), true},
+		{"uncounted", *skipGap("", 120, 600), true},
 		{"a count beside the flag", ProgressGapSummary{Kind: CompletionGapSkipped,
 			ReasonCode: ReasonCode(contract.ReasonSchedulePruned), FirstSlot: 120, LastSlot: 120,
 			Count: 3, Uncounted: true}, false},
@@ -170,7 +175,7 @@ func TestAGapSummaryEitherCountsItsSlotsOrSaysItCannot(t *testing.T) {
 // retention. A request may carry any forward skip's word and no other.
 func TestTheRepairedSkipIsAForwardSkipWithItsOwnWord(t *testing.T) {
 	repaired := ScheduleProgress{Identity: ProgressIdentity{QueryGroup: "q"}, NextSlot: 600,
-		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: ScheduleRepairedSkipGap(120, 600)}
+		LastCompletionKind: CompletionGapSkipped, CurrentOrRecentGap: skipGap(ReasonCode(contract.ReasonScheduleRepaired), 120, 600)}
 	if err := repaired.Validate(); err != nil {
 		t.Fatalf("a repaired skip does not validate: %v", err)
 	}
