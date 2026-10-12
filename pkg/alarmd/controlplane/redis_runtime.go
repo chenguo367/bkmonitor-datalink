@@ -25,6 +25,14 @@ const scheduleTimelineSchemaVersion = "alarmd-control-schedule-timeline-v1"
 var (
 	ErrScheduleUnavailable = errors.New("alarmd controlplane: schedule unavailable")
 	ErrScheduleConflict    = errors.New("alarmd controlplane: schedule activation conflict")
+	// ErrScheduleTimelineAbsent is a Query Group's Schedule timeline key that
+	// is not there at all - evicted, expired, deleted - as opposed to a
+	// timeline that has no Segment for a Slot, which is unavailable too. It
+	// is ErrScheduleUnavailable to every reader that asks for that, so no
+	// branch that tested for it before goes another way; the Worker names a
+	// round that met it by its own word and reports the Query Group, and the
+	// Control Leader opens the timeline again (RepairUnreadableTimelines).
+	ErrScheduleTimelineAbsent = fmt.Errorf("%w: the timeline key is absent", ErrScheduleUnavailable)
 )
 
 type FreezeSlotContractFailureClass string
@@ -972,7 +980,7 @@ func (timelines *cutoverTimelines) timeline(ctx context.Context, queryGroup exec
 	value := timelines.window[timelines.next-timelines.start]
 	timelines.next++
 	if value.Missing {
-		return persistedScheduleTimeline{}, nil, ErrScheduleUnavailable
+		return persistedScheduleTimeline{}, nil, ErrScheduleTimelineAbsent
 	}
 	timeline, err := decodeScheduleTimeline(queryGroup, value.Raw)
 	if err != nil {

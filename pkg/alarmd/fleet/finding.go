@@ -751,7 +751,10 @@ var codeChecks = map[string]verdict{
 	// A timeline this build cannot decode is a defect - corrupt bytes, or a
 	// release whose content the previous build cannot read - not a dependency
 	// that is down.
-	"SCHEDULE_UNREADABLE":     lands(CheckDefect),
+	"SCHEDULE_UNREADABLE": lands(CheckDefect),
+	// A timeline whose key the store lost: the store did not have what the
+	// round needed, as the span the reopen records is filed under it.
+	"SCHEDULE_MISSING":        lands(CheckDependencyDown),
 	"SLOT_SOURCE_RETRY":       lands(CheckDependencyDown),
 	"VIEW_NOT_EXECUTABLE":     lands(CheckDependencyDown),
 	"PROGRESS_BEGIN_FAILED":   lands(CheckDependencyDown),

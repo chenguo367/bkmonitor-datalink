@@ -101,10 +101,13 @@ type WorkerRegistration struct {
 	// before it, which leaves the Query Group where it is as before.
 	Declined []DeclinedQueryGroup `json:"declined,omitempty"`
 	// UnreadableTimelines names the Query Groups whose last round here met a
-	// Schedule timeline that does not decode (SCHEDULE_UNREADABLE), the
-	// first MaxReportedUnreadableTimelines of them in Query Group order, and
-	// UnreadableTimelinesTotal how many there are in all. A leader reads each
-	// named timeline again and rewrites the ones it cannot decode either;
+	// Schedule timeline that does not decode (SCHEDULE_UNREADABLE) or whose
+	// key is not there at all (SCHEDULE_MISSING), the first
+	// MaxReportedUnreadableTimelines of them in Query Group order, and
+	// UnreadableTimelinesTotal how many there are in all. A name is a request
+	// to look, not a verdict: a leader reads each named timeline again,
+	// rewrites the ones it cannot decode either and opens again the ones it
+	// finds absent;
 	// before this, nothing told it and the Query Group ran nothing for as
 	// long as the timeline's key lived. A name is dropped by the first later
 	// round of that Query Group that runs a Slot. Absent from a binary that
