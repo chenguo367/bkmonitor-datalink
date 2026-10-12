@@ -149,12 +149,11 @@ type Config struct {
 	Admission SeriesAdmission
 	// ObserveAdmission counts decisions. Optional.
 	ObserveAdmission AdmissionObserver
-	// ObserveHostPlacement counts each admitted series a Plan reads whose
+	// ObserveHostPlacement hears each admitted series a Plan reads whose
 	// host CMDB placed by id or agent (admission.Facts.PlacedByHostID), with
-	// whether its own address is not that host's
-	// (admission.Facts.ReportedAddressDiffers), by whether the Plan's alert
-	// identity groups by bk_target_ip. Optional.
-	ObserveHostPlacement func(groupedByTargetIP, addressDiffers bool)
+	// how its own address compares with that host's
+	// (admission.Facts.ReportedAddress). Optional.
+	ObserveHostPlacement func(HostPlacement)
 	// ScopeDrops receives the series the target filters turned away, for
 	// the target-scope close; see ScopeDropSink. Optional.
 	ScopeDrops ScopeDropSink
@@ -408,7 +407,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			defer running.Done()
 			adapter := &seriesAdapter{consumer: consumer, query: query, attemptNo: attempt.AttemptNo,
 				admission: source.config.Admission, observe: source.config.ObserveAdmission,
-				hostPlacement: source.config.ObserveHostPlacement, pulled: source.config.ObserveSeriesPulled, scopes: scopes,
+				hostPlacement: source.config.ObserveHostPlacement, queryGroup: request.Contract.Slot.QueryGroup, pulled: source.config.ObserveSeriesPulled, scopes: scopes,
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
 				lookback: kept}
 			adapters[index] = adapter
@@ -712,6 +711,17 @@ type PreparedExecution struct {
 	Queries []PlannedQuery
 }
 
+// HostPlacement is one admitted series a Plan read whose host CMDB placed by
+// id or agent: the Plan, its Query Group, whether the Plan's alert identity
+// groups by bk_target_ip, and how the series' own address compares with the
+// host's. Passed by value on every such series, so it allocates nothing.
+type HostPlacement struct {
+	Plan              execution.PlanIdentity
+	QueryGroup        execution.QueryGroupIdentity
+	GroupedByTargetIP bool
+	Address           admission.ReportedAddress
+}
+
 type PlannedQuery struct {
 	Spec                         execution.PhysicalQuerySpec
 	Requirements                 []execution.DataRequirement
@@ -981,9 +991,12 @@ type seriesAdapter struct {
 	attemptNo uint32
 	admission SeriesAdmission
 	observe   AdmissionObserver
-	// hostPlacement counts an admitted series whose host CMDB placed by id
-	// or agent, with whether its address differs, per Plan. Optional.
-	hostPlacement func(groupedByTargetIP, addressDiffers bool)
+	// hostPlacement hears an admitted series whose host CMDB placed by id
+	// or agent, per Plan. Optional.
+	hostPlacement func(HostPlacement)
+	// queryGroup is the Query Group the query runs for, named on a
+	// placement.
+	queryGroup execution.QueryGroupIdentity
 	// pulled counts the series this query actually handed on. Optional.
 	pulled func(records uint64)
 	scopes planScopes
@@ -1120,7 +1133,8 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 				adapter.reportScopeDrop(identity, plan, &facts, filter, reason)
 			}
 			if admit && facts.PlacedByHostID && adapter.hostPlacement != nil {
-				adapter.hostPlacement(adapter.query.groupsByTargetIP(), facts.ReportedAddressDiffers)
+				adapter.hostPlacement(HostPlacement{Plan: identity, QueryGroup: adapter.queryGroup,
+					GroupedByTargetIP: adapter.query.groupsByTargetIP(), Address: facts.ReportedAddress})
 			}
 			outside = outside && !admit && admission.DefinitelyOutside(plan, &facts, filter, reason)
 			if adapter.observe != nil {

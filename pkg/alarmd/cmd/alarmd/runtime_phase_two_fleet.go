@@ -229,6 +229,9 @@ type fleetPublisher struct {
 	// count above readable: without it, zero overdue on a shadow build and zero
 	// overdue on a healthy one are the same reading.
 	dispatch func() *fleet.DispatchSuppression
+	// addressDiffers is this replica's latest records whose address is not
+	// their host's; nil publishes none.
+	addressDiffers func() []fleet.AddressDiffersSample
 	// restoreAttempts is scoped to current ownership. The maximum also marks
 	// successful reads (including missing/stale history) as finished.
 	restoreAttempts map[execution.QueryGroupIdentity]int
@@ -855,6 +858,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.dispatch != nil {
 		snapshot.Dispatch = publisher.dispatch()
+	}
+	if publisher.addressDiffers != nil {
+		snapshot.AddressDiffers = publisher.addressDiffers()
 	}
 	return snapshot
 }

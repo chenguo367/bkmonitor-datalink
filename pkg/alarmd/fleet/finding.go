@@ -438,9 +438,12 @@ func queryRejected(failure *FailureRef) bool {
 	if failure == nil {
 		return false
 	}
-	detail := failure.Detail
-	return strings.HasPrefix(detail, routedetail.RouteDetailKindResponse+"="+routedetail.ResponseFailureStatusPrefix) ||
-		strings.HasPrefix(detail, routedetail.RouteDetailKindHTTPStatus+"=4")
+	// The number decides; a failure without one is read by its detail, as
+	// a replica of an earlier build still writes it while a rollout is under
+	// way.
+	return strings.HasPrefix(failure.Detail, routedetail.RouteDetailKindResponse+"="+routedetail.ResponseFailureStatusPrefix) ||
+		failure.HTTPStatus >= 400 && failure.HTTPStatus <= 499 ||
+		failure.HTTPStatus == 0 && strings.HasPrefix(failure.Detail, routedetail.RouteDetailKindHTTPStatus+"=4")
 }
 
 // sparseEvidence says every short window of the object is short only by

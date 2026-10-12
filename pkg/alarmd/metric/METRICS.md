@@ -117,9 +117,9 @@ Active Set Redis operation duration.
 
 ## bkmonitor_alarmd_admission_cmdb_address_differs_total
 
-Labels: `grouped_by_target_ip`
+Labels: `grouped_by_target_ip`, `cause`
 
-Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip="true" these are the series whose alert identity differs from Python's. Counted per admitted series per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the pairs are about the rate times its period; it says whether this happens and roughly how much, and a non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, the count these are a part of, which tells a zero here from a branch never taken. The address is compared exactly, as Python's dedupe sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read through /metrics on each deployment it waits on.
+Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip="true" these are the series whose alert identity differs from Python's. Counted per admitted series per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the pairs are about the rate times its period; it says whether this happens and roughly how much, and a non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, the count these are a part of, which tells a zero here from a branch never taken. The address is compared exactly, as Python's dedupe sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. cause says how it differs: differs (another address), missing (none, or empty), undecodable (not a string); fleet.get address_differs_samples names the latest such records, with the strategy, Query Group, host and both addresses. Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read through /metrics on each deployment it waits on.
 
 ## bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total
 
@@ -1283,9 +1283,9 @@ Actual query admission call wall duration including immediate grants and failure
 
 ## bkmonitor_alarmd_query_unavailable_attribution_total
 
-Labels: `attribution`
+Labels: `attribution`, `http_class`
 
-Physical queries that completed UNAVAILABLE, by where their reason code came from: attempt (an attempt named the reason; the code means what it says), no_attempt_reason (attempts were made and none was classified; the code is a fallback guess about a provider that was reached), no_attempts (nothing was sent; the code says nothing about the provider). QUERY_UNAVAILABLE reads as a provider fault and sends a reader to the provider, and two of these three would send them somewhere there is nothing to find; this is the only reading that tells them apart. One increment per physical query, so a Query Group with several Plans counts once per Plan.
+Physical queries that completed UNAVAILABLE, by where their reason code came from: attempt (an attempt named the reason; the code means what it says), no_attempt_reason (attempts were made and none was classified; the code is a fallback guess about a provider that was reached), no_attempts (nothing was sent; the code says nothing about the provider). QUERY_UNAVAILABLE reads as a provider fault and sends a reader to the provider, and two of these three would send them somewhere there is nothing to find; this is the only reading that tells them apart. One increment per physical query, so a Query Group with several Plans counts once per Plan. http_class is the last failed attempt's HTTP answer: 4xx (the backend refused the query), 5xx (it failed), other (a status of neither kind), none (no HTTP answer: a transport failure, a timeout, a query never sent).
 
 ## bkmonitor_alarmd_range_gate_total
 

@@ -47,7 +47,7 @@ var redactedHealthFields = map[string]bool{
 	"AssignmentSweepReplica": true, "ViewStream": true, "ViewStreamReplica": true, "Source": true,
 	"SourceReplica": true, "SourceStanding": true, "ControlFacts": true, "NoDataTracking": true, "Dependencies": true,
 	"DependenciesReplica": true, "LinkdConsole": true, "Coverage": true, "PerReplica": true, "Overdue": true,
-	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true,
+	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true, "AddressDiffers": true,
 	"VerdictHistory": true, "VerdictHistorySince": true, "VerdictHistoryReplica": true,
 	"LeaderRound": true, "LeaderRoundReplica": true, "PlatformSettingFields": true,
 }

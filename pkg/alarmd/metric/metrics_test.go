@@ -266,7 +266,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_control_cache_audit_total":                    "variableLabels: {object,result}",
 		"bkmonitor_alarmd_legacy_pod_cache_total":                       "variableLabels: {result}",
 		"bkmonitor_alarmd_series_admission_total":                       "variableLabels: {filter,result,reason}",
-		"bkmonitor_alarmd_admission_cmdb_address_differs_total":         "variableLabels: {grouped_by_target_ip}",
+		"bkmonitor_alarmd_admission_cmdb_address_differs_total":         "variableLabels: {grouped_by_target_ip,cause}",
 		"bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total":       "variableLabels: {grouped_by_target_ip}",
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
@@ -308,7 +308,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_access_response_status_total":                 "variableLabels: {code,outcome}",
 		"bkmonitor_alarmd_access_response_codec_total":                  "variableLabels: {codec,negotiation,completion}",
 		"bkmonitor_alarmd_uq_answer_truncated_total":                    "variableLabels: {source_semantics}",
-		"bkmonitor_alarmd_query_unavailable_attribution_total":          "variableLabels: {attribution}",
+		"bkmonitor_alarmd_query_unavailable_attribution_total":          "variableLabels: {attribution,http_class}",
 		"bkmonitor_alarmd_slot_readiness_slack_seconds":                 "variableLabels: {}",
 		"bkmonitor_alarmd_slot_readiness_boundary_total":                "variableLabels: {boundary}",
 		"bkmonitor_alarmd_short_period_slot_execution_duration_seconds": "variableLabels: {cohort,completion_kind}",
@@ -799,7 +799,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("legacy_pod_cache_total"):     3,
 		// Filters and reasons are closed vocabularies in the recorder.
 		fqName("series_admission_total"):                 len(admissionFilters) * len(admissionResults) * len(admissionReasons),
-		fqName("admission_cmdb_address_differs_total"):   2,
+		fqName("admission_cmdb_address_differs_total"):   6,
 		fqName("admission_cmdb_placed_by_host_id_total"): 2,
 		// Levels 1..64 plus "other". Empty in a healthy build: the platform's
 		// three levels all have names here, so a series appearing at all is the
@@ -852,7 +852,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// One per source answered through Elasticsearch terms.
 		fqName("uq_answer_truncated_total"): 4,
 		// attempt, no_attempt_reason, no_attempts, other.
-		fqName("query_unavailable_attribution_total"): 4,
+		fqName("query_unavailable_attribution_total"): 16,
 		fqName("query_cooldown_events_total"):         len(observability.QueryCooldownEvents) + 1,
 		// Unlabelled, so one histogram: eleven buckets plus +Inf, sum and count.
 		fqName("slot_readiness_slack_seconds"): histogramSeries(1, len(slotReadinessSlackBuckets)),

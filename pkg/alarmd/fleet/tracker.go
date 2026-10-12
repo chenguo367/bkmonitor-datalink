@@ -1368,7 +1368,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// make a retried transient look like a determined verdict.
 		seen := at
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
-			Code: failure.Code, Detail: failure.Detail, At: &seen, Slot: trace.EvaluationTime}
+			Code: failure.Code, Detail: failure.Detail, HTTPStatus: failure.HTTPStatus, At: &seen, Slot: trace.EvaluationTime}
 		if timing := failure.Timing; timing != nil {
 			copied := *timing
 			state.lastFailure.Timing = &copied
