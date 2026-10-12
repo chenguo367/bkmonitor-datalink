@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisatomic"
 )
 
 const (
@@ -67,29 +69,40 @@ func NewSREReceipts(client redis.Cmdable, key string, now func() time.Time, writ
 	return &SREReceipts{client: client, key: key, now: now, written: written}
 }
 
+// sreReceiptWrite adds a receipt, cuts the list to its bound and renews its
+// life, as one script rather than a MULTI/EXEC (see redisatomic for why).
+// One key, so it is in one slot on any deployment. ARGV[3] is seconds, as
+// EXPIRE takes them.
+var sreReceiptWrite = redisatomic.New(`
+redis.call('LPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]))
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return 1
+`)
+
 // Record writes one action's receipt, the newest first, within its own
-// bound.
+// bound, and says whether it landed.
 func (s *SREReceipts) Record(action SREAction) {
 	if s == nil {
 		return
 	}
+	err := s.record(action)
+	if s.written != nil {
+		s.written(err == nil)
+	}
+}
+
+func (s *SREReceipts) record(action SREAction) error {
 	if action.At.IsZero() {
 		action.At = s.now().UTC()
 	}
 	body, err := json.Marshal(action)
-	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), sreReceiptWriteTimeout)
-		_, err = s.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.LPush(ctx, s.key, body)
-			pipe.LTrim(ctx, s.key, 0, MaxSREReceipts-1)
-			pipe.Expire(ctx, s.key, SREReceiptRetention)
-			return nil
-		})
-		cancel()
+	if err != nil {
+		return err
 	}
-	if s.written != nil {
-		s.written(err == nil)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), sreReceiptWriteTimeout)
+	defer cancel()
+	return sreReceiptWrite.Run(ctx, s.client, []string{s.key}, body, MaxSREReceipts-1, int64(SREReceiptRetention/time.Second))
 }
 
 // SREReceiptFilter selects receipts: by time (since inclusive, until
