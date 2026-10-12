@@ -1655,6 +1655,12 @@ Labels: `op`, `result`
 
 Execution, management and Secret-read calls the SRE channel made, by operation (pod.exec, pod.delete, workload.restart, workload.scale, secret.get, configmap.get, workload.set_image, and workload.revert - a revert the channel wrote itself when a changed image did not become ready) and result: done; target_changed (the Pod or workload was replaced since it was read, and nothing was changed); forbidden (the apiserver refused the ServiceAccount); refused (an invalid or unsupported request, a busy provider, or a command that could not start - nothing ran); failed (an apiserver or transport failure); unknown (an execution whose remote end is unconfirmed). Each call also writes one sre_action line naming the session, the request, the namespace and object and the result. Every cell exists once the channel is wired: eight operations by six results, 48 series. A secret.get line names the Secret and whether its values were revealed, never a value.
 
+## bkmonitor_alarmd_sre_receipts_write_total
+
+Labels: `result`
+
+Receipts of SRE actions written to the shared store sre.receipts reads, by result: ok, or error (the store refused or did not answer within its half second; the action itself went ahead, and its sre_action line is the only record). Both cells exist from the start.
+
 ## bkmonitor_alarmd_sre_rollouts_total
 
 Labels: `state`

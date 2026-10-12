@@ -32,6 +32,10 @@ type SREAction struct {
 	DurationMS int64  `json:"duration_ms"`
 	SessionID  string `json:"session_id,omitempty"`
 	RequestID  string `json:"request_id,omitempty"`
+	// At is when the action ended.
+	At time.Time `json:"at"`
+	// Exec is what a pod.exec run said about itself, without its output.
+	Exec *SREExec `json:"exec,omitempty"`
 }
 
 // The results an SREAction ends in, closed: done, the target replaced since
@@ -130,7 +134,11 @@ type SREOptions struct {
 	Rollouts      *rollout.Driver
 	RolloutReason string
 	Audit         func(SREAction)
-	Now           func() time.Time
+	// Receipts answers sre.receipts; nil leaves it unavailable, for
+	// ReceiptsReason. Writing them is the audit's.
+	Receipts       *SREReceipts
+	ReceiptsReason string
+	Now            func() time.Time
 }
 
 // SREOperations runs on the channel. These operations do not accept a Worker
@@ -150,7 +158,8 @@ func SREOperations(options SREOptions) []Operation {
 		}
 		caller := CallerFrom(ctx)
 		action.Result, action.Code = sreResult(err)
-		action.DurationMS = now().Sub(started).Milliseconds()
+		ended := now()
+		action.DurationMS, action.At = ended.Sub(started).Milliseconds(), ended.UTC()
 		action.SessionID, action.RequestID = caller.SessionID, caller.RequestID
 		options.Audit(action)
 	}
@@ -252,13 +261,20 @@ func SREOperations(options SREOptions) []Operation {
 				target := podTarget(p)
 				v, err := pods.Exec(ctx, pod.ExecRequest{Target: target, Argv: argv, Stdin: stdin, TimeoutMS: int64(p.Int("timeout_ms", 0)), OutputBytes: int64(p.Int("output_bytes", 0))})
 				audit(ctx, started, SREAction{Op: "pod.exec", Namespace: target.Namespace, Kind: "Pod", Name: target.Pod + "/" + target.Container, UID: target.UID,
-					Detail: fmt.Sprintf("script %s stdin_bytes %d remote %s", v.ScriptDigest, len(stdin), v.RemoteState)}, err)
+					Detail: fmt.Sprintf("script %s stdin_bytes %d remote %s", v.ScriptDigest, len(stdin), v.RemoteState),
+					Exec: &SREExec{RemoteState: v.RemoteState, Supervision: v.Supervision, UnsupervisedReason: v.UnsupervisedReason, ExitCode: v.ExitCode,
+						DeadlineRaced: v.DeadlineRaced, StreamCut: v.StreamCut, Truncated: v.Truncated, ScriptDigest: v.ScriptDigest,
+						DeclaredTimeoutMS: v.DeclaredTimeoutMS, EnforcedTimeoutSeconds: v.EnforcedTimeoutSeconds, BootstrapExitCode: v.BootstrapExitCode,
+						BootstrapClass: v.BootstrapClass, StartFailure: v.StartFailure}}, err)
 				out := wrapPod(v, err, err == nil && !v.Truncated && !v.TargetChanged && v.RemoteState == pod.RemoteCompleted && v.EvidenceScope == "identity_verified_before_and_after")
 				if v.ObservedAfter == nil && v.RemoteState != pod.RemoteNotStarted {
 					out.Limitations = append(out.Limitations, "Remote execution receipt is retained; post-execution target identity verification did not complete.")
 				}
 				if v.RemoteState == pod.RemoteUnknown {
 					out.Limitations = append(out.Limitations, "Remote process termination is unconfirmed. Do not automatically repeat this execution.")
+				}
+				if v.RemoteState == pod.RemoteUnsupervised {
+					out.Limitations = append(out.Limitations, "Nothing in the target could end this command ("+v.UnsupervisedReason+"); only this side's stream deadline bounded it.")
 				}
 				return out
 			}},
@@ -431,6 +447,53 @@ func SREOperations(options SREOptions) []Operation {
 			body, _ := p["body"].(map[string]any)
 			v, err := queries.Trace(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
 			return wrapQuery(v, err)
+		},
+	})
+	receiptsAvailable := func() Availability {
+		if options.Receipts == nil {
+			reason := options.ReceiptsReason
+			if reason == "" {
+				reason = "receipts_unavailable: this channel keeps no shared receipt store"
+			}
+			return Availability{Reason: reason}
+		}
+		return Availability{Available: true}
+	}
+	timestamp := Field{Type: "string", MinLength: 1, MaxLength: 64, Description: "RFC 3339 time"}
+	maxReceiptsPage, maxReceiptsOffset := int64(maxSREReceiptsPage), int64(MaxSREReceipts)
+	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名与 request_id 过滤，带分页。",
+		EvidenceScope: "sre_receipts", ExecutionPool: "sre", ExecutionTimeout: 10 * time.Second, Availability: receiptsAvailable,
+		Limits: map[string]any{"kept": MaxSREReceipts, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
+			"content": "who, what, where and how each action ended; a pod.exec receipt carries its run's facts and its script digest, never its argv, stdin or output"},
+		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text,
+			"limit": {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
+		OutputSchema: SchemaOf(SREReceiptPage{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
+			for key, into := range map[string]*time.Time{"since": &filter.Since, "until": &filter.Until} {
+				if value := p.String(key); value != "" {
+					at, err := time.Parse(time.RFC3339Nano, value)
+					if err != nil {
+						return Outcome{Error: &Failure{Code: "sre_receipts_invalid_time", Message: key + " is not an RFC 3339 time"}}
+					}
+					*into = at
+				}
+			}
+			page, err := options.Receipts.List(ctx, filter)
+			if err != nil {
+				return Outcome{Error: &Failure{Code: "sre_receipts_unreadable", Message: "the receipt store did not answer"}}
+			}
+			out := Outcome{Value: page, Complete: page.NextOffset == 0}
+			if page.NextOffset > 0 {
+				next := Params{"offset": page.NextOffset}
+				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "limit"} {
+					if value, present := p[key]; present {
+						next[key] = value
+					}
+				}
+				out.Next = []Call{{Operation: OpSREReceipts, Params: next, Reason: "读取同一过滤条件的下一页。"}}
+			}
+			return out
 		},
 	})
 	return ops
