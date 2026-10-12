@@ -353,17 +353,6 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
 			budgetStart = recoveryStartedAt.UnixMilli()
-			// An execution the query cooldown pool let run decides whether
-			// the Query Group leaves it, so it gets what a normal round of
-			// this Slot has: from its arrival, the span from the query's
-			// readiness to its deadline as prepare plans both for the normal
-			// round. Not the whole interval a catch-up gets.
-			if execution.NormalQueryBudget(ctx) {
-				normal := recoveryStartedAt.Add(time.Duration(query.DeadlineUnixMilli-query.ReadyAtUnixMilli) * time.Millisecond)
-				if normal.Before(queryDeadline) {
-					queryDeadline = normal
-				}
-			}
 		}
 		permit, err := permits.AcquireQueryPermit(queryCtx, request.Contract.Slot, request.Operation, queryDeadline)
 		if err != nil {
@@ -416,7 +405,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			// request to its answer or failure; this goroutine reads no
 			// clock of the Source's, which the dispatch loop owns.
 			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: budgetMillis,
-				ElapsedMillis: int64(completion.Stats.QueryMillis)}
+				ElapsedMillis: int64(completion.Stats.QueryMillis), ReadyAtUnixMilli: query.ReadyAtUnixMilli}
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {

@@ -52,6 +52,10 @@ type queryCooldownState struct {
 	// after N timeouts". Both clear with the failures.
 	timeouts       uint32
 	firstTimeoutAt time.Time
+	// excusedUntil is the cooldown end (until) whose deciding round last had
+	// its timeout excused for the Runner's own lateness, so each cooldown's
+	// end excuses one round at most (queryCooldownExcusesItsOwnDelay).
+	excusedUntil time.Time
 }
 
 // queryCooldownMemory is what the pool remembers across membership: since
@@ -275,17 +279,43 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	return true
 }
 
-// queryCooldownLetsRun reports whether an execution starting now runs while
-// the Query Group is in the pool: the pool let it through - its cooldown ran
-// out, or the Slot's own checks let it run (deferUnavailableQuery) - and its
-// answer decides whether the Query Group stays. Such an execution runs under
-// the budget a normal round has (execution.WithNormalQueryBudget), so the
-// pool is left only on an answer the Query Group's normal rounds can get too:
-// a retry or replay otherwise has its whole interval from its arrival, and a
-// backend slower than a normal round's budget answered it every time and was
-// let out, to time out again on the normal rounds and come back.
-func (runner *Runner) queryCooldownLetsRun() bool {
-	return !runner.queryCooldown.until.IsZero()
+// queryCooldownDecidedBy reports whether an execution of operation, starting
+// now while the Query Group is in the pool, decides whether it stays: only a
+// normal one does. A normal execution runs at its Slot's own second, under its
+// frozen deadline, and queues for its permit with every other Query Group due
+// then, so an answer to it is one the Query Group's normal rounds get. The
+// first execution after the cooldown runs out is usually the held Slot's
+// replay instead: it starts when the cooldown ends, away from the burst its
+// normal rounds queue in, and a backend that answered it in 22 s was let out
+// to time out on the next normal round, with 13 s left, and come back. The
+// replay still runs, for its Slot's data, under a replay's budget; its answer
+// neither takes the Query Group out nor keeps it in.
+func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool {
+	return !runner.queryCooldown.until.IsZero() && operation == execution.OperationNormal
+}
+
+// queryCooldownExcusesItsOwnDelay reports whether a deciding round's timeout
+// is set aside because the round started late on the pool's own account: the
+// Runner was still running its previous execution - at a cooldown's end, the
+// held Slot's replay - when the round's query became ready, so the query had
+// that much less of its budget than a normal round outside the pool gets.
+// Waiting for a permit or for dispatch is not excused; every normal round
+// waits so. The round then decides nothing, and the next one does. Only one
+// round is excused for each cooldown's end: a Runner kept busy round after
+// round by its own retries against a backend that does not answer would
+// otherwise have every timeout excused, run every Slot, and never be held
+// again. An answer and a failure that is not a timeout are never excused.
+func (runner *Runner) queryCooldownExcusesItsOwnDelay(result execution.SlotExecutionResult, busyUntil time.Time) bool {
+	state := &runner.queryCooldown
+	clock := result.PrimaryQueryClock
+	// The reason is set only on an unavailable query (an answer has none).
+	if state.until.IsZero() || state.excusedUntil.Equal(state.until) ||
+		result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryTimeout) ||
+		clock == nil || clock.ReadyAtUnixMilli <= 0 || busyUntil.IsZero() || busyUntil.UnixMilli() <= clock.ReadyAtUnixMilli {
+		return false
+	}
+	state.excusedUntil = state.until
+	return true
 }
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
@@ -294,6 +324,11 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 		return
 	}
 	state := &runner.queryCooldown
+	if !state.until.IsZero() && !decides {
+		// A replay or retry the pool let run: its answer is its Slot's, not
+		// the pool's (queryCooldownDecidedBy).
+		return
+	}
 	if decides {
 		runner.cooldownMemory.lastProbe = queryCooldownProbe(runner.now(), operation, result)
 	}

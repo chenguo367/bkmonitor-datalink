@@ -41,6 +41,9 @@ const (
 	poolBudgetSettle  = 30 * time.Second
 	poolBudgetReserve = 5 * time.Second
 	poolNormalBudget  = time.Minute - poolBudgetReserve - poolBudgetSettle
+	// poolPassSlack is how far past a Slot's readiness a round's pass runs:
+	// at the instant itself the Slot is not yet due.
+	poolPassSlack = 500 * time.Millisecond
 )
 
 // poolBackend is a query service that answers after a set latency on the
@@ -204,61 +207,123 @@ func (h *poolProbeHarness) enterPool() int64 {
 	return 3
 }
 
-// probe runs minutes until the pool lets an execution run, and returns that
-// execution's query and the transition it made.
-func (h *poolProbeHarness) probe(from int64) (int64, poolRequest, observability.QueryCooldownFacts) {
+// pass runs one scheduler pass at the given unix millisecond, and returns
+// the queries it sent and the pool transitions it made.
+func (h *poolProbeHarness) pass(at int64) ([]poolRequest, []observability.QueryCooldownFacts) {
 	h.t.Helper()
-	for minute := from; minute < from+12; minute++ {
-		requests, events := h.round(minute)
-		if len(requests) == 0 {
-			if len(events) != 0 {
-				h.t.Fatalf("minute %d: a held round made %+v", minute, events)
-			}
-			continue
-		}
-		if len(requests) != 1 || len(events) != 1 {
-			h.t.Fatalf("minute %d: the pool let %+v run and made %+v, want one query and one transition", minute, requests, events)
-		}
-		return minute, requests[0], events[0]
+	h.backend.clock.Store(at)
+	if err := runScheduledOnceSettled(h.ctx, h.bundle); err != nil {
+		h.t.Fatalf("pass at base+%d ms: %v", at-h.base*1000, err)
 	}
-	h.t.Fatal("the pool let nothing run in twelve minutes")
-	return 0, poolRequest{}, observability.QueryCooldownFacts{}
+	h.mu.Lock()
+	events := h.events
+	h.events = nil
+	h.mu.Unlock()
+	return h.backend.take(), events
 }
 
-// The execution the pool lets run decides whether the Query Group leaves it,
-// and it has what a normal round has - not the whole interval a retry or
-// replay gets from its arrival. A backend answering a second inside that
-// budget takes the Query Group out; one answering a second past it keeps
-// the Query Group in, though a retry's budget would have let it answer. The
-// probe line says what the deciding execution had and used either way.
-func TestThePoolIsLeftOnlyOnAnAnswerInsideANormalRoundsBudget(t *testing.T) {
+// afterCooldown is the first instant after the Query Group's cooldown runs
+// out, or - where it runs out inside a Slot's own window, which depends on
+// the wall-clock minute the case started in - just after that window's
+// deadline, so the Slot is held and replayed like the rest and every run of a
+// case meets the same order.
+func (h *poolProbeHarness) afterCooldown() int64 {
+	h.t.Helper()
+	at := h.poolRecord().Until.UnixMilli() + 1
+	deadline := (time.Minute - poolBudgetReserve).Milliseconds()
+	if second := (at - h.base*1000) % time.Minute.Milliseconds(); second >= poolBudgetSettle.Milliseconds() && second < deadline {
+		at += deadline - second + 1
+	}
+	return at
+}
+
+// decide runs the Query Group from the moment its cooldown runs out to the
+// execution that decides the pool, from afterCooldown: a round deciding
+// inside its own window at the cooldown's end is the scheduler's own test
+// (TestOnlyANormalExecutionDecidesThePool). It runs passes, each when the last query came back, until one sends
+// nothing: the Slots held in the pool, replayed, each leaving the pool as it
+// is (a pass that decides there is returned with atEnd). Then it runs the next
+// round whose Slot is not yet ready, late into it as a round that queued for
+// its permit at second 30 is, and returns that round's query and the
+// transition it made. A pass waits on the wall clock for a retry due later on
+// the test's, so the harness never repeats an instant.
+func (h *poolProbeHarness) decide(late time.Duration) (replays []poolRequest, decider poolRequest, event observability.QueryCooldownFacts, atEnd bool) {
+	h.t.Helper()
+	at := h.afterCooldown()
+	for i := 0; ; i++ {
+		requests, events := h.pass(at)
+		if len(events) != 0 {
+			if len(requests) != 1 || len(events) != 1 {
+				h.t.Fatalf("at the cooldown's end %+v sent and %+v made, want one round and its transition", requests, events)
+			}
+			return replays, requests[0], events[0], true
+		}
+		if len(requests) == 0 {
+			break
+		}
+		if i == 8 {
+			h.t.Fatalf("still replaying after %d passes", i)
+		}
+		replays = append(replays, requests...)
+		at = h.backend.clock.Load() + 1
+	}
+	minute := (at/1000 - h.base) / 60
+	if (h.base+minute*60)*1000+poolBudgetSettle.Milliseconds() < at {
+		minute++
+	}
+	requests, events := h.pass((h.base+minute*60)*1000 + (poolBudgetSettle + poolPassSlack + late).Milliseconds())
+	if len(requests) != 1 || len(events) != 1 {
+		h.t.Fatalf("minute %d, %s late: %+v sent and %+v made, want one query and the pool decided", minute, late, requests, events)
+	}
+	return replays, requests[0], events[0], false
+}
+
+// Only the Query Group's next normal round decides the pool, at its own
+// second and late as it is: one that queued 12 s for its permit has 13 s of
+// its 25. A backend answering in 22 s - which a replay at the cooldown's end,
+// with no queue, answers - keeps the Query Group in; one answering in 10 s
+// takes it out. The held Slot is replayed first, with a replay's 55 s from its
+// arrival, for its data, and decides nothing. The probe line says what the
+// deciding round had and used.
+func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
+	const late = 12 * time.Second
 	for _, test := range []struct {
 		name    string
 		latency time.Duration
 		event   string
 		outcome string
 	}{
-		{"a second inside", poolNormalBudget - time.Second, "recovered", observability.QueryCooldownProbeAnswered},
-		{"a second past", poolNormalBudget + time.Second, "extended", observability.QueryCooldownProbeUnavailable},
+		{"a backend answering in 22 s", 22 * time.Second, "extended", observability.QueryCooldownProbeUnavailable},
+		{"a backend answering in 10 s", 10 * time.Second, "recovered", observability.QueryCooldownProbeAnswered},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := newPoolProbeHarness(t, 30*time.Second)
-			next := h.enterPool()
+			h.enterPool()
 			h.backend.latency.Store(test.latency.Milliseconds())
-			minute, request, event := h.probe(next)
-			if request.remaining > poolNormalBudget {
-				t.Fatalf("minute %d: the deciding execution had %s, want at most a normal round's %s", minute, request.remaining, poolNormalBudget)
+			replays, decider, event, atEnd := h.decide(late)
+			// The held Slot is replayed, and the next round decides.
+			if atEnd || len(replays) == 0 {
+				t.Fatalf("at the cooldown's end: replays %+v, decided %t; want the held Slot replayed and nothing decided", replays, atEnd)
+			}
+			// The held Slot is replayed with a replay's 55 s and answers; a
+			// retry of the round that put the Query Group in may run too,
+			// with what its own budget has left. Neither decides.
+			if !anyReplayAnswered(replays) {
+				t.Fatalf("the held Slots' executions %+v, want the held Slot replayed with 55 s and answered", replays)
+			}
+			if decider.remaining != poolNormalBudget-poolPassSlack-late {
+				t.Fatalf("the deciding round had %s, want its normal round's %s less %s late", decider.remaining, poolNormalBudget, late)
 			}
 			if event.Event != test.event {
-				t.Fatalf("minute %d: a backend answering in %s made %q, want %q", minute, test.latency, event.Event, test.event)
+				t.Fatalf("a backend answering in %s made %q, want %q", test.latency, event.Event, test.event)
 			}
 			probe := event.LastProbe
 			// The elapsed time is the query service client's own measure, on
 			// the wall clock; this backend's latency is on the test's, so only
 			// its bound is read here (the access package pins the value).
-			if probe == nil || probe.Outcome != test.outcome || !probe.Measured ||
-				probe.BudgetMillis != request.remaining.Milliseconds() || probe.ElapsedMillis < 0 || probe.ElapsedMillis > probe.BudgetMillis {
-				t.Fatalf("the transition's probe = %+v, want %s with budget %d ms and the time it took", probe, test.outcome, request.remaining.Milliseconds())
+			if probe == nil || probe.Operation != string(execution.OperationNormal) || probe.Outcome != test.outcome || !probe.Measured ||
+				probe.BudgetMillis != decider.remaining.Milliseconds() || probe.ElapsedMillis < 0 || probe.ElapsedMillis > probe.BudgetMillis {
+				t.Fatalf("the transition's probe = %+v, want a normal round's, %s, with budget %d ms", probe, test.outcome, decider.remaining.Milliseconds())
 			}
 			// The record a restart or the next owner reads back says the same.
 			if record := h.poolRecord(); record.LastProbe == nil || *record.LastProbe != *probe {
@@ -269,40 +334,30 @@ func TestThePoolIsLeftOnlyOnAnAnswerInsideANormalRoundsBudget(t *testing.T) {
 }
 
 // A backend that answers in 30 s, past a normal round's 25 s and inside a
-// retry's 55 s: the shape that went in and out of the pool every few
+// replay's 55 s: the shape that went in and out of the pool every few
 // minutes, each exit an answer the next normal rounds could not get. Now the
-// Query Group enters once and stays: every round in the pool either sends
-// nothing or is the pool's own probe, which has a normal round's budget,
-// times out and extends the pool. No exit, no re-entry, and the backend is
-// asked only at the probe cadence.
+// Query Group enters once and stays: the cooldown's end replays the held
+// Slots, and the backend answers them for their data; the normal round that
+// decides times out and extends the pool, with no exit and no re-entry. One
+// cooldown only: after an extension this harness's one-shot passes do not
+// dispatch the Query Group again (seen on the shared head before this change
+// too), so a second cooldown cannot be driven here.
 func TestABackendSlowerThanANormalRoundStaysInThePoolWithoutReentering(t *testing.T) {
 	h := newPoolProbeHarness(t, 30*time.Second)
-	next := h.enterPool()
-	probes := 0
-	for minute := next; minute < next+40; minute++ {
-		requests, events := h.round(minute)
-		switch {
-		case len(requests) == 0 && len(events) == 0:
-			continue
-		case len(requests) == 1 && len(events) == 1:
-		default:
-			t.Fatalf("minute %d: %+v sent and %+v made, want nothing or one probe and its transition", minute, requests, events)
-		}
-		probes++
-		event, probe := events[0], events[0].LastProbe
-		if requests[0].answered || requests[0].remaining > poolNormalBudget {
-			t.Fatalf("minute %d: the probe %+v, want one with a normal round's budget that timed out", minute, requests[0])
-		}
-		if event.Event != "extended" || event.Reentries != 0 || probe == nil ||
-			probe.Outcome != observability.QueryCooldownProbeUnavailable || probe.BudgetMillis != requests[0].remaining.Milliseconds() {
-			t.Fatalf("minute %d: the probe made %+v (probe %+v), want the pool extended, no re-entry, the probe's budget on it", minute, event, probe)
-		}
+	h.enterPool()
+	replays, decider, event, atEnd := h.decide(0)
+	if atEnd {
+		t.Fatal("a held Slot's replay decided the pool")
 	}
-	// The cooldown grows from two periods towards five minutes, so forty
-	// minutes in the pool hold far fewer probes than rounds: at least one,
-	// and no more than one every two minutes.
-	if probes == 0 || probes > 20 {
-		t.Fatalf("%d probes in forty minutes, want the pool's cadence", probes)
+	if !anyReplayAnswered(replays) {
+		t.Fatalf("the held Slots' executions %+v, want the held Slot replayed with 55 s and answered in 30", replays)
+	}
+	probe := event.LastProbe
+	if decider.answered || decider.remaining != poolNormalBudget-poolPassSlack ||
+		event.Event != "extended" || event.Reentries != 0 ||
+		probe == nil || probe.Operation != string(execution.OperationNormal) || probe.Outcome != observability.QueryCooldownProbeUnavailable {
+		t.Fatalf("the deciding round %+v made %+v (probe %+v), want a normal round that timed out and the pool extended",
+			decider, event, probe)
 	}
 }
 
@@ -354,4 +409,100 @@ func (h *poolProbeHarness) poolRecord() scheduler.QueryCooldownRecord {
 		h.t.Fatalf("pool record (found %t, %v)", found, err)
 	}
 	return record
+}
+
+// readyAfter is the first minute's Slot readiness, in unix milliseconds, at or
+// after at.
+func (h *poolProbeHarness) readyAfter(at int64) int64 {
+	minute := (at/1000 - h.base) / 60
+	ready := (h.base+minute*60)*1000 + poolBudgetSettle.Milliseconds()
+	if ready < at {
+		ready += 60_000
+	}
+	return ready
+}
+
+// The held Slot's replay at a cooldown's end can run into the next normal
+// round: the Runner is still busy with it when the round's query is ready,
+// so the round starts late on the pool's own account, which no round outside
+// the pool would. A backend answering in 22 s - inside a normal round's
+// 25 s, past what the late round has left - would then time out every
+// cooldown and stay in for good. The late round's timeout is excused and
+// decides nothing; the next round, with nothing of its own ahead of it,
+// answers and takes the Query Group out.
+func TestARoundLateBehindThePoolsOwnReplayDoesNotKeepTheQueryGroupIn(t *testing.T) {
+	h := newPoolProbeHarness(t, 30*time.Second)
+	h.enterPool()
+	entered := h.poolRecord()
+	end := h.afterCooldown()
+	ready := h.readyAfter(end)
+	// The replay runs from the cooldown's end to 5 s past the next round's
+	// readiness.
+	h.backend.latency.Store(ready - end + 5_000)
+	requests, events := h.pass(end)
+	if len(requests) != 1 || !requests[0].answered || requests[0].remaining != time.Minute-poolBudgetReserve || len(events) != 0 {
+		t.Fatalf("at the cooldown's end %+v sent and %+v made, want the held Slot's replay answered with 55 s and nothing decided", requests, events)
+	}
+	h.backend.latency.Store((22 * time.Second).Milliseconds())
+	requests, events = h.pass(h.backend.clock.Load() + 1)
+	if len(requests) != 1 || requests[0].answered || requests[0].remaining >= poolNormalBudget-4*time.Second || len(events) != 0 {
+		t.Fatalf("the round behind the replay: %+v sent and %+v made, want a late round that timed out and decided nothing", requests, events)
+	}
+	if record := h.poolRecord(); record.Until != entered.Until || record.Failures != 3 {
+		t.Fatalf("after the excused round the pool record is %+v, want it as the cooldown left it", record)
+	}
+	at := h.readyAfter(h.backend.clock.Load()+1) + poolPassSlack.Milliseconds()
+	requests, events = h.pass(at)
+	if len(requests) != 1 || !requests[0].answered || requests[0].remaining != poolNormalBudget-poolPassSlack || len(events) != 1 || events[0].Event != "recovered" {
+		t.Fatalf("the next round: %+v sent and %+v made, want a normal round's 25 s answered and the Query Group out", requests, events)
+	}
+}
+
+// The excuse is one round for each cooldown's end. Against a backend that
+// never answers, the Runner stays busy with its own replays and retries
+// round after round; were every late round excused, nothing would extend the
+// cooldown, every Slot would run and time out, and the Query Group would be
+// as good as out of the pool with no answer to show for it. After the one
+// excused round, the next deciding round extends the cooldown.
+func TestOnlyOneRoundIsExcusedForEachCooldownsEnd(t *testing.T) {
+	h := newPoolProbeHarness(t, 30*time.Second)
+	h.enterPool()
+	h.backend.latency.Store((5 * time.Minute).Milliseconds())
+	entered := h.poolRecord()
+	at := h.afterCooldown()
+	excused := 0
+	for pass := 0; pass < 12; pass++ {
+		requests, events := h.pass(at)
+		if len(events) != 0 {
+			if len(events) != 1 || events[0].Event != "extended" || events[0].Failures != entered.Failures+1 {
+				t.Fatalf("pass %d made %+v, want the cooldown extended on one more failure", pass, events)
+			}
+			if excused > 1 {
+				t.Fatalf("%d late rounds were excused before the cooldown was extended, want at most one", excused)
+			}
+			return
+		}
+		for _, request := range requests {
+			if request.remaining <= poolNormalBudget {
+				excused++
+			}
+		}
+		if len(requests) != 0 {
+			at = h.backend.clock.Load() + 1
+		} else {
+			at = h.readyAfter(at+1) + poolPassSlack.Milliseconds()
+		}
+	}
+	t.Fatalf("the cooldown was never extended against a backend that does not answer (%d rounds excused)", excused)
+}
+
+// anyReplayAnswered says one of the executions at a cooldown's end was a
+// replay with a replay's whole budget, and the backend answered it.
+func anyReplayAnswered(requests []poolRequest) bool {
+	for _, request := range requests {
+		if request.remaining == time.Minute-poolBudgetReserve && request.answered {
+			return true
+		}
+	}
+	return false
 }
