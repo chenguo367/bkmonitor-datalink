@@ -4,21 +4,18 @@
 package pod
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -286,6 +283,12 @@ func (localExecutor) Stream(ctx context.Context, request StreamRequest) (StreamR
 	command.Stdout = request.Stdout
 	command.Stderr = request.Stderr
 	err := command.Run()
+	// A program that cannot be found or executed is a start the runtime
+	// refused, as the Kubernetes adapter reads containerd's refusal.
+	var path *fs.PathError
+	if errors.Is(err, exec.ErrNotFound) || errors.As(err, &path) {
+		return StreamResult{StartRefused: true}, nil
+	}
 	if err == nil {
 		zero := 0
 		return StreamResult{ExitCode: &zero}, nil
@@ -299,12 +302,12 @@ func (localExecutor) Stream(ctx context.Context, request StreamRequest) (StreamR
 }
 func runtimeProvider(t *testing.T) (*Provider, *fixtureClient, Target) {
 	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 on PATH is the remote supervisor's contract")
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is the remote supervisor's contract")
 	}
 	client, target := fixture()
 	// These tests are about what a run reports, not how long its start may
-	// take: a loaded machine can take seconds to start python3, so the start
+	// take: a loaded machine can take seconds to start a shell, so the start
 	// is given far more than the production allowance. The bound itself is
 	// tested with a stream whose timing the test controls.
 	return mustProvider(t, Options{Client: client, Executor: localExecutor{}, LiteralSecrets: []string{"literalcredential"}, startupAllowance: time.Minute}), client, target
@@ -339,116 +342,6 @@ func TestRemoteOutputCapRetainsExitAndTimeout(t *testing.T) {
 	}
 	if result.RemoteState != RemoteTimedOut || result.ExitCode == nil || !result.Truncated || len(result.Stdout) > 3 {
 		t.Fatalf("timeout receipt: %+v", result)
-	}
-}
-
-// A command that ignores TERM is killed with its process group at its
-// deadline. The signal is the supervisor's own: its complete frame says the
-// command timed out, and after it the command's process is gone - not a
-// wall-clock margin, which a loaded machine stretches. The command ignores
-// TERM before it records itself, under a deadline that covers the shell's
-// start, so the TERM always meets a command that ignores it; and the frame
-// arriving no sooner than the supervisor's TERM grace after the deadline is
-// the proof that the KILL path ran - a bound load can lengthen but not break.
-func TestRemoteTimeoutKillsTERMResistantGroup(t *testing.T) {
-	runtimeProvider(t)
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	const deadline, termGrace = time.Second, 2 * time.Second
-	pidPath := filepath.Join(t.TempDir(), "child-pid")
-	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "trap '' TERM; echo $$ > \"$1\"; while true; do sleep 1; done", "cmd", pidPath})
-	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "1.0", "4096", string(argv))
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Taken before the supervisor exists, so no earlier than its deadline
-	// timer starts: the interval to the complete frame can only overstate
-	// the timer's, never understate it.
-	launched := time.Now()
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { command.Process.Kill(); command.Wait() }()
-	frames := make(chan wireFrame)
-	go func() {
-		defer close(frames)
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			var frame wireFrame
-			if json.Unmarshal(scanner.Bytes(), &frame) == nil {
-				frames <- frame
-			}
-		}
-	}()
-	guard := time.After(60 * time.Second)
-	for {
-		select {
-		case frame, open := <-frames:
-			if !open {
-				t.Fatal("the supervisor ended without a complete frame")
-			}
-			if frame.Event != "complete" {
-				continue
-			}
-			if !frame.TimedOut {
-				t.Fatalf("complete frame without the timeout: %+v", frame)
-			}
-			if elapsed := time.Since(launched); elapsed < deadline+termGrace {
-				t.Fatalf("complete %v after launch, sooner than the deadline and the TERM grace: the TERM ended the command and the KILL path did not run", elapsed)
-			}
-			data, err := os.ReadFile(pidPath)
-			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err != nil || pid == 0 {
-				t.Fatalf("the command did not record its pid: %v", err)
-			}
-			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-				syscall.Kill(pid, syscall.SIGKILL)
-				t.Fatalf("the TERM-resistant command outlived its reported kill (kill -0: %v)", err)
-			}
-			return
-		case <-guard:
-			t.Fatal("no complete frame within the guard")
-		}
-	}
-}
-
-func TestRemoteStartFailuresNameWhatTheTargetLacks(t *testing.T) {
-	provider, client, target := runtimeProvider(t)
-	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/no/such/command"}})
-	requireCode(t, err, CodeCommandStartFailed)
-	if result.RemoteState != RemoteNotStarted || result.StartFailure != "" {
-		t.Fatalf("launch failure: %+v", result)
-	}
-	for _, c := range []struct {
-		exit int
-		want string
-	}{{126, StartNotExecutable}, {127, StartPython3Unavailable}} {
-		exit := c.exit
-		var argv []string
-		missing := mustProvider(t, Options{Client: client, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
-			argv = request.Argv
-			return StreamResult{ExitCode: &exit}, nil
-		})})
-		result, err := missing.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
-		requireCode(t, err, CodeCommandStartFailed)
-		if result.RemoteState != RemoteNotStarted || result.StartFailure != c.want {
-			t.Fatalf("exit %d: %+v, want not started for %s", c.exit, result, c.want)
-		}
-		if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" || argv[2] != supervisorLaunch || argv[3] != remoteSupervisor {
-			t.Fatalf("the supervisor was not launched through /bin/sh from PATH: %q", argv[:min(len(argv), 3)])
-		}
-	}
-	other := 3
-	odd := mustProvider(t, Options{Client: client, Executor: executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
-		return StreamResult{ExitCode: &other}, nil
-	})})
-	result, err = odd.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
-	requireCode(t, err, CodeTimeoutUnsupported)
-	if result.StartFailure != "" {
-		t.Fatalf("an unexplained supervisor exit named a cause: %+v", result)
 	}
 }
 
@@ -506,7 +399,7 @@ func TestStandardExecIsPOSTNonTTYAndNeverRetries(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.Method != "POST" || r.URL.Path != "/api/v1/namespaces/tenant/pods/web-abc/exec" || r.URL.Query().Get("tty") == "true" || r.URL.Query().Get("container") != "web" || strings.Join(r.URL.Query()["command"], " ") != "python3 -c script" {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/namespaces/tenant/pods/web-abc/exec" || r.URL.Query().Get("tty") == "true" || r.URL.Query().Get("container") != "web" || strings.Join(r.URL.Query()["command"], " ") != "/bin/sh -c script" {
 			t.Errorf("incorrect standard exec request: %s %s", r.Method, r.URL)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -519,7 +412,7 @@ func TestStandardExecIsPOSTNonTTYAndNeverRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, target := fixture()
-	_, err = executor.Stream(context.Background(), StreamRequest{Target: target, Argv: []string{"python3", "-c", "script"}, Stdout: io.Discard, Stderr: io.Discard})
+	_, err = executor.Stream(context.Background(), StreamRequest{Target: target, Argv: []string{"/bin/sh", "-c", "script"}, Stdout: io.Discard, Stderr: io.Discard})
 	if err == nil || calls != 1 {
 		t.Fatalf("exec err=%v calls=%d", err, calls)
 	}
@@ -533,7 +426,7 @@ type startedWriter struct {
 
 func (w *startedWriter) Write(data []byte) (int, error) {
 	n, err := w.destination.Write(data)
-	if strings.Contains(string(data), `"event":"started"`) {
+	if strings.Contains(string(data), " started ") {
 		w.once.Do(func() { close(w.started) })
 	}
 	return n, err
@@ -546,8 +439,8 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
 		command := exec.Command(request.Argv[0], request.Argv[1:]...)
 		command.Stdin = request.Stdin
-		command.Stdout = &startedWriter{destination: request.Stdout, started: started}
-		command.Stderr = request.Stderr
+		command.Stdout = request.Stdout
+		command.Stderr = &startedWriter{destination: request.Stderr, started: started}
 		if err := command.Start(); err != nil {
 			return StreamResult{}, err
 		}
@@ -601,117 +494,6 @@ func TestCancellationReturnsUnknownAndRemoteTimerContinues(t *testing.T) {
 	}
 }
 
-// The supervisor signals the command's group once more after the command
-// ends. A kernel may refuse that with EPERM while the group's members are
-// still being reaped (seen on a loaded machine); the command is over all the
-// same, and the supervisor still reports how it ended rather than dying
-// without a report, which Exec could only answer as unknown.
-func TestSupervisorReportsWhenTheEndedGroupRefusesSignals(t *testing.T) {
-	runtimeProvider(t)
-	python, _ := exec.LookPath("python3")
-	refusing := "import os, sys\n" +
-		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
-		"os.killpg = refused\n" +
-		"source = sys.argv.pop(1)\n" +
-		"exec(compile(source, 'remote.py', 'exec'), {'__name__': '__main__'})\n"
-	command := exec.Command(python, "-u", "-c", refusing, remoteSupervisor, "nonce", "5.0", "128", `["/bin/sh","-c","exit 3"]`)
-	var stdout, stderr strings.Builder
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("supervisor failed: %v %s", err, stderr.String())
-		}
-	case <-time.After(time.Minute):
-		command.Process.Kill()
-		t.Fatal("supervisor did not finish")
-	}
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	var last wireFrame
-	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) != nil || last.Event != "complete" || last.ExitCode == nil || *last.ExitCode != 3 || last.TimedOut {
-		t.Fatalf("supervisor report %q, want the command's completion with exit 3", lines)
-	}
-}
-
-// A group the supervisor cannot signal while its command still runs (a
-// command that changed identity, say) is not reported as timed out or
-// complete: the deadline's TERM and KILL are refused, and the supervisor's
-// own wait after its last KILL ends in an unknown report.
-func TestSupervisorReportsUnknownWhenTheLiveGroupRefusesSignals(t *testing.T) {
-	runtimeProvider(t)
-	python, _ := exec.LookPath("python3")
-	pidPath := filepath.Join(t.TempDir(), "command-pid")
-	refusing := "import os, sys\n" +
-		"def refused(pid, sig):\n    raise PermissionError(1, 'Operation not permitted')\n" +
-		"os.killpg = refused\n" +
-		"source = sys.argv.pop(1)\n" +
-		"exec(compile(source, 'remote.py', 'exec'), {'__name__': '__main__'})\n"
-	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "echo $$ > \"$1\"; exec sleep 30", "cmd", pidPath})
-	command := exec.Command(python, "-u", "-c", refusing, remoteSupervisor, "nonce", "0.2", "128", string(argv))
-	var stdout, stderr strings.Builder
-	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if data, err := os.ReadFile(pidPath); err == nil {
-			if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
-				syscall.Kill(pid, syscall.SIGKILL)
-			}
-		}
-	}()
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("supervisor failed: %v %s", err, stderr.String())
-		}
-	case <-time.After(time.Minute):
-		command.Process.Kill()
-		t.Fatal("supervisor did not finish")
-	}
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	var last wireFrame
-	if json.Unmarshal([]byte(lines[len(lines)-1]), &last) != nil || last.Event != "unknown" {
-		t.Fatalf("supervisor report %q, want unknown for a command it could not stop", lines)
-	}
-}
-
-func TestSupervisorBrokenOutputPipeRetainsDeadline(t *testing.T) {
-	runtimeProvider(t)
-	python, _ := exec.LookPath("python3")
-	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "0.15", "128", `["/bin/sh","-c","while true; do printf output; sleep 0.01; done"]`)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil || !strings.Contains(line, `"event":"started"`) {
-		t.Fatalf("start frame=%q err=%v", line, err)
-	}
-	stdout.Close()
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("broken pipe defeated deadline: %v", err)
-		}
-	case <-time.After(time.Minute):
-		command.Process.Kill()
-		t.Fatal("supervisor failed to finish after broken pipe")
-	}
-}
-
 func TestContainerAndProbeStatusWithoutMessages(t *testing.T) {
 	client, target := fixture()
 	client.pod.Spec.NodeName = "node-a"
@@ -758,68 +540,10 @@ func TestTheModuleLabelKeyIsTheDeployments(t *testing.T) {
 	}
 }
 
-func TestRemoteDeadlineSurvivesOutputBackpressure(t *testing.T) {
-	runtimeProvider(t)
-	python, _ := exec.LookPath("python3")
-	pidPath := filepath.Join(t.TempDir(), "child-pid")
-	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "echo $$ > \"$1\"; while true; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done", "cmd", pidPath})
-	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "2.0", "524288", string(argv))
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { stdout.Close(); command.Process.Kill(); command.Wait() }()
-	reader := bufio.NewReader(stdout)
-	first, err := reader.ReadString('\n')
-	if err != nil || !strings.Contains(first, `"event":"started"`) {
-		t.Fatalf("supervisor did not start its command: first=%q err=%v", first, err)
-	}
-	output, err := reader.ReadString('\n')
-	if err != nil || !strings.Contains(output, `"event":"output"`) {
-		t.Fatalf("command produced no output before its deadline: frame=%q err=%v", output, err)
-	}
-	// Only a hang guard: the supervisor's 2.0 s deadline and TERM grace end
-	// the command, and a loaded machine must not turn their sum into a failure.
-	end := time.Now().Add(time.Minute)
-	pid := 0
-	for time.Now().Before(end) {
-		data, err := os.ReadFile(pidPath)
-		if err == nil {
-			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
-			if pid > 0 {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if pid == 0 {
-		diagnostics := []string{output}
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			var frame wireFrame
-			if json.Unmarshal(scanner.Bytes(), &frame) == nil && (frame.Stream == "stderr" || frame.Event == "complete") {
-				diagnostics = append(diagnostics, string(scanner.Bytes()))
-			}
-		}
-		t.Fatalf("supervised command did not record its pid: %v", diagnostics)
-	}
-	for time.Now().Before(end) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	syscall.Kill(pid, syscall.SIGKILL)
-	t.Fatal("output backpressure disabled the remote deadline")
-}
-
 func TestInvalidProtocolCannotClaimNotStarted(t *testing.T) {
 	provider, _, target := runtimeProvider(t)
 	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
-		io.WriteString(request.Stdout, `{"nonce":"wrong","event":"complete","exit_code":0}`+"\n")
+		io.WriteString(request.Stderr, "wrong complete 0\n")
 		zero := 0
 		return StreamResult{ExitCode: &zero}, nil
 	})

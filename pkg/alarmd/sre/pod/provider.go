@@ -23,6 +23,8 @@ type Provider struct {
 	options  Options
 	permits  chan struct{}
 	redactor *redactor
+	// shellless is the containers found without /bin/sh.
+	shellless shelllessMemo
 }
 
 // DefaultNamespace is the namespace a request that names none reads.

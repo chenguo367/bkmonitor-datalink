@@ -5,9 +5,9 @@ package obchannel
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -64,19 +64,13 @@ type postObservationExecutor struct{ calls atomic.Int32 }
 
 func (e *postObservationExecutor) Stream(_ context.Context, request pod.StreamRequest) (pod.StreamResult, error) {
 	e.calls.Add(1)
-	// Simulate the transport's supervisor frames; no local or remote command runs.
+	// Simulate the supervisor's records and the command's output; no local
+	// or remote command runs.
 	nonce := request.Argv[4]
-	encoder := json.NewEncoder(request.Stdout)
-	for _, frame := range []map[string]any{
-		{"nonce": nonce, "event": "started"},
-		{"nonce": nonce, "event": "output", "stream": "stdout", "data": base64.StdEncoding.EncodeToString([]byte("completed command output\n"))},
-		{"nonce": nonce, "event": "output", "stream": "stderr", "data": base64.StdEncoding.EncodeToString([]byte("command diagnostic\n"))},
-		{"nonce": nonce, "event": "complete", "exit_code": 19},
-	} {
-		if err := encoder.Encode(frame); err != nil {
-			return pod.StreamResult{}, err
-		}
-	}
+	fmt.Fprintf(request.Stderr, "%s started 1\n", nonce)
+	io.WriteString(request.Stdout, "completed command output\n")
+	io.WriteString(request.Stderr, "command diagnostic\n")
+	fmt.Fprintf(request.Stderr, "\n%s complete 19\n", nonce)
 	zero := 0
 	return pod.StreamResult{ExitCode: &zero}, nil
 }

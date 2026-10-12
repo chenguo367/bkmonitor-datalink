@@ -208,3 +208,39 @@ func TestInvalidAdmissionAndMarginAreRejectedBeforeInvoke(t *testing.T) {
 		}
 	}
 }
+
+// An unsupervised run is a receipt: with its exit code, or cut at its
+// deadline. One with neither is not, and is saved as unknown.
+func TestAnUnsupervisedExecReceiptNeedsAnEnd(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		receipt map[string]any
+		code    int
+	}{
+		{"exit code", map[string]any{"remote_state": "remote_unsupervised", "unsupervised_reason": "no_shell", "exit_code": 5}, 0},
+		{"cut", map[string]any{"remote_state": "remote_unsupervised", "unsupervised_reason": "no_shell", "stream_cut": true}, 0},
+		{"neither", map[string]any{"remote_state": "remote_unsupervised", "unsupervised_reason": "no_shell"}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := fixtureProfile("http://fixture.test")
+			p.Scope = legacyExecScope
+			store := Store{t.TempDir()}
+			_ = store.save(p, false)
+			calls := 0
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return jsonHTTP(envelope(p, "ok", map[string]any{"effect": "exec", "required_scope": legacyExecScope}), 200), nil
+				}
+				return jsonHTTP(envelope(p, "ok", c.receipt), 200), nil
+			})}
+			code, out, _, _ := run(t, store, client, "", "invoke", "pod.exec", "--env", p.EnvironmentID)
+			if code != c.code || calls != 2 {
+				t.Fatalf("exit %d after %d calls, want %d: %+v", code, calls, c.code, out)
+			}
+			if c.code == 1 && stringField(objectField(out, "error"), "code") != "remote_state_unknown" {
+				t.Fatalf("a receipt without an end was not unknown: %+v", out)
+			}
+		})
+	}
+}

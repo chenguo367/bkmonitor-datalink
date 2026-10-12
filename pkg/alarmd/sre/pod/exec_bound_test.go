@@ -50,11 +50,11 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 		return StreamResult{}, err
 	}
 	f.startedAt = time.Now()
-	io.WriteString(request.Stdout, fmt.Sprintf(`{"nonce":%q,"event":"started"}`+"\n", nonce))
+	io.WriteString(request.Stderr, fmt.Sprintf("%s started 1\n", nonce))
 	if err := wait(f.beforeComplete, f.neverComplete); err != nil {
 		return StreamResult{}, err
 	}
-	io.WriteString(request.Stdout, fmt.Sprintf(`{"nonce":%q,"event":"complete","exit_code":0}`+"\n", nonce))
+	io.WriteString(request.Stderr, fmt.Sprintf("\n%s complete 0\n", nonce))
 	if f.holdAfterComplete {
 		<-ctx.Done()
 		f.gaveUp = time.Now()
@@ -81,8 +81,9 @@ func TestTheExecBoundCountsFromTheSupervisorStart(t *testing.T) {
 }
 
 // Past the deadline the stream is held for TerminationGrace after the
-// supervisor's start plus the request's own timeout, and then given up as
-// unknown rather than waiting on the target forever.
+// supervisor's start plus the deadline its timer runs, rounded up to whole
+// seconds, and then given up as unknown rather than waiting on the target
+// forever.
 func TestTheExecBoundEndsAtTheDeadlinePlusGrace(t *testing.T) {
 	t.Parallel()
 	provider, _, target := runtimeProvider(t)
@@ -95,8 +96,8 @@ func TestTheExecBoundEndsAtTheDeadlinePlusGrace(t *testing.T) {
 	if result.RemoteState != RemoteUnknown {
 		t.Fatalf("an unreported command was not unknown: %+v", result)
 	}
-	if held := executor.gaveUp.Sub(executor.startedAt); held < timeout+TerminationGrace {
-		t.Fatalf("stream given up %v after start, before the deadline plus grace %v", held, timeout+TerminationGrace)
+	if held := executor.gaveUp.Sub(executor.startedAt); held < time.Second+TerminationGrace || result.EnforcedTimeoutSeconds != 1 || result.DeclaredTimeoutMS != 100 {
+		t.Fatalf("stream given up %v after start (enforced %d s of %d ms), before the whole-second deadline plus grace %v", held, result.EnforcedTimeoutSeconds, result.DeclaredTimeoutMS, time.Second+TerminationGrace)
 	}
 }
 
@@ -110,12 +111,16 @@ func TestTheExecStartupIsBounded(t *testing.T) {
 	executor := &frameExecutor{neverStart: true}
 	provider.options.Executor = executor
 	timeout := 10 * time.Second
+	// Taken before the call, so no later than the startup timer, which
+	// starts just before the stream is opened: the hold measured from here
+	// can only overstate the timer's, never understate it.
+	called := time.Now()
 	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: timeout.Milliseconds()})
 	requireCode(t, err, RemoteUnknown)
 	if result.RemoteState != RemoteUnknown {
 		t.Fatalf("an unstarted stream was not unknown: %+v", result)
 	}
-	held := executor.gaveUp.Sub(executor.invoked)
+	held := executor.gaveUp.Sub(called)
 	if held < StartupAllowance || held >= timeout {
 		t.Fatalf("unstarted stream given up after %v, want from %v and before the command's %v", held, StartupAllowance, timeout)
 	}

@@ -19,32 +19,50 @@ import (
 )
 
 const (
-	// TimeoutContract is the remote supervisor's: Python 3's standard
-	// library and POSIX process groups, started as python3 from the target
-	// image's own PATH through /bin/sh.
-	TimeoutContract = "python3_process_group_v1"
+	// TimeoutContract is the remote supervisor's: a POSIX shell job, in its
+	// own process group where the shell supports job control, ended at its
+	// deadline by a sleep and kill timer in the target. Where the target has
+	// no /bin/sh, or no sleep, the command runs unsupervised and the receipt
+	// says so.
+	TimeoutContract = "posix_sh_job_v1"
 	// ReleaseLabel is the label a target's release is read from.
 	ReleaseLabel = "app.kubernetes.io/instance"
 	// DefaultModuleLabel is the label a target's module is read from when
 	// the deployment names no other (Options.ModuleLabel).
 	DefaultModuleLabel = "app.kubernetes.io/component"
-	// The start failures of an execution that never reached the command.
-	// StartNotExecutable is exit 126: the runtime found the shell or python3
-	// and could not execute it, or (depending on the runtime) found no shell
-	// at all; which one the code alone does not say.
-	StartNotExecutable      = "not_executable"
-	StartPython3Unavailable = "python3_unavailable"
-	VerificationTimeout     = 3 * time.Second
-	TerminationGrace        = 4 * time.Second
+	// StartCommandUnavailable is a command the target's runtime refused to
+	// start, in a container run without a shell.
+	StartCommandUnavailable = "command_unavailable"
+	// How a run was supervised: a shell job in its own process group, a
+	// shell job whose shell has no job control (only the job itself is
+	// ended, its descendants may stay), or not at all.
+	SupervisionShGroup = "sh_group"
+	SupervisionShPID   = "sh_pid"
+	SupervisionNone    = "none"
+	// Why a run was not supervised.
+	UnsupervisedNoShell = "no_shell"
+	UnsupervisedNoSleep = "no_sleep"
+	// What the supervisor's own stderr said when it failed before its first
+	// record, by category only.
+	BootstrapSilent     = "silent"
+	BootstrapNotFound   = "not_found"
+	BootstrapPermission = "permission"
+	BootstrapSyntax     = "syntax"
+	BootstrapOther      = "other"
+	VerificationTimeout = 3 * time.Second
+	TerminationGrace    = 4 * time.Second
 	// StartupAllowance bounds connection setup and the supervisor's start
 	// before its started report. With VerificationTimeout before and after,
 	// the longest execution fits the exec operation's 45 s budget:
 	// 3 + 4 + 30 + 4 + 3 = 44 s.
-	StartupAllowance       = 4 * time.Second
-	RemoteNotStarted       = "remote_not_started"
-	RemoteCompleted        = "remote_completed"
-	RemoteTimedOut         = "remote_timeout_confirmed"
-	RemoteUnknown          = "remote_state_unknown"
+	StartupAllowance = 4 * time.Second
+	RemoteNotStarted = "remote_not_started"
+	RemoteCompleted  = "remote_completed"
+	RemoteTimedOut   = "remote_timeout_confirmed"
+	RemoteUnknown    = "remote_state_unknown"
+	// RemoteUnsupervised is a run nothing in the target could end: its exit
+	// code when it ended inside the deadline, StreamCut when it did not.
+	RemoteUnsupervised     = "remote_unsupervised"
 	CodeInvalidRequest     = "invalid_request"
 	CodeNotInScope         = "not_in_scope"
 	CodeTargetChanged      = "target_changed"
@@ -112,7 +130,12 @@ type StreamRequest struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 }
-type StreamResult struct{ ExitCode *int }
+type StreamResult struct {
+	ExitCode *int
+	// StartRefused is the runtime refusing to start argv[0] (not found, not
+	// executable): nothing ran.
+	StartRefused bool
+}
 
 type Options struct {
 	Client   Client
@@ -247,8 +270,25 @@ type ExecReceipt struct {
 	ExitCode      *int         `json:"exit_code,omitempty"`
 	Truncated     bool         `json:"truncated"`
 	RemoteState   string       `json:"remote_state"`
-	// StartFailure says what the target lacked when the command never
-	// started: StartNotExecutable or StartPython3Unavailable.
+	// Supervision is how the run was supervised (SupervisionShGroup,
+	// SupervisionShPID, SupervisionNone) and UnsupervisedReason why not.
+	Supervision        string `json:"supervision,omitempty"`
+	UnsupervisedReason string `json:"unsupervised_reason,omitempty"`
+	// StreamCut is an unsupervised run this side cut at its deadline: it
+	// may still run in the target.
+	StreamCut bool `json:"stream_cut,omitempty"`
+	// DeadlineRaced is a run whose timer fired as the command ended on its
+	// own: the exit code says the command finished first.
+	DeadlineRaced bool `json:"deadline_raced,omitempty"`
+	// DeclaredTimeoutMS is the deadline asked for; EnforcedTimeoutSeconds
+	// what the supervisor's timer ran, rounded up to whole seconds.
+	DeclaredTimeoutMS      int64 `json:"declared_timeout_ms"`
+	EnforcedTimeoutSeconds int64 `json:"enforced_timeout_seconds,omitempty"`
+	// BootstrapExitCode and BootstrapClass say how the supervisor itself
+	// failed before its first record; the class is a category, never text.
+	BootstrapExitCode *int   `json:"bootstrap_exit_code,omitempty"`
+	BootstrapClass    string `json:"bootstrap_class,omitempty"`
+	// StartFailure says why the command never started: StartCommandUnavailable.
 	StartFailure      string `json:"start_failure,omitempty"`
 	TargetChanged     bool   `json:"target_changed"`
 	EvidenceScope     string `json:"evidence_scope"`

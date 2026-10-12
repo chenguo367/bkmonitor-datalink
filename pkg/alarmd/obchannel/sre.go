@@ -176,7 +176,9 @@ func SREOperations(options SREOptions) []Operation {
 	podLimits := map[string]any{"max_timeout_ms": maxTimeout, "max_output_bytes": maxOutput, "max_stdin_bytes": 32 << 10, "max_targets_per_page": 32,
 		"scope": "one namespace per request (this process's own when none is named) and its label selector; owner chain and container identity verified",
 		"retry": "explicit_only; canceled or unknown executions must be inspected before retry", "non_tty": true,
-		"supervisor": pod.TimeoutContract + ": python3 from the target's PATH through /bin/sh"}
+		"supervisor": pod.TimeoutContract + ": the target's /bin/sh runs the command as a job with a sleep and kill timer at its deadline, " +
+			"rounded up to whole seconds; without /bin/sh or sleep the command runs unsupervised (remote_unsupervised, unsupervised_reason) " +
+			"and only this side's stream deadline bounds it"}
 	podLimits["verification_timeout_ms"] = pod.VerificationTimeout.Milliseconds()
 	podLimits["termination_grace_ms"] = pod.TerminationGrace.Milliseconds()
 	podLimits["startup_allowance_ms"] = pod.StartupAllowance.Milliseconds()

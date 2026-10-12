@@ -213,5 +213,28 @@ func (e *KubernetesExecutor) Stream(ctx context.Context, request StreamRequest) 
 		code := exit.ExitStatus()
 		return StreamResult{ExitCode: &code}, nil
 	}
+	if startRefused(err, request.Argv[0]) {
+		return StreamResult{StartRefused: true}, nil
+	}
 	return StreamResult{}, err
+}
+
+// startRefused reads the runtime's refusal to start the exec's program, as
+// containerd and runc word it ("exec: \"/bin/sh\": stat /bin/sh: no such file
+// or directory", "executable file not found in $PATH", "permission denied"),
+// naming the program: the process was never created, so nothing ran. Read
+// only here; the text is never returned.
+func startRefused(err error, program string) bool {
+	// Matched as containerd quotes it (exec: "/bin/sh": ...): a short argv[0]
+	// such as "ls" appears in unrelated error text unquoted.
+	text := err.Error()
+	if program == "" || !strings.Contains(text, `"`+program+`"`) {
+		return false
+	}
+	for _, refusal := range []string{"no such file or directory", "executable file not found", "permission denied"} {
+		if strings.Contains(text, refusal) {
+			return true
+		}
+	}
+	return false
 }
