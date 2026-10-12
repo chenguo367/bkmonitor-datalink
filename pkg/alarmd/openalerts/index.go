@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 type IndexOptions struct {
@@ -578,7 +580,16 @@ func (state *indexState) calibrationP90() time.Duration {
 	return sorted[(len(sorted)*9+9)/10-1]
 }
 
-// noteCalibration times one successful calibration. Called with the lock held.
+// calibrationTimedOut is a calibration cut by a deadline: the round's, or
+// the Console client's own timeout. The HTTP reconciler reports either as
+// its transport word, which carries no wrapped error.
+func calibrationTimedOut(err error) bool {
+	var transport transportError
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &transport) && string(transport) == execution.TransportFailureTimeout)
+}
+
+// noteCalibration times one calibration that answered or ran out of time.
+// Called with the lock held.
 func (state *indexState) noteCalibration(took time.Duration) {
 	if len(state.calibrations) < calibrationSamples {
 		state.calibrations = append(state.calibrations, took)
@@ -806,7 +817,10 @@ func (cache *Cache) applyIndex(job indexJob, members []string, err error) {
 func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Reconciliation, err error) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if err == nil {
+	// A call the deadline cut is timed too: it took at least this long,
+	// and a p90 of only the calls that finished would read the Console fast
+	// exactly when it is slow, and press it harder.
+	if err == nil || calibrationTimedOut(err) {
 		cache.index.noteCalibration(cache.now().Sub(started))
 	}
 	// The calibration resolved the target first: a move it found, and the

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,32 +240,58 @@ func TestASetIsReadWholeHoweverManyPages(t *testing.T) {
 	}
 }
 
-// Once a complete read has measured what a member weighs, a set whose
-// estimated bytes exceed the budget is refused before it is scanned, and the
-// refusal says how many members and the estimate; before any is measured
-// the member count alone decides.
-func TestASetIsRefusedOnItsEstimateBeforeItIsRead(t *testing.T) {
+// A set is refused before it is read by its own measured size, never by an
+// average of other sets: its first read measures and refuses it, later reads
+// refuse it beforehand while it holds as many members, and once it holds
+// fewer it is read again. A set small in members but heavy in bytes is not
+// let through for the sets that passed being light, and a set the light
+// average would have refused is read.
+func TestASetIsRefusedByItsOwnMeasuredSize(t *testing.T) {
 	client := indexRedis(t)
 	ctx := context.Background()
-	small, large := "test:index:"+keyA.TenantID+":"+keyA.StrategyID, "test:index:"+keyB.TenantID+":"+keyB.StrategyID
-	for index := 0; index < 4; index++ {
-		client.SAdd(ctx, small, fmt.Sprintf("member-%04d", index))
-	}
+	heavy, light := "test:index:"+keyA.TenantID+":"+keyA.StrategyID, "test:index:"+keyB.TenantID+":"+keyB.StrategyID
 	for index := 0; index < 20; index++ {
-		client.SAdd(ctx, large, fmt.Sprintf("member-%04d", index))
+		client.SAdd(ctx, heavy, fmt.Sprintf("member-%04d", index))
+	}
+	for index := 0; index < 30; index++ {
+		client.SAdd(ctx, light, fmt.Sprintf("m%02d", index))
 	}
 	source, _ := NewSetSource(client, "test:index", ReadLimits{MaxMembers: 100, MaxBytes: 150, PageSize: 100})
-	if _, err := source.ReadSet(ctx, keyA); err != nil {
-		t.Fatal(err)
-	}
-	_, err := source.ReadSet(ctx, keyB)
+	_, err := source.ReadSet(ctx, keyA)
 	var refusal *SetTooLargeError
-	if !errors.As(err, &refusal) || !errors.Is(err, ErrSetTooLarge) || refusal.Members != 20 || refusal.Bytes != 220 || refusal.MaxBytes != 150 {
-		t.Fatalf("refusal %+v (%v), want 20 members estimated at 220 bytes against 150", refusal, err)
+	if !errors.As(err, &refusal) || !errors.Is(err, ErrSetTooLarge) || refusal.Members != 20 || refusal.Bytes <= 150 {
+		t.Fatalf("first read %+v (%v), want refused as read, past 150 bytes", refusal, err)
+	}
+	// 30 light members (90 bytes) are read although 30 of the heavy ones
+	// would not fit.
+	if members, err := source.ReadSet(ctx, keyB); err != nil || len(members) != 30 {
+		t.Fatalf("the light set: %d members, %v", len(members), err)
+	}
+	client.SAdd(ctx, heavy, "member-0020")
+	pages := countingPages(t, client)
+	if _, err := source.ReadSet(ctx, keyA); !errors.As(err, &refusal) || refusal.Members != 21 || pages() != 0 {
+		t.Fatalf("again %+v (%v) after %d pages, want refused before reading at 21 members", refusal, err, pages())
+	}
+	for index := 0; index < 10; index++ {
+		client.SRem(ctx, heavy, fmt.Sprintf("member-%04d", index))
+	}
+	if members, err := source.ReadSet(ctx, keyA); err != nil || len(members) != 11 {
+		t.Fatalf("shrunk to 11: %d members, %v, want read again", len(members), err)
+	}
+	// Read whole, it is forgotten: grown past its old count with light
+	// members that fit (6 heavy and 16 light, 114 bytes), it is read.
+	for index := 10; index < 15; index++ {
+		client.SRem(ctx, heavy, fmt.Sprintf("member-%04d", index))
+	}
+	for index := 0; index < 16; index++ {
+		client.SAdd(ctx, heavy, fmt.Sprintf("x%02d", index))
+	}
+	if members, err := source.ReadSet(ctx, keyA); err != nil || len(members) != 22 {
+		t.Fatalf("grown back light to 22: %d members, %v, want read: the old refusal was forgotten", len(members), err)
 	}
 	fresh, _ := NewSetSource(client, "test:index", ReadLimits{MaxMembers: 10, MaxBytes: 1 << 20, PageSize: 100})
-	if _, err := fresh.ReadSet(ctx, keyB); !errors.As(err, &refusal) || refusal.Members != 20 || refusal.Bytes != 0 {
-		t.Fatalf("an unmeasured source refused %+v (%v), want the 20 members against 10", refusal, err)
+	if _, err := fresh.ReadSet(ctx, keyB); !errors.As(err, &refusal) || refusal.Members != 30 || refusal.Bytes != 0 {
+		t.Fatalf("by member count %+v (%v), want the 30 members against 10", refusal, err)
 	}
 }
 
@@ -290,5 +317,78 @@ func TestASetTooSlowForTheRoundIsReadOnItsOwn(t *testing.T) {
 	defer cancelOwn()
 	if members, err := source.ReadSet(own, keyA); err != nil || len(members) != 50 {
 		t.Fatalf("read on its own: %d members, %v", len(members), err)
+	}
+}
+
+// sscanCounter counts the SSCAN pages a client sends.
+type sscanCounter struct{ pages *atomic.Int64 }
+
+func (h sscanCounter) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	if cmd.Name() == "sscan" {
+		h.pages.Add(1)
+	}
+	return ctx, nil
+}
+func (sscanCounter) AfterProcess(context.Context, redis.Cmder) error { return nil }
+func (h sscanCounter) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+func (sscanCounter) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
+
+// countingPages counts the client's SSCAN pages from now on.
+func countingPages(t *testing.T, client *redis.Client) func() int64 {
+	t.Helper()
+	pages := &atomic.Int64{}
+	client.AddHook(sscanCounter{pages: pages})
+	return pages.Load
+}
+
+// stallingScan holds every SSCAN until its caller's deadline.
+type stallingScan struct{ sscanCounter }
+
+func (stallingScan) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	if cmd.Name() == "sscan" {
+		<-ctx.Done()
+		return ctx, ctx.Err()
+	}
+	return ctx, nil
+}
+
+// A page the deadline cut is timed too: an average that learned only from
+// the pages fast enough to finish would keep giving a slow set too little.
+func TestAPageTheDeadlineCutIsTimed(t *testing.T) {
+	client := indexRedis(t)
+	ctx := context.Background()
+	client.SAdd(ctx, "test:index:"+keyA.TenantID+":"+keyA.StrategyID, "member-1")
+	source, _ := NewSetSource(client, "test:index", ReadLimits{MaxMembers: 100, MaxBytes: 1 << 20, PageSize: 100})
+	client.AddHook(stallingScan{sscanCounter{pages: &atomic.Int64{}}})
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	if _, err := source.ReadSet(short, keyA); err == nil {
+		t.Fatal("a stalled page was read")
+	}
+	// The page waited out what was left of the 200 ms after the SCARD
+	// before it: far above a page that answers, which takes well under a
+	// millisecond here.
+	if page := time.Duration(source.pageNanos.Load()); page < 100*time.Millisecond {
+		t.Fatalf("page time %v, want the cut page's wait, most of the 200 ms", page)
+	}
+}
+
+// A page the caller cancelled (shutdown, takeover) says nothing about pace
+// and is not timed.
+func TestAPageTheCallerCancelledIsNotTimed(t *testing.T) {
+	client := indexRedis(t)
+	ctx := context.Background()
+	client.SAdd(ctx, "test:index:"+keyA.TenantID+":"+keyA.StrategyID, "member-1")
+	source, _ := NewSetSource(client, "test:index", ReadLimits{MaxMembers: 100, MaxBytes: 1 << 20, PageSize: 100})
+	client.AddHook(stallingScan{sscanCounter{pages: &atomic.Int64{}}})
+	cancelled, cancel := context.WithCancel(ctx)
+	time.AfterFunc(100*time.Millisecond, cancel)
+	if _, err := source.ReadSet(cancelled, keyA); err == nil {
+		t.Fatal("a stalled page was read")
+	}
+	if page := source.pageNanos.Load(); page != 0 {
+		t.Fatalf("page time %v, want none from a cancelled page", time.Duration(page))
 	}
 }

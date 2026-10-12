@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -120,11 +121,20 @@ type SetSource struct {
 	client redis.Cmdable
 	prefix string
 	limits ReadLimits
-	// memberBytes and members total what complete reads found, for the
-	// average a set's bytes are estimated by before it is read; pageNanos
-	// is a moving average of a scan page's time.
-	memberBytes, members, pageNanos atomic.Int64
+	// pageNanos is a moving average of a scan page's time, pages the
+	// deadline cut included.
+	pageNanos atomic.Int64
+	// refused is each set a read found too large, by its own count then:
+	// refused before reading while it holds at least that many, read again
+	// once it holds fewer. A set is judged by what it was measured to weigh,
+	// never by an average of the sets that passed.
+	refusedMu sync.Mutex
+	refused   map[string]SetTooLargeError
 }
+
+// maxRememberedRefusals bounds the sets remembered as too large; one past it
+// is read again on each attempt, which the byte budget still bounds.
+const maxRememberedRefusals = 4096
 
 func validPrefix(prefix string) bool {
 	return prefix != "" && len(prefix) <= 256 && strings.TrimSpace(prefix) == prefix
@@ -144,9 +154,9 @@ func NewSetSource(client redis.Cmdable, prefix string, limits ReadLimits) (*SetS
 }
 
 // ReadSet reads a strategy's set whole, or refuses it by name. A set larger
-// than the budget is refused before it is read: by its member count, and by
-// its estimated bytes once a complete read has measured what a member
-// weighs. A set that fits but would not be read inside the caller's
+// than the budget is refused before it is read: by its member count, and,
+// once a read of it was refused for its size, while it holds at least as
+// many members as it did then. A set that fits but would not be read inside the caller's
 // deadline is handed back as a *LargeSetError, to be read on its own under
 // WithLargeRead. Members are counted once each: a scan may return one twice
 // across a rehash.
@@ -165,10 +175,26 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 	if before > int64(source.limits.MaxMembers) {
 		return nil, tooLarge(0)
 	}
-	if measured := source.members.Load(); measured > 0 {
-		if estimate := before * source.memberBytes.Load() / measured; estimate > int64(source.limits.MaxBytes) {
-			return nil, tooLarge(estimate)
+	source.refusedMu.Lock()
+	prior, remembered := source.refused[name]
+	source.refusedMu.Unlock()
+	if remembered && before >= prior.Members {
+		refusal := prior
+		refusal.Members = before
+		return nil, &refusal
+	}
+	// tooLargeRead is a refusal the read measured: remembered for this set.
+	tooLargeRead := func(bytes int64) error {
+		err := tooLarge(bytes)
+		source.refusedMu.Lock()
+		if source.refused == nil {
+			source.refused = make(map[string]SetTooLargeError)
 		}
+		if _, ok := source.refused[name]; ok || len(source.refused) < maxRememberedRefusals {
+			source.refused[name] = *err.(*SetTooLargeError)
+		}
+		source.refusedMu.Unlock()
+		return err
 	}
 	if pages := (before + source.limits.PageSize - 1) / source.limits.PageSize; pages > 1 && ctx.Value(largeReadKey{}) == nil {
 		page := time.Duration(source.pageNanos.Load())
@@ -191,6 +217,12 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 		started := time.Now()
 		values, next, err := source.client.SScan(ctx, name, cursor, "", source.limits.PageSize).Result()
 		if err != nil {
+			// A page the deadline cut took at least this long: left out, the
+			// average would learn only from the pages fast enough to finish.
+			// A cancel (shutdown, takeover) says nothing about pace.
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				source.notePage(time.Since(started))
+			}
 			return nil, err
 		}
 		source.notePage(time.Since(started))
@@ -205,11 +237,11 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 			}
 			bytes += int64(len(value))
 			if bytes > int64(source.limits.MaxBytes) {
-				return nil, tooLarge(bytes)
+				return nil, tooLargeRead(bytes)
 			}
 			members[value] = struct{}{}
 			if len(members) > source.limits.MaxMembers {
-				return nil, tooLarge(bytes)
+				return nil, tooLargeRead(bytes)
 			}
 		}
 		cursor = next
@@ -224,8 +256,9 @@ func (source *SetSource) ReadSet(ctx context.Context, key StrategyKey) ([]string
 	if after != before || int64(len(members)) != after {
 		return nil, ErrIncomplete
 	}
-	source.memberBytes.Add(bytes)
-	source.members.Add(int64(len(members)))
+	source.refusedMu.Lock()
+	delete(source.refused, name)
+	source.refusedMu.Unlock()
 	result := make([]string, 0, len(members))
 	for value := range members {
 		result = append(result, value)

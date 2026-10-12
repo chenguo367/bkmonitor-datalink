@@ -6,6 +6,8 @@ package openalerts
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -143,5 +145,53 @@ func TestARoundCalibratesThePlannedNumber(t *testing.T) {
 	cache.Refresh(context.Background())
 	if calls != 5 {
 		t.Fatalf("second round calibrated %d, want 5", calls)
+	}
+}
+
+// Through the HTTP reconciler, as production calls the Console: a call cut
+// by the client's own timeout and one cut by the round's deadline come back
+// as the transport's timeout and are timed; one the caller cancelled is
+// not.
+func TestAConsoleCallCutByItsDeadlineIsTimed(t *testing.T) {
+	block := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	for _, c := range []struct {
+		name  string
+		timed bool
+		call  func(t *testing.T, url string) error
+	}{
+		{"client timeout", true, func(t *testing.T, url string) error {
+			_, err := classReader(t, url, &http.Client{Timeout: 100 * time.Millisecond}, nil).Reconcile(context.Background(), keyA)
+			return err
+		}},
+		{"round deadline", true, func(t *testing.T, url string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			_, err := classReader(t, url, &http.Client{}, nil).Reconcile(ctx, keyA)
+			return err
+		}},
+		{"cancelled", false, func(t *testing.T, url string) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(100*time.Millisecond, cancel)
+			_, err := classReader(t, url, &http.Client{}, nil).Reconcile(ctx, keyA)
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewServer(block)
+			defer server.Close()
+			err := c.call(t, server.URL)
+			if err == nil {
+				t.Fatal("the call succeeded")
+			}
+			clock := &clock{at: time.Unix(1700000000, 0)}
+			cache := mustIndex(t, indexOptions(clock))
+			cache.applyCalibration(indexJob{entry: &indexEntry{}}, clock.at.Add(-2*time.Second), Reconciliation{}, err)
+			cache.mu.Lock()
+			timed := len(cache.index.calibrations) == 1
+			cache.mu.Unlock()
+			if timed != c.timed {
+				t.Fatalf("%v: timed %v, want %v", err, timed, c.timed)
+			}
+		})
 	}
 }
