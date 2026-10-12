@@ -8,6 +8,7 @@ package metric
 import (
 	"strconv"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 )
 
@@ -260,4 +261,18 @@ func (r *Recorder) SetHostDisableMonitorStates(states int) {
 		return
 	}
 	r.phaseTwo.hostDisableMonitorStates.Set(float64(states))
+}
+
+// RecordDownstreamDistress counts one physical query whose answer said the
+// query service is overloaded or unreachable (access.DistressClasses), by
+// whether it had queued for its permit. A class outside the set is not
+// counted: the label set is closed.
+func (r *Recorder) RecordDownstreamDistress(class string, contended bool) {
+	if r == nil {
+		return
+	}
+	switch class {
+	case access.DistressTimeout, access.DistressThrottled, access.DistressUnavailable, access.DistressUnreachable:
+		r.phaseTwo.queryDownstreamDistress.WithLabelValues(class, strconv.FormatBool(contended)).Inc()
+	}
 }

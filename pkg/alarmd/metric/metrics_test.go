@@ -21,6 +21,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -202,6 +203,7 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"bkmonitor_alarmd_worker_query_permit_seconds_total": 4,
 		"bkmonitor_alarmd_worker_query_permit_budget":        2,
 		"bkmonitor_alarmd_worker_query_admission_total":      20,
+		"bkmonitor_alarmd_query_downstream_distress_total":   8,
 		// One series per alert level this build has no name for, plus "other"
 		// for anything past the bound. The platform states its levels in
 		// strategy configuration and today has three named ones, so this family
@@ -254,6 +256,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_source_change_signal_age_seconds":             "variableLabels: {}",
 		"bkmonitor_alarmd_activation_failure_total":                     "variableLabels: {activation_failure_stage,activation_failure_class}",
 		"bkmonitor_alarmd_worker_query_admission_total":                 "variableLabels: {operation,result}",
+		"bkmonitor_alarmd_query_downstream_distress_total":              "variableLabels: {class,contended}",
 		"bkmonitor_alarmd_control_cache_total":                          "variableLabels: {object,result}",
 		"bkmonitor_alarmd_control_cache_entries":                        "variableLabels: {object}",
 		"bkmonitor_alarmd_control_cache_bytes":                          "variableLabels: {object}",
@@ -784,6 +787,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_query_permits_waiting"):                 len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_permit_budget"):                   len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_admission_total"):                 len(phaseTwoQueryInflightKinds) * len(phaseTwoQueryAdmissionResults),
+		fqName("query_downstream_distress_total"):              len(access.DistressClasses) * 2,
 		// Cached objects: version, activation, activation delta, catalog
 		// index, timeline, timeline by revision, and the key segment memos;
 		// four outcomes each. Only an object bounded by a derived budget

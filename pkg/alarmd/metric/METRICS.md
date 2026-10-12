@@ -1263,6 +1263,12 @@ Labels: `result`
 
 Writes of a Query Group's query cooldown pool record, by result: written; superseded (a later owner's record is there, so this owner's write was refused -- the successor's pool state stands); failed (the runtime store did not take the write, and the pool state it carried is lost to the next restart or owner). Written on a change of the pool state only, never per round.
 
+## bkmonitor_alarmd_query_downstream_distress_total
+
+Labels: `class`, `contended`
+
+Physical queries whose answer said the query service is overloaded or unreachable, by how and by whether the query had queued for its permit. class is timeout (no answer in time), throttled (HTTP 429), unavailable (HTTP 502, 503 or 504) or unreachable (a connection refused, reset or cut short); a query the service refused as malformed, or answered, is not counted. contended="true" is a query sent when this process's own query budget was full: read the true rate against worker_query_admission_total{result="started"} and the false rate against the remaining admissions. Distress concentrated in contended queries says this process's own bursts bring it on, and is the condition for revisiting how the query budget is derived; distress at the same rate either way comes from the service or its other consumers. Every label is created at startup, so a zero is a zero.
+
 ## bkmonitor_alarmd_query_failure_total
 
 Labels: `stage`, `category`

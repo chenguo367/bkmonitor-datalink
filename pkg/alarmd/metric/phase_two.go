@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -56,6 +57,7 @@ type phaseTwoMetrics struct {
 	ownedQueryGroups               *prometheus.GaugeVec
 	ownershipTransitions           *prometheus.CounterVec
 	queryAdmission                 *prometheus.CounterVec
+	queryDownstreamDistress        *prometheus.CounterVec
 	noDataSlotPlans                *prometheus.CounterVec
 	noDataAbsences                 *prometheus.CounterVec
 	targetPlanResolutions          *prometheus.CounterVec
@@ -588,6 +590,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"deadline reached while waiting, failed is the waiter queue itself being full or recovery " +
 				"permits being off.",
 		}, []string{"operation", "result"}),
+		queryDownstreamDistress: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_downstream_distress_total",
+			Help: "Physical queries whose answer said the query service is overloaded or unreachable, by how and by " +
+				"whether the query had queued for its permit. class is timeout (no answer in time), throttled (HTTP " +
+				"429), unavailable (HTTP 502, 503 or 504) or unreachable (a connection refused, reset or cut short); " +
+				"a query the service refused as malformed, or answered, is not counted. contended=\"true\" is a " +
+				"query sent when this process's own query budget was full: read the true rate against " +
+				"worker_query_admission_total{result=\"started\"} and the false rate against the remaining " +
+				"admissions. Distress concentrated in contended queries says this process's own bursts bring it " +
+				"on, and is the condition for revisiting how the query budget is derived; distress at the same " +
+				"rate either way comes from the service or its other consumers. Every label is created at " +
+				"startup, so a zero is a zero.",
+		}, []string{"class", "contended"}),
+	}
+	for _, class := range access.DistressClasses {
+		for _, contended := range []string{"true", "false"} {
+			metrics.queryDownstreamDistress.WithLabelValues(class, contended)
+		}
 	}
 	metrics.noDataStalls = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_persistent_skips_total",
@@ -1690,7 +1710,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
-		m.queryAdmission,
+		m.queryAdmission, m.queryDownstreamDistress,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,

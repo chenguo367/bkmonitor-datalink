@@ -166,6 +166,10 @@ type Config struct {
 	// how its own address compares with that host's
 	// (admission.Facts.ReportedAddress). Optional.
 	ObserveHostPlacement func(HostPlacement)
+	// ObserveDownstreamDistress hears each query whose answer says the
+	// downstream is overloaded or unreachable (DistressClasses), with whether
+	// the query had queued for its permit. Optional.
+	ObserveDownstreamDistress func(class string, contended bool)
 	// ScopeDrops receives the series the target filters turned away, for
 	// the target-scope close; see ScopeDropSink. Optional.
 	ScopeDrops ScopeDropSink
@@ -693,6 +697,11 @@ func (source *Source) executeWithPermit(
 	defer permit.Release()
 	observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "query_running"})
 	completion, err := source.provider.Execute(ctx, attempt, adapter)
+	if err == nil && source.config.ObserveDownstreamDistress != nil {
+		if class := downstreamDistressOf(completion); class != "" {
+			source.config.ObserveDownstreamDistress(class, permitWaited(permit))
+		}
+	}
 	if err == nil && completion.Stats.NullIdentityFields > 0 {
 		// Bounded diagnostics marker: at least one declared identity dimension
 		// was absent from a delivered series and was bound to null (the Python
