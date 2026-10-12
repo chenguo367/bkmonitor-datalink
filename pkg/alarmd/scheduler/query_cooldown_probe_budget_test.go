@@ -133,3 +133,52 @@ func TestRoundsOutsideThePoolLeaveNoProbe(t *testing.T) {
 		t.Fatalf("entry lines %+v, want one entered line with no probe", lines)
 	}
 }
+
+// A deciding round is excused only for the Runner's own lateness, only on a
+// timeout, and once for each cooldown's end. Its query was ready at 100 s; a
+// Runner whose previous execution came back at 105 s started it late on its
+// own account, one whose previous execution came back at 95 s did not (it
+// waited for a permit or for dispatch, as every round does). An answer, or a
+// failure that is not a timeout, is never excused.
+func TestOnlyATimeoutLateOnTheRunnersOwnAccountIsExcusedOncePerCooldownEnd(t *testing.T) {
+	timedOut := func(reason string) execution.SlotExecutionResult {
+		return execution.SlotExecutionResult{Completed: true, QueryAvailability: execution.QueryAvailabilityUnavailable,
+			QueryUnavailableReason: execution.ReasonCode(reason),
+			PrimaryQueryClock:      &execution.PhysicalQueryClock{BudgetMillis: 20_000, ReadyAtUnixMilli: 100_000}}
+	}
+	answered := timedOut(contract.ReasonQueryTimeout)
+	answered.QueryAvailability, answered.QueryUnavailableReason = execution.QueryAvailabilityAvailable, ""
+	busy, idle := time.UnixMilli(105_000), time.UnixMilli(95_000)
+	for _, test := range []struct {
+		name    string
+		result  execution.SlotExecutionResult
+		busy    time.Time
+		excused bool
+	}{
+		{"a timeout behind its own execution", timedOut(contract.ReasonQueryTimeout), busy, true},
+		{"a timeout behind a permit", timedOut(contract.ReasonQueryTimeout), idle, false},
+		{"an answer behind its own execution", answered, busy, false},
+		{"another failure behind its own execution", timedOut(contract.ReasonQueryUnavailable), busy, false},
+		{"a timeout of the Runner's first execution", timedOut(contract.ReasonQueryTimeout), time.Time{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &Runner{queryCooldown: queryCooldownState{until: time.Unix(90, 0), failures: 3}}
+			if got := runner.queryCooldownExcusesItsOwnDelay(test.result, test.busy); got != test.excused {
+				t.Fatalf("excused %t, want %t", got, test.excused)
+			}
+			if test.excused && runner.queryCooldownExcusesItsOwnDelay(test.result, test.busy) {
+				t.Fatal("a second round was excused for the same cooldown's end")
+			}
+			if test.excused {
+				runner.queryCooldown.until = time.Unix(150, 0)
+				if !runner.queryCooldownExcusesItsOwnDelay(test.result, test.busy) {
+					t.Fatal("the next cooldown's end excused nothing")
+				}
+			}
+		})
+	}
+	outside := &Runner{}
+	if outside.queryCooldownExcusesItsOwnDelay(timedOut(contract.ReasonQueryTimeout), busy) {
+		t.Fatal("a round outside the pool was excused")
+	}
+}

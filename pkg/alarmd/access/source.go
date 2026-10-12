@@ -405,7 +405,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			// request to its answer or failure; this goroutine reads no
 			// clock of the Source's, which the dispatch loop owns.
 			results[index].clock = &execution.PhysicalQueryClock{BudgetMillis: budgetMillis,
-				ElapsedMillis: int64(completion.Stats.QueryMillis)}
+				ElapsedMillis: int64(completion.Stats.QueryMillis), ReadyAtUnixMilli: query.ReadyAtUnixMilli}
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {

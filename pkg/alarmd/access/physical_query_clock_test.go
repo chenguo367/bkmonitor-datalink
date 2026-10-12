@@ -31,7 +31,8 @@ func (provider *timedProvider) Execute(ctx context.Context, attempt execution.Qu
 }
 
 // Every physical query carries what it had from its send - after its permit,
-// not from its arrival - and what the provider says it took. A replay has
+// not from its arrival - what the provider says it took, and when it was
+// planned ready: the Slot plus the settling wait. A replay has
 // its recovery budget, the 30 s interval less the reserve from its arrival,
 // 25 s; a permit that took 2 s leaves it 23 s at its send.
 func TestEveryPhysicalQueryCarriesItsClock(t *testing.T) {
@@ -59,7 +60,7 @@ func TestEveryPhysicalQueryCarriesItsClock(t *testing.T) {
 		t.Fatalf("attempts %+v, want one with deadline arrival + 25 s", provider.attempts)
 	}
 	if len(completion.PhysicalQueries) != 1 || completion.PhysicalQueries[0].Clock == nil ||
-		*completion.PhysicalQueries[0].Clock != (execution.PhysicalQueryClock{BudgetMillis: 23_000, ElapsedMillis: 1_234}) {
-		t.Fatalf("physical queries %+v, want one with clock {23000 1234}", completion.PhysicalQueries)
+		*completion.PhysicalQueries[0].Clock != (execution.PhysicalQueryClock{BudgetMillis: 23_000, ElapsedMillis: 1_234, ReadyAtUnixMilli: eval + 10_000}) {
+		t.Fatalf("physical queries %+v, want one with clock {23000 1234 ready at the Slot + 10 s}", completion.PhysicalQueries)
 	}
 }

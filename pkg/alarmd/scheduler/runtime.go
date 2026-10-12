@@ -541,8 +541,11 @@ type Runner struct {
 	attempt        *recoveryAttempt
 	sourceFailures uint32
 	sourceNextAt   time.Time
-	dueBound       RunnerDueBound
-	queryCooldown  queryCooldownState
+	// lastExecutionReturnedAt is when this Runner's latest execution came
+	// back: until then the Runner could start nothing else of its Query Group.
+	lastExecutionReturnedAt time.Time
+	dueBound                RunnerDueBound
+	queryCooldown           queryCooldownState
 	// cooldownMemory, cooldownStore, cooldownLoaded and cooldownFence carry
 	// the pool membership across Runners: what it remembers of the pool, the
 	// store it is kept in, whether it has been read back, and the fence the
@@ -1009,7 +1012,12 @@ func (runner *Runner) runOneTracked(
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
 	decidesPool := runner.queryCooldownDecidedBy(operation)
+	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
+	runner.lastExecutionReturnedAt = runner.now()
+	if decidesPool && runner.queryCooldownExcusesItsOwnDelay(result, busyUntil) {
+		decidesPool = false
+	}
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
 		// between the source's reads and here is refused by the same name:

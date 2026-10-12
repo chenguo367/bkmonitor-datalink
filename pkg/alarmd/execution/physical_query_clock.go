@@ -14,7 +14,12 @@ package execution
 // it took to come back - answered, timed out or failed. A Slot carries the
 // slowest PRIMARY query's (SlotExecutionResult.PrimaryQueryClock), which is
 // what says how far a backend that answered was from the budget it had.
+//
+// ReadyAtUnixMilli is when the query became ready to send, as planned. A
+// query sent after it waited - for a permit, or for the execution ahead of it
+// - and the clock's budget is what that wait left.
 type PhysicalQueryClock struct {
-	BudgetMillis  int64 `json:"budget_ms"`
-	ElapsedMillis int64 `json:"elapsed_ms"`
+	BudgetMillis     int64 `json:"budget_ms"`
+	ElapsedMillis    int64 `json:"elapsed_ms"`
+	ReadyAtUnixMilli int64 `json:"ready_at_ms,omitempty"`
 }

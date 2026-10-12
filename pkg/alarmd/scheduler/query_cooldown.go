@@ -52,6 +52,10 @@ type queryCooldownState struct {
 	// after N timeouts". Both clear with the failures.
 	timeouts       uint32
 	firstTimeoutAt time.Time
+	// excusedUntil is the cooldown end (until) whose deciding round last had
+	// its timeout excused for the Runner's own lateness, so each cooldown's
+	// end excuses one round at most (queryCooldownExcusesItsOwnDelay).
+	excusedUntil time.Time
 }
 
 // queryCooldownMemory is what the pool remembers across membership: since
@@ -288,6 +292,30 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 // neither takes the Query Group out nor keeps it in.
 func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool {
 	return !runner.queryCooldown.until.IsZero() && operation == execution.OperationNormal
+}
+
+// queryCooldownExcusesItsOwnDelay reports whether a deciding round's timeout
+// is set aside because the round started late on the pool's own account: the
+// Runner was still running its previous execution - at a cooldown's end, the
+// held Slot's replay - when the round's query became ready, so the query had
+// that much less of its budget than a normal round outside the pool gets.
+// Waiting for a permit or for dispatch is not excused; every normal round
+// waits so. The round then decides nothing, and the next one does. Only one
+// round is excused for each cooldown's end: a Runner kept busy round after
+// round by its own retries against a backend that does not answer would
+// otherwise have every timeout excused, run every Slot, and never be held
+// again. An answer and a failure that is not a timeout are never excused.
+func (runner *Runner) queryCooldownExcusesItsOwnDelay(result execution.SlotExecutionResult, busyUntil time.Time) bool {
+	state := &runner.queryCooldown
+	clock := result.PrimaryQueryClock
+	// The reason is set only on an unavailable query (an answer has none).
+	if state.until.IsZero() || state.excusedUntil.Equal(state.until) ||
+		result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryTimeout) ||
+		clock == nil || clock.ReadyAtUnixMilli <= 0 || busyUntil.IsZero() || busyUntil.UnixMilli() <= clock.ReadyAtUnixMilli {
+		return false
+	}
+	state.excusedUntil = state.until
+	return true
 }
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
