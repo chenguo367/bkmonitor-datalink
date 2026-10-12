@@ -189,10 +189,10 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,
 		DialContext:     (&net.Dialer{Timeout: obchannel.RequestTimeout}).DialContext,
 		MaxConnsPerHost: 1, MaxIdleConns: 1, MaxIdleConnsPerHost: 1,
-		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: obchannel.RequestTimeout, ResponseHeaderTimeout: obchannel.RequestTimeout}
+		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: obchannel.RequestTimeout, ResponseHeaderTimeout: obchannel.MaxExecutionTimeout}
 	closeQuery = queryTransport.CloseIdleConnections
 	queryClient, _ := accessuq.NewDiagnosticClient(cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource,
-		&http.Client{Transport: queryTransport, Timeout: obchannel.RequestTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+		&http.Client{Transport: queryTransport, Timeout: obchannel.MaxExecutionTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	// The operation schemas stay the same across roles; only their currently
 	// bound providers and the ingress's default routing differ.
 	ops := obchannel.NativeOperations(providers)
