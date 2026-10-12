@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/readhold"
@@ -119,10 +120,10 @@ func TestANewGroupIsSeededFromItsPeersOnTheSameData(t *testing.T) {
 	}
 	// Nine peers measured 12 to 28 s and one 60 s, net of their 5 s delay:
 	// the 90th percentile of the ten, sorted, is the tenth - the 60 s one.
-	if seed, origin := holds.seedArrival("new", time.Minute, 30*time.Second); origin != readhold.SeedPeer || seed != time.Minute+60*time.Second {
+	if seed, origin := holds.seedArrival("new", time.Minute, 30*time.Second, time.Hour); origin != readhold.SeedPeer || seed != time.Minute+60*time.Second {
 		t.Fatalf("seed %v from %q, want the peers' 90th percentile past the group's own minute", seed, origin)
 	}
-	if seed, origin := holds.seedArrival("alone", 0, 30*time.Second); origin != readhold.SeedColdStart || seed != 30*time.Second {
+	if seed, origin := holds.seedArrival("alone", 0, 30*time.Second, time.Hour); origin != readhold.SeedColdStart || seed != 30*time.Second {
 		t.Fatalf("a source nobody measured seeded %v from %q, want the 30 s cold start", seed, origin)
 	}
 }
@@ -177,4 +178,81 @@ func TestAForgottenGroupIsNoLongerAPeer(t *testing.T) {
 	if len(holds.sources) != 0 {
 		t.Fatalf("a group bound again kept its old source in the index: %v", holds.sources)
 	}
+}
+
+// A peer seed stays inside the group's own read budget. One-minute peers on
+// the same table that measured a 30-second landing seed a one-minute group
+// at 30 s, but a ten-second group - its Slot due 30 s after the window, 25 s
+// of it for the query - at no more than its budget past the 10 s floor:
+// 15 s. A group with Plans of both is held to the ten-second one's budget,
+// the one a late read misses first.
+func TestAPeerSeedStaysInsideTheGroupsOwnReadBudget(t *testing.T) {
+	values := map[execution.QueryGroupIdentity][]byte{}
+	groups := map[execution.QueryGroupIdentity]*productionReadHoldGroup{}
+	for i := 0; i < 5; i++ {
+		qg := execution.QueryGroupIdentity(fmt.Sprintf("minute-peer-%d", i))
+		raw, _ := json.Marshal(readhold.Record{SinceSlot: 1, ArrivalAgeMillis: 30_000})
+		values[qg] = raw
+		groups[qg] = &productionReadHoldGroup{querySource: "bk_monitor/system.cpu"}
+	}
+	for _, qg := range []execution.QueryGroupIdentity{"ten-second", "one-minute", "both"} {
+		groups[qg] = &productionReadHoldGroup{querySource: "bk_monitor/system.cpu"}
+	}
+	controller, err := readhold.NewController(readhold.Options{Control: seedControl{values}, Prefix: "schedule", MaxHold: 10 * time.Minute,
+		Owner: func(execution.QueryGroupIdentity) (readhold.Owner, error) { return readhold.Owner{}, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restore []execution.QueryGroupIdentity
+	for qg := range values {
+		if err := controller.Configure(readhold.GroupSpec{QueryGroup: qg, Plans: []readhold.PlanRef{{Key: execution.PlanKey{
+			PlanIdentity: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: string(qg)}}}}}); err != nil {
+			t.Fatal(err)
+		}
+		restore = append(restore, qg)
+	}
+	if err := controller.RestoreBatch(context.Background(), restore); err != nil {
+		t.Fatal(err)
+	}
+	holds := &productionReadHolds{cfg: validGoAccessRuntimeConfig(), controller: controller, groups: map[execution.QueryGroupIdentity]*productionReadHoldGroup{}}
+	holds.cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(30 * time.Second)
+	holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(5 * time.Second)
+	for qg, group := range groups {
+		source := group.querySource
+		group.querySource = ""
+		holds.groups[qg] = group
+		holds.indexSourceLocked(qg, source)
+		group.querySource = source
+	}
+	for _, c := range []struct {
+		qg      execution.QueryGroupIdentity
+		periods []int64
+		want    time.Duration
+	}{
+		{"one-minute", []int64{60}, 30 * time.Second},
+		{"ten-second", []int64{10}, 15 * time.Second},
+		{"both", []int64{60, 10}, 15 * time.Second},
+	} {
+		seed, origin := holds.seedFor(c.qg, 0, seedCeilingSchedule(t, c.qg, c.periods...))
+		if origin != readhold.SeedPeer || seed != c.want {
+			t.Fatalf("%s on %v s schedules seeded %v from %q, want %v from its peers", c.qg, c.periods, seed, origin, c.want)
+		}
+	}
+}
+
+// seedCeilingSchedule is a schedule of the group with one Plan per period,
+// each with the schedule spec a strategy of that period derives.
+func seedCeilingSchedule(t *testing.T, qg execution.QueryGroupIdentity, periods ...int64) execution.FrozenQueryGroupSchedule {
+	t.Helper()
+	var plans []execution.FrozenPlanSchedule
+	for index, period := range periods {
+		spec := execution.DeriveScheduleSpec(period)
+		revision, err := execution.DerivePlanScheduleRevision(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plans = append(plans, execution.FrozenPlanSchedule{Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "2",
+			StrategyID: fmt.Sprintf("%d", index+1)}, ScheduleRevision: revision, Spec: spec})
+	}
+	return execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{QueryGroup: qg}, Plans: plans}
 }

@@ -325,7 +325,14 @@ const readHoldPeerPercentile = 0.9
 // readHoldPeerPercentile of the arrival ages its peers on the same data
 // measured, each net of its own time_delay, with the group's time_delay added;
 // or coldStart on a source none of them has measured.
-func (holds *productionReadHolds) seedArrival(qg execution.QueryGroupIdentity, delay, coldStart time.Duration) (time.Duration, string) {
+//
+// A peer seed is never past ceiling, what the group's own read budget leaves
+// past its settling floor. Peers on the same data can run on longer
+// schedules: a ten-second group beside one-minute groups that measured a
+// 30-second landing would otherwise start reading past its own budget, late
+// on every Slot until its own early reads brought it down. Its own
+// measurements still raise it past the ceiling when its data lands later.
+func (holds *productionReadHolds) seedArrival(qg execution.QueryGroupIdentity, delay, coldStart, ceiling time.Duration) (time.Duration, string) {
 	type peer struct {
 		group execution.QueryGroupIdentity
 		delay time.Duration
@@ -351,7 +358,32 @@ func (holds *productionReadHolds) seedArrival(qg execution.QueryGroupIdentity, d
 	}
 	slices.Sort(arrivals)
 	index := min(int(float64(len(arrivals))*readHoldPeerPercentile), len(arrivals)-1)
-	return delay + max(arrivals[index], 0), readhold.SeedPeer
+	return delay + min(max(arrivals[index], 0), max(ceiling, 0)), readhold.SeedPeer
+}
+
+// seedFor is the seed of a group with no record of its own, on the schedule
+// it is prepared for: the cold start is the deployment's wait as the
+// schedule's tightest budget allows it, and the peer seed's ceiling is that
+// budget past its settling floor - both from the Plan with the smallest
+// budget, the one a late read misses first.
+func (holds *productionReadHolds) seedFor(qg execution.QueryGroupIdentity, delay time.Duration, schedule execution.FrozenQueryGroupSchedule) (time.Duration, string) {
+	var coldStart, ceiling time.Duration
+	for index, plan := range schedule.Plans {
+		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
+		budget := offset - holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
+		// The cold start is where the group was read before the wait came
+		// down to its floor: the deployment's wait as its schedule's budget
+		// allowed it - a ten-second period was read at ten seconds then too.
+		previous := execution.SettlingWaitWithinQueryBudget(budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+		room := budget - holds.holdBase(qg, budget)
+		if index == 0 || previous < coldStart {
+			coldStart = previous
+		}
+		if index == 0 || room < ceiling {
+			ceiling = room
+		}
+	}
+	return holds.seedArrival(qg, delay, coldStart, ceiling)
 }
 
 func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.FrozenQueryGroupSchedule) (readhold.GroupSpec, error) {
@@ -365,27 +397,19 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	// aggregates, whose schedule is shorter than its data step, would never
 	// have its hold lowered if this were the schedule's.
 	spec := readhold.GroupSpec{QueryGroup: schedule.Segment.QueryGroup, Delay: delay, HoldLimit: holds.holdLimit(schedule), Step: step}
-	var coldStart time.Duration
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key()})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
 		budget := offset - holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
 		wait := holds.holdBase(schedule.Segment.QueryGroup, budget)
-		// The cold start is where the group was read before the wait came
-		// down to its floor: the deployment's wait as its schedule's budget
-		// allowed it - a ten-second period was read at ten seconds then too.
-		previous := execution.SettlingWaitWithinQueryBudget(budget, holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
-		}
-		if len(spec.Plans) == 1 || previous < coldStart {
-			coldStart = previous
 		}
 	}
 	// Only a group with no record of its own is ever seeded: one with a
 	// record skips the walk of its peers, at a rollout as in steady state.
 	if !holds.controller.HasOwnRecord(schedule.Segment.QueryGroup) {
-		spec.SeedArrivalAge, spec.SeedOrigin = holds.seedArrival(schedule.Segment.QueryGroup, delay, coldStart)
+		spec.SeedArrivalAge, spec.SeedOrigin = holds.seedFor(schedule.Segment.QueryGroup, delay, schedule)
 	}
 	return spec, nil
 }
