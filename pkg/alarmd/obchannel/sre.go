@@ -126,26 +126,51 @@ func SREOperations(pods *pod.Provider, queries *uq.Provider, scrubber *redact.Sc
 		return Availability{Available: true}
 	}
 	uqLimits := map[string]any{"wire_contract": "structured_query_ts_v1", "max_timeout_ms": maxTimeout, "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": uq.MaxResponseBytes, "pagination": "explicit_native_cursor_or_offset_in_body; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "log_content": "status/count/digest only before SaaS topic masking; content and cursors omitted"}
+	wrapQuery := func(v uq.Receipt, err error) Outcome {
+		if v.Native != nil {
+			v.Native = scrubber.JSON(v.Native)
+		}
+		v.TraceID = scrubber.Text(v.TraceID)
+		if v.TracePage != nil {
+			v.TracePage.RequestedID = scrubber.Text(v.TracePage.RequestedID)
+		}
+		out := Outcome{Value: v, Complete: v.Complete, Limitations: v.Limitations}
+		if err != nil {
+			var named *uq.Error
+			if errors.As(err, &named) {
+				out.Error = &Failure{Code: named.Code, Message: named.Message}
+			} else {
+				out.Error = &Failure{Code: "uq_provider_failed", Message: "Native query did not complete."}
+			}
+		}
+		return out
+	}
 	ops = append(ops, Operation{ID: "uq.egresses", Summary: "读取部署登记的 UQ 出口、端点、tenant/space 范围与时间单位合同。", EvidenceScope: "sre_uq_egresses", Availability: queryAvailable, Fields: map[string]Field{}, Limits: uqLimits, OutputSchema: SchemaOf([]uq.Egress{}), Run: func(context.Context, Params) Outcome { return Outcome{Value: queries.Egresses(), Complete: true} }}, Operation{
 		ID: "uq.query", Summary: "按登记出口和端点转发原生 UQ JSON 查询，保留实际出口、scope、下游状态与响应。", EvidenceScope: "sre_uq_native_query", ExecutionPool: "sre", ExecutionTimeout: 35 * time.Second, Availability: queryAvailable, Limits: uqLimits,
 		Fields: map[string]Field{"egress": text, "endpoint": {Type: "string", Source: "uq.egresses endpoints[].path", MinLength: 1, MaxLength: 256}, "tenant": text, "space": text, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxTimeout}}, Required: []string{"egress", "endpoint", "tenant", "space", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
 		Run: func(ctx context.Context, p Params) Outcome {
 			body, _ := p["body"].(map[string]any)
 			v, err := queries.Query(ctx, uq.Request{Egress: p.String("egress"), Endpoint: p.String("endpoint"), Tenant: p.String("tenant"), Space: p.String("space"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
-			if v.Native != nil {
-				v.Native = scrubber.JSON(v.Native)
-			}
-			v.TraceID = scrubber.Text(v.TraceID)
-			out := Outcome{Value: v, Complete: v.Complete, Limitations: v.Limitations}
-			if err != nil {
-				var named *uq.Error
-				if errors.As(err, &named) {
-					out.Error = &Failure{Code: named.Code, Message: named.Message}
-				} else {
-					out.Error = &Failure{Code: "uq_provider_failed", Message: "Native query did not complete."}
+			return wrapQuery(v, err)
+		},
+	})
+	traceAvailable := func() Availability {
+		if queries != nil {
+			for _, egress := range queries.Egresses() {
+				if len(egress.TraceTargets) != 0 {
+					return Availability{Available: true}
 				}
 			}
-			return out
+		}
+		return Availability{Reason: "uq_trace_unconfigured: register exact sre.uq.egresses trace_targets from the application datasource mapping"}
+	}
+	traceLimits := map[string]any{"wire_contract": "bkapm_raw_span_v1", "max_timeout_ms": maxTimeout, "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": uq.MaxResponseBytes, "max_rows": uq.MaxTraceRows, "window_time_unit": "s", "span_time_unit": "us", "pagination": "explicit_native_offset; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "scope": "registered_application_and_exact_table; no cross-application or retention expansion"}
+	ops = append(ops, Operation{ID: "uq.trace", Summary: "按登记应用与实际结果表转发原生 bkapm Span search/trace_id 查询，保留原始 Span、微秒时间和单页完整性。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: 35 * time.Second, Availability: traceAvailable, Limits: traceLimits,
+		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxTimeout}}, Required: []string{"egress", "target", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			body, _ := p["body"].(map[string]any)
+			v, err := queries.Trace(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
+			return wrapQuery(v, err)
 		},
 	})
 	return ops

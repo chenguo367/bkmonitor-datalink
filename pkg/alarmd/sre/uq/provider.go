@@ -40,11 +40,12 @@ type Endpoint struct {
 }
 
 type Egress struct {
-	Name      string     `yaml:"name" json:"name"`
-	URL       string     `yaml:"url" json:"url"`
-	Tenants   []string   `yaml:"tenants" json:"tenants"`
-	Spaces    []string   `yaml:"spaces" json:"spaces"`
-	Endpoints []Endpoint `yaml:"endpoints" json:"endpoints"`
+	Name         string        `yaml:"name" json:"name"`
+	URL          string        `yaml:"url" json:"url"`
+	Tenants      []string      `yaml:"tenants" json:"tenants"`
+	Spaces       []string      `yaml:"spaces" json:"spaces"`
+	Endpoints    []Endpoint    `yaml:"endpoints" json:"endpoints"`
+	TraceTargets []TraceTarget `yaml:"trace_targets,omitempty" json:"trace_targets,omitempty"`
 }
 
 type Request struct {
@@ -73,6 +74,7 @@ type Receipt struct {
 	ContentOmitted string          `json:"content_omitted,omitempty"`
 	Complete       bool            `json:"complete"`
 	Limitations    []string        `json:"limitations"`
+	TracePage      *TracePage      `json:"trace_page,omitempty"`
 }
 
 type Error struct{ Code, Message string }
@@ -81,10 +83,11 @@ func (e *Error) Error() string        { return e.Code + ": " + e.Message }
 func fail(code, message string) error { return &Error{code, message} }
 
 type Provider struct {
-	egresses  map[string]Egress
-	client    *http.Client
-	transport *http.Transport
-	slots     chan struct{}
+	egresses    map[string]Egress
+	client      *http.Client
+	transport   *http.Transport
+	slots       chan struct{}
+	querySource string
 }
 
 func Validate(egresses []Egress) error {
@@ -115,19 +118,32 @@ func Validate(egresses []Egress) error {
 			}
 			paths[endpoint.Path] = true
 		}
+		if err := validateTraceTargets(e); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func New(egresses []Egress, client *http.Client) (*Provider, error) {
+	return NewWithQuerySource(egresses, client, "alarmd-sre")
+}
+
+// NewWithQuerySource reuses the deployment's existing alarmd UQ source label.
+// Native Trace and metric/log queries share the same transport and budget.
+func NewWithQuerySource(egresses []Egress, client *http.Client, querySource string) (*Provider, error) {
 	if err := Validate(egresses); err != nil {
 		return nil, err
 	}
-	p := &Provider{egresses: map[string]Egress{}, slots: make(chan struct{}, 1)}
+	if !text(querySource) {
+		return nil, errors.New("sre.uq: a nonempty query source without control characters is required")
+	}
+	p := &Provider{egresses: map[string]Egress{}, slots: make(chan struct{}, 1), querySource: querySource}
 	for _, e := range egresses {
 		e.Tenants = append([]string(nil), e.Tenants...)
 		e.Spaces = append([]string(nil), e.Spaces...)
 		e.Endpoints = append([]Endpoint(nil), e.Endpoints...)
+		e.TraceTargets = append([]TraceTarget(nil), e.TraceTargets...)
 		p.egresses[e.Name] = e
 	}
 	if client == nil {
@@ -151,6 +167,7 @@ func (p *Provider) Egresses() []Egress {
 		e.Tenants = append([]string(nil), e.Tenants...)
 		e.Spaces = append([]string(nil), e.Spaces...)
 		e.Endpoints = append([]Endpoint(nil), e.Endpoints...)
+		e.TraceTargets = append([]TraceTarget(nil), e.TraceTargets...)
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -158,13 +175,17 @@ func (p *Provider) Egresses() []Egress {
 }
 
 func (p *Provider) Query(ctx context.Context, request Request) (receipt Receipt, err error) {
+	return p.query(ctx, request, false)
+}
+
+func (p *Provider) query(ctx context.Context, request Request, trace bool) (receipt Receipt, err error) {
 	receipt = Receipt{Egress: request.Egress, Tenant: request.Tenant, Space: request.Space, Authority: "deployment_operator_readonly; page_user_authorization_not_replayed", StartedAt: time.Now().UTC(), Limitations: []string{}}
 	defer func() { receipt.FinishedAt = time.Now().UTC() }()
 	// Native log responses precede SaaS topic masking. Retain query/status/count
 	// evidence, not log content or value-bearing pagination cursors. The body
 	// projection is also applied on failures, whose messages can echo log rows.
 	defer func() {
-		if receipt.Native != nil && logContent(request, receipt.Native) {
+		if !trace && receipt.Native != nil && logContent(request, receipt.Native) {
 			digest := sha256.Sum256(receipt.Native)
 			receipt.ResponseDigest = hex.EncodeToString(digest[:])
 			receipt.ContentOmitted = "log_masking_boundary"
@@ -239,7 +260,7 @@ func (p *Provider) Query(ctx context.Context, request Request) (receipt Receipt,
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Bk-Tenant-Id", request.Tenant)
 	r.Header.Set("X-Bk-Scope-Space-Uid", request.Space)
-	r.Header.Set("Bk-Query-Source", "alarmd-sre")
+	r.Header.Set("Bk-Query-Source", p.querySource)
 	response, err := p.client.Do(r)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -292,6 +313,9 @@ func (p *Provider) Query(ctx context.Context, request Request) (receipt Receipt,
 	if value, exists := envelope["status"]; exists && string(value) != "[]" && string(value) != "null" && string(value) != "{}" {
 		receipt.Complete = false
 		receipt.Limitations = append(receipt.Limitations, "native statuses must be checked before inferring data absence")
+		if trace {
+			return receipt, fail("uq_query_error", "Native Trace query returned nonempty statuses; inspect the native receipt.")
+		}
 	}
 	receipt.Limitations = append(receipt.Limitations, "one native request; pagination and data completeness follow the native response")
 	return receipt, nil
