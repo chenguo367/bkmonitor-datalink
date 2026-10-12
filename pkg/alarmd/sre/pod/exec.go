@@ -140,7 +140,12 @@ func (p *Provider) Exec(ctx context.Context, request ExecRequest) (ExecReceipt, 
 	remaining := limit - int64(len(result.Stdout))
 	result.Stderr, stderrCut = p.redactor.bounded(state.stderr, remaining)
 	result.Truncated = state.truncated || stdoutCut || stderrCut
-	if cut.Load() || streamErr != nil || state.invalid || !state.finished || transport.ExitCode == nil || *transport.ExitCode != 0 {
+	// A cut on its own decides nothing: the end is unknown only when the
+	// complete record, the stream or the exit says so, and a run whose
+	// complete record arrived and whose transport ended cleanly completed
+	// even if the bound fired in between. A cut does decide that a run
+	// without a started record is not known never to have started.
+	if streamErr != nil || state.invalid || !state.finished || transport.ExitCode == nil || *transport.ExitCode != 0 {
 		result.RemoteState = RemoteUnknown
 		if !cut.Load() && streamErr == nil && !state.started && !state.invalid && transport.ExitCode != nil {
 			result.RemoteState = RemoteNotStarted

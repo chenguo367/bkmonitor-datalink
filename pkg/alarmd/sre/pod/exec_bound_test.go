@@ -18,7 +18,10 @@ type frameExecutor struct {
 	neverStart, neverComplete   bool
 	// exitOnCancel answers a cancelled stream as a local process killed by
 	// its context does: an exit code and no error.
-	exitOnCancel               bool
+	exitOnCancel bool
+	// holdAfterComplete keeps the stream open after the complete record
+	// until it is cut, then ends it cleanly.
+	holdAfterComplete          bool
 	invoked, startedAt, gaveUp time.Time
 }
 
@@ -52,6 +55,10 @@ func (f *frameExecutor) Stream(ctx context.Context, request StreamRequest) (Stre
 		return StreamResult{}, err
 	}
 	io.WriteString(request.Stdout, fmt.Sprintf(`{"nonce":%q,"event":"complete","exit_code":0}`+"\n", nonce))
+	if f.holdAfterComplete {
+		<-ctx.Done()
+		f.gaveUp = time.Now()
+	}
 	zero := 0
 	return StreamResult{ExitCode: &zero}, nil
 }
@@ -128,5 +135,21 @@ func TestAStartupCutIsUnknownWhateverTheTransportAnswers(t *testing.T) {
 	requireCode(t, err, RemoteUnknown)
 	if result.RemoteState != RemoteUnknown {
 		t.Fatalf("a startup cut read as %+v", result)
+	}
+}
+
+// A run whose complete record arrived is complete even when the bound fires
+// before its stream ends: the cut cannot make a known end unknown.
+func TestACutAfterTheCompleteRecordKeepsTheRunComplete(t *testing.T) {
+	t.Parallel()
+	provider, _, target := runtimeProvider(t)
+	executor := &frameExecutor{holdAfterComplete: true}
+	provider.options.Executor = executor
+	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}, TimeoutMS: 100})
+	if err != nil || result.RemoteState != RemoteCompleted || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("a completed run cut afterwards read as %+v %v", result, err)
+	}
+	if executor.gaveUp.IsZero() {
+		t.Fatal("the stream was never cut: the test did not reach the case")
 	}
 }
