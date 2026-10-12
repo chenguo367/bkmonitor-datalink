@@ -717,7 +717,6 @@ var alarmdWords = []string{
 	"issued",
 	"items",
 	"iter",
-	"job",
 	"jobs",
 	"json",
 	"judged",
