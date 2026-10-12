@@ -46,6 +46,11 @@ type Source interface {
 // one transaction, so fields read between two equal revisions are that
 // revision's.
 //
+// This rests on the revision changing on every publication. A writer that
+// published B and then A again between the two GETs would leave equal
+// revisions around fields of B: the platform's writer never reuses a
+// revision, and one that did would break this check.
+//
 // It is a pipeline rather than a MULTI or a script. A MULTI is what the
 // protocol suggests, but go-redis returns from a refused MULTI without
 // reading the rest of its replies and leaves them for the next command on
