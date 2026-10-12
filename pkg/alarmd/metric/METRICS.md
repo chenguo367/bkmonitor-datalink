@@ -97,6 +97,18 @@ Labels: `operation`, `result`
 
 Active Set Redis operation duration.
 
+## bkmonitor_alarmd_admission_cmdb_address_differs_total
+
+Labels: `grouped_by_target_ip`
+
+Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own bk_target_ip was not that host's address (another one, empty or missing), by whether the Plan's alert identity groups by bk_target_ip. Python's fuller overwrites bk_target_ip with the host's address on that branch and reads the alert's target from it; alarmd writes nothing back, so under grouped_by_target_ip="true" these are the series whose alert identity differs from Python's. Counted per admitted series per Plan per round: the rate is distinct (series, Plan) pairs times rounds a second, so for one Plan the pairs are about the rate times its period; it says whether this happens and roughly how much, and a non-zero true is followed by reading the objects; read against admission_cmdb_placed_by_host_id_total, the count these are a part of, which tells a zero here from a branch never taken. The address is compared exactly, as Python's dedupe sees it; a differing cloud area alone is not counted, a known undercount for Plans grouped by it. Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read through /metrics on each deployment it waits on.
+
+## bkmonitor_alarmd_admission_cmdb_placed_by_host_id_total
+
+Labels: `grouped_by_target_ip`
+
+Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id, whatever the record's own bk_target_ip, by whether the Plan's alert identity groups by bk_target_ip: the branch Python's fuller overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells "placed this way and the address always the host's" (this one rising) from "never placed this way" (this one zero too). Reader: the same decision, through /metrics. Retired with it.
+
 ## bkmonitor_alarmd_algorithm_evaluation_total
 
 Labels: `algorithm_family`, `result`
@@ -1046,6 +1058,12 @@ Asks for more memory the line refused, by consumer: cost_summary (groups past th
 Labels: `component`, `stage`, `result`, `reason_code`
 
 Bounded alarmd observations by pipeline stage and result.
+
+## bkmonitor_alarmd_observer_panics_total
+
+Labels: `observer`
+
+Panics an observer raised and the fan-out recovered, by observer; every other observer still received the observation. entry is a panic before any member. Any count is a defect. Reader: the release acceptance, at +5 and +15 minutes after each deploy (its observer_panics column).
 
 ## bkmonitor_alarmd_open_alert_set_authoritative_age_seconds
 

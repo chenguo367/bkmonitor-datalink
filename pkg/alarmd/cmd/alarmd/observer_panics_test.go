@@ -24,17 +24,22 @@ import (
 )
 
 // A panic in an observer handed the observation directly, outside any
-// fan-out, is still recovered.
-func TestAPanicOutsideTheFanOutIsRecovered(t *testing.T) {
+// fan-out, is still recovered, and counted under the entry rather than
+// swallowed.
+func TestAPanicOutsideTheFanOutIsCountedUnderTheEntry(t *testing.T) {
+	before := observability.ObserverPanicCounts()[observability.ObserverEntry]
 	observeRuntime(context.Background(), observability.ObserverFunc(func(context.Context, observability.Observation) {
 		panic("observer defect")
 	}), observability.Observation{})
+	if after := observability.ObserverPanicCounts()[observability.ObserverEntry]; after != before+1 {
+		t.Fatalf("entry panics %d -> %d, want one more", before, after)
+	}
 }
 
-// In the production assembly an observer that panics on every observation
-// is recovered in its own member, and the recorder before it in the fan-out
-// still records what happened.
-func TestTheProductionFanOutIsolatesAPanickingObserver(t *testing.T) {
+// The production assembly names its observers: one that panics on every
+// observation is counted under its own name, and the recorder before it in
+// the fan-out still records what happened.
+func TestTheProductionFanOutCountsAPanickingObserverByName(t *testing.T) {
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	installTwoPhaseTwoStrategies(t, ctx, client)
@@ -67,9 +72,17 @@ func TestTheProductionFanOutIsolatesAPanickingObserver(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	before := observability.ObserverPanicCounts()
 	failed, cancel := context.WithCancel(ctx)
 	cancel()
 	bundle.dependencies.PublishFleet(failed)
+	after := observability.ObserverPanicCounts()
+	if after[observability.ObserverAdditional] <= before[observability.ObserverAdditional] {
+		t.Fatalf("the panicking observer was not counted under its name: %v -> %v", before, after)
+	}
+	if after[observability.ObserverEntry] != before[observability.ObserverEntry] || after[observability.ObserverUnnamed] != before[observability.ObserverUnnamed] {
+		t.Fatalf("the panic escaped its member: %v -> %v", before, after)
+	}
 	if got := fleetPublishSeries(t, recorder, string(observability.ResultFailed)); got != 1 {
 		t.Fatalf("failed publish metric = %v, want the recorder to have recorded it", got)
 	}

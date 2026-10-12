@@ -227,10 +227,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// bounded diagnostic; the census is every owned Query Group's peak for
 	// the heartbeat, which has to be a census.
 	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
-	// Each member on its own, so that a panic in one leaves the others their
-	// observation.
-	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary,
-		retainedPeaks)
+	// Each member named, so that a panic in one is counted under it while the
+	// others still receive the observation.
+	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),
+		observability.Named(observability.ObserverAdditional, external.AdditionalObserver),
+		observability.Named(observability.ObserverTargetFlow, targetFlow),
+		observability.Named(observability.ObserverRejectionTally, rejectionTally),
+		observability.Named(observability.ObserverCostSummary, costSummary),
+		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks))
 	observer = phaseTwoRuntimeObserver(observer)
 	compiler, err := newPlanCompiler(cfg)
 	if err != nil {
@@ -707,14 +711,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
-		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
-		Now:                 external.Now,
-		Observer:            observer,
-		Admission:           seriesAdmission,
-		ObserveAdmission:    recorder.RecordSeriesAdmission,
-		ScopeDrops:          scopeDrops,
-		ObserveSeriesPulled: seriesPullTally.Add,
-		Lookback:            lookbackEngine,
+		MinReadyDelay:        cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
+		Now:                  external.Now,
+		Observer:             observer,
+		Admission:            seriesAdmission,
+		ObserveAdmission:     recorder.RecordSeriesAdmission,
+		ObserveHostPlacement: recorder.RecordHostPlacement,
+		ScopeDrops:           scopeDrops,
+		ObserveSeriesPulled:  seriesPullTally.Add,
+		Lookback:             lookbackEngine,
 	})
 	if err != nil {
 		return nil, err

@@ -3043,7 +3043,8 @@ func newPhaseTwoRuntimeObserver(recorder *metric.Recorder, logger *observability
 	}
 	logging := observability.NewLoggingObserver(logger, policy)
 	recorder.SetLogLineSource(logging.LineCounts)
-	return observability.Multi(recorder, logging), nil
+	return observability.Multi(observability.Named(observability.ObserverRecorder, recorder),
+		observability.Named(observability.ObserverLogging, logging)), nil
 }
 
 // publishedComposition is what a round hands the catalog gauges.
