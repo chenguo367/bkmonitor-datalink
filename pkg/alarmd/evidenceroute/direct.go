@@ -28,6 +28,11 @@ type registration struct {
 	expiresAt                        time.Time
 	roles                            roles.Set
 	legacy                           bool
+	// controlCapable is a registration that can hold the Control Leader
+	// lease: the control role, or a Worker standing as a fallback
+	// candidate. Who is the Leader is the lease's to say; this only says
+	// the process the lease names is one that can be.
+	controlCapable bool
 }
 
 // Absence may name an older binary's Worker registration. A malformed,
@@ -46,7 +51,8 @@ func (r *Router) readRegistration(ctx context.Context, id string) (registration,
 				return registration{}, false, errors.New("registered instance identity does not match")
 			}
 			return registration{id: instance.InstanceID, endpoint: instance.Endpoint, incarnation: instance.Incarnation,
-				token: instance.InternalToken, expiresAt: instance.ExpiresAt, roles: instance.Roles}, true, nil
+				token: instance.InternalToken, expiresAt: instance.ExpiresAt, roles: instance.Roles,
+				controlCapable: instance.ControlCapable()}, true, nil
 		}
 	}
 	worker, found, err := r.options.Store.ReadWorker(ctx, id)
@@ -105,7 +111,7 @@ func (r *Router) invokeDirect(ctx context.Context, call obchannel.Invocation) (o
 	if identity.legacy {
 		return obchannel.Response{}, false
 	}
-	if call.Target.ControlLeader && !identity.roles.Has(roles.Control) || call.Target.OwnerQueryGroup != "" && !identity.roles.Has(roles.Worker) {
+	if call.Target.ControlLeader && !identity.controlCapable || call.Target.OwnerQueryGroup != "" && !identity.roles.Has(roles.Worker) {
 		return fail("target_role_mismatch", "The registered target no longer declares the requested business role."), true
 	}
 	expected := call.Target.ExpectedIncarnation
@@ -145,7 +151,7 @@ func (r *Router) handleDirect(ctx context.Context, req *pb.EvidenceRequest, call
 	}
 	if req.ControlLeaderTarget {
 		leader, found, err := r.options.Store.ReadActiveControlLeader(ctx)
-		if err != nil || !found || leader.OwnerID != r.options.WorkerID || leader.OwnerEpoch != req.ControlEpoch || !local.roles.Has(roles.Control) {
+		if err != nil || !found || leader.OwnerID != r.options.WorkerID || leader.OwnerEpoch != req.ControlEpoch || !local.controlCapable {
 			return r.encode(r.failure(req.RequestId, "control_changed", "The control Leader or its lease term changed before this read."))
 		}
 		if req.OwnerQueryGroup != "" || req.OwnerEpoch != 0 {

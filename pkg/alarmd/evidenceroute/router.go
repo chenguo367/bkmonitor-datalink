@@ -145,7 +145,7 @@ func (r *Router) Handle(ctx context.Context, req *pb.EvidenceRequest) (*pb.Evide
 		}
 		return r.route(ctx, req)
 	case "execute":
-		if caller.id != leader.OwnerID || !caller.legacy && !caller.roles.Has(roles.Control) {
+		if caller.id != leader.OwnerID || !caller.legacy && !caller.controlCapable {
 			return nil, status.Error(codes.PermissionDenied, "Only the active Control Leader can dispatch evidence execution.")
 		}
 		if req.TargetWorkerId != r.options.WorkerID {

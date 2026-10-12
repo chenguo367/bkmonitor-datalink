@@ -3660,13 +3660,14 @@ func settleControlFacts(view *View, read controlRead, embeddedLeaderFacts bool) 
 	switch {
 	case read.current != nil:
 		mergeControlFacts(view, *read.current)
-		return &ControlFactsStanding{Source: ControlFactsFromRecord, Replica: read.current.Replica}
+		return &ControlFactsStanding{Source: ControlFactsFromRecord, Replica: read.current.Replica,
+			LeaderClass: read.current.CandidacyClass}
 	case embeddedLeaderFacts:
 		return &ControlFactsStanding{Source: ControlFactsFromEmbedded, Unavailable: read.unavailable()}
 	case read.previous != nil:
 		mergeControlFacts(view, *read.previous)
 		return &ControlFactsStanding{Source: ControlFactsFromPreviousTerm, Replica: read.previous.Replica,
-			Unavailable: read.unavailable()}
+			Unavailable: read.unavailable(), LeaderClass: read.previous.CandidacyClass}
 	}
 	if read.err != nil {
 		view.Gaps = append(view.Gaps, Gap{Kind: GapControlFactsUnavailable, Detail: gapDetail(read.err)})

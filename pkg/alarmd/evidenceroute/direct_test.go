@@ -180,3 +180,34 @@ func TestDirectControlLeaderRechecksTermAndKeepsResolvedLease(t *testing.T) {
 		t.Fatalf("changed control term executed or lost lease: %+v", result)
 	}
 }
+
+// A Worker that holds the control lease as the fallback candidate is the
+// Control Leader a direct read is routed to; a Worker that does not stand as a
+// candidate is not, whatever the lease names.
+func TestADirectControlLeaderReadReachesAFallbackLeader(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		candidacy string
+		code      string
+	}{
+		{name: "fallback candidate", candidacy: ownership.ControlCandidacyFallback},
+		{name: "no candidacy", code: "target_role_mismatch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			nodes, store := roleFixture(t)
+			leader := store.instances["leader"]
+			leader.Roles, leader.ControlCandidacy = roles.Set{roles.Worker}, test.candidacy
+			store.instances["leader"] = leader
+			result := invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
+			if test.code == "" {
+				if result.Status != "ok" || result.Meta.AnsweredBy != "leader" || nodes["leader"].runs.Load() != 1 {
+					t.Fatalf("control Leader read of a fallback Leader = %+v", result)
+				}
+				return
+			}
+			if result.Error == nil || result.Error.Code != test.code || nodes["leader"].runs.Load() != 0 {
+				t.Fatalf("control Leader read of a Worker that is no candidate = %+v", result)
+			}
+		})
+	}
+}

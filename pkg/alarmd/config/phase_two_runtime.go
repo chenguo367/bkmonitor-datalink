@@ -351,12 +351,8 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 		)
 	}
 	if selected.Has(roles.Control) {
-		if !canonicalText(c.Control.StrategyCachePrefix) || !canonicalText(c.Control.ProviderRoute) ||
-			!canonicalText(c.Control.Timezone) {
-			return errors.New("phase_two control source, provider route and timezone must be canonical text")
-		}
-		if _, err := time.LoadLocation(c.Control.Timezone); err != nil {
-			return errors.New("phase_two control timezone is invalid")
+		if err := c.validateControlSource(); err != nil {
+			return err
 		}
 	}
 	if err := platformsettings.ValidateKeyPrefix(c.PlatformSettings.RedisKeyPrefix); err != nil {
@@ -375,9 +371,8 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 		}
 	}
 	if selected.Has(roles.Control) {
-		if c.Control.RefreshInterval.Duration() <= 0 || c.Control.ReconcileInterval.Duration() <= 0 ||
-			c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() {
-			return errors.New("phase_two control refresh, reconcile and catalog TTL are invalid")
+		if err := c.validateControlCadence(); err != nil {
+			return err
 		}
 	}
 	if !ttlExceedsRenew(c.Ownership.ControlLeaderTTL, c.Ownership.ControlLeaderRenewInterval) ||
@@ -410,6 +405,47 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 		return errors.New("phase_two Coordinator and Sequencer budgets must be positive")
 	}
 	return nil
+}
+
+// validateControlSource is what compiling the strategies takes: where they
+// are read from, the route their queries are frozen onto and the timezone
+// they are evaluated in.
+func (c PhaseTwoRuntimeConfig) validateControlSource() error {
+	if !canonicalText(c.Control.StrategyCachePrefix) || !canonicalText(c.Control.ProviderRoute) ||
+		!canonicalText(c.Control.Timezone) {
+		return errors.New("phase_two control source, provider route and timezone must be canonical text")
+	}
+	if _, err := time.LoadLocation(c.Control.Timezone); err != nil {
+		return errors.New("phase_two control timezone is invalid")
+	}
+	return nil
+}
+
+// validateControlCadence is the Leader's round cadence against the catalog
+// retention it renews.
+func (c PhaseTwoRuntimeConfig) validateControlCadence() error {
+	if c.Control.RefreshInterval.Duration() <= 0 || c.Control.ReconcileInterval.Duration() <= 0 ||
+		c.Control.CatalogTTL.Duration() <= c.Control.RefreshInterval.Duration() {
+		return errors.New("phase_two control refresh, reconcile and catalog TTL are invalid")
+	}
+	return nil
+}
+
+// DormantControlInputsError says why a process without the control role
+// could not run the Control Leader's core rounds if it held the lease, or nil
+// when it could. It is the same checks a control process is refused startup
+// on, asked of a Worker instead of required of it: a Worker whose
+// configuration leaves them out is still a valid Worker, and is simply no
+// fallback candidate. Nothing is configured for this; the answer is read off
+// the configuration the Worker already has.
+func (c Config) DormantControlInputsError() error {
+	if err := c.PhaseTwo.validateControlSource(); err != nil {
+		return err
+	}
+	if err := c.PhaseTwo.validateControlCadence(); err != nil {
+		return err
+	}
+	return validateRuntimePrefixIsolation(c.Redis.StatePrefix, c.PhaseTwo.Control.StrategyCachePrefix)
 }
 
 func ttlExceedsRenew(ttl, renew Duration) bool {

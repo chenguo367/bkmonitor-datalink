@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
 // ControlFacts carries a control instance's observations independently of
@@ -33,6 +32,11 @@ type ControlFacts struct {
 	AssignmentSweep  *AssignmentSweepFacts  `json:"assignment_sweep,omitempty"`
 	LeaderRound      *LeaderRoundFacts      `json:"leader_round,omitempty"`
 	ViewStream       *ViewStreamFacts       `json:"view_stream,omitempty"`
+
+	// CandidacyClass is the class the Leader that wrote the record stands
+	// in: preferred, or fallback while a Worker leads because no control
+	// process is there. Empty in records written before candidacy existed.
+	CandidacyClass string `json:"candidacy_class,omitempty"`
 }
 
 func (facts ControlFacts) Validate() error {
@@ -190,7 +194,7 @@ func (source registeredControlFacts) ControlFacts(ctx context.Context, at time.T
 	if err := instance.Validate(); err != nil {
 		return ControlFactsReading{}, false, err
 	}
-	if instance.InstanceID != leader.OwnerID || !instance.ExpiresAt.After(at) || !instance.Roles.Has(roles.Control) {
+	if instance.InstanceID != leader.OwnerID || !instance.ExpiresAt.After(at) || !instance.ControlCapable() {
 		return ControlFactsReading{}, false, errors.New("alarmd fleet: control leader instance is expired or not a control instance")
 	}
 	facts, found, err := source.reader.LoadControl(ctx)
@@ -252,6 +256,11 @@ type ControlFactsStanding struct {
 	Replica string `json:"replica,omitempty"`
 	// Unavailable is why the current term's record was not used.
 	Unavailable string `json:"unavailable,omitempty"`
+	// LeaderClass is the class of the Leader that wrote the record used,
+	// for record and previous_term: preferred, or fallback while a Worker
+	// leads because no control process is there. Empty when the record
+	// does not say.
+	LeaderClass string `json:"leader_class,omitempty"`
 }
 
 type controlRead struct {

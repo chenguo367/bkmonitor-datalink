@@ -301,6 +301,10 @@ func TestControlFactsSourceChecksLeaseRoleIncarnationAndTakeover(t *testing.T) {
 		"worker role": {mutate: func(registry *stubControlRegistry, _ *stubControlReader) {
 			registry.instance.Roles = roles.Set{roles.Worker}
 		}, fails: true},
+		"worker standing as the fallback candidate": {mutate: func(registry *stubControlRegistry, _ *stubControlReader) {
+			registry.instance.Roles = roles.Set{roles.Worker}
+			registry.instance.ControlCandidacy = ownership.ControlCandidacyFallback
+		}, term: ControlTermCurrent},
 		"facts absent":         {mutate: func(_ *stubControlRegistry, reader *stubControlReader) { reader.found = false }, fails: true},
 		"previous incarnation": {mutate: func(_ *stubControlRegistry, reader *stubControlReader) { reader.facts.Incarnation = "previous-process" }, fails: true},
 		"previous epoch": {mutate: func(_ *stubControlRegistry, reader *stubControlReader) {
@@ -339,5 +343,33 @@ func TestControlFactsSourceChecksLeaseRoleIncarnationAndTakeover(t *testing.T) {
 				t.Fatalf("ControlFacts() = (%+v, %v, %v)", got, found, err)
 			}
 		})
+	}
+}
+
+func TestTheViewSaysWhichClassOfLeaderWroteTheControlRecord(t *testing.T) {
+	for _, testCase := range []struct {
+		term  ControlTerm
+		class string
+		from  string
+	}{
+		{term: ControlTermCurrent, class: ownership.ControlCandidacyFallback, from: ControlFactsFromRecord},
+		{term: ControlTermCurrent, class: ownership.ControlCandidacyPreferred, from: ControlFactsFromRecord},
+		{term: ControlTermCurrent, class: "", from: ControlFactsFromRecord},
+		{term: ControlTermPrevious, class: ownership.ControlCandidacyFallback, from: ControlFactsFromPreviousTerm},
+	} {
+		facts := controlFixture(now)
+		if testCase.term == ControlTermPrevious {
+			facts = controlFixture(now.Add(-90 * time.Second))
+		}
+		facts.Activation = nil
+		facts.CandidacyClass = testCase.class
+		service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
+			stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: healthySnapshots()})
+		service.SetControlFactsSource(stubControlFacts{facts: facts, term: testCase.term, found: true})
+		summary, part := service.Summarized(context.Background(), time.Minute)
+		health := healthOf(&summary, part, now)
+		if standing := health.ControlFacts; standing == nil || standing.Source != testCase.from || standing.LeaderClass != testCase.class {
+			t.Fatalf("%s record of a %q Leader: health control facts = %+v", testCase.term, testCase.class, standing)
+		}
 	}
 }

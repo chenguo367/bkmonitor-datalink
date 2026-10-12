@@ -802,6 +802,7 @@ func openProductionPhaseTwoBundleAssembly(
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		Roles:               cfg.EffectiveRoles(),
+		ControlCandidate:    phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyFallback,
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,
@@ -1185,7 +1186,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// its own. It exists only with the alert link's Console: the difference
 	// is the link's roster minus the snapshot, and a deployment without the
 	// link has neither the roster nor the alerts it would close.
-	if cfg.HasRole(roles.Control) && linkd.Console != nil {
+	if absentCloseWired(cfg, linkd.Console != nil) {
 		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events)
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
 		absentPage.bind(absentClose)

@@ -8,7 +8,6 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
 func wireRoleControlFacts(service *fleet.Service, registry *ownership.RedisStore, store *fleet.RedisStore, runtime *phaseTwoRoleRuntime) error {
@@ -24,7 +23,7 @@ func wireRoleControlFacts(service *fleet.Service, registry *ownership.RedisStore
 }
 
 func publishRoleControlFacts(ctx context.Context, bundle *phaseTwoWorkerBundle, store *fleet.RedisStore, runtime *phaseTwoRoleRuntime) {
-	if runtime == nil || bundle == nil || !bundle.dependencies.Config.HasRole(roles.Control) || bundle.dependencies.ViewStreamStats == nil {
+	if runtime == nil || bundle == nil || bundle.candidacy == "" || bundle.dependencies.ViewStreamStats == nil {
 		return
 	}
 	stream := bundle.dependencies.ViewStreamStats()
@@ -37,7 +36,8 @@ func publishRoleControlFacts(ctx context.Context, bundle *phaseTwoWorkerBundle, 
 		ActivationHeader: bundle.activationHeaderFleetFacts(), ControlSource: bundle.controlSourceFleetFacts(),
 		Rebalance: bundle.rebalanceFleetFacts(), AssignmentScope: bundle.assignmentScopeFleetFacts(),
 		AssignmentSweep: bundle.assignmentSweepFleetFacts(), LeaderRound: bundle.leaderRoundFleetFacts(),
-		ViewStream: viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, bundle.dependencies.Now)()}
+		ViewStream:     viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, bundle.dependencies.Now)(),
+		CandidacyClass: bundle.candidacy}
 	err := store.PublishControl(ctx, facts)
 	bundle.dependencies.Recorder.ObserveControlFactsWrite(fleet.ControlPublishResult(err))
 	if err != nil {

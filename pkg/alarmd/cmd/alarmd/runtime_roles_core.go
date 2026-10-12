@@ -65,7 +65,13 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 
 	var strategySource controlplane.StrategySource
 	var planner controlplane.PrimaryQueryCompiler
-	if cfg.HasRole(roles.Control) {
+	// A fallback candidate builds the same source and compiler as a control
+	// process and leaves them idle: a follower's rounds never read them, and
+	// a fallback that takes the lease runs the core control rounds with them
+	// unchanged. Building them costs a client handle and a compiler, no
+	// reads.
+	candidacy := phaseTwoControlCandidacy(cfg)
+	if candidacy != "" {
 		strategySource, err = newStrategySource(redisForCaller(controlClient, redisfailure.CallerStrategySource), cfg.PhaseTwo.Control.StrategyCachePrefix)
 		if err != nil {
 			return nil, err
@@ -297,8 +303,9 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 	timelineRepairs := &controlplane.TimelineRepairRequests{}
 	activator.WithTimelineRepairs(timelineRepairs)
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
-		Roles:  cfg.EffectiveRoles(),
-		Source: strategySource, Planner: planner, Reconciler: reconciler, Activator: activator,
+		Roles:            cfg.EffectiveRoles(),
+		ControlCandidate: candidacy == ownership.ControlCandidacyFallback,
+		Source:           strategySource, Planner: planner, Reconciler: reconciler, Activator: activator,
 		Repository: repository, Schedules: catalog, Progress: progressStore,
 		Observer: observer,
 		Recorder: recorder,

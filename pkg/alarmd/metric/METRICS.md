@@ -391,6 +391,12 @@ Labels: `field`
 
 Invalid control health facts by the field that was wrong. Read beside control_health_facts_total, which grows on every round; this one is zero on a correct program, and naming the field is what makes it actionable rather than a thing to watch.
 
+## bkmonitor_alarmd_control_leader_transitions_total
+
+Labels: `to_class`, `reason`
+
+Control Leader lease moves this process made, by the class the lease moved to (preferred, fallback, or none for a release nobody was named to take) and why: acquire_free (a preferred candidate took a free lease), fallback_takeover (a Worker without the control role took it because no preferred candidate was live and ready), handback (a fallback Leader gave it back once a preferred candidate had been ready for a whole instance record lifetime), release (given up at shutdown). Summed over the processes: fallback_takeover without a handback later is a deployment whose control process has not come back; handback rising faster than fallback_takeover cannot happen, and the two rising together every few minutes is a control process that keeps dying.
+
 ## bkmonitor_alarmd_control_read_duration_seconds
 
 Labels: `read`
