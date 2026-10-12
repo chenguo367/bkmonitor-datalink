@@ -46,15 +46,15 @@ func historyAheadExecution(t *testing.T) (execution.FrozenExecutionContractRef, 
 	auxiliary := frozen.Requirements[0]
 	auxiliary.RequirementID, auxiliary.DatasetName = "earlier-ready-history", "earlier_ready_history"
 	auxiliary.Role, auxiliary.LogicalQueryRef = execution.InputRoleAlgorithmDependency, auxiliaryRef
-	auxiliary.RelativeWindow = execution.RelativeQueryWindow{StartOffsetSeconds: -120, EndOffsetSeconds: -20, HalfOpen: true}
+	auxiliary.RelativeWindow = execution.RelativeQueryWindow{StartOffsetSeconds: -120, EndOffsetSeconds: -5, HalfOpen: true}
 	frozen.Requirements = append(frozen.Requirements, auxiliary)
 	frozen.QueryFacts[auxiliaryRef] = auxiliaryFacts
 	return bindFrozenDueDigest(t, contractRef, frozen), frozen, evaluationTime
 }
 
 // A Slot that arrives before any of its queries is readable, with their
-// readiness 20 s apart, is not deferred as a whole: it waits in place twice,
-// 10 s with nothing sent and 20 s with its dependency sent, and says so on
+// readiness 5 s apart, is not deferred as a whole: it waits in place twice,
+// 5 s with nothing sent and 5 s with its dependency sent, and says so on
 // its completion - the most input its consumer had retained at either end of
 // a wait, exactly, and a non-zero estimate of the copies it made for itself.
 // Here 4096 bytes arrive during each wait, so the most is the 8192 held when
@@ -79,9 +79,9 @@ func TestAnInPlaceReadinessWaitIsMeasured(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait := completion.InPlaceWait
-	if wait == nil || wait.Waits != 2 || wait.TotalMillis != 30_000 || wait.LongestMillis != 20_000 ||
-		wait.SentBeforeFirstWait != 0 || wait.BeforeAnySentMillis != 10_000 || wait.HeldInputBytes != 8_192 || wait.HeldPreparedBytes == 0 {
-		t.Fatalf("in-place wait %+v, want 10 s with nothing sent then 20 s, the 8192 input bytes held at the second wait's end and a prepared estimate", wait)
+	if wait == nil || wait.Waits != 2 || wait.TotalMillis != 10_000 || wait.LongestMillis != 5_000 ||
+		wait.SentBeforeFirstWait != 0 || wait.BeforeAnySentMillis != 5_000 || wait.HeldInputBytes != 8_192 || wait.HeldPreparedBytes == 0 {
+		t.Fatalf("in-place wait %+v, want 5 s with nothing sent then 5 s, the 8192 input bytes held at the second wait's end and a prepared estimate", wait)
 	}
 }
 

@@ -77,7 +77,7 @@ func TestAScheduledSlotCompletionCarriesTheSlotAfterIt(t *testing.T) {
 	if len(bundle.queryGroups) != 1 {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
-	backend.clock.Store(base*1000 + readWaitOf(cfg, bundle.queryGroups[0], 60).Milliseconds() + 500)
+	backend.clock.Store(base*1000 + firstReadWaitOf(cfg, bundle.queryGroups[0], 60).Milliseconds() + 500)
 	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatal(err)
 	}

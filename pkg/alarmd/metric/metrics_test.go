@@ -486,6 +486,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_read_hold_transition_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_transition_overtaken_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_predecessor_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_read_hold_seeds_total"] = "variableLabels: {origin}"
 	expected["bkmonitor_alarmd_read_hold_transition_clamped_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_read_hold_record_corrupt_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_read_hold_retire_close_failed_total"] = "variableLabels: {}"

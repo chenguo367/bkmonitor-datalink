@@ -648,8 +648,13 @@ func (fact FrozenSlotContractFact) validateAgainst(request FreezeSlotContractReq
 // and the read holds to measure lateness from the moment the group actually
 // reads. A place that added the settling wait itself would disagree with the
 // read by up to the phase.
+//
+// The settling wait here is the floor, MinimumSettlingWait, or the
+// deployment's own wait when that is shorter: how much longer a group's data
+// takes to land is measured per group and read as its read hold (readhold),
+// which starts a group nothing has measured at the deployment's wait.
 func ReadWaitWithinQueryBudget(queryGroup QueryGroupIdentity, queryBudget, configured time.Duration) time.Duration {
-	settle := SettlingWaitWithinQueryBudget(queryBudget, configured)
+	settle := min(SettlingWaitWithinQueryBudget(queryBudget, configured), MinimumSettlingWait)
 	return settle + readPhase(queryGroup, readPhaseSpread(queryBudget, settle))
 }
 

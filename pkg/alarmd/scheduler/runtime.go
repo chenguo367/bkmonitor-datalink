@@ -291,11 +291,17 @@ type FlightCoordinator struct {
 	// active is each Query Group's flight held now, by what; released is
 	// told of each Query Group whose hold turned a Slot away, once the hold
 	// ends (OnTurnedAwayReleased).
-	active                 map[execution.QueryGroupIdentity]flightHold
-	released               func(execution.QueryGroupIdentity)
-	recoveryEnabled        bool
-	limits                 RecoveryLimits
-	now                    func() time.Time
+	active          map[execution.QueryGroupIdentity]flightHold
+	released        func(execution.QueryGroupIdentity)
+	recoveryEnabled bool
+	limits          RecoveryLimits
+	now             func() time.Time
+	// holds is the last day's normal permit holds (HoldReference).
+	holds HourlyMedian
+	// recoveryAcquires is the part of permitAcquires asked by a recovery
+	// operation; normalRequests the normal ones by second.
+	recoveryAcquires       uint64
+	normalRequests         SecondPeak
 	normalWaiters          []*queryPermitWaiter
 	recoveryWaiters        []*queryPermitWaiter
 	recoveryChannelWaiters []*recoveryChannelWaiter

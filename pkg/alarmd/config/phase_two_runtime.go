@@ -109,22 +109,28 @@ type PhaseTwoOwnershipConfig struct {
 }
 
 type PhaseTwoSchedulerConfig struct {
-	// ActiveExecutionLimit bounds outstanding Runner invocations. It is derived
-	// from the container's CPU budget alongside the permits below, and there is
-	// no unlimited setting: zero was one until production showed it produced
-	// parked executions rather than query throughput.
-	ActiveExecutionLimit int      `yaml:"-"`
-	TickInterval         Duration `yaml:"-"`
-	// Admission and queue depth are derived from the container's CPU budget.
-	ProcessQueryPermits   int      `yaml:"-"`
-	RecoveryQueryPermits  int      `yaml:"-"`
-	ReadyQueueCapacity    int      `yaml:"-"`
-	RecoveryQueueCapacity int      `yaml:"-"`
-	MaxQueuedItemsPerQG   int      `yaml:"-"`
-	MaxReplaySlots        uint32   `yaml:"-"`
-	MaxReplayAge          Duration `yaml:"-"`
-	RetryMinDelay         Duration `yaml:"-"`
-	RetryMaxDelay         Duration `yaml:"-"`
+	// ActiveExecutionLimit bounds outstanding Runner invocations. It and the
+	// permits and queues below are the shape a process starts with
+	// (config.DeriveScheduler); once it knows the work it owns the runtime
+	// sizes them from that (config.DeriveSchedulerShape), inside
+	// ActiveExecutionCeiling. There is no unlimited setting: zero was one
+	// until production showed it produced parked executions rather than query
+	// throughput.
+	ActiveExecutionLimit int `yaml:"-"`
+	// ActiveExecutionCeiling is the most executions the container's memory
+	// can hold parked: the dispatcher's slot count and the Redis pool's
+	// cover. It does not move while the process runs.
+	ActiveExecutionCeiling int      `yaml:"-"`
+	TickInterval           Duration `yaml:"-"`
+	ProcessQueryPermits    int      `yaml:"-"`
+	RecoveryQueryPermits   int      `yaml:"-"`
+	ReadyQueueCapacity     int      `yaml:"-"`
+	RecoveryQueueCapacity  int      `yaml:"-"`
+	MaxQueuedItemsPerQG    int      `yaml:"-"`
+	MaxReplaySlots         uint32   `yaml:"-"`
+	MaxReplayAge           Duration `yaml:"-"`
+	RetryMinDelay          Duration `yaml:"-"`
+	RetryMaxDelay          Duration `yaml:"-"`
 }
 
 func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits {

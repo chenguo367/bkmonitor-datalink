@@ -156,7 +156,11 @@ type RuntimeCapacityFacts struct {
 	// field named for a setting sends whoever is reading it to look for a
 	// configuration that does not exist, at the moment they can least afford it.
 	// Nothing outside the process can set either value.
-	DerivedActiveExecutions   int    `json:"derived_active_executions"`
+	DerivedActiveExecutions int `json:"derived_active_executions"`
+	// ActiveExecutionCeiling is the most the runtime may size the execution
+	// slots to, the container's memory over one parked execution; the values
+	// around it are the startup shape the runtime re-derives from its work.
+	ActiveExecutionCeiling    int    `json:"active_execution_ceiling"`
 	EffectiveActiveExecutions int    `json:"effective_active_executions"`
 	QueryPermits              int    `json:"query_permits"`
 	RecoveryQueryPermits      int    `json:"recovery_query_permits"`

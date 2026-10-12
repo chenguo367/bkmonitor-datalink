@@ -30,7 +30,7 @@ func TestTheReplayGuardEstimatesTheGroupsOwnReadMoment(t *testing.T) {
 			t.Fatalf("hold %d: estimated ready %d, access reads at %d", hold, got, want)
 		}
 	}
-	if phase := execution.ReadWaitWithinQueryBudget("query-group-1", 55*time.Second, 30*time.Second) - 30*time.Second; phase <= 0 {
+	if phase := execution.ReadWaitWithinQueryBudget("query-group-1", 55*time.Second, 30*time.Second) - execution.MinimumSettlingWait; phase <= 0 {
 		t.Fatalf("query-group-1 has no phase on a 60s schedule, so this test cannot tell the estimates apart")
 	}
 }

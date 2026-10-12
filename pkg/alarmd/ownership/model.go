@@ -157,6 +157,13 @@ type AppliedControlFacts struct {
 // WorkerLoad is the worker's own occupancy at the heartbeat, copied from the
 // capacity its fleet snapshot already reports; it adds no measurement. It is
 // written for a scheduler that will weigh it later, and read by nothing yet.
+//
+// Placement must not read PermitBudget, or anything else here that the
+// worker re-derives while it runs: the query budget is sized from the work
+// the worker owns once a minute (config.DeriveSchedulerShape), so placing by
+// it would move work every time the budget followed the work, and the next
+// derivation would move it back. Only RetainedPoolBytes, which is fixed by
+// the container, is read (the cost ledger's byte constraint).
 type WorkerLoad struct {
 	OwnedQueryGroups int     `json:"owned_query_groups"`
 	PermitsHeld      int     `json:"permits_held"`

@@ -205,6 +205,7 @@ func phaseTwoRuntimeCapacity(cfg config.Config, inputs config.CapacityInputs) ob
 	goRuntime := config.DeriveGoRuntime(inputs)
 	return observability.RuntimeCapacityFacts{
 		DerivedActiveExecutions:   s.ActiveExecutionLimit,
+		ActiveExecutionCeiling:    s.ActiveExecutionCeiling,
 		EffectiveActiveExecutions: min(s.ActiveExecutionLimit, s.ReadyQueueCapacity),
 		QueryPermits:              s.ProcessQueryPermits, RecoveryQueryPermits: s.RecoveryQueryPermits,
 		RedisPoolSize: cfg.Redis.PoolSize,

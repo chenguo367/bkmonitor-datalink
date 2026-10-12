@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -69,8 +70,9 @@ func TestEveryContainerShapeDerivesARunnableConfiguration(t *testing.T) {
 			// The pool is what the block profile found queueing, and queueing
 			// for a connection must never be what gates execution.
 			admitted := cfg.AdmittedQueryConcurrency()
-			if pool := DeriveRedisPoolSize(inputs.CPUBudget); pool <= admitted {
-				t.Errorf("pool %d does not clear admitted concurrency %d", pool, admitted)
+			if pool := DeriveRedisPoolSize(inputs); pool <= admitted || pool <= cfg.PhaseTwo.Scheduler.ActiveExecutionLimit {
+				t.Errorf("pool %d does not clear admitted concurrency %d and the %d execution slots", pool, admitted,
+					cfg.PhaseTwo.Scheduler.ActiveExecutionLimit)
 			}
 		})
 	}
@@ -169,30 +171,105 @@ func TestControlTimelineCacheBudgetHoldsAnOwnedWorkingSet(t *testing.T) {
 // every shape while staying inside the ready queue.
 func TestActiveExecutionsClearTheMeasuredBatchFloor(t *testing.T) {
 	const (
-		productionCPU      = 8
+		productionMemory   = 8 << 30
 		measuredBatchFloor = 64
 	)
 	for _, inputs := range containerShapes() {
 		derived := DeriveScheduler(inputs)
-		if derived.ActiveExecutions <= 0 {
-			t.Fatalf("%d CPU: active executions = %d, want a bound rather than none",
-				inputs.CPUBudget, derived.ActiveExecutions)
+		if derived.ActiveExecutions <= 0 || derived.ActiveExecutions != derived.ActiveExecutionCeiling {
+			t.Fatalf("%d MiB: active executions = %d of a %d ceiling, want the ceiling until the work is known",
+				inputs.MemoryLimitBytes>>20, derived.ActiveExecutions, derived.ActiveExecutionCeiling)
 		}
-		// Below the permit budget the slots cannot keep the permits fed; above
-		// the ready queue the queue would bind first and the pair would be
-		// describing two different limits.
+		// The slots have to be able to feed every permit, and the ready queue
+		// has to be able to feed every slot.
 		if admitted := derived.AdmittedConcurrency(); derived.ActiveExecutions <= admitted {
-			t.Fatalf("%d CPU: active executions %d cannot keep %d permits fed",
-				inputs.CPUBudget, derived.ActiveExecutions, admitted)
+			t.Fatalf("%d MiB: active executions %d cannot keep %d permits fed",
+				inputs.MemoryLimitBytes>>20, derived.ActiveExecutions, admitted)
 		}
 		if derived.ActiveExecutions > derived.ReadyQueueCapacity {
-			t.Fatalf("%d CPU: active executions %d exceed the %d ready queue",
-				inputs.CPUBudget, derived.ActiveExecutions, derived.ReadyQueueCapacity)
+			t.Fatalf("%d MiB: active executions %d exceed the %d ready queue",
+				inputs.MemoryLimitBytes>>20, derived.ActiveExecutions, derived.ReadyQueueCapacity)
 		}
-		if inputs.CPUBudget == productionCPU && derived.ActiveExecutions < measuredBatchFloor {
-			t.Fatalf("%d CPU: active executions %d are below the measured batch floor of %d",
-				inputs.CPUBudget, derived.ActiveExecutions, measuredBatchFloor)
+		if inputs.MemoryLimitBytes == productionMemory && derived.ActiveExecutionCeiling < measuredBatchFloor {
+			t.Fatalf("%d MiB: an execution ceiling of %d is below the measured batch floor of %d",
+				inputs.MemoryLimitBytes>>20, derived.ActiveExecutionCeiling, measuredBatchFloor)
 		}
+	}
+}
+
+// No scheduler bound reads the CPU. A query permit and an execution slot are
+// held while the query service and Redis answer, which no core spends; two
+// containers that differ only in cores get the same shape and the same pool.
+func TestTheSchedulerShapeDoesNotReadTheCPU(t *testing.T) {
+	for _, memory := range []uint64{512 << 20, 4 << 30, 32 << 30} {
+		few := CapacityInputs{CPUBudget: 1, MemoryLimitBytes: memory}
+		many := CapacityInputs{CPUBudget: 64, MemoryLimitBytes: memory}
+		if DeriveScheduler(few) != DeriveScheduler(many) || DeriveRedisPoolSize(few) != DeriveRedisPoolSize(many) {
+			t.Fatalf("%d MiB: 1 core %+v pool %d, 64 cores %+v pool %d", memory>>20,
+				DeriveScheduler(few), DeriveRedisPoolSize(few), DeriveScheduler(many), DeriveRedisPoolSize(many))
+		}
+	}
+	// The ceiling is the runtime's memory beyond the retained pool over what
+	// one parked execution holds: a 4 GiB container has 1 GiB of it.
+	if got := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30}).ActiveExecutionCeiling; got != (1<<30)/bytesPerParkedExecution {
+		t.Fatalf("4 GiB execution ceiling = %d, want %d", got, (1<<30)/bytesPerParkedExecution)
+	}
+}
+
+// The bounds follow the work: each is the demand's rate times what one unit
+// holds it for, twice over, inside the container's ceiling. The figures are a
+// production replica's: 58 queries ready in its busiest second, a 90 ms
+// answer, half a replay a second, 15 Slots ready in a second running 1.5 s,
+// 700 owned Query Groups.
+func TestTheSchedulerShapeFollowsTheDemand(t *testing.T) {
+	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
+	demand := SchedulerDemand{PeakQueriesPerSecond: 58, ReplayQueriesPerSecond: 0.5, PeakSlotsPerSecond: 15,
+		Hold: 90 * time.Millisecond, Execution: 1500 * time.Millisecond, OwnedQueryGroups: 700, MaxQueuedItemsPerQG: 16}
+	got := DeriveSchedulerShape(ceiling, demand)
+	want := DerivedScheduler{ProcessQueryPermits: 11, RecoveryQueryPermits: 1, ActiveExecutions: 45,
+		ReadyQueueCapacity: 700*16 + 1, RecoveryQueueCapacity: 700*16 + 1, ActiveExecutionCeiling: ceiling.ActiveExecutionCeiling}
+	if got != want {
+		t.Fatalf("shape %+v, want %+v", got, want)
+	}
+	// A slower service does not raise the budget: the hold is the caller's
+	// lowest hourly median, and the same demand at the same hold is the same
+	// shape however slow the last answers were.
+	if again := DeriveSchedulerShape(ceiling, demand); again != got {
+		t.Fatalf("the same demand derived %+v and then %+v", got, again)
+	}
+}
+
+// Both sides of every bound: no demand still leaves the smallest shape that
+// runs - one recovery permit, one process permit above it, an execution for
+// each and one more, a queue one deeper than a Query Group may queue - and a
+// demand past
+// the container's memory is held at its ceiling, permits never above the
+// slots that feed them.
+func TestTheSchedulerShapeStaysInsideItsBounds(t *testing.T) {
+	ceiling := DeriveScheduler(CapacityInputs{MemoryLimitBytes: 4 << 30})
+	floor := DeriveSchedulerShape(ceiling, SchedulerDemand{MaxQueuedItemsPerQG: 16})
+	if floor.RecoveryQueryPermits != 1 || floor.ProcessQueryPermits != 2 || floor.ActiveExecutions != 4 || floor.ReadyQueueCapacity != 17 {
+		t.Fatalf("no demand derived %+v, want 1/2/4 and a queue of 17", floor)
+	}
+	flood := DeriveSchedulerShape(ceiling, SchedulerDemand{PeakQueriesPerSecond: 1e9, ReplayQueriesPerSecond: 1e9,
+		PeakSlotsPerSecond: 1e9, Hold: time.Second, Execution: time.Second, OwnedQueryGroups: 10, MaxQueuedItemsPerQG: 16})
+	top := ceiling.ActiveExecutionCeiling
+	if flood.ActiveExecutions != top || flood.RecoveryQueryPermits+flood.ProcessQueryPermits != top-1 {
+		t.Fatalf("a flood derived %+v against a ceiling of %d, want every slot and all but one permit at it", flood, top)
+	}
+	// What the coordinator requires of any shape it runs under.
+	for _, shape := range []DerivedScheduler{floor, flood} {
+		if shape.RecoveryQueryPermits < 1 || shape.RecoveryQueryPermits >= shape.ProcessQueryPermits ||
+			shape.ActiveExecutions <= shape.ProcessQueryPermits+shape.RecoveryQueryPermits ||
+			shape.ReadyQueueCapacity <= 16 || shape.RecoveryQueueCapacity <= 16 {
+			t.Fatalf("derived %+v, a shape the coordinator refuses", shape)
+		}
+	}
+	// Until a hold is measured a query is taken to hold its permit for half a
+	// second.
+	cold := DeriveSchedulerShape(ceiling, SchedulerDemand{PeakQueriesPerSecond: 10, MaxQueuedItemsPerQG: 16})
+	if cold.ProcessQueryPermits != 10 {
+		t.Fatalf("10 queries a second with no measured hold derived %d permits, want 10", cold.ProcessQueryPermits)
 	}
 }
 
@@ -350,5 +427,24 @@ func TestTheRetainedPointCeilingComesFromTheRepresentation(t *testing.T) {
 	// failure than the one it prevents.
 	if single < 1469 {
 		t.Fatalf("single-Level ceiling %d would refuse a 1469-point window that stores cleanly today", single)
+	}
+}
+
+// The series count is a guardrail implied by the bytes, not a budget beside
+// them: at the smallest a series can encode, the count allows every series
+// the retained bytes can hold, so a Slot of light series meets the byte bound
+// and never the count. The old divisor of 4 KiB turned such a Slot away by
+// count with most of its bytes free.
+func TestTheSeriesCountNeverBindsBeforeTheBytes(t *testing.T) {
+	for _, inputs := range containerShapes() {
+		budgets := DeriveCoordinator(inputs, 1, 1)
+		if budgets.MaxSeries != max(budgets.MaxRetainedBytes/MinimumSeriesBytes, 1) {
+			t.Fatalf("%d MiB: series guardrail %d for %d retained bytes", inputs.MemoryLimitBytes>>20, budgets.MaxSeries, budgets.MaxRetainedBytes)
+		}
+		// A Slot of 200-byte series that fills the retained bytes is within
+		// the count.
+		if light := budgets.MaxRetainedBytes / 200; light > budgets.MaxSeries {
+			t.Fatalf("%d MiB: %d series of 200 bytes fit the bytes but not the count %d", inputs.MemoryLimitBytes>>20, light, budgets.MaxSeries)
+		}
 	}
 }

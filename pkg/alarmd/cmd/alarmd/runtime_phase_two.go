@@ -618,7 +618,11 @@ type phaseTwoQueryGroupRuntime interface {
 }
 
 type phaseTwoWorkerBundleDependencies struct {
-	Config     config.Config
+	Config config.Config
+	// Flights is the process's query coordinator, whose budget the bundle
+	// sizes from the work it owns (schedulerShaper); nil keeps the startup
+	// shape.
+	Flights    *scheduler.FlightCoordinator
 	Health     *phaseTwoApplicationHealth
 	Control    phaseTwoControlRuntime
 	Ownership  phaseTwoOwnershipRuntime
@@ -815,6 +819,9 @@ type phaseTwoWorkerBundle struct {
 	// addressDiffers is the latest records whose address is not their
 	// host's, as the fleet snapshot publishes them.
 	addressDiffers *fleet.AddressDiffersSamples
+	// shaper sizes the query budget, execution slots and queues from the
+	// work this bundle owns; nil keeps the startup shape.
+	shaper *schedulerShaper
 }
 
 type phaseTwoScheduledRunner struct {
@@ -1060,6 +1067,9 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		assigned:       make(map[execution.QueryGroupIdentity]struct{}),
 		runners:        make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
 		liveness:       newPhaseTwoLiveness(dependencies.Now, dependencies.Recorder)}
+	if dependencies.Flights != nil {
+		bundle.shaper = newSchedulerShaper(dependencies.Flights, dependencies.Config, dependencies.Now)
+	}
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
@@ -1401,7 +1411,7 @@ func newPhaseTwoRunnerDispatcher(
 	oneShot bool,
 ) *phaseTwoRunnerDispatcher {
 	schedulerConfig := bundle.dependencies.Config.PhaseTwo.Scheduler
-	fanout := phaseTwoDispatcherFanout(schedulerConfig)
+	fanout := phaseTwoDispatcherFanout(bundle)
 	// A fresh dispatcher starts with no bounds. Entries carried over from a
 	// previous one would be answers about a schedule nobody has looked at since,
 	// and starting empty reproduces exactly what the first tick does today.
@@ -1522,6 +1532,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 		defer dispatcher.bundle.liveness.executionReturned(token)
 		if ctx.Err() == nil && dispatcher.bundle.enterScheduledRunner(scheduled) {
 			result.ran = true
+			defer dispatcher.bundle.shaper.executionStarted()()
 			func() {
 				defer dispatcher.bundle.exitScheduledRunner(scheduled.lifecycle)
 				defer startSlotTiming(runCtx, dispatcher.bundle.dependencies.Observer, observability.StageRunnerCompleted, time.Now)()
@@ -1624,6 +1635,14 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 			selectNormal = true
 		}
 
+		// The execution slots in force: the dispatcher runs the ceiling's
+		// worth of goroutines and offers work only while fewer than the
+		// derived bound are executing. A bound lowered under what is running
+		// takes nothing back; the next offer waits for a result.
+		slotsFull := dispatcher.slotsFull()
+		if slotsFull {
+			selectDelayed, selectNormal = false, false
+		}
 		var dispatch chan phaseTwoScheduledRunner
 		var scheduled phaseTwoScheduledRunner
 		if selectDelayed {
@@ -1636,7 +1655,9 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 
 		var retryTimer *time.Timer
 		var retryReady <-chan time.Time
-		if canceled == nil && dispatch == nil && len(dispatcher.delayed) > 0 {
+		// With every slot in use a due retry cannot run either: the next
+		// result wakes the loop, and a timer here would spin it.
+		if canceled == nil && dispatch == nil && !slotsFull && len(dispatcher.delayed) > 0 {
 			delay := dispatcher.delayed[0].readyAt.Sub(now)
 			if delay < 0 {
 				delay = 0
@@ -1934,7 +1955,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 		// appear anywhere in a 60 second CPU profile, and at a Worker owning tens
 		// of thousands it would. The queue becoming the owned set is what makes
 		// that the next thing to measure, not a reason to keep it too small.
-		limits := dispatcher.bundle.dependencies.Config.PhaseTwo.Scheduler
+		limits := dispatcher.bundle.schedulerShape()
 		recoveryCapacity := max(limits.RecoveryQueueCapacity, len(runners))
 		if readyAt.IsZero() {
 			if len(dispatcher.normal) >= limits.ReadyQueueCapacity {
@@ -1977,6 +1998,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				dispatcher.normal = append(dispatcher.normal, queued)
 			}
 			dispatcher.normalDirty = true
+			dispatcher.bundle.shaper.recordReady()
 		} else {
 			if len(dispatcher.delayed) >= recoveryCapacity {
 				latest := dispatcher.latestDelayedIndex()
@@ -2228,7 +2250,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 		// the first place.
 		return
 	}
-	if len(dispatcher.delayed) >= dispatcher.bundle.dependencies.Config.PhaseTwo.Scheduler.RecoveryQueueCapacity {
+	if len(dispatcher.delayed) >= dispatcher.bundle.schedulerShape().RecoveryQueueCapacity {
 		return
 	}
 	// The same entry the walk would build, not a bare one. This used to write
@@ -2288,7 +2310,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) flightReleased(queryGroup execution.
 func (dispatcher *phaseTwoRunnerDispatcher) queueNow(scheduled phaseTwoScheduledRunner) {
 	if !dispatcher.bundle.isCurrentScheduledRunner(scheduled) || dispatcher.queued[scheduled.queryGroup] != nil ||
 		dispatcher.active[scheduled.queryGroup] != nil ||
-		len(dispatcher.delayed) >= dispatcher.bundle.dependencies.Config.PhaseTwo.Scheduler.RecoveryQueueCapacity {
+		len(dispatcher.delayed) >= dispatcher.bundle.schedulerShape().RecoveryQueueCapacity {
 		return
 	}
 	dispatcher.delayed = append(dispatcher.delayed, dispatcher.queueEntry(scheduled, dispatcher.bundle.schedulerNow()))
@@ -3980,13 +4002,19 @@ func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 }
 
 // phaseTwoDispatcherFanout is how many execution slots the dispatcher runs:
-// one goroutine each, taking Slots off the queue. The limit is derived from
-// the container and validated positive, so the floor of one is reached only
-// by a Config assembled field by field in a test. There is no unlimited
-// fanout to fall back to.
-func phaseTwoDispatcherFanout(schedulerConfig config.PhaseTwoSchedulerConfig) int {
+// one goroutine each, taking Slots off the queue. A bundle that sizes its
+// shape from its work runs the container's ceiling and offers work only
+// while fewer than the derived bound execute; one that does not runs the
+// configured limit. The limit is derived from the container and validated
+// positive, so the floor of one is reached only by a Config assembled field
+// by field in a test. There is no unlimited fanout to fall back to.
+func phaseTwoDispatcherFanout(bundle *phaseTwoWorkerBundle) int {
+	schedulerConfig := bundle.dependencies.Config.PhaseTwo.Scheduler
 	fanout := max(schedulerConfig.ActiveExecutionLimit, 1)
-	if schedulerConfig.ReadyQueueCapacity > 0 && schedulerConfig.ReadyQueueCapacity < fanout {
+	if bundle.shaper != nil {
+		fanout = max(schedulerConfig.ActiveExecutionCeiling, fanout)
+	}
+	if schedulerConfig.ReadyQueueCapacity > 0 && schedulerConfig.ReadyQueueCapacity < fanout && bundle.shaper == nil {
 		fanout = schedulerConfig.ReadyQueueCapacity
 	}
 	return fanout
@@ -4007,7 +4035,7 @@ func (bundle *phaseTwoWorkerBundle) declineFleetFacts() *fleet.DeclineFacts {
 		declined = append(declined, fleet.DeclinedQueryGroup{QueryGroup: string(queryGroup), Stage: entry.stage, Since: entry.since.UTC()})
 	}
 	sort.Slice(declined, func(left, right int) bool { return declined[left].QueryGroup < declined[right].QueryGroup })
-	return &fleet.DeclineFacts{Fanout: phaseTwoDispatcherFanout(bundle.dependencies.Config.PhaseTwo.Scheduler), Total: len(declined),
+	return &fleet.DeclineFacts{Fanout: phaseTwoDispatcherFanout(bundle), Total: len(declined),
 		QueryGroups: declined[:min(len(declined), fleet.MaxDeclineSamples)]}
 }
 
@@ -4029,6 +4057,12 @@ func (bundle *phaseTwoWorkerBundle) declinedRegistration() []ownership.DeclinedQ
 
 func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, refresh bool) error {
 	bundle.declineHungExecutions(bundle.dependencies.Now())
+	if bundle.shaper.due() {
+		bundle.mu.RLock()
+		owned := len(bundle.runners)
+		bundle.mu.RUnlock()
+		bundle.shaper.derive(owned)
+	}
 	failureSeq := bundle.controlDependencyFailureSeq()
 	var queryGroups []execution.QueryGroupIdentity
 	var err error
@@ -4560,4 +4594,23 @@ func normalizeRuntimeShutdownError(err error, stoppedBeforeShutdown bool) error 
 		return nil
 	}
 	return fmt.Errorf("runtime component: %w", err)
+}
+
+// schedulerShape is the scheduler shape in force: the one the shaper last
+// derived, or the startup shape from the configuration.
+func (bundle *phaseTwoWorkerBundle) schedulerShape() config.DerivedScheduler {
+	if bundle.shaper != nil {
+		return bundle.shaper.shape()
+	}
+	s := bundle.dependencies.Config.PhaseTwo.Scheduler
+	return config.DerivedScheduler{ActiveExecutions: s.ActiveExecutionLimit, ProcessQueryPermits: s.ProcessQueryPermits,
+		RecoveryQueryPermits: s.RecoveryQueryPermits, ReadyQueueCapacity: s.ReadyQueueCapacity,
+		RecoveryQueueCapacity: s.RecoveryQueueCapacity, ActiveExecutionCeiling: max(s.ActiveExecutionCeiling, s.ActiveExecutionLimit)}
+}
+
+// slotsFull is whether every execution slot in force is in use: the
+// dispatcher runs the ceiling's worth of goroutines and offers work only
+// while fewer than the derived bound execute.
+func (dispatcher *phaseTwoRunnerDispatcher) slotsFull() bool {
+	return len(dispatcher.active) >= dispatcher.bundle.schedulerShape().ActiveExecutions
 }
