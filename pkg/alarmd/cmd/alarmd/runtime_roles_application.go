@@ -37,6 +37,10 @@ type phaseTwoRoleRuntime struct {
 	closeOnce      sync.Once
 	closeErr       error
 	failed         func(error)
+	// now stamps the instance record's expiry. The process clock in
+	// production; the bundle's clock where one is injected, so the record
+	// expires on the same clock its readers judge it by.
+	now func() time.Time
 }
 
 type roleEvidenceServer struct {
@@ -57,7 +61,7 @@ func openPhaseTwoRoleRuntime(cfg config.Config, recorder *metric.Recorder, facts
 	if err != nil {
 		return nil, err
 	}
-	runtime := &phaseTwoRoleRuntime{StreamIdentity: identity, Incarnation: incarnation, config: cfg,
+	runtime := &phaseTwoRoleRuntime{StreamIdentity: identity, Incarnation: incarnation, config: cfg, now: time.Now,
 		failed: func(err error) { recorder.ObserveDiagnosticRedisFailure("instance", redisfailure.Reason(err)) }}
 	defer func() {
 		if resultErr != nil {
@@ -137,7 +141,7 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 			registration := ownership.InstanceRegistration{InstanceID: runtime.config.PhaseTwo.Worker.ID,
 				Roles: runtime.config.EffectiveRoles(), Endpoint: runtime.StreamIdentity.Endpoint,
 				Incarnation: runtime.Incarnation, InternalToken: runtime.StreamIdentity.Token,
-				ExpiresAt: time.Now().Add(runtime.config.PhaseTwo.Worker.RegistrationTTL.Duration()), RoleStatus: statuses}
+				ExpiresAt: runtime.now().Add(runtime.config.PhaseTwo.Worker.RegistrationTTL.Duration()), RoleStatus: statuses}
 			round, stop := context.WithTimeout(ctx, time.Second)
 			err := runtime.store.RegisterInstance(round, registration)
 			stop()
