@@ -18,7 +18,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-const executionStateSchemaV2 = "alarmd-runtime-state-v2"
 const executionGapSchemaV2 = "alarmd-plan-gap-v2"
 
 type CompareAndSetBackend interface {
@@ -118,18 +117,6 @@ type ExecutionStore struct {
 		mu    sync.RWMutex
 		bytes map[execution.QueryGroupIdentity]uint64
 	}
-}
-
-type runtimeEnvelope struct {
-	Schema         string                                `json:"schema"`
-	Identity       execution.StateKeyIdentity            `json:"identity"`
-	BlobRevision   uint64                                `json:"blob_revision"`
-	ApplyVersion   execution.ApplyVersion                `json:"apply_version"`
-	MutationDigest execution.MutationDigest              `json:"mutation_digest"`
-	LastEventTime  int64                                 `json:"last_event_time"`
-	SeriesGuard    *execution.StateGuardFact             `json:"series_guard,omitempty"`
-	Levels         []execution.RuntimeLevelStateMutation `json:"levels"`
-	History        []execution.StateHistoryPoint         `json:"history"`
 }
 
 type gapEnvelope struct {
@@ -256,32 +243,20 @@ func rejectRuntimeBudget(items []execution.StateMutation) []execution.StateApply
 // classified on its own; a preflight witness is kept per readable key so the
 // following ApplyRuntime can prove what it saw without reading again.
 //
-// The read is in two passes, and the second one is usually empty. Every series
-// may hold two records - the framed one every binary of this era writes, and
-// the JSON envelope its predecessors wrote - and the round used to fetch both
-// keys of every series whether or not the older one held anything. On a
-// strategy retaining a long window that is the whole cost of the read: 1466
-// points are 7 KB framed and 344 KB as an envelope, so a Query Group of 249
-// series read 87.6 MB per round of which 85.7 MB was a representation with no
-// writer, and a read that size stops fitting in its deadline. The first pass
-// asks for the framed key alone; the second asks for the envelope only of the
-// series whose frame is missing or cannot be read by itself, which is what the
-// envelope was being kept for. A series whose frame answers is classified from
-// the frame in the first pass, exactly as it was when both keys arrived
-// together - the choice between the two records only ever mattered when both
-// held one.
+// Only the framed record is read. The JSON envelope under the older runtime
+// key is not: no binary since the framed record was introduced writes it, the
+// previous upstream snapshot included, so an envelope still present is a
+// record from before that and leaves on its own TTL. A series that only has
+// one starts warming, as a new series does.
 //
-// The older records are not deleted here or anywhere: they are not renewed
-// either (a frozen series is renewed under the representation it was read in),
-// so they leave on their own TTL. EnvelopeReads says how many series still
-// need the second read, which is how a deployment learns when the
-// compatibility pass can go.
+// A second pass reads, for the series still without a record whose Plan
+// carries history from the generation it moved from, that generation's frame.
 func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
 	if err := request.Contract.Validate(); err != nil || len(request.Items) == 0 || len(request.Items) > store.options.MaxItemsPerCall {
 		return execution.StatePreflightResult{}, fmt.Errorf("state: invalid runtime load request")
 	}
 	result := execution.StatePreflightResult{Items: make([]execution.RuntimeStateView, len(request.Items))}
-	pass := &runtimeLoadPass{frames: make(map[int][]byte)}
+	pass := &runtimeLoadPass{}
 	batch := &runtimeLoadBatch{}
 	roundLargest, anyRead := 0, false
 	flush := func() {
@@ -292,12 +267,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		// was read, and the next round's frame pass reads it there. Leaving it
 		// out committed the empty frame pass's zero as the Query Group's size,
 		// and the next round asked for every carried record in one batch.
-		if read && !pass.envelopes {
-			// Only the frame pass measures. The Query Group's committed size
-			// describes the key every write goes to and the one the next round
-			// reads first; the envelopes are leaving, and a size learned from
-			// them would bound the frame pass by records that will not be
-			// there.
+		if read {
 			anyRead = true
 			if largest > roundLargest {
 				roundLargest = largest
@@ -324,37 +294,10 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		batch.keys = append(batch.keys, framedKey)
 	}
 	flush()
-	// The second pass, for the series the first one could not answer from the
-	// frame alone. Its bound is what the store accepts as a value and nothing
-	// else - not the frames the first pass measured, and not its own earlier
-	// batches. See envelopeLoadBatchLimit for why both of those are traps.
-	pass.envelopes = true
-	for _, index := range pass.pending {
-		item := request.Items[index]
-		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
-		envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
-		var target StorageTarget
-		if err == nil {
-			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
-		}
-		if err != nil {
-			result.Items[index] = runtimeLoadFailure(view, err)
-			continue
-		}
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
-			flush()
-		}
-		batch.target = target
-		batch.indexes = append(batch.indexes, index)
-		batch.keys = append(batch.keys, envelopeKey)
-	}
-	flush()
-	// The third pass, for the series still without a record whose Plan
+	// The second pass, for the series still without a record whose Plan
 	// carries history from the generation it moved from: that generation's
-	// frame, under the same batching and the same byte count as the other
-	// two. Only the frame is read -- a record the previous generation still
-	// held only as an envelope is old enough to warm up again.
-	pass.envelopes, pass.carry = false, true
+	// frame, under the same batching and the same byte count as the first.
+	pass.carry = true
 	for index, item := range request.Items {
 		if item.CarryFrom == "" || item.CarryFrom == item.Identity.StateGeneration || result.Items[index].Status != execution.StateMissingWarming {
 			continue
@@ -370,12 +313,11 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			pass.carryUnreadable++
 			continue
 		}
-		// Bounded as the envelope pass is, by the largest value the store
-		// accepts and not by anything learned: the frame pass has just found
-		// no record for every one of these series, so what it learned about
-		// this Query Group says nothing about the size of what the previous
-		// generation holds.
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
+		// Bounded by the largest value the store accepts and not by anything
+		// learned: the frame pass has just found no record for every one of
+		// these series, so what it learned about this Query Group says nothing
+		// about the size of what the previous generation holds.
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.carryLoadBatchLimit()) {
 			flush()
 		}
 		batch.target = target
@@ -384,11 +326,6 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	}
 	flush()
 	result.CarryFound, result.CarryMissing, result.CarryUnreadable = pass.carryFound, pass.carryMissing, pass.carryUnreadable
-	result.EnvelopeReads = len(pass.pending)
-	result.EnvelopeAnswered, result.NoRecordYet = pass.envelopeAnswered, pass.noRecordYet
-	result.EnvelopeCorrupt = pass.envelopeCorrupt
-	result.FrameCorruptRescued, result.FrameCorruptLost = pass.frameCorruptRescued, pass.frameCorruptLost
-	result.Unclassified = pass.unclassified
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.
@@ -464,49 +401,26 @@ func (store *ExecutionStore) ApplyRuntime(ctx context.Context, request execution
 	return store.applyRuntime(ctx, request, nil)
 }
 
-// decodeRuntime reads a stored record in whichever representation it was
-// written and classifies it against the candidate the caller is about to
-// apply. The shape is read from the bytes, not from the key they came from:
-// the framed record announces itself with its magic, and everything else is
-// the JSON envelope. The view says which one it was.
+// decodeRuntime reads a stored framed record and classifies it against the
+// candidate the caller is about to apply. Bytes that do not carry the frame's
+// magic are corrupt: no writer of this or the previous snapshot stores any
+// other shape under the runtime key.
 func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
 	invalid := func(reason string) execution.RuntimeStateView {
 		return execution.RuntimeStateView{Identity: identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
 			ReasonCode: execution.ReasonCode(reason)}
 	}
-	var view execution.RuntimeStateView
-	if packedFrame(raw) {
-		decoded, err := decodeRuntimePacked(raw, identity)
-		switch {
-		case errors.Is(err, ErrUnsupportedState):
-			return invalid(contract.ReasonStateSchemaUnsupported)
-		case err != nil:
-			return invalid(contract.ReasonStateCorrupt)
-		}
-		view = decoded
-		view.Representation = execution.StateRepresentationFramed
-	} else {
-		var value runtimeEnvelope
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return invalid(contract.ReasonStateCorrupt)
-		}
-		if value.Schema != executionStateSchemaV2 {
-			return invalid(contract.ReasonStateSchemaUnsupported)
-		}
-		if value.Identity != identity || value.BlobRevision == 0 {
-			return invalid(contract.ReasonStateCorrupt)
-		}
-		levels := make([]execution.RuntimeLevelStateView, len(value.Levels))
-		for i, level := range value.Levels {
-			levels[i] = execution.RuntimeLevelStateView{LevelID: level.LevelID, LevelStateCompatibility: level.LevelStateCompatibility,
-				HistoryCompleteness: level.HistoryCompleteness, GapReasonCode: level.GapReasonCode,
-				WarmupRequirementRef: level.WarmupRequirementRef, LastProcessedEventTime: level.LastProcessedEventTime}
-		}
-		view = execution.RuntimeStateView{Identity: identity, BlobRevision: value.BlobRevision,
-			Representation:        execution.StateRepresentationEnvelope,
-			PersistedApplyVersion: value.ApplyVersion, PersistedMutationDigest: value.MutationDigest,
-			LastProcessedEventTime: value.LastEventTime, SeriesGuard: value.SeriesGuard, Levels: levels, History: value.History}
+	if !packedFrame(raw) {
+		return invalid(contract.ReasonStateCorrupt)
 	}
+	view, err := decodeRuntimePacked(raw, identity)
+	switch {
+	case errors.Is(err, ErrUnsupportedState):
+		return invalid(contract.ReasonStateSchemaUnsupported)
+	case err != nil:
+		return invalid(contract.ReasonStateCorrupt)
+	}
+	view.Representation = execution.StateRepresentationFramed
 	view.Status = storedLoadStatus(view.Levels, view.SeriesGuard)
 	classified, err := execution.ClassifyStatePreflight(execution.StatePreflightRequest{Contract: contractRef,
 		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: candidate}}}, execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}})
@@ -517,8 +431,7 @@ func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef 
 }
 
 // storedLoadStatus is what the Levels and the series guard say about a record
-// that was found: gapped wins over warming wins over ready, the same reading
-// for both representations.
+// that was found: gapped wins over warming wins over ready.
 func storedLoadStatus(levels []execution.RuntimeLevelStateView, guard *execution.StateGuardFact) execution.StateLoadStatus {
 	status := execution.StateFoundReady
 	for _, level := range levels {

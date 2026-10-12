@@ -25,20 +25,6 @@ func (err *IdentityError) Unwrap() error { return err.Err }
 
 func identityError(message string) error { return &IdentityError{Err: errors.New(message)} }
 
-func RuntimeStateKeyV2(prefix string, identity execution.StateKeyIdentity) (string, error) {
-	if err := validatePlanIdentity(prefix, identity.Plan, identity.StateGeneration); err != nil {
-		return "", err
-	}
-	if identity.SeriesIdentityDigest == "" {
-		return "", identityError("series identity digest is required")
-	}
-	series, err := contract.DeriveCanonicalDigestV2("alarmd-runtime-series-v2", identity.SeriesIdentityDigest)
-	if err != nil {
-		return "", fmt.Errorf("state: derive series digest: %w", err)
-	}
-	return executionKey(prefix, "runtime", identity.Plan, identity.StateGeneration, series), nil
-}
-
 // PlanGapKeyV2 names one Plan's gap marker. A piece of a split strategy has
 // its own marker under its own kind, see shardedKind.
 func PlanGapKeyV2(prefix string, identity execution.PlanGapIdentity) (string, error) {

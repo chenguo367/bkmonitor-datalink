@@ -1619,16 +1619,6 @@ Labels: `site`, `kind`
 
 Runtime State mutations found already on disk, by where that was decided and how. site: preflight is the view the Slot loaded before evaluating, apply is the bytes the CAS met when it tried to write. kind: stable is the ordinary retry that read the stored revision and found its own statement there; revision_skew is the same statement -- same ApplyVersion, same digest -- found at a revision the mutation did not expect, which is a write that landed while its reply was lost or was sent twice, and which used to be classified STATE_VERSION_CONFLICT and send the Slot into a retry that could not succeed. revision_skew is the only reading that says whether such re-sends happen in production: non-zero and aligned with conflict bursts confirms the mechanism, a steady zero says something else writes the key. Every pair is published at zero so absent and zero read apart. Population is mutations, not Redis commands.
 
-## bkmonitor_alarmd_state_envelope_apply_items_total
-
-State writes on the per-key path whose outcome the older envelope representation decided: the record the write was classified against came from the envelope, or an unreadable envelope with no frame refused it. The envelope can be deleted only when this and state_envelope_pass_series_total{outcome="old_representation"} have both stayed at zero for a whole retention window. A write request that fails part-way reports no items, so its round is under-counted, never over-counted.
-
-## bkmonitor_alarmd_state_envelope_pass_series_total
-
-Labels: `outcome`
-
-Series a state preflight's second pass classified, by what it found. old_representation is the migration stock and the only outcome that ends; no_record_yet is a series with no record at all and never ends. envelope_corrupt, frame_corrupt_rescued and frame_corrupt_lost are damaged records, not writers, and should be zero. The sum is below state_preflight's envelope_reads by the series whose read failed and never reached the split.
-
 ## bkmonitor_alarmd_state_generation_carry_total
 
 Labels: `scope`, `result`

@@ -25,7 +25,8 @@ import (
 // through its own store into a real server: every key's exact bytes, the
 // preflight that reads them, and what that release itself loaded from them.
 // testdata/runtime-state-upgrade holds one per release an upgrade may start
-// from: the upstream line writes the v2 envelope, 0.2.4605 the v3 frame.
+// from: the previous upstream snapshot (8c3c859f) and 0.2.4605, both of which
+// write the v3 frame.
 // writer_test.go.txt there wrote them: copied into that release's
 // pkg/alarmd/state as a _test.go file, it runs with XV_OUT naming the
 // fixture and XV_SOURCE the commit.
