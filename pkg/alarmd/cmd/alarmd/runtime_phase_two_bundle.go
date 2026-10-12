@@ -66,6 +66,10 @@ type productionPhaseTwoEventSink interface {
 }
 
 type phaseTwoProductionExternalDependencies struct {
+	// RoleRuntime is the process's role runtime, opened and started by
+	// startup. Left nil, the opener builds and starts one the same way and the
+	// bundle closes it, so no caller runs the bundle without the wiring
+	// production has.
 	RoleRuntime *phaseTwoRoleRuntime
 	// Now is the clock the bundle schedules and freezes by. It is not the
 	// clock every deadline is measured by: access/uq Client.Execute and
@@ -153,6 +157,44 @@ func openProductionPhaseTwoBundle(
 }
 
 func openProductionPhaseTwoBundleWithDependencies(
+	ctx context.Context,
+	cfg config.Config,
+	recorder *metric.Recorder,
+	logger *observability.Logger,
+	health *phaseTwoApplicationHealth,
+	newStrategySource productionStrategySourceFactory,
+	external phaseTwoProductionExternalDependencies,
+) (*phaseTwoWorkerBundle, error) {
+	if external.RoleRuntime != nil || ctx == nil || recorder == nil || health == nil {
+		return openProductionPhaseTwoBundleAssembly(ctx, cfg, recorder, logger, health, newStrategySource, external)
+	}
+	// Startup opens the role runtime, starts it, then opens the bundle with
+	// it (runPhaseTwoApplication); a caller that passes none gets the same.
+	runtime, err := openPhaseTwoRoleRuntime(cfg, recorder, nil)
+	if err != nil {
+		return nil, err
+	}
+	if external.Now != nil {
+		runtime.now = external.Now
+	}
+	runtime.Start(ctx, health)
+	external.RoleRuntime = runtime
+	bundle, err := openProductionPhaseTwoBundleAssembly(ctx, cfg, recorder, logger, health, newStrategySource, external)
+	if err != nil || bundle == nil {
+		return bundle, errors.Join(err, runtime.Close())
+	}
+	closeResources := bundle.dependencies.CloseResources
+	bundle.dependencies.CloseResources = func(shutdownCtx context.Context) error {
+		var err error
+		if closeResources != nil {
+			err = closeResources(shutdownCtx)
+		}
+		return errors.Join(err, runtime.Close())
+	}
+	return bundle, nil
+}
+
+func openProductionPhaseTwoBundleAssembly(
 	ctx context.Context,
 	cfg config.Config,
 	recorder *metric.Recorder,
