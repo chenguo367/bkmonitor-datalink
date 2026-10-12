@@ -279,7 +279,10 @@ func TestRemoteOutputCapRetainsExitAndTimeout(t *testing.T) {
 	if !result.Truncated || len(result.Stdout)+len(result.Stderr) > 64 || result.ExitCode == nil || *result.ExitCode != 9 || result.RemoteState != RemoteCompleted {
 		t.Fatalf("truncation lost completion: %+v", result)
 	}
-	result, err = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "printf started; sleep 10"}, TimeoutMS: 50, OutputBytes: 3})
+	// A deadline that covers the supervisor's and the shell's start on a
+	// loaded machine; the command outlives it all the same, so the timeout
+	// path always runs.
+	result, err = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "printf started; sleep 10"}, TimeoutMS: 1000, OutputBytes: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,15 +291,76 @@ func TestRemoteOutputCapRetainsExitAndTimeout(t *testing.T) {
 	}
 }
 
+// A command that ignores TERM is killed with its process group at its
+// deadline. The signal is the supervisor's own: its complete frame says the
+// command timed out, and after it the command's process is gone - not a
+// wall-clock margin, which a loaded machine stretches. The command ignores
+// TERM before it records itself, under a deadline that covers the shell's
+// start, so the TERM always meets a command that ignores it; and the frame
+// arriving no sooner than the supervisor's TERM grace after the deadline is
+// the proof that the KILL path ran - a bound load can lengthen but not break.
 func TestRemoteTimeoutKillsTERMResistantGroup(t *testing.T) {
-	provider, _, target := runtimeProvider(t)
-	start := time.Now()
-	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "trap '' TERM; sleep 10"}, TimeoutMS: 50})
+	runtimeProvider(t)
+	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RemoteState != RemoteTimedOut || time.Since(start) > 4*time.Second {
-		t.Fatalf("TERM-resistant target did not stop within grace: %+v", result)
+	const deadline, termGrace = time.Second, 2 * time.Second
+	pidPath := filepath.Join(t.TempDir(), "child-pid")
+	argv, _ := json.Marshal([]string{"/bin/sh", "-c", "trap '' TERM; echo $$ > \"$1\"; while true; do sleep 1; done", "cmd", pidPath})
+	command := exec.Command(python, "-u", "-c", remoteSupervisor, "nonce", "1.0", "4096", string(argv))
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Taken before the supervisor exists, so no earlier than its deadline
+	// timer starts: the interval to the complete frame can only overstate
+	// the timer's, never understate it.
+	launched := time.Now()
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { command.Process.Kill(); command.Wait() }()
+	frames := make(chan wireFrame)
+	go func() {
+		defer close(frames)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			var frame wireFrame
+			if json.Unmarshal(scanner.Bytes(), &frame) == nil {
+				frames <- frame
+			}
+		}
+	}()
+	guard := time.After(60 * time.Second)
+	for {
+		select {
+		case frame, open := <-frames:
+			if !open {
+				t.Fatal("the supervisor ended without a complete frame")
+			}
+			if frame.Event != "complete" {
+				continue
+			}
+			if !frame.TimedOut {
+				t.Fatalf("complete frame without the timeout: %+v", frame)
+			}
+			if elapsed := time.Since(launched); elapsed < deadline+termGrace {
+				t.Fatalf("complete %v after launch, sooner than the deadline and the TERM grace: the TERM ended the command and the KILL path did not run", elapsed)
+			}
+			data, err := os.ReadFile(pidPath)
+			pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil || pid == 0 {
+				t.Fatalf("the command did not record its pid: %v", err)
+			}
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatalf("the TERM-resistant command outlived its reported kill (kill -0: %v)", err)
+			}
+			return
+		case <-guard:
+			t.Fatal("no complete frame within the guard")
+		}
 	}
 }
 

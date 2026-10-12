@@ -124,10 +124,14 @@ func (w *requestDeadlineRecorder) SetWriteDeadline(t time.Time) error {
 
 func TestOperationDeadlineAndExecReceiptSurviveCancellation(t *testing.T) {
 	auth := &scopedTestAuth{scope: cliauth.ScopeExec}
-	var observed time.Duration
+	// The operation's deadline is read off its context and judged against
+	// two instants the test takes around the call - after the request starts
+	// and once it has returned - never against how much time was left when
+	// the operation happened to be scheduled, which load shrinks.
+	var deadline time.Time
+	var hasDeadline bool
 	op := Operation{ID: "pod.exec", Summary: "Exec", Effect: "exec", ExecutionTimeout: 20 * time.Millisecond, Run: func(ctx context.Context, _ Params) Outcome {
-		deadline, _ := ctx.Deadline()
-		observed = time.Until(deadline)
+		deadline, hasDeadline = ctx.Deadline()
 		<-ctx.Done()
 		return Outcome{Value: map[string]any{"remote_state": "unknown", "stdout": "captured"}, Error: &Failure{Code: "remote_state_unknown", Message: "Remote termination unconfirmed."}}
 	}}
@@ -141,12 +145,13 @@ func TestOperationDeadlineAndExecReceiptSurviveCancellation(t *testing.T) {
 	w := &requestDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	start := time.Now()
 	c.ServeHTTP(w, r)
+	returned := time.Now()
 	var out Response
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if observed <= 0 || observed > op.ExecutionTimeout || out.Error == nil || out.Error.Code != "remote_state_unknown" || out.Result == nil || out.Evidence.Complete {
-		t.Fatalf("timeout receipt lost: %s %+v", observed, out)
+	if !hasDeadline || deadline.Before(start.Add(op.ExecutionTimeout)) || deadline.After(returned) || out.Error == nil || out.Error.Code != "remote_state_unknown" || out.Result == nil || out.Evidence.Complete {
+		t.Fatalf("timeout receipt lost: deadline %v (start %v, returned %v) %+v", deadline, start, returned, out)
 	}
 	if len(w.write) < 3 || w.write[1].Sub(start) < TransportMargin || !w.write[len(w.write)-1].IsZero() || !w.read[len(w.read)-1].IsZero() {
 		t.Fatalf("deadlines mismatch: read %v write %v", w.read, w.write)

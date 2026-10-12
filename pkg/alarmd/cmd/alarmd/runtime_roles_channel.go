@@ -235,11 +235,11 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime), Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient, LatestPublication: cliLatestPublication(catalog)})...)
 	if binding.Roles.Has(roles.Channel) {
 		var sreOps []obchannel.Operation
-		sreOps,closeSRE,err = channelSREOperations(cfg)
+		sreOps, closeSRE, err = channelSREOperations(cfg)
 		if err != nil {
-			return nil,err
+			return nil, err
 		}
-		ops = append(ops,sreOps...)
+		ops = append(ops, sreOps...)
 	}
 	diagnose := obchannel.DiagnoseOperation(providers, ops)
 	diagnose.Targetable, diagnose.DefaultControlLeader = true, true
