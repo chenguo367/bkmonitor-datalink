@@ -38,20 +38,6 @@ func PlanGapKeyV2(prefix string, identity execution.PlanGapIdentity) (string, er
 	return executionKey(prefix, kind, identity.Plan, identity.StateGeneration, suffix), nil
 }
 
-// PlanNoDataKeyV2 names one Plan's no-data memory. Same shape and same level as
-// a gap marker, with its own segment: both are one record per Plan per state
-// generation, and neither is per series.
-func PlanNoDataKeyV2(prefix string, identity execution.PlanNoDataIdentity) (string, error) {
-	if err := validatePlanIdentity(prefix, identity.Plan, identity.StateGeneration); err != nil {
-		return "", err
-	}
-	kind, suffix, err := shardedKind("nodata", identity.Shard)
-	if err != nil {
-		return "", err
-	}
-	return executionKey(prefix, kind, identity.Plan, identity.StateGeneration, suffix), nil
-}
-
 // shardedKind is how a per-Plan record of a piece of a split strategy is
 // kept apart from its siblings' and from the unsplit record.
 //
@@ -84,13 +70,9 @@ func shardedKind(kind string, shard execution.ShardRef) (string, string, error) 
 // PlanNoDataHashKeyV2 names one Plan's no-data memory in the shape that holds
 // one field per group.
 //
-// It is a second key rather than a second shape under the first, because the
-// two coexist for a rollout: a build that only knows the whole-memory record
-// must go on finding it where it was, and a build that writes the hash must
-// not have to decide what an old value under a new key means. The kind segment
-// is what separates them, and it separates them under a glob as well: the
-// cleanup that enumerates the old records scans "<prefix>:nodata:v2:*", and no
-// hash key can match it because the character after "nodata" differs.
+// Its kind segment differs from the single-value record's "nodata" that
+// builds before it wrote, so an old value under that key is never read as a
+// hash, and a glob anchored on one cannot match the other.
 //
 // The "v2" segment both keys carry is the execution key scheme's version. It
 // has nothing to do with the memory's schema version, which is a field inside

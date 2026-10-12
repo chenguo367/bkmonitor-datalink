@@ -1640,22 +1640,10 @@ type NoDataGroupDelta struct {
 type PlanNoDataMutation struct {
 	Identity      PlanNoDataIdentity
 	SchemaVersion NoDataMemorySchema
-	// DerivedFrom is the representation this round read the memory out of.
-	//
-	// A marker revision belongs to the record that issued it, and the two
-	// representations keep separate ones. A statement derived from the
-	// whole-memory record therefore has no revision to expect of the per-group
-	// record, and must not be compared against one: the first deployment that
-	// did compare them refused every write in the fleet -- the per-group record
-	// did not exist yet, the expected revision came off the blob, and the
-	// mismatch read as "the record vanished" on every round forever.
-	//
-	// It also decides what the statement is. A delta describes the difference
-	// from the record it was derived against, so a delta derived from the blob
-	// is meaningless to the hash: the groups it leaves out are the ones that
-	// did not change since the blob, and they are not in the hash at all. Only
-	// a statement derived from the per-group record is a delta; every other
-	// one carries the whole memory and replaces what is stored.
+	// DerivedFrom is the representation this round read the memory out of,
+	// and it decides what the statement is. Only a statement derived from the
+	// per-group record is a delta against that record's revision; one derived
+	// from no record carries the whole memory and replaces what is stored.
 	DerivedFrom            NoDataRepresentation
 	ExpectedMarkerRevision uint64
 	// LoadedApplyVersion is the apply version of the record this statement was

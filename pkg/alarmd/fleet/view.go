@@ -396,7 +396,7 @@ type StateAdmissionRefusal struct {
 type NoDataMemoryUpkeep struct {
 	Plan StrategyRef `json:"plan"`
 	// Representation is what the last read said the memory was stored as:
-	// NONE, WHOLE_MEMORY or PER_GROUP, as the emitter names them.
+	// NONE or PER_GROUP, as the emitter names them.
 	Representation string     `json:"representation,omitempty"`
 	LastReadAt     *time.Time `json:"last_read_at,omitempty"`
 	// LastAttemptAt is the last renewal that reached the store, whatever it

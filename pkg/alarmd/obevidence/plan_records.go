@@ -22,13 +22,10 @@ const (
 	FamilyNoDataMemory = "no_data_memory"
 )
 
-// Plan record kinds: the gap marker, the per-group absence memory every
-// build since the change of representation writes, and the whole-record
-// one it only reads.
+// Plan record kinds: the gap marker and the per-group absence memory.
 const (
-	RecordGapMarker         = "gap_marker"
-	RecordNoDataMemory      = "no_data_memory"
-	RecordNoDataMemoryWhole = "no_data_memory_whole"
+	RecordGapMarker    = "gap_marker"
+	RecordNoDataMemory = "no_data_memory"
 )
 
 // planRecordCommands is what one record costs: TYPE, PTTL, and a size and a
@@ -195,17 +192,9 @@ func planRecordReads(family, prefix string, plan controlplane.QueryGroupPlanObje
 	if err != nil {
 		return nil, err
 	}
-	wholeKey, err := state.PlanNoDataKeyV2(prefix, identity)
-	if err != nil {
-		return nil, err
-	}
 	return []planRecordRead{
 		{kind: RecordNoDataMemory, key: hashKey, hash: true, plan: index, matches: func(raw []byte) (state.ObservedPlanRecord, bool, error) {
 			header, named, err := state.ObservedNoDataHeader(raw)
-			return header, named == identity, err
-		}},
-		{kind: RecordNoDataMemoryWhole, key: wholeKey, plan: index, matches: func(raw []byte) (state.ObservedPlanRecord, bool, error) {
-			header, named, err := state.ObservedNoDataWhole(raw)
 			return header, named == identity, err
 		}},
 	}, nil

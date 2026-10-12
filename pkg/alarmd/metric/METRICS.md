@@ -1911,7 +1911,7 @@ Groups of the Plans that detect no-data, summed over every Slot that judged them
 
 Labels: `representation`
 
-One per Plan per round that read its absence memory, by which stored shape it came from. WHOLE_MEMORY is the single-value record this build reads and no longer writes, PER_GROUP is the one it writes, NONE is a Plan with no memory yet or one whose read failed. It is the only signal that says how far the change of representation has got: every other one looks the same either way, and WHOLE_MEMORY at zero across a rolling window is the condition the one-shot cleanup waits for. WHOLE_MEMORY rising again after reaching zero is a Plan that went back to an older build, which is the one case where deleting the old records would lose rounds. The three add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
+One per Plan per round that read its absence memory, by which stored shape it came from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one whose read failed. The two add up to the Plans that were asked for, so the sum is checkable rather than assumed, and every label exists at startup so a zero is a zero rather than a label nothing wrote.
 
 ## bkmonitor_alarmd_worker_no_data_memory_refusals_total
 

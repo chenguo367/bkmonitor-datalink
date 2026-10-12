@@ -153,8 +153,8 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 		t.Fatalf("ApplyNoData() = (%+v, %v)", applied, err)
 	}
 	memory := recordsOf(noDataRequest)
-	if len(memory) != 2 || memory[0].Kind != RecordNoDataMemory || memory[1].Kind != RecordNoDataMemoryWhole {
-		t.Fatalf("absence memory = %+v, want the per-group record and the whole one", memory)
+	if len(memory) != 1 || memory[0].Kind != RecordNoDataMemory {
+		t.Fatalf("absence memory = %+v, want the per-group record", memory)
 	}
 	perGroup := memory[0]
 	if perGroup.Status != "ok" || perGroup.Type != "hash" || perGroup.Fields == nil || *perGroup.Fields < 2 || perGroup.Header == nil ||
@@ -162,9 +162,6 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 		t.Fatalf("per-group memory = %+v header %+v, want it present with its fields and header", perGroup, perGroup.Header)
 	}
 	wantLife(perGroup, state.GenerationScopedFloor)
-	if memory[1].Status != "missing" {
-		t.Fatalf("whole memory = %+v, want missing: this build does not write it", memory[1])
-	}
 
 	// A Plan past a day: its marker lives its own lifetime, past the floor,
 	// which is what reading a sixty-hour strategy's keys has to show.

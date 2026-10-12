@@ -158,14 +158,8 @@ const (
 	// as a refused one does, and a reader with only the refusal lines cannot
 	// tell a Plan that recovered from one that started losing races instead.
 	StageNoDataMemoryWritten = "no_data_memory_written"
-	// StageNoDataMemoryRead names which of the two stored shapes one Plan's
-	// memory was read from.
-	//
-	// It is the only signal that says how far the change of representation has
-	// got. Every other one looks the same either way -- the memory is read, the
-	// Plan evaluates, the write goes through -- and the count of Plans still on
-	// the old record is what the one-shot cleanup waits for. Without it that
-	// wait is somebody's guess about how long a rollout takes.
+	// StageNoDataMemoryRead names whether one Plan's memory was read from the
+	// per-group record or from none.
 	StageNoDataMemoryRead = "no_data_memory_read"
 	// StageNoDataMemoryRenewed names one renewal of a Plan's absence-memory
 	// key that actually reached the store.
@@ -590,9 +584,9 @@ type NoDataMemoryWriteFacts struct {
 	// two sides were, and none of it left the store. The reason code cannot
 	// carry it either, because a conflict is not a rejection and has none.
 	Conflict *NoDataMemoryConflictFacts
-	// DerivedFrom is the record the refused statement was built from. It is
-	// what tells a conflict during a rollout -- a Plan still writing from the
-	// whole-memory record -- from one between two writers of the same record.
+	// DerivedFrom is the record the refused statement was built from: none,
+	// for a statement that replaces the whole record, or the per-group record
+	// for a delta.
 	DerivedFrom string
 }
 

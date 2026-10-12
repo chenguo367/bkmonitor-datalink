@@ -612,15 +612,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.noDataMemoryReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_reads_total",
 		Help: "One per Plan per round that read its absence memory, by which stored shape it came " +
-			"from. WHOLE_MEMORY is the single-value record this build reads and no longer writes, " +
-			"PER_GROUP is the one it writes, NONE is a Plan with no memory yet or one whose read " +
-			"failed. It is the only signal that says how far the change of representation has got: " +
-			"every other one looks the same either way, and WHOLE_MEMORY at zero across a rolling " +
-			"window is the condition the one-shot cleanup waits for. WHOLE_MEMORY rising again after " +
-			"reaching zero is a Plan that went back to an older build, which is the one case where " +
-			"deleting the old records would lose rounds. The three add up to the Plans that were " +
-			"asked for, so the sum is checkable rather than assumed, and every label exists at " +
-			"startup so a zero is a zero rather than a label nothing wrote.",
+			"from. PER_GROUP is the record this build writes, NONE is a Plan with no memory yet or one " +
+			"whose read failed. The two add up to the Plans that were asked for, so the sum is " +
+			"checkable rather than assumed, and every label exists at startup so a zero is a zero " +
+			"rather than a label nothing wrote.",
 	}, []string{"representation"})
 	metrics.noDataMemoryRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_renewals_total",
@@ -1611,10 +1606,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		metrics.frozenStateRenewals.WithLabelValues(frozenRenewalLabel(outcome))
 	}
 	for _, representation := range execution.NoDataRepresentations {
-		// Pre-created, because the reading this family exists for is a zero:
-		// WHOLE_MEMORY reaching zero and staying there is what says every Plan
-		// has moved, and a series that is absent rather than zero cannot say
-		// the difference between "none left" and "nobody looked".
+		// Pre-created, so a zero is a zero rather than a label nothing wrote.
 		metrics.noDataMemoryReads.WithLabelValues(string(representation))
 	}
 	for _, refusal := range execution.NoDataRefusals {
