@@ -53,7 +53,7 @@ type schedulerShaper struct {
 	mu sync.Mutex
 	// executions is the last day's Slot execution lengths, and ready the
 	// Slots made ready by second.
-	executions scheduler.HourlyMedian
+	executions scheduler.HourlyDurations
 	ready      scheduler.SecondPeak
 	// last is the recovery request count at the previous derivation, the
 	// replay rate's base.

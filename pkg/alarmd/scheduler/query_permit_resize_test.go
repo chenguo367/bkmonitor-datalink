@@ -111,10 +111,10 @@ func TestAnInvalidQueryBudgetIsRefusedAndTheOldOneStays(t *testing.T) {
 }
 
 // The hold a query permit is sized against is the service's answer time when
-// it is not under pressure: the lowest hourly median of the normal queries'
+// it is not under pressure: the lowest hourly mean of the normal queries'
 // holds over the last day, so an hour of slow answers does not raise the
 // budget and put more pressure on a service that is already slow.
-func TestTheHoldReferenceIsTheLowestHourlyMedian(t *testing.T) {
+func TestTheHoldReferenceIsTheLowestHourlyMean(t *testing.T) {
 	clock := newMutableClock(time.Unix(3600*100, 0))
 	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
 	if err != nil {
@@ -144,5 +144,29 @@ func TestTheHoldReferenceIsTheLowestHourlyMedian(t *testing.T) {
 	hold(2*time.Second, 200)
 	if got := flights.HoldReference(); got < 1400*time.Millisecond {
 		t.Fatalf("a day after the fast hour the reference is still %v", got)
+	}
+}
+
+// A budget is a rate times the hold, and the permits a rate keeps busy are
+// the rate times the mean hold: an hour whose answers are mostly fast and
+// one in five slow reads as what its permits were held on average, not as
+// its fast majority.
+func TestTheHoldReferenceCountsTheSlowAnswersOfItsHour(t *testing.T) {
+	clock := newMutableClock(time.Unix(3600*100, 0))
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		d := 150 * time.Millisecond
+		if i%5 == 0 {
+			d = 3 * time.Second
+		}
+		permit := acquireNormal(t, flights, "a", clock.Now().Add(time.Hour))
+		clock.Advance(d)
+		permit.Release()
+	}
+	if got, want := flights.HoldReference(), 720*time.Millisecond; got != want {
+		t.Fatalf("hold reference %v, want the mean hold %v", got, want)
 	}
 }

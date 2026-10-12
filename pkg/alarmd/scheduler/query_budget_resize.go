@@ -46,19 +46,26 @@ func (coordinator *FlightCoordinator) ResizeQueryLimits(limits RecoveryLimits) e
 }
 
 // HoldReference is how long a normal query holds its permit when the query
-// service is not under pressure: the lowest hourly median of the normal
-// holds over the last day, the current hour included. Zero before any hold.
+// service is not under pressure: the lowest hourly mean of the normal holds
+// over the last day, the current hour included. Zero before any hold.
 //
 // The lowest and not the latest, because the budget is sized from it: an
 // hour of slow answers that raised the reference would raise the budget and
 // put more queries at once on a service that is already slow.
+//
+// The mean and not the median, because the budget is a rate times this
+// hold, and how many permits a rate keeps busy is the rate times the mean
+// hold (Little's law). A service that answers most queries in 150 ms and
+// one in five in 3 s keeps 0.72 s of permit per query: a median of 150 ms
+// sized the budget at a fifth of that, and the soak's step of demand then
+// queued behind a budget that never rose.
 func (coordinator *FlightCoordinator) HoldReference() time.Duration {
 	if coordinator == nil {
 		return 0
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	return coordinator.holds.Reference(coordinator.now())
+	return coordinator.holds.MeanReference(coordinator.now())
 }
 
 // holdHourBuckets is how finely an hour's holds are kept: bucket i holds
@@ -67,18 +74,20 @@ func (coordinator *FlightCoordinator) HoldReference() time.Duration {
 // everything from about 18 minutes up.
 const holdHourBuckets = 42
 
-// holdHour is one hour's durations, as a histogram.
+// holdHour is one hour's durations, as a histogram and their exact sum.
 type holdHour struct {
 	start   int64 // unix hour; zero for an hour never written
 	count   uint64
+	sum     time.Duration
 	buckets [holdHourBuckets]uint32
 }
 
-// HourlyMedian is the last day's durations of one kind - permit holds,
-// executions - one histogram per hour in a ring, read as the lowest hourly
-// median (Reference). Fixed size: recording allocates nothing. Not safe for
-// concurrent use; its owner holds a lock around it.
-type HourlyMedian struct {
+// HourlyDurations is the last day's durations of one kind - permit holds,
+// executions - one histogram and sum per hour in a ring, read as the lowest
+// hourly median (Reference) or mean (MeanReference). Fixed size: recording
+// allocates nothing. Not safe for concurrent use; its owner holds a lock
+// around it.
+type HourlyDurations struct {
 	hours [24]holdHour
 }
 
@@ -108,19 +117,30 @@ func holdBucketMiddle(index int) time.Duration {
 }
 
 // Record keeps one duration, in the hour at falls in.
-func (history *HourlyMedian) Record(at time.Time, hold time.Duration) {
+func (history *HourlyDurations) Record(at time.Time, hold time.Duration) {
 	hour := at.Unix() / 3600
 	slot := &history.hours[hour%int64(len(history.hours))]
 	if slot.start != hour {
 		*slot = holdHour{start: hour}
 	}
 	slot.count++
+	slot.sum += max(hold, 0)
 	slot.buckets[holdBucket(hold)]++
 }
 
 // Reference is the lowest median of the hours of the day before at, the
 // current one included; zero before any duration.
-func (history *HourlyMedian) Reference(at time.Time) time.Duration {
+func (history *HourlyDurations) Reference(at time.Time) time.Duration {
+	return history.lowest(at, (*holdHour).median)
+}
+
+// MeanReference is the lowest mean of the hours of the day before at, the
+// current one included; zero before any duration.
+func (history *HourlyDurations) MeanReference(at time.Time) time.Duration {
+	return history.lowest(at, (*holdHour).mean)
+}
+
+func (history *HourlyDurations) lowest(at time.Time, read func(*holdHour) time.Duration) time.Duration {
 	now := at.Unix() / 3600
 	var lowest time.Duration
 	for index := range history.hours {
@@ -128,12 +148,18 @@ func (history *HourlyMedian) Reference(at time.Time) time.Duration {
 		if hour.count == 0 || hour.start <= now-int64(len(history.hours)) || hour.start > now {
 			continue
 		}
-		median := hour.median()
-		if lowest == 0 || median < lowest {
-			lowest = median
+		if value := read(hour); lowest == 0 || value < lowest {
+			lowest = value
 		}
 	}
 	return lowest
+}
+
+// mean is never below a millisecond, the histogram's own floor: a zero
+// would read as no hold at all, and the shape would size from the
+// cold-start guess instead.
+func (hour *holdHour) mean() time.Duration {
+	return max(hour.sum/time.Duration(hour.count), time.Millisecond)
 }
 
 func (hour *holdHour) median() time.Duration {
