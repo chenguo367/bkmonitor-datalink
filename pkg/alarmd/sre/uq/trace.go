@@ -178,8 +178,8 @@ func validateTraceBody(body map[string]any, target TraceTarget) (*TracePage, err
 	if err := traceKeys(query, "data_source", "table_id", "time_field", "conditions", "query_string", "keep_columns", "driver", "reference_name", "field_name", "dimensions", "function", "time_aggregation", "order_by"); err != nil {
 		return nil, err
 	}
-	if query["data_source"] != "bkapm" || query["table_id"] != target.TableID || query["time_field"] != "start_time" {
-		return nil, fail("uq_trace_scope_denied", "Raw Span query must use bkapm, the exact registered table and start_time.")
+	if (query["data_source"] != "bkapm" && query["data_source"] != "bk_apm") || query["table_id"] != target.TableID || query["time_field"] != "start_time" {
+		return nil, fail("uq_trace_scope_denied", "Raw Span query must use bkapm or bk_apm, the exact registered table and start_time.")
 	}
 	if value, exists := query["field_name"]; exists && value != "" {
 		return nil, fail("uq_contract_unsupported", "Raw Span diagnostics do not query aggregated fields.")

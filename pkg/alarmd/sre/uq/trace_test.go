@@ -50,10 +50,19 @@ func traceCondition(r *TraceRequest, index int) map[string]any {
 }
 
 func TestTraceNativeMCPWirePreservesSpanUnitsAndQuerySource(t *testing.T) {
-	for _, shared := range []bool{false, true} {
-		t.Run(map[bool]string{false: "exclusive", true: "shared"}[shared], func(t *testing.T) {
-			r := traceRequest(shared)
+	for _, tc := range []struct {
+		name, source string
+		shared       bool
+	}{
+		{"exclusive", "bkapm", false},
+		{"shared", "bkapm", true},
+		{"exclusive alias", "bk_apm", false},
+		{"shared alias", "bk_apm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := traceRequest(tc.shared)
 			q := traceQuery(&r)
+			q["data_source"] = tc.source
 			// Legacy MCP/SpanQuery emits these defaults; a minimal application
 			// native body omits them. Both are the same raw Span contract.
 			q["driver"], q["reference_name"], q["field_name"] = "influxdb", "a", ""
@@ -75,7 +84,7 @@ func TestTraceNativeMCPWirePreservesSpanUnitsAndQuerySource(t *testing.T) {
 				_, _ = io.WriteString(w, `{"list":[{"trace_id":"synthetic-trace","span_id":"span-fixture","start_time":1700000000123456,"end_time":1700000000123498,"elapsed_time":42,"attributes":{"large_uint":9223372036854775808}}],"total":1,"status":[]}`)
 			}))
 			defer s.Close()
-			p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", shared), nil, "fixture-runtime-source")
+			p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", tc.shared), nil, "fixture-runtime-source")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +98,7 @@ func TestTraceNativeMCPWirePreservesSpanUnitsAndQuerySource(t *testing.T) {
 					t.Fatalf("native Span unit/value lost: %s", got.Native)
 				}
 			}
-			if shared && len(p.Egresses()[0].TraceTargets) != 1 {
+			if tc.shared && len(p.Egresses()[0].TraceTargets) != 1 {
 				t.Fatal("target missing from discovery")
 			}
 		})

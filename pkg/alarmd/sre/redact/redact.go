@@ -56,7 +56,14 @@ func (s *Scrubber) value(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, item := range v {
-			normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+			// Raw Span columns can flatten attributes/resource paths into
+			// dotted names. Apply the existing credential-field predicate to
+			// the terminal field, just as for its nested JSON representation.
+			field := key
+			if dot := strings.LastIndexByte(field, '.'); dot >= 0 {
+				field = field[dot+1:]
+			}
+			normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(field))
 			switch normalized {
 			case "password", "passwd", "secret", "clientsecret", "apikey", "privatekey", "adminkey", "token", "accesstoken", "refreshtoken", "authorization", "proxyauthorization", "cookie", "setcookie", "credentials", "headers", "xbkapijwt", "identityassertion":
 				out[key] = "[REDACTED]"
