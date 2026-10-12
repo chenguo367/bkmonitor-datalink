@@ -492,6 +492,9 @@ func (reconciler *SourceReconciler) Refresh(
 	if audit != nil {
 		previousDispositions = audit.Dispositions
 	}
+	// The observation is never nil here: observe stored this round's or
+	// returned the stored one, and ForgetTerm, the only other writer that
+	// clears it, runs on this same loop, never inside a round.
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
 		Now: reconciler.now(), WriterHoldsLastGood: reconciler.memory.Load().holdsLastGood,
