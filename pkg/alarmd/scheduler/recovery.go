@@ -273,6 +273,17 @@ type QueryPermit struct {
 	id             uint64
 	once           sync.Once
 	releaseChannel func()
+	// waited is whether the query found no free permit and queued for this
+	// one.
+	waited bool
+}
+
+// Waited reports whether the query this permit admits had to queue for it:
+// the moment it was sent this process's own query budget was full. The
+// downstream's errors are read against it, to tell errors this process's
+// contention brought on from errors that arrive whatever it does.
+func (permit *QueryPermit) Waited() bool {
+	return permit != nil && permit.waited
 }
 
 func (permit *QueryPermit) RecoveryPermit() *execution.RecoveryPermit {
@@ -368,6 +379,7 @@ func (coordinator *FlightCoordinator) acquireProcessQueryPermit(
 		}
 		coordinator.observeQueryPermit(ctx, operation, observability.ResultSuccess, true, coordinator.queryPermitSnapshot())
 		observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "P_acquired"})
+		permit.waited = queued
 		return permit, nil
 	case <-ctx.Done():
 		coordinator.mu.Lock()

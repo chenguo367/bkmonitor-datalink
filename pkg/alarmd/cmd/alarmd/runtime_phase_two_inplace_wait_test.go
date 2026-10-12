@@ -87,7 +87,10 @@ func TestAnInPlaceReadinessWaitIsOnTheSlotLineAndCounted(t *testing.T) {
 		mu.Lock()
 		waits, completed = nil, 0
 		mu.Unlock()
-		backend.clock.Store((base+minute*60)*1000 + (poolBudgetSettle - beforePrimaryReady).Milliseconds())
+		if len(bundle.queryGroups) != 1 {
+			t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
+		}
+		backend.clock.Store((base+minute*60)*1000 + (readWaitOf(cfg, bundle.queryGroups[0], 60) - beforePrimaryReady).Milliseconds())
 		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 			t.Fatalf("minute %d: %v", minute, err)
 		}

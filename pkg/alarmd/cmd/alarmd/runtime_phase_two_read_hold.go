@@ -269,7 +269,10 @@ func (holds *productionReadHolds) spec(ctx context.Context, schedule execution.F
 	for _, plan := range schedule.Plans {
 		spec.Plans = append(spec.Plans, readhold.PlanRef{Key: plan.Key()})
 		offset := time.Duration(plan.Spec.CompletionOffsetSeconds()) * time.Second
-		wait := execution.SettlingWaitWithinQueryBudget(offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
+		// The group reads at its own moment, settling wait plus phase, and a
+		// hold is how much later than that it must read: measured from the
+		// settling wait alone it would hold the group its phase too long.
+		wait := execution.ReadWaitWithinQueryBudget(schedule.Segment.QueryGroup, offset-holds.cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration(), holds.cfg.PhaseTwo.Access.MinReadyDelay.Duration())
 		if len(spec.Plans) == 1 || wait < spec.SettlingWait {
 			spec.SettlingWait = wait
 		}

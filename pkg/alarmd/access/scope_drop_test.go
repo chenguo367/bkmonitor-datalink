@@ -112,7 +112,7 @@ func TestADefinitiveRejectionCarriesTheEvaluatorsFingerprint(t *testing.T) {
 	adapter, plan := scopeDropAdapter(t, targetChain(), hostPlanContext(true), sink, scopeOutput)
 	deliverSeries(t, adapter, hostDims("101"))
 	deliverSeries(t, adapter, hostDims("102"))
-	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
 
 	want, err := contract.MonitorDedupeMD5("42", plan.BusinessID, hostDims("102"),
 		contract.MonitorOutputIdentity{DimensionFields: []string{"bk_host_id", "device"}})
@@ -159,7 +159,7 @@ func TestRejectionsTheCloseCannotUseAreCountedInBulk(t *testing.T) {
 		if len(sink.counts) != 0 {
 			t.Fatalf("%s: counted before the query ended: %v", c.name, sink.counts)
 		}
-		flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
+		flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
 		if len(sink.observed) != 0 || sink.counts[c.word] != 3 || len(sink.counts) != 1 || sink.screens != c.screens {
 			t.Errorf("%s: observed %d counts %v screens %d, want 3 under %q and %d screens", c.name, len(sink.observed), sink.counts, sink.screens, c.word, c.screens)
 		}
@@ -175,7 +175,7 @@ func TestAHostStatusRejectionIsNotReported(t *testing.T) {
 	sink := &recordingSink{}
 	adapter, _ := scopeDropAdapter(t, chain, admission.PlanContext{TargetScope: hostScope("7")}, sink, scopeOutput)
 	deliverSeries(t, adapter, map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"7"`)})
-	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
 	if len(sink.observed) != 0 || len(sink.counts) != 0 || sink.screens != 0 {
 		t.Fatalf("sink = %+v, want the host status rejection unreported", sink)
 	}
@@ -234,7 +234,7 @@ func TestTheZeroMemberPathDoesNoPerRecordWork(t *testing.T) {
 	if sink.screens != 1 || len(sink.observed) != 0 {
 		t.Fatalf("screens %d observed %d, want one screen and no observation", sink.screens, len(sink.observed))
 	}
-	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: execution.EvaluationTime(adapter.round)}, adapter.outputs)
 	if sink.counts["not_member"] != 1002 {
 		t.Fatalf("counts = %v, want all 1002 rejections in one bulk count", sink.counts)
 	}
@@ -349,11 +349,11 @@ func TestAnAttemptHandsOverOneSumPerPlanAndWord(t *testing.T) {
 	first.tallyScopeDrop(plan, ScopeDropCacheUnavailable)
 	second.tallyScopeDrop(plan, ScopeDropCacheUnavailable)
 	sink := &recordingSink{}
-	flushScopeDrops(sink, []*seriesAdapter{first, nil, second}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: 1700000000}, nil)
+	flushScopeDrops(sink, []*seriesAdapter{first, nil, second}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: 1700000000}, nil)
 	if sink.counts[ScopeDropCacheUnavailable] != 3 || len(sink.counts) != 1 {
 		t.Fatalf("counts = %v, want one sum of 3", sink.counts)
 	}
-	flushScopeDrops(sink, []*seriesAdapter{first, second}, execution.SlotIdentity{QueryGroup: "group", EvaluationTime: 1700000000}, nil)
+	flushScopeDrops(sink, []*seriesAdapter{first, second}, execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: 1700000000}, nil)
 	if sink.counts[ScopeDropCacheUnavailable] != 3 {
 		t.Fatalf("a second flush handed the same tallies over again: %v", sink.counts)
 	}
@@ -399,7 +399,7 @@ func TestTwoQueriesOfOnePlanAreSummedAndRetriesAreNot(t *testing.T) {
 // The reporter instance tells apart the Query Group, the business and the
 // shard, and nothing else: the round and the strategy travel beside it.
 func TestTheReporterInstanceNamesQueryGroupBusinessAndShard(t *testing.T) {
-	base := ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: 1700000000},
+	base := ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: unphasedQueryGroup, EvaluationTime: 1700000000},
 		Plan: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "42"}}
 	retry := base
 	retry.Slot.EvaluationTime = 1700000060

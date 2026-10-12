@@ -527,15 +527,16 @@ func openProductionPhaseTwoBundleAssembly(
 	// name beside the count.
 	addressDiffers := &fleet.AddressDiffersSamples{}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
-		MinReadyDelay:        cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
-		Now:                  external.Now,
-		Observer:             observer,
-		Admission:            seriesAdmission,
-		ObserveAdmission:     recorder.RecordSeriesAdmission,
-		ObserveHostPlacement: hostPlacementObserver(recorder, addressDiffers, external.Now),
-		ScopeDrops:           scopeDrops,
-		ObserveSeriesPulled:  seriesPullTally.Add,
-		Lookback:             lookbackEngine,
+		MinReadyDelay:             cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
+		Now:                       external.Now,
+		Observer:                  observer,
+		Admission:                 seriesAdmission,
+		ObserveAdmission:          recorder.RecordSeriesAdmission,
+		ObserveHostPlacement:      hostPlacementObserver(recorder, addressDiffers, external.Now),
+		ObserveDownstreamDistress: recorder.RecordDownstreamDistress,
+		ScopeDrops:                scopeDrops,
+		ObserveSeriesPulled:       seriesPullTally.Add,
+		Lookback:                  lookbackEngine,
 	})
 	if err != nil {
 		return nil, err

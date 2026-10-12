@@ -47,8 +47,20 @@ const minimumSettlingWait = execution.MinimumSettlingWait
 // the strategy serializer accepts any of them -- it validates agg_interval
 // only as a non-negative integer, with no tier list behind it.
 func settlingWaitWithinBudget(schedule execution.ScheduleSpec, configured, reserve time.Duration) time.Duration {
-	budget := time.Duration(schedule.CompletionOffsetSeconds())*time.Second - reserve
-	return execution.SettlingWaitWithinQueryBudget(budget, configured)
+	return execution.SettlingWaitWithinQueryBudget(queryBudgetOf(schedule, reserve), configured)
+}
+
+// readWaitWithinBudget is how long after its query window closes the group's
+// Slot is read for the schedule one of its Plans carries: the settling wait
+// and the group's phase (execution.ReadWaitWithinQueryBudget).
+func readWaitWithinBudget(queryGroup execution.QueryGroupIdentity, schedule execution.ScheduleSpec, configured, reserve time.Duration) time.Duration {
+	return execution.ReadWaitWithinQueryBudget(queryGroup, queryBudgetOf(schedule, reserve), configured)
+}
+
+// queryBudgetOf is a Plan's schedule in the readiness rule's terms: the
+// completion offset less the downstream execution reserve.
+func queryBudgetOf(schedule execution.ScheduleSpec, reserve time.Duration) time.Duration {
+	return time.Duration(schedule.CompletionOffsetSeconds())*time.Second - reserve
 }
 
 // lookbackQuery is a physical query as the lookback sees it before it is
@@ -154,6 +166,10 @@ type Config struct {
 	// how its own address compares with that host's
 	// (admission.Facts.ReportedAddress). Optional.
 	ObserveHostPlacement func(HostPlacement)
+	// ObserveDownstreamDistress hears each query whose answer says the
+	// downstream is overloaded or unreachable (DistressClasses), with whether
+	// the query had queued for its permit. Optional.
+	ObserveDownstreamDistress func(class string, contended bool)
 	// ScopeDrops receives the series the target filters turned away, for
 	// the target-scope close; see ScopeDropSink. Optional.
 	ScopeDrops ScopeDropSink
@@ -681,6 +697,11 @@ func (source *Source) executeWithPermit(
 	defer permit.Release()
 	observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "query_running"})
 	completion, err := source.provider.Execute(ctx, attempt, adapter)
+	if err == nil && source.config.ObserveDownstreamDistress != nil {
+		if class := downstreamDistressOf(completion); class != "" {
+			source.config.ObserveDownstreamDistress(class, permitWaited(permit))
+		}
+	}
 	if err == nil && completion.Stats.NullIdentityFields > 0 {
 		// Bounded diagnostics marker: at least one declared identity dimension
 		// was absent from a delivered series and was bound to null (the Python
@@ -896,7 +917,7 @@ func frozenConsumerReadyAt(
 	// Source delay selects an older data window; it must not move the
 	// scheduler's global readiness boundary earlier by the same amount.
 	window.End += sourceDelaySeconds
-	ready, err := frozenRequirementReadyAt(requirement, window, settlingWaitWithinBudget(schedule, configuredDelay, reserve))
+	ready, err := frozenRequirementReadyAt(requirement, window, readWaitWithinBudget(contractRef.Slot.QueryGroup, schedule, configuredDelay, reserve))
 	if err != nil {
 		return 0, err
 	}
