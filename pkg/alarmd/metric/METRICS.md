@@ -1245,6 +1245,10 @@ Labels: `mode`
 
 Which state the process copy of the platform's settings (host_disable_monitor_states, is_access_bk_data, bkdata_cmdb_level_tables, file_system_type_ignore) is in, 1 on the current one and 0 on the others; read each scrape from the copy's state. not_configured: the deployment renders no distribution source, the copy answers from its own configuration and the platform's code defaults, which is what alarmd did before it could read the platform, and is not a fault. never_loaded: a source is configured and no read has found a publication since the process started. authoritative: the last read found a publication and every field decoded. stale: there was a publication once and the last read did not yield one; the copy answers from the last publication, and past the staleness bound fleet health degrades.
 
+## bkmonitor_alarmd_platform_settings_read_retry_total
+
+Reads of the distribution whose first try was torn -- the revision changed between its first and last command, a publication landing meanwhile -- and that were tried again, whatever the second try came to. A second try torn as well is also counted in platform_settings_unavailable_total under revision_moved.
+
 ## bkmonitor_alarmd_platform_settings_refresh_total
 
 Labels: `result`
@@ -1255,7 +1259,7 @@ Reads of the distribution by result: authoritative (a publication, every field d
 
 Labels: `reason`
 
-Reads that yielded no publication, by why: read_error (the read did not happen), unpublished (the revision key is absent -- nothing was ever published, and the field keys beside it are not read as no override), decode_error (a field is not of its declared type; the whole publication is refused rather than half of it, and the log line names the field and the value).
+Reads that yielded no publication, by why: read_error (the read did not happen), revision_moved (the store answered and the revision changed during the read on both tries, so the fields may be of two publications and are not used -- a publisher writing faster than a round trip, not the store being down), unpublished (the revision key is absent -- nothing was ever published, and the field keys beside it are not read as no override), decode_error (a field is not of its declared type; the whole publication is refused rather than half of it, and the log line names the field and the value).
 
 ## bkmonitor_alarmd_progress_completed_total
 
