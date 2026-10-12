@@ -687,6 +687,12 @@ Objects whose rounds stopped finishing for longer than the deployment's own budg
 
 Bytes of the fleet summary this replica last published beside its snapshot. A summarized fleet view reads every replica's summary, so one costs about the sum of this across the fleet.
 
+## bkmonitor_alarmd_fleet_tracker_dropped_total
+
+Labels: `what`
+
+Facts the replica's fleet object table dropped because it was full, by what: observation (a new object's round never recorded), truncation, range. The table holds four times the objects the replica owns, at least 16384; anything here is an object the page and fleet.get cannot speak for, and fleet.get names the latest of them. Every kind exists from the start.
+
 ## bkmonitor_alarmd_fleet_view_owned_bytes_total
 
 Bytes of owned lists this replica read for summarized fleet views.

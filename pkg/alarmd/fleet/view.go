@@ -1895,6 +1895,9 @@ type Snapshot struct {
 	// TestSnapshotOmitsDispatchOnAReplicaThatDoesNotSuppress rather than a note
 	// here: it asserts on the encoded form, which is where the page reads this.
 	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
+	// TrackerDropped is what this replica's table lost because it was full,
+	// omitted while it has lost nothing.
+	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
 	// AddressDiffers is this replica's latest records whose address is not
 	// their host's (AddressDiffersSamples); omitted when it has none.
 	AddressDiffers []AddressDiffersSample `json:"address_differs,omitempty"`
@@ -2982,6 +2985,10 @@ type View struct {
 	// Suppression says whether anything in this deployment can be parked at
 	// all. See DispatchSuppression: its absence, not its value, is the answer.
 	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
+	// TrackerDropped is what the replicas' tables lost because they were
+	// full: the counts summed, and the latest objects named with their
+	// replica. Nil while none has lost anything.
+	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
 	// AddressDiffers is every replica's latest records whose address is not
 	// their host's, newest first and bounded.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
@@ -3558,6 +3565,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateSchedule(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
+	aggregateTrackerDropped(&view, counted)
 	aggregateUndetermined(&view, counted)
 
 	// Owning an object is not knowing about it. A replica that has just restarted

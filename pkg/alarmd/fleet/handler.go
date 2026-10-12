@@ -372,6 +372,10 @@ type HealthResponse struct {
 	// which strategy, Query Group and host, and both addresses. The count
 	// admission_cmdb_address_differs_total says how often.
 	AddressDiffers []AddressDiffersSample `json:"address_differs_samples,omitempty"`
+	// TrackerDropped is what the replicas' object tables lost because they
+	// were full: rounds, truncations and ranges never recorded, with the
+	// latest objects named. Absent while nothing was lost.
+	TrackerDropped *TrackerDropped `json:"tracker_dropped,omitempty"`
 	// AwaitingFirstRound is the objects only waiting for their first round
 	// since their replica took them over, by period; they are covered and not
 	// counted in unknown. Undetermined names the objects unknown does count,
@@ -1013,7 +1017,7 @@ func healthOf(view *View, part ReplicaPart, at time.Time) HealthResponse {
 		NoDataTracking: view.NoDataTracking,
 		Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 		DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
-		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers,
+		Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule, AddressDiffers: view.AddressDiffers, TrackerDropped: view.TrackerDropped,
 		AwaitingFirstRound: view.AwaitingFirstRound, Undetermined: view.Undetermined, UndeterminedTotal: view.UndeterminedTotal,
 		Gaps: view.Gaps, Capacity: view.Capacity,
 		Load: part.Load(view),

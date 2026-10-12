@@ -245,6 +245,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
 	fleetTracker := fleet.NewTracker(baseObserver, cfg.PhaseTwo.Worker.ID, external.Now)
+	recorder.SetFleetTrackerSource(fleetTracker.Dropped)
 	// How long a Query Group may wait for this Worker's view to carry it
 	// before the wait is listed: the old Leader's lease running out, a
 	// candidate taking the lead (and publishing) on a refresh tick, the

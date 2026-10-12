@@ -865,6 +865,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.dispatch != nil {
 		snapshot.Dispatch = publisher.dispatch()
 	}
+	if dropped := publisher.tracker.Dropped(); dropped.Lost() {
+		snapshot.TrackerDropped = &dropped
+	}
 	if publisher.addressDiffers != nil {
 		snapshot.AddressDiffers = publisher.addressDiffers()
 	}
