@@ -2346,6 +2346,10 @@ type Observation struct {
 	CapacityRejection *CapacityRejectionFacts
 	SlotBudgetUsage   *SlotBudgetUsageFacts
 	SlotTiming        *SlotTimingFacts
+	// FollowingSlot is the evaluation time of the Slot after this one, on a
+	// slot_completed line whose execution carried it; zero otherwise. With
+	// the trace's EvaluationTime it is the Query Group's own period.
+	FollowingSlot int64
 	// InPlaceWait is the Slot's in-place readiness wait, on its
 	// slot_completed line; nil when it did not wait.
 	InPlaceWait         *InPlaceWaitFacts
