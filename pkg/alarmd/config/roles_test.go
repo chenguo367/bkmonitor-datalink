@@ -9,7 +9,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
@@ -164,7 +163,6 @@ func TestRoleSpecificBusinessDependenciesAndLeaseBudgets(t *testing.T) {
 		{"Worker CMDB", worker, func(c *Config) { c.PlatformCache.CMDB = &RedisConnectionConfig{} }, "platform_cache.cmdb"},
 		{"Worker effective-time Redis", worker, func(c *Config) { c.PlatformCache.Strategy = &RedisConnectionConfig{} }, "platform_cache.strategy"},
 		{"Worker QG lease", worker, func(c *Config) { c.PhaseTwo.Ownership.LeaseRenewInterval = c.PhaseTwo.Ownership.LeaseTTL }, "ownership TTL"},
-		{"Worker replay proof", worker, func(c *Config) { c.Redis.RestartMargin = Duration(time.Second) }, "replay window"},
 		{"Worker mutation budget", worker, func(c *Config) { c.PhaseTwo.Coordinator.MaxStateMutations = c.chunkedStateApplyBudget() + 1 }, "chunked state"},
 		{"Worker output evidence", worker, func(c *Config) { c.Kafka.TriggerEvent.MaxMessageBytes = c.Limits.Trigger.MaxEvidenceBytesPerEvent - 1 }, "maximum trigger evidence"},
 	} {

@@ -229,11 +229,36 @@ type RedisConfig struct {
 	RedisConnectionConfig `yaml:",inline"`
 	// StatePrefix defaults to DefaultStatePrefix; it is a program fact, not
 	// an environment choice.
-	StatePrefix   string   `yaml:"state_prefix"`
-	MinTTL        Duration `yaml:"min_ttl"`
-	MaxTTL        Duration `yaml:"max_ttl"`
-	RestartMargin Duration `yaml:"restart_margin"`
+	StatePrefix string `yaml:"state_prefix"`
+	// The state key lifetimes are the program's, not the deployment's; none
+	// of them is a values key any more.
+	//
+	// RestartMargin is how long past its Plan's retention a state key lives:
+	// the replay window (PhaseTwo.Scheduler.MaxReplayAge), since a replayed
+	// Slot recognises its own earlier write only while that key exists. It
+	// was a values key that had to be set to at least the replay window,
+	// which no values key sets, so the only valid setting was the program's
+	// own number.
+	//
+	// MinTTL is that same margin: every lifetime is a retention plus the
+	// margin, so no floor below it ever applied.
+	//
+	// MaxTTL is the longest any state key lives, StateMaxTTL; see there.
+	MinTTL        Duration `yaml:"-"`
+	MaxTTL        Duration `yaml:"-"`
+	RestartMargin Duration `yaml:"-"`
 }
+
+// StateMaxTTL is the longest a state key lives, and with it the longest a
+// Plan's content is kept (phaseTwoObjectRetentionLimit): a Plan whose
+// retention needs longer is refused by name, as before. It is what bounds
+// how long the state of a series that went away keeps occupying the store,
+// a trade of store memory against the longest Plans that an operator is not
+// better placed to make than the program. It stays a number rather than a
+// derivation because nothing upstream bounds it: the compiler bounds a
+// Plan's points, not its cadence, so the longest retention a Plan may ask
+// for has no ceiling of its own to derive this from.
+const StateMaxTTL = 30 * 24 * time.Hour
 
 // PlatformCacheConfig names the platform's own caches that alarmd reads. They
 // are separate connections because the platform routes them separately: its
@@ -329,12 +354,14 @@ func Default() Config {
 				DialTimeout: Duration(3 * time.Second), ReadTimeout: Duration(3 * time.Second),
 				WriteTimeout: Duration(3 * time.Second), PoolSize: 0},
 			StatePrefix: DefaultStatePrefix,
-			MinTTL:      Duration(time.Minute), MaxTTL: Duration(30 * 24 * time.Hour), RestartMargin: Duration(10 * time.Minute),
+			MaxTTL:      Duration(StateMaxTTL),
 		},
 		Limits:          defaultLimits(),
 		PhaseTwo:        defaultPhaseTwoRuntime(),
 		ShutdownTimeout: Duration(10 * time.Second),
 	}
+	cfg.Redis.RestartMargin = cfg.PhaseTwo.Scheduler.MaxReplayAge
+	cfg.Redis.MinTTL = cfg.Redis.RestartMargin
 	return cfg.withDerivedCapacity(ReferenceContainer())
 }
 
@@ -925,30 +952,9 @@ func (c Config) validateGoAccessRuntime() error {
 	if !selected.Has(roles.Worker) {
 		return nil
 	}
-	// A replayed Slot recognises its own earlier write and reports it as
-	// already applied instead of emitting the same events twice. That only
-	// works while the key it wrote still exists. Runtime State TTLs are derived
-	// from Plan retention plus the restart margin, so the shortest one any Plan
-	// can produce is the margin plus one evaluation interval: a margin below
-	// max_replay_age would let the shortest-retention Plans lose that proof
-	// inside the replay window, silently and only for them.
-	if c.Redis.RestartMargin.Duration() < c.PhaseTwo.Scheduler.MaxReplayAge.Duration() {
-		// The only reader of this message is whoever is holding the deployment
-		// that will not start, and the two halves are not symmetric: the margin
-		// is theirs to set - how long a restart takes is a property of their
-		// cluster - while the replay window is a fixed property of the replay
-		// algorithm that no values key sets. Naming both values and saying
-		// which half moves is the difference between a message that can be
-		// acted on and one that invites looking for a key that does not exist.
-		return fmt.Errorf(
-			"redis.restart_margin (%s) must cover the replay window (%s): "+
-				"the replay window is fixed by the program and no values key sets it, "+
-				"so raise restart_margin to at least %s",
-			c.Redis.RestartMargin.Duration(),
-			c.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-			c.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-		)
-	}
+	// The restart margin is the replay window (RedisConfig.RestartMargin),
+	// so the state a replayed Slot needs to recognise its own write outlives
+	// the window by construction; there is nothing left here to check.
 	budget := c.PhaseTwo.Coordinator
 	// One Slot's State or Gap mutations are applied in successive Store calls
 	// of at most max_keys_per_batch items, up to StateApplyMaxChunks calls.

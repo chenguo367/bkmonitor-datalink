@@ -295,34 +295,24 @@ phase_two:
 `, workerID)
 }
 
-func TestRestartMarginCoversTheReplayWindow(t *testing.T) {
+// The state key lifetimes are the program's: the restart margin is the
+// replay window, the floor is that margin, the ceiling is StateMaxTTL, and
+// none of them is a values key any more -- a file that still sets one is
+// refused by the strict decoder, by the key's name.
+func TestStateKeyLifetimesAreDerivedAndNotValuesKeys(t *testing.T) {
 	cfg := completePhaseTwoProductionConfig(validGoAccessConfigObject())
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("the default configuration does not validate: %v", err)
 	}
-	if cfg.Redis.RestartMargin.Duration() < cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration() {
-		t.Fatalf("default restart_margin %s does not cover max_replay_age %s",
-			cfg.Redis.RestartMargin.Duration(), cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
+	if cfg.Redis.RestartMargin != cfg.PhaseTwo.Scheduler.MaxReplayAge || cfg.Redis.MinTTL != cfg.Redis.RestartMargin ||
+		cfg.Redis.MaxTTL.Duration() != StateMaxTTL {
+		t.Fatalf("lifetimes = margin %s, floor %s, ceiling %s; want the replay window %s twice and %s",
+			cfg.Redis.RestartMargin.Duration(), cfg.Redis.MinTTL.Duration(), cfg.Redis.MaxTTL.Duration(),
+			cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(), StateMaxTTL)
 	}
-	narrowed := completePhaseTwoProductionConfig(validGoAccessConfigObject())
-	narrowed.Redis.RestartMargin = Duration(narrowed.PhaseTwo.Scheduler.MaxReplayAge.Duration() - time.Second)
-	err := narrowed.Validate()
-	if err == nil || !strings.Contains(err.Error(), "restart_margin") {
-		t.Fatalf("a restart margin narrower than the replay window was accepted: %v", err)
-	}
-	// The message is read by whoever is holding a deployment that will not
-	// start. It has to carry both durations, because neither is visible from
-	// the values file alone, and it has to say which half is fixed: without
-	// that the obvious move is to look for a replay window key, and there is
-	// none.
-	for _, want := range []string{
-		narrowed.Redis.RestartMargin.Duration().String(),
-		narrowed.PhaseTwo.Scheduler.MaxReplayAge.Duration().String(),
-		"replay window is fixed",
-		"no values key sets it",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("the rejection does not tell the operator %q: %v", want, err)
+	for _, key := range []string{"restart_margin", "min_ttl", "max_ttl"} {
+		if _, err := LoadWithRoles(writeConfig(t, "redis:\n  "+key+": 10m\n"), nil); err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("redis.%s in a values file: error = %v, want it refused by name", key, err)
 		}
 	}
 }
