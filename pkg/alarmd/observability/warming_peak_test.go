@@ -219,3 +219,10 @@ func TestWarmingPeakCountsAGroupOnceWhateverStrategyTheTraceNames(t *testing.T) 
 		t.Fatalf("groups = %+v, want the one group with all 60 writes", groups)
 	}
 }
+
+// held is how many groups the current minute counts, for the bound's test.
+func (p *WarmingPeak) held() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.counts)
+}

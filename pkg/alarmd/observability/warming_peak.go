@@ -193,13 +193,6 @@ func (p *WarmingPeak) top() []WarmingGroup {
 	return groups[:min(len(groups), warmingPeakTop)]
 }
 
-// held is how many groups the current minute counts.
-func (p *WarmingPeak) held() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.counts)
-}
-
 // medianMinute is the median of an hour's sixty minutes, of which only the
 // ones with writes are listed: the others are zero.
 func medianMinute(listed []int64) int64 {
