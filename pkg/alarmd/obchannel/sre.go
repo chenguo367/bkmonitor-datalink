@@ -36,6 +36,10 @@ type SREAction struct {
 	At time.Time `json:"at"`
 	// Exec is what a pod.exec run said about itself, without its output.
 	Exec *SREExec `json:"exec,omitempty"`
+	// Argv is an execution's command line, redacted and capped
+	// (pod.AuditArgv), for the sre_action line only: the stored receipt keeps
+	// the script's digest and never the command line.
+	Argv string `json:"-"`
 }
 
 // The results an SREAction ends in, closed: done, the target replaced since
@@ -310,7 +314,7 @@ func SREOperations(options SREOptions) []Operation {
 				stdin := p.String("stdin")
 				target := podTarget(p)
 				v, err := pods.Exec(ctx, pod.ExecRequest{RequestID: CallerFrom(ctx).RequestID, Target: target, Argv: argv, Stdin: stdin, TimeoutMS: int64(p.Int("timeout_ms", 0)), OutputBytes: int64(p.Int("output_bytes", 0))})
-				audit(ctx, started, SREAction{Op: "pod.exec", Namespace: target.Namespace, Kind: "Pod", Name: target.Pod + "/" + target.Container, UID: target.UID,
+				audit(ctx, started, SREAction{Op: "pod.exec", Namespace: target.Namespace, Kind: "Pod", Name: target.Pod + "/" + target.Container, UID: target.UID, Argv: pods.AuditArgv(argv),
 					Detail: fmt.Sprintf("script %s stdin_bytes %d remote %s", v.ScriptDigest, len(stdin), v.RemoteState),
 					Exec: &SREExec{RemoteState: v.RemoteState, Supervision: v.Supervision, UnsupervisedReason: v.UnsupervisedReason, ExitCode: v.ExitCode,
 						DeadlineRaced: v.DeadlineRaced, StreamCut: v.StreamCut, Truncated: v.Truncated, ScriptDigest: v.ScriptDigest,
