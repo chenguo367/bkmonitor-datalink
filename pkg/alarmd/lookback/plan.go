@@ -61,7 +61,7 @@ func (engine *Engine) ApplyPlans(plans []Plan) {
 	defer engine.mu.Unlock()
 	next := make(map[execution.QueryGroupIdentity]Plan, len(plans))
 	for _, plan := range plans {
-		if plan.QueryGroup == "" || plan.Rung < 0 || plan.Rung >= len(RungSteps) {
+		if plan.Rung < 0 || plan.Rung >= len(RungSteps) {
 			continue
 		}
 		next[plan.QueryGroup] = plan

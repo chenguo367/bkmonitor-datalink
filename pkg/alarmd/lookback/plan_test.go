@@ -115,8 +115,9 @@ func TestAPlanPastItsExpiryOrRungsIsNoPlan(t *testing.T) {
 	f.engine.ApplyPlans([]Plan{
 		{QueryGroup: "qg", Rung: 1, ExpiresAt: f.clock.now()},
 		{QueryGroup: "qg-b", Rung: len(RungSteps), ExpiresAt: f.clock.now().Add(time.Hour)},
+		{QueryGroup: "qg-c", Rung: -1, ExpiresAt: f.clock.now().Add(time.Hour)},
 	})
-	for _, queryGroup := range []string{"qg", "qg-b"} {
+	for _, queryGroup := range []string{"qg", "qg-b", "qg-c"} {
 		if read := f.engine.Begin(query(queryGroup, f.clock.now().Unix(), minute, sourceLog)); read == nil || read.directed != nil {
 			t.Fatalf("%s's first read under an unusable entry = %+v, want no directed read", queryGroup, read)
 		}
