@@ -69,6 +69,10 @@ type snapshotRead struct {
 	params    map[string]any
 }
 
+// snapshotClock is when a snapshot starts, which names its file; a test
+// fixes it.
+var snapshotClock = time.Now
+
 // snapshotPace is the wait between two calls at the session's rate; a test
 // sets it to nothing.
 var snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) }
@@ -144,7 +148,7 @@ func (a *App) snapshot(p Profile, out string) int {
 	run := &snapshotRun{a: a, p: p, files: map[string][]byte{}, manifest: SnapshotManifest{Format: snapshotFormat,
 		Notice: "This file holds this deployment's own readings, with credentials redacted; host addresses, host names " +
 			"and business IDs are kept because diagnosis needs them. Whoever receives it receives those.",
-		CLIVersion: a.Version, EnvironmentID: p.EnvironmentID, StartedAt: time.Now().UTC(), MaxBytes: snapshotMaxBytes,
+		CLIVersion: a.Version, EnvironmentID: p.EnvironmentID, StartedAt: snapshotClock().UTC(), MaxBytes: snapshotMaxBytes,
 		Redactions: []SnapshotRedacts{}, Items: []SnapshotItem{}, Builds: []string{}}}
 	fmt.Fprintln(a.Err, "Reading the operation catalog...")
 	discovered, status, err := a.channelRequest("discover", "", nil, "", p)

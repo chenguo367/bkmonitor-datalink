@@ -269,7 +269,38 @@ func TestASnapshotIsReadWithTheSameCommands(t *testing.T) {
 	if code, result, _, _ = run(t, reader, offline, "", "discover", "--snapshot", file, "--env", "another-env"); code != 2 {
 		t.Fatalf("another environment: code %d %v", code, result)
 	}
-	if code, result, _, _ = run(t, reader, offline, "", "accept", "--snapshot", file, "--env", p.EnvironmentID); code != 2 {
+	// A command that cannot read a snapshot is refused before any file is
+	// opened.
+	if code, result, _, _ = run(t, reader, offline, "", "accept", "--snapshot", filepath.Join(t.TempDir(), "absent.tar.gz"), "--env", p.EnvironmentID); code != 2 ||
+		stringField(objectField(result, "error"), "code") != "invalid_input" {
 		t.Fatalf("accept from a snapshot: code %d %v", code, result)
+	}
+}
+
+// A snapshot is never written over another: one whose file already exists
+// is refused and the existing file is left as it was.
+func TestASnapshotIsNeverWrittenOverAnother(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	at := time.Date(2026, 10, 14, 3, 0, 0, 0, time.UTC)
+	snapshotClock = func() time.Time { return at }
+	t.Cleanup(func() {
+		snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) }
+		snapshotClock = time.Now
+	})
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	out := t.TempDir()
+	existing := filepath.Join(out, "alarmd-snapshot-"+p.EnvironmentID+"-20261014T030000Z.tar.gz")
+	if err := os.WriteFile(existing, []byte("earlier"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", out)
+	kept, _ := os.ReadFile(existing)
+	if code != 1 || stringField(objectField(result, "error"), "code") != "snapshot_failed" || string(kept) != "earlier" {
+		t.Fatalf("code %d result %v kept %q", code, result, kept)
 	}
 }
