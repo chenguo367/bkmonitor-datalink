@@ -212,6 +212,7 @@ type phaseTwoMetrics struct {
 	unmappedSeverity                *prometheus.CounterVec
 	cmdbIndexAge                    *prometheus.GaugeVec
 	cmdbIndexDegraded               *prometheus.GaugeVec
+	cmdbIndexReads                  *prometheus.CounterVec
 	dueIndex                        dueIndexMetrics
 	handover                        handoverMetrics
 	sreActions                      *sreActionMetrics
@@ -1550,6 +1551,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_degraded",
 		Help: "Whether the CMDB index is unusable for filtering, by bounded reason.",
 	}, []string{"reason"})
+	metrics.cmdbIndexReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_host_index_reads_total",
+		Help: "Refreshes of the CMDB index, by how they read the cache: full, every hash read into a new " +
+			"index; unchanged, the writer's publish time was where the held index has it and the held index " +
+			"was kept without reading the hashes (only for a writer that publishes whole snapshots with a " +
+			"publish time for every hash read, the service instance hash's included, and no second writer); failed, a read that failed and kept the held index.",
+	}, []string{"result"})
+	for _, result := range []string{"full", "unchanged", "failed"} {
+		metrics.cmdbIndexReads.WithLabelValues(result)
+	}
 	// Publish every class from the first scrape, at zero. A class created only
 	// on its first increment is absent until then, and absent and zero read the
 	// same way off a graph while meaning opposite things: one says the
@@ -1732,7 +1743,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes,
 		m.fleetSummaryBytes, m.fleetViewSummaryLoads, m.fleetViewSummaryBytes, m.fleetViewOwnedLoads, m.fleetViewOwnedBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
-		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
+		m.cmdbIndexDegraded, m.cmdbIndexReads, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 

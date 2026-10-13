@@ -290,6 +290,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_host_disable_monitor_states":                  "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_host_index_age_seconds":                  "variableLabels: {kind}",
 		"bkmonitor_alarmd_cmdb_host_index_degraded":                     "variableLabels: {reason}",
+		"bkmonitor_alarmd_cmdb_host_index_reads_total":                  "variableLabels: {result}",
 		"bkmonitor_alarmd_due_index_entries":                            "variableLabels: {}",
 		"bkmonitor_alarmd_due_index_prediction_total":                   "variableLabels: {prediction,actual}",
 		"bkmonitor_alarmd_due_index_recomputed_total":                   "variableLabels: {trigger}",
@@ -836,6 +837,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("host_disable_monitor_states"):           1,
 		fqName("cmdb_host_index_age_seconds"):           3,
 		fqName("cmdb_host_index_degraded"):              len(cmdbIndexReasons),
+		fqName("cmdb_host_index_reads_total"):           3,
 		// Every combination is created at construction, so these are exact rather
 		// than an upper bound: a series that has never happened still publishes a
 		// zero, which is what lets "no violations" be told apart from "not wired".

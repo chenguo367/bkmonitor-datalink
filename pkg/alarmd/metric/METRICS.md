@@ -295,6 +295,12 @@ Whether the CMDB index is unusable for filtering, by bounded reason.
 
 Hosts in the in-memory CMDB index the target filter decides on.
 
+## bkmonitor_alarmd_cmdb_host_index_reads_total
+
+Labels: `result`
+
+Refreshes of the CMDB index, by how they read the cache: full, every hash read into a new index; unchanged, the writer's publish time was where the held index has it and the held index was kept without reading the hashes (only for a writer that publishes whole snapshots with a publish time for every hash read, the service instance hash's included, and no second writer); failed, a read that failed and kept the held index.
+
 ## bkmonitor_alarmd_cmdb_index_business_mappings
 
 Labels: `mapping`, `state`
