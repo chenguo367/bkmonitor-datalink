@@ -12,6 +12,8 @@ package fleet
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -218,5 +220,58 @@ func TestTheOverviewCapabilityIsThePublishedStrategyCount(t *testing.T) {
 	}
 	if len(got.IgnoredByDesign) != 1 || got.IgnoredByDesign[0].Strategies != 2 {
 		t.Fatalf("ignored = %+v", got.IgnoredByDesign)
+	}
+}
+
+// What the runtime block says about a replica and the deployment: a
+// replica not ready is in attention, one without a known memory limit has
+// no memory share, one build is not a rollout and two are, and published
+// configuration that has not taken effect past its bound is named.
+func TestTheOverviewRuntimeNamesWhatNeedsAPerson(t *testing.T) {
+	health := overviewHealth()
+	if overviewOf(health, nil, false, time.Now()).Build.Rolling {
+		t.Fatal("one build reads as a rollout")
+	}
+	second := health.PerReplica[0]
+	second.Replica, second.Readiness = "replica-b", &ReadinessFacts{Ready: false}
+	second.Capacity = &Capacity{PermitBudget: 16}
+	health.PerReplica = append(health.PerReplica, second)
+	health.Builds = append(health.Builds, BuildGroup{Build: BuildFacts{Version: "0.4.11"}, Replicas: []string{"replica-b"}})
+	health.Activation = &ActivationFacts{BehindBeyondBound: true, ConsecutiveFailures: 4}
+	overview := overviewOf(health, nil, false, time.Now())
+	if !overview.Build.Rolling {
+		t.Fatal("two builds do not read as a rollout")
+	}
+	if overview.Runtime.Replicas[1].State != OverviewAttention || overview.Runtime.Replicas[0].State != OverviewOK {
+		t.Fatalf("replica states = %+v, want the one not ready in attention", overview.Runtime.Replicas)
+	}
+	if overview.Resources.Replicas[1].MemoryRatio.Measured {
+		t.Fatalf("a replica without a memory limit has a memory share: %+v", overview.Resources.Replicas[1])
+	}
+	if len(overview.Runtime.Attention) != 1 || overview.Runtime.Attention[0].Kind != "config_behind" || !strings.Contains(overview.Runtime.Attention[0].Line, "4") {
+		t.Fatalf("attention = %+v, want the configuration behind named with its failures", overview.Runtime.Attention)
+	}
+}
+
+// The route answers the same verdict as the health route, from the same
+// replicas, with no address on it.
+func TestTheOverviewRouteProjectsTheHealthRoute(t *testing.T) {
+	snapshots := idleSnapshots()
+	snapshots[0].Source = blockedSource(now.Add(-30 * time.Second))
+	db := 8
+	snapshots[0].Dependencies = []Endpoint{{Role: EndpointStateRedis, Kind: "redis", Address: "redis.example:6379", DB: &db, Configured: true}}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 0, Known: true}, replicas())
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "redis.example") {
+		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var overview Overview
+	if err := json.Unmarshal(recorder.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.Verdict.State != OverviewAttention || overview.Capability.Funnel.Listed != 26 || overview.MaxAgeSeconds != 15 ||
+		flowStage(overview, "state").Dependencies[0].Name != EndpointStateRedis {
+		t.Fatalf("overview = %+v, want the degraded verdict, the 26-strategy round and the state store", overview)
 	}
 }
