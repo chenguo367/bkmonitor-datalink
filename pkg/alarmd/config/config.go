@@ -186,8 +186,19 @@ func (c HTTPConfig) DiagnosticsFact() string {
 }
 
 type KafkaOutputConfig struct {
-	Topic           string `yaml:"topic"`
-	MaxMessageBytes int    `yaml:"max_message_bytes"`
+	Topic string `yaml:"topic"`
+	// MaxMessageBytes is the largest message this output sends, the
+	// program's (defaultOutputMaxMessageBytes) and not a values key. It is
+	// not read from the topic's max.message.bytes either, though that is
+	// the limit it stands under: every message carries at most the trigger
+	// evidence bound (limits.trigger.max_evidence_bytes_per_event, checked
+	// against this at startup) and the fields beside it, well inside this,
+	// and this is under the broker's default topic limit of about a
+	// megabyte. A broker configured below it refuses at produce, which is
+	// named per message. Reading the limit would make starting depend on a
+	// describe-configs permission on the topic, for a case no message
+	// reaches.
+	MaxMessageBytes int `yaml:"-"`
 }
 
 type KafkaConfig struct {
@@ -229,11 +240,36 @@ type RedisConfig struct {
 	RedisConnectionConfig `yaml:",inline"`
 	// StatePrefix defaults to DefaultStatePrefix; it is a program fact, not
 	// an environment choice.
-	StatePrefix   string   `yaml:"state_prefix"`
-	MinTTL        Duration `yaml:"min_ttl"`
-	MaxTTL        Duration `yaml:"max_ttl"`
-	RestartMargin Duration `yaml:"restart_margin"`
+	StatePrefix string `yaml:"state_prefix"`
+	// The state key lifetimes are the program's, not the deployment's; none
+	// of them is a values key any more.
+	//
+	// RestartMargin is how long past its Plan's retention a state key lives:
+	// the replay window (PhaseTwo.Scheduler.MaxReplayAge), since a replayed
+	// Slot recognises its own earlier write only while that key exists. It
+	// was a values key that had to be set to at least the replay window,
+	// which no values key sets, so the only valid setting was the program's
+	// own number.
+	//
+	// MinTTL is that same margin: every lifetime is a retention plus the
+	// margin, so no floor below it ever applied.
+	//
+	// MaxTTL is the longest any state key lives, StateMaxTTL; see there.
+	MinTTL        Duration `yaml:"-"`
+	MaxTTL        Duration `yaml:"-"`
+	RestartMargin Duration `yaml:"-"`
 }
+
+// StateMaxTTL is the longest a state key lives, and with it the longest a
+// Plan's content is kept (phaseTwoObjectRetentionLimit): a Plan whose
+// retention needs longer is refused by name, as before. It is what bounds
+// how long the state of a series that went away keeps occupying the store,
+// a trade of store memory against the longest Plans that an operator is not
+// better placed to make than the program. It stays a number rather than a
+// derivation because nothing upstream bounds it: the compiler bounds a
+// Plan's points, not its cadence, so the longest retention a Plan may ask
+// for has no ceiling of its own to derive this from.
+const StateMaxTTL = 30 * 24 * time.Hour
 
 // PlatformCacheConfig names the platform's own caches that alarmd reads. They
 // are separate connections because the platform routes them separately: its
@@ -298,12 +334,71 @@ type Config struct {
 	PhaseTwo      PhaseTwoRuntimeConfig `yaml:"phase_two"`
 	// ShutdownTimeout is the drain deadline of a stop (design 02 section
 	// 6.6), and the lease releases after it get as long again: a stop takes
-	// up to 2 x ShutdownTimeout, plus a second for Slots that ignore their
-	// cancellation, plus the stop record's write (2 s). The Pod's
+	// up to 2 x ShutdownTimeout, plus the stop record's write (2 s); a Slot
+	// that ignores its cancellation is not waited for past that. The Pod's
 	// terminationGracePeriodSeconds must cover that, or the kubelet kills the
-	// process before its leases are released and its stop is recorded; with
-	// the default 30 s grace that is up to about 13 s here.
-	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
+	// process before its leases are released and its stop is recorded.
+	//
+	// It is derived from that grace and not a values key: the chart passes
+	// the grace it gives the Pod (TerminationGraceEnvironment), and the
+	// timeout is what fits in it (shutdownTimeoutWithin). A values key had
+	// to be kept in step with the grace by hand. Without the variable -- a
+	// process outside a chart that passes it -- it stays
+	// DefaultShutdownTimeout, which fits Kubernetes' default grace.
+	ShutdownTimeout Duration `yaml:"-"`
+}
+
+// TerminationGraceEnvironment is how the chart tells the process the
+// terminationGracePeriodSeconds it gave the Pod. The Downward API does not
+// expose it, and reading it from the API server would make every stop depend
+// on a permission to read the Pod.
+const TerminationGraceEnvironment = "ALARMD_TERMINATION_GRACE_SECONDS"
+
+// DefaultShutdownTimeout is the drain deadline when no grace is passed: it
+// fits Kubernetes' default 30 second grace with room to spare.
+const DefaultShutdownTimeout = 10 * time.Second
+
+// stopOverhead is what a stop is given beyond its two timeouts: the stop
+// record's write, which runs under its own two second timeout
+// (lifecycleWriteTimeout), and one second of slack. The stop waits for the
+// drain and the lease release only until their deadlines and then goes on --
+// a Slot that ignores its cancellation is left behind and its lease left to
+// expire, not waited for -- so the longest a stop can take, counted from when
+// the process sees the signal, is two timeouts and two seconds. The second
+// left over is what covers the time between the kubelet sending the signal
+// and the process acting on it, and the exit after the record.
+const stopOverhead = 3 * time.Second
+
+// shutdownTimeoutWithin is the longest drain deadline whose stop fits in the
+// grace: 2 x timeout + stopOverhead <= grace.
+func shutdownTimeoutWithin(grace time.Duration) (time.Duration, error) {
+	timeout := (grace - stopOverhead) / 2
+	if timeout <= 0 {
+		return 0, fmt.Errorf("%s %s leaves no time to drain: a stop needs %s beyond two drain deadlines",
+			TerminationGraceEnvironment, grace, stopOverhead)
+	}
+	return timeout, nil
+}
+
+// resolveShutdownTimeoutFromEnvironment derives the drain deadline from the
+// grace the chart passes, when it passes one. A value that is not a whole
+// positive number of seconds is refused rather than ignored: a chart that
+// passes the variable means the stop to fit the grace.
+func (c *Config) resolveShutdownTimeoutFromEnvironment() error {
+	value, ok := os.LookupEnv(TerminationGraceEnvironment)
+	if c == nil || !ok {
+		return nil
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seconds <= 0 {
+		return fmt.Errorf("%s %q must be a whole positive number of seconds", TerminationGraceEnvironment, value)
+	}
+	timeout, err := shutdownTimeoutWithin(time.Duration(seconds) * time.Second)
+	if err != nil {
+		return err
+	}
+	c.ShutdownTimeout = Duration(timeout)
+	return nil
 }
 
 // Default is the product configuration, and it is the same on every machine:
@@ -329,12 +424,14 @@ func Default() Config {
 				DialTimeout: Duration(3 * time.Second), ReadTimeout: Duration(3 * time.Second),
 				WriteTimeout: Duration(3 * time.Second), PoolSize: 0},
 			StatePrefix: DefaultStatePrefix,
-			MinTTL:      Duration(time.Minute), MaxTTL: Duration(30 * 24 * time.Hour), RestartMargin: Duration(10 * time.Minute),
+			MaxTTL:      Duration(StateMaxTTL),
 		},
 		Limits:          defaultLimits(),
 		PhaseTwo:        defaultPhaseTwoRuntime(),
-		ShutdownTimeout: Duration(10 * time.Second),
+		ShutdownTimeout: Duration(DefaultShutdownTimeout),
 	}
+	cfg.Redis.RestartMargin = cfg.PhaseTwo.Scheduler.MaxReplayAge
+	cfg.Redis.MinTTL = cfg.Redis.RestartMargin
 	return cfg.withDerivedCapacity(ReferenceContainer())
 }
 
@@ -634,6 +731,9 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 		cfg.resolvePlatformCacheRedis()
 		cfg.resolveCompatibilityServiceTimeouts()
 		cfg.resolveCompatibilityPodCache()
+		if err := cfg.resolveShutdownTimeoutFromEnvironment(); err != nil {
+			return Config{}, err
+		}
 		return cfg, cfg.Validate()
 	}
 
@@ -692,6 +792,9 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 	cfg.resolvePlatformCacheRedis()
 	cfg.resolveCompatibilityServiceTimeouts()
 	cfg.resolveCompatibilityPodCache()
+	if err := cfg.resolveShutdownTimeoutFromEnvironment(); err != nil {
+		return Config{}, err
+	}
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
 	if cfg.HasRole(roles.Control) || cfg.HasRole(roles.Worker) {
 		if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
@@ -925,30 +1028,9 @@ func (c Config) validateGoAccessRuntime() error {
 	if !selected.Has(roles.Worker) {
 		return nil
 	}
-	// A replayed Slot recognises its own earlier write and reports it as
-	// already applied instead of emitting the same events twice. That only
-	// works while the key it wrote still exists. Runtime State TTLs are derived
-	// from Plan retention plus the restart margin, so the shortest one any Plan
-	// can produce is the margin plus one evaluation interval: a margin below
-	// max_replay_age would let the shortest-retention Plans lose that proof
-	// inside the replay window, silently and only for them.
-	if c.Redis.RestartMargin.Duration() < c.PhaseTwo.Scheduler.MaxReplayAge.Duration() {
-		// The only reader of this message is whoever is holding the deployment
-		// that will not start, and the two halves are not symmetric: the margin
-		// is theirs to set - how long a restart takes is a property of their
-		// cluster - while the replay window is a fixed property of the replay
-		// algorithm that no values key sets. Naming both values and saying
-		// which half moves is the difference between a message that can be
-		// acted on and one that invites looking for a key that does not exist.
-		return fmt.Errorf(
-			"redis.restart_margin (%s) must cover the replay window (%s): "+
-				"the replay window is fixed by the program and no values key sets it, "+
-				"so raise restart_margin to at least %s",
-			c.Redis.RestartMargin.Duration(),
-			c.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-			c.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-		)
-	}
+	// The restart margin is the replay window (RedisConfig.RestartMargin),
+	// so the state a replayed Slot needs to recognise its own write outlives
+	// the window by construction; there is nothing left here to check.
 	budget := c.PhaseTwo.Coordinator
 	// One Slot's State or Gap mutations are applied in successive Store calls
 	// of at most max_keys_per_batch items, up to StateApplyMaxChunks calls.
@@ -958,8 +1040,7 @@ func (c Config) validateGoAccessRuntime() error {
 	if budget.MaxStateMutations > chunkedApplyBudget || budget.MaxGapMutations > chunkedApplyBudget {
 		return errors.New("phase_two mutation budgets exceed the chunked state store apply budget")
 	}
-	if budget.MaxRetainedBytes > math.MaxInt64 ||
-		budget.MaxSeries > math.MaxUint64/c.Limits.Detect.MaxRecordsPerSeries {
+	if budget.MaxRetainedBytes > math.MaxInt64 {
 		return errors.New("phase_two provider budgets overflow production limits")
 	}
 	return nil

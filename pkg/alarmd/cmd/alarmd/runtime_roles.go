@@ -78,7 +78,9 @@ func (bundle *phaseTwoWorkerBundle) runControlRounds(ctx context.Context) error 
 
 // The legacy digest remains unchanged for older leaders and registrations.
 // This additional contract describes executable formats and algorithms, not
-// the resource quota assigned to this particular process.
+// the resource quota assigned to this particular process. The legacy digest
+// is retired with the fallback in ownership.WorkerCompatibility.Matches:
+// once the previous upstream snapshot declares ExecutionContractDigest.
 func phaseTwoExecutionContractDigest() (string, error) {
 	semantics, err := state.RuntimeStateSemantics()
 	if err != nil {

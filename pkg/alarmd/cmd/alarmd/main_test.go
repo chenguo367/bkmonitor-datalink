@@ -151,13 +151,11 @@ func TestRunRoleFlagOverridesYAMLBeforeDependencyValidation(t *testing.T) {
 func validGoAccessApplicationYAML() string {
 	return `http:
   listen: 127.0.0.1:8080
-shutdown_timeout: 1s
 kafka:
   brokers:
     - 127.0.0.1:9092
   trigger_event:
     topic: alarmd-shadow-trigger-event-v2
-    max_message_bytes: 524288
   legacy_adapter:
     topic: alarmd_0bkmonitor_backend_event
     snapshot_prefix: alarmd-compatibility-test

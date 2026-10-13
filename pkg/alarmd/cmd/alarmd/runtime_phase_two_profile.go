@@ -222,8 +222,7 @@ func phaseTwoRuntimeCapacity(cfg config.Config, inputs config.CapacityInputs) ob
 		ControlTimelineCacheEntries: timelineCache.MaxEntries,
 		GoMemoryLimitBytes:          goRuntime.MemoryLimitBytes,
 		GoGCPercent:                 goRuntime.GCPercent,
-		EvaluatorMaxPlans:           cfg.Limits.Detect.MaxPlans, EvaluatorMaxRecords: cfg.Limits.Detect.MaxRecordsPerSeries,
-		EvaluatorMaxLevels: uint64(cfg.Limits.Compiler.MaxLevelsPerPlan), EvidenceBytes: cfg.TriggerLimits().MaxEvidenceBytesPerEvent,
+		EvaluatorMaxLevels:          uint64(cfg.Limits.Compiler.MaxLevelsPerPlan), EvidenceBytes: cfg.TriggerLimits().MaxEvidenceBytesPerEvent,
 		OutputMessageBytes: cfg.Kafka.TriggerEvent.MaxMessageBytes,
 		UQBodyBytes:        uq.MaxBodyBytes, UQSeriesBytes: uq.MaxSeriesBytes, UQSeries: uq.MaxSeries, UQRecords: uq.MaxRecords,
 	}
