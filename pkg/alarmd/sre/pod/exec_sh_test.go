@@ -53,6 +53,12 @@ func withSetsid(t *testing.T) string {
 	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
+// recordDeadline is the deadline, in seconds, of a supervised command that
+// has to write its pids before the timer ends it: long enough for a shell to
+// start and write them on a machine running several test suites at once,
+// where one second was not.
+const recordDeadline = "3"
+
 // supervise runs remoteSupervisor under the local /bin/sh as the target's
 // would: it returns the supervisor's stderr records and the command's output.
 func supervise(t *testing.T, seconds string, argv ...string) (records []string, stdout, stderr string) {
@@ -189,7 +195,7 @@ func TestTheShellSupervisorEndsTheWholeGroupAtItsDeadline(t *testing.T) {
 	runtimeProvider(t)
 	pidPath := filepath.Join(t.TempDir(), "grandchild")
 	started := time.Now()
-	records, _, _ := superviseUnder(t, "/bin/sh", groupingPath(t), "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
+	records, _, _ := superviseUnder(t, "/bin/sh", groupingPath(t), recordDeadline, "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
 	if fmt.Sprint(records) != "[started group 1 expired complete 143]" {
 		t.Fatalf("records %q, want expired then complete 143", records)
 	}
@@ -646,7 +652,7 @@ func TestUnderDashWithoutSetsidTheCommandHasNoGroupAndSaysSo(t *testing.T) {
 		t.Fatalf("records %q, want no group and complete 4", records)
 	}
 	pidPath := filepath.Join(t.TempDir(), "pids")
-	records, _, _ := superviseUnder(t, "/bin/dash", "", "1", "/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $$ $! > \"$1\"; wait", "cmd", pidPath)
+	records, _, _ := superviseUnder(t, "/bin/dash", "", recordDeadline, "/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $$ $! > \"$1\"; wait", "cmd", pidPath)
 	data, _ := os.ReadFile(pidPath)
 	var command, child int
 	fmt.Sscan(string(data), &command, &child)
@@ -675,7 +681,7 @@ func TestUnderSetsidTheCommandsGroupIsEndedWhole(t *testing.T) {
 			t.Fatalf("%s: records %q, want a group and complete 4", shell, records)
 		}
 		pidPath := filepath.Join(t.TempDir(), "grandchild")
-		records, _, _ := superviseUnder(t, shell, path, "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
+		records, _, _ := superviseUnder(t, shell, path, recordDeadline, "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
 		if fmt.Sprint(records) != "[started group 1 expired complete 143]" {
 			t.Fatalf("%s: records %q, want a group, expired, complete 143", shell, records)
 		}
