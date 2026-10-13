@@ -186,8 +186,19 @@ func (c HTTPConfig) DiagnosticsFact() string {
 }
 
 type KafkaOutputConfig struct {
-	Topic           string `yaml:"topic"`
-	MaxMessageBytes int    `yaml:"max_message_bytes"`
+	Topic string `yaml:"topic"`
+	// MaxMessageBytes is the largest message this output sends, the
+	// program's (defaultOutputMaxMessageBytes) and not a values key. It is
+	// not read from the topic's max.message.bytes either, though that is
+	// the limit it stands under: every message carries at most the trigger
+	// evidence bound (limits.trigger.max_evidence_bytes_per_event, checked
+	// against this at startup) and the fields beside it, well inside this,
+	// and this is under the broker's default topic limit of about a
+	// megabyte. A broker configured below it refuses at produce, which is
+	// named per message. Reading the limit would make starting depend on a
+	// describe-configs permission on the topic, for a case no message
+	// reaches.
+	MaxMessageBytes int `yaml:"-"`
 }
 
 type KafkaConfig struct {

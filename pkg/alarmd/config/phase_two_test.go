@@ -316,3 +316,19 @@ func TestStateKeyLifetimesAreDerivedAndNotValuesKeys(t *testing.T) {
 		}
 	}
 }
+
+// The output's largest message is the program's: a values file that still
+// sets it is refused by the strict decoder, naming the key, and the default
+// still admits the largest trigger evidence.
+func TestTheOutputMessageBoundIsNotAValuesKey(t *testing.T) {
+	cfg := completePhaseTwoProductionConfig(validGoAccessConfigObject())
+	if cfg.Kafka.TriggerEvent.MaxMessageBytes != defaultOutputMaxMessageBytes ||
+		cfg.Kafka.TriggerEvent.MaxMessageBytes < cfg.Limits.Trigger.MaxEvidenceBytesPerEvent {
+		t.Fatalf("output bound = %d, want %d and at least the evidence bound %d",
+			cfg.Kafka.TriggerEvent.MaxMessageBytes, defaultOutputMaxMessageBytes, cfg.Limits.Trigger.MaxEvidenceBytesPerEvent)
+	}
+	if _, err := LoadWithRoles(writeConfig(t, "kafka:\n  trigger_event:\n    max_message_bytes: 1048576\n"), nil); err == nil ||
+		!strings.Contains(err.Error(), "max_message_bytes") {
+		t.Fatalf("kafka.trigger_event.max_message_bytes in a values file: error = %v, want it refused by name", err)
+	}
+}
