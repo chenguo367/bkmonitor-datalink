@@ -324,8 +324,35 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 // to time out on the next normal round, with 13 s left, and come back. The
 // replay still runs, for its Slot's data, under a replay's budget; its answer
 // neither takes the Query Group out nor keeps it in.
+//
+// Except where the pool holds the Query Group for a reason no time range
+// changes (queryCooldownTimeIndependent): the backend refusing the table the
+// query names says the same of a replay as of an on-time round, whatever the
+// budget. There the first held Slot's replay decides. Refused again, the
+// cooldown is extended and the Slots still held stay held, given up for
+// distance and age as the pool always gave them up, instead of each sending
+// a query that could only be refused: on one production deployment those
+// replays were about 230 queries a minute, 6% of all it sent. Answered, the
+// Query Group leaves and the held Slots after it replay as they always did.
+// With no held Slot at the cooldown's end the normal round decides, as it
+// does for every other reason.
 func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool {
-	return !runner.queryCooldown.until.IsZero() && operation == execution.OperationNormal
+	state := runner.queryCooldown
+	if state.until.IsZero() {
+		return false
+	}
+	return operation == execution.OperationNormal ||
+		(operation == execution.OperationReplay && queryCooldownTimeIndependent(state.reason))
+}
+
+// queryCooldownTimeIndependent reports a pool reason that no time range
+// changes: the query's routing refused in its space, or its storage not
+// reading the windows its detection asks for. Both stay until somebody
+// changes the strategy or the space (contract.ReasonQueryTargetMissing,
+// contract.ReasonDetectIntervalStorageNotSliding).
+func queryCooldownTimeIndependent(reason execution.ReasonCode) bool {
+	return reason == execution.ReasonCode(contract.ReasonQueryTargetMissing) ||
+		reason == execution.ReasonCode(contract.ReasonDetectIntervalStorageNotSliding)
 }
 
 // queryCooldownExcusesItsOwnDelay reports whether a deciding round's timeout
