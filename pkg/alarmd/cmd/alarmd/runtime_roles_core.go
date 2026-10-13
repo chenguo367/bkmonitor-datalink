@@ -144,6 +144,7 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		stats := repository.ControlReadCacheStats()
 		occupancy := stats.TimelineOccupancy
 		objects := repository.ObjectCacheStats()
+		compiled := compiler.CacheStats()
 		counts := []metric.ControlCacheCounts{
 			{Object: "version", Hits: stats.Version.Hits, Misses: stats.Version.Misses, Refreshes: stats.Version.Refreshes},
 			{Object: "activation", Hits: stats.Activation.Hits, Misses: stats.Activation.Misses, Refreshes: stats.Activation.Refreshes},
@@ -174,9 +175,19 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 			// stored bytes it is bounded by; the observation memory line
 			// charges them decoded (observation_memory_budget_*_bytes).
 			{Object: "catalog_object", Hits: objects.Hits, Misses: objects.Misses, Evictions: objects.Evictions,
+				Clears: objects.Clears,
 				Occupancy: &metric.ControlCacheOccupancy{
 					Entries: float64(objects.Occupancy.Entries), Bytes: float64(objects.Occupancy.Bytes),
 					BytesLimit: float64(objects.Occupancy.MaxBytes),
+				}},
+			// Compiled Plans, shared by the control rounds and the Worker's
+			// Slot freezing. A clear is a term ending (ForgetCached): a former
+			// Leader drops what it compiled for every Query Group and refills
+			// its own, so the occupancy after one is a Worker's again.
+			{Object: "plan_compile", Hits: compiled.Hits, Misses: compiled.Misses, Evictions: compiled.Evictions,
+				Clears: compiled.Clears,
+				Occupancy: &metric.ControlCacheOccupancy{
+					Entries: float64(compiled.Entries), Bytes: float64(compiled.Bytes), BytesLimit: float64(compiled.MaxBytes),
 				}},
 		}
 		// The key segment memos are caches too, and they report through the same

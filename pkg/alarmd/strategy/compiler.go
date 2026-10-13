@@ -151,6 +151,19 @@ func (c *PlanCompiler) CacheStats() CacheStats {
 	return c.cache.snapshot()
 }
 
+// ForgetCached drops every compiled result the compiler keeps. The control
+// rounds and a Worker's Slot freezing share the one compiler, so a process
+// that led holds the compiled Plans of every Query Group, of which as a
+// Worker it uses only its own; nothing evicts the rest under a Worker's
+// steady load. A process calls it when its term ends, and refills what its
+// own Slots compile.
+func (c *PlanCompiler) ForgetCached() {
+	if c == nil || c.cache == nil {
+		return
+	}
+	c.cache.clear()
+}
+
 func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileRequest) (CompileResult, error) {
 	if err := ctx.Err(); err != nil {
 		return CompileResult{}, err

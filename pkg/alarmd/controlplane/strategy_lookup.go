@@ -325,7 +325,8 @@ func (reconciler *SourceReconciler) StepDown() {
 // ForgetTerm is StepDown plus everything else this process kept only to
 // lead: the last observation of the source and the documents it holds, the
 // reusable round's Catalog, the last-good publication, and the compiled
-// candidates. A follower never refreshes, so without it a former Leader
+// candidates; and, once after a term, the compile cache and the decoded
+// catalog objects it shares with the Worker path. A follower never refreshes, so without it a former Leader
 // carried all of that for as long as it stayed a follower -- the Leader's
 // whole working set, on a replica that no longer uses any of it.
 //
@@ -350,4 +351,16 @@ func (reconciler *SourceReconciler) ForgetTerm() {
 	reconciler.memory.Store(nil)
 	reconciler.lastGood = nil
 	reconciler.candidates.forget()
+	// The two caches the control rounds share with the Worker path hold
+	// what the term filled for every Query Group, beyond the Worker's own.
+	// Dropped once, on the first follower tick after a term: this runs on
+	// every one, and a Worker that never led refills them only for itself.
+	if !reconciler.refreshed {
+		return
+	}
+	reconciler.refreshed = false
+	if forgetting, ok := reconciler.compiler.(interface{ ForgetCached() }); ok {
+		forgetting.ForgetCached()
+	}
+	reconciler.repository.ForgetCachedObjects()
 }
