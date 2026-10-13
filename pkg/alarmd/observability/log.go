@@ -471,6 +471,16 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.SlotBudgetUsage; f != nil {
 		attributes = append(attributes, slog.Any("slot_budget_usage", f))
 	}
+	if f := observation.WarmingPeak; f != nil {
+		attributes = append(attributes,
+			slog.Time("warming_hour_start", f.HourStart),
+			slog.Int64("warming_writes", f.Writes),
+			slog.Int("warming_minutes", f.MinutesWithWrites),
+			slog.Int64("warming_median_minute_writes", f.MedianMinuteWrites),
+			slog.Time("warming_peak_minute", f.PeakMinute),
+			slog.Int64("warming_peak_minute_writes", f.PeakMinuteWrites),
+			slog.Any("warming_peak_groups", f.PeakGroups))
+	}
 	// Flat, so a log query can filter and group on them.
 	if f := observation.InPlaceWait; f != nil {
 		attributes = append(attributes,
@@ -1219,6 +1229,10 @@ func mandatoryLogStage(stage Stage) bool {
 	case StageAssignmentApplied:
 		// One line per assignment change in place of one per Query Group
 		// acquired, lost or taken over: about 2,100 a Pod at every start.
+		return true
+	case StageWarmingPeak:
+		// One line an hour per replica, and only for an hour that had a
+		// warming write: the one account of whose burst it was.
 		return true
 	case StageAssignmentSwept, StageViewPublished, StageViewSession, StageViewInstalled:
 		// Once per term, or once per Worker per connection: rare, and the

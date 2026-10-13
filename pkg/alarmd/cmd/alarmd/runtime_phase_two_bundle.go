@@ -289,6 +289,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// A Query Group's last Slot peak is held for two of its own periods and
 	// the replay age, so an hourly or daily one stays a reading between Slots.
 	retainedPeaks.SetReplayAge(cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
+	// Whose burst of writes to warming series an hour's busiest minute was:
+	// one line an hour, through the observer it is a member of.
+	warmingPeak := observability.NewWarmingPeak(external.Now)
 	// Each member named, so that a panic in one is counted under it while the
 	// others still receive the observation.
 	observer = observability.Multi(observability.Named(observability.ObserverTracker, observer),
@@ -296,8 +299,10 @@ func openProductionPhaseTwoBundleAssembly(
 		observability.Named(observability.ObserverTargetFlow, targetFlow),
 		observability.Named(observability.ObserverRejectionTally, rejectionTally),
 		observability.Named(observability.ObserverCostSummary, costSummary),
-		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks))
+		observability.Named(observability.ObserverRetainedPeaks, retainedPeaks),
+		observability.Named(observability.ObserverWarmingPeak, warmingPeak))
 	observer = phaseTwoRuntimeObserver(observer)
+	warmingPeak.SetEmit(observer)
 
 	sourceConnection := cfg.StrategySourceRedis()
 	runtimeConnection := cfg.RuntimeStoreRedis()
