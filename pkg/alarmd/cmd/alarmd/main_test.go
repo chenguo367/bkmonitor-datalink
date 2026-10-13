@@ -157,7 +157,6 @@ kafka:
     - 127.0.0.1:9092
   trigger_event:
     topic: alarmd-shadow-trigger-event-v2
-    max_message_bytes: 524288
   legacy_adapter:
     topic: alarmd_0bkmonitor_backend_event
     snapshot_prefix: alarmd-compatibility-test
