@@ -108,7 +108,13 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 ### 4. 常用排障路径
 
-`diagnose` 和 `accept` 是 CLI 内置的组合命令，直接运行；其余都通过 `invoke <operation>` 调用。下面每条写成"问题 → 调用 → 看哪些字段"。
+`diagnose`、`accept` 和 `snapshot` 是 CLI 内置的组合命令，直接运行；其余都通过 `invoke <operation>` 调用。下面每条写成"问题 → 调用 → 看哪些字段"。
+
+**没有 agent 的环境：先做一份诊断快照**
+
+1. `alarmd-cli snapshot --env <environment_id> [--out <目录>]`：按服务端 `discover` 给出的每会话调用速率，读操作目录、`fleet.get`、全部 `diagnose.environment` 分页、一组固定读取、`fleet.get` 里不正常的副本（逐个读运行配置、指标名单与关键指标族、日志）和不在检测的策略（`strategy.get` 与 `object.get`），写成一个 `alarmd-snapshot-<环境>-<UTC 时刻>.tar.gz` 和旁边的 `.sha256`。计划调用数和时长上限（调用数按速率折成分钟，再加一次调用的最长期限 30 秒）在开始收集前写进 `manifest.json`；超过时长或 64 MiB 的读取记为 `skipped_by_bound`。退出码：0 全部收全，3 有没收全的（逐项写在 manifest 里），1 什么都没写成。
+2. 快照里保留主机地址、主机名和业务 ID（诊断要用），凭据已脱敏；交给谁就等于给了谁这个环境的这些信息。`manifest.json` 的 `redactions` 不为空，说明服务端漏脱了凭据，按缺陷上报。
+3. agent 读快照用同一套命令，加 `--snapshot <文件>`：`discover`、`describe <operation>`、`invoke <operation> --input …`、`diagnose`。读到的形状与在线相同，`meta.snapshot` 写明文件和收集时刻；快照里没有按这组参数读过的，返回 `not_in_snapshot` 并列出它读过的参数。读快照不连网络，`--env` 可省略；给了而与快照的环境不一致时返回退出码 2 并说出快照是哪个环境的，拿到一份不知来源的快照时可以这样核对。
 
 **Pod / 原生 UQ 取证与运维**
 
