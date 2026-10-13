@@ -76,8 +76,11 @@ func TestAReceiverThatLeftIsNamedDepartedNotLagging(t *testing.T) {
 	if stats.Counts.Expected != 1 || stats.Counts.Installed != 1 || len(stats.Lagging) != 0 || departedWorkers(stats)[0] != "w2" {
 		t.Fatalf("after w2 left: counts %+v lagging %+v departed %v", stats.Counts, stats.Lagging, departedWorkers(stats))
 	}
-	if harness.observer.count("installed_by_all", "") != 1 {
-		t.Fatalf("installed_by_all observed %d times, want once when w2 left", harness.observer.count("installed_by_all", ""))
+	// The moment is reported right after the departure is recorded, on the
+	// closing session's goroutine: wait for it, then hold it to once.
+	eventually(t, "installed_by_all reported", func() bool { return harness.observer.count("installed_by_all", "") >= 1 })
+	if got := harness.observer.count("installed_by_all", ""); got != 1 {
+		t.Fatalf("installed_by_all observed %d times, want once when w2 left", got)
 	}
 }
 

@@ -559,6 +559,7 @@ func openProductionPhaseTwoBundleAssembly(
 		ObserveAdmission:          recorder.RecordSeriesAdmission,
 		ObserveHostPlacement:      hostPlacementObserver(recorder, addressDiffers, external.Now),
 		ObserveDownstreamDistress: recorder.RecordDownstreamDistress,
+		ObserveQuery:              recorder.RecordPhysicalQuery,
 		ScopeDrops:                scopeDrops,
 		ObserveSeriesPulled:       seriesPullTally.Add,
 		Lookback:                  lookbackEngine,
@@ -824,6 +825,7 @@ func openProductionPhaseTwoBundleAssembly(
 		SteppedDownAsLeader: controlLeaderSteppedDown(reconciler, recorder),
 		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		ReadHolds:           readHolds,
+		DecisionLag:         recorder.RecordDecisionLag,
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
@@ -1264,6 +1266,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// cursor older than that describes an object that stopped rather than
 		// one between rounds.
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
+		flow:      flowFactsSource(recorder, cfg.EffectiveRoles()),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
 		readHolds: readHolds.fleetFacts,
 		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),

@@ -188,6 +188,10 @@ type redisCallMetrics struct {
 	callerReasons    *prometheus.CounterVec
 }
 
+// redisDurationBuckets are redis_command_duration_seconds's bounds; the
+// flow copies the runtime client's buckets in this order.
+var redisDurationBuckets = []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5}
+
 func newRedisCallMetrics() redisCallMetrics {
 	labels := []string{"client", "command", "pipelined"}
 	operations := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -239,7 +243,7 @@ func newRedisCallMetrics() redisCallMetrics {
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_duration_seconds",
 			Help:    "Redis round-trip duration. A pipelined batch is recorded once for the whole batch.",
-			Buckets: []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+			Buckets: redisDurationBuckets,
 		}, labels),
 		failures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_failure_total",

@@ -337,3 +337,103 @@ func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
 		t.Fatal("a caller waiting on the panicking computation is stranded")
 	}
 }
+
+func flowHealth(at time.Time, started time.Time, flow *FlowFacts) HealthResponse {
+	health := overviewHealth()
+	health.PerReplica[0].AgeSeconds = 0
+	health.PerReplica[0].StartedAt = started
+	health.PerReplica[0].Flow = flow
+	return health
+}
+
+func cumulative(counts ...uint64) []uint64 {
+	out := make([]uint64, len(counts))
+	var sum uint64
+	for index, count := range counts {
+		sum += count
+		out[index] = sum
+	}
+	return out
+}
+
+// The stages' numbers are the replicas' counters over two computations:
+// nothing on the first, a rate and a P95 from the buckets on the second,
+// a P95 past the last bound said as at least that bound, and nothing for a
+// replica that restarted between them.
+func TestTheFlowRatesAreTheCountersOverTwoComputations(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	first := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	before := &FlowFacts{Queries: 100, QueryDuration: FlowHistogram{Buckets: make([]uint64, len(FlowQueryBounds)), Count: 100},
+		DecisionLag: FlowHistogram{Buckets: make([]uint64, len(FlowDecisionBounds))}, RuntimeRedis: FlowHistogram{Buckets: make([]uint64, len(FlowRedisBounds))},
+		Detections: 50, StateWrites: 10, EventsEmitted: 4}
+	// 300 more queries: 270 within 0.5 s, 30 cut at 30 s (past the last
+	// bound); 6 timed out.
+	after := *before
+	after.Queries = 400
+	after.QueryFailures = map[string]uint64{"timeout": 6}
+	after.QueryDuration = FlowHistogram{Buckets: cumulative(0, 0, 0, 270, 0, 0, 0, 0, 0, 0), Count: 400}
+	after.Detections, after.StateWrites, after.EventsEmitted, after.EventsRejected = 110, 130, 10, 3
+	after.DecisionLag = FlowHistogram{Buckets: cumulative(0, 0, 0, 0, 60, 0, 0, 0, 0, 0), Count: 60}
+
+	flows := newOverviewFlows()
+	one := overviewOf(flowHealth(first, started, before), nil, false, first)
+	flows.apply(&one, flowHealth(first, started, before), first)
+	if pull := flowStage(one, "pull"); pull.Volume.Measured || pull.LatencyP95MS.Measured {
+		t.Fatalf("first computation = %+v, want nothing measured with nothing to subtract", pull)
+	}
+	two := overviewOf(flowHealth(second, started, &after), nil, false, second)
+	flows.apply(&two, flowHealth(second, started, &after), second)
+	pull := flowStage(two, "pull")
+	if !pull.Volume.Measured || pull.Volume.Value != 5 || !pull.Failures.Measured || pull.Failures.Value != 6 ||
+		len(pull.FailureCauses) != 1 || pull.FailureCauses[0].Cause != "timeout" || pull.FailureCauses[0].Count != 6 {
+		t.Fatalf("pull = %+v, want 5 a second and 6 timeouts a minute", pull)
+	}
+	if !pull.LatencyP95MS.Measured || !pull.LatencyP95MS.AtLeast || pull.LatencyP95MS.Value != 30000 {
+		t.Fatalf("pull P95 = %+v, want at least 30 s: 10%% of the queries were cut", pull.LatencyP95MS)
+	}
+	evaluate := flowStage(two, "evaluate")
+	// All 60 lags in the 2.5-5 s bucket: the 95th of them is 95% of the way
+	// through it.
+	if evaluate.Volume.Value != 1 || !evaluate.LatencyP95MS.Measured || evaluate.LatencyP95MS.AtLeast ||
+		evaluate.LatencyP95MS.Value < 4874.9 || evaluate.LatencyP95MS.Value > 4875.1 {
+		t.Fatalf("evaluate = %+v, want 60 decisions a minute as 1 a second and a P95 of 4875 ms", evaluate)
+	}
+	if state, output := flowStage(two, "state"), flowStage(two, "output"); state.Volume.Value != 2 || output.Volume.Value != 0.1 ||
+		output.Failures.Value != 3 || output.LatencyP95MS.Measured {
+		t.Fatalf("state %+v output %+v", state, output)
+	}
+	restarted := second.Add(time.Minute)
+	// A new process that has already counted past the old one: higher
+	// counters, still not a difference of anything.
+	afterRestart := after
+	afterRestart.Queries = 1000
+	three := overviewOf(flowHealth(restarted, started.Add(time.Hour), &afterRestart), nil, false, restarted)
+	flows.apply(&three, flowHealth(restarted, started.Add(time.Hour), &afterRestart), restarted)
+	if pull := flowStage(three, "pull"); pull.Volume.Measured {
+		t.Fatalf("after a restart = %+v, want unmeasured until the next computation", pull)
+	}
+}
+
+// Each replica's rate is over the time between its own two readings, not
+// between the two computations: a summary published 30 seconds before the
+// computation is 30 seconds older.
+func TestAReplicasRateIsOverItsOwnReadings(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	first := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	empty := func(bounds []float64) FlowHistogram { return FlowHistogram{Buckets: make([]uint64, len(bounds))} }
+	before := &FlowFacts{Queries: 0, QueryDuration: empty(FlowQueryBounds), DecisionLag: empty(FlowDecisionBounds), RuntimeRedis: empty(FlowRedisBounds)}
+	after := *before
+	after.Queries = 90
+	flows := newOverviewFlows()
+	one := overviewOf(flowHealth(first, started, before), nil, false, first)
+	flows.apply(&one, flowHealth(first, started, before), first)
+	late := flowHealth(second, started, &after)
+	late.PerReplica[0].AgeSeconds = 30
+	two := overviewOf(late, nil, false, second)
+	flows.apply(&two, late, second)
+	if pull := flowStage(two, "pull"); !pull.Volume.Measured || pull.Volume.Value != 3 {
+		t.Fatalf("pull = %+v, want 90 queries over the 30 seconds between the readings, 3 a second", pull.Volume)
+	}
+}

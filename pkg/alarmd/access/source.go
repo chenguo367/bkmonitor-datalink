@@ -141,6 +141,11 @@ type Config struct {
 	// downstream is overloaded or unreachable (DistressClasses), with whether
 	// the query had queued for its permit. Optional.
 	ObserveDownstreamDistress func(class string, contended bool)
+	// ObserveQuery hears every physical query this Source runs -- each
+	// attempt, retries included -- with the time its provider took and how
+	// it failed (QueryFailures), "" when it answered. Diagnostic reads do
+	// not go through a Source and are not heard.
+	ObserveQuery func(elapsed time.Duration, failure string)
 	// ScopeDrops receives the series the target filters turned away, for
 	// the target-scope close; see ScopeDropSink. Optional.
 	ScopeDrops ScopeDropSink
@@ -667,7 +672,14 @@ func (source *Source) executeWithPermit(
 ) (execution.ProviderCompletion, error) {
 	defer permit.Release()
 	observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "query_running"})
+	called := time.Now()
 	completion, err := source.provider.Execute(ctx, attempt, adapter)
+	// A caller that gave up -- a step-down, a shutdown -- is not a failure of
+	// the query, and an attempt cut short that way has no duration of its
+	// own: it is not heard.
+	if source.config.ObserveQuery != nil && !errors.Is(err, context.Canceled) {
+		source.config.ObserveQuery(queryElapsed(completion, err, time.Since(called)), queryFailureOf(completion, err))
+	}
 	if err == nil && source.config.ObserveDownstreamDistress != nil {
 		if class := downstreamDistressOf(completion); class != "" {
 			source.config.ObserveDownstreamDistress(class, permitWaited(permit))

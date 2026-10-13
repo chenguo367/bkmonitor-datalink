@@ -45,6 +45,9 @@ type OverviewNumber struct {
 	Value    float64 `json:"value"`
 	Unit     string  `json:"unit,omitempty"`
 	Measured bool    `json:"measured"`
+	// AtLeast is a quantile past a histogram's last bound: the value is that
+	// bound, and the truth is at least it.
+	AtLeast bool `json:"at_least,omitempty"`
 }
 
 func overviewMeasured(value float64, unit string) OverviewNumber {
@@ -141,12 +144,22 @@ type OverviewFunnel struct {
 // OverviewStage is one part of the flow -- pull, evaluate, state, output --
 // with its volume, failures and latency, and the dependencies it needs.
 type OverviewStage struct {
-	Stage        string               `json:"stage"`
-	State        string               `json:"state"`
-	Volume       OverviewNumber       `json:"volume"`
-	Failures     OverviewNumber       `json:"failures"`
-	LatencyP95MS OverviewNumber       `json:"latency_p95_ms"`
+	Stage        string         `json:"stage"`
+	State        string         `json:"state"`
+	Volume       OverviewNumber `json:"volume"`
+	Failures     OverviewNumber `json:"failures"`
+	LatencyP95MS OverviewNumber `json:"latency_p95_ms"`
+	// FailureCauses splits the pull stage's failures by cause, per minute.
+	FailureCauses []OverviewCauseCount `json:"failure_causes,omitempty"`
+	// Basis names the counters the numbers are rates of, so they can be
+	// read against the same counters' charts.
+	Basis        string               `json:"basis"`
 	Dependencies []OverviewDependency `json:"dependencies"`
+}
+
+type OverviewCauseCount struct {
+	Cause string  `json:"cause"`
+	Count float64 `json:"count"`
 }
 
 type OverviewDependency struct {
@@ -189,12 +202,13 @@ type OverviewRuntime struct {
 }
 
 type OverviewReplica struct {
-	Name          string  `json:"name"`
-	Version       string  `json:"version"`
-	UptimeSeconds float64 `json:"uptime_seconds"`
-	Ready         bool    `json:"ready"`
-	MergedQueries int     `json:"merged_queries"`
-	State         string  `json:"state"`
+	Name          string   `json:"name"`
+	Roles         []string `json:"roles,omitempty"`
+	Version       string   `json:"version"`
+	UptimeSeconds float64  `json:"uptime_seconds"`
+	Ready         bool     `json:"ready"`
+	MergedQueries int      `json:"merged_queries"`
+	State         string   `json:"state"`
 }
 
 type OverviewNotice struct {
@@ -453,4 +467,179 @@ func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
 		capability.IgnoredByDesign = append(capability.IgnoredByDesign, OverviewIgnoredReason{Code: reason.Code, Strategies: reason.Strategies})
 	}
 	return capability
+}
+
+// overviewStageBasis is the counters each stage's numbers are rates of,
+// over the last two computations.
+var overviewStageBasis = map[string]string{
+	"pull": "worker_work_total{work_kind=\"physical_query\"}、access_query_failure_total、access_query_duration_seconds，取最近两次计算的差",
+	"evaluate": "progress_completed_total（不含 GAP_SKIPPED、SNAPSHOT_UNAVAILABLE）、slot_decision_lag_seconds，取最近两次计算的差；" +
+		"失败是此刻调度普查里迟到和超期的检测",
+	"state":  "worker_work_total{work_kind=\"state_apply\"}、state_admission_total（非 success）与 state_version_conflict_total、redis_command_duration_seconds{client=\"runtime\"}（运行态 Redis 往返），取最近两次计算的差",
+	"output": "output_events_by_kind_total、output_events_rejected_all_total，取最近两次计算的差；发送耗时没有度量",
+}
+
+// overviewReading is one replica's counters as one computation read them,
+// with when they were taken and the process they belong to.
+type overviewReading struct {
+	takenAt, startedAt time.Time
+	flow               FlowFacts
+}
+
+// overviewFlows turns the replicas' counters into the stages' numbers: the
+// difference from the previous computation over the time between the two
+// readings of each replica. It keeps one reading per replica, the last; a
+// replica whose process changed, whose counters went back or whose reading
+// did not move between the two contributes nothing that time.
+type overviewFlows struct {
+	readings map[string]overviewReading
+}
+
+func newOverviewFlows() *overviewFlows {
+	return &overviewFlows{readings: map[string]overviewReading{}}
+}
+
+type flowSum struct {
+	contributed                                                        bool
+	queries, detections, stateWrites, stateFailures, emitted, rejected float64
+	failures                                                           map[string]float64
+	queryBuckets, lagBuckets, redisBuckets                             []uint64
+	queryCount, lagCount, redisCount                                   uint64
+}
+
+func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at time.Time) {
+	sum := flowSum{failures: map[string]float64{}, queryBuckets: make([]uint64, len(FlowQueryBounds)),
+		lagBuckets: make([]uint64, len(FlowDecisionBounds)), redisBuckets: make([]uint64, len(FlowRedisBounds))}
+	next := make(map[string]overviewReading, len(health.PerReplica))
+	var hosts uint64
+	hostsKnown := false
+	for index, replica := range health.PerReplica {
+		if replica.Flow == nil {
+			continue
+		}
+		reading := overviewReading{takenAt: at.Add(-time.Duration(replica.AgeSeconds * float64(time.Second))), startedAt: replica.StartedAt, flow: *replica.Flow}
+		next[replica.Replica] = reading
+		if replica.Flow.LiveHeapBytes != nil && index < len(overview.Resources.Replicas) {
+			overview.Resources.Replicas[index].LiveHeapBytes = overviewMeasured(float64(*replica.Flow.LiveHeapBytes), "bytes")
+		}
+		if index < len(overview.Runtime.Replicas) {
+			overview.Runtime.Replicas[index].Roles = replica.Flow.Roles
+		}
+		if replica.Flow.Hosts > hosts {
+			hosts, hostsKnown = replica.Flow.Hosts, true
+		}
+		if previous, found := flows.readings[replica.Replica]; found {
+			sum.add(previous, reading)
+		}
+	}
+	flows.readings = next
+	if hostsKnown {
+		overview.Resources.Scale.Hosts = overviewMeasured(float64(hosts), "hosts")
+	}
+	for index := range overview.Flow {
+		stage := &overview.Flow[index]
+		stage.Basis = overviewStageBasis[stage.Stage]
+		if !sum.contributed {
+			continue
+		}
+		switch stage.Stage {
+		case "pull":
+			stage.Volume = overviewMeasured(sum.queries, "per_second")
+			total := 0.0
+			for _, cause := range overviewQueryFailureOrder {
+				if count := sum.failures[cause]; count > 0 {
+					stage.FailureCauses = append(stage.FailureCauses, OverviewCauseCount{Cause: cause, Count: count})
+					total += count
+				}
+			}
+			stage.Failures = overviewMeasured(total, "per_minute")
+			stage.LatencyP95MS = overviewQuantile(FlowQueryBounds, sum.queryBuckets, sum.queryCount)
+		case "evaluate":
+			stage.Volume = overviewMeasured(sum.detections, "per_second")
+			stage.LatencyP95MS = overviewQuantile(FlowDecisionBounds, sum.lagBuckets, sum.lagCount)
+		case "state":
+			stage.Volume = overviewMeasured(sum.stateWrites, "per_second")
+			stage.Failures = overviewMeasured(sum.stateFailures, "per_minute")
+			stage.LatencyP95MS = overviewQuantile(FlowRedisBounds, sum.redisBuckets, sum.redisCount)
+		case "output":
+			stage.Volume = overviewMeasured(sum.emitted, "per_second")
+			stage.Failures = overviewMeasured(sum.rejected, "per_minute")
+		}
+		if stage.Failures.Measured && stage.Failures.Value > 0 && stage.State == OverviewOK {
+			stage.State = OverviewAttention
+		}
+	}
+}
+
+// overviewQueryFailureOrder is the order the pull stage lists causes in.
+var overviewQueryFailureOrder = []string{"timeout", "refused", "not_found", "transport", "decode", "other"}
+
+func (sum *flowSum) add(previous, current overviewReading) {
+	elapsed := current.takenAt.Sub(previous.takenAt).Seconds()
+	was, now := previous.flow, current.flow
+	if !previous.startedAt.Equal(current.startedAt) || elapsed <= 0 || now.Queries < was.Queries || now.Detections < was.Detections ||
+		now.StateWrites < was.StateWrites || now.EventsEmitted < was.EventsEmitted || now.QueryDuration.Count < was.QueryDuration.Count {
+		return
+	}
+	sum.contributed = true
+	sum.queries += float64(now.Queries-was.Queries) / elapsed
+	sum.detections += float64(now.Detections-was.Detections) / elapsed
+	sum.stateWrites += float64(now.StateWrites-was.StateWrites) / elapsed
+	sum.emitted += float64(now.EventsEmitted-was.EventsEmitted) / elapsed
+	sum.stateFailures += float64(subtract(now.StateFailures, was.StateFailures)) / elapsed * 60
+	sum.rejected += float64(subtract(now.EventsRejected, was.EventsRejected)) / elapsed * 60
+	for cause, count := range now.QueryFailures {
+		sum.failures[cause] += float64(subtract(count, was.QueryFailures[cause])) / elapsed * 60
+	}
+	sum.queryCount += addBuckets(sum.queryBuckets, now.QueryDuration, was.QueryDuration)
+	sum.lagCount += addBuckets(sum.lagBuckets, now.DecisionLag, was.DecisionLag)
+	sum.redisCount += addBuckets(sum.redisBuckets, now.RuntimeRedis, was.RuntimeRedis)
+}
+
+func subtract(now, was uint64) uint64 {
+	if now < was {
+		return 0
+	}
+	return now - was
+}
+
+// addBuckets adds one replica's bucket differences into the sum and returns
+// its count's difference.
+func addBuckets(into []uint64, now, was FlowHistogram) uint64 {
+	for index := range into {
+		var current, previous uint64
+		if index < len(now.Buckets) {
+			current = now.Buckets[index]
+		}
+		if index < len(was.Buckets) {
+			previous = was.Buckets[index]
+		}
+		into[index] += subtract(current, previous)
+	}
+	return subtract(now.Count, was.Count)
+}
+
+// overviewQuantile is the 95th percentile in milliseconds from cumulative
+// bucket counts, interpolated within its bucket; past the last bound it is
+// that bound, said as at least. No observations is no number.
+func overviewQuantile(bounds []float64, buckets []uint64, count uint64) OverviewNumber {
+	if count == 0 {
+		return overviewUnmeasured("ms")
+	}
+	target := 0.95 * float64(count)
+	lower, below := 0.0, uint64(0)
+	for index, bound := range bounds {
+		if float64(buckets[index]) >= target {
+			inBucket := buckets[index] - below
+			fraction := 1.0
+			if inBucket > 0 {
+				fraction = (target - float64(below)) / float64(inBucket)
+			}
+			return overviewMeasured((lower+(bound-lower)*fraction)*1000, "ms")
+		}
+		lower, below = bound, buckets[index]
+	}
+	number := overviewMeasured(bounds[len(bounds)-1]*1000, "ms")
+	number.AtLeast = true
+	return number
 }

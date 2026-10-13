@@ -61,6 +61,12 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 		t.Fatalf("control leader = %+v found=%t err=%v, want this replica with a term", leader, found, err)
 	}
 
+	// The Slot it ran was heard by the flow's counters: its physical queries
+	// by the Source and its decision by the production executor.
+	if flow := bundle.dependencies.Recorder.FlowCounters(); flow.Queries == 0 || flow.QueryDuration.Count != flow.Queries || flow.DecisionLag.Count == 0 {
+		t.Fatalf("flow counters after a Slot = %+v, want its queries timed and its decision's lag", flow)
+	}
+
 	// The fixture serves the control stream once it runs a Slot, and this
 	// replica's own Worker holds a session under the Worker id the manual
 	// stream below uses. It is stopped first: replaced by the manual stream,

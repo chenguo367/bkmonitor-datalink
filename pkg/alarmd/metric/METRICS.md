@@ -35,6 +35,16 @@ Labels: `wait`
 
 Slot executions that waited in place, holding their execution slot, for a later query of the Slot to become readable, by their total wait. A Slot whose queries become readable at different times is not deferred as a whole; its dispatch waits for each later query while keeping its slot, its prepared plan and the input its earlier queries delivered. Its slot_completed line carries the wait (inplace_wait_ms, inplace_waits, inplace_longest_ms, inplace_sent_before, inplace_wait_before_any_sent_ms) and what it held: inplace_held_input_bytes is exact, from the Slot's own retention accounting; inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they reference, which is shared and held without the wait. Every cell exists from the start.
 
+## bkmonitor_alarmd_access_query_duration_seconds
+
+Each physical query a Slot runs, every attempt including retries, by the time its provider took from request to answer or failure. Counted where worker_work_total{work_kind="physical_query"} is, so the two agree; diagnostic reads are not in it. A query cut at 30 seconds lands in +Inf.
+
+## bkmonitor_alarmd_access_query_failure_total
+
+Labels: `reason`
+
+Physical queries that did not answer, by what their last failed attempt says: timeout, refused (the backend answered no), not_found (its status names something that does not exist), transport, decode (the answer broke the wire contract), other. Closed set.
+
 ## bkmonitor_alarmd_access_response_codec_total
 
 Labels: `codec`, `negotiation`, `completion`
@@ -1215,6 +1225,10 @@ Labels: `format`
 
 Events handed to the output sink, by the wire format they were published as: python_compatible is the event the Python alert builder reads, standard_raw_event the raw event the alert pipeline consumes, _other an event whose word this build does not name or that carried none. Counted on every event_acked, the refused batches included -- a batch the broker would not take still was what it was -- so read it beside event_acked's result for what actually landed. Every format is created at startup: a standard_raw_event that reads zero is a deployment where no event went the standard way, and it reads zero rather than not at all. The leader's catalog_plans_by_wire_format says how many Plans would publish each way; this says how many events did.
 
+## bkmonitor_alarmd_output_events_rejected_all_total
+
+Events refused on their way to the wire, all rules and strategies: output_events_rejected_total without its labels, counted at the same place.
+
 ## bkmonitor_alarmd_output_events_rejected_strategies_overflow_total
 
 Rejected events whose strategy did not get a label of its own on output_events_rejected_total because OutputRejectedStrategyLabels strategies already had one. Non-zero means the per-strategy split is partial: read which strategies through the event_acked lines.
@@ -1612,6 +1626,10 @@ Acknowledged short-period Slot Progress completions by actual completion kind.
 Labels: `cohort`, `completion_kind`
 
 Duration of the committed executor call, excluding SlotSource preparation and earlier attempts, by the completion kind it committed.
+
+## bkmonitor_alarmd_slot_decision_lag_seconds
+
+Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion being acknowledged, for every period; skipped and snapshot-unavailable completions are not decisions and are not in it.
 
 ## bkmonitor_alarmd_slot_operation_duration_seconds
 
