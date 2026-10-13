@@ -52,15 +52,17 @@ func gatherPermits(t *testing.T, source QueryPermitOccupancySource) map[string]m
 func TestPermitOccupancyIsExportedAsAccumulatedHoldTime(t *testing.T) {
 	gathered := gatherPermits(t, func() QueryPermitOccupancy {
 		return QueryPermitOccupancy{
-			Inflight:    map[string]int{"normal": 31, "retry": 1},
+			Inflight:    map[string]int{"normal": 31, "retry": 1, "lookback": 2},
 			Waiting:     map[string]int{"normal": 12, "recovery": 0},
-			HeldSeconds: map[string]float64{"normal": 1840.5, "retry": 3.25},
+			HeldSeconds: map[string]float64{"normal": 1840.5, "retry": 3.25, "lookback": 97.5},
 			Budget:      32, RecoveryBudget: 8,
 		}
 	})
 
 	held := gathered["bkmonitor_alarmd_worker_query_permit_seconds_total"]
-	if held["normal"] != 1840.5 || held["retry"] != 3.25 {
+	// The lookback borrows from the same pool, so its hold time is read beside
+	// the operations': without it the pool looked emptier than it was.
+	if held["normal"] != 1840.5 || held["retry"] != 3.25 || held["lookback"] != 97.5 {
 		t.Fatalf("accumulated hold time not exported: %v", held)
 	}
 	if got := gathered["bkmonitor_alarmd_worker_query_permits_held"]["normal"]; got != 31 {
@@ -89,7 +91,7 @@ func TestPermitOccupancyPublishesEveryOperationEvenAtZero(t *testing.T) {
 			HeldSeconds: map[string]float64{"normal": 9}, Budget: 32,
 		}
 	})
-	for _, kind := range []string{"normal", "retry", "replay", "probe"} {
+	for _, kind := range []string{"normal", "retry", "replay", "probe", "lookback"} {
 		if _, present := gathered["bkmonitor_alarmd_worker_query_permits_held"][kind]; !present {
 			t.Fatalf("operation %q absent from held permits: %v", kind,
 				gathered["bkmonitor_alarmd_worker_query_permits_held"])

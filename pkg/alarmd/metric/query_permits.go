@@ -87,7 +87,7 @@ func (c *queryPermitCollector) Collect(metrics chan<- prometheus.Metric) {
 	// Every operation is published even at zero. An absent series and a zero
 	// series read the same on a dashboard but not in an alert: "no retries are
 	// running" and "retries stopped being reported" need to be distinguishable.
-	for _, kind := range phaseTwoQueryInflightKinds {
+	for _, kind := range phaseTwoQueryPermitKinds {
 		metrics <- prometheus.MustNewConstMetric(
 			c.inflight, prometheus.GaugeValue, float64(occupancy.Inflight[kind]), kind)
 		metrics <- prometheus.MustNewConstMetric(

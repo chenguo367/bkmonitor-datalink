@@ -297,6 +297,12 @@ var phaseTwoSourceResults = []string{"degraded", "recovered"}
 var sourceCompileResults = []string{"compiled", "reused"}
 var phaseTwoReadyQueueKinds = []string{"normal", "recovery"}
 var phaseTwoQueryInflightKinds = []string{"normal", "retry", "replay", "probe"}
+
+// phaseTwoQueryPermitKinds are the holders of a query permit: every operation,
+// and the lookback, which borrows permits from the same pool without being an
+// operation or passing admission. The permit readings carry it so the pool's
+// occupancy adds up and a reader can tell how much of it re-reads take.
+var phaseTwoQueryPermitKinds = append(append([]string(nil), phaseTwoQueryInflightKinds...), "lookback")
 var phaseTwoQueryAdmissionResults = []observability.Result{
 	observability.ResultStarted,
 	observability.ResultSuccess,
