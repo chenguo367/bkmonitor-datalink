@@ -275,3 +275,65 @@ func TestTheOverviewRouteProjectsTheHealthRoute(t *testing.T) {
 		t.Fatalf("overview = %+v, want the degraded verdict, the 26-strategy round and the state store", overview)
 	}
 }
+
+// A computation that panics caches nothing and leaves nobody waiting: its
+// own caller sees the panic, and the next caller computes again.
+func TestAPanickingOverviewComputationDoesNotStrandTheNextCaller(t *testing.T) {
+	var calls atomic.Int32
+	cache := newOverviewCache(time.Now, func() Overview {
+		if calls.Add(1) == 1 {
+			panic("first computation fails")
+		}
+		return Overview{Verdict: OverviewVerdict{State: OverviewOK}}
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panicking computation's caller did not see the panic")
+			}
+		}()
+		cache.get()
+	}()
+	done := make(chan Overview, 1)
+	go func() { done <- cache.get() }()
+	select {
+	case got := <-done:
+		if got.Verdict.State != OverviewOK || calls.Load() != 2 {
+			t.Fatalf("after the panic: %+v in %d calls, want a fresh computation", got, calls.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the caller after a panicking computation is stranded")
+	}
+}
+
+// A caller already waiting on a computation that panics is released and
+// computes again; it is not left waiting on a computation that never ends.
+func TestACallerWaitingOnAPanickingComputationIsReleased(t *testing.T) {
+	var calls atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	cache := newOverviewCache(time.Now, func() Overview {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			panic("first computation fails")
+		}
+		return Overview{Verdict: OverviewVerdict{State: OverviewOK}}
+	})
+	go func() {
+		defer func() { _ = recover() }()
+		cache.get()
+	}()
+	<-started
+	waiter := make(chan Overview, 1)
+	go func() { waiter <- cache.get() }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	select {
+	case got := <-waiter:
+		if got.Verdict.State != OverviewOK || calls.Load() != 2 {
+			t.Fatalf("the waiter got %+v after %d computations, want its own", got, calls.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a caller waiting on the panicking computation is stranded")
+	}
+}

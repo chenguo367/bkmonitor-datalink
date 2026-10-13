@@ -93,7 +93,8 @@ func NativeOperations(handler http.Handler) []Operation {
 			"unplaceable 包含 declined_everywhere：每个合格副本都因执行卡死放弃过的对象（开始提交之前超过这次执行自己的期限一分钟仍没返回，代码没响应取消；见 declined_everywhere_sample 的副本与步骤），它们哪儿都不跑、没有对象行，原因与\"没有就绪副本\"不同，要修代码；"+
 			"per_replica[].declines 是该副本放弃中的对象与执行位（total/fanout，各占一个执行位直到卡住的执行返回；total 等于 fanout 时这个副本什么都不执行而就绪照常）。", map[string]Field{}, nil, fleet.HealthResponse{}, func(Params) (string, url.Values) { return "/api/health", nil }),
 		makeOp("overview.get", "读取部署大盘：一句判定与它指向的环节、策略漏斗与能力矩阵（按策略计、按方面与处理结果分格，前 5 个拒绝原因）、拉取→判定→状态→输出四段的量/失败/延迟与挂在各段的依赖、资源占上限的比例、副本运行态。"+
-			"服务端每 15 秒最多算一次（generated_at、max_age_seconds），同时到达的请求共用一次计算；读不到的数带 measured=false，不是 0；不含地址、键、查询组和 Slot，细节用其它操作读。",
+			"服务端每 15 秒最多算一次（generated_at、max_age_seconds），同时到达的请求共用一次计算；读不到的数带 measured=false，不是 0；不含地址、键、查询组和 Slot，细节用其它操作读。"+
+			"与 fleet.get 相同，只在承载 control 或 worker 角色的进程上回答；只承载 channel 的进程回答 business_waiting。",
 			map[string]Field{}, nil, fleet.Overview{}, func(Params) (string, url.Values) { return "/api/overview", nil }),
 		makeOp("strategy.list", "按服务端状态/行动词列出需要关注的策略（scope 不填或 attention），不是全量源目录；"+
 			"scope=accepted 时改为分页列出已发布目录接受的全部策略，每行是策略ID、租户、业务和它的全部 Plan（query_group 与 group_by），一条策略只出现在一页里；用 next_call 的 cursor 翻页。", map[string]Field{

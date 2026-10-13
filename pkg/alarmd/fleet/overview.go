@@ -391,12 +391,24 @@ func (cache *overviewCache) get() Overview {
 	wait.Add(1)
 	cache.inFlight = wait
 	cache.mu.Unlock()
-	value := cache.compute()
+	var value Overview
+	computed := false
+	// Released however compute ends: a computation that panics caches
+	// nothing, its waiters compute again, and the panic goes on to its own
+	// caller -- left set, every later caller would wait on it forever,
+	// each holding a request slot of the channel.
+	defer func() {
+		cache.mu.Lock()
+		cache.inFlight = nil
+		if computed {
+			cache.value, cache.at = value, cache.now()
+		}
+		cache.mu.Unlock()
+		wait.Done()
+	}()
+	value = cache.compute()
 	value.MaxAgeSeconds = int(OverviewMaxAge / time.Second)
-	cache.mu.Lock()
-	cache.value, cache.at, cache.inFlight = value, cache.now(), nil
-	cache.mu.Unlock()
-	wait.Done()
+	computed = true
 	return value
 }
 
