@@ -1168,6 +1168,7 @@ var alarmdWords = []string{
 	"redaction",
 	"redis",
 	"reentered",
+	"reentry",
 	"ref",
 	"reference",
 	"referenced",
