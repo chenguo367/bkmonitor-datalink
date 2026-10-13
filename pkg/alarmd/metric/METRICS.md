@@ -2081,13 +2081,13 @@ The configured permit ceiling, exported beside the occupancy so a reader does no
 
 Labels: `kind`
 
-Cumulative permit-hold time by operation, including permits still held. Its rate over a window is the mean number of permits occupied in that window, so rate divided by worker_query_permit_budget is the fraction of the budget in use. Permits that are never released keep raising it, which is the intended behaviour: a stuck query should look like permanent occupancy rather than disappear.
+Cumulative permit-hold time by holder - each operation, and the lookback - including permits still held. Its rate over a window is the mean number of permits occupied in that window, so rate divided by worker_query_permit_budget is the fraction of the budget in use. Permits that are never released keep raising it, which is the intended behaviour: a stuck query should look like permanent occupancy rather than disappear.
 
 ## bkmonitor_alarmd_worker_query_permits_held
 
 Labels: `kind`
 
-Query permits held at the moment of the scrape, by operation. This is an instant, not an average: a scrape that lands between two queries reports what is running then, which is why it must NOT be used to judge whether the budget is full. Use the rate of worker_query_permit_seconds_total for that.
+Query permits held at the moment of the scrape, by holder: each operation, and the lookback. This is an instant, not an average: a scrape that lands between two queries reports what is running then, which is why it must NOT be used to judge whether the budget is full. Use the rate of worker_query_permit_seconds_total for that.
 
 ## bkmonitor_alarmd_worker_query_permits_waiting
 
