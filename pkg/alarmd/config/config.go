@@ -337,9 +337,61 @@ type Config struct {
 	// up to 2 x ShutdownTimeout, plus a second for Slots that ignore their
 	// cancellation, plus the stop record's write (2 s). The Pod's
 	// terminationGracePeriodSeconds must cover that, or the kubelet kills the
-	// process before its leases are released and its stop is recorded; with
-	// the default 30 s grace that is up to about 13 s here.
-	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
+	// process before its leases are released and its stop is recorded.
+	//
+	// It is derived from that grace and not a values key: the chart passes
+	// the grace it gives the Pod (TerminationGraceEnvironment), and the
+	// timeout is what fits in it (shutdownTimeoutWithin). A values key had
+	// to be kept in step with the grace by hand. Without the variable -- a
+	// process outside a chart that passes it -- it stays
+	// DefaultShutdownTimeout, which fits Kubernetes' default grace.
+	ShutdownTimeout Duration `yaml:"-"`
+}
+
+// TerminationGraceEnvironment is how the chart tells the process the
+// terminationGracePeriodSeconds it gave the Pod. The Downward API does not
+// expose it, and reading it from the API server would make every stop depend
+// on a permission to read the Pod.
+const TerminationGraceEnvironment = "ALARMD_TERMINATION_GRACE_SECONDS"
+
+// DefaultShutdownTimeout is the drain deadline when no grace is passed: it
+// fits Kubernetes' default 30 second grace with room to spare.
+const DefaultShutdownTimeout = 10 * time.Second
+
+// stopOverhead is what a stop takes beyond its two timeouts: a second for
+// Slots that ignore their cancellation and two for the stop record's write.
+const stopOverhead = 3 * time.Second
+
+// shutdownTimeoutWithin is the longest drain deadline whose stop fits in the
+// grace: 2 x timeout + stopOverhead <= grace.
+func shutdownTimeoutWithin(grace time.Duration) (time.Duration, error) {
+	timeout := (grace - stopOverhead) / 2
+	if timeout <= 0 {
+		return 0, fmt.Errorf("%s %s leaves no time to drain: a stop needs %s beyond two drain deadlines",
+			TerminationGraceEnvironment, grace, stopOverhead)
+	}
+	return timeout, nil
+}
+
+// resolveShutdownTimeoutFromEnvironment derives the drain deadline from the
+// grace the chart passes, when it passes one. A value that is not a whole
+// positive number of seconds is refused rather than ignored: a chart that
+// passes the variable means the stop to fit the grace.
+func (c *Config) resolveShutdownTimeoutFromEnvironment() error {
+	value, ok := os.LookupEnv(TerminationGraceEnvironment)
+	if c == nil || !ok {
+		return nil
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || seconds <= 0 {
+		return fmt.Errorf("%s %q must be a whole positive number of seconds", TerminationGraceEnvironment, value)
+	}
+	timeout, err := shutdownTimeoutWithin(time.Duration(seconds) * time.Second)
+	if err != nil {
+		return err
+	}
+	c.ShutdownTimeout = Duration(timeout)
+	return nil
 }
 
 // Default is the product configuration, and it is the same on every machine:
@@ -369,7 +421,7 @@ func Default() Config {
 		},
 		Limits:          defaultLimits(),
 		PhaseTwo:        defaultPhaseTwoRuntime(),
-		ShutdownTimeout: Duration(10 * time.Second),
+		ShutdownTimeout: Duration(DefaultShutdownTimeout),
 	}
 	cfg.Redis.RestartMargin = cfg.PhaseTwo.Scheduler.MaxReplayAge
 	cfg.Redis.MinTTL = cfg.Redis.RestartMargin
@@ -672,6 +724,9 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 		cfg.resolvePlatformCacheRedis()
 		cfg.resolveCompatibilityServiceTimeouts()
 		cfg.resolveCompatibilityPodCache()
+		if err := cfg.resolveShutdownTimeoutFromEnvironment(); err != nil {
+			return Config{}, err
+		}
 		return cfg, cfg.Validate()
 	}
 
@@ -730,6 +785,9 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 	cfg.resolvePlatformCacheRedis()
 	cfg.resolveCompatibilityServiceTimeouts()
 	cfg.resolveCompatibilityPodCache()
+	if err := cfg.resolveShutdownTimeoutFromEnvironment(); err != nil {
+		return Config{}, err
+	}
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
 	if cfg.HasRole(roles.Control) || cfg.HasRole(roles.Worker) {
 		if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {

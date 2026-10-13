@@ -151,7 +151,6 @@ func TestRunRoleFlagOverridesYAMLBeforeDependencyValidation(t *testing.T) {
 func validGoAccessApplicationYAML() string {
 	return `http:
   listen: 127.0.0.1:8080
-shutdown_timeout: 1s
 kafka:
   brokers:
     - 127.0.0.1:9092
