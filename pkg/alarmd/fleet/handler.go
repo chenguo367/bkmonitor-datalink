@@ -967,13 +967,19 @@ func NewHandler(
 	}
 	// The overview is one computation per OverviewMaxAge whoever asks; it
 	// runs on its own context, since the callers it answers share it.
+	flows := newOverviewFlows()
 	overviews := newOverviewCache(now, func() Overview {
 		ctx, cancel := context.WithTimeout(context.Background(), overviewComputeTimeout)
 		defer cancel()
 		view, part := service.Summarized(ctx, stallAfter)
 		at := now()
 		running, known := RunningStrategiesOf(&view, part)
-		return overviewOf(healthOf(&view, part, at), running, known, at)
+		health := healthOf(&view, part, at)
+		overview := overviewOf(health, running, known, at)
+		// The cache computes one at a time, so the readings it keeps are
+		// touched by one computation at once.
+		flows.apply(&overview, health, at)
+		return overview
 	})
 	mux.HandleFunc("/api/overview", func(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, overviews.get())
