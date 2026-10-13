@@ -313,10 +313,11 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	return true
 }
 
-// queryCooldownDecidedBy reports whether an execution of operation, starting
-// now while the Query Group is in the pool, decides whether it stays: only a
-// normal one does. A normal execution runs at its Slot's own second, under its
-// frozen deadline, and queues for its permit with every other Query Group due
+// queryCooldownDecidedBy reports whether an execution of operation, run while
+// the Query Group is in the pool, may decide whether it stays: a normal one
+// always may, any other only for the reasons below (queryCooldownDecision
+// then asks whether what it got is evidence). A normal execution runs at its
+// Slot's own second, under its frozen deadline, and queues for its permit with every other Query Group due
 // then, so an answer to it is one the Query Group's normal rounds get. The
 // first execution after the cooldown runs out is usually the held Slot's
 // replay instead: it starts when the cooldown ends, away from the burst its
