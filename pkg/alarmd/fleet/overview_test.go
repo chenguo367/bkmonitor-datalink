@@ -410,8 +410,10 @@ func TestTheFlowRatesAreTheCountersOverTwoComputations(t *testing.T) {
 	afterRestart.Queries = 1000
 	three := overviewOf(flowHealth(restarted, started.Add(time.Hour), &afterRestart), nil, false, restarted)
 	flows.apply(&three, flowHealth(restarted, started.Add(time.Hour), &afterRestart), restarted)
-	if pull := flowStage(three, "pull"); pull.Volume.Measured {
-		t.Fatalf("after a restart = %+v, want unmeasured until the next computation", pull)
+	// A restart is a reading that is a difference of nothing: the rate the
+	// replica had is carried once, said so.
+	if pull := flowStage(three, "pull"); pull.Volume.Value != 5 || three.FlowCoverage != (OverviewCoverage{Counted: 1, Carried: 1, Expected: 1}) {
+		t.Fatalf("after a restart = %+v coverage %+v, want the last rate carried once", pull.Volume, three.FlowCoverage)
 	}
 }
 
@@ -435,5 +437,117 @@ func TestAReplicasRateIsOverItsOwnReadings(t *testing.T) {
 	flows.apply(&two, late, second)
 	if pull := flowStage(two, "pull"); !pull.Volume.Measured || pull.Volume.Value != 3 {
 		t.Fatalf("pull = %+v, want 90 queries over the 30 seconds between the readings, 3 a second", pull.Volume)
+	}
+}
+
+// Two replicas, counters as each published them, ages relative to the
+// computation.
+func twoReplicaHealth(started time.Time, a, b *FlowFacts, ageA, ageB float64) HealthResponse {
+	health := overviewHealth()
+	first := health.PerReplica[0]
+	first.StartedAt, first.Flow, first.AgeSeconds = started, a, ageA
+	second := first
+	second.Replica, second.Flow, second.AgeSeconds = "replica-b", b, ageB
+	health.PerReplica = []ReplicaView{first, second}
+	return health
+}
+
+func queriesFlow(queries uint64) *FlowFacts {
+	empty := func(bounds []float64) FlowHistogram { return FlowHistogram{Buckets: make([]uint64, len(bounds))} }
+	return &FlowFacts{Queries: queries, QueryDuration: empty(FlowQueryBounds), DecisionLag: empty(FlowDecisionBounds), RuntimeRedis: empty(FlowRedisBounds)}
+}
+
+// A replica that missed one publish contributes the rate it had, said so;
+// past one window it is dropped, the flow says how many replicas it covers
+// of how many publish, and the verdict is no better than attention while it
+// covers fewer.
+func TestAReplicaThatStoppedPublishingIsCarriedOnceThenCountedOut(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	flows := newOverviewFlows()
+	compute := func(health HealthResponse) Overview {
+		overview := overviewOf(health, map[StateWord]int{StateDetecting: 50}, true, at)
+		flows.apply(&overview, health, at)
+		return overview
+	}
+	// Both publish: nothing to subtract yet, then 1 and 2 queries a second.
+	compute(twoReplicaHealth(started, queriesFlow(0), queriesFlow(0), 0, 0))
+	at = at.Add(time.Minute)
+	if got := compute(twoReplicaHealth(started, queriesFlow(60), queriesFlow(120), 0, 0)); flowStage(got, "pull").Volume.Value != 3 ||
+		got.FlowCoverage != (OverviewCoverage{Counted: 2, Expected: 2}) {
+		t.Fatalf("both publishing: volume %+v coverage %+v", flowStage(got, "pull").Volume, got.FlowCoverage)
+	}
+	// replica-b's summary does not move: its last rate is carried, flagged.
+	at = at.Add(time.Minute)
+	carried := compute(twoReplicaHealth(started, queriesFlow(120), queriesFlow(120), 0, 60))
+	if flowStage(carried, "pull").Volume.Value != 3 || carried.FlowCoverage != (OverviewCoverage{Counted: 2, Carried: 1, Expected: 2}) ||
+		carried.Verdict.State != OverviewOK {
+		t.Fatalf("one missed publish: volume %+v coverage %+v verdict %+v", flowStage(carried, "pull").Volume, carried.FlowCoverage, carried.Verdict)
+	}
+	// Still not moved: counted out, and the verdict is held.
+	at = at.Add(time.Minute)
+	dropped := compute(twoReplicaHealth(started, queriesFlow(180), queriesFlow(120), 0, 120))
+	if flowStage(dropped, "pull").Volume.Value != 1 || dropped.FlowCoverage != (OverviewCoverage{Counted: 1, Expected: 2}) {
+		t.Fatalf("two missed publishes: volume %+v coverage %+v", flowStage(dropped, "pull").Volume, dropped.FlowCoverage)
+	}
+	if dropped.Verdict.State != OverviewAttention || !strings.Contains(dropped.Verdict.Line, "1/2") {
+		t.Fatalf("verdict = %+v, want attention naming the 1/2 coverage", dropped.Verdict)
+	}
+	// It publishes again: counted again once it has two readings that move.
+	at = at.Add(time.Minute)
+	back := compute(twoReplicaHealth(started, queriesFlow(240), queriesFlow(180), 0, 0))
+	if back.FlowCoverage != (OverviewCoverage{Counted: 2, Expected: 2}) || back.Verdict.State != OverviewOK {
+		t.Fatalf("publishing again: coverage %+v verdict %+v", back.FlowCoverage, back.Verdict)
+	}
+}
+
+// A replica of a build that does not publish the counters is not one the
+// flow is expected to cover, and does not hold the verdict.
+func TestAReplicaThatDoesNotPublishTheCountersIsNotExpected(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	flows := newOverviewFlows()
+	health := twoReplicaHealth(started, queriesFlow(0), nil, 0, 0)
+	first := overviewOf(health, map[StateWord]int{StateDetecting: 50}, true, at)
+	flows.apply(&first, health, at)
+	at = at.Add(time.Minute)
+	health = twoReplicaHealth(started, queriesFlow(60), nil, 0, 0)
+	second := overviewOf(health, map[StateWord]int{StateDetecting: 50}, true, at)
+	flows.apply(&second, health, at)
+	if second.FlowCoverage != (OverviewCoverage{Counted: 1, Expected: 1}) || second.Verdict.State != OverviewOK {
+		t.Fatalf("coverage %+v verdict %+v, want the publishing replica alone expected", second.FlowCoverage, second.Verdict)
+	}
+}
+
+// A replica seen for the first time in this process is warming, not
+// missing: the first computation over a healthy fleet, a scale-out and a
+// rollout's new pods keep the verdict, and the replica is expected from its
+// second computation.
+func TestAReplicaSeenForTheFirstTimeIsWarmingNotMissing(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	flows := newOverviewFlows()
+	compute := func(health HealthResponse) Overview {
+		overview := overviewOf(health, map[StateWord]int{StateDetecting: 50}, true, at)
+		flows.apply(&overview, health, at)
+		return overview
+	}
+	first := compute(twoReplicaHealth(started, queriesFlow(0), queriesFlow(0), 0, 0))
+	if first.FlowCoverage != (OverviewCoverage{Warming: 2}) || first.Verdict.State != OverviewOK {
+		t.Fatalf("first computation: coverage %+v verdict %+v, want both warming and ok", first.FlowCoverage, first.Verdict)
+	}
+	// One replica of the two, then a second appears.
+	flows = newOverviewFlows()
+	one := overviewHealth()
+	one.PerReplica[0].StartedAt, one.PerReplica[0].Flow = started, queriesFlow(0)
+	compute(one)
+	at = at.Add(time.Minute)
+	scaled := compute(twoReplicaHealth(started, queriesFlow(60), queriesFlow(0), 0, 0))
+	if scaled.FlowCoverage != (OverviewCoverage{Counted: 1, Expected: 1, Warming: 1}) || scaled.Verdict.State != OverviewOK {
+		t.Fatalf("scale-out: coverage %+v verdict %+v, want the new replica warming and ok", scaled.FlowCoverage, scaled.Verdict)
+	}
+	at = at.Add(time.Minute)
+	if next := compute(twoReplicaHealth(started, queriesFlow(120), queriesFlow(60), 0, 0)); next.FlowCoverage != (OverviewCoverage{Counted: 2, Expected: 2}) {
+		t.Fatalf("its second computation: coverage %+v, want it counted", next.FlowCoverage)
 	}
 }

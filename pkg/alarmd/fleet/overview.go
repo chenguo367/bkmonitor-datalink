@@ -63,8 +63,10 @@ type Overview struct {
 	Verdict       OverviewVerdict    `json:"verdict"`
 	Capability    OverviewCapability `json:"capability"`
 	Flow          []OverviewStage    `json:"flow"`
-	Resources     OverviewResources  `json:"resources"`
-	Runtime       OverviewRuntime    `json:"runtime"`
+	// FlowCoverage is how many replicas the flow's numbers are from.
+	FlowCoverage OverviewCoverage  `json:"flow_coverage"`
+	Resources    OverviewResources `json:"resources"`
+	Runtime      OverviewRuntime   `json:"runtime"`
 }
 
 type OverviewBuild struct {
@@ -488,29 +490,62 @@ type overviewReading struct {
 
 // overviewFlows turns the replicas' counters into the stages' numbers: the
 // difference from the previous computation over the time between the two
-// readings of each replica. It keeps one reading per replica, the last; a
-// replica whose process changed, whose counters went back or whose reading
-// did not move between the two contributes nothing that time.
+// readings of each replica. A replica whose reading moved, in the same
+// process, with no counter gone back, contributes that difference. One
+// whose reading did not -- a missed publish, a restart -- contributes the
+// rate it had the computation before, once, and is counted as carried;
+// after that it contributes nothing, and the flow covers fewer replicas
+// than publish (OverviewCoverage), which holds the verdict.
 type overviewFlows struct {
 	readings map[string]overviewReading
+	// last is each replica's latest fresh contribution and whether it has
+	// already been carried once.
+	last map[string]carriedContribution
+}
+
+type carriedContribution struct {
+	contribution flowContribution
+	carried      bool
 }
 
 func newOverviewFlows() *overviewFlows {
-	return &overviewFlows{readings: map[string]overviewReading{}}
+	return &overviewFlows{readings: map[string]overviewReading{}, last: map[string]carriedContribution{}}
 }
 
-type flowSum struct {
-	contributed                                                        bool
+// flowContribution is one replica's rates and histogram differences between
+// two of its readings.
+type flowContribution struct {
 	queries, detections, stateWrites, stateFailures, emitted, rejected float64
 	failures                                                           map[string]float64
 	queryBuckets, lagBuckets, redisBuckets                             []uint64
 	queryCount, lagCount, redisCount                                   uint64
 }
 
+type flowSum struct {
+	contributed bool
+	flowContribution
+}
+
+// OverviewCoverage is how many replicas the flow's numbers are from, of the
+// replicas that publish the counters: Carried of Counted are a missed
+// publish's last rate.
+type OverviewCoverage struct {
+	Counted  int `json:"counted"`
+	Carried  int `json:"carried,omitempty"`
+	Expected int `json:"expected"`
+	// Warming are the replicas seen for the first time by this process -- its
+	// first computation, a scale-out, a rollout's new pods -- which have no
+	// earlier reading to be a difference from. They are not expected yet and
+	// do not hold the verdict; from their second computation they are.
+	Warming int `json:"warming,omitempty"`
+}
+
 func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at time.Time) {
-	sum := flowSum{failures: map[string]float64{}, queryBuckets: make([]uint64, len(FlowQueryBounds)),
-		lagBuckets: make([]uint64, len(FlowDecisionBounds)), redisBuckets: make([]uint64, len(FlowRedisBounds))}
+	sum := flowSum{flowContribution: flowContribution{failures: map[string]float64{}, queryBuckets: make([]uint64, len(FlowQueryBounds)),
+		lagBuckets: make([]uint64, len(FlowDecisionBounds)), redisBuckets: make([]uint64, len(FlowRedisBounds))}}
 	next := make(map[string]overviewReading, len(health.PerReplica))
+	last := make(map[string]carriedContribution, len(health.PerReplica))
+	coverage := OverviewCoverage{}
 	var hosts uint64
 	hostsKnown := false
 	for index, replica := range health.PerReplica {
@@ -528,11 +563,38 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 		if replica.Flow.Hosts > hosts {
 			hosts, hostsKnown = replica.Flow.Hosts, true
 		}
-		if previous, found := flows.readings[replica.Replica]; found {
-			sum.add(previous, reading)
+		// A replica this process has not read before has nothing to be a
+		// difference from: it is warming, not missing (OverviewCoverage).
+		previous, found := flows.readings[replica.Replica]
+		if !found {
+			coverage.Warming++
+			continue
+		}
+		coverage.Expected++
+		if contribution, fresh := contributionOf(previous, reading); fresh {
+			sum.add(contribution)
+			coverage.Counted++
+			last[replica.Replica] = carriedContribution{contribution: contribution}
+			continue
+		}
+		if moved := reading.takenAt.After(previous.takenAt); !moved {
+			// The reading did not move: keep the older one, so the next
+			// reading that does is measured from it.
+			next[replica.Replica] = previous
+		}
+		if kept, had := flows.last[replica.Replica]; had && !kept.carried {
+			sum.add(kept.contribution)
+			coverage.Counted++
+			coverage.Carried++
+			last[replica.Replica] = carriedContribution{contribution: kept.contribution, carried: true}
 		}
 	}
-	flows.readings = next
+	flows.readings, flows.last = next, last
+	overview.FlowCoverage = coverage
+	if coverage.Counted < coverage.Expected && overview.Verdict.State == OverviewOK {
+		overview.Verdict = OverviewVerdict{State: OverviewAttention, Stage: "",
+			Line: fmt.Sprintf("数据流只覆盖 %d/%d 个副本：有副本没有按时发布计数，下面各段的量少算了它的份", coverage.Counted, coverage.Expected)}
+	}
 	if hostsKnown {
 		overview.Resources.Scale.Hosts = overviewMeasured(float64(hosts), "hosts")
 	}
@@ -574,26 +636,56 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 // overviewQueryFailureOrder is the order the pull stage lists causes in.
 var overviewQueryFailureOrder = []string{"timeout", "refused", "not_found", "transport", "decode", "other"}
 
-func (sum *flowSum) add(previous, current overviewReading) {
+// contributionOf is a replica's rates between two readings, and whether
+// they are a difference of anything: the same process, a reading that
+// moved, no counter gone back.
+func contributionOf(previous, current overviewReading) (flowContribution, bool) {
 	elapsed := current.takenAt.Sub(previous.takenAt).Seconds()
 	was, now := previous.flow, current.flow
 	if !previous.startedAt.Equal(current.startedAt) || elapsed <= 0 || now.Queries < was.Queries || now.Detections < was.Detections ||
 		now.StateWrites < was.StateWrites || now.EventsEmitted < was.EventsEmitted || now.QueryDuration.Count < was.QueryDuration.Count {
-		return
+		return flowContribution{}, false
 	}
-	sum.contributed = true
-	sum.queries += float64(now.Queries-was.Queries) / elapsed
-	sum.detections += float64(now.Detections-was.Detections) / elapsed
-	sum.stateWrites += float64(now.StateWrites-was.StateWrites) / elapsed
-	sum.emitted += float64(now.EventsEmitted-was.EventsEmitted) / elapsed
-	sum.stateFailures += float64(subtract(now.StateFailures, was.StateFailures)) / elapsed * 60
-	sum.rejected += float64(subtract(now.EventsRejected, was.EventsRejected)) / elapsed * 60
+	contribution := flowContribution{failures: map[string]float64{}, queryBuckets: make([]uint64, len(FlowQueryBounds)),
+		lagBuckets: make([]uint64, len(FlowDecisionBounds)), redisBuckets: make([]uint64, len(FlowRedisBounds))}
+	contribution.queries = float64(now.Queries-was.Queries) / elapsed
+	contribution.detections = float64(now.Detections-was.Detections) / elapsed
+	contribution.stateWrites = float64(now.StateWrites-was.StateWrites) / elapsed
+	contribution.emitted = float64(now.EventsEmitted-was.EventsEmitted) / elapsed
+	contribution.stateFailures = float64(subtract(now.StateFailures, was.StateFailures)) / elapsed * 60
+	contribution.rejected = float64(subtract(now.EventsRejected, was.EventsRejected)) / elapsed * 60
 	for cause, count := range now.QueryFailures {
-		sum.failures[cause] += float64(subtract(count, was.QueryFailures[cause])) / elapsed * 60
+		contribution.failures[cause] = float64(subtract(count, was.QueryFailures[cause])) / elapsed * 60
 	}
-	sum.queryCount += addBuckets(sum.queryBuckets, now.QueryDuration, was.QueryDuration)
-	sum.lagCount += addBuckets(sum.lagBuckets, now.DecisionLag, was.DecisionLag)
-	sum.redisCount += addBuckets(sum.redisBuckets, now.RuntimeRedis, was.RuntimeRedis)
+	contribution.queryCount = addBuckets(contribution.queryBuckets, now.QueryDuration, was.QueryDuration)
+	contribution.lagCount = addBuckets(contribution.lagBuckets, now.DecisionLag, was.DecisionLag)
+	contribution.redisCount = addBuckets(contribution.redisBuckets, now.RuntimeRedis, was.RuntimeRedis)
+	return contribution, true
+}
+
+func (sum *flowSum) add(contribution flowContribution) {
+	sum.contributed = true
+	sum.queries += contribution.queries
+	sum.detections += contribution.detections
+	sum.stateWrites += contribution.stateWrites
+	sum.emitted += contribution.emitted
+	sum.stateFailures += contribution.stateFailures
+	sum.rejected += contribution.rejected
+	for cause, count := range contribution.failures {
+		sum.failures[cause] += count
+	}
+	for index := range sum.queryBuckets {
+		sum.queryBuckets[index] += contribution.queryBuckets[index]
+	}
+	for index := range sum.lagBuckets {
+		sum.lagBuckets[index] += contribution.lagBuckets[index]
+	}
+	for index := range sum.redisBuckets {
+		sum.redisBuckets[index] += contribution.redisBuckets[index]
+	}
+	sum.queryCount += contribution.queryCount
+	sum.lagCount += contribution.lagCount
+	sum.redisCount += contribution.redisCount
 }
 
 func subtract(now, was uint64) uint64 {
