@@ -152,3 +152,24 @@ func TestEachTermStartsFromTheKeptSet(t *testing.T) {
 		t.Fatalf("w1's plans in the new term = %+v, want qg-3 from the kept set", got)
 	}
 }
+
+// An entry no Worker reports any more leaves the set when its life runs
+// out, and with the last one the kept key goes: a deployment whose late
+// Query Groups recovered leaves nothing behind.
+func TestAnEntryNobodyRenewsLeavesTheSetWithItsLife(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store, client := plannerFleet(t, now)
+	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
+	if _, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Del(context.Background(), "test.fleet:fleet-lookback:"+replicaDigest("w1"), "test.fleet:fleet-lookback:"+replicaDigest("w2"))
+	now = now.Add(lookback.PlanLife + time.Second)
+	byWorker, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
+	if err != nil || len(byWorker["w2"]) != 0 {
+		t.Fatalf("after the life with nothing reported w2's plans = %+v error %v, want none", byWorker["w2"], err)
+	}
+	if exists := client.Exists(context.Background(), "test.fleet:lookback-plan").Val(); exists != 0 {
+		t.Fatal("the emptied set left its key behind")
+	}
+}

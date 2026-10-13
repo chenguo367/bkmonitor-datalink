@@ -427,8 +427,34 @@ func TestASummarizedPublishWritesTheLookbackLateListBesideTheSnapshot(t *testing
 	if raw := client.Get(context.Background(), store.snapshotKey("pod-a")).Val(); strings.Contains(raw, "qg-later") {
 		t.Fatalf("the snapshot carries the lookback late list: %s", raw)
 	}
-	cut := withinLookbackBudget(map[string]int{"qg-a": 1, "qg-b": 1, "qg-c": 1}, 2+2*(len("qg-a")+6))
-	if len(cut) != 2 || cut["qg-a"] != 1 || cut["qg-b"] != 1 {
-		t.Fatalf("a list cut to two entries' budget = %v, want the first two by name", cut)
+	for publish := 0; publish < 20; publish++ {
+		cut := withinLookbackBudget(map[string]int{"qg-a": 1, "qg-b": 1, "qg-c": 1}, 2+2*(len("qg-a")+6))
+		if len(cut) != 2 || cut["qg-a"] != 1 || cut["qg-b"] != 1 {
+			t.Fatalf("publish %d: a list cut to two entries' budget = %v, want the first two by name every time", publish, cut)
+		}
+	}
+}
+
+// The kept plan set is read without the entries expired by the time it is
+// read, whatever the key still holds: a Leader elected after a gap longer
+// than an entry's life starts from nothing.
+func TestTheKeptPlanSetIsReadWithoutItsExpiredEntries(t *testing.T) {
+	_, client := realRedis(t)
+	store := mustStore(t, client, time.Minute, 0)
+	now := time.Unix(1_700_000_000, 0)
+	entries := map[string]LookbackPlanEntry{"qg-old": {Rung: 1, ExpiresAtMs: now.Add(time.Minute).UnixMilli()},
+		"qg-new": {Rung: 2, ExpiresAtMs: now.Add(time.Hour).UnixMilli()}}
+	if err := store.SaveLookbackPlan(context.Background(), entries, now); err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.LoadLookbackPlan(context.Background(), now.Add(2*time.Minute))
+	if err != nil || len(read) != 1 || read["qg-new"].Rung != 2 {
+		t.Fatalf("the kept set read two minutes on = %v error %v, want qg-new alone", read, err)
+	}
+	if err := store.SaveLookbackPlan(context.Background(), nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if exists := client.Exists(context.Background(), store.lookbackPlanKey()).Val(); exists != 0 {
+		t.Fatal("an empty plan set left its key behind")
 	}
 }
