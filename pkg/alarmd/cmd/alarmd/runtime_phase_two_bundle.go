@@ -1089,8 +1089,8 @@ func openProductionPhaseTwoBundleAssembly(
 	}
 	cliBinding := cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
 		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
-		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry,
-		Lookback:         lookbackEngine, LookbackStanding: lookbackState, ReadHolds: readHolds, Maintenance: maintenanceReadings}
+		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry, AuthEvents: cliAuthEvents(recorder), RosterApplied: recorder.SetCLIRosterApplied,
+		Lookback: lookbackEngine, LookbackStanding: lookbackState, ReadHolds: readHolds, Maintenance: maintenanceReadings}
 	var closeCLI func() error
 	var publicRestricted bool
 	var channelBinding *ChannelBinding

@@ -181,6 +181,9 @@ type Options struct {
 	RouteControlDefaults bool
 	RequireWorkerTarget  map[string]bool
 	Roles                roles.Set
+	// FrontCores is the CPU limit the front read budget is a share of;
+	// nil is GOMAXPROCS, which automaxprocs sets from the cgroup quota.
+	FrontCores func() int
 }
 type Channel struct {
 	*EvidenceExecutor
@@ -190,6 +193,8 @@ type Channel struct {
 	// current clock minute, keyed by session ID; see allowInvoke.
 	windowsMu sync.Mutex
 	windows   map[string]*sessionWindow
+	// front is the charged front reads' spend this minute.
+	front frontBudget
 }
 
 // sessionWindow is one session's count of executed invocations in one clock
@@ -545,7 +550,18 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	execCtx, execCancel := executionContext()
 	defer execCancel()
 	// Who asked, for the audit record of an execution or management call.
-	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID})
+	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID, Operator: session.Operator, IssuedVia: session.IssuedVia})
+	out := c.runHere(execCtx, op, req, params, meta)
+	code := 200
+	if out.Status == "error" {
+		code = 502
+	}
+	c.write(w, code, out)
+}
+
+// runHere runs op on this replica and, when its answer says the read is
+// held by another replica's lease, reads it there instead.
+func (c *Channel) runHere(execCtx context.Context, op Operation, req request, params Params, meta Meta) Response {
 	out := c.run(execCtx, op, params, Target{}, meta)
 	if op.RouteWhenElsewhere != nil && c.options.Route != nil && out.Status != "error" {
 		if group, elsewhere := op.RouteWhenElsewhere(params, out.Result); elsewhere {
@@ -572,11 +588,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	code := 200
-	if out.Status == "error" {
-		code = 502
-	}
-	c.write(w, code, out)
+	return out
 }
 
 func (c *Channel) write(w http.ResponseWriter, status int, response Response) {
