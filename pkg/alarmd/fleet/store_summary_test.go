@@ -458,3 +458,24 @@ func TestTheKeptPlanSetIsReadWithoutItsExpiredEntries(t *testing.T) {
 		t.Fatal("an empty plan set left its key behind")
 	}
 }
+
+// A replica's lookback late list lives as long as the snapshot it is
+// written beside: a rollout names every replica anew, and a list of a
+// replica that stopped publishing is gone with its snapshot, not left
+// behind under a name nobody will write again.
+func TestADepartedReplicasLookbackLateListGoesWithItsSnapshot(t *testing.T) {
+	_, client := realRedis(t)
+	store := mustStore(t, client, 300*time.Millisecond, 0)
+	snapshot := summarizedSnapshot("pod-gone", 2)
+	snapshot.LookbackLate = map[string]int{"qg-late": 2}
+	if _, err := store.PublishSummarized(context.Background(), snapshot, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if lists, err := store.LoadLookbackLate(context.Background(), []string{"pod-gone"}); err != nil || len(lists) != 1 {
+		t.Fatalf("lists just after the publish = %v error %v, want pod-gone's", lists, err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if exists := client.Exists(context.Background(), store.lookbackKey("pod-gone"), store.snapshotKey("pod-gone")).Val(); exists != 0 {
+		t.Fatalf("%d of the departed replica's list and snapshot remain past the store's life, want none", exists)
+	}
+}
