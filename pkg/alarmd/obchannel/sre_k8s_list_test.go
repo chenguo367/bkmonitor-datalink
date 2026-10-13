@@ -28,6 +28,7 @@ func (l *nodeList) ListResources(_ context.Context, _ schema.GroupVersionResourc
 	list.SetContinue(l.continueToken)
 	list.Items = []unstructured.Unstructured{{Object: map[string]any{"apiVersion": "v1", "kind": "Node",
 		"metadata": map[string]any{"name": "n1", "uid": "u1"},
+		"spec":     map[string]any{"podCIDR": "198.51.100.0/24"},
 		"status":   map[string]any{"addresses": []any{map[string]any{"type": "InternalIP", "address": "192.0.2.36"}}}}}}
 	return list, nil
 }
@@ -59,8 +60,9 @@ func TestTheChannelListsClusterResourcesAndPointsAtTheNextPage(t *testing.T) {
 		t.Fatalf("invoke: HTTP %d %+v", status, response)
 	}
 	encoded, _ := json.Marshal(response.Result)
-	if !strings.Contains(string(encoded), `"address":"192.0.2.36"`) || !strings.Contains(string(encoded), `"type":"InternalIP"`) {
-		t.Fatalf("result %s", encoded)
+	if !strings.Contains(string(encoded), `"address":"192.0.2.36"`) || !strings.Contains(string(encoded), `"type":"InternalIP"`) ||
+		strings.Contains(string(encoded), "podCIDR") {
+		t.Fatalf("result %s, want status.addresses and not what the paths left out", encoded)
 	}
 	if len(resources.options) != 1 || resources.options[0].LabelSelector != "role=worker" || resources.options[0].Limit != 10 {
 		t.Fatalf("options %+v", resources.options)
