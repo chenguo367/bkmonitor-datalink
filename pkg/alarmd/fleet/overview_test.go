@@ -177,3 +177,46 @@ func TestTheOverviewIsComputedOncePerWindow(t *testing.T) {
 		t.Fatalf("after the window: computed %d, max age %d", computed.Load(), got.MaxAgeSeconds)
 	}
 }
+
+// The capability matrix is the Leader's published per-strategy count, one
+// row per area; the reasons list keeps the five largest and counts the
+// rest, each with what it means. Without the count it is unmeasured.
+func TestTheOverviewCapabilityIsThePublishedStrategyCount(t *testing.T) {
+	health := overviewHealth()
+	if got := overviewOf(health, nil, false, time.Now()).Capability; got.Measured || len(got.Matrix) != 0 {
+		t.Fatalf("without a published count: %+v, want unmeasured", got)
+	}
+	cells := []CapabilityCell{}
+	for _, area := range CapabilityAreas {
+		for _, outcome := range CapabilityOutcomes {
+			count := 0
+			switch {
+			case outcome == CapabilitySupported:
+				count = 50
+			case area == CapabilitySource && outcome == CapabilityNotYetSupported:
+				count = 6
+			}
+			cells = append(cells, CapabilityCell{Area: area, Outcome: outcome, Strategies: count})
+		}
+	}
+	reasons := []CapabilityReason{}
+	for i := 0; i < 7; i++ {
+		reasons = append(reasons, CapabilityReason{Code: fmt.Sprintf("QUERY_SOURCE_NOT_MIGRATED_%d", i), Area: CapabilitySource,
+			Outcome: CapabilityNotYetSupported, Strategies: 7 - i, SampleIDs: []string{"79"}})
+	}
+	reasons[0].Code = "QUERY_SOURCE_NOT_MIGRATED"
+	health.Source = &SourceFacts{Capability: &SourceCapability{Cells: cells, Reasons: reasons,
+		IgnoredByDesign: []CapabilityReason{{Code: "PRIORITY_IGNORED", Strategies: 2}}}}
+	got := overviewOf(health, nil, false, time.Now()).Capability
+	if !got.Measured || len(got.Matrix) != len(CapabilityAreas) || got.Matrix[0].Area != CapabilitySource ||
+		got.Matrix[0].Supported != 50 || got.Matrix[0].NotYetSupported != 6 {
+		t.Fatalf("matrix = %+v", got.Matrix)
+	}
+	if len(got.Reasons) != OverviewReasonRows || got.Reasons[0].Code != "QUERY_SOURCE_NOT_MIGRATED" || got.Reasons[0].What == "" ||
+		got.ReasonsOmitted.Kinds != 2 || got.ReasonsOmitted.Strategies != 2+1 {
+		t.Fatalf("reasons = %+v omitted %+v", got.Reasons, got.ReasonsOmitted)
+	}
+	if len(got.IgnoredByDesign) != 1 || got.IgnoredByDesign[0].Strategies != 2 {
+		t.Fatalf("ignored = %+v", got.IgnoredByDesign)
+	}
+}

@@ -26,6 +26,9 @@ import (
 const (
 	OverviewMaxAge   = 15 * time.Second
 	OverviewMaxBytes = 256 << 10
+	// overviewComputeTimeout bounds one computation, which no caller's
+	// context does: they all wait on it.
+	overviewComputeTimeout = 10 * time.Second
 )
 
 // The states a conclusion, a stage or a dependency is in, closed.
@@ -81,8 +84,49 @@ type OverviewVerdict struct {
 	Stage string `json:"stage,omitempty"`
 }
 
+// OverviewReasonRows is how many refusal reasons the overview names; the
+// rest are counted.
+const OverviewReasonRows = 5
+
+// OverviewCapability is the strategy funnel and the capability matrix: the
+// Leader's published count of strategies per area and outcome
+// (SourceFacts.Capability), unmeasured on a Leader that did not publish it.
 type OverviewCapability struct {
-	Funnel OverviewFunnel `json:"funnel"`
+	Funnel          OverviewFunnel          `json:"funnel"`
+	Measured        bool                    `json:"measured"`
+	Matrix          []OverviewCapabilityRow `json:"matrix"`
+	Reasons         []OverviewReason        `json:"reasons"`
+	ReasonsOmitted  OverviewOmitted         `json:"reasons_omitted"`
+	IgnoredByDesign []OverviewIgnoredReason `json:"ignored_by_design"`
+}
+
+type OverviewCapabilityRow struct {
+	Area                string `json:"area"`
+	Supported           int    `json:"supported"`
+	Partial             int    `json:"partial"`
+	UnsupportedByDesign int    `json:"unsupported_by_design"`
+	NotYetSupported     int    `json:"not_yet_supported"`
+}
+
+// OverviewReason is one refusal reason with what it means, in the words the
+// page shows for it elsewhere.
+type OverviewReason struct {
+	Code       string   `json:"code"`
+	Area       string   `json:"area"`
+	Outcome    string   `json:"outcome"`
+	What       string   `json:"what"`
+	Strategies int      `json:"strategies"`
+	SampleIDs  []string `json:"sample_ids"`
+}
+
+type OverviewOmitted struct {
+	Kinds      int `json:"kinds"`
+	Strategies int `json:"strategies"`
+}
+
+type OverviewIgnoredReason struct {
+	Code       string `json:"code"`
+	Strategies int    `json:"strategies"`
 }
 
 // OverviewFunnel is the strategy cache's count, how many of them became
@@ -198,6 +242,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 	if runningKnown {
 		funnel.Detecting = overviewMeasured(float64(running[StateDetecting]), "strategies")
 	}
+	overview.Capability = overviewCapabilityOf(health.Source)
 	overview.Capability.Funnel = funnel
 	overview.Verdict = overviewVerdictOf(health, funnel)
 
@@ -353,4 +398,47 @@ func (cache *overviewCache) get() Overview {
 	cache.mu.Unlock()
 	wait.Done()
 	return value
+}
+
+func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
+	capability := OverviewCapability{Matrix: []OverviewCapabilityRow{}, Reasons: []OverviewReason{}, IgnoredByDesign: []OverviewIgnoredReason{}}
+	if source == nil || source.Capability == nil {
+		return capability
+	}
+	capability.Measured = true
+	capability.Matrix = make([]OverviewCapabilityRow, len(CapabilityAreas))
+	rows := make(map[string]*OverviewCapabilityRow, len(CapabilityAreas))
+	for index, area := range CapabilityAreas {
+		capability.Matrix[index].Area = area
+		rows[area] = &capability.Matrix[index]
+	}
+	for _, cell := range source.Capability.Cells {
+		row := rows[cell.Area]
+		if row == nil {
+			continue
+		}
+		switch cell.Outcome {
+		case CapabilitySupported:
+			row.Supported = cell.Strategies
+		case CapabilityPartial:
+			row.Partial = cell.Strategies
+		case CapabilityUnsupportedByDesign:
+			row.UnsupportedByDesign = cell.Strategies
+		case CapabilityNotYetSupported:
+			row.NotYetSupported = cell.Strategies
+		}
+	}
+	for index, reason := range source.Capability.Reasons {
+		if index >= OverviewReasonRows {
+			capability.ReasonsOmitted.Kinds++
+			capability.ReasonsOmitted.Strategies += reason.Strategies
+			continue
+		}
+		capability.Reasons = append(capability.Reasons, OverviewReason{Code: reason.Code, Area: reason.Area, Outcome: reason.Outcome,
+			What: WithheldWordsOf(reason.Code).What, Strategies: reason.Strategies, SampleIDs: reason.SampleIDs})
+	}
+	for _, reason := range source.Capability.IgnoredByDesign {
+		capability.IgnoredByDesign = append(capability.IgnoredByDesign, OverviewIgnoredReason{Code: reason.Code, Strategies: reason.Strategies})
+	}
+	return capability
 }
