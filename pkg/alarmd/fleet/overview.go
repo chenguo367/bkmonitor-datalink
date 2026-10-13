@@ -11,6 +11,8 @@ package fleet
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -172,6 +174,13 @@ type OverviewDependency struct {
 type OverviewResources struct {
 	Scale    OverviewScale             `json:"scale"`
 	Replicas []OverviewReplicaResource `json:"replicas"`
+	// Fleet is the replicas' memory and query permits added up, as shares of
+	// their limits added up; MostConstrained the replica closest to a limit
+	// past the line the overview names one at, and Line the sentence for
+	// both, which is the page's one line about resources.
+	Fleet           OverviewFleetShares  `json:"fleet"`
+	MostConstrained *OverviewConstrained `json:"most_constrained,omitempty"`
+	Line            string               `json:"line"`
 	// Constraint is the load judgment's bottleneck, as the health route
 	// decides it.
 	Constraint string `json:"constraint"`
@@ -201,7 +210,38 @@ type OverviewPermits struct {
 type OverviewRuntime struct {
 	Replicas  []OverviewReplica `json:"replicas"`
 	Attention []OverviewNotice  `json:"attention"`
+	// Summary counts the replicas by the roles they run and their version,
+	// ready and not: what the page shows without opening the replica table.
+	Summary []OverviewReplicaGroup `json:"summary"`
 }
+
+type OverviewReplicaGroup struct {
+	Roles    []string `json:"roles"`
+	Version  string   `json:"version"`
+	Ready    int      `json:"ready"`
+	NotReady int      `json:"not_ready"`
+}
+
+type OverviewFleetShares struct {
+	MemoryRatio      OverviewNumber `json:"memory_ratio"`
+	QueryPermitRatio OverviewNumber `json:"query_permit_ratio"`
+}
+
+// OverviewConstrained is the replica closest to one of its limits:
+// memory, or the query permits.
+type OverviewConstrained struct {
+	Replica    string  `json:"replica"`
+	Constraint string  `json:"constraint"`
+	Ratio      float64 `json:"ratio"`
+}
+
+// The shares past which the overview names a replica as constrained: its
+// memory at four fifths of its limit, the line the capacity budgets start
+// trimming at, or its query permits nine in ten held.
+const (
+	overviewMemoryLine = 0.8
+	overviewPermitLine = 0.9
+)
 
 type OverviewReplica struct {
 	Name          string   `json:"name"`
@@ -598,6 +638,7 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 	if hostsKnown {
 		overview.Resources.Scale.Hosts = overviewMeasured(float64(hosts), "hosts")
 	}
+	overviewSummarize(overview, health)
 	for index := range overview.Flow {
 		stage := &overview.Flow[index]
 		stage.Basis = overviewStageBasis[stage.Stage]
@@ -734,4 +775,68 @@ func overviewQuantile(bounds []float64, buckets []uint64, count uint64) Overview
 	number := overviewMeasured(bounds[len(bounds)-1]*1000, "ms")
 	number.AtLeast = true
 	return number
+}
+
+// overviewSummarize writes the page's one resource line and its runtime
+// count, from the replicas as the overview already has them.
+func overviewSummarize(overview *Overview, health HealthResponse) {
+	var used, limit uint64
+	held, budget := 0, 0
+	var most *OverviewConstrained
+	for _, replica := range health.PerReplica {
+		capacity := replica.Capacity
+		if capacity == nil {
+			continue
+		}
+		if capacity.MemoryLimit > 0 {
+			used, limit = used+capacity.MemoryUsed, limit+capacity.MemoryLimit
+			if ratio := float64(capacity.MemoryUsed) / float64(capacity.MemoryLimit); ratio >= overviewMemoryLine && (most == nil || ratio > most.Ratio) {
+				most = &OverviewConstrained{Replica: replica.Replica, Constraint: "memory", Ratio: ratio}
+			}
+		}
+		if capacity.PermitBudget > 0 {
+			held, budget = held+capacity.PermitsHeld, budget+capacity.PermitBudget
+			if ratio := float64(capacity.PermitsHeld) / float64(capacity.PermitBudget); ratio >= overviewPermitLine && (most == nil || ratio > most.Ratio) {
+				most = &OverviewConstrained{Replica: replica.Replica, Constraint: "query_permits", Ratio: ratio}
+			}
+		}
+	}
+	fleet := OverviewFleetShares{MemoryRatio: overviewUnmeasured("ratio"), QueryPermitRatio: overviewUnmeasured("ratio")}
+	if limit > 0 {
+		fleet.MemoryRatio = overviewMeasured(float64(used)/float64(limit), "ratio")
+	}
+	if budget > 0 {
+		fleet.QueryPermitRatio = overviewMeasured(float64(held)/float64(budget), "ratio")
+	}
+	overview.Resources.Fleet, overview.Resources.MostConstrained = fleet, most
+	switch {
+	case most != nil && most.Constraint == "memory":
+		overview.Resources.Line = fmt.Sprintf("副本 %s 的内存到了上限的 %.0f%%，最先受限", most.Replica, most.Ratio*100)
+	case most != nil:
+		overview.Resources.Line = fmt.Sprintf("副本 %s 的查询许可占用到了 %.0f%%，查询并发最先受限", most.Replica, most.Ratio*100)
+	case limit == 0 && budget == 0:
+		overview.Resources.Line = "副本没有报告资源占用"
+	default:
+		overview.Resources.Line = fmt.Sprintf("各副本内存都在上限的 %.0f%% 以下、查询许可都在 %.0f%% 以下，资源不是约束", overviewMemoryLine*100, overviewPermitLine*100)
+	}
+
+	groups := []OverviewReplicaGroup{}
+	index := map[string]int{}
+	for position, replica := range overview.Runtime.Replicas {
+		roles := append([]string(nil), replica.Roles...)
+		sort.Strings(roles)
+		key := strings.Join(roles, ",") + "|" + replica.Version
+		at, seen := index[key]
+		if !seen {
+			at = len(groups)
+			index[key] = at
+			groups = append(groups, OverviewReplicaGroup{Roles: roles, Version: replica.Version})
+		}
+		if overview.Runtime.Replicas[position].Ready {
+			groups[at].Ready++
+		} else {
+			groups[at].NotReady++
+		}
+	}
+	overview.Runtime.Summary = groups
 }
