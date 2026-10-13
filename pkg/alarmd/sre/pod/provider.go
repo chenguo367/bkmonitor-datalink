@@ -115,10 +115,9 @@ func (p *Provider) readContext(ctx context.Context) (context.Context, context.Ca
 	return context.WithTimeout(ctx, p.options.MaxTimeout)
 }
 
-// namespace is the one namespace a request reads: the one it names, or
-// this process's own. A request reads one namespace at a time - a listing
-// across the cluster is not offered, since on a large cluster one would be
-// hundreds of megabytes on the apiserver and here, paged or not.
+// namespace is the one namespace a Pod read works in: the one it names, or
+// this process's own. A listing across the cluster is k8s.list's, page by
+// page, each page bounded by its limit (ListResources).
 func (p *Provider) namespace(value string) (string, error) {
 	if value == "" {
 		value = p.options.DefaultNamespace

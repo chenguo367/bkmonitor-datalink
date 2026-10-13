@@ -149,6 +149,8 @@ type Options struct {
 	Secrets SecretReader
 	// ConfigMaps reads ConfigMaps; nil leaves configmap.get unavailable.
 	ConfigMaps ConfigMapReader
+	// Resources reads the kinds k8s.list serves; nil leaves it unavailable.
+	Resources ResourceReader
 	// DefaultNamespace is the namespace a request that names none reads:
 	// this process's own. Empty means a request must name one.
 	DefaultNamespace string
