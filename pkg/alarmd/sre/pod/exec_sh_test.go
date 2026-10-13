@@ -63,6 +63,16 @@ func supervise(t *testing.T, seconds string, argv ...string) (records []string, 
 // superviseUnder runs remoteSupervisor under shell, with PATH when given.
 func superviseUnder(t *testing.T, shell, path, seconds string, argv ...string) (records []string, stdout, stderr string) {
 	t.Helper()
+	return superviseHeld(t, shell, path, seconds, false, argv...)
+}
+
+// superviseHeld is superviseUnder; with hold, the command's stdin stays open
+// until the supervisor has written its group record, so a command that
+// reads its stdin to the end is alive when its group is looked for. A
+// command that ends before that look leaves no group to find, on a host
+// that gives one or not - a race on the host's speed, not a reading of it.
+func superviseHeld(t *testing.T, shell, path, seconds string, hold bool, argv ...string) (records []string, stdout, stderr string) {
+	t.Helper()
 	command := exec.Command(shell, append([]string{"-c", remoteSupervisor, supervisorName, "N0NCE", seconds}, argv...)...)
 	if path != "" {
 		command.Env = append(os.Environ(), "PATH="+path)
@@ -72,13 +82,35 @@ func superviseUnder(t *testing.T, shell, path, seconds string, argv ...string) (
 	if err != nil {
 		t.Fatal(err)
 	}
+	var stdin io.WriteCloser
+	if hold {
+		if stdin, err = command.StdinPipe(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	command.Stdout = &out
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
 	sink := newOutputSink(1<<20, func() {})
 	parser := newControlParser("N0NCE", sink, true)
-	raw, _ := io.ReadAll(errPipe)
+	var raw []byte
+	if hold {
+		lines := bufio.NewReader(errPipe)
+		for {
+			line, err := lines.ReadBytes('\n')
+			raw = append(raw, line...)
+			if strings.HasPrefix(string(line), "N0NCE group ") {
+				stdin.Close()
+			}
+			if err != nil {
+				break
+			}
+		}
+		stdin.Close()
+	} else {
+		raw, _ = io.ReadAll(errPipe)
+	}
 	if err := command.Wait(); err != nil {
 		t.Fatalf("supervisor exited %v; stderr %q", err, raw)
 	}
@@ -92,14 +124,58 @@ func superviseUnder(t *testing.T, shell, path, seconds string, argv ...string) (
 	return records, out.String(), state.stderr
 }
 
+// hostGroups is whether this host's /bin/sh, with the PATH given (the
+// test's own when empty), gives a background command a process group of its
+// own: setsid on the PATH, or job control that takes effect without a tty.
+// Read from the host with a probe of its own, never from the supervisor, so a
+// supervisor that claims a group it did not get still fails.
+func hostGroups(t *testing.T, path string) bool {
+	t.Helper()
+	probe := exec.Command("/bin/sh", "-c", `if command -v setsid >/dev/null 2>&1; then echo 1; exit 0; fi
+set -m 2>/dev/null
+sleep 5 >/dev/null 2>&1 &
+p=$!
+if kill -0 -"$p" 2>/dev/null; then echo 1; else echo 0; fi
+kill "$p" 2>/dev/null
+exit 0`)
+	if path != "" {
+		probe.Env = append(os.Environ(), "PATH="+path)
+	}
+	out, err := probe.Output()
+	if err != nil {
+		t.Fatalf("group probe: %v", err)
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+// hostGroupRecord is the group record a long-lived command gets on this host.
+func hostGroupRecord(t *testing.T) string {
+	t.Helper()
+	if hostGroups(t, "") {
+		return "group 1"
+	}
+	return "group 0"
+}
+
+// groupingPath is a PATH under which the local /bin/sh gives a command its
+// own group: the test's own where it already does, else with the setsid
+// stand-in first. For the tests whose point is what a group is ended with.
+func groupingPath(t *testing.T) string {
+	t.Helper()
+	if hostGroups(t, "") {
+		return ""
+	}
+	return withSetsid(t)
+}
+
 // A command that ends by itself is reported with its exit code; its stdin
 // reaches it, its output passes through unchanged - a last stderr line
 // without a newline too - and the records are the supervisor's alone.
 func TestTheShellSupervisorReportsTheCommandsEnd(t *testing.T) {
 	runtimeProvider(t)
-	records, stdout, stderr := supervise(t, "5", "/bin/sh", "-c", "printf 'out\\n'; printf 'last line' >&2; exit 4")
-	if fmt.Sprint(records) != "[started group 1 complete 4]" {
-		t.Fatalf("records %q, want started, in a group, complete 4", records)
+	records, stdout, stderr := superviseHeld(t, "/bin/sh", "", "5", true, "/bin/sh", "-c", "cat >/dev/null; printf 'out\\n'; printf 'last line' >&2; exit 4")
+	if want := "[started " + hostGroupRecord(t) + " complete 4]"; fmt.Sprint(records) != want {
+		t.Fatalf("records %q, want %s", records, want)
 	}
 	if stdout != "out\n" || stderr != "last line" {
 		t.Fatalf("stdout %q stderr %q", stdout, stderr)
@@ -113,7 +189,7 @@ func TestTheShellSupervisorEndsTheWholeGroupAtItsDeadline(t *testing.T) {
 	runtimeProvider(t)
 	pidPath := filepath.Join(t.TempDir(), "grandchild")
 	started := time.Now()
-	records, _, _ := supervise(t, "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
+	records, _, _ := superviseUnder(t, "/bin/sh", groupingPath(t), "1", "/bin/sh", "-c", "sleep 30 & echo $! > \"$1\"; sleep 30", "cmd", pidPath)
 	if fmt.Sprint(records) != "[started group 1 expired complete 143]" {
 		t.Fatalf("records %q, want expired then complete 143", records)
 	}
@@ -137,8 +213,8 @@ func TestTheShellSupervisorKillsACommandThatIgnoresTERM(t *testing.T) {
 	runtimeProvider(t)
 	launched := time.Now()
 	records, _, _ := supervise(t, "1", "/bin/sh", "-c", "trap '' TERM; while true; do sleep 1; done")
-	if fmt.Sprint(records) != "[started group 1 expired complete 137]" {
-		t.Fatalf("records %q, want expired then complete 137", records)
+	if want := "[started " + hostGroupRecord(t) + " expired complete 137]"; fmt.Sprint(records) != want {
+		t.Fatalf("records %q, want %s", records, want)
 	}
 	if elapsed := time.Since(launched); elapsed < 3*time.Second {
 		t.Fatalf("complete after %v, sooner than the deadline and the TERM grace", elapsed)
@@ -228,12 +304,21 @@ func waitGone(t *testing.T, pidPath string, guard time.Duration) {
 func TestExecUnderTheShellSupervisor(t *testing.T) {
 	provider, _, target := runtimeProvider(t)
 	result, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "cat; exit 3"}, Stdin: "in"})
-	if err != nil || result.RemoteState != RemoteCompleted || result.Supervision != SupervisionShGroup || result.ExitCode == nil || *result.ExitCode != 3 || result.Stdout != "in" {
+	// It reads its stdin to the end and exits: it may end before its group
+	// is looked for, so either supervision is right for it.
+	if err != nil || result.RemoteState != RemoteCompleted || (result.Supervision != SupervisionShGroup && result.Supervision != SupervisionShPID) ||
+		result.ExitCode == nil || *result.ExitCode != 3 || result.Stdout != "in" {
 		t.Fatalf("completed run: %+v %v", result, err)
 	}
+	// A command alive at the look is supervised as this host's shell allows.
+	wantSupervision := SupervisionShPID
+	if hostGroups(t, "") {
+		wantSupervision = SupervisionShGroup
+	}
 	result, err = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/bin/sh", "-c", "sleep 30"}, TimeoutMS: 300})
-	if err != nil || result.RemoteState != RemoteTimedOut || result.ExitCode == nil || *result.ExitCode != 143 || result.EnforcedTimeoutSeconds != 1 || result.DeclaredTimeoutMS != 300 {
-		t.Fatalf("timed out run: %+v %v", result, err)
+	if err != nil || result.RemoteState != RemoteTimedOut || result.Supervision != wantSupervision || result.ExitCode == nil || *result.ExitCode != 143 ||
+		result.EnforcedTimeoutSeconds != 1 || result.DeclaredTimeoutMS != 300 {
+		t.Fatalf("timed out run: %+v %v, want supervision %s", result, err, wantSupervision)
 	}
 	result, err = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"/no/such/command"}})
 	// It ends before the supervisor looks for its group, so whether it led
@@ -411,7 +496,7 @@ func TestTheTransferBoundCutsTheStream(t *testing.T) {
 func TestTheShellSupervisorEndsTheGroupWhenTheCommandEnds(t *testing.T) {
 	runtimeProvider(t)
 	started := time.Now()
-	records, _, _ := supervise(t, "30", "/bin/sh", "-c", "sleep 30 & exit 0")
+	records, _, _ := superviseUnder(t, "/bin/sh", groupingPath(t), "30", "/bin/sh", "-c", "sleep 30 & exit 0")
 	if fmt.Sprint(records) != "[started group 1 complete 0]" || time.Since(started) > 10*time.Second {
 		t.Fatalf("records %q after %v, want complete 0 without waiting for the child", records, time.Since(started))
 	}
@@ -557,7 +642,7 @@ func dashOrSkip(t *testing.T) {
 func TestUnderDashWithoutSetsidTheCommandHasNoGroupAndSaysSo(t *testing.T) {
 	runtimeProvider(t)
 	dashOrSkip(t)
-	if records, _, _ := superviseUnder(t, "/bin/dash", "", "5", "/bin/sh", "-c", "exit 4"); fmt.Sprint(records) != "[started group 0 complete 4]" {
+	if records, _, _ := superviseHeld(t, "/bin/dash", "", "5", true, "/bin/sh", "-c", "cat >/dev/null; exit 4"); fmt.Sprint(records) != "[started group 0 complete 4]" {
 		t.Fatalf("records %q, want no group and complete 4", records)
 	}
 	pidPath := filepath.Join(t.TempDir(), "pids")
@@ -586,7 +671,7 @@ func TestUnderSetsidTheCommandsGroupIsEndedWhole(t *testing.T) {
 		shells = append(shells, "/bin/dash")
 	}
 	for _, shell := range shells {
-		if records, _, _ := superviseUnder(t, shell, path, "5", "/bin/sh", "-c", "exit 4"); fmt.Sprint(records) != "[started group 1 complete 4]" {
+		if records, _, _ := superviseHeld(t, shell, path, "5", true, "/bin/sh", "-c", "cat >/dev/null; exit 4"); fmt.Sprint(records) != "[started group 1 complete 4]" {
 			t.Fatalf("%s: records %q, want a group and complete 4", shell, records)
 		}
 		pidPath := filepath.Join(t.TempDir(), "grandchild")
