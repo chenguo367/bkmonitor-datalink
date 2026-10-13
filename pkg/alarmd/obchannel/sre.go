@@ -189,6 +189,11 @@ func SREOperations(options SREOptions) []Operation {
 			"supervision says whether it got one) with a sleep and kill timer at its deadline, " +
 			"rounded up to whole seconds; without /bin/sh or sleep the command runs unsupervised (remote_unsupervised, unsupervised_reason) " +
 			"and only this side's stream deadline bounds it"}
+	maxResourceLimit := int64(pod.MaxResourceLimit)
+	k8sListLimits := map[string]any{"max_output_bytes": maxOutput, "max_objects_per_page": pod.MaxResourceLimit, "default_objects_per_page": pod.DefaultResourceLimit,
+		"max_paths": pod.MaxResourcePaths, "kinds": pod.ResourceKinds(),
+		"scope":     "the whole cluster when namespace is left out, else that namespace; the kinds the channel's ClusterRole grants get and list on",
+		"redaction": pod.RedactionContract + "; managedFields and the last-applied annotation dropped, credential-named annotations and env values masked whole; Secret and ConfigMap names in references kept"}
 	podLimits["verification_timeout_ms"] = pod.VerificationTimeout.Milliseconds()
 	podLimits["termination_grace_ms"] = pod.TerminationGrace.Milliseconds()
 	podLimits["startup_allowance_ms"] = pod.StartupAllowance.Milliseconds()
@@ -231,6 +236,50 @@ func SREOperations(options SREOptions) []Operation {
 						}
 					}
 					out.Next = []Call{{Operation: "pod.targets", Params: next, Reason: "读取同一目标范围的下一页，直至 continuation 为空。"}}
+				}
+				return out
+			}},
+		{ID: pod.OpListResources, Summary: "列出或读取一种 Kubernetes 资源（Node、Namespace、Pod、Service、Endpoints、Event、Deployment、StatefulSet、DaemonSet、ReplicaSet、Job、CronJob、Ingress、HorizontalPodAutoscaler）：不填 namespace 时命名空间级的种类按整个集群列；name 读一个对象；label_selector、field_selector 原样交给 apiserver（如 spec.nodeName=节点名 按节点列 Pod）；paths 只取给出的点分路径。输出去掉 managedFields 与 last-applied 注解，凭据名的注解与 env 值整值遮蔽，所有字符串经过脱敏。Secret 与 ConfigMap 不在此读。",
+			EvidenceScope: "sre_k8s_read", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: k8sListLimits,
+			Fields: map[string]Field{"kind": {Type: "string", MinLength: 1, MaxLength: 64}, "namespace": text, "name": {Type: "string", MinLength: 1, MaxLength: 253},
+				"label_selector": {Type: "string", MaxLength: 1024}, "field_selector": {Type: "string", MaxLength: 1024},
+				"paths":    {Type: "array", MaxItems: pod.MaxResourcePaths, Items: &Field{Type: "string", MinLength: 1, MaxLength: 256}},
+				"continue": {Type: "string", MaxLength: 4096}, "limit": {Type: "integer", Minimum: &positive, Maximum: &maxResourceLimit}},
+			Required: []string{"kind"}, OutputSchema: SchemaOf(pod.ResourceReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				request := pod.ResourceRequest{Kind: p.String("kind"), Namespace: p.String("namespace"), Name: p.String("name"),
+					LabelSelector: p.String("label_selector"), FieldSelector: p.String("field_selector"), Continue: p.String("continue"), Limit: p.Int("limit", 0)}
+				if values, ok := p["paths"].([]any); ok {
+					for _, value := range values {
+						request.Paths = append(request.Paths, value.(string))
+					}
+				}
+				v, err := pods.ListResources(ctx, request)
+				out := wrapPod(v, err, err == nil && v.Continue == "" && !v.Truncated && len(v.OversizedItems) == 0)
+				out.Limitations = []string{"A list across the cluster is paged: a cluster-wide Pod list can take several pages at the output bound, so follow continue until it is empty.",
+					"Secret and ConfigMap content is not read here; secret.get and configmap.get read them with their masking."}
+				if err != nil {
+					return out
+				}
+				next := Params{}
+				for _, key := range []string{"kind", "namespace", "label_selector", "field_selector", "paths", "limit"} {
+					if value, present := p[key]; present {
+						next[key] = value
+					}
+				}
+				switch {
+				case v.Truncated:
+					next["limit"] = max(1, v.Count)
+					if v.ReadWith != "" {
+						next["continue"] = v.ReadWith
+					}
+					out.Next = []Call{{Operation: pod.OpListResources, Params: next, Reason: fmt.Sprintf("这一页超出应答上限，漏了 %d 个对象；用同一续读位置、每页 %d 个再读。", v.ItemsOmitted, max(1, v.Count))}}
+				case v.Continue != "":
+					next["continue"] = v.Continue
+					out.Next = []Call{{Operation: pod.OpListResources, Params: next, Reason: "读取下一页，直至 continue 为空。"}}
+				}
+				if len(v.OversizedItems) > 0 {
+					out.Limitations = append(out.Limitations, "Some objects were over the output bound alone and came back as their identity only (oversized_items); read them by name with paths.")
 				}
 				return out
 			}},

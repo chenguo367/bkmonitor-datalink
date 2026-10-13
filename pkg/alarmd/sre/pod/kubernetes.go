@@ -59,6 +59,7 @@ func NewInCluster(options Options) (*Provider, error) {
 	options.Manager = client
 	options.Secrets = client
 	options.ConfigMaps = client
+	options.Resources = client
 	options.Executor = executor
 	return New(options)
 }
@@ -130,6 +131,17 @@ func (c *KubernetesClient) GetOwner(ctx context.Context, namespace string, ref m
 		result.Replicas = &count
 	}
 	return result, nil
+}
+
+// ListResources lists one page of one kind, across the cluster when
+// namespace is empty.
+func (c *KubernetesClient) ListResources(ctx context.Context, resource schema.GroupVersionResource, namespace string, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	return c.owners.Resource(resource).Namespace(namespace).List(ctx, options)
+}
+
+// GetResource reads one object of one kind.
+func (c *KubernetesClient) GetResource(ctx context.Context, resource schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
+	return c.owners.Resource(resource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 // GetConfigMap reads one ConfigMap by name.
