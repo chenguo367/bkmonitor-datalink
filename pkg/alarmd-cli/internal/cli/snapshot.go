@@ -38,7 +38,6 @@ const snapshotFormat = "alarmd-snapshot/v1"
 // -- one call's longest deadline (a k8s read's 30 s), since a call admitted
 // in the last slot can still run that long.
 const (
-	snapshotMaxBytes      = 64 << 20
 	snapshotMaxDetails    = 50
 	snapshotMaxReplicas   = 64
 	snapshotLogLines      = 2000
@@ -47,6 +46,10 @@ const (
 	snapshotFallbackRate  = 30
 	snapshotDetailCallsBy = 2
 )
+
+// snapshotMaxBytes bounds the answers a snapshot keeps, and with them what
+// its reader unpacks; a test lowers it.
+var snapshotMaxBytes = 64 << 20
 
 // snapshotFixed are the reads every snapshot takes once, in order; one the
 // deployment's catalog does not offer is recorded as skipped.
@@ -125,7 +128,8 @@ var snapshotRules = []struct {
 	pattern *regexp.Regexp
 	keep    string
 }{
-	{"private_key", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?(?:-----END (?:[A-Z ]+ )?PRIVATE KEY-----|$)`), "<redacted-private-key>"},
+	// In encoded JSON a key's newlines are \n: the key ends with its string.
+	{"private_key", regexp.MustCompile(`-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[^"]*`), "<redacted-private-key>"},
 	{"bearer", regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}`), "${1} <redacted>"},
 	{"credential_field", regexp.MustCompile(`(?i)((?:password|passwd|secret|api[_-]?key|access[_-]?token)["']?\s*[:=]\s*["']?)[^"'\s,;}<]{4,}`), "${1}<redacted>"},
 	{"url_userinfo", regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@"]+:[^\s/@"]*@`), "${1}<redacted>@"},
@@ -165,7 +169,9 @@ func (a *App) snapshot(p Profile, out string) int {
 	offered := map[string]bool{}
 	operations, _ := objectField(discovered, "result")["operations"].([]any)
 	for _, raw := range operations {
-		offered[stringField(raw.(map[string]any), "operation")] = true
+		if row, ok := raw.(map[string]any); ok {
+			offered[stringField(row, "operation")] = true
+		}
 	}
 	run.manifest.RatePerMinute, run.manifest.RateSource = snapshotFallbackRate, "fallback: the deployment did not state its session rate"
 	if rate := number(objectField(objectField(discovered, "result"), "budget")["invokes_per_session_per_minute"]); rate > 0 {
@@ -331,6 +337,19 @@ func (run *snapshotRun) keep(operation, key string, params map[string]any, m map
 	record["request"] = map[string]any{"operation": strings.TrimPrefix(operation, "describe/"), "params": params, "mode": snapshotMode(operation)}
 	data, _ := json.MarshalIndent(record, "", " ")
 	data = run.scan(name, data)
+	// The scan replaces inside JSON strings; an answer it left unreadable is
+	// kept as a placeholder and is not counted as whole.
+	if !json.Valid(data) {
+		data, _ = json.Marshal(map[string]any{"status": "error", "request": record["request"],
+			"error": map[string]any{"code": "redaction_broke_json", "message": "the second redaction pass left this answer unreadable; it is not kept"}})
+		result, reason = "redaction_broke_json", "the second redaction pass left the answer unreadable"
+	}
+	// The bound counts the answer about to be kept, so a snapshot never holds
+	// more than its reader unpacks.
+	if run.manifest.Bytes+len(data) > snapshotMaxBytes {
+		run.record(SnapshotItem{Operation: operation, Params: params, Result: "skipped_by_bound", Reason: "byte cap reached"})
+		return
+	}
 	run.files[name] = data
 	run.manifest.Bytes += len(data)
 	run.record(SnapshotItem{Operation: operation, Params: params, File: name, Result: result, Reason: reason})
@@ -437,9 +456,9 @@ func snapshotMode(operation string) string {
 }
 
 // snapshotFileKey keeps a file name to the characters a path holds safely.
-func snapshotFileKey(key string) string {
-	return regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(key, "_")
-}
+func snapshotFileKey(key string) string { return snapshotUnsafeKey.ReplaceAllString(key, "_") }
+
+var snapshotUnsafeKey = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
 // snapshotTroubledReplicas are the replicas fleet.get does not show well:
 // not ready, or named by a degradation. Healthy ones are in fleet.get's own
@@ -448,12 +467,17 @@ func snapshotTroubledReplicas(health map[string]any) []string {
 	degraded := map[string]bool{}
 	list, _ := health["degradations"].([]any)
 	for _, raw := range list {
-		degraded[stringField(raw.(map[string]any), "replica")] = true
+		if row, ok := raw.(map[string]any); ok {
+			degraded[stringField(row, "replica")] = true
+		}
 	}
 	var troubled []string
 	replicas, _ := health["per_replica"].([]any)
 	for _, raw := range replicas {
-		row, _ := raw.(map[string]any)
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
 		name := stringField(row, "replica")
 		ready, _ := objectField(row, "readiness")["ready"].(bool)
 		if name != "" && (!ready || degraded[name]) && len(troubled) < snapshotMaxReplicas {
@@ -467,8 +491,10 @@ func snapshotBuilds(health map[string]any) []string {
 	var builds []string
 	groups, _ := health["builds"].([]any)
 	for _, raw := range groups {
-		build := objectField(raw.(map[string]any), "build")
-		builds = append(builds, stringField(build, "version")+"/"+stringField(build, "commit"))
+		if group, ok := raw.(map[string]any); ok {
+			build := objectField(group, "build")
+			builds = append(builds, stringField(build, "version")+"/"+stringField(build, "commit"))
+		}
 	}
 	return builds
 }
@@ -479,7 +505,10 @@ func snapshotDetailStrategies(page map[string]any) []string {
 	var ids []string
 	rows, _ := page["strategies"].([]any)
 	for _, raw := range rows {
-		row, _ := raw.(map[string]any)
+		row, ok := raw.(map[string]any)
+		if !ok || stringField(row, "strategy_id") == "" {
+			continue
+		}
 		if stringField(row, "verdict") != "DETECTING" && len(ids) < snapshotMaxDetails {
 			ids = append(ids, stringField(row, "strategy_id"))
 		}
@@ -537,8 +566,10 @@ func snapshotMetricNames(listed map[string]any) []string {
 func snapshotFirstQueryGroup(strategy map[string]any) string {
 	plans, _ := strategy["plans"].([]any)
 	for _, raw := range plans {
-		if group := stringField(raw.(map[string]any), "query_group"); group != "" {
-			return group
+		if plan, ok := raw.(map[string]any); ok {
+			if group := stringField(plan, "query_group"); group != "" {
+				return group
+			}
 		}
 	}
 	return ""

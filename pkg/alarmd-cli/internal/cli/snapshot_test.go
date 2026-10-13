@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,10 @@ import (
 type snapshotFixture struct {
 	mu      sync.Mutex
 	invoked map[string][]map[string]any
+	// storeInfo replaces store.info's answer; malformed puts non-object
+	// elements where objects are expected.
+	storeInfo any
+	malformed bool
 }
 
 func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
@@ -50,6 +55,9 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 			switch stringField(body, "mode") {
 			case "discover":
 				rows := []any{}
+				if f.malformed {
+					rows = append(rows, "not an object", nil)
+				}
 				for _, name := range offered {
 					rows = append(rows, map[string]any{"operation": name})
 				}
@@ -72,6 +80,12 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 						map[string]any{"replica": "replica-a", "readiness": map[string]any{"ready": true}},
 						map[string]any{"replica": "replica-b", "readiness": map[string]any{"ready": false}},
 					}}
+				if f.malformed {
+					health := result.(map[string]any)
+					health["per_replica"] = append(health["per_replica"].([]any), nil, "replica-c")
+					health["degradations"] = []any{7.0}
+					health["builds"] = []any{"0.4.10"}
+				}
 			case "diagnose.environment":
 				if stringField(params, "cursor") == "" {
 					page := diagnosisPage(3, []string{"1", "2"}, 2, true, "c1")
@@ -84,8 +98,14 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 				result = map[string]any{"families": []any{map[string]any{"name": "bkmonitor_alarmd_worker_work_total"}, map[string]any{"name": "bkmonitor_alarmd_unrelated_total"}}}
 			case "strategy.get":
 				result = map[string]any{"plans": []any{map[string]any{"query_group": "qg-two"}}}
+				if f.malformed {
+					result = map[string]any{"plans": []any{"qg-one", map[string]any{"query_group": "qg-two"}}}
+				}
 			case "store.info":
 				result = map[string]any{"note": "redis://ops:hunter2-credential@192.0.2.10:6379"}
+				if f.storeInfo != nil {
+					result = f.storeInfo
+				}
 			case "lookback.get":
 				out := envelope(*p, "error", nil)
 				out["error"] = map[string]any{"code": "lookback_unavailable", "message": "not here"}
@@ -302,5 +322,115 @@ func TestASnapshotIsNeverWrittenOverAnother(t *testing.T) {
 	kept, _ := os.ReadFile(existing)
 	if code != 1 || stringField(objectField(result, "error"), "code") != "snapshot_failed" || string(kept) != "earlier" {
 		t.Fatalf("code %d result %v kept %q", code, result, kept)
+	}
+}
+
+func takeSnapshot(t *testing.T, fixture *snapshotFixture) (string, map[string]any, int) {
+	t.Helper()
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	var p Profile
+	server := fixture.server(t, &p)
+	t.Cleanup(server.Close)
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	return stringField(objectField(result, "result"), "file"), result, code
+}
+
+func manifestOf(t *testing.T, file string) SnapshotManifest {
+	t.Helper()
+	var manifest SnapshotManifest
+	if err := json.Unmarshal(readArchive(t, file)["manifest.json"], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+func itemOf(manifest SnapshotManifest, operation string) SnapshotItem {
+	for _, item := range manifest.Items {
+		if item.Operation == operation {
+			return item
+		}
+	}
+	return SnapshotItem{}
+}
+
+// An answer that would take the snapshot past its byte cap is not kept: the
+// read is recorded as skipped by the bound, and the archive is one its own
+// reader opens.
+func TestAnAnswerPastTheByteCapIsSkippedAndTheSnapshotStaysReadable(t *testing.T) {
+	saved := snapshotMaxBytes
+	snapshotMaxBytes = 64 << 10
+	t.Cleanup(func() { snapshotMaxBytes = saved })
+	file, _, code := takeSnapshot(t, &snapshotFixture{invoked: map[string][]map[string]any{}, storeInfo: map[string]any{"note": strings.Repeat("x", 80<<10)}})
+	if code != 3 {
+		t.Fatalf("code %d, want 3: a read was skipped", code)
+	}
+	if item := itemOf(manifestOf(t, file), "store.info"); item.Result != "skipped_by_bound" || item.Reason != "byte cap reached" {
+		t.Fatalf("store.info item = %+v", item)
+	}
+	reader := Store{t.TempDir()}
+	if code, result, _, _ := run(t, reader, &http.Client{Transport: noNetwork{t}}, "", "discover", "--snapshot", file); code != 0 {
+		t.Fatalf("the snapshot does not open offline: code %d %v", code, result)
+	}
+}
+
+// One element of the wrong shape, in the catalog, the fleet, the
+// diagnosis or a strategy, is skipped; the run goes on and writes its file.
+func TestAMalformedElementIsSkippedNotFatal(t *testing.T) {
+	file, result, code := takeSnapshot(t, &snapshotFixture{invoked: map[string][]map[string]any{}, malformed: true})
+	if code != 3 || file == "" {
+		t.Fatalf("code %d result %v, want a written partial snapshot", code, result)
+	}
+	if manifest := manifestOf(t, file); len(manifest.Builds) != 0 || itemOf(manifest, "object.get").Result != "ok" {
+		t.Fatalf("builds %v object.get %+v", manifest.Builds, itemOf(manifest, "object.get"))
+	}
+}
+
+// A private key with no END line is redacted to the end of its string, not
+// of the file: the answer stays readable JSON and reads back offline.
+func TestAPrivateKeyWithoutItsEndIsRedactedWithinItsString(t *testing.T) {
+	file, _, _ := takeSnapshot(t, &snapshotFixture{invoked: map[string][]map[string]any{},
+		storeInfo: map[string]any{"key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANkey-material", "after": "kept"}})
+	data := readArchive(t, file)["ops/store.info.json"]
+	if !json.Valid(data) || bytes.Contains(data, []byte("key-material")) || !bytes.Contains(data, []byte(`"after": "kept"`)) {
+		t.Fatalf("store.info = %s", data)
+	}
+	if item := itemOf(manifestOf(t, file), "store.info"); item.Result != "ok" {
+		t.Fatalf("store.info item = %+v", item)
+	}
+}
+
+// Should the second pass ever leave an answer unreadable, the answer is kept
+// as a placeholder and counted as not whole; and a reader meeting a file
+// that does not parse names it rather than leaving it out.
+func TestABrokenAnswerIsAPlaceholderAndAnUnreadableFileIsNamed(t *testing.T) {
+	saved := snapshotRules
+	snapshotRules = append(append(snapshotRules[:0:0], snapshotRules...), struct {
+		name    string
+		pattern *regexp.Regexp
+		keep    string
+	}{"breaks_json", regexp.MustCompile(`"note"`), `"note`})
+	t.Cleanup(func() { snapshotRules = saved })
+	file, _, code := takeSnapshot(t, &snapshotFixture{invoked: map[string][]map[string]any{}, storeInfo: map[string]any{"note": "plain"}})
+	if code != 3 || itemOf(manifestOf(t, file), "store.info").Result != "redaction_broke_json" {
+		t.Fatalf("code %d store.info %+v", code, itemOf(manifestOf(t, file), "store.info"))
+	}
+	// An archive holding an ops file that does not parse.
+	var buffer bytes.Buffer
+	zipped := gzip.NewWriter(&buffer)
+	tarred := tar.NewWriter(zipped)
+	for name, body := range map[string]string{"s/manifest.json": `{"format":"` + snapshotFormat + `","environment_id":"env-one"}`, "s/ops/fleet.get.json": `{"status":`} {
+		_ = tarred.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(body))})
+		_, _ = tarred.Write([]byte(body))
+	}
+	_ = tarred.Close()
+	_ = zipped.Close()
+	broken := filepath.Join(t.TempDir(), "broken.tar.gz")
+	_ = os.WriteFile(broken, buffer.Bytes(), 0o600)
+	code, result, _, _ := run(t, Store{t.TempDir()}, &http.Client{Transport: noNetwork{t}}, "", "discover", "--snapshot", broken)
+	if code != 1 || !strings.Contains(stringField(objectField(result, "error"), "message"), "ops/fleet.get.json") {
+		t.Fatalf("code %d result %v, want the unreadable file named", code, result)
 	}
 }

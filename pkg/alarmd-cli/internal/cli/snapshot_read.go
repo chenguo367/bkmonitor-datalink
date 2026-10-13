@@ -28,9 +28,10 @@ import (
 // collected. A read the snapshot does not hold is not_in_snapshot; nothing
 // goes to the network.
 
-// snapshotReadLimit bounds what one archive may unpack to, the collector's
-// own bound with room for its manifest.
-const snapshotReadLimit = snapshotMaxBytes + 8<<20
+// snapshotReadSlack is what an archive holds beyond its answers: the
+// manifest, the collector's log, the sums and the tar headers. The answers
+// themselves are bounded by snapshotMaxBytes, which the collector counts.
+const snapshotReadSlack = 8 << 20
 
 type snapshotArchive struct {
 	file     string
@@ -49,7 +50,7 @@ func openSnapshot(file string) (*snapshotArchive, error) {
 		return nil, errors.New("the snapshot file is not a gzip archive")
 	}
 	archive := &snapshotArchive{file: file, records: map[string]map[string]any{}}
-	tarred := tar.NewReader(io.LimitReader(zipped, snapshotReadLimit))
+	tarred := tar.NewReader(io.LimitReader(zipped, int64(snapshotMaxBytes+snapshotReadSlack)))
 	manifestSeen := false
 	for {
 		header, err := tarred.Next()
@@ -72,9 +73,10 @@ func openSnapshot(file string) (*snapshotArchive, error) {
 			manifestSeen = true
 		case strings.HasPrefix(name, "ops/") && strings.HasSuffix(name, ".json"):
 			var record map[string]any
-			if json.Unmarshal(data, &record) == nil {
-				archive.records[name] = record
+			if json.Unmarshal(data, &record) != nil {
+				return nil, errors.New("the snapshot's " + name + " is not readable JSON")
 			}
+			archive.records[name] = record
 		}
 	}
 	if !manifestSeen {
