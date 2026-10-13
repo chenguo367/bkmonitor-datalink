@@ -32,11 +32,6 @@ const channelVersion = "alarmd-ob/v1"
 // session, execution and management included. The identifier is historical.
 const sessionScope = "deployment_ops_readonly"
 
-// legacyExecScope is what an earlier server granted for a separately
-// requested execution session. A profile carrying it still loads; against an
-// earlier server that still describes an operation as requiring it, only such
-// a profile is allowed it.
-const legacyExecScope = "deployment_ops_exec"
 const maxResponse = 8 << 20
 
 // requestNotSent marks failures that happen before the channel can receive
@@ -45,9 +40,12 @@ type requestNotSent struct{ error }
 
 func notSent(message string) error { return &requestNotSent{errors.New(message)} }
 
-func validScope(scope string) bool { return scope == sessionScope || scope == legacyExecScope }
+// validScope and allowsScope know the one scope. No server a CLI talks to
+// ever issued another: the execution scope an earlier build defined was
+// gone before any deployment ran it.
+func validScope(scope string) bool { return scope == sessionScope }
 func allowsScope(granted, required string) bool {
-	return validScope(granted) && (required == sessionScope || granted == required)
+	return validScope(granted) && required == sessionScope
 }
 
 func baseURL(raw string) (*url.URL, error) {
