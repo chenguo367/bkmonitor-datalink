@@ -21,35 +21,6 @@ import (
 
 var ErrFrozenQueryPlanUnavailable = errors.New("alarmd access: frozen QueryPlanFacts unavailable")
 
-// minimumSettlingWait is the shortest wait this product has ever treated as
-// enough for data to land: it is Python's ACCESS_DATA_TIME_DELAY, which that
-// side adds to every strategy's lookback whatever the period. A Slot falls
-// back to it when its completion budget cannot afford the deployment's
-// configured wait.
-//
-// It replaces a constant named thirtySecondReadyDelay whose value was ten
-// seconds and which was applied by listing the interval values that needed
-// it. The name said thirty, the value was ten, and the list had a hole.
-const minimumSettlingWait = execution.MinimumSettlingWait
-
-// settlingWaitWithinBudget reports how long after its query window closes a
-// Slot waits before reading it, for the schedule one of its Plans carries.
-//
-// The rule itself is execution.SettlingWaitWithinQueryBudget, shared with the
-// scheduler, which needs the same answer to decide whether a replay can still
-// be read before its distance runs out. This function is the translation of a
-// Plan's schedule into that rule's terms: the query budget is the completion
-// offset less the downstream execution reserve.
-//
-// A wait that outlasts its own budget does not delay the read, it cancels it:
-// the consumer fails the readiness comparison at every round and is bound as
-// unavailable forever. That is what intervals of 16 to 35 seconds did, and
-// the strategy serializer accepts any of them -- it validates agg_interval
-// only as a non-negative integer, with no tier list behind it.
-func settlingWaitWithinBudget(schedule execution.ScheduleSpec, configured, reserve time.Duration) time.Duration {
-	return execution.SettlingWaitWithinQueryBudget(queryBudgetOf(schedule, reserve), configured)
-}
-
 // readWaitWithinBudget is how long after its query window closes the group's
 // Slot is read for the schedule one of its Plans carries: the settling wait
 // and the group's phase (execution.ReadWaitWithinQueryBudget).

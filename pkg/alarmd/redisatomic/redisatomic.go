@@ -73,8 +73,3 @@ func (write *Write) Run(ctx context.Context, client redis.Scripter, keys []strin
 	}
 	return err
 }
-
-// Hash is the script's SHA-1, the name EVALSHA sends.
-func (write *Write) Hash() string {
-	return write.script.Hash()
-}

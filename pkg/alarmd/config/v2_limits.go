@@ -24,18 +24,20 @@ import (
 const defaultOutputMaxMessageBytes = 512 << 10
 
 type CompilerLimitsConfig struct {
-	MaxPlanBytes              int      `yaml:"max_plan_bytes"`
-	MaxLevelsPerPlan          int      `yaml:"max_levels_per_plan"`
-	MaxAlgorithmsPerLevel     int      `yaml:"max_algorithms_per_level"`
-	MaxGroupsPerAlgorithm     int      `yaml:"max_groups_per_algorithm"`
-	MaxConditionsPerAlgorithm int      `yaml:"max_conditions_per_algorithm"`
-	MaxASTNodesPerLevel       int      `yaml:"max_ast_nodes_per_level"`
-	MaxRequiredHistoryPoints  uint32   `yaml:"max_required_history_points"`
-	MaxCompiledPlanBytes      int      `yaml:"max_compiled_plan_bytes"`
-	MaxCacheEntries           int      `yaml:"max_cache_entries"`
-	MaxCacheBytes             int      `yaml:"max_cache_bytes"`
-	NegativeCacheTTL          Duration `yaml:"negative_cache_ttl"`
-	BudgetRevision            string   `yaml:"budget_revision"`
+	MaxPlanBytes              int    `yaml:"max_plan_bytes"`
+	MaxLevelsPerPlan          int    `yaml:"max_levels_per_plan"`
+	MaxAlgorithmsPerLevel     int    `yaml:"max_algorithms_per_level"`
+	MaxGroupsPerAlgorithm     int    `yaml:"max_groups_per_algorithm"`
+	MaxConditionsPerAlgorithm int    `yaml:"max_conditions_per_algorithm"`
+	MaxASTNodesPerLevel       int    `yaml:"max_ast_nodes_per_level"`
+	MaxRequiredHistoryPoints  uint32 `yaml:"max_required_history_points"`
+	MaxCompiledPlanBytes      int    `yaml:"max_compiled_plan_bytes"`
+	// MaxCacheEntries and MaxCacheBytes bound the compile cache. They are
+	// sized from the container (DeriveCompileCache), not configured.
+	MaxCacheEntries  int      `yaml:"-"`
+	MaxCacheBytes    int      `yaml:"-"`
+	NegativeCacheTTL Duration `yaml:"negative_cache_ttl"`
+	BudgetRevision   string   `yaml:"budget_revision"`
 }
 
 // DetectLimitsConfig is what the phase-two runtime still reads by name. The
@@ -84,8 +86,8 @@ func defaultLimits() LimitsConfig {
 			MaxPlanBytes: 256 << 10, MaxLevelsPerPlan: 8, MaxAlgorithmsPerLevel: 8,
 			MaxGroupsPerAlgorithm: 16, MaxConditionsPerAlgorithm: 32, MaxASTNodesPerLevel: 512,
 			MaxRequiredHistoryPoints: 4096, MaxCompiledPlanBytes: 512 << 10,
-			MaxCacheEntries: 4096, MaxCacheBytes: 64 << 20, NegativeCacheTTL: Duration(time.Minute),
-			BudgetRevision: "phase-one-default-v1",
+			NegativeCacheTTL: Duration(time.Minute),
+			BudgetRevision:   "phase-one-default-v1",
 		},
 		// Five of the seven budgets that used to live here went with the batch
 		// evaluation that read them. What is left is what the phase-two runtime

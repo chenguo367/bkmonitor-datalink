@@ -97,6 +97,13 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		reconciler, facts = console, console
 		location.console = console
 	}
+	// The calibration rate is not written here. ReconcileBatch is only the
+	// floor, and what a round calibrates before any Console call has been
+	// timed; each round then calibrates what covers every tracked strategy
+	// within the calibration interval, at the pace the Console's measured p90
+	// allows inside half of CycleTimeout (openalerts calibrationPlan), and a
+	// shortfall is reported as calibration_short. RefreshInterval is the
+	// round's cadence and CycleTimeout bounds one round.
 	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: location, Subscriber: location, Reconciler: reconciler, Now: now,
 		Policy: openalerts.PolicySelfMaintain, MaxStrategies: capacity.Strategies, MaxMembers: capacity.Members, MaxBytes: capacity.Bytes,
 		MaxLocalEntries: capacity.LocalEntries, ReadBatch: capacity.ReadBatch, ReconcileBatch: 1, RefreshInterval: time.Second,

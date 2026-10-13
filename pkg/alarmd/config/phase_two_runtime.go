@@ -321,6 +321,16 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 		// purpose: they are sized from the container by Default, which is the
 		// only place that knows the chunked Store apply budget they are held
 		// against.
+		// MaxReplayAge is a wall-clock window on purpose, counted from the
+		// Slot's own query deadline, which is already its period less the
+		// reserve: a 1h Slot has its hour and then ten minutes, a 1d Slot its
+		// day. A Slot that is still undone past that missed its whole period,
+		// which is an outage rather than a handover (about 71 s), and every
+		// age expiry one production deployment recorded in a week sits on
+		// one of three incidents.
+		// Scaling it by period instead would shorten it for 60 s groups and
+		// stretch the read hold, draining window and state retention it also
+		// bounds to days for 1d groups, for Slots that late.
 		Scheduler: PhaseTwoSchedulerConfig{
 			TickInterval:        Duration(time.Second),
 			MaxQueuedItemsPerQG: 16, MaxReplaySlots: 3, MaxReplayAge: Duration(10 * time.Minute),

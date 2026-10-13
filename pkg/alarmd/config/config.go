@@ -351,6 +351,9 @@ func (c Config) withDerivedCapacity(inputs CapacityInputs) Config {
 	c.PhaseTwo.Coordinator = DeriveCoordinator(
 		inputs, uint64(c.Limits.Store.MaxKeysPerBatch), c.chunkedStateApplyBudget(),
 	)
+	compileCache := DeriveCompileCache(inputs, c.Limits.Compiler.MaxCompiledPlanBytes)
+	c.Limits.Compiler.MaxCacheEntries = compileCache.MaxEntries
+	c.Limits.Compiler.MaxCacheBytes = compileCache.MaxBytes
 	return c
 }
 
