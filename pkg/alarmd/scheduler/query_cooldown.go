@@ -354,7 +354,7 @@ func (runner *Runner) queryCooldownExcusesItsOwnDelay(result execution.SlotExecu
 // lateness the Runner's own previous execution caused is excused, once per
 // cooldown's end (queryCooldownExcusesItsOwnDelay), before this applies.
 func (runner *Runner) queryCooldownCountsALateTimeout(result execution.SlotExecutionResult) bool {
-	return !runner.queryCooldown.until.IsZero() && result.QueryAvailability == execution.QueryAvailabilityUnknown &&
+	return result.QueryAvailability == execution.QueryAvailabilityUnknown &&
 		result.QueryUnknownReason == execution.ReasonCode(contract.ReasonQueryTimeout)
 }
 
