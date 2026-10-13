@@ -305,27 +305,53 @@ type costWindows struct {
 	current  CostScalars
 	previous CostScalars
 	// slotTime is the evaluation time of the latest Slot an observation of
-	// this object named, and slot what was observed of that Slot alone. They
-	// do not rotate with the windows: a Plan whose period is longer than the
-	// two windows -- an hourly one, read in windows of minutes -- is judged
-	// by its last Slot once that Slot's completion falls in the window,
-	// which is long after the Slot's own observations rotated out (see
-	// costDue.straddling). A newer Slot replaces them, so a record can only
-	// ever answer for the one Slot it names.
-	slotTime int64
-	slot     CostScalars
+	// this object named, and slot what was observed of that Slot alone;
+	// priorTime and prior are the same for the Slot before it. They do not
+	// rotate with the windows: a Plan whose period is longer than the two
+	// windows -- an hourly one, read in windows of minutes -- is judged by a
+	// Slot once that Slot's completion falls in the window, long after the
+	// Slot's own observations rotated out (see costDue.straddling).
+	//
+	// Two, because the next Slot begins while the window that judges the
+	// one before is still open: an hourly Slot completes at the next one's
+	// evaluation time, and that one runs within seconds. With a period
+	// longer than the window no more than one newer Slot can begin while a
+	// Slot is judged, so two records always hold the Slot being judged. A
+	// record answers only for the Slot it names.
+	slotTime  int64
+	slot      CostScalars
+	priorTime int64
+	prior     CostScalars
 }
 
-// observeSlot adds o to the record of the Slot it names, starting the record
-// over for a newer Slot and leaving it alone for an older one.
+// slotRecord is what was observed of the named Slot, and whether a record
+// names it.
+func (w costWindows) slotRecord(slot int64) (CostScalars, bool) {
+	switch slot {
+	case w.slotTime:
+		return w.slot, w.slotTime != 0
+	case w.priorTime:
+		return w.prior, w.priorTime != 0
+	}
+	return CostScalars{}, false
+}
+
+// observeSlot adds o to the record of the Slot it names. A newer Slot moves
+// the latest record to the prior one and starts a new latest; an observation
+// of the prior Slot still lands in its record; one of an older Slot is
+// dropped.
 func (w *costWindows) observeSlot(o Observation, trace TraceFields, now time.Time) {
-	if trace.EvaluationTime <= 0 || trace.EvaluationTime < w.slotTime {
-		return
+	switch at := trace.EvaluationTime; {
+	case at <= 0:
+	case at > w.slotTime:
+		w.priorTime, w.prior = w.slotTime, w.slot
+		w.slotTime, w.slot = at, CostScalars{}
+		addCost(&w.slot, o, trace, now)
+	case at == w.slotTime:
+		addCost(&w.slot, o, trace, now)
+	case at == w.priorTime:
+		addCost(&w.prior, o, trace, now)
 	}
-	if trace.EvaluationTime > w.slotTime {
-		w.slotTime, w.slot = trace.EvaluationTime, CostScalars{}
-	}
-	addCost(&w.slot, o, trace, now)
 }
 
 // rotate brings the windows to epoch. An epoch older than the one they hold
@@ -1339,7 +1365,7 @@ func (c *CostSummary) Publish(now time.Time) {
 				// A Slot longer than the window, judged by the record of the
 				// latest Slot the group was observed at.
 				snapshot.Coverage.DueGroups++
-				if w.slotTime < slot {
+				if _, recorded := w.slotRecord(slot); !recorded {
 					snapshot.Coverage.UnobservedDueGroups++
 					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w, costMissNoRecord))
 				}
@@ -1384,10 +1410,10 @@ func (c *CostSummary) Publish(now time.Time) {
 				// it, read as costUnevaluated reads a window. A record of an
 				// older Slot answers for nothing here.
 				snapshot.Coverage.DuePlans++
-				if w.slotTime != slot || w.slot.Evaluations == 0 {
+				if record, recorded := w.slotRecord(slot); !recorded || record.Evaluations == 0 {
 					var groupSlot costWindows
-					if group := groupWindows[entry.group]; group.slotTime == slot {
-						groupSlot.current = group.slot
+					if record, recorded := groupWindows[entry.group].slotRecord(slot); recorded {
+						groupSlot.current = record
 					}
 					unevaluated(groupSlot)
 				}

@@ -89,6 +89,54 @@ func TestAnHourlyPlanIsJudgedByItsLastSlotLongAfterItRan(t *testing.T) {
 	}
 }
 
+// The next Slot begins while the window that judges the one before is still
+// open -- an hourly Slot at 7200 runs at 7230, and the window to 7400 judges
+// the Slot at 3600 -- so the record of the Slot before is still read: seen
+// when it was evaluated, accounted for by its failure when it was not, for
+// the Plan and its group alike.
+func TestTheSlotBeforeIsJudgedAfterTheNextOneBegan(t *testing.T) {
+	c, now := longPeriodFixture(t)
+	*now = time.Unix(4800, 0)
+	hourlySlot(c, 3600, true, ResultSuccess)
+	*now = time.Unix(7230, 0)
+	hourlySlot(c, 7200, true, ResultSuccess)
+	*now = time.Unix(7400, 0)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.DuePlans != 1 || coverage.UnobservedDuePlans != 0 || coverage.UnobservedDueGroups != 0 || coverage.Incomplete {
+		t.Fatalf("the Slot at 3600 after the one at 7200 began = %+v, want it seen and the window complete", coverage)
+	}
+
+	c, now = longPeriodFixture(t)
+	*now = time.Unix(4800, 0)
+	hourlySlot(c, 3600, false, ResultFailed)
+	*now = time.Unix(7230, 0)
+	hourlySlot(c, 7200, true, ResultSuccess)
+	*now = time.Unix(7400, 0)
+	c.Publish(*now)
+	coverage := c.Snapshot().Coverage
+	if coverage.UnobservedDuePlans != 0 || unevaluatedOf(t, coverage)["failed"] != 1 {
+		t.Fatalf("the failed Slot at 3600 after the one at 7200 began = %+v, want it accounted for by its failure", coverage)
+	}
+
+	// A Slot's result that lands after the next Slot began -- a long one,
+	// failing late -- still lands in its own record: the group's record of
+	// it reads failed, not still in flight.
+	c, now = longPeriodFixture(t)
+	trace := TraceFields{QueryGroupKey: "hourly", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 3600}
+	*now = time.Unix(4800, 0)
+	c.Observe(context.Background(), Observation{Stage: StageSlotStarted, Result: ResultStarted, Trace: trace})
+	*now = time.Unix(7230, 0)
+	hourlySlot(c, 7200, true, ResultSuccess)
+	*now = time.Unix(7300, 0)
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultFailed, Duration: time.Millisecond, DurationKnown: true, Trace: trace})
+	*now = time.Unix(7400, 0)
+	c.Publish(*now)
+	coverage = c.Snapshot().Coverage
+	if counts := unevaluatedOf(t, coverage); counts["failed"] != 1 || counts["in_flight"] != 0 {
+		t.Fatalf("the Slot at 3600 failing after the one at 7200 began = %+v, want it accounted for by its failure", coverage)
+	}
+}
+
 // A record answers only for the Slot it names: the "ok" of a Slot never
 // stands in for a later one the Plan lost, however recent it was.
 func TestAnOlderSlotsRecordDoesNotAnswerForALaterOne(t *testing.T) {
