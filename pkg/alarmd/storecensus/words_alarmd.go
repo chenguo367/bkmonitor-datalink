@@ -1452,6 +1452,7 @@ var alarmdWords = []string{
 	"supervisor",
 	"supplement",
 	"supplemented",
+	"supported",
 	"suppressed",
 	"surface",
 	"suspected",
