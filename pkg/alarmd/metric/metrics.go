@@ -37,7 +37,10 @@ type Recorder struct {
 	// only a metric label: answering "which commit is this deployment on"
 	// meant a PromQL query, and a rollout that left two builds running was
 	// invisible on the page that reads their combined numbers.
-	build             BuildInfo
+	build BuildInfo
+	// heap is the live-heap collector, read by the flow's copy from its last
+	// sample.
+	heap              *heapSiteCollector
 	lifecycleMu       sync.Mutex
 	lifecycleBound    bool
 	healthMu          sync.Mutex
@@ -70,6 +73,7 @@ func NewRecorder(build BuildInfo) *Recorder {
 	buildInfo.WithLabelValues(build.Version, build.Commit, build.SchemaVersion).Set(1)
 	observations := newObservationMetrics()
 	phaseTwo := newPhaseTwoMetrics()
+	heap := newHeapSiteCollector(time.Now)
 
 	collectorsToRegister := []prometheus.Collector{
 		// The legacy Go collector exports memstats but no CPU split, so the
@@ -83,7 +87,7 @@ func NewRecorder(build BuildInfo) *Recorder {
 		)),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		// Where the live heap comes from, by allocating function; see heap_sites.go.
-		newHeapSiteCollector(time.Now),
+		heap,
 		buildInfo,
 	}
 	collectorsToRegister = append(collectorsToRegister, observations.collectors()...)
@@ -91,6 +95,7 @@ func NewRecorder(build BuildInfo) *Recorder {
 	registry.MustRegister(collectorsToRegister...)
 
 	return &Recorder{
+		heap:         heap,
 		registry:     registry,
 		build:        build,
 		observations: observations,

@@ -1255,8 +1255,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// QueryCooldowns keeps each owned Query Group's place in the query
 	// cooldown pool across restarts and owners. Nil keeps it in the Runner
 	// alone, which is what every runtime did before.
-	QueryCooldowns   scheduler.QueryCooldownStore
-	ReadHolds        *productionReadHolds
+	QueryCooldowns scheduler.QueryCooldownStore
+	ReadHolds      *productionReadHolds
+	// DecisionLag hears each decided Slot's lag (the flow's evaluate
+	// stage); nil hears nothing.
+	DecisionLag      func(time.Duration)
 	Store            productionPhaseTwoOwnershipStore
 	WorkerID         string
 	Catalog          productionPhaseTwoSlotCatalog
@@ -2572,7 +2575,8 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		previousRelease := release
 		release = func() { previousRelease(); runtime.viewGate.forget(queryGroup, session) }
 	}
-	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds}
+	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer, readHolds: runtime.dependencies.ReadHolds,
+		decisionLag: runtime.dependencies.DecisionLag}
 	var readHolds scheduler.ReadHolds
 	if runtime.dependencies.ReadHolds != nil {
 		readHolds = runtime.dependencies.ReadHolds
@@ -2794,6 +2798,9 @@ type observedProductionSlotExecutor struct {
 	next      scheduler.Executor
 	observer  observability.Observer
 	readHolds *productionReadHolds
+	// decisionLag hears each decided Slot's lag from readable data to its
+	// completion; nil hears nothing.
+	decisionLag func(time.Duration)
 }
 
 func (executor observedProductionSlotExecutor) Execute(
@@ -2816,12 +2823,21 @@ func (executor observedProductionSlotExecutor) Execute(
 		}
 	}
 	var shortCompletion *observability.ShortPeriodCompletionFacts
-	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
+	if err == nil && result.Completed && result.CompletionKind != "" {
 		// Lag from when the Slot was to be read: its evaluation time, read
 		// hold later. A read hold is not lag; it is the wait the Slot chose.
 		due := time.Unix(int64(request.Contract.Slot.EvaluationTime), 0).Add(time.Duration(request.Contract.ReadHoldMillis) * time.Millisecond)
-		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
-			LagSeconds: time.Since(due).Seconds(), AttemptNo: request.AttemptNo}
+		lag := time.Since(due)
+		// Every period's decision, for the overview's evaluate stage; a Slot
+		// booked without a decision lags by its booking, not its detection.
+		if executor.decisionLag != nil && result.CompletionKind != execution.CompletionGapSkipped &&
+			result.CompletionKind != execution.CompletionSnapshotUnavailable {
+			executor.decisionLag(lag)
+		}
+		if observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
+			shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
+				LagSeconds: lag.Seconds(), AttemptNo: request.AttemptNo}
+		}
 	}
 	// What held the round before this one, on the completions where that is
 	// the question. Any cohort: it used to ride inside the short-period

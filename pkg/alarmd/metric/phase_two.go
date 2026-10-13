@@ -31,6 +31,7 @@ type phaseTwoMetrics struct {
 	workflow                       workflowMetrics
 	shortPeriod                    shortPeriodMetrics
 	queryStatus                    queryStatusMetrics
+	flow                           flowMetrics
 	queryCodec                     queryCodecMetrics
 	queryTruncation                queryTruncationMetrics
 	queryUnavailable               queryUnavailableMetrics
@@ -740,6 +741,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.canonicalEncoding = newCanonicalEncodingCollector()
 	metrics.shortPeriod = newShortPeriodMetrics()
 	metrics.queryStatus = newQueryStatusMetrics()
+	metrics.flow = newFlowMetrics(metrics.work)
 	metrics.queryCodec = newQueryCodecMetrics()
 	metrics.queryTruncation = newQueryTruncationMetrics()
 	metrics.queryUnavailable = newQueryUnavailableMetrics()
@@ -1736,6 +1738,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
 		m.queryStatus.responses,
+		m.flow.queryDuration, m.flow.queryFailures, m.flow.decisionLag, m.flow.outputRejectedAll,
 		m.queryCodec.responses,
 		m.queryTruncation.truncated,
 		m.queryUnavailable.attributions,
@@ -2048,6 +2051,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 					m.outputRejectedStrategyOverflow.Inc()
 				}
 				m.outputEventsRejected.WithLabelValues(observability.NormalizeOutputRejectRule(rejected.Rule), strategy).Inc()
+				m.flow.outputRejectedAll.Inc()
 			}
 			for _, bucket := range write.WithoutMessageBy {
 				m.outputEventsWithoutMessage.WithLabelValues(
