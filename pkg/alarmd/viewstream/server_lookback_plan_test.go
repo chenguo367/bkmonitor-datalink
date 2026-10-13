@@ -121,3 +121,30 @@ func TestAFallbackSendsNoPlansAndTheNextTermsReachANewStreamWhole(t *testing.T) 
 		t.Fatalf("the new stream's plan set = %+v, want the new term's whole set", got)
 	}
 }
+
+// A new term starts with no plans, whatever the last one sent: a Worker that
+// opens a stream to it gets its view and nothing more until this term plans.
+func TestANewTermStartsWithNoPlans(t *testing.T) {
+	harness := startServer(t)
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})
+	if err := harness.server.SetLookbackPlans(map[string][]viewstream.LookbackPlan{"w1": {{QueryGroup: "qg-1",
+		Class: viewstream.LookbackPlanSeriesLate, Rung: 2, ExpiresAt: time.Unix(5000, 0)}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.server.Lead(8); err != nil {
+		t.Fatal(err)
+	}
+	desired.ControlEpoch = 8
+	if _, err := harness.server.Publish(context.Background(), desired); err != nil {
+		t.Fatal(err)
+	}
+	w1 := harness.connect("w1", "t1", "i1", nil)
+	w1.recvSnapshot()
+	w1.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}})
+	if next := w1.recv(); next.GetHeartbeat() == nil {
+		t.Fatalf("a new term's stream got %s after its snapshot, want no plan set before the term plans", describe(next))
+	}
+}

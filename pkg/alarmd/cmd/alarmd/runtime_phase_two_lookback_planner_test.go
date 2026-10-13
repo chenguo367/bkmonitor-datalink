@@ -129,3 +129,26 @@ func TestAFallbackLeavesTheKeptSetAndANewTermStartsFromItUnlessItExpired(t *test
 		t.Fatalf("after the life ran out w2's plans = %+v error %v, want none", byWorker["w2"], err)
 	}
 }
+
+// Each term starts from the set as kept, not from what this process last
+// planned: another Leader may have planned in between.
+func TestEachTermStartsFromTheKeptSet(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store, _ := plannerFleet(t, now)
+	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
+	if _, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	other := map[string]fleet.LookbackPlanEntry{"qg-3": {Rung: 1, ExpiresAtMs: now.Add(time.Hour).UnixMilli()}}
+	if err := store.SaveLookbackPlan(context.Background(), other, now); err != nil {
+		t.Fatal(err)
+	}
+	planner.newTerm()
+	byWorker, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := byWorker["w1"]; len(got) != 1 || got[0].QueryGroup != "qg-3" || got[0].Rung != 1 {
+		t.Fatalf("w1's plans in the new term = %+v, want qg-3 from the kept set", got)
+	}
+}
