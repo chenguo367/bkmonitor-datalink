@@ -1046,17 +1046,10 @@ func (runner *Runner) runOneTracked(
 	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
-	decidesPool := runner.queryCooldownDecidedBy(operation)
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
-	poolResult := result
-	if decidesPool && runner.queryCooldownExcusesItsOwnDelay(result, busyUntil) {
-		decidesPool = false
-	} else if decidesPool && runner.queryCooldownCountsALateTimeout(result) {
-		poolResult.QueryAvailability = execution.QueryAvailabilityUnavailable
-		poolResult.QueryUnavailableReason = execution.ReasonCode(contract.ReasonQueryTimeout)
-	}
+	decidesPool, poolResult := runner.queryCooldownDecision(operation, result, busyUntil)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
 		// between the source's reads and here is refused by the same name:

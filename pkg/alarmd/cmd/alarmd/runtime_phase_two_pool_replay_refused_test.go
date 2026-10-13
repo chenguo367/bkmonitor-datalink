@@ -99,3 +99,55 @@ func TestARefusedTableIsProbedByTheFirstReplayAndTheRestWait(t *testing.T) {
 		}
 	}
 }
+
+// A replay decides a missing-table pool only on what that reason is about:
+// an answer, or the table refused again. A held replay that times out, or
+// that the backend cuts, says nothing about whether the table routes - a
+// timeout is about the time and the budget the replay had - so it leaves the
+// pool exactly as it was, its reason, failures, timeouts and cooldown, and
+// the next normal round decides.
+func TestAReplayThatTimesOutOrIsCutLeavesAMissingTablePoolToItsNormalRound(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setUp func(h *poolProbeHarness)
+	}{
+		{"timed out", func(h *poolProbeHarness) { h.backend.latency.Store((60 * time.Second).Milliseconds()) }},
+		{"cut by the backend", func(h *poolProbeHarness) {
+			h.backend.cut.Store(backendCut.Milliseconds())
+			h.backend.latency.Store((backendCut + time.Second).Milliseconds())
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newPoolProbeHarnessWith(t, 0, 10*time.Second)
+			enterPoolOnAMissingTable(t, h)
+			before := h.poolRecord()
+			h.backend.missing.Store(false)
+			test.setUp(h)
+			requests, events := heldPasses(t, h, h.afterCooldown())
+			if len(requests) == 0 || len(events) != 0 {
+				t.Fatalf("held replays %s: %+v sent and %+v made, want them run and no pool transition", test.name, requests, events)
+			}
+			for i, request := range requests {
+				if request.answered {
+					t.Fatalf("held replay %d was answered: %+v", i, requests)
+				}
+			}
+			after := h.poolRecord()
+			if !after.Until.Equal(before.Until) || after.Reason != before.Reason || after.Failures != before.Failures ||
+				after.Timeouts != before.Timeouts || after.Reason != "QUERY_TARGET_MISSING" {
+				t.Fatalf("the record after held replays %s = %+v, want it as before them: %+v", test.name, after, before)
+			}
+
+			// The next normal round decides: the table still refused, it stays.
+			h.backend.cut.Store(0)
+			h.backend.missing.Store(true)
+			h.backend.latency.Store(200)
+			minute := (h.backend.clock.Load()/1000-h.base)/60 + 1
+			requests, events = h.pass((h.base+minute*60)*1000 + (h.readWait() + poolPassSlack).Milliseconds())
+			if len(requests) != 1 || len(events) != 1 || events[0].Event != "extended" || events[0].LastProbe == nil ||
+				events[0].LastProbe.Operation != "normal" {
+				t.Fatalf("the next normal round %+v sent and %+v made, want it to decide the pool", requests, events)
+			}
+		})
+	}
+}

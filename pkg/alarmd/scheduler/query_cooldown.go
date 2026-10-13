@@ -345,6 +345,47 @@ func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool
 	return operation == execution.OperationNormal || queryCooldownTimeIndependent(state.reason)
 }
 
+// queryCooldownDecision is whether an execution of operation that came back
+// with result decides the pool, and the result the pool reads it as. One the
+// pool's reason does not let it decide on decides nothing, before anything
+// the pool keeps for its normal round is spent on it: the one excuse a
+// cooldown's end gives a timeout the Runner made late itself, and the reading
+// of a late timeout as the backend's.
+func (runner *Runner) queryCooldownDecision(operation execution.Operation, result execution.SlotExecutionResult,
+	busyUntil time.Time) (bool, execution.SlotExecutionResult) {
+	if !runner.queryCooldownDecidedBy(operation) || !queryCooldownTimeIndependentEvidence(operation, result) ||
+		runner.queryCooldownExcusesItsOwnDelay(result, busyUntil) {
+		return false, result
+	}
+	if runner.queryCooldownCountsALateTimeout(result) {
+		result.QueryAvailability = execution.QueryAvailabilityUnavailable
+		result.QueryUnavailableReason = execution.ReasonCode(contract.ReasonQueryTimeout)
+	}
+	return true, result
+}
+
+// queryCooldownTimeIndependentEvidence reports whether an execution that
+// decides only because its pool's reason takes no time range showed something
+// that reason lets it decide on: an answer, or the same kind of refusal. A
+// timeout, an unavailable backend or a result that proved nothing depend on
+// the time and the budget the execution had - a replay's is not a normal
+// round's - and say nothing about whether the table routes; the execution
+// then decides nothing, spends nothing the pool keeps for its normal round,
+// and the next normal round decides. A normal round always decides on what
+// it got.
+func queryCooldownTimeIndependentEvidence(operation execution.Operation, result execution.SlotExecutionResult) bool {
+	if operation == execution.OperationNormal {
+		return true
+	}
+	switch result.QueryAvailability {
+	case execution.QueryAvailabilityAvailable:
+		return true
+	case execution.QueryAvailabilityUnavailable:
+		return queryCooldownTimeIndependent(result.QueryUnavailableReason)
+	}
+	return false
+}
+
 // queryCooldownTimeIndependent reports a pool reason that no time range
 // changes: the query's routing refused in its space, or its storage not
 // reading the windows its detection asks for. Both stay until somebody
