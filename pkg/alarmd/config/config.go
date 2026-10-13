@@ -334,8 +334,8 @@ type Config struct {
 	PhaseTwo      PhaseTwoRuntimeConfig `yaml:"phase_two"`
 	// ShutdownTimeout is the drain deadline of a stop (design 02 section
 	// 6.6), and the lease releases after it get as long again: a stop takes
-	// up to 2 x ShutdownTimeout, plus a second for Slots that ignore their
-	// cancellation, plus the stop record's write (2 s). The Pod's
+	// up to 2 x ShutdownTimeout, plus the stop record's write (2 s); a Slot
+	// that ignores its cancellation is not waited for past that. The Pod's
 	// terminationGracePeriodSeconds must cover that, or the kubelet kills the
 	// process before its leases are released and its stop is recorded.
 	//
@@ -358,8 +358,15 @@ const TerminationGraceEnvironment = "ALARMD_TERMINATION_GRACE_SECONDS"
 // fits Kubernetes' default 30 second grace with room to spare.
 const DefaultShutdownTimeout = 10 * time.Second
 
-// stopOverhead is what a stop takes beyond its two timeouts: a second for
-// Slots that ignore their cancellation and two for the stop record's write.
+// stopOverhead is what a stop is given beyond its two timeouts: the stop
+// record's write, which runs under its own two second timeout
+// (lifecycleWriteTimeout), and one second of slack. The stop waits for the
+// drain and the lease release only until their deadlines and then goes on --
+// a Slot that ignores its cancellation is left behind and its lease left to
+// expire, not waited for -- so the longest a stop can take, counted from when
+// the process sees the signal, is two timeouts and two seconds. The second
+// left over is what covers the time between the kubelet sending the signal
+// and the process acting on it, and the exit after the record.
 const stopOverhead = 3 * time.Second
 
 // shutdownTimeoutWithin is the longest drain deadline whose stop fits in the
