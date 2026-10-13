@@ -20,7 +20,27 @@ import (
 
 // queryCooldownRunTimesKept is how many answered run times a Query Group's
 // spread is read from, how many deciding probes it keeps for a reader, and
-// how many answered probes in a row near its ceiling let it out.
+// how many answered probes in a row near its ceiling let it out. It is a
+// sample size, not a budget.
+//
+// Eight answers with no cut between them is evidence that the backend cuts
+// few of this query's rounds: at a cut rate of a quarter such a run comes up
+// one time in ten (0.75^8), at a third one time in twenty-five. What that
+// release lets back in is bounded. Re-entry takes three rounds cut in a row,
+// and the release eight answers in a row at a probe every one to two
+// minutes for a minute Query Group (queryCooldownDelay). Over every cut rate
+// the expected cycle through this release is shortest at neither end - a
+// backend that rarely cuts seldom puts the Query Group in, one that often
+// cuts seldom answers eight times running - and is at its shortest near a
+// cut rate of 0.28: about 0.46 re-entries an hour, against the two to six an
+// hour per replica that an answer within the budget let through. Only a
+// backend that answers exactly eight times and then cuts exactly three could
+// do more, about 5.5 an hour, and no random cut rate does.
+//
+// The same bound covers a ceiling set by something that was not a cut - an
+// overloaded backend answering one unavailable slower than a short query's
+// runs: it holds the Query Group near that ceiling for at most eight
+// answers, and an answer past it drops it.
 const queryCooldownRunTimesKept = 8
 
 // A backend that cuts a query at its own limit answers unavailable after
