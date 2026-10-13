@@ -70,6 +70,16 @@ type queryCooldownMemory struct {
 	// lastProbe is the latest execution the pool let run, kept across the
 	// exit it may have caused.
 	lastProbe *observability.QueryCooldownProbe
+	// runTimes are its latest answered normal run times, oldest first, and
+	// ceiling the backend's cut its failures showed, both of the query
+	// revision runRevision (query_cooldown_ceiling.go); probes its latest
+	// deciding probes, and answeredInRow how many answered probes in a row
+	// were held near the ceiling.
+	runRevision   execution.QueryRevision
+	runTimes      []int64
+	ceiling       int64
+	probes        []observability.QueryCooldownProbe
+	answeredInRow uint32
 }
 
 // QueryCooldownRecord is one Query Group's place in the pool as it is kept
@@ -103,6 +113,17 @@ type QueryCooldownRecord struct {
 	// was, what budget it had and how long it took. A record written before
 	// it existed has none.
 	LastProbe *observability.QueryCooldownProbe `json:"last_probe,omitempty"`
+	// RunQueryRevision, RunTimesMillis and CeilingMillis are what its normal
+	// executions showed of how long its query takes and where its backend
+	// cuts it; Probes its latest deciding probes and AnsweredInRow the
+	// answered ones in a row held near the ceiling. A record written before
+	// they existed has none, and the Query Group leaves on an answer as it
+	// did.
+	RunQueryRevision execution.QueryRevision            `json:"run_query_revision,omitempty"`
+	RunTimesMillis   []int64                            `json:"run_times_ms,omitempty"`
+	CeilingMillis    int64                              `json:"ceiling_ms,omitempty"`
+	Probes           []observability.QueryCooldownProbe `json:"probes,omitempty"`
+	AnsweredInRow    uint32                             `json:"answered_in_row,omitempty"`
 }
 
 // QueryCooldownKey is where a Query Group's record is kept under prefix. The
@@ -165,6 +186,8 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	memory := &runner.cooldownMemory
 	memory.exitedAt, memory.exitReason, memory.reentries = record.ExitedAt, record.ExitReason, record.Reentries
 	memory.lastProbe = record.LastProbe
+	memory.runRevision, memory.runTimes, memory.ceiling = record.RunQueryRevision, record.RunTimesMillis, record.CeilingMillis
+	memory.probes, memory.answeredInRow = record.Probes, record.AnsweredInRow
 	if record.Until.IsZero() {
 		return
 	}
@@ -190,6 +213,9 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
 		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
 		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, LastProbe: memory.lastProbe,
+		RunQueryRevision: memory.runRevision, RunTimesMillis: append([]int64(nil), memory.runTimes...),
+		CeilingMillis: memory.ceiling, Probes: append([]observability.QueryCooldownProbe(nil), memory.probes...),
+		AnsweredInRow: memory.answeredInRow,
 	})
 }
 
@@ -331,6 +357,12 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 	}
 	if decides {
 		runner.cooldownMemory.lastProbe = queryCooldownProbe(runner.now(), operation, result)
+		if result.QueryAvailability != execution.QueryAvailabilityAvailable {
+			// Only an answer is decided against the ceiling; a probe that
+			// did not answer stays by its failure, and breaks the run.
+			runner.noteProbe(*runner.cooldownMemory.lastProbe)
+			runner.cooldownMemory.answeredInRow = 0
+		}
 	}
 	if result.QueryAvailability == execution.QueryAvailabilityUnknown {
 		// A probe that proved nothing either way. The Query Group stays in
@@ -345,9 +377,16 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 	}
 	if result.QueryAvailability == execution.QueryAvailabilityAvailable {
 		state.lastQueryAt = runner.now()
-		runner.clearQueryCooldown(ctx, QueryCooldownRecovered)
+		// Decided before this run is kept, so an answer past the ceiling is
+		// named for what it did to it.
+		letOut := !decides || runner.queryCooldownLetsOut(ctx, runner.cooldownMemory.lastProbe, intervalSeconds)
+		runner.noteRunFacts(slot, operation, result)
+		if letOut {
+			runner.clearQueryCooldown(ctx, QueryCooldownRecovered)
+		}
 		return
 	}
+	runner.noteRunFacts(slot, operation, result)
 	if result.QueryAvailability != execution.QueryAvailabilityUnavailable || state.lastSlot == slot.Contract.Slot {
 		return
 	}
@@ -428,7 +467,8 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
 			EnteredAt: memory.enteredAt, Source: memory.source,
 			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries,
-			LastProbe: memory.lastProbe},
+			LastProbe: memory.lastProbe, CeilingMillis: memory.ceiling, RunSpreadMillis: runSpread(memory.runTimes),
+			Probes: append([]observability.QueryCooldownProbe(nil), memory.probes...)},
 	})
 }
 

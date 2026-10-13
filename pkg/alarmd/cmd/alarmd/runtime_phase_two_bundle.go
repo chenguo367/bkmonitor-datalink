@@ -81,6 +81,11 @@ type phaseTwoProductionExternalDependencies struct {
 	// reads as a query timeout rather than as the clock skew it is.
 	Now        func() time.Time
 	HTTPClient *http.Client
+	// QueryClock is the clock the query client times each query on, nil for
+	// the real clock as in production. A test whose backend answers on the
+	// test's clock sets it to that clock, so a query's elapsed time is the
+	// latency the backend was given.
+	QueryClock func() time.Time
 	// PrepareEvents validates the output coordinates and returns the opener
 	// that connects; validation errors refuse startup, the opener's errors
 	// are retried while the replica reports itself not ready.
@@ -483,6 +488,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if err != nil {
 		return nil, err
 	}
+	queryClient.WithNow(external.QueryClock)
 	flights, err := scheduler.NewFlightCoordinatorWithRecovery(recoveryLimits, external.Now, observer)
 	if err != nil {
 		return nil, err
