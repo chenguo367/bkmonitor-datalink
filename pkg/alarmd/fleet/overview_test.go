@@ -518,3 +518,36 @@ func TestAReplicaThatDoesNotPublishTheCountersIsNotExpected(t *testing.T) {
 		t.Fatalf("coverage %+v verdict %+v, want the publishing replica alone expected", second.FlowCoverage, second.Verdict)
 	}
 }
+
+// A replica seen for the first time in this process is warming, not
+// missing: the first computation over a healthy fleet, a scale-out and a
+// rollout's new pods keep the verdict, and the replica is expected from its
+// second computation.
+func TestAReplicaSeenForTheFirstTimeIsWarmingNotMissing(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	flows := newOverviewFlows()
+	compute := func(health HealthResponse) Overview {
+		overview := overviewOf(health, map[StateWord]int{StateDetecting: 50}, true, at)
+		flows.apply(&overview, health, at)
+		return overview
+	}
+	first := compute(twoReplicaHealth(started, queriesFlow(0), queriesFlow(0), 0, 0))
+	if first.FlowCoverage != (OverviewCoverage{Warming: 2}) || first.Verdict.State != OverviewOK {
+		t.Fatalf("first computation: coverage %+v verdict %+v, want both warming and ok", first.FlowCoverage, first.Verdict)
+	}
+	// One replica of the two, then a second appears.
+	flows = newOverviewFlows()
+	one := overviewHealth()
+	one.PerReplica[0].StartedAt, one.PerReplica[0].Flow = started, queriesFlow(0)
+	compute(one)
+	at = at.Add(time.Minute)
+	scaled := compute(twoReplicaHealth(started, queriesFlow(60), queriesFlow(0), 0, 0))
+	if scaled.FlowCoverage != (OverviewCoverage{Counted: 1, Expected: 1, Warming: 1}) || scaled.Verdict.State != OverviewOK {
+		t.Fatalf("scale-out: coverage %+v verdict %+v, want the new replica warming and ok", scaled.FlowCoverage, scaled.Verdict)
+	}
+	at = at.Add(time.Minute)
+	if next := compute(twoReplicaHealth(started, queriesFlow(120), queriesFlow(60), 0, 0)); next.FlowCoverage != (OverviewCoverage{Counted: 2, Expected: 2}) {
+		t.Fatalf("its second computation: coverage %+v, want it counted", next.FlowCoverage)
+	}
+}

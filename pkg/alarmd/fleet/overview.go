@@ -533,6 +533,11 @@ type OverviewCoverage struct {
 	Counted  int `json:"counted"`
 	Carried  int `json:"carried,omitempty"`
 	Expected int `json:"expected"`
+	// Warming are the replicas seen for the first time by this process -- its
+	// first computation, a scale-out, a rollout's new pods -- which have no
+	// earlier reading to be a difference from. They are not expected yet and
+	// do not hold the verdict; from their second computation they are.
+	Warming int `json:"warming,omitempty"`
 }
 
 func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at time.Time) {
@@ -547,7 +552,6 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 		if replica.Flow == nil {
 			continue
 		}
-		coverage.Expected++
 		reading := overviewReading{takenAt: at.Add(-time.Duration(replica.AgeSeconds * float64(time.Second))), startedAt: replica.StartedAt, flow: *replica.Flow}
 		next[replica.Replica] = reading
 		if replica.Flow.LiveHeapBytes != nil && index < len(overview.Resources.Replicas) {
@@ -559,19 +563,24 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 		if replica.Flow.Hosts > hosts {
 			hosts, hostsKnown = replica.Flow.Hosts, true
 		}
+		// A replica this process has not read before has nothing to be a
+		// difference from: it is warming, not missing (OverviewCoverage).
 		previous, found := flows.readings[replica.Replica]
-		if found {
-			if contribution, fresh := contributionOf(previous, reading); fresh {
-				sum.add(contribution)
-				coverage.Counted++
-				last[replica.Replica] = carriedContribution{contribution: contribution}
-				continue
-			}
-			if moved := reading.takenAt.After(previous.takenAt); !moved {
-				// The reading did not move: keep the older one, so the next
-				// reading that does is measured from it.
-				next[replica.Replica] = previous
-			}
+		if !found {
+			coverage.Warming++
+			continue
+		}
+		coverage.Expected++
+		if contribution, fresh := contributionOf(previous, reading); fresh {
+			sum.add(contribution)
+			coverage.Counted++
+			last[replica.Replica] = carriedContribution{contribution: contribution}
+			continue
+		}
+		if moved := reading.takenAt.After(previous.takenAt); !moved {
+			// The reading did not move: keep the older one, so the next
+			// reading that does is measured from it.
+			next[replica.Replica] = previous
 		}
 		if kept, had := flows.last[replica.Replica]; had && !kept.carried {
 			sum.add(kept.contribution)
