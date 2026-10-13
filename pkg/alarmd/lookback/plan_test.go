@@ -44,6 +44,16 @@ func TestAPlannedQueryGroupIsReadDirectedFromItsFirstRead(t *testing.T) {
 	if got := f.engine.Stats().Plans[PlanSeeded]; got != 1 {
 		t.Fatalf("seeded plans = %d, want 1", got)
 	}
+	// The next read of it is still the one entry: counted once, and a newer
+	// set's rung taken while no sample here has seen late series.
+	f.engine.ApplyPlans([]Plan{{QueryGroup: "qg", Rung: 3, ExpiresAt: f.clock.now().Add(time.Hour)}})
+	f.engine.Begin(query("qg", f.clock.now().Unix()+60, minute, sourceLog))
+	if got := f.engine.Stats().Plans[PlanSeeded]; got != 1 {
+		t.Fatalf("seeded plans after a second read = %d, want the one entry counted once", got)
+	}
+	if late := f.group("qg").seriesLate; late == nil || late.rung != 3 {
+		t.Fatalf("after a newer set moved the rung = %+v, want rung 3", late)
+	}
 	// Unplanned, the same first read is not read directed.
 	if other := f.engine.Begin(query("qg-b", f.clock.now().Unix(), minute, sourceLog)); other == nil || other.directed != nil {
 		t.Fatalf("an unplanned Query Group's first read = %+v, want no directed read", other)
@@ -61,8 +71,9 @@ func TestAPlanNeverOverridesWhatTheQueryGroupsOwnSamplesFound(t *testing.T) {
 	if late := clean.group("qg").seriesLate; late != nil {
 		t.Fatalf("a Query Group its own sample found complete = %+v, want it left as it is", late)
 	}
+	clean.engine.Begin(query("qg", clean.clock.now().Unix()+60, minute, sourceLog))
 	if got := clean.engine.Stats().Plans; got[PlanKeptLocal] != 1 || got[PlanSeeded] != 0 {
-		t.Fatalf("plan outcomes = %v, want one kept_local and none seeded", got)
+		t.Fatalf("plan outcomes after another read = %v, want one kept_local and none seeded", got)
 	}
 
 	late, _ := directedFixture(t, SupplementOutcome{Ran: true})

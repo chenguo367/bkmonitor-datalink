@@ -54,7 +54,9 @@ func lookbackPlansFromWire(wire *pb.LookbackPlans) []LookbackPlan {
 }
 
 // LookbackPlansMessage is the message that carries a Worker's whole plan set
-// under the Leader's control epoch.
+// under the Leader's control epoch. The Worker does not read the epoch: it
+// holds one stream at a time and takes the last set that stream sent, and
+// an entry's expiry, not its term, ends it.
 func LookbackPlansMessage(controlEpoch uint64, plans []LookbackPlan) *pb.LeaderMessage {
 	entries := make([]*pb.LookbackPlanEntry, 0, len(plans))
 	for _, plan := range plans {

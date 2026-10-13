@@ -78,9 +78,15 @@ func (engine *Engine) ApplyPlans(plans []Plan) {
 // seedLocked starts a Query Group's directed reads at its plan's rung, when
 // nothing here says otherwise: no sample of it has completed in this
 // process. Its own late series are only ever found by such a sample, so a
-// Query Group read directed on its own evidence is a sampled one.
+// Query Group read directed on its own evidence is a sampled one. A seeded
+// Query Group none of whose samples has seen late series yet takes a newer
+// entry's rung: the plan is the only evidence it has. Each entry is counted
+// once, however many reads it is seen at.
 func (engine *Engine) seedLocked(state *group, plan Plan, now time.Time) {
-	if state.seriesLate != nil && state.seriesLate.seeded {
+	if late := state.seriesLate; late != nil && late.seeded {
+		if late.seen == 0 {
+			late.rung = plan.Rung
+		}
 		return
 	}
 	if state.sampled {
