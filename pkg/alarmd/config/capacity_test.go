@@ -156,6 +156,54 @@ func TestControlTimelineCacheBudgetHoldsAnOwnedWorkingSet(t *testing.T) {
 	}
 }
 
+// The compile cache replaced a written 4096 entries and 64 MiB with a share of
+// the container. The leader compiles every Plan of the deployment on each
+// catalog build, a cycle that an LRU smaller than it misses on every access,
+// so the check is that the share holds that cycle with room to grow: a production
+// leader measured 35 MB of compiled Plans for 2,930 Plans on 8 GiB.
+func TestCompileCacheBudgetHoldsTheLeadersCycle(t *testing.T) {
+	const (
+		productionPlans     = 2930
+		productionPlanBytes = 35_000_000 / productionPlans
+		replacedEntries     = 4096
+		// The deployment size at which the replaced entry bound would have
+		// recompiled every Plan on every build.
+		grownPlans = 2 * replacedEntries
+	)
+	limits := Default().Limits.Compiler
+	production := DeriveCompileCache(CapacityInputs{CPUBudget: 8, MemoryLimitBytes: 8 << 30}, limits.MaxCompiledPlanBytes)
+	if held := production.MaxBytes / productionPlanBytes; held < grownPlans {
+		t.Fatalf("8 GiB container holds %d compiled Plans, below %d", held, grownPlans)
+	}
+	if production.MaxEntries < grownPlans {
+		t.Fatalf("8 GiB container's entry bound %d is below %d Plans", production.MaxEntries, grownPlans)
+	}
+	// The last shape's share is below one maximum compiled Plan, so the floor
+	// is what sizes it.
+	shapes := append(containerShapes(), CapacityInputs{CPUBudget: 1, MemoryLimitBytes: 8 << 20})
+	for _, inputs := range shapes {
+		derived := DeriveCompileCache(inputs, limits.MaxCompiledPlanBytes)
+		if derived.MaxBytes < limits.MaxCompiledPlanBytes {
+			t.Fatalf("%d MiB container: cache of %d bytes cannot admit one %d-byte compiled Plan",
+				inputs.MemoryLimitBytes>>20, derived.MaxBytes, limits.MaxCompiledPlanBytes)
+		}
+		if uint64(derived.MaxBytes) > inputs.MemoryLimitBytes/compileCacheMemoryDivisor &&
+			derived.MaxBytes != limits.MaxCompiledPlanBytes {
+			t.Fatalf("%d MiB container gave the cache %d bytes, above its share",
+				inputs.MemoryLimitBytes>>20, derived.MaxBytes)
+		}
+		if derived.MaxEntries*compileCacheMinEntryBytes < derived.MaxBytes {
+			t.Fatalf("%d MiB container: entry bound %d is tighter than its byte bound %d",
+				inputs.MemoryLimitBytes>>20, derived.MaxEntries, derived.MaxBytes)
+		}
+		cfg := Default().withDerivedCapacity(inputs)
+		if cfg.Limits.Compiler.MaxCacheBytes != derived.MaxBytes || cfg.Limits.Compiler.MaxCacheEntries != derived.MaxEntries {
+			t.Fatalf("%d MiB container configured the compiler cache %d entries, %d bytes; derived %+v",
+				inputs.MemoryLimitBytes>>20, cfg.Limits.Compiler.MaxCacheEntries, cfg.Limits.Compiler.MaxCacheBytes, derived)
+		}
+	}
+}
+
 // The dispatcher bound has to be derived, not left at a value that means "no
 // bound". Production ran unbounded and peaked at 452 outstanding Runner
 // invocations against 32 query permits, so the 420 in between were prepared

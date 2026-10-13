@@ -54,6 +54,11 @@ const (
 	// Plan - is charged over 2 KiB, so no real entry is smaller than this.
 	controlTimelineCacheMinEntryBytes = 1 << 10
 
+	compileCacheMemoryDivisor = 32
+	// Every compile cache entry is charged a 64-byte header before anything
+	// it holds (strategy.estimateCompileResultBytes), so none is smaller.
+	compileCacheMinEntryBytes = 64
+
 	// Only local runs and unit tests reach this: a container states its limit
 	// through the environment, and a host cgroup states it in the files below.
 	fallbackMemoryLimitBytes = 2 << 30
@@ -412,6 +417,42 @@ func DeriveControlTimelineCache(inputs CapacityInputs) DerivedControlTimelineCac
 	}
 	return DerivedControlTimelineCache{
 		MaxEntries: max(int(budget/controlTimelineCacheMinEntryBytes), 1),
+		MaxBytes:   int(budget),
+	}
+}
+
+// DerivedCompileCache bounds the Plan compile cache for one container.
+type DerivedCompileCache struct {
+	MaxEntries int
+	MaxBytes   int
+}
+
+// DeriveCompileCache sizes the Plan compile cache from the memory limit. The
+// cache holds one compiled Plan per Plan the process compiles: on a Worker the
+// Plans of the Query Groups it owns, each Slot; on the leader every Plan of
+// the deployment, on every catalog build. That second access is a cycle over
+// the whole set, and a least-recently-used cache that is smaller than a cycle
+// misses on every access, so the bound is a cliff rather than a slope: the
+// written 4096 entries and 64 MiB it replaces were fine at the 2,930 Plans of a
+// production deployment and would have recompiled every Plan on every build one deployment
+// size later, with nothing reporting it.
+//
+// One thirty-second of the container holds that cycle many times over: the
+// leader's compiled Plans measured 35 MB of live heap for 2,930 Plans, about
+// 12 KiB each, so 8 GiB holds some twenty thousand. It is a ceiling, not a
+// reservation - the cache only grows to the Plans the process compiles.
+// Floored at one maximum compiled Plan, which the cache must always admit.
+//
+// The entry bound comes from the same budget, as for the timeline cache: how
+// many entries it could hold if every one were the smallest that can exist,
+// so it never binds before the bytes do.
+func DeriveCompileCache(inputs CapacityInputs, maxCompiledPlanBytes int) DerivedCompileCache {
+	budget := max(inputs.MemoryLimitBytes/compileCacheMemoryDivisor, uint64(max(maxCompiledPlanBytes, compileCacheMinEntryBytes)))
+	if budget > uint64(math.MaxInt) {
+		budget = uint64(math.MaxInt)
+	}
+	return DerivedCompileCache{
+		MaxEntries: max(int(budget/compileCacheMinEntryBytes), 1),
 		MaxBytes:   int(budget),
 	}
 }
