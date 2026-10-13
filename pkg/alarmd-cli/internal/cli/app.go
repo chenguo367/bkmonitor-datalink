@@ -43,6 +43,7 @@ type options struct {
 	url, port, state      string
 	timeout               time.Duration
 	expectBuild           string
+	out                   string
 	window                time.Duration
 	hasWindow             bool
 	hasInput, rebind      bool
@@ -57,7 +58,7 @@ func parse(args []string) (options, error) {
 		arg := args[i]
 		name, value, equal := strings.Cut(arg, "=")
 		if name == "--env" || name == "--input" || name == "--ca-cert" || name == "--url" || name == "--port" || name == "--state" || name == "--timeout" ||
-			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" {
+			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--out" {
 			if seen[name] {
 				return o, errors.New("flags may only be provided once")
 			}
@@ -74,6 +75,8 @@ func parse(args []string) (options, error) {
 			}
 			if name == "--expect-build" {
 				o.expectBuild = value
+			} else if name == "--out" {
+				o.out = value
 			} else if name == "--params-file" {
 				o.paramsFile = value
 			} else if name == "--stdin-file" || name == "--script-file" {
@@ -164,6 +167,9 @@ func (a *App) Run(args []string) int {
 	if (o.url != "" || o.port != "" || o.state != "" || o.timeout != 0) && command != "auth listen" {
 		return a.fail("invalid_input", "--url, --port, --state and --timeout are only valid with auth listen", 2)
 	}
+	if o.out != "" && command != "snapshot" {
+		return a.fail("invalid_input", "--out is only valid with snapshot", 2)
+	}
 	if (o.expectBuild != "" || o.hasWindow) && command != "accept" {
 		return a.fail("invalid_input", "--expect-build and --window are only valid with accept", 2)
 	}
@@ -186,7 +192,7 @@ func (a *App) Run(args []string) int {
 	}
 	switch command {
 	case "auth login", "auth listen", "profile list", "profile use":
-	case "auth status", "auth logout", "discover", "describe", "invoke", "diagnose", "accept":
+	case "auth status", "auth logout", "discover", "describe", "invoke", "diagnose", "accept", "snapshot":
 		if o.env == "" {
 			return a.fail("invalid_input", "remote commands require explicit --env <environment_id>; run profile list", 2)
 		}
@@ -262,6 +268,9 @@ func (a *App) Run(args []string) int {
 	}
 	if command == "diagnose" {
 		return a.diagnose(p)
+	}
+	if command == "snapshot" {
+		return a.snapshot(p, o.out)
 	}
 	if command == "accept" {
 		window := acceptDefaultWindow
