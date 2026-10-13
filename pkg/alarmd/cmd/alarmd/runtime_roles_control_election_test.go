@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -448,6 +449,24 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	if got := fixture.pass(1, true, queryGroups); got != queryGroups {
 		t.Fatalf("Slot 0 with the control process up: %d of %d Query Groups completed", got, queryGroups)
 	}
+	// The lookback planning is the control process's: a kept plan set it
+	// starts from, and a set sent to every Worker.
+	planKey := productionPhaseTwoPrefix(control.bundle.dependencies.Config.Redis.StatePrefix, "fleet") + ":lookback-plan"
+	if err := fixture.redis.Set(fixture.ctx, planKey, `{"qg-kept":{"rung":2,"expires_at_ms":`+
+		strconv.FormatInt(fixture.now().Add(lookback.PlanLife).UnixMilli(), 10)+`}}`, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.tick()
+	kept := fixture.redis.Get(fixture.ctx, planKey).Val()
+	plansBefore := map[string]uint64{}
+	waitPhaseTwoCondition(t, 15*time.Second, "every Worker has a plan set from the control process", func() bool {
+		for _, worker := range workers {
+			if plansBefore[worker.name] = worker.bundle.dependencies.ViewClient.Stats().LookbackPlanSets; plansBefore[worker.name] == 0 {
+				return false
+			}
+		}
+		return true
+	})
 
 	// The control process dies. Its lease runs out on the Redis clock; its
 	// record says ready until T after its last write.
@@ -489,6 +508,22 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	})
 	if got := fixture.pass(2, false, queryGroups); got != queryGroups {
 		t.Fatalf("Slot 1 across the takeover: %d of %d Query Groups completed", got, queryGroups)
+	}
+	// The fallback Leader plans nothing: it counts the rounds it paused,
+	// leaves the kept set as the control process left it, and sends no plan
+	// set, so every Worker keeps what it was sent.
+	fixture.tick()
+	if paused := counterValue(t, fallbackLeader.recorder, "bkmonitor_alarmd_control_tier_paused_total",
+		map[string]string{"function": metric.ControlTierLookbackPlanning}); paused == 0 {
+		t.Fatal("the fallback Leader's rounds were not counted as lookback planning paused")
+	}
+	if now := fixture.redis.Get(fixture.ctx, planKey).Val(); now != kept {
+		t.Fatalf("the fallback term changed the kept plan set:\n%s\n%s", kept, now)
+	}
+	for _, worker := range workers {
+		if sets := worker.bundle.dependencies.ViewClient.Stats().LookbackPlanSets; sets != plansBefore[worker.name] {
+			t.Fatalf("%s received %d plan sets under the fallback Leader, want none beyond the %d before", worker.name, sets, plansBefore[worker.name])
+		}
 	}
 
 	// A control process comes back. It cannot take a live lease, and the
@@ -532,6 +567,16 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	if got := fixture.pass(3, false, queryGroups); got != queryGroups {
 		t.Fatalf("Slot 2 across the handback: %d of %d Query Groups completed", got, queryGroups)
 	}
+	// Handed back, the control process plans again and every Worker gets its
+	// set on the stream it opened to it.
+	waitPhaseTwoCondition(t, 15*time.Second, "every Worker has a plan set from the returned control process", func() bool {
+		for _, worker := range workers {
+			if worker.bundle.dependencies.ViewClient.Stats().LookbackPlanSets <= plansBefore[worker.name] {
+				return false
+			}
+		}
+		return true
+	})
 
 	// Steady from here: no further moves of the lease.
 	for step := 0; step < 6; step++ {
