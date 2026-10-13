@@ -60,12 +60,13 @@ func (c *PlanCompiler) BoundaryLocation() *time.Location { return c.boundaryLoca
 
 // compileKeyMemoEntries bounds how many content keys the compiler remembers
 // a cache key for. A replica freezes the Slots of the Query Groups it owns --
-// on a production deployment some seven hundred groups holding about 2,900
-// Plans -- and a publication that changes content brings a second key for
-// each Plan it changes while the first is still being frozen. Twice the Plans
-// with room over is 8,192 entries at about 350 bytes each, under 3 MB. Past it
-// the memory is cleared whole and refilled; a cleared key only derives its
-// cache key from the Plan again, as a request without a content key does.
+// on a production deployment some seven hundred groups holding about 730
+// Plans, while the Leader compiles the deployment's 2,900 -- and a
+// publication that changes content brings a second key for each Plan it
+// changes while the first is still being frozen. Twice the Leader's Plans
+// with room over is 8,192 entries at about 350 bytes each, under 3 MB. Past
+// it the memory is cleared whole and refilled; a cleared key only derives
+// its cache key from the Plan again, as a request without a content key does.
 const compileKeyMemoEntries = 8192
 
 // compileKeyMemo is the cache key each content key was found to have, by
