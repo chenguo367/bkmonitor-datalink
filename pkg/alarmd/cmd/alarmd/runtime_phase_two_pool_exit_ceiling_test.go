@@ -69,7 +69,7 @@ func enterPoolOnTheBackendsCut(t *testing.T, h *poolProbeHarness) (int64, observ
 // spread, takes it out and says so. Both comparisons are kept on the record a
 // restart or the next owner reads, and on the line object.get shows.
 func TestASlowQueryLeavesThePoolOnlyClearOfItsBackendsCut(t *testing.T) {
-	h := newPoolProbeHarnessWith(t, 0, 10*time.Second, true)
+	h := newPoolProbeHarnessWith(t, 0, 10*time.Second)
 	_, entry := enterPoolOnTheBackendsCut(t, h)
 	if entry.CeilingMillis != backendCut.Milliseconds() || entry.RunSpreadMillis != 1800 || entry.Reentries != 0 {
 		t.Fatalf("the entry = %+v, want the %s cut and the runs' 1.8 s spread recorded", entry, backendCut)
@@ -111,7 +111,7 @@ func TestASlowQueryLeavesThePoolOnlyClearOfItsBackendsCut(t *testing.T) {
 // held to. That answer takes it out and drops the ceiling: holding it to a
 // cut that is no longer there would keep it in the pool for good.
 func TestAnAnswerPastTheCutTakesTheQueryGroupOutAndDropsTheCeiling(t *testing.T) {
-	h := newPoolProbeHarnessWith(t, 0, 10*time.Second, true)
+	h := newPoolProbeHarnessWith(t, 0, 10*time.Second)
 	enterPoolOnTheBackendsCut(t, h)
 	h.backend.cut.Store(0)
 	h.backend.latency.Store(35000)

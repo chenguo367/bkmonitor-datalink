@@ -727,7 +727,8 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	physical := make(map[execution.PhysicalQueryDigest]classifiedPhysicalCompletion, len(completion.PhysicalQueries))
 	for _, item := range completion.PhysicalQueries {
 		sourceBackend := physicalFailureCategory(item.RouteFacts) == observability.QueryFailureCategorySourceBackend || backendDidNotAnswer(item.RouteFacts)
-		physical[item.PhysicalQuery] = classifiedPhysicalCompletion{PhysicalQueryCompletion: item, sourceBackend: sourceBackend}
+		physical[item.PhysicalQuery] = classifiedPhysicalCompletion{PhysicalQueryCompletion: item, sourceBackend: sourceBackend,
+			sentLate: !sourceBackend && timedOutSentLate(item.RouteFacts)}
 	}
 	completionBindings := make(map[struct {
 		consumer    execution.ConsumerRef
@@ -754,6 +755,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			return completionContractError(codeDuplicateCompletionBinding, "alarmd worker: duplicate completion binding")
 		}
 		stream.queryEvidence.observe(binding, item.PhysicalQueryCompletion, false, item.sourceBackend)
+		stream.queryEvidence.observeSentLate(binding, item.sentLate)
 		stream.noteAnswerTruncation(binding, item.RouteFacts)
 		completionBindings[key] = binding
 	}
@@ -2399,6 +2401,9 @@ func provisionalResult(result execution.EvaluationResult) (observability.Result,
 type classifiedPhysicalCompletion struct {
 	execution.PhysicalQueryCompletion
 	sourceBackend bool
+	// sentLate is a timeout not counted against the backend because the
+	// query was sent late (timedOutSentLate).
+	sentLate bool
 }
 
 // oneTimeClose is the open alert set a no-data close is asked against when it

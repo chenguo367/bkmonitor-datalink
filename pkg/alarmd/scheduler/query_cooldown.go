@@ -333,15 +333,46 @@ func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool
 // again. An answer and a failure that is not a timeout are never excused.
 func (runner *Runner) queryCooldownExcusesItsOwnDelay(result execution.SlotExecutionResult, busyUntil time.Time) bool {
 	state := &runner.queryCooldown
-	clock := result.PrimaryQueryClock
-	// The reason is set only on an unavailable query (an answer has none).
-	if state.until.IsZero() || state.excusedUntil.Equal(state.until) ||
-		result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryTimeout) ||
-		clock == nil || clock.ReadyAtUnixMilli <= 0 || busyUntil.IsZero() || busyUntil.UnixMilli() <= clock.ReadyAtUnixMilli {
+	if state.until.IsZero() || state.excusedUntil.Equal(state.until) || !queryTimedOut(result) || !startedLateBehindItself(result, busyUntil) {
 		return false
 	}
 	state.excusedUntil = state.until
 	return true
+}
+
+// queryCooldownCountsALateTimeout reports whether a deciding round's timeout
+// counts against the backend although the round was sent late. The worker
+// does not count a late query's timeout against the backend, so that a burst
+// of this process's own load does not put healthy Query Groups in the pool,
+// and reports it as proving nothing. A Query Group already in the pool is
+// decided by its normal round late as it is - normal rounds outside the
+// pool queue for their permits too - and reading the late timeout as
+// nothing kept it from being decided at all: each such round pushed the next
+// probe a period on, where the next held Slots' replays or the same burst
+// made it late again; the cooldown never grew, nothing came out, and every
+// cycle paid the replays against a backend that did not answer them. Only
+// lateness the Runner's own previous execution caused is excused, once per
+// cooldown's end (queryCooldownExcusesItsOwnDelay), before this applies.
+func (runner *Runner) queryCooldownCountsALateTimeout(result execution.SlotExecutionResult) bool {
+	return !runner.queryCooldown.until.IsZero() && result.QueryAvailability == execution.QueryAvailabilityUnknown &&
+		result.QueryUnknownReason == execution.ReasonCode(contract.ReasonQueryTimeout)
+}
+
+// queryTimedOut reports a round whose primary query timed out, whether the
+// worker counted the timeout against the backend (unavailable) or not
+// (unknown, a query sent late). An answer and a failure that is not a
+// timeout are neither.
+func queryTimedOut(result execution.SlotExecutionResult) bool {
+	timeout := execution.ReasonCode(contract.ReasonQueryTimeout)
+	return (result.QueryAvailability == execution.QueryAvailabilityUnavailable && result.QueryUnavailableReason == timeout) ||
+		(result.QueryAvailability == execution.QueryAvailabilityUnknown && result.QueryUnknownReason == timeout)
+}
+
+// startedLateBehindItself reports a round whose query became ready while the
+// Runner was still running its previous execution (busyUntil).
+func startedLateBehindItself(result execution.SlotExecutionResult, busyUntil time.Time) bool {
+	clock := result.PrimaryQueryClock
+	return clock != nil && clock.ReadyAtUnixMilli > 0 && !busyUntil.IsZero() && busyUntil.UnixMilli() > clock.ReadyAtUnixMilli
 }
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
