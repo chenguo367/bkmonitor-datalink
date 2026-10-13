@@ -200,9 +200,9 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		}
 	}
 	for family, want := range map[string]int{
-		"bkmonitor_alarmd_worker_query_permits_held":         4,
+		"bkmonitor_alarmd_worker_query_permits_held":         5,
 		"bkmonitor_alarmd_worker_query_permits_waiting":      2,
-		"bkmonitor_alarmd_worker_query_permit_seconds_total": 4,
+		"bkmonitor_alarmd_worker_query_permit_seconds_total": 5,
 		"bkmonitor_alarmd_worker_query_permit_budget":        2,
 		"bkmonitor_alarmd_worker_query_admission_total":      20,
 		"bkmonitor_alarmd_query_downstream_distress_total":   8,
@@ -799,8 +799,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("container_cpu_cores"):                          len(capacitySources) + 1,
 		fqName("container_memory_used_bytes"):                  1,
 		fqName("container_cpu_throttled_seconds_total"):        1,
-		fqName("worker_query_permits_held"):                    len(phaseTwoQueryInflightKinds),
-		fqName("worker_query_permit_seconds_total"):            len(phaseTwoQueryInflightKinds),
+		fqName("worker_query_permits_held"):                    len(phaseTwoQueryPermitKinds),
+		fqName("worker_query_permit_seconds_total"):            len(phaseTwoQueryPermitKinds),
 		fqName("worker_query_permits_waiting"):                 len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_permit_budget"):                   len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_admission_total"):                 len(phaseTwoQueryInflightKinds) * len(phaseTwoQueryAdmissionResults),
