@@ -111,6 +111,19 @@ func TestTheRoundsReadySetIsWhatSaysWhoLeft(t *testing.T) {
 		t.Fatalf("w1 ready and w2 not, neither connected: expected %d lagging %+v departed %v, want w1 lagging and w2 gone",
 			stats.Counts.Expected, stats.Lagging, departedWorkers(stats))
 	}
+	// A new term starts without a ready set: the last term's says nothing
+	// about who has left until this term's round publishes its own.
+	if err := harness.server.Lead(8); err != nil {
+		t.Fatal(err)
+	}
+	desired.ControlEpoch, desired.Ready, desired.ReadyKnown = 8, nil, false
+	if _, err := harness.server.Publish(ctx, desired); err != nil {
+		t.Fatal(err)
+	}
+	if stats = harness.server.Stats(); len(stats.Departed) != 0 || stats.Counts.Expected != 2 {
+		t.Fatalf("a new term's first publication: departed %v expected %d, want nobody gone before its round says so",
+			departedWorkers(stats), stats.Counts.Expected)
+	}
 }
 
 // What the ledger does with Workers that left: one that installed before it
