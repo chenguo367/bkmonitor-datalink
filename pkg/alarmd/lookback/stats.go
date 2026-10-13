@@ -203,7 +203,10 @@ type Stats struct {
 	// Pending is the samples in flight - one at most per Query Group, and
 	// one waiting for its deep recheck - and PendingBytes what their
 	// summaries hold: computed, not a budget.
-	Pending      int `json:"pending"`
+	Pending int `json:"pending"`
+	// PlanEntries is how many entries of the control plane's plan set this
+	// process holds now, expired ones gone.
+	PlanEntries  int `json:"plan_entries"`
 	PendingBytes int `json:"pending_bytes"`
 	// Latest is the measured Query Groups whose data was complete latest,
 	// latest first, at most maxLatest.
@@ -674,6 +677,7 @@ func (engine *Engine) Stats() Stats {
 	for outcome, n := range engine.counts.plans {
 		stats.Plans[outcome] = n
 	}
+	stats.PlanEntries = len(engine.plans)
 	for reason, n := range engine.counts.faults {
 		stats.Faults[reason] = n
 	}

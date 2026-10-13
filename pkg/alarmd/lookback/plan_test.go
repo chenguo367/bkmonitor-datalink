@@ -41,8 +41,8 @@ func TestAPlannedQueryGroupIsReadDirectedFromItsFirstRead(t *testing.T) {
 	if late := f.group("qg").seriesLate; late == nil || !late.seeded || late.rung != 2 {
 		t.Fatalf("the planned Query Group's state = %+v, want it seeded at rung 2", late)
 	}
-	if got := f.engine.Stats().Plans[PlanSeeded]; got != 1 {
-		t.Fatalf("seeded plans = %d, want 1", got)
+	if stats := f.engine.Stats(); stats.Plans[PlanSeeded] != 1 || stats.PlanEntries != 1 {
+		t.Fatalf("seeded plans = %d, entries held %d; want 1 and 1", stats.Plans[PlanSeeded], stats.PlanEntries)
 	}
 	// The next read of it is still the one entry: counted once, and a newer
 	// set's rung taken while no sample here has seen late series.
@@ -95,8 +95,8 @@ func TestASeededQueryGroupLeavesWithItsPlanUnlessItsOwnSamplesConfirmIt(t *testi
 	if late := withdrawn.group("qg").seriesLate; late != nil {
 		t.Fatalf("after its entry was withdrawn = %+v, want directed reading ended", late)
 	}
-	if got := withdrawn.engine.Stats().Plans[PlanExpired]; got != 1 {
-		t.Fatalf("expired plans = %d, want 1", got)
+	if stats := withdrawn.engine.Stats(); stats.Plans[PlanExpired] != 1 || stats.PlanEntries != 0 {
+		t.Fatalf("expired plans = %d, entries held %d; want 1 and none", stats.Plans[PlanExpired], stats.PlanEntries)
 	}
 
 	expired := plannedFixture(t)

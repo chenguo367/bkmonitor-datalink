@@ -975,6 +975,10 @@ Labels: `reason`
 
 Lookback query permits refused, by reason: waiters (a formal query is waiting), full (every process permit is held), disabled. A refused rung keeps its window.
 
+## bkmonitor_alarmd_lookback_plan_entries
+
+Entries of the control plane's lookback plan set this process holds now: the Query Groups it was told read late series. Zero where no Leader plans, or before the first set arrives.
+
 ## bkmonitor_alarmd_lookback_plan_total
 
 Labels: `outcome`
