@@ -201,7 +201,6 @@ func TestValidateRejectsInvalidRedisAndRuntimeBudgets(t *testing.T) {
 			cfg.Redis.RestartMargin = Duration(-time.Second)
 		},
 		"zero compiler budget": func(cfg *Config) { cfg.Limits.Compiler.MaxPlanBytes = 0 },
-		"zero detect budget":   func(cfg *Config) { cfg.Limits.Detect.MaxPlans = 0 },
 		"zero trigger budget":  func(cfg *Config) { cfg.Limits.Trigger.MaxLevels = 0 },
 		"compiler levels exceed trigger event": func(cfg *Config) {
 			cfg.Limits.Trigger.MaxLevelResultsPerEvent = uint32(cfg.Limits.Compiler.MaxLevelsPerPlan - 1)

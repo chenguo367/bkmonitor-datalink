@@ -565,7 +565,6 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	evaluator, err := evaluation.New(detector, evaluation.Limits{
-		MaxPlans: cfg.Limits.Detect.MaxPlans, MaxRecords: cfg.Limits.Detect.MaxRecordsPerSeries,
 		MaxLevels: uint64(cfg.Limits.Compiler.MaxLevelsPerPlan), Trigger: cfg.TriggerLimits(),
 	})
 	if err != nil {
@@ -1707,8 +1706,7 @@ func phaseTwoUQLimits(cfg config.Config) accessuq.Limits {
 }
 
 func phaseTwoProductionBudgetsFitPlatform(cfg config.Config) bool {
-	return cfg.PhaseTwo.Coordinator.MaxRetainedBytes <= math.MaxInt64 &&
-		cfg.PhaseTwo.Coordinator.MaxSeries <= math.MaxUint64/cfg.Limits.Detect.MaxRecordsPerSeries
+	return cfg.PhaseTwo.Coordinator.MaxRetainedBytes <= math.MaxInt64
 }
 
 // gateLookupFacts is the kept gate lookups as the replica publishes them.

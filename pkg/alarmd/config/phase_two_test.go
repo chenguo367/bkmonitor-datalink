@@ -162,9 +162,6 @@ func TestGoAccessRequiresCompletePhaseTwoProductionCoordinates(t *testing.T) {
 		"provider retained overflow": func(cfg *Config) {
 			cfg.PhaseTwo.Coordinator.MaxRetainedBytes = ^uint64(0)
 		},
-		"provider record overflow": func(cfg *Config) {
-			cfg.PhaseTwo.Coordinator.MaxSeries = ^uint64(0)
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := valid

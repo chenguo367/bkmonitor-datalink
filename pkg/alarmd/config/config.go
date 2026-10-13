@@ -958,8 +958,7 @@ func (c Config) validateGoAccessRuntime() error {
 	if budget.MaxStateMutations > chunkedApplyBudget || budget.MaxGapMutations > chunkedApplyBudget {
 		return errors.New("phase_two mutation budgets exceed the chunked state store apply budget")
 	}
-	if budget.MaxRetainedBytes > math.MaxInt64 ||
-		budget.MaxSeries > math.MaxUint64/c.Limits.Detect.MaxRecordsPerSeries {
+	if budget.MaxRetainedBytes > math.MaxInt64 {
 		return errors.New("phase_two provider budgets overflow production limits")
 	}
 	return nil
