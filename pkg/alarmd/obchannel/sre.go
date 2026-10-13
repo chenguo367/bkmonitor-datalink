@@ -309,7 +309,7 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				stdin := p.String("stdin")
 				target := podTarget(p)
-				v, err := pods.Exec(ctx, pod.ExecRequest{Target: target, Argv: argv, Stdin: stdin, TimeoutMS: int64(p.Int("timeout_ms", 0)), OutputBytes: int64(p.Int("output_bytes", 0))})
+				v, err := pods.Exec(ctx, pod.ExecRequest{RequestID: CallerFrom(ctx).RequestID, Target: target, Argv: argv, Stdin: stdin, TimeoutMS: int64(p.Int("timeout_ms", 0)), OutputBytes: int64(p.Int("output_bytes", 0))})
 				audit(ctx, started, SREAction{Op: "pod.exec", Namespace: target.Namespace, Kind: "Pod", Name: target.Pod + "/" + target.Container, UID: target.UID,
 					Detail: fmt.Sprintf("script %s stdin_bytes %d remote %s", v.ScriptDigest, len(stdin), v.RemoteState),
 					Exec: &SREExec{RemoteState: v.RemoteState, Supervision: v.Supervision, UnsupervisedReason: v.UnsupervisedReason, ExitCode: v.ExitCode,

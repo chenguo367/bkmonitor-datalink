@@ -57,7 +57,8 @@ func auditFixture(t *testing.T) (*Channel, *[]SREAction, *auditManager) {
 // Every execution and management call is heard once, after it ends, with who
 // asked (the admitted session and the request), what, where and how it
 // ended; an execution's record carries the digest of its script and its
-// stdin's length, never the stdin's text. A read is not an action.
+// stdin's length, never the stdin's text, and the receipt the caller gets
+// back names the same request. A read is not an action.
 func TestEveryExecutionAndManagementCallIsAudited(t *testing.T) {
 	channel, actions, manager := auditFixture(t)
 	target := map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid", "container": "web", "container_id": "containerd://fixture", "image_id": "sha256:fixture"}
@@ -75,6 +76,12 @@ func TestEveryExecutionAndManagementCallIsAudited(t *testing.T) {
 	if exec.Op != "pod.exec" || exec.Namespace != "fixture" || exec.Name != "web-0/web" || exec.UID != "pod-uid" || exec.Result != SREResultDone ||
 		exec.SessionID != "post-observation-session" || exec.RequestID == "" || exec.RequestID != response.Meta.RequestID {
 		t.Fatalf("exec record %+v", exec)
+	}
+	// The receipt the caller holds names the request its record is filed
+	// under, so sre.receipts finds it by the id the reply gave.
+	var receipt pod.ExecReceipt
+	if encoded, err := json.Marshal(response.Result); err != nil || json.Unmarshal(encoded, &receipt) != nil || receipt.RequestID != exec.RequestID {
+		t.Fatalf("exec reply request_id %q, the record's %q", receipt.RequestID, exec.RequestID)
 	}
 	if !strings.Contains(exec.Detail, "sha256:") || !strings.Contains(exec.Detail, "stdin_bytes 18") || strings.Contains(exec.Detail, "secret-script-text") {
 		t.Fatalf("exec detail %q, want the digest and stdin length and not its text", exec.Detail)

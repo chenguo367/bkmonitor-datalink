@@ -257,6 +257,10 @@ type LogsReceipt struct {
 	ObservedAt        time.Time    `json:"observed_at"`
 }
 type ExecRequest struct {
+	// RequestID is the channel request the call came in on, so the receipt
+	// and the audit record carry one identity. Empty, the receipt gets its
+	// own.
+	RequestID   string   `json:"request_id,omitempty"`
 	Target      Target   `json:"target"`
 	Argv        []string `json:"argv"`
 	Stdin       string   `json:"stdin,omitempty"`
