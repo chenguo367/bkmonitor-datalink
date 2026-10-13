@@ -33,16 +33,18 @@ const (
 	// pairings already stored carry it, and renaming it would mean migrating
 	// them for no difference in behaviour.
 	ScopeReadonly = "deployment_ops_readonly"
-	// legacyScopeExec and execRenewalPrefix are what earlier builds issued
-	// for a separately requested execution session. They are no longer
-	// issued; a session or pairing carrying them is still read, and is
-	// allowed everything the one scope allows, so no device pairs again.
-	legacyScopeExec   = "deployment_ops_exec"
-	execRenewalPrefix = "exec-v1."
-	GrantLifetime     = 5 * time.Minute
-	SessionLifetime   = time.Hour
-	RenewalThreshold  = 10 * time.Minute
-	redisTimeout      = time.Second
+	// requestedExecScope is what an alarmd-cli built between 10-10 and 10-12
+	// (before 310f82cf7) may still ask the authorization page for; it is
+	// granted the one scope. No running deployment ever issued it, so no
+	// stored session or pairing carries it and none is read.
+	//
+	// Retire when: no alarmd-cli older than 310f82cf7 is supported - the
+	// CLI that stopped asking for it.
+	requestedExecScope = "deployment_ops_exec"
+	GrantLifetime      = 5 * time.Minute
+	SessionLifetime    = time.Hour
+	RenewalThreshold   = 10 * time.Minute
+	redisTimeout       = time.Second
 	// PairingIdleLifetime is how long a renewal credential lives unused. A
 	// credential is spent and replaced at every renewal, so this bounds only a
 	// device that stopped asking: a month covers a holiday and not a
@@ -57,10 +59,9 @@ const (
 func ValidScope(scope string) bool { return scope == ScopeReadonly }
 
 // AllowsScope is whether a session granted granted may run an operation
-// requiring required. A session an earlier build granted as an execution
-// session is the same session now.
+// requiring required.
 func AllowsScope(granted, required string) bool {
-	return (granted == ScopeReadonly || granted == legacyScopeExec) && ValidScope(required)
+	return granted == ScopeReadonly && ValidScope(required)
 }
 
 // Options uses an independently budgeted Redis client supplied by the caller.
@@ -247,12 +248,6 @@ func validSecret(secret string) bool {
 	return err == nil && len(decoded) == 32
 }
 
-// Old readonly instances reject this credential before touching Redis,
-// rather than deleting a pairing whose scope their Lua cannot understand.
-func validRenewalSecret(secret string) bool {
-	return validSecret(secret) || (strings.HasPrefix(secret, execRenewalPrefix) && validSecret(strings.TrimPrefix(secret, execRenewalPrefix)))
-}
-
 type storedRecord struct {
 	SessionID     string `json:"session_id,omitempty"`
 	EnvironmentID string `json:"environment_id"`
@@ -334,7 +329,7 @@ func (m *Manager) Admit(ctx context.Context, session Session, renew bool) (Sessi
 
 func (m *Manager) sessionOperation(ctx context.Context, hash, expectedID, action string) (Session, error) {
 	result, err := m.run(ctx, sessionScript, []string{m.prefix + "session:" + hash, m.epochKey()},
-		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds(), legacyScopeExec)
+		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds())
 	if err != nil {
 		return Session{}, err
 	}

@@ -166,8 +166,8 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 		return failure("invalid_request", "Explicit authorization confirmation is required.", 400)
 	}
 	// An earlier page or CLI asking for the execution session gets the one
-	// session, which now carries execution.
-	if input.Scope == "" || input.Scope == legacyScopeExec {
+	// session, which carries execution.
+	if input.Scope == "" || input.Scope == requestedExecScope {
 		input.Scope = ScopeReadonly
 	}
 	if !ValidScope(input.Scope) {
@@ -279,9 +279,9 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 	token, id, refresh, pairingID := secrets[0], secrets[1], secrets[2], secrets[3]
 	result, err := m.run(r.Context(), exchangeScript,
 		[]string{m.prefix + "grant:" + digest(input.GrantSecret), m.prefix + "session:" + digest(token),
-			pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey(), pairingKey(m.prefix, execRenewalPrefix+refresh)},
+			pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey()},
 		m.environmentID, id, ScopeReadonly, SessionLifetime.Milliseconds(),
-		pairingID, PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), challenge, legacyScopeExec)
+		pairingID, PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), challenge)
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return err
@@ -311,11 +311,6 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		refresh = ""
 	} else {
 		m.count(CountPairingsIssued)
-		// A grant an earlier build issued as an execution grant is still
-		// stored under its prefixed pairing key.
-		if record.Scope == legacyScopeExec {
-			refresh = execRenewalPrefix + refresh
-		}
 	}
 	response := m.login(record, token, refresh)
 	response.BoundToChallenge = bound == 1

@@ -49,12 +49,16 @@ func TestExecRunsForTheOperationsSessionAndNeverThroughInternalRPC(t *testing.T)
 	if row["authorized"] != true || row["required_scope"] != cliauth.ScopeReadonly {
 		t.Fatalf("the operations session is not shown as authorized: %+v", row)
 	}
-	for _, scope := range []string{cliauth.ScopeReadonly, "deployment_ops_exec"} {
-		auth.scope = scope
-		before := runs.Load()
-		if status, response := call(t, c, envelope(c, "invoke", op.ID, nil)); status != 200 || runs.Load() != before+1 {
-			t.Fatalf("session %q refused: %+v", scope, response)
-		}
+	auth.scope = cliauth.ScopeReadonly
+	before := runs.Load()
+	if status, response := call(t, c, envelope(c, "invoke", op.ID, nil)); status != 200 || runs.Load() != before+1 {
+		t.Fatalf("the operations session refused: %+v", response)
+	}
+	// A scope no running build issued is not a session.
+	auth.scope = "deployment_ops_exec"
+	before = runs.Load()
+	if status, _ := call(t, c, envelope(c, "invoke", op.ID, nil)); status == 200 || runs.Load() != before {
+		t.Fatal("a session with the execution scope ran an operation")
 	}
 	runsBefore := runs.Load()
 	response = c.ExecuteEvidence(context.Background(), Invocation{EnvironmentID: "test", Version: Version, Revision: c.revision, Operation: op.ID, Target: Target{Replica: "worker"}})
