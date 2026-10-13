@@ -188,8 +188,14 @@ func (reads *sharedReads[T]) do(ctx context.Context, key string, read func(conte
 			}
 			reads.mu.Unlock()
 			stop()
-			close(flight.done)
+			// The read lets go of its answer before anyone is told it is
+			// there: a caller woken first could otherwise use the answer,
+			// release its own page and be the last user to let go while the
+			// read still counted as one, and the hold would outlive the
+			// page that asked for it -- a kept view admitted on top of the
+			// read it replaces.
 			reads.letGo(flight)
+			close(flight.done)
 		}()
 	}
 	flight.waiters++
