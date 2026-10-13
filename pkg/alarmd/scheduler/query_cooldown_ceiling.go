@@ -83,11 +83,12 @@ const queryCooldownRunTimesKept = 8
 // entry still leaves on an answer clear of the cut by its spread.
 
 // noteRunFacts keeps what a normal execution showed about how long the Query
-// Group's query takes and where its backend cuts it. Facts about another
-// query revision are not this query's, and are dropped first.
-func (runner *Runner) noteRunFacts(slot FrozenSlot, operation execution.Operation, result execution.SlotExecutionResult) {
+// Group's query takes and where its backend cuts it, and reports a failure
+// that was such a cut. Facts about another query revision are not this
+// query's, and are dropped first.
+func (runner *Runner) noteRunFacts(slot FrozenSlot, operation execution.Operation, result execution.SlotExecutionResult) (cut bool) {
 	if operation != execution.OperationNormal || result.PrimaryQueryClock == nil {
-		return
+		return false
 	}
 	memory := &runner.cooldownMemory
 	if revision := slot.Contract.QueryRevision; revision != memory.runRevision {
@@ -110,12 +111,14 @@ func (runner *Runner) noteRunFacts(slot FrozenSlot, operation execution.Operatio
 		// back quicker than an answer is an error, not a cut.
 		if result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryUnavailable) ||
 			len(memory.runTimes) == 0 || elapsed <= longestRun(memory.runTimes) {
-			return
+			return false
 		}
 		if memory.ceiling == 0 || elapsed < memory.ceiling {
 			memory.ceiling = elapsed
 		}
+		return true
 	}
+	return false
 }
 
 // queryCooldownLetsOut decides an answered deciding probe against the
@@ -163,12 +166,16 @@ func (runner *Runner) queryCooldownLetsOut(ctx context.Context, probe *observabi
 }
 
 // reenteredAfterAnAnswer reports whether the Query Group is in the pool
-// again within QueryCooldownReentryWindow of an answer letting it out. The
-// entry time and the last exit are both on its record, so a restart or the
-// next owner decides the same way.
+// again, on failures that showed its backend's cut, within
+// QueryCooldownReentryWindow of an answer letting it out. A re-entry on
+// failures that were no cut - the query service down for every Query Group,
+// failing fast - says nothing about how close its answers run to the cut,
+// and is decided as a first entry is. The entry, its cuts and the last exit
+// are all on its record, so a restart or the next owner decides the same way.
 func (runner *Runner) reenteredAfterAnAnswer() bool {
-	memory := runner.cooldownMemory
-	return memory.exitReason == QueryCooldownRecovered && memory.enteredAt.Sub(memory.exitedAt) < QueryCooldownReentryWindow
+	memory := &runner.cooldownMemory
+	return runner.queryCooldown.cuts > 0 && memory.exitReason == QueryCooldownRecovered &&
+		memory.enteredAt.Sub(memory.exitedAt) < QueryCooldownReentryWindow
 }
 
 // noteProbe keeps a deciding probe among the latest ones, for a reader.

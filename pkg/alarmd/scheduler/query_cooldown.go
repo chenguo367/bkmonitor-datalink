@@ -52,6 +52,10 @@ type queryCooldownState struct {
 	// after N timeouts". Both clear with the failures.
 	timeouts       uint32
 	firstTimeoutAt time.Time
+	// cuts is how many of the failures were the backend's own cut
+	// (noteRunFacts): what makes a re-entry one the cut caused
+	// (reenteredAfterAnAnswer). It clears with the failures.
+	cuts uint32
 	// excusedUntil is the cooldown end (until) whose deciding round last had
 	// its timeout excused for the Runner's own lateness, so each cooldown's
 	// end excuses one round at most (queryCooldownExcusesItsOwnDelay).
@@ -109,6 +113,10 @@ type QueryCooldownRecord struct {
 	// as none, which is what it had.
 	Timeouts       uint32    `json:"timeouts,omitempty"`
 	FirstTimeoutAt time.Time `json:"first_timeout_at"`
+	// Cuts is the failures that were the backend's own cut. A record written
+	// before it existed reads as none, and its Query Group is decided as a
+	// first entry is.
+	Cuts uint32 `json:"cuts,omitempty"`
 	// LastProbe is the latest execution the pool let run: what its answer
 	// was, what budget it had and how long it took. A record written before
 	// it existed has none.
@@ -194,7 +202,7 @@ func (runner *Runner) restoreQueryCooldown(ctx context.Context, fence execution.
 	runner.queryCooldown = queryCooldownState{failures: record.Failures, queryRevision: record.QueryRevision,
 		scheduleRevision: record.ScheduleRevision, segmentStart: record.SegmentStart,
 		until: record.Until, lastQueryAt: record.LastQueryAt, reason: record.Reason,
-		timeouts: record.Timeouts, firstTimeoutAt: record.FirstTimeoutAt}
+		timeouts: record.Timeouts, firstTimeoutAt: record.FirstTimeoutAt, cuts: record.Cuts}
 	memory.enteredAt, memory.source = record.EnteredAt, QueryCooldownRestored
 	runner.emitQueryCooldown(ctx, QueryCooldownRestored)
 }
@@ -212,7 +220,7 @@ func (runner *Runner) saveQueryCooldown(ctx context.Context) {
 		EnteredAt: memory.enteredAt, Until: state.until, LastQueryAt: state.lastQueryAt, Failures: state.failures,
 		QueryRevision: state.queryRevision, ScheduleRevision: state.scheduleRevision, SegmentStart: state.segmentStart,
 		ExitedAt: memory.exitedAt, ExitReason: memory.exitReason, Reentries: memory.reentries, Reason: state.reason,
-		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, LastProbe: memory.lastProbe,
+		Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts, LastProbe: memory.lastProbe,
 		RunQueryRevision: memory.runRevision, RunTimesMillis: append([]int64(nil), memory.runTimes...),
 		CeilingMillis: memory.ceiling, Probes: append([]observability.QueryCooldownProbe(nil), memory.probes...),
 		AnsweredInRow: memory.answeredInRow,
@@ -417,7 +425,7 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 		}
 		return
 	}
-	runner.noteRunFacts(slot, operation, result)
+	cut := runner.noteRunFacts(slot, operation, result)
 	if result.QueryAvailability != execution.QueryAvailabilityUnavailable || state.lastSlot == slot.Contract.Slot {
 		return
 	}
@@ -437,6 +445,9 @@ func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSl
 		if state.timeouts < 32 {
 			state.timeouts++
 		}
+	}
+	if cut && state.cuts < 32 {
+		state.cuts++
 	}
 	// A missing or extreme interval is not permission to guess a cooldown.
 	if state.failures < unavailableThreshold || intervalSeconds <= 0 ||

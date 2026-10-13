@@ -267,10 +267,31 @@ func TestAReenteredQueryGroupLeavesOnlyOnEvidenceOfItsOwn(t *testing.T) {
 		t.Fatalf("back after leaving on a query change: in %t, rule %q; want it out under the ceiling", changed.in(), changed.lastRule())
 	}
 
+	// The query service down for everyone fails every query fast: the
+	// re-entry shows no cut, and its first answer once the service is back
+	// leaves as a first entry's would, under the ceiling the earlier stay
+	// set.
+	outage := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	outage.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	outage.round(timed(20_000, ""))
+	outage.now = outage.now.Add(time.Hour)
+	outage.enter(slowRuns, 1_000, contract.ReasonQueryUnavailable)
+	if outage.runner.queryCooldown.cuts != 0 || outage.runner.cooldownMemory.ceiling != 30_000 {
+		t.Fatalf("a re-entry on fast failures: %d cuts, ceiling %d; want no cut and the earlier ceiling kept",
+			outage.runner.queryCooldown.cuts, outage.runner.cooldownMemory.ceiling)
+	}
+	outage.round(timed(1_000, ""))
+	if outage.in() || outage.lastRule() != observability.QueryCooldownRuleUnderCeiling {
+		t.Fatalf("the first 1 s answer after an outage re-entry: in %t, rule %q; want it out under the ceiling", outage.in(), outage.lastRule())
+	}
+
 	store := newMemoryCooldownStore()
 	before := newCeilingPool(t, store, 1)
 	before.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
 	before.reenter(time.Hour, slowRuns)
+	if record, _, _ := store.LoadQueryCooldown(context.Background(), before.runner.queryGroup); record.Cuts != unavailableThreshold {
+		t.Fatalf("the re-entry's record carries %d cuts, want %d", record.Cuts, unavailableThreshold)
+	}
 	after := newCeilingPool(t, store, 2)
 	after.now = before.now
 	after.round(timed(20_000, ""))
@@ -287,8 +308,8 @@ func TestTheReentryHoldEndsWithTheReentryWindow(t *testing.T) {
 		after time.Duration
 		held  bool
 	}{{QueryCooldownReentryWindow - time.Nanosecond, true}, {QueryCooldownReentryWindow, false}} {
-		runner := &Runner{cooldownMemory: queryCooldownMemory{exitedAt: exited, exitReason: QueryCooldownRecovered,
-			enteredAt: exited.Add(test.after)}}
+		runner := &Runner{queryCooldown: queryCooldownState{cuts: 1}, cooldownMemory: queryCooldownMemory{exitedAt: exited,
+			exitReason: QueryCooldownRecovered, enteredAt: exited.Add(test.after)}}
 		if held := runner.reenteredAfterAnAnswer(); held != test.held {
 			t.Fatalf("entered %s after an answer let it out: held %t, want %t", test.after, held, test.held)
 		}
