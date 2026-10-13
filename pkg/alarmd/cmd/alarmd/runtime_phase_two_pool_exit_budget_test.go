@@ -55,8 +55,12 @@ const (
 // request times out, as a backend that did not answer in time does. Every
 // request is kept with the time it had left.
 type poolBackend struct {
-	clock    atomic.Int64 // unix milliseconds
-	latency  atomic.Int64 // milliseconds
+	clock   atomic.Int64 // unix milliseconds
+	latency atomic.Int64 // milliseconds
+	// cut, when set, is the backend's own limit: a query that would take
+	// that long or longer is answered unavailable when it is reached, as a
+	// query service answers when its storage client gives up.
+	cut      atomic.Int64 // milliseconds
 	mu       sync.Mutex
 	requests []poolRequest
 }
@@ -88,6 +92,14 @@ func (backend *poolBackend) roundTrip(request *http.Request) (*http.Response, er
 	now := backend.clock.Load()
 	remaining := deadline.UnixMilli() - now
 	latency := backend.latency.Load()
+	if cut := backend.cut.Load(); cut > 0 && latency >= cut && cut < remaining {
+		backend.mu.Lock()
+		backend.requests = append(backend.requests, poolRequest{remaining: time.Duration(remaining) * time.Millisecond})
+		backend.mu.Unlock()
+		backend.clock.Store(now + cut)
+		return &http.Response{StatusCode: http.StatusInternalServerError, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(bytes.NewBufferString(`{"error":"context deadline exceeded"}`)), Request: request}, nil
+	}
 	answered := latency < remaining
 	backend.mu.Lock()
 	backend.requests = append(backend.requests, poolRequest{remaining: time.Duration(remaining) * time.Millisecond, answered: answered})
@@ -135,6 +147,16 @@ type poolProbeHarness struct {
 
 func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness {
 	t.Helper()
+	return newPoolProbeHarnessWith(t, latency, poolBudgetSettle)
+}
+
+// newPoolProbeHarnessWith is newPoolProbeHarness with the deployment's ready
+// delay settle. The query client times each query on the test's clock, as
+// production times it on the same clock its budgets are read from, so a
+// query's elapsed time is the latency the backend had and its lateness is
+// read against the same instants as its deadline.
+func newPoolProbeHarnessWith(t *testing.T, latency, settle time.Duration) *poolProbeHarness {
+	t.Helper()
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	document := controlledG4StrategyDocument(t, 7401, "Threshold", "usage", "system.cpu_summary", []string{"host"},
@@ -151,7 +173,7 @@ func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness 
 	h.backend.clock.Store(h.base * 1000)
 	h.backend.latency.Store(latency.Milliseconds())
 	cfg := controlledG4RuntimeConfig(address, "http://controlled-uq", "alarmd-pool-budget")
-	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(poolBudgetSettle)
+	cfg.PhaseTwo.Access.MinReadyDelay = config.Duration(settle)
 	cfg.PhaseTwo.Access.DownstreamExecutionReserve = config.Duration(poolBudgetReserve)
 	// The clock jumps minutes within a second of real time, faster than any
 	// renewal ticks: registrations and leases are given hours so a cooldown's
@@ -166,7 +188,7 @@ func newPoolProbeHarness(t *testing.T, latency time.Duration) *poolProbeHarness 
 		func(client redis.Cmdable, prefix string) (controlplane.StrategySource, error) {
 			return controlplane.NewLegacyRedisStrategySource(client, prefix)
 		}, phaseTwoProductionExternalDependencies{
-			Now: h.backend.now, HTTPClient: &http.Client{Transport: controlledRoundTripper(h.backend.roundTrip)},
+			Now: h.backend.now, QueryClock: h.backend.now, HTTPClient: &http.Client{Transport: controlledRoundTripper(h.backend.roundTrip)},
 			AdditionalObserver: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
 				if o.Stage == observability.StageSlotCompleted {
 					h.mu.Lock()
@@ -406,11 +428,11 @@ func TestThePoolIsLeftOnlyOnAnAnswerItsNormalRoundGets(t *testing.T) {
 				t.Fatalf("a backend answering in %s made %q, want %q", latency, event.Event, test.event)
 			}
 			probe := event.LastProbe
-			// The elapsed time is the query service client's own measure, on
-			// the wall clock; this backend's latency is on the test's, so only
-			// its bound is read here (the access package pins the value).
+			// The elapsed time is what the query took: the backend's latency
+			// when it answered, the round's whole budget when it did not.
+			elapsed := min(latency, decider.remaining)
 			if probe == nil || probe.Operation != string(execution.OperationNormal) || probe.Outcome != test.outcome || !probe.Measured ||
-				probe.BudgetMillis != decider.remaining.Milliseconds() || probe.ElapsedMillis < 0 || probe.ElapsedMillis > probe.BudgetMillis {
+				probe.BudgetMillis != decider.remaining.Milliseconds() || probe.ElapsedMillis != elapsed.Milliseconds() {
 				t.Fatalf("the transition's probe = %+v, want a normal round's, %s, with budget %d ms", probe, test.outcome, decider.remaining.Milliseconds())
 			}
 			// The record a restart or the next owner reads back says the same.

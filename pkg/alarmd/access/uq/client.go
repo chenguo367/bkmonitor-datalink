@@ -139,6 +139,15 @@ func NewClientWithLimits(endpoint, querySource string, httpClient *http.Client, 
 		httpClient: httpClient, limits: limits, now: time.Now}, nil
 }
 
+// WithNow times the client's queries on now instead of the wall clock; nil
+// keeps the wall clock.
+func (client *Client) WithNow(now func() time.Time) *Client {
+	if client != nil && now != nil {
+		client.now = now
+	}
+	return client
+}
+
 func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttempt, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 	if client == nil || sink == nil {
 		return execution.ProviderCompletion{}, errors.New("alarmd access uq: initialized client and sink are required")

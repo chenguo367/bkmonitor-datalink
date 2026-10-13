@@ -391,6 +391,31 @@ func backendDidNotAnswer(routes execution.ProviderRouteFacts) bool {
 	return false
 }
 
+// timedOutSentLate reports a query whose last failed attempt timed out with
+// no answer, or with the answer stopping partway, but was sent so late that
+// backendDidNotAnswer does not count it against the backend. It is not
+// evidence for entering the degraded pool; a Query Group already in it reads
+// it as its deciding round's timeout (QueryUnknownReason).
+func timedOutSentLate(routes execution.ProviderRouteFacts) bool {
+	for index := len(routes.Attempts) - 1; index >= 0; index-- {
+		attempt := routes.Attempts[index]
+		if attempt.Result != execution.RouteAttemptFailed && attempt.ReasonCode == "" {
+			continue
+		}
+		if attempt.ReasonCode != execution.ReasonCode(contract.ReasonQueryTimeout) || attempt.Timing == nil {
+			return false
+		}
+		switch attempt.Detail {
+		case execution.TransportRouteDetail(execution.TransportFailureTimeout), execution.BodyRouteDetail(execution.TransportFailureTimeout):
+		default:
+			return false
+		}
+		timing := attempt.Timing
+		return timing.ElapsedMillis-timing.LocalMillis <= timing.StartLateMillis+timing.LocalMillis
+	}
+	return false
+}
+
 // unexplainedOutcomeFacts names a non-successful evaluation outcome that
 // carries no reason of its own. Without it the line normalises to
 // internal_unknown with no error text, which is how several Query Groups

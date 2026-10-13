@@ -1050,8 +1050,12 @@ func (runner *Runner) runOneTracked(
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
+	poolResult := result
 	if decidesPool && runner.queryCooldownExcusesItsOwnDelay(result, busyUntil) {
 		decidesPool = false
+	} else if decidesPool && runner.queryCooldownCountsALateTimeout(result) {
+		poolResult.QueryAvailability = execution.QueryAvailabilityUnavailable
+		poolResult.QueryUnavailableReason = execution.ReasonCode(contract.ReasonQueryTimeout)
 	}
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved
@@ -1079,7 +1083,7 @@ func (runner *Runner) runOneTracked(
 	if err == nil {
 		runner.nextDeadline = time.Time{}
 		runner.recordResult(slot, result, runner.now())
-		runner.recordQueryAvailability(ctx, slot, operation, result, sourceFacts.IntervalSeconds, decidesPool)
+		runner.recordQueryAvailability(ctx, slot, operation, poolResult, sourceFacts.IntervalSeconds, decidesPool)
 	}
 	decision = "execution_returned"
 	return result, true, err
