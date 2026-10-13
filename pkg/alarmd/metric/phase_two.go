@@ -83,6 +83,7 @@ type phaseTwoMetrics struct {
 	frozenStateCensus              *prometheus.CounterVec
 	segmentContent                 *prometheus.CounterVec
 	inPlaceWaits                   *prometheus.CounterVec
+	inPlaceHeldInputBytes          prometheus.Histogram
 	sourceWithheldLines            *prometheus.CounterVec
 	activeQGSetCount               prometheus.Gauge
 	activeQGSetBytes               prometheus.Gauge
@@ -261,6 +262,10 @@ var ControlReadKinds = []string{"assignment", "registry"}
 // Timeline sizes from one Segment (about a kilobyte) up past the sizes that
 // made a publication cutover exceed the Redis write timeout.
 var scheduleTimelineBytesBuckets = []float64{1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216}
+
+// inPlaceHeldInputBytesBuckets reach the retained-bytes budget's default (256
+// MiB): one Slot holding near that much while it waits is the case to see.
+var inPlaceHeldInputBytesBuckets = []float64{1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456}
 
 var phaseTwoBusyStages = []string{"query", "evaluation", "event", "state", "progress", "other"}
 var phaseTwoWorkKinds = []string{
@@ -548,6 +553,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they " +
 				"reference, which is shared and held without the wait. Every cell exists from the start.",
 		}, []string{"wait"}),
+		inPlaceHeldInputBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_inplace_held_input_bytes",
+			Help: "Retained input bytes a Slot execution held while it waited in place for a later query of the Slot, one observation per execution " +
+				"that waited (the ones access_inplace_readiness_waits_total counts). Exact, from the Slot's own retention accounting: the most input " +
+				"it held at any of its waits. The same value is inplace_held_input_bytes on the slot_completed line, which log admission mostly " +
+				"drops; this is the reading a scrape always has. sum over count is the mean held per waiting execution, and the top buckets reach " +
+				"the retained-bytes budget's default.",
+			Buckets: inPlaceHeldInputBytesBuckets,
+		}),
 		segmentContent: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "segment_content_freshness_total",
 			Help: "Slots frozen against a Segment, by whether that Segment names the execution object the " +
@@ -1382,9 +1396,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// Both cells exist from start: "about zero" is the reading this exists
 	// for, and a missing series is not a zero.
 	//
-	// Retire when: the last deployment reading that decision waits on is in
-	// and the decision is recorded; both counters go together, unless the
-	// decision keeps them as a migration check.
+	// Kept as a migration check: the decision is recorded (a known
+	// difference, the records' own reporting), and it keeps both counters
+	// and the sample row as what is read before a cutover that must
+	// continue the alerts Python opened.
+	//
+	// Retire when: no deployment is left whose Python-opened alerts alarmd
+	// would have to continue; both counters and the sample row go together.
 	metrics.cmdbAddressDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_address_differs_total",
 		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own " +
@@ -1401,8 +1419,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"cause says how it differs: differs (another address), missing (none, or empty), undecodable (not a " +
 			"string); fleet.get address_differs_samples names the latest such records, with the strategy, Query " +
 			"Group, host and both addresses. " +
-			"Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read " +
-			"through /metrics on each deployment it waits on.",
+			"Reader: the check before a cutover from Python that must continue the alerts Python opened, read on " +
+			"that deployment: the alert identity does not follow CMDB's address, a recorded known difference, and " +
+			"the series counted here are the ones whose Python-opened alerts alarmd would not recover.",
 	}, []string{"grouped_by_target_ip", "cause"})
 	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
@@ -1411,7 +1430,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at " +
 			"the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells " +
 			"\"placed this way and the address always the host's\" (this one rising) from \"never placed this way\" " +
-			"(this one zero too). Reader: the same decision, through /metrics. Retired with it.",
+			"(this one zero too). Reader: the same cutover check, through /metrics. Retired with it.",
 	}, []string{"grouped_by_target_ip"})
 	for _, grouped := range []string{"true", "false"} {
 		for _, cause := range admission.AddressCauses {
@@ -1726,7 +1745,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission, m.queryDownstreamDistress,
-		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -2084,6 +2103,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.InPlaceWait; facts != nil {
 		m.inPlaceWaits.WithLabelValues(observability.InPlaceWaitBucket(time.Duration(facts.TotalMillis) * time.Millisecond)).Inc()
+		m.inPlaceHeldInputBytes.Observe(float64(facts.HeldInputBytes))
 	}
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {

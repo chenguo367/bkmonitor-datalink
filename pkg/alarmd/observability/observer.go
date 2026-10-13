@@ -186,9 +186,13 @@ const (
 	StageStateAdmission      = "state_admission"
 	StageGapGuardCommitted   = "gap_guard_committed"
 	StageMutationCompared    = "mutation_compared"
-	StageEventACKed          = "event_acked"
-	StageStateApplied        = "state_applied"
-	StageProgressCommitted   = "progress_committed"
+	// StageWarmingPeak names a replica's hourly line on its state writes to
+	// series still warming their history: the busiest minute and the groups
+	// behind it (WarmingPeak).
+	StageWarmingPeak       = "state_warming_peak"
+	StageEventACKed        = "event_acked"
+	StageStateApplied      = "state_applied"
+	StageProgressCommitted = "progress_committed"
 	// StageExecutionEvidenceWritten names the mark an attempt leaves when it
 	// wrote state and then could not write the Slot down. It is the only sign
 	// that the mark-writing works at all: nothing downstream fails when it does
@@ -2385,12 +2389,14 @@ type Observation struct {
 	ShortPeriodCompletion *ShortPeriodCompletionFacts
 	StateApplyChunk       *StateApplyChunkFacts
 	StateWriteReuse       *StateWriteReuseFacts
-	StateAlreadyApplied   *StateAlreadyAppliedFacts
-	StateVersionConflict  *StateVersionConflictFacts
-	ActiveQGSet           *ActiveQGSetFacts
-	ScheduleCutover       *ScheduleCutoverFacts
-	ReplayExpiry          *ReplayExpiryFacts
-	ReplayTakeover        *ReplayTakeoverFacts
+	// WarmingPeak is the hour a state_warming_peak line reports.
+	WarmingPeak          *WarmingPeakFacts
+	StateAlreadyApplied  *StateAlreadyAppliedFacts
+	StateVersionConflict *StateVersionConflictFacts
+	ActiveQGSet          *ActiveQGSetFacts
+	ScheduleCutover      *ScheduleCutoverFacts
+	ReplayExpiry         *ReplayExpiryFacts
+	ReplayTakeover       *ReplayTakeoverFacts
 	// HeldBy is what the round before this one did with the Query Group. It
 	// sits on the Observation rather than inside one cohort's fact bundle:
 	// it first shipped inside ShortPeriodCompletionFacts, and every Query
@@ -3455,7 +3461,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
-	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission},
+	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission}, {ComponentState, StageWarmingPeak},
 	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},
 	{ComponentOutput, StageEventACKed},
 	{ComponentProgress, StageProgressCommitted},
