@@ -328,7 +328,8 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 // Except where the pool holds the Query Group for a reason no time range
 // changes (queryCooldownTimeIndependent): the backend refusing the table the
 // query names says the same of a replay as of an on-time round, whatever the
-// budget. There the first held Slot's replay decides. Refused again, the
+// budget. There whatever runs first decides - at the cooldown's end, the
+// first held Slot's replay. Refused again, the
 // cooldown is extended and the Slots still held stay held, given up for
 // distance and age as the pool always gave them up, instead of each sending
 // a query that could only be refused: on one production deployment those
@@ -341,8 +342,7 @@ func (runner *Runner) queryCooldownDecidedBy(operation execution.Operation) bool
 	if state.until.IsZero() {
 		return false
 	}
-	return operation == execution.OperationNormal ||
-		(operation == execution.OperationReplay && queryCooldownTimeIndependent(state.reason))
+	return operation == execution.OperationNormal || queryCooldownTimeIndependent(state.reason)
 }
 
 // queryCooldownTimeIndependent reports a pool reason that no time range
