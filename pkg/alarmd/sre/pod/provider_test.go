@@ -579,6 +579,23 @@ func TestOutputPolicyMasksAnAuthorizationHeaderWhole(t *testing.T) {
 	}
 }
 
+// An execution's audited command line is redacted as one line, so a
+// credential the caller split across arguments is caught as it would be in
+// output; a single argument carrying a credential field is caught too.
+func TestAnAuditedCommandLineIsRedactedAcrossItsArguments(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client})
+	for _, argv := range [][]string{
+		{"curl", "-H", "Authorization:", "Bearer", "argv-credential", "http://svc"},
+		{"curl", "-H", "Authorization:", "Bearer argv-credential", "http://svc"},
+		{"tool", "--password=argv-credential"},
+	} {
+		if line := provider.AuditArgv(argv); strings.Contains(line, "argv-credential") || !strings.Contains(line, "<redacted>") {
+			t.Fatalf("audited %q as %q", argv, line)
+		}
+	}
+}
+
 // A Provider printed into a log line names its settings, never the literal
 // credentials it redacts.
 func TestAFormattedProviderCarriesNoCredential(t *testing.T) {

@@ -37,9 +37,14 @@ const (
 )
 
 // AuditArgv is the command line of an execution as its audit line shows it:
-// each argument redacted under the same contract as the output, quoted when
-// it is empty or holds a space or a quote, joined by spaces and capped at
-// AuditArgvBytes.
+// each argument redacted under the same contract as the output and quoted
+// when it is empty or holds a space or a quote, the arguments joined by
+// spaces, the joined line redacted again as a whole -- so a credential the
+// caller split across arguments ("Authorization:" "Bearer" "x") is caught
+// as it would be in output -- and the result capped at AuditArgvBytes.
+// credential_fields_v1 covers what it covers in output and no more: a flag
+// and its value as two arguments ("--password" "x") is not a credential
+// field to it, here as there.
 func (p *Provider) AuditArgv(argv []string) string {
 	parts := make([]string, 0, len(argv))
 	for _, arg := range argv {
@@ -49,7 +54,7 @@ func (p *Provider) AuditArgv(argv []string) string {
 		}
 		parts = append(parts, redacted)
 	}
-	line := strings.Join(parts, " ")
+	line, _ := p.redactor.bounded(strings.Join(parts, " "), math.MaxInt64)
 	if len(line) <= AuditArgvBytes {
 		return line
 	}
