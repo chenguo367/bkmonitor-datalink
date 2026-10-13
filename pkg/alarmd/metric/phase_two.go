@@ -1395,9 +1395,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// Both cells exist from start: "about zero" is the reading this exists
 	// for, and a missing series is not a zero.
 	//
-	// Retire when: the last deployment reading that decision waits on is in
-	// and the decision is recorded; both counters go together, unless the
-	// decision keeps them as a migration check.
+	// Kept as a migration check: the decision is recorded (a known
+	// difference, the records' own reporting), and it keeps both counters
+	// and the sample row as what is read before a cutover that must
+	// continue the alerts Python opened.
+	//
+	// Retire when: no deployment is left whose Python-opened alerts alarmd
+	// would have to continue; both counters and the sample row go together.
 	metrics.cmdbAddressDiffers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_address_differs_total",
 		Help: "Admitted series a Plan read whose host CMDB placed by bk_host_id or bk_agent_id while the record's own " +
@@ -1414,8 +1418,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"cause says how it differs: differs (another address), missing (none, or empty), undecodable (not a " +
 			"string); fleet.get address_differs_samples names the latest such records, with the strategy, Query " +
 			"Group, host and both addresses. " +
-			"Reader: the open decision whether an alert's identity follows CMDB's address as Python's does, read " +
-			"through /metrics on each deployment it waits on.",
+			"Reader: the check before a cutover from Python that must continue the alerts Python opened, read on " +
+			"that deployment: the alert identity does not follow CMDB's address, a recorded known difference, and " +
+			"the series counted here are the ones whose Python-opened alerts alarmd would not recover.",
 	}, []string{"grouped_by_target_ip", "cause"})
 	metrics.cmdbPlacedByHostID = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "admission_cmdb_placed_by_host_id_total",
@@ -1424,7 +1429,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"overwrites bk_target_ip on, and the count admission_cmdb_address_differs_total is a part of. Counted at " +
 			"the same site, per admitted series per Plan per round. Read beside that counter, so a zero of it tells " +
 			"\"placed this way and the address always the host's\" (this one rising) from \"never placed this way\" " +
-			"(this one zero too). Reader: the same decision, through /metrics. Retired with it.",
+			"(this one zero too). Reader: the same cutover check, through /metrics. Retired with it.",
 	}, []string{"grouped_by_target_ip"})
 	for _, grouped := range []string{"true", "false"} {
 		for _, cause := range admission.AddressCauses {
