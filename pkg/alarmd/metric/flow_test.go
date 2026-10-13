@@ -69,3 +69,15 @@ func observabilityRejectedWrite(n int) observability.Observation {
 	return observability.Observation{Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
 		Result: observability.ResultSuccess, OutputWrite: write}
 }
+
+// A Slot booked without a decision -- skipped, or without its snapshot --
+// is not a detection.
+func TestASlotBookedWithoutADecisionIsNotADetection(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	for _, kind := range []string{"FULL_COMPLETED", "GAP_SKIPPED", "SNAPSHOT_UNAVAILABLE", "COMPLETED_WITH_PARTIAL_GAP"} {
+		r.phaseTwo.workflow.progress.WithLabelValues(kind).Inc()
+	}
+	if got := r.FlowCounters().Detections; got != 2 {
+		t.Fatalf("detections = %d, want the full and the partial-gap completions", got)
+	}
+}
