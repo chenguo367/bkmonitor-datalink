@@ -278,3 +278,19 @@ func TestAReenteredQueryGroupLeavesOnlyOnEvidenceOfItsOwn(t *testing.T) {
 		t.Fatalf("the new owner's re-entered 20 s answer: in %t, rule %q; want it held after the re-entry", after.in(), after.lastRule())
 	}
 }
+
+// The re-entry window is the one a re-entry is counted in: an entry a full
+// window after an answer let the Query Group out is a first entry again.
+func TestTheReentryHoldEndsWithTheReentryWindow(t *testing.T) {
+	exited := time.Unix(1_000, 0)
+	for _, test := range []struct {
+		after time.Duration
+		held  bool
+	}{{QueryCooldownReentryWindow - time.Nanosecond, true}, {QueryCooldownReentryWindow, false}} {
+		runner := &Runner{cooldownMemory: queryCooldownMemory{exitedAt: exited, exitReason: QueryCooldownRecovered,
+			enteredAt: exited.Add(test.after)}}
+		if held := runner.reenteredAfterAnAnswer(); held != test.held {
+			t.Fatalf("entered %s after an answer let it out: held %t, want %t", test.after, held, test.held)
+		}
+	}
+}

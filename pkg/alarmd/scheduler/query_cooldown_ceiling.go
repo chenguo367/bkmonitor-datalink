@@ -168,8 +168,7 @@ func (runner *Runner) queryCooldownLetsOut(ctx context.Context, probe *observabi
 // next owner decides the same way.
 func (runner *Runner) reenteredAfterAnAnswer() bool {
 	memory := runner.cooldownMemory
-	return memory.exitReason == QueryCooldownRecovered && !memory.exitedAt.IsZero() && !memory.enteredAt.IsZero() &&
-		memory.enteredAt.After(memory.exitedAt) && memory.enteredAt.Sub(memory.exitedAt) < QueryCooldownReentryWindow
+	return memory.exitReason == QueryCooldownRecovered && memory.enteredAt.Sub(memory.exitedAt) < QueryCooldownReentryWindow
 }
 
 // noteProbe keeps a deciding probe among the latest ones, for a reader.
