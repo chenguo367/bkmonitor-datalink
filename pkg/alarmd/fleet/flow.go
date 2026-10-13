@@ -29,8 +29,9 @@ type FlowFacts struct {
 	DecisionLag FlowHistogram `json:"decision_lag"`
 	// StateWrites are the applied state keys (worker_work_total
 	// {work_kind="state_apply"}), StateFailures the admissions that did not
-	// succeed and the version conflicts, RuntimeRedis the runtime client's
-	// round trips (redis_command_duration_seconds{client="runtime"}).
+	// succeed and the version conflicts, RuntimeRedis the round trips of the
+	// client serving runtime state (redis_command_duration_seconds under
+	// client="runtime", or client="source" when it shares the source client).
 	StateWrites   uint64        `json:"state_writes"`
 	StateFailures uint64        `json:"state_failures"`
 	RuntimeRedis  FlowHistogram `json:"runtime_redis"`

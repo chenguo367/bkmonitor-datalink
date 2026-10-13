@@ -551,3 +551,42 @@ func TestAReplicaSeenForTheFirstTimeIsWarmingNotMissing(t *testing.T) {
 		t.Fatalf("its second computation: coverage %+v, want it counted", next.FlowCoverage)
 	}
 }
+
+// The page's one resource line and its runtime count are the server's: the
+// fleet's shares, the replica closest to a limit and which limit, and the
+// replicas counted by roles, version and readiness.
+func TestTheOverviewSaysTheMostConstrainedReplicaAndCountsTheRest(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	health := twoReplicaHealth(started, queriesFlow(0), queriesFlow(0), 0, 0)
+	health.PerReplica[0].Capacity = &Capacity{MemoryUsed: 300, MemoryLimit: 1000, PermitsHeld: 2, PermitBudget: 16}
+	health.PerReplica[1].Capacity = &Capacity{MemoryUsed: 900, MemoryLimit: 1000, PermitsHeld: 4, PermitBudget: 16}
+	health.PerReplica[0].Flow.Roles = []string{"control", "worker"}
+	health.PerReplica[1].Flow.Roles = []string{"worker", "control"}
+	health.PerReplica[1].Readiness = &ReadinessFacts{Ready: false}
+	overview := overviewOf(health, nil, false, at)
+	newOverviewFlows().apply(&overview, health, at)
+	if most := overview.Resources.MostConstrained; most == nil || most.Replica != "replica-b" || most.Constraint != "memory" ||
+		!strings.Contains(overview.Resources.Line, "replica-b") {
+		t.Fatalf("most constrained %+v line %q", most, overview.Resources.Line)
+	}
+	if fleet := overview.Resources.Fleet; !fleet.MemoryRatio.Measured || fleet.MemoryRatio.Value != 0.6 || fleet.QueryPermitRatio.Value != 6.0/32 {
+		t.Fatalf("fleet shares %+v", fleet)
+	}
+	summary := overview.Runtime.Summary
+	if len(summary) != 1 || summary[0].Version != "0.4.10" || summary[0].Ready != 1 || summary[0].NotReady != 1 ||
+		strings.Join(summary[0].Roles, ",") != "control,worker" {
+		t.Fatalf("summary %+v, want one group of the two replicas, roles in order", summary)
+	}
+	// Nothing near a limit: no replica named, and the line says so.
+	health.PerReplica[1].Capacity = &Capacity{MemoryUsed: 400, MemoryLimit: 1000, PermitsHeld: 4, PermitBudget: 16}
+	health.PerReplica[1].Readiness = &ReadinessFacts{Ready: true}
+	calm := overviewOf(health, nil, false, at)
+	newOverviewFlows().apply(&calm, health, at)
+	if calm.Resources.MostConstrained != nil || calm.Resources.Line == "" {
+		t.Fatalf("calm: most %+v line %q", calm.Resources.MostConstrained, calm.Resources.Line)
+	}
+	if summary := calm.Runtime.Summary; len(summary) != 1 || summary[0].Ready != 2 || summary[0].NotReady != 0 {
+		t.Fatalf("calm summary %+v, want both ready", summary)
+	}
+}

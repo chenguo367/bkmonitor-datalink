@@ -12,6 +12,7 @@ package metric
 import (
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,7 +41,12 @@ type Recorder struct {
 	build BuildInfo
 	// heap is the live-heap collector, read by the flow's copy from its last
 	// sample.
-	heap              *heapSiteCollector
+	heap *heapSiteCollector
+	// runtimeRedis is the Redis hook label of the client that serves runtime
+	// state: "runtime" when the process opened its own, the source's label
+	// when the runtime store is the source's connection and shares its
+	// client. The flow's runtime round trips are read under it.
+	runtimeRedis      atomic.Value
 	lifecycleMu       sync.Mutex
 	lifecycleBound    bool
 	healthMu          sync.Mutex

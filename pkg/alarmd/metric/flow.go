@@ -100,6 +100,21 @@ func (r *Recorder) RecordPhysicalQuery(elapsed time.Duration, failure string) {
 	counter.Inc()
 }
 
+// SetRuntimeRedisClient names the Redis hook label of the client that
+// serves runtime state, which the flow's runtime round trips are read under.
+func (r *Recorder) SetRuntimeRedisClient(label string) {
+	if r != nil && label != "" {
+		r.runtimeRedis.Store(label)
+	}
+}
+
+func (r *Recorder) runtimeRedisClient() string {
+	if label, ok := r.runtimeRedis.Load().(string); ok {
+		return label
+	}
+	return "runtime"
+}
+
 // RecordDecisionLag counts one decision's lag from readable data to its
 // acknowledged completion.
 func (r *Recorder) RecordDecisionLag(lag time.Duration) {
@@ -170,8 +185,9 @@ func (r *Recorder) FlowCounters() FlowCounters {
 	})
 	eachSample(m.stateVersionConflict, func(sample *dto.Metric) { flow.StateFailures += uint64(sample.GetCounter().GetValue()) })
 	flow.RuntimeRedis = FlowHistogram{Buckets: make([]uint64, len(redisDurationBuckets))}
+	runtimeClient := r.runtimeRedisClient()
 	eachSample(m.redisCalls.duration, func(sample *dto.Metric) {
-		if labelOf(sample, "client") != "runtime" {
+		if labelOf(sample, "client") != runtimeClient {
 			return
 		}
 		histogram := sample.GetHistogram()
