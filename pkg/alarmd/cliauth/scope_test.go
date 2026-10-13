@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/go-redis/redis/v8"
 )
 
 // A grant is the one deployment operations session, whether the page or CLI
@@ -42,7 +40,7 @@ func TestEveryGrantIsTheOneOperationsSession(t *testing.T) {
 				t.Fatalf("the code names a scope: %s", raw)
 			}
 			login := decodeLogin(t, exchange(m, code))
-			if !validSecret(login.RefreshToken) || strings.HasPrefix(login.RefreshToken, execRenewalPrefix) {
+			if !validSecret(login.RefreshToken) || strings.HasPrefix(login.RefreshToken, "exec-v1.") {
 				t.Fatalf("renewal credential %q, want one without a prefix", login.RefreshToken)
 			}
 			next := decodeLogin(t, refresh(m, login.RefreshToken))
@@ -54,55 +52,41 @@ func TestEveryGrantIsTheOneOperationsSession(t *testing.T) {
 	}
 }
 
-// An execution pairing an earlier build issued - its credential carrying the
-// prefix, its record stored under the prefixed key - still renews here, and
-// its successor is issued without the prefix and renews again; the session it
-// buys is allowed every operation. No device has to pair again.
-func TestAnEarlierExecutionCredentialStillRenews(t *testing.T) {
+// No running deployment ever issued an execution session or pairing, so none
+// is read: a session stored with that scope does not authenticate, a pairing
+// stored with it does not renew and is deleted as any foreign pairing is,
+// and a renewal credential carrying the prefix those builds gave it is
+// refused before Redis is asked. An operation may require only the one scope.
+func TestAnExecutionScopeNoBuildIssuedIsNotRead(t *testing.T) {
 	m := newTestManager(t, startRedis(t))
 	ctx := context.Background()
-	refreshSecret, _ := randomSecret()
-	old := execRenewalPrefix + refreshSecret
-	now := time.Now().UnixMilli()
-	pairing, _ := json.Marshal(map[string]any{"pairing_id": "earlier-device", "environment_id": m.environmentID, "scope": legacyScopeExec, "epoch": 0,
-		"admin_binding": m.adminBinding(), "created_at_ms": now, "last_used_at_ms": now})
-	if err := m.client.Set(ctx, pairingKey(m.prefix, old), pairing, time.Hour).Err(); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.client.ZAdd(ctx, m.pairingsKey(), &redis.Z{Score: float64(now), Member: "earlier-device"}).Err(); err != nil {
-		t.Fatal(err)
-	}
-	renewal, err := m.Refresh(ctx, old)
-	if err != nil {
-		t.Fatalf("an earlier execution credential did not renew: %v", err)
-	}
-	if strings.HasPrefix(renewal.RefreshToken, execRenewalPrefix) || !validSecret(renewal.RefreshToken) {
-		t.Fatalf("successor %q still carries the prefix", renewal.RefreshToken)
-	}
-	if !AllowsScope(renewal.Session.Scope, ScopeReadonly) {
-		t.Fatalf("the renewed session %q is not allowed the operations", renewal.Session.Scope)
-	}
-	again, err := m.Refresh(ctx, renewal.RefreshToken)
-	if err != nil || !AllowsScope(again.Session.Scope, ScopeReadonly) {
-		t.Fatalf("the successor did not renew: %+v %v", again.Session, err)
-	}
-}
-
-// A session an earlier build granted as an execution session authenticates
-// and is allowed every operation, as the one scope is.
-func TestAnEarlierExecutionSessionIsTheOneSession(t *testing.T) {
-	m := newTestManager(t, startRedis(t))
 	token, _ := randomSecret()
-	record := storedRecord{SessionID: "earlier", EnvironmentID: m.environmentID, Scope: legacyScopeExec, ExpiresAtMS: time.Now().Add(time.Hour).UnixMilli()}
+	record := storedRecord{SessionID: "never-issued", EnvironmentID: m.environmentID, Scope: requestedExecScope, ExpiresAtMS: time.Now().Add(time.Hour).UnixMilli()}
 	raw, _ := json.Marshal(record)
-	if err := m.client.Set(context.Background(), m.prefix+"session:"+digest(token), raw, time.Hour).Err(); err != nil {
+	if err := m.client.Set(ctx, m.prefix+"session:"+digest(token), raw, time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	session, err := m.Authenticate(context.Background(), token)
-	if err != nil || !AllowsScope(session.Scope, ScopeReadonly) {
-		t.Fatalf("earlier execution session: %+v %v", session, err)
+	if session, err := m.Authenticate(ctx, token); err == nil {
+		t.Fatalf("a session stored with the execution scope authenticated: %+v", session)
 	}
-	if AllowsScope("", ScopeReadonly) || AllowsScope("other", ScopeReadonly) || ValidScope(legacyScopeExec) {
-		t.Fatal("a scope that is neither the one nor the earlier execution scope is allowed, or an operation may require the earlier one")
+
+	refreshSecret, _ := randomSecret()
+	now := time.Now().UnixMilli()
+	pairing, _ := json.Marshal(map[string]any{"pairing_id": "never-issued", "environment_id": m.environmentID, "scope": requestedExecScope, "epoch": 0,
+		"admin_binding": m.adminBinding(), "created_at_ms": now, "last_used_at_ms": now})
+	if err := m.client.Set(ctx, pairingKey(m.prefix, refreshSecret), pairing, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Refresh(ctx, refreshSecret); ErrorCode(err) != "renewal_expired_or_revoked" {
+		t.Fatalf("a pairing stored with the execution scope: err=%v, want renewal_expired_or_revoked", err)
+	}
+	if exists, _ := m.client.Exists(ctx, pairingKey(m.prefix, refreshSecret)).Result(); exists != 0 {
+		t.Fatal("the foreign pairing was kept")
+	}
+	if _, err := m.Refresh(ctx, "exec-v1."+refreshSecret); ErrorCode(err) != "renewal_expired_or_revoked" {
+		t.Fatalf("a prefixed credential: err=%v, want renewal_expired_or_revoked", err)
+	}
+	if AllowsScope(requestedExecScope, ScopeReadonly) || AllowsScope("", ScopeReadonly) || ValidScope(requestedExecScope) {
+		t.Fatal("a scope other than the one is allowed, or an operation may require another")
 	}
 }
