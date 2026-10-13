@@ -506,7 +506,7 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 		Result: result, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup)},
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
-			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt,
+			LastQueryAt: state.lastQueryAt, Failures: state.failures, Timeouts: state.timeouts, FirstTimeoutAt: state.firstTimeoutAt, Cuts: state.cuts,
 			EnteredAt: memory.enteredAt, Source: memory.source,
 			LastExitAt: memory.exitedAt, LastExitReason: memory.exitReason, Reentries: memory.reentries,
 			LastProbe: memory.lastProbe, CeilingMillis: memory.ceiling, RunSpreadMillis: runSpread(memory.runTimes),

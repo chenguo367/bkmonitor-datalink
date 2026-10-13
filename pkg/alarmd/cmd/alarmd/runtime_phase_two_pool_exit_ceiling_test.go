@@ -178,14 +178,14 @@ func TestAReenteredQueryGroupLeavesOnlyOnEvidence(t *testing.T) {
 	h := newPoolProbeHarnessWith(t, 0, 10*time.Second)
 	enterPoolOnTheBackendsCut(t, h)
 	reentry := reenterAfterAnAnswer(t, h)
-	if reentry.CeilingMillis != backendCut.Milliseconds() || reentry.RunSpreadMillis != 9190 || reentry.Reentries != 1 {
-		t.Fatalf("the re-entry = %+v, want the 30 s cut, the 9.19 s spread and one re-entry", reentry)
+	if reentry.CeilingMillis != backendCut.Milliseconds() || reentry.RunSpreadMillis != 9190 || reentry.Reentries != 1 || reentry.Cuts != 3 {
+		t.Fatalf("the re-entry = %+v, want the 30 s cut, the 9.19 s spread, one re-entry and its three cuts", reentry)
 	}
 
 	h.backend.latency.Store(17030)
 	_, decider, event, atEnd := h.decide(0)
 	probe := event.LastProbe
-	if probe == nil || !decider.answered || probe.Operation != "normal" || event.Event != "extended" ||
+	if probe == nil || !decider.answered || probe.Operation != "normal" || event.Event != "extended" || event.Cuts != 3 ||
 		probe.Rule != observability.QueryCooldownRuleHeldAfterReentry || probe.ElapsedMillis != 17030 ||
 		probe.CeilingMillis != 30000 || probe.RunSpreadMillis != 9190 {
 		t.Fatalf("a re-entered probe at 17.03 s: decided at the end %t, %+v made %+v (probe %+v), want it held after the re-entry", atEnd, decider, event, probe)
