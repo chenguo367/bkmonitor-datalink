@@ -64,7 +64,7 @@ type QueryCooldownProbe struct {
 }
 
 // The comparisons that decide an answered probe, closed. Every one but
-// near_ceiling takes the Query Group out of the pool.
+// near_ceiling and held_after_reentry takes the Query Group out of the pool.
 //
 // no_ceiling: none of its failures showed a backend cut, so an answer is
 // the evidence it always was. unmeasured: the answer was not timed and
@@ -75,20 +75,25 @@ type QueryCooldownProbe struct {
 // its run times keep, near the ceiling every time; a backend that answers
 // that often is answering its normal rounds. near_ceiling: it answered
 // within its spread of the cut, where the next normal round is as likely to
-// be cut as not; it stays, and the next probe decides.
+// be cut as not; it stays, and the next probe decides. held_after_reentry:
+// it answered under the ceiling, or untimed, but it went back in after an
+// answer last let it out, so such an answer has already been shown not to be
+// evidence; it stays, and only an answer past the ceiling, a ceiling gone, or
+// answers in a row let it out.
 const (
-	QueryCooldownRuleNoCeiling     = "no_ceiling"
-	QueryCooldownRuleUnmeasured    = "unmeasured"
-	QueryCooldownRuleAboveCeiling  = "above_ceiling"
-	QueryCooldownRuleUnderCeiling  = "under_ceiling"
-	QueryCooldownRuleAnsweredInRow = "answered_in_row"
-	QueryCooldownRuleNearCeiling   = "near_ceiling"
+	QueryCooldownRuleNoCeiling        = "no_ceiling"
+	QueryCooldownRuleUnmeasured       = "unmeasured"
+	QueryCooldownRuleAboveCeiling     = "above_ceiling"
+	QueryCooldownRuleUnderCeiling     = "under_ceiling"
+	QueryCooldownRuleAnsweredInRow    = "answered_in_row"
+	QueryCooldownRuleNearCeiling      = "near_ceiling"
+	QueryCooldownRuleHeldAfterReentry = "held_after_reentry"
 )
 
 // QueryCooldownExitRules is the closed set a probe's Rule takes.
 var QueryCooldownExitRules = []string{QueryCooldownRuleNoCeiling, QueryCooldownRuleUnmeasured,
 	QueryCooldownRuleAboveCeiling, QueryCooldownRuleUnderCeiling, QueryCooldownRuleAnsweredInRow,
-	QueryCooldownRuleNearCeiling}
+	QueryCooldownRuleNearCeiling, QueryCooldownRuleHeldAfterReentry}
 
 // The outcomes a QueryCooldownProbe records, closed.
 const (

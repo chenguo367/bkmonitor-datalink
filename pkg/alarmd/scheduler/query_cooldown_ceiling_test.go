@@ -209,3 +209,72 @@ func TestTheCeilingIsRestoredWithThePool(t *testing.T) {
 		t.Fatalf("the new owner's answer near the ceiling: in %t, rule %q; want it held", after.in(), after.lastRule())
 	}
 }
+
+// reenter takes a Query Group in the pool out on an answer clear of the cut
+// by its spread, waits away, then runs it outside on runs and puts it back
+// with three more cuts.
+func (pool *ceilingPool) reenter(away time.Duration, runs []int64) {
+	pool.round(timed(20_000, ""))
+	if pool.in() || pool.lastRule() != observability.QueryCooldownRuleUnderCeiling {
+		pool.t.Fatalf("a first entry's 20 s answer: in %t, rule %q; want it out under the ceiling", pool.in(), pool.lastRule())
+	}
+	pool.now = pool.now.Add(away)
+	pool.enter(runs, 30_000, contract.ReasonQueryUnavailable)
+}
+
+// A Query Group back in the pool within the re-entry window of an answer
+// letting it out stays on an answer clear of its cut, timed or not, and
+// leaves on answers in a row. One back after the window, or after leaving
+// for another reason than an answer, is decided as a first entry is. A
+// restart or the next owner holds it the same way.
+func TestAReenteredQueryGroupLeavesOnlyOnEvidenceOfItsOwn(t *testing.T) {
+	inRow := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	inRow.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	inRow.reenter(time.Hour, slowRuns)
+	for i := 0; i < queryCooldownRunTimesKept-1; i++ {
+		inRow.round(timed(20_000, ""))
+		if !inRow.in() || inRow.lastRule() != observability.QueryCooldownRuleHeldAfterReentry {
+			t.Fatalf("re-entered answer %d at 20 s: in %t, rule %q; want it held after the re-entry", i+1, inRow.in(), inRow.lastRule())
+		}
+	}
+	inRow.round(timed(29_900, ""))
+	if inRow.in() || inRow.lastRule() != observability.QueryCooldownRuleAnsweredInRow {
+		t.Fatalf("after %d answers in a row: in %t, rule %q; want it out, answered in a row", queryCooldownRunTimesKept, inRow.in(), inRow.lastRule())
+	}
+
+	untimed := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	untimed.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	untimed.reenter(time.Hour, slowRuns)
+	untimed.round(execution.SlotExecutionResult{Completed: true, QueryAvailability: execution.QueryAvailabilityAvailable})
+	if !untimed.in() || untimed.lastRule() != observability.QueryCooldownRuleHeldAfterReentry {
+		t.Fatalf("a re-entered untimed answer: in %t, rule %q; want it held after the re-entry", untimed.in(), untimed.lastRule())
+	}
+
+	late := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	late.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	late.reenter(QueryCooldownReentryWindow, slowRuns)
+	late.round(timed(20_000, ""))
+	if late.in() || late.lastRule() != observability.QueryCooldownRuleUnderCeiling {
+		t.Fatalf("back after the re-entry window: in %t, rule %q; want it out under the ceiling as a first entry", late.in(), late.lastRule())
+	}
+
+	changed := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	changed.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	changed.runner.clearQueryCooldown(context.Background(), QueryCooldownQueryRevisionChanged)
+	changed.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	changed.round(timed(20_000, ""))
+	if changed.in() || changed.lastRule() != observability.QueryCooldownRuleUnderCeiling {
+		t.Fatalf("back after leaving on a query change: in %t, rule %q; want it out under the ceiling", changed.in(), changed.lastRule())
+	}
+
+	store := newMemoryCooldownStore()
+	before := newCeilingPool(t, store, 1)
+	before.enter(slowRuns, 30_000, contract.ReasonQueryUnavailable)
+	before.reenter(time.Hour, slowRuns)
+	after := newCeilingPool(t, store, 2)
+	after.now = before.now
+	after.round(timed(20_000, ""))
+	if !after.in() || after.lastRule() != observability.QueryCooldownRuleHeldAfterReentry {
+		t.Fatalf("the new owner's re-entered 20 s answer: in %t, rule %q; want it held after the re-entry", after.in(), after.lastRule())
+	}
+}
