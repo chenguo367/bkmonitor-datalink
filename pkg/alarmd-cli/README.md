@@ -1,9 +1,12 @@
 # alarmd-cli
 
 登录得到本部署的运维会话（标识沿用 `deployment_ops_readonly`）：取证读取、Pod 命令执行与
-工作负载管理都在这一个会话里，不再另行申请执行权限。早先单独申请的执行会话和带 `exec-v1.`
-前缀的续期凭据照常可用、照常续期，续出来的新凭据不再带前缀。每次执行和管理操作都在服务端
-留一条审计记录（`sre_action` 日志与 `sre_actions_total` 计数）。
+工作负载管理都在这一个会话里，不再另行申请执行权限。服务端不再接受早先单独申请的执行会话，
+带 `exec-v1.` 前缀的续期凭据按 `renewal_expired_or_revoked` 拒绝，重新登录即可。每次执行和
+管理操作都在服务端留一条审计记录（`sre_action` 日志与 `sre_actions_total` 计数）。
+
+CLI 与服务端一起升级：较早的 CLI 用固定 30 秒请求期限，短于 `pod.exec`（45 秒）和
+`slot.query`（最长 2 分钟）的执行期限，这些调用会在服务端完成前被本地切断。
 
 `invoke` 可用 `--params-file path.json` 传入嵌套 JSON 参数；`--params-file -`
 从 stdin 读取。`--stdin-file script.txt` 与 `--script-file script.txt` 等价，只把
