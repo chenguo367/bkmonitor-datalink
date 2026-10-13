@@ -127,6 +127,21 @@ func (r *Recorder) SetCMDBHostIndex(hosts int, ageSeconds, publishedAgeSeconds, 
 	r.phaseTwo.cmdbIndexDegraded.WithLabelValues(reason).Set(value)
 }
 
+// RecordCMDBIndexRead counts one refresh of the CMDB index by how it read
+// the cache: full, unchanged or failed. Any other word is counted as failed
+// rather than as a new series.
+func (r *Recorder) RecordCMDBIndexRead(result string) {
+	if r == nil {
+		return
+	}
+	switch result {
+	case "full", "unchanged", "failed":
+	default:
+		result = "failed"
+	}
+	r.phaseTwo.cmdbIndexReads.WithLabelValues(result).Inc()
+}
+
 // SetCMDBServiceInstanceIndex publishes how many service instances the index
 // holds. Zero beside a non-zero service_instance_facts_unavailable count is
 // the signature of an instance cache nobody writes.
