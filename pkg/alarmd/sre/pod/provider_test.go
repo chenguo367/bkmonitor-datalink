@@ -563,6 +563,22 @@ func TestOutputPolicyMasksURLUserinfoUnderAnyScheme(t *testing.T) {
 	}
 }
 
+// A credential header keeps nothing of its credential, however it is
+// written: as a header line, as a curl argument, or as a field. The field
+// rule alone stops at the scheme word and leaves the token after it.
+func TestOutputPolicyMasksAnAuthorizationHeaderWhole(t *testing.T) {
+	for _, line := range []string{
+		"Authorization: Bearer header-credential",
+		"curl -H 'Authorization: Bearer header-credential' http://svc",
+		`{"authorization": "Basic header-credential"}`,
+		"authorization=Bearer header-credential",
+	} {
+		if out, _ := newRedactor(nil).bounded(line, 4096); strings.Contains(out, "header-credential") || !strings.Contains(out, "<redacted>") {
+			t.Fatalf("policy output for %q is %q", line, out)
+		}
+	}
+}
+
 // A Provider printed into a log line names its settings, never the literal
 // credentials it redacts.
 func TestAFormattedProviderCarriesNoCredential(t *testing.T) {

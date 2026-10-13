@@ -36,8 +36,10 @@ func newRedactor(secrets []string) *redactor {
 func (r *redactor) bounded(value string, limit int64) (string, bool) {
 	value = strings.ToValidUTF8(value, "�")
 	value = privateKey.ReplaceAllString(value, "<redacted-private-key>")
-	value = credentialAssignment.ReplaceAllString(value, "${1}<redacted>")
+	// The scheme rule first: run after the field rule, "Authorization: Bearer
+	// x" lost only the scheme word to it and kept x.
 	value = authCredential.ReplaceAllString(value, "${1} <redacted>")
+	value = credentialAssignment.ReplaceAllString(value, "${1}<redacted>")
 	value = urlCredential.ReplaceAllString(value, "${1}<redacted>@")
 	for _, secret := range r.secrets {
 		if secret != "" {
