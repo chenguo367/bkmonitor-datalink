@@ -471,6 +471,7 @@ var alarmdWords = []string{
 	"ended",
 	"endpoint",
 	"endpoints",
+	"endpointslices",
 	"entered",
 	"entries",
 	"entry",
