@@ -187,3 +187,19 @@ func TestWarmingPeakLineIsAlwaysWrittenWithItsGroups(t *testing.T) {
 		}
 	}
 }
+
+// A group that takes a full minute's place carries the evicted group's
+// writes, and says how many of its writes those are.
+func TestWarmingPeakSaysWhatANewcomerMayHaveInherited(t *testing.T) {
+	hour := time.Date(2026, 10, 13, 3, 0, 0, 0, time.UTC)
+	fixture := newWarmingPeakFixture(hour)
+	for i := 0; i < warmingPeakGroups; i++ {
+		fixture.apply(hour.Add(time.Second), fmt.Sprintf("qg-%03d", i), "1", 2, 0)
+	}
+	fixture.apply(hour.Add(2*time.Second), "qg-new", "5", 5, 0)
+	fixture.apply(hour.Add(time.Hour+time.Second), "qg-new", "5", 0, 1)
+	top := fixture.lines[0].WarmingPeak.PeakGroups[0]
+	if top != (WarmingGroup{QueryGroup: "qg-new", StrategyID: "5", Writes: 7, Overcount: 2}) {
+		t.Fatalf("top = %+v, want qg-new with 5 writes of its own and 2 inherited, said as overcount", top)
+	}
+}
