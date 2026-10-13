@@ -217,6 +217,11 @@ func (worker WorkerRegistration) Compatibility() WorkerCompatibility {
 // Matches compares the execution contract when both peers declare it. Mixed
 // versions use the existing capability digest; a declared contract mismatch
 // never falls back to that legacy comparison.
+//
+// Retire the fallback once the previous upstream snapshot declares
+// ExecutionContractDigest: a peer that does not declare it is then older
+// than anything an upgrade starts from. The legacy CapabilitiesDigest
+// comparison, and the digest itself, go with it.
 func (compatibility WorkerCompatibility) Matches(other WorkerCompatibility) bool {
 	if compatibility.DeploymentProfile != other.DeploymentProfile {
 		return false
