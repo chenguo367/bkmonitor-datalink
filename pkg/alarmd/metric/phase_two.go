@@ -83,6 +83,7 @@ type phaseTwoMetrics struct {
 	frozenStateCensus              *prometheus.CounterVec
 	segmentContent                 *prometheus.CounterVec
 	inPlaceWaits                   *prometheus.CounterVec
+	inPlaceHeldInputBytes          prometheus.Histogram
 	sourceWithheldLines            *prometheus.CounterVec
 	activeQGSetCount               prometheus.Gauge
 	activeQGSetBytes               prometheus.Gauge
@@ -260,6 +261,10 @@ var ControlReadKinds = []string{"assignment", "registry"}
 // Timeline sizes from one Segment (about a kilobyte) up past the sizes that
 // made a publication cutover exceed the Redis write timeout.
 var scheduleTimelineBytesBuckets = []float64{1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216}
+
+// inPlaceHeldInputBytesBuckets reach the retained-bytes budget's default (256
+// MiB): one Slot holding near that much while it waits is the case to see.
+var inPlaceHeldInputBytesBuckets = []float64{1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456}
 
 var phaseTwoBusyStages = []string{"query", "evaluation", "event", "state", "progress", "other"}
 var phaseTwoWorkKinds = []string{
@@ -547,6 +552,15 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"inplace_held_prepared_bytes_estimate is an estimate, the struct sizes of the copies this execution made for itself, not the cached plan they " +
 				"reference, which is shared and held without the wait. Every cell exists from the start.",
 		}, []string{"wait"}),
+		inPlaceHeldInputBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_inplace_held_input_bytes",
+			Help: "Retained input bytes a Slot execution held while it waited in place for a later query of the Slot, one observation per execution " +
+				"that waited (the ones access_inplace_readiness_waits_total counts). Exact, from the Slot's own retention accounting: the most input " +
+				"it held at any of its waits. The same value is inplace_held_input_bytes on the slot_completed line, which log admission mostly " +
+				"drops; this is the reading a scrape always has. sum over count is the mean held per waiting execution, and the top buckets reach " +
+				"the retained-bytes budget's default.",
+			Buckets: inPlaceHeldInputBytesBuckets,
+		}),
 		segmentContent: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "segment_content_freshness_total",
 			Help: "Slots frozen against a Segment, by whether that Segment names the execution object the " +
@@ -1715,7 +1729,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission, m.queryDownstreamDistress,
-		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -2073,6 +2087,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.InPlaceWait; facts != nil {
 		m.inPlaceWaits.WithLabelValues(observability.InPlaceWaitBucket(time.Duration(facts.TotalMillis) * time.Millisecond)).Inc()
+		m.inPlaceHeldInputBytes.Observe(float64(facts.HeldInputBytes))
 	}
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {

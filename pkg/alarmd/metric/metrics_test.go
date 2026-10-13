@@ -548,6 +548,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_access_inplace_readiness_waits_total"] = "variableLabels: {wait}"
+	expected["bkmonitor_alarmd_access_inplace_held_input_bytes"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
@@ -1162,6 +1163,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// no more: the label is written only from the list controlplane publishes.
 	bounds[fqName("segment_content_freshness_total")] = len(controlplane.SegmentContentStates)
 	bounds[fqName("access_inplace_readiness_waits_total")] = len(observability.InPlaceWaitBuckets)
+	bounds[fqName("access_inplace_held_input_bytes")] = histogramSeries(1, len(inPlaceHeldInputBytesBuckets))
 	// Every reason under failure, and one success. Success carries no reason
 	// because there is nothing to explain; the label is empty there.
 	bounds[fqName("schedule_cutover_total")] = len(controlplane.CutoverReasons) + 1

@@ -25,6 +25,10 @@ Labels: `disposition`
 
 How each round of the difference ended: none is a round that decided, and the rest name the fact that was not good enough to decide on - link_unavailable (the alert link's roster could not be read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded recently), snapshot_unusable (the source was not observed this round), snapshot_empty and snapshot_stale. Rounds, not strategies. none is the denominator the outcome family is read against.
 
+## bkmonitor_alarmd_access_inplace_held_input_bytes
+
+Retained input bytes a Slot execution held while it waited in place for a later query of the Slot, one observation per execution that waited (the ones access_inplace_readiness_waits_total counts). Exact, from the Slot's own retention accounting: the most input it held at any of its waits. The same value is inplace_held_input_bytes on the slot_completed line, which log admission mostly drops; this is the reading a scrape always has. sum over count is the mean held per waiting execution, and the top buckets reach the retained-bytes budget's default.
+
 ## bkmonitor_alarmd_access_inplace_readiness_waits_total
 
 Labels: `wait`
