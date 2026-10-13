@@ -30,13 +30,17 @@ const (
 	minutesPerHour = 60
 )
 
-// WarmingGroup is one group's writes to series still warming their history
-// in the peak minute. Overcount is how many of them may be another group's,
-// one that held the place before this one took it; zero when the minute
-// never ran out of places.
+// WarmingGroup is one Query Group's writes to series still warming their
+// history in the peak minute. Overcount is how many of them may be another
+// group's, one that held the place before this one took it; zero when the
+// minute never ran out of places.
+//
+// A group and not a strategy: the reuse facts are counted once per Slot
+// apply, over all of the Slot's Plans, so which strategy's series were
+// warming is not known here. The group's strategies are a strategy.list or
+// object.get away.
 type WarmingGroup struct {
 	QueryGroup string `json:"query_group"`
-	StrategyID string `json:"strategy_id,omitempty"`
 	Writes     int64  `json:"writes"`
 	Overcount  int64  `json:"overcount,omitempty"`
 }
@@ -44,7 +48,7 @@ type WarmingGroup struct {
 // WarmingPeakFacts is one hour of this replica's state writes to series still
 // warming their history (StateWriteReuseStoredWarming): the total, the
 // minutes that had any, the median minute over all sixty, and the busiest
-// minute with the groups that made it. state_write_reuse_total says a burst
+// minute with the Query Groups that made it. state_write_reuse_total says a burst
 // happened; this says whose it was.
 type WarmingPeakFacts struct {
 	HourStart          time.Time      `json:"hour_start"`
@@ -55,8 +59,6 @@ type WarmingPeakFacts struct {
 	PeakMinuteWrites   int64          `json:"peak_minute_writes"`
 	PeakGroups         []WarmingGroup `json:"peak_groups"`
 }
-
-type warmingKey struct{ queryGroup, strategy string }
 
 type warmingCount struct{ writes, overcount int64 }
 
@@ -72,7 +74,7 @@ type WarmingPeak struct {
 	mu          sync.Mutex
 	minute      time.Time
 	hour        time.Time
-	counts      map[warmingKey]*warmingCount
+	counts      map[string]*warmingCount
 	minuteTotal int64
 	hourTotal   int64
 	minutes     []int64
@@ -83,7 +85,7 @@ func NewWarmingPeak(now func() time.Time) *WarmingPeak {
 	if now == nil {
 		now = time.Now
 	}
-	return &WarmingPeak{now: now, counts: make(map[warmingKey]*warmingCount, warmingPeakGroups)}
+	return &WarmingPeak{now: now, counts: make(map[string]*warmingCount, warmingPeakGroups)}
 }
 
 // SetEmit is where the hour's line goes: the runtime's observer, so it is
@@ -100,14 +102,14 @@ func (p *WarmingPeak) Observe(ctx context.Context, o Observation) {
 			warming += count
 		}
 	}
-	var trace TraceFields
+	var queryGroup string
 	if warming > 0 {
-		trace = mergeTraceFields(o.Trace, TraceFieldsFromContext(ctx))
+		queryGroup = mergeTraceFields(o.Trace, TraceFieldsFromContext(ctx)).QueryGroupKey
 	}
 	p.mu.Lock()
 	line := p.advance(p.now().UTC())
 	if warming > 0 {
-		p.add(warmingKey{queryGroup: trace.QueryGroupKey, strategy: trace.StrategyID}, warming)
+		p.add(queryGroup, warming)
 	}
 	p.mu.Unlock()
 	if line != nil && p.emit != nil {
@@ -156,7 +158,7 @@ func (p *WarmingPeak) closeMinute() {
 	p.minuteTotal = 0
 }
 
-func (p *WarmingPeak) add(key warmingKey, writes int64) {
+func (p *WarmingPeak) add(key string, writes int64) {
 	p.minuteTotal += writes
 	if count, found := p.counts[key]; found {
 		count.writes += writes
@@ -166,7 +168,7 @@ func (p *WarmingPeak) add(key warmingKey, writes int64) {
 		p.counts[key] = &warmingCount{writes: writes}
 		return
 	}
-	var smallest warmingKey
+	var smallest string
 	var least *warmingCount
 	for candidate, count := range p.counts {
 		if least == nil || count.writes < least.writes {
@@ -180,13 +182,13 @@ func (p *WarmingPeak) add(key warmingKey, writes int64) {
 func (p *WarmingPeak) top() []WarmingGroup {
 	groups := make([]WarmingGroup, 0, len(p.counts))
 	for key, count := range p.counts {
-		groups = append(groups, WarmingGroup{QueryGroup: key.queryGroup, StrategyID: key.strategy, Writes: count.writes, Overcount: count.overcount})
+		groups = append(groups, WarmingGroup{QueryGroup: key, Writes: count.writes, Overcount: count.overcount})
 	}
 	slices.SortFunc(groups, func(a, b WarmingGroup) int {
 		if order := cmp.Compare(b.Writes, a.Writes); order != 0 {
 			return order
 		}
-		return cmp.Compare(a.QueryGroup+"\x00"+a.StrategyID, b.QueryGroup+"\x00"+b.StrategyID)
+		return cmp.Compare(a.QueryGroup, b.QueryGroup)
 	})
 	return groups[:min(len(groups), warmingPeakTop)]
 }

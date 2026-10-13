@@ -78,7 +78,7 @@ func TestWarmingPeakNamesTheGroupsOfAnHoursBusiestMinute(t *testing.T) {
 	want := WarmingPeakFacts{
 		HourStart: hour, Writes: 1150, MinutesWithWrites: 3, MedianMinuteWrites: 0,
 		PeakMinute: hour.Add(time.Minute), PeakMinuteWrites: 1000,
-		PeakGroups: []WarmingGroup{{QueryGroup: "qg-b", StrategyID: "22", Writes: 800}, {QueryGroup: "qg-c", StrategyID: "33", Writes: 200}},
+		PeakGroups: []WarmingGroup{{QueryGroup: "qg-b", Writes: 800}, {QueryGroup: "qg-c", Writes: 200}},
 	}
 	if !reflect.DeepEqual(*line.WarmingPeak, want) {
 		t.Fatalf("peak = %+v, want %+v", *line.WarmingPeak, want)
@@ -175,7 +175,7 @@ func TestWarmingPeakLineIsAlwaysWrittenWithItsGroups(t *testing.T) {
 		output.Reset()
 		observer.Observe(context.Background(), Observation{Component: ComponentState, Stage: StageWarmingPeak, Result: ResultSuccess,
 			WarmingPeak: &WarmingPeakFacts{HourStart: hour, Writes: 1150, MinutesWithWrites: 3, PeakMinute: hour.Add(time.Minute), PeakMinuteWrites: 1000,
-				PeakGroups: []WarmingGroup{{QueryGroup: "qg-b", StrategyID: "22", Writes: 800}}}})
+				PeakGroups: []WarmingGroup{{QueryGroup: "qg-b", Writes: 800}}}})
 		var event map[string]any
 		if err := json.Unmarshal(output.Bytes(), &event); err != nil {
 			t.Fatalf("line %d: %v; log=%q", i, err, output.String())
@@ -199,7 +199,23 @@ func TestWarmingPeakSaysWhatANewcomerMayHaveInherited(t *testing.T) {
 	fixture.apply(hour.Add(2*time.Second), "qg-new", "5", 5, 0)
 	fixture.apply(hour.Add(time.Hour+time.Second), "qg-new", "5", 0, 1)
 	top := fixture.lines[0].WarmingPeak.PeakGroups[0]
-	if top != (WarmingGroup{QueryGroup: "qg-new", StrategyID: "5", Writes: 7, Overcount: 2}) {
+	if top != (WarmingGroup{QueryGroup: "qg-new", Writes: 7, Overcount: 2}) {
 		t.Fatalf("top = %+v, want qg-new with 5 writes of its own and 2 inherited, said as overcount", top)
+	}
+}
+
+// A Slot's applies are counted under its Query Group whatever strategy the
+// trace names: the reuse facts cover all of the Slot's Plans, so the line
+// does not split a group by a strategy it cannot attribute.
+func TestWarmingPeakCountsAGroupOnceWhateverStrategyTheTraceNames(t *testing.T) {
+	hour := time.Date(2026, 10, 13, 3, 0, 0, 0, time.UTC)
+	fixture := newWarmingPeakFixture(hour)
+	fixture.apply(hour.Add(time.Second), "qg-two-plans", "11", 30, 0)
+	fixture.apply(hour.Add(2*time.Second), "qg-two-plans", "12", 20, 0)
+	fixture.apply(hour.Add(3*time.Second), "qg-two-plans", "", 10, 0)
+	fixture.apply(hour.Add(time.Hour+time.Second), "qg-two-plans", "", 0, 1)
+	groups := fixture.lines[0].WarmingPeak.PeakGroups
+	if len(groups) != 1 || groups[0] != (WarmingGroup{QueryGroup: "qg-two-plans", Writes: 60}) {
+		t.Fatalf("groups = %+v, want the one group with all 60 writes", groups)
 	}
 }

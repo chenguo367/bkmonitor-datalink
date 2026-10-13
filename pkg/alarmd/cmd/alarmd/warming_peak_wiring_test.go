@@ -97,7 +97,7 @@ func TestTheProductionObserverWritesTheHourlyWarmingLine(t *testing.T) {
 		t.Fatalf("warming lines = %+v, want one carrying the hour", lines)
 	}
 	peak := lines[0].WarmingPeak
-	if peak.Writes != 42 || len(peak.PeakGroups) != 1 || peak.PeakGroups[0].QueryGroup != "qg-wiring" || peak.PeakGroups[0].StrategyID != "7" {
-		t.Fatalf("peak = %+v, want 42 writes from qg-wiring, strategy 7", peak)
+	if peak.Writes != 42 || len(peak.PeakGroups) != 1 || peak.PeakGroups[0].QueryGroup != "qg-wiring" {
+		t.Fatalf("peak = %+v, want 42 writes from qg-wiring", peak)
 	}
 }
