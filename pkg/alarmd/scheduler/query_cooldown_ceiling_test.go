@@ -315,3 +315,114 @@ func TestTheReentryHoldEndsWithTheReentryWindow(t *testing.T) {
 		}
 	}
 }
+
+// replayRound records a replay at the cooldown's end of the first Slot held
+// after the last round, as the Runner records it.
+func (pool *ceilingPool) replayRound(result execution.SlotExecutionResult) {
+	pool.slot.Contract.Slot.EvaluationTime += 60
+	if until := pool.runner.queryCooldown.until; !until.IsZero() && pool.now.Before(until) {
+		pool.now = until.Add(time.Second)
+	}
+	pool.runner.recordQueryAvailability(context.Background(), pool.slot, execution.OperationReplay, result, 60,
+		pool.runner.queryCooldownDecidedBy(execution.OperationReplay))
+}
+
+// Only a refusal no time range changes lets a replay decide: a missing
+// table and a storage that cannot read sliding windows are refused for any
+// window, while a backend that did not answer may answer a replay's longer
+// budget and not the next round's.
+func TestOnlyATimeIndependentRefusalLetsAReplayDecide(t *testing.T) {
+	for _, test := range []struct {
+		reason  string
+		decides bool
+	}{
+		{contract.ReasonQueryTargetMissing, true},
+		{contract.ReasonDetectIntervalStorageNotSliding, true},
+		{contract.ReasonQueryUnavailable, false},
+		{contract.ReasonQueryTimeout, false},
+	} {
+		pool := newCeilingPool(t, newMemoryCooldownStore(), 1)
+		pool.enter(slowRuns, 1_000, test.reason)
+		if decides := pool.runner.queryCooldownDecidedBy(execution.OperationReplay); decides != test.decides {
+			t.Errorf("a replay in the pool for %s decides %t, want %t", test.reason, decides, test.decides)
+		}
+		if !pool.runner.queryCooldownDecidedBy(execution.OperationNormal) {
+			t.Errorf("a normal round in the pool for %s does not decide", test.reason)
+		}
+		pool.replayRound(timed(1_000, ""))
+		if pool.in() == test.decides {
+			t.Errorf("an answered replay in the pool for %s: in %t, want out %t", test.reason, pool.in(), test.decides)
+		}
+	}
+}
+
+// With no held Slot at the cooldown's end, a pool held for a missing table is
+// decided by its normal round as before; and a Query Group back in for a
+// missing table after an answer let it out leaves on the answer: those
+// refusals show no cut, so the re-entry hold does not apply and the exit is
+// no_ceiling. Refused again, a replay keeps it in and extends the cooldown.
+func TestAMissingTablePoolIsDecidedByWhicheverRoundComesFirst(t *testing.T) {
+	normal := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	normal.enter(slowRuns, 1_000, contract.ReasonQueryTargetMissing)
+	normal.round(timed(1_000, ""))
+	if normal.in() || normal.lastRule() != observability.QueryCooldownRuleNoCeiling {
+		t.Fatalf("a normal round answering a missing-table pool: in %t, rule %q; want it out with no ceiling", normal.in(), normal.lastRule())
+	}
+
+	refused := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	refused.enter(slowRuns, 1_000, contract.ReasonQueryTargetMissing)
+	until := refused.runner.queryCooldown.until
+	refused.replayRound(timed(1_000, contract.ReasonQueryTargetMissing))
+	if !refused.in() || !refused.runner.queryCooldown.until.After(until) || refused.runner.cooldownMemory.lastProbe.Operation != string(execution.OperationReplay) {
+		t.Fatalf("a refused replay: in %t, until %s after %s; want it held, the cooldown extended and the replay its probe",
+			refused.in(), refused.runner.queryCooldown.until, until)
+	}
+
+	back := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	back.enter(slowRuns, 1_000, contract.ReasonQueryTargetMissing)
+	back.replayRound(timed(1_000, ""))
+	if back.in() {
+		t.Fatal("an answered replay left a missing-table pool held")
+	}
+	back.now = back.now.Add(time.Hour)
+	back.enter(slowRuns, 1_000, contract.ReasonQueryTargetMissing)
+	if back.runner.cooldownMemory.reentries != 1 || back.runner.queryCooldown.cuts != 0 {
+		t.Fatalf("back for the missing table: %d re-entries, %d cuts; want one re-entry and no cut", back.runner.cooldownMemory.reentries, back.runner.queryCooldown.cuts)
+	}
+	back.replayRound(timed(1_000, ""))
+	if back.in() || back.lastRule() != observability.QueryCooldownRuleNoCeiling {
+		t.Fatalf("a re-entered missing-table pool answered by its replay: in %t, rule %q; want it out with no ceiling", back.in(), back.lastRule())
+	}
+}
+
+// A held replay at a missing-table pool's cooldown end that the Runner sent
+// late and that timed out decides nothing and spends nothing: the excuse for
+// a timeout the Runner made late itself is still there for the normal round
+// queued behind the replays, and the timeout is not read as the backend's. A
+// replay the backend answered unavailable decides nothing either.
+func TestAReplayTheReasonDoesNotCoverSpendsNothingOfThePool(t *testing.T) {
+	pool := newCeilingPool(t, newMemoryCooldownStore(), 1)
+	pool.enter(slowRuns, 1_000, contract.ReasonQueryTargetMissing)
+	pool.now = pool.runner.queryCooldown.until.Add(time.Second)
+	busyUntil := pool.now
+	lateTimeout := execution.SlotExecutionResult{Completed: true, QueryAvailability: execution.QueryAvailabilityUnknown,
+		QueryUnknownReason: execution.ReasonCode(contract.ReasonQueryTimeout),
+		PrimaryQueryClock:  &execution.PhysicalQueryClock{ReadyAtUnixMilli: busyUntil.Add(-time.Minute).UnixMilli(), ElapsedMillis: 55_000}}
+	unavailable := timed(30_000, contract.ReasonQueryUnavailable)
+	for _, result := range []execution.SlotExecutionResult{lateTimeout, unavailable} {
+		decides, read := pool.runner.queryCooldownDecision(execution.OperationReplay, result, busyUntil)
+		if decides || read.QueryAvailability != result.QueryAvailability || !pool.runner.queryCooldown.excusedUntil.IsZero() {
+			t.Fatalf("a held replay %+v: decides %t, read as %v, excused until %s; want nothing decided, read or spent",
+				result.QueryAvailability, decides, read.QueryAvailability, pool.runner.queryCooldown.excusedUntil)
+		}
+	}
+	decides, _ := pool.runner.queryCooldownDecision(execution.OperationNormal, lateTimeout, busyUntil)
+	if decides || !pool.runner.queryCooldown.excusedUntil.Equal(pool.runner.queryCooldown.until) {
+		t.Fatalf("the normal round that timed out late behind the replays: decides %t, excused until %s; want it excused",
+			decides, pool.runner.queryCooldown.excusedUntil)
+	}
+	decides, read := pool.runner.queryCooldownDecision(execution.OperationReplay, timed(1_000, contract.ReasonQueryTargetMissing), busyUntil)
+	if !decides || read.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryTargetMissing) {
+		t.Fatalf("a held replay refused for the table: decides %t, read %+v; want it to decide on the refusal", decides, read)
+	}
+}
