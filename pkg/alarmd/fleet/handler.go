@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -964,6 +965,19 @@ func NewHandler(
 			seriesRange(response, request, series, now)
 		})
 	}
+	// The overview is one computation per OverviewMaxAge whoever asks; it
+	// runs on its own context, since the callers it answers share it.
+	overviews := newOverviewCache(now, func() Overview {
+		ctx, cancel := context.WithTimeout(context.Background(), overviewComputeTimeout)
+		defer cancel()
+		view, part := service.Summarized(ctx, stallAfter)
+		at := now()
+		running, known := RunningStrategiesOf(&view, part)
+		return overviewOf(healthOf(&view, part, at), running, known, at)
+	})
+	mux.HandleFunc("/api/overview", func(response http.ResponseWriter, request *http.Request) {
+		writeJSON(response, http.StatusOK, overviews.get())
+	})
 	mux.HandleFunc("/api/health", func(response http.ResponseWriter, request *http.Request) {
 		// From the replicas' summaries: what the rows give is the parts they
 		// add up to, and a snapshot is read only for a replica that published

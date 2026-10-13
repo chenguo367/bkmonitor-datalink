@@ -575,8 +575,8 @@ func (store failingSnapshotsWithSummaries) LoadOwned(context.Context, []string) 
 // The reads past the memory line are reached by the verdict alone: the
 // snapshot reads for replicas whose summaries carry no counts -- one
 // snapshot at a time from Redis, all at once from any other reader -- from
-// the summaries' read, and that from the health route and the verdict
-// scrape. Each call is placed by the function it is written in, one entry a
+// the summaries' read, and that from the health route, the overview
+// beside it and the verdict scrape. Each call is placed by the function it is written in, one entry a
 // call, so a new caller of any of them fails here.
 func TestTheReadsPastTheMemoryLineAreReachedByTheVerdictAlone(t *testing.T) {
 	want := map[string][]string{
@@ -584,8 +584,10 @@ func TestTheReadsPastTheMemoryLineAreReachedByTheVerdictAlone(t *testing.T) {
 		"loadForVerdict":         {"fleet/service.go:summarizeFromSnapshots"},
 		"summarizeUnadmitted":    {"fleet/service.go:summarizeFromSnapshots"},
 		"summarizeFromSnapshots": {"fleet/service.go:summarize"},
-		// the /api/health route, its one call there, and the scrape
-		"Summarized": {"cmd/alarmd/runtime_phase_two_fleet.go:fleetVerdictSource", "fleet/handler.go:NewHandler"},
+		// the /api/health route and the overview computed beside it -- the
+		// same verdict projected for the admin page, once per OverviewMaxAge
+		// whoever asks -- and the scrape
+		"Summarized": {"cmd/alarmd/runtime_phase_two_fleet.go:fleetVerdictSource", "fleet/handler.go:NewHandler", "fleet/handler.go:NewHandler"},
 	}
 	got := map[string][]string{}
 	err := filepath.WalkDir("..", func(path string, entry os.DirEntry, err error) error {
