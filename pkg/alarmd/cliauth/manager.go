@@ -33,10 +33,10 @@ const (
 	// pairings already stored carry it, and renaming it would mean migrating
 	// them for no difference in behaviour.
 	ScopeReadonly = "deployment_ops_readonly"
-	// requestedExecScope is what an alarmd-cli built between 10-10 and 10-12
-	// (before 310f82cf7) may still ask the authorization page for; it is
-	// granted the one scope. No running deployment ever issued it, so no
-	// stored session or pairing carries it and none is read.
+	// requestedExecScope is what an alarmd-cli built after the execution
+	// scope was added and before 310f82cf7 may still ask the authorization
+	// page for; it is granted the one scope. No running deployment ever
+	// issued it, so no stored session or pairing carries it and none is read.
 	//
 	// Retire when: no alarmd-cli older than 310f82cf7 is supported - the
 	// CLI that stopped asking for it.
