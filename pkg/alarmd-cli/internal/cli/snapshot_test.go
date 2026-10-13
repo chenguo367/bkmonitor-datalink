@@ -138,6 +138,7 @@ func readArchive(t *testing.T, file string) map[string][]byte {
 func TestASnapshotIsEveryReadNowInOneFile(t *testing.T) {
 	snapshotPace = func(int) time.Duration { return 0 }
 	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
 	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}}
 	var p Profile
 	server := fixture.server(t, &p)
@@ -214,5 +215,61 @@ func TestSnapshotFlagsAreItsOwn(t *testing.T) {
 	if code, result, _, _ := run(t, store, http.DefaultClient, "", "diagnose", "--env", "env-one", "--out", t.TempDir()); code != 2 ||
 		stringField(objectField(result, "error"), "code") != "invalid_input" {
 		t.Fatalf("code %d result %v", code, result)
+	}
+}
+
+type noNetwork struct{ t *testing.T }
+
+func (n noNetwork) RoundTrip(*http.Request) (*http.Response, error) {
+	n.t.Error("a read from a snapshot went to the network")
+	return nil, io.ErrUnexpectedEOF
+}
+
+// A snapshot is read with the commands the deployment is read with, in the
+// same shapes and from the file alone: what it holds is answered with
+// meta.snapshot, what it does not is not_in_snapshot with the params it was
+// read with, and the diagnosis is proved over its stored pages as diagnose
+// proves it live.
+func TestASnapshotIsReadWithTheSameCommands(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}}
+	var p Profile
+	server := fixture.server(t, &p)
+	store := loggedIn(t, p, server)
+	_, written, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	server.Close()
+	file := stringField(objectField(written, "result"), "file")
+	offline := &http.Client{Transport: noNetwork{t}}
+	reader := Store{t.TempDir()}
+
+	code, result, _, _ := run(t, reader, offline, "", "discover", "--snapshot", file)
+	if code != 0 || stringField(objectField(objectField(result, "meta"), "snapshot"), "file") != file {
+		t.Fatalf("discover: code %d meta %v", code, result["meta"])
+	}
+	if code, result, _, _ = run(t, reader, offline, "", "invoke", "strategy.get", "--snapshot", file, "--input", `{"strategy_id":"2"}`); code != 0 ||
+		result["status"] != "ok" {
+		t.Fatalf("held read: code %d %v", code, result)
+	}
+	code, result, _, _ = run(t, reader, offline, "", "invoke", "strategy.get", "--snapshot", file, "--input", `{"strategy_id":"9"}`)
+	asked, _ := objectField(result, "result")["asked_in_snapshot"].([]any)
+	if code != 1 || stringField(objectField(result, "error"), "code") != "not_in_snapshot" || len(asked) != 1 ||
+		stringField(asked[0].(map[string]any), "strategy_id") != "2" {
+		t.Fatalf("read not held: code %d %v", code, result)
+	}
+	if code, _, _, _ = run(t, reader, offline, "", "describe", "fleet.get", "--snapshot", file); code != 0 {
+		t.Fatalf("describe: code %d", code)
+	}
+	code, result, _, _ = run(t, reader, offline, "", "diagnose", "--snapshot", file)
+	coverage := objectField(objectField(savedResult(t, result), "result"), "coverage")
+	if code != 0 || coverage["holds"] != true {
+		t.Fatalf("diagnose: code %d coverage %v", code, coverage)
+	}
+	if code, result, _, _ = run(t, reader, offline, "", "discover", "--snapshot", file, "--env", "another-env"); code != 2 {
+		t.Fatalf("another environment: code %d %v", code, result)
+	}
+	if code, result, _, _ = run(t, reader, offline, "", "accept", "--snapshot", file, "--env", p.EnvironmentID); code != 2 {
+		t.Fatalf("accept from a snapshot: code %d %v", code, result)
 	}
 }
