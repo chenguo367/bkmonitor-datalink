@@ -1736,7 +1736,13 @@ type Snapshot struct {
 	// for the count: the list is bounded like the anomaly list, so a replica
 	// holding more than the budget publishes a short list beside a full count
 	// rather than a smaller count.
-	OwnedObjects []string                 `json:"owned_objects,omitempty"`
+	OwnedObjects []string `json:"owned_objects,omitempty"`
+	// LookbackLate is the Query Groups this replica's lookback reads directed
+	// on its own evidence, by the rung their late series were last seen at.
+	// It is not part of the snapshot's body: the store writes it to a key of
+	// its own beside it, for the control plane's lookback planning to read
+	// without loading every snapshot (RedisStore.LoadLookbackLate).
+	LookbackLate map[string]int           `json:"-"`
 	ReadHolds    map[string]ReadHoldFacts `json:"read_holds,omitempty"`
 	// ReadHoldsCut says ReadHolds was cut to its budget, so a group it does
 	// not list may hold one (ReadHoldFacts).

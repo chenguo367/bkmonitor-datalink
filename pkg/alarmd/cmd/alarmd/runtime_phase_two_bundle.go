@@ -1275,8 +1275,9 @@ func openProductionPhaseTwoBundleAssembly(
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
 		flow:      flowFactsSource(recorder, cfg.EffectiveRoles()),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
-		readHolds: readHolds.fleetFacts,
-		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
+		lookbackLate: lookbackLateRungs(lookbackEngine),
+		readHolds:    readHolds.fleetFacts,
+		holdOf:       readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
 		applied: repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader

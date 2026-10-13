@@ -1324,6 +1324,7 @@ var alarmdWords = []string{
 	"seconds",
 	"secret",
 	"secrets",
+	"seeded",
 	"seeds",
 	"seen",
 	"segment",

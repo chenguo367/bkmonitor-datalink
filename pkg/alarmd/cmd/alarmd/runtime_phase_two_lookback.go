@@ -410,3 +410,20 @@ func lookbackPlansInto(engine *lookback.Engine) viewstream.LookbackPlansHandler 
 		engine.ApplyPlans(converted)
 	}
 }
+
+// lookbackLateRungs is the Query Groups the lookback reads directed on its
+// own evidence, by the rung their late series were seen at, keyed as the
+// fleet keys objects; nil when there is no engine.
+func lookbackLateRungs(engine *lookback.Engine) func() map[string]int {
+	if engine == nil {
+		return nil
+	}
+	return func() map[string]int {
+		rungs := engine.SeriesLateRungs()
+		late := make(map[string]int, len(rungs))
+		for queryGroup, rung := range rungs {
+			late[string(queryGroup)] = rung
+		}
+		return late
+	}
+}

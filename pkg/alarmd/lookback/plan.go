@@ -118,3 +118,23 @@ func (engine *Engine) expirePlansLocked(now time.Time) {
 		}
 	}
 }
+
+// SeriesLateRungs is every Query Group this process reads directed on its
+// own evidence, with the rung its late series were last seen at: what the
+// control plane plans from. A seeded Query Group none of whose samples here
+// has seen late series is left out: reporting a plan back as evidence would
+// keep it alive with nothing behind it.
+func (engine *Engine) SeriesLateRungs() map[execution.QueryGroupIdentity]int {
+	if engine == nil {
+		return nil
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	rungs := make(map[execution.QueryGroupIdentity]int)
+	for queryGroup, state := range engine.groups {
+		if late := state.seriesLate; late != nil && (!late.seeded || late.seen > 0) {
+			rungs[queryGroup] = late.rung
+		}
+	}
+	return rungs
+}

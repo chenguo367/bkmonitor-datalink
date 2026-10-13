@@ -143,3 +143,26 @@ func TestAPlanPastItsExpiryOrRungsIsNoPlan(t *testing.T) {
 		t.Fatalf("a first read after its entry expired, before a tick = %+v, want no directed read", read)
 	}
 }
+
+// What the control plane plans from is this process's own evidence: a
+// Query Group read directed because its samples here saw late series, by
+// their rung; never one read directed only because a plan said so, which
+// would keep the plan alive on its own word. A seeded one is reported once
+// its own sample has seen late series too.
+func TestOnlyOwnEvidenceIsReportedForPlanning(t *testing.T) {
+	own, _ := directedFixture(t, SupplementOutcome{Ran: true})
+	if rungs := own.engine.SeriesLateRungs(); len(rungs) != 1 || rungs["qg"] != own.group("qg").seriesLate.rung {
+		t.Fatalf("reported %v, want qg at its own rung", rungs)
+	}
+	seeded := plannedFixture(t)
+	seeded.engine.Begin(query("qg", seeded.clock.now().Unix(), minute, sourceLog))
+	if rungs := seeded.engine.SeriesLateRungs(); len(rungs) != 0 {
+		t.Fatalf("reported %v for a Query Group read directed only on its plan, want nothing", rungs)
+	}
+	seeded.engine.mu.Lock()
+	seeded.engine.groups["qg"].seriesLate.seen = 1
+	seeded.engine.mu.Unlock()
+	if rungs := seeded.engine.SeriesLateRungs(); len(rungs) != 1 || rungs["qg"] != 2 {
+		t.Fatalf("reported %v once its own sample confirmed it, want qg at rung 2", rungs)
+	}
+}
