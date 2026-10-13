@@ -286,6 +286,22 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			// A 60 second TTL survives several missed 10 second renewals
 			// during a short Ownership Store outage before the Worker
 			// drops out of the ready set.
+			//
+			// It is longer than the 30 second lease on purpose, and is not
+			// to be set equal to it. During a store outage of 30 to 60
+			// seconds the leases lapse but the registrations do not, so
+			// once the store is back every Worker takes its own Query
+			// Groups again and nothing moves. At the lease TTL every
+			// registration would lapse together, the Leader's first round
+			// after the outage would see only the Workers that renewed
+			// first, and settle places a Query Group away from a holder
+			// that is not ready with no handover budget: the whole fleet
+			// would move at once. What the shorter TTL buys is a crash
+			// takeover some 30 seconds sooner, which changes whether the
+			// replay window covers the gap only for periods of about 15
+			// to 24 seconds. A faster crash takeover belongs in the
+			// Leader -- hold placements away from absent holders for a
+			// renewal after its own store reads failed -- not here.
 			RegistrationTTL: Duration(60 * time.Second), RegistrationRenewInterval: Duration(10 * time.Second),
 		},
 		Control: PhaseTwoControlConfig{
