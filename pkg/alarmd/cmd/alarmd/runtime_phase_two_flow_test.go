@@ -17,8 +17,10 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 )
 
 // Every decided Slot's lag from readable data -- evaluation time plus read
@@ -61,5 +63,27 @@ func TestTheQueryFailureCausesAreOneList(t *testing.T) {
 	}
 	if len(flow.QueryFailures) != len(access.QueryFailures) || !slices.Contains(access.QueryFailures, "other") {
 		t.Fatalf("failures = %v", flow.QueryFailures)
+	}
+}
+
+// The bounds the summary's block is read by are the metrics' own.
+func TestTheFlowBoundsAreTheMetricsBounds(t *testing.T) {
+	if !slices.Equal(fleet.FlowQueryBounds, metric.QueryDurationBuckets) || !slices.Equal(fleet.FlowDecisionBounds, metric.DecisionLagBuckets) ||
+		!slices.Equal(fleet.FlowRedisBounds, metric.RedisDurationBuckets()) {
+		t.Fatal("the flow block's bounds are not the metrics' bounds")
+	}
+}
+
+// The block a replica publishes is the metrics' values, with the roles it
+// runs and the heap only once sampled.
+func TestTheFlowBlockIsTheMetricsValues(t *testing.T) {
+	r := metric.NewRecorder(metric.BuildInfo{})
+	r.RecordPhysicalQuery(time.Second, access.QueryFailureTimeout)
+	r.RecordDecisionLag(2 * time.Second)
+	facts := flowFactsSource(r, roles.Set{roles.Worker, roles.Channel})()
+	if facts.Queries != 1 || facts.QueryFailures[access.QueryFailureTimeout] != 1 || facts.DecisionLag.Count != 1 ||
+		len(facts.QueryDuration.Buckets) != len(fleet.FlowQueryBounds) || !slices.Equal(facts.Roles, []string{"worker", "channel"}) ||
+		facts.LiveHeapBytes != nil {
+		t.Fatalf("flow facts = %+v", facts)
 	}
 }

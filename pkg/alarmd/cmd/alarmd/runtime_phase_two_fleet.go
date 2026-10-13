@@ -187,6 +187,9 @@ type fleetPublisher struct {
 	// use, so the page can answer "how close are we" from the same read that
 	// produced the verdict instead of waiting on collection.
 	capacity func() *fleet.Capacity
+	// flow is this replica's stage counters for the overview, read from the
+	// metrics at each publish; nil publishes none.
+	flow func() *fleet.FlowFacts
 	// readEarly is the late-data lookback's report of the owned objects read
 	// before their data was complete, by object. Nil on a process that runs
 	// no lookback, and the snapshot then carries no such line.
@@ -862,6 +865,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.capacity != nil {
 		snapshot.Capacity = publisher.capacity()
+	}
+	if publisher.flow != nil {
+		snapshot.Flow = publisher.flow()
 	}
 	if publisher.applied != nil {
 		snapshot.AppliedActivationRecordRevision = publisher.applied()

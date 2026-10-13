@@ -1880,6 +1880,9 @@ type Snapshot struct {
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
 	Capacity *Capacity `json:"capacity,omitempty"`
+	// Flow is the replica's counters for the overview's stages (FlowFacts):
+	// fixed size, so the summary carries it. Absent on a build before it.
+	Flow *FlowFacts `json:"flow,omitempty"`
 	// Overdue counts the objects this replica should have picked up and has not.
 	// Absent means the replica has nothing holding wake times, which is a
 	// different answer from "nothing is overdue" and must not be shown as one.
@@ -2845,6 +2848,8 @@ type ReplicaView struct {
 	// Capacity is this replica's own occupancy. Present only where the replica
 	// reports it; absent is different from zero and stays absent.
 	Capacity *Capacity `json:"capacity,omitempty"`
+	// Flow is this replica's stage counters as it published them.
+	Flow *FlowFacts `json:"flow,omitempty"`
 	// AckedVersion is the Activation record revision this replica reported
 	// executing by, absent when it reported none. Lag is the difference
 	// between it and the deployment's PublishedVersion, two persisted
@@ -3470,7 +3475,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			// an older build will not. Zero has to read as "not reported" rather
 			// than "started just now", so the page checks before using it.
 			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now), StartedAt: snapshot.StartedAt,
-			Truncated: truncated, Capacity: snapshot.Capacity,
+			Truncated: truncated, Capacity: snapshot.Capacity, Flow: snapshot.Flow,
 			Build: snapshot.Build,
 		}
 		// This replica's own record of its dependencies, copied so a later

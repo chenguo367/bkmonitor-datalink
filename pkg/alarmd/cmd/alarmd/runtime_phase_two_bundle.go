@@ -1266,6 +1266,7 @@ func openProductionPhaseTwoBundleAssembly(
 		// cursor older than that describes an object that stopped rather than
 		// one between rounds.
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
+		flow:      flowFactsSource(recorder, cfg.EffectiveRoles()),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
 		readHolds: readHolds.fleetFacts,
 		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),

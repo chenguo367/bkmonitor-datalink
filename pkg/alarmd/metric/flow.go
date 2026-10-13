@@ -243,3 +243,7 @@ func labelOf(sample *dto.Metric, name string) string {
 	}
 	return ""
 }
+
+// RedisDurationBuckets is redis_command_duration_seconds's bounds, for the
+// readers of the flow's runtime Redis histogram.
+func RedisDurationBuckets() []float64 { return append([]float64(nil), redisDurationBuckets...) }
