@@ -141,9 +141,11 @@ func TestAPreferredProcessThatIsNotYetStableLeavesAFreeLeaseToAReadyFallback(t *
 		})
 	}
 	at := time.Unix(1_800_000_000, 0)
-	fallback := func(id string, ready bool, expiresAt time.Time) ownership.InstanceRegistration {
+	const window = time.Minute
+	stableSince, youngSince := at.Add(-window), at.Add(-window+time.Second)
+	fallback := func(id string, ready bool, expiresAt time.Time, since *time.Time) ownership.InstanceRegistration {
 		return ownership.InstanceRegistration{InstanceID: id, Roles: roles.Set{roles.Worker}, Incarnation: "1", ExpiresAt: expiresAt,
-			ControlCandidacy: ownership.ControlCandidacyFallback, ControlCandidacyReady: ready}
+			ControlCandidacy: ownership.ControlCandidacyFallback, ControlCandidacyReady: ready, ControlCandidacyReadySince: since}
 	}
 	for _, testCase := range []struct {
 		name       string
@@ -151,15 +153,36 @@ func TestAPreferredProcessThatIsNotYetStableLeavesAFreeLeaseToAReadyFallback(t *
 		want       bool
 	}{
 		{name: "none registered"},
-		{name: "live and ready", candidates: []ownership.InstanceRegistration{fallback("w", true, at.Add(time.Second))}, want: true},
-		{name: "live, not ready", candidates: []ownership.InstanceRegistration{fallback("w", false, at.Add(time.Minute))}},
-		{name: "ready, expired", candidates: []ownership.InstanceRegistration{fallback("w", true, at)}},
-		{name: "itself", candidates: []ownership.InstanceRegistration{fallback("self", true, at.Add(time.Minute))}},
+		{name: "live and ready for a window", candidates: []ownership.InstanceRegistration{fallback("w", true, at.Add(time.Second), &stableSince)}, want: true},
+		{name: "live and ready, younger than a window", candidates: []ownership.InstanceRegistration{fallback("w", true, at.Add(time.Minute), &youngSince)}},
+		{name: "live, not ready", candidates: []ownership.InstanceRegistration{fallback("w", false, at.Add(time.Minute), &stableSince)}},
+		{name: "ready, expired", candidates: []ownership.InstanceRegistration{fallback("w", true, at, &stableSince)}},
+		{name: "itself", candidates: []ownership.InstanceRegistration{fallback("self", true, at.Add(time.Minute), &stableSince)}},
 		{name: "a preferred record is no fallback", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", true, at.Add(time.Minute))}},
 	} {
 		t.Run("fallback "+testCase.name, func(t *testing.T) {
-			if got := readyFallbackPresent(testCase.candidates, "self", at); got != testCase.want {
-				t.Fatalf("readyFallbackPresent() = %v, want %v", got, testCase.want)
+			if got := stableFallbackPresent(testCase.candidates, "self", at, window); got != testCase.want {
+				t.Fatalf("stableFallbackPresent() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+	young := preferredRecordForTest("c", "1", true, at.Add(time.Minute))
+	young.ControlCandidacyReadySince = &youngSince
+	for _, testCase := range []struct {
+		name       string
+		candidates []ownership.InstanceRegistration
+		want       bool
+	}{
+		{name: "none registered"},
+		{name: "ready however young", candidates: []ownership.InstanceRegistration{young}, want: true},
+		{name: "not ready", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", false, at.Add(time.Minute))}},
+		{name: "ready, expired", candidates: []ownership.InstanceRegistration{preferredRecordForTest("c", "1", true, at)}},
+		{name: "itself", candidates: []ownership.InstanceRegistration{preferredRecordForTest("self", "1", true, at.Add(time.Minute))}},
+		{name: "a fallback record is no preferred", candidates: []ownership.InstanceRegistration{fallback("w", true, at.Add(time.Minute), &stableSince)}},
+	} {
+		t.Run("preferred "+testCase.name, func(t *testing.T) {
+			if got := readyPreferredPresent(testCase.candidates, "self", at); got != testCase.want {
+				t.Fatalf("readyPreferredPresent() = %v, want %v", got, testCase.want)
 			}
 		})
 	}
