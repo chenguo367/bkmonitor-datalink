@@ -15,6 +15,12 @@ type QueryCooldownFacts struct {
 	// before the deadline, FirstTimeoutAt when the first was; saturates at 32.
 	Timeouts       uint32    `json:"timeouts,omitempty"`
 	FirstTimeoutAt time.Time `json:"first_timeout_at,omitempty"`
+	// Cuts is how many of the failures were the backend's own cut - answered
+	// unavailable after running longer than any answer - and saturates at 32.
+	// A Query Group back in the pool with cuts after an answer let it out
+	// leaves only on evidence (held_after_reentry); with none it is decided
+	// as a first entry is. The same count is kept on its record.
+	Cuts uint32 `json:"cuts,omitempty"`
 	// EnteredAt is when the Query Group entered the pool, across restarts and
 	// owners; Source says how it is in it now: probe (this process's own
 	// failed queries) or restored (read back from its record). LastExitAt and
