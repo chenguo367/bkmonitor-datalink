@@ -2828,10 +2828,13 @@ func (executor observedProductionSlotExecutor) Execute(
 		// hold later. A read hold is not lag; it is the wait the Slot chose.
 		due := time.Unix(int64(request.Contract.Slot.EvaluationTime), 0).Add(time.Duration(request.Contract.ReadHoldMillis) * time.Millisecond)
 		lag := time.Since(due)
-		// Every period's decision, for the overview's evaluate stage; a Slot
-		// booked without a decision lags by its booking, not its detection.
+		// Every period's decision in a normal round, for the overview's
+		// evaluate stage. A Slot booked without a decision lags by its
+		// booking, not its detection; a replay, a probe and a supplement are
+		// late by what they are and would read as the rounds running late.
 		if executor.decisionLag != nil && result.CompletionKind != execution.CompletionGapSkipped &&
-			result.CompletionKind != execution.CompletionSnapshotUnavailable {
+			result.CompletionKind != execution.CompletionSnapshotUnavailable &&
+			(request.Operation == execution.OperationNormal || request.Operation == execution.OperationRetry) {
 			executor.decisionLag(lag)
 		}
 		if observability.IsShortPeriodCohort(request.ShortPeriodCohort) {

@@ -64,8 +64,9 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 		decisionLag: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "slot_decision_lag_seconds",
 			Help: "Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion " +
-				"being acknowledged, for every period; skipped and snapshot-unavailable completions are not decisions " +
-				"and are not in it.",
+				"being acknowledged, for every period, in normal rounds: a normal Slot and its retry. Replays, probes and " +
+				"supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions " +
+				"are not decisions and are not in it either.",
 			Buckets: DecisionLagBuckets,
 		}),
 		outputRejectedAll: prometheus.NewCounter(prometheus.CounterOpts{
