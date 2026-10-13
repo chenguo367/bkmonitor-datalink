@@ -36,6 +36,7 @@ var queryFailureReasons = []string{"timeout", "refused", "not_found", "transport
 
 type flowMetrics struct {
 	physicalQueries   prometheus.Counter
+	stateApplied      prometheus.Counter
 	queryDuration     prometheus.Histogram
 	queryFailures     *prometheus.CounterVec
 	failures          map[string]prometheus.Counter
@@ -46,6 +47,7 @@ type flowMetrics struct {
 func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 	m := flowMetrics{
 		physicalQueries: work.WithLabelValues("physical_query"),
+		stateApplied:    work.WithLabelValues("state_apply"),
 		queryDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_query_duration_seconds",
 			Help: "Each physical query a Slot runs, every attempt including retries, by the time its provider took from " +
@@ -160,7 +162,7 @@ func (r *Recorder) FlowCounters() FlowCounters {
 			flow.Detections += uint64(sample.GetCounter().GetValue())
 		}
 	})
-	flow.StateWrites = counterOf(m.work.WithLabelValues("state_apply"))
+	flow.StateWrites = counterOf(m.flow.stateApplied)
 	eachSample(m.stateAdmissions, func(sample *dto.Metric) {
 		if labelOf(sample, "result") != "success" {
 			flow.StateFailures += uint64(sample.GetCounter().GetValue())

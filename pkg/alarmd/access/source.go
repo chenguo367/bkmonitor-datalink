@@ -672,9 +672,13 @@ func (source *Source) executeWithPermit(
 ) (execution.ProviderCompletion, error) {
 	defer permit.Release()
 	observability.EmitTargetFlow(ctx, "runner_decision", observability.TraceFields{}, observability.TargetFlowFacts{Decision: "query_running"})
+	called := time.Now()
 	completion, err := source.provider.Execute(ctx, attempt, adapter)
-	if source.config.ObserveQuery != nil {
-		source.config.ObserveQuery(time.Duration(completion.Stats.QueryMillis)*time.Millisecond, queryFailureOf(completion, err))
+	// A caller that gave up -- a step-down, a shutdown -- is not a failure of
+	// the query, and an attempt cut short that way has no duration of its
+	// own: it is not heard.
+	if source.config.ObserveQuery != nil && !errors.Is(err, context.Canceled) {
+		source.config.ObserveQuery(queryElapsed(completion, err, time.Since(called)), queryFailureOf(completion, err))
 	}
 	if err == nil && source.config.ObserveDownstreamDistress != nil {
 		if class := downstreamDistressOf(completion); class != "" {

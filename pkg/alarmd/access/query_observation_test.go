@@ -12,6 +12,7 @@ package access
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -83,5 +84,58 @@ func TestEveryPhysicalQueryIsHeardOnceWithItsTimeAndFailure(t *testing.T) {
 	want := []observedQuery{{1500 * time.Millisecond, ""}, {20 * time.Millisecond, QueryFailureRefused}}
 	if !slices.Equal(heard, want) {
 		t.Fatalf("heard %+v, want %+v", heard, want)
+	}
+}
+
+// bodyFailure is shaped as the UQ client's failure after an answer began:
+// an error, not a completion, carrying its detail and its timing.
+type bodyFailure struct {
+	detail string
+	timing *execution.AttemptTiming
+}
+
+func (f bodyFailure) Error() string                                { return "body failed: " + f.detail }
+func (f bodyFailure) QueryFailureDetail() string                   { return f.detail }
+func (f bodyFailure) QueryFailureTiming() *execution.AttemptTiming { return f.timing }
+
+type failingProvider struct {
+	err   error
+	sleep time.Duration
+}
+
+func (provider failingProvider) Execute(context.Context, execution.QueryAttempt, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+	time.Sleep(provider.sleep)
+	return execution.ProviderCompletion{}, provider.err
+}
+
+// A query that failed after its answer began comes back as an error, not a
+// completion: it is classified by the detail the error carries and timed by
+// the error's own timing, or by the call itself when it has none -- never
+// at zero. A caller that gave up is not a failure of the query and is not
+// heard.
+func TestAQueryThatFailedAsAnErrorIsClassifiedAndTimedByIt(t *testing.T) {
+	var heard []observedQuery
+	released := 0
+	observe := Config{ObserveQuery: func(elapsed time.Duration, failure string) { heard = append(heard, observedQuery{elapsed, failure}) }}
+	for _, provider := range []failingProvider{
+		{err: bodyFailure{detail: execution.BodyRouteDetail(execution.TransportFailureTimeout), timing: &execution.AttemptTiming{ElapsedMillis: 30_004}}},
+		{err: fmt.Errorf("wrapped: %w", bodyFailure{detail: execution.BodyRouteDetail(execution.TransportFailureConnectionReset)}), sleep: 20 * time.Millisecond},
+		{err: bodyFailure{detail: execution.DeliveryTimeoutRouteDetail, timing: &execution.AttemptTiming{ElapsedMillis: 12_000}}},
+		{err: fmt.Errorf("step down: %w", context.Canceled)},
+	} {
+		source := &Source{provider: provider, config: observe}
+		_, _ = source.executeWithPermit(context.Background(), execution.QueryAttempt{}, nil, waitedPermit{released: &released})
+	}
+	if len(heard) != 3 {
+		t.Fatalf("heard %+v, want three: the cancelled one is not a failure of the query", heard)
+	}
+	if heard[0] != (observedQuery{30_004 * time.Millisecond, QueryFailureTimeout}) {
+		t.Fatalf("body timeout heard as %+v, want 30.004 s timeout from its own timing", heard[0])
+	}
+	if heard[1].failure != QueryFailureTransport || heard[1].elapsed < 20*time.Millisecond {
+		t.Fatalf("body reset heard as %+v, want transport timed by the call", heard[1])
+	}
+	if heard[2] != (observedQuery{12 * time.Second, QueryFailureTimeout}) {
+		t.Fatalf("delivery timeout heard as %+v, want a 12 s timeout", heard[2])
 	}
 }
