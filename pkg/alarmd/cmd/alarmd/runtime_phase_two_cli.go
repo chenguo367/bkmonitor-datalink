@@ -59,6 +59,10 @@ type cliControlBinding struct {
 	// RedisDialRetries, when set, hears each second dial of the CLI's own
 	// Redis clients -- evidence, auth -- by why the first dial failed.
 	RedisDialRetries func(client, reason string)
+	// AuthEvents and RosterApplied, when set, hear the CLI authorization's
+	// counted events and each roster it applies.
+	AuthEvents    func(event string, n uint64)
+	RosterApplied func(at time.Time)
 	// Lookback is this process's late-data lookback, nil when it does not
 	// run one, and LookbackStanding why; read by lookback.get.
 	Lookback         *lookback.Engine
@@ -67,6 +71,13 @@ type cliControlBinding struct {
 	// Maintenance is the effective-time maintenance, bound once the loop is
 	// built; read by maintenance.get.
 	Maintenance *maintenanceSource
+}
+
+// cliAuthEvents counts the CLI authorization's events, every cell created
+// up front.
+func cliAuthEvents(recorder *metric.Recorder) func(event string, n uint64) {
+	recorder.PresetCLIAuth(cliauth.Counts)
+	return recorder.RecordCLIAuth
 }
 
 // cliRedisFailures counts an unanswered call of a CLI client by its reason,
@@ -145,7 +156,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	runtime, err := openProductionRoleChannel(cfg, ChannelBinding{Native: native, Catalog: catalog, Progress: progressStore,
 		Settings: settings, Facts: facts, Control: control})
 	if err != nil {
-		return composeCLI(native, nil, nil), func() error { return nil }, false
+		return composeCLI(native, nil, nil, nil), func() error { return nil }, false
 	}
 	return runtime.Handler, runtime.Close, runtime.Restricted
 }
@@ -319,7 +330,24 @@ func (c *capturedResponse) WriteHeader(code int) {
 	}
 }
 
-func composeCLI(native, channel, auth http.Handler) http.Handler {
+// frontSurface is what the admin server in front of the deployment calls,
+// with the administrator key: named grants and the roster, and the reads of
+// obchannel.FrontReads.
+func frontSurface(channel *obchannel.Channel, manager *cliauth.Manager) http.Handler {
+	read, grants := channel.FrontReadHandler(manager.AuthorizeAdmin), manager.FrontHandler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == cliauth.FrontReadPath {
+			read.ServeHTTP(w, r)
+			return
+		}
+		grants.ServeHTTP(w, r)
+	})
+}
+
+// composeCLI puts the CLI's routes and the front surface in front of the
+// API. The front surface is matched on the request's own path, outside
+// /api/cli/, so a forwarder that passes /api/cli/* through never reaches it.
+func composeCLI(native, channel, auth, front http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var handler http.Handler
 		switch {
@@ -327,6 +355,8 @@ func composeCLI(native, channel, auth http.Handler) http.Handler {
 			handler = channel
 		case slices.Contains(cliauth.Paths, r.URL.Path):
 			handler = auth
+		case strings.HasPrefix(r.URL.Path, "/api/front/"):
+			handler = front
 		default:
 			native.ServeHTTP(w, r)
 			return

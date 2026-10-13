@@ -283,6 +283,16 @@ Labels: `disposition`, `reason`
 
 Source objects the Catalog the leader last built did not turn into a Plan, by what happened to them and why. The disposition alone cannot be acted on: a CONFIG_REJECTED strategy has stopped detecting, a STALE_CONFIG one is still running its last good Plan, and the reason names the configuration that caused either. The reason is the control plane's own word, carried as written -- a reason added at its site appears here under its name the first scrape it has an object -- while a disposition this build does not name is counted under other, so the partition keeps adding up. Most pairs are absent from a scrape that had no objects under them; a few are published at zero regardless, because their zero is a claim somebody acts on and a claim that reads the same as 'this build does not produce that reason' is not one. Every pair reading zero is the expected state and is also what 'nothing was computed' looks like, so read it against catalog_objects: these pairs partition every object that is not ACCEPTED, the same pass produces both, and a zero that adds up against that sum is a zero that was computed. Reported by the leader only.
 
+## bkmonitor_alarmd_cli_auth_total
+
+Labels: `event`
+
+CLI authorization events this process handled, by event: grants issued on the authorization page (grants_issued) and through the admin's front surface (front_grants_issued); front grants refused before the first roster sync (front_grants_refused_roster_not_synced) and for an operator off the roster (front_grants_refused_not_on_roster); exchanges, pairings and renewals and their refusals; rosters applied, unchanged (the same digest again) and rejected; pairings the roster revoked (roster_pairings_revoked, counted per pairing); and store_unavailable. Reader: the operator of an admin in front of the deployment, and anyone asking why a CLI login failed.
+
+## bkmonitor_alarmd_cli_roster_applied_timestamp_seconds
+
+When this process last applied a new operator roster from the admin, as Unix seconds; 0 until one is. The roster is shared: another channel replica may have applied the latest one.
+
 ## bkmonitor_alarmd_cmdb_host_index_age_seconds
 
 Labels: `kind`

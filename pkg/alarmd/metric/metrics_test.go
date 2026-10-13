@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -514,6 +515,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_sre_rollouts_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_sre_rollouts_watched"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_sre_receipts_write_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_cli_auth_total"] = "variableLabels: {event}"
+	expected["bkmonitor_alarmd_cli_roster_applied_timestamp_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_linkd_console_failures_total"] = "variableLabels: {op,class}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_last_good_identity_changed_total"] = "variableLabels: {}"
@@ -1071,6 +1074,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("sre_rollouts_total")] = 7
 	bounds[fqName("sre_rollouts_watched")] = 1
 	bounds[fqName("sre_receipts_write_total")] = 2
+	// cliauth.Counts, bound at wiring.
+	bounds[fqName("cli_auth_total")] = len(cliauth.Counts)
+	bounds[fqName("cli_roster_applied_timestamp_seconds")] = 1
 	// Every Console operation by every failure class.
 	bounds[fqName("linkd_console_failures_total")] = len(openalerts.ConsoleOps) * len(openalerts.ConsoleFailureClasses)
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1

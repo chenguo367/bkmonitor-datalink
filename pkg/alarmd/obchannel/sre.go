@@ -32,6 +32,11 @@ type SREAction struct {
 	DurationMS int64  `json:"duration_ms"`
 	SessionID  string `json:"session_id,omitempty"`
 	RequestID  string `json:"request_id,omitempty"`
+	// Operator is the admin user the session was issued to; empty with
+	// IssuedVia admin_key, the deployment administrator. Both empty on a
+	// receipt from before 0.4.
+	Operator  string `json:"operator,omitempty"`
+	IssuedVia string `json:"issued_via,omitempty"`
 	// At is when the action ended.
 	At time.Time `json:"at"`
 	// Exec is what a pod.exec run said about itself, without its output.
@@ -107,6 +112,10 @@ func sreResult(err error) (string, string) {
 type Caller struct {
 	SessionID string
 	RequestID string
+	// Operator and IssuedVia are the session's: who it was issued to and
+	// through which route (cliauth.IssuedViaFront or IssuedViaAdminKey).
+	Operator  string
+	IssuedVia string
 }
 
 type callerKey struct{}
@@ -161,6 +170,7 @@ func SREOperations(options SREOptions) []Operation {
 		ended := now()
 		action.DurationMS, action.At = ended.Sub(started).Milliseconds(), ended.UTC()
 		action.SessionID, action.RequestID = caller.SessionID, caller.RequestID
+		action.Operator, action.IssuedVia = caller.Operator, caller.IssuedVia
 		options.Audit(action)
 	}
 	text := Field{Type: "string", MinLength: 1, MaxLength: 256}
@@ -423,7 +433,7 @@ func SREOperations(options SREOptions) []Operation {
 				namespace = pods.DefaultNamespace()
 			}
 			v, err := rollouts.Start(ctx, rollout.Request{Namespace: namespace, Name: p.String("name"), UID: p.String("uid"), Container: p.String("container"),
-				Image: p.String("image"), SessionID: caller.SessionID, RequestID: caller.RequestID})
+				Image: p.String("image"), SessionID: caller.SessionID, RequestID: caller.RequestID, Operator: caller.Operator, IssuedVia: caller.IssuedVia})
 			audit(ctx, started, SREAction{Op: OpSetImage, Namespace: namespace, Kind: "Deployment", Name: p.String("name"), UID: p.String("uid"),
 				Detail: "receipt " + v.ID + " container " + p.String("container") + ": " + v.Previous + " -> " + p.String("image") + " " + v.State}, err)
 			out := wrapRollout(v, err)

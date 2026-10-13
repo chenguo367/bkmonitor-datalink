@@ -308,7 +308,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	if !binding.Roles.Has(roles.Channel) {
 		restrictPublic()
 	}
-	runtime.Handler = composeCLI(publicNative, nil, nil)
+	runtime.Handler = composeCLI(publicNative, nil, nil, nil)
 	if !binding.Roles.Has(roles.Channel) || !cfg.CLI.Enabled() {
 		return runtime, nil
 	}
@@ -317,6 +317,16 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		OnStoreFailure: func(reason, detail string) {
 			if failure := providers.read().Control.RedisFailures; failure != nil {
 				failure("auth", reason, detail)
+			}
+		},
+		OnEvent: func(event string, n uint64) {
+			if count := providers.read().Control.AuthEvents; count != nil {
+				count(event, n)
+			}
+		},
+		OnRosterApplied: func(at time.Time) {
+			if applied := providers.read().Control.RosterApplied; applied != nil {
+				applied(at)
 			}
 		}})
 	if authErr != nil {
@@ -337,7 +347,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	if cfg.PublicSurfaceRestrictionRequested() {
 		restrictPublic()
 	}
-	runtime.Handler = composeCLI(publicNative, channel, manager.Handler())
+	runtime.Handler = composeCLI(publicNative, channel, manager.Handler(), frontSurface(channel, manager))
 	runtime.HTTPConfigured = true
 	runtime.Ready = func(ctx context.Context) error {
 		// ActivePairings uses the auth pool's real Lua/read contract within

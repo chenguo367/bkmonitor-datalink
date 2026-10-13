@@ -100,7 +100,8 @@ func channelRollouts(cfg config.Config, binding ChannelBinding, client redis.Uni
 			if audit != nil {
 				audit(obchannel.SREAction{Op: obchannel.OpRevert, Namespace: record.Namespace, Kind: "Deployment", Name: record.Name, UID: record.UID,
 					Detail: "receipt " + record.ID + " container " + record.Container + ": " + record.Image + " -> " + record.Previous,
-					Result: obchannel.SREResultDone, SessionID: record.SessionID, RequestID: record.RequestID})
+					Result: obchannel.SREResultDone, SessionID: record.SessionID, RequestID: record.RequestID,
+					Operator: record.Operator, IssuedVia: record.IssuedVia})
 			}
 		},
 	})
@@ -141,7 +142,8 @@ func sreAuditSink(logger *observability.Logger, recorder *metric.Recorder) func(
 		recorder.RecordSREAction(action.Op, action.Result)
 		attrs := []slog.Attr{slog.String("op", action.Op), slog.String("namespace", action.Namespace), slog.String("kind", action.Kind),
 			slog.String("name", action.Name), slog.String("uid", action.UID), slog.String("detail", action.Detail), slog.String("code", action.Code),
-			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID)}
+			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID),
+			slog.String("operator", action.Operator), slog.String("issued_via", action.IssuedVia)}
 		duration := time.Duration(action.DurationMS) * time.Millisecond
 		if action.Result == obchannel.SREResultDone {
 			logger.Info("sre_action", action.Result, 0, duration, attrs...)
@@ -160,7 +162,8 @@ func sreRolloutSink(logger *observability.Logger, recorder *metric.Recorder) fun
 		duration := time.Duration(record.EndedAt-record.StartedAt) * time.Millisecond
 		attrs := []slog.Attr{slog.String("receipt_id", record.ID), slog.String("namespace", record.Namespace), slog.String("name", record.Name),
 			slog.String("container", record.Container), slog.String("previous_image", record.Previous), slog.String("image", record.Image),
-			slog.String("detail", record.Detail), slog.String("session_id", record.SessionID)}
+			slog.String("detail", record.Detail), slog.String("session_id", record.SessionID),
+			slog.String("operator", record.Operator), slog.String("issued_via", record.IssuedVia)}
 		if record.State == rollout.StateComplete || record.State == rollout.StateUnchanged {
 			logger.Info("sre_rollout", record.State, 0, duration, attrs...)
 			return
