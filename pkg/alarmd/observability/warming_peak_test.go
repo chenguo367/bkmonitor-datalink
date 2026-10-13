@@ -220,6 +220,30 @@ func TestWarmingPeakCountsAGroupOnceWhateverStrategyTheTraceNames(t *testing.T) 
 	}
 }
 
+// The hour's line is about the hour: it carries none of the trace of the
+// apply that happened to close it, whose Query Group and revisions a reader
+// would take for the hour's subject.
+func TestWarmingPeakLineCarriesNoTraceOfTheApplyThatClosedIt(t *testing.T) {
+	var output bytes.Buffer
+	hour := time.Date(2026, 10, 13, 3, 0, 0, 0, time.UTC)
+	fixture := newWarmingPeakFixture(hour)
+	fixture.peak.SetEmit(withheldObserver(t, &output))
+	fixture.apply(hour.Add(time.Second), "qg-warming", "11", 30, 0)
+	fixture.apply(hour.Add(time.Hour+time.Second), "qg-closer", "12", 0, 1)
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("%v; log=%q", err, output.String())
+	}
+	if event["stage"] != StageWarmingPeak {
+		t.Fatalf("line = %#v, want the hour's warming line", event)
+	}
+	for _, field := range []string{"query_group_key", "strategy_id"} {
+		if _, carried := event[field]; carried {
+			t.Fatalf("the hour's line carries %s=%v from the apply that closed it: %s", field, event[field], output.String())
+		}
+	}
+}
+
 // held is how many groups the current minute counts, for the bound's test.
 func (p *WarmingPeak) held() int {
 	p.mu.Lock()

@@ -57,7 +57,8 @@ func auditFixture(t *testing.T) (*Channel, *[]SREAction, *auditManager) {
 // Every execution and management call is heard once, after it ends, with who
 // asked (the admitted session and the request), what, where and how it
 // ended; an execution's record carries the digest of its script and its
-// stdin's length, never the stdin's text. A read is not an action.
+// stdin's length, never the stdin's text, and the receipt the caller gets
+// back names the same request. A read is not an action.
 func TestEveryExecutionAndManagementCallIsAudited(t *testing.T) {
 	channel, actions, manager := auditFixture(t)
 	target := map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid", "container": "web", "container_id": "containerd://fixture", "image_id": "sha256:fixture"}
@@ -76,6 +77,12 @@ func TestEveryExecutionAndManagementCallIsAudited(t *testing.T) {
 		exec.SessionID != "post-observation-session" || exec.RequestID == "" || exec.RequestID != response.Meta.RequestID {
 		t.Fatalf("exec record %+v", exec)
 	}
+	// The receipt the caller holds names the request its record is filed
+	// under, so sre.receipts finds it by the id the reply gave.
+	var receipt pod.ExecReceipt
+	if encoded, err := json.Marshal(response.Result); err != nil || json.Unmarshal(encoded, &receipt) != nil || receipt.RequestID != exec.RequestID {
+		t.Fatalf("exec reply request_id %q, the record's %q", receipt.RequestID, exec.RequestID)
+	}
 	if !strings.Contains(exec.Detail, "sha256:") || !strings.Contains(exec.Detail, "stdin_bytes 18") || strings.Contains(exec.Detail, "secret-script-text") {
 		t.Fatalf("exec detail %q, want the digest and stdin length and not its text", exec.Detail)
 	}
@@ -93,6 +100,31 @@ func TestEveryExecutionAndManagementCallIsAudited(t *testing.T) {
 	}
 	if len(manager.deleted) != 1 || manager.deleted[0] != "fixture/web-0@pod-uid" || (*actions)[2].Result != SREResultDone {
 		t.Fatalf("delete deleted %v recorded %+v", manager.deleted, (*actions)[2])
+	}
+}
+
+// The audit record of an execution carries the command line it ran, with
+// credentials redacted and the length capped, for the sre_action line; the
+// stored receipt keeps only the script's digest, never the command line.
+func TestAnExecutionsAuditCarriesItsRedactedCappedArgvAndTheReceiptDoesNot(t *testing.T) {
+	channel, actions, _ := auditFixture(t)
+	target := map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid", "container": "web", "container_id": "containerd://fixture", "image_id": "sha256:fixture"}
+	long := strings.Repeat("x", 4096)
+	argv := []any{"/bin/sh", "-c", "curl -H 'Authorization: Bearer abc123' http://svc; echo password=hunter2", long}
+	if status, response := call(t, channel, envelope(channel, "invoke", "pod.exec", Params{"target": target, "argv": argv})); status != 200 || response.Error != nil {
+		t.Fatalf("exec: HTTP %d %+v", status, response)
+	}
+	exec := (*actions)[0]
+	if !strings.HasPrefix(exec.Argv, "/bin/sh -c ") || !strings.Contains(exec.Argv, "<redacted>") ||
+		strings.Contains(exec.Argv, "abc123") || strings.Contains(exec.Argv, "hunter2") {
+		t.Fatalf("audited argv %q, want the command line with its credentials redacted", exec.Argv)
+	}
+	if len(exec.Argv) > pod.AuditArgvBytes+len(pod.AuditArgvTruncated) || !strings.HasSuffix(exec.Argv, pod.AuditArgvTruncated) {
+		t.Fatalf("audited argv is %d bytes ending %q, want at most %d and marked cut", len(exec.Argv), exec.Argv[max(0, len(exec.Argv)-20):], pod.AuditArgvBytes)
+	}
+	stored, err := json.Marshal(exec)
+	if err != nil || strings.Contains(string(stored), "argv") || strings.Contains(string(stored), "/bin/sh") {
+		t.Fatalf("the stored receipt carries the command line: %s (%v)", stored, err)
 	}
 }
 

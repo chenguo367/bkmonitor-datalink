@@ -77,8 +77,12 @@ type Stats struct {
 	Counts  Counts
 	Objects ObjectsSummary
 	Ignored Ignored
-	// Lagging lists the Workers that have not installed the current version.
+	// Lagging lists the Workers that have not installed the current version
+	// and are still there.
 	Lagging []LaggingReceiver
+	// Departed lists the Workers that left before installing it: out of the
+	// round's ready set with no stream. They are not in Counts.
+	Departed []LaggingReceiver
 	// NotSwitched lists the Workers that installed the current version but
 	// do not yet execute every one of its Query Groups from it, each with
 	// the count it does (decision-016 batch 4). Empty is every installed
@@ -150,9 +154,12 @@ type Server struct {
 	mu        sync.Mutex
 	publisher *Publisher
 	sessions  map[string]*session
-	counters  serverCounters
-	closed    bool
-	failures  publishFailures
+	// ready is the last round's ready set of the term; nil until a round
+	// has published one, and nobody has left before that.
+	ready    map[string]struct{}
+	counters serverCounters
+	closed   bool
+	failures publishFailures
 	// noSessionsSince backs Stats.NoSessionsSince.
 	noSessionsSince time.Time
 
@@ -205,7 +212,7 @@ func (server *Server) Lead(controlEpoch uint64) error {
 	if err != nil {
 		return err
 	}
-	server.publisher = publisher
+	server.publisher, server.ready = publisher, nil
 	for _, sess := range server.sessions {
 		sess.poke()
 	}
@@ -216,7 +223,7 @@ func (server *Server) Lead(controlEpoch uint64) error {
 // and nothing is published until Lead is called again.
 func (server *Server) StepDown() {
 	server.mu.Lock()
-	server.publisher = nil
+	server.publisher, server.ready = nil, nil
 	sessions := server.sessions
 	server.sessions = map[string]*session{}
 	server.mu.Unlock()
@@ -255,6 +262,16 @@ func (server *Server) Publish(ctx context.Context, desired Desired) (Published, 
 		server.NotePublishFailure(PublishFailureRejected)
 		return Published{}, err
 	}
+	if desired.ReadyKnown {
+		ready := make(map[string]struct{}, len(desired.Ready))
+		for _, worker := range desired.Ready {
+			ready[worker] = struct{}{}
+		}
+		server.mu.Lock()
+		server.ready = ready
+		server.mu.Unlock()
+	}
+	server.settleDeparted(ctx)
 	server.mu.Lock()
 	server.failures.since, server.failures.run, server.failures.reason = time.Time{}, 0, ""
 	if published.Changed {
@@ -331,6 +348,7 @@ func (server *Server) Stats() Stats {
 		stats.Current, stats.Counts = key, counts
 		stats.Objects, _ = server.publisher.ledger.Objects(key)
 		stats.Lagging = server.publisher.ledger.Lagging("installed")
+		stats.Departed = server.publisher.ledger.Departed()
 		installed := make(map[string]struct{}, len(stats.Lagging))
 		for _, lagging := range stats.Lagging {
 			installed[lagging.WorkerID] = struct{}{}
@@ -425,6 +443,7 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 		previous.refuse(RefusalReplaced)
 	}
 	server.observeSession(ctx, "opened", receiver, "")
+	server.settleDeparted(ctx)
 	// The first turn of the send loop is now, not at the next publication
 	// or idle tick: a Worker that connects between publications gets its
 	// snapshot at once.
@@ -437,7 +456,35 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 	}
 	server.mu.Unlock()
 	server.observeSession(ctx, "closed", receiver, reason)
+	server.settleDeparted(ctx)
 	return nil
+}
+
+// settleDeparted tells the ledger which receivers have left: out of the
+// last ready set and with no stream. Out of the ready set but connected is
+// a Worker that is alive -- warming, degraded -- and stays lagging. Before
+// any ready set nobody has left.
+func (server *Server) settleDeparted(ctx context.Context) {
+	server.mu.Lock()
+	publisher := server.publisher
+	if publisher == nil || server.ready == nil {
+		server.mu.Unlock()
+		return
+	}
+	ready := server.ready
+	connected := make(map[string]struct{}, len(server.sessions))
+	for worker := range server.sessions {
+		connected[worker] = struct{}{}
+	}
+	server.mu.Unlock()
+	recorded := publisher.ledger.SetDeparted(func(worker string) bool {
+		_, isReady := ready[worker]
+		_, isConnected := connected[worker]
+		return !isReady && !isConnected
+	})
+	if recorded.InstalledByAll {
+		server.observeInstalledByAll(ctx, recorded)
+	}
 }
 
 // recordClaimedInstall credits a Worker's Hello with the version it says

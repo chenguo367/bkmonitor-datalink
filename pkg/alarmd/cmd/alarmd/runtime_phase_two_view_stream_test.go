@@ -209,7 +209,7 @@ func TestAViewPublishFailureIsReportedAndTheRoundStands(t *testing.T) {
 	authority := ownership.PublicationAuthority{Fence: execution.OwnerFence{
 		QueryGroup: ownership.ControlLeaderIdentity, OwnerID: "leader", OwnerEpoch: 4, LeaseToken: "token",
 	}}
-	runtime.publishView(context.Background(), authority, nil, nil)
+	runtime.publishView(context.Background(), authority, nil, nil, nil, false)
 	if len(observed) != 1 || observed[0].Stage != observability.StageViewPublished || observed[0].Result != observability.ResultDegraded ||
 		observed[0].ViewStream == nil || observed[0].ViewStream.Event != "publish_failed" || !strings.Contains(observed[0].ViewStream.Reason, "redis gone") {
 		t.Fatalf("observed = %+v, want one degraded view_published naming the failure", observed)
@@ -219,7 +219,7 @@ func TestAViewPublishFailureIsReportedAndTheRoundStands(t *testing.T) {
 	}
 	// Not leading is a failure of the same kind, not a panic and not a stall.
 	runtime.dependencies.ViewSource = staticViewSource{}
-	runtime.publishView(context.Background(), authority, nil, nil)
+	runtime.publishView(context.Background(), authority, nil, nil, nil, false)
 	if len(observed) != 2 || !strings.Contains(observed[1].ViewStream.Reason, "not leading") {
 		t.Fatalf("observed = %+v, want a second failure for not leading", observed)
 	}

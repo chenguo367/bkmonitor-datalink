@@ -259,10 +259,32 @@ func TestTheStoredViewIsTheActivationsSetAndTheRoundSupersedesIt(t *testing.T) {
 		t.Fatalf("records asked for %v, want the active and the draining Query Group", store.asked)
 	}
 	changed := map[execution.QueryGroupIdentity]ownership.AssignmentRecord{"qg-active": {DesiredWorkerID: "worker-c", RecordRevision: 4}}
-	runtime.publishView(context.Background(), authority, changed, nil)
+	runtime.publishView(context.Background(), authority, changed, nil, nil, false)
 	round := server.Stats()
 	if round.ControlEpoch != stored.ControlEpoch || round.Revision <= stored.Revision {
 		t.Fatalf("the round's view (%+v) does not supersede the stored one (%+v)", round, stored)
+	}
+}
+
+// The round hands the view its ready set: a receiver outside it with no
+// stream has left and is named so, while a ready one without a stream is
+// lagging. A publication from outside the round brings no ready set and
+// leaves the last one standing.
+func TestTheRoundsReadySetTellsTheViewWhoLeft(t *testing.T) {
+	var observed []observability.Observation
+	records := map[execution.QueryGroupIdentity]ownership.AssignmentRecord{
+		"qg-a": {DesiredWorkerID: "worker-a", RecordRevision: 3},
+		"qg-b": {DesiredWorkerID: "worker-b", RecordRevision: 2},
+	}
+	runtime, server, authority := storedViewRuntime(t, storedViewSource{}, &storedViewStore{records: records}, &observed)
+	runtime.publishView(context.Background(), authority, records, nil, []ownership.WorkerRegistration{{WorkerID: "worker-a"}}, true)
+	stats := server.Stats()
+	if len(stats.Departed) != 1 || stats.Departed[0].WorkerID != "worker-b" || len(stats.Lagging) != 1 || stats.Lagging[0].WorkerID != "worker-a" || stats.Counts.Expected != 1 {
+		t.Fatalf("after the round: departed %+v lagging %+v counts %+v, want worker-b gone and worker-a lagging", stats.Departed, stats.Lagging, stats.Counts)
+	}
+	runtime.publishView(context.Background(), authority, records, nil, nil, false)
+	if stats := server.Stats(); len(stats.Departed) != 1 || stats.Departed[0].WorkerID != "worker-b" {
+		t.Fatalf("a publication without a ready set changed who left: %+v", stats.Departed)
 	}
 }
 
@@ -372,7 +394,7 @@ func TestTheViewGivesAHeldBackQueryGroupItsOpenSegment(t *testing.T) {
 	}
 	runtime, server, authority := storedViewRuntime(t, storedViewSource{}, &storedViewStore{records: records}, &observed)
 	runtime.dependencies.ViewSource = blockedViewSource{}
-	runtime.publishView(context.Background(), authority, records, nil)
+	runtime.publishView(context.Background(), authority, records, nil, nil, false)
 	view, ok := server.Snapshot("worker-a")
 	if !ok || len(observed) != 0 {
 		t.Fatalf("nothing published: ok=%v observed=%+v", ok, observed)

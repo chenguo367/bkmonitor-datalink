@@ -113,6 +113,9 @@ func (p *WarmingPeak) Observe(ctx context.Context, o Observation) {
 	}
 	p.mu.Unlock()
 	if line != nil && p.emit != nil {
+		// The hour's line, not the apply's: the trace on ctx is the apply
+		// that happened to close the hour, and would read as its subject.
+		ctx = context.WithValue(ctx, traceFieldsContextKey{}, TraceFields{})
 		p.emit.Observe(ctx, Observation{Component: ComponentState, Stage: StageWarmingPeak,
 			Result: ResultSuccess, Direction: DirectionInternal, ReasonCode: ReasonNone, WarmingPeak: line})
 	}

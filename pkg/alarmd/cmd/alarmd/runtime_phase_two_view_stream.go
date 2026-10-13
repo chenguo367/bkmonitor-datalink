@@ -249,6 +249,8 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	authority ownership.PublicationAuthority,
 	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
 	owners map[execution.QueryGroupIdentity]string,
+	ready []ownership.WorkerRegistration,
+	readyKnown bool,
 ) {
 	stream, source := runtime.dependencies.ViewStream, runtime.dependencies.ViewSource
 	if stream == nil || source == nil {
@@ -279,6 +281,10 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 			ActivationRecordRevision: state.RecordRevision},
 		Content:     make(map[execution.QueryGroupIdentity]viewstream.Content, len(running)),
 		Assignments: make(map[execution.QueryGroupIdentity]viewstream.Assignment, len(records)),
+		ReadyKnown:  readyKnown,
+	}
+	for _, worker := range ready {
+		desired.Ready = append(desired.Ready, worker.WorkerID)
 	}
 	for identity, entry := range running {
 		content := viewstream.Content{ObjectDigest: entry.Digest, OutputContexts: make([]viewstream.OutputContextRef, 0, len(entry.Refs))}
@@ -518,5 +524,5 @@ func (runtime *productionPhaseTwoOwnership) PublishStoredView(ctx context.Contex
 	if len(records) == 0 {
 		return
 	}
-	runtime.publishView(ctx, authority, records, nil)
+	runtime.publishView(ctx, authority, records, nil, nil, false)
 }

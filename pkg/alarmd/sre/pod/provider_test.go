@@ -563,6 +563,39 @@ func TestOutputPolicyMasksURLUserinfoUnderAnyScheme(t *testing.T) {
 	}
 }
 
+// A credential header keeps nothing of its credential, however it is
+// written: as a header line, as a curl argument, or as a field. The field
+// rule alone stops at the scheme word and leaves the token after it.
+func TestOutputPolicyMasksAnAuthorizationHeaderWhole(t *testing.T) {
+	for _, line := range []string{
+		"Authorization: Bearer header-credential",
+		"curl -H 'Authorization: Bearer header-credential' http://svc",
+		`{"authorization": "Basic header-credential"}`,
+		"authorization=Bearer header-credential",
+	} {
+		if out, _ := newRedactor(nil).bounded(line, 4096); strings.Contains(out, "header-credential") || !strings.Contains(out, "<redacted>") {
+			t.Fatalf("policy output for %q is %q", line, out)
+		}
+	}
+}
+
+// An execution's audited command line is redacted as one line, so a
+// credential the caller split across arguments is caught as it would be in
+// output; a single argument carrying a credential field is caught too.
+func TestAnAuditedCommandLineIsRedactedAcrossItsArguments(t *testing.T) {
+	client, _ := fixture()
+	provider := mustProvider(t, Options{Client: client})
+	for _, argv := range [][]string{
+		{"curl", "-H", "Authorization:", "Bearer", "argv-credential", "http://svc"},
+		{"curl", "-H", "Authorization:", "Bearer argv-credential", "http://svc"},
+		{"tool", "--password=argv-credential"},
+	} {
+		if line := provider.AuditArgv(argv); strings.Contains(line, "argv-credential") || !strings.Contains(line, "<redacted>") {
+			t.Fatalf("audited %q as %q", argv, line)
+		}
+	}
+}
+
 // A Provider printed into a log line names its settings, never the literal
 // credentials it redacts.
 func TestAFormattedProviderCarriesNoCredential(t *testing.T) {

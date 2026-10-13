@@ -1646,7 +1646,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	round.done(fleet.LeaderRoundStageAssignmentIndex)
 	runtime.sweepRetiredAssignments(ctx, authority, ordered)
 	round.done(fleet.LeaderRoundStageAssignmentSweep)
-	runtime.publishView(ctx, authority, records, owners)
+	runtime.publishView(ctx, authority, records, owners, workers, true)
 	round.done(fleet.LeaderRoundStageViewPublish)
 	return nil
 }

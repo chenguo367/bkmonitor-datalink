@@ -144,6 +144,9 @@ func sreAuditSink(logger *observability.Logger, recorder *metric.Recorder) func(
 			slog.String("name", action.Name), slog.String("uid", action.UID), slog.String("detail", action.Detail), slog.String("code", action.Code),
 			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID),
 			slog.String("operator", action.Operator), slog.String("issued_via", action.IssuedVia)}
+		if action.Argv != "" {
+			attrs = append(attrs, slog.String("argv", action.Argv))
+		}
 		duration := time.Duration(action.DurationMS) * time.Millisecond
 		if action.Result == obchannel.SREResultDone {
 			logger.Info("sre_action", action.Result, 0, duration, attrs...)
