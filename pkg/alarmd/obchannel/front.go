@@ -21,8 +21,9 @@ import (
 // FrontReads is what the front surface may read, the admin server's page:
 // alarmd's own data and nothing of the cluster's, no raw store read, no
 // re-query and no write. The value says whether a read is charged to the
-// front read budget: overview.get answers from its own cache, which bounds
-// it, and a refresh storm must not refuse the cheapest read.
+// front read budget. overview.get answers from its own cache and runtime.get
+// from process memory without Redis: both are bounded without it, and a
+// burst of list reads must not refuse the page its own cheapest reads.
 var FrontReads = map[string]bool{
 	"overview.get":         false,
 	"fleet.get":            true,
@@ -31,7 +32,7 @@ var FrontReads = map[string]bool{
 	"object.list":          true,
 	"object.get":           true,
 	"diagnose.environment": true,
-	"runtime.get":          true,
+	"runtime.get":          false,
 }
 
 // FrontReadShare is the share of this process's CPU limit the charged front
@@ -41,7 +42,11 @@ var FrontReads = map[string]bool{
 // limit: below the 1.7-point CPU spread measured between two identical
 // replicas (20.19% against 21.91%), so detection cannot tell them from noise.
 // The reads share the runtime Redis pool with detection; this bound, not a
-// separate pool, is what keeps them apart.
+// separate pool, is what keeps them apart. It is not exact: a read is
+// charged after it ends, so reads already running when the minute's budget
+// runs out finish over it -- at most the evidence pool's concurrency times
+// one read's elapsed time -- and a read that straddles a minute is not
+// charged to either.
 const FrontReadShare = 0.025
 
 // frontBudget is the charged front reads' spend of elapsed time in one

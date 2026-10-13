@@ -63,7 +63,8 @@ func TestTheFrontReadBudgetFollowsTheCPULimit(t *testing.T) {
 }
 
 // With the budget spent the charged reads are refused with when it refills,
-// and overview.get, which answers from its own cache, still answers.
+// and overview.get (its own cache) and runtime.get (process memory) still
+// answer.
 func TestOverviewAnswersWhenTheFrontBudgetIsSpent(t *testing.T) {
 	read := func(id string) Operation {
 		return Operation{ID: id, Summary: id, Fields: map[string]Field{}, Run: func(context.Context, Params) Outcome {
@@ -71,15 +72,17 @@ func TestOverviewAnswersWhenTheFrontBudgetIsSpent(t *testing.T) {
 		}}
 	}
 	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
-		Operations: []Operation{read("fleet.get"), read("overview.get")}, FrontCores: func() int { return 0 }})
+		Operations: []Operation{read("fleet.get"), read("overview.get"), read("runtime.get")}, FrontCores: func() int { return 0 }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status, out := frontRead(t, c, "fleet.get"); status != 429 || out.Error == nil || out.Error.Code != "front_rate_limited" {
 		t.Fatalf("charged read with no budget = %d %+v, want 429 front_rate_limited", status, out.Error)
 	}
-	if status, out := frontRead(t, c, "overview.get"); status != 200 || out.Status != "ok" {
-		t.Fatalf("overview with the budget spent = %d %+v, want answered", status, out)
+	for _, uncharged := range []string{"overview.get", "runtime.get"} {
+		if status, out := frontRead(t, c, uncharged); status != 200 || out.Status != "ok" {
+			t.Fatalf("%s with the budget spent = %d %+v, want answered", uncharged, status, out)
+		}
 	}
 	c.options.FrontCores = func() int { return 2 }
 	if status, out := frontRead(t, c, "fleet.get"); status != 200 || out.Status != "ok" {
