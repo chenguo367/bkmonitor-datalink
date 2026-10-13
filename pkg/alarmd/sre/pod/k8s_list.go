@@ -57,6 +57,8 @@ var resourceKinds = []resourceKind{
 	{Kind: "Pod", Resource: schema.GroupVersionResource{Version: "v1", Resource: "pods"}, Namespaced: true},
 	{Kind: "Service", Resource: schema.GroupVersionResource{Version: "v1", Resource: "services"}, Namespaced: true},
 	{Kind: "Endpoints", Resource: schema.GroupVersionResource{Version: "v1", Resource: "endpoints"}, Namespaced: true},
+	// Endpoints stops at 1,000 addresses per Service; the slices hold them all.
+	{Kind: "EndpointSlice", Resource: schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}, Namespaced: true},
 	{Kind: "Event", Resource: schema.GroupVersionResource{Version: "v1", Resource: "events"}, Namespaced: true},
 	{Kind: "Deployment", Resource: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, Namespaced: true},
 	{Kind: "StatefulSet", Resource: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}, Namespaced: true},

@@ -143,6 +143,19 @@ func TestAResourceListIsClusterWideUnlessANamespaceIsNamed(t *testing.T) {
 	}
 }
 
+// A Service's EndpointSlices are read in its namespace from discovery.k8s.io,
+// the group the channel's ClusterRole grants them in.
+func TestAResourceReadListsAServicesEndpointSlices(t *testing.T) {
+	provider, resources := resourceProvider(t, map[string]any{"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "metadata": map[string]any{"name": "s1-abc", "namespace": "ns3", "uid": "u1"}})
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "endpointslices", Namespace: "ns3", LabelSelector: "kubernetes.io/service-name=s1"})
+	if err != nil || receipt.Kind != "EndpointSlice" || receipt.APIVersion != "discovery.k8s.io/v1" || receipt.Count != 1 {
+		t.Fatalf("receipt %+v err=%v", receipt, err)
+	}
+	if resources.asked[0] != `list discovery.k8s.io/v1 endpointslices ns="ns3"` || resources.options[0].LabelSelector != "kubernetes.io/service-name=s1" {
+		t.Fatalf("asked %v options %+v, want the Service's slices in its namespace", resources.asked, resources.options)
+	}
+}
+
 // A name reads one object with a GET.
 func TestAResourceReadByNameGetsOneObject(t *testing.T) {
 	provider, resources := resourceProvider(t, node("192.0.2.36", "192.0.2.36"))
