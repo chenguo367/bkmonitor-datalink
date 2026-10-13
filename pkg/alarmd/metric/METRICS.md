@@ -1629,7 +1629,7 @@ Duration of the committed executor call, excluding SlotSource preparation and ea
 
 ## bkmonitor_alarmd_slot_decision_lag_seconds
 
-Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion being acknowledged, for every period; skipped and snapshot-unavailable completions are not decisions and are not in it.
+Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion being acknowledged, for every period, in normal rounds: a normal Slot and its retry. Replays, probes and supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions are not decisions and are not in it either.
 
 ## bkmonitor_alarmd_slot_operation_duration_seconds
 

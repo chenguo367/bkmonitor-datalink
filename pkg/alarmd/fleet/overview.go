@@ -515,7 +515,7 @@ func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
 // over the last two computations.
 var overviewStageBasis = map[string]string{
 	"pull": "worker_work_total{work_kind=\"physical_query\"}、access_query_failure_total、access_query_duration_seconds，取最近两次计算的差",
-	"evaluate": "progress_completed_total（不含 GAP_SKIPPED、SNAPSHOT_UNAVAILABLE）、slot_decision_lag_seconds，取最近两次计算的差；" +
+	"evaluate": "progress_completed_total（不含 GAP_SKIPPED、SNAPSHOT_UNAVAILABLE）、slot_decision_lag_seconds（只含正常轮次及其重试，不含回放、探测与补充检测），取最近两次计算的差；" +
 		"失败是此刻调度普查里迟到和超期的检测",
 	"state":  "worker_work_total{work_kind=\"state_apply\"}、state_admission_total（非 success）与 state_version_conflict_total、redis_command_duration_seconds（运行态 Redis 往返；运行态独立连接时 client=\"runtime\"，与策略源共用连接时 client=\"source\"），取最近两次计算的差",
 	"output": "output_events_by_kind_total、output_events_rejected_all_total，取最近两次计算的差；发送耗时没有度量",

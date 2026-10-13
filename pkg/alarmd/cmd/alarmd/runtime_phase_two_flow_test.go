@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ import (
 func TestEveryDecidedSlotsLagIsHeardOnce(t *testing.T) {
 	var lags []time.Duration
 	evaluation := time.Now().Add(-90 * time.Second).Truncate(time.Second)
-	request := execution.SlotExecutionRequest{AttemptNo: 1}
+	request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: execution.OperationNormal}
 	request.Contract.Slot.EvaluationTime = execution.EvaluationTime(evaluation.Unix())
 	request.Contract.ReadHoldMillis = 30_000
 	for _, kind := range []execution.CompletionKind{execution.CompletionFull, execution.CompletionGapSkipped, execution.CompletionSnapshotUnavailable} {
@@ -46,6 +47,34 @@ func TestEveryDecidedSlotsLagIsHeardOnce(t *testing.T) {
 	}
 	if len(lags) != 1 || lags[0] < 55*time.Second || lags[0] > 70*time.Second {
 		t.Fatalf("lags = %v, want one of about a minute (90 s since evaluation less the 30 s hold)", lags)
+	}
+}
+
+// The lag is a normal round's: a normal Slot and its retry are heard; a
+// replay, a probe and a supplement are late by what they are -- a missed
+// Slot run again, a recovery's test read, a completed Slot read once more --
+// and are not, so the histogram shows the rounds as they run.
+func TestOnlyNormalRoundsLagIsHeard(t *testing.T) {
+	evaluation := time.Now().Add(-90 * time.Second).Truncate(time.Second)
+	heard := map[execution.Operation]int{}
+	for _, operation := range []execution.Operation{execution.OperationNormal, execution.OperationRetry,
+		execution.OperationReplay, execution.OperationProbe, execution.OperationSupplement} {
+		request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: operation}
+		request.Contract.Slot.EvaluationTime = execution.EvaluationTime(evaluation.Unix())
+		executor := observedProductionSlotExecutor{
+			next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+				return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull, Result: observability.ResultSuccess}, nil
+			}),
+			observer:    observability.ObserverFunc(func(context.Context, observability.Observation) {}),
+			decisionLag: func(time.Duration) { heard[operation]++ },
+		}
+		if _, err := executor.Execute(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[execution.Operation]int{execution.OperationNormal: 1, execution.OperationRetry: 1}
+	if !maps.Equal(heard, want) {
+		t.Fatalf("heard = %v, want %v", heard, want)
 	}
 }
 
