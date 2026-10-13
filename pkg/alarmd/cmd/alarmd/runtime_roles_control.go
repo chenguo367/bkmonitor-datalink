@@ -286,6 +286,8 @@ func openProductionControlRoleBundle(
 	}
 	fleetStore.Meter(recorder)
 	fleetStore.HoldLoads(observationHold(observationMemory, memoryline.ConsumerFleetView))
+	// A control process is the preferred candidate: it plans the lookback.
+	controlOwnership.WithLookbackPlanner(fleetStore, true, recorder)
 	service, err := fleet.NewService(controlPlaneExpectation{repository: core.Repository}, registryReplicas{store: core.Ownership},
 		fleetStore, 6*cfg.PhaseTwo.Control.ReconcileInterval.Duration(), external.Now)
 	if err != nil {

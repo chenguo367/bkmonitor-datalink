@@ -181,6 +181,71 @@ func (store *RedisStore) ownedKey(replica string) string {
 	return store.replicaKey("fleet-owned", replica)
 }
 
+// lookbackPlanKey is where the control plane keeps its lookback plan set:
+// one key for the deployment, under the fleet's prefix.
+func (store *RedisStore) lookbackPlanKey() string {
+	return store.prefix + ":lookback-plan"
+}
+
+// LookbackPlanEntry is one Query Group of the control plane's lookback plan
+// set as it is kept: the rung its late series were seen at and when the
+// entry expires.
+type LookbackPlanEntry struct {
+	Rung        int   `json:"rung"`
+	ExpiresAtMs int64 `json:"expires_at_ms"`
+}
+
+// SaveLookbackPlan writes the control plane's whole lookback plan set, to
+// live until its latest entry expires: a deployment that stops planning
+// leaves nothing behind. An empty set deletes the key.
+func (store *RedisStore) SaveLookbackPlan(ctx context.Context, entries map[string]LookbackPlanEntry, now time.Time) error {
+	var latest int64
+	for _, entry := range entries {
+		latest = max(latest, entry.ExpiresAtMs)
+	}
+	life := time.Duration(latest-now.UnixMilli()) * time.Millisecond
+	if len(entries) == 0 || life <= 0 {
+		if err := store.client.Del(ctx, store.lookbackPlanKey()).Err(); err != nil {
+			return fmt.Errorf("alarmd fleet: clear lookback plan: %w", err)
+		}
+		return nil
+	}
+	payload, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("alarmd fleet: encode lookback plan: %w", err)
+	}
+	if err := store.client.Set(ctx, store.lookbackPlanKey(), payload, life).Err(); err != nil {
+		return fmt.Errorf("alarmd fleet: save lookback plan: %w", err)
+	}
+	return nil
+}
+
+// LoadLookbackPlan reads the control plane's lookback plan set, without the
+// entries expired by now: a set read after a longer gap than an entry's life
+// is empty whatever the key held.
+func (store *RedisStore) LoadLookbackPlan(ctx context.Context, now time.Time) (map[string]LookbackPlanEntry, error) {
+	payload, err := store.client.Get(ctx, store.lookbackPlanKey()).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return map[string]LookbackPlanEntry{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("alarmd fleet: read lookback plan: %w", err)
+	}
+	var entries map[string]LookbackPlanEntry
+	if err := json.Unmarshal(payload, &entries); err != nil {
+		return nil, fmt.Errorf("alarmd fleet: decode lookback plan: %w", err)
+	}
+	for queryGroup, entry := range entries {
+		if entry.ExpiresAtMs <= now.UnixMilli() {
+			delete(entries, queryGroup)
+		}
+	}
+	if entries == nil {
+		entries = map[string]LookbackPlanEntry{}
+	}
+	return entries, nil
+}
+
 // lookbackKey is where a replica's lookback late list is written, beside
 // its snapshot.
 func (store *RedisStore) lookbackKey(replica string) string {

@@ -230,6 +230,7 @@ func (runtime *productionPhaseTwoOwnership) viewLead(controlEpoch uint64) {
 		return
 	}
 	_ = runtime.dependencies.ViewStream.Lead(controlEpoch)
+	runtime.lookbackPlanner.newTerm()
 }
 
 func (runtime *productionPhaseTwoOwnership) viewStepDown() {
@@ -356,6 +357,33 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	}
 	if _, err := stream.Publish(ctx, desired); err != nil {
 		report(err)
+		return
+	}
+	runtime.planLookback(ctx, stream, desired)
+}
+
+// planLookback hands the stream the round's lookback plan sets, after the
+// view: a fallback Leader's nil sends nothing. A store that did not answer
+// leaves the sets the stream holds - each Worker keeps what it was sent -
+// and is reported under the stream's stage.
+func (runtime *productionPhaseTwoOwnership) planLookback(ctx context.Context, stream *viewstream.Server, desired viewstream.Desired) {
+	if runtime.lookbackPlanner == nil {
+		return
+	}
+	owners := make(map[execution.QueryGroupIdentity]string, len(desired.Assignments))
+	for queryGroup, assignment := range desired.Assignments {
+		owners[queryGroup] = assignment.DesiredWorkerID
+	}
+	byWorker, err := runtime.lookbackPlanner.plan(ctx, owners, desired.Workers())
+	if err == nil {
+		err = stream.SetLookbackPlans(byWorker)
+	}
+	if err != nil {
+		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageViewPublished,
+			Result: observability.ResultDegraded, ReasonCode: observability.ReasonInternalUnknown, Err: err,
+			ViewStream: &observability.ViewStreamFacts{Event: "lookback_plan_failed", Reason: err.Error()},
+		})
 	}
 }
 

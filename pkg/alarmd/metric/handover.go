@@ -24,7 +24,16 @@ type handoverMetrics struct {
 	drainSeconds    prometheus.Histogram
 	outputUnapplied *prometheus.CounterVec
 	executionsHung  *prometheus.CounterVec
+	// tierPaused counts the control rounds a fallback Leader ran without
+	// the second tier's functions, by function.
+	tierPaused *prometheus.CounterVec
 }
+
+// ControlTierLookbackPlanning is the second-tier control function that plans
+// the lookback; ControlTierFunctions every such function, closed.
+const ControlTierLookbackPlanning = "lookback_planning"
+
+var ControlTierFunctions = []string{ControlTierLookbackPlanning}
 
 // The waits are a Slot's commit boundary at the short end and a lease's
 // grace -- its TTL plus the switch margin -- at the long end.
@@ -78,6 +87,15 @@ func newHandoverMetrics() handoverMetrics {
 				" Reader: the release acceptance, from /metrics after each deploy.",
 		}, []string{"outcome"}),
 	}
+	metrics.tierPaused = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_tier_paused_total",
+		Help: "Control rounds this process ran as a fallback Leader without a second-tier function, by function: " +
+			"the functions only the preferred control process runs, which detection never depends on. Non-zero " +
+			"while a Worker holds the control lease for want of a control process; it stops when control is handed back.",
+	}, []string{"function"})
+	for _, function := range ControlTierFunctions {
+		metrics.tierPaused.WithLabelValues(function)
+	}
 	for _, outcome := range observability.ExecutionHungOutcomes {
 		metrics.executionsHung.WithLabelValues(outcome)
 	}
@@ -103,7 +121,7 @@ func handoverDrainOutcomes() []string {
 }
 
 func (m handoverMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied, m.executionsHung}
+	return []prometheus.Collector{m.drains, m.drainSeconds, m.outputUnapplied, m.executionsHung, m.tierPaused}
 }
 
 // RecordHandoverDrain counts one planned handover's wait for its Slot.
@@ -113,6 +131,15 @@ func (r *Recorder) RecordHandoverDrain(outcome string, wait time.Duration) {
 	}
 	r.phaseTwo.handover.drains.WithLabelValues(outcome).Inc()
 	r.phaseTwo.handover.drainSeconds.Observe(wait.Seconds())
+}
+
+// RecordControlTierPaused counts one control round a fallback Leader ran
+// without the second-tier function.
+func (r *Recorder) RecordControlTierPaused(function string) {
+	if r == nil || !knownLabel(ControlTierFunctions, function) {
+		return
+	}
+	r.phaseTwo.handover.tierPaused.WithLabelValues(function).Inc()
 }
 
 // RecordExecutionHung counts one hung execution declined or returned.

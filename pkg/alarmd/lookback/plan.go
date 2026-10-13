@@ -15,6 +15,15 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
+// PlanLife is how long a plan entry lasts from when the control plane last
+// renewed it: two of a sample's longest rests. A process that has just taken
+// a Query Group over samples it within a rest, and its samples have read their
+// deepest rung by about one more, so an entry outlives the time its new
+// owner's own evidence takes to confirm or clear it, and one nobody renews -
+// the evidence gone, or a control plane that stopped planning - is gone
+// within two hours.
+const PlanLife = 2 * restCap
+
 // Plan is the control plane's word that a Query Group read late series at a
 // recheck rung, good until ExpiresAt.
 //

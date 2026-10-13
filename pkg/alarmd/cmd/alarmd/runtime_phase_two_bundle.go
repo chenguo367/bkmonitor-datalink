@@ -921,6 +921,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// scrape reads without asking.
 	fleetStore.AdmitLoads(observationAdmit(observationMemory, memoryline.ConsumerFleetView))
 	fleetStore.HoldLoads(observationHold(observationMemory, memoryline.ConsumerFleetView))
+	// The Leader's lookback planning reads the Workers' late lists and keeps
+	// its plan set in the same store; a fallback Leader pauses it.
+	productionOwnership.WithLookbackPlanner(fleetStore, phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyPreferred, recorder)
 	// Freshness has to be shorter than the snapshot TTL, or a replica that
 	// stops publishing goes straight from fresh to absent and the stale branch
 	// never fires. The two say different things: stale means alive but stuck,
