@@ -111,6 +111,7 @@ func TestASeededQueryGroupLeavesWithItsPlanUnlessItsOwnSamplesConfirmIt(t *testi
 // rung this build does not read.
 func TestAPlanPastItsExpiryOrRungsIsNoPlan(t *testing.T) {
 	f := newFixture(t)
+	f.engine.options.Supplement = (&supplementRecorder{outcome: SupplementOutcome{Ran: true}}).run
 	f.engine.ApplyPlans([]Plan{
 		{QueryGroup: "qg", Rung: 1, ExpiresAt: f.clock.now()},
 		{QueryGroup: "qg-b", Rung: len(RungSteps), ExpiresAt: f.clock.now().Add(time.Hour)},
@@ -119,5 +120,14 @@ func TestAPlanPastItsExpiryOrRungsIsNoPlan(t *testing.T) {
 		if read := f.engine.Begin(query(queryGroup, f.clock.now().Unix(), minute, sourceLog)); read == nil || read.directed != nil {
 			t.Fatalf("%s's first read under an unusable entry = %+v, want no directed read", queryGroup, read)
 		}
+	}
+	// An entry that expired since the last maintenance tick is no plan for
+	// the first read that comes before the next one.
+	between := newFixture(t)
+	between.engine.options.Supplement = (&supplementRecorder{outcome: SupplementOutcome{Ran: true}}).run
+	between.engine.ApplyPlans([]Plan{{QueryGroup: "qg", Rung: 1, ExpiresAt: between.clock.now().Add(time.Minute)}})
+	between.set(func() { between.clock.at = between.clock.at.Add(2 * time.Minute) })
+	if read := between.engine.Begin(query("qg", between.clock.now().Unix(), minute, sourceLog)); read == nil || read.directed != nil {
+		t.Fatalf("a first read after its entry expired, before a tick = %+v, want no directed read", read)
 	}
 }

@@ -49,9 +49,9 @@ const (
 var PlanOutcomes = []string{PlanSeeded, PlanKeptLocal, PlanExpired}
 
 // ApplyPlans replaces the plan set with plans: the whole set the control
-// plane holds for this Worker, never a change to the last one. Entries
-// already past their expiry or naming a rung this build does not have are
-// not plans.
+// plane holds for this Worker, never a change to the last one. An entry
+// naming a rung this build does not have is not a plan; one already past
+// its expiry goes with the rest of the expired ones.
 func (engine *Engine) ApplyPlans(plans []Plan) {
 	if engine == nil {
 		return
@@ -61,7 +61,7 @@ func (engine *Engine) ApplyPlans(plans []Plan) {
 	defer engine.mu.Unlock()
 	next := make(map[execution.QueryGroupIdentity]Plan, len(plans))
 	for _, plan := range plans {
-		if plan.QueryGroup == "" || plan.Rung < 0 || plan.Rung >= len(RungSteps) || !now.Before(plan.ExpiresAt) {
+		if plan.QueryGroup == "" || plan.Rung < 0 || plan.Rung >= len(RungSteps) {
 			continue
 		}
 		next[plan.QueryGroup] = plan
@@ -77,12 +77,13 @@ func (engine *Engine) ApplyPlans(plans []Plan) {
 
 // seedLocked starts a Query Group's directed reads at its plan's rung, when
 // nothing here says otherwise: no sample of it has completed in this
-// process, and it is not already read directed.
+// process. Its own late series are only ever found by such a sample, so a
+// Query Group read directed on its own evidence is a sampled one.
 func (engine *Engine) seedLocked(state *group, plan Plan, now time.Time) {
 	if state.seriesLate != nil && state.seriesLate.seeded {
 		return
 	}
-	if state.sampled || state.seriesLate != nil {
+	if state.sampled {
 		if !state.planKept {
 			state.planKept = true
 			engine.counts.plans[PlanKeptLocal]++
