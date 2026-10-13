@@ -877,7 +877,7 @@ func openProductionPhaseTwoBundleAssembly(
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
-			Costs: workerCosts},
+			Costs: workerCosts, LookbackPlans: lookbackPlansInto(lookbackEngine)},
 	)
 	if err != nil {
 		return nil, err

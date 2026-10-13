@@ -69,6 +69,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 		// Every reason the scheduler refuses with, and other.
 		"lookback_permit_refusals_total": len(scheduler.LookbackRefusals) + 1,
 		"lookback_faults_total":          len(lookback.Faults),
+		"lookback_plan_total":            len(lookback.PlanOutcomes),
 	}
 }
 

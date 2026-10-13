@@ -127,6 +127,9 @@ func (engine *Engine) groupLocked(query Query, now time.Time) *group {
 	}
 	state.source = sourceOf(query.Spec.PlanFacts)
 	state.step = time.Duration(query.Spec.PlanFacts.StepMillis) * time.Millisecond
+	if plan, planned := engine.plans[qg]; planned && now.Before(plan.ExpiresAt) {
+		engine.seedLocked(state, plan, now)
+	}
 	return state
 }
 

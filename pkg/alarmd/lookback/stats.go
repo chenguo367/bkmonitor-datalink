@@ -62,6 +62,7 @@ type counters struct {
 	emptyCompletion map[string]uint64
 	refusals        map[string]uint64 // reason: permits refused
 	faults          map[string]uint64 // reason
+	plans           map[string]uint64 // outcome (PlanOutcomes)
 	// Per source: the latest completion seen, the bytes rechecks read back,
 	// and samples whose query's lookback could not be read.
 	maxCompletion   map[string]time.Duration
@@ -83,7 +84,7 @@ func newCounters(sources, refusals []string) counters {
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
-		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
+		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
 	for _, reason := range refusals {
@@ -91,6 +92,9 @@ func newCounters(sources, refusals []string) counters {
 	}
 	for _, fault := range Faults {
 		c.faults[fault] = 0
+	}
+	for _, outcome := range PlanOutcomes {
+		c.plans[outcome] = 0
 	}
 	for _, source := range sources {
 		c.firstReads[source] = 0
@@ -194,6 +198,8 @@ type Stats struct {
 	// Faults: reason -> reads not kept for a defect. Always 0 in normal
 	// running; anything else is a defect to fix.
 	Faults map[string]uint64 `json:"faults"`
+	// Plans: outcome -> plan entries by what became of them (PlanOutcomes).
+	Plans map[string]uint64 `json:"plans"`
 	// Pending is the samples in flight - one at most per Query Group, and
 	// one waiting for its deep recheck - and PendingBytes what their
 	// summaries hold: computed, not a budget.
@@ -483,7 +489,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 // Stats reads the lookback now. Ownership is asked outside the engine's
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
-	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{},
+	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{}, Plans: map[string]uint64{},
 		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}, NeverCompleteFirstRead: []NeverCompleteGroup{},
 		Supplements: []SupplementReading{}, LatePastRound: []LatePastRoundReading{}, ResidualMisses: []ResidualMissReading{}}
 	if engine == nil {
@@ -664,6 +670,9 @@ func (engine *Engine) Stats() Stats {
 	}
 	for reason, n := range engine.counts.refusals {
 		stats.PermitRefusals[reason] = n
+	}
+	for outcome, n := range engine.counts.plans {
+		stats.Plans[outcome] = n
 	}
 	for reason, n := range engine.counts.faults {
 		stats.Faults[reason] = n

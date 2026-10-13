@@ -513,6 +513,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_preemptions_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_lookback_plan_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_sre_actions_total"] = "variableLabels: {op,result}"
