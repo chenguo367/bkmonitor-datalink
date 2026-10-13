@@ -81,3 +81,20 @@ func TestASlotBookedWithoutADecisionIsNotADetection(t *testing.T) {
 		t.Fatalf("detections = %d, want the full and the partial-gap completions", got)
 	}
 }
+
+// The runtime round trips are read under the label of the client that
+// serves runtime state: its own client when the process opened one, the
+// source's when the two share a connection and so a client.
+func TestTheRuntimeRoundTripsFollowTheClientThatServesRuntimeState(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.phaseTwo.redisCalls.duration.WithLabelValues("runtime", "evalsha", "false").Observe(0.001)
+	r.phaseTwo.redisCalls.duration.WithLabelValues("source", "evalsha", "false").Observe(0.002)
+	r.phaseTwo.redisCalls.duration.WithLabelValues("source", "get", "false").Observe(0.003)
+	if got := r.FlowCounters().RuntimeRedis.Count; got != 1 {
+		t.Fatalf("separate client: %d round trips, want the runtime client's one", got)
+	}
+	r.SetRuntimeRedisClient("source")
+	if got := r.FlowCounters().RuntimeRedis.Count; got != 2 {
+		t.Fatalf("shared client: %d round trips, want the source client's two", got)
+	}
+}

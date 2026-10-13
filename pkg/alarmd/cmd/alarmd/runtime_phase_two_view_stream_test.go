@@ -63,8 +63,12 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 
 	// The Slot it ran was heard by the flow's counters: its physical queries
 	// by the Source and its decision by the production executor.
-	if flow := bundle.dependencies.Recorder.FlowCounters(); flow.Queries == 0 || flow.QueryDuration.Count != flow.Queries || flow.DecisionLag.Count == 0 {
-		t.Fatalf("flow counters after a Slot = %+v, want its queries timed and its decision's lag", flow)
+	// Its state was written through the Redis client that serves runtime
+	// state, whichever hook label that client has: here it is the source's,
+	// as in the default single-Redis deployment.
+	if flow := bundle.dependencies.Recorder.FlowCounters(); flow.Queries == 0 || flow.QueryDuration.Count != flow.Queries || flow.DecisionLag.Count == 0 ||
+		flow.RuntimeRedis.Count == 0 {
+		t.Fatalf("flow counters after a Slot = %+v, want its queries timed, its decision's lag and its runtime Redis round trips", flow)
 	}
 
 	// The fixture serves the control stream once it runs a Slot, and this

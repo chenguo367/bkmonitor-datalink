@@ -324,6 +324,13 @@ func openProductionPhaseTwoBundleAssembly(
 	}()
 	runtimeClient := controlClient
 	runtimeClientIsSource := reflect.DeepEqual(runtimeConnection, sourceConnection)
+	// The flow reads the runtime store's round trips under the hook label of
+	// the client that serves it: the source's when the two share it.
+	if runtimeClientIsSource {
+		recorder.SetRuntimeRedisClient("source")
+	} else {
+		recorder.SetRuntimeRedisClient("runtime")
+	}
 	sharing := endpointSharing{runtimeIsSource: runtimeClientIsSource, compatOutputPresent: true}
 	if !runtimeClientIsSource {
 		runtimeClient, err = wait.openRedis(ctx, "redis_runtime", runtimeConnection, recorder.RedisHook("runtime"))
