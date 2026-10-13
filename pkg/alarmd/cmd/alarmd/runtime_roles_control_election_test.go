@@ -233,7 +233,7 @@ func (fixture *electionFixture) start(process *electionProcess) {
 		fixture.t.Fatalf("%s Start: %v", process.name, err)
 	}
 	serveControlStreamForTest(process.bundle)
-	process.runtime.writeInstance(fixture.ctx, process.health, "disabled")
+	process.runtime.writeInstance(fixture.ctx, process.health, "disabled", false)
 }
 
 // crash ends a process without a word: no lease is released, its record and
@@ -241,6 +241,9 @@ func (fixture *electionFixture) start(process *electionProcess) {
 func (fixture *electionFixture) crash(process *electionProcess) {
 	withholdControlStreamForTest(process.bundle)
 	process.bundle.cancelMaintain()
+	// A process that crashes writes nothing more: its store connection goes
+	// first, so the leaving record a stopping process writes never lands.
+	_ = process.runtime.client.Close()
 	_ = process.runtime.Close()
 	process.alive = false
 }
@@ -260,7 +263,7 @@ func (fixture *electionFixture) alive() []*electionProcess {
 func (fixture *electionFixture) renewRecords() {
 	for _, process := range fixture.alive() {
 		_ = process.bundle.register(fixture.ctx, ownership.WorkerReady)
-		process.runtime.writeInstance(fixture.ctx, process.health, "disabled")
+		process.runtime.writeInstance(fixture.ctx, process.health, "disabled", false)
 	}
 }
 
@@ -591,7 +594,7 @@ func TestAControlProcessThatKeepsFlappingNeverTakesTheLeaseBack(t *testing.T) {
 	flapping, flappingHealth := fixture.flappingPreferred("flap-control")
 	write := func(ready bool) {
 		flappingHealth.candidacyReady.Store(ready)
-		flapping.writeInstance(fixture.ctx, flappingHealth, "disabled")
+		flapping.writeInstance(fixture.ctx, flappingHealth, "disabled", false)
 	}
 	// Ready for 40 s, not ready for 10 s, over and over for five minutes:
 	// never a whole window of readiness.
@@ -720,7 +723,7 @@ func TestTheDefaultFormElectsAsBeforeButNeverAProcessThatIsStartingOrStopping(t 
 	if leader, _ := fixture.leader(); leader != nil {
 		t.Fatalf("%s leads before any process finished starting", leader.name)
 	}
-	first.runtime.writeInstance(fixture.ctx, first.health, "disabled")
+	first.runtime.writeInstance(fixture.ctx, first.health, "disabled", false)
 	if record, _, _ := first.runtime.store.ReadInstance(fixture.ctx, first.name); record.ControlCandidacy != ownership.ControlCandidacyPreferred ||
 		record.ControlCandidacyReady {
 		t.Fatalf("record of a process still starting = %+v, want preferred and not ready", record)
@@ -746,7 +749,7 @@ func TestTheDefaultFormElectsAsBeforeButNeverAProcessThatIsStartingOrStopping(t 
 	if err := second.bundle.beginDraining(fixture.ctx); err != nil {
 		t.Fatal(err)
 	}
-	second.runtime.writeInstance(fixture.ctx, second.health, "disabled")
+	second.runtime.writeInstance(fixture.ctx, second.health, "disabled", false)
 	if record, _, _ := second.runtime.store.ReadInstance(fixture.ctx, second.name); record.ControlCandidacyReady {
 		t.Fatalf("record of a draining process = %+v, want not ready", record)
 	}

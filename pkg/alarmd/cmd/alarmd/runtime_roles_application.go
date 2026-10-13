@@ -119,6 +119,7 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 				}
 			}
 			if ctx.Err() != nil {
+				runtime.writeLeavingInstance(ctx, health)
 				return
 			}
 			health.channelState.Store(&channelState)
@@ -137,9 +138,10 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 				health.Update(phaseTwoReadiness{State: state, Reasons: reasons, SnapshotReady: true,
 					AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true})
 			}
-			runtime.writeInstance(ctx, health, channelState)
+			runtime.writeInstance(ctx, health, channelState, false)
 			select {
 			case <-ctx.Done():
+				runtime.writeLeavingInstance(ctx, health)
 				return
 			case <-ticker.C:
 			}
@@ -147,13 +149,27 @@ func (runtime *phaseTwoRoleRuntime) Start(parent context.Context, health *phaseT
 	}()
 }
 
+// writeLeavingInstance is the record's last write, made as the process
+// stops: every role draining and the candidacy not ready. Without it the
+// record kept saying ready, and stable, for up to the record TTL after the
+// process was gone, and a fallback waited all that time on a preferred
+// process that would never lead. The stop has cancelled ctx, so the write
+// gets its own second.
+func (runtime *phaseTwoRoleRuntime) writeLeavingInstance(ctx context.Context, health *phaseTwoApplicationHealth) {
+	runtime.writeInstance(context.WithoutCancel(ctx), health, observability.HealthDraining, true)
+}
+
 // writeInstance writes this process's instance record once: its roles, each
 // role's readiness and its Control Leader candidacy, under the record TTL.
+// A leaving write says draining for every role and never ready.
 func (runtime *phaseTwoRoleRuntime) writeInstance(ctx context.Context, health *phaseTwoApplicationHealth,
-	channelState observability.HealthState,
+	channelState observability.HealthState, leaving bool,
 ) {
 	statuses := make(map[roles.Role]string)
 	snapshot := health.HealthSnapshot()
+	if leaving {
+		snapshot.State = observability.HealthDraining
+	}
 	for _, role := range runtime.config.EffectiveRoles() {
 		statuses[role] = string(snapshot.State)
 		if role == roles.Control {
@@ -166,7 +182,7 @@ func (runtime *phaseTwoRoleRuntime) writeInstance(ctx context.Context, health *p
 	// Ready only while the bundle says so and the process is neither
 	// stopping nor failed: a record that kept saying ready through a
 	// drain would hold a fallback off a process that is leaving.
-	candidacyReady := runtime.candidacy != "" && health.candidacyReady.Load() &&
+	candidacyReady := !leaving && runtime.candidacy != "" && health.candidacyReady.Load() &&
 		snapshot.State != observability.HealthDraining && snapshot.State != observability.HealthFatal
 	// The first write that says ready starts the incarnation's ready-since
 	// time; every later one keeps it; the first that does not drops it, so

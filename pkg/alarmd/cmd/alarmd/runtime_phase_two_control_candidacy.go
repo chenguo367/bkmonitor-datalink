@@ -28,7 +28,13 @@ import (
 //     preferred process has a live, ready instance record. A live record is
 //     one written within the record TTL, so a preferred process that stops
 //     being heard from is replaced within that TTL plus one reconcile tick,
-//     and one that only missed a write or two is not raced.
+//     and one that only missed a write or two is not raced. A process that
+//     stops rather than crashes says so in its record's last write, so it
+//     holds nobody off. When the whole deployment rolls at once every
+//     candidate is young: a young preferred process waits only for a
+//     fallback that has been ready for a window, and a young fallback waits
+//     for any ready preferred process until it has been ready for a window
+//     itself, so the control process leads from the first epoch.
 //
 // A fallback Leader hands the lease back once a preferred process has been
 // ready for a whole record TTL without a break: it finishes the round it is
@@ -108,12 +114,31 @@ func preferredCandidatePresent(candidates []ownership.InstanceRegistration, self
 	return false
 }
 
-// readyFallbackPresent says some fallback candidate other than this process
-// has a record that is live at the instant and says it is ready.
-func readyFallbackPresent(candidates []ownership.InstanceRegistration, self string, at time.Time) bool {
+// readyPreferredPresent says some preferred process other than this one has
+// a record that is live at the instant and says it is ready, however young.
+// A fallback that is itself young defers to it: when the whole deployment
+// rolls at once every candidate is young, and the control process should
+// lead from the first epoch rather than after a fallback's term and a
+// handback.
+func readyPreferredPresent(candidates []ownership.InstanceRegistration, self string, at time.Time) bool {
+	for _, candidate := range candidates {
+		if candidate.InstanceID != self && candidate.CandidacyClass() == ownership.ControlCandidacyPreferred &&
+			candidate.ControlCandidacyReady && candidate.ExpiresAt.After(at) {
+			return true
+		}
+	}
+	return false
+}
+
+// stableFallbackPresent says some fallback candidate other than this
+// process has a record that is live at the instant and has said ready for a
+// whole window. Only such a fallback is a reason for a young preferred
+// process to wait: a fallback as young as it is would lead no longer and
+// only cost a second epoch.
+func stableFallbackPresent(candidates []ownership.InstanceRegistration, self string, at time.Time, window time.Duration) bool {
 	for _, candidate := range candidates {
 		if candidate.InstanceID != self && candidate.CandidacyClass() == ownership.ControlCandidacyFallback &&
-			candidate.ControlCandidacyReady && candidate.ExpiresAt.After(at) {
+			candidate.CandidacyStable(at, window) {
 			return true
 		}
 	}
@@ -244,8 +269,15 @@ func (bundle *phaseTwoWorkerBundle) fallbackMayContend(ctx context.Context) (boo
 	if err != nil {
 		return false, err
 	}
-	present := preferredCandidatePresent(candidates, bundle.dependencies.Config.PhaseTwo.Worker.ID, at,
-		controlCandidacyWindow(bundle.dependencies.Config))
+	self, window := bundle.dependencies.Config.PhaseTwo.Worker.ID, controlCandidacyWindow(bundle.dependencies.Config)
+	present := preferredCandidatePresent(candidates, self, at, window)
+	if !present && !bundle.controlCandidacyStable(at) {
+		// Until this fallback has itself been ready for a window, any ready
+		// preferred process holds it off. The wait is bounded by that window,
+		// so a preferred process in a crash loop still cannot starve a
+		// deployment of a Leader.
+		present = readyPreferredPresent(candidates, self, at)
+	}
 	return controlContentionAllowed(bundle.candidacy, true, false, present), nil
 }
 
@@ -285,7 +317,8 @@ func (bundle *phaseTwoWorkerBundle) preferredMayContend(ctx context.Context) (bo
 	if err != nil {
 		return false, err
 	}
-	ready := readyFallbackPresent(fallbacks, bundle.dependencies.Config.PhaseTwo.Worker.ID, at)
+	ready := stableFallbackPresent(fallbacks, bundle.dependencies.Config.PhaseTwo.Worker.ID, at,
+		controlCandidacyWindow(bundle.dependencies.Config))
 	return preferredContentionAllowed(false, false, ready), nil
 }
 
