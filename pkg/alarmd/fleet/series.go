@@ -264,9 +264,21 @@ type Trends struct {
 	Spaces func(ctx context.Context) map[string]TrendSpace
 	Scope  TrendScope
 
-	mu      sync.Mutex
-	answers map[string]TrendsAnswer
+	mu       sync.Mutex
+	answers  map[string]TrendsAnswer
+	inFlight map[string]*trendsFlight
 }
+
+// trendsFlight is one window's read in progress; callers arriving while it
+// runs wait for it rather than reading again.
+type trendsFlight struct {
+	done   chan struct{}
+	answer TrendsAnswer
+}
+
+// trendsComputeTimeout bounds one shared read: it runs on its own context,
+// since the callers it answers share it and any one of them may leave.
+const trendsComputeTimeout = 45 * time.Second
 
 // TrendsMaxAge is how long one read of a window answers: a page refresh
 // costs the query backend one query per line at most this often.
@@ -278,15 +290,32 @@ func (trends *Trends) read(ctx context.Context, window SeriesWindow, at time.Tim
 		trends.mu.Unlock()
 		return cached
 	}
-	trends.mu.Unlock()
-	answer := collectTrends(ctx, trends.Range, trends.Spaces(ctx), trends.Scope, window, at)
-	trends.mu.Lock()
-	if trends.answers == nil {
-		trends.answers = map[string]TrendsAnswer{}
+	if flight, running := trends.inFlight[window.Key]; running {
+		trends.mu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.answer
+		case <-ctx.Done():
+			return TrendsAnswer{Window: window.Key, WindowChoice: seriesWindowKeys(), ReadAt: at.UTC(), Trends: []Trend{}}
+		}
 	}
-	trends.answers[window.Key] = answer
+	if trends.inFlight == nil {
+		trends.inFlight, trends.answers = map[string]*trendsFlight{}, map[string]TrendsAnswer{}
+	}
+	flight := &trendsFlight{done: make(chan struct{})}
+	trends.inFlight[window.Key] = flight
 	trends.mu.Unlock()
-	return answer
+	defer func() {
+		trends.mu.Lock()
+		trends.answers[window.Key] = flight.answer
+		delete(trends.inFlight, window.Key)
+		trends.mu.Unlock()
+		close(flight.done)
+	}()
+	shared, cancel := context.WithTimeout(context.Background(), trendsComputeTimeout)
+	defer cancel()
+	flight.answer = collectTrends(shared, trends.Range, trends.Spaces(shared), trends.Scope, window, at)
+	return flight.answer
 }
 
 // collectTrends runs the catalog over one window. One failing chart is
