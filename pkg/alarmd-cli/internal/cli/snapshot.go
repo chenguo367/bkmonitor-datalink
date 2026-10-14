@@ -45,6 +45,10 @@ const (
 	snapshotCallMargin    = 30 * time.Second
 	snapshotFallbackRate  = 30
 	snapshotDetailCallsBy = 2
+	// snapshotRateAttempts is how many times one read is asked while the
+	// session's budget refuses it: the first, the one after the minute
+	// turns, and one more for the two clocks' difference.
+	snapshotRateAttempts = 3
 )
 
 // snapshotMaxBytes bounds the answers a snapshot keeps, and with them what
@@ -79,6 +83,9 @@ var snapshotClock = time.Now
 // snapshotPace is the wait between two calls at the session's rate; a test
 // sets it to nothing.
 var snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) }
+
+// snapshotSleep waits for the session's budget; a test records it instead.
+var snapshotSleep = time.Sleep
 
 // SnapshotItem is one collected read as the manifest records it.
 type SnapshotItem struct {
@@ -297,21 +304,55 @@ func (run *snapshotRun) wait() {
 	run.last = time.Now()
 }
 
+// call asks one read. The session's budget is shared with every call made
+// under the same login, so the snapshot's own pace does not keep it from
+// being spent: a read refused for it executed nothing, and is asked again
+// when the refusal says to, while the wait fits the time cap.
 func (run *snapshotRun) call(operation string, params map[string]any) (map[string]any, bool) {
-	run.wait()
-	started := time.Now()
-	m, status, err := run.a.channelRequest("invoke", operation, params, run.revision, run.p)
-	run.calls++
-	entry := map[string]any{"at": started.UTC().Format(time.RFC3339Nano), "operation": operation, "elapsed_ms": time.Since(started).Milliseconds(), "http_status": status}
-	if err != nil {
-		entry["error"] = err.Error()
+	var m map[string]any
+	var status int
+	var err error
+	for attempt := 1; ; attempt++ {
+		run.wait()
+		started := time.Now()
+		m, status, err = run.a.channelRequest("invoke", operation, params, run.revision, run.p)
+		run.calls++
+		entry := map[string]any{"at": started.UTC().Format(time.RFC3339Nano), "operation": operation, "elapsed_ms": time.Since(started).Milliseconds(), "http_status": status}
+		if err != nil {
+			entry["error"] = err.Error()
+		}
+		retry := time.Duration(0)
+		if err == nil && stringField(objectField(m, "error"), "code") == "rate_limited" && attempt < snapshotRateAttempts {
+			retry = snapshotRetryAfter(m)
+			if !run.deadline.IsZero() && time.Now().Add(retry).After(run.deadline) {
+				retry = 0
+			}
+		}
+		if retry > 0 {
+			entry["retry_after_ms"] = retry.Milliseconds()
+		}
+		line, _ := json.Marshal(entry)
+		run.log.Write(append(line, '\n'))
+		if retry <= 0 {
+			break
+		}
+		snapshotSleep(retry)
 	}
-	line, _ := json.Marshal(entry)
-	run.log.Write(append(line, '\n'))
 	if err != nil || m == nil {
 		return map[string]any{"status": "error", "error": map[string]any{"code": "request_failed", "message": fmt.Sprint(err)}, "meta": map[string]any{"http_status": status}}, false
 	}
 	return m, status >= 200 && status < 300
+}
+
+// snapshotRetryAfter is how long a refusal for the session's budget says to
+// wait: its Retry-After, else until a second past the next minute by this
+// clock, the budget's window being the clock minute.
+func snapshotRetryAfter(m map[string]any) time.Duration {
+	if seconds, ok := objectField(m, "meta")["client_retry_after_seconds"].(int); ok {
+		return time.Duration(max(seconds, 1)) * time.Second
+	}
+	now := time.Now()
+	return now.Truncate(time.Minute).Add(time.Minute + time.Second).Sub(now)
 }
 
 // keepAnswer files one answer with the request it answered.

@@ -43,6 +43,11 @@ type snapshotFixture struct {
 	// maintenance.get too.
 	lookback     string
 	catalogWhole bool
+	// limited is how many strategy.get calls the session's budget refuses
+	// before one is answered, -1 for every one; retryAfter is the
+	// Retry-After those refusals carry, none when empty.
+	limited    int
+	retryAfter string
 }
 
 func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
@@ -77,7 +82,21 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 			}
 			f.mu.Lock()
 			f.invoked[operation] = append(f.invoked[operation], params)
+			refuse := operation == "strategy.get" && f.limited != 0
+			if refuse && f.limited > 0 {
+				f.limited--
+			}
 			f.mu.Unlock()
+			if refuse {
+				out := envelope(*p, "error", nil)
+				out["error"] = map[string]any{"code": "rate_limited", "message": "This session has spent its 30 invocations for this minute; retry when the minute turns."}
+				if f.retryAfter != "" {
+					w.Header().Set("Retry-After", f.retryAfter)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				writeJSON(t, w, out)
+				return
+			}
 			var result any = map[string]any{}
 			switch operation {
 			case "fleet.get":
@@ -120,6 +139,14 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 					// standing limitation: the read was collected whole.
 					out := envelope(*p, "partial", map[string]any{"coverage": map[string]any{"owned": 1.0}})
 					out["evidence"] = map[string]any{"complete": false, "limitations": []any{"Counts are the answering process's alone."}}
+					writeJSON(t, w, out)
+					return
+				}
+				if f.lookback == "busy" {
+					out := envelope(*p, "error", nil)
+					out["error"] = map[string]any{"code": "request_budget_exceeded", "message": "busy"}
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(http.StatusTooManyRequests)
 					writeJSON(t, w, out)
 					return
 				}
@@ -529,5 +556,160 @@ func TestAnErrorAnswerIsNotCollectedEvenWithASuccessfulStatus(t *testing.T) {
 		if item.Operation == "lookback.get" && (item.Result != "refused" || item.Reason != "lookback_unavailable") {
 			t.Fatalf("lookback.get item = %+v, want refused with its code", item)
 		}
+	}
+}
+
+// snapshotSlept records the waits a run took for the session's budget in
+// place of sleeping them.
+func snapshotSlept(t *testing.T) *[]time.Duration {
+	t.Helper()
+	slept := &[]time.Duration{}
+	snapshotSleep = func(d time.Duration) { *slept = append(*slept, d) }
+	t.Cleanup(func() { snapshotSleep = time.Sleep })
+	return slept
+}
+
+// The session's budget is shared with every other call made under the same
+// login, so a read can find it spent although the snapshot kept its own
+// pace. The refusal executed nothing and says when to come back: the read
+// waits the Retry-After it was given and is asked again, and the snapshot
+// is whole.
+func TestAReadRefusedForTheSessionBudgetWaitsTheMinuteOutAndIsAskedAgain(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 2, retryAfter: "7"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	if code != 0 || result["status"] != "ok" {
+		t.Fatalf("code %d result %v, want a whole snapshot: the refused read was asked again", code, result)
+	}
+	if len(*slept) != 2 || (*slept)[0] != 7*time.Second || (*slept)[1] != 7*time.Second {
+		t.Fatalf("waits = %v, want the Retry-After of each refusal, 7s twice", *slept)
+	}
+	if got := fixture.invoked["strategy.get"]; len(got) != 3 || stringField(got[2], "strategy_id") != "2" {
+		t.Fatalf("strategy.get asked %v, want strategy 2 three times", got)
+	}
+	files := readArchive(t, stringField(objectField(result, "result"), "file"))
+	var refused, answered int
+	for _, line := range strings.Split(strings.TrimSpace(string(files["collector.log.jsonl"])), "\n") {
+		var entry map[string]any
+		_ = json.Unmarshal([]byte(line), &entry)
+		if entry["operation"] != "strategy.get" {
+			continue
+		}
+		switch number(entry["http_status"]) {
+		case 429:
+			refused++
+			if number(entry["retry_after_ms"]) != 7000 {
+				t.Fatalf("refusal logged as %v, want the wait it took", entry)
+			}
+		case 200:
+			answered++
+		}
+	}
+	if refused != 2 || answered != 1 {
+		t.Fatalf("collector log has %d refusals and %d answers of strategy.get, want 2 and 1", refused, answered)
+	}
+}
+
+// Without a Retry-After the read waits for the next minute by the
+// collector's clock, a second past it for the two clocks' difference.
+func TestARefusalWithoutRetryAfterWaitsForTheNextMinute(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 1}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	before := time.Now()
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	after := time.Now()
+	if code != 0 || len(*slept) != 1 {
+		t.Fatalf("code %d waits %v result %v, want one wait and a whole snapshot", code, *slept, result)
+	}
+	// The wait ends a second into a minute that began after the refusal.
+	low := before.Truncate(time.Minute).Add(time.Minute + time.Second).Sub(after)
+	high := after.Truncate(time.Minute).Add(time.Minute + time.Second).Sub(before)
+	if wait := (*slept)[0]; wait < low || wait > high || wait > time.Minute+time.Second || wait <= 0 {
+		t.Fatalf("wait %v, want the rest of the minute plus a second (%v..%v)", wait, low, high)
+	}
+}
+
+// A wait that would run past the snapshot's time cap is not taken: the
+// read is filed refused with the session budget's code, and the snapshot
+// is incomplete.
+func TestAWaitPastTheTimeCapIsNotTaken(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 1, retryAfter: "3600"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	notWhole, _ := objectField(result, "result")["not_whole"].([]any)
+	if code != 3 || len(*slept) != 0 || len(notWhole) != 1 || notWhole[0] != "strategy.get" {
+		t.Fatalf("code %d waits %v result %v, want exit 3 naming strategy.get and no wait", code, *slept, result)
+	}
+	files := readArchive(t, stringField(objectField(result, "result"), "file"))
+	var manifest SnapshotManifest
+	_ = json.Unmarshal(files["manifest.json"], &manifest)
+	for _, item := range manifest.Items {
+		if item.Operation == "strategy.get" && (item.Result != "refused" || item.Reason != "rate_limited") {
+			t.Fatalf("strategy.get item = %+v, want refused rate_limited", item)
+		}
+	}
+}
+
+// A budget that stays spent is asked a bounded number of times, and only a
+// refusal for the session budget is asked again: a busy refusal, though it
+// is a 429 with a Retry-After too, is asked once.
+func TestARefusalThatPersistsIsAskedABoundedNumberOfTimes(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "busy", catalogWhole: true, limited: -1, retryAfter: "1"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	if code != 3 {
+		t.Fatalf("code %d result %v, want 3", code, result)
+	}
+	if got := len(fixture.invoked["strategy.get"]); got != snapshotRateAttempts || len(*slept) != snapshotRateAttempts-1 {
+		t.Fatalf("strategy.get asked %d times with %d waits, want %d and %d", got, len(*slept), snapshotRateAttempts, snapshotRateAttempts-1)
+	}
+	if got := len(fixture.invoked["lookback.get"]); got != 1 {
+		t.Fatalf("lookback.get asked %d times, want once: a busy refusal is not the session budget", got)
+	}
+}
+
+// A Retry-After of 0 is the minute turning as the refusal was sent: the
+// read waits a second, not a whole minute and not nothing.
+func TestARetryAfterOfZeroWaitsOneSecond(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 1, retryAfter: "0"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	if code != 0 || len(*slept) != 1 || (*slept)[0] != time.Second {
+		t.Fatalf("code %d waits %v result %v, want one wait of 1s and a whole snapshot", code, *slept, result)
 	}
 }
