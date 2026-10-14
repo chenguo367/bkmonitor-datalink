@@ -13,7 +13,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 )
@@ -82,16 +84,47 @@ func (r *Release) serveInstaller(response http.ResponseWriter, request *http.Req
 // manifest lists for this release's version, and nothing else.
 func (r *Release) serveFile(response http.ResponseWriter, request *http.Request) {
 	version, name, ok := strings.Cut(strings.TrimPrefix(request.URL.Path, ReleasesPath), "/")
-	content, listed := r.files[name]
-	if !ok || version != r.manifest.Version || !listed {
-		refuse(response, http.StatusNotFound, CodeNotFound, "this alarmd serves the files of release "+r.manifest.Version+" alone; read "+ManifestPath)
+	if !ok || version != r.manifest.Version {
+		r.notFound(response)
 		return
 	}
-	contentType := "application/gzip"
-	if strings.HasSuffix(name, ".sha256") {
-		contentType = "text/plain; charset=utf-8"
+	if checksum, listed := r.checksums[name]; listed {
+		serveContent(response, request, "text/plain; charset=utf-8", checksum)
+		return
 	}
-	serveContent(response, request, contentType, content)
+	if !r.listed(name) {
+		r.notFound(response)
+		return
+	}
+	// Opened per download and streamed: an embedded file reads from the
+	// binary's read-only data and seeks, so ranges and HEAD work without
+	// the archive ever being copied whole.
+	file, err := r.root.Open(path.Join(r.manifest.Version, name))
+	if err != nil {
+		refuse(response, http.StatusInternalServerError, CodeInvalid, "the release lists "+name+" but it cannot be opened")
+		return
+	}
+	defer file.Close()
+	content, seekable := file.(io.ReadSeeker)
+	if !seekable {
+		refuse(response, http.StatusInternalServerError, CodeInvalid, "the release file "+name+" cannot be served")
+		return
+	}
+	response.Header().Set("Content-Type", "application/gzip")
+	http.ServeContent(response, request, "", time.Time{}, content)
+}
+
+func (r *Release) listed(name string) bool {
+	for _, artifact := range r.manifest.Artifacts {
+		if artifact.File == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Release) notFound(response http.ResponseWriter) {
+	refuse(response, http.StatusNotFound, CodeNotFound, "this alarmd serves the files of release "+r.manifest.Version+" alone; read "+ManifestPath)
 }
 
 func serveContent(response http.ResponseWriter, request *http.Request, contentType string, content []byte) {

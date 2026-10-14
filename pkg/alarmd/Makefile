@@ -40,12 +40,19 @@ lint:
 
 # The alarmd-cli release is packed from ../alarmd-cli with the same version
 # and embedded in the binary (clirelease), so whatever copies the binary ships
-# the CLI too. CLI_RELEASE=0 builds without it -- clearing what an earlier
-# pack left, which go:embed would otherwise pick up -- and the distribution
-# routes then answer cli_release_unavailable. On a linux/amd64 host the built
-# binary checks its own release.
-CLI_RELEASE ?= 1
+# the CLI too. The release needs a release version: the root Makefile passes
+# 0.4.<BUILD_NO>; a plain local make, whose VERSION is the 0.4.x line, builds
+# without it and says so. CLI_RELEASE=0 also builds without it. Building
+# without it clears what an earlier pack left, which go:embed would otherwise
+# pick up, and the distribution routes then answer cli_release_unavailable.
+# On a linux/amd64 host the built binary checks its own release.
 CLI_SOURCE ?= ../alarmd-cli
+ifeq ($(shell echo '$(VERSION)' | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$$' && echo yes),yes)
+CLI_RELEASE ?= 1
+else
+CLI_RELEASE ?= 0
+CLI_RELEASE_NOTICE = alarmd-cli release skipped: VERSION $(VERSION) is not a release version (set VERSION=<x.y.z> to embed one)
+endif
 
 .PHONY: build
 build:
@@ -53,6 +60,7 @@ build:
 ifneq ($(CLI_RELEASE),0)
 	$(GO) run ./clirelease/pack -cli $(CLI_SOURCE) -version $(VERSION) -out clirelease/assets
 else
+	$(if $(CLI_RELEASE_NOTICE),@echo "$(CLI_RELEASE_NOTICE)")
 	find clirelease/assets -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
 endif
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \

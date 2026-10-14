@@ -106,7 +106,7 @@ func TestTheInstallerLeavesTheOldBinaryOnAnyFailure(t *testing.T) {
 		t.Fatalf("install: %v\n%s", err, output)
 	}
 	before := installedVersion(t, dir)
-	mislabelled := t.TempDir()
+	mislabelled := releaseRoot(t)
 	if err := Pack(mislabelled, testVersion, fakeBuild("0.4.1")); err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +157,28 @@ func TestTheInstallerLeavesTheOldBinaryOnAnyFailure(t *testing.T) {
 				t.Fatalf("the failure left %d entries in the install directory", len(entries))
 			}
 		})
+	}
+}
+
+// The temporary directory may be mounted noexec; the install directory
+// cannot be, so the new binary is checked from there. The executable here
+// runs only from the install directory, as on such a machine.
+func TestTheInstallerChecksTheBinaryWhereItWillLive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bin")
+	root := releaseRoot(t)
+	err := Pack(root, testVersion, func(_ Target, dst string) error {
+		script := "#!/bin/sh\ncase \"$0\" in \"" + dir + "\"/*) ;; *) exit 126 ;; esac\necho '{\"version\":\"" + testVersion + "\"}'\n"
+		return os.WriteFile(dst, []byte(script), 0o755)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newInstallerHost(t, LoadFS(os.DirFS(root), testVersion), nil)
+	if output, err := host.install(dir); err != nil {
+		t.Fatalf("install: %v\n%s", err, output)
+	}
+	if !strings.Contains(installedVersion(t, dir), testVersion) {
+		t.Fatal("the installed binary does not report the release")
 	}
 }
 

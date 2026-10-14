@@ -81,7 +81,10 @@ case $(uname -m) in
 esac
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+staged=
+# The staged copy in the install directory goes too, on any way out: a cp cut
+# short or an interrupt before the rename must not leave it behind.
+trap 'rm -rf "$work"; if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT
 trap 'exit 1' HUP INT TERM
 
 # fetch writes a URL's body to a file and stops on anything but 200, showing
@@ -107,25 +110,27 @@ actual=$(sha256 "$work/$file")
 
 mkdir "$work/unpacked"
 tar -xzf "$work/$file" -C "$work/unpacked" alarmd-cli || fail "cannot unpack $file"
-chmod 755 "$work/unpacked/alarmd-cli"
-reported=$("$work/unpacked/alarmd-cli" --version 2>/dev/null) || fail "the downloaded alarmd-cli does not run on this machine"
+
+# The new binary is staged beside the target and checked from there -- the
+# temporary directory may be mounted noexec, the install directory cannot
+# be -- then renamed over the target: the old binary stays whole until the
+# new one is complete, and a rename in one directory is atomic.
+mkdir -p "$install_dir" || fail "cannot create $install_dir"
+target=$install_dir/alarmd-cli
+staged=$install_dir/.alarmd-cli.$$
+cp "$work/unpacked/alarmd-cli" "$staged" || fail "cannot write to $install_dir"
+chmod 755 "$staged"
+reported=$("$staged" --version 2>/dev/null) || fail "the downloaded alarmd-cli does not run from $install_dir: check that it is not mounted noexec and that $os-$arch is this machine"
 case $reported in
   *"\"version\":\"$version\""*) ;;
   *) fail "the downloaded alarmd-cli reports $reported, not version $version" ;;
 esac
-
-mkdir -p "$install_dir" || fail "cannot create $install_dir"
-target=$install_dir/alarmd-cli
 previous=
 if [ -x "$target" ]; then
   previous=$("$target" --version 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p') || previous=
 fi
-# Copy beside the target and rename over it: the old binary stays whole until
-# the new one is complete, and a rename in one directory is atomic.
-staged=$install_dir/.alarmd-cli.$$
-cp "$work/unpacked/alarmd-cli" "$staged" || fail "cannot write to $install_dir"
-chmod 755 "$staged"
-mv -f "$staged" "$target" || { rm -f "$staged"; fail "cannot replace $target"; }
+mv -f "$staged" "$target" || fail "cannot replace $target"
+staged=
 
 if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
   printf 'alarmd-cli %s -> %s installed at %s\n' "$previous" "$version" "$target"

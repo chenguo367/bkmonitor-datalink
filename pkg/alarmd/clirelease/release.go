@@ -106,12 +106,16 @@ var (
 )
 
 // Release is what a binary carries: a manifest and the files it lists, or the
-// reason there is none.
+// reason there is none. It holds the manifest and the checksum lines; the
+// archives stay where they are -- in the binary's read-only data, for the
+// embedded release -- and are opened per download, so a process that never
+// serves one never brings them onto its heap.
 type Release struct {
 	problem   error
+	root      fs.FS
 	manifest  Manifest
 	document  []byte
-	files     map[string][]byte
+	checksums map[string][]byte
 	installer []byte
 }
 
@@ -148,17 +152,17 @@ func LoadFS(root fs.FS, version string) *Release {
 	if manifest.Version != version {
 		return &Release{problem: fmt.Errorf("%w: it is release %s and this alarmd is %s", ErrInvalid, manifest.Version, version)}
 	}
-	files := make(map[string][]byte, 2*len(manifest.Artifacts))
+	checksums := make(map[string][]byte, len(manifest.Artifacts))
 	for target, artifact := range manifest.Artifacts {
-		content, err := fs.ReadFile(root, path.Join(manifest.Version, artifact.File))
+		// Sizes, not digests, and from Stat: the digests were written by Pack
+		// from these bytes and Verify recomputes them at build time. Reading
+		// an archive here would copy it onto the heap of every process.
+		info, err := fs.Stat(root, path.Join(manifest.Version, artifact.File))
 		if err != nil {
 			return &Release{problem: fmt.Errorf("%w: %s: %v", ErrInvalid, target, err)}
 		}
-		// Sizes, not digests: the digests were written by Pack from these
-		// bytes and Verify recomputes them at build time. Hashing here would
-		// read every archive into memory at each start for nothing.
-		if int64(len(content)) != artifact.Size {
-			return &Release{problem: fmt.Errorf("%w: %s is %d bytes, the manifest says %d", ErrInvalid, artifact.File, len(content), artifact.Size)}
+		if !info.Mode().IsRegular() || info.Size() != artifact.Size {
+			return &Release{problem: fmt.Errorf("%w: %s is %d bytes, the manifest says %d", ErrInvalid, artifact.File, info.Size(), artifact.Size)}
 		}
 		checksum, err := fs.ReadFile(root, path.Join(manifest.Version, artifact.File+".sha256"))
 		if err != nil {
@@ -167,10 +171,9 @@ func LoadFS(root fs.FS, version string) *Release {
 		if string(checksum) != ChecksumLine(artifact.SHA256, artifact.File) {
 			return &Release{problem: fmt.Errorf("%w: %s.sha256 does not match the manifest", ErrInvalid, artifact.File)}
 		}
-		files[artifact.File] = content
-		files[artifact.File+".sha256"] = checksum
+		checksums[artifact.File+".sha256"] = checksum
 	}
-	return &Release{manifest: manifest, document: document, files: files, installer: installer}
+	return &Release{root: root, manifest: manifest, document: document, checksums: checksums, installer: installer}
 }
 
 func parseManifest(document []byte) (Manifest, error) {
@@ -254,7 +257,10 @@ func (r *Release) Verify() error {
 		return err
 	}
 	for target, artifact := range r.manifest.Artifacts {
-		content := r.files[artifact.File]
+		content, err := fs.ReadFile(r.root, path.Join(r.manifest.Version, artifact.File))
+		if err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrInvalid, artifact.File, err)
+		}
 		if digest(content) != artifact.SHA256 {
 			return fmt.Errorf("%w: %s does not hash to its manifest digest", ErrInvalid, artifact.File)
 		}

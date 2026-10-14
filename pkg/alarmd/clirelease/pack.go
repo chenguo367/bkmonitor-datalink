@@ -89,10 +89,13 @@ func Pack(root, version string, build Build) error {
 }
 
 func clearRoot(root string) error {
-	entries, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return os.MkdirAll(root, 0o755)
+	// Everything under the root but the placeholder is removed, so a root
+	// without one -- a mistyped -out such as "." -- is refused rather than
+	// emptied.
+	if _, err := os.Stat(filepath.Join(root, Placeholder)); err != nil {
+		return fmt.Errorf("%s is not a release root: it has no %s placeholder", root, Placeholder)
 	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return err
 	}

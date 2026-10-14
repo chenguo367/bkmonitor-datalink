@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
@@ -22,6 +23,9 @@ import (
 func packedRelease(t *testing.T, version string) *clirelease.Release {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, clirelease.Placeholder), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	err := clirelease.Pack(root, version, func(_ clirelease.Target, dst string) error {
 		return os.WriteFile(dst, []byte("#!/bin/sh\n"), 0o755)
 	})

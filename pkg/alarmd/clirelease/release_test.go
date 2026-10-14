@@ -13,6 +13,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -35,12 +37,19 @@ func fakeBuild(version string) Build {
 	}
 }
 
-func packed(t *testing.T, version string) string {
+// releaseRoot is an empty release root, as the committed one is.
+func releaseRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, Placeholder), []byte("placeholder\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return root
+}
+
+func packed(t *testing.T, version string) string {
+	t.Helper()
+	root := releaseRoot(t)
 	if err := Pack(root, version, fakeBuild(version)); err != nil {
 		t.Fatalf("Pack: %v", err)
 	}
@@ -124,12 +133,21 @@ func TestPackClearsAnEarlierReleaseAndRefusesANonReleaseVersion(t *testing.T) {
 		t.Fatalf("the earlier release is still under the root: %v", err)
 	}
 	for _, version := range []string{"dev", "0.4.x", "v0.4.1", "0.4.01", "0.4.1+build"} {
-		if err := Pack(t.TempDir(), version, fakeBuild(version)); err == nil {
+		if err := Pack(releaseRoot(t), version, fakeBuild(version)); err == nil {
 			t.Errorf("Pack accepted version %q", version)
 		}
 	}
-	if err := Pack(t.TempDir(), "0.2.0-ci.123", fakeBuild("0.2.0-ci.123")); err != nil {
+	if err := Pack(releaseRoot(t), "0.2.0-ci.123", fakeBuild("0.2.0-ci.123")); err != nil {
 		t.Errorf("Pack refused a pre-release version: %v", err)
+	}
+	// A root without the placeholder is refused, and left as it was.
+	stranger := t.TempDir()
+	_ = os.WriteFile(filepath.Join(stranger, "go.mod"), []byte("module example.test\n"), 0o644)
+	if err := Pack(stranger, testVersion, fakeBuild(testVersion)); err == nil {
+		t.Error("Pack accepted a root without the placeholder")
+	}
+	if _, err := os.Stat(filepath.Join(stranger, "go.mod")); err != nil {
+		t.Errorf("Pack removed a file from a root it refused: %v", err)
 	}
 }
 
@@ -140,9 +158,15 @@ func TestLoadTellsNoReleaseFromABrokenOne(t *testing.T) {
 	if err := (*Release)(nil).Problem(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("a nil release: %v, want unavailable", err)
 	}
-	// The placeholder alone is what go build and go test embed.
-	if err := Load(testVersion).Problem(); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("the embedded placeholder: %v, want unavailable", err)
+	// The placeholder alone is what go build and go test embed. The
+	// package's own embed is not read here: a local make build leaves a
+	// release in it, and the test must not depend on that.
+	if err := LoadFS(os.DirFS(releaseRoot(t)), testVersion).Problem(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("the placeholder alone: %v, want unavailable", err)
+	}
+	// Whatever was embedded, a binary stamped dev has no usable release.
+	if err := Load("dev").Problem(); err == nil {
+		t.Fatal("Load(dev) found a usable release")
 	}
 
 	broken := map[string]func(t *testing.T, root string){
@@ -238,6 +262,34 @@ func TestVerifyCatchesWhatLoadDoesNotHash(t *testing.T) {
 	if err := LoadFS(os.DirFS(root), testVersion).Verify(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Verify with a wrong executable digest: %v, want invalid", err)
 	}
+}
+
+// A loaded release keeps the manifest and the checksum lines, never the
+// archives: every alarmd process loads it, and few ever serve a download.
+func TestALoadedReleaseDoesNotHoldTheArchives(t *testing.T) {
+	root := releaseRoot(t)
+	executable := make([]byte, 4<<20)
+	if _, err := rand.Read(executable); err != nil {
+		t.Fatal(err)
+	}
+	err := Pack(root, testVersion, func(_ Target, dst string) error { return os.WriteFile(dst, executable, 0o755) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable = nil
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	release := LoadFS(os.DirFS(root), testVersion)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if err := release.Problem(); err != nil {
+		t.Fatal(err)
+	}
+	if grown := int64(after.HeapAlloc) - int64(before.HeapAlloc); grown > 1<<20 {
+		t.Fatalf("loading a %d MB release grew the live heap by %d bytes", 4*len(Targets), grown)
+	}
+	runtime.KeepAlive(release)
 }
 
 func TestAnArchiveCarriesTheExecutableAlone(t *testing.T) {
