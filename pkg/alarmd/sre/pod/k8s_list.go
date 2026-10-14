@@ -55,8 +55,10 @@ type resourceKind struct {
 	// answers not-found means its CRD is not installed.
 	Custom bool
 	// KeysOnly returns the object as its metadata and its data keys with
-	// their sizes, never a value (keysOnlyRow).
-	KeysOnly bool
+	// their sizes, never a value (keysOnlyRow); Fingerprinted adds each
+	// value's fingerprint, for Secrets.
+	KeysOnly      bool
+	Fingerprinted bool
 }
 
 var resourceKinds = []resourceKind{
@@ -79,6 +81,7 @@ var resourceKinds = []resourceKind{
 	// What a Helm release owns besides its workloads, read by its ownership
 	// annotations (helmOwnership).
 	{Kind: "ConfigMap", Resource: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}, Namespaced: true, KeysOnly: true},
+	{Kind: "Secret", Resource: schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, Namespaced: true, KeysOnly: true, Fingerprinted: true},
 	{Kind: "ServiceAccount", Resource: schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}, Namespaced: true},
 	{Kind: "PersistentVolumeClaim", Resource: schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}, Namespaced: true},
 	{Kind: "Role", Resource: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}, Namespaced: true},
@@ -108,17 +111,8 @@ func ResourceKinds() []string {
 	return kinds
 }
 
-// secretsNotListed is why Secrets are the one kind not listed: listing them
-// takes a grant that hands this process every value in scope, whatever the
-// listing shows.
-const secretsNotListed = "Secrets are not listed: a list grant on Secrets exposes every value in scope. " +
-	"Read a Secret a workload references by name with " + OpReadSecret + ", whose whitelist names it"
-
 func lookupKind(value string) (resourceKind, error) {
 	name := strings.ToLower(strings.TrimSpace(value))
-	if name == "secret" || name == "secrets" {
-		return resourceKind{}, denied(secretsNotListed)
-	}
 	for _, kind := range resourceKinds {
 		if name == strings.ToLower(kind.Kind) || name == kind.Resource.Resource {
 			return kind, nil
@@ -160,7 +154,10 @@ type ResourceReceipt struct {
 	ReadWith          string            `json:"read_with,omitempty"`
 	OversizedItems    []string          `json:"oversized_items,omitempty"`
 	RedactionContract string            `json:"redaction_contract"`
-	At                time.Time         `json:"at"`
+	// FingerprintScope is where a Secret's fingerprints compare; set on a
+	// Secret read only.
+	FingerprintScope string    `json:"fingerprint_scope,omitempty"`
+	At               time.Time `json:"at"`
 }
 
 // identityPaths are on every item, projected or not.
@@ -177,6 +174,9 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		return result, err
 	}
 	result.Kind, result.APIVersion = kind.Kind, kind.Resource.GroupVersion().String()
+	if kind.Fingerprinted {
+		result.FingerprintScope = p.fingerprintScope()
+	}
 	if p.options.Resources == nil {
 		return result, &Error{Code: CodeAPIError, Message: "Kubernetes resource adapter is unavailable"}
 	}
@@ -240,7 +240,7 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	for index, object := range objects {
 		raw := object.Object
 		if kind.KeysOnly {
-			raw = keysOnlyRow(raw)
+			raw = p.keysOnlyRow(raw, kind.Fingerprinted)
 		}
 		item := p.cleanObject(raw)
 		if len(paths) > 0 {
@@ -268,12 +268,17 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	return result, nil
 }
 
-// keysOnlyRow is a ConfigMap as listed: its identity, metadata, and each data
-// and binaryData key with its value's size in bytes, sorted by key. It is
-// built from nothing that holds a value, so neither the whole item nor any
-// projection of it can carry one; configmap.get reads values, masked.
-func keysOnlyRow(object map[string]any) map[string]any {
+// keysOnlyRow is a ConfigMap or a Secret as listed: its identity, metadata,
+// type, and each data and binaryData key with its value's size in bytes and,
+// fingerprinted, its value's fingerprint, sorted by key. It is built from
+// nothing that holds a value, so neither the whole item nor any projection
+// of it can carry one. configmap.get reads ConfigMap values, masked; no read
+// returns a Secret value.
+func (p *Provider) keysOnlyRow(object map[string]any, fingerprinted bool) map[string]any {
 	row := map[string]any{"apiVersion": object["apiVersion"], "kind": object["kind"]}
+	if kind, ok := object["type"].(string); ok {
+		row["type"] = kind
+	}
 	if metadata, ok := object["metadata"].(map[string]any); ok {
 		kept := map[string]any{}
 		for _, key := range []string{"name", "namespace", "uid", "labels", "annotations", "ownerReferences", "creationTimestamp"} {
@@ -283,18 +288,24 @@ func keysOnlyRow(object map[string]any) map[string]any {
 		}
 		row["metadata"] = kept
 	}
-	row["data"] = keySizes(object["data"], func(value string) int { return len(value) })
-	row["binaryData"] = keySizes(object["binaryData"], func(value string) int {
+	text := func(value string) ([]byte, bool) { return []byte(value), true }
+	encoded := func(value string) ([]byte, bool) {
 		decoded, err := base64.StdEncoding.DecodeString(value)
-		if err != nil {
-			return -1
-		}
-		return len(decoded)
-	})
+		return decoded, err == nil
+	}
+	data := text
+	if fingerprinted {
+		// A Secret's data is base64 on the wire, like a ConfigMap's binaryData.
+		data = encoded
+	}
+	row["data"] = p.keySizes(object["data"], data, fingerprinted)
+	if _, present := object["binaryData"]; present || !fingerprinted {
+		row["binaryData"] = p.keySizes(object["binaryData"], encoded, fingerprinted)
+	}
 	return row
 }
 
-func keySizes(value any, size func(string) int) []any {
+func (p *Provider) keySizes(value any, decode func(string) ([]byte, bool), fingerprinted bool) []any {
 	entries, _ := value.(map[string]any)
 	keys := make([]string, 0, len(entries))
 	for key := range entries {
@@ -303,8 +314,15 @@ func keySizes(value any, size func(string) int) []any {
 	sort.Strings(keys)
 	out := make([]any, 0, len(keys))
 	for _, key := range keys {
-		text, _ := entries[key].(string)
-		out = append(out, map[string]any{"key": key, "bytes": size(text)})
+		raw, _ := entries[key].(string)
+		decoded, ok := decode(raw)
+		entry := map[string]any{"key": key, "bytes": len(decoded)}
+		if !ok {
+			entry["bytes"] = -1
+		} else if fingerprinted {
+			entry["fingerprint"] = p.fingerprint(decoded)
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -399,7 +417,7 @@ func (p *Provider) cleanValue(value any) any {
 	case map[string]any:
 		for key, item := range v {
 			if key == "env" {
-				maskEnv(item)
+				p.maskEnv(item)
 			}
 			v[key] = p.cleanValue(item)
 		}
@@ -417,7 +435,10 @@ func (p *Provider) cleanValue(value any) any {
 	}
 }
 
-func maskEnv(value any) {
+// maskEnv masks an env value under a credential name and puts its
+// fingerprint beside it, so a value set in place can be compared with the
+// Secret that should hold it.
+func (p *Provider) maskEnv(value any) {
 	entries, ok := value.([]any)
 	if !ok {
 		return
@@ -429,7 +450,7 @@ func maskEnv(value any) {
 		}
 		name, _ := variable["name"].(string)
 		if text, isText := variable["value"].(string); isText && text != "" && credentialKey.MatchString(name) {
-			variable["value"] = "<redacted>"
+			variable["value"], variable["valueFingerprint"] = "<redacted>", p.fingerprint([]byte(text))
 		}
 	}
 }

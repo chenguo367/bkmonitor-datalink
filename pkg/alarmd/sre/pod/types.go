@@ -167,7 +167,21 @@ type Options struct {
 	// LiteralSecrets supplements the documented credential_fields_v1 redactor.
 	// Secrets stay in memory and are never included in an observation or receipt.
 	LiteralSecrets []string
-	Now            func() time.Time
+	// FingerprintKey keys the fingerprint every Secret value, and every
+	// value masked under a credential name, is shown as: HMAC-SHA256 under
+	// a key local to the deployment, so a fingerprint compares values within
+	// it and cannot be checked against a table of common values made
+	// elsewhere. Never output. Empty, the process makes its own and
+	// FingerprintScope reads "process".
+	FingerprintKey []byte
+	// FingerprintScope is where fingerprints compare: "deployment" for a
+	// key every replica shares, "process" for one this process made.
+	FingerprintScope string
+	// FingerprintKeySource, when FingerprintKey is empty, is asked once, at
+	// the first fingerprint, for the deployment's key: building the provider
+	// does no I/O. Nil from it, the process makes its own key.
+	FingerprintKeySource func() []byte
+	Now                  func() time.Time
 	// startupAllowance replaces StartupAllowance when set; only tests about
 	// what a run reports, not how long its start may take, set it.
 	startupAllowance time.Duration

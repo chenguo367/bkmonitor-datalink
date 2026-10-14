@@ -5,6 +5,7 @@ package pod
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,7 +74,7 @@ func resourceProvider(t *testing.T, objects ...map[string]any) (*Provider, *reso
 	t.Helper()
 	client, _ := fixture()
 	resources := &resourceFixture{objects: objects}
-	return mustProvider(t, Options{Client: client, Resources: resources, DefaultNamespace: "own", LiteralSecrets: []string{"deployment-literal"}}), resources
+	return mustProvider(t, Options{Client: client, Resources: resources, DefaultNamespace: "own", LiteralSecrets: []string{"deployment-literal"}, FingerprintKey: testFingerprintKey, FingerprintScope: "deployment"}), resources
 }
 
 func decodeItems(t *testing.T, receipt ResourceReceipt) []map[string]any {
@@ -99,7 +100,7 @@ func TestAResourceReadServesTheGrantedKindsOnly(t *testing.T) {
 			t.Fatalf("kind %q: %+v err=%v", kind, receipt, err)
 		}
 	}
-	for kind, want := range map[string]string{"Secret": OpReadSecret, "secrets": "not listed", "CustomResourceDefinition": "Node, Namespace, Pod"} {
+	for kind, want := range map[string]string{"CustomResourceDefinition": "Node, Namespace, Pod"} {
 		_, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind})
 		if errorCode(err) != CodeNotInScope || !strings.Contains(err.Error(), want) {
 			t.Fatalf("kind %q: err=%v, want not_in_scope naming %q", kind, err, want)
@@ -107,6 +108,9 @@ func TestAResourceReadServesTheGrantedKindsOnly(t *testing.T) {
 	}
 	if len(resources.asked) != 3 {
 		t.Fatalf("asked %v, want only the three granted reads", resources.asked)
+	}
+	if receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "secrets", Namespace: "own"}); err != nil || receipt.Kind != "Secret" {
+		t.Fatalf("Secrets are listed: %+v err=%v", receipt, err)
 	}
 	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Node", Namespace: "own"}); errorCode(err) != CodeInvalidRequest {
 		t.Fatalf("a cluster-scoped kind with a namespace: err=%v, want invalid_request", err)
@@ -374,5 +378,105 @@ func TestACustomResourceNotInstalledIsSaidSo(t *testing.T) {
 	}
 	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Service"}); errorCode(err) != CodeNotFound {
 		t.Fatalf("a built-in kind's not-found stays not found: err=%v", err)
+	}
+}
+
+// A Secret is listed as its metadata and each key's size and fingerprint:
+// never a value, listed or read by name, projected or not; the last-applied
+// annotation, which holds the values again, is dropped, and the fingerprint
+// is the one secret.get shows for the same value.
+func TestASecretIsListedWithoutAnyValue(t *testing.T) {
+	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	secret := func(name, password string) map[string]any {
+		return map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+			"metadata": map[string]any{"name": name, "namespace": "ns1", "uid": "uid-" + name, "creationTimestamp": "2026-10-01T00:00:00Z",
+				"labels":          map[string]any{"app.kubernetes.io/managed-by": "Helm"},
+				"annotations":     map[string]any{"meta.helm.sh/release-name": "release-a", lastAppliedAnnotation: `{"stringData":{"password":"sentinel-applied"}}`},
+				"ownerReferences": []any{map[string]any{"kind": "Deployment", "name": "d1"}}},
+			"data": map[string]any{"password": encode(password), "url": encode("redis://user:sentinel-url@192.0.2.10:6379")}}
+	}
+	for _, request := range []ResourceRequest{
+		{Kind: "Secret", Namespace: "ns1"},
+		{Kind: "Secret", Namespace: "ns1", Paths: []string{"data", "stringData", "metadata.annotations"}},
+		{Kind: "Secret", Namespace: "ns1", Name: "s1"},
+	} {
+		provider, _ := resourceProvider(t, secret("s1", "sentinel-shared"), secret("s2", "sentinel-shared"))
+		receipt, err := provider.ListResources(context.Background(), request)
+		if err != nil || receipt.FingerprintScope != "deployment" {
+			t.Fatalf("request %+v: receipt %+v err=%v", request, receipt, err)
+		}
+		for _, raw := range receipt.Items {
+			text := string(raw)
+			for _, value := range []string{"sentinel", encode("sentinel-shared"), "redis://", "last-applied-configuration"} {
+				if strings.Contains(text, value) {
+					t.Fatalf("request %+v: the item carries %q: %s", request, value, text)
+				}
+			}
+		}
+		items := decodeItems(t, receipt)
+		data, _ := json.Marshal(items[0]["data"])
+		want := fmt.Sprintf(`[{"bytes":15,"fingerprint":"%s","key":"password"},{"bytes":41,"fingerprint":"%s","key":"url"}]`,
+			fingerprintOf(testFingerprintKey, "sentinel-shared"), fingerprintOf(testFingerprintKey, "redis://user:sentinel-url@192.0.2.10:6379"))
+		if string(data) != want {
+			t.Fatalf("request %+v: data %s\nwant %s", request, data, want)
+		}
+		if request.Name == "" && request.Paths == nil {
+			first, _ := json.Marshal(items[0]["data"])
+			second, _ := json.Marshal(items[1]["data"])
+			if string(first) != string(second) || items[0]["type"] != "Opaque" {
+				t.Fatalf("two Secrets with one value: %s and %s, type %v", first, second, items[0]["type"])
+			}
+		}
+	}
+}
+
+// An env value under a credential name is masked and carries the value's
+// fingerprint, so a password set in place can be compared with the Secret
+// that should hold it.
+func TestACredentialEnvValueCarriesItsFingerprint(t *testing.T) {
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "d1", "namespace": "ns1", "uid": "u1"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "app",
+			"env": []any{map[string]any{"name": "REDIS_PASSWORD", "value": "sentinel-env"}, map[string]any{"name": "LOG_LEVEL", "value": "debug"}}}}}}}}
+	provider, _ := resourceProvider(t, deployment)
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Deployment", Namespace: "ns1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(receipt.Items[0])
+	if strings.Contains(text, "sentinel-env") || !strings.Contains(text, `"valueFingerprint":"`+fingerprintOf(testFingerprintKey, "sentinel-env")+`"`) ||
+		strings.Count(text, "valueFingerprint") != 1 {
+		t.Fatalf("env = %s", text)
+	}
+}
+
+// Every form a pod spec names a Secret by - a volume's source, a projected
+// source, a key reference, an envFrom reference, an image pull Secret - and
+// an Ingress's TLS Secret come back as they are: a reference names where a
+// credential is kept, and is how a reader finds a workload's dependencies.
+func TestSecretReferencesComeBackAsTheyAre(t *testing.T) {
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "d1", "namespace": "ns1", "uid": "u1"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"volumes": []any{
+				map[string]any{"name": "trace-runtime", "secret": map[string]any{"secretName": "ref-volume", "items": []any{map[string]any{"key": "ref-item", "path": "p"}}}},
+				map[string]any{"name": "bundle", "projected": map[string]any{"sources": []any{map[string]any{"secret": map[string]any{"name": "ref-projected"}}}}}},
+			"imagePullSecrets": []any{map[string]any{"name": "ref-pull"}},
+			"containers": []any{map[string]any{"name": "app",
+				"envFrom": []any{map[string]any{"secretRef": map[string]any{"name": "ref-env-from"}}},
+				"env":     []any{map[string]any{"name": "DB_PASSWORD", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "ref-key", "key": "ref-key-field"}}}}}}}}}}
+	ingress := map[string]any{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": map[string]any{"name": "i1", "namespace": "ns1", "uid": "u2"},
+		"spec": map[string]any{"tls": []any{map[string]any{"secretName": "ref-tls"}}}}
+	for kind, object := range map[string]map[string]any{"Deployment": deployment, "Ingress": ingress} {
+		provider, _ := resourceProvider(t, object)
+		receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var original, returned any
+		encoded, _ := json.Marshal(object["spec"])
+		_ = json.Unmarshal(encoded, &original)
+		returned = decodeItems(t, receipt)[0]["spec"]
+		if got, _ := json.Marshal(returned); string(got) != string(encoded) {
+			t.Fatalf("%s spec changed:\n got %s\nwant %s", kind, got, encoded)
+		}
 	}
 }
