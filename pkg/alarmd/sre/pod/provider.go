@@ -5,10 +5,15 @@ package pod
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,6 +28,10 @@ type Provider struct {
 	options  Options
 	permits  chan struct{}
 	redactor *redactor
+	// keyOnce resolves the fingerprint key at its first use (fingerprintKey).
+	keyOnce  sync.Once
+	key      []byte
+	keyScope string
 	// shellless is the containers found without /bin/sh.
 	shellless shelllessMemo
 }
@@ -75,7 +84,50 @@ func New(options Options) (*Provider, error) {
 		return nil, invalid("provider budgets exceed supported bounds")
 	}
 	options.LiteralSecrets = append([]string(nil), options.LiteralSecrets...)
+	options.FingerprintKey = append([]byte(nil), options.FingerprintKey...)
+	if len(options.FingerprintKey) > 0 && options.FingerprintScope == "" {
+		options.FingerprintScope = FingerprintScopeDeployment
+	}
 	return &Provider{options: options, permits: make(chan struct{}, options.Concurrency), redactor: newRedactor(options.LiteralSecrets)}, nil
+}
+
+// Where fingerprints compare (Options.FingerprintScope).
+const (
+	FingerprintScopeDeployment = "deployment"
+	FingerprintScopeProcess    = "process"
+)
+
+// fingerprintKey is the key fingerprints are made under and where they
+// compare: the configured key; else the deployment's, asked for once; else
+// one this process makes.
+func (p *Provider) fingerprintKey() ([]byte, string) {
+	p.keyOnce.Do(func() {
+		p.key, p.keyScope = p.options.FingerprintKey, p.options.FingerprintScope
+		if len(p.key) == 0 && p.options.FingerprintKeySource != nil {
+			p.key, p.keyScope = p.options.FingerprintKeySource(), FingerprintScopeDeployment
+		}
+		if len(p.key) == 0 {
+			p.key, p.keyScope = make([]byte, 32), FingerprintScopeProcess
+			_, _ = rand.Read(p.key)
+		}
+	})
+	return p.key, p.keyScope
+}
+
+// fingerprintScope is where this provider's fingerprints compare.
+func (p *Provider) fingerprintScope() string {
+	_, scope := p.fingerprintKey()
+	return scope
+}
+
+// fingerprint is a value as it is shown when it may not be: HMAC-SHA256
+// under the deployment's key, the first 16 hex digits. It tells two equal
+// values and a changed one apart and gives nothing else.
+func (p *Provider) fingerprint(value []byte) string {
+	key, _ := p.fingerprintKey()
+	mac := hmac.New(sha256.New, key)
+	mac.Write(value)
+	return hex.EncodeToString(mac.Sum(nil))[:16]
 }
 
 func invalid(message string) error { return &Error{Code: CodeInvalidRequest, Message: message} }

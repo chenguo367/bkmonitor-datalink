@@ -5,12 +5,14 @@ package pod
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,11 +25,17 @@ type resourceFixture struct {
 	continue_ string
 	asked     []string
 	options   []metav1.ListOptions
+	// missing answers every read with the apiserver's not-found, as for a
+	// resource whose CRD is not installed or an object that does not exist.
+	missing bool
 }
 
 func (f *resourceFixture) ListResources(_ context.Context, resource schema.GroupVersionResource, namespace string, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
 	f.asked = append(f.asked, fmt.Sprintf("list %s %s ns=%q", resource.GroupVersion(), resource.Resource, namespace))
 	f.options = append(f.options, options)
+	if f.missing {
+		return nil, apierrors.NewNotFound(resource.GroupResource(), "")
+	}
 	list := &unstructured.UnstructuredList{}
 	list.SetContinue(f.continue_)
 	list.SetResourceVersion("rv-7")
@@ -39,6 +47,9 @@ func (f *resourceFixture) ListResources(_ context.Context, resource schema.Group
 
 func (f *resourceFixture) GetResource(_ context.Context, resource schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
 	f.asked = append(f.asked, fmt.Sprintf("get %s %s ns=%q %s", resource.GroupVersion(), resource.Resource, namespace, name))
+	if f.missing {
+		return nil, apierrors.NewNotFound(resource.GroupResource(), name)
+	}
 	return &unstructured.Unstructured{Object: deepCopyJSON(f.objects[0])}, nil
 }
 
@@ -63,7 +74,7 @@ func resourceProvider(t *testing.T, objects ...map[string]any) (*Provider, *reso
 	t.Helper()
 	client, _ := fixture()
 	resources := &resourceFixture{objects: objects}
-	return mustProvider(t, Options{Client: client, Resources: resources, DefaultNamespace: "own", LiteralSecrets: []string{"deployment-literal"}}), resources
+	return mustProvider(t, Options{Client: client, Resources: resources, DefaultNamespace: "own", LiteralSecrets: []string{"deployment-literal"}, FingerprintKey: testFingerprintKey, FingerprintScope: "deployment"}), resources
 }
 
 func decodeItems(t *testing.T, receipt ResourceReceipt) []map[string]any {
@@ -89,7 +100,7 @@ func TestAResourceReadServesTheGrantedKindsOnly(t *testing.T) {
 			t.Fatalf("kind %q: %+v err=%v", kind, receipt, err)
 		}
 	}
-	for kind, want := range map[string]string{"Secret": OpReadSecret, "configmaps": OpReadConfigMap, "CustomResourceDefinition": "Node, Namespace, Pod"} {
+	for kind, want := range map[string]string{"CustomResourceDefinition": "Node, Namespace, Pod"} {
 		_, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind})
 		if errorCode(err) != CodeNotInScope || !strings.Contains(err.Error(), want) {
 			t.Fatalf("kind %q: err=%v, want not_in_scope naming %q", kind, err, want)
@@ -97,6 +108,9 @@ func TestAResourceReadServesTheGrantedKindsOnly(t *testing.T) {
 	}
 	if len(resources.asked) != 3 {
 		t.Fatalf("asked %v, want only the three granted reads", resources.asked)
+	}
+	if receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "secrets", Namespace: "own"}); err != nil || receipt.Kind != "Secret" {
+		t.Fatalf("Secrets are listed: %+v err=%v", receipt, err)
 	}
 	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Node", Namespace: "own"}); errorCode(err) != CodeInvalidRequest {
 		t.Fatalf("a cluster-scoped kind with a namespace: err=%v, want invalid_request", err)
@@ -253,4 +267,216 @@ func errorCode(err error) string {
 		return named.Code
 	}
 	return ""
+}
+
+// The kinds a release's ownership is read across, each from the group the
+// channel's ClusterRole grants it in: service accounts, RBAC objects, volume
+// claims, ConfigMaps, and the custom resources on the fixed list.
+func TestAResourceReadServesTheOwnershipKinds(t *testing.T) {
+	for kind, want := range map[string]string{
+		"ServiceAccount":        `list v1 serviceaccounts ns="ns1"`,
+		"PersistentVolumeClaim": `list v1 persistentvolumeclaims ns="ns1"`,
+		"ConfigMap":             `list v1 configmaps ns="ns1"`,
+		"Role":                  `list rbac.authorization.k8s.io/v1 roles ns="ns1"`,
+		"RoleBinding":           `list rbac.authorization.k8s.io/v1 rolebindings ns="ns1"`,
+		"ServiceMonitor":        `list monitoring.coreos.com/v1 servicemonitors ns="ns1"`,
+		"PodMonitor":            `list monitoring.coreos.com/v1 podmonitors ns="ns1"`,
+		"BkLogConfig":           `list bk.tencent.com/v1alpha1 bklogconfigs ns="ns1"`,
+	} {
+		provider, resources := resourceProvider(t)
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"}); err != nil || resources.asked[0] != want {
+			t.Fatalf("kind %s: asked %v err=%v, want %s", kind, resources.asked, err, want)
+		}
+	}
+	for kind, want := range map[string]string{
+		"ClusterRole":        `list rbac.authorization.k8s.io/v1 clusterroles ns=""`,
+		"ClusterRoleBinding": `list rbac.authorization.k8s.io/v1 clusterrolebindings ns=""`,
+	} {
+		provider, resources := resourceProvider(t)
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind}); err != nil || resources.asked[0] != want {
+			t.Fatalf("kind %s: asked %v err=%v, want %s", kind, resources.asked, err, want)
+		}
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"}); errorCode(err) != CodeInvalidRequest {
+			t.Fatalf("kind %s is cluster-scoped: err=%v", kind, err)
+		}
+	}
+}
+
+// A ConfigMap is listed as its metadata and, per key, the size of its value:
+// never a value, whether the object is returned whole or projected, and the
+// last-applied annotation, which holds the values again, is dropped.
+func TestAConfigMapIsListedWithoutAnyValue(t *testing.T) {
+	configMap := map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "app-config", "namespace": "ns1", "uid": "cm-uid", "creationTimestamp": "2026-10-01T00:00:00Z",
+			"labels": map[string]any{"app.kubernetes.io/managed-by": "Helm"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "release-a", "meta.helm.sh/release-namespace": "ns1",
+				lastAppliedAnnotation: `{"data":{"config.yaml":"sentinel-applied"}}`},
+			"ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "d1", "uid": "d-uid"}},
+			"managedFields":   []any{map[string]any{"manager": "helm"}}},
+		"data":       map[string]any{"config.yaml": "sentinel-data-one", "b.txt": "sentinel-data-two"},
+		"binaryData": map[string]any{"blob.bin": "c2VudGluZWwtYmluYXJ5"}}
+	for _, paths := range [][]string{nil, {"data", "binaryData", "metadata.labels"}} {
+		provider, _ := resourceProvider(t, configMap)
+		receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "configmaps", Namespace: "ns1", Paths: paths})
+		if err != nil || receipt.Count != 1 {
+			t.Fatalf("paths %v: receipt %+v err=%v", paths, receipt, err)
+		}
+		text := string(receipt.Items[0])
+		for _, value := range []string{"sentinel", "c2VudGluZWwtYmluYXJ5", "managedFields", "last-applied-configuration"} {
+			if strings.Contains(text, value) {
+				t.Fatalf("paths %v: the item carries %q: %s", paths, value, text)
+			}
+		}
+		item := decodeItems(t, receipt)[0]
+		data, _ := json.Marshal(item["data"])
+		binary, _ := json.Marshal(item["binaryData"])
+		if string(data) != `[{"bytes":17,"key":"b.txt"},{"bytes":17,"key":"config.yaml"}]` || string(binary) != `[{"bytes":15,"key":"blob.bin"}]` {
+			t.Fatalf("paths %v: data %s binaryData %s, want each key with its value's size, sorted", paths, data, binary)
+		}
+		if paths == nil {
+			metadata := item["metadata"].(map[string]any)
+			owners, _ := json.Marshal(metadata["ownerReferences"])
+			if metadata["creationTimestamp"] != "2026-10-01T00:00:00Z" || !strings.Contains(string(owners), `"name":"d1"`) ||
+				metadata["annotations"].(map[string]any)["meta.helm.sh/release-name"] != "release-a" {
+				t.Fatalf("metadata %v, want its creation time, owners and Helm ownership", metadata)
+			}
+		}
+	}
+}
+
+// What a Helm release owns is a listing across the kinds: every item keeps
+// Helm's ownership annotations and label, projected or not, since paths
+// cannot name a key with dots in it.
+func TestEveryItemKeepsItsHelmOwnership(t *testing.T) {
+	service := map[string]any{"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": "s1", "namespace": "ns1", "uid": "s-uid",
+			"labels":      map[string]any{"app.kubernetes.io/managed-by": "Helm", "app": "x"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "release-a", "meta.helm.sh/release-namespace": "ns1", "example.com/other": "y"}},
+		"spec": map[string]any{"clusterIP": "198.51.100.7"}}
+	provider, _ := resourceProvider(t, service)
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Service", Namespace: "ns1", LabelSelector: "app.kubernetes.io/managed-by=Helm", Paths: []string{"spec.clusterIP"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"apiVersion":"v1","kind":"Service","metadata":{"annotations":{"meta.helm.sh/release-name":"release-a","meta.helm.sh/release-namespace":"ns1"},"labels":{"app.kubernetes.io/managed-by":"Helm"},"name":"s1","namespace":"ns1","uid":"s-uid"},"spec":{"clusterIP":"198.51.100.7"}}`
+	if got, _ := json.Marshal(decodeItems(t, receipt)[0]); string(got) != want {
+		t.Fatalf("item = %s\nwant   %s", got, want)
+	}
+}
+
+// A custom resource whose CRD the cluster does not have is said to be not
+// installed, not an apiserver failure; one object that does not exist is
+// still not found.
+func TestACustomResourceNotInstalledIsSaidSo(t *testing.T) {
+	provider, resources := resourceProvider(t)
+	resources.missing = true
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "ServiceMonitor"}); errorCode(err) != CodeKindNotInstalled {
+		t.Fatalf("list of a missing CRD: err=%v, want %s", err, CodeKindNotInstalled)
+	}
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "ServiceMonitor", Namespace: "ns1", Name: "sm1"}); errorCode(err) != CodeNotFound {
+		t.Fatalf("get of a missing object: err=%v, want %s", err, CodeNotFound)
+	}
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Service"}); errorCode(err) != CodeNotFound {
+		t.Fatalf("a built-in kind's not-found stays not found: err=%v", err)
+	}
+}
+
+// A Secret is listed as its metadata and each key's size and fingerprint:
+// never a value, listed or read by name, projected or not; the last-applied
+// annotation, which holds the values again, is dropped, and the fingerprint
+// is the one secret.get shows for the same value.
+func TestASecretIsListedWithoutAnyValue(t *testing.T) {
+	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	secret := func(name, password string) map[string]any {
+		return map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+			"metadata": map[string]any{"name": name, "namespace": "ns1", "uid": "uid-" + name, "creationTimestamp": "2026-10-01T00:00:00Z",
+				"labels":          map[string]any{"app.kubernetes.io/managed-by": "Helm"},
+				"annotations":     map[string]any{"meta.helm.sh/release-name": "release-a", lastAppliedAnnotation: `{"stringData":{"password":"sentinel-applied"}}`},
+				"ownerReferences": []any{map[string]any{"kind": "Deployment", "name": "d1"}}},
+			"data": map[string]any{"password": encode(password), "url": encode("redis://user:sentinel-url@192.0.2.10:6379")}}
+	}
+	for _, request := range []ResourceRequest{
+		{Kind: "Secret", Namespace: "ns1"},
+		{Kind: "Secret", Namespace: "ns1", Paths: []string{"data", "stringData", "metadata.annotations"}},
+		{Kind: "Secret", Namespace: "ns1", Name: "s1"},
+	} {
+		provider, _ := resourceProvider(t, secret("s1", "sentinel-shared"), secret("s2", "sentinel-shared"))
+		receipt, err := provider.ListResources(context.Background(), request)
+		if err != nil || receipt.FingerprintScope != "deployment" {
+			t.Fatalf("request %+v: receipt %+v err=%v", request, receipt, err)
+		}
+		for _, raw := range receipt.Items {
+			text := string(raw)
+			for _, value := range []string{"sentinel", encode("sentinel-shared"), "redis://", "last-applied-configuration"} {
+				if strings.Contains(text, value) {
+					t.Fatalf("request %+v: the item carries %q: %s", request, value, text)
+				}
+			}
+		}
+		items := decodeItems(t, receipt)
+		data, _ := json.Marshal(items[0]["data"])
+		want := fmt.Sprintf(`[{"bytes":15,"fingerprint":"%s","key":"password"},{"bytes":41,"fingerprint":"%s","key":"url"}]`,
+			fingerprintOf(testFingerprintKey, "sentinel-shared"), fingerprintOf(testFingerprintKey, "redis://user:sentinel-url@192.0.2.10:6379"))
+		if string(data) != want {
+			t.Fatalf("request %+v: data %s\nwant %s", request, data, want)
+		}
+		if request.Name == "" && request.Paths == nil {
+			first, _ := json.Marshal(items[0]["data"])
+			second, _ := json.Marshal(items[1]["data"])
+			if string(first) != string(second) || items[0]["type"] != "Opaque" {
+				t.Fatalf("two Secrets with one value: %s and %s, type %v", first, second, items[0]["type"])
+			}
+		}
+	}
+}
+
+// An env value under a credential name is masked and carries the value's
+// fingerprint, so a password set in place can be compared with the Secret
+// that should hold it.
+func TestACredentialEnvValueCarriesItsFingerprint(t *testing.T) {
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "d1", "namespace": "ns1", "uid": "u1"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "app",
+			"env": []any{map[string]any{"name": "REDIS_PASSWORD", "value": "sentinel-env"}, map[string]any{"name": "LOG_LEVEL", "value": "debug"}}}}}}}}
+	provider, _ := resourceProvider(t, deployment)
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Deployment", Namespace: "ns1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(receipt.Items[0])
+	if strings.Contains(text, "sentinel-env") || !strings.Contains(text, `"valueFingerprint":"`+fingerprintOf(testFingerprintKey, "sentinel-env")+`"`) ||
+		strings.Count(text, "valueFingerprint") != 1 {
+		t.Fatalf("env = %s", text)
+	}
+}
+
+// Every form a pod spec names a Secret by - a volume's source, a projected
+// source, a key reference, an envFrom reference, an image pull Secret - and
+// an Ingress's TLS Secret come back as they are: a reference names where a
+// credential is kept, and is how a reader finds a workload's dependencies.
+func TestSecretReferencesComeBackAsTheyAre(t *testing.T) {
+	deployment := map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "d1", "namespace": "ns1", "uid": "u1"},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"volumes": []any{
+				map[string]any{"name": "trace-runtime", "secret": map[string]any{"secretName": "ref-volume", "items": []any{map[string]any{"key": "ref-item", "path": "p"}}}},
+				map[string]any{"name": "bundle", "projected": map[string]any{"sources": []any{map[string]any{"secret": map[string]any{"name": "ref-projected"}}}}}},
+			"imagePullSecrets": []any{map[string]any{"name": "ref-pull"}},
+			"containers": []any{map[string]any{"name": "app",
+				"envFrom": []any{map[string]any{"secretRef": map[string]any{"name": "ref-env-from"}}},
+				"env":     []any{map[string]any{"name": "DB_PASSWORD", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "ref-key", "key": "ref-key-field"}}}}}}}}}}
+	ingress := map[string]any{"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": map[string]any{"name": "i1", "namespace": "ns1", "uid": "u2"},
+		"spec": map[string]any{"tls": []any{map[string]any{"secretName": "ref-tls"}}}}
+	for kind, object := range map[string]map[string]any{"Deployment": deployment, "Ingress": ingress} {
+		provider, _ := resourceProvider(t, object)
+		receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var original, returned any
+		encoded, _ := json.Marshal(object["spec"])
+		_ = json.Unmarshal(encoded, &original)
+		returned = decodeItems(t, receipt)[0]["spec"]
+		if got, _ := json.Marshal(returned); string(got) != string(encoded) {
+			t.Fatalf("%s spec changed:\n got %s\nwant %s", kind, got, encoded)
+		}
+	}
 }

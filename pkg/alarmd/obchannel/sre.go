@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
@@ -73,7 +74,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert}
+	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -105,7 +106,7 @@ func sreResult(err error) (string, string) {
 		return SREResultForbidden, named.Code
 	case pod.RemoteUnknown:
 		return SREResultUnknown, named.Code
-	case pod.CodeInvalidRequest, pod.CodeNotInScope, pod.CodeTargetNotRunning, pod.CodeCommandStartFailed, pod.CodeTimeoutUnsupported, pod.CodeBusy, pod.CodeNotFound:
+	case pod.CodeInvalidRequest, pod.CodeNotInScope, pod.CodeTargetNotRunning, pod.CodeCommandStartFailed, pod.CodeTimeoutUnsupported, pod.CodeBusy, pod.CodeNotFound, pod.CodeKindNotInstalled:
 		return SREResultRefused, named.Code
 	}
 	return SREResultFailed, named.Code
@@ -253,7 +254,7 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				return out
 			}},
-		{ID: pod.OpListResources, Summary: "列出或读取一种 Kubernetes 资源（Node、Namespace、Pod、Service、Endpoints、EndpointSlice、Event、Deployment、StatefulSet、DaemonSet、ReplicaSet、Job、CronJob、Ingress、HorizontalPodAutoscaler）：不填 namespace 时命名空间级的种类按整个集群列；name 读一个对象；label_selector、field_selector 原样交给 apiserver（如 spec.nodeName=节点名 按节点列 Pod）；paths 只取给出的点分路径。输出去掉 managedFields 与 last-applied 注解，凭据名的注解与 env 值整值遮蔽，所有字符串经过脱敏。Secret 与 ConfigMap 不在此读。",
+		{ID: pod.OpListResources, Summary: "列出或读取一种 Kubernetes 资源（Node、Namespace、Pod、Service、Endpoints、EndpointSlice、Event、Deployment、StatefulSet、DaemonSet、ReplicaSet、Job、CronJob、Ingress、HorizontalPodAutoscaler、ConfigMap、Secret、ServiceAccount、PersistentVolumeClaim、Role、RoleBinding、ClusterRole、ClusterRoleBinding，以及自定义资源 ServiceMonitor、PodMonitor、BkLogConfig）：不填 namespace 时命名空间级的种类按整个集群列；name 读一个对象；label_selector、field_selector 原样交给 apiserver（如 spec.nodeName=节点名 按节点列 Pod，app.kubernetes.io/managed-by=Helm 列 Helm 管理的对象）；paths 只取给出的点分路径。每个对象都带 Helm 的归属标签与注解（meta.helm.sh/release-name、release-namespace），投影时也带，按它们可列出一个 release 拥有什么。Secret 只给元数据和每个键的字节数与指纹（部署内密钥的 HMAC，16 位十六进制，能比较是否同值、是否变过，不能还原），从不给值；ConfigMap 只给元数据和每个键的字节数，值用 configmap.get 读。其他种类去掉 managedFields 与 last-applied 注解，凭据名的注解整值遮蔽，凭据名的 env 值遮蔽并附指纹，所有字符串经过脱敏；对 Secret 的引用（secretName、secretKeyRef、envFrom、imagePullSecrets）原样保留。集群没装的自定义资源答 kind_not_installed。列 Secret 每次都留审计记录。",
 			EvidenceScope: "sre_k8s_read", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: k8sListLimits,
 			Fields: map[string]Field{"kind": {Type: "string", MinLength: 1, MaxLength: 64}, "namespace": text, "name": {Type: "string", MinLength: 1, MaxLength: 253},
 				"label_selector": {Type: "string", MaxLength: 1024}, "field_selector": {Type: "string", MaxLength: 1024},
@@ -268,10 +269,14 @@ func SREOperations(options SREOptions) []Operation {
 						request.Paths = append(request.Paths, value.(string))
 					}
 				}
+				started := now()
 				v, err := pods.ListResources(ctx, request)
+				if v.Kind == "Secret" {
+					audit(ctx, started, SREAction{Op: pod.OpListResources, Namespace: v.Namespace, Kind: "Secret", Name: secretNames(v), Detail: fmt.Sprintf("secrets %d, no values", v.Count)}, err)
+				}
 				out := wrapPod(v, err, err == nil && v.Continue == "" && !v.Truncated && len(v.OversizedItems) == 0)
 				out.Limitations = []string{"A list across the cluster is paged: a cluster-wide Pod list can take several pages at the output bound, so follow continue until it is empty.",
-					"Secret and ConfigMap content is not read here; secret.get and configmap.get read them with their masking."}
+					"A Secret comes back as metadata and each key's size and fingerprint, never a value; a ConfigMap as metadata and each key's size, its values through configmap.get."}
 				if err != nil {
 					return out
 				}
@@ -375,21 +380,13 @@ func SREOperations(options SREOptions) []Operation {
 				audit(ctx, started, SREAction{Op: pod.OpScaleWorkload, Namespace: request.Namespace, Kind: request.Kind, Name: request.Name, UID: request.UID, Detail: detail}, err)
 				return wrapPod(v, err, err == nil)
 			}},
-		{ID: pod.OpReadSecret, Summary: "读白名单里的一个 Secret：默认只返回键名、每个值的字节数和 sha256，不返回值；reveal=true 才返回原值（仍经脱敏），回执和审计都记下要了原值。不在白名单的 Secret 由 apiserver 拒绝。", Effect: "exec", EvidenceScope: "sre_secret", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
-			Fields: map[string]Field{"namespace": text, "name": text, "reveal": {Type: "boolean"}}, Required: []string{"name"}, OutputSchema: SchemaOf(pod.SecretReceipt{}),
+		{ID: pod.OpReadSecret, Summary: "读一个 Secret（任意命名空间，不指定时是本进程所在的命名空间）：返回类型、标签、注解（去掉 last-applied，凭据名的整值遮蔽）、属主引用、创建时间，以及每个键的字节数与指纹（部署内密钥的 HMAC，16 位十六进制；同值同指纹，能比较是否同值、是否变过，不能还原，也不能拿别处算的常见值表去对），从不返回值。fingerprint_scope 为 process 时指纹只在应答进程内可比。每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_secret", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
+			Fields: map[string]Field{"namespace": text, "name": text}, Required: []string{"name"}, OutputSchema: SchemaOf(pod.SecretReceipt{}),
 			Run: func(ctx context.Context, p Params) Outcome {
 				started := now()
-				v, err := pods.ReadSecret(ctx, pod.SecretRequest{Namespace: p.String("namespace"), Name: p.String("name"), Reveal: p.Bool("reveal")})
-				detail := "values not revealed"
-				if v.Revealed {
-					detail = "values revealed on request"
-				}
-				audit(ctx, started, SREAction{Op: pod.OpReadSecret, Namespace: v.Namespace, Kind: "Secret", Name: v.Name, UID: v.UID, Detail: detail}, err)
-				out := wrapPod(v, err, err == nil && !v.Truncated)
-				if v.Revealed {
-					out.Limitations = append(out.Limitations, "Secret values were returned on request; they passed the output redaction, which masks only credentials it recognizes.")
-				}
-				return out
+				v, err := pods.ReadSecret(ctx, pod.SecretRequest{Namespace: p.String("namespace"), Name: p.String("name")})
+				audit(ctx, started, SREAction{Op: pod.OpReadSecret, Namespace: v.Namespace, Kind: "Secret", Name: v.Name, UID: v.UID, Detail: fmt.Sprintf("keys %d, no values", len(v.Keys))}, err)
+				return wrapPod(v, err, err == nil && !v.Truncated)
 			}},
 		{ID: pod.OpReadConfigMap, Summary: "读一个 ConfigMap（任意命名空间，不指定时是本进程所在的命名空间）：每个值都经过脱敏，名字像凭据的键（password、secret、token 等）整值遮蔽；各模块渲染进 ConfigMap 的明文口令因此不会原样返回。每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_configmap", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
 			Fields: map[string]Field{"namespace": text, "name": text}, Required: []string{"name"}, OutputSchema: SchemaOf(pod.ConfigMapReceipt{}),
@@ -568,4 +565,28 @@ func podTarget(p Params) pod.Target {
 	var target pod.Target
 	_ = json.Unmarshal(value, &target)
 	return target
+}
+
+// secretAuditNames bounds the Secret names one listing's audit line carries.
+const secretAuditNames = 20
+
+// secretNames is the Secrets a listing returned, as its audit line names
+// them: namespace/name, at most secretAuditNames, then how many more.
+func secretNames(receipt pod.ResourceReceipt) string {
+	names := make([]string, 0, min(len(receipt.Items), secretAuditNames+1))
+	for index, raw := range receipt.Items {
+		if index == secretAuditNames {
+			names = append(names, fmt.Sprintf("+%d more", len(receipt.Items)-secretAuditNames))
+			break
+		}
+		var item struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+				Name      string `json:"name"`
+			} `json:"metadata"`
+		}
+		_ = json.Unmarshal(raw, &item)
+		names = append(names, item.Metadata.Namespace+"/"+item.Metadata.Name)
+	}
+	return strings.Join(names, ",")
 }

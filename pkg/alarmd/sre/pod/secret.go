@@ -5,8 +5,6 @@ package pod
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"regexp"
 	"sort"
 	"time"
@@ -28,36 +26,52 @@ type SecretReader interface {
 	GetSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error)
 }
 
-// SecretRequest names one Secret. Reveal asks for the values themselves;
-// without it a read returns each key's size and digest and no value.
+// SecretRequest names one Secret. A read never returns a value.
 type SecretRequest struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
-	Reveal    bool   `json:"reveal,omitempty"`
 }
 
-// SecretKey is one key of a Secret: its value's size and SHA-256, and the
-// value only when the request asked for it.
+// SecretKey is one key of a Secret: its value's size and fingerprint, never
+// the value, masked or otherwise.
 type SecretKey struct {
-	Key    string `json:"key"`
-	Bytes  int    `json:"bytes"`
-	SHA256 string `json:"sha256"`
-	Value  string `json:"value,omitempty"`
+	Key         string `json:"key"`
+	Bytes       int    `json:"bytes"`
+	Fingerprint string `json:"fingerprint"`
 }
 
-// SecretReceipt is what one Secret read returned. Revealed records that the
-// request asked for the values; Truncated that keys past MaxSecretKeys were
+// SecretReceipt is what one Secret read returned: never a value, each key
+// as its size and fingerprint. Truncated says keys past MaxSecretKeys were
 // left out.
 type SecretReceipt struct {
-	Namespace         string      `json:"namespace"`
-	Name              string      `json:"name"`
-	UID               string      `json:"uid"`
-	Type              string      `json:"type"`
-	Keys              []SecretKey `json:"keys"`
-	Revealed          bool        `json:"revealed"`
-	Truncated         bool        `json:"truncated"`
-	RedactionContract string      `json:"redaction_contract"`
-	At                time.Time   `json:"at"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	Type      string `json:"type"`
+	// Labels, Annotations, OwnerReferences and CreatedAt say what owns the
+	// Secret - Helm's ownership marks among them - so a reader can tell
+	// whether removing a release deletes it. Annotations are cleaned as a
+	// resource read cleans them: the last-applied copy, which holds the
+	// values, dropped, and a credential-named one masked.
+	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	OwnerReferences []SecretOwner     `json:"owner_references,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	Keys            []SecretKey       `json:"keys"`
+	// FingerprintScope is where the fingerprints compare: "deployment" or,
+	// when this process had to make its own key, "process".
+	FingerprintScope  string    `json:"fingerprint_scope"`
+	Truncated         bool      `json:"truncated"`
+	RedactionContract string    `json:"redaction_contract"`
+	At                time.Time `json:"at"`
+}
+
+// SecretOwner is one owner reference of a Secret.
+type SecretOwner struct {
+	APIVersion string `json:"api_version"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
 }
 
 // ReadSecret reads one Secret the deployment's whitelist names. A value is
@@ -66,7 +80,7 @@ type SecretReceipt struct {
 // output redaction (credentials the deployment knows, credential fields, URL
 // userinfo).
 func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (SecretReceipt, error) {
-	result := SecretReceipt{Namespace: request.Namespace, Name: request.Name, Revealed: request.Reveal, Keys: []SecretKey{}, RedactionContract: RedactionContract, At: p.options.Now().UTC()}
+	result := SecretReceipt{Namespace: request.Namespace, Name: request.Name, Keys: []SecretKey{}, FingerprintScope: p.fingerprintScope(), RedactionContract: RedactionContract, At: p.options.Now().UTC()}
 	if p.options.Secrets == nil {
 		return result, &Error{Code: CodeAPIError, Message: "Kubernetes Secret adapter is unavailable"}
 	}
@@ -90,6 +104,31 @@ func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (Secre
 		return result, apiError(err)
 	}
 	result.UID, result.Type = string(secret.UID), string(secret.Type)
+	result.CreatedAt = secret.CreationTimestamp.UTC()
+	if len(secret.Labels) > 0 {
+		result.Labels = map[string]string{}
+		for key, value := range secret.Labels {
+			redacted, _ := p.redactor.bounded(value, p.options.MaxOutputBytes)
+			result.Labels[key] = redacted
+		}
+	}
+	for key, value := range secret.Annotations {
+		if key == lastAppliedAnnotation {
+			continue
+		}
+		if result.Annotations == nil {
+			result.Annotations = map[string]string{}
+		}
+		if value != "" && credentialKey.MatchString(key) {
+			result.Annotations[key] = "<redacted>"
+			continue
+		}
+		redacted, _ := p.redactor.bounded(value, p.options.MaxOutputBytes)
+		result.Annotations[key] = redacted
+	}
+	for _, owner := range secret.OwnerReferences {
+		result.OwnerReferences = append(result.OwnerReferences, SecretOwner{APIVersion: owner.APIVersion, Kind: owner.Kind, Name: owner.Name, UID: string(owner.UID)})
+	}
 	keys := make([]string, 0, len(secret.Data))
 	for key := range secret.Data {
 		keys = append(keys, key)
@@ -100,22 +139,7 @@ func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (Secre
 	}
 	for _, key := range keys {
 		value := secret.Data[key]
-		digest := sha256.Sum256(value)
-		entry := SecretKey{Key: key, Bytes: len(value), SHA256: hex.EncodeToString(digest[:])}
-		if request.Reveal {
-			// The same masking a ConfigMap read applies: a value under a
-			// credential-named key is masked whole, the rest goes through the
-			// output redaction. Hosts, ports and user names show; a
-			// credential is compared by its size and digest.
-			shown := string(value)
-			if credentialKey.MatchString(key) && shown != "" {
-				shown = "<redacted>"
-			}
-			redacted, cut := p.redactor.bounded(shown, p.options.MaxOutputBytes)
-			entry.Value = redacted
-			result.Truncated = result.Truncated || cut
-		}
-		result.Keys = append(result.Keys, entry)
+		result.Keys = append(result.Keys, SecretKey{Key: key, Bytes: len(value), Fingerprint: p.fingerprint(value)})
 	}
 	return result, nil
 }
@@ -140,6 +164,9 @@ type ConfigMapKey struct {
 	Key   string `json:"key"`
 	Bytes int    `json:"bytes"`
 	Value string `json:"value"`
+	// Fingerprint is a value masked under a credential name, shown as a
+	// Secret value is, so it can be compared with the Secret that holds it.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // ConfigMapReceipt is what one ConfigMap read returned. Values are always
@@ -201,14 +228,14 @@ func (p *Provider) ReadConfigMap(ctx context.Context, request ConfigMapRequest) 
 	remaining := p.options.MaxOutputBytes
 	for _, key := range keys {
 		value := configMap.Data[key]
-		masked := value
+		masked, fingerprint := value, ""
 		if credentialKey.MatchString(key) && value != "" {
-			masked = "<redacted>"
+			masked, fingerprint = "<redacted>", p.fingerprint([]byte(value))
 		}
 		redacted, cut := p.redactor.bounded(masked, max(remaining, 0))
 		remaining -= int64(len(redacted))
 		result.Truncated = result.Truncated || cut
-		result.Keys = append(result.Keys, ConfigMapKey{Key: key, Bytes: len(value), Value: redacted})
+		result.Keys = append(result.Keys, ConfigMapKey{Key: key, Bytes: len(value), Value: redacted, Fingerprint: fingerprint})
 	}
 	for key := range configMap.BinaryData {
 		result.BinaryKeys = append(result.BinaryKeys, key)

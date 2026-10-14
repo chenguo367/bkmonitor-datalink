@@ -51,3 +51,52 @@ func TestURLUserinfoIsACredentialUnderAnyScheme(t *testing.T) {
 		t.Fatalf("non-credential text changed: %s", out)
 	}
 }
+
+// A structure under a credential-named key is walked, not masked whole: a
+// reference to where a credential is kept comes through, and a scalar under
+// a credential-named key inside it is still masked. A structure that is a
+// credential by what it is - headers, credentials, cookies - stays masked.
+func TestAStructureUnderACredentialNameIsWalkedNotMasked(t *testing.T) {
+	raw := json.RawMessage(`{"secret":{"secretName":"ref-volume","items":[{"key":"ref-key"}],"password":"inline-nested"},"token":"inline-token","headers":{"X-Custom-Auth":"inline-header"},"credentials":{"user":"inline-credential"}}`)
+	out := string(New().JSON(raw))
+	for _, kept := range []string{"ref-volume", "ref-key"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("reference lost: %s in %s", kept, out)
+		}
+	}
+	for _, gone := range []string{"inline-nested", "inline-token", "inline-header", "inline-credential"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("credential retained: %s in %s", gone, out)
+		}
+	}
+}
+
+// Under a credential-named key a structure is read as a reference: only the
+// fields a reference to a Secret has come through, and every other value -
+// a list element, a field with an ordinary name - is masked, at any depth.
+func TestUnderACredentialNameOnlyAReferenceComesThrough(t *testing.T) {
+	for _, raw := range []string{
+		`{"token":["sentinel-list"]}`,
+		`{"apiKey":{"value":"sentinel-value"}}`,
+		`{"password":{"data":"sentinel-data"}}`,
+		`{"secret":{"secretName":"ref-kept","items":[{"key":"ref-item","path":"p","note":"sentinel-nested"},"sentinel-element"]}}`,
+		`{"password":{"data":{"inner":"sentinel-deep"}}}`,
+	} {
+		out := string(New().JSON(json.RawMessage(raw)))
+		if strings.Contains(out, "sentinel") {
+			t.Errorf("%s leaked: %s", raw, out)
+		}
+		if strings.Contains(raw, "ref-kept") && (!strings.Contains(out, "ref-kept") || !strings.Contains(out, "ref-item")) {
+			t.Errorf("%s lost its reference: %s", raw, out)
+		}
+	}
+}
+
+// The reference fields are one table, the same one the CLI holds.
+func TestTheReferenceFieldsAreTheSharedTable(t *testing.T) {
+	want := []string{"defaultMode", "items", "key", "mode", "name", "namespace", "optional", "path", "secretName"}
+	got := ReferenceFields()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("reference fields %v, want %v", got, want)
+	}
+}

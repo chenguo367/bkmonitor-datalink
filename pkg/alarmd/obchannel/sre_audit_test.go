@@ -139,6 +139,7 @@ func TestEverySREOutcomeLandsInOneResult(t *testing.T) {
 		pod.CodeInvalidRequest:     SREResultRefused,
 		pod.CodeCommandStartFailed: SREResultRefused,
 		pod.CodeBusy:               SREResultRefused,
+		pod.CodeKindNotInstalled:   SREResultRefused,
 		pod.CodeAPIError:           SREResultFailed,
 	}
 	for code, want := range cases {
@@ -164,14 +165,13 @@ func TestEverySREOutcomeLandsInOneResult(t *testing.T) {
 	}
 }
 
-// A Secret read is audited by namespace and name, with whether its values
-// were revealed, and never with a value. Without reveal the answer carries no
-// value; revealed, a plain key's value shows and a credential-named key's
-// stays masked.
+// A Secret read is audited by namespace and name and never with a value, and
+// its answer carries none: neither a credential-named key's nor a plain one's.
+// Asking for the values is not a parameter the read has.
 func TestASecretReadIsAuditedByNameNeverByValue(t *testing.T) {
 	controller := true
 	client := &postObservationClient{target: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "web-0", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: "web", UID: "workload-uid", Controller: &controller}}}}}
-	secrets := secretStore{"fixture/app-redis": {ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "app-redis", UID: "secret-uid"}, Data: map[string][]byte{"password": []byte("value-never-logged"), "host": []byte("host-shown-on-reveal")}}}
+	secrets := secretStore{"fixture/app-redis": {ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "app-redis", UID: "secret-uid"}, Data: map[string][]byte{"password": []byte("value-never-logged"), "host": []byte("host-never-shown")}}}
 	provider, err := pod.New(pod.Options{Client: client, Secrets: secrets, DefaultNamespace: "fixture"})
 	if err != nil {
 		t.Fatal(err)
@@ -181,24 +181,22 @@ func TestASecretReadIsAuditedByNameNeverByValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, reveal := range []bool{false, true} {
-		status, response := call(t, channel, envelope(channel, "invoke", pod.OpReadSecret, Params{"name": "app-redis", "reveal": reveal}))
-		if status != 200 || response.Error != nil {
-			t.Fatalf("reveal=%v: HTTP %d %+v", reveal, status, response)
-		}
-		encoded, _ := json.Marshal(response.Result)
-		// The credential-named key stays masked even revealed; a plain key
-		// shows only when revealed.
-		if strings.Contains(string(encoded), "value-never-logged") || strings.Contains(string(encoded), "host-shown-on-reveal") != reveal {
-			t.Fatalf("reveal=%v answer %s", reveal, encoded)
-		}
+	status, response := call(t, channel, envelope(channel, "invoke", pod.OpReadSecret, Params{"name": "app-redis"}))
+	if status != 200 || response.Error != nil {
+		t.Fatalf("HTTP %d %+v", status, response)
 	}
-	if len(actions) != 2 || actions[0].Op != pod.OpReadSecret || actions[0].Namespace != "fixture" || actions[0].Name != "app-redis" ||
-		actions[0].Detail != "values not revealed" || actions[1].Detail != "values revealed on request" {
+	encoded, _ := json.Marshal(response)
+	if strings.Contains(string(encoded), "value-never-logged") || strings.Contains(string(encoded), "host-never-shown") || !strings.Contains(string(encoded), `"fingerprint"`) {
+		t.Fatalf("answer %s", encoded)
+	}
+	if status, response := call(t, channel, envelope(channel, "invoke", pod.OpReadSecret, Params{"name": "app-redis", "reveal": true})); status != 400 || response.Error == nil {
+		t.Fatalf("reveal: HTTP %d %+v, want it refused as a parameter the read does not have", status, response)
+	}
+	if len(actions) != 1 || actions[0].Op != pod.OpReadSecret || actions[0].Namespace != "fixture" || actions[0].Name != "app-redis" || actions[0].Detail != "keys 2, no values" {
 		t.Fatalf("audit %+v", actions)
 	}
 	for _, action := range actions {
-		if encoded, _ := json.Marshal(action); strings.Contains(string(encoded), "value-never-logged") || strings.Contains(string(encoded), "host-shown-on-reveal") {
+		if encoded, _ := json.Marshal(action); strings.Contains(string(encoded), "value-never-logged") || strings.Contains(string(encoded), "host-never-shown") {
 			t.Fatalf("an audit record carries a value: %s", encoded)
 		}
 	}

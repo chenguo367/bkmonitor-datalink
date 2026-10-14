@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"log/slog"
 	"time"
 
@@ -33,7 +34,8 @@ import (
 func channelSREOperations(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) ([]obchannel.Operation, func(), error) {
 	secrets := sreDeploymentSecrets(cfg)
 	podReason := ""
-	pods, err := pod.NewInCluster(pod.Options{ModuleLabel: cfg.SRE.ModuleLabel, LiteralSecrets: secrets})
+	pods, err := pod.NewInCluster(pod.Options{ModuleLabel: cfg.SRE.ModuleLabel, LiteralSecrets: secrets,
+		FingerprintKeySource: func() []byte { return sreFingerprintKey(client, sreKeyPrefix(cfg, binding)+"fingerprint-key") }})
 	if err != nil {
 		podReason = "pod_provider_unavailable: " + err.Error()
 		pods = nil
@@ -59,6 +61,32 @@ func channelSREOperations(cfg config.Config, binding ChannelBinding, client redi
 	ops := obchannel.SREOperations(obchannel.SREOptions{Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason,
 		Rollouts: rollouts, RolloutReason: rolloutReason, Audit: binding.SREAudit, Receipts: receipts, ReceiptsReason: receiptsReason})
 	return ops, func() { stopRollouts(); queries.Close() }, nil
+}
+
+// sreFingerprintKey is the deployment's fingerprint key: made once, by the
+// first process to ask, and read by every other, so a value fingerprints the
+// same on every replica and across restarts. It lives in the runtime store
+// under the channel's prefix and never leaves it but as fingerprints. Nil
+// when the store does not answer: the provider then makes a key of its own
+// and its receipts say the fingerprints compare within that process only.
+func sreFingerprintKey(client redis.UniversalClient, key string) []byte {
+	if client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	candidate := make([]byte, 32)
+	if _, err := rand.Read(candidate); err != nil {
+		return nil
+	}
+	if err := client.SetNX(ctx, key, candidate, 0).Err(); err != nil {
+		return nil
+	}
+	stored, err := client.Get(ctx, key).Bytes()
+	if err != nil || len(stored) < 32 {
+		return nil
+	}
+	return stored
 }
 
 // auditWithReceipts hears each action as audit does and records its

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -27,18 +28,41 @@ const stdoutBudget = 20 << 10
 func sensitiveKey(key string) bool {
 	k := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
 	switch k {
-	case "adminkey", "authorization", "proxyauthorization", "accesstoken", "refreshtoken", "token", "grantsecret", "grant", "grantcode", "logincode", "password", "passwd", "secret", "clientsecret", "cookie", "setcookie", "assertion", "identityassertion", "jwt", "xbkapijwt", "headers", "requestheaders", "responseheaders", "credentials":
+	case "adminkey", "apikey", "privatekey", "authorization", "proxyauthorization", "accesstoken", "refreshtoken", "token", "grantsecret", "grant", "grantcode", "logincode", "password", "passwd", "secret", "clientsecret", "cookie", "setcookie", "assertion", "identityassertion", "jwt", "xbkapijwt", "headers", "requestheaders", "responseheaders", "credentials":
 		return true
 	}
 	return false
 }
 
+// credentialBundle is a key whose structure is a credential by what it is:
+// a header set, a credential set, a cookie jar, an authorization grant.
+func credentialBundle(key string) bool {
+	k := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+	switch k {
+	case "headers", "requestheaders", "responseheaders", "credentials", "cookie", "setcookie", "grant", "grantsecret", "grantcode":
+		return true
+	}
+	return false
+}
+
+// redact leaves out a credential-named key's scalar value and reads a
+// structure under one as a reference to where a credential is kept: a
+// Kubernetes object keeps its Secret references - a volume's
+// secret.secretName, a ServiceMonitor's basicAuth.password {name, key} -
+// which are how a reader finds a dependency, and every other value under it
+// is masked. A credential bundle is left out whole.
 func redact(v any, secrets []string) any {
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, value := range x {
+			if credentialBundle(k) {
+				continue
+			}
 			if sensitiveKey(k) {
+				if structured(value) {
+					out[redact(k, secrets).(string)] = reference(value, secrets)
+				}
 				continue
 			}
 			out[redact(k, secrets).(string)] = redact(value, secrets)
@@ -64,6 +88,62 @@ func redact(v any, secrets []string) any {
 	default:
 		return v
 	}
+}
+
+// referenceFields are the fields a reference to a Secret has; the server's
+// redaction (pkg/alarmd/sre/redact) holds the same table.
+var referenceFields = map[string]bool{"secretName": true, "name": true, "key": true, "optional": true, "items": true,
+	"path": true, "mode": true, "defaultMode": true, "namespace": true}
+
+func sortedReferenceFields() []string {
+	fields := make([]string, 0, len(referenceFields))
+	for field := range referenceFields {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// reference is a structure under a credential-named key: a reference's
+// fields, walked the same way, and every other value - a field with another
+// name, a list element that is not a structure - masked.
+func reference(value any, secrets []string) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			if !referenceFields[key] {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			if structured(item) {
+				out[key] = reference(item, secrets)
+				continue
+			}
+			out[key] = redact(item, secrets)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			if structured(item) {
+				out[i] = reference(item, secrets)
+				continue
+			}
+			out[i] = "[REDACTED]"
+		}
+		return out
+	default:
+		return "[REDACTED]"
+	}
+}
+
+func structured(value any) bool {
+	switch value.(type) {
+	case map[string]any, []any:
+		return true
+	}
+	return false
 }
 
 func (a *App) print(value any) int {
