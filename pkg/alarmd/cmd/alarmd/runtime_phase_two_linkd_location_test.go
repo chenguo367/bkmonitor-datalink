@@ -194,3 +194,21 @@ func TestTheDiscoveryCarriesWhatTheConsoleListed(t *testing.T) {
 		t.Fatalf("twenty targets: count %d, names %v; want the count whole and the first %d names", facts.TargetCount, facts.TargetNames, fleet.MaxLinkdTargetNames)
 	}
 }
+
+// A Console URL that is not the link's API root fails the startup discovery
+// with its class on the facts, so the snapshot and the startup line say
+// not_api rather than an unreadable answer.
+func TestADiscoveryThatReachedAWebPageCarriesTheNotAPIClass(t *testing.T) {
+	defer func(pause time.Duration) { linkdDiscoveryPause = pause }(linkdDiscoveryPause)
+	linkdDiscoveryPause = 0
+	calls := 0
+	_, facts := adoptLinkdLocation(context.Background(), linkdLocationConfig(),
+		func(context.Context, openalerts.HTTPReconcilerOptions) (openalerts.TargetBinding, error) {
+			calls++
+			return openalerts.TargetBinding{}, openalerts.ErrNotAPI
+		})
+	if facts == nil || facts.Outcome != fleet.LinkdDiscoveryFailed || facts.Class != openalerts.ConsoleFailureNotAPI ||
+		calls != linkdDiscoveryAttempts || !strings.Contains(facts.Error, "API root") {
+		t.Fatalf("a discovery that reached a web page reads as %+v after %d calls", facts, calls)
+	}
+}

@@ -222,7 +222,7 @@ func TestTheTargetScopeCloseIsNotWiredWithoutTheLinkConsole(t *testing.T) {
 		t.Fatalf("%d outcome cells on /metrics, want every one of %d pre-registered", found, len(scopeclose.Outcomes))
 	}
 
-	cfg.PhaseTwo.Linkd.ConsoleURL = "https://console.example.test"
+	cfg.PhaseTwo.Linkd.ConsoleURL = "https://console.example.test/local-api"
 	closer, sink = targetScopeCloseFor(cfg, time.Now)
 	if closer == nil || sink == nil {
 		t.Fatal("with a Console the close was not built")

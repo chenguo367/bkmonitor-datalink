@@ -19,13 +19,13 @@ func consoleServer(t *testing.T, browse, alert http.HandlerFunc) *HTTPReconciler
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/local-api/strategy-index/targets":
+		case r.URL.Path == "/api/modules/linkd/strategy-index/targets":
 			_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
-		case r.URL.Path == "/local-api/strategy-index/reconcile":
+		case r.URL.Path == "/api/modules/linkd/strategy-index/reconcile":
 			_ = json.NewEncoder(w).Encode(reconciliationJSON())
-		case r.URL.Path == "/local-api/strategy-index/browse":
+		case r.URL.Path == "/api/modules/linkd/strategy-index/browse":
 			browse(w, r)
-		case strings.HasPrefix(r.URL.Path, "/local-api/alerts/"):
+		case strings.HasPrefix(r.URL.Path, "/api/modules/linkd/alerts/"):
 			alert(w, r)
 		default:
 			http.NotFound(w, r)
@@ -33,7 +33,7 @@ func consoleServer(t *testing.T, browse, alert http.HandlerFunc) *HTTPReconciler
 	}))
 	t.Cleanup(server.Close)
 	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user",
 		Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestAConsoleNeverCalledListsEveryOperationAtZero(t *testing.T) {
 // failure it would make a working Console read as unreadable every time a
 // close looked for a record the link had already let go.
 func TestAnAlertTheLinkDoesNotHaveIsAnAnswerNotAFailure(t *testing.T) {
-	reader := consoleServer(t, http.NotFound, http.NotFound)
+	reader := consoleServer(t, http.NotFound, objectMissingAnswer)
 	if _, err := reader.AlertRecord(context.Background(), "system", "a-1"); err != ErrAlertNotFound {
 		t.Fatalf("err = %v", err)
 	}

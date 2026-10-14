@@ -239,6 +239,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// read before anything connects, so the index, the difference and the
 	// endpoint list all read the one location.
 	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
+	logLinkdDiscovery(logger, linkdDiscovery)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
 	// other Query Group's coordinates once one object became noisy.

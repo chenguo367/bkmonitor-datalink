@@ -58,7 +58,7 @@ func newRebindFixture(t *testing.T) *rebindFixture {
 		answer(w, r)
 	}))
 	t.Cleanup(console.Close)
-	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	startup := &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryFailed, Attempts: linkdDiscoveryAttempts, Error: "console unreachable"}
 	open := func(connection config.RedisConnectionConfig) (redis.UniversalClient, bool) {

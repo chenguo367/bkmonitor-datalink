@@ -842,7 +842,7 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 	const deletedTenant, deletedStrategy = "system", "9999"
 	var rosterReads atomic.Int64
 	console := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/local-api/strategy-index/browse" {
+		if r.URL.Path != "/api/modules/linkd/strategy-index/browse" {
 			link(w, r)
 			return
 		}
@@ -854,7 +854,7 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 	}))
 	t.Cleanup(console.Close)
 	fixture.configure = func(cfg *config.Config) {
-		cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+		cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
 		cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	}
 	leading := fixture.open("absent-worker-1", roles.Set{roles.Worker}, true)

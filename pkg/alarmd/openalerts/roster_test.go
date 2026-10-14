@@ -44,7 +44,7 @@ func rosterServer(t *testing.T, respond func(w http.ResponseWriter, r *http.Requ
 		respond(w, r)
 	}))
 	t.Cleanup(server.Close)
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func rosterServer(t *testing.T, respond func(w http.ResponseWriter, r *http.Requ
 func TestTheRosterIsReadInTheLinksOwnShape(t *testing.T) {
 	reader := rosterServer(t, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if r.URL.Path != "/local-api/strategy-index/browse" || q.Get("event_source_id") != "source" || q.Get("hook_name") != "active" ||
+		if r.URL.Path != "/api/modules/linkd/strategy-index/browse" || q.Get("event_source_id") != "source" || q.Get("hook_name") != "active" ||
 			q.Get("count") != "200" || q.Get("cursor") != "next-page" {
 			t.Errorf("request %s %v", r.URL.Path, q)
 		}
@@ -130,7 +130,7 @@ func alertJSON() map[string]any {
 
 func TestAnAlertRecordCarriesTheIdentityItWasCreatedWith(t *testing.T) {
 	reader := rosterServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/local-api/alerts/alert-1" || r.URL.Query().Get("bk_tenant_id") != "system" {
+		if r.URL.Path != "/api/modules/linkd/alerts/alert-1" || r.URL.Query().Get("bk_tenant_id") != "system" {
 			t.Errorf("request %s %v", r.URL.Path, r.URL.Query())
 		}
 		_ = json.NewEncoder(w).Encode(alertJSON())
@@ -159,7 +159,7 @@ func TestAnAlertRecordReadsTextLabelsAndLeavesMissingOnesZero(t *testing.T) {
 }
 
 func TestAMissingAlertIsNamedAndAnotherAlertIsRefused(t *testing.T) {
-	missing := rosterServer(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	missing := rosterServer(t, objectMissingAnswer)
 	if _, err := missing.AlertRecord(context.Background(), "system", "alert-1"); !errors.Is(err, ErrAlertNotFound) {
 		t.Fatalf("a 404 was not read as a missing alert: %v", err)
 	}

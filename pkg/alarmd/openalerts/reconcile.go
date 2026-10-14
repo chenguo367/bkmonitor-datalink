@@ -4,6 +4,7 @@
 package openalerts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -143,9 +144,13 @@ func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 }
 
 func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Values, out any) error {
-	return reader.getPath(ctx, "/local-api/strategy-index/"+path, query, out)
+	return reader.getPath(ctx, "/strategy-index/"+path, query, out)
 }
 
+// getPath reads path under the link's API root, which BaseURL names whole:
+// where the operations are served depends on what serves them - the admin
+// module, or a Console of its own - and the deployment says which, not this
+// process. Only the operations' own paths are appended.
 func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query url.Values, out any) error {
 	u := strings.TrimRight(reader.options.BaseURL, "/") + path
 	if len(query) > 0 {
@@ -162,16 +167,62 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusNotFound && objectMissing(response.Body) {
+			return errObjectMissing
+		}
 		return statusError(response.StatusCode)
+	}
+	if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
+		return ErrNotAPI
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, reader.options.MaxResponseBytes+1))
 	if err != nil || int64(len(data)) > reader.options.MaxResponseBytes {
 		return ErrIncomplete
 	}
 	if json.Unmarshal(data, out) != nil {
+		if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '<' {
+			return ErrNotAPI
+		}
 		return ErrIncomplete
 	}
 	return nil
+}
+
+// ErrNotAPI is a URL that answered with a page rather than the link's API:
+// a Console's or the admin's web application serves its page at any path it
+// has no route for, so a URL naming the server rather than its API root - the
+// form the Console URL had before it named the root - reaches the page and
+// would otherwise read as a garbled answer.
+var ErrNotAPI = errors.New("alarmd openalerts: the Console URL answered with a web page, not the link's API; " +
+	"it must name the API root (the admin module's .../api/modules/linkd, or a Console's .../local-api)")
+
+// errObjectMissing is the link answering that the object a path names does
+// not exist. Both servers answer a path they have no route for with the same
+// status and error code, so the status alone cannot tell "no such alert" from
+// "no such operation here" - a wrong API root would read as every alert gone.
+// Only the object-missing answer's own message is taken as one; any other 404
+// is a failure, so a changed message costs reads, never closes.
+var errObjectMissing = errors.New("alarmd openalerts: the link has no such object")
+
+// objectMissingMessage is the message both the admin module and a Console
+// give when the object a path names does not exist (their route-missing
+// answers carry the same code and a different message).
+const objectMissingMessage = "对象不存在"
+
+// objectMissing reports whether a 404's body is the link's object-missing
+// answer: {"error": {"code": "not_found", "message": objectMissingMessage}}.
+func objectMissing(body io.Reader) bool {
+	var answer struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	data, err := io.ReadAll(io.LimitReader(body, 4096))
+	if err != nil || json.Unmarshal(data, &answer) != nil {
+		return false
+	}
+	return answer.Error.Code == "not_found" && answer.Error.Message == objectMissingMessage
 }
 
 // Binding is this deployment's target, read from the Console. It is reused
@@ -378,12 +429,16 @@ func (class transportError) Error() string {
 	return "alarmd openalerts: Console request failed (" + string(class) + ")"
 }
 
-// statusError is a Console answer other than 200. It keeps the code so a
-// caller for which one code is an answer rather than a failure - the alert
-// record's 404 - can tell it apart.
+// statusError is a Console answer other than 200 that is not an answer about
+// the object (errObjectMissing). A 404 here is a path the server has no route
+// for, which says the Console URL is not the link's API root, and says so.
 type statusError int
 
 func (code statusError) Error() string {
+	if int(code) == http.StatusNotFound {
+		return "alarmd openalerts: Console HTTP status 404 for an operation's path; the Console URL must name the API root " +
+			"(the admin module's .../api/modules/linkd, or a Console's .../local-api)"
+	}
 	return fmt.Sprintf("alarmd openalerts: Console HTTP status %d", int(code))
 }
 

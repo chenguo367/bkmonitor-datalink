@@ -50,6 +50,7 @@ func openProductionControlRoleBundle(
 	cfg = cfg.WithResolvedRedisPoolSize()
 	wait := external.startupWaiter(recorder, logger, health)
 	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
+	logLinkdDiscovery(logger, linkdDiscovery)
 	baseObserver, err := newPhaseTwoRuntimeObserver(recorder, logger)
 	if err != nil {
 		return nil, err
