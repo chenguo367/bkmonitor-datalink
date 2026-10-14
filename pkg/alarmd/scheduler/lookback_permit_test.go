@@ -293,6 +293,14 @@ func TestThePermitPeakIsTheMostHeldInTheLastMinute(t *testing.T) {
 	clock := newMutableClock(time.Unix(300, 0))
 	flights := lookbackFlights(t, clock)
 	normal := holdNormal(t, flights, clock, 5)
+	if got := flights.QueryPermitOccupancy().PeakHeld; got != 5 {
+		t.Fatalf("five formal permits held, peak %d, want 5", got)
+	}
+	normal[4].Release()
+	if got := flights.QueryPermitOccupancy().PeakHeld; got != 5 {
+		t.Fatalf("one of five formal permits given back, peak %d, want the five", got)
+	}
+	normal[4] = holdNormal(t, flights, clock, 1)[0]
 	lookback, _ := flights.TryAcquireLookbackPermit()
 	if lookback == nil {
 		t.Fatal("an idle pool refused the lookback")

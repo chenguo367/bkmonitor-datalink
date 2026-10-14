@@ -1550,10 +1550,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"上限按内存算，卡片读最近一分钟的峰值对上限，不再说按负载推导"},
 		{"PERMIT peak-reported ::", "每个副本按自己的内存算，2 个副本相加", "",
 			"总上限是各副本内存份额之和，要说清怎么加起来的"},
-		// A replica from before the peak was reported reads as its instant
-		// rather than as no number.
 		{"PERMIT never-waited ::", "（按内存）", "undefined",
-			"旧副本没报峰值时用此刻占用顶上，不能出现 undefined"},
+			"峰值字段总在汇总里，卡片不能出现 undefined"},
 	} {
 		line := lineStarting(text, want.prefix)
 		if line == "" {
