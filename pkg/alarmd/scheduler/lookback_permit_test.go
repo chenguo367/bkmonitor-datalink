@@ -325,3 +325,25 @@ func TestThePermitPeakIsTheMostHeldInTheLastMinute(t *testing.T) {
 		t.Fatalf("nothing held and nothing granted in the minute: peak %d, want 0", got)
 	}
 }
+
+// The window is the minute before the read, the read's own second included:
+// a value 59 s old counts, one 60 s old does not. A second ahead of the read
+// - a wall clock stepped back after it was observed - is not counted, or it
+// would hold the peak until real time caught up with it.
+func TestSecondMaxKeepsExactlyTheLastMinute(t *testing.T) {
+	var peak SecondMax
+	at := time.Unix(1_000_000, 0)
+	peak.Observe(at, 7)
+	if got := peak.Max(at); got != 7 {
+		t.Fatalf("read in the observed second: %d, want 7", got)
+	}
+	if got := peak.Max(at.Add(59 * time.Second)); got != 7 {
+		t.Fatalf("59 s later: %d, want 7", got)
+	}
+	if got := peak.Max(at.Add(60 * time.Second)); got != 0 {
+		t.Fatalf("60 s later: %d, want 0", got)
+	}
+	if got := peak.Max(at.Add(-time.Second)); got != 0 {
+		t.Fatalf("read a second before the observation (clock stepped back): %d, want 0", got)
+	}
+}
