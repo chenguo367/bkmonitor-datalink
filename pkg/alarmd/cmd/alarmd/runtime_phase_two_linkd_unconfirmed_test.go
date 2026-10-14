@@ -54,7 +54,7 @@ func TestAnUnconfirmedSetLocationIsNotRead(t *testing.T) {
 	cfg.Redis.Address = address
 	withCompatibilityOutput(&cfg, address)
 	cfg.Redis.StatePrefix = "alarmd:phase-two:unconfirmed-location"
-	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "reader", "secret"
 	key := openalerts.StrategyKey{TenantID: "tenant-a", StrategyID: "123"}
 	// The fallback location holds a set for the strategy: a process reading
@@ -130,9 +130,9 @@ func consoleAt(t *testing.T, target openalerts.TargetBinding) *httptest.Server {
 func consoleFor(target openalerts.TargetBinding) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/local-api/strategy-index/targets":
+		case "/api/modules/linkd/strategy-index/targets":
 			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{target})
-		case "/local-api/event-sources/" + target.EventSourceID:
+		case "/api/modules/linkd/event-sources/" + target.EventSourceID:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": target.EventSourceID, "revision": 1, "published": 1,
 				"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
 		default:
@@ -167,7 +167,7 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 	prefix := "platform"
 	cfg.PlatformCache.DynamicGroupKeyPrefix = &prefix
 	cfg.PlatformCache.TargetGroup = &config.RedisConnectionConfig{Mode: config.RedisModeStandalone, Address: linkdAddress}
-	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	// Adopted at startup: the runtime Redis under the old prefix.
 	adopted := cfg.RuntimeStoreRedis()
@@ -184,7 +184,7 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 		return redis.NewClient(&redis.Options{Addr: connection.Address, DB: connection.DB}), true
 	}
 	startup := &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryAdopted, Attempts: 1}
-	index, err := newLinkdIndex(cfg, runtimeClient, adopted, startup, open, time.Now, nil)
+	index, err := newLinkdIndex(cfg, runtimeClient, adopted, startup, open, nil, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestACopyWithoutAConsoleReadsNothingAndCountsNothing(t *testing.T) {
 	}
 	setCommands := redisCommandsOn(t, runtimeAddress, "alarmd:open_alerts")
 	open := func(config.RedisConnectionConfig) (redis.UniversalClient, bool) { return runtimeClient, false }
-	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), nil, open, time.Now, nil)
+	index, err := newLinkdIndex(cfg, runtimeClient, cfg.RuntimeStoreRedis(), nil, open, nil, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

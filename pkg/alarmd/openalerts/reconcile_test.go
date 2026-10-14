@@ -45,11 +45,11 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 			t.Error("BasicAuth missing")
 		}
 		requests = append(requests, r.URL.Path)
-		if r.URL.Path == "/local-api/strategy-index/targets" {
+		if r.URL.Path == "/api/modules/linkd/strategy-index/targets" {
 			_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 			return
 		}
-		if r.URL.Path == "/local-api/event-sources/source" {
+		if r.URL.Path == "/api/modules/linkd/event-sources/source" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "source", "revision": 3, "published": 3,
 				"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
 			return
@@ -61,7 +61,7 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(reconciliationJSON())
 	}))
 	defer server.Close()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 	}
 	// A reconciliation also reads the event source's keying, once until it
 	// is due again: the Console's word on how the link keys our alerts.
-	if !reflect.DeepEqual(requests, []string{"/local-api/strategy-index/targets", "/local-api/event-sources/source", "/local-api/strategy-index/reconcile"}) {
+	if !reflect.DeepEqual(requests, []string{"/api/modules/linkd/strategy-index/targets", "/api/modules/linkd/event-sources/source", "/api/modules/linkd/strategy-index/reconcile"}) {
 		t.Fatalf("requests %v", requests)
 	}
 	if keyed, _, known := reader.KeyedByAlertID(); !keyed || !known || !reader.LocationConfirmed() {
@@ -121,7 +121,7 @@ func TestHTTPReconcilerRejectsPartialAndInvalidScope(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(m)
 			}))
 			defer server.Close()
-			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
+			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -152,7 +152,7 @@ func TestTheTargetIsReadFromTheLinkAndNeverGuessed(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(tc.targets)
 			}))
 			defer server.Close()
-			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "private-user",
+			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "private-user",
 				Password: "private-password", Index: testIndex(), MaxResponseBytes: 1 << 20})
 			if err != nil {
 				t.Fatal(err)
@@ -198,7 +198,7 @@ func TestATargetWritingElsewhereIsRefusedByName(t *testing.T) {
 				_ = json.NewEncoder(w).Encode([]TargetBinding{elsewhere})
 			}))
 			defer server.Close()
-			reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
+			reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
 			_, err := reader.Binding(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "this process reads redis:6379 db 3 prefix test:active") {
 				t.Fatalf("err = %v", err)
@@ -209,7 +209,7 @@ func TestATargetWritingElsewhereIsRefusedByName(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 	}))
 	defer server.Close()
-	reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1})
+	reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1})
 	if _, err := reader.Reconcile(context.Background(), keyA); !errors.Is(err, ErrIncomplete) {
 		t.Fatalf("body bound error = %v", err)
 	}
@@ -219,13 +219,13 @@ func TestATargetWritingElsewhereIsRefusedByName(t *testing.T) {
 // today: it is how the process learns where to read.
 func TestDiscoveryReadsTheTargetWithoutAskingWhereThisProcessReads(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/local-api/strategy-index/targets" {
+		if r.URL.Path != "/api/modules/linkd/strategy-index/targets" {
 			t.Errorf("path %s", r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 	}))
 	defer server.Close()
-	target, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", MaxResponseBytes: 1 << 20,
+	target, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret", MaxResponseBytes: 1 << 20,
 		Index: IndexLocation{KeyPrefix: "elsewhere", Address: "other:6379", Database: 9}})
 	if err != nil || target.Address != "redis:6379" || target.Database != 3 || target.KeyPrefix != "test:active" {
 		t.Fatalf("target %+v err %v", target, err)
@@ -241,7 +241,7 @@ func TestAReaderMovedToWhereTheLinkWritesResolves(t *testing.T) {
 	}))
 	defer server.Close()
 	fallback := IndexLocation{KeyPrefix: "alarmd:open_alerts", Address: "runtime:6379", Database: 8}
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: fallback, MaxResponseBytes: 1 << 20})
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "u", Password: "p", Index: fallback, MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

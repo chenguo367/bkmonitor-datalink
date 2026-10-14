@@ -19,18 +19,25 @@ func TestLinkdConfigurationBinding(t *testing.T) {
 	}
 	// The target is read from the Console, so a Console with credentials
 	// is the whole configuration.
-	c := LinkdConfig{ConsoleURL: "https://console.example.test", Username: "reader", Password: "test-password"}
+	c := LinkdConfig{ConsoleURL: "https://console.example.test/local-api", Username: "reader", Password: "test-password"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("a Console with credentials alone was refused: %v", err)
 	}
-	c.ConsoleURL = "https://reader:password@console.example.test"
+	c.ConsoleURL = "https://reader:password@console.example.test/local-api"
 	if err := c.Validate(); err == nil {
 		t.Fatal("URL credentials accepted")
 	}
-	c.ConsoleURL = "https://console.example.test"
+	c.ConsoleURL = "https://console.example.test/local-api"
 	c.Password = ""
 	if err := c.Validate(); err == nil {
-		t.Fatal("a Console without credentials was accepted")
+		t.Fatal("half a Basic pair was accepted")
+	}
+	// No pair at all is the admin's API, called with the token it hands over.
+	if err := (LinkdConfig{ConsoleURL: "http://admin.example.test/api/modules/linkd"}).Validate(); err != nil {
+		t.Fatalf("the admin's API root without a Basic pair was refused: %v", err)
+	}
+	if err := (LinkdConfig{ConsoleURL: "http://admin.example.test/"}).Validate(); err == nil {
+		t.Fatal("a server URL that is not an API root was accepted")
 	}
 	if err := (LinkdConfig{Username: "reader"}).Validate(); err == nil {
 		t.Fatal("credentials without a Console were accepted")
@@ -43,7 +50,7 @@ func TestLinkdConfigurationBinding(t *testing.T) {
 func TestLinkdConsoleCredentialsComeFromTheEnvironment(t *testing.T) {
 	t.Setenv(LinkdConsoleUsernameEnvironment, "reader")
 	t.Setenv(LinkdConsolePasswordEnvironment, "test-password")
-	c := LinkdConfig{ConsoleURL: "https://console.example.test"}
+	c := LinkdConfig{ConsoleURL: "https://console.example.test/local-api"}
 	if err := c.resolveCredentialsFromEnvironment(); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +78,7 @@ func TestLoadingTakesTheConsoleCredentialsFromTheEnvironment(t *testing.T) {
 	t.Setenv(LinkdConsoleUsernameEnvironment, "reader")
 	t.Setenv(LinkdConsolePasswordEnvironment, "test-password")
 	text := validGoAccessRuntimeConfigYAML("linkd-worker") +
-		"  linkd:\n    console_url: https://console.example.test\n"
+		"  linkd:\n    console_url: https://console.example.test/local-api\n"
 	cfg, err := LoadWithRoles(writeConfig(t, text), nil)
 	if err != nil {
 		t.Fatal(err)

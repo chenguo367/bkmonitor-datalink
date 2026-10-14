@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 )
 
 // The Console operations this process calls, closed. Each has its own
@@ -33,27 +34,39 @@ const (
 )
 
 // The classes of a Console failure that are not the transport's: an answer
-// other than 200, and a body that could not be read whole or decoded.
+// other than 200, a body that could not be read whole or decoded, and a web
+// page where the API was asked for (ErrNotAPI: the URL is not the API root).
 const (
 	ConsoleFailureStatus     = "status"
 	ConsoleFailureIncomplete = "incomplete"
+	ConsoleFailureNotAPI     = "not_api"
+	// ConsoleFailureNoToken is a call not made for want of a usable token:
+	// none handed over yet, expired, or refused by the admin.
+	ConsoleFailureNoToken = "no_token"
 )
 
 // ConsoleFailureClasses is every class a Console failure is counted under:
-// the transport's words (execution.TransportFailureWords), then status and
-// incomplete. Any other failure of an operation is other.
+// the transport's words (execution.TransportFailureWords), then status,
+// incomplete, not_api and no_token. Any other failure of an operation is
+// other.
 var ConsoleFailureClasses = append(append([]string(nil), execution.TransportFailureWords...),
-	ConsoleFailureStatus, ConsoleFailureIncomplete)
+	ConsoleFailureStatus, ConsoleFailureIncomplete, ConsoleFailureNotAPI, ConsoleFailureNoToken)
 
-// consoleFailureClass is the class err is counted under.
-func consoleFailureClass(err error) string {
+// ConsoleFailureClass is the class err is counted under (ConsoleFailureClasses).
+// An object-missing answer is a status here: only the alert record reads it
+// as an answer, before it is counted.
+func ConsoleFailureClass(err error) string {
 	var transport transportError
 	var status statusError
 	switch {
 	case errors.As(err, &transport):
 		return string(transport)
-	case errors.As(err, &status):
+	case errors.As(err, &status), errors.Is(err, errObjectMissing):
 		return ConsoleFailureStatus
+	case errors.Is(err, ErrNotAPI):
+		return ConsoleFailureNotAPI
+	case errors.As(err, new(linkdtoken.ErrNoToken)):
+		return ConsoleFailureNoToken
 	case errors.Is(err, ErrIncomplete):
 		return ConsoleFailureIncomplete
 	}
@@ -126,7 +139,7 @@ func (calls *consoleCalls) record(op string, at time.Time, err error) (tell bool
 	if err == nil {
 		call.LastSuccessAt = at
 	} else {
-		class = consoleFailureClass(err)
+		class = ConsoleFailureClass(err)
 		call.Failures++
 		call.LastFailureAt, call.LastFailure, call.LastFailureClass = at, err.Error(), class
 		// A new map each time: Record hands the map out, and one it has

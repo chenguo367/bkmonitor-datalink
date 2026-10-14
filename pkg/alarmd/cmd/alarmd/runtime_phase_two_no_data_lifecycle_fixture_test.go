@@ -161,7 +161,7 @@ func startLifecycleFixtureOn(t *testing.T, address string, client *redis.Client,
 	// cases that publish an open alert and wait for it to be read need it.
 	console := httptest.NewServer(lifecycleConsole(address, client))
 	t.Cleanup(console.Close)
-	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL
+	cfg.PhaseTwo.Linkd.ConsoleURL = console.URL + testLinkdAPIRoot
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	if configure != nil {
 		configure(&cfg)
@@ -753,9 +753,9 @@ func lifecycleConsole(address string, client *redis.Client) http.HandlerFunc {
 		Address: address, Database: 0, Sources: []string{"source"}}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/local-api/strategy-index/targets":
+		case "/api/modules/linkd/strategy-index/targets":
 			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{target})
-		case "/local-api/event-sources/" + target.EventSourceID:
+		case "/api/modules/linkd/event-sources/" + target.EventSourceID:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": target.EventSourceID, "revision": 1, "published": 1,
 				"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
 		default:

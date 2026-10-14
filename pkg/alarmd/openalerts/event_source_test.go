@@ -19,7 +19,7 @@ import (
 func TestTheEventSourceKeyingIsReadAndKept(t *testing.T) {
 	fail := false
 	reader := rosterServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/local-api/event-sources/"+testBinding().EventSourceID {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/modules/linkd/event-sources/"+testBinding().EventSourceID {
 			t.Errorf("request %s %s", r.Method, r.URL.Path)
 		}
 		if fail {

@@ -96,7 +96,7 @@ func (reader *HTTPReconciler) eventSource(ctx context.Context) (EventSourceKeyin
 			FingerprintFields []string `json:"fingerprint_fields"`
 		} `json:"spec"`
 	}
-	if err := reader.getPath(ctx, "/local-api/event-sources/"+url.PathEscape(target.EventSourceID), nil, &response); err != nil {
+	if err := reader.getPath(ctx, "/event-sources/"+url.PathEscape(target.EventSourceID), nil, &response); err != nil {
 		return EventSourceKeying{}, err
 	}
 	if response.ID != target.EventSourceID {

@@ -311,10 +311,14 @@ type LinkdTargetFacts struct {
 // credentials looked afterwards exactly like one never asked.
 type LinkdDiscoveryFacts struct {
 	// Outcome is one of LinkdDiscoveryOutcomes.
-	Outcome  string            `json:"outcome"`
-	Attempts int               `json:"attempts"`
-	Error    string            `json:"error,omitempty"`
-	Target   *LinkdTargetFacts `json:"target,omitempty"`
+	Outcome  string `json:"outcome"`
+	Attempts int    `json:"attempts"`
+	Error    string `json:"error,omitempty"`
+	// Class is the failure's class on a failed discovery, one of
+	// openalerts.ConsoleFailureClasses: not_api is a Console URL that is not
+	// the link's API root, status 401 a credential the server refused.
+	Class  string            `json:"class,omitempty"`
+	Target *LinkdTargetFacts `json:"target,omitempty"`
 	// TargetCount and TargetNames are what the Console listed when it was
 	// asked: one on adoption, and on a refusal however many it listed, with
 	// their names (source/hook, the first MaxLinkdTargetNames of them), so a

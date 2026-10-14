@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -18,9 +19,16 @@ import (
 type LinkdConfig struct {
 	Connection *RedisConnectionConfig `yaml:"-"`
 	KeyPrefix  string                 `yaml:"-"`
-	ConsoleURL string                 `yaml:"console_url"`
-	Username   string                 `yaml:"username"`
-	Password   string                 `yaml:"password"`
+	// ConsoleURL is the root of the link's API, whole: alarmd appends only
+	// each operation's own path (strategy-index/..., alerts/...,
+	// event-sources/...). Where the link serves it is the deployment's to
+	// say - the admin's linkd module at <admin><base_path>/api/modules/linkd,
+	// or a Console of its own at <console>/local-api. A URL naming the server
+	// rather than this root is refused at startup discovery (the server's web
+	// page answers there), never read as an empty answer.
+	ConsoleURL string `yaml:"console_url"`
+	Username   string `yaml:"username"`
+	Password   string `yaml:"password"`
 }
 
 // LinkdCalibrationInterval is how often the copy calibrates against the
@@ -76,8 +84,17 @@ func (c LinkdConfig) Validate() error {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("linkd console_url must be an HTTP service URL without credentials or query")
 	}
-	if c.Username == "" || c.Password == "" {
-		return errors.New("linkd console service requires username and password")
+	// The API root always has a path: no server alarmd reads serves the link's
+	// operations at its own root, where its web page is.
+	if strings.Trim(u.Path, "/") == "" {
+		return errors.New("linkd console_url must name the link's API root, not the server: " +
+			"<admin><base_path>/api/modules/linkd, or <console>/local-api")
+	}
+	// A Basic pair is a Console's own credential. Without one the calls carry
+	// the token the admin hands over (linkdtoken): the admin serving the API
+	// accepts nothing else, and keeps no account for alarmd to configure.
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("linkd console username and password come together, or neither for the admin's token")
 	}
 	return nil
 }

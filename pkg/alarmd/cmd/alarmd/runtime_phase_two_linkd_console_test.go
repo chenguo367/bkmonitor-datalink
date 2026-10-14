@@ -43,22 +43,22 @@ func consoleTestServer(t *testing.T, browse http.HandlerFunc) *openalerts.HTTPRe
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/local-api/strategy-index/targets":
+		case "/api/modules/linkd/strategy-index/targets":
 			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{consoleTestBinding()})
 			return
-		case "/local-api/strategy-index/browse":
+		case "/api/modules/linkd/strategy-index/browse":
 			browse(w, r)
 			return
 		}
 		// The event source definition is the test's to answer, like browse.
-		if strings.HasPrefix(r.URL.Path, "/local-api/event-sources/") {
+		if strings.HasPrefix(r.URL.Path, "/api/modules/linkd/event-sources/") {
 			browse(w, r)
 			return
 		}
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(server.Close)
-	console, err := openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
+	console, err := openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(),
 		Username: "user", Password: "secret", MaxResponseBytes: 1 << 20,
 		Index: openalerts.IndexLocation{KeyPrefix: "test:active", Address: "192.0.2.10:6379", Database: 3},
 		Now:   func() time.Time { return consoleTestNow }})
@@ -97,8 +97,8 @@ func TestADeploymentWithoutAConsoleSaysSoFromTheStart(t *testing.T) {
 		entry.Console.State != fleet.LinkdConsoleNotConfigured || len(entry.Console.Calls) != len(openalerts.ConsoleOps) {
 		t.Fatalf("an unconfigured Console reads as %+v (facts %+v)", entry, entry.Console)
 	}
-	cfg.PhaseTwo.Linkd.ConsoleURL = "http://192.0.2.20:8080"
-	if configured := linkdConsoleEndpoint(cfg); !configured.Configured || configured.Address != "http://192.0.2.20:8080" ||
+	cfg.PhaseTwo.Linkd.ConsoleURL = "http://192.0.2.20:8080/api/modules/linkd"
+	if configured := linkdConsoleEndpoint(cfg); !configured.Configured || configured.Address != "http://192.0.2.20:8080/api/modules/linkd" ||
 		configured.Kind != "http" || configured.Console != nil {
 		t.Fatalf("a configured Console reads as %+v", configured)
 	}
@@ -273,7 +273,7 @@ func TestTheLinksKeyingReachesTheConsoleFacts(t *testing.T) {
 // publishes.
 func TestTheConsoleFactsCarryTheKeyingOnceRead(t *testing.T) {
 	console := consoleTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/local-api/event-sources/"+consoleTestBinding().EventSourceID {
+		if r.URL.Path != "/api/modules/linkd/event-sources/"+consoleTestBinding().EventSourceID {
 			http.NotFound(w, r)
 			return
 		}
@@ -304,7 +304,7 @@ func TestTheProcesssConsoleWritesALineWhenItsFailuresStart(t *testing.T) {
 	cfg.PhaseTwo.Linkd.ConsoleURL = address
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	var out bytes.Buffer
-	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, time.Now, observability.New("worker", &out))
+	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, nil, time.Now, observability.New("worker", &out))
 	if err != nil {
 		t.Fatal(err)
 	}

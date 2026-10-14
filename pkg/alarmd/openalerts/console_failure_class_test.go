@@ -46,7 +46,7 @@ type consoleFailure struct{ op, class string }
 
 func classReader(t *testing.T, baseURL string, client *http.Client, failed func(op, class string, failures uint64)) *HTTPReconciler {
 	t.Helper()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: baseURL, Client: client, Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: baseURL + testLinkdAPIRoot, Client: client, Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, OnFailure: failed})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestTheConsoleAndTheRouteDetailNameOneErrorAlike(t *testing.T) {
 func TestAConsoleFailureIsToldWhenItStartsAndWhenItsCauseChanges(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/local-api/strategy-index/targets":
+		case "/api/modules/linkd/strategy-index/targets":
 			_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 		default:
 			_ = json.NewEncoder(w).Encode(reconciliationJSON())

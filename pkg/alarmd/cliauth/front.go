@@ -11,12 +11,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
@@ -28,6 +30,12 @@ import (
 const (
 	frontGrantsPath = "/api/front/v1/grants"
 	frontRosterPath = "/api/front/v1/roster"
+	// frontLinkdTokenPath is where the admin hands over the token alarmd
+	// calls the link's API with, and reads whether alarmd still holds a
+	// usable one (linkdtoken).
+	frontLinkdTokenPath = "/api/front/v1/linkd-token"
+	// maxLinkdTokenBodyBytes holds the admin's longest token in its body.
+	maxLinkdTokenBodyBytes = 8 << 10
 	// FrontReadPath is the front surface's read, served by the channel.
 	FrontReadPath = "/api/front/v1/invoke"
 	// MaxRosterOperators bounds one roster.
@@ -45,7 +53,7 @@ const (
 )
 
 // FrontPaths is every front route this package serves.
-var FrontPaths = []string{frontGrantsPath, frontRosterPath}
+var FrontPaths = []string{frontGrantsPath, frontRosterPath, frontLinkdTokenPath}
 
 // operatorName is an admin user name: letters, digits and . _ @ -, starting
 // and ending with a letter or digit, at most 64 bytes.
@@ -78,6 +86,8 @@ func (m *Manager) FrontHandler() http.Handler {
 			err = m.handleFrontGrants(w, r)
 		case frontRosterPath:
 			err = m.handleRoster(w, r)
+		case frontLinkdTokenPath:
+			err = m.handleLinkdToken(w, r)
 		default:
 			err = failure("not_found", "Unknown front route.", 404)
 		}
@@ -336,4 +346,49 @@ func (m *Manager) handleRoster(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return writeJSON(w, applied)
+}
+
+// LinkdTokens is the deployment's token for the link's API (linkdtoken.Store).
+type LinkdTokens interface {
+	Put(ctx context.Context, token string) (linkdtoken.Answer, error)
+	State(ctx context.Context) (linkdtoken.Answer, error)
+}
+
+// ServeLinkdTokens makes the front surface take and report the token for the
+// link's API; without it the route answers that this deployment keeps none.
+func (m *Manager) ServeLinkdTokens(tokens LinkdTokens) { m.linkdTokens = tokens }
+
+// handleLinkdToken answers the token's state, and on a POST first keeps the
+// token handed over. The answer never carries the token, and no failure text
+// carries it either.
+func (m *Manager) handleLinkdToken(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		return methodNotAllowed(w, "GET, POST")
+	}
+	if err := m.authorizeAdmin(r); err != nil {
+		return err
+	}
+	if m.linkdTokens == nil {
+		return failure("linkd_token_unused", "This deployment reads no link through the admin, and keeps no token for it.", 404)
+	}
+	var answer linkdtoken.Answer
+	var err error
+	if r.Method == http.MethodPost {
+		var input struct {
+			Token string `json:"token"`
+		}
+		if err := decodeJSONWithin(w, r, &input, maxLinkdTokenBodyBytes); err != nil {
+			return err
+		}
+		answer, err = m.linkdTokens.Put(r.Context(), input.Token)
+		if errors.Is(err, linkdtoken.ErrInvalidToken) {
+			return failure("invalid_token", "The token is not one the admin issues, or it has expired.", 400)
+		}
+	} else {
+		answer, err = m.linkdTokens.State(r.Context())
+	}
+	if err != nil {
+		return failure("store_unavailable", "The runtime store did not answer.", 503)
+	}
+	return json.NewEncoder(w).Encode(answer)
 }

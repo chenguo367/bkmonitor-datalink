@@ -238,7 +238,19 @@ func openProductionPhaseTwoBundleAssembly(
 	// Where the link writes its open alert sets is the link's answer; it is
 	// read before anything connects, so the index, the difference and the
 	// endpoint list all read the one location.
-	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
+	linkdTokens, linkdTokenClient, err := openLinkdTokens(cfg, recorder.RedisHook("linkd"), external.Now)
+	if err != nil {
+		return nil, err
+	}
+	linkdTokensClosed := false
+	defer func() {
+		if resultErr != nil && linkdTokenClient != nil && !linkdTokensClosed {
+			resultErr = errors.Join(resultErr, linkdTokenClient.Close())
+		}
+	}()
+	discoverLinkd := withLinkdToken(openalerts.DiscoverTarget, linkdTokenSource(linkdTokens))
+	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, discoverLinkd)
+	logLinkdDiscovery(logger, linkdDiscovery)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
 	// other Query Group's coordinates once one object became noisy.
@@ -708,7 +720,7 @@ func openProductionPhaseTwoBundleAssembly(
 		client.AddHook(recorder.RedisHook("linkd"))
 		return client, true
 	}
-	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, external.Now, logger)
+	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, linkdTokenSource(linkdTokens), external.Now, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -1148,7 +1160,7 @@ func openProductionPhaseTwoBundleAssembly(
 		RunOpenAlerts: func(runCtx context.Context) error {
 			// A process whose startup discovery failed keeps asking in the
 			// background, on the same lifetime as the copy it may rebind.
-			go linkd.Location.retry(runCtx, cfg, openalerts.DiscoverTarget, linkdRetryFirst, linkdRetryCeiling)
+			go linkd.Location.retry(runCtx, cfg, discoverLinkd, linkdRetryFirst, linkdRetryCeiling)
 			return openAlertCopy.Run(runCtx)
 		},
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
@@ -1172,6 +1184,10 @@ func openProductionPhaseTwoBundleAssembly(
 			}
 			if linkdClientOwned {
 				closers = append(closers, linkdClient.Close())
+			}
+			if linkdTokenClient != nil {
+				linkdTokensClosed = true
+				closers = append(closers, linkdTokenClient.Close())
 			}
 			if !runtimeClientIsSource {
 				closers = append(closers, runtimeClient.Close())

@@ -33,10 +33,10 @@ func (stub *consoleStub) serve(w http.ResponseWriter, r *http.Request) {
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
 	switch r.URL.Path {
-	case "/local-api/strategy-index/targets":
+	case "/api/modules/linkd/strategy-index/targets":
 		stub.targets++
 		_ = json.NewEncoder(w).Encode([]TargetBinding{stub.target})
-	case "/local-api/event-sources/source":
+	case "/api/modules/linkd/event-sources/source":
 		stub.reads++
 		stub.eventSource(w)
 	default:
@@ -66,7 +66,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 	stub := &consoleStub{target: testBinding(), eventSource: eventSourceAnswer(3, false)}
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	defer server.Close()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, Now: c.now, LocationConfirmed: true, KeyingEvery: 30 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestAReconciliationConfirmsOrWithdrawsTheLocation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	defer server.Close()
 	var handed []TargetBinding
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, OnLocationMismatch: func(target TargetBinding) { handed = append(handed, target) }})
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestAKeyingReadForAnotherSourceIsNoAnswer(t *testing.T) {
 	stub := &consoleStub{target: testBinding(), eventSource: eventSourceAnswer(3, false)}
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	defer server.Close()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, LocationConfirmed: true})
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestAMoveIsConfirmedByTheNextResolutionAndRereadsTheKeying(t *testing.T) {
 	defer server.Close()
 	moved := testBinding()
 	moved.Database++
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, KeyingEvery: time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestRefreshLearnsBothFactsWithNoStrategy(t *testing.T) {
 	stub := &consoleStub{target: testBinding(), eventSource: eventSourceAnswer(3, false)}
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	defer server.Close()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret",
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
 		Index: testIndex(), MaxResponseBytes: 1 << 20, Now: c.now, KeyingEvery: 30 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
