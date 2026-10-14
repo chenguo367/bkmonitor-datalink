@@ -87,16 +87,27 @@ func (planner *lookbackPlanner) plan(ctx context.Context, owners map[execution.Q
 		return nil, err
 	}
 	life := lookback.PlanLife.Milliseconds()
-	for _, replica := range sortedKeys(lists) {
-		for queryGroup, rung := range lists[replica] {
-			entry, kept := planner.entries[queryGroup]
-			// Renewed only when its rung moved or half its life is gone, so
-			// the set - and every Worker's message - does not change on every
-			// round a Query Group stays late.
-			if !kept || entry.Rung != rung || entry.ExpiresAtMs-now.UnixMilli() < life/2 {
-				planner.entries[queryGroup] = fleet.LookbackPlanEntry{Rung: rung, ExpiresAtMs: now.UnixMilli() + life}
-				planner.unsaved = true
+	// Around a change of owner two replicas can both read a Query Group
+	// directed on their own evidence, at different rungs, until the old one
+	// forgets it: the round takes the deepest, so the entry does not flip
+	// between the two - and the set is not saved and sent again - every round.
+	deepest := make(map[string]int)
+	for _, list := range lists {
+		for queryGroup, rung := range list {
+			if current, seen := deepest[queryGroup]; !seen || rung > current {
+				deepest[queryGroup] = rung
 			}
+		}
+	}
+	for _, queryGroup := range sortedKeys(deepest) {
+		rung := deepest[queryGroup]
+		entry, kept := planner.entries[queryGroup]
+		// Renewed only when its rung moved or half its life is gone, so the
+		// set - and every Worker's message - does not change on every round
+		// a Query Group stays late.
+		if !kept || entry.Rung != rung || entry.ExpiresAtMs-now.UnixMilli() < life/2 {
+			planner.entries[queryGroup] = fleet.LookbackPlanEntry{Rung: rung, ExpiresAtMs: now.UnixMilli() + life}
+			planner.unsaved = true
 		}
 	}
 	for queryGroup, entry := range planner.entries {

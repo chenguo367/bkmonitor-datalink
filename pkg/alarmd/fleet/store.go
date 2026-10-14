@@ -198,6 +198,13 @@ type LookbackPlanEntry struct {
 // SaveLookbackPlan writes the control plane's whole lookback plan set, to
 // live until its latest entry expires: a deployment that stops planning
 // leaves nothing behind. An empty set deletes the key.
+//
+// A plain SET, like the fleet control record: during a takeover the previous
+// Leader may still save once before it learns it lost the lease, over what
+// the new one loaded. What it writes is advice that expires within
+// lookback.PlanLife, and the new Leader's next change of the set writes it
+// whole again; a restart in between plans from the older set, which a
+// Worker's own samples override anyway.
 func (store *RedisStore) SaveLookbackPlan(ctx context.Context, entries map[string]LookbackPlanEntry, now time.Time) error {
 	var latest int64
 	for _, entry := range entries {
