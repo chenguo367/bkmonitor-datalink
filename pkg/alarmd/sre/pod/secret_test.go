@@ -224,3 +224,45 @@ func TestTheDeploymentKeyIsAskedForOnceAtFirstUse(t *testing.T) {
 		t.Fatalf("no deployment key: %+v", receipt)
 	}
 }
+
+// A process whose first fingerprint found no deployment key asks again, at
+// most once a minute, and takes the deployment's key once it comes; from
+// then on it does not ask, and each answer reports the scope of the key its
+// fingerprints were made under.
+func TestAProcessKeyGivesWayToTheDeploymentKeyWhenItComes(t *testing.T) {
+	client, _ := fixture()
+	secrets := &secretFixture{secrets: map[string]*corev1.Secret{
+		"ns1/one": {ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "one"}, Data: map[string][]byte{"password": []byte("value")}}}}
+	now := time.Unix(1_700_000_000, 0)
+	asked, available := 0, false
+	provider := mustProvider(t, Options{Client: client, Secrets: secrets, Now: func() time.Time { return now },
+		FingerprintKeySource: func() []byte {
+			asked++
+			if available {
+				return testFingerprintKey
+			}
+			return nil
+		}})
+	read := func() SecretReceipt {
+		receipt, err := provider.ReadSecret(context.Background(), SecretRequest{Namespace: "ns1", Name: "one"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	first := read()
+	available = true
+	now = now.Add(30 * time.Second)
+	if second := read(); first.FingerprintScope != "process" || second.FingerprintScope != "process" || asked != 1 ||
+		second.Keys[0].Fingerprint != first.Keys[0].Fingerprint {
+		t.Fatalf("within the minute: %+v then %+v, asked %d; want the process key, asked once", first, second, asked)
+	}
+	now = now.Add(31 * time.Second)
+	if healed := read(); healed.FingerprintScope != "deployment" || healed.Keys[0].Fingerprint != fingerprintOf(testFingerprintKey, "value") || asked != 2 {
+		t.Fatalf("after the minute: %+v, asked %d; want the deployment key", healed, asked)
+	}
+	now = now.Add(time.Hour)
+	if read(); asked != 2 {
+		t.Fatalf("asked %d times after the deployment key came, want no more", asked)
+	}
+}

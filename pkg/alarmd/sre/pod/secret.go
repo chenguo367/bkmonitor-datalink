@@ -80,7 +80,8 @@ type SecretOwner struct {
 // output redaction (credentials the deployment knows, credential fields, URL
 // userinfo).
 func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (SecretReceipt, error) {
-	result := SecretReceipt{Namespace: request.Namespace, Name: request.Name, Keys: []SecretKey{}, FingerprintScope: p.fingerprintScope(), RedactionContract: RedactionContract, At: p.options.Now().UTC()}
+	fingerprints := p.newFingerprints()
+	result := SecretReceipt{Namespace: request.Namespace, Name: request.Name, Keys: []SecretKey{}, FingerprintScope: fingerprints.Scope(), RedactionContract: RedactionContract, At: p.options.Now().UTC()}
 	if p.options.Secrets == nil {
 		return result, &Error{Code: CodeAPIError, Message: "Kubernetes Secret adapter is unavailable"}
 	}
@@ -139,7 +140,7 @@ func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (Secre
 	}
 	for _, key := range keys {
 		value := secret.Data[key]
-		result.Keys = append(result.Keys, SecretKey{Key: key, Bytes: len(value), Fingerprint: p.fingerprint(value)})
+		result.Keys = append(result.Keys, SecretKey{Key: key, Bytes: len(value), Fingerprint: fingerprints.sum(value)})
 	}
 	return result, nil
 }
@@ -226,11 +227,12 @@ func (p *Provider) ReadConfigMap(ctx context.Context, request ConfigMapRequest) 
 		keys, result.Truncated = keys[:MaxSecretKeys], true
 	}
 	remaining := p.options.MaxOutputBytes
+	fingerprints := p.newFingerprints()
 	for _, key := range keys {
 		value := configMap.Data[key]
 		masked, fingerprint := value, ""
 		if credentialKey.MatchString(key) && value != "" {
-			masked, fingerprint = "<redacted>", p.fingerprint([]byte(value))
+			masked, fingerprint = "<redacted>", fingerprints.sum([]byte(value))
 		}
 		redacted, cut := p.redactor.bounded(masked, max(remaining, 0))
 		remaining -= int64(len(redacted))

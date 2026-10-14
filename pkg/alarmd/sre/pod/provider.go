@@ -28,10 +28,12 @@ type Provider struct {
 	options  Options
 	permits  chan struct{}
 	redactor *redactor
-	// keyOnce resolves the fingerprint key at its first use (fingerprintKey).
-	keyOnce  sync.Once
+	// keyMu guards the fingerprint key (fingerprintKey): the key, where it
+	// compares, and when the deployment's was last asked for.
+	keyMu    sync.Mutex
 	key      []byte
 	keyScope string
+	keyAsked time.Time
 	// shellless is the containers found without /bin/sh.
 	shellless shelllessMemo
 }
@@ -97,35 +99,71 @@ const (
 	FingerprintScopeProcess    = "process"
 )
 
+// fingerprintKeyRetry is how long a process that had to make its own key
+// waits before asking for the deployment's again: a runtime store that did
+// not answer at the first fingerprint is asked again, at most this often,
+// until it does.
+const fingerprintKeyRetry = time.Minute
+
 // fingerprintKey is the key fingerprints are made under and where they
-// compare: the configured key; else the deployment's, asked for once; else
-// one this process makes.
+// compare: the configured key; else the deployment's, asked for at the first
+// fingerprint and again at most every fingerprintKeyRetry while it has not
+// come; else one this process made. The source is asked under the lock, so
+// a slow store holds fingerprinting back for one bounded read a minute.
 func (p *Provider) fingerprintKey() ([]byte, string) {
-	p.keyOnce.Do(func() {
-		p.key, p.keyScope = p.options.FingerprintKey, p.options.FingerprintScope
-		if len(p.key) == 0 && p.options.FingerprintKeySource != nil {
-			p.key, p.keyScope = p.options.FingerprintKeySource(), FingerprintScopeDeployment
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+	if len(p.options.FingerprintKey) > 0 {
+		return p.options.FingerprintKey, p.options.FingerprintScope
+	}
+	if p.keyScope == FingerprintScopeDeployment {
+		return p.key, p.keyScope
+	}
+	if source := p.options.FingerprintKeySource; source != nil {
+		if now := p.options.Now(); p.keyAsked.IsZero() || now.Sub(p.keyAsked) >= fingerprintKeyRetry {
+			p.keyAsked = now
+			if key := source(); len(key) > 0 {
+				p.key, p.keyScope = key, FingerprintScopeDeployment
+				return p.key, p.keyScope
+			}
 		}
-		if len(p.key) == 0 {
-			p.key, p.keyScope = make([]byte, 32), FingerprintScopeProcess
-			_, _ = rand.Read(p.key)
-		}
-	})
+	}
+	if len(p.key) == 0 {
+		p.key, p.keyScope = make([]byte, 32), FingerprintScopeProcess
+		_, _ = rand.Read(p.key)
+	}
 	return p.key, p.keyScope
 }
 
-// fingerprintScope is where this provider's fingerprints compare.
-func (p *Provider) fingerprintScope() string {
-	_, scope := p.fingerprintKey()
-	return scope
+// fingerprints is one answer's fingerprinting. It takes the key at the
+// answer's first fingerprint and keeps it, so every fingerprint in one answer
+// is made under one key and the scope the answer reports is that key's.
+type fingerprints struct {
+	p     *Provider
+	key   []byte
+	scope string
 }
 
-// fingerprint is a value as it is shown when it may not be: HMAC-SHA256
-// under the deployment's key, the first 16 hex digits. It tells two equal
-// values and a changed one apart and gives nothing else.
-func (p *Provider) fingerprint(value []byte) string {
-	key, _ := p.fingerprintKey()
-	mac := hmac.New(sha256.New, key)
+func (p *Provider) newFingerprints() *fingerprints { return &fingerprints{p: p} }
+
+func (f *fingerprints) take() {
+	if f.key == nil {
+		f.key, f.scope = f.p.fingerprintKey()
+	}
+}
+
+// Scope is where this answer's fingerprints compare.
+func (f *fingerprints) Scope() string {
+	f.take()
+	return f.scope
+}
+
+// sum is a value as it is shown when it may not be: HMAC-SHA256 under the
+// answer's key, the first 16 hex digits. It tells two equal values and a
+// changed one apart and gives nothing else.
+func (f *fingerprints) sum(value []byte) string {
+	f.take()
+	mac := hmac.New(sha256.New, f.key)
 	mac.Write(value)
 	return hex.EncodeToString(mac.Sum(nil))[:16]
 }
