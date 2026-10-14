@@ -315,9 +315,11 @@ func TestAResourceReadServesTheOwnershipKinds(t *testing.T) {
 		}
 	}
 	for kind, want := range map[string]string{
-		"ClusterRole":        `list rbac.authorization.k8s.io/v1 clusterroles ns=""`,
-		"ClusterRoleBinding": `list rbac.authorization.k8s.io/v1 clusterrolebindings ns=""`,
-		"DataID":             `list monitoring.bk.tencent.com/v1beta1 dataids ns=""`,
+		"ClusterRole":                    `list rbac.authorization.k8s.io/v1 clusterroles ns=""`,
+		"ClusterRoleBinding":             `list rbac.authorization.k8s.io/v1 clusterrolebindings ns=""`,
+		"DataID":                         `list monitoring.bk.tencent.com/v1beta1 dataids ns=""`,
+		"ValidatingWebhookConfiguration": `list admissionregistration.k8s.io/v1 validatingwebhookconfigurations ns=""`,
+		"MutatingWebhookConfiguration":   `list admissionregistration.k8s.io/v1 mutatingwebhookconfigurations ns=""`,
 	} {
 		provider, resources := resourceProvider(t)
 		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind}); err != nil || resources.asked[0] != want {
@@ -540,5 +542,37 @@ func TestAWalkFollowingContinueReadsEveryObjectAcrossCutPages(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "n0,n1,n2,n3,n4,n5,n6" {
 		t.Fatalf("walked %v, want every object once in order", names)
+	}
+}
+
+// A webhook configuration says which webhook gates what -- its rules,
+// selectors, failure policy and the service it calls -- and never the CA
+// bundle it is called under.
+func TestAWebhookConfigurationComesWithoutItsCABundle(t *testing.T) {
+	client, _ := fixture()
+	bundle := "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCmZpeHR1cmUK"
+	webhook := map[string]any{"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingWebhookConfiguration",
+		"metadata": map[string]any{"name": "ingress-admission"},
+		"webhooks": []any{map[string]any{"name": "validate.nginx.ingress.kubernetes.io", "failurePolicy": "Fail",
+			"rules":        []any{map[string]any{"apiGroups": []any{"networking.k8s.io"}, "resources": []any{"ingresses"}, "operations": []any{"CREATE", "UPDATE"}}},
+			"clientConfig": map[string]any{"caBundle": bundle, "service": map[string]any{"namespace": "ingress", "name": "admission", "port": 443}}}}}
+	resources := &resourceFixture{objects: []map[string]any{webhook}}
+	provider := mustProvider(t, Options{Client: client, Resources: resources})
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "ValidatingWebhookConfiguration"})
+	if err != nil || receipt.Count != 1 {
+		t.Fatalf("receipt %+v err %v", receipt, err)
+	}
+	item := string(receipt.Items[0])
+	if strings.Contains(item, bundle) || strings.Contains(item, "caBundle") {
+		t.Fatalf("the CA bundle came back: %s", item)
+	}
+	for _, kept := range []string{"validate.nginx.ingress.kubernetes.io", "ingresses", `"failurePolicy":"Fail"`, `"name":"admission"`} {
+		if !strings.Contains(item, kept) {
+			t.Fatalf("item %s lacks %s", item, kept)
+		}
+	}
+	// The resource the fixture holds keeps its bundle: the copy is the answer's.
+	if config := webhook["webhooks"].([]any)[0].(map[string]any)["clientConfig"].(map[string]any); config["caBundle"] != bundle {
+		t.Fatal("the read changed the object it read")
 	}
 }

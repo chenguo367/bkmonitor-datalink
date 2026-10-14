@@ -12,14 +12,18 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	typedcore "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
 )
@@ -27,6 +31,10 @@ import (
 type KubernetesClient struct {
 	core   typedcore.CoreV1Interface
 	owners dynamic.Interface
+	// mapper resolves a kind to its resource from the cluster's discovery,
+	// cached; a kind it does not know resets the cache once, for a CRD
+	// installed since.
+	mapper *restmapper.DeferredDiscoveryRESTMapper
 }
 
 // serviceAccountNamespace is where the kubelet writes the Pod's own namespace.
@@ -60,6 +68,7 @@ func NewInCluster(options Options) (*Provider, error) {
 	options.Secrets = client
 	options.ConfigMaps = client
 	options.Resources = client
+	options.DryRun = client
 	options.Executor = executor
 	return New(options)
 }
@@ -82,7 +91,12 @@ func NewKubernetesClient(config *rest.Config) (*KubernetesClient, error) {
 	if err != nil {
 		return nil, apiError(err)
 	}
-	return &KubernetesClient{core: core, owners: owners}, nil
+	discovered, err := discovery.NewDiscoveryClientForConfig(rest.CopyConfig(config))
+	if err != nil {
+		return nil, apiError(err)
+	}
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discovered))
+	return &KubernetesClient{core: core, owners: owners, mapper: mapper}, nil
 }
 func (c *KubernetesClient) ListPods(ctx context.Context, namespace string, options metav1.ListOptions) (*corev1.PodList, error) {
 	return c.core.Pods(namespace).List(ctx, options)
@@ -249,4 +263,30 @@ func startRefused(err error, program string) bool {
 		}
 	}
 	return false
+}
+
+// Mapping resolves apiVersion and kind to the resource the cluster serves
+// them under and whether it is namespaced.
+func (c *KubernetesClient) Mapping(apiVersion, kind string) (schema.GroupVersionResource, bool, error) {
+	version, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return schema.GroupVersionResource{}, false, err
+	}
+	gk := schema.GroupKind{Group: version.Group, Kind: kind}
+	mapping, err := c.mapper.RESTMapping(gk, version.Version)
+	if meta.IsNoMatchError(err) {
+		c.mapper.Reset()
+		mapping, err = c.mapper.RESTMapping(gk, version.Version)
+	}
+	if err != nil {
+		return schema.GroupVersionResource{}, false, err
+	}
+	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
+}
+
+// ApplyDryRun is the dry run's one write: a server-side apply that the
+// apiserver runs through admission and does not persist. dryRunPatchOptions
+// is fixed here; no caller reaches it.
+func (c *KubernetesClient) ApplyDryRun(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, data []byte) (*unstructured.Unstructured, error) {
+	return c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.ApplyPatchType, data, dryRunPatchOptions())
 }

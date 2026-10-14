@@ -74,7 +74,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources}
+	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -254,7 +254,7 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				return out
 			}},
-		{ID: pod.OpListResources, Summary: "列出或读取一种 Kubernetes 资源（Node、Namespace、Pod、Service、Endpoints、EndpointSlice、Event、Deployment、StatefulSet、DaemonSet、ReplicaSet、Job、CronJob、Ingress、HorizontalPodAutoscaler、ConfigMap、Secret、ServiceAccount、PersistentVolumeClaim、Role、RoleBinding、ClusterRole、ClusterRoleBinding，以及自定义资源 ServiceMonitor、PodMonitor、BkLogConfig、DataID（集群级，bk-monitor-operator 的数据落在哪个业务））：不填 namespace 时命名空间级的种类按整个集群列；name 读一个对象；label_selector、field_selector 原样交给 apiserver（如 spec.nodeName=节点名 按节点列 Pod，app.kubernetes.io/managed-by=Helm 列 Helm 管理的对象）；paths 只取给出的点分路径。每个对象都带 Helm 的归属标签与注解（meta.helm.sh/release-name、release-namespace），投影时也带，按它们可列出一个 release 拥有什么。Secret 只给元数据和每个键的字节数与指纹（部署内密钥的 HMAC，16 位十六进制，能比较是否同值、是否变过，不能还原），从不给值；ConfigMap 只给元数据和每个键的字节数，值用 configmap.get 读。其他种类去掉 managedFields 与 last-applied 注解，凭据名的注解整值遮蔽，凭据名的 env 值遮蔽并附指纹，所有字符串经过脱敏；对 Secret 的引用（secretName、secretKeyRef、envFrom、imagePullSecrets）原样保留。集群没装的自定义资源答 kind_not_installed。列 Secret 每次都留审计记录。",
+		{ID: pod.OpListResources, Summary: "列出或读取一种 Kubernetes 资源（Node、Namespace、Pod、Service、Endpoints、EndpointSlice、Event、Deployment、StatefulSet、DaemonSet、ReplicaSet、Job、CronJob、Ingress、HorizontalPodAutoscaler、ConfigMap、Secret、ServiceAccount、PersistentVolumeClaim、Role、RoleBinding、ClusterRole、ClusterRoleBinding，ValidatingWebhookConfiguration、MutatingWebhookConfiguration（集群级，只给元数据与各 webhook 的规则、选择器、失败策略与调用目标，不给 caBundle），以及自定义资源 ServiceMonitor、PodMonitor、BkLogConfig、DataID（集群级，bk-monitor-operator 的数据落在哪个业务））：不填 namespace 时命名空间级的种类按整个集群列；name 读一个对象；label_selector、field_selector 原样交给 apiserver（如 spec.nodeName=节点名 按节点列 Pod，app.kubernetes.io/managed-by=Helm 列 Helm 管理的对象）；paths 只取给出的点分路径。每个对象都带 Helm 的归属标签与注解（meta.helm.sh/release-name、release-namespace），投影时也带，按它们可列出一个 release 拥有什么。Secret 只给元数据和每个键的字节数与指纹（部署内密钥的 HMAC，16 位十六进制，能比较是否同值、是否变过，不能还原），从不给值；ConfigMap 只给元数据和每个键的字节数，值用 configmap.get 读。其他种类去掉 managedFields 与 last-applied 注解，凭据名的注解整值遮蔽，凭据名的 env 值遮蔽并附指纹，所有字符串经过脱敏；对 Secret 的引用（secretName、secretKeyRef、envFrom、imagePullSecrets）原样保留。集群没装的自定义资源答 kind_not_installed。列 Secret 每次都留审计记录。",
 			EvidenceScope: "sre_k8s_read", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: k8sListLimits,
 			Fields: map[string]Field{"kind": {Type: "string", MinLength: 1, MaxLength: 64}, "namespace": text, "name": {Type: "string", MinLength: 1, MaxLength: 253},
 				"label_selector": {Type: "string", MaxLength: 1024}, "field_selector": {Type: "string", MaxLength: 1024},
@@ -299,6 +299,20 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				if len(v.OversizedItems) > 0 {
 					out.Limitations = append(out.Limitations, "Some objects were over the output bound alone and came back as their identity only (oversized_items); read them by name with paths.")
+				}
+				return out
+			}},
+		{ID: pod.OpDryRun, Summary: "把一组清单（YAML 文档或 JSON 对象，如 chart 渲染出的）逐个以服务端 apply、dryRun=All 交给 apiserver：准入 webhook、schema、配额与冲突都照常检查，什么都不落库。每个对象答 would_create / would_update / unchanged / denied（webhook、校验、配额、无权限）/ manager_conflict（字段归属冲突，不是拒绝）/ not_checked（集群不认这个种类、没有名字或命名空间、没拿到应答）/ rbac_not_dry_run（Role、ClusterRole 与绑定不送：apiserver 即使 dry run 也做 RBAC 提权检查，通过它要 bind 与 escalate，通道不持有），拒绝时原样带 apiserver 的 reason、code、message 与 causes（Secret 自己的值被遮蔽）；clean 为真表示没有 denied、manager_conflict 与 not_checked。dryRun=All 写死在代码里，没有参数能关掉。命名空间级对象没写命名空间时用 namespace 参数；不给就不检查。每次调用都留审计记录，写明对象清单。", EvidenceScope: "sre_dry_run", ExecutionPool: "sre", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+			Limits:   map[string]any{"max_objects": pod.MaxDryRunObjects, "max_manifest_bytes": pod.MaxDryRunBytes, "dry_run": "All (fixed)", "field_manager": "alarmd-dry-run", "force": true},
+			Fields:   map[string]Field{"manifests": {Type: "string", MinLength: 1, MaxLength: pod.MaxDryRunBytes, Source: "helm template 的输出或任意清单"}, "namespace": text},
+			Required: []string{"manifests"}, OutputSchema: SchemaOf(pod.DryRunReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				started := now()
+				v, err := pods.DryRun(ctx, pod.DryRunRequest{Manifests: p.String("manifests"), Namespace: p.String("namespace")})
+				audit(ctx, started, SREAction{Op: pod.OpDryRun, Namespace: p.String("namespace"), Kind: "objects", Name: dryRunNames(v), Detail: dryRunCounts(v)}, err)
+				out := wrapPod(v, err, err == nil)
+				if err == nil && !v.Clean {
+					out.Summary = "dry run not clean: " + dryRunCounts(v)
 				}
 				return out
 			}},
@@ -565,6 +579,34 @@ func podTarget(p Params) pod.Target {
 	var target pod.Target
 	_ = json.Unmarshal(value, &target)
 	return target
+}
+
+// dryRunNames is the objects one dry run asked about, as its audit line names
+// them: kind/namespace/name, at most secretAuditNames, then how many more.
+func dryRunNames(receipt pod.DryRunReceipt) string {
+	names := make([]string, 0, min(len(receipt.Objects), secretAuditNames+1))
+	for index, object := range receipt.Objects {
+		if index == secretAuditNames {
+			names = append(names, fmt.Sprintf("+%d more", len(receipt.Objects)-secretAuditNames))
+			break
+		}
+		names = append(names, object.Kind+"/"+object.Namespace+"/"+object.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+// dryRunCounts is a dry run's verdicts by count, in their fixed order.
+func dryRunCounts(receipt pod.DryRunReceipt) string {
+	var parts []string
+	for _, verdict := range pod.DryRunVerdicts {
+		if count := receipt.Counts[verdict]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", verdict, count))
+		}
+	}
+	if len(parts) == 0 {
+		return "no objects"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // secretAuditNames bounds the Secret names one listing's audit line carries.

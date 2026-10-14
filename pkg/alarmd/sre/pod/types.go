@@ -154,6 +154,8 @@ type Options struct {
 	ConfigMaps ConfigMapReader
 	// Resources reads the kinds k8s.list serves; nil leaves it unavailable.
 	Resources ResourceReader
+	// DryRun is k8s.dry_run's Kubernetes access; nil leaves it unavailable.
+	DryRun DryRunner
 	// DefaultNamespace is the namespace a request that names none reads:
 	// this process's own. Empty means a request must name one.
 	DefaultNamespace string
