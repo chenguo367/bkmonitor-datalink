@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
 // plannerFleet is a real fleet store with two Workers whose lookback read
@@ -173,3 +175,131 @@ func TestAnEntryNobodyRenewsLeavesTheSetWithItsLife(t *testing.T) {
 		t.Fatal("the emptied set left its key behind")
 	}
 }
+
+// failingPlanStore is a fleet store whose plan saves fail while failSaves
+// is above zero, counting every save asked of it.
+type failingPlanStore struct {
+	*fleet.RedisStore
+	failSaves int
+	saves     int
+}
+
+func (store *failingPlanStore) SaveLookbackPlan(ctx context.Context, entries map[string]fleet.LookbackPlanEntry, now time.Time) error {
+	store.saves++
+	if store.failSaves > 0 {
+		store.failSaves--
+		return errors.New("store unavailable")
+	}
+	return store.RedisStore.SaveLookbackPlan(ctx, entries, now)
+}
+
+// A plan set the store refused is saved on the next round although nothing
+// changed in between: the round that planned it already changed the set.
+func TestAPlanSetTheStoreRefusedIsSavedOnTheNextRound(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	fleetStore, _ := plannerFleet(t, now)
+	store := &failingPlanStore{RedisStore: fleetStore, failSaves: 1}
+	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
+	if _, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err == nil {
+		t.Fatal("a round whose save failed reported no error")
+	}
+	now = now.Add(30 * time.Second)
+	if _, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := fleetStore.LoadLookbackPlan(context.Background(), now)
+	if store.saves != 2 || err != nil || len(kept) != 2 {
+		t.Fatalf("saves %d, kept %v (error %v); want the identical round to save the set the failed one planned", store.saves, kept, err)
+	}
+}
+
+// A Query Group that stays late is renewed once half its entry's life is
+// gone: its entry runs a whole life from the renewal and the kept set is
+// written again with it, so it never lapses while its Worker still reports it.
+func TestAQueryGroupThatStaysLateIsRenewedAtHalfItsLife(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store, client := plannerFleet(t, now)
+	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
+	if _, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	before := client.Get(context.Background(), "test.fleet:lookback-plan").Val()
+	// The lists live as long as the store's snapshots: publish them again,
+	// as the Workers do, half a life on.
+	now = now.Add(lookback.PlanLife/2 + time.Minute)
+	for replica, late := range map[string]map[string]int{"w1": {"qg-1": 2}, "w2": {"qg-2": 4}} {
+		if _, err := store.PublishSummarized(context.Background(), fleet.Snapshot{Replica: replica, TakenAt: now, LookbackLate: late}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	byWorker, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range byWorker["w2"] {
+		if !plan.ExpiresAt.Equal(now.Add(lookback.PlanLife)) {
+			t.Fatalf("%s expires %s after its renewal at %s, want a whole life from it", plan.QueryGroup, plan.ExpiresAt, now)
+		}
+	}
+	if after := client.Get(context.Background(), "test.fleet:lookback-plan").Val(); after == before {
+		t.Fatal("the renewal was not written to the kept set")
+	}
+}
+
+// A listed Query Group no Worker owns in the round's desired set - it left,
+// or moves before the next round - goes into no Worker's set.
+func TestALateQueryGroupNoWorkerOwnsIsPlannedForNobody(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store, _ := plannerFleet(t, now)
+	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
+	owners := map[execution.QueryGroupIdentity]string{"qg-2": "w2"}
+	byWorker, err := planner.plan(context.Background(), owners, []string{"w1", "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for worker, plans := range byWorker {
+		for _, plan := range plans {
+			if plan.QueryGroup == "qg-1" {
+				t.Fatalf("qg-1, owned by no Worker, is in %s's set", worker)
+			}
+		}
+	}
+	if len(byWorker["w2"]) != 1 {
+		t.Fatalf("w2's set = %+v, want qg-2 alone", byWorker["w2"])
+	}
+}
+
+// Starting a term on the view stream starts the planner's: the next round
+// plans from the set as kept, not from what this process last planned.
+func TestLeadingAViewStreamTermReloadsTheKeptPlanSet(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store, _ := plannerFleet(t, now)
+	server, err := viewstream.NewServer(refuseEveryStream{}, nil, viewstream.ServerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{ViewStream: server}}
+	runtime.WithLookbackPlanner(store, true, nil)
+	runtime.lookbackPlanner.now = func() time.Time { return now }
+	if _, err := runtime.lookbackPlanner.plan(context.Background(), plannerOwners, []string{"w1", "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	other := map[string]fleet.LookbackPlanEntry{"qg-3": {Rung: 1, ExpiresAtMs: now.Add(time.Hour).UnixMilli()}}
+	if err := store.SaveLookbackPlan(context.Background(), other, now); err != nil {
+		t.Fatal(err)
+	}
+	runtime.viewLead(9)
+	byWorker, err := runtime.lookbackPlanner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := byWorker["w1"]; len(got) != 1 || got[0].QueryGroup != "qg-3" {
+		t.Fatalf("w1's set after a new term = %+v, want qg-3 from the kept set", got)
+	}
+}
+
+// refuseEveryStream admits no Worker: a server that only leads.
+type refuseEveryStream struct{}
+
+func (refuseEveryStream) Admit(context.Context, string, string) (string, error) { return "test", nil }
