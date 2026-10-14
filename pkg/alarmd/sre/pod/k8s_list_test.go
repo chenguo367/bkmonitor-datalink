@@ -28,6 +28,9 @@ type resourceFixture struct {
 	// missing answers every read with the apiserver's not-found, as for a
 	// resource whose CRD is not installed or an object that does not exist.
 	missing bool
+	// paged answers as the apiserver pages: at most Limit objects from where
+	// Continue ("at-<index>") says, and the token for the next.
+	paged bool
 }
 
 func (f *resourceFixture) ListResources(_ context.Context, resource schema.GroupVersionResource, namespace string, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
@@ -39,7 +42,18 @@ func (f *resourceFixture) ListResources(_ context.Context, resource schema.Group
 	list := &unstructured.UnstructuredList{}
 	list.SetContinue(f.continue_)
 	list.SetResourceVersion("rv-7")
-	for _, object := range f.objects {
+	objects := f.objects
+	if f.paged {
+		start := 0
+		_, _ = fmt.Sscanf(options.Continue, "at-%d", &start)
+		end := min(start+int(options.Limit), len(objects))
+		objects = objects[start:end]
+		list.SetContinue("")
+		if end < len(f.objects) {
+			list.SetContinue(fmt.Sprintf("at-%d", end))
+		}
+	}
+	for _, object := range objects {
 		list.Items = append(list.Items, unstructured.Unstructured{Object: deepCopyJSON(object)})
 	}
 	return list, nil
@@ -233,9 +247,12 @@ func TestAResourceReadProjectsThePathsItIsGiven(t *testing.T) {
 	}
 }
 
-// A page over the output bound keeps the objects that fit, says how many it
-// left out and gives the token it was read with instead of the next one; an
-// object alone over the bound comes back as its identity and is named.
+// A page over the output bound is listed again at the count that fit; when
+// the apiserver's answer still does not fit -- here it ignores the limit,
+// as objects that grew between the lists would -- the page keeps the
+// objects that fit, says how many it left out and gives the token it was
+// read with instead of the next one. An object alone over the bound comes
+// back as its identity and is named.
 func TestAResourceReadStaysWithinTheOutputBound(t *testing.T) {
 	big := func(name string, size int) map[string]any {
 		object := node(name, "192.0.2.9")
@@ -249,6 +266,15 @@ func TestAResourceReadStaysWithinTheOutputBound(t *testing.T) {
 	if err != nil || receipt.Count != 2 || !receipt.Truncated || receipt.ItemsOmitted != 1 || receipt.Continue != "" || receipt.ReadWith != "page-2" {
 		t.Fatalf("receipt count=%d truncated=%t omitted=%d continue=%q read_with=%q err=%v", receipt.Count, receipt.Truncated, receipt.ItemsOmitted, receipt.Continue, receipt.ReadWith, err)
 	}
+	if len(resources.options) != 1+resourceListCuts {
+		t.Fatalf("listed %d times, want the page and %d lists again", len(resources.options), resourceListCuts)
+	}
+	for _, again := range resources.options[1:] {
+		if again.Limit != 2 || again.Continue != "page-2" {
+			t.Fatalf("listed again with %+v, want the count that fit from the same token", again)
+		}
+	}
+	resources.options = nil
 
 	resources.objects = []map[string]any{big("n4", 4000), node("n5", "192.0.2.5")}
 	receipt, err = provider.ListResources(context.Background(), ResourceRequest{Kind: "Node"})
@@ -479,5 +505,40 @@ func TestSecretReferencesComeBackAsTheyAre(t *testing.T) {
 		if got, _ := json.Marshal(returned); string(got) != string(encoded) {
 			t.Fatalf("%s spec changed:\n got %s\nwant %s", kind, got, encoded)
 		}
+	}
+}
+
+// A walk that follows continue reads every object, however many of each
+// page the output bound lets through: a cut page is listed again at the
+// count that fit, so its continue resumes after its last item. Before, a cut
+// page answered with no continue, and a walker read it as the end of the
+// list -- a cluster-wide Deployment list with spec stopped at 81 of several
+// hundred.
+func TestAWalkFollowingContinueReadsEveryObjectAcrossCutPages(t *testing.T) {
+	client, _ := fixture()
+	var objects []map[string]any
+	for index := range 7 {
+		object := node(fmt.Sprintf("n%d", index), "192.0.2.9")
+		object["status"].(map[string]any)["images"] = []any{map[string]any{"names": []any{strings.Repeat("x", 300)}}}
+		objects = append(objects, object)
+	}
+	resources := &resourceFixture{objects: objects, paged: true}
+	provider := mustProvider(t, Options{Client: client, Resources: resources, MaxOutputBytes: 1500})
+	var names []string
+	token := ""
+	for page := 0; page < 10; page++ {
+		receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Node", Limit: 5, Continue: token})
+		if err != nil || receipt.Truncated || receipt.Count == 0 {
+			t.Fatalf("page %d: %+v err=%v, want a whole page", page, receipt, err)
+		}
+		for _, item := range decodeItems(t, receipt) {
+			names = append(names, item["metadata"].(map[string]any)["name"].(string))
+		}
+		if token = receipt.Continue; token == "" {
+			break
+		}
+	}
+	if strings.Join(names, ",") != "n0,n1,n2,n3,n4,n5,n6" {
+		t.Fatalf("walked %v, want every object once in order", names)
 	}
 }

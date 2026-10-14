@@ -140,9 +140,13 @@ type ResourceRequest struct {
 // ResourceReceipt is what one read returned. Items are the objects as
 // cleaned (cleanObject) and, with paths, projected; each is whole or, when
 // one object alone is over the output bound, its identity only and named in
-// OversizedItems. Truncated says the page held more than the bound let
-// through: the rest are omitted, Continue is empty, and ReadWith is the
-// token this page was read with, to read it again with a smaller limit.
+// OversizedItems. A page whose objects do not all fit the output bound is
+// listed again at the count that fit (resourceListCuts), so
+// it ends where its items end and Continue goes on from there: a walk that
+// follows Continue reads every object. Truncated says even that did not
+// fit -- the objects grew between the two lists: the rest are omitted,
+// Continue is empty, and ReadWith is the token this page was read with, to
+// read it again with a smaller limit.
 type ResourceReceipt struct {
 	Kind              string            `json:"kind"`
 	APIVersion        string            `json:"api_version"`
@@ -240,6 +244,41 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		}
 		objects, result.Continue, result.ResourceVersion = list.Items, list.GetContinue(), list.GetResourceVersion()
 	}
+	for cuts := 0; ; cuts++ {
+		fit, err := p.encodeResources(&result, kind, paths, objects, fingerprints)
+		if err != nil || fit == len(objects) {
+			return result, err
+		}
+		if request.Name != "" || cuts == resourceListCuts {
+			result.Truncated, result.ItemsOmitted = true, len(objects)-fit
+			result.ReadWith, result.Continue = request.Continue, ""
+			return result, nil
+		}
+		// The page again, at the count that fit: the apiserver's own token
+		// then resumes after the last item returned.
+		list, err := p.options.Resources.ListResources(ctx, kind.Resource, request.Namespace, metav1.ListOptions{
+			LabelSelector: request.LabelSelector, FieldSelector: request.FieldSelector, Continue: request.Continue, Limit: int64(fit)})
+		if err != nil {
+			return result, apiError(err)
+		}
+		objects, result.Continue, result.ResourceVersion = list.Items, list.GetContinue(), list.GetResourceVersion()
+		result.Items, result.Count, result.OversizedItems = []json.RawMessage{}, 0, nil
+	}
+}
+
+// resourceListCuts is how many times a page cut by the output bound is
+// listed again at the count that fit: once, which costs the apiserver one
+// more LIST of fewer objects than the page. Objects that grew between the
+// two lists leave the page truncated, said so.
+const resourceListCuts = 1
+
+// encodeResources cleans, projects and encodes objects into the receipt
+// while they fit the output bound, and says how many did. The first always
+// fits: one alone over the bound is its identity only, named in
+// OversizedItems.
+func (p *Provider) encodeResources(result *ResourceReceipt, kind resourceKind, paths [][]string, objects []unstructured.Unstructured,
+	fingerprints *fingerprints,
+) (int, error) {
 	remaining := p.options.MaxOutputBytes
 	for index, object := range objects {
 		raw := object.Object
@@ -252,7 +291,7 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		}
 		encoded, err := json.Marshal(item)
 		if err != nil {
-			return result, &Error{Code: CodeAPIError, Message: "a Kubernetes object did not encode"}
+			return index, &Error{Code: CodeAPIError, Message: "a Kubernetes object did not encode"}
 		}
 		if int64(len(encoded)) > p.options.MaxOutputBytes {
 			// Alone over the bound: its identity, so the caller can read it
@@ -261,15 +300,13 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 			result.OversizedItems = append(result.OversizedItems, object.GetNamespace()+"/"+object.GetName())
 		}
 		if int64(len(encoded)) > remaining {
-			result.Truncated, result.ItemsOmitted = true, len(objects)-index
-			result.ReadWith, result.Continue = request.Continue, ""
-			break
+			return index, nil
 		}
 		remaining -= int64(len(encoded))
 		result.Items = append(result.Items, encoded)
+		result.Count = len(result.Items)
 	}
-	result.Count = len(result.Items)
-	return result, nil
+	return len(objects), nil
 }
 
 // keysOnlyRow is a ConfigMap or a Secret as listed: its identity, metadata,
