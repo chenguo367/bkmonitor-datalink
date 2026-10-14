@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
 // lookbackTick is how often due rechecks are looked for: inside the window
@@ -392,4 +393,37 @@ func lateSeriesFacts(pastRound []lookback.LatePastRoundReading, residual []lookb
 		missed[string(reading.QueryGroup)] = row
 	}
 	return past, missed
+}
+
+// lookbackPlansInto hands every plan set the control plane sends to the
+// lookback engine, which replaces its last one with it; nil when there is no
+// engine.
+func lookbackPlansInto(engine *lookback.Engine) viewstream.LookbackPlansHandler {
+	if engine == nil {
+		return nil
+	}
+	return func(plans []viewstream.LookbackPlan) {
+		converted := make([]lookback.Plan, 0, len(plans))
+		for _, plan := range plans {
+			converted = append(converted, lookback.Plan{QueryGroup: plan.QueryGroup, Rung: plan.Rung, ExpiresAt: plan.ExpiresAt})
+		}
+		engine.ApplyPlans(converted)
+	}
+}
+
+// lookbackLateRungs is the Query Groups the lookback reads directed on its
+// own evidence, by the rung their late series were seen at, keyed as the
+// fleet keys objects; nil when there is no engine.
+func lookbackLateRungs(engine *lookback.Engine) func() map[string]int {
+	if engine == nil {
+		return nil
+	}
+	return func() map[string]int {
+		rungs := engine.SeriesLateRungs()
+		late := make(map[string]int, len(rungs))
+		for queryGroup, rung := range rungs {
+			late[string(queryGroup)] = rung
+		}
+		return late
+	}
 }

@@ -1323,6 +1323,9 @@ type productionPhaseTwoOwnership struct {
 	dependencies productionPhaseTwoOwnershipDependencies
 	reconciler   *scheduler.Reconciler
 	flights      *scheduler.FlightCoordinator
+	// lookbackPlanner is the Leader's lookback planning after each view
+	// publication (WithLookbackPlanner); nil plans nothing.
+	lookbackPlanner *lookbackPlanner
 	// viewGate decides, per Slot read, whether a Query Group is executed
 	// from the installed view (decision-016 batch 4); nil reads every
 	// Query Group the control plane's way.

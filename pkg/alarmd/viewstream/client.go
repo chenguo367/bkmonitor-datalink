@@ -132,6 +132,8 @@ type ClientStats struct {
 	Connections        uint64
 	// DiscoveryMisses is by reason, one of DiscoveryMissReasons.
 	DiscoveryMisses map[string]uint64
+	// LookbackPlanSets is how many lookback plan sets the Leader sent.
+	LookbackPlanSets uint64
 }
 
 // ClientOptions are the client's seams: the dialer a test replaces to reach
@@ -150,6 +152,8 @@ type ClientOptions struct {
 	// view's Query Groups this Worker executes from it; nil reports zero and
 	// never claims switched.
 	Switched SwitchedSource
+	// LookbackPlans takes every plan set the Leader sends; nil drops them.
+	LookbackPlans LookbackPlansHandler
 }
 
 // SwitchedSource is what a receipt asks for the count of Query Groups the
@@ -181,6 +185,7 @@ type Client struct {
 	random    *rand.Rand
 	costs     CostSource
 	switched  SwitchedSource
+	plans     LookbackPlansHandler
 
 	installed atomic.Pointer[View]
 	mu        sync.Mutex
@@ -199,9 +204,9 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 	}
 	client := &Client{identity: identity, discovery: discovery, probe: probe, observer: observer,
 		dial: options.Dial, now: options.Now, sleep: options.Sleep, tick: options.Tick, costs: options.Costs,
-		switched: options.Switched,
-		random:   rand.New(rand.NewSource(time.Now().UnixNano())),
-		stats:    ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
+		switched: options.Switched, plans: options.LookbackPlans,
+		random: rand.New(rand.NewSource(time.Now().UnixNano())),
+		stats:  ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
 	if client.dial == nil {
 		client.dial = dialLeader
 	}
@@ -515,6 +520,13 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 			client.installSnapshot(ctx, chunks, send)
 		case *pb.LeaderMessage_Delta:
 			client.installDelta(ctx, body.Delta, send)
+		case *pb.LeaderMessage_LookbackPlans:
+			client.mu.Lock()
+			client.stats.LookbackPlanSets++
+			client.mu.Unlock()
+			if client.plans != nil {
+				client.plans(lookbackPlansFromWire(body.LookbackPlans))
+			}
 		case *pb.LeaderMessage_Heartbeat, *pb.LeaderMessage_ObjectResult:
 			// Nothing to do with either here.
 		}

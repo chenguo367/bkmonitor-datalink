@@ -398,6 +398,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_handover_drain_seconds":                       "variableLabels: {}",
 		"bkmonitor_alarmd_output_unapplied_total":                       "variableLabels: {refusal}",
 		"bkmonitor_alarmd_executions_hung_total":                        "variableLabels: {outcome}",
+		"bkmonitor_alarmd_control_tier_paused_total":                    "variableLabels: {function}",
 		"bkmonitor_alarmd_assignment_moves_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_rebalance_paused_total":                       "variableLabels: {reason}",
 		"bkmonitor_alarmd_control_read_round_trips_total":               "variableLabels: {read}",
@@ -510,9 +511,11 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_unknown_lookback_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_coverage"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
+	expected["bkmonitor_alarmd_lookback_plan_entries"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_lookback_preemptions_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_lookback_faults_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_lookback_plan_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_sre_actions_total"] = "variableLabels: {op,result}"
@@ -989,6 +992,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("handover_drain_seconds"):              histogramSeries(1, len(handoverDrainBuckets)),
 		fqName("output_unapplied_total"):              len(ownership.RefusalReasons),
 		fqName("executions_hung_total"):               len(observability.ExecutionHungOutcomes),
+		fqName("control_tier_paused_total"):           len(ControlTierFunctions),
 		fqName("assignment_moves_total"):              1,
 		fqName("rebalance_paused_total"):              1,
 		fqName("control_read_round_trips_total"):      len(ControlReadKinds),

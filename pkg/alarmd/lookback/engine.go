@@ -273,6 +273,8 @@ type Engine struct {
 	woken           chan struct{}
 	holdEvidence    []ReadHoldEvidence
 	ignoredEvidence []ignoredReadHold
+	// plans is the control plane's plan set for this Worker (plan.go).
+	plans map[execution.QueryGroupIdentity]Plan
 }
 
 // group is one Query Group: how it is rechecked, which it learns from its
@@ -325,9 +327,14 @@ type group struct {
 	// read of its query again is bounded by (rereadTimeout).
 	firstReads durations
 	capturing  bool
-	prepared   *earlierSample
-	sample     *sample
-	nextAt     time.Time
+	// sampled says a sample of it has completed in this process, which then
+	// decides it rather than any plan; planKept that a plan was set aside
+	// for that, counted once.
+	sampled  bool
+	planKept bool
+	prepared *earlierSample
+	sample   *sample
+	nextAt   time.Time
 	// period is the observed time between two of its Slots, lastSlot the
 	// latest one seen; a Query Group is sampled at its first reads, so how
 	// fresh its measurement can be depends on how often it reads.
@@ -738,6 +745,9 @@ func (engine *Engine) Step(ctx context.Context) {
 	defer engine.publishReadHold()
 	now := engine.options.Now()
 	engine.mu.Lock()
+	// A plan entry that expired with no new set from the control plane -
+	// a lost stream, a fallback Leader that plans nothing - ends here.
+	engine.expirePlansLocked(now)
 	due := make([]*sample, 0)
 	var directed []*directedSlot
 	for _, state := range engine.groups {

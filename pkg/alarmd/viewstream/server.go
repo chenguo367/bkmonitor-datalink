@@ -99,6 +99,8 @@ type Stats struct {
 	// by the chunked snapshot of the same revision.
 	DeltasOversized uint64
 	Refusals        uint64
+	// LookbackPlanSetsSent counts the lookback plan sets sent to Workers.
+	LookbackPlanSetsSent uint64
 	// PublishFailingSince is when the Leader's desired set last failed to
 	// be published with no success since; zero while publishing works.
 	// PublishFailures counts the failures since then, PublishFailureReason
@@ -138,6 +140,7 @@ type publishFailures struct {
 
 type serverCounters struct {
 	publications, publicationsSkipped, snapshotChunks, deltas, emptyDeltas, deltasOversized, refusals uint64
+	lookbackPlanSets                                                                                  uint64
 }
 
 // Server implements pb.ControlServiceServer for the Leader.
@@ -162,6 +165,9 @@ type Server struct {
 	failures publishFailures
 	// noSessionsSince backs Stats.NoSessionsSince.
 	noSessionsSince time.Time
+	// plans is each Worker's lookback plan set (SetLookbackPlans), nil while
+	// this term has none: a fallback Leader plans nothing and sends nothing.
+	plans *lookbackPlanSets
 
 	// Diagnostics have their own admission slots and handler lock. A slow
 	// evidence reader must not hold the control stream's session lock or queue.
@@ -212,7 +218,7 @@ func (server *Server) Lead(controlEpoch uint64) error {
 	if err != nil {
 		return err
 	}
-	server.publisher, server.ready = publisher, nil
+	server.publisher, server.ready, server.plans = publisher, nil, nil
 	for _, sess := range server.sessions {
 		sess.poke()
 	}
@@ -223,7 +229,7 @@ func (server *Server) Lead(controlEpoch uint64) error {
 // and nothing is published until Lead is called again.
 func (server *Server) StepDown() {
 	server.mu.Lock()
-	server.publisher, server.ready = nil, nil
+	server.publisher, server.ready, server.plans = nil, nil, nil
 	sessions := server.sessions
 	server.sessions = map[string]*session{}
 	server.mu.Unlock()
@@ -335,7 +341,7 @@ func (server *Server) Stats() Stats {
 		Publications: server.counters.publications, PublicationsSkipped: server.counters.publicationsSkipped,
 		SnapshotChunksSent: server.counters.snapshotChunks, DeltasSent: server.counters.deltas,
 		EmptyDeltasSent: server.counters.emptyDeltas, DeltasOversized: server.counters.deltasOversized,
-		Refusals: server.counters.refusals}
+		Refusals: server.counters.refusals, LookbackPlanSetsSent: server.counters.lookbackPlanSets}
 	for _, reason := range PublishFailureReasons {
 		stats.PublishFailuresByReason[reason] = server.failures.byReason[reason]
 	}
@@ -621,6 +627,9 @@ type session struct {
 	wantSnapshot bool
 	lastHeard    time.Time
 	refusal      string
+	// plansSent is the digest of the last lookback plan set sent on this
+	// stream, empty before the first.
+	plansSent string
 }
 
 func (sess *session) poke() {
@@ -754,6 +763,9 @@ func (sess *session) send() string {
 			return RefusalNotLeader
 		}
 		if err := sess.publish(publisher); err != nil {
+			return "SEND_FAILED"
+		}
+		if err := sess.sendLookbackPlans(); err != nil {
 			return "SEND_FAILED"
 		}
 	}

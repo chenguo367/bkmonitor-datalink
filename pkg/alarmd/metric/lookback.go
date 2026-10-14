@@ -40,6 +40,8 @@ type lookbackCollector struct {
 	yields     *prometheus.Desc
 	refused    *prometheus.Desc
 	faults     *prometheus.Desc
+	plans      *prometheus.Desc
+	planHeld   *prometheus.Desc
 	// The directed reads of series_late Query Groups and the supplements of
 	// their Slots.
 	supplementWindows    *prometheus.Desc
@@ -211,13 +213,22 @@ func newLookbackCollector() *lookbackCollector {
 		faults: desc("lookback_faults_total",
 			"Reads not kept for a defect, by reason. Normal running never meets one; any count is a defect to fix.",
 			"reason"),
+		plans: desc("lookback_plan_total",
+			"Control-plane lookback plan entries by what became of them: seeded (a Query Group read directed "+
+				"at the plan's rung from its first read here), kept_local (its own samples here decide it), expired "+
+				"(a seeded Query Group none of whose samples here saw late series left directed reading when its "+
+				"entry expired or was withdrawn).",
+			"outcome"),
+		planHeld: desc("lookback_plan_entries",
+			"Entries of the control plane's lookback plan set this process holds now: the Query Groups it was "+
+				"told read late series. Zero where no Leader plans, or before the first set arrives."),
 	}
 }
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
-		c.pending, c.yields, c.refused, c.faults, c.readHoldTransition, c.readHoldOvertaken,
+		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
@@ -343,6 +354,10 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	for reason, n := range stats.Faults {
 		counter(c.faults, n, reason)
 	}
+	for outcome, n := range stats.Plans {
+		counter(c.plans, n, outcome)
+	}
+	gauge(c.planHeld, float64(stats.PlanEntries))
 	gauge(c.coverage, float64(stats.Coverage.Owned), "owned")
 	gauge(c.coverage, float64(stats.Coverage.Covered), "covered")
 	gauge(c.coverage, float64(stats.Coverage.NeverCompleteFirstRead), "never_complete_first_read")

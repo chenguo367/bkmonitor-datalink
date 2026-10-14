@@ -877,7 +877,7 @@ func openProductionPhaseTwoBundleAssembly(
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
-			Costs: workerCosts},
+			Costs: workerCosts, LookbackPlans: lookbackPlansInto(lookbackEngine)},
 	)
 	if err != nil {
 		return nil, err
@@ -921,6 +921,9 @@ func openProductionPhaseTwoBundleAssembly(
 	// scrape reads without asking.
 	fleetStore.AdmitLoads(observationAdmit(observationMemory, memoryline.ConsumerFleetView))
 	fleetStore.HoldLoads(observationHold(observationMemory, memoryline.ConsumerFleetView))
+	// The Leader's lookback planning reads the Workers' late lists and keeps
+	// its plan set in the same store; a fallback Leader pauses it.
+	productionOwnership.WithLookbackPlanner(fleetStore, phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyPreferred, recorder)
 	// Freshness has to be shorter than the snapshot TTL, or a replica that
 	// stops publishing goes straight from fresh to absent and the stale branch
 	// never fires. The two say different things: stale means alive but stuck,
@@ -1275,8 +1278,9 @@ func openProductionPhaseTwoBundleAssembly(
 		capacity:  capacitySnapshotSource(flights, cfg, rejectionTally, bundle.rotationFacts, seriesPullTally, bundle.shaper.facts),
 		flow:      flowFactsSource(recorder, cfg.EffectiveRoles()),
 		readEarly: lookbackReadEarly(lookbackEngine, readHolds), lateSeries: lookbackLateSeries(lookbackEngine, readHolds),
-		readHolds: readHolds.fleetFacts,
-		holdOf:    readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
+		lookbackLate: lookbackLateRungs(lookbackEngine),
+		readHolds:    readHolds.fleetFacts,
+		holdOf:       readHolds.holdOf, onOverdue: overdueEpisodeObserver(logger, recorder),
 		applied: repository.AppliedActivationRevision,
 		// The due index is the only thing that knows an object was passed over
 		// rather than evaluated. It lives on the bundle precisely so a reader

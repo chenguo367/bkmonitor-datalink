@@ -475,6 +475,12 @@ Labels: `result`
 
 Source objects whose disposition changed in a refresh round, by whether the round named the object in a log line or its line budget cut it. A partition of the changed objects: each one is named or dropped, never both, so their sum is how much changed. named is what a reader can act on -- each one is a log line at stage source_withheld carrying the strategy, what happened to it and why. dropped is what the round decided not to write, which happens when more objects changed at once than one round names; the objects behind it are withheld all the same and are counted in catalog_withheld_objects. Both labels are created at startup, so a steady zero on dropped can be told from a label nothing ever wrote, and it is only a computed zero while named moves: on a leader that reports neither, nothing changed that round, which is the steady state. Reported by the leader only: no other replica refreshes the source.
 
+## bkmonitor_alarmd_control_tier_paused_total
+
+Labels: `function`
+
+Control rounds this process ran as a fallback Leader without a second-tier function, by function: the functions only the preferred control process runs, which detection never depends on. Non-zero while a Worker holds the control lease for want of a control process; it stops when control is handed back.
+
 ## bkmonitor_alarmd_diagnostic_redis_dial_retries_total
 
 Labels: `client`, `reason`
@@ -974,6 +980,16 @@ Samples in flight - one at most per owned Query Group, and one waiting for its d
 Labels: `reason`
 
 Lookback query permits refused, by reason: waiters (a formal query is waiting), full (every process permit is held), disabled. A refused rung keeps its window.
+
+## bkmonitor_alarmd_lookback_plan_entries
+
+Entries of the control plane's lookback plan set this process holds now: the Query Groups it was told read late series. Zero where no Leader plans, or before the first set arrives.
+
+## bkmonitor_alarmd_lookback_plan_total
+
+Labels: `outcome`
+
+Control-plane lookback plan entries by what became of them: seeded (a Query Group read directed at the plan's rung from its first read here), kept_local (its own samples here decide it), expired (a seeded Query Group none of whose samples here saw late series left directed reading when its entry expired or was withdrawn).
 
 ## bkmonitor_alarmd_lookback_preemptions_total
 

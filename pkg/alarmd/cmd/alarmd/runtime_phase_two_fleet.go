@@ -211,6 +211,9 @@ type fleetPublisher struct {
 	// lateSeries is what the lookback's supplements could not recover, by
 	// kind; nil without a lookback.
 	lateSeries func() (map[string]fleet.LatePastRoundFacts, map[string]fleet.LateSeriesMissedFacts)
+	// lookbackLate is the Query Groups the lookback reads directed on its
+	// own evidence, by rung: what the control plane plans from.
+	lookbackLate func() map[string]int
 	// applied is the Activation record revision this replica executes by,
 	// published on every snapshot so the page can compare it with what the
 	// control plane published.
@@ -818,6 +821,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// part.
 	if publisher.lateSeries != nil {
 		snapshot.LateSeries = publisher.tracker.LateSeries(publisher.lateSeries())
+	}
+	if publisher.lookbackLate != nil {
+		snapshot.LookbackLate = publisher.lookbackLate()
 	}
 	// And the problems whose objects recovered within the hour: the evidence
 	// the RECOVERED reading is made of, which nothing on the current lines
