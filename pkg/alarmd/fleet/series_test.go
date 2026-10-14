@@ -219,3 +219,19 @@ func TestWithoutTrendsTheSeriesRouteIsAbsent(t *testing.T) {
 		t.Fatalf("status = %d, want the route to be absent", response.Code)
 	}
 }
+
+// A chart is read whole or not at all: when a later line fails, the lines
+// read before it are not shown as if they were the chart.
+func TestAChartWithOneFailingLineShowsNoneOfItsLines(t *testing.T) {
+	provider := &stubRange{answer: func(_, promQL string) (SeriesRange, error) {
+		if strings.Contains(promQL, "state_version_conflict_total") {
+			return SeriesRange{}, errors.New("provider is down")
+		}
+		return SeriesRange{Lines: onePoint(1)}, nil
+	}}
+	window, _ := lookupSeriesWindow("1h")
+	answer := collectTrends(context.Background(), provider, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
+	if failures := trendByKey(answer, "failures_per_minute"); failures.Unavailable != "PROVIDER_ERROR" || len(failures.Lines) != 0 {
+		t.Fatalf("failures = %+v, want unavailable with no lines", failures)
+	}
+}
