@@ -182,9 +182,7 @@ func probeWith(provider fleet.RangeProvider, now func() time.Time) spaceProbe {
 		if err != nil {
 			return false, err
 		}
-		if result.Code != "" {
-			return false, nil
-		}
+		// A refusal (a code) comes with no samples, and is no.
 		for _, line := range result.Lines {
 			if len(line.Points) > 0 {
 				return true, nil
