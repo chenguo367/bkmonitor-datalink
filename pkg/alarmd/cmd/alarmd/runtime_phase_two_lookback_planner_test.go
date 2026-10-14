@@ -317,7 +317,10 @@ func TestTwoReplicasListingOneQueryGroupGiveItTheDeeperRungOnce(t *testing.T) {
 	}
 	store := &failingPlanStore{RedisStore: fleetStore}
 	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
-	for round := 0; round < 3; round++ {
+	// Twenty rounds: the order the lists are read in is a map's, so a round
+	// that took the last list read instead of the deepest would show within
+	// a few.
+	for round := 0; round < 20; round++ {
 		byWorker, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
 		if err != nil {
 			t.Fatal(err)
@@ -330,6 +333,6 @@ func TestTwoReplicasListingOneQueryGroupGiveItTheDeeperRungOnce(t *testing.T) {
 		now = now.Add(30 * time.Second)
 	}
 	if store.saves != 1 {
-		t.Fatalf("saves over three rounds of the same lists = %d, want 1", store.saves)
+		t.Fatalf("saves over twenty rounds of the same lists = %d, want 1", store.saves)
 	}
 }
