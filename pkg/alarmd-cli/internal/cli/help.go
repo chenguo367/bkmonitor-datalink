@@ -57,6 +57,14 @@ Commands:
                                            column=governance list what strategy owners must fix and never fail
                                            it (output refusals whose rule is the strategy's). The items and every
                                            answer they were decided from are saved in meta.result_file.
+  snapshot --env <id> [--out <dir>]        Write the deployment's diagnostic reads, at the session's rate, to one
+                                           alarmd-snapshot-<env>-<UTC>.tar.gz with its .sha256; manifest.json
+                                           files every read with its result. Exit 0 when every read was collected,
+                                           exit 3 only when a read was not collected (refused, timeout,
+                                           skipped_by_bound, not_in_catalog), each named; an answer with partial
+                                           status was collected, filed with its reason, and does not make it 3.
+                                           Exit 1 when nothing was written. Read one back with --snapshot <file>
+                                           on discover, describe, invoke and diagnose, without the network.
   describe <operation> --env <id>           Fetch schema, limits, sources and examples.
   invoke <operation> --env <id> [--input <JSON|@file> | --params-file <file|->]
              [--stdin-file <file|-> | --script-file <file|->]
@@ -68,8 +76,8 @@ Commands:
 
 Agent rules:
   Always specify --env on remote commands; login may derive it from the code.
-  Discover/describe supplies all operation names and input contracts; only diagnose and accept
-  compose built-in reads.
+  Discover/describe supplies all operation names and input contracts; only diagnose, accept
+  and snapshot compose built-in reads.
   Read next_call as a suggestion. It is never executed automatically.
   An invoke renews only if admitted by the server and due; there is no background keepalive.
   Local expiry is a hint. The server decides whether a token is still valid.

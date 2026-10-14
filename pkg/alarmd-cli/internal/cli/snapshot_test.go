@@ -38,12 +38,20 @@ type snapshotFixture struct {
 	// elements where objects are expected.
 	storeInfo any
 	malformed bool
+	// lookback is how lookback.get answers: refused (the default), partial,
+	// or error, an error status in a 200 answer; catalogWhole offers
+	// maintenance.get too.
+	lookback     string
+	catalogWhole bool
 }
 
 func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 	t.Helper()
 	offered := []string{"fleet.get", "diagnose.environment", "overview.get", "lifecycle.get", "absent.list", "lookback.get", "store.info",
 		"k8s.pods", "k8s.workloads", "k8s.events", "sre.receipts", "runtime.get", "metrics.list", "metrics.get", "k8s.logs", "strategy.get", "object.get"}
+	if f.catalogWhole {
+		offered = append(offered, "maintenance.get")
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ob/api/cli/auth/exchange":
@@ -107,6 +115,20 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 					result = f.storeInfo
 				}
 			case "lookback.get":
+				if f.lookback == "partial" {
+					// An answer whose evidence is scoped by the operation's
+					// standing limitation: the read was collected whole.
+					out := envelope(*p, "partial", map[string]any{"coverage": map[string]any{"owned": 1.0}})
+					out["evidence"] = map[string]any{"complete": false, "limitations": []any{"Counts are the answering process's alone."}}
+					writeJSON(t, w, out)
+					return
+				}
+				if f.lookback == "error" {
+					out := envelope(*p, "error", nil)
+					out["error"] = map[string]any{"code": "lookback_unavailable", "message": "not here"}
+					writeJSON(t, w, out)
+					return
+				}
 				out := envelope(*p, "error", nil)
 				out["error"] = map[string]any{"code": "lookback_unavailable", "message": "not here"}
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -432,5 +454,80 @@ func TestABrokenAnswerIsAPlaceholderAndAnUnreadableFileIsNamed(t *testing.T) {
 	code, result, _, _ := run(t, Store{t.TempDir()}, &http.Client{Transport: noNetwork{t}}, "", "discover", "--snapshot", broken)
 	if code != 1 || !strings.Contains(stringField(objectField(result, "error"), "message"), "ops/fleet.get.json") {
 		t.Fatalf("code %d result %v, want the unreadable file named", code, result)
+	}
+}
+
+// A read the deployment answered is collected, whatever the answer says of
+// its own evidence: an operation whose standing limitation marks every
+// answer partial is filed with that status and reason, and the snapshot is
+// whole. Only a read that was not collected makes it incomplete.
+func TestAPartialAnswerIsCollectedAndLeavesTheSnapshotWhole(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	if code != 0 || result["status"] != "ok" {
+		t.Fatalf("code %d result %v, want a whole snapshot: every read was collected", code, result)
+	}
+	files := readArchive(t, stringField(objectField(result, "result"), "file"))
+	var manifest SnapshotManifest
+	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range manifest.Items {
+		if item.Operation == "lookback.get" && (item.Result != "partial" || item.Reason != "Counts are the answering process's alone.") {
+			t.Fatalf("lookback.get item = %+v, want it filed partial with its reason", item)
+		}
+	}
+}
+
+// An operation the deployment's catalog does not offer was not collected:
+// the snapshot is written and says so with exit 3, naming it.
+func TestAReadTheCatalogLacksLeavesTheSnapshotIncomplete(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	notWhole, _ := objectField(result, "result")["not_whole"].([]any)
+	if code != 3 || result["status"] != "partial" || len(notWhole) != 1 || notWhole[0] != "maintenance.get" {
+		t.Fatalf("code %d result %v, want exit 3 naming maintenance.get alone", code, result)
+	}
+}
+
+// An answer with an error status was not collected, whatever its HTTP
+// status: it is filed as refused with its code, and the snapshot is
+// incomplete.
+func TestAnErrorAnswerIsNotCollectedEvenWithASuccessfulStatus(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "error", catalogWhole: true}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	if code != 3 {
+		t.Fatalf("code %d result %v, want 3: lookback.get answered with an error", code, result)
+	}
+	files := readArchive(t, stringField(objectField(result, "result"), "file"))
+	var manifest SnapshotManifest
+	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range manifest.Items {
+		if item.Operation == "lookback.get" && (item.Result != "refused" || item.Reason != "lookback_unavailable") {
+			t.Fatalf("lookback.get item = %+v, want refused with its code", item)
+		}
 	}
 }
