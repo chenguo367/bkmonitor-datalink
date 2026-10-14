@@ -27,14 +27,19 @@ type stubRange struct {
 	calls  []rangeCall
 }
 
-func (stub *stubRange) Range(_ context.Context, space, promQL string, start, end time.Time, step time.Duration) (SeriesRange, error) {
+func (stub *stubRange) Range(ctx context.Context, space, promQL string, start, end time.Time, step time.Duration) (SeriesRange, error) {
 	stub.mu.Lock()
 	stub.calls = append(stub.calls, rangeCall{space: space, promQL: promQL, window: end.Sub(start), step: step})
 	stub.mu.Unlock()
 	if stub.answer == nil {
 		return SeriesRange{}, nil
 	}
-	return stub.answer(space, promQL)
+	answer, err := stub.answer(space, promQL)
+	// As a real provider does: a context gone by the time it answers fails.
+	if ctx.Err() != nil {
+		return SeriesRange{}, ctx.Err()
+	}
+	return answer, err
 }
 
 func resolvedSpaces(context.Context) map[string]TrendSpace {
@@ -233,5 +238,88 @@ func TestAChartWithOneFailingLineShowsNoneOfItsLines(t *testing.T) {
 	answer := collectTrends(context.Background(), provider, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
 	if failures := trendByKey(answer, "failures_per_minute"); failures.Unavailable != "PROVIDER_ERROR" || len(failures.Lines) != 0 {
 		t.Fatalf("failures = %+v, want unavailable with no lines", failures)
+	}
+}
+
+// Callers arriving together after the max age share one read: the query
+// backend sees each line once, not once per caller.
+func TestConcurrentReadsOfAWindowShareOneRead(t *testing.T) {
+	release := make(chan struct{})
+	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
+		<-release
+		return SeriesRange{Lines: onePoint(1)}, nil
+	}}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	var group sync.WaitGroup
+	for range 4 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			trends.read(context.Background(), window, at)
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	group.Wait()
+	lines := 0
+	for _, definition := range trendCatalog {
+		lines += len(definition.Lines)
+	}
+	if len(provider.calls) != lines {
+		t.Fatalf("%d calls for four callers, want one read's %d", len(provider.calls), lines)
+	}
+}
+
+// A caller that leaves while the shared read runs gets an empty answer at
+// once, and the read goes on for the others on its own context.
+func TestACallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
+	release := make(chan struct{})
+	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
+		<-release
+		return SeriesRange{Lines: onePoint(1)}, nil
+	}}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	first := make(chan TrendsAnswer, 1)
+	go func() { first <- trends.read(context.Background(), window, at) }()
+	time.Sleep(20 * time.Millisecond)
+	leaving, cancel := context.WithCancel(context.Background())
+	cancel()
+	if left := trends.read(leaving, window, at); len(left.Trends) != 0 {
+		t.Fatalf("the leaving caller got %d charts, want an empty answer", len(left.Trends))
+	}
+	close(release)
+	if answer := <-first; len(answer.Trends) != len(trendCatalog) || answer.Trends[1].NoSeries {
+		t.Fatalf("the shared read = %+v, want every chart read", answer)
+	}
+}
+
+// The caller that started the shared read may leave too: the read runs on
+// its own context, and the callers still waiting get every chart.
+func TestTheStartingCallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
+	release := make(chan struct{})
+	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
+		<-release
+		return SeriesRange{Lines: onePoint(1)}, nil
+	}}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	starting, cancel := context.WithCancel(context.Background())
+	go trends.read(starting, window, at)
+	time.Sleep(20 * time.Millisecond)
+	waiting := make(chan TrendsAnswer, 1)
+	go func() { waiting <- trends.read(context.Background(), window, at) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	close(release)
+	answer := <-waiting
+	for _, trend := range answer.Trends {
+		if trend.Unavailable != "" {
+			t.Fatalf("chart %s = %+v, want read: the starting caller's leaving cancelled the shared read", trend.Key, trend)
+		}
 	}
 }

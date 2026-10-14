@@ -110,20 +110,25 @@ const (
 // at a file of their own.
 var serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
+// ProcessNamespace is the namespace this process's Pod runs in: its
+// ServiceAccount's namespace file, or POD_NAMESPACE when the file is not
+// there; empty out of a cluster.
+func ProcessNamespace() string {
+	if raw, err := os.ReadFile(serviceAccountNamespacePath); err == nil {
+		if namespace := strings.TrimSpace(string(raw)); namespace != "" {
+			return namespace
+		}
+	}
+	return strings.TrimSpace(os.Getenv(PodNamespaceEnvironment))
+}
+
 // resolveAdminKeySecret fills AdminKeySecret: the namespace from the Pod's
 // own namespace file, or POD_NAMESPACE when the file is not there, and the
 // Secret's name and key from the environment. Nothing here can fail
 // startup; a name that cannot be read stays empty.
 func (c *CLIConfig) resolveAdminKeySecret() {
-	namespace := ""
-	if raw, err := os.ReadFile(serviceAccountNamespacePath); err == nil {
-		namespace = strings.TrimSpace(string(raw))
-	}
-	if namespace == "" {
-		namespace = strings.TrimSpace(os.Getenv(PodNamespaceEnvironment))
-	}
 	c.AdminKeySecret = CLIAdminKeySecret{
-		Namespace: namespace,
+		Namespace: ProcessNamespace(),
 		Name:      strings.TrimSpace(os.Getenv(CLIAdminKeySecretNameEnvironment)),
 		Key:       strings.TrimSpace(os.Getenv(CLIAdminKeySecretKeyEnvironment)),
 	}

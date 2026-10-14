@@ -156,3 +156,43 @@ type rangeFunc func(space string) (fleet.SeriesRange, error)
 func (f rangeFunc) Range(_ context.Context, space, _ string, _, _ time.Time, _ time.Duration) (fleet.SeriesRange, error) {
 	return f(space)
 }
+
+// The DataIDs are read page by page; an install past the cap is said, not
+// cut.
+func TestTheDataIDsAreReadPageByPage(t *testing.T) {
+	pages := 0
+	items, err := pagedDataIDs(context.Background(), func(_ context.Context, token string) ([]unstructured.Unstructured, string, error) {
+		pages++
+		next := map[string]string{"": "p2", "p2": "p3", "p3": ""}[token]
+		return []unstructured.Unstructured{dataID("d-"+token, "metric", "true", "false", "2")}, next, nil
+	})
+	if err != nil || len(items) != 3 || pages != 3 {
+		t.Fatalf("items %d pages %d err %v, want 3 of each", len(items), pages, err)
+	}
+	_, err = pagedDataIDs(context.Background(), func(context.Context, string) ([]unstructured.Unstructured, string, error) {
+		return nil, "more", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "the candidates would be cut") {
+		t.Fatalf("err %v, want the cut named", err)
+	}
+}
+
+// The spaces are derived on their own context: a caller that has already
+// left does not leave every space unresolved for the minute after.
+func TestDerivingTheSpacesDoesNotUseTheCallersContext(t *testing.T) {
+	at := time.Unix(1789006380, 0)
+	items := []unstructured.Unstructured{dataID("c", "metric", "true", "false", "2"), dataID("k", "metric", "true", "true", "2")}
+	spaces := &trendSpaces{
+		list: func(ctx context.Context) ([]unstructured.Unstructured, error) { return items, ctx.Err() },
+		probe: func(ctx context.Context, _, _ string) (bool, error) {
+			return ctx.Err() == nil, ctx.Err()
+		},
+		namespace: "alarmd-ns", now: func() time.Time { return at },
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := spaces.get(gone)
+	if got[fleet.TrendSpaceSelf].State != fleet.TrendSpaceResolved || got[fleet.TrendSpaceContainer].State != fleet.TrendSpaceResolved {
+		t.Fatalf("spaces %+v, want both resolved despite the caller's cancelled context", got)
+	}
+}

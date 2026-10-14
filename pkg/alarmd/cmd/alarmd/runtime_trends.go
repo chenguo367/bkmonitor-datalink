@@ -57,6 +57,17 @@ const (
 // metric that says it is the one.
 const trendProbeWindow = 10 * time.Minute
 
+// trendSpaceDeriveTimeout bounds one derivation: the DataID list and every
+// candidate's probe.
+const trendSpaceDeriveTimeout = 30 * time.Second
+
+// The DataID list is read in pages, up to a cap; an install with more is a
+// named cut, not a silent one.
+const (
+	dataIDPage  = 500
+	dataIDPages = 10
+)
+
 type dataIDLister func(ctx context.Context) ([]unstructured.Unstructured, error)
 
 // spaceProbe says whether a space has samples of an expression lately.
@@ -86,13 +97,17 @@ func (spaces *trendSpaces) spaceKinds() []struct {
 	}
 }
 
-func (spaces *trendSpaces) get(ctx context.Context) map[string]fleet.TrendSpace {
+func (spaces *trendSpaces) get(context.Context) map[string]fleet.TrendSpace {
 	spaces.mu.Lock()
 	defer spaces.mu.Unlock()
 	at := spaces.now()
 	if spaces.spaces != nil && at.Sub(spaces.at) < spaces.ttl {
 		return spaces.spaces
 	}
+	// Derived on its own bounded context: the answer is cached for every
+	// caller, so one caller leaving must not make it unresolved.
+	ctx, cancel := context.WithTimeout(context.Background(), trendSpaceDeriveTimeout)
+	defer cancel()
 	derived := map[string]fleet.TrendSpace{}
 	resolved := true
 	items, err := spaces.list(ctx)
@@ -210,11 +225,13 @@ func inClusterDataIDs() dataIDLister {
 		if setup != nil {
 			return nil, setup
 		}
-		list, err := client.Resource(dataIDResource).List(ctx, metav1.ListOptions{Limit: 500})
-		if err != nil {
-			return nil, err
-		}
-		return list.Items, nil
+		return pagedDataIDs(ctx, func(ctx context.Context, token string) ([]unstructured.Unstructured, string, error) {
+			list, err := client.Resource(dataIDResource).List(ctx, metav1.ListOptions{Limit: dataIDPage, Continue: token})
+			if err != nil {
+				return nil, "", err
+			}
+			return list.Items, list.GetContinue(), nil
+		})
 	}
 }
 
@@ -227,4 +244,22 @@ func fleetTrends(client *accessuq.Client, namespace string, now func() time.Time
 	provider := trendRange{client: client}
 	spaces := &trendSpaces{list: inClusterDataIDs(), probe: probeWith(provider, now), namespace: namespace, now: now}
 	return &fleet.Trends{Range: provider, Spaces: spaces.get, Scope: fleet.TrendScope{Namespace: namespace, Container: trendContainer}}
+}
+
+// pagedDataIDs reads every page, up to dataIDPages of them; more is an
+// error that says so, never a silent cut.
+func pagedDataIDs(ctx context.Context, page func(ctx context.Context, token string) ([]unstructured.Unstructured, string, error)) ([]unstructured.Unstructured, error) {
+	var items []unstructured.Unstructured
+	token := ""
+	for count := 0; count < dataIDPages; count++ {
+		read, next, err := page(ctx, token)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, read...)
+		if token = next; token == "" {
+			return items, nil
+		}
+	}
+	return nil, fmt.Errorf("more than %d DataIDs; the candidates would be cut", dataIDPage*dataIDPages)
 }
