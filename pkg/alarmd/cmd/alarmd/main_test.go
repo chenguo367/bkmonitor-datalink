@@ -96,6 +96,20 @@ func TestRunRejectsConflictingTerminalFlags(t *testing.T) {
 	}
 }
 
+// A test binary is built without a release, so the build's own check fails
+// it, and it fails before reading any configuration.
+func TestCheckCLIReleaseFailsABinaryBuiltWithoutOne(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--check-cli-release", "--config", "/missing/config.yaml"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "built without an alarmd-cli release") || stdout.Len() != 0 {
+		t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	stderr.Reset()
+	if code := run(context.Background(), []string{"--check-cli-release", "--version"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "cannot be used together") {
+		t.Fatalf("run() code = %d, stderr = %q, want flag conflict", code, stderr.String())
+	}
+}
+
 func TestRunRejectsOwnerConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "alarmd.yaml")
 	if err := os.WriteFile(path, []byte("mode: owner\n"), 0o600); err != nil {

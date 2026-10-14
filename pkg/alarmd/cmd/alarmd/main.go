@@ -17,8 +17,11 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -30,6 +33,10 @@ var (
 	commit        = "unknown"
 	schemaVersion = "none"
 )
+
+// embeddedCLIRelease is the alarmd-cli release this binary carries, read
+// once: the build stamps version, and the release must name the same one.
+var embeddedCLIRelease = sync.OnceValue(func() *clirelease.Release { return clirelease.Load(version) })
 
 // Contention is the one dimension the profiles cannot answer with the defaults:
 // mutex and block sampling are off unless the process turns them on. Both rates
@@ -69,6 +76,7 @@ func runWithRuntimeModeDependencies(
 	configPath := flags.String("config", "", "path to alarmd YAML configuration")
 	checkConfig := flags.Bool("check-config", false, "validate configuration and exit")
 	showVersion := flags.Bool("version", false, "print build information and exit")
+	checkCLIRelease := flags.Bool("check-cli-release", false, "verify the embedded alarmd-cli release against this binary and exit")
 	selectedRoles := flags.String("roles", "", "comma-separated process roles (default: control,worker,channel)")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -78,17 +86,28 @@ func runWithRuntimeModeDependencies(
 		return 2
 	}
 	terminalModes := 0
-	for _, enabled := range []bool{*showVersion, *checkConfig} {
+	for _, enabled := range []bool{*showVersion, *checkConfig, *checkCLIRelease} {
 		if enabled {
 			terminalModes++
 		}
 	}
 	if terminalModes > 1 {
-		fmt.Fprintln(stderr, "--version and --check-config cannot be used together")
+		fmt.Fprintln(stderr, "--version, --check-config and --check-cli-release cannot be used together")
 		return 2
 	}
 	if *showVersion {
 		fmt.Fprintf(stdout, "alarmd version=%s commit=%s schema_version=%s\n", version, commit, schemaVersion)
+		return 0
+	}
+	if *checkCLIRelease {
+		// The build's own check: every digest recomputed, the release named
+		// for this binary's version. Serving trusts that it passed.
+		release := embeddedCLIRelease()
+		if err := release.Verify(); err != nil {
+			fmt.Fprintf(stderr, "alarmd-cli release: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "alarmd-cli release version=%s targets=%s\n", release.Version(), strings.Join(release.TargetNames(), ","))
 		return 0
 	}
 

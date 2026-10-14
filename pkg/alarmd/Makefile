@@ -17,7 +17,7 @@ help:
 	@echo " test:   Run unit tests"
 	@echo " race:   Run unit tests with the race detector"
 	@echo " lint:   Check formatting and run static analysis"
-	@echo " build:  Build the linux/amd64 binary"
+	@echo " build:  Build the linux/amd64 binary with the alarmd-cli release embedded"
 	@echo " proto:  Regenerate the control stream's Go code from viewstream/pb/*.proto"
 
 .PHONY: verify
@@ -38,11 +38,28 @@ lint:
 	test -z "$$(gofmt -l .)"
 	$(GO) vet ./...
 
+# The alarmd-cli release is packed from ../alarmd-cli with the same version
+# and embedded in the binary (clirelease), so whatever copies the binary ships
+# the CLI too. CLI_RELEASE=0 builds without it -- clearing what an earlier
+# pack left, which go:embed would otherwise pick up -- and the distribution
+# routes then answer cli_release_unavailable. On a linux/amd64 host the built
+# binary checks its own release.
+CLI_RELEASE ?= 1
+CLI_SOURCE ?= ../alarmd-cli
+
 .PHONY: build
 build:
 	mkdir -p $(RELEASE_PATH)
+ifneq ($(CLI_RELEASE),0)
+	$(GO) run ./clirelease/pack -cli $(CLI_SOURCE) -version $(VERSION) -out clirelease/assets
+else
+	find clirelease/assets -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+endif
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/alarmd
+ifneq ($(CLI_RELEASE),0)
+	if [ "$$($(GO) env GOHOSTOS)/$$($(GO) env GOHOSTARCH)" = linux/amd64 ]; then $(BIN) --check-cli-release; fi
+endif
 
 # The generated code is committed; this target is for a change to the .proto.
 # Plugin versions are pinned so two people regenerating produce one diff;
