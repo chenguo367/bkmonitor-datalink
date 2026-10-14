@@ -10,7 +10,9 @@
 package clirelease
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"io"
@@ -83,6 +85,27 @@ func TestAPackedReleaseLoadsVerifiesAndListsEveryTarget(t *testing.T) {
 
 // One version packed twice -- as the amd64 and arm64 image builds each do --
 // gives the same bytes, so every replica answers the same digest.
+func TestAnArchiveEntryCarriesNothingOfTheBuildMachine(t *testing.T) {
+	archive, err := archiveOf([]byte("binary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decompressor, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := tar.NewReader(decompressor).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !header.ModTime.Equal(archiveTime) || header.Uid != 0 || header.Gid != 0 || header.Uname != "" || header.Gname != "" || header.Mode != 0o755 {
+		t.Fatalf("the entry carries %v uid %d gid %d %q %q mode %o", header.ModTime, header.Uid, header.Gid, header.Uname, header.Gname, header.Mode)
+	}
+	if !decompressor.Header.ModTime.IsZero() || decompressor.Header.Name != "" {
+		t.Fatalf("the gzip header carries %v %q", decompressor.Header.ModTime, decompressor.Header.Name)
+	}
+}
+
 func TestPackIsAFunctionOfTheExecutablesAlone(t *testing.T) {
 	first, second := readManifest(t, packed(t, testVersion)), readManifest(t, packed(t, testVersion))
 	for name, artifact := range first.Artifacts {
@@ -132,8 +155,23 @@ func TestLoadTellsNoReleaseFromABrokenOne(t *testing.T) {
 		"a checksum file that disagrees": func(t *testing.T, root string) {
 			_ = os.WriteFile(filepath.Join(root, testVersion, ArtifactName(testVersion, "linux-x64")+".sha256"), []byte(ChecksumLine(strings.Repeat("0", 64), ArtifactName(testVersion, "linux-x64"))), 0o644)
 		},
+		// Named, sized and summed like a real entry, so only the target list
+		// can refuse it.
 		"an unknown target": func(t *testing.T, root string) {
-			rewrite(t, root, func(m *Manifest) { m.Artifacts["windows-x64"] = m.Artifacts["linux-x64"] })
+			from, to := ArtifactName(testVersion, "linux-x64"), ArtifactName(testVersion, "windows-x64")
+			content, _ := os.ReadFile(filepath.Join(root, testVersion, from))
+			_ = os.WriteFile(filepath.Join(root, testVersion, to), content, 0o644)
+			rewrite(t, root, func(m *Manifest) {
+				a := m.Artifacts["linux-x64"]
+				a.File = to
+				m.Artifacts["windows-x64"] = a
+			})
+			_ = os.WriteFile(filepath.Join(root, testVersion, to+".sha256"), []byte(ChecksumLine(readManifest(t, root).Artifacts["windows-x64"].SHA256, to)), 0o644)
+		},
+		// Another target's archive, whole and consistent, filed under this
+		// target: only the name rule can tell.
+		"another target's archive": func(t *testing.T, root string) {
+			rewrite(t, root, func(m *Manifest) { m.Artifacts["linux-x64"] = m.Artifacts["darwin-x64"] })
 		},
 		"a misnamed file": func(t *testing.T, root string) {
 			rewrite(t, root, func(m *Manifest) {
@@ -179,7 +217,9 @@ func TestVerifyCatchesWhatLoadDoesNotHash(t *testing.T) {
 	root := packed(t, testVersion)
 	file := filepath.Join(root, testVersion, ArtifactName(testVersion, "linux-arm64"))
 	content, _ := os.ReadFile(file)
-	content[len(content)/2] ^= 0xff
+	// The gzip header's OS byte: the archive still unpacks to the same
+	// executable at the same size, so only the archive digest differs.
+	content[9] ^= 0xff
 	_ = os.WriteFile(file, content, 0o644)
 	release := LoadFS(os.DirFS(root), testVersion)
 	if err := release.Problem(); err != nil {
