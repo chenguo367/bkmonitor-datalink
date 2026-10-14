@@ -159,8 +159,10 @@ type snapshotRun struct {
 	files    map[string][]byte
 	log      bytes.Buffer
 	deadline time.Time
-	// waitRoom is how much more the deadline may move for budget waits.
+	// waitRoom is how much more the deadline may move for budget waits, and
+	// waited how long the run has waited for the budget.
 	waitRoom time.Duration
+	waited   time.Duration
 	pace     time.Duration
 	last     time.Time
 	calls    int
@@ -355,7 +357,7 @@ func (run *snapshotRun) call(operation string, params map[string]any) (map[strin
 			break
 		}
 		snapshotSleep(retry)
-		run.manifest.BudgetWaitSeconds += int(retry / time.Second)
+		run.waited += retry
 	}
 	if err != nil || m == nil {
 		return map[string]any{"status": "error", "error": map[string]any{"code": "request_failed", "message": fmt.Sprint(err)}, "meta": map[string]any{"http_status": status}}, false
@@ -370,7 +372,7 @@ func snapshotRetryAfter(m map[string]any) time.Duration {
 	if seconds, ok := objectField(m, "meta")["client_retry_after_seconds"].(int); ok {
 		return time.Duration(max(seconds, 1)) * time.Second
 	}
-	now := time.Now()
+	now := snapshotNow()
 	return now.Truncate(time.Minute).Add(time.Minute + time.Second).Sub(now)
 }
 
@@ -456,6 +458,7 @@ func (run *snapshotRun) scan(name string, data []byte) []byte {
 // read was collected, 3 when some were not: a partial answer was collected.
 func (run *snapshotRun) finish(out string) int {
 	run.manifest.FinishedAt = time.Now().UTC()
+	run.manifest.BudgetWaitSeconds = int(run.waited.Round(time.Second) / time.Second)
 	whole := true
 	missing := []string{}
 	for _, item := range run.manifest.Items {
