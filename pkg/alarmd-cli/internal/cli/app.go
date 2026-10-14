@@ -295,6 +295,9 @@ func (a *App) Run(args []string) int {
 	if len(o.args) > 0 {
 		operation = o.args[0]
 	}
+	if command == "discover" {
+		a.versionCheck(p)
+	}
 	return a.channel(command, operation, params, p, o)
 }
 
@@ -417,6 +420,7 @@ func (a *App) login(o options) int {
 	if failure != "" {
 		return a.fail(failure, message, 1)
 	}
+	a.versionCheck(p)
 	return a.print(map[string]any{"status": "ok", "summary": "Environment imported. Run discover with explicit --env.", "session": session})
 }
 
