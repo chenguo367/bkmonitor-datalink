@@ -160,17 +160,9 @@ const (
 // in-place wait's retention reading against the heap at peak.
 const bytesPerParkedExecution = 3 << 20
 
-// Until the first demand is measured, a query is taken to hold its permit for
-// half a second - three times the 0.153 s a production fleet measured - and an
-// execution to run for a second.
-const (
-	coldStartHold      = 500 * time.Millisecond
-	coldStartExecution = time.Second
-)
-
-// DeriveScheduler is the shape a container starts with: every bound at the
-// ceiling its memory sets, until the work it owns is known and
-// DeriveSchedulerShape sizes the bounds from it.
+// DeriveScheduler is the shape a container runs with: every bound at the
+// ceiling its memory sets. Only the queues are sized again once the work it
+// owns is known (DeriveSchedulerShape).
 //
 // CPU sizes none of them. The permits once came from CPU times four, the
 // executions from four per permit and the queues from thirty-two per permit,
@@ -180,8 +172,16 @@ const (
 // trip. A query permit is held while the query service answers and an
 // execution slot while Redis and the query service answer; neither is CPU
 // work. What a held slot costs this process is memory, so memory sets the
-// ceiling, and what it costs the query service is concurrency, so the work's
-// own rate sets the value under it.
+// ceiling, and the query permits are a share of it.
+//
+// The permits were once sized from the work's own rate - peak queries a
+// second times the hold, twice over - and that sized nothing real: on a small
+// deployment it sat at its floor of two while almost no query ever waited,
+// and on a large one it rose with the demand, so it never stood between the
+// query service and a load it could not take. A share of what this process
+// can hold in memory is the bound this process actually has. What the query
+// service can take is the service's own capacity, read from its metrics and
+// from query_downstream_distress_total, not guessed from alarmd's demand.
 //
 // The ceiling is the memory the runtime may use beyond the retained pool -
 // the soft memory limit less the retained bytes - over what one parked
@@ -215,19 +215,19 @@ func activeExecutionCeiling(inputs CapacityInputs) int {
 // above it, an execution for each and one more.
 const minimumActiveExecutions = 4
 
-// Until the first derivation half the execution slots may hold a query - a
-// profile of full slots found about a third in one - a quarter of those are
-// recovery permits, and each permit gets thirty-two queue places. All three
-// are start values only: the derivation replaces them with the measured
-// demand.
+// Half the execution slots may hold a query - a profile of full slots found
+// about a third in one - and a quarter of those are recovery permits. Each
+// permit gets thirty-two queue places until the work is known; the queues are
+// then sized from the owned Query Groups.
 const (
 	startQueryShareOfCeiling = 2
 	recoveryShareOfQueries   = 4
 	queueDepthPerQueryPermit = 32
 )
 
-// SchedulerDemand is the work a process owns and how fast it is served, the
-// inputs DeriveSchedulerShape sizes the bounds from.
+// SchedulerDemand is the work a process owns and how fast it is served. Only
+// the owned Query Groups size anything (the queues); the rest is reported
+// beside the bounds, so a reader sees how far the work is from them.
 type SchedulerDemand struct {
 	// PeakQueriesPerSecond is the most normal queries this process's owned
 	// Query Groups make ready in one second.
@@ -250,64 +250,31 @@ type SchedulerDemand struct {
 	MaxQueuedItemsPerQG int
 }
 
-// demandHeadroom is how far above the demand's own concurrency a bound sits.
-// At the demand's rate times its hold a bound is fully used and the queue
-// behind it is unbounded; at twice that it is half used, and a multi-server
-// queue at half load waits less than one service time.
-const demandHeadroom = 2
-
-// DeriveSchedulerShape sizes the bounds from the work, given the shape in
-// force (previous) and the permits held now (held).
+// DeriveSchedulerShape sizes the queues from the work and keeps every other
+// bound at the ceiling the container's memory sets.
 //
-//   - Execution slots stay at the container's ceiling. They bound how many
-//     executions are parked in memory at once, which is what the ceiling
-//     measures; an execution slot is a goroutine waiting on Redis or the query
-//     service. Sized from demand they hid the demand: fewer slots ran fewer
-//     Slots, which asked for fewer permits, which read as less demand - a
-//     bound whose input its own output gated, stuck at its floor on a
+//   - Execution slots stay at the ceiling. They bound how many executions are
+//     parked in memory at once, which is what the ceiling measures. Sized from
+//     demand they hid the demand: fewer slots ran fewer Slots, which asked for
+//     fewer permits, which read as less demand - stuck at the floor on a
 //     production deployment within a minute of starting.
-//   - Process permits: peak queries a second times the hold, twice over. The
-//     queries are counted where they ask for a permit, before the permit
-//     budget gates them, and with the slots at the ceiling nothing upstream
-//     gates them either.
-//   - Recovery permits: replay queries a second times the hold, at least one.
-//   - Neither comes down by more than half in one derivation, nor below what
-//     is held now: a minute that measured little does not take a full budget
-//     to its floor, and lowering never takes back what is running.
+//   - Process and recovery permits stay at their share of the ceiling. They
+//     do not move with the demand: a bound that follows the demand at twice
+//     its size is never the constraint, and on a small deployment its floor
+//     read as one.
 //   - Queues: every owned Query Group queued as deep as one may be.
-//
-// The hold is the lowest hourly median, not the latest: a hold that followed
-// the query service as it slowed would raise the budget and put more queries
-// at once on a service that is already slow.
-func DeriveSchedulerShape(ceiling DerivedScheduler, demand SchedulerDemand, previous DerivedScheduler, held int) DerivedScheduler {
-	hold := demand.Hold
-	if hold <= 0 {
-		hold = coldStartHold
-	}
+func DeriveSchedulerShape(ceiling DerivedScheduler, demand SchedulerDemand) DerivedScheduler {
 	top := max(ceiling.ActiveExecutionCeiling, minimumActiveExecutions)
-	gradual := func(derived, before int) int { return max(derived, before/2, held) }
-	// Normal rounds first: recovery permits stay below the process permits,
-	// as the coordinator requires, and the two together under the slots.
-	permits := min(max(gradual(concurrency(demand.PeakQueriesPerSecond, hold), previous.ProcessQueryPermits), 2), top-2)
-	recovery := min(max(concurrency(demand.ReplayQueriesPerSecond, hold), previous.RecoveryQueryPermits/2, 1), permits-1, top-1-permits)
 	queued := max(demand.MaxQueuedItemsPerQG, 1)
 	queue := max(demand.OwnedQueryGroups, 1)*queued + 1
 	return DerivedScheduler{
 		ActiveExecutions:       top,
-		ProcessQueryPermits:    permits,
-		RecoveryQueryPermits:   recovery,
+		ProcessQueryPermits:    ceiling.ProcessQueryPermits,
+		RecoveryQueryPermits:   ceiling.RecoveryQueryPermits,
 		ReadyQueueCapacity:     queue,
 		RecoveryQueueCapacity:  queue,
 		ActiveExecutionCeiling: top,
 	}
-}
-
-// concurrency is a rate times a hold, times the headroom, rounded up.
-func concurrency(perSecond float64, hold time.Duration) int {
-	if perSecond <= 0 {
-		return 0
-	}
-	return int(math.Min(math.Ceil(perSecond*hold.Seconds()*demandHeadroom), math.MaxInt32))
 }
 
 // DerivedGoRuntime is the collector's budget for one container.

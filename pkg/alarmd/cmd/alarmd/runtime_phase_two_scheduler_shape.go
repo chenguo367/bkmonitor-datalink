@@ -35,11 +35,13 @@ type schedulerShapeReading struct {
 	Applied bool
 }
 
-// schedulerShaper sizes this process's query permits, execution slots and
-// queues from the work it owns and how fast it is served
-// (config.DeriveSchedulerShape), once a minute, inside the ceiling the
-// container's memory set at start. Before its first derivation, and in a
-// bundle with no query coordinator, the startup shape stands.
+// schedulerShaper sizes this process's queues from the work it owns
+// (config.DeriveSchedulerShape), once a minute; the query permits and
+// execution slots stay at the ceiling the container's memory set at start.
+// It also measures the demand - peak queries and Slots a second, the hold,
+// the execution length - that the capacity reports beside those bounds.
+// Before its first derivation, and in a bundle with no query coordinator,
+// the startup shape stands.
 type schedulerShaper struct {
 	flights *scheduler.FlightCoordinator
 	ceiling config.DerivedScheduler
@@ -154,12 +156,7 @@ func (shaper *schedulerShaper) derive(owned int) schedulerShapeReading {
 		PeakQueriesPerSecond: float64(shaper.flights.PeakNormalRequestsPerSecond()), ReplayQueriesPerSecond: replayRate,
 		Hold: shaper.flights.HoldReference(), Execution: execution,
 		OwnedQueryGroups: owned, MaxQueuedItemsPerQG: shaper.limits.MaxQueuedItemsPerQG}
-	occupancy := shaper.flights.QueryPermitOccupancy()
-	held := occupancy.LookbackInflight
-	for _, count := range occupancy.Inflight {
-		held += count
-	}
-	shape := config.DeriveSchedulerShape(shaper.ceiling, demand, shaper.shape(), held)
+	shape := config.DeriveSchedulerShape(shaper.ceiling, demand)
 	limits := shaper.limits
 	limits.ProcessQueryPermits, limits.RecoveryQueryPermits = shape.ProcessQueryPermits, shape.RecoveryQueryPermits
 	limits.ReadyQueueCapacity, limits.RecoveryQueueCapacity = shape.ReadyQueueCapacity, shape.RecoveryQueueCapacity

@@ -71,7 +71,7 @@ func capacitySnapshotSource(
 		seconds += occupancy.LookbackHeldSeconds
 		usage := config.ReadContainerUsage()
 		capacity := &fleet.Capacity{
-			PermitsHeld: held, PermitBudget: occupancy.Budget, PermitSeconds: seconds,
+			PermitsHeld: held, PermitBudget: occupancy.Budget, PermitsPeak: occupancy.PeakHeld, PermitSeconds: seconds,
 			Waiting:        occupancy.Waiting["normal"] + occupancy.Waiting["recovery"],
 			PermitAcquires: occupancy.Acquires, PermitWaits: occupancy.Queued,
 			QueueBudget: facts.Capacity.ReadyQueue + facts.Capacity.RecoveryQueue,

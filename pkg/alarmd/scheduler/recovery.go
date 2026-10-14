@@ -481,6 +481,7 @@ func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
 			}
 		}
 		coordinator.queryInflight++
+		coordinator.heldPeak.Observe(coordinator.now(), coordinator.queryInflight)
 		coordinator.permitSequence++
 		permit := &QueryPermit{coordinator: coordinator, operation: waiter.operation, id: coordinator.permitSequence}
 		coordinator.inflightByOp[waiter.operation]++

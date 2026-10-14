@@ -17,9 +17,9 @@ import (
 )
 
 // ResizeQueryLimits puts a new query budget in force: the process and
-// recovery permits and the two waiter queues. The budget follows the work
-// this process owns and how fast the query service answers, so it changes
-// while the process runs.
+// recovery permits and the two waiter queues. The queues follow the work this
+// process owns, so they change while the process runs; the permits are the
+// memory's share and a resize normally carries them unchanged.
 //
 // Raising it grants the queries already waiting at once. Lowering it takes
 // nothing back: permits already held run to their release, and none is
@@ -47,18 +47,13 @@ func (coordinator *FlightCoordinator) ResizeQueryLimits(limits RecoveryLimits) e
 
 // HoldReference is how long a normal query holds its permit when the query
 // service is not under pressure: the lowest hourly mean of the normal holds
-// over the last day, the current hour included. Zero before any hold.
+// over the last day, the current hour included. Zero before any hold. It
+// sizes nothing; the capacity reports it beside the budget.
 //
-// The lowest and not the latest, because the budget is sized from it: an
-// hour of slow answers that raised the reference would raise the budget and
-// put more queries at once on a service that is already slow.
-//
-// The mean and not the median, because the budget is a rate times this
-// hold, and how many permits a rate keeps busy is the rate times the mean
-// hold (Little's law). A service that answers most queries in 150 ms and
-// one in five in 3 s keeps 0.72 s of permit per query: a median of 150 ms
-// sized the budget at a fifth of that, and the soak's step of demand then
-// queued behind a budget that never rose.
+// The mean and not the median, because how many permits a rate keeps busy is
+// the rate times the mean hold (Little's law): a service that answers most
+// queries in 150 ms and one in five in 3 s keeps 0.72 s of permit per query,
+// and a median would read a fifth of that.
 func (coordinator *FlightCoordinator) HoldReference() time.Duration {
 	if coordinator == nil {
 		return 0
@@ -239,6 +234,37 @@ func (peak *SecondPeak) Peak(at time.Time) int {
 		}
 	}
 	return int(most)
+}
+
+// SecondMax keeps the highest value seen in each second of the last minute
+// and reads the highest of them. Fixed size: observing allocates nothing. Not
+// safe for concurrent use; its owner holds a lock around it.
+type SecondMax struct {
+	seconds [64]int64
+	values  [64]int
+}
+
+// Observe keeps value for the second at falls in, if it is that second's
+// highest so far.
+func (peak *SecondMax) Observe(at time.Time, value int) {
+	second := at.Unix()
+	slot := second & 63
+	if peak.seconds[slot] != second {
+		peak.seconds[slot], peak.values[slot] = second, 0
+	}
+	peak.values[slot] = max(peak.values[slot], value)
+}
+
+// Max is the highest value observed in the minute before at.
+func (peak *SecondMax) Max(at time.Time) int {
+	now := at.Unix()
+	most := 0
+	for slot, second := range peak.seconds {
+		if second > now-60 && second <= now {
+			most = max(most, peak.values[slot])
+		}
+	}
+	return most
 }
 
 // PeakNormalRequestsPerSecond is the most normal query permits asked for in
