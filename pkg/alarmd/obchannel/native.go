@@ -93,9 +93,14 @@ func NativeOperations(handler http.Handler) []Operation {
 			"unplaceable 包含 declined_everywhere：每个合格副本都因执行卡死放弃过的对象（开始提交之前超过这次执行自己的期限一分钟仍没返回，代码没响应取消；见 declined_everywhere_sample 的副本与步骤），它们哪儿都不跑、没有对象行，原因与\"没有就绪副本\"不同，要修代码；"+
 			"per_replica[].declines 是该副本放弃中的对象与执行位（total/fanout，各占一个执行位直到卡住的执行返回；total 等于 fanout 时这个副本什么都不执行而就绪照常）。", map[string]Field{}, nil, fleet.HealthResponse{}, func(Params) (string, url.Values) { return "/api/health", nil }),
 		makeOp("overview.get", "读取部署大盘：一句判定与它指向的环节、策略漏斗与能力矩阵（按策略计、按方面与处理结果分格，前 5 个拒绝原因）、拉取→判定→状态→输出四段的量/失败/延迟与挂在各段的依赖、资源占上限的比例、副本运行态。"+
-			"服务端每 15 秒最多算一次（generated_at、max_age_seconds），同时到达的请求共用一次计算；读不到的数带 measured=false，不是 0；不含地址、键、查询组和 Slot，细节用其它操作读。"+
+			"服务端每 15 秒最多算一次（generated_at、max_age_seconds），同时到达的请求共用一次计算；读不到的数带 measured=false，不是 0；依赖带地址（实例名）、最近一次应答与失败，查询后端与运行态 Redis 另带只量它的 P95/失败，Linkd 控制台带它对本部署事件源的 event_source_id；不含键、查询组和 Slot，细节用其它操作读。"+
 			"与 fleet.get 相同，只在承载 control 或 worker 角色的进程上回答；只承载 channel 的进程回答 business_waiting。",
 			map[string]Field{}, nil, fleet.Overview{}, func(Params) (string, url.Values) { return "/api/overview", nil }),
+		makeOp("trends.get", "读取趋势：本部署自己的指标（判定延迟 P95、每秒查询数、各段每分钟失败数）与容器 CPU/内存及上限，按所选时间窗从平台采集结果经查询后端读回；表达式固定在服务端，带在每条线上。"+
+			"空间按 bk-monitor-operator 的 DataID 推出（自身指标取公共自定义指标 DataID、容器指标取系统 k8s 指标 DataID 的业务，多个候选逐个探测，第一个有样本的就是），写在 spaces；推不出时该空间的图为 space_unresolved 并写明原因。"+
+			"no_series 表示读到了但窗口内没有样本，即没有在采集；每个时间窗的读取 30 秒内共用。",
+			map[string]Field{"window": enumField("时间窗，默认 1h；速率窗口为 4 个步长且不少于 5 分钟。", []string{"1h", "6h", "24h"})}, nil, fleet.TrendsAnswer{},
+			func(p Params) (string, url.Values) { return "/api/series", url.Values{"window": {p.String("window")}} }),
 		makeOp("strategy.list", "按服务端状态/行动词列出需要关注的策略（scope 不填或 attention），不是全量源目录；"+
 			"scope=accepted 时改为分页列出已发布目录接受的全部策略，每行是策略ID、租户、业务和它的全部 Plan（query_group 与 group_by），一条策略只出现在一页里；用 next_call 的 cursor 翻页。", map[string]Field{
 			"scope":  enumField("attention（默认）列需要关注的策略；accepted 分页列出已接受的全部策略。", []string{strategyScopeAttention, strategyScopeAccepted}),

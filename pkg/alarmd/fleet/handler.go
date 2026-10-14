@@ -938,7 +938,7 @@ func NewHandler(
 	windows *WindowStore,
 	now func() time.Time,
 	stallAfter time.Duration,
-	series RangeProvider,
+	series *Trends,
 	diagnostics *DiagnosticStore,
 	strategyLinkBase string,
 ) (http.Handler, error) {
@@ -1614,7 +1614,7 @@ func writeJSON(response http.ResponseWriter, status int, body any) {
 func seriesRange(
 	response http.ResponseWriter,
 	request *http.Request,
-	provider RangeProvider,
+	trends *Trends,
 	now func() time.Time,
 ) {
 	// The window is chosen from a fixed list rather than sent as a duration: a
@@ -1626,21 +1626,7 @@ func seriesRange(
 			map[string]string{"error": "unknown window " + requested})
 		return
 	}
-	at := now()
-	writeJSON(response, http.StatusOK, seriesResponse{
-		Window: window.Key, WindowChoice: seriesWindowKeys(),
-		StartUnixMs: at.Add(-window.Duration).UnixMilli(), EndUnixMs: at.UnixMilli(),
-		StepSeconds: int(window.Step / time.Second),
-		Series:      collectSeries(request.Context(), provider, window, at),
-	})
-}
-
-func seriesWindowKeys() []string {
-	keys := make([]string, 0, len(seriesWindows))
-	for _, window := range seriesWindows {
-		keys = append(keys, window.Key)
-	}
-	return keys
+	writeJSON(response, http.StatusOK, trends.read(request.Context(), window, now()))
 }
 
 // objectRecords reads what a window recorded, when the caller asked for it.

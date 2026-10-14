@@ -10,177 +10,211 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
+type rangeCall struct {
+	space, promQL string
+	window, step  time.Duration
+}
+
 type stubRange struct {
-	byExpression map[string]SeriesRange
-	errFor       string
-	windows      []time.Duration
-	steps        []time.Duration
+	mu     sync.Mutex
+	answer func(space, promQL string) (SeriesRange, error)
+	calls  []rangeCall
 }
 
-func (stub *stubRange) Range(
-	_ context.Context, promQL string, start, end time.Time, step time.Duration,
-) (SeriesRange, error) {
-	stub.windows = append(stub.windows, end.Sub(start))
-	stub.steps = append(stub.steps, step)
-	if promQL == stub.errFor {
-		return SeriesRange{}, errors.New("provider is down")
+func (stub *stubRange) Range(_ context.Context, space, promQL string, start, end time.Time, step time.Duration) (SeriesRange, error) {
+	stub.mu.Lock()
+	stub.calls = append(stub.calls, rangeCall{space: space, promQL: promQL, window: end.Sub(start), step: step})
+	stub.mu.Unlock()
+	if stub.answer == nil {
+		return SeriesRange{}, nil
 	}
-	return stub.byExpression[promQL], nil
+	return stub.answer(space, promQL)
 }
 
-func seriesHandler(t *testing.T, provider RangeProvider) http.Handler {
+func resolvedSpaces(context.Context) map[string]TrendSpace {
+	return map[string]TrendSpace{
+		TrendSpaceSelf:      {Space: "bkcc__2", State: TrendSpaceResolved},
+		TrendSpaceContainer: {Space: "bkcc__3", State: TrendSpaceResolved},
+	}
+}
+
+var trendTestScope = TrendScope{Namespace: "alarmd-ns", Container: "alarmd"}
+
+func onePoint(value float64) []SeriesLine {
+	return []SeriesLine{{Points: []SeriesPoint{{AtUnixMilli: 1789006260000, Value: value}}}}
+}
+
+func trendByKey(answer TrendsAnswer, key string) Trend {
+	for _, trend := range answer.Trends {
+		if trend.Key == key {
+			return trend
+		}
+	}
+	return Trend{}
+}
+
+// Each chart reads its own space with the expressions scoped by this
+// deployment's namespace and container and the window's rate; a by-pod line
+// is one line per pod, named with it; and the expression travels with each
+// line.
+func TestTrendsReadEachChartInItsSpaceScopedToThisDeployment(t *testing.T) {
+	provider := &stubRange{answer: func(space, promQL string) (SeriesRange, error) {
+		if strings.Contains(promQL, "container_cpu_usage_seconds_total") {
+			return SeriesRange{Lines: []SeriesLine{
+				{Labels: map[string]string{"pod": "alarmd-b"}, Points: []SeriesPoint{{AtUnixMilli: 1, Value: 0.05}}},
+				{Labels: map[string]string{"pod": "alarmd-a"}, Points: []SeriesPoint{{AtUnixMilli: 1, Value: 0.04}}},
+			}}, nil
+		}
+		return SeriesRange{Lines: onePoint(1)}, nil
+	}}
+	window, _ := lookupSeriesWindow("1h")
+	answer := collectTrends(context.Background(), provider, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
+	if len(answer.Trends) != len(trendCatalog) || answer.RateWindow != "5m" || answer.Spaces[TrendSpaceSelf].Space != "bkcc__2" {
+		t.Fatalf("answer = %+v", answer)
+	}
+	for _, call := range provider.calls {
+		container := strings.Contains(call.promQL, "container_") || strings.Contains(call.promQL, "kube_pod_")
+		if container && (call.space != "bkcc__3" || !strings.Contains(call.promQL, `namespace="alarmd-ns",container="alarmd"`)) {
+			t.Errorf("container expression %s in %s, want bkcc__3 scoped to this deployment", call.promQL, call.space)
+		}
+		if !container && (call.space != "bkcc__2" || !strings.Contains(call.promQL, "bkmonitor_alarmd_")) {
+			t.Errorf("self expression %s in %s, want bkcc__2 on alarmd's own metrics", call.promQL, call.space)
+		}
+		if strings.Contains(call.promQL, "rate(") && !strings.Contains(call.promQL, "[5m]") {
+			t.Errorf("expression %s, want the 1h window's 5m rate", call.promQL)
+		}
+		if call.window != time.Hour || call.step != time.Minute {
+			t.Errorf("window %v step %v, want 1h by 1m", call.window, call.step)
+		}
+	}
+	cpu := trendByKey(answer, "cpu_cores")
+	if len(cpu.Lines) < 2 || cpu.Lines[0].Pod != "alarmd-a" || cpu.Lines[0].Name != "使用 · alarmd-a" || cpu.Lines[1].Pod != "alarmd-b" ||
+		!strings.Contains(cpu.Lines[0].PromQL, "container_cpu_usage_seconds_total") {
+		t.Fatalf("cpu lines = %+v, want one per pod in pod order, named and with the expression", cpu.Lines)
+	}
+	failures := trendByKey(answer, "failures_per_minute")
+	if len(failures.Lines) != 4 || failures.Lines[1].Name != "状态·准入未成功" || !strings.Contains(failures.Lines[1].PromQL, `result!="success"`) {
+		t.Fatalf("failure lines = %+v, want the four stages", failures.Lines)
+	}
+}
+
+// A container limit is read from kube-state-metrics in either generation's
+// names: the resource-labelled family, else the per-resource one.
+func TestAContainerLimitReadsEitherKubeStateMetricsGeneration(t *testing.T) {
+	cpu := containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores")(trendTestScope, "5m")
+	if !strings.Contains(cpu, `kube_pod_container_resource_limits{namespace="alarmd-ns",container="alarmd",resource="cpu"}`) ||
+		!strings.Contains(cpu, ` or `) || !strings.Contains(cpu, `kube_pod_container_resource_limits_cpu_cores{namespace="alarmd-ns",container="alarmd"}`) {
+		t.Fatalf("cpu limit = %s", cpu)
+	}
+}
+
+// A chart whose space is unresolved says so with the reason and reads
+// nothing; one read with nothing in the window says it has no series; one
+// the provider refused or failed is reported on that chart alone.
+func TestEachChartSaysWhyItHasNoLines(t *testing.T) {
+	spaces := map[string]TrendSpace{
+		TrendSpaceSelf:      {Space: "bkcc__2", State: TrendSpaceResolved},
+		TrendSpaceContainer: {State: TrendSpaceUnresolved, Reason: "no candidate space has samples"},
+	}
+	provider := &stubRange{answer: func(_, promQL string) (SeriesRange, error) {
+		switch {
+		case strings.Contains(promQL, "slot_decision_lag"):
+			return SeriesRange{}, errors.New("provider is down")
+		case strings.Contains(promQL, "worker_work_total"):
+			return SeriesRange{Code: "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS", Message: "field is empty"}, nil
+		case strings.Contains(promQL, "access_query_failure_total"):
+			return SeriesRange{Lines: onePoint(0)}, nil
+		}
+		return SeriesRange{}, nil
+	}}
+	window, _ := lookupSeriesWindow("")
+	answer := collectTrends(context.Background(), provider, spaces, trendTestScope, window, time.Unix(1789006380, 0))
+	if lag := trendByKey(answer, "decision_lag_p95"); lag.Unavailable != "PROVIDER_ERROR" || lag.Detail != "provider is down" || len(lag.Lines) != 0 {
+		t.Errorf("lag = %+v, want the provider's failure", lag)
+	}
+	if queries := trendByKey(answer, "queries_per_second"); queries.Unavailable != "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS" || queries.NoSeries {
+		t.Errorf("queries = %+v, want the refusal, not silence", queries)
+	}
+	// One stage has a point: the chart has series, the empty stages included.
+	if failures := trendByKey(answer, "failures_per_minute"); failures.Unavailable != "" || failures.NoSeries || len(failures.Lines) != 4 {
+		t.Errorf("failures = %+v, want read with its four lines", failures)
+	}
+	for _, key := range []string{"cpu_cores", "memory_bytes"} {
+		if trend := trendByKey(answer, key); trend.Unavailable != TrendSpaceUnresolved || trend.Detail != "no candidate space has samples" {
+			t.Errorf("%s = %+v, want space_unresolved with the reason", key, trend)
+		}
+	}
+	for _, call := range provider.calls {
+		if strings.Contains(call.promQL, "container_") {
+			t.Errorf("a container expression was sent with its space unresolved: %s", call.promQL)
+		}
+	}
+	quiet := collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
+	if trend := trendByKey(quiet, "queries_per_second"); !trend.NoSeries || trend.Unavailable != "" {
+		t.Errorf("an empty window = %+v, want no_series", trend)
+	}
+}
+
+// The window is chosen from a fixed list, and the rate spans four steps and
+// never less than five minutes, so it always covers several scrapes.
+func TestTheWindowComesFromAFixedListWithItsRate(t *testing.T) {
+	for key, rate := range map[string]string{"1h": "5m", "6h": "20m", "24h": "40m"} {
+		window, ok := lookupSeriesWindow(key)
+		if !ok || window.rate() != rate {
+			t.Errorf("%s: rate %s, want %s", key, window.rate(), rate)
+		}
+	}
+	trends := &Trends{Range: &stubRange{}, Spaces: resolvedSpaces, Scope: trendTestScope}
+	status, body := get(t, trendsHandler(t, trends), "/api/series?window=6h")
+	if status != http.StatusOK || body["window"] != "6h" || body["rate_window"] != "20m" {
+		t.Fatalf("status %d body %v", status, body)
+	}
+	if status, _ := get(t, trendsHandler(t, trends), "/api/series?window=90d"); status != http.StatusBadRequest {
+		t.Fatalf("an unlisted window returned %d", status)
+	}
+}
+
+// One read of a window answers for TrendsMaxAge: a burst of page refreshes
+// costs the query backend one query per line.
+func TestOneReadOfAWindowAnswersForItsMaxAge(t *testing.T) {
+	provider := &stubRange{}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	trends.read(context.Background(), window, at)
+	once := len(provider.calls)
+	trends.read(context.Background(), window, at.Add(TrendsMaxAge-time.Second))
+	if len(provider.calls) != once {
+		t.Fatalf("a read within the max age queried again: %d calls, want %d", len(provider.calls), once)
+	}
+	trends.read(context.Background(), window, at.Add(TrendsMaxAge))
+	if len(provider.calls) != 2*once {
+		t.Fatalf("a read past the max age: %d calls, want %d", len(provider.calls), 2*once)
+	}
+}
+
+func trendsHandler(t *testing.T, trends *Trends) http.Handler {
 	t.Helper()
 	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}},
 		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: healthySnapshots()})
-	handler, err := NewHandler(service, nil, func() time.Time { return now }, 0, provider, nil, "")
+	handler, err := NewHandler(service, nil, func() time.Time { return now }, 0, trends, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return handler
 }
 
-func seriesByKey(t *testing.T, body map[string]any) map[string]map[string]any {
-	t.Helper()
-	byKey := map[string]map[string]any{}
-	for _, raw := range body["series"].([]any) {
-		item := raw.(map[string]any)
-		byKey[item["key"].(string)] = item
-	}
-	return byKey
-}
-
-// A number on a page is only as trustworthy as the reader's ability to find out
-// where it came from, so the expression travels with the curve.
-func TestSeriesCarryTheExpressionThatProducedThem(t *testing.T) {
-	provider := &stubRange{byExpression: map[string]SeriesRange{
-		`max(bkmonitor_alarmd_fleet_objects{state="expected"})`: {
-			Points: []SeriesPoint{{AtUnixMilli: 1789006260000, Value: 931}},
-		},
-	}}
-	status, body := get(t, seriesHandler(t, provider), "/api/series")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d", status)
-	}
-	byKey := seriesByKey(t, body)
-	expected := byKey["expected"]
-	if expected["promql"] != `max(bkmonitor_alarmd_fleet_objects{state="expected"})` {
-		t.Fatalf("expression not carried: %v", expected["promql"])
-	}
-	if len(expected["points"].([]any)) != 1 {
-		t.Fatalf("points = %v", expected["points"])
-	}
-	if expected["help"] == "" {
-		t.Fatal("a curve without a reading is a decoration")
-	}
-}
-
-// One provider failure must cost one curve. Failing the whole response would
-// take the working curves down with it, exactly when someone came to look.
-func TestOneBrokenCurveDoesNotTakeTheOthersDown(t *testing.T) {
-	provider := &stubRange{
-		errFor: `sum(max by (kind) (bkmonitor_alarmd_fleet_anomalies))`,
-		byExpression: map[string]SeriesRange{
-			`max(bkmonitor_alarmd_fleet_objects{state="expected"})`: {
-				Points: []SeriesPoint{{AtUnixMilli: 1789006260000, Value: 931}},
-			},
-		},
-	}
-	_, body := get(t, seriesHandler(t, provider), "/api/series")
-	byKey := seriesByKey(t, body)
-	if byKey["anomalies"]["unavailable"] != "PROVIDER_ERROR" {
-		t.Fatalf("broken curve = %v", byKey["anomalies"])
-	}
-	if len(byKey["expected"]["points"].([]any)) != 1 {
-		t.Fatalf("a working curve was lost with the broken one: %v", byKey["expected"])
-	}
-}
-
-// The provider reports a missing scope or a missing metric as HTTP 200 with an
-// empty series list. Merging that into "no points" makes a misconfigured
-// deployment look like a calm one.
-func TestARefusedCurveIsNotShownAsAnEmptyOne(t *testing.T) {
-	provider := &stubRange{byExpression: map[string]SeriesRange{
-		`max(bkmonitor_alarmd_fleet_stalled_objects)`: {
-			Code: "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS", Message: "field is empty",
-		},
-	}}
-	_, body := get(t, seriesHandler(t, provider), "/api/series")
-	byKey := seriesByKey(t, body)
-	if byKey["stalled"]["unavailable"] != "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS" {
-		t.Fatalf("refusal was read as silence: %v", byKey["stalled"])
-	}
-	// A window that really was empty stays empty rather than being dressed up.
-	if byKey["unknown"]["unavailable"] != nil {
-		t.Fatalf("an empty window was reported as a refusal: %v", byKey["unknown"])
-	}
-}
-
-// The window is chosen from a fixed list: a page that can name its own range
-// can also name one nobody budgeted for.
-func TestTheWindowComesFromAFixedList(t *testing.T) {
-	provider := &stubRange{}
-	handler := seriesHandler(t, provider)
-
-	_, body := get(t, handler, "/api/series?window=6h")
-	if body["window"] != "6h" {
-		t.Fatalf("window = %v", body["window"])
-	}
-	if provider.windows[0] != 6*time.Hour || provider.steps[0] != 5*time.Minute {
-		t.Fatalf("window/step = %v/%v", provider.windows[0], provider.steps[0])
-	}
-
-	status, _ := get(t, handler, "/api/series?window=90d")
-	if status != http.StatusBadRequest {
-		t.Fatalf("an unlisted window returned %d", status)
-	}
-}
-
-// Every metric these curves read is the deployment-wide judgment, and every
-// replica exports all of it rather than its own share. So the aggregation that
-// touches the raw metric has to be one that collapses the replicas; adding up
-// first multiplies a real number by the replica count.
-//
-// That is invisible on the page. The curve has the right shape, moves when the
-// deployment moves, and is simply twice the truth on two replicas -- which also
-// means it silently changes when the deployment is scaled, with no code change
-// and nothing to notice. The anomaly curve shipped that way.
-func TestEveryCurveCollapsesTheReplicasBeforeAddingAnythingUp(t *testing.T) {
-	// Captures the aggregation applied directly to the metric selector, which is
-	// the one that decides whether the replicas were collapsed. An outer sum over
-	// an inner max is fine; an outer sum over the selector itself is the defect.
-	innermost := regexp.MustCompile(`([a-z_]+)\s*(?:by\s*\([^)]*\)\s*)?\(\s*(bkmonitor_alarmd_[a-z_]+)`)
-	checked := 0
-	for _, definition := range seriesCatalog {
-		matches := innermost.FindAllStringSubmatch(definition.PromQL, -1)
-		if len(matches) == 0 {
-			t.Errorf("curve %q reads no alarmd metric through an aggregation: %s", definition.Key, definition.PromQL)
-			continue
-		}
-		for _, match := range matches {
-			checked++
-			if match[1] != "max" {
-				t.Errorf("curve %q applies %s directly to %s: every replica exports the whole deployment's "+
-					"number, so this reports it multiplied by the replica count",
-					definition.Key, match[1], match[2])
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no expression was checked; the guard would pass vacuously")
-	}
-}
-
-// A deployment that was never told where its own metrics live cannot draw
-// curves. An unmounted route says so; a mounted one that always answers with
-// nothing does not.
-func TestWithoutAProviderTheSeriesRouteIsAbsent(t *testing.T) {
+// Without a query client there is nothing to read the trends with, and the
+// route is absent rather than mounted and empty.
+func TestWithoutTrendsTheSeriesRouteIsAbsent(t *testing.T) {
 	response := httptest.NewRecorder()
-	seriesHandler(t, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/series", nil))
+	trendsHandler(t, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/series", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want the route to be absent", response.Code)
 	}

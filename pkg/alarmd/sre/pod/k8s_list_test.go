@@ -291,6 +291,7 @@ func TestAResourceReadServesTheOwnershipKinds(t *testing.T) {
 	for kind, want := range map[string]string{
 		"ClusterRole":        `list rbac.authorization.k8s.io/v1 clusterroles ns=""`,
 		"ClusterRoleBinding": `list rbac.authorization.k8s.io/v1 clusterrolebindings ns=""`,
+		"DataID":             `list monitoring.bk.tencent.com/v1beta1 dataids ns=""`,
 	} {
 		provider, resources := resourceProvider(t)
 		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind}); err != nil || resources.asked[0] != want {

@@ -1020,7 +1020,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// happens before the bundle that owns that state is built.
 	var bundle *phaseTwoWorkerBundle
 	fleetAPI, err := fleet.NewHandler(fleetService, windowStore, external.Now, stallAfter,
-		fleetRangeProvider(queryClient, cfg.PhaseTwo.Access.SelfMetricsSpaceUID), diagnostics,
+		fleetTrends(queryClient, cfg.CLI.AdminKeySecret.Namespace, external.Now), diagnostics,
 		cfg.PhaseTwo.Access.MonitorWebBaseURL)
 	if err != nil {
 		return nil, err
