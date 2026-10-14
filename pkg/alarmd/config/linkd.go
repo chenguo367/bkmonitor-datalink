@@ -90,8 +90,11 @@ func (c LinkdConfig) Validate() error {
 		return errors.New("linkd console_url must name the link's API root, not the server: " +
 			"<admin><base_path>/api/modules/linkd, or <console>/local-api")
 	}
-	if c.Username == "" || c.Password == "" {
-		return errors.New("linkd console service requires username and password")
+	// A Basic pair is a Console's own credential. Without one the calls carry
+	// the token the admin hands over (linkdtoken): the admin serving the API
+	// accepts nothing else, and keeps no account for alarmd to configure.
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("linkd console username and password come together, or neither for the admin's token")
 	}
 	return nil
 }

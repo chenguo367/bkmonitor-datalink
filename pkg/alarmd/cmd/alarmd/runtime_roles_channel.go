@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -312,7 +313,8 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	if !binding.Roles.Has(roles.Channel) || !cfg.CLI.Enabled() {
 		return runtime, nil
 	}
-	manager, authErr := cliauth.New(cliauth.Options{Redis: clientFor("auth")(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix,
+	authClient := clientFor("auth")(cfg.RuntimeStoreRedis())
+	manager, authErr := cliauth.New(cliauth.Options{Redis: authClient, Prefix: cfg.Redis.StatePrefix,
 		EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey,
 		OnStoreFailure: func(reason, detail string) {
 			if failure := providers.read().Control.RedisFailures; failure != nil {
@@ -331,6 +333,15 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		}})
 	if authErr != nil {
 		return runtime, nil
+	}
+	// A link read through the admin is read with the token the admin hands
+	// over here; the Workers and the Control read it from the same key.
+	if linkdTokenMode(cfg) {
+		tokens, err := linkdtoken.New(authClient, cfg.Redis.StatePrefix, nil)
+		if err != nil {
+			return nil, err
+		}
+		manager.ServeLinkdTokens(tokens)
 	}
 	options := obchannel.Options{Auth: manager, EnvironmentID: binding.EnvironmentID, Replica: binding.InstanceID, Incarnation: binding.Control.Incarnation,
 		Build: version + "/" + commit, Executor: executor, RouteControlDefaults: !binding.Roles.Has(roles.Worker)}

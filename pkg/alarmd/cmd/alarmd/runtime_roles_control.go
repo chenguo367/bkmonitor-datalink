@@ -49,7 +49,19 @@ func openProductionControlRoleBundle(
 	}
 	cfg = cfg.WithResolvedRedisPoolSize()
 	wait := external.startupWaiter(recorder, logger, health)
-	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
+	linkdTokens, linkdTokenClient, err := openLinkdTokens(cfg, recorder.RedisHook("linkd"), external.Now)
+	if err != nil {
+		return nil, err
+	}
+	// Closed here until the owned clients take it over below.
+	linkdTokensOwned := false
+	defer func() {
+		if resultErr != nil && linkdTokenClient != nil && !linkdTokensOwned {
+			resultErr = errors.Join(resultErr, linkdTokenClient.Close())
+		}
+	}()
+	discoverLinkd := withLinkdToken(openalerts.DiscoverTarget, linkdTokenSource(linkdTokens))
+	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, discoverLinkd)
 	logLinkdDiscovery(logger, linkdDiscovery)
 	baseObserver, err := newPhaseTwoRuntimeObserver(recorder, logger)
 	if err != nil {
@@ -63,6 +75,9 @@ func openProductionControlRoleBundle(
 		return nil, err
 	}
 	var ownedClients []redis.UniversalClient
+	if linkdTokenClient != nil {
+		ownedClients, linkdTokensOwned = append(ownedClients, linkdTokenClient), true
+	}
 	closeOwned := func() error {
 		var errs []error
 		for _, client := range ownedClients {
@@ -202,7 +217,7 @@ func openProductionControlRoleBundle(
 			ownedClients = append(ownedClients, linkdClient)
 		}
 	}
-	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkd, external.Now, logger)
+	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkd, linkdTokenSource(linkdTokens), external.Now, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +383,7 @@ func openProductionControlRoleBundle(
 		ViewStreamStats: viewServer.Stats, ActivationBlocked: core.Repository.ActivationBlockedReading,
 		ActivationSkipped: core.Repository.SkippedTimelinesReading, ActivationHeader: core.Repository.ActivationHeaderReading,
 		RunOpenAlerts: func(runCtx context.Context) error {
-			go linkd.Location.retry(runCtx, cfg, openalerts.DiscoverTarget, linkdRetryFirst, linkdRetryCeiling)
+			go linkd.Location.retry(runCtx, cfg, discoverLinkd, linkdRetryFirst, linkdRetryCeiling)
 			return linkd.Cache.Run(runCtx)
 		},
 		RefreshPlatformSettings: func(refreshCtx context.Context) { settings.Refresh(refreshCtx) },

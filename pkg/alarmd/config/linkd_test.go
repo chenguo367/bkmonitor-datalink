@@ -30,7 +30,14 @@ func TestLinkdConfigurationBinding(t *testing.T) {
 	c.ConsoleURL = "https://console.example.test/local-api"
 	c.Password = ""
 	if err := c.Validate(); err == nil {
-		t.Fatal("a Console without credentials was accepted")
+		t.Fatal("half a Basic pair was accepted")
+	}
+	// No pair at all is the admin's API, called with the token it hands over.
+	if err := (LinkdConfig{ConsoleURL: "http://admin.example.test/api/modules/linkd"}).Validate(); err != nil {
+		t.Fatalf("the admin's API root without a Basic pair was refused: %v", err)
+	}
+	if err := (LinkdConfig{ConsoleURL: "http://admin.example.test/"}).Validate(); err == nil {
+		t.Fatal("a server URL that is not an API root was accepted")
 	}
 	if err := (LinkdConfig{Username: "reader"}).Validate(); err == nil {
 		t.Fatal("credentials without a Console were accepted")

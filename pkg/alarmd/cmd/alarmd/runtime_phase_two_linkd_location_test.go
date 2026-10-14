@@ -212,3 +212,35 @@ func TestADiscoveryThatReachedAWebPageCarriesTheNotAPIClass(t *testing.T) {
 		t.Fatalf("a discovery that reached a web page reads as %+v after %d calls", facts, calls)
 	}
 }
+
+// A Console URL with no Basic pair is the admin's API, read with its token:
+// the discoveries carry the store's token, and nothing else opens a store.
+func TestAnAPIRootWithoutABasicPairIsReadWithTheAdminsToken(t *testing.T) {
+	cfg := linkdLocationConfig()
+	tokenMode := cfg
+	tokenMode.PhaseTwo.Linkd.Username, tokenMode.PhaseTwo.Linkd.Password = "", ""
+	if !linkdTokenMode(tokenMode) || linkdTokenMode(cfg) {
+		t.Fatal("token mode is not decided by the Basic pair alone")
+	}
+	if store, client, err := openLinkdTokens(cfg, nil, time.Now); store != nil || client != nil || err != nil {
+		t.Fatal("a deployment with a Basic pair opened a token store")
+	}
+	if linkdTokenSource(nil) != nil {
+		t.Fatal("no store is a source")
+	}
+	var carried openalerts.TokenSource
+	tokens := &stubTokens{}
+	discover := withLinkdToken(func(_ context.Context, options openalerts.HTTPReconcilerOptions) (openalerts.TargetBinding, error) {
+		carried = options.Token
+		return openalerts.TargetBinding{}, errors.New("stop")
+	}, tokens)
+	_, _ = discover(context.Background(), openalerts.HTTPReconcilerOptions{})
+	if carried != tokens {
+		t.Fatal("the discovery did not carry the token source")
+	}
+}
+
+type stubTokens struct{}
+
+func (*stubTokens) Token(context.Context) (string, error)  { return "t", nil }
+func (*stubTokens) Rejected(context.Context, string) error { return nil }

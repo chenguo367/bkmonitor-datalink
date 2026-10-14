@@ -1619,6 +1619,7 @@ var alarmdWords = []string{
 	"untouched",
 	"untracked",
 	"unusable",
+	"unused",
 	"unwired",
 	"unwritten",
 	"update",

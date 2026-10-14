@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 )
 
 // The Console operations this process calls, closed. Each has its own
@@ -39,13 +40,17 @@ const (
 	ConsoleFailureStatus     = "status"
 	ConsoleFailureIncomplete = "incomplete"
 	ConsoleFailureNotAPI     = "not_api"
+	// ConsoleFailureNoToken is a call not made for want of a usable token:
+	// none handed over yet, expired, or refused by the admin.
+	ConsoleFailureNoToken = "no_token"
 )
 
 // ConsoleFailureClasses is every class a Console failure is counted under:
 // the transport's words (execution.TransportFailureWords), then status,
-// incomplete and not_api. Any other failure of an operation is other.
+// incomplete, not_api and no_token. Any other failure of an operation is
+// other.
 var ConsoleFailureClasses = append(append([]string(nil), execution.TransportFailureWords...),
-	ConsoleFailureStatus, ConsoleFailureIncomplete, ConsoleFailureNotAPI)
+	ConsoleFailureStatus, ConsoleFailureIncomplete, ConsoleFailureNotAPI, ConsoleFailureNoToken)
 
 // ConsoleFailureClass is the class err is counted under (ConsoleFailureClasses).
 // An object-missing answer is a status here: only the alert record reads it
@@ -60,6 +65,8 @@ func ConsoleFailureClass(err error) string {
 		return ConsoleFailureStatus
 	case errors.Is(err, ErrNotAPI):
 		return ConsoleFailureNotAPI
+	case errors.As(err, new(linkdtoken.ErrNoToken)):
+		return ConsoleFailureNoToken
 	case errors.Is(err, ErrIncomplete):
 		return ConsoleFailureIncomplete
 	}

@@ -16,6 +16,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 )
 
 // testLinkdAPIRoot is the API root the link's admin module serves its
@@ -110,5 +112,70 @@ func TestTheOperationsAreAskedForUnderTheRootTheURLNames(t *testing.T) {
 	want := []string{"/admin/api/modules/linkd/strategy-index/targets", "/admin/api/modules/linkd/alerts/a-1"}
 	if len(paths) < 2 || paths[0] != want[0] || paths[len(paths)-1] != want[1] {
 		t.Fatalf("asked for %v, want first %s and last %s", paths, want[0], want[1])
+	}
+}
+
+// fakeTokens is a token source that names the token it hands out and the
+// refusals it is told of.
+type fakeTokens struct {
+	token    string
+	err      error
+	asked    int
+	rejected []string
+}
+
+func (f *fakeTokens) Token(context.Context) (string, error) { f.asked++; return f.token, f.err }
+func (f *fakeTokens) Rejected(_ context.Context, token string) error {
+	f.rejected = append(f.rejected, token)
+	return nil
+}
+
+// Without a Basic pair every call carries the admin's token as a bearer; a
+// 401 tells the source which token was refused; no usable token makes no
+// call and fails as no_token. A Basic pair never asks the source.
+func TestWithoutABasicPairTheCallsCarryTheAdminsToken(t *testing.T) {
+	var seen []string
+	refuse := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		if refuse {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"请先登录"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`[{"eventSourceId":"source","hookName":"active","keyPrefix":"test:active","address":"redis:6379","database":3,"sources":["source"]}]`))
+	}))
+	t.Cleanup(server.Close)
+	tokens := &fakeTokens{token: "head.claims.signature"}
+	options := HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Token: tokens, MaxResponseBytes: 1 << 20}
+	if _, err := DiscoverTarget(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "Bearer head.claims.signature" {
+		t.Fatalf("the call carried %q", seen)
+	}
+	refuse = true
+	if _, err := DiscoverTarget(context.Background(), options); err == nil || ConsoleFailureClass(err) != ConsoleFailureStatus {
+		t.Fatalf("a refused call read as %v", err)
+	}
+	if len(tokens.rejected) != 1 || tokens.rejected[0] != "head.claims.signature" {
+		t.Fatalf("the refusal was told as %q", tokens.rejected)
+	}
+	calls := len(seen)
+	tokens.err = linkdtoken.ErrNoToken{State: linkdtoken.StateRejected}
+	if _, err := DiscoverTarget(context.Background(), options); ConsoleFailureClass(err) != ConsoleFailureNoToken || len(seen) != calls {
+		t.Fatalf("no token read as %v (class %s) after %d calls", err, ConsoleFailureClass(err), len(seen)-calls)
+	}
+	asked := tokens.asked
+	refuse = false
+	basic := options
+	basic.Username, basic.Password = "user", "secret"
+	if _, err := DiscoverTarget(context.Background(), basic); err != nil || tokens.asked != asked ||
+		!strings.HasPrefix(seen[len(seen)-1], "Basic ") {
+		t.Fatalf("a Basic pair asked the token source (%d) or did not carry Basic (%q): %v", tokens.asked-asked, seen[len(seen)-1], err)
+	}
+	if _, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Index: testIndex(), MaxResponseBytes: 1}); err == nil {
+		t.Fatal("a reader with neither a Basic pair nor a token source was built")
 	}
 }

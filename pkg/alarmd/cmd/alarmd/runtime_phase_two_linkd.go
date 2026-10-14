@@ -54,8 +54,8 @@ func effectiveTimeFailureLine(logger *observability.Logger) func(dependency, cla
 }
 
 func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig,
-	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), now func() time.Time,
-	logger *observability.Logger) (linkdIndex, error) {
+	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), token openalerts.TokenSource,
+	now func() time.Time, logger *observability.Logger) (linkdIndex, error) {
 	capacity := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	settings := cfg.PhaseTwo.Linkd
 	// One read cannot monopolize the allowance for the whole worker. These
@@ -88,7 +88,7 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		// The link's target, and its source scope, are read from the
 		// Console, which lists one target for a link alarmd reads.
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
-			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
+			Username: settings.Username, Password: settings.Password, Token: token, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
 			Now: now, Index: index, LocationConfirmed: adopted, OnLocationMismatch: location.relocate,
 			KeyingEvery: config.LinkdCalibrationInterval, OnFailure: consoleFailureLine(logger)})
 		if err != nil {

@@ -304,7 +304,7 @@ func TestTheProcesssConsoleWritesALineWhenItsFailuresStart(t *testing.T) {
 	cfg.PhaseTwo.Linkd.ConsoleURL = address
 	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
 	var out bytes.Buffer
-	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, time.Now, observability.New("worker", &out))
+	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, nil, time.Now, observability.New("worker", &out))
 	if err != nil {
 		t.Fatal(err)
 	}

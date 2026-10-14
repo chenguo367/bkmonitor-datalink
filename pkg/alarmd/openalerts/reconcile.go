@@ -79,9 +79,13 @@ type IndexLocation struct {
 }
 
 type HTTPReconcilerOptions struct {
-	BaseURL          string
-	Username         string
-	Password         string
+	BaseURL  string
+	Username string
+	Password string
+	// Token is where the token comes from when there is no Basic pair: the
+	// admin serves the link's API to the bearer of a token it issued and
+	// handed over (linkdtoken). With a Basic pair it is not asked.
+	Token            TokenSource
 	Client           *http.Client
 	Index            IndexLocation
 	MaxResponseBytes int64
@@ -129,10 +133,19 @@ type HTTPReconciler struct {
 // as often as it pages.
 const bindingReuse = time.Minute
 
+// TokenSource is the token a call to the link's API is made with, and where
+// a refusal of it is told (linkdtoken.Store).
+type TokenSource interface {
+	Token(context.Context) (string, error)
+	Rejected(context.Context, string) error
+}
+
 func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 	u, err := url.Parse(options.BaseURL)
+	basic := options.Username != "" && options.Password != ""
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		options.Client == nil || options.MaxResponseBytes <= 0 || options.Username == "" || options.Password == "" ||
+		options.Client == nil || options.MaxResponseBytes <= 0 || (!basic && options.Token == nil) ||
+		(options.Username == "") != (options.Password == "") ||
 		!validPrefix(options.Index.KeyPrefix) || options.Index.Address == "" || options.Index.Database < 0 {
 		return nil, errors.New("alarmd openalerts: invalid reconciliation endpoint")
 	}
@@ -160,12 +173,26 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	if err != nil {
 		return errors.New("alarmd openalerts: invalid reconcile request")
 	}
-	req.SetBasicAuth(reader.options.Username, reader.options.Password)
+	token := ""
+	if reader.options.Username != "" {
+		req.SetBasicAuth(reader.options.Username, reader.options.Password)
+	} else {
+		if token, err = reader.options.Token.Token(ctx); err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	response, err := reader.options.Client.Do(req)
 	if err != nil {
 		return transportError(execution.ClassifyTransportFailure(err))
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized && token != "" {
+		// The admin no longer accepts this token - its password or signing
+		// key changed: say so, for it to hand over another. A failure to
+		// record it leaves the call failing as it does anyway.
+		_ = reader.options.Token.Rejected(ctx, token)
+	}
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode == http.StatusNotFound && objectMissing(response.Body) {
 			return errObjectMissing
