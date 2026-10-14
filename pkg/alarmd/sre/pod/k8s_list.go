@@ -174,8 +174,9 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		return result, err
 	}
 	result.Kind, result.APIVersion = kind.Kind, kind.Resource.GroupVersion().String()
+	fingerprints := p.newFingerprints()
 	if kind.Fingerprinted {
-		result.FingerprintScope = p.fingerprintScope()
+		result.FingerprintScope = fingerprints.Scope()
 	}
 	if p.options.Resources == nil {
 		return result, &Error{Code: CodeAPIError, Message: "Kubernetes resource adapter is unavailable"}
@@ -240,9 +241,9 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	for index, object := range objects {
 		raw := object.Object
 		if kind.KeysOnly {
-			raw = p.keysOnlyRow(raw, kind.Fingerprinted)
+			raw = p.keysOnlyRow(raw, kind.Fingerprinted, fingerprints)
 		}
-		item := p.cleanObject(raw)
+		item := p.cleanObject(raw, fingerprints)
 		if len(paths) > 0 {
 			item = keepHelmOwnership(project(item, append(append([][]string(nil), identityPaths...), paths...)), item)
 		}
@@ -274,7 +275,7 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 // nothing that holds a value, so neither the whole item nor any projection
 // of it can carry one. configmap.get reads ConfigMap values, masked; no read
 // returns a Secret value.
-func (p *Provider) keysOnlyRow(object map[string]any, fingerprinted bool) map[string]any {
+func (p *Provider) keysOnlyRow(object map[string]any, fingerprinted bool, fingerprints *fingerprints) map[string]any {
 	row := map[string]any{"apiVersion": object["apiVersion"], "kind": object["kind"]}
 	if kind, ok := object["type"].(string); ok {
 		row["type"] = kind
@@ -298,14 +299,14 @@ func (p *Provider) keysOnlyRow(object map[string]any, fingerprinted bool) map[st
 		// A Secret's data is base64 on the wire, like a ConfigMap's binaryData.
 		data = encoded
 	}
-	row["data"] = p.keySizes(object["data"], data, fingerprinted)
+	row["data"] = keySizes(object["data"], data, fingerprinted, fingerprints)
 	if _, present := object["binaryData"]; present || !fingerprinted {
-		row["binaryData"] = p.keySizes(object["binaryData"], encoded, fingerprinted)
+		row["binaryData"] = keySizes(object["binaryData"], encoded, fingerprinted, fingerprints)
 	}
 	return row
 }
 
-func (p *Provider) keySizes(value any, decode func(string) ([]byte, bool), fingerprinted bool) []any {
+func keySizes(value any, decode func(string) ([]byte, bool), fingerprinted bool, fingerprints *fingerprints) []any {
 	entries, _ := value.(map[string]any)
 	keys := make([]string, 0, len(entries))
 	for key := range entries {
@@ -320,7 +321,7 @@ func (p *Provider) keySizes(value any, decode func(string) ([]byte, bool), finge
 		if !ok {
 			entry["bytes"] = -1
 		} else if fingerprinted {
-			entry["fingerprint"] = p.fingerprint(decoded)
+			entry["fingerprint"] = fingerprints.sum(decoded)
 		}
 		out = append(out, entry)
 	}
@@ -396,7 +397,7 @@ func sliceHasEmpty(values []string) bool {
 // References by name - secretKeyRef, configMapKeyRef, envFrom - are left as
 // they are on purpose: a Secret's or ConfigMap's name is not its content,
 // and it is how a reader finds which one a workload reads.
-func (p *Provider) cleanObject(object map[string]any) map[string]any {
+func (p *Provider) cleanObject(object map[string]any, fingerprints *fingerprints) map[string]any {
 	if metadata, ok := object["metadata"].(map[string]any); ok {
 		delete(metadata, "managedFields")
 		if annotations, ok := metadata["annotations"].(map[string]any); ok {
@@ -408,23 +409,23 @@ func (p *Provider) cleanObject(object map[string]any) map[string]any {
 			}
 		}
 	}
-	cleaned, _ := p.cleanValue(object).(map[string]any)
+	cleaned, _ := p.cleanValue(object, fingerprints).(map[string]any)
 	return cleaned
 }
 
-func (p *Provider) cleanValue(value any) any {
+func (p *Provider) cleanValue(value any, fingerprints *fingerprints) any {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, item := range v {
 			if key == "env" {
-				p.maskEnv(item)
+				maskEnv(item, fingerprints)
 			}
-			v[key] = p.cleanValue(item)
+			v[key] = p.cleanValue(item, fingerprints)
 		}
 		return v
 	case []any:
 		for index := range v {
-			v[index] = p.cleanValue(v[index])
+			v[index] = p.cleanValue(v[index], fingerprints)
 		}
 		return v
 	case string:
@@ -438,7 +439,7 @@ func (p *Provider) cleanValue(value any) any {
 // maskEnv masks an env value under a credential name and puts its
 // fingerprint beside it, so a value set in place can be compared with the
 // Secret that should hold it.
-func (p *Provider) maskEnv(value any) {
+func maskEnv(value any, fingerprints *fingerprints) {
 	entries, ok := value.([]any)
 	if !ok {
 		return
@@ -450,7 +451,7 @@ func (p *Provider) maskEnv(value any) {
 		}
 		name, _ := variable["name"].(string)
 		if text, isText := variable["value"].(string); isText && text != "" && credentialKey.MatchString(name) {
-			variable["value"], variable["valueFingerprint"] = "<redacted>", p.fingerprint([]byte(text))
+			variable["value"], variable["valueFingerprint"] = "<redacted>", fingerprints.sum([]byte(text))
 		}
 	}
 }
