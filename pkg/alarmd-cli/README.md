@@ -189,6 +189,30 @@ alarmd-cli invoke k8s.logs --env <environment_id> --input '{"pod":"<pod>","previ
 
 读不到时按失败码区分：`k8s_rbac_forbidden`（Role 没建或被关）、`k8s_service_account_not_mounted`、`k8s_apiserver_unreachable`、`k8s_not_found`（含从未写过的 previous 日志）、`k8s_not_in_scope`（不是 alarmd 的 Pod 或容器）等，不会以空列表冒充"没有事件"。所有副本都挂掉时这条路读不到，只能用 kubectl。
 
+## 集群资源的检查与写入（SRE 通道）
+
+SRE 通道有集群管理权限（RBAC 组只读，不给 bind/escalate）。三个操作走同一个服务端 apply 路径，只认 chart 授权的种类（chart 之外的种类答 `not_granted_kind`，Role、ClusterRole 与绑定答 `rbac_not_dry_run` / `rbac_not_writable`，都不发出）：
+
+```sh
+# 部署前检查：每个对象以 dryRun=All 交给 apiserver，准入 webhook、schema、配额、冲突照常检查，什么都不落库
+helm template <release> <chart> -n <ns> -f <values> > render.yaml
+python3 -c 'import json,sys;print(json.dumps({"manifests":open(sys.argv[1]).read(),"namespace":sys.argv[2]}))' render.yaml <ns> > dry.json
+alarmd-cli invoke k8s.dry_run --env <environment_id> --input @dry.json
+# 写入：字段管理者 alarmd-sre；冲突时答 conflict，force=true 接管；结果给出字段差异，Secret 只显示键与指纹
+alarmd-cli invoke k8s.apply --env <environment_id> --input @apply.json
+# 删除：按先前 k8s.list 读到的 uid；kube-system、kube-public、kube-node-lease、default 与 alarmd 所在命名空间不删
+alarmd-cli invoke k8s.delete --env <environment_id> --input '{"api_version":"networking.k8s.io/v1","kind":"Ingress","namespace":"<ns>","name":"<name>","uid":"<uid>"}'
+```
+
+Secret 的值只从本地文件经 `--input @文件` 传入，从不出现在应答、审计与日志里；CLI 到 alarmd 若是明文 HTTP，值会以明文经过集群网络。每次写入都留 `sre_action` 审计。对象带 `meta.helm.sh/release-name` 时应答写明 `helm_release`：下一次 `helm upgrade` 会改回或冲突。
+
+**卸载一个 helm release（如 bk-monitor）**，按顺序：
+
+1. 列出这个 release 拥有的对象：对每个命名空间级种类 `k8s.list {"kind":"<Kind>","label_selector":"app.kubernetes.io/managed-by=Helm","paths":["metadata.annotations"]}`，留下 `meta.helm.sh/release-name` 是它的；集群级的同样列一遍。
+2. 逐个 `k8s.delete`，带读到的 `uid`。先删工作负载（Deployment、StatefulSet、DaemonSet、Job、CronJob），再删 Service、Ingress、ConfigMap、Secret 等。
+3. RBAC 对象（Role、RoleBinding、ClusterRole、ClusterRoleBinding）通道不写，列给人用 kubectl 删。
+4. 最后删 helm 自己的记录：release 命名空间里 `sh.helm.release.v1.<release>.v*` 这些 Secret（`k8s.list {"kind":"Secret","namespace":"<ns>","label_selector":"owner=helm,name=<release>"}`，逐个按 uid 删）。删了以后 `helm list` 里就没有这个 release；在那之前不要删，否则 helm 会把剩下的对象当成孤儿。
+
 ## 会话与环境
 
 ```sh

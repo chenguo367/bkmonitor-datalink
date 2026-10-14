@@ -72,8 +72,14 @@ type fakeDryRunner struct {
 	asked    []string
 }
 
+// Mapping parses apiVersion as the cluster client does, so a spelling the
+// parser accepts ("/v1") resolves here as it would on a cluster.
 func (f *fakeDryRunner) Mapping(apiVersion, kind string) (schema.GroupVersionResource, bool, error) {
-	resource, ok := f.mappings[apiVersion+"/"+kind]
+	version, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return schema.GroupVersionResource{}, false, err
+	}
+	resource, ok := f.mappings[version.String()+"/"+kind]
 	if !ok {
 		return schema.GroupVersionResource{}, false, errors.New("no matches for kind")
 	}
@@ -255,7 +261,9 @@ stringData: {token: %s}
 // What cannot be asked about is said so, object by object, and the run is
 // not clean: a granted kind the cluster does not serve (a CRD not
 // installed), an object without a name, a namespaced object with no
-// namespace anywhere, and a call that got no status back.
+// namespace anywhere, an apiVersion not in its canonical form (the parser
+// takes "/v1" for core v1; it is refused, not resolved), and a call that
+// got no status back.
 func TestWhatCannotBeAskedAboutIsNotChecked(t *testing.T) {
 	runner := &fakeDryRunner{}
 	provider := dryRunProvider(t, runner)
@@ -271,6 +279,10 @@ metadata: {generateName: cm-, namespace: ns1}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: nowhere}
+---
+apiVersion: /v1
+kind: ConfigMap
+metadata: {name: spelled, namespace: ns1}
 `})
 	if err != nil {
 		t.Fatal(err)
@@ -280,8 +292,11 @@ metadata: {name: nowhere}
 			t.Fatalf("object %+v, want not_checked with why", object)
 		}
 	}
-	if receipt.Clean || receipt.Counts[DryRunNotChecked] != 3 || len(runner.asked) != 0 {
-		t.Fatalf("receipt %+v asked %v, want three not checked and nothing asked", receipt, runner.asked)
+	if receipt.Clean || receipt.Counts[DryRunNotChecked] != 4 || len(runner.asked) != 0 {
+		t.Fatalf("receipt %+v asked %v, want four not checked and nothing asked", receipt, runner.asked)
+	}
+	if spelled := receipt.Objects[3]; !strings.Contains(spelled.Message, `write "v1"`) {
+		t.Fatalf("object %+v, want the canonical spelling named", spelled)
 	}
 	transport := &fakeDryRunner{getErr: errors.New("dial tcp: connection refused")}
 	receipt, err = dryRunProvider(t, transport).DryRun(context.Background(), DryRunRequest{Manifests: ingressManifest})

@@ -184,36 +184,11 @@ func (p *Provider) dryRunOne(ctx context.Context, object *unstructured.Unstructu
 		answer.Verdict, answer.Message = DryRunNotChecked, message
 		return answer
 	}
-	if answer.APIVersion == "" || answer.Kind == "" {
-		return notChecked("the object names no apiVersion or kind")
-	}
-	if answer.Name == "" {
-		return notChecked("the object has no metadata.name (generateName is not dry-run here)")
-	}
-	version, err := schema.ParseGroupVersion(answer.APIVersion)
-	if err != nil {
-		return notChecked("apiVersion does not parse: " + err.Error())
-	}
-	if version.Group == rbacGroup {
-		answer.Verdict = DryRunRBACNotDryRun
-		answer.Message = "RBAC objects are not dry-run: the apiserver's escalation check would need bind and escalate, which this channel does not hold"
+	resource, outcome, message := p.gate(object, defaultNamespace, DryRunRBACNotDryRun, DryRunNotGrantedKind)
+	answer.Namespace = object.GetNamespace()
+	if outcome != "" {
+		answer.Verdict, answer.Message = outcome, message
 		return answer
-	}
-	if !dryRunGranted[schema.GroupKind{Group: version.Group, Kind: answer.Kind}] {
-		answer.Verdict = DryRunNotGrantedKind
-		answer.Message = "the channel is granted a dry run only on the kinds the chart renders; extend the chart's grant and this list together"
-		return answer
-	}
-	resource, namespaced, err := p.options.DryRun.Mapping(answer.APIVersion, answer.Kind)
-	if err != nil {
-		return notChecked("this cluster serves no " + answer.APIVersion + " " + answer.Kind + ": " + err.Error())
-	}
-	if namespaced && answer.Namespace == "" {
-		if defaultNamespace == "" {
-			return notChecked("a namespaced object without a namespace, and the request names none")
-		}
-		answer.Namespace = defaultNamespace
-		object.SetNamespace(defaultNamespace)
 	}
 	data, err := json.Marshal(object.Object)
 	if err != nil {

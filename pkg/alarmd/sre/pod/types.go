@@ -156,6 +156,9 @@ type Options struct {
 	Resources ResourceReader
 	// DryRun is k8s.dry_run's Kubernetes access; nil leaves it unavailable.
 	DryRun DryRunner
+	// Writer is k8s.apply's and k8s.delete's Kubernetes write; nil leaves
+	// them unavailable.
+	Writer Writer
 	// DefaultNamespace is the namespace a request that names none reads:
 	// this process's own. Empty means a request must name one.
 	DefaultNamespace string
