@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -101,12 +102,14 @@ type httpSurface struct {
 	Internal       string
 	Restricted     bool
 	AdminKeySecret ui.AdminKeySecret
+	CLIRelease     *clirelease.Release
 }
 
 func httpSurfaceOf(cfg config.Config) httpSurface {
 	secret := cfg.CLI.AdminKeySecret
 	return httpSurface{Diagnostics: cfg.HTTP.DiagnosticsListen, Internal: cfg.HTTP.InternalListen, Restricted: cfg.PublicSurfaceRestrictionRequested(),
-		AdminKeySecret: ui.AdminKeySecret{Namespace: secret.Namespace, Name: secret.Name, Key: secret.Key}}
+		AdminKeySecret: ui.AdminKeySecret{Namespace: secret.Namespace, Name: secret.Name, Key: secret.Key},
+		CLIRelease:     embeddedCLIRelease()}
 }
 
 type runtimeModeDependencies struct {
@@ -121,7 +124,7 @@ func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 		openRoles: openPhaseTwoRoleRuntime, openRoleBundle: openProductionRoleBundle,
 		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
 			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal),
-				httpservice.WithAdminKeySecret(surface.AdminKeySecret)}
+				httpservice.WithAdminKeySecret(surface.AdminKeySecret), httpservice.WithCLIRelease(surface.CLIRelease)}
 			if surface.Restricted {
 				options = append(options, httpservice.WithRestrictedPublicSurface())
 			}
@@ -231,6 +234,15 @@ func runPhaseTwoApplicationWithDependencies(
 			slog.String("established", divergence.Established))
 	})
 
+	// The distribution routes answer 503 without a usable release; this line
+	// is where an operator reading the Pod finds out which of the two it is.
+	if err := embeddedCLIRelease().Problem(); err != nil {
+		result := "unavailable"
+		if errors.Is(err, clirelease.ErrInvalid) {
+			result = "invalid"
+		}
+		logger.Warn("cli_release", result, 0, 0, slog.String("error", err.Error()))
+	}
 	server, err := dependencies.newHTTP(recorder, application, httpSurfaceOf(cfg))
 	if err != nil {
 		return err

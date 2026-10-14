@@ -97,9 +97,13 @@ build)
     daemon=$(docker info --format '{{.OSType}}/{{.Architecture}}')
     case $daemon in linux/x86_64) daemon=linux/amd64 ;; linux/aarch64) daemon=linux/arm64 ;; esac
     [[ $daemon == "linux/$TARGET_ARCH" ]] || fail "需要原生 linux/$TARGET_ARCH 构建机，实际为 $daemon"
+    # alarmd-cli 与 alarmd 同提交、同版本，发行物打进 alarmd 二进制；它在构建上下文之外，按具名上下文带入。
+    cli_source="$(cd "$module/.." && pwd)/alarmd-cli"
+    [[ -f $cli_source/go.mod && ! -L $cli_source ]] || fail "找不到 alarmd-cli 源码：$cli_source"
     login
     ref=$(local_image)
     docker buildx build --load --platform "linux/$TARGET_ARCH" --progress plain \
+        --build-context "alarmd-cli=$cli_source" \
         --build-arg "VERSION=$PACKAGE_VERSION" --build-arg "GIT_COMMIT=$revision" \
         --build-arg "GO_IMAGE=${GO_IMAGE:-golang:1.26.7}" \
         --build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE:-tencentos/tencentos4-minimal}" \
@@ -113,6 +117,10 @@ build)
     actual=$(docker run --rm --network none "$ref" --version)
     expected="alarmd version=$PACKAGE_VERSION commit=$revision schema_version=$schema"
     [[ $actual == "$expected" ]] || fail "alarmd 版本元数据不匹配：$actual"
+    # 内嵌的 alarmd-cli 发行物必须是本次版本、四个平台齐全，且摘要逐个重算通过。
+    cli_actual=$(docker run --rm --network none "$ref" --check-cli-release) || fail 'alarmd-cli 发行物校验失败'
+    cli_expected="alarmd-cli release version=$PACKAGE_VERSION targets=darwin-arm64,darwin-x64,linux-arm64,linux-x64"
+    [[ $cli_actual == "$cli_expected" ]] || fail "alarmd-cli 发行物不匹配：$cli_actual"
     touch "$state/built"
     printf '::set-output name=revision::%s\n' "$revision"
     ;;

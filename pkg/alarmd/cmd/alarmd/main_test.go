@@ -17,7 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -93,6 +95,24 @@ func TestRunRejectsConflictingTerminalFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cannot be used together") {
 		t.Fatalf("run() stderr = %q, want flag conflict", stderr.String())
+	}
+}
+
+// A binary built without a release fails the build's own check, before
+// reading any configuration. The release is injected: a local make build
+// leaves one in the package's embed, and the test must not depend on that.
+func TestCheckCLIReleaseFailsABinaryBuiltWithoutOne(t *testing.T) {
+	embedded := embeddedCLIRelease
+	t.Cleanup(func() { embeddedCLIRelease = embedded })
+	embeddedCLIRelease = func() *clirelease.Release { return clirelease.LoadFS(fstest.MapFS{}, version) }
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--check-cli-release", "--config", "/missing/config.yaml"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "built without an alarmd-cli release") || stdout.Len() != 0 {
+		t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	stderr.Reset()
+	if code := run(context.Background(), []string{"--check-cli-release", "--version"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "cannot be used together") {
+		t.Fatalf("run() code = %d, stderr = %q, want flag conflict", code, stderr.String())
 	}
 }
 

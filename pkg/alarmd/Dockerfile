@@ -8,7 +8,12 @@
 # specific language governing permissions and limitations under the License.
 
 # Build from pkg/alarmd:
-#   docker buildx build --build-arg VERSION=<version> --build-arg GIT_COMMIT=<sha> -t alarmd:<tag> .
+#   docker buildx build --build-context alarmd-cli=../alarmd-cli \
+#     --build-arg VERSION=<version> --build-arg GIT_COMMIT=<sha> -t alarmd:<tag> .
+# VERSION must be the SemVer the image is released as: the alarmd-cli release
+# embedded in the binary is built from the alarmd-cli context with the same
+# version, and the pack step refuses anything else. The CLI lives outside this
+# build context, so it comes in as the named context alarmd-cli.
 # The binary lives under /data/bkmonitor, the same layout the in-house release
 # pipeline produces, so one chart serves either image. The runtime stage only
 # copies files: no shell or useradd is needed there, so RUNTIME_IMAGE can be any
@@ -29,6 +34,10 @@ ENV CGO_ENABLED=0 \
 COPY go.mod go.sum ./
 RUN go mod download
 
+COPY --from=alarmd-cli go.mod go.sum /alarmd-cli/
+RUN cd /alarmd-cli && go mod download
+COPY --from=alarmd-cli . /alarmd-cli/
+
 COPY . .
 
 # RUN uses the ARGs declared before it; version and target are declared after
@@ -38,10 +47,12 @@ ARG GIT_COMMIT=unknown
 ARG TARGETOS
 ARG TARGETARCH
 # The ldflags mirror pkg/alarmd/Makefile: main.version, main.commit and the
-# schema version the binary speaks. The directories are created here so the
-# runtime stage does not need a shell.
+# schema version the binary speaks. The alarmd-cli release is packed first, as
+# the Makefile does, so the binary embeds it. The directories are created here
+# so the runtime stage does not need a shell.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     mkdir -p /out/data/bkmonitor /out/etc/alarmd \
+ && go run ./clirelease/pack -cli /alarmd-cli -version "${VERSION}" -out clirelease/assets \
  && GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath \
       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GIT_COMMIT} -X main.schemaVersion=$(cat SCHEMA_VERSION)" \

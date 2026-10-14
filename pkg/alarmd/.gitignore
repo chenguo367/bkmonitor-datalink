@@ -4,3 +4,7 @@
 /alarmd
 /alarmd-comparator
 /alarmd-shadow-verify
+# The embedded alarmd-cli release is build output; only its placeholder is
+# source.
+/clirelease/assets/*
+!/clirelease/assets/README.md

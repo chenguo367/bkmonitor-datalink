@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet/ui"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -63,6 +64,9 @@ type Server struct {
 	// adminKeySecret is what the login page says about where the
 	// administrator key is kept: names only.
 	adminKeySecret ui.AdminKeySecret
+	// cliRelease is the alarmd-cli release this binary carries; nil serves
+	// the routes as unavailable.
+	cliRelease *clirelease.Release
 }
 
 // Stall is one reason the process is not making progress: a named loop that
@@ -119,6 +123,12 @@ func WithRestrictedPublicSurface() Option {
 // that reads it. The key itself is never passed here.
 func WithAdminKeySecret(secret ui.AdminKeySecret) Option {
 	return func(server *Server) { server.adminKeySecret = secret }
+}
+
+// WithCLIRelease serves the alarmd-cli release this binary carries on the
+// public /api/cli/ distribution routes.
+func WithCLIRelease(release *clirelease.Release) Option {
+	return func(server *Server) { server.cliRelease = release }
 }
 
 // SetPublicSurfaceRestricted settles whether the query surface is restricted.
@@ -262,6 +272,11 @@ func newServer(recorder *metric.Recorder, options ...Option) *Server {
 		metrics.ServeHTTP(response, request)
 	})
 	mux.HandleFunc("/api/", server.serveAPI)
+	// The CLI distribution routes are more specific than /api/, so they never
+	// reach the runtime's API handler: a new operator can fetch the CLI from
+	// a deployment whose runtime is not open yet or whose surface is
+	// restricted, which is when the CLI is needed most.
+	server.cliRelease.Register(mux)
 	// The page is static and carries no runtime dependency, so it is mounted
 	// unconditionally: when the runtime is not open yet the page still loads and
 	// says which channel cannot answer, which is the degradation it was designed
