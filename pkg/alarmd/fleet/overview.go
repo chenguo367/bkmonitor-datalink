@@ -279,7 +279,9 @@ var overviewDegradationStage = map[DegradationKind]string{
 }
 
 // overviewOf projects the health route's answer, and the replicas'
-// strategy states when they reported them, onto the overview.
+// strategy states when they reported them, onto the overview. Runtime.Summary
+// and Resources.Line are filled only by overviewFlows.apply, so a caller of
+// overviewOf alone gets them empty.
 func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown bool, at time.Time) Overview {
 	overview := Overview{GeneratedAt: at.UTC(), MaxAgeSeconds: int(OverviewMaxAge / time.Second),
 		Flow: make([]OverviewStage, 0, len(overviewStages))}

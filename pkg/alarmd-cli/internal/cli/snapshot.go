@@ -85,9 +85,11 @@ type SnapshotItem struct {
 	Operation string         `json:"operation"`
 	Params    map[string]any `json:"params,omitempty"`
 	File      string         `json:"file,omitempty"`
-	// Result is ok, partial (the deployment answered with a partial or
-	// error status), refused (no answer the channel accepted), timeout, or
-	// skipped_by_bound / not_in_catalog.
+	// Result is ok; partial, the deployment answered with a partial status,
+	// which is the read collected with the answer's own evidence caveat;
+	// refused, no answer the channel accepted or an answer with an error
+	// status; timeout; or skipped_by_bound / not_in_catalog. Every result
+	// but ok and partial is a read not collected, and makes the exit 3.
 	Result string `json:"result"`
 	Reason string `json:"reason,omitempty"`
 }
@@ -322,10 +324,28 @@ func (run *snapshotRun) keepAnswer(operation, key string, params map[string]any,
 		if strings.Contains(reason, "timeout") {
 			result = "timeout"
 		}
+	case stringField(m, "status") == "partial":
+		// Collected: the answer names its own limitations, and several
+		// operations' standing ones mark every answer partial.
+		result, reason = "partial", firstLimitation(m)
 	case stringField(m, "status") != "ok":
-		result, reason = "partial", stringField(m, "status")
+		result, reason = "refused", stringField(objectField(m, "error"), "code")
+		if reason == "" {
+			reason = stringField(m, "status")
+		}
 	}
 	run.keep(operation, key, params, m, result, reason)
+}
+
+// firstLimitation is the first limitation an answer names of its evidence,
+// or its status when it names none.
+func firstLimitation(m map[string]any) string {
+	if limitations, ok := objectField(m, "evidence")["limitations"].([]any); ok && len(limitations) > 0 {
+		if text, ok := limitations[0].(string); ok && text != "" {
+			return text
+		}
+	}
+	return stringField(m, "status")
 }
 
 func (run *snapshotRun) keep(operation, key string, params map[string]any, m map[string]any, result, reason string) {
@@ -373,13 +393,13 @@ func (run *snapshotRun) scan(name string, data []byte) []byte {
 }
 
 // finish writes the archive and its checksum, and answers 0 when every
-// read was collected whole, 3 when some were not.
+// read was collected, 3 when some were not: a partial answer was collected.
 func (run *snapshotRun) finish(out string) int {
 	run.manifest.FinishedAt = time.Now().UTC()
 	whole := true
 	missing := []string{}
 	for _, item := range run.manifest.Items {
-		if item.Result != "ok" && item.Result != "not_in_catalog" {
+		if item.Result != "ok" && item.Result != "partial" {
 			whole = false
 			missing = append(missing, item.Operation)
 		}
@@ -434,7 +454,7 @@ func (run *snapshotRun) finish(out string) int {
 	}
 	status, code, summary := "ok", 0, "Snapshot written with every read collected."
 	if !whole {
-		status, code, summary = "partial", 3, fmt.Sprintf("Snapshot written; %d reads were not collected whole, each named in manifest.json.", len(missing))
+		status, code, summary = "partial", 3, fmt.Sprintf("Snapshot written; %d reads were not collected, each named in manifest.json.", len(missing))
 	}
 	if len(run.manifest.Redactions) > 0 {
 		summary += " The second redaction pass replaced credential-like text; manifest.json names the files and rules. Report it: the deployment should have redacted it."
