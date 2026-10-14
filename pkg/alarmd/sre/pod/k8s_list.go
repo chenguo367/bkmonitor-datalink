@@ -59,6 +59,10 @@ type resourceKind struct {
 	// value's fingerprint, for Secrets.
 	KeysOnly      bool
 	Fingerprinted bool
+	// Webhooks drops each webhook's clientConfig.caBundle: the CA a webhook
+	// is called under is the cluster's trust material, and which webhooks
+	// gate what needs only their rules, selectors and targets.
+	Webhooks bool
 }
 
 var resourceKinds = []resourceKind{
@@ -97,6 +101,10 @@ var resourceKinds = []resourceKind{
 	// bk-monitor-operator's DataID: which business each kind of collected
 	// data lands in, the fact the trends derive their space from.
 	{Kind: "DataID", Resource: schema.GroupVersionResource{Group: "monitoring.bk.tencent.com", Version: "v1beta1", Resource: "dataids"}, Custom: true},
+	// The admission webhooks: which webhook gates which resources, so a
+	// dry run's denial can be traced to the webhook that made it.
+	{Kind: "ValidatingWebhookConfiguration", Resource: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations"}, Webhooks: true},
+	{Kind: "MutatingWebhookConfiguration", Resource: schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "mutatingwebhookconfigurations"}, Webhooks: true},
 }
 
 // helmLabel and helmAnnotations are Helm's ownership marks on every object a
@@ -284,6 +292,9 @@ func (p *Provider) encodeResources(result *ResourceReceipt, kind resourceKind, p
 		raw := object.Object
 		if kind.KeysOnly {
 			raw = p.keysOnlyRow(raw, kind.Fingerprinted, fingerprints)
+		}
+		if kind.Webhooks {
+			raw = withoutCABundles(raw)
 		}
 		item := p.cleanObject(raw, fingerprints)
 		if len(paths) > 0 {
@@ -572,4 +583,19 @@ func mergeProjected(into, from any) any {
 	default:
 		return from
 	}
+}
+
+// withoutCABundles is a webhook configuration with every webhook's
+// clientConfig.caBundle removed.
+func withoutCABundles(object map[string]any) map[string]any {
+	copied := (&unstructured.Unstructured{Object: object}).DeepCopy().Object
+	webhooks, _ := copied["webhooks"].([]any)
+	for _, raw := range webhooks {
+		if webhook, ok := raw.(map[string]any); ok {
+			if config, ok := webhook["clientConfig"].(map[string]any); ok {
+				delete(config, "caBundle")
+			}
+		}
+	}
+	return copied
 }
