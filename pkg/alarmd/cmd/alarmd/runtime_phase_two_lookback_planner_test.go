@@ -304,30 +304,36 @@ type refuseEveryStream struct{}
 
 func (refuseEveryStream) Admit(context.Context, string, string) (string, error) { return "test", nil }
 
-// Two replicas that both read a Query Group directed on their own evidence,
-// at different rungs - its old and new owner around a move - give it the
-// deeper rung, every round the same: the set is saved once, not again on
-// every round the two lists stand.
-func TestTwoReplicasListingOneQueryGroupGiveItTheDeeperRungOnce(t *testing.T) {
+// Replicas that all read a Query Group directed on their own evidence, at
+// different rungs - its old and new owner around a move, or more - give it
+// the deepest rung, every round the same: the set is saved once, not again
+// on every round the lists stand. Eight replicas, one of them deep: a round
+// that took whichever list it read last would miss the deep one in most
+// rounds, whatever order the lists come in.
+func TestReplicasListingOneQueryGroupGiveItTheDeepestRungOnce(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	fleetStore, _ := plannerFleet(t, now)
-	if _, err := fleetStore.PublishSummarized(context.Background(), fleet.Snapshot{Replica: "w1", TakenAt: now,
-		LookbackLate: map[string]int{"qg-1": 2, "qg-2": 1}}, time.Minute); err != nil {
-		t.Fatal(err)
+	replicas := []string{"w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8"}
+	for _, replica := range replicas {
+		rung := 1
+		if replica == "w5" {
+			rung = 4
+		}
+		if _, err := fleetStore.PublishSummarized(context.Background(), fleet.Snapshot{Replica: replica, TakenAt: now,
+			LookbackLate: map[string]int{"qg-2": rung}}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
 	}
 	store := &failingPlanStore{RedisStore: fleetStore}
 	planner := &lookbackPlanner{preferred: true, store: store, now: func() time.Time { return now }}
-	// Twenty rounds: the order the lists are read in is a map's, so a round
-	// that took the last list read instead of the deepest would show within
-	// a few.
 	for round := 0; round < 20; round++ {
-		byWorker, err := planner.plan(context.Background(), plannerOwners, []string{"w1", "w2"})
+		byWorker, err := planner.plan(context.Background(), plannerOwners, replicas)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, plan := range byWorker["w2"] {
 			if plan.QueryGroup == "qg-2" && plan.Rung != 4 {
-				t.Fatalf("round %d: qg-2 at rung %d, want the deeper 4", round, plan.Rung)
+				t.Fatalf("round %d: qg-2 at rung %d, want the deepest 4", round, plan.Rung)
 			}
 		}
 		now = now.Add(30 * time.Second)
