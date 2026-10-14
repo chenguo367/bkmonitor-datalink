@@ -234,7 +234,6 @@ type OverviewScale struct {
 
 type OverviewReplicaResource struct {
 	Name                string          `json:"name"`
-	CPURatio            OverviewNumber  `json:"cpu_ratio"`
 	MemoryRatio         OverviewNumber  `json:"memory_ratio"`
 	LiveHeapBytes       OverviewNumber  `json:"live_heap_bytes"`
 	QueryPermits        OverviewPermits `json:"query_permits"`
@@ -383,7 +382,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 	}
 	overview.Runtime = OverviewRuntime{Replicas: []OverviewReplica{}, Attention: []OverviewNotice{}}
 	for _, replica := range health.PerReplica {
-		resource := OverviewReplicaResource{Name: replica.Replica, CPURatio: overviewUnmeasured("ratio"), MemoryRatio: overviewUnmeasured("ratio"),
+		resource := OverviewReplicaResource{Name: replica.Replica, MemoryRatio: overviewUnmeasured("ratio"),
 			LiveHeapBytes: overviewUnmeasured("bytes"), CPUThrottledSeconds: overviewUnmeasured("seconds")}
 		if capacity := replica.Capacity; capacity != nil {
 			resource.QueryPermits = OverviewPermits{Held: capacity.PermitsHeld, Limit: capacity.PermitBudget}

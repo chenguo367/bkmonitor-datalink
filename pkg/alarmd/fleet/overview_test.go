@@ -119,7 +119,7 @@ func TestTheOverviewResourcesAreSharesOfTheirLimits(t *testing.T) {
 	}
 	replica := overview.Resources.Replicas[0]
 	if !replica.MemoryRatio.Measured || replica.MemoryRatio.Value < 0.17 || replica.MemoryRatio.Value > 0.18 ||
-		replica.QueryPermits.Held != 1 || replica.QueryPermits.Limit != 16 || replica.CPURatio.Measured || replica.LiveHeapBytes.Measured {
+		replica.QueryPermits.Held != 1 || replica.QueryPermits.Limit != 16 || replica.LiveHeapBytes.Measured {
 		t.Fatalf("replica resources = %+v", replica)
 	}
 	if overview.Resources.Scale.Strategies.Value != 53 || overview.Resources.Scale.MergedQueries.Value != 36 || overview.Resources.Scale.Hosts.Measured {
