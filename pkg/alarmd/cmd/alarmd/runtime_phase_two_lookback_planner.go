@@ -45,17 +45,20 @@ type lookbackPlanner struct {
 	store     lookbackPlanStore
 	recorder  *metric.Recorder
 	now       func() time.Time
-	// entries is the plan set as last kept; loaded says it was read from
-	// the store in this term.
+	// entries is the plan set as planned; loaded says it was read from the
+	// store in this term, and unsaved that it changed since the store last
+	// took it, so a save that failed is made again on the next round rather
+	// than waiting for the next change.
 	entries map[string]fleet.LookbackPlanEntry
 	loaded  bool
+	unsaved bool
 }
 
 // newTerm makes the next round read the kept set again: what another
 // Leader planned in between is the set to start from.
 func (planner *lookbackPlanner) newTerm() {
 	if planner != nil {
-		planner.loaded, planner.entries = false, nil
+		planner.loaded, planner.entries, planner.unsaved = false, nil, false
 	}
 }
 
@@ -83,7 +86,6 @@ func (planner *lookbackPlanner) plan(ctx context.Context, owners map[execution.Q
 	if err != nil {
 		return nil, err
 	}
-	changed := false
 	life := lookback.PlanLife.Milliseconds()
 	for _, replica := range sortedKeys(lists) {
 		for queryGroup, rung := range lists[replica] {
@@ -93,20 +95,21 @@ func (planner *lookbackPlanner) plan(ctx context.Context, owners map[execution.Q
 			// round a Query Group stays late.
 			if !kept || entry.Rung != rung || entry.ExpiresAtMs-now.UnixMilli() < life/2 {
 				planner.entries[queryGroup] = fleet.LookbackPlanEntry{Rung: rung, ExpiresAtMs: now.UnixMilli() + life}
-				changed = true
+				planner.unsaved = true
 			}
 		}
 	}
 	for queryGroup, entry := range planner.entries {
 		if entry.ExpiresAtMs <= now.UnixMilli() {
 			delete(planner.entries, queryGroup)
-			changed = true
+			planner.unsaved = true
 		}
 	}
-	if changed {
+	if planner.unsaved {
 		if err := planner.store.SaveLookbackPlan(ctx, planner.entries, now); err != nil {
 			return nil, err
 		}
+		planner.unsaved = false
 	}
 	byWorker := make(map[string][]viewstream.LookbackPlan, len(workers))
 	for _, worker := range workers {
