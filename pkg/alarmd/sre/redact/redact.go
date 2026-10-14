@@ -68,9 +68,19 @@ func (s *Scrubber) value(value any) any {
 			if dot := strings.LastIndexByte(field, '.'); dot >= 0 {
 				field = field[dot+1:]
 			}
+			// A credential-named key masks a scalar; a structure under it is
+			// walked, its fields judged the same way, so a reference to where
+			// a credential is kept - {secretName}, {name, key} - comes
+			// through. A credential bundle is masked whole.
 			normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(field))
-			switch normalized {
-			case "password", "passwd", "secret", "clientsecret", "apikey", "privatekey", "adminkey", "token", "accesstoken", "refreshtoken", "authorization", "proxyauthorization", "cookie", "setcookie", "credentials", "headers", "xbkapijwt", "identityassertion":
+			_, structure := item.(map[string]any)
+			if _, list := item.([]any); list {
+				structure = true
+			}
+			switch {
+			case credentialBundleField(normalized):
+				out[key] = "[REDACTED]"
+			case credentialField(normalized) && !structure:
 				out[key] = "[REDACTED]"
 			default:
 				out[s.Text(key)] = s.value(item)
@@ -87,4 +97,22 @@ func (s *Scrubber) value(value any) any {
 	default:
 		return v
 	}
+}
+
+func credentialField(normalized string) bool {
+	switch normalized {
+	case "password", "passwd", "secret", "clientsecret", "apikey", "privatekey", "adminkey", "token", "accesstoken", "refreshtoken", "authorization", "proxyauthorization", "xbkapijwt", "identityassertion":
+		return true
+	}
+	return false
+}
+
+// credentialBundleField is a key whose structure is a credential by what it
+// is: a header set, a credential set, a cookie jar.
+func credentialBundleField(normalized string) bool {
+	switch normalized {
+	case "cookie", "setcookie", "credentials", "headers":
+		return true
+	}
+	return false
 }

@@ -51,3 +51,22 @@ func TestURLUserinfoIsACredentialUnderAnyScheme(t *testing.T) {
 		t.Fatalf("non-credential text changed: %s", out)
 	}
 }
+
+// A structure under a credential-named key is walked, not masked whole: a
+// reference to where a credential is kept comes through, and a scalar under
+// a credential-named key inside it is still masked. A structure that is a
+// credential by what it is - headers, credentials, cookies - stays masked.
+func TestAStructureUnderACredentialNameIsWalkedNotMasked(t *testing.T) {
+	raw := json.RawMessage(`{"secret":{"secretName":"ref-volume","items":[{"key":"ref-key"}],"password":"inline-nested"},"token":"inline-token","headers":{"X-Custom-Auth":"inline-header"},"credentials":{"user":"inline-credential"}}`)
+	out := string(New().JSON(raw))
+	for _, kept := range []string{"ref-volume", "ref-key"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("reference lost: %s in %s", kept, out)
+		}
+	}
+	for _, gone := range []string{"inline-nested", "inline-token", "inline-header", "inline-credential"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("credential retained: %s in %s", gone, out)
+		}
+	}
+}

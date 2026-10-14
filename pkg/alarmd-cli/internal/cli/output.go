@@ -33,12 +33,32 @@ func sensitiveKey(key string) bool {
 	return false
 }
 
+// credentialBundle is a key whose structure is a credential by what it is:
+// a header set, a credential set, a cookie jar, an authorization grant.
+func credentialBundle(key string) bool {
+	k := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+	switch k {
+	case "headers", "requestheaders", "responseheaders", "credentials", "cookie", "setcookie", "grant", "grantsecret", "grantcode":
+		return true
+	}
+	return false
+}
+
+// redact leaves out a credential-named key's scalar value and walks a
+// structure under one, judging its fields the same way: a Kubernetes object
+// keeps its Secret references - a volume's secret.secretName, a
+// ServiceMonitor's basicAuth.password {name, key} - which name where a
+// credential is kept and are how a reader finds a dependency. A credential
+// bundle is left out whole.
 func redact(v any, secrets []string) any {
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, value := range x {
-			if sensitiveKey(k) {
+			if credentialBundle(k) {
+				continue
+			}
+			if sensitiveKey(k) && !structured(value) {
 				continue
 			}
 			out[redact(k, secrets).(string)] = redact(value, secrets)
@@ -64,6 +84,14 @@ func redact(v any, secrets []string) any {
 	default:
 		return v
 	}
+}
+
+func structured(value any) bool {
+	switch value.(type) {
+	case map[string]any, []any:
+		return true
+	}
+	return false
 }
 
 func (a *App) print(value any) int {
