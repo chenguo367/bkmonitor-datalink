@@ -9,6 +9,7 @@ package redact
 import (
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -69,9 +70,9 @@ func (s *Scrubber) value(value any) any {
 				field = field[dot+1:]
 			}
 			// A credential-named key masks a scalar; a structure under it is
-			// walked, its fields judged the same way, so a reference to where
-			// a credential is kept - {secretName}, {name, key} - comes
-			// through. A credential bundle is masked whole.
+			// read as a reference to where a credential is kept - {secretName},
+			// {name, key} - and only a reference's fields come through. A
+			// credential bundle is masked whole.
 			normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(field))
 			_, structure := item.(map[string]any)
 			if _, list := item.([]any); list {
@@ -82,6 +83,8 @@ func (s *Scrubber) value(value any) any {
 				out[key] = "[REDACTED]"
 			case credentialField(normalized) && !structure:
 				out[key] = "[REDACTED]"
+			case credentialField(normalized):
+				out[key] = s.reference(item)
 			default:
 				out[s.Text(key)] = s.value(item)
 			}
@@ -115,4 +118,66 @@ func credentialBundleField(normalized string) bool {
 		return true
 	}
 	return false
+}
+
+// referenceFields are the fields a reference to a Secret has: a volume's
+// secret {secretName, items [{key, path, mode}], defaultMode, optional}, a key
+// reference {name, key, optional}, a ServiceMonitor's {name, key}. The CLI
+// holds the same table (alarmd-cli internal/cli output.go).
+var referenceFields = map[string]bool{"secretName": true, "name": true, "key": true, "optional": true, "items": true,
+	"path": true, "mode": true, "defaultMode": true, "namespace": true}
+
+// ReferenceFields is the table, sorted, for the test that holds both copies
+// to it.
+func ReferenceFields() []string {
+	fields := make([]string, 0, len(referenceFields))
+	for field := range referenceFields {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// reference is a structure under a credential-named key as it is shown: a
+// reference's fields, walked the same way, and every other value masked - a
+// field with any other name, a list element that is not a structure - so
+// nothing under a credential name comes out unless it names where a
+// credential is kept.
+func (s *Scrubber) reference(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			if !referenceFields[key] {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			out[key] = s.referenceField(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			switch item.(type) {
+			case map[string]any, []any:
+				out[i] = s.reference(item)
+			default:
+				out[i] = "[REDACTED]"
+			}
+		}
+		return out
+	default:
+		return "[REDACTED]"
+	}
+}
+
+func (s *Scrubber) referenceField(value any) any {
+	switch v := value.(type) {
+	case map[string]any, []any:
+		return s.reference(v)
+	case string:
+		return s.Text(v)
+	default:
+		return v
+	}
 }

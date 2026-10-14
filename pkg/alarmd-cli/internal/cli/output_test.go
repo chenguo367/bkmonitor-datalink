@@ -58,3 +58,32 @@ func TestASecretReferenceIsKeptAndACredentialValueIsNot(t *testing.T) {
 		}
 	}
 }
+
+// Under a credential-named key a structure is read as a reference: only the
+// fields a reference to a Secret has come through, and every other value -
+// a list element, a field with an ordinary name - is left out, at any depth.
+func TestUnderACredentialNameOnlyAReferenceComesThrough(t *testing.T) {
+	for _, value := range []map[string]any{
+		{"token": []any{"sentinel-list"}},
+		{"apiKey": map[string]any{"value": "sentinel-value"}},
+		{"password": map[string]any{"data": "sentinel-data"}},
+		{"secret": map[string]any{"secretName": "ref-kept", "items": []any{map[string]any{"key": "ref-item", "path": "p", "note": "sentinel-nested"}, "sentinel-element"}}},
+		{"password": map[string]any{"data": map[string]any{"inner": "sentinel-deep"}}},
+	} {
+		encoded, _ := json.Marshal(redact(value, nil))
+		if strings.Contains(string(encoded), "sentinel") {
+			t.Errorf("%v leaked: %s", value, encoded)
+		}
+		if _, isRef := value["secret"]; isRef && (!strings.Contains(string(encoded), "ref-kept") || !strings.Contains(string(encoded), "ref-item")) {
+			t.Errorf("%v lost its reference: %s", value, encoded)
+		}
+	}
+}
+
+// The reference fields are one table, the same one the server holds.
+func TestTheReferenceFieldsAreTheSharedTable(t *testing.T) {
+	want := "defaultMode,items,key,mode,name,namespace,optional,path,secretName"
+	if got := strings.Join(sortedReferenceFields(), ","); got != want {
+		t.Fatalf("reference fields %s, want %s", got, want)
+	}
+}

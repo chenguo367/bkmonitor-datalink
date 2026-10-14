@@ -40,8 +40,8 @@ type SecretKey struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
-// SecretReceipt is what one Secret read returned. Revealed records that the
-// request asked for the values; Truncated that keys past MaxSecretKeys were
+// SecretReceipt is what one Secret read returned: never a value, each key
+// as its size and fingerprint. Truncated says keys past MaxSecretKeys were
 // left out.
 type SecretReceipt struct {
 	Namespace string `json:"namespace"`
