@@ -195,3 +195,25 @@ func TestOnlyAnAdminShapedLiveTokenIsKept(t *testing.T) {
 		t.Fatalf("the key lives %v, the token %v", ttl, want)
 	}
 }
+
+// A store that does not answer fails the call, even while this process
+// still holds a token it read before: that token may have been refused by
+// another process since.
+func TestAStoreThatDoesNotAnswerFailsTheCallInsteadOfTheCachedToken(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	store, client := testStore(t, &now)
+	ctx := context.Background()
+	if _, err := store.Put(ctx, AdminToken(t, now, "first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Token(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(reread)
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Token(ctx); err == nil || got != "" || errors.As(err, new(ErrNoToken)) {
+		t.Fatalf("an unanswered store gave token %q, err %v", got, err)
+	}
+}

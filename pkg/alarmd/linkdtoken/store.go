@@ -169,6 +169,14 @@ func (s *Store) State(ctx context.Context) (Answer, error) {
 // read, read again from the store once it is reread old. A token the admin
 // refused, or past its expiry, is no token; one past its refresh time is
 // still used until the admin hands over the next.
+//
+// A store that does not answer fails the call rather than falling back to
+// the token read before: that one may have been refused by another process
+// meanwhile, and the store is the runtime store this process cannot run
+// without anyway. A failed read does not count as a read, so while the store
+// is down every call asks it again - deliberately unbounded: the client holds
+// two connections, and each call that asks fails at once instead of calling
+// the link.
 func (s *Store) Token(ctx context.Context) (string, error) {
 	now := s.now()
 	s.mu.Lock()

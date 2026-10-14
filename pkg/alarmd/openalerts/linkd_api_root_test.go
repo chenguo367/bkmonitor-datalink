@@ -179,3 +179,17 @@ func TestWithoutABasicPairTheCallsCarryTheAdminsToken(t *testing.T) {
 		t.Fatal("a reader with neither a Basic pair nor a token source was built")
 	}
 }
+
+// The page is told by its body: an answer labelled text/html whose body is
+// the API's JSON is the API's answer, not the web page.
+func TestAJSONAnswerLabelledHTMLIsStillTheAPIs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`[{"eventSourceId":"source","hookName":"active","keyPrefix":"test:active","address":"redis:6379","database":3,"sources":["source"]}]`))
+	}))
+	t.Cleanup(server.Close)
+	if _, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
+		Username: "user", Password: "secret", MaxResponseBytes: 1 << 20}); err != nil {
+		t.Fatalf("a JSON answer labelled text/html was refused: %v", err)
+	}
+}

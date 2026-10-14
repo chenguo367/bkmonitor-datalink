@@ -199,14 +199,13 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 		}
 		return statusError(response.StatusCode)
 	}
-	if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
-		return ErrNotAPI
-	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, reader.options.MaxResponseBytes+1))
 	if err != nil || int64(len(data)) > reader.options.MaxResponseBytes {
 		return ErrIncomplete
 	}
 	if json.Unmarshal(data, out) != nil {
+		// The page is told by its body, not its label: a JSON answer
+		// labelled text/html would otherwise be refused as not_api.
 		if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '<' {
 			return ErrNotAPI
 		}
