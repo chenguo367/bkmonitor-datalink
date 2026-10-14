@@ -132,3 +132,20 @@ func TestTheConsoleEntryCarriesItsCallsLatestAnswerAndFailure(t *testing.T) {
 		t.Fatalf("a refused Console: %+v, want the roster's failure and no success", entry)
 	}
 }
+
+// The Console's latest answer and failure are the latest across its
+// operations, whichever operation came first in the list.
+func TestTheConsoleEntryTakesTheLatestAcrossItsOperations(t *testing.T) {
+	age := func(seconds float64) *float64 { return &seconds }
+	facts := &fleet.LinkdConsoleFacts{Calls: []fleet.ConsoleCallFacts{
+		{Op: "roster", LastSuccessAgeSeconds: age(100), LastFailureAgeSeconds: age(300), LastFailure: "status 502"},
+		{Op: "event_source", LastSuccessAgeSeconds: age(5), LastFailureAgeSeconds: age(50), LastFailure: "timeout"},
+		{Op: "reconcile", LastFailureAgeSeconds: age(20), LastFailure: "status 401"},
+	}}
+	entry := fleet.Endpoint{Role: fleet.EndpointLinkdConsole, Configured: true}
+	consoleHealth(&entry, facts)
+	if entry.LastSuccessAgeSeconds == nil || *entry.LastSuccessAgeSeconds != 5 ||
+		entry.LastFailureAgeSeconds == nil || *entry.LastFailureAgeSeconds != 20 || entry.LastFailure != "reconcile: status 401" {
+		t.Fatalf("entry = %+v, want the 5 s answer and the 20 s reconcile failure", entry)
+	}
+}
