@@ -49,12 +49,22 @@ type RangePoint struct {
 // misconfigured scope is indistinguishable from a quiet system -- which is the
 // worse of the two answers to get wrong, because it looks like good news.
 type RangeResult struct {
+	// Points is every series' samples together; Series keeps them apart,
+	// each with the labels the expression grouped it by.
 	Points []RangePoint
+	Series []RangeSeries
 	// Code is the provider's own classification when it returned no series.
 	// Empty means the provider raised nothing.
 	Code    string
 	Message string
 	Partial bool
+}
+
+// RangeSeries is one series of a range answer: its group labels, as the
+// provider names them, and its samples.
+type RangeSeries struct {
+	Labels map[string]string
+	Points []RangePoint
 }
 
 // Unavailable reports whether the provider declined to answer. An empty result
@@ -70,8 +80,10 @@ type promQLRequestBody struct {
 
 type promQLResponseBody struct {
 	Series []struct {
-		Columns []string    `json:"columns"`
-		Values  [][]float64 `json:"values"`
+		GroupKeys   []string    `json:"group_keys"`
+		GroupValues []string    `json:"group_values"`
+		Columns     []string    `json:"columns"`
+		Values      [][]float64 `json:"values"`
 	} `json:"series"`
 	Status *struct {
 		Code    string `json:"code"`
@@ -161,14 +173,21 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 		if timeColumn < 0 || valueColumn < 0 {
 			return RangeResult{}, errors.New("alarmd access uq: range response is missing the time or value column")
 		}
+		kept := RangeSeries{Labels: map[string]string{}, Points: []RangePoint{}}
+		for index, key := range series.GroupKeys {
+			if index < len(series.GroupValues) {
+				kept.Labels[key] = series.GroupValues[index]
+			}
+		}
 		for _, values := range series.Values {
 			if timeColumn >= len(values) || valueColumn >= len(values) {
 				continue
 			}
-			result.Points = append(result.Points, RangePoint{
-				AtUnixMilli: int64(values[timeColumn]), Value: values[valueColumn],
-			})
+			point := RangePoint{AtUnixMilli: int64(values[timeColumn]), Value: values[valueColumn]}
+			result.Points = append(result.Points, point)
+			kept.Points = append(kept.Points, point)
 		}
+		result.Series = append(result.Series, kept)
 	}
 	return result, nil
 }

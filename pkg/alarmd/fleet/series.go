@@ -11,18 +11,35 @@ package fleet
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 )
 
-// SeriesPoint is one sample of one curve.
+// The trends: this deployment's own numbers over time, read back from the
+// platform's collection of them -- its ServiceMonitor's metrics and the
+// cluster's container metrics -- through the query backend the evaluation
+// already uses. The expressions are fixed here; a caller picks a window
+// from a fixed list and nothing else.
+
+// SeriesPoint is one sample of one line.
 type SeriesPoint struct {
 	AtUnixMilli int64   `json:"at"`
 	Value       float64 `json:"value"`
 }
 
+// SeriesLine is one series of an answer, with the labels the expression
+// grouped it by.
+type SeriesLine struct {
+	Labels map[string]string `json:"labels,omitempty"`
+	Points []SeriesPoint     `json:"points"`
+}
+
 // SeriesRange is what a provider returns for one expression.
 type SeriesRange struct {
-	Points []SeriesPoint
+	Lines []SeriesLine
 	// Code is the provider's own classification when it answered without
 	// samples. Empty means the window really was empty.
 	Code    string
@@ -30,72 +47,140 @@ type SeriesRange struct {
 	Partial bool
 }
 
-// RangeProvider answers one fixed expression over a window.
-//
-// It is an interface so this package states what it needs and nothing more: the
-// curves are alarmd's own numbers, and the page must not become a place where
-// arbitrary queries can be posted.
+// RangeProvider answers one fixed expression in one space over a window.
 type RangeProvider interface {
-	Range(ctx context.Context, promQL string, start, end time.Time, step time.Duration) (SeriesRange, error)
+	Range(ctx context.Context, space, promQL string, start, end time.Time, step time.Duration) (SeriesRange, error)
 }
 
-// SeriesDefinition is one curve. The expression travels with the curve because
-// a number on a page is only as trustworthy as the reader's ability to find out
-// where it came from.
-type SeriesDefinition struct {
-	Key    string
-	Label  string
-	PromQL string
-	// Help says what a reader should conclude from the curve, which is not the
-	// same as what it measures.
-	Help string
+// The two spaces a trend reads from: where the platform files this
+// deployment's own metrics (its ServiceMonitor's), and where it files the
+// cluster's container metrics.
+const (
+	TrendSpaceSelf      = "self"
+	TrendSpaceContainer = "container"
+)
+
+// TrendSpace is one space as the deployment derived it. State is resolved
+// with Space set, or unresolved with Reason saying why and Candidates the
+// spaces tried.
+type TrendSpace struct {
+	Space      string   `json:"space,omitempty"`
+	State      string   `json:"state"`
+	Reason     string   `json:"reason,omitempty"`
+	Candidates []string `json:"candidates,omitempty"`
 }
 
-// seriesCatalog is fixed at build time. The page cannot add to it and cannot
-// pass an expression: the expressions live next to the thresholds they
-// illustrate, so a curve cannot drift from the judgment it explains.
-//
-// Every metric read here is the deployment-wide judgment, and every replica
-// exports the whole of it -- the judgment is computed once per replica over all
-// the snapshots, so two replicas publish the same numbers rather than their own
-// halves. So each expression has to collapse the replica dimension before it
-// adds anything up. Summing over a replicated total multiplies it by the replica
-// count, which looks like a real curve, moves when the deployment moves, and is
-// wrong by a factor nobody can see from the shape.
-var seriesCatalog = []SeriesDefinition{
+// The space states, closed.
+const (
+	TrendSpaceResolved   = "resolved"
+	TrendSpaceUnresolved = "space_unresolved"
+)
+
+// TrendScope is what the container expressions select by: the namespace
+// this deployment's pods run in and its container's name, both its own.
+type TrendScope struct {
+	Namespace string
+	Container string
+}
+
+// TrendLine is one line of a chart: its name and its expression. ByPod
+// lines are one series per pod, named with the pod.
+type TrendLine struct {
+	Name   string
+	PromQL func(scope TrendScope, rate string) string
+	ByPod  bool
+}
+
+// TrendDefinition is one chart: what it shows, in which unit, from which
+// space, and what a reader concludes from it.
+type TrendDefinition struct {
+	Key   string
+	Title string
+	Unit  string
+	Space string
+	Help  string
+	Lines []TrendLine
+}
+
+const metricPrefix = "bkmonitor_alarmd_"
+
+// trendCatalog is fixed at build time. The alarmd counters here are each
+// process's own work -- a physical query, a decision, an admission is
+// counted once, by the process that did it -- so the replicas add up.
+var trendCatalog = []TrendDefinition{
 	{
-		Key: "expected", Label: "应有对象",
-		// Reads the judgment's own exported number rather than the control plane
-		// gauge it is derived from. The two are close but not the same read, and
-		// a page that shows one figure beside the other contradicts itself the
-		// moment they differ by a reporting cycle.
-		PromQL: `max(bkmonitor_alarmd_fleet_objects{state="expected"})`,
-		Help:   "控制面认为应该被执行的对象总数。它变动说明策略在增删，不是故障。",
+		Key: "decision_lag_p95", Title: "判定延迟 P95", Unit: "seconds", Space: TrendSpaceSelf,
+		Help: "slot_decision_lag_seconds 的 P95：从数据可读（检测时刻加读取等待）到判定完成确认；与总览判定段的 P95 同一口径。直方图最后一个桶是 300 秒，超过时画 300。",
+		Lines: []TrendLine{{Name: "P95", PromQL: func(_ TrendScope, rate string) string {
+			return fmt.Sprintf(`histogram_quantile(0.95, sum by (le) (rate(%sslot_decision_lag_seconds_bucket[%s])))`, metricPrefix, rate)
+		}}},
 	},
 	{
-		Key: "unknown", Label: "未知对象",
-		PromQL: `max(bkmonitor_alarmd_fleet_objects{state="unknown"})`,
-		Help:   "没人认领、或认领了但还说不出结论的对象。不为零时整体判定就停在 UNKNOWN。",
+		Key: "queries_per_second", Title: "每秒查询数", Unit: "query/s", Space: TrendSpaceSelf,
+		Help: "worker_work_total{work_kind=\"physical_query\"} 的速率：合并后实际发往统一查询的物理查询，全部副本合计。",
+		Lines: []TrendLine{{Name: "物理查询", PromQL: func(_ TrendScope, rate string) string {
+			return fmt.Sprintf(`sum(rate(%sworker_work_total{work_kind="physical_query"}[%s]))`, metricPrefix, rate)
+		}}},
 	},
 	{
-		Key: "anomalies", Label: "异常对象",
-		// The inner max collapses the replicas, the outer sum adds up the kinds.
-		// Both are needed and they are not interchangeable: this metric is split
-		// by kind, so a bare max would report only the largest kind, and a bare
-		// sum would count every kind once per replica.
-		PromQL: `sum(max by (kind) (bkmonitor_alarmd_fleet_anomalies))`,
-		Help:   "当前有多少对象处于异常。持续上升说明问题在扩散，不是单点抖动。",
+		Key: "failures_per_minute", Title: "各段每分钟失败数", Unit: "failure/min", Space: TrendSpaceSelf,
+		Help: "拉取：access_query_failure_total；状态：state_admission_total 中非 success 的准入与 state_version_conflict_total；输出：output_events_rejected_all_total。判定段的失败是调度普查里此刻迟到和超期的检测，不是计数，不在图上。",
+		Lines: []TrendLine{
+			{Name: "拉取", PromQL: perMinute("access_query_failure_total", "")},
+			{Name: "状态·准入未成功", PromQL: perMinute("state_admission_total", `result!="success"`)},
+			{Name: "状态·版本冲突", PromQL: perMinute("state_version_conflict_total", "")},
+			{Name: "输出", PromQL: perMinute("output_events_rejected_all_total", "")},
+		},
 	},
 	{
-		Key: "stalled", Label: "自锁对象",
-		PromQL: `max(bkmonitor_alarmd_fleet_stalled_objects)`,
-		Help:   "轮次已经停止结束的对象。这条不会自己回落，非零就需要有人介入。",
+		Key: "cpu_cores", Title: "CPU 与上限", Unit: "cores", Space: TrendSpaceContainer,
+		Help: "容器监控的 container_cpu_usage_seconds_total 速率，按副本；上限取 kube-state-metrics 的容器 CPU limit。持续贴近上限说明在被限流。",
+		Lines: []TrendLine{
+			{Name: "使用", ByPod: true, PromQL: func(scope TrendScope, rate string) string {
+				return fmt.Sprintf(`sum by (pod) (rate(container_cpu_usage_seconds_total{%s}[%s]))`, scope.selector(), rate)
+			}},
+			{Name: "上限", ByPod: true, PromQL: containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores")},
+		},
+	},
+	{
+		Key: "memory_bytes", Title: "内存工作集与上限", Unit: "bytes", Space: TrendSpaceContainer,
+		Help: "容器监控的 container_memory_working_set_bytes，按副本；上限取 kube-state-metrics 的容器 memory limit。工作集到上限会被 OOM 杀掉。",
+		Lines: []TrendLine{
+			{Name: "工作集", ByPod: true, PromQL: func(scope TrendScope, _ string) string {
+				return fmt.Sprintf(`max by (pod) (container_memory_working_set_bytes{%s})`, scope.selector())
+			}},
+			{Name: "上限", ByPod: true, PromQL: containerLimit("memory", "kube_pod_container_resource_limits_memory_bytes")},
+		},
 	},
 }
 
-// SeriesWindow is a bounded choice of range and resolution. The page picks from
-// this list rather than sending its own, so a page cannot ask for a window that
-// costs the provider more than the deployment intends to spend.
+func perMinute(name, matcher string) func(TrendScope, string) string {
+	return func(_ TrendScope, rate string) string {
+		selector := metricPrefix + name
+		if matcher != "" {
+			selector += "{" + matcher + "}"
+		}
+		return fmt.Sprintf(`60 * sum(rate(%s[%s]))`, selector, rate)
+	}
+}
+
+// containerLimit is a container's limit as kube-state-metrics publishes it:
+// the resource-labelled family of version 2, else the per-resource family
+// of version 1, whichever this cluster's exporter has.
+func containerLimit(resource, legacy string) func(TrendScope, string) string {
+	return func(scope TrendScope, _ string) string {
+		return fmt.Sprintf(`max by (pod) (kube_pod_container_resource_limits{%s,resource=%q}) or max by (pod) (%s{%s})`,
+			scope.selector(), resource, legacy, scope.selector())
+	}
+}
+
+func (scope TrendScope) selector() string {
+	return fmt.Sprintf(`namespace=%q,container=%q`, scope.Namespace, scope.Container)
+}
+
+// SeriesWindow is a bounded choice of range and resolution, and the rate
+// window the expressions use: four steps and never under five minutes, so
+// a rate always spans several scrapes whatever the collection's interval.
 type SeriesWindow struct {
 	Key      string
 	Duration time.Duration
@@ -108,8 +193,16 @@ var seriesWindows = []SeriesWindow{
 	{Key: "24h", Duration: 24 * time.Hour, Step: 10 * time.Minute},
 }
 
-// DefaultSeriesWindow is what the page opens with.
+// DefaultSeriesWindow is what a reader gets without choosing.
 const DefaultSeriesWindow = "1h"
+
+func (window SeriesWindow) rate() string {
+	rate := 4 * window.Step
+	if rate < 5*time.Minute {
+		rate = 5 * time.Minute
+	}
+	return fmt.Sprintf("%dm", int(rate/time.Minute))
+}
 
 func lookupSeriesWindow(key string) (SeriesWindow, bool) {
 	if key == "" {
@@ -123,64 +216,151 @@ func lookupSeriesWindow(key string) (SeriesWindow, bool) {
 	return SeriesWindow{}, false
 }
 
-// Series is one curve as the page receives it.
-type Series struct {
-	Key    string        `json:"key"`
-	Label  string        `json:"label"`
+// TrendLineAnswer is one line as a reader receives it: its name (with the
+// pod for a by-pod line), the expression, and its samples.
+type TrendLineAnswer struct {
+	Name   string        `json:"name"`
+	Pod    string        `json:"pod,omitempty"`
 	PromQL string        `json:"promql"`
-	Help   string        `json:"help"`
 	Points []SeriesPoint `json:"points"`
-	// Unavailable says the provider declined rather than reported nothing. The
-	// two are different answers and the page must not merge them: an empty
-	// curve reads as calm, a declined one reads as "you are not looking".
-	Unavailable string `json:"unavailable,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-	Partial     bool   `json:"partial,omitempty"`
 }
 
-type seriesResponse struct {
-	Window       string   `json:"window"`
-	WindowChoice []string `json:"window_choices"`
-	StartUnixMs  int64    `json:"start"`
-	EndUnixMs    int64    `json:"end"`
-	StepSeconds  int      `json:"step_seconds"`
-	Series       []Series `json:"series"`
+// Trend is one chart as a reader receives it. Unavailable says the chart
+// could not be read -- its space is unresolved, or the provider declined or
+// failed -- with Detail why; NoSeries that it was read and the collection
+// has nothing for it in the window, which is its own answer: the metrics
+// are not being collected.
+type Trend struct {
+	Key         string            `json:"key"`
+	Title       string            `json:"title"`
+	Unit        string            `json:"unit"`
+	Space       string            `json:"space"`
+	Help        string            `json:"help"`
+	Lines       []TrendLineAnswer `json:"lines"`
+	Unavailable string            `json:"unavailable,omitempty"`
+	Detail      string            `json:"detail,omitempty"`
+	NoSeries    bool              `json:"no_series,omitempty"`
+	Partial     bool              `json:"partial,omitempty"`
 }
 
-// collectSeries runs the catalog over one window.
-//
-// One failing curve is reported on that curve and nowhere else. Failing the
-// whole response would take three working curves down with the fourth, and the
-// reader would lose the trend at the moment they came looking for it.
-func collectSeries(
-	ctx context.Context,
-	provider RangeProvider,
-	window SeriesWindow,
-	at time.Time,
-) []Series {
-	start := at.Add(-window.Duration)
-	collected := make([]Series, 0, len(seriesCatalog))
-	for _, definition := range seriesCatalog {
-		series := Series{
-			Key: definition.Key, Label: definition.Label,
-			PromQL: definition.PromQL, Help: definition.Help,
-			Points: []SeriesPoint{},
-		}
-		result, err := provider.Range(ctx, definition.PromQL, start, at, window.Step)
-		switch {
-		case err != nil:
-			series.Unavailable = "PROVIDER_ERROR"
-			series.Detail = err.Error()
-		case result.Code != "":
-			series.Unavailable = result.Code
-			series.Detail = result.Message
-		default:
-			if result.Points != nil {
-				series.Points = result.Points
-			}
-			series.Partial = result.Partial
-		}
-		collected = append(collected, series)
+// TrendsAnswer is the whole read: the window, when it was read, the two
+// spaces as derived, and the charts.
+type TrendsAnswer struct {
+	Window       string                `json:"window"`
+	WindowChoice []string              `json:"window_choices"`
+	StartUnixMs  int64                 `json:"start"`
+	EndUnixMs    int64                 `json:"end"`
+	StepSeconds  int                   `json:"step_seconds"`
+	RateWindow   string                `json:"rate_window"`
+	ReadAt       time.Time             `json:"read_at"`
+	Spaces       map[string]TrendSpace `json:"spaces"`
+	Trends       []Trend               `json:"trends"`
+}
+
+// Trends reads the catalog: through Range, in the spaces Spaces derives,
+// scoped by Scope. One answer per window serves for TrendsMaxAge.
+type Trends struct {
+	Range  RangeProvider
+	Spaces func(ctx context.Context) map[string]TrendSpace
+	Scope  TrendScope
+
+	mu      sync.Mutex
+	answers map[string]TrendsAnswer
+}
+
+// TrendsMaxAge is how long one read of a window answers: a page refresh
+// costs the query backend one query per line at most this often.
+const TrendsMaxAge = 30 * time.Second
+
+func (trends *Trends) read(ctx context.Context, window SeriesWindow, at time.Time) TrendsAnswer {
+	trends.mu.Lock()
+	if cached, found := trends.answers[window.Key]; found && at.Sub(cached.ReadAt) < TrendsMaxAge {
+		trends.mu.Unlock()
+		return cached
 	}
-	return collected
+	trends.mu.Unlock()
+	answer := collectTrends(ctx, trends.Range, trends.Spaces(ctx), trends.Scope, window, at)
+	trends.mu.Lock()
+	if trends.answers == nil {
+		trends.answers = map[string]TrendsAnswer{}
+	}
+	trends.answers[window.Key] = answer
+	trends.mu.Unlock()
+	return answer
+}
+
+// collectTrends runs the catalog over one window. One failing chart is
+// reported on that chart and nowhere else.
+func collectTrends(ctx context.Context, provider RangeProvider, spaces map[string]TrendSpace, scope TrendScope,
+	window SeriesWindow, at time.Time,
+) TrendsAnswer {
+	start := at.Add(-window.Duration)
+	answer := TrendsAnswer{Window: window.Key, WindowChoice: seriesWindowKeys(), StartUnixMs: start.UnixMilli(), EndUnixMs: at.UnixMilli(),
+		StepSeconds: int(window.Step / time.Second), RateWindow: window.rate(), ReadAt: at.UTC(), Spaces: spaces,
+		Trends: make([]Trend, 0, len(trendCatalog))}
+	for _, definition := range trendCatalog {
+		trend := Trend{Key: definition.Key, Title: definition.Title, Unit: definition.Unit, Space: definition.Space, Help: definition.Help,
+			Lines: []TrendLineAnswer{}}
+		space := spaces[definition.Space]
+		if space.State != TrendSpaceResolved {
+			trend.Unavailable, trend.Detail = TrendSpaceUnresolved, space.Reason
+			answer.Trends = append(answer.Trends, trend)
+			continue
+		}
+		points := 0
+		for _, line := range definition.Lines {
+			promQL := line.PromQL(scope, window.rate())
+			result, err := provider.Range(ctx, space.Space, promQL, start, at, window.Step)
+			switch {
+			case err != nil:
+				trend.Unavailable, trend.Detail = "PROVIDER_ERROR", err.Error()
+			case result.Code != "":
+				trend.Unavailable, trend.Detail = result.Code, result.Message
+			}
+			if trend.Unavailable != "" {
+				break
+			}
+			trend.Partial = trend.Partial || result.Partial
+			answers := linesOf(line, promQL, result.Lines)
+			for _, kept := range answers {
+				points += len(kept.Points)
+			}
+			trend.Lines = append(trend.Lines, answers...)
+		}
+		if trend.Unavailable != "" {
+			trend.Lines = []TrendLineAnswer{}
+		} else if points == 0 {
+			trend.NoSeries = true
+		}
+		answer.Trends = append(answer.Trends, trend)
+	}
+	return answer
+}
+
+// linesOf names a line's series: by pod, one line per pod in pod order;
+// otherwise the one line, every series' samples together.
+func linesOf(line TrendLine, promQL string, series []SeriesLine) []TrendLineAnswer {
+	if !line.ByPod {
+		kept := TrendLineAnswer{Name: line.Name, PromQL: promQL, Points: []SeriesPoint{}}
+		for _, one := range series {
+			kept.Points = append(kept.Points, one.Points...)
+		}
+		return []TrendLineAnswer{kept}
+	}
+	answers := make([]TrendLineAnswer, 0, len(series))
+	for _, one := range series {
+		pod := one.Labels["pod"]
+		answers = append(answers, TrendLineAnswer{Name: strings.TrimSpace(line.Name + " · " + pod), Pod: pod, PromQL: promQL,
+			Points: append([]SeriesPoint{}, one.Points...)})
+	}
+	sort.Slice(answers, func(i, j int) bool { return answers[i].Pod < answers[j].Pod })
+	return answers
+}
+
+func seriesWindowKeys() []string {
+	keys := make([]string, 0, len(seriesWindows))
+	for _, window := range seriesWindows {
+		keys = append(keys, window.Key)
+	}
+	return keys
 }

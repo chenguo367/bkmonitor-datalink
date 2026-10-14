@@ -21,11 +21,13 @@ import (
 // FrontReads is what the front surface may read, the admin server's page:
 // alarmd's own data and nothing of the cluster's, no raw store read, no
 // re-query and no write. The value says whether a read is charged to the
-// front read budget. overview.get answers from its own cache and runtime.get
-// from process memory without Redis: both are bounded without it, and a
-// burst of list reads must not refuse the page its own cheapest reads.
+// front read budget. overview.get and trends.get answer from their own
+// caches and runtime.get from process memory without Redis: all are bounded
+// without it, and a burst of list reads must not refuse the page its own
+// cheapest reads.
 var FrontReads = map[string]bool{
 	"overview.get":         false,
+	"trends.get":           false,
 	"fleet.get":            true,
 	"strategy.list":        true,
 	"strategy.get":         true,

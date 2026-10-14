@@ -74,8 +74,8 @@ func TestTheOverviewVerdictIsTheHealthVerdictInOneLine(t *testing.T) {
 	}
 }
 
-// Each dependency hangs on its stage, by state and never by address, and a
-// number the replicas do not report is unmeasured, never zero.
+// Each dependency hangs on its stage with its state and the instance it is,
+// and a number the replicas do not report is unmeasured, never zero.
 func TestTheOverviewFlowHangsDependenciesOnTheirStageAndSaysWhatIsUnmeasured(t *testing.T) {
 	overview := overviewOf(overviewHealth(), nil, false, time.Now())
 	pull := flowStage(overview, "pull")
@@ -99,10 +99,11 @@ func TestTheOverviewFlowHangsDependenciesOnTheirStageAndSaysWhatIsUnmeasured(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, address := range []string{"198.51.100.7", "192.0.2.10", "203.0.113.5"} {
-		if strings.Contains(string(encoded), address) {
-			t.Fatalf("the overview carries an address: %s", encoded)
-		}
+	if pull.Dependencies[0].Address != "http://198.51.100.7:10205" || flowStage(overview, "state").Dependencies[0].Address != "192.0.2.10:6379" {
+		t.Fatalf("dependencies = %+v, want each with its address", overview.Flow)
+	}
+	if strings.Contains(string(encoded), "password") || strings.Contains(string(encoded), "@") {
+		t.Fatalf("the overview carries a credential: %s", encoded)
 	}
 	if overview.Capability.Funnel.Listed != 56 || overview.Capability.Funnel.Accepted != 53 || overview.Capability.Funnel.Detecting.Measured {
 		t.Fatalf("funnel = %+v, want 56 listed, 53 accepted and detecting unmeasured without strategy counts", overview.Capability.Funnel)
@@ -118,7 +119,7 @@ func TestTheOverviewResourcesAreSharesOfTheirLimits(t *testing.T) {
 	}
 	replica := overview.Resources.Replicas[0]
 	if !replica.MemoryRatio.Measured || replica.MemoryRatio.Value < 0.17 || replica.MemoryRatio.Value > 0.18 ||
-		replica.QueryPermits.Held != 1 || replica.QueryPermits.Limit != 16 || replica.CPURatio.Measured || replica.LiveHeapBytes.Measured {
+		replica.QueryPermits.Held != 1 || replica.QueryPermits.Limit != 16 || replica.LiveHeapBytes.Measured {
 		t.Fatalf("replica resources = %+v", replica)
 	}
 	if overview.Resources.Scale.Strategies.Value != 53 || overview.Resources.Scale.MergedQueries.Value != 36 || overview.Resources.Scale.Hosts.Measured {
@@ -254,7 +255,7 @@ func TestTheOverviewRuntimeNamesWhatNeedsAPerson(t *testing.T) {
 }
 
 // The route answers the same verdict as the health route, from the same
-// replicas, with no address on it.
+// replicas.
 func TestTheOverviewRouteProjectsTheHealthRoute(t *testing.T) {
 	snapshots := idleSnapshots()
 	snapshots[0].Source = blockedSource(now.Add(-30 * time.Second))
@@ -263,7 +264,7 @@ func TestTheOverviewRouteProjectsTheHealthRoute(t *testing.T) {
 	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 0, Known: true}, replicas())
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
-	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "redis.example") {
+	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
 	}
 	var overview Overview
@@ -588,5 +589,90 @@ func TestTheOverviewSaysTheMostConstrainedReplicaAndCountsTheRest(t *testing.T) 
 	}
 	if summary := calm.Runtime.Summary; len(summary) != 1 || summary[0].Ready != 2 || summary[0].NotReady != 0 {
 		t.Fatalf("calm summary %+v, want both ready", summary)
+	}
+}
+
+// A dependency carries the stage's numbers where they measure it alone --
+// the pull's latency and failures are the query backend's, the state
+// stage's latency the runtime Redis's round trips -- and no borrowed
+// number elsewhere.
+func TestADependencyCarriesTheNumbersThatMeasureItAlone(t *testing.T) {
+	started := time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC)
+	first := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+	before := &FlowFacts{Queries: 100, QueryDuration: FlowHistogram{Buckets: make([]uint64, len(FlowQueryBounds)), Count: 100},
+		DecisionLag: FlowHistogram{Buckets: make([]uint64, len(FlowDecisionBounds))}, RuntimeRedis: FlowHistogram{Buckets: make([]uint64, len(FlowRedisBounds))}}
+	after := *before
+	after.Queries = 400
+	after.QueryFailures = map[string]uint64{"timeout": 6}
+	after.QueryDuration = FlowHistogram{Buckets: cumulative(0, 0, 0, 300, 0, 0, 0, 0, 0, 0), Count: 400}
+	after.RuntimeRedis = FlowHistogram{Buckets: cumulative(append([]uint64{120}, make([]uint64, len(FlowRedisBounds)-1)...)...), Count: 120}
+	// The CMDB cache hangs on the pull too, and is measured by nothing.
+	withCMDB := func(at time.Time, flow *FlowFacts) HealthResponse {
+		health := flowHealth(at, started, flow)
+		health.Dependencies = append(health.Dependencies, Endpoint{Role: EndpointCMDBCache, Address: "192.0.2.13:6379", Configured: true})
+		return health
+	}
+	flows := newOverviewFlows()
+	one := overviewOf(withCMDB(first, before), nil, false, first)
+	flows.apply(&one, withCMDB(first, before), first)
+	two := overviewOf(withCMDB(second, &after), nil, false, second)
+	flows.apply(&two, withCMDB(second, &after), second)
+	pull, state, output := flowStage(two, "pull"), flowStage(two, "state"), flowStage(two, "output")
+	if cmdb := pull.Dependencies[1]; cmdb.Name != EndpointCMDBCache || cmdb.LatencyP95MS != nil || cmdb.FailuresPerMinute != nil {
+		t.Fatalf("cmdb cache = %+v, want none of the query backend's numbers", cmdb)
+	}
+	// A third computation with no runtime Redis round trips since: the
+	// state stage has no P95, and neither has the Redis.
+	third := second.Add(time.Minute)
+	idle := after
+	idle.Queries = 500
+	idle.QueryDuration = FlowHistogram{Buckets: cumulative(0, 0, 0, 400, 0, 0, 0, 0, 0, 0), Count: 500}
+	three := overviewOf(withCMDB(third, &idle), nil, false, third)
+	flows.apply(&three, withCMDB(third, &idle), third)
+	if quiet := flowStage(three, "state"); quiet.LatencyP95MS.Measured || quiet.Dependencies[0].LatencyP95MS != nil {
+		t.Fatalf("state with no round trips = %+v, want no P95 on the stage or the Redis", quiet)
+	}
+	backend := pull.Dependencies[0]
+	if backend.LatencyP95MS == nil || *backend.LatencyP95MS != pull.LatencyP95MS || backend.FailuresPerMinute == nil ||
+		backend.FailuresPerMinute.Value != 6 {
+		t.Fatalf("query backend = %+v, want the pull's P95 and its 6 failures a minute", backend)
+	}
+	redisRow := state.Dependencies[0]
+	if !state.LatencyP95MS.Measured || redisRow.LatencyP95MS == nil || *redisRow.LatencyP95MS != state.LatencyP95MS || redisRow.FailuresPerMinute != nil {
+		t.Fatalf("state redis = %+v (stage P95 %+v), want the stage's P95 and no failures borrowed from admissions", redisRow, state.LatencyP95MS)
+	}
+	if kafka := output.Dependencies[0]; kafka.LatencyP95MS != nil || kafka.FailuresPerMinute != nil {
+		t.Fatalf("output kafka = %+v, want no numbers: nothing measures it alone", kafka)
+	}
+	// Before two computations there is nothing to put on any dependency.
+	if first := flowStage(one, "pull").Dependencies[0]; first.LatencyP95MS != nil || first.FailuresPerMinute != nil {
+		t.Fatalf("first computation's query backend = %+v, want no numbers", first)
+	}
+}
+
+// The Console's state reads its own word: an operation whose latest call
+// failed is attention even when another answered later, and the row says
+// which event source the link keys this deployment by.
+func TestTheConsoleDependencyReadsTheConsolesOwnWord(t *testing.T) {
+	recent, older := 1.0, 100.0
+	health := overviewHealth()
+	health.Dependencies = append(health.Dependencies, Endpoint{Role: EndpointLinkdConsole, Address: "http://198.51.100.8/api", Configured: true,
+		LastSuccessAgeSeconds: &recent, LastFailureAgeSeconds: &older, LastFailure: "roster: status 502",
+		Console: &LinkdConsoleFacts{State: LinkdConsoleUnreadable, Reason: "roster", EventSource: &LinkdEventSourceFacts{EventSourceID: "source-7"}}})
+	console := flowStage(overviewOf(health, nil, false, time.Now()), "output").Dependencies[1]
+	if console.State != OverviewAttention || console.ConsoleState != LinkdConsoleUnreadable || console.EventSourceID != "source-7" ||
+		console.LastFailure != "roster: status 502" || console.Address != "http://198.51.100.8/api" {
+		t.Fatalf("console = %+v, want attention from its own word, with its event source and latest failure", console)
+	}
+	for _, word := range []string{LinkdConsoleLinkUnhealthy} {
+		health.Dependencies[3].Console.State = word
+		if got := flowStage(overviewOf(health, nil, false, time.Now()), "output").Dependencies[1].State; got != OverviewAttention {
+			t.Fatalf("console %s reads %s, want attention", word, got)
+		}
+	}
+	health.Dependencies[3].Console.State = LinkdConsoleReachable
+	if got := flowStage(overviewOf(health, nil, false, time.Now()), "output").Dependencies[1].State; got != OverviewOK {
+		t.Fatalf("a reachable Console whose last failure is older than its last answer reads %s, want ok", got)
 	}
 }

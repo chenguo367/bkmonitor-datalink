@@ -34,6 +34,23 @@ func linkdConsoleEndpoint(cfg config.Config) fleet.Endpoint {
 	return entry
 }
 
+// consoleHealth is the Console entry's last success and last failure: the
+// latest of its operations' calls. The entry's state also reads the
+// Console's own word (fleet.endpointState), since one operation failing
+// while another answered later is still a Console that fails a close.
+func consoleHealth(entry *fleet.Endpoint, facts *fleet.LinkdConsoleFacts) {
+	for _, call := range facts.Calls {
+		if call.LastSuccessAgeSeconds != nil && (entry.LastSuccessAgeSeconds == nil || *call.LastSuccessAgeSeconds < *entry.LastSuccessAgeSeconds) {
+			age := *call.LastSuccessAgeSeconds
+			entry.LastSuccessAgeSeconds = &age
+		}
+		if call.LastFailureAgeSeconds != nil && (entry.LastFailureAgeSeconds == nil || *call.LastFailureAgeSeconds < *entry.LastFailureAgeSeconds) {
+			age := *call.LastFailureAgeSeconds
+			entry.LastFailureAgeSeconds, entry.LastFailure = &age, call.Op+": "+call.LastFailure
+		}
+	}
+}
+
 // linkdLocationReport is where the open alert sets are read and how that was
 // found: the startup discovery, or a later one that moved the reads.
 type linkdLocationReport interface {
@@ -60,6 +77,7 @@ func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTT
 				facts := linkdConsoleFacts(console, now())
 				facts.Discovery = location.Discovery()
 				entries[index].Console = facts
+				consoleHealth(&entries[index], facts)
 			case fleet.EndpointOpenAlertSet:
 				if moved {
 					entry := redisEndpoint(fleet.EndpointOpenAlertSet, connection, prefix)

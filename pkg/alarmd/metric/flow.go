@@ -11,6 +11,7 @@ package metric
 
 import (
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +43,23 @@ type flowMetrics struct {
 	failures          map[string]prometheus.Counter
 	decisionLag       prometheus.Histogram
 	outputRejectedAll prometheus.Counter
+	// backend is the query backend's last answer and last failure, the
+	// dependency entry's health for the role (QueryBackendHealth).
+	backend *queryBackendBook
+}
+
+// QueryBackendHealth is when a physical query last answered and last failed,
+// and the failure's closed word (access_query_failure_total's reason).
+type QueryBackendHealth struct {
+	LastSuccessAt time.Time
+	LastFailureAt time.Time
+	LastFailure   string
+}
+
+type queryBackendBook struct {
+	mu     sync.Mutex
+	health QueryBackendHealth
+	known  bool
 }
 
 func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
@@ -75,6 +93,7 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 				"without its labels, counted at the same place.",
 		}),
 	}
+	m.backend = &queryBackendBook{}
 	m.failures = make(map[string]prometheus.Counter, len(queryFailureReasons))
 	for _, reason := range queryFailureReasons {
 		m.failures[reason] = m.queryFailures.WithLabelValues(reason)
@@ -83,7 +102,8 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 }
 
 // RecordPhysicalQuery counts one physical query with the time its provider
-// took and how it failed, "" when it answered.
+// took and how it failed, "" when it answered, and notes it as the query
+// backend's latest word.
 func (r *Recorder) RecordPhysicalQuery(elapsed time.Duration, failure string) {
 	if r == nil {
 		return
@@ -92,13 +112,41 @@ func (r *Recorder) RecordPhysicalQuery(elapsed time.Duration, failure string) {
 	flow.physicalQueries.Inc()
 	flow.queryDuration.Observe(elapsed.Seconds())
 	if failure == "" {
+		flow.backend.note(time.Now(), "")
 		return
 	}
 	counter, known := flow.failures[failure]
 	if !known {
-		counter = flow.failures["other"]
+		counter, failure = flow.failures["other"], "other"
 	}
 	counter.Inc()
+	flow.backend.note(time.Now(), failure)
+}
+
+func (book *queryBackendBook) note(at time.Time, failure string) {
+	if book == nil {
+		return
+	}
+	book.mu.Lock()
+	defer book.mu.Unlock()
+	book.known = true
+	if failure == "" {
+		book.health.LastSuccessAt = at
+		return
+	}
+	book.health.LastFailureAt, book.health.LastFailure = at, failure
+}
+
+// QueryBackendHealth reads the query backend's latest answer and failure;
+// false before this process has run a physical query.
+func (r *Recorder) QueryBackendHealth() (QueryBackendHealth, bool) {
+	if r == nil || r.phaseTwo.flow.backend == nil {
+		return QueryBackendHealth{}, false
+	}
+	book := r.phaseTwo.flow.backend
+	book.mu.Lock()
+	defer book.mu.Unlock()
+	return book.health, book.known
 }
 
 // SetRuntimeRedisClient names the Redis hook label of the client that

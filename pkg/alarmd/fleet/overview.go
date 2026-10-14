@@ -20,8 +20,10 @@ import (
 // The overview: whether this deployment detects what it can, on time and
 // whole, in a few conclusions and numbers for a page that shows nothing
 // else. It is a projection of the health route's answer, cached for
-// OverviewMaxAge, and carries no address, key, Query Group or Slot: detail
-// is for the CLI.
+// OverviewMaxAge, and carries no key, Query Group or Slot: detail is for the
+// CLI. A dependency carries its address, which names the instance a reader
+// goes to next (the link's infrastructure page for one it shares) and is
+// never a credential.
 
 // OverviewMaxAge is how long one computation answers; OverviewMaxBytes
 // bounds the answer at the largest fleet.
@@ -166,9 +168,46 @@ type OverviewCauseCount struct {
 	Count float64 `json:"count"`
 }
 
+// OverviewDependency is one external system a stage needs, as the answering
+// replica sees it: its state, where it is, and its latest answer and
+// failure. LatencyP95MS and FailuresPerMinute are present only where the
+// stage measures them for this dependency alone -- the query backend's
+// queries, the runtime Redis's round trips -- and are the stage's own
+// numbers; the other dependencies have no per-call histogram, and say so by
+// leaving them out rather than borrowing one.
 type OverviewDependency struct {
 	Name  string `json:"name"`
 	State string `json:"state"`
+	// Address is the entry's host:port (several joined with commas, or a
+	// sentinel's master name and addresses); never a credential.
+	Address    string `json:"address,omitempty"`
+	SharedWith string `json:"shared_with,omitempty"`
+	// LastSuccessAgeSeconds and LastFailureAgeSeconds are how long ago the
+	// replica last had an answer from it and last had a failure; LastFailure
+	// what that failure said, sanitised and bounded.
+	LastSuccessAgeSeconds *float64        `json:"last_success_age_seconds,omitempty"`
+	LastFailureAgeSeconds *float64        `json:"last_failure_age_seconds,omitempty"`
+	LastFailure           string          `json:"last_failure,omitempty"`
+	LatencyP95MS          *OverviewNumber `json:"latency_p95_ms,omitempty"`
+	FailuresPerMinute     *OverviewNumber `json:"failures_per_minute,omitempty"`
+	// ConsoleState is the Console's own word, on the Console only
+	// (LinkdConsoleStates), and EventSourceID how the link names this
+	// deployment's event source, as its Console last answered.
+	ConsoleState  string `json:"console_state,omitempty"`
+	EventSourceID string `json:"event_source_id,omitempty"`
+}
+
+// overviewDependencyOf is one endpoint as the overview shows it.
+func overviewDependencyOf(endpoint Endpoint) OverviewDependency {
+	dependency := OverviewDependency{Name: endpoint.Role, State: endpointState(endpoint), Address: endpoint.Address, SharedWith: endpoint.SharedWith,
+		LastSuccessAgeSeconds: endpoint.LastSuccessAgeSeconds, LastFailureAgeSeconds: endpoint.LastFailureAgeSeconds, LastFailure: endpoint.LastFailure}
+	if console := endpoint.Console; console != nil {
+		dependency.ConsoleState = console.State
+		if console.EventSource != nil {
+			dependency.EventSourceID = console.EventSource.EventSourceID
+		}
+	}
+	return dependency
 }
 
 type OverviewResources struct {
@@ -195,7 +234,6 @@ type OverviewScale struct {
 
 type OverviewReplicaResource struct {
 	Name                string          `json:"name"`
-	CPURatio            OverviewNumber  `json:"cpu_ratio"`
 	MemoryRatio         OverviewNumber  `json:"memory_ratio"`
 	LiveHeapBytes       OverviewNumber  `json:"live_heap_bytes"`
 	QueryPermits        OverviewPermits `json:"query_permits"`
@@ -315,7 +353,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 			if overviewStageOf[endpoint.Role] != stage {
 				continue
 			}
-			dependency := OverviewDependency{Name: endpoint.Role, State: endpointState(endpoint)}
+			dependency := overviewDependencyOf(endpoint)
 			row.Dependencies = append(row.Dependencies, dependency)
 			if dependency.State == OverviewAttention {
 				row.State = OverviewAttention
@@ -344,7 +382,7 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 	}
 	overview.Runtime = OverviewRuntime{Replicas: []OverviewReplica{}, Attention: []OverviewNotice{}}
 	for _, replica := range health.PerReplica {
-		resource := OverviewReplicaResource{Name: replica.Replica, CPURatio: overviewUnmeasured("ratio"), MemoryRatio: overviewUnmeasured("ratio"),
+		resource := OverviewReplicaResource{Name: replica.Replica, MemoryRatio: overviewUnmeasured("ratio"),
 			LiveHeapBytes: overviewUnmeasured("bytes"), CPUThrottledSeconds: overviewUnmeasured("seconds")}
 		if capacity := replica.Capacity; capacity != nil {
 			resource.QueryPermits = OverviewPermits{Held: capacity.PermitsHeld, Limit: capacity.PermitBudget}
@@ -404,6 +442,11 @@ func endpointState(endpoint Endpoint) string {
 	switch {
 	case !endpoint.Configured:
 		return OverviewNotConfigured
+	case endpoint.Console != nil && (endpoint.Console.State == LinkdConsoleUnreadable || endpoint.Console.State == LinkdConsoleLinkUnhealthy):
+		// The Console's own word: an operation whose latest call failed, or
+		// a link that says it is behind, fails a close whatever answered
+		// last.
+		return OverviewAttention
 	case endpoint.LastFailureAgeSeconds != nil && (endpoint.LastSuccessAgeSeconds == nil || *endpoint.LastFailureAgeSeconds < *endpoint.LastSuccessAgeSeconds):
 		return OverviewAttention
 	case endpoint.LastSuccessAgeSeconds != nil || (endpoint.Ready != nil && *endpoint.Ready):
@@ -670,8 +713,36 @@ func (flows *overviewFlows) apply(overview *Overview, health HealthResponse, at 
 			stage.Volume = overviewMeasured(sum.emitted, "per_second")
 			stage.Failures = overviewMeasured(sum.rejected, "per_minute")
 		}
+		switch stage.Stage {
+		case "pull":
+			overviewDependencyNumbers(stage, EndpointQueryBackend, &stage.LatencyP95MS, &stage.Failures)
+		case "state":
+			overviewDependencyNumbers(stage, EndpointStateRedis, &stage.LatencyP95MS, nil)
+		}
 		if stage.Failures.Measured && stage.Failures.Value > 0 && stage.State == OverviewOK {
 			stage.State = OverviewAttention
+		}
+	}
+}
+
+// overviewDependencyNumbers puts the stage's numbers on the one dependency
+// they measure alone: the pull's latency and failures are the query
+// backend's, the state stage's latency the runtime Redis's round trips. A
+// latency with no observations behind it is left off; the failures are
+// always measured once the flow has contributed.
+func overviewDependencyNumbers(stage *OverviewStage, role string, latency, failures *OverviewNumber) {
+	for index := range stage.Dependencies {
+		dependency := &stage.Dependencies[index]
+		if dependency.Name != role {
+			continue
+		}
+		if latency != nil && latency.Measured {
+			value := *latency
+			dependency.LatencyP95MS = &value
+		}
+		if failures != nil {
+			value := *failures
+			dependency.FailuresPerMinute = &value
 		}
 	}
 }

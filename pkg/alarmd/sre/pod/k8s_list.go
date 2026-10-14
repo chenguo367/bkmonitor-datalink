@@ -94,6 +94,9 @@ var resourceKinds = []resourceKind{
 	{Kind: "ServiceMonitor", Resource: schema.GroupVersionResource{Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors"}, Namespaced: true, Custom: true},
 	{Kind: "PodMonitor", Resource: schema.GroupVersionResource{Group: "monitoring.coreos.com", Version: "v1", Resource: "podmonitors"}, Namespaced: true, Custom: true},
 	{Kind: "BkLogConfig", Resource: schema.GroupVersionResource{Group: "bk.tencent.com", Version: "v1alpha1", Resource: "bklogconfigs"}, Namespaced: true, Custom: true},
+	// bk-monitor-operator's DataID: which business each kind of collected
+	// data lands in, the fact the trends derive their space from.
+	{Kind: "DataID", Resource: schema.GroupVersionResource{Group: "monitoring.bk.tencent.com", Version: "v1beta1", Resource: "dataids"}, Custom: true},
 }
 
 // helmLabel and helmAnnotations are Helm's ownership marks on every object a
