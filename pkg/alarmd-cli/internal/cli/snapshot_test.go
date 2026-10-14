@@ -564,8 +564,20 @@ func TestAnErrorAnswerIsNotCollectedEvenWithASuccessfulStatus(t *testing.T) {
 func snapshotSlept(t *testing.T) *[]time.Duration {
 	t.Helper()
 	slept := &[]time.Duration{}
-	snapshotSleep = func(d time.Duration) { *slept = append(*slept, d) }
-	t.Cleanup(func() { snapshotSleep = time.Sleep })
+	var mu sync.Mutex
+	var passed time.Duration
+	snapshotSleep = func(d time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		*slept = append(*slept, d)
+		passed += d
+	}
+	snapshotNow = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return time.Now().Add(passed)
+	}
+	t.Cleanup(func() { snapshotSleep, snapshotNow = time.Sleep, time.Now })
 	return slept
 }
 
@@ -711,5 +723,50 @@ func TestARetryAfterOfZeroWaitsOneSecond(t *testing.T) {
 	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
 	if code != 0 || len(*slept) != 1 || (*slept)[0] != time.Second {
 		t.Fatalf("code %d waits %v result %v, want one wait of 1s and a whole snapshot", code, *slept, result)
+	}
+}
+
+// A wait for the session's budget is time no call could use, so the time
+// cap grows by it: two waits that together fill the planned cap still leave
+// the reads after them their time, and the manifest says how long the run
+// waited.
+func TestABudgetWaitMovesTheTimeCap(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 2, retryAfter: "75"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	files := readArchive(t, stringField(objectField(result, "result"), "file"))
+	var manifest SnapshotManifest
+	_ = json.Unmarshal(files["manifest.json"], &manifest)
+	if manifest.TimeCapSeconds != 150 {
+		t.Fatalf("time cap %d s, want the fixture's 150 s", manifest.TimeCapSeconds)
+	}
+	if code != 0 || len(*slept) != 2 || manifest.BudgetWaitSeconds != 150 {
+		t.Fatalf("code %d waits %v budget wait %d s result %v, want both waits taken, 150 s, and a whole snapshot", code, *slept, manifest.BudgetWaitSeconds, result)
+	}
+}
+
+// The cap grows by no more than itself: once the waits have used that
+// room, a wait that does not fit in what is left is not taken.
+func TestBudgetWaitsTogetherGrowTheCapByNoMoreThanItself(t *testing.T) {
+	snapshotPace = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
+	slept := snapshotSlept(t)
+	fixtureDigest = universeDigest([]string{"1", "2", "3"})
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 2, retryAfter: "80"}
+	var p Profile
+	server := fixture.server(t, &p)
+	defer server.Close()
+	store := loggedIn(t, p, server)
+	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
+	notWhole, _ := objectField(result, "result")["not_whole"].([]any)
+	if code != 3 || len(*slept) != 1 || len(notWhole) != 1 || notWhole[0] != "strategy.get" {
+		t.Fatalf("code %d waits %v result %v, want one 80 s wait, the second refused past the 150 s room", code, *slept, result)
 	}
 }
