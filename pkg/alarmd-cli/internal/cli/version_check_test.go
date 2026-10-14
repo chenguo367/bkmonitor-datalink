@@ -74,6 +74,24 @@ func TestACLIOfAnotherVersionIsToldAtLoginAndDiscover(t *testing.T) {
 	}
 }
 
+// A pre-release is a release too, stamped as the Makefile stamps one
+// (x.y.z-<pre-release>): either side being one is still compared.
+func TestAPreReleaseOfAnotherVersionIsTold(t *testing.T) {
+	for _, c := range []struct{ cli, served string }{
+		{"0.2.0-ci.7", "0.2.0-ci.8"},
+		{"0.4.4753", "0.4.4800-rc.1"},
+		{"0.4.4800-rc.1", "0.4.4753"},
+	} {
+		var p Profile
+		server, _ := versionServer(t, &p, http.StatusOK, c.served+"\n")
+		code, stderr := runAs(t, c.cli, Store{t.TempDir()}, server.Client(), bundle(p), "auth", "login")
+		server.Close()
+		if want := "Warning: this alarmd-cli is " + c.cli + " and the deployment serves " + c.served + "."; code != 0 || !strings.Contains(stderr, want) {
+			t.Fatalf("cli %s served %s: code %d stderr %q, want %q", c.cli, c.served, code, stderr, want)
+		}
+	}
+}
+
 // The same version says nothing; a development build does not ask; a
 // deployment that serves no version (an older one, or one built without the
 // CLI) or answers something that is not a version is not a mismatch.
@@ -88,7 +106,9 @@ func TestOnlyAKnownDifferentVersionWarns(t *testing.T) {
 		{"older deployment", "0.4.4753", `{"error":"not found"}`, http.StatusNotFound, true},
 		{"no bundle", "0.4.4753", `{"status":"error","error":{"code":"cli_release_unavailable"}}`, http.StatusServiceUnavailable, true},
 		{"not a version", "0.4.4753", "<html>proxy</html>", http.StatusOK, true},
-		{"a version inside something else", "0.4.4753", "0.4.4800-rc1", http.StatusOK, true},
+		{"a version inside something else", "0.4.4753", "release 0.4.4800", http.StatusOK, true},
+		{"the same pre-release", "0.2.0-ci.7", "0.2.0-ci.7\n", http.StatusOK, true},
+		{"a leading zero is not a release", "0.4.04800", "0.4.4800\n", http.StatusOK, false},
 		{"a refusal that looks like a version", "0.4.4753", "0.4.4800", http.StatusNotFound, true},
 		{"too long", "0.4.4753", "0.4.4800" + strings.Repeat(" ", 70), http.StatusOK, true},
 	} {

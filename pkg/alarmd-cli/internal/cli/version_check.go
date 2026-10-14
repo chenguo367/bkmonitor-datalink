@@ -26,9 +26,10 @@ import (
 // given the command that installs the matching one. There is no self
 // update.
 
-// releaseVersion is a version a release build is stamped with; a local or
+// releaseVersion is a version a release build is stamped with, the form the
+// Makefile accepts for VERSION (pre-releases included); a local or
 // development build is not compared.
-var releaseVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+var releaseVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$`)
 
 // versionCheckTimeout bounds the read: the check never holds a command up
 // for longer than this.
