@@ -257,6 +257,10 @@ metadata: {name: uq, namespace: ns1}
 	if len(writer.asked) != 1 {
 		t.Fatalf("asked %v, want only the Ingress sent", writer.asked)
 	}
+	spelled, err := writeProvider(t, &fakeDryRunner{}, writer).Apply(context.Background(), ApplyRequest{Manifests: "apiVersion: /v1\nkind: ConfigMap\nmetadata: {name: spelled, namespace: ns1}\n"})
+	if err != nil || spelled.Objects[0].Outcome != WriteNotChecked || len(writer.asked) != 1 {
+		t.Fatalf("receipt %+v asked %v err %v, want a non-canonical apiVersion not checked and not sent", spelled.Objects, writer.asked, err)
+	}
 	many := strings.Repeat("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: a, namespace: ns1}\n---\n", MaxApplyObjects+1)
 	if _, err := writeProvider(t, &fakeDryRunner{}, &fakeWriter{}).Apply(context.Background(), ApplyRequest{Manifests: many}); errorCode(err) != "apply_too_many_objects" {
 		t.Fatalf("err %v, want apply_too_many_objects", err)
@@ -295,6 +299,11 @@ func TestADeleteGoesByUIDAndSparesTheProtectedNamespaces(t *testing.T) {
 		{ObjectDeleteRequest{APIVersion: "v1", Kind: "Namespace", Name: "default", UID: "uid-1"}, WriteProtected},
 		{ObjectDeleteRequest{APIVersion: "v1", Kind: "Namespace", Name: "alarmd-ns", UID: "uid-1"}, WriteProtected},
 		{ObjectDeleteRequest{APIVersion: "v1", Kind: "Namespace", Name: "bk-monitor-old", UID: "uid-1"}, WriteDeleted},
+		// "/v1" parses as core v1: the protection is decided on the resource
+		// that would be deleted, not on the request's spelling.
+		{ObjectDeleteRequest{APIVersion: "/v1", Kind: "Namespace", Name: "kube-system", UID: "uid-1"}, WriteProtected},
+		{ObjectDeleteRequest{APIVersion: "/v1", Kind: "Namespace", Name: "alarmd-ns", UID: "uid-1"}, WriteProtected},
+		{ObjectDeleteRequest{APIVersion: "/v1", Kind: "ConfigMap", Namespace: "ns1", Name: "spelled", UID: "uid-1"}, WriteNotChecked},
 		{ObjectDeleteRequest{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role", Namespace: "ns1", Name: "r", UID: "uid-1"}, WriteRBACNotWritable},
 		{ObjectDeleteRequest{APIVersion: "storage.k8s.io/v1", Kind: "StorageClass", Name: "fast", UID: "uid-1"}, WriteNotGrantedKind},
 	}
@@ -308,7 +317,7 @@ func TestADeleteGoesByUIDAndSparesTheProtectedNamespaces(t *testing.T) {
 		t.Errorf("delete of a helm-owned object = %+v, want its release named", receipt.Objects[0])
 	}
 	sent := strings.Join(writer.asked, ";")
-	for _, protected := range []string{"kube-system", "/default", "alarmd-ns", "roles", "storageclasses"} {
+	for _, protected := range []string{"kube-system", "/default", "alarmd-ns", "roles", "storageclasses", "spelled"} {
 		if strings.Contains(sent, protected) {
 			t.Fatalf("asked %v: %s was sent", writer.asked, protected)
 		}

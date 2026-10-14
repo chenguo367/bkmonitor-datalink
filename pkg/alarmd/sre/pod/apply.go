@@ -71,6 +71,8 @@ var WriteOutcomes = []string{WriteCreated, WriteUpdated, WriteUnchanged, WriteCo
 // call (DefaultNamespace).
 var protectedNamespaces = map[string]bool{"kube-system": true, "kube-public": true, "kube-node-lease": true, "default": true}
 
+var namespacesResource = schema.GroupResource{Resource: "namespaces"}
+
 // Writer is the Kubernetes access the writes have; its options are fixed in
 // the adapter.
 type Writer interface {
@@ -126,8 +128,11 @@ type WriteReceipt struct {
 }
 
 // gate is the check every write and dry run makes before any call: the
-// object names itself, its kind is not RBAC and is granted, and it has a
-// namespace when it needs one. It answers the resource, or why not.
+// object names itself, its kind is not RBAC and is granted, its apiVersion
+// is written the one way the parser prints it, and it has a namespace when
+// it needs one. It answers the resource, or why not; a refusal for spelling
+// alone still answers the resource it resolved to, so a delete can judge
+// protection on what the request names rather than how it spells it.
 func (p *Provider) gate(object *unstructured.Unstructured, defaultNamespace string, rbacOutcome, grantOutcome string) (schema.GroupVersionResource, string, string) {
 	apiVersion, kind := object.GetAPIVersion(), object.GetKind()
 	if apiVersion == "" || kind == "" {
@@ -149,6 +154,12 @@ func (p *Provider) gate(object *unstructured.Unstructured, defaultNamespace stri
 	resource, namespaced, err := p.options.DryRun.Mapping(apiVersion, kind)
 	if err != nil {
 		return schema.GroupVersionResource{}, WriteNotChecked, "this cluster serves no " + apiVersion + " " + kind + ": " + err.Error()
+	}
+	// The parser accepts spellings such as "/v1" for core v1; only the
+	// canonical one goes on, so every check, receipt and audit sees the
+	// object as the cluster names it.
+	if apiVersion != version.String() {
+		return resource, WriteNotChecked, fmt.Sprintf("apiVersion %q is not in its canonical form: write %q", apiVersion, version.String())
 	}
 	if namespaced && object.GetNamespace() == "" {
 		if defaultNamespace == "" {
@@ -275,12 +286,14 @@ func (p *Provider) DeleteObject(ctx context.Context, request ObjectDeleteRequest
 		receipt.Counts[answer.Outcome]++
 		return receipt, nil
 	}
-	if request.Kind == "Namespace" && request.APIVersion == "v1" &&
+	resource, outcome, message := p.gate(object, "", WriteRBACNotWritable, WriteNotGrantedKind)
+	// Protection is judged on the resource the request resolved to, however
+	// its apiVersion is spelled.
+	if resource.GroupResource() == namespacesResource &&
 		(protectedNamespaces[request.Name] || request.Name == p.options.DefaultNamespace) {
 		answer.Outcome, answer.Message = WriteProtected, "namespace "+request.Name+" is not deleted through the channel: the cluster or this process depends on it"
 		return record(answer)
 	}
-	resource, outcome, message := p.gate(object, "", WriteRBACNotWritable, WriteNotGrantedKind)
 	if outcome != "" {
 		answer.Outcome, answer.Message = outcome, message
 		return record(answer)
