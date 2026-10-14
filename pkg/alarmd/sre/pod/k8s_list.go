@@ -5,12 +5,14 @@ package pod
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math"
 	"sort"
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
@@ -49,6 +51,12 @@ type resourceKind struct {
 	Kind       string
 	Resource   schema.GroupVersionResource
 	Namespaced bool
+	// Custom is a custom resource on the fixed list: a list the apiserver
+	// answers not-found means its CRD is not installed.
+	Custom bool
+	// KeysOnly returns the object as its metadata and its data keys with
+	// their sizes, never a value (keysOnlyRow).
+	KeysOnly bool
 }
 
 var resourceKinds = []resourceKind{
@@ -68,7 +76,28 @@ var resourceKinds = []resourceKind{
 	{Kind: "CronJob", Resource: schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}, Namespaced: true},
 	{Kind: "Ingress", Resource: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}, Namespaced: true},
 	{Kind: "HorizontalPodAutoscaler", Resource: schema.GroupVersionResource{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers"}, Namespaced: true},
+	// What a Helm release owns besides its workloads, read by its ownership
+	// annotations (helmOwnership).
+	{Kind: "ConfigMap", Resource: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}, Namespaced: true, KeysOnly: true},
+	{Kind: "ServiceAccount", Resource: schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}, Namespaced: true},
+	{Kind: "PersistentVolumeClaim", Resource: schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}, Namespaced: true},
+	{Kind: "Role", Resource: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}, Namespaced: true},
+	{Kind: "RoleBinding", Resource: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, Namespaced: true},
+	{Kind: "ClusterRole", Resource: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}},
+	{Kind: "ClusterRoleBinding", Resource: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}},
+	// Custom resources, a fixed list rather than any group/version/kind: a
+	// kind is read only where its group is granted, and some custom
+	// resources carry credentials.
+	{Kind: "ServiceMonitor", Resource: schema.GroupVersionResource{Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors"}, Namespaced: true, Custom: true},
+	{Kind: "PodMonitor", Resource: schema.GroupVersionResource{Group: "monitoring.coreos.com", Version: "v1", Resource: "podmonitors"}, Namespaced: true, Custom: true},
+	{Kind: "BkLogConfig", Resource: schema.GroupVersionResource{Group: "bk.tencent.com", Version: "v1alpha1", Resource: "bklogconfigs"}, Namespaced: true, Custom: true},
 }
+
+// helmLabel and helmAnnotations are Helm's ownership marks on every object a
+// release manages: what "what does this release own" is read by.
+const helmLabel = "app.kubernetes.io/managed-by"
+
+var helmAnnotations = []string{"meta.helm.sh/release-name", "meta.helm.sh/release-namespace"}
 
 // ResourceKinds is every kind the read serves, for the operation's schema.
 func ResourceKinds() []string {
@@ -79,17 +108,16 @@ func ResourceKinds() []string {
 	return kinds
 }
 
-// refusedKinds have operations of their own, which mask what this read
-// would return in full.
-var refusedKinds = map[string]string{
-	"secret": OpReadSecret, "secrets": OpReadSecret,
-	"configmap": OpReadConfigMap, "configmaps": OpReadConfigMap,
-}
+// secretsNotListed is why Secrets are the one kind not listed: listing them
+// takes a grant that hands this process every value in scope, whatever the
+// listing shows.
+const secretsNotListed = "Secrets are not listed: a list grant on Secrets exposes every value in scope. " +
+	"Read a Secret a workload references by name with " + OpReadSecret + ", whose whitelist names it"
 
 func lookupKind(value string) (resourceKind, error) {
 	name := strings.ToLower(strings.TrimSpace(value))
-	if op, refused := refusedKinds[name]; refused {
-		return resourceKind{}, denied(value + " is read with " + op + ", which masks its values")
+	if name == "secret" || name == "secrets" {
+		return resourceKind{}, denied(secretsNotListed)
 	}
 	for _, kind := range resourceKinds {
 		if name == strings.ToLower(kind.Kind) || name == kind.Resource.Resource {
@@ -199,6 +227,10 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	} else {
 		list, err := p.options.Resources.ListResources(ctx, kind.Resource, request.Namespace, metav1.ListOptions{
 			LabelSelector: request.LabelSelector, FieldSelector: request.FieldSelector, Continue: request.Continue, Limit: int64(limit)})
+		if kind.Custom && apierrors.IsNotFound(err) {
+			return result, &Error{Code: CodeKindNotInstalled, Message: kind.Kind + " is not installed on this cluster: its CRD " +
+				kind.Resource.Resource + "." + kind.Resource.Group + " is absent"}
+		}
 		if err != nil {
 			return result, apiError(err)
 		}
@@ -206,9 +238,13 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	}
 	remaining := p.options.MaxOutputBytes
 	for index, object := range objects {
-		item := p.cleanObject(object.Object)
+		raw := object.Object
+		if kind.KeysOnly {
+			raw = keysOnlyRow(raw)
+		}
+		item := p.cleanObject(raw)
 		if len(paths) > 0 {
-			item = project(item, append(append([][]string(nil), identityPaths...), paths...))
+			item = keepHelmOwnership(project(item, append(append([][]string(nil), identityPaths...), paths...)), item)
 		}
 		encoded, err := json.Marshal(item)
 		if err != nil {
@@ -230,6 +266,80 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 	}
 	result.Count = len(result.Items)
 	return result, nil
+}
+
+// keysOnlyRow is a ConfigMap as listed: its identity, metadata, and each data
+// and binaryData key with its value's size in bytes, sorted by key. It is
+// built from nothing that holds a value, so neither the whole item nor any
+// projection of it can carry one; configmap.get reads values, masked.
+func keysOnlyRow(object map[string]any) map[string]any {
+	row := map[string]any{"apiVersion": object["apiVersion"], "kind": object["kind"]}
+	if metadata, ok := object["metadata"].(map[string]any); ok {
+		kept := map[string]any{}
+		for _, key := range []string{"name", "namespace", "uid", "labels", "annotations", "ownerReferences", "creationTimestamp"} {
+			if value, present := metadata[key]; present {
+				kept[key] = value
+			}
+		}
+		row["metadata"] = kept
+	}
+	row["data"] = keySizes(object["data"], func(value string) int { return len(value) })
+	row["binaryData"] = keySizes(object["binaryData"], func(value string) int {
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return -1
+		}
+		return len(decoded)
+	})
+	return row
+}
+
+func keySizes(value any, size func(string) int) []any {
+	entries, _ := value.(map[string]any)
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]any, 0, len(keys))
+	for _, key := range keys {
+		text, _ := entries[key].(string)
+		out = append(out, map[string]any{"key": key, "bytes": size(text)})
+	}
+	return out
+}
+
+// keepHelmOwnership puts Helm's ownership label and annotations, where the
+// object has them, back on a projected item: a path cannot name a key with
+// dots in it, and a release's inventory is read by these on every kind.
+func keepHelmOwnership(projected, item map[string]any) map[string]any {
+	metadata, _ := item["metadata"].(map[string]any)
+	if metadata == nil {
+		return projected
+	}
+	out, _ := projected["metadata"].(map[string]any)
+	if out == nil {
+		out = map[string]any{}
+	}
+	keep := func(field string, keys []string) {
+		from, _ := metadata[field].(map[string]any)
+		for _, key := range keys {
+			value, present := from[key]
+			if !present {
+				continue
+			}
+			to, _ := out[field].(map[string]any)
+			if to == nil {
+				to = map[string]any{}
+				out[field] = to
+			}
+			to[key] = value
+		}
+	}
+	keep("labels", []string{helmLabel})
+	keep("annotations", helmAnnotations)
+	projected["metadata"] = out
+	return projected
 }
 
 func resourcePaths(values []string) ([][]string, error) {

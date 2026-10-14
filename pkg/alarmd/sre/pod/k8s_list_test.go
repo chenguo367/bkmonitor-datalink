@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,11 +24,17 @@ type resourceFixture struct {
 	continue_ string
 	asked     []string
 	options   []metav1.ListOptions
+	// missing answers every read with the apiserver's not-found, as for a
+	// resource whose CRD is not installed or an object that does not exist.
+	missing bool
 }
 
 func (f *resourceFixture) ListResources(_ context.Context, resource schema.GroupVersionResource, namespace string, options metav1.ListOptions) (*unstructured.UnstructuredList, error) {
 	f.asked = append(f.asked, fmt.Sprintf("list %s %s ns=%q", resource.GroupVersion(), resource.Resource, namespace))
 	f.options = append(f.options, options)
+	if f.missing {
+		return nil, apierrors.NewNotFound(resource.GroupResource(), "")
+	}
 	list := &unstructured.UnstructuredList{}
 	list.SetContinue(f.continue_)
 	list.SetResourceVersion("rv-7")
@@ -39,6 +46,9 @@ func (f *resourceFixture) ListResources(_ context.Context, resource schema.Group
 
 func (f *resourceFixture) GetResource(_ context.Context, resource schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
 	f.asked = append(f.asked, fmt.Sprintf("get %s %s ns=%q %s", resource.GroupVersion(), resource.Resource, namespace, name))
+	if f.missing {
+		return nil, apierrors.NewNotFound(resource.GroupResource(), name)
+	}
 	return &unstructured.Unstructured{Object: deepCopyJSON(f.objects[0])}, nil
 }
 
@@ -89,7 +99,7 @@ func TestAResourceReadServesTheGrantedKindsOnly(t *testing.T) {
 			t.Fatalf("kind %q: %+v err=%v", kind, receipt, err)
 		}
 	}
-	for kind, want := range map[string]string{"Secret": OpReadSecret, "configmaps": OpReadConfigMap, "CustomResourceDefinition": "Node, Namespace, Pod"} {
+	for kind, want := range map[string]string{"Secret": OpReadSecret, "secrets": "not listed", "CustomResourceDefinition": "Node, Namespace, Pod"} {
 		_, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind})
 		if errorCode(err) != CodeNotInScope || !strings.Contains(err.Error(), want) {
 			t.Fatalf("kind %q: err=%v, want not_in_scope naming %q", kind, err, want)
@@ -253,4 +263,116 @@ func errorCode(err error) string {
 		return named.Code
 	}
 	return ""
+}
+
+// The kinds a release's ownership is read across, each from the group the
+// channel's ClusterRole grants it in: service accounts, RBAC objects, volume
+// claims, ConfigMaps, and the custom resources on the fixed list.
+func TestAResourceReadServesTheOwnershipKinds(t *testing.T) {
+	for kind, want := range map[string]string{
+		"ServiceAccount":        `list v1 serviceaccounts ns="ns1"`,
+		"PersistentVolumeClaim": `list v1 persistentvolumeclaims ns="ns1"`,
+		"ConfigMap":             `list v1 configmaps ns="ns1"`,
+		"Role":                  `list rbac.authorization.k8s.io/v1 roles ns="ns1"`,
+		"RoleBinding":           `list rbac.authorization.k8s.io/v1 rolebindings ns="ns1"`,
+		"ServiceMonitor":        `list monitoring.coreos.com/v1 servicemonitors ns="ns1"`,
+		"PodMonitor":            `list monitoring.coreos.com/v1 podmonitors ns="ns1"`,
+		"BkLogConfig":           `list bk.tencent.com/v1alpha1 bklogconfigs ns="ns1"`,
+	} {
+		provider, resources := resourceProvider(t)
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"}); err != nil || resources.asked[0] != want {
+			t.Fatalf("kind %s: asked %v err=%v, want %s", kind, resources.asked, err, want)
+		}
+	}
+	for kind, want := range map[string]string{
+		"ClusterRole":        `list rbac.authorization.k8s.io/v1 clusterroles ns=""`,
+		"ClusterRoleBinding": `list rbac.authorization.k8s.io/v1 clusterrolebindings ns=""`,
+	} {
+		provider, resources := resourceProvider(t)
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind}); err != nil || resources.asked[0] != want {
+			t.Fatalf("kind %s: asked %v err=%v, want %s", kind, resources.asked, err, want)
+		}
+		if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: kind, Namespace: "ns1"}); errorCode(err) != CodeInvalidRequest {
+			t.Fatalf("kind %s is cluster-scoped: err=%v", kind, err)
+		}
+	}
+}
+
+// A ConfigMap is listed as its metadata and, per key, the size of its value:
+// never a value, whether the object is returned whole or projected, and the
+// last-applied annotation, which holds the values again, is dropped.
+func TestAConfigMapIsListedWithoutAnyValue(t *testing.T) {
+	configMap := map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "app-config", "namespace": "ns1", "uid": "cm-uid", "creationTimestamp": "2026-10-01T00:00:00Z",
+			"labels": map[string]any{"app.kubernetes.io/managed-by": "Helm"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "release-a", "meta.helm.sh/release-namespace": "ns1",
+				lastAppliedAnnotation: `{"data":{"config.yaml":"sentinel-applied"}}`},
+			"ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "d1", "uid": "d-uid"}},
+			"managedFields":   []any{map[string]any{"manager": "helm"}}},
+		"data":       map[string]any{"config.yaml": "sentinel-data-one", "b.txt": "sentinel-data-two"},
+		"binaryData": map[string]any{"blob.bin": "c2VudGluZWwtYmluYXJ5"}}
+	for _, paths := range [][]string{nil, {"data", "binaryData", "metadata.labels"}} {
+		provider, _ := resourceProvider(t, configMap)
+		receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "configmaps", Namespace: "ns1", Paths: paths})
+		if err != nil || receipt.Count != 1 {
+			t.Fatalf("paths %v: receipt %+v err=%v", paths, receipt, err)
+		}
+		text := string(receipt.Items[0])
+		for _, value := range []string{"sentinel", "c2VudGluZWwtYmluYXJ5", "managedFields", "last-applied-configuration"} {
+			if strings.Contains(text, value) {
+				t.Fatalf("paths %v: the item carries %q: %s", paths, value, text)
+			}
+		}
+		item := decodeItems(t, receipt)[0]
+		data, _ := json.Marshal(item["data"])
+		binary, _ := json.Marshal(item["binaryData"])
+		if string(data) != `[{"bytes":17,"key":"b.txt"},{"bytes":17,"key":"config.yaml"}]` || string(binary) != `[{"bytes":15,"key":"blob.bin"}]` {
+			t.Fatalf("paths %v: data %s binaryData %s, want each key with its value's size, sorted", paths, data, binary)
+		}
+		if paths == nil {
+			metadata := item["metadata"].(map[string]any)
+			owners, _ := json.Marshal(metadata["ownerReferences"])
+			if metadata["creationTimestamp"] != "2026-10-01T00:00:00Z" || !strings.Contains(string(owners), `"name":"d1"`) ||
+				metadata["annotations"].(map[string]any)["meta.helm.sh/release-name"] != "release-a" {
+				t.Fatalf("metadata %v, want its creation time, owners and Helm ownership", metadata)
+			}
+		}
+	}
+}
+
+// What a Helm release owns is a listing across the kinds: every item keeps
+// Helm's ownership annotations and label, projected or not, since paths
+// cannot name a key with dots in it.
+func TestEveryItemKeepsItsHelmOwnership(t *testing.T) {
+	service := map[string]any{"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": "s1", "namespace": "ns1", "uid": "s-uid",
+			"labels":      map[string]any{"app.kubernetes.io/managed-by": "Helm", "app": "x"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "release-a", "meta.helm.sh/release-namespace": "ns1", "example.com/other": "y"}},
+		"spec": map[string]any{"clusterIP": "198.51.100.7"}}
+	provider, _ := resourceProvider(t, service)
+	receipt, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Service", Namespace: "ns1", LabelSelector: "app.kubernetes.io/managed-by=Helm", Paths: []string{"spec.clusterIP"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"apiVersion":"v1","kind":"Service","metadata":{"annotations":{"meta.helm.sh/release-name":"release-a","meta.helm.sh/release-namespace":"ns1"},"labels":{"app.kubernetes.io/managed-by":"Helm"},"name":"s1","namespace":"ns1","uid":"s-uid"},"spec":{"clusterIP":"198.51.100.7"}}`
+	if got, _ := json.Marshal(decodeItems(t, receipt)[0]); string(got) != want {
+		t.Fatalf("item = %s\nwant   %s", got, want)
+	}
+}
+
+// A custom resource whose CRD the cluster does not have is said to be not
+// installed, not an apiserver failure; one object that does not exist is
+// still not found.
+func TestACustomResourceNotInstalledIsSaidSo(t *testing.T) {
+	provider, resources := resourceProvider(t)
+	resources.missing = true
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "ServiceMonitor"}); errorCode(err) != CodeKindNotInstalled {
+		t.Fatalf("list of a missing CRD: err=%v, want %s", err, CodeKindNotInstalled)
+	}
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "ServiceMonitor", Namespace: "ns1", Name: "sm1"}); errorCode(err) != CodeNotFound {
+		t.Fatalf("get of a missing object: err=%v, want %s", err, CodeNotFound)
+	}
+	if _, err := provider.ListResources(context.Background(), ResourceRequest{Kind: "Service"}); errorCode(err) != CodeNotFound {
+		t.Fatalf("a built-in kind's not-found stays not found: err=%v", err)
+	}
 }

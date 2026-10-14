@@ -49,15 +49,32 @@ type SecretKey struct {
 // request asked for the values; Truncated that keys past MaxSecretKeys were
 // left out.
 type SecretReceipt struct {
-	Namespace         string      `json:"namespace"`
-	Name              string      `json:"name"`
-	UID               string      `json:"uid"`
-	Type              string      `json:"type"`
-	Keys              []SecretKey `json:"keys"`
-	Revealed          bool        `json:"revealed"`
-	Truncated         bool        `json:"truncated"`
-	RedactionContract string      `json:"redaction_contract"`
-	At                time.Time   `json:"at"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+	Type      string `json:"type"`
+	// Labels, Annotations, OwnerReferences and CreatedAt say what owns the
+	// Secret - Helm's ownership marks among them - so a reader can tell
+	// whether removing a release deletes it. Annotations are cleaned as a
+	// resource read cleans them: the last-applied copy, which holds the
+	// values, dropped, and a credential-named one masked.
+	Labels            map[string]string `json:"labels,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
+	OwnerReferences   []SecretOwner     `json:"owner_references,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	Keys              []SecretKey       `json:"keys"`
+	Revealed          bool              `json:"revealed"`
+	Truncated         bool              `json:"truncated"`
+	RedactionContract string            `json:"redaction_contract"`
+	At                time.Time         `json:"at"`
+}
+
+// SecretOwner is one owner reference of a Secret.
+type SecretOwner struct {
+	APIVersion string `json:"api_version"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
 }
 
 // ReadSecret reads one Secret the deployment's whitelist names. A value is
@@ -90,6 +107,31 @@ func (p *Provider) ReadSecret(ctx context.Context, request SecretRequest) (Secre
 		return result, apiError(err)
 	}
 	result.UID, result.Type = string(secret.UID), string(secret.Type)
+	result.CreatedAt = secret.CreationTimestamp.UTC()
+	if len(secret.Labels) > 0 {
+		result.Labels = map[string]string{}
+		for key, value := range secret.Labels {
+			redacted, _ := p.redactor.bounded(value, p.options.MaxOutputBytes)
+			result.Labels[key] = redacted
+		}
+	}
+	for key, value := range secret.Annotations {
+		if key == lastAppliedAnnotation {
+			continue
+		}
+		if result.Annotations == nil {
+			result.Annotations = map[string]string{}
+		}
+		if value != "" && credentialKey.MatchString(key) {
+			result.Annotations[key] = "<redacted>"
+			continue
+		}
+		redacted, _ := p.redactor.bounded(value, p.options.MaxOutputBytes)
+		result.Annotations[key] = redacted
+	}
+	for _, owner := range secret.OwnerReferences {
+		result.OwnerReferences = append(result.OwnerReferences, SecretOwner{APIVersion: owner.APIVersion, Kind: owner.Kind, Name: owner.Name, UID: string(owner.UID)})
+	}
 	keys := make([]string, 0, len(secret.Data))
 	for key := range secret.Data {
 		keys = append(keys, key)

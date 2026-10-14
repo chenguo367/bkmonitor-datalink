@@ -76,7 +76,10 @@ const (
 	CodeAPIError           = "apiserver_error"
 	CodeForbidden          = "rbac_forbidden"
 	CodeNotFound           = "not_found"
-	CodeCanceled           = "request_canceled"
+	// CodeKindNotInstalled is a custom resource kind whose CRD the cluster
+	// does not have.
+	CodeKindNotInstalled = "kind_not_installed"
+	CodeCanceled         = "request_canceled"
 )
 
 // Error deliberately omits raw API/transport errors, which can contain URLs,

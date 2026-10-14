@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -138,4 +139,37 @@ func TestAConfigMapIsAlwaysRedacted(t *testing.T) {
 	}
 	_, err = provider.ReadConfigMap(context.Background(), ConfigMapRequest{Name: "missing"})
 	requireCode(t, err, CodeNotFound)
+}
+
+// A Secret read also says what owns it and who made it, so a reader can tell
+// whether removing a release would delete it: labels, annotations with the
+// last-applied copy dropped and a credential-named one masked, owner
+// references and creation time, beside the keys and their sizes.
+func TestASecretReadCarriesItsMetadata(t *testing.T) {
+	client, _ := fixture()
+	created := metav1.NewTime(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC))
+	secrets := &secretFixture{secrets: map[string]*corev1.Secret{
+		"ns1/dep-secret": {ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "dep-secret", UID: "s-uid", CreationTimestamp: created,
+			Labels: map[string]string{"app.kubernetes.io/managed-by": "Helm"},
+			Annotations: map[string]string{"meta.helm.sh/release-name": "release-a", "meta.helm.sh/release-namespace": "ns1",
+				lastAppliedAnnotation: `{"data":{"password":"sentinel-applied"}}`, "example.com/api-token": "sentinel-annotation"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "d1", UID: "d-uid"}}},
+			Type: corev1.SecretTypeOpaque, Data: map[string][]byte{"password": []byte("sentinel-value")}},
+	}}
+	provider := mustProvider(t, Options{Client: client, Secrets: secrets, DefaultNamespace: "own"})
+	receipt, err := provider.ReadSecret(context.Background(), SecretRequest{Namespace: "ns1", Name: "dep-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(receipt)
+	for _, value := range []string{"sentinel", "last-applied-configuration"} {
+		if strings.Contains(string(encoded), value) {
+			t.Fatalf("receipt carries %q: %s", value, encoded)
+		}
+	}
+	if receipt.Labels["app.kubernetes.io/managed-by"] != "Helm" || receipt.Annotations["meta.helm.sh/release-name"] != "release-a" ||
+		receipt.Annotations["example.com/api-token"] != "<redacted>" || !receipt.CreatedAt.Equal(created.Time) ||
+		len(receipt.OwnerReferences) != 1 || receipt.OwnerReferences[0].Name != "d1" || receipt.OwnerReferences[0].Kind != "Deployment" {
+		t.Fatalf("metadata = labels %v annotations %v owners %+v created %v", receipt.Labels, receipt.Annotations, receipt.OwnerReferences, receipt.CreatedAt)
+	}
 }
