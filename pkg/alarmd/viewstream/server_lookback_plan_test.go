@@ -55,6 +55,9 @@ func TestTheLeaderSendsEachWorkerItsPlanSetBesideTheViewNotInIt(t *testing.T) {
 	if empty := w2.recvPlans(); len(empty.Entries) != 0 {
 		t.Fatalf("w2's plan set = %+v, want the empty set", empty)
 	}
+	// A set is counted after its Send returns, so the Worker can hold it a
+	// moment before the count does.
+	eventually(t, "both sets were sent", func() bool { return harness.server.Stats().LookbackPlanSetsSent == 2 })
 	if stats := harness.server.Stats(); stats.Revision != 1 || stats.LookbackPlanSetsSent != 2 {
 		t.Fatalf("stats = revision %d, %d plan sets sent; want revision 1 unchanged and two sets", stats.Revision, stats.LookbackPlanSetsSent)
 	}
