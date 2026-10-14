@@ -1542,6 +1542,18 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"一次都没等过才是真的有余量，这一支要和上一支说相反的话"},
 		{"PERMIT nothing-asked ::", "无从谈起", "不是约束",
 			"零次取位子里零次等待不是有余量，是什么都没量到"},
+		// The ceiling is the memory's share and no longer follows the load, so
+		// the card reads the minute's peak against it and says where it comes
+		// from; the old wording said the ceiling was derived from each
+		// replica's load.
+		{"PERMIT peak-reported ::", "峰值 9 / 上限 64（按内存）", "按各自负载",
+			"上限按内存算，卡片读最近一分钟的峰值对上限，不再说按负载推导"},
+		{"PERMIT peak-reported ::", "每个副本按自己的内存算，2 个副本相加", "",
+			"总上限是各副本内存份额之和，要说清怎么加起来的"},
+		// A replica from before the peak was reported reads as its instant
+		// rather than as no number.
+		{"PERMIT never-waited ::", "（按内存）", "undefined",
+			"旧副本没报峰值时用此刻占用顶上，不能出现 undefined"},
 	} {
 		line := lineStarting(text, want.prefix)
 		if line == "" {
@@ -1892,6 +1904,11 @@ const permitShapes = {
   // A replica that has not run a query yet. Zero waits out of zero asks is not
   // "there is room", it is nothing measured.
   'nothing-asked': {permit_acquires: 0, permit_waits: 0, waiting: 0},
+  // The ceiling is each replica's memory share, two replicas of 32; the peak
+  // is the most held at once in the last minute, which is what it is read
+  // against.
+  'peak-reported': {permit_acquires: 40000, permit_waits: 2, waiting: 0, replicas: 2,
+    permits_peak_total: 9, permit_budget_total: 64, permit_budget_per_replica: 32},
 };
 for (const [name, override] of Object.entries(permitShapes)) {
   store['capCards'].textContent = '';

@@ -4110,9 +4110,12 @@ function renderCapacity(cap, gaps, census) {
     if (hint) { var h = document.createElement('div'); h.className = 'k'; h.textContent = hint; d.appendChild(h); }
     box.appendChild(d);
   }
-  // Each replica sizes its own budget from the work it owns, so the
+  // Each replica's budget is its share of its own memory, so the
   // deployment's is their sum, not one replica's times the count.
   var permitCeiling = cap.permit_budget_total || cap.permit_budget_per_replica * cap.replicas;
+  // The most held at once in the last minute, added over the replicas. A
+  // replica that does not report it yet reads as its instant.
+  var permitPeak = cap.permits_peak_total == null ? cap.permits_held_total : cap.permits_peak_total;
   var at = Date.now();
   // Every cumulative figure is turned into a rate exactly once per render.
   // betweenReads records the value it was handed, so asking it a second time in
@@ -4304,7 +4307,9 @@ function renderCapacity(cap, gaps, census) {
   // gone from the card: the panel's opening paragraph already says the operator
   // sets two numbers and the program derives every ceiling below them, and
   // saying it again on each card is what pushed the measurement to the end.
-  var ceilingText = '上限 ' + permitCeiling + ' 个（' + cap.replicas + ' 副本按各自负载推导之和）';
+  // The ceiling no longer follows the load: it is what each replica's memory
+  // allows, so the card says so in the value and the hint says how it adds up.
+  var ceilingText = '上限 ' + permitCeiling + ' 个（每个副本按自己的内存算，' + cap.replicas + ' 个副本相加）';
   // "没有查询在排队。" was a statement about the deployment made from one
   // instant, and both halves of why that is wrong are already written down --
   // one in the Go type beside this field, one in the shape of the workload.
@@ -4362,8 +4367,8 @@ function renderCapacity(cap, gaps, census) {
     queueText = '此刻另有 ' + cap.waiting_total + ' 个在排队等位子。' + queueText;
   }
   cell('同时在跑的查询',
-    cap.permits_held_total + ' / ' + permitCeiling,
-    (held
+    '峰值 ' + permitPeak + ' / 上限 ' + permitCeiling + '（按内存）',
+    '最近一分钟最多同时跑 ' + permitPeak + ' 个；' + (held
       ? '最近 ' + Math.round(held.elapsed) + ' 秒平均跑着 ' + held.rate.toFixed(1)
         + ' 个，此刻 ' + cap.permits_held_total + ' 个；' + ceilingText + '。'
       : '此刻在跑 ' + cap.permits_held_total + ' 个，' + ceilingText + '；平均值约 30 秒后出现。')

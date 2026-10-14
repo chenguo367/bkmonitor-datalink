@@ -300,8 +300,11 @@ type FlightCoordinator struct {
 	holds HourlyDurations
 	// recoveryAcquires is the part of permitAcquires asked by a recovery
 	// operation; normalRequests the normal ones by second.
-	recoveryAcquires       uint64
-	normalRequests         SecondPeak
+	recoveryAcquires uint64
+	normalRequests   SecondPeak
+	// heldPeak is the most permits held at once, lookback included, by
+	// second over the last minute.
+	heldPeak               SecondMax
 	normalWaiters          []*queryPermitWaiter
 	recoveryWaiters        []*queryPermitWaiter
 	recoveryChannelWaiters []*recoveryChannelWaiter
@@ -405,6 +408,11 @@ type QueryPermitOccupancy struct {
 	// normal's or recovery's.
 	LookbackInflight    int
 	LookbackHeldSeconds float64
+	// PeakHeld is the most permits held at once in the last minute, the
+	// lookback's included. Inflight is an instant and the held seconds a
+	// mean; this is the one of the three that says how close the work came to
+	// the budget, which is what a reader compares the budget against.
+	PeakHeld int
 }
 
 // QueryPermitOccupancySource reports live occupancy.
@@ -441,6 +449,9 @@ func (coordinator *FlightCoordinator) QueryPermitOccupancy() QueryPermitOccupanc
 		}
 	}
 	occupancy.LookbackInflight, occupancy.LookbackHeldSeconds = coordinator.lookbackInflight, coordinator.lookbackSeconds
+	// A permit taken more than a minute ago and still held is not in the
+	// minute's grants, and is still part of the peak.
+	occupancy.PeakHeld = max(coordinator.heldPeak.Max(at), coordinator.queryInflight)
 	for _, held := range coordinator.lookbackHeld {
 		if elapsed := at.Sub(held.since); elapsed > 0 {
 			occupancy.LookbackHeldSeconds += elapsed.Seconds()
