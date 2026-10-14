@@ -45,6 +45,10 @@ const (
 	snapshotCallMargin    = 30 * time.Second
 	snapshotFallbackRate  = 30
 	snapshotDetailCallsBy = 2
+	// snapshotRateAttempts is how many times one read is asked while the
+	// session's budget refuses it: the first, the one after the minute
+	// turns, and one more for the two clocks' difference.
+	snapshotRateAttempts = 3
 )
 
 // snapshotMaxBytes bounds the answers a snapshot keeps, and with them what
@@ -80,6 +84,13 @@ var snapshotClock = time.Now
 // sets it to nothing.
 var snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) }
 
+// snapshotSleep waits for the session's budget and snapshotNow reads the
+// clock the time cap is held to; a test moves one with the other.
+var (
+	snapshotSleep = time.Sleep
+	snapshotNow   = time.Now
+)
+
 // SnapshotItem is one collected read as the manifest records it.
 type SnapshotItem struct {
 	Operation string         `json:"operation"`
@@ -96,22 +107,25 @@ type SnapshotItem struct {
 
 // SnapshotManifest is the snapshot's own account, at a fixed path.
 type SnapshotManifest struct {
-	Format          string            `json:"format"`
-	Notice          string            `json:"notice"`
-	CLIVersion      string            `json:"cli_version"`
-	EnvironmentID   string            `json:"environment_id"`
-	CatalogRevision string            `json:"catalog_revision"`
-	Builds          []string          `json:"builds"`
-	StartedAt       time.Time         `json:"started_at"`
-	FinishedAt      time.Time         `json:"finished_at"`
-	RatePerMinute   int               `json:"rate_per_minute"`
-	RateSource      string            `json:"rate_source"`
-	PlannedCalls    int               `json:"planned_calls"`
-	TimeCapSeconds  int               `json:"time_cap_seconds"`
-	MaxBytes        int               `json:"max_bytes"`
-	Bytes           int               `json:"bytes"`
-	Redactions      []SnapshotRedacts `json:"redactions"`
-	Items           []SnapshotItem    `json:"items"`
+	Format          string    `json:"format"`
+	Notice          string    `json:"notice"`
+	CLIVersion      string    `json:"cli_version"`
+	EnvironmentID   string    `json:"environment_id"`
+	CatalogRevision string    `json:"catalog_revision"`
+	Builds          []string  `json:"builds"`
+	StartedAt       time.Time `json:"started_at"`
+	FinishedAt      time.Time `json:"finished_at"`
+	RatePerMinute   int       `json:"rate_per_minute"`
+	RateSource      string    `json:"rate_source"`
+	PlannedCalls    int       `json:"planned_calls"`
+	TimeCapSeconds  int       `json:"time_cap_seconds"`
+	// BudgetWaitSeconds is how long the run waited for the session's
+	// budget; the time cap grew by as much, up to the cap again.
+	BudgetWaitSeconds int               `json:"budget_wait_seconds"`
+	MaxBytes          int               `json:"max_bytes"`
+	Bytes             int               `json:"bytes"`
+	Redactions        []SnapshotRedacts `json:"redactions"`
+	Items             []SnapshotItem    `json:"items"`
 }
 
 // SnapshotRedacts is what the second redaction pass replaced in one file:
@@ -145,6 +159,10 @@ type snapshotRun struct {
 	files    map[string][]byte
 	log      bytes.Buffer
 	deadline time.Time
+	// waitRoom is how much more the deadline may move for budget waits, and
+	// waited how long the run has waited for the budget.
+	waitRoom time.Duration
+	waited   time.Duration
 	pace     time.Duration
 	last     time.Time
 	calls    int
@@ -202,6 +220,7 @@ func (a *App) snapshot(p Profile, out string) int {
 	capacity := time.Duration(minutes)*time.Minute + snapshotCallMargin
 	run.manifest.TimeCapSeconds = int(capacity / time.Second)
 	run.deadline = run.manifest.StartedAt.Add(capacity)
+	run.waitRoom = capacity
 	for _, build := range snapshotBuilds(objectField(fleet, "result")) {
 		run.manifest.Builds = append(run.manifest.Builds, build)
 	}
@@ -276,7 +295,7 @@ func (run *snapshotRun) invoke(read snapshotRead, offered map[string]bool) map[s
 func (run *snapshotRun) allowed(operation string, params map[string]any) bool {
 	reason := ""
 	switch {
-	case !run.deadline.IsZero() && time.Now().After(run.deadline):
+	case !run.deadline.IsZero() && snapshotNow().After(run.deadline):
 		reason = "time cap reached"
 	case run.manifest.Bytes >= snapshotMaxBytes:
 		reason = "byte cap reached"
@@ -297,21 +316,64 @@ func (run *snapshotRun) wait() {
 	run.last = time.Now()
 }
 
+// call asks one read. The session's budget is shared with every call made
+// under the same login, so the snapshot's own pace does not keep it from
+// being spent: a read refused for it executed nothing, and is asked again
+// when the refusal says to. The cap was planned from the calls at the full
+// rate, and a wait is time no call could use, so the cap grows by each wait
+// taken, by no more than the cap again in all; a wait past that is not
+// taken.
 func (run *snapshotRun) call(operation string, params map[string]any) (map[string]any, bool) {
-	run.wait()
-	started := time.Now()
-	m, status, err := run.a.channelRequest("invoke", operation, params, run.revision, run.p)
-	run.calls++
-	entry := map[string]any{"at": started.UTC().Format(time.RFC3339Nano), "operation": operation, "elapsed_ms": time.Since(started).Milliseconds(), "http_status": status}
-	if err != nil {
-		entry["error"] = err.Error()
+	var m map[string]any
+	var status int
+	var err error
+	for attempt := 1; ; attempt++ {
+		run.wait()
+		started := time.Now()
+		m, status, err = run.a.channelRequest("invoke", operation, params, run.revision, run.p)
+		run.calls++
+		entry := map[string]any{"at": started.UTC().Format(time.RFC3339Nano), "operation": operation, "elapsed_ms": time.Since(started).Milliseconds(), "http_status": status}
+		if err != nil {
+			entry["error"] = err.Error()
+		}
+		retry := time.Duration(0)
+		if err == nil && stringField(objectField(m, "error"), "code") == "rate_limited" && attempt < snapshotRateAttempts {
+			retry = snapshotRetryAfter(m)
+			if !run.deadline.IsZero() {
+				if retry > run.waitRoom {
+					retry = 0
+				} else {
+					run.waitRoom -= retry
+					run.deadline = run.deadline.Add(retry)
+				}
+			}
+		}
+		if retry > 0 {
+			entry["retry_after_ms"] = retry.Milliseconds()
+		}
+		line, _ := json.Marshal(entry)
+		run.log.Write(append(line, '\n'))
+		if retry <= 0 {
+			break
+		}
+		snapshotSleep(retry)
+		run.waited += retry
 	}
-	line, _ := json.Marshal(entry)
-	run.log.Write(append(line, '\n'))
 	if err != nil || m == nil {
 		return map[string]any{"status": "error", "error": map[string]any{"code": "request_failed", "message": fmt.Sprint(err)}, "meta": map[string]any{"http_status": status}}, false
 	}
 	return m, status >= 200 && status < 300
+}
+
+// snapshotRetryAfter is how long a refusal for the session's budget says to
+// wait: its Retry-After, else until a second past the next minute by this
+// clock, the budget's window being the clock minute.
+func snapshotRetryAfter(m map[string]any) time.Duration {
+	if seconds, ok := objectField(m, "meta")["client_retry_after_seconds"].(int); ok {
+		return time.Duration(max(seconds, 1)) * time.Second
+	}
+	now := snapshotNow()
+	return now.Truncate(time.Minute).Add(time.Minute + time.Second).Sub(now)
 }
 
 // keepAnswer files one answer with the request it answered.
@@ -396,6 +458,7 @@ func (run *snapshotRun) scan(name string, data []byte) []byte {
 // read was collected, 3 when some were not: a partial answer was collected.
 func (run *snapshotRun) finish(out string) int {
 	run.manifest.FinishedAt = time.Now().UTC()
+	run.manifest.BudgetWaitSeconds = int(run.waited.Round(time.Second) / time.Second)
 	whole := true
 	missing := []string{}
 	for _, item := range run.manifest.Items {

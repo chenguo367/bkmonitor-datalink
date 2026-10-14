@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -220,6 +221,11 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 		verification = "disabled_explicitly"
 	}
 	meta["client_transport"] = map[string]any{"scheme": u.Scheme, "encrypted": u.Scheme == "https", "tls_verification": verification}
+	// When to come back, as a refusal said it: the header is not in the
+	// body, and a caller that waits needs it.
+	if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds >= 0 {
+		meta["client_retry_after_seconds"] = seconds
+	}
 	return result, resp.StatusCode, nil
 }
 
