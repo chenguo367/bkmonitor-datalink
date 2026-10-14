@@ -69,6 +69,7 @@ func NewInCluster(options Options) (*Provider, error) {
 	options.ConfigMaps = client
 	options.Resources = client
 	options.DryRun = client
+	options.Writer = client
 	options.Executor = executor
 	return New(options)
 }
@@ -289,4 +290,16 @@ func (c *KubernetesClient) Mapping(apiVersion, kind string) (schema.GroupVersion
 // is fixed here; no caller reaches it.
 func (c *KubernetesClient) ApplyDryRun(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, data []byte) (*unstructured.Unstructured, error) {
 	return c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.ApplyPatchType, data, dryRunPatchOptions())
+}
+
+// Apply is k8s.apply's write: a server-side apply under the channel's field
+// manager, persisted; writePatchOptions is fixed here.
+func (c *KubernetesClient) Apply(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, data []byte, force bool) (*unstructured.Unstructured, error) {
+	return c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.ApplyPatchType, data, writePatchOptions(force))
+}
+
+// Delete is k8s.delete's write: only the object the uid names, dependents in
+// the background; deleteOptions is fixed here.
+func (c *KubernetesClient) Delete(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, uid types.UID, resourceVersion string) error {
+	return c.owners.Resource(resource).Namespace(namespace).Delete(ctx, name, deleteOptions(uid, resourceVersion))
 }

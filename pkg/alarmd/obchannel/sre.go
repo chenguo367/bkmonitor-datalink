@@ -74,7 +74,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun}
+	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -315,6 +315,27 @@ func SREOperations(options SREOptions) []Operation {
 					out.Summary = "dry run not clean: " + dryRunCounts(v)
 				}
 				return out
+			}},
+		{ID: pod.OpApply, Summary: "把一组清单（YAML 文档或 JSON 对象，至多 50 个）逐个以服务端 apply 写入集群（字段管理者 alarmd-sre，真写，不是 dry run）：每个对象答 created / updated / unchanged / conflict（字段归属冲突，force=true 接管这些字段）/ denied（准入、校验、配额、无权限，原样带 apiserver 的话）/ not_checked / not_granted_kind（chart 授权之外的种类）/ rbac_not_writable（Role、ClusterRole 与绑定不写），并给出改前改后的字段差异（按 k8s.list 的遮蔽显示，Secret 只显示键与指纹，从不显示值）；对象带 meta.helm.sh/release-name 时写明 helm_release：下一次 helm upgrade 会改回或冲突。命名空间级对象没写命名空间时用 namespace 参数。注意：本环境 CLI 到 alarmd 若是明文 HTTP，Secret 的值会以明文经过集群网络。每次调用都留审计记录，写明对象清单。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+			Limits:   map[string]any{"max_objects": pod.MaxApplyObjects, "max_manifest_bytes": pod.MaxDryRunBytes, "field_manager": "alarmd-sre"},
+			Fields:   map[string]Field{"manifests": {Type: "string", MinLength: 1, MaxLength: pod.MaxDryRunBytes, Source: "要写入的清单；Secret 从本地文件经 --input @文件 传入"}, "namespace": text, "force": {Type: "boolean"}},
+			Required: []string{"manifests"}, OutputSchema: SchemaOf(pod.WriteReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				started := now()
+				force, _ := p["force"].(bool)
+				v, err := pods.Apply(ctx, pod.ApplyRequest{Manifests: p.String("manifests"), Namespace: p.String("namespace"), Force: force})
+				audit(ctx, started, SREAction{Op: pod.OpApply, Namespace: p.String("namespace"), Kind: "objects", Name: writeNames(v), Detail: writeDetail(v)}, err)
+				return wrapPod(v, err, err == nil)
+			}},
+		{ID: pod.OpDelete, Summary: "删除一个对象：按 api_version、kind、namespace、name 与读到的 uid（必填，来自先前的 k8s.list），给了 resource_version 时也须仍是它；依赖对象后台删除。答 deleted / gone（已不存在）/ precondition_failed（已不是读到的那个）/ denied / not_granted_kind / rbac_not_writable / protected_namespace（kube-system、kube-public、kube-node-lease、default 与本进程所在命名空间不删）；对象带 helm 归属时写明 helm_release。每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable,
+			Fields:   map[string]Field{"api_version": text, "kind": text, "namespace": text, "name": text, "uid": {Type: "string", MinLength: 1, MaxLength: 128, Source: "k8s.list items[].metadata.uid"}, "resource_version": {Type: "string", MinLength: 1, MaxLength: 64}},
+			Required: []string{"api_version", "kind", "name", "uid"}, OutputSchema: SchemaOf(pod.WriteReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				started := now()
+				v, err := pods.DeleteObject(ctx, pod.ObjectDeleteRequest{APIVersion: p.String("api_version"), Kind: p.String("kind"), Namespace: p.String("namespace"),
+					Name: p.String("name"), UID: p.String("uid"), ResourceVersion: p.String("resource_version")})
+				audit(ctx, started, SREAction{Op: pod.OpDelete, Namespace: p.String("namespace"), Kind: p.String("kind"), Name: p.String("name"), UID: p.String("uid"), Detail: writeDetail(v)}, err)
+				return wrapPod(v, err, err == nil)
 			}},
 		{ID: "pod.get", Summary: "读取一个 Pod 的容器身份、运行状态与 owner 链；首次可省略 UID，后续使用返回身份。", EvidenceScope: "sre_pod_target", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": inspectTarget}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.Observation{}),
 			Run: func(ctx context.Context, p Params) Outcome {
@@ -593,6 +614,45 @@ func dryRunNames(receipt pod.DryRunReceipt) string {
 		names = append(names, object.Kind+"/"+object.Namespace+"/"+object.Name)
 	}
 	return strings.Join(names, ",")
+}
+
+// writeNames is the objects one apply wrote or tried to, as its audit line
+// names them, at most secretAuditNames, then how many more.
+func writeNames(receipt pod.WriteReceipt) string {
+	names := make([]string, 0, min(len(receipt.Objects), secretAuditNames+1))
+	for index, object := range receipt.Objects {
+		if index == secretAuditNames {
+			names = append(names, fmt.Sprintf("+%d more", len(receipt.Objects)-secretAuditNames))
+			break
+		}
+		names = append(names, object.Kind+"/"+object.Namespace+"/"+object.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+// writeDetail is a write's outcomes by count, whether it forced ownership,
+// and the helm releases it touched.
+func writeDetail(receipt pod.WriteReceipt) string {
+	var parts []string
+	for _, outcome := range pod.WriteOutcomes {
+		if count := receipt.Counts[outcome]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", outcome, count))
+		}
+	}
+	if receipt.Force {
+		parts = append(parts, "force")
+	}
+	releases := map[string]bool{}
+	for _, object := range receipt.Objects {
+		if object.HelmRelease != "" && !releases[object.HelmRelease] {
+			releases[object.HelmRelease] = true
+			parts = append(parts, "helm_release "+object.HelmRelease)
+		}
+	}
+	if len(parts) == 0 {
+		return "no objects"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // dryRunCounts is a dry run's verdicts by count, in their fixed order.
