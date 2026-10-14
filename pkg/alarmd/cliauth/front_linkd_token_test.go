@@ -6,6 +6,7 @@
 package cliauth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -66,7 +67,7 @@ func TestTheAdminHandsTheLinkTokenOverOnTheFrontSurface(t *testing.T) {
 	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != want {
 		t.Fatalf("hand-over answered %d %s, want %s", w.Code, w.Body, want)
 	}
-	if got, err := store.Token(t.Context()); err != nil || got != token {
+	if got, err := store.Token(context.Background()); err != nil || got != token {
 		t.Fatalf("the handed token is not the one used: %v", err)
 	}
 	for name, w := range map[string]*httptest.ResponseRecorder{

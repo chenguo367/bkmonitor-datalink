@@ -1671,7 +1671,8 @@ var CONSOLE_OP = { roster: '名册', reconcile: '校准对账', alert_record: '�
 // and incomplete.
 var CONSOLE_FAILURE_CLASS = { cancelled: '调用方先放弃了（进程退出或放手）', timeout: '超时', connection_refused: '连接被拒绝',
   connection_reset: '连接被重置', dns: '域名解析失败', tls: 'TLS 握手或证书校验失败', eof: '连接被对端提前关闭',
-  other: '其他传输错误', status: '应答不是 200', incomplete: '应答体读不全或解析不了' };
+  other: '其他传输错误', status: '应答不是 200', incomplete: '应答体读不全或解析不了',
+  not_api: '地址答的是网页不是 linkd 的 API，Console 地址要写到 API 根', no_token: '还没有可用的 admin 令牌（未交接、过期或被拒）' };
 var LINK_HEALTH = {
   discovery_failing: '最近一次全量发现失败',
   discovery_never_succeeded: '从未成功完成全量发现',
