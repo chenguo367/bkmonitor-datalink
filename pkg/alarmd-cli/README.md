@@ -51,7 +51,7 @@ alarmd-cli invoke <operation> --env <environment_id> --input '{"field":"value"}'
 alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 ```
 
-登录自动导入授权码中的稳定 `environment_id`、名称和入口；可选 `auth login --env <id>` 用于核对环境。其余远程命令必须显式传 `--env`。`profile use <id>` 仅记录人工偏好，不会给远程命令隐式选择环境。服务端更新操作目录后客户端无需升级；先读 discover 摘要，按需读 describe 中的 schema、limits、parameter_sources 和示例。
+登录自动导入授权码中的稳定 `environment_id`、名称和入口；可选 `auth login --env <id>` 用于核对环境。其余远程命令必须显式传 `--env`。`profile use <id>` 仅记录人工偏好，不会给远程命令隐式选择环境。服务端更新操作目录后客户端无需升级；先读 discover 摘要，按需读 describe 中的 schema、limits、parameter_sources 和示例。部署自带与它同一提交构建的 alarmd-cli，并在 `api/cli/version` 报出版本；发行版 CLI（版本号为 `x.y.z`）在登录和每次 discover 时读一次，与本地版本不同就在 stderr 提示，并给出从这个部署安装匹配版本的命令（`curl -fsSL <入口>/api/cli/install.sh | sh -s -- --server <入口>`）。不自动更新；部署不报版本（旧部署 404、未打包 CLI 的 503）或本地是开发构建时不提示。
 
 每次 invoke 在本进程先 describe 一次，再携带当前 revision 调用一次。没有持久 schema 缓存、完整客户端 schema 校验器或自动重试。`catalog_changed` 说明合同变化，应重新查阅 describe 后决定是否再次调用。`next_call` 只是建议，客户端不会自行执行。
 
