@@ -139,6 +139,7 @@ func TestEverySREOutcomeLandsInOneResult(t *testing.T) {
 		pod.CodeInvalidRequest:     SREResultRefused,
 		pod.CodeCommandStartFailed: SREResultRefused,
 		pod.CodeBusy:               SREResultRefused,
+		pod.CodeKindNotInstalled:   SREResultRefused,
 		pod.CodeAPIError:           SREResultFailed,
 	}
 	for code, want := range cases {
