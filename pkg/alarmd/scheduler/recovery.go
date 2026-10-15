@@ -461,7 +461,9 @@ func (coordinator *FlightCoordinator) releaseQueryPermit(operation execution.Ope
 }
 
 func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
-	hold := coordinator.holds.MeanReference(coordinator.now())
+	// The hold reference scans a day of hours; read it once, and only when a
+	// recovery turn is actually contested by normal waiters.
+	hold := time.Duration(-1)
 	for coordinator.queryInflight < coordinator.limits.ProcessQueryPermits {
 		coordinator.expireWaitersLocked(&coordinator.normalWaiters)
 		coordinator.expireWaitersLocked(&coordinator.recoveryWaiters)
@@ -475,7 +477,13 @@ func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
 		// arriving in the last seconds of a Slot's permit window otherwise
 		// halves the normal queue's drain and turns its tail away, though the
 		// replays' own deadlines are far off.
-		useRecovery := canRecovery && (!canNormal || (coordinator.nextRecovery && !coordinator.normalDueLocked(hold)))
+		useRecovery := canRecovery && !canNormal
+		if canRecovery && canNormal && coordinator.nextRecovery {
+			if hold < 0 {
+				hold = coordinator.holds.MeanReference(coordinator.now())
+			}
+			useRecovery = !coordinator.normalDueLocked(hold)
+		}
 		var waiter *queryPermitWaiter
 		if useRecovery {
 			waiter = coordinator.popFairWaiterLocked(&coordinator.recoveryWaiters, &coordinator.lastRecoveryQG)
