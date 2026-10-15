@@ -81,6 +81,9 @@ const (
 type TrendScope struct {
 	Namespace string
 	Container string
+	// Node is the node this replica runs on, when known: a container chart
+	// with no series names it, since the collector not covering it is why.
+	Node string
 }
 
 // TrendLine is one line of a chart: its name and its expression. ByPod
@@ -263,6 +266,8 @@ type Trends struct {
 	Range  RangeProvider
 	Spaces func(ctx context.Context) map[string]TrendSpace
 	Scope  TrendScope
+	// Node says the node this replica runs on, or "" when it cannot.
+	Node func(ctx context.Context) string
 
 	mu       sync.Mutex
 	answers  map[string]TrendsAnswer
@@ -314,7 +319,11 @@ func (trends *Trends) read(ctx context.Context, window SeriesWindow, at time.Tim
 	}()
 	shared, cancel := context.WithTimeout(context.Background(), trendsComputeTimeout)
 	defer cancel()
-	flight.answer = collectTrends(shared, trends.Range, trends.Spaces(shared), trends.Scope, window, at)
+	scope := trends.Scope
+	if trends.Node != nil {
+		scope.Node = trends.Node(shared)
+	}
+	flight.answer = collectTrends(shared, trends.Range, trends.Spaces(shared), scope, window, at)
 	return flight.answer
 }
 
@@ -360,6 +369,17 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 			trend.Lines = []TrendLineAnswer{}
 		} else if points == 0 {
 			trend.NoSeries = true
+			// The container space resolved on the namespace's container data,
+			// so nothing for this deployment's container is the collector not
+			// reaching the node it runs on.
+			if definition.Space == TrendSpaceContainer {
+				node := ""
+				if scope.Node != "" {
+					node = " (" + scope.Node + ")"
+				}
+				trend.Detail = fmt.Sprintf("space %s has container data for namespace %q but no series for container %q: the collector does not cover the node this replica runs on%s",
+					space.Space, scope.Namespace, scope.Container, node)
+			}
 		}
 		answer.Trends = append(answer.Trends, trend)
 	}

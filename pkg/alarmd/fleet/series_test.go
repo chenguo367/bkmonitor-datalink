@@ -161,8 +161,25 @@ func TestEachChartSaysWhyItHasNoLines(t *testing.T) {
 		}
 	}
 	quiet := collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
-	if trend := trendByKey(quiet, "queries_per_second"); !trend.NoSeries || trend.Unavailable != "" {
+	if trend := trendByKey(quiet, "queries_per_second"); !trend.NoSeries || trend.Unavailable != "" || trend.Detail != "" {
 		t.Errorf("an empty window = %+v, want no_series", trend)
+	}
+	// A resolved container space holds the namespace's container data (that
+	// is what resolved it); none for alarmd's container is the collector not
+	// covering the node this replica runs on, said so, with the node.
+	scope := trendTestScope
+	scope.Node = "node-7"
+	quiet = collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), scope, window, time.Unix(1789006380, 0))
+	for _, key := range []string{"cpu_cores", "memory_bytes"} {
+		trend := trendByKey(quiet, key)
+		if !trend.NoSeries || trend.Unavailable != "" || trend.Detail != `space bkcc__3 has container data for namespace "alarmd-ns" but no series for container "alarmd": the collector does not cover the node this replica runs on (node-7)` {
+			t.Errorf("%s with no alarmd series = %+v", key, trend)
+		}
+	}
+	// A read takes the node from the deployment's Node at read time.
+	trends := &Trends{Range: &stubRange{}, Spaces: resolvedSpaces, Scope: trendTestScope, Node: func(context.Context) string { return "node-9" }}
+	if memory := trendByKey(trends.read(context.Background(), window, time.Unix(1789006380, 0)), "memory_bytes"); !strings.HasSuffix(memory.Detail, "(node-9)") {
+		t.Errorf("a read's memory chart = %+v, want the node it was told", memory)
 	}
 }
 
