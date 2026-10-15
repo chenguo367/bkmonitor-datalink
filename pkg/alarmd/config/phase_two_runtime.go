@@ -407,12 +407,15 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 	if c.Access.DownstreamExecutionReserve.Duration() <= 0 {
 		return errors.New("phase_two access downstream_execution_reserve must be positive")
 	}
+	// A control process reads trends through the UQ endpoint when one is
+	// set; its coordinates are checked here rather than failing the start.
+	if selected.Has(roles.Control) && !selected.Has(roles.Worker) && c.Access.UQEndpoint != "" && !c.Access.uqCoordinatesValid() {
+		return errors.New("phase_two access UQ coordinates are invalid: a control process reads trends through uq_endpoint with query_source")
+	}
 	if !selected.Has(roles.Worker) {
 		return nil
 	}
-	endpoint, err := url.Parse(c.Access.UQEndpoint)
-	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" ||
-		!canonicalText(c.Access.UQEndpoint) || !canonicalText(c.Access.QuerySource) ||
+	if !c.Access.uqCoordinatesValid() ||
 		c.Access.MinReadyDelay.Duration() <= 0 || c.Access.DownstreamExecutionReserve.Duration() <= 0 {
 		return errors.New("phase_two access UQ coordinates and min_ready_delay are invalid")
 	}
@@ -483,4 +486,12 @@ func canonicalTextList(values []string) bool {
 		}
 	}
 	return true
+}
+
+// uqCoordinatesValid is whether the UQ endpoint is an absolute http(s) URL
+// and it and the query source are canonical text.
+func (a PhaseTwoAccessConfig) uqCoordinatesValid() bool {
+	endpoint, err := url.Parse(a.UQEndpoint)
+	return err == nil && (endpoint.Scheme == "http" || endpoint.Scheme == "https") && endpoint.Host != "" &&
+		canonicalText(a.UQEndpoint) && canonicalText(a.QuerySource)
 }
