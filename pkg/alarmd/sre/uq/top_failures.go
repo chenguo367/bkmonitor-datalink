@@ -6,6 +6,7 @@ package uq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -18,6 +19,15 @@ import (
 // MaxTraceRows each are scanned, and a larger failure set is answered as a
 // sample.
 const TopFailuresPages = 5
+
+// TopFailuresRows is the most failing spans one read scans; TopFailuresRequests
+// the most requests it makes, pages shrunk for the response budget included;
+// topFailuresMinRows the smallest page it shrinks to.
+const (
+	TopFailuresRows     = TopFailuresPages * MaxTraceRows
+	TopFailuresRequests = 20
+	topFailuresMinRows  = 100
+)
 
 // TopFailuresGroups is how many groups an answer lists.
 const TopFailuresGroups = 20
@@ -141,7 +151,14 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 	answer.Target, answer.Window, answer.Start, answer.End = *target, window, start, end
 	answer.QueryString = failurePredicate(request)
 	groups := map[string]*failureAccumulator{}
-	for page := 0; page < TopFailuresPages; page++ {
+	// Pages are read newest first, so they neither overlap nor skip and a
+	// sample is the most recent failing spans. A page too large for the
+	// response budget (spans carrying stack traces) is read again at half
+	// the rows, down to a floor: a noisy failing service is the case this
+	// read exists for, and must be answered rather than refused.
+	limit, shrunk, stopped := MaxTraceRows, false, false
+	for answer.Scanned < TopFailuresRows && answer.Pages < TopFailuresRequests {
+		limit = min(limit, TopFailuresRows-answer.Scanned)
 		query := map[string]any{"data_source": "bkapm", "table_id": target.TableID, "time_field": "start_time",
 			"query_string": answer.QueryString, "keep_columns": topFailureColumns}
 		if target.Shared || strings.HasPrefix(target.TableID, "apm_global.shared") {
@@ -151,9 +168,18 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 			}, "condition_list": []any{"and"}}
 		}
 		body := map[string]any{"query_list": []any{query}, "start_time": strconv.FormatInt(start.Unix(), 10), "end_time": strconv.FormatInt(end.Unix(), 10),
-			"from": page * MaxTraceRows, "limit": MaxTraceRows}
+			"from": answer.Scanned, "limit": limit, "order_by": []any{"-start_time"}}
 		receipt, err := p.Trace(ctx, TraceRequest{Egress: request.Egress, Target: request.Target, Body: body})
 		answer.Pages++
+		var named *Error
+		if errors.As(err, &named) && named.Code == "uq_response_bytes_exceeded" {
+			if limit > topFailuresMinRows {
+				limit, shrunk = max(limit/2, topFailuresMinRows), true
+				continue
+			}
+			stopped = true
+			break
+		}
 		if err != nil {
 			return answer, err
 		}
@@ -169,14 +195,22 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 			addFailure(groups, row)
 		}
 		answer.Scanned += len(response.List)
-		if len(response.List) < MaxTraceRows || int64(answer.Scanned) >= response.Total {
+		if len(response.List) < limit || int64(answer.Scanned) >= response.Total {
 			break
 		}
 	}
+	if shrunk {
+		answer.Limitations = append(answer.Limitations, fmt.Sprintf("pages were shrunk to %d spans to fit the response budget", limit))
+	}
+	if stopped {
+		answer.Limitations = append(answer.Limitations, fmt.Sprintf("a page of %d spans still exceeded the response budget; the read stopped there", topFailuresMinRows))
+	}
 	answer.TotalAtLeast = answer.Total >= traceTotalCap
-	answer.Sampled = int64(answer.Scanned) < answer.Total
+	// A read that stopped short of the failures is a sample, whatever total
+	// it saw.
+	answer.Sampled = int64(answer.Scanned) < answer.Total || stopped
 	if answer.Sampled {
-		answer.Limitations = append(answer.Limitations, fmt.Sprintf("sampled: %d of the failing spans were scanned; groups, counts and percentiles are over the scanned part only", answer.Scanned))
+		answer.Limitations = append(answer.Limitations, fmt.Sprintf("sampled: the %d most recent failing spans were scanned; groups, counts, percentiles and first_seen are over the scanned part only", answer.Scanned))
 	}
 	if answer.TotalAtLeast {
 		answer.Limitations = append(answer.Limitations, fmt.Sprintf("the backend caps the total at %d; there are at least that many failing spans", traceTotalCap))

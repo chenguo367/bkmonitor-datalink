@@ -227,3 +227,119 @@ func TestAnUnreadableWindowIsRefusedBeforeAnyCall(t *testing.T) {
 		t.Fatalf("calls = %d, want only the valid window sent", calls)
 	}
 }
+
+// Every page asks for the newest spans first, so pages neither overlap nor
+// skip and a sampled answer is the most recent failing spans.
+func TestEveryPageReadsTheNewestFirst(t *testing.T) {
+	server := &failureServer{rows: func(int) ([]map[string]any, int) { return nil, 0 }}
+	p := failureProvider(t, server, false)
+	if _, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow}); err != nil {
+		t.Fatal(err)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	for i, body := range server.bodies {
+		if order, _ := json.Marshal(body["order_by"]); string(order) != `["-start_time"]` {
+			t.Fatalf("page %d order_by = %s, want newest first", i, order)
+		}
+	}
+}
+
+// A page too large for the response budget (spans carrying stack traces) is
+// read again at half the rows, down to a floor, so a noisy failing service
+// is answered rather than refused; the rows scanned and the requests made
+// stay bounded, and the answer says the pages were shrunk.
+func TestAPageTooLargeIsReadInSmallerPages(t *testing.T) {
+	base := failureNow.Add(-time.Hour).UnixMilli()
+	var requests int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requests++
+		limit, _ := body["limit"].(float64)
+		from, _ := body["from"].(float64)
+		if limit > 250 {
+			_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+			return
+		}
+		rows := []map[string]any{}
+		for i := 0; i < int(limit) && int(from)+i < 600; i++ {
+			rows = append(rows, span(fmt.Sprintf("t%d", int(from)+i), "web", "/noisy", 500, nil, base+int64(from)+int64(i), 1, nil))
+		}
+		encoded, _ := json.Marshal(map[string]any{"list": rows, "total": 600})
+		_, _ = w.Write(encoded)
+	}))
+	defer s.Close()
+	p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", false), nil, "fixture-runtime-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
+	if err != nil {
+		t.Fatalf("a noisy service was refused: %v", err)
+	}
+	shrunk := false
+	for _, limitation := range answer.Limitations {
+		shrunk = shrunk || strings.Contains(limitation, "pages were shrunk")
+	}
+	if answer.Scanned != 600 || answer.Sampled || len(answer.Groups) != 1 || answer.Groups[0].Count != 600 || !shrunk || requests > TopFailuresRequests {
+		t.Fatalf("answer %+v after %d requests", answer, requests)
+	}
+}
+
+// When even the smallest page is too large the read stops, says so, and is
+// a sample rather than a complete answer.
+func TestAReadThatStopsShortIsASample(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+	}))
+	defer s.Close()
+	p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", false), nil, "fixture-runtime-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
+	stopped := false
+	for _, limitation := range answer.Limitations {
+		stopped = stopped || strings.Contains(limitation, "the read stopped there")
+	}
+	if err != nil || !answer.Sampled || !stopped || answer.Pages > TopFailuresRequests {
+		t.Fatalf("answer %+v err %v, want a stopped sample", answer, err)
+	}
+}
+
+// Pages shrunk to the floor still stop at the request cap: the read is
+// bounded in calls as well as rows, and what it scanned is a sample.
+func TestShrunkPagesStopAtTheRequestCap(t *testing.T) {
+	base := failureNow.Add(-time.Hour).UnixMilli()
+	var requests int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requests++
+		limit, _ := body["limit"].(float64)
+		from, _ := body["from"].(float64)
+		if limit > 100 {
+			_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+			return
+		}
+		rows := []map[string]any{}
+		for i := 0; i < int(limit); i++ {
+			rows = append(rows, span(fmt.Sprintf("t%d", int(from)+i), "web", "/noisy", 500, nil, base+int64(from)+int64(i), 1, nil))
+		}
+		encoded, _ := json.Marshal(map[string]any{"list": rows, "total": 5000})
+		_, _ = w.Write(encoded)
+	}))
+	defer s.Close()
+	p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", false), nil, "fixture-runtime-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
+	if err != nil || requests != TopFailuresRequests || answer.Pages != TopFailuresRequests || !answer.Sampled || answer.Scanned >= 5000 {
+		t.Fatalf("answer %+v after %d requests err %v, want the cap", answer, requests, err)
+	}
+}
