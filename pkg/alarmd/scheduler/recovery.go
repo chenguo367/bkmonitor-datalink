@@ -461,6 +461,7 @@ func (coordinator *FlightCoordinator) releaseQueryPermit(operation execution.Ope
 }
 
 func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
+	hold := coordinator.holds.MeanReference(coordinator.now())
 	for coordinator.queryInflight < coordinator.limits.ProcessQueryPermits {
 		coordinator.expireWaitersLocked(&coordinator.normalWaiters)
 		coordinator.expireWaitersLocked(&coordinator.recoveryWaiters)
@@ -469,7 +470,12 @@ func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
 		if !canRecovery && !canNormal {
 			return
 		}
-		useRecovery := canRecovery && (!canNormal || coordinator.nextRecovery)
+		// Recovery takes every other permit only while no normal waiter is
+		// about to miss its deadline. A replay burst (a handover's takeovers)
+		// arriving in the last seconds of a Slot's permit window otherwise
+		// halves the normal queue's drain and turns its tail away, though the
+		// replays' own deadlines are far off.
+		useRecovery := canRecovery && (!canNormal || (coordinator.nextRecovery && !coordinator.normalDueLocked(hold)))
 		var waiter *queryPermitWaiter
 		if useRecovery {
 			waiter = coordinator.popFairWaiterLocked(&coordinator.recoveryWaiters, &coordinator.lastRecoveryQG)
@@ -494,6 +500,26 @@ func (coordinator *FlightCoordinator) dispatchQueryPermitsLocked() {
 		}
 		waiter.grant <- permit
 	}
+}
+
+// normalDueLocked reports whether a queued normal waiter's deadline falls
+// within the time the normal queue needs to drain with every permit: one hold
+// per ProcessQueryPermits waiters ahead, plus the hold of its own. hold is the
+// normal permit hold when the query service is not under pressure
+// (HoldReference); zero before any hold, when no waiter is due and recovery
+// keeps its turn.
+func (coordinator *FlightCoordinator) normalDueLocked(hold time.Duration) bool {
+	if hold <= 0 || len(coordinator.normalWaiters) == 0 || coordinator.limits.ProcessQueryPermits <= 0 {
+		return false
+	}
+	rounds := 1 + len(coordinator.normalWaiters)/coordinator.limits.ProcessQueryPermits
+	due := coordinator.now().Add(time.Duration(rounds) * hold)
+	for _, waiter := range coordinator.normalWaiters {
+		if !waiter.deadline.After(due) {
+			return true
+		}
+	}
+	return false
 }
 
 func (coordinator *FlightCoordinator) waiterQueuedLocked(waiter *queryPermitWaiter, recovery bool) bool {
