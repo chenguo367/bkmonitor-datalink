@@ -269,6 +269,39 @@ func TestLogsBoundRedactionAndTargetChanged(t *testing.T) {
 	}
 }
 
+// An init container is a target of its own, marked as one, verified against
+// its own status: a stuck init (a gse check that never passes) is read by
+// its logs, the previous run's too, like any container. A name that is in
+// neither list is still refused.
+func TestAnInitContainerIsReadLikeAnyContainer(t *testing.T) {
+	client, _ := fixture()
+	client.pod.Spec.InitContainers = []corev1.Container{{Name: "gse-check", Image: "check:v1"}}
+	client.pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "gse-check", ContainerID: "containerd://init-cid", ImageID: "sha256:check", RestartCount: 3,
+		State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}}}
+	client.logs = "waiting for gse socket"
+	provider := mustProvider(t, Options{Client: client})
+	observed, err := provider.Inspect(context.Background(), TargetRequest{Target: Target{Namespace: "tenant", Pod: "web-abc", Container: "gse-check"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observed.Init || observed.Target.ContainerID != "containerd://init-cid" || observed.Target.ImageID != "sha256:check" || observed.Image != "check:v1" ||
+		observed.RestartCount != 3 || !observed.Running || observed.LastTermination == nil || observed.LastTermination.ExitCode != 1 {
+		t.Fatalf("init observation %+v", observed)
+	}
+	regular, err := provider.Inspect(context.Background(), TargetRequest{Target: Target{Namespace: "tenant", Pod: "web-abc", Container: "web"}})
+	if err != nil || regular.Init {
+		t.Fatalf("regular observation %+v err %v", regular, err)
+	}
+	result, err := provider.Logs(context.Background(), LogsRequest{Target: observed.Target, Previous: true})
+	if err != nil || result.Output != "waiting for gse socket" || result.TargetChanged || client.logOptions.Container != "gse-check" || !client.logOptions.Previous {
+		t.Fatalf("init logs %+v err %v options %+v", result, err, client.logOptions)
+	}
+	if _, err := provider.Inspect(context.Background(), TargetRequest{Target: Target{Namespace: "tenant", Pod: "web-abc", Container: "absent"}}); err == nil {
+		t.Fatal("a container in neither list was accepted")
+	}
+}
+
 type executorFunc func(context.Context, StreamRequest) (StreamResult, error)
 
 func (f executorFunc) Stream(ctx context.Context, request StreamRequest) (StreamResult, error) {

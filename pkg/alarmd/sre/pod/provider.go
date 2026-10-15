@@ -335,11 +335,26 @@ func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container strin
 	}
 	root := chain[len(chain)-1]
 	var observations []Observation
+	// Init containers are targets too, each with its own status: a stuck or
+	// failing init is read by its logs like any container.
+	type candidate struct {
+		spec     corev1.Container
+		statuses []corev1.ContainerStatus
+		init     bool
+	}
+	var candidates []candidate
 	for _, spec := range obj.Spec.Containers {
+		candidates = append(candidates, candidate{spec, obj.Status.ContainerStatuses, false})
+	}
+	for _, spec := range obj.Spec.InitContainers {
+		candidates = append(candidates, candidate{spec, obj.Status.InitContainerStatuses, true})
+	}
+	for _, each := range candidates {
+		spec := each.spec
 		if container != "" && container != spec.Name {
 			continue
 		}
-		observation := Observation{Target: Target{Namespace: obj.Namespace, Pod: obj.Name, UID: string(obj.UID), Container: spec.Name}, Release: obj.Labels[ReleaseLabel], Module: obj.Labels[p.options.ModuleLabel], Workload: root, OwnerChain: chain, Image: spec.Image, Phase: string(obj.Status.Phase), Conditions: []Condition{}, NodeName: obj.Spec.NodeName, ObservedAt: p.options.Now().UTC()}
+		observation := Observation{Init: each.init, Target: Target{Namespace: obj.Namespace, Pod: obj.Name, UID: string(obj.UID), Container: spec.Name}, Release: obj.Labels[ReleaseLabel], Module: obj.Labels[p.options.ModuleLabel], Workload: root, OwnerChain: chain, Image: spec.Image, Phase: string(obj.Status.Phase), Conditions: []Condition{}, NodeName: obj.Spec.NodeName, ObservedAt: p.options.Now().UTC()}
 		if obj.DeletionTimestamp != nil {
 			deletedAt := obj.DeletionTimestamp.Time.UTC()
 			observation.DeletionTimestamp = &deletedAt
@@ -350,7 +365,7 @@ func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container strin
 			}
 			observation.Conditions = append(observation.Conditions, Condition{Type: boundedStatus(string(condition.Type)), Status: string(condition.Status), Reason: boundedStatus(condition.Reason)})
 		}
-		for _, status := range obj.Status.ContainerStatuses {
+		for _, status := range each.statuses {
 			if status.Name == spec.Name {
 				observation.Target.ContainerID = status.ContainerID
 				observation.Target.ImageID = status.ImageID
@@ -368,7 +383,7 @@ func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container strin
 		observations = append(observations, observation)
 	}
 	if len(observations) == 0 {
-		return nil, denied("container is not a regular container of this pod")
+		return nil, denied("container is not a container or init container of this pod")
 	}
 	return observations, nil
 }

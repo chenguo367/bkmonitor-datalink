@@ -203,7 +203,10 @@ type Target struct {
 	ImageID     string `json:"image_id"`
 }
 type Observation struct {
-	Target             Target       `json:"target"`
+	Target Target `json:"target"`
+	// Init says the container is an init container of the Pod; its
+	// identity and state are its init-container status.
+	Init               bool         `json:"init,omitempty"`
 	Release            string       `json:"release,omitempty"`
 	Module             string       `json:"module,omitempty"`
 	Workload           Workload     `json:"workload"`
