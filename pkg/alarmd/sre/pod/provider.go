@@ -208,15 +208,18 @@ func statusWords(err error) string {
 		return ""
 	}
 	words := strings.TrimSpace(status.Status().Message)
-	if reason := string(status.Status().Reason); reason != "" {
-		words = strings.TrimSpace(reason + ": " + words)
+	if reason := string(status.Status().Reason); reason != "" && words != "" {
+		words = reason + ": " + words
+	} else if reason != "" {
+		words = reason
 	}
 	if words == "" {
 		return ""
 	}
 	words = statusScrubber.Text(words)
 	if len(words) > maxStatusWords {
-		words = words[:maxStatusWords] + "..."
+		// Cut on a character boundary: a webhook's denial may be in Chinese.
+		words = strings.ToValidUTF8(words[:maxStatusWords], "") + "..."
 	}
 	return ": " + words
 }
