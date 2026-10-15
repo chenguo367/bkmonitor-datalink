@@ -370,15 +370,17 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 		} else if points == 0 {
 			trend.NoSeries = true
 			// The container space resolved on the namespace's container data,
-			// so nothing for this deployment's container is the collector not
-			// reaching the node it runs on.
+			// so what is seen is that data present and none for this
+			// deployment's container; the collector not reaching its node is
+			// the likely cause, not an observed one (a replica younger than
+			// the window, or a relabel rule, look the same).
 			if definition.Space == TrendSpaceContainer {
-				node := ""
+				where, cause := "", "the collector does not cover the node this replica runs on"
 				if scope.Node != "" {
-					node = " (" + scope.Node + ")"
+					where, cause = " on node "+scope.Node, "the collector does not cover that node"
 				}
-				trend.Detail = fmt.Sprintf("space %s has container data for namespace %q but no series for container %q: the collector does not cover the node this replica runs on%s",
-					space.Space, scope.Namespace, scope.Container, node)
+				trend.Detail = fmt.Sprintf("space %s has container data for namespace %q but no series for container %q%s; most likely %s",
+					space.Space, scope.Namespace, scope.Container, where, cause)
 			}
 		}
 		answer.Trends = append(answer.Trends, trend)

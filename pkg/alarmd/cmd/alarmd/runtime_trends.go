@@ -102,7 +102,7 @@ type trendKind struct {
 func (spaces *trendSpaces) spaceKinds() []trendKind {
 	return []trendKind{
 		{fleet.TrendSpaceSelf, "false", "count(bkmonitor_alarmd_build_info)",
-			"alarmd's ServiceMonitor is not collected into this platform's metadata: no candidate space has samples of count(bkmonitor_alarmd_build_info) in the last 10 minutes"},
+			"no candidate space has samples of count(bkmonitor_alarmd_build_info) in the last 10 minutes; most likely alarmd's ServiceMonitor is not collected into this platform's metadata"},
 		{fleet.TrendSpaceContainer, "true", fmt.Sprintf(`count(container_memory_working_set_bytes{namespace=%q})`, spaces.namespace),
 			fmt.Sprintf("no candidate space has container data for namespace %q in the last 10 minutes", spaces.namespace)},
 	}
@@ -261,10 +261,17 @@ func fleetTrends(client *accessuq.Client, namespace string, now func() time.Time
 
 var podResource = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
+// podNodeReadTimeout bounds the read of this replica's own Pod.
+const podNodeReadTimeout = 3 * time.Second
+
 // inClusterPodNode reads the node of this replica's own Pod, named by its
 // hostname, with this process's ServiceAccount.
 func inClusterPodNode(namespace string) func(ctx context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
+		// Its own short bound: the read runs inside the charts' shared
+		// budget, which a hanging API call must not use up.
+		ctx, cancel := context.WithTimeout(ctx, podNodeReadTimeout)
+		defer cancel()
 		name, err := os.Hostname()
 		if err != nil {
 			return "", err

@@ -103,7 +103,7 @@ func TestAnUnresolvedSpaceSaysWhy(t *testing.T) {
 	spaces, _, _ = spacesUnder([]unstructured.Unstructured{dataID("custommetricdataid", "metric", "true", "false", "7")}, nil, nil, &at)
 	if self := spaces.get(context.Background())[fleet.TrendSpaceSelf]; self.State != fleet.TrendSpaceUnresolved ||
 		!strings.Contains(self.Reason, "no candidate space has samples of count(bkmonitor_alarmd_build_info)") || len(self.Candidates) != 1 ||
-		!strings.Contains(self.Reason, "alarmd's ServiceMonitor is not collected into this platform's metadata") {
+		!strings.Contains(self.Reason, "; most likely alarmd's ServiceMonitor is not collected into this platform's metadata") {
 		t.Fatalf("no candidate with the metric: %+v", self)
 	}
 	spaces, _, _ = spacesUnder([]unstructured.Unstructured{dataID("k8smetricdataid", "metric", "true", "true", "7")}, nil, nil, &at)
