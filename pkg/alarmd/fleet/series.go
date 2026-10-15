@@ -92,6 +92,11 @@ type TrendLine struct {
 	Name   string
 	PromQL func(scope TrendScope, rate string) string
 	ByPod  bool
+	// Fallback, when set, is asked when PromQL is refused or has no series:
+	// the same quantity under the names another exporter generation uses.
+	// They are asked apart, since the query backend refuses a whole
+	// expression that names a field the space does not have.
+	Fallback func(scope TrendScope, rate string) string
 }
 
 // TrendDefinition is one chart: what it shows, in which unit, from which
@@ -142,7 +147,7 @@ var trendCatalog = []TrendDefinition{
 			{Name: "使用", ByPod: true, PromQL: func(scope TrendScope, rate string) string {
 				return fmt.Sprintf(`sum by (pod) (rate(container_cpu_usage_seconds_total{%s}[%s]))`, scope.selector(), rate)
 			}},
-			{Name: "上限", ByPod: true, PromQL: containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores")},
+			containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores"),
 		},
 	},
 	{
@@ -152,7 +157,7 @@ var trendCatalog = []TrendDefinition{
 			{Name: "工作集", ByPod: true, PromQL: func(scope TrendScope, _ string) string {
 				return fmt.Sprintf(`max by (pod) (container_memory_working_set_bytes{%s})`, scope.selector())
 			}},
-			{Name: "上限", ByPod: true, PromQL: containerLimit("memory", "kube_pod_container_resource_limits_memory_bytes")},
+			containerLimit("memory", "kube_pod_container_resource_limits_memory_bytes"),
 		},
 	},
 }
@@ -167,14 +172,17 @@ func perMinute(name, matcher string) func(TrendScope, string) string {
 	}
 }
 
-// containerLimit is a container's limit as kube-state-metrics publishes it:
-// the resource-labelled family of version 2, else the per-resource family
-// of version 1, whichever this cluster's exporter has.
-func containerLimit(resource, legacy string) func(TrendScope, string) string {
-	return func(scope TrendScope, _ string) string {
-		return fmt.Sprintf(`max by (pod) (kube_pod_container_resource_limits{%s,resource=%q}) or max by (pod) (%s{%s})`,
-			scope.selector(), resource, legacy, scope.selector())
-	}
+// containerLimit is the limit line: a container's limit as kube-state-metrics
+// publishes it, the resource-labelled family of version 2, else the
+// per-resource family of version 1, whichever this space has.
+func containerLimit(resource, legacy string) TrendLine {
+	return TrendLine{Name: "上限", ByPod: true,
+		PromQL: func(scope TrendScope, _ string) string {
+			return fmt.Sprintf(`max by (pod) (kube_pod_container_resource_limits{%s,resource=%q})`, scope.selector(), resource)
+		},
+		Fallback: func(scope TrendScope, _ string) string {
+			return fmt.Sprintf(`max by (pod) (%s{%s})`, legacy, scope.selector())
+		}}
 }
 
 func (scope TrendScope) selector() string {
@@ -226,6 +234,10 @@ type TrendLineAnswer struct {
 	Pod    string        `json:"pod,omitempty"`
 	PromQL string        `json:"promql"`
 	Points []SeriesPoint `json:"points"`
+	// Unavailable says this line could not be read, with Detail why; the
+	// chart's other lines are drawn.
+	Unavailable string `json:"unavailable,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // Trend is one chart as a reader receives it. Unavailable says the chart
@@ -345,27 +357,29 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 			answer.Trends = append(answer.Trends, trend)
 			continue
 		}
-		points := 0
+		points, failed := 0, 0
+		var firstCode, firstDetail string
 		for _, line := range definition.Lines {
-			promQL := line.PromQL(scope, window.rate())
-			result, err := provider.Range(ctx, space.Space, promQL, start, at, window.Step)
-			switch {
-			case err != nil:
-				trend.Unavailable, trend.Detail = "PROVIDER_ERROR", err.Error()
-			case result.Code != "":
-				trend.Unavailable, trend.Detail = result.Code, result.Message
+			answers, partial, code, detail := readLine(ctx, provider, space.Space, line, scope, window, start, at)
+			if code != "" {
+				failed++
+				if firstCode == "" {
+					firstCode, firstDetail = code, detail
+				}
+				trend.Lines = append(trend.Lines, TrendLineAnswer{Name: line.Name, PromQL: line.PromQL(scope, window.rate()),
+					Points: []SeriesPoint{}, Unavailable: code, Detail: detail})
+				continue
 			}
-			if trend.Unavailable != "" {
-				break
-			}
-			trend.Partial = trend.Partial || result.Partial
-			answers := linesOf(line, promQL, result.Lines)
+			trend.Partial = trend.Partial || partial
 			for _, kept := range answers {
 				points += len(kept.Points)
 			}
 			trend.Lines = append(trend.Lines, answers...)
 		}
-		if trend.Unavailable != "" {
+		// One line that cannot be read is said on that line; the chart is
+		// unavailable only when none of its lines could be read.
+		if failed == len(definition.Lines) {
+			trend.Unavailable, trend.Detail = firstCode, firstDetail
 			trend.Lines = []TrendLineAnswer{}
 		} else if points == 0 {
 			trend.NoSeries = true
@@ -386,6 +400,44 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 		answer.Trends = append(answer.Trends, trend)
 	}
 	return answer
+}
+
+// readLine reads one line: its expression, then its fallback when that is
+// refused or has no series. The first with series is the line; one that was
+// read and is empty is an empty line; when every expression was refused or
+// failed, the code and words of the last say why.
+func readLine(ctx context.Context, provider RangeProvider, space string, line TrendLine, scope TrendScope, window SeriesWindow,
+	start, at time.Time,
+) (answers []TrendLineAnswer, partial bool, code, detail string) {
+	expressions := []string{line.PromQL(scope, window.rate())}
+	if line.Fallback != nil {
+		expressions = append(expressions, line.Fallback(scope, window.rate()))
+	}
+	var empty []TrendLineAnswer
+	for _, promQL := range expressions {
+		result, err := provider.Range(ctx, space, promQL, start, at, window.Step)
+		switch {
+		case err != nil:
+			code, detail = "PROVIDER_ERROR", err.Error()
+			continue
+		case result.Code != "":
+			code, detail = result.Code, result.Message
+			continue
+		}
+		read := linesOf(line, promQL, result.Lines)
+		for _, kept := range read {
+			if len(kept.Points) > 0 {
+				return read, result.Partial, "", ""
+			}
+		}
+		if empty == nil {
+			empty, partial = read, result.Partial
+		}
+	}
+	if empty != nil {
+		return empty, partial, "", ""
+	}
+	return nil, false, code, detail
 }
 
 // linesOf names a line's series: by pod, one line per pod in pod order;
