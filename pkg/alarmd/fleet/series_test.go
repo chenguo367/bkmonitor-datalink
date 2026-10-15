@@ -112,10 +112,98 @@ func TestTrendsReadEachChartInItsSpaceScopedToThisDeployment(t *testing.T) {
 // A container limit is read from kube-state-metrics in either generation's
 // names: the resource-labelled family, else the per-resource one.
 func TestAContainerLimitReadsEitherKubeStateMetricsGeneration(t *testing.T) {
-	cpu := containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores")(trendTestScope, "5m")
-	if !strings.Contains(cpu, `kube_pod_container_resource_limits{namespace="alarmd-ns",container="alarmd",resource="cpu"}`) ||
-		!strings.Contains(cpu, ` or `) || !strings.Contains(cpu, `kube_pod_container_resource_limits_cpu_cores{namespace="alarmd-ns",container="alarmd"}`) {
-		t.Fatalf("cpu limit = %s", cpu)
+	limit := containerLimit("cpu", "kube_pod_container_resource_limits_cpu_cores")
+	if v2 := limit.PromQL(trendTestScope, "5m"); v2 != `max by (pod) (kube_pod_container_resource_limits{namespace="alarmd-ns",container="alarmd",resource="cpu"})` {
+		t.Fatalf("cpu limit = %s, want the resource-labelled family alone", v2)
+	}
+	if v1 := limit.Fallback(trendTestScope, "5m"); v1 != `max by (pod) (kube_pod_container_resource_limits_cpu_cores{namespace="alarmd-ns",container="alarmd"})` {
+		t.Fatalf("cpu limit fallback = %s, want the per-resource family", v1)
+	}
+}
+
+// A space has one exporter generation's names and not the other's, and the
+// query backend refuses a whole expression naming a field the space lacks:
+// each generation is asked on its own, the one with series is the line. A
+// line that cannot be read is marked on that line, with the backend's
+// words; the chart still draws the lines that could be read, and is
+// unavailable only when none could.
+func TestALimitLineReadsTheGenerationTheSpaceHasAndFailsAlone(t *testing.T) {
+	refuse := func(field string) SeriesRange {
+		return SeriesRange{Code: "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS", Message: "tableID with field is empty with field: " + field}
+	}
+	usage := SeriesRange{Lines: []SeriesLine{{Labels: map[string]string{"pod": "alarmd-a"}, Points: []SeriesPoint{{AtUnixMilli: 1, Value: 0.04}}}}}
+	limit := SeriesRange{Lines: []SeriesLine{{Labels: map[string]string{"pod": "alarmd-a"}, Points: []SeriesPoint{{AtUnixMilli: 1, Value: 2}}}}}
+	window, _ := lookupSeriesWindow("1h")
+	read := func(answer func(promQL string) SeriesRange) TrendsAnswer {
+		return collectTrends(context.Background(), &stubRange{answer: func(_, promQL string) (SeriesRange, error) { return answer(promQL), nil }},
+			resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
+	}
+	limitLine := func(trend Trend) TrendLineAnswer {
+		for _, line := range trend.Lines {
+			if strings.HasPrefix(line.Name, "上限") {
+				return line
+			}
+		}
+		return TrendLineAnswer{}
+	}
+	// Version 2 only: the resource-labelled family is the line.
+	answer := read(func(promQL string) SeriesRange {
+		switch {
+		case strings.Contains(promQL, "_cpu_cores"):
+			return refuse("kube_pod_container_resource_limits_cpu_cores")
+		case strings.Contains(promQL, "kube_pod_container_resource_limits{"):
+			return limit
+		}
+		return usage
+	})
+	if cpu := trendByKey(answer, "cpu_cores"); cpu.Unavailable != "" || len(limitLine(cpu).Points) != 1 || !strings.Contains(limitLine(cpu).PromQL, `resource="cpu"`) {
+		t.Fatalf("v2 space: cpu = %+v", cpu)
+	}
+	// Version 1 only: the per-resource family is the line.
+	answer = read(func(promQL string) SeriesRange {
+		switch {
+		case strings.Contains(promQL, "kube_pod_container_resource_limits{"):
+			return refuse("kube_pod_container_resource_limits")
+		case strings.Contains(promQL, "_memory_bytes"):
+			return limit
+		}
+		return usage
+	})
+	if memory := trendByKey(answer, "memory_bytes"); memory.Unavailable != "" || len(limitLine(memory).Points) != 1 || !strings.Contains(limitLine(memory).PromQL, "kube_pod_container_resource_limits_memory_bytes") {
+		t.Fatalf("v1 space: memory = %+v", memory)
+	}
+	// Version 2 known to the space but empty for this container: version 1 is
+	// still asked, and its series are the line.
+	answer = read(func(promQL string) SeriesRange {
+		switch {
+		case strings.Contains(promQL, "kube_pod_container_resource_limits{"):
+			return SeriesRange{}
+		case strings.Contains(promQL, "_cpu_cores"):
+			return limit
+		}
+		return usage
+	})
+	if cpu := trendByKey(answer, "cpu_cores"); len(limitLine(cpu).Points) != 1 || !strings.Contains(limitLine(cpu).PromQL, "_cpu_cores") {
+		t.Fatalf("empty v2: cpu = %+v, want v1's series", cpu)
+	}
+	// Neither: usage draws, the limit line says why.
+	answer = read(func(promQL string) SeriesRange {
+		if strings.Contains(promQL, "kube_pod_container_resource_limits") {
+			return refuse("kube_pod_container_resource_limits")
+		}
+		return usage
+	})
+	cpu := trendByKey(answer, "cpu_cores")
+	if cpu.Unavailable != "" || cpu.NoSeries || len(cpu.Lines) != 2 || len(cpu.Lines[0].Points) != 1 {
+		t.Fatalf("no limit: cpu = %+v, want usage drawn", cpu)
+	}
+	if line := limitLine(cpu); line.Unavailable != "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS" || !strings.Contains(line.Detail, "field is empty") || len(line.Points) != 0 {
+		t.Fatalf("no limit: limit line = %+v, want marked with the backend's words", line)
+	}
+	// Nothing readable: the chart is unavailable.
+	answer = read(func(string) SeriesRange { return refuse("container_cpu_usage_seconds_total") })
+	if cpu := trendByKey(answer, "cpu_cores"); cpu.Unavailable != "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS" || len(cpu.Lines) != 0 {
+		t.Fatalf("nothing readable: cpu = %+v, want the chart unavailable", cpu)
 	}
 }
 
@@ -247,9 +335,10 @@ func TestWithoutTrendsTheSeriesRouteIsAbsent(t *testing.T) {
 	}
 }
 
-// A chart is read whole or not at all: when a later line fails, the lines
-// read before it are not shown as if they were the chart.
-func TestAChartWithOneFailingLineShowsNoneOfItsLines(t *testing.T) {
+// A line that fails is never dropped, so the lines read are not shown as if
+// they were the chart: it stays in its place marked unavailable with why,
+// and the others are drawn.
+func TestAChartWithOneFailingLineMarksThatLine(t *testing.T) {
 	provider := &stubRange{answer: func(_, promQL string) (SeriesRange, error) {
 		if strings.Contains(promQL, "state_version_conflict_total") {
 			return SeriesRange{}, errors.New("provider is down")
@@ -258,8 +347,16 @@ func TestAChartWithOneFailingLineShowsNoneOfItsLines(t *testing.T) {
 	}}
 	window, _ := lookupSeriesWindow("1h")
 	answer := collectTrends(context.Background(), provider, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
-	if failures := trendByKey(answer, "failures_per_minute"); failures.Unavailable != "PROVIDER_ERROR" || len(failures.Lines) != 0 {
-		t.Fatalf("failures = %+v, want unavailable with no lines", failures)
+	failures := trendByKey(answer, "failures_per_minute")
+	if failures.Unavailable != "" || len(failures.Lines) != 4 {
+		t.Fatalf("failures = %+v, want its four lines", failures)
+	}
+	for i, line := range failures.Lines {
+		failing := strings.Contains(line.PromQL, "state_version_conflict_total")
+		if failing != (i == 2) || failing && (line.Unavailable != "PROVIDER_ERROR" || line.Detail != "provider is down" || len(line.Points) != 0) ||
+			!failing && (line.Unavailable != "" || len(line.Points) != 1) {
+			t.Fatalf("failures line %d = %+v", i, line)
+		}
 	}
 }
 
