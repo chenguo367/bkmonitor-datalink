@@ -32,6 +32,11 @@ type admission struct {
 	changed  chan struct{}
 }
 
+// admissionRecheck is how often a waiting read asks the line again: room
+// can come back with no read of this pool ending (a collection, another
+// consumer, the other pool letting go), and nothing signals that.
+const admissionRecheck = 150 * time.Millisecond
+
 func newAdmission(bytes uint64) *admission {
 	return &admission{bytes: bytes, changed: make(chan struct{})}
 }
@@ -55,6 +60,8 @@ func (a *admission) acquire(ctx context.Context, timeout time.Duration) (func(),
 	start := time.Now()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	recheck := time.NewTicker(admissionRecheck)
+	defer recheck.Stop()
 	for {
 		a.mu.Lock()
 		release, admitted := a.tryLocked()
@@ -65,6 +72,7 @@ func (a *admission) acquire(ctx context.Context, timeout time.Duration) (func(),
 		}
 		select {
 		case <-changed:
+		case <-recheck.C:
 		case <-timer.C:
 			return nil, a.refusal(time.Since(start), inFlight)
 		case <-ctx.Done():

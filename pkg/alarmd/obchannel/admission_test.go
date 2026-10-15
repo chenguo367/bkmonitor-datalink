@@ -172,3 +172,32 @@ func TestTwoReadsRunAndAThirdWaitsThroughTheChannel(t *testing.T) {
 		t.Fatalf("peak %d reads at once, want the memory's two", peak)
 	}
 }
+
+// Room on the line can come back without any read of this pool ending (a
+// collection, another consumer, the other pool letting go): a waiting read
+// rechecks while it waits and is admitted soon after, not at its timeout.
+func TestAWaitingReadSeesRoomFreedElsewhere(t *testing.T) {
+	memory := &fakeMemory{room: 2 << 20}
+	gate := newAdmission(1 << 20)
+	gate.memory = memory
+	first, _ := gate.acquire(context.Background(), time.Second)
+	defer first()
+	memory.mu.Lock()
+	memory.held += 1 << 20 // another consumer takes the rest of the room
+	memory.mu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		memory.mu.Lock()
+		memory.held -= 1 << 20 // and gives it back, with no read of this pool ending
+		memory.mu.Unlock()
+	}()
+	start := time.Now()
+	release, refusal := gate.acquire(context.Background(), 3*time.Second)
+	if release == nil {
+		t.Fatalf("the waiting read was refused: %s", refusal)
+	}
+	release()
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("admitted after %v, want soon after the room came back", waited)
+	}
+}
