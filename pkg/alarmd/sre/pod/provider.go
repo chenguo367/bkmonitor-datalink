@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
 type Provider struct {
@@ -187,7 +190,38 @@ func apiError(err error) error {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		code = CodeCanceled
 	}
-	return &Error{Code: code, Message: "Kubernetes evidence request did not succeed"}
+	return &Error{Code: code, Message: "Kubernetes evidence request did not succeed" + statusWords(err)}
+}
+
+// statusScrubber clears the common credential shapes from an apiserver's
+// words; maxStatusWords bounds them.
+var statusScrubber = redact.New()
+
+const maxStatusWords = 512
+
+// statusWords is an apiserver refusal's own reason and message, scrubbed and
+// bounded, so the reader is told why ("previous terminated container ... not
+// found"); an error that is no apiserver status adds nothing.
+func statusWords(err error) string {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return ""
+	}
+	words := strings.TrimSpace(status.Status().Message)
+	if reason := string(status.Status().Reason); reason != "" && words != "" {
+		words = reason + ": " + words
+	} else if reason != "" {
+		words = reason
+	}
+	if words == "" {
+		return ""
+	}
+	words = statusScrubber.Text(words)
+	if len(words) > maxStatusWords {
+		// Cut on a character boundary: a webhook's denial may be in Chinese.
+		words = strings.ToValidUTF8(words[:maxStatusWords], "") + "..."
+	}
+	return ": " + words
 }
 
 func (p *Provider) acquire(ctx context.Context) (func(), error) {

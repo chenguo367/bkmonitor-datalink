@@ -18,8 +18,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -41,6 +43,7 @@ type fixtureClient struct {
 	deleted     []string
 	patches     []string
 	writeError  error
+	logsErr     error
 }
 
 func (f *fixtureClient) DeletePod(ctx context.Context, namespace, name, uid string) error {
@@ -95,6 +98,9 @@ func (f *fixtureClient) OpenLogs(ctx context.Context, namespace, name string, op
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logOptions = options
+	if f.logsErr != nil {
+		return nil, f.logsErr
+	}
 	return io.NopCloser(strings.NewReader(f.logs)), nil
 }
 
@@ -299,6 +305,46 @@ func TestAnInitContainerIsReadLikeAnyContainer(t *testing.T) {
 	}
 	if _, err := provider.Inspect(context.Background(), TargetRequest{Target: Target{Namespace: "tenant", Pod: "web-abc", Container: "absent"}}); err == nil {
 		t.Fatal("a container in neither list was accepted")
+	}
+}
+
+// An apiserver refusal is named with its own reason and words, so a reader
+// sees why ("previous terminated container ... not found") instead of a
+// generic failure; credentials in those words are still scrubbed, and an
+// error that is no apiserver status keeps the generic sentence.
+func TestAnApiserverRefusalIsNamedInItsOwnWords(t *testing.T) {
+	client, target := fixture()
+	client.logsErr = apierrors.NewBadRequest(`previous terminated container "web" in pod "web-abc" not found`)
+	provider := mustProvider(t, Options{Client: client})
+	_, err := provider.Logs(context.Background(), LogsRequest{Target: target, Previous: true})
+	requireCode(t, err, CodeAPIError)
+	if !strings.Contains(err.Error(), `BadRequest: previous terminated container "web" in pod "web-abc" not found`) {
+		t.Fatalf("refusal = %v, want the apiserver's reason and words", err)
+	}
+	client.logsErr = apierrors.NewBadRequest(`dial https://user:hunter2@198.51.100.7 refused; access_token=abcdef`)
+	_, err = provider.Logs(context.Background(), LogsRequest{Target: target})
+	if err == nil || strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "abcdef") {
+		t.Fatalf("refusal = %v, want its credentials scrubbed", err)
+	}
+	client.logsErr = apierrors.NewBadRequest(strings.Repeat("x", 4000))
+	if _, err = provider.Logs(context.Background(), LogsRequest{Target: target}); err == nil || len(err.Error()) > 700 {
+		t.Fatalf("a long refusal came back %d bytes long", len(err.Error()))
+	}
+	// A multibyte message crossing the cut stays valid text.
+	for n := 496; n <= 500; n++ {
+		client.logsErr = apierrors.NewBadRequest(strings.Repeat("a", n) + strings.Repeat("容", 10))
+		if _, err = provider.Logs(context.Background(), LogsRequest{Target: target}); err == nil || !utf8.ValidString(err.Error()) {
+			t.Fatalf("a multibyte refusal cut at %d: %q is not valid UTF-8", n, err)
+		}
+	}
+	// A reason without words is the reason alone.
+	client.logsErr = &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Reason: metav1.StatusReasonServiceUnavailable}}
+	if _, err = provider.Logs(context.Background(), LogsRequest{Target: target}); err == nil || !strings.HasSuffix(err.Error(), ": ServiceUnavailable") {
+		t.Fatalf("a reason without words = %v", err)
+	}
+	client.logsErr = errors.New("stream reset by peer at 192.0.2.4")
+	if _, err = provider.Logs(context.Background(), LogsRequest{Target: target}); err == nil || err.Error() != "Kubernetes evidence request did not succeed" && !strings.HasSuffix(err.Error(), "Kubernetes evidence request did not succeed") {
+		t.Fatalf("a non-status error = %v, want the generic sentence", err)
 	}
 }
 
