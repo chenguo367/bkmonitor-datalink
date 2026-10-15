@@ -13,6 +13,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"google.golang.org/grpc"
 
+	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
@@ -321,7 +322,11 @@ func openProductionControlRoleBundle(
 	if err != nil {
 		return nil, err
 	}
-	native, err := fleet.NewHandler(service, windows, external.Now, cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(), nil, nil,
+	trends, err := controlTrends(cfg, external)
+	if err != nil {
+		return nil, err
+	}
+	native, err := fleet.NewHandler(service, windows, external.Now, cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(), trends, nil,
 		cfg.PhaseTwo.Access.MonitorWebBaseURL)
 	if err != nil {
 		return nil, err
@@ -421,4 +426,22 @@ func openProductionControlRoleBundle(
 		external.RoleRuntime.Channel.Bind(*channelBinding)
 	}
 	return bundle, nil
+}
+
+// controlTrends gives a control process the trends a process running every
+// role serves: in the split topology the control process hosts the channel,
+// and trends.get reads them from the handler it binds. The client is the
+// trends' own, at the UQ client's default limits; a control process builds
+// no query execution. Without a UQ endpoint there are no trends.
+func controlTrends(cfg config.Config, external phaseTwoProductionExternalDependencies) (*fleet.Trends, error) {
+	if cfg.PhaseTwo.Access.UQEndpoint == "" {
+		return nil, nil
+	}
+	client, err := accessuq.NewClientWithLimits(cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource,
+		external.HTTPClient, accessuq.DefaultLimits())
+	if err != nil {
+		return nil, err
+	}
+	client.WithNow(external.QueryClock)
+	return fleetTrends(client, config.ProcessNamespace(), external.Now), nil
 }
