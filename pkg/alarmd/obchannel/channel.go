@@ -170,9 +170,6 @@ type Options struct {
 	EnvironmentID        string
 	Replica              string
 	Build                string
-	Concurrency          int
-	SREConcurrency       int
-	ExecConcurrency      int
 	Operations           []Operation
 	Now                  func() time.Time
 	Incarnation          string
@@ -305,7 +302,7 @@ func New(options Options) (*Channel, error) {
 	if executor == nil {
 		var err error
 		executor, err = NewEvidenceExecutor(ExecutorOptions{EnvironmentID: options.EnvironmentID, Replica: options.Replica, Build: options.Build,
-			Incarnation: options.Incarnation, Concurrency: options.Concurrency, SREConcurrency: options.SREConcurrency, ExecConcurrency: options.ExecConcurrency, Operations: options.Operations, Now: options.Now, Roles: options.Roles})
+			Incarnation: options.Incarnation, Operations: options.Operations, Now: options.Now, Roles: options.Roles})
 		if err != nil {
 			return nil, err
 		}
@@ -523,14 +520,12 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if overBudget() {
 		return
 	}
-	pool := c.executionSlots(op)
-	select {
-	case pool <- struct{}{}:
-		defer func() { <-pool }()
-	default:
-		fail(429, "request_budget_exceeded", "OB evidence readers are busy; retry this read later.")
+	release, refusal := c.executionSlots(op).acquire(ctx, RequestTimeout)
+	if release == nil {
+		fail(429, "request_budget_exceeded", "OB evidence readers are busy: "+refusal+"; retry this read later.")
 		return
 	}
+	defer release()
 	// Final admission checks revocation again. Discovery, invalid inputs and
 	// rejected budgets do not count as activity and cannot prolong a session.
 	session, err = c.options.Auth.Admit(ctx, session, req.Renew)

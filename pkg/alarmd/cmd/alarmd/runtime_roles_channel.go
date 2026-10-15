@@ -49,6 +49,9 @@ type ChannelBinding struct {
 	// SRERolloutsWatched how many it watches; nil hears none.
 	SRERolloutEnded    func(rollout.Record)
 	SRERolloutsWatched func(int)
+	// ReadMemory is the process's observation memory line, as the channel's
+	// reads hold it; nil keeps each read pool at one read at a time.
+	ReadMemory func(bytes uint64) (func(), bool)
 	// SREReceiptWritten hears whether each receipt write landed; nil hears
 	// none.
 	SREReceiptWritten func(ok bool)
@@ -266,7 +269,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		}
 	}
 	executor, err := obchannel.NewEvidenceExecutor(obchannel.ExecutorOptions{EnvironmentID: binding.EnvironmentID, Replica: binding.InstanceID,
-		Incarnation: binding.Control.Incarnation, Build: version + "/" + commit, Concurrency: 1, Operations: ops, Roles: binding.Roles})
+		Incarnation: binding.Control.Incarnation, Build: version + "/" + commit, Operations: ops, Roles: binding.Roles})
 	if err != nil {
 		return nil, err
 	}
@@ -287,6 +290,9 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 	}
 	runtime.Bind = func(binding ChannelBinding) {
 		providers.bind(binding)
+		if binding.ReadMemory != nil {
+			executor.AttachReadMemory(readMemory(binding.ReadMemory))
+		}
 		if binding.Control.Server != nil {
 			binding.Control.Server.SetEvidenceHandler(runtime.EvidenceHandler)
 		}
@@ -389,3 +395,8 @@ func waitingChannelOperation(id string) obchannel.Operation {
 		return obchannel.Outcome{Error: &obchannel.Failure{Code: "business_waiting", Message: "Business Worker providers are waiting for their runtime binding."}}
 	}}
 }
+
+// readMemory adapts the memory line's hold to the channel's read gate.
+type readMemory func(bytes uint64) (func(), bool)
+
+func (hold readMemory) Hold(bytes uint64) (func(), bool) { return hold(bytes) }

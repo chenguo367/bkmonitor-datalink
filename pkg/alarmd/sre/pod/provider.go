@@ -29,7 +29,6 @@ import (
 
 type Provider struct {
 	options  Options
-	permits  chan struct{}
 	redactor *redactor
 	// keyMu guards the fingerprint key (fingerprintKey): the key, where it
 	// compares, and when the deployment's was last asked for.
@@ -48,7 +47,7 @@ func (p *Provider) DefaultNamespace() string { return p.options.DefaultNamespace
 func (p *Provider) ModuleLabel() string { return p.options.ModuleLabel }
 
 func (p *Provider) Limits() Limits {
-	return Limits{Concurrency: p.options.Concurrency, DefaultTimeoutMS: p.options.DefaultTimeout.Milliseconds(), MaxTimeoutMS: p.options.MaxTimeout.Milliseconds(), MaxOutputBytes: p.options.MaxOutputBytes, MaxStdinBytes: p.options.MaxStdinBytes, MaxPods: p.options.MaxPods}
+	return Limits{DefaultTimeoutMS: p.options.DefaultTimeout.Milliseconds(), MaxTimeoutMS: p.options.MaxTimeout.Milliseconds(), MaxOutputBytes: p.options.MaxOutputBytes, MaxStdinBytes: p.options.MaxStdinBytes, MaxPods: p.options.MaxPods}
 }
 
 func New(options Options) (*Provider, error) {
@@ -63,9 +62,6 @@ func New(options Options) (*Provider, error) {
 	}
 	if options.DefaultNamespace != "" && len(validation.IsDNS1123Label(options.DefaultNamespace)) != 0 {
 		return nil, invalid("default namespace is not a namespace name")
-	}
-	if options.Concurrency == 0 {
-		options.Concurrency = 1
 	}
 	if options.DefaultTimeout == 0 {
 		options.DefaultTimeout = 30 * time.Second
@@ -85,7 +81,7 @@ func New(options Options) (*Provider, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.Concurrency < 1 || options.Concurrency > 64 || options.DefaultTimeout <= 0 || options.DefaultTimeout > options.MaxTimeout || options.MaxTimeout > 30*time.Second || options.MaxOutputBytes < 1 || options.MaxOutputBytes > 512<<10 || options.MaxStdinBytes < 1 || options.MaxStdinBytes > 32<<10 || options.MaxPods < 1 || options.MaxPods > 128 {
+	if options.DefaultTimeout <= 0 || options.DefaultTimeout > options.MaxTimeout || options.MaxTimeout > 30*time.Second || options.MaxOutputBytes < 1 || options.MaxOutputBytes > 512<<10 || options.MaxStdinBytes < 1 || options.MaxStdinBytes > 32<<10 || options.MaxPods < 1 || options.MaxPods > 128 {
 		return nil, invalid("provider budgets exceed supported bounds")
 	}
 	options.LiteralSecrets = append([]string(nil), options.LiteralSecrets...)
@@ -93,7 +89,7 @@ func New(options Options) (*Provider, error) {
 	if len(options.FingerprintKey) > 0 && options.FingerprintScope == "" {
 		options.FingerprintScope = FingerprintScopeDeployment
 	}
-	return &Provider{options: options, permits: make(chan struct{}, options.Concurrency), redactor: newRedactor(options.LiteralSecrets)}, nil
+	return &Provider{options: options, redactor: newRedactor(options.LiteralSecrets)}, nil
 }
 
 // Where fingerprints compare (Options.FingerprintScope).
@@ -224,16 +220,14 @@ func statusWords(err error) string {
 	return ": " + words
 }
 
+// acquire admits a call whose caller is still there. How many run at once
+// is the channel's admission, by the observation memory line; the provider
+// keeps no count of its own, which refused reads the channel had admitted.
 func (p *Provider) acquire(ctx context.Context) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, apiError(err)
 	}
-	select {
-	case p.permits <- struct{}{}:
-		return func() { <-p.permits }, nil
-	default:
-		return nil, &Error{Code: CodeBusy, Message: "diagnostic concurrency budget is occupied"}
-	}
+	return func() {}, nil
 }
 func (p *Provider) readContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, p.options.MaxTimeout)

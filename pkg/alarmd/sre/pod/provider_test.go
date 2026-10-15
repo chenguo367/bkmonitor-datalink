@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -449,25 +450,36 @@ func TestTransportFailureUnknownAndNoRetry(t *testing.T) {
 	}
 }
 
+// The provider keeps no count of its own: a call made while another runs
+// runs too, since how many run at once is the channel's admission. Bounds
+// on each request still refuse.
 func TestConcurrentRequestsAndBudgets(t *testing.T) {
 	provider, _, target := runtimeProvider(t)
-	entered := make(chan struct{})
+	var running atomic.Int32
+	both := make(chan struct{})
 	unblock := make(chan struct{})
 	provider.options.Executor = executorFunc(func(ctx context.Context, request StreamRequest) (StreamResult, error) {
-		close(entered)
+		if running.Add(1) == 2 {
+			close(both)
+		}
 		<-unblock
 		return StreamResult{}, errors.New("lost")
 	})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
-	}()
-	<-entered
-	_, err := provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
-	requireCode(t, err, CodeBusy)
+	var done sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			_, _ = provider.Exec(context.Background(), ExecRequest{Target: target, Argv: []string{"true"}})
+		}()
+	}
+	select {
+	case <-both:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second call was held back by the provider")
+	}
 	close(unblock)
-	<-done
+	done.Wait()
 	for _, request := range []ExecRequest{{Target: target}, {Target: target, Argv: []string{"true"}, Stdin: strings.Repeat("x", 32<<10+1)}, {Target: target, Argv: []string{"true"}, TimeoutMS: 30001}, {Target: target, Argv: []string{"true"}, OutputBytes: 512<<10 + 1}} {
 		_, err := provider.Exec(context.Background(), request)
 		requireCode(t, err, CodeInvalidRequest)

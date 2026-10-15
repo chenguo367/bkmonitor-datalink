@@ -49,7 +49,10 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"asked again each round while full, so this counts objects times rounds), "+
 				"fleet_restore (the record and every one after it are left for the next publish, spending no attempt), "+
 				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED), "+
-				"fleet_view (the view is not read and is the gap SNAPSHOTS_DEFERRED). "+
+				"fleet_view (the view is not read and is the gap SNAPSHOTS_DEFERRED), "+
+				"channel_reads (an OB channel read waits for one in flight to end, and past its admission timeout is "+
+				"refused as request_budget_exceeded; a pool always admits one read, so this never refuses the only "+
+				"one; asked again while waiting, so this counts asks, not reads). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. A grant to state "+
