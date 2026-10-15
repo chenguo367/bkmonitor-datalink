@@ -152,6 +152,9 @@ func observationLevel(observation Observation) slog.Level {
 	if failedResult(observation.Result) {
 		return slog.LevelError
 	}
+	if observation.RetryingAfterFailure {
+		return slog.LevelWarn
+	}
 	if observation.HeldBy != nil || observation.AwaitingView {
 		return slog.LevelInfo
 	}

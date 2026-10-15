@@ -1057,6 +1057,9 @@ func (runner *Runner) runOneTracked(
 	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
+	if runner.flights.recoveryEnabled {
+		executeCtx = WithFailureRetried(executeCtx)
+	}
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()

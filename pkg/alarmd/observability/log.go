@@ -862,6 +862,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if observation.AwaitingView {
 		attributes = append(attributes, slog.Bool("awaiting_view", true))
 	}
+	if observation.RetryingAfterFailure {
+		attributes = append(attributes, slog.Bool("retrying_after_failure", true))
+	}
 	if facts := observation.ExecutionHung; facts != nil {
 		attributes = append(attributes,
 			slog.String("hung_outcome", facts.Outcome),

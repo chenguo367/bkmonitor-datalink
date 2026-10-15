@@ -2236,6 +2236,38 @@ func TestObservedProductionSlotExecutorDoesNotReportReadinessDeferralAsFailure(t
 	}
 }
 
+// A failed attempt the Runner will retry completes retrying, with the
+// failure's reason and error kept (its level, WARN, is the observability
+// rule's); the same failure from a Runner that will not retry it stays the
+// Slot's end, failed.
+func TestAFailureTheSlotRetriesCompletesRetrying(t *testing.T) {
+	wantErr := errors.New("query permit deadline elapsed")
+	run := func(ctx context.Context) observability.Observation {
+		var observations []observability.Observation
+		executor := observedProductionSlotExecutor{
+			next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+				return execution.SlotExecutionResult{}, wantErr
+			}),
+			observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+				observations = append(observations, observation)
+			}),
+		}
+		if _, err := executor.Execute(ctx, execution.SlotExecutionRequest{}); !errors.Is(err, wantErr) {
+			t.Fatalf("Execute() error=%v", err)
+		}
+		return observations[len(observations)-1]
+	}
+	retried := run(scheduler.WithFailureRetried(context.Background()))
+	if retried.Stage != observability.StageSlotCompleted || retried.Result != observability.ResultRetrying || !retried.RetryingAfterFailure ||
+		!errors.Is(retried.Err, wantErr) || retried.ReasonCode == "" {
+		t.Fatalf("retried completion=%+v, want retrying with the failure's reason and error", retried)
+	}
+	final := run(context.Background())
+	if final.Result != observability.ResultFailed || final.RetryingAfterFailure {
+		t.Fatalf("unretried completion=%+v, want failed", final)
+	}
+}
+
 type phaseTwoReadinessDeferredError struct{ readyAt time.Time }
 
 func (err phaseTwoReadinessDeferredError) Error() string               { return "readiness deferred" }

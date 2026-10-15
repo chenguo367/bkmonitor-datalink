@@ -2873,6 +2873,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	observedResult := result.Result
 	reason := result.ReasonCode
 	observedErr := err
+	retryingAfterFailure := false
 	var notExecutable *scheduler.ViewNotExecutableError
 	if err != nil {
 		if errors.As(err, &notExecutable) {
@@ -2901,6 +2902,12 @@ func (executor observedProductionSlotExecutor) Execute(
 			if reason == observability.ReasonInternalUnknown && observability.CancelledFromAbove(ctx, err) {
 				reason = observability.ReasonSlotCancelled
 			}
+			// An attempt its Runner backs off and retries is one attempt, not
+			// the Slot's end: retrying, with the failure's reason and error,
+			// at WARN. Only a Slot that really finishes short stays failed.
+			if scheduler.FailureRetried(ctx, err) {
+				observedResult, retryingAfterFailure = observability.ResultRetrying, true
+			}
 		}
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess
@@ -2908,8 +2915,8 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
-		AwaitingView: notExecutable != nil && notExecutable.AwaitingView,
-		HeldBy:       heldBy, GapApplySite: gapApplySite,
+		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
+		HeldBy: heldBy, GapApplySite: gapApplySite,
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes

@@ -2440,7 +2440,11 @@ type Observation struct {
 	// already holds its lease: the record arrives by renewal and the view by
 	// delta, at every Worker's start and on every move. A Query Group that
 	// stays there is counted on the gate's not_in_view gauge.
-	AwaitingView         bool
+	AwaitingView bool
+	// RetryingAfterFailure says a Slot's attempt failed and its Runner backs
+	// off and retries it: the line is retrying, with the failure's reason and
+	// error, at WARN, not the Slot's end at ERROR.
+	RetryingAfterFailure bool
 	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
