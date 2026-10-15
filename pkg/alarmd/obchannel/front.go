@@ -200,14 +200,12 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 			return
 		}
 	}
-	pool := c.executionSlots(op)
-	select {
-	case pool <- struct{}{}:
-		defer func() { <-pool }()
-	default:
-		fail(429, "request_budget_exceeded", "OB evidence readers are busy; retry this read later.")
+	release, refusal := c.executionSlots(op).acquire(r.Context(), RequestTimeout)
+	if release == nil {
+		fail(429, "request_budget_exceeded", "OB evidence readers are busy: "+refusal+"; retry this read later.")
 		return
 	}
+	defer release()
 	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Now().Add(op.ExecutionTimeout + TransportMargin))
 	execCtx, cancel := context.WithTimeout(r.Context(), op.ExecutionTimeout)

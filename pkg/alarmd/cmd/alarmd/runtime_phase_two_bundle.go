@@ -1120,7 +1120,8 @@ func openProductionPhaseTwoBundleAssembly(
 	var channelBinding *ChannelBinding
 	if external.RoleRuntime != nil {
 		channelBinding = &ChannelBinding{Native: fleetAPI, Catalog: repository, Progress: progressStore,
-			Settings: platformSettings, Control: cliBinding}
+			ReadMemory: observationHold(observationMemory, memoryline.ConsumerChannelReads),
+			Settings:   platformSettings, Control: cliBinding}
 		fleetAPI, publicRestricted = external.RoleRuntime.Channel.Handler, external.RoleRuntime.Channel.Restricted
 		closeCLI = func() error { return nil }
 	} else {

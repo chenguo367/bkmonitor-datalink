@@ -106,10 +106,13 @@ func TestProviderPoolsDoNotBlockShortEvidenceReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Occupied provider permits do not contend for the existing reader pool.
-	c.sreSlots <- struct{}{}
-	c.execSlots <- struct{}{}
-	defer func() { <-c.sreSlots; <-c.execSlots }()
+	// Occupied provider pools do not contend for the existing reader pool;
+	// with no memory line attached each pool holds one read, and a second
+	// waits out its admission timeout before it is refused.
+	sre, _ := c.sreSlots.acquire(context.Background(), time.Second)
+	exec, _ := c.execSlots.acquire(context.Background(), time.Second)
+	defer sre()
+	defer exec()
 	if status, response := call(t, c, envelope(c, "invoke", "read", nil)); status != 200 {
 		t.Fatalf("provider blocked read: %+v", response)
 	}

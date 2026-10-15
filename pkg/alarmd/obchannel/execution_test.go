@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -251,14 +252,19 @@ func TestInvalidRouteAndRevokedAdmissionNeverDispatch(t *testing.T) {
 
 func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 	entered := make(chan struct{})
+	var enter sync.Once
+	// hold keeps the first read in its slot past the others' admission
+	// waits, so they see the shared budget full however long they wait.
+	hold := make(chan struct{})
 	auth := &testAuth{}
 	op := targetOperation(func(ctx context.Context, _ Params) Outcome {
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > RequestTimeout {
 			t.Error("unbounded execution context")
 		}
-		close(entered)
+		enter.Do(func() { close(entered) })
 		<-ctx.Done()
+		<-hold
 		return Outcome{Complete: true, Value: map[string]any{"points_read_before_timeout": 2}}
 	})
 	c := newTargetChannel(t, Options{Auth: auth, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
@@ -276,6 +282,7 @@ func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 		t.Fatal("external local read bypassed shared execution slots")
 	}
 	cancel()
+	close(hold)
 	response = <-done
 	if response.Error == nil || response.Error.Code != "request_timeout" || response.Evidence.Complete || response.Result != nil {
 		t.Fatal("cancelled read returned evidence beyond the channel deadline")

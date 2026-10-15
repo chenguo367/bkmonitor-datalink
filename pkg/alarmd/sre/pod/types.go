@@ -165,7 +165,6 @@ type Options struct {
 	// ModuleLabel is the label key a target's module is read from and a
 	// discovery's module filter matches; DefaultModuleLabel when empty.
 	ModuleLabel                   string
-	Concurrency                   int
 	DefaultTimeout, MaxTimeout    time.Duration
 	MaxOutputBytes, MaxStdinBytes int64
 	MaxPods                       int
@@ -237,7 +236,6 @@ type Condition struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Limits struct {
-	Concurrency      int   `json:"concurrency"`
 	DefaultTimeoutMS int64 `json:"default_timeout_ms"`
 	MaxTimeoutMS     int64 `json:"max_timeout_ms"`
 	MaxOutputBytes   int64 `json:"max_output_bytes"`
