@@ -65,7 +65,7 @@ func TestTheTrendSpacesAreDerivedFromTheOperatorsDataIDs(t *testing.T) {
 		dataID("exporter-9", "metric", "false", "false", "9"),
 		dataID("space-scoped", "metric", "true", "false", "-4"),
 	}
-	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\",container=\"alarmd\"})": true}
+	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
 	spaces, calls, _ := spacesUnder(items, nil, has, &at)
 	got := spaces.get(context.Background())
 	self, container := got[fleet.TrendSpaceSelf], got[fleet.TrendSpaceContainer]
@@ -78,8 +78,11 @@ func TestTheTrendSpacesAreDerivedFromTheOperatorsDataIDs(t *testing.T) {
 	if len(*calls) != 3 || (*calls)[0].space != "bkcc__106" || (*calls)[1].space != "bkcc__2" {
 		t.Fatalf("probes = %+v, want 106 then 2 for self, then 2 for containers", *calls)
 	}
-	if !strings.Contains((*calls)[2].promQL, `namespace="alarmd-ns",container="alarmd"`) {
-		t.Fatalf("container probe = %s, want this deployment's namespace and container", (*calls)[2].promQL)
+	// The container space is the one with this cluster's container data for
+	// the namespace; whether alarmd's own container has series is the
+	// charts' answer, so a node the collector skips does not unresolve it.
+	if probe := (*calls)[2].promQL; probe != `count(container_memory_working_set_bytes{namespace="alarmd-ns"})` {
+		t.Fatalf("container probe = %s, want this deployment's namespace alone", probe)
 	}
 }
 
@@ -99,17 +102,24 @@ func TestAnUnresolvedSpaceSaysWhy(t *testing.T) {
 	}
 	spaces, _, _ = spacesUnder([]unstructured.Unstructured{dataID("custommetricdataid", "metric", "true", "false", "7")}, nil, nil, &at)
 	if self := spaces.get(context.Background())[fleet.TrendSpaceSelf]; self.State != fleet.TrendSpaceUnresolved ||
-		!strings.Contains(self.Reason, "no candidate space has samples of count(bkmonitor_alarmd_build_info)") || len(self.Candidates) != 1 {
+		!strings.Contains(self.Reason, "no candidate space has samples of count(bkmonitor_alarmd_build_info)") || len(self.Candidates) != 1 ||
+		!strings.Contains(self.Reason, "; most likely alarmd's ServiceMonitor is not collected into this platform's metadata") {
 		t.Fatalf("no candidate with the metric: %+v", self)
+	}
+	spaces, _, _ = spacesUnder([]unstructured.Unstructured{dataID("k8smetricdataid", "metric", "true", "true", "7")}, nil, nil, &at)
+	if container := spaces.get(context.Background())[fleet.TrendSpaceContainer]; container.State != fleet.TrendSpaceUnresolved ||
+		!strings.Contains(container.Reason, `no candidate space has container data for namespace "alarmd-ns"`) {
+		t.Fatalf("no candidate with the namespace's container data: %+v", container)
 	}
 }
 
-// A resolved pair answers for ten minutes; an unresolved one for a minute,
-// since a collection that has only just started resolves soon.
+// A resolved pair answers for ten minutes; an unresolved one for five: the
+// reason is usually a collection that is absent, not one just starting, and
+// each derivation probes every candidate.
 func TestDerivedSpacesAnswerForTheirTime(t *testing.T) {
 	at := time.Unix(1789006380, 0)
 	items := []unstructured.Unstructured{dataID("c", "metric", "true", "false", "2"), dataID("k", "metric", "true", "true", "2")}
-	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\",container=\"alarmd\"})": true}
+	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
 	spaces, _, lists := spacesUnder(items, nil, has, &at)
 	spaces.get(context.Background())
 	at = at.Add(trendSpaceResolvedFor - time.Second)
@@ -128,8 +138,8 @@ func TestDerivedSpacesAnswerForTheirTime(t *testing.T) {
 	unresolved.get(context.Background())
 	at = at.Add(time.Second)
 	unresolved.get(context.Background())
-	if *unresolvedLists != 2 {
-		t.Fatalf("an unresolved pair listed %d times over a minute, want twice", *unresolvedLists)
+	if *unresolvedLists != 2 || trendSpaceUnresolvedFor != 5*time.Minute {
+		t.Fatalf("an unresolved pair listed %d times over %v, want twice over five minutes", *unresolvedLists, trendSpaceUnresolvedFor)
 	}
 }
 
@@ -194,5 +204,29 @@ func TestDerivingTheSpacesDoesNotUseTheCallersContext(t *testing.T) {
 	got := spaces.get(gone)
 	if got[fleet.TrendSpaceSelf].State != fleet.TrendSpaceResolved || got[fleet.TrendSpaceContainer].State != fleet.TrendSpaceResolved {
 		t.Fatalf("spaces %+v, want both resolved despite the caller's cancelled context", got)
+	}
+}
+
+// The node this replica runs on is read from its own Pod once it answers;
+// a failed read says nothing and is tried again on the next chart read.
+func TestTheReplicasNodeIsReadOnceItAnswers(t *testing.T) {
+	reads := 0
+	failing := true
+	node := cachedNode(func(context.Context) (string, error) {
+		reads++
+		if failing {
+			return "", errors.New("pods is forbidden")
+		}
+		return "node-7", nil
+	})
+	if got := node(context.Background()); got != "" {
+		t.Fatalf("a failed read said %q", got)
+	}
+	failing = false
+	if got := node(context.Background()); got != "node-7" || reads != 2 {
+		t.Fatalf("after a failure: %q after %d reads, want node-7 read again", got, reads)
+	}
+	if got := node(context.Background()); got != "node-7" || reads != 2 {
+		t.Fatalf("an answered node was read again: %q after %d reads", got, reads)
 	}
 }

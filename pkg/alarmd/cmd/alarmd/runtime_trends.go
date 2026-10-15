@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,11 +47,12 @@ var dataIDResource = schema.GroupVersionResource{Group: "monitoring.bk.tencent.c
 const trendContainer = "alarmd"
 
 // How long a derived space answers: a resolved one for ten minutes, an
-// unresolved one for a minute, since the reason may be a collection that
-// has only just started.
+// unresolved one for five, since the reason is usually a collection that is
+// absent rather than one just starting, and each derivation probes every
+// candidate.
 const (
 	trendSpaceResolvedFor   = 10 * time.Minute
-	trendSpaceUnresolvedFor = time.Minute
+	trendSpaceUnresolvedFor = 5 * time.Minute
 )
 
 // trendProbeWindow is how far back a candidate space is asked for the
@@ -86,14 +88,23 @@ type trendSpaces struct {
 	spaces map[string]fleet.TrendSpace
 }
 
-// spaceKinds is each trend space with the DataID labels that say a DataID
-// carries it and the expression whose samples say a candidate is the one.
-func (spaces *trendSpaces) spaceKinds() []struct {
-	key, isSystem, probe string
-} {
-	return []struct{ key, isSystem, probe string }{
-		{fleet.TrendSpaceSelf, "false", "count(bkmonitor_alarmd_build_info)"},
-		{fleet.TrendSpaceContainer, "true", fmt.Sprintf(`count(container_memory_working_set_bytes{namespace=%q,container=%q})`, spaces.namespace, trendContainer)},
+// trendKind is a trend space: the DataID label that says a DataID carries
+// it, the expression whose samples say a candidate is the one, and what no
+// candidate having them means.
+type trendKind struct {
+	key, isSystem, probe, absent string
+}
+
+// spaceKinds is the two trend spaces. The container probe is the
+// namespace's container data, not alarmd's own container's: whether that
+// has series is the charts' answer, so a node the collector skips is said
+// on the charts rather than unresolving the space.
+func (spaces *trendSpaces) spaceKinds() []trendKind {
+	return []trendKind{
+		{fleet.TrendSpaceSelf, "false", "count(bkmonitor_alarmd_build_info)",
+			"no candidate space has samples of count(bkmonitor_alarmd_build_info) in the last 10 minutes; most likely alarmd's ServiceMonitor is not collected into this platform's metadata"},
+		{fleet.TrendSpaceContainer, "true", fmt.Sprintf(`count(container_memory_working_set_bytes{namespace=%q})`, spaces.namespace),
+			fmt.Sprintf("no candidate space has container data for namespace %q in the last 10 minutes", spaces.namespace)},
 	}
 }
 
@@ -116,7 +127,7 @@ func (spaces *trendSpaces) get(context.Context) map[string]fleet.TrendSpace {
 		if err != nil {
 			space = fleet.TrendSpace{State: fleet.TrendSpaceUnresolved, Reason: "the operator's DataID resources could not be read: " + err.Error()}
 		} else {
-			space = spaces.derive(ctx, items, kind.isSystem, kind.probe)
+			space = spaces.derive(ctx, items, kind)
 		}
 		derived[kind.key] = space
 		resolved = resolved && space.State == fleet.TrendSpaceResolved
@@ -131,7 +142,8 @@ func (spaces *trendSpaces) get(context.Context) map[string]fleet.TrendSpace {
 // derive is one space: the businesses of the common metric DataIDs of the
 // kind, in order, each asked for the probe's samples; the first that has
 // them.
-func (spaces *trendSpaces) derive(ctx context.Context, items []unstructured.Unstructured, isSystem, probe string) fleet.TrendSpace {
+func (spaces *trendSpaces) derive(ctx context.Context, items []unstructured.Unstructured, kind trendKind) fleet.TrendSpace {
+	isSystem, probe := kind.isSystem, kind.probe
 	businesses := map[string]bool{}
 	for _, item := range items {
 		labels := item.GetLabels()
@@ -163,7 +175,7 @@ func (spaces *trendSpaces) derive(ctx context.Context, items []unstructured.Unst
 			return fleet.TrendSpace{Space: candidate, State: fleet.TrendSpaceResolved, Candidates: candidates}
 		}
 	}
-	reason := "no candidate space has samples of " + probe + " in the last 10 minutes"
+	reason := kind.absent
 	if len(failures) > 0 {
 		reason += "; " + strings.Join(failures, "; ")
 	}
@@ -243,7 +255,59 @@ func fleetTrends(client *accessuq.Client, namespace string, now func() time.Time
 	}
 	provider := trendRange{client: client}
 	spaces := &trendSpaces{list: inClusterDataIDs(), probe: probeWith(provider, now), namespace: namespace, now: now}
-	return &fleet.Trends{Range: provider, Spaces: spaces.get, Scope: fleet.TrendScope{Namespace: namespace, Container: trendContainer}}
+	return &fleet.Trends{Range: provider, Spaces: spaces.get, Scope: fleet.TrendScope{Namespace: namespace, Container: trendContainer},
+		Node: cachedNode(inClusterPodNode(namespace))}
+}
+
+var podResource = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+// podNodeReadTimeout bounds the read of this replica's own Pod.
+const podNodeReadTimeout = 3 * time.Second
+
+// inClusterPodNode reads the node of this replica's own Pod, named by its
+// hostname, with this process's ServiceAccount.
+func inClusterPodNode(namespace string) func(ctx context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		// Its own short bound: the read runs inside the charts' shared
+		// budget, which a hanging API call must not use up.
+		ctx, cancel := context.WithTimeout(ctx, podNodeReadTimeout)
+		defer cancel()
+		name, err := os.Hostname()
+		if err != nil {
+			return "", err
+		}
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			return "", err
+		}
+		client, err := dynamic.NewForConfig(config)
+		if err != nil {
+			return "", err
+		}
+		pod, err := client.Resource(podResource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		node, _, _ := unstructured.NestedString(pod.Object, "spec", "nodeName")
+		return node, nil
+	}
+}
+
+// cachedNode keeps the first node a read answers; a failed or empty read
+// says nothing and is tried again on the next chart read.
+func cachedNode(read func(ctx context.Context) (string, error)) func(ctx context.Context) string {
+	var mu sync.Mutex
+	known := ""
+	return func(ctx context.Context) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if known == "" {
+			if node, err := read(ctx); err == nil {
+				known = node
+			}
+		}
+		return known
+	}
 }
 
 // pagedDataIDs reads every page, up to dataIDPages of them; more is an

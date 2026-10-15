@@ -161,8 +161,30 @@ func TestEachChartSaysWhyItHasNoLines(t *testing.T) {
 		}
 	}
 	quiet := collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
-	if trend := trendByKey(quiet, "queries_per_second"); !trend.NoSeries || trend.Unavailable != "" {
+	if trend := trendByKey(quiet, "queries_per_second"); !trend.NoSeries || trend.Unavailable != "" || trend.Detail != "" {
 		t.Errorf("an empty window = %+v, want no_series", trend)
+	}
+	// A resolved container space holds the namespace's container data (that
+	// is what resolved it); none for alarmd's container is said as seen, with
+	// the node, and the collector not covering it as the likely cause.
+	scope := trendTestScope
+	scope.Node = "node-7"
+	quiet = collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), scope, window, time.Unix(1789006380, 0))
+	for _, key := range []string{"cpu_cores", "memory_bytes"} {
+		trend := trendByKey(quiet, key)
+		if !trend.NoSeries || trend.Unavailable != "" || trend.Detail != `space bkcc__3 has container data for namespace "alarmd-ns" but no series for container "alarmd" on node node-7; most likely the collector does not cover that node` {
+			t.Errorf("%s with no alarmd series = %+v", key, trend)
+		}
+	}
+	// Without a known node the sentence names none.
+	unknown := collectTrends(context.Background(), &stubRange{}, resolvedSpaces(context.Background()), trendTestScope, window, time.Unix(1789006380, 0))
+	if cpu := trendByKey(unknown, "cpu_cores"); cpu.Detail != `space bkcc__3 has container data for namespace "alarmd-ns" but no series for container "alarmd"; most likely the collector does not cover the node this replica runs on` {
+		t.Errorf("cpu with no known node = %+v", cpu)
+	}
+	// A read takes the node from the deployment's Node at read time.
+	trends := &Trends{Range: &stubRange{}, Spaces: resolvedSpaces, Scope: trendTestScope, Node: func(context.Context) string { return "node-9" }}
+	if memory := trendByKey(trends.read(context.Background(), window, time.Unix(1789006380, 0)), "memory_bytes"); !strings.Contains(memory.Detail, "on node node-9;") {
+		t.Errorf("a read's memory chart = %+v, want the node it was told", memory)
 	}
 }
 
