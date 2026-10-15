@@ -545,6 +545,33 @@ func SREOperations(options SREOptions) []Operation {
 			return wrapQuery(v, err)
 		},
 	})
+	ops = append(ops, Operation{ID: OpTraceTopFailures, Summary: "列出一个登记 trace 目标里失败最多的服务端接口：按服务、路由、HTTP 状态与业务码分组，给次数、首末次时间、耗时 P50/P95、至多 3 个示例 trace_id 与一条错误原文（脱敏、截断）。失败指 SERVER span 被标失败或 HTTP ≥500（include_4xx 时 ≥400），条件下推给 UQ；至多扫 5 页×1000 条，扫不完时标 sampled，total 到上限 10000 时写 total_at_least。end 可回看 7 天内某个时刻（UTC，以 Z 结尾）。示例 trace_id 用 uq.trace 下钻。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: 60 * time.Second, Availability: traceAvailable,
+		Limits: map[string]any{"max_pages": uq.TopFailuresPages, "page_rows": uq.MaxTraceRows, "max_groups": uq.TopFailuresGroups, "windows": []string{"1h", "6h"}, "retention_days": int(uq.TraceRetention / (24 * time.Hour)), "message_bytes": topFailureMessageBytes, "redaction_contract": redact.Contract},
+		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "window": {Type: "string", MaxLength: 8},
+			"end": {Type: "string", MaxLength: 64, Description: "RFC 3339 UTC"}, "service": {Type: "string", MaxLength: 256}, "include_4xx": {Type: "boolean"}},
+		Required: []string{"egress", "target"}, OutputSchema: SchemaOf(uq.TopFailures{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			include4xx, _ := p["include_4xx"].(bool)
+			v, err := queries.TopFailures(ctx, uq.TopFailuresRequest{Egress: p.String("egress"), Target: p.String("target"), Window: p.String("window"),
+				End: p.String("end"), Service: p.String("service"), Include4xx: include4xx})
+			for i := range v.Groups {
+				v.Groups[i].Message = boundedText(scrubber.Text(v.Groups[i].Message), topFailureMessageBytes)
+				for j, id := range v.Groups[i].SampleTraceIDs {
+					v.Groups[i].SampleTraceIDs[j] = scrubber.Text(id)
+				}
+			}
+			out := Outcome{Value: v, Complete: err == nil && !v.Sampled, Limitations: v.Limitations}
+			if err != nil {
+				var named *uq.Error
+				if errors.As(err, &named) {
+					out.Error = &Failure{Code: named.Code, Message: named.Message}
+				} else {
+					out.Error = &Failure{Code: "uq_provider_failed", Message: "Native query did not complete."}
+				}
+			}
+			return out
+		},
+	})
 	receiptsAvailable := func() Availability {
 		if options.Receipts == nil {
 			reason := options.ReceiptsReason
@@ -691,4 +718,18 @@ func secretNames(receipt pod.ResourceReceipt) string {
 		names = append(names, item.Metadata.Namespace+"/"+item.Metadata.Name)
 	}
 	return strings.Join(names, ",")
+}
+
+// OpTraceTopFailures lists a trace target's most failing server routes.
+const OpTraceTopFailures = "trace.top_failures"
+
+// topFailureMessageBytes bounds a group's message for its reader.
+const topFailureMessageBytes = 200
+
+// boundedText cuts text to at most limit bytes on a character boundary.
+func boundedText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return strings.ToValidUTF8(text[:limit], "") + "..."
 }
