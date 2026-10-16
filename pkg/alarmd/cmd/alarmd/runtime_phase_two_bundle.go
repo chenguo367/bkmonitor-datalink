@@ -926,13 +926,12 @@ func openProductionPhaseTwoBundleAssembly(
 	// everything else on this connection, so its traffic is invisible in the
 	// per-connection counters; these are written by it alone.
 	fleetStore.Meter(recorder)
-	// A whole view a reader asks for is read only when the memory line has
-	// room for what its snapshots decode to; refused, the view is a gap, not
-	// half of one. A page holds it until its answer is written, and a view
-	// kept in the diagnoses' cache is admitted as it is kept. The verdict
+	// A whole view a reader asks for is an operator's read: the memory line
+	// counts what its snapshots decode to and reports a view read past it,
+	// never refuses it. A page holds it until its answer is written, and a
+	// view kept in the diagnoses' cache is counted as it is kept. The verdict
 	// scrape reads without asking.
-	fleetStore.AdmitLoads(observationAdmit(observationMemory, memoryline.ConsumerFleetView))
-	fleetStore.HoldLoads(observationHold(observationMemory, memoryline.ConsumerFleetView))
+	operatorFleetLoads(fleetStore, observationMemory)
 	// The Leader's lookback planning reads the Workers' late lists and keeps
 	// its plan set in the same store; a fallback Leader pauses it.
 	productionOwnership.WithLookbackPlanner(fleetStore, phaseTwoControlCandidacy(cfg) == ownership.ControlCandidacyPreferred, recorder)
@@ -1053,10 +1052,10 @@ func openProductionPhaseTwoBundleAssembly(
 	// process takes the catalog over, on the fleet publish cadence below, so
 	// the first page asked after a hand-over is not the process's first read.
 	diagnosisWarmer := fleet.NewDiagnosisWarmer(fleetService, strategyLookupSource(reconciler),
-		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)), external.Now, stallAfter)
+		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, operatorProgressReads(observationMemory)), external.Now, stallAfter)
 	fleetAPI = fleet.WithDiagnosis(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout, "diagnosis", recorder.ObserveLeaderForward),
-		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)),
+		diagnosisUniverse(strategySource), diagnosisProgress(progressStore, operatorProgressReads(observationMemory)),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter, diagnosisWarmer)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh

@@ -66,11 +66,12 @@ const (
 	// restore the objects it owns, one batch at a time.
 	ConsumerFleetRestore Consumer = "fleet_restore"
 	// ConsumerDiagnosisProgress is the Progress records a diagnosis page
-	// reads for its objects.
+	// reads for its objects: an operator's read, observed, never refused.
 	ConsumerDiagnosisProgress Consumer = "diagnosis_progress"
 	// ConsumerFleetView is the replicas' snapshots a fleet view a reader
 	// asks for reads whole: the objects route, the diagnosis, the strategy
-	// standing. The verdict scrape's read does not ask.
+	// standing: an operator's read, observed, never refused. The verdict
+	// scrape's read does not ask.
 	ConsumerFleetView Consumer = "fleet_view"
 )
 
@@ -136,7 +137,9 @@ type Line struct {
 	grown    uint64
 
 	// refused and admitted are by consumer, in the order of Consumers.
-	refused  []atomic.Uint64
+	refused []atomic.Uint64
+	// over is by consumer too: observed asks that went ahead past the line.
+	over     []atomic.Uint64
 	admitted []atomic.Uint64
 	// closed ends the watch of collections: see Close.
 	closed atomic.Bool
@@ -198,7 +201,7 @@ func (line *Line) collected(cycle uint64) {
 }
 
 func newLine(read func() heap) *Line {
-	return &Line{read: read, refused: make([]atomic.Uint64, len(Consumers)), admitted: make([]atomic.Uint64, len(Consumers))}
+	return &Line{read: read, refused: make([]atomic.Uint64, len(Consumers)), over: make([]atomic.Uint64, len(Consumers)), admitted: make([]atomic.Uint64, len(Consumers))}
 }
 
 func sampleValue(sample runtimemetrics.Sample) uint64 {
@@ -283,6 +286,55 @@ func (line *Line) Hold(consumer Consumer, bytes uint64) (release func(), held bo
 	}, true
 }
 
+// Observe takes bytes for consumer the way Admit does, for an operator's
+// read the line must never refuse: an operator's reads are a handful next to
+// the detection's work. It always grants; an ask that would not have fit is
+// counted as over the line instead of refused.
+func (line *Line) Observe(consumer Consumer, bytes uint64) bool {
+	if line == nil {
+		return true
+	}
+	index := consumerIndex(consumer)
+	reading := line.read()
+	line.mu.Lock()
+	fits := line.fitsLocked(reading, bytes)
+	line.granted = saturatingAdd(line.granted, bytes)
+	line.mu.Unlock()
+	line.count(index, true, bytes)
+	if !fits && index >= 0 {
+		line.over[index].Add(1)
+	}
+	return true
+}
+
+// HoldObserved holds bytes for consumer for one piece of work, as Hold does,
+// and like Observe never refuses: past the line it holds them anyway and
+// counts the ask as over. Release once the work is done; it is safe to call
+// more than once.
+func (line *Line) HoldObserved(consumer Consumer, bytes uint64) (release func()) {
+	if line == nil {
+		return func() {}
+	}
+	index := consumerIndex(consumer)
+	reading := line.read()
+	line.mu.Lock()
+	fits := line.fitsLocked(reading, bytes)
+	line.held = saturatingAdd(line.held, bytes)
+	line.mu.Unlock()
+	line.count(index, true, bytes)
+	if !fits && index >= 0 {
+		line.over[index].Add(1)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			line.mu.Lock()
+			line.held -= min(line.held, bytes)
+			line.mu.Unlock()
+		})
+	}
+}
+
 // fitsLocked answers whether bytes more fit under the line: the live heap
 // after the last collection, the detection budgets' room, what observation
 // was granted since and what it holds now, and bytes, within the limit.
@@ -352,13 +404,15 @@ func (line *Line) reservedLocked(cycle uint64) uint64 {
 // observation was granted since that collection and what it holds now
 // (Hold), which admission also takes out of the headroom.
 type Reading struct {
-	LimitBytes     uint64
-	LiveBytes      uint64
-	ReservedBytes  uint64
-	HeadroomBytes  int64
-	GrantedBytes   uint64
-	HeldBytes      uint64
-	RefusedTotal   map[Consumer]uint64
+	LimitBytes    uint64
+	LiveBytes     uint64
+	ReservedBytes uint64
+	HeadroomBytes int64
+	GrantedBytes  uint64
+	HeldBytes     uint64
+	RefusedTotal  map[Consumer]uint64
+	// OverTotal is observed asks that went ahead past the line, by consumer.
+	OverTotal      map[Consumer]uint64
 	AdmittedBytes  map[Consumer]uint64
 	LimitUnlimited bool
 	// Budgets is each detection budget now, in the order reserved.
@@ -378,9 +432,9 @@ type BudgetReading struct {
 
 // Read is the line now.
 func (line *Line) Read() Reading {
-	reading := Reading{RefusedTotal: map[Consumer]uint64{}, AdmittedBytes: map[Consumer]uint64{}}
+	reading := Reading{RefusedTotal: map[Consumer]uint64{}, OverTotal: map[Consumer]uint64{}, AdmittedBytes: map[Consumer]uint64{}}
 	for _, consumer := range Consumers {
-		reading.RefusedTotal[consumer], reading.AdmittedBytes[consumer] = 0, 0
+		reading.RefusedTotal[consumer], reading.OverTotal[consumer], reading.AdmittedBytes[consumer] = 0, 0, 0
 	}
 	if line == nil {
 		return reading
@@ -400,6 +454,7 @@ func (line *Line) Read() Reading {
 	reading.HeadroomBytes = signedDifference(heap.limit, saturatingAdd(heap.live, reserved))
 	for index, consumer := range Consumers {
 		reading.RefusedTotal[consumer] = line.refused[index].Load()
+		reading.OverTotal[consumer] = line.over[index].Load()
 		reading.AdmittedBytes[consumer] = line.admitted[index].Load()
 	}
 	return reading
