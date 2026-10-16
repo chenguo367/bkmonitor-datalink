@@ -100,6 +100,10 @@ func TestReadEvidenceValidatesWireBytesAndLeavesAuthorizationToHandler(t *testin
 	if _, err := h.server.ReadEvidence(context.Background(), nil); status.Code(err) != codes.InvalidArgument {
 		t.Fatal("nil request accepted")
 	}
+	// A smaller bound for the fixture; the real one follows the channel's
+	// response bound.
+	defer func(previous int) { viewstream.EvidenceResponseBytes = previous }(viewstream.EvidenceResponseBytes)
+	viewstream.EvidenceResponseBytes = 2 << 20
 	response := &pb.EvidenceResult{ResponseJson: make([]byte, viewstream.EvidenceResponseBytes-4)}
 	if proto.Size(response) != viewstream.EvidenceResponseBytes {
 		t.Fatal("invalid response boundary fixture")
@@ -119,25 +123,29 @@ func TestReadEvidenceValidatesWireBytesAndLeavesAuthorizationToHandler(t *testin
 	}
 }
 
-func TestReadEvidenceSlotsSurviveCancellationWithoutBlockingControl(t *testing.T) {
+// Evidence reads between replicas are an operator's, a handful next to the
+// business work, and have no count of their own: with eight handlers stalled
+// (ignoring cancellation), a ninth request still reaches its handler.
+func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 	h := startServer(t)
 	client := evidenceClient(t, h)
-	entered := make(chan struct{}, viewstream.EvidenceConcurrency)
+	const stalled = 8
+	entered := make(chan struct{}, stalled+1)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	h.server.SetEvidenceHandler(func(context.Context, *pb.EvidenceRequest) (*pb.EvidenceResult, error) {
 		entered <- struct{}{}
-		<-release // Deliberately ignores cancellation to test the hard task bound.
+		<-release // Deliberately ignores cancellation.
 		return &pb.EvidenceResult{}, nil
 	})
-	for i := 0; i < viewstream.EvidenceConcurrency; i++ {
+	for i := 0; i < stalled; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { _, err := client.ReadEvidence(ctx, &pb.EvidenceRequest{}); done <- err }()
 		select {
 		case <-entered:
 		case <-time.After(time.Second):
-			t.Fatal("handler did not start")
+			t.Fatalf("handler %d did not start", i+1)
 		}
 		cancel()
 		select {
@@ -149,9 +157,18 @@ func TestReadEvidenceSlotsSurviveCancellationWithoutBlockingControl(t *testing.T
 			t.Fatal("canceled RPC did not return")
 		}
 	}
-	if _, err := client.ReadEvidence(context.Background(), &pb.EvidenceRequest{}); status.Code(err) != codes.ResourceExhausted {
-		t.Fatal("cancellation released an executing handler's slot")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := client.ReadEvidence(ctx, &pb.EvidenceRequest{}); done <- err }()
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("the ninth request was answered %s without reaching its handler", status.Code(err))
+	case <-time.After(time.Second):
+		t.Fatal("the ninth request did not reach its handler")
 	}
+	cancel()
+	<-done
 	// A separate RPC on the very same connection must not occupy Connect's
 	// locks or message queues, even with every evidence handler stalled.
 	w := evidenceControlWorker(t, h, client)

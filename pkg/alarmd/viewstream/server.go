@@ -169,11 +169,10 @@ type Server struct {
 	// this term has none: a fallback Leader plans nothing and sends nothing.
 	plans *lookbackPlanSets
 
-	// Diagnostics have their own admission slots and handler lock. A slow
-	// evidence reader must not hold the control stream's session lock or queue.
+	// Diagnostics have their own handler lock. A slow evidence reader must not
+	// hold the control stream's session lock or queue.
 	evidenceMu      sync.RWMutex
 	evidenceHandler func(context.Context, *pb.EvidenceRequest) (*pb.EvidenceResult, error)
-	evidenceSlots   chan struct{}
 }
 
 // ServerOptions are the seams a test needs: a clock, and how often the
@@ -202,7 +201,7 @@ func NewServer(admission Admission, observer observability.Observer, options Ser
 		tick = HeartbeatInterval
 	}
 	return &Server{admission: admission, observer: observer, costs: options.Costs, now: now, tick: tick,
-		sessions: map[string]*session{}, evidenceSlots: make(chan struct{}, EvidenceConcurrency)}, nil
+		sessions: map[string]*session{}}, nil
 }
 
 // Lead starts a term: a new publisher, and every open session is woken so
