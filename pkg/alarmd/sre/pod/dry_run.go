@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -121,15 +123,20 @@ type DryRunCause struct {
 // and when it refused, its status verbatim -- reason, code, message and
 // causes -- with the object's own Secret values masked.
 type DryRunObject struct {
-	APIVersion string        `json:"api_version"`
-	Kind       string        `json:"kind"`
-	Namespace  string        `json:"namespace,omitempty"`
-	Name       string        `json:"name"`
-	Verdict    string        `json:"verdict"`
-	Reason     string        `json:"reason,omitempty"`
-	Code       int32         `json:"code,omitempty"`
-	Message    string        `json:"message,omitempty"`
-	Causes     []DryRunCause `json:"causes,omitempty"`
+	APIVersion string `json:"api_version"`
+	Kind       string `json:"kind"`
+	Namespace  string `json:"namespace,omitempty"`
+	Name       string `json:"name"`
+	Verdict    string `json:"verdict"`
+	// ChangedPaths is, for would_update, every field the apply changes:
+	// leaves by path (maps by key, lists by index, a key on one side only,
+	// a list that changes length as the list). A Secret's values are
+	// compared here and named by key only (data.KEY), never answered.
+	ChangedPaths []string      `json:"changed_paths,omitempty"`
+	Reason       string        `json:"reason,omitempty"`
+	Code         int32         `json:"code,omitempty"`
+	Message      string        `json:"message,omitempty"`
+	Causes       []DryRunCause `json:"causes,omitempty"`
 }
 
 // DryRunReceipt is the whole answer: every object in manifest order and how
@@ -208,10 +215,12 @@ func (p *Provider) dryRunOne(ctx context.Context, object *unstructured.Unstructu
 	switch {
 	case !existed:
 		answer.Verdict = DryRunWouldCreate
-	case sameObject(live, applied):
-		answer.Verdict = DryRunUnchanged
 	default:
+		answer.ChangedPaths = changedPaths(cleanForCompare(live), cleanForCompare(applied), "")
 		answer.Verdict = DryRunWouldUpdate
+		if len(answer.ChangedPaths) == 0 {
+			answer.Verdict = DryRunUnchanged
+		}
 	}
 	return answer
 }
@@ -240,17 +249,64 @@ func (p *Provider) refused(answer DryRunObject, err error, object *unstructured.
 	return answer
 }
 
-// sameObject says a dry-run apply would leave the live object as it is:
-// equal once the bookkeeping an apply always touches is set aside.
-func sameObject(live, applied *unstructured.Unstructured) bool {
-	clean := func(object *unstructured.Unstructured) map[string]any {
-		copied := object.DeepCopy().Object
-		for _, field := range []string{"managedFields", "resourceVersion", "generation"} {
-			unstructured.RemoveNestedField(copied, "metadata", field)
-		}
-		return copied
+// cleanForCompare is an object without what an apply always touches or
+// cannot set: the bookkeeping (managedFields, resourceVersion, generation)
+// and the status.
+func cleanForCompare(object *unstructured.Unstructured) map[string]any {
+	copied := object.DeepCopy().Object
+	for _, field := range []string{"managedFields", "resourceVersion", "generation"} {
+		unstructured.RemoveNestedField(copied, "metadata", field)
 	}
-	return reflect.DeepEqual(clean(live), clean(applied))
+	delete(copied, "status")
+	return copied
+}
+
+// changedPaths is every leaf where live and applied differ, in path order.
+// Values are compared, never returned: a Secret's data.KEY says its value
+// changes and nothing about the value.
+func changedPaths(live, applied any, path string) []string {
+	join := func(key string) string {
+		if path == "" {
+			return key
+		}
+		return path + "." + key
+	}
+	switch a := live.(type) {
+	case map[string]any:
+		b, ok := applied.(map[string]any)
+		if !ok {
+			break
+		}
+		keys := make([]string, 0, len(a)+len(b))
+		for key := range a {
+			keys = append(keys, key)
+		}
+		for key := range b {
+			if _, seen := a[key]; !seen {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		var out []string
+		for _, key := range keys {
+			out = append(out, changedPaths(a[key], b[key], join(key))...)
+		}
+		return out
+	case []any:
+		b, ok := applied.([]any)
+		if !ok || len(a) != len(b) {
+			break
+		}
+		var out []string
+		for i := range a {
+			out = append(out, changedPaths(a[i], b[i], path+"["+strconv.Itoa(i)+"]")...)
+		}
+		return out
+	}
+	if reflect.DeepEqual(live, applied) {
+		return nil
+	}
+	return []string{path}
 }
 
 // secretMasker replaces a Secret object's own values in a message: the
