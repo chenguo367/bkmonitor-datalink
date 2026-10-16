@@ -135,6 +135,8 @@ func TestLogCountRefusesBeforeAnyQuery(t *testing.T) {
 		"not a log table": func(r *LogCountRequest) { r.TableID = "2_bkapm.trace_fixture" },
 		"no field":        func(r *LogCountRequest) { r.By = nil },
 		"container log":   func(r *LogCountRequest) { r.By = []string{"__ext.container_log"} },
+		"otel body":       func(r *LogCountRequest) { r.By = []string{"body"} },
+		"nested body":     func(r *LogCountRequest) { r.By = []string{"log.body"} },
 		"window":          func(r *LogCountRequest) { r.Window = "31d" },
 		"top":             func(r *LogCountRequest) { r.Top = 1001 },
 		"future end":      func(r *LogCountRequest) { r.End = "2026-10-16T07:00:00Z" },
