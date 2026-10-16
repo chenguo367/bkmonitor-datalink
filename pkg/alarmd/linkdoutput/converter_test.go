@@ -141,7 +141,6 @@ func TestAnAbnormalDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 		"evaluations":  `[{"severity":"warning","action":"triggered","action_reason":""}]`,
 		// Whole, with the target identity still in it.
 		"dimensions":  `{"bk_target_cloud_id":"0","bk_target_ip":"127.0.0.1","device":"sda"}`,
-		"subject":     `{"system":"cmdb","type":"host","id":"127.0.0.1|0"}`,
 		"occurred_at": `"2025-09-01T00:00:00Z"`,
 		"produced_at": `"2025-09-01T00:01:00Z"`,
 		"labels":      `{"strategy_id":123,"strategy_version":7,"bk_biz_id":2}`,
@@ -153,6 +152,10 @@ func TestAnAbnormalDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 	// ones: the consumer does not read a top-level severity or action any
 	// more, and a message carrying both shapes would be read as whichever
 	// the reader happened to look at.
+	// A host placed by address and cloud has no host id to name: the consumer
+	// resolves it from the dimensions above, and a cmdb/host subject of
+	// "127.0.0.1|0" would be refused there as an invalid id.
+	assertAbsent(t, message, "subject")
 	assertAbsent(t, message, "severity", "action", "action_reason", "data_time", "occurred_time",
 		"observation", "strategy", "extra", "record_id", "received_at", "alarm_source_id")
 }
@@ -507,8 +510,12 @@ func TestEverySubjectTypeTheProjectionProducesHasAConsumerSpelling(t *testing.T)
 		if !known || naming.System == "" || naming.Type == "" {
 			t.Fatalf("subject type %q has no consumer spelling", kind)
 		}
-		subject := wireSubjectFor(contract.MonitorSubject{Type: kind, ID: "x"})
-		if subject == nil || subject.System != naming.System || subject.Type != naming.Type || subject.ID != "x" {
+		id := "x"
+		if kind == contract.MonitorSubjectHost {
+			id = "42"
+		}
+		subject := wireSubjectFor(contract.MonitorSubject{Type: kind, ID: id})
+		if subject == nil || subject.System != naming.System || subject.Type != naming.Type || subject.ID != id {
 			t.Fatalf("subject type %q written as %+v", kind, subject)
 		}
 	}
@@ -579,4 +586,26 @@ func TestADecisionWithNoAlertIdentityIsRefused(t *testing.T) {
 			t.Fatalf("%s: Convert() accepted a decision it cannot write", name)
 		}
 	}
+}
+
+// The consumer reads a cmdb/host subject as a host id and refuses anything
+// else as an invalid id, before it would look at the address and cloud in the
+// dimensions. So a host is a subject only by its id; placed by address and
+// cloud, it is not one, and the dimensions it is still carried in name it.
+func TestAHostIsASubjectOnlyByItsHostID(t *testing.T) {
+	for id, want := range map[string]bool{
+		"42": true, "1": true,
+		"127.0.0.1|0": false, "127.0.0.1": false, "0": false, "-1": false, "042": false, "4x": false,
+		"+42": false, "9223372036854775807": true, "9223372036854775808": false,
+	} {
+		subject := wireSubjectFor(contract.MonitorSubject{Type: contract.MonitorSubjectHost, ID: id})
+		if (subject != nil) != want {
+			t.Errorf("host id %q: subject %+v, want present %v", id, subject, want)
+		}
+	}
+	message := convert(t, decision(func(e *contract.TriggerEventV1) {
+		e.RecordRef.Dimensions["bk_host_id"] = json.RawMessage(`42`)
+		e.Subject.Subject = contract.MonitorSubject{Type: contract.MonitorSubjectHost, ID: "42"}
+	}))
+	assertFields(t, message, map[string]string{"subject": `{"system":"cmdb","type":"host","id":"42"}`})
 }

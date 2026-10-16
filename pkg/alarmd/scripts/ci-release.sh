@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # alarmd 的 CI 发布脚本：原生 Linux amd64/arm64 构建，build → push，finally 里 cleanup。
-# 契约与 pkg/linkd/scripts/ci-release.sh 相同，流水线可以照 linkd 的接。
+# 契约与 linkd 的 pkg/linkd/scripts/ci-release.sh 相同（上游 feat/linkd-dev 1e9617f2；本仓 pkg/linkd 是旧副本），流水线可以照 linkd 的接。
 # 版本来源二选一：按 tag 发布时只给 SOURCE_TAG（pkg/alarmd/v<版本>，镜像 tag 就是 <版本>，
 # 且 HEAD 必须是该 tag 指向的提交）；不按 tag 发布时给 PACKAGE_VERSION。
 # alarmd 没有 chart 子命令：它的 chart 是父 chart 的一个模块，随父 chart 发布，不从本仓打包。
