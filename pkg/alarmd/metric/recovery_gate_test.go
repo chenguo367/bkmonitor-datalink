@@ -38,10 +38,10 @@ func gatherFamily(t *testing.T, r *Recorder, name string) []*dto.Metric {
 // held and past-without-recovery, are gone: the gate no longer holds on
 // another Level, and a family that could only read zero would be misread.
 func TestRecoveryBesideLevelCounterStartsAtZeroAndAddsByState(t *testing.T) {
-	const beside = "bkmonitor_alarmd_trigger_recovery_beside_level_total"
+	const beside = "alarmd_trigger_recovery_beside_level_total"
 	r := NewRecorder(BuildInfo{})
 
-	for _, gone := range []string{"bkmonitor_alarmd_trigger_recovery_held_total", "bkmonitor_alarmd_trigger_recovery_past_level_without_recovery_total"} {
+	for _, gone := range []string{"alarmd_trigger_recovery_held_total", "alarmd_trigger_recovery_past_level_without_recovery_total"} {
 		if got := gatherFamily(t, r, gone); got != nil {
 			t.Fatalf("%s is still exported: %v", gone, got)
 		}

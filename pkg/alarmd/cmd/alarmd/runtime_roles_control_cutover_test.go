@@ -91,7 +91,7 @@ func TestAWholeDeploymentRollingAtOnceElectsTheControlProcessInOneEpoch(t *testi
 		t.Fatalf("fallback takeovers %v and handbacks %v over the cut-over, want none", takeovers, handbacks)
 	}
 	for _, worker := range workers {
-		if got := counterValue(t, worker.recorder, "bkmonitor_alarmd_control_leader_transitions_total",
+		if got := counterValue(t, worker.recorder, "alarmd_control_leader_transitions_total",
 			map[string]string{"to_class": "fallback", "reason": "fallback_takeover"}); got != 0 {
 			t.Fatalf("%s took the lease %v times", worker.name, got)
 		}

@@ -36,12 +36,12 @@ type observationMemoryCollector struct {
 func newObservationMemoryCollector(source ObservationMemorySource) *observationMemoryCollector {
 	return &observationMemoryCollector{
 		source: source,
-		headroom: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_headroom_bytes"),
+		headroom: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_headroom_bytes"),
 			"The Go soft memory limit less the live heap after the last collection and what the detection budgets "+
 				"(the Slots' retained bytes, the control caches) may still take: the room observation may grow into. "+
 				"Negative is past the line, where every observation consumer takes no more. Admission also takes out "+
 				"what observation was granted since that collection.", nil, nil),
-		refused: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_refused_total"),
+		refused: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_refused_total"),
 			"Asks for more memory the line refused, by consumer: cost_summary (groups past the refusal are not "+
 				"tracked), cost_projection (the refresh reads no projections), series_sampler (a new sample window "+
 				"gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified), "+
@@ -54,16 +54,16 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"refused as request_budget_exceeded; a pool always admits one read, so this never refuses the only "+
 				"one; asked again while waiting, so this counts asks, not reads). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
-		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
+		admitted: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. A grant to state "+
 				"that stays is not given back - what it took is in the live heap from the next collection on; a hold, "+
 				"memory taken for one piece of work (a page's snapshots and view), is given back when the work is done "+
 				"(observation_memory_held_bytes).", []string{"consumer"}, nil),
-		held: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_held_bytes"),
+		held: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_held_bytes"),
 			"What observation holds now for work in progress, admitted by the line and counted against it until "+
 				"the work is done and lets it go. Zero between pages; one that stays above zero is a hold never "+
 				"released.", nil, nil),
-		budgetSize: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_budget_size_bytes"),
+		budgetSize: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_budget_size_bytes"),
 			"A detection budget's size as the line reads it, by budget: retained (the owned Query Groups' "+
 				"measured retained peaks summed and a quarter more, within the Slots' retained-bytes ceiling; the "+
 				"ceiling until every owned Query Group has a reading), timeline_cache and object_cache (each cache's working set - what it holds and an entry "+
@@ -71,7 +71,7 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"cache charged decoded). Its size less its held bytes is what it holds observation off with; a "+
 				"cache whose size stays well above what it holds between reads is a reader that did not settle.",
 			[]string{"budget"}, nil),
-		budgetHeld: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_budget_held_bytes"),
+		budgetHeld: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_budget_held_bytes"),
 			"What a detection budget holds now, by budget, in the charge its size is in.", []string{"budget"}, nil),
 	}
 }

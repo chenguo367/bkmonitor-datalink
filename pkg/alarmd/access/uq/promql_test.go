@@ -31,7 +31,7 @@ func rangeClient(t *testing.T, handler http.HandlerFunc) (*Client, *http.Request
 func rangeRequest() RangeRequest {
 	end := time.Unix(1789006380, 0)
 	return RangeRequest{
-		PromQL: "max(bkmonitor_alarmd_fleet_objects)", SpaceUID: "bkcc__2",
+		PromQL: "max(alarmd_fleet_objects)", SpaceUID: "bkcc__2",
 		Start: end.Add(-time.Hour), End: end, Step: time.Minute,
 	}
 }

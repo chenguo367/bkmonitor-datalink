@@ -16,10 +16,10 @@ type workflowMetrics struct {
 
 func newWorkflowMetrics() workflowMetrics {
 	counter := func(name, help, label string) *prometheus.CounterVec {
-		return prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: name, Help: help}, []string{label})
+		return prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: name, Help: help}, []string{label})
 	}
 	gauge := func(name, help string) prometheus.Gauge {
-		return prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: name, Help: help})
+		return prometheus.NewGauge(prometheus.GaugeOpts{Subsystem: metricSubsystem, Name: name, Help: help})
 	}
 	return workflowMetrics{
 		ranges:       counter("expired_range_total", "Expired range operation returns, not logical Slot completions.", "result"),
@@ -27,7 +27,7 @@ func newWorkflowMetrics() workflowMetrics {
 		run:          counter("run_one_return_total", "RunOne exits including panic, classified once by actual control flow.", "outcome"),
 		execute:      counter("execute_return_total", "Executor returns; not successful Slot completions.", "outcome"),
 		progress:     counter("progress_completed_total", "Acknowledged Progress commit observations by existing completion kind.", "kind"),
-		progressCauses: prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
+		progressCauses: prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem,
 			Name: "progress_completion_causes_total",
 			Help: "Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by " +
 				"the cause the completion carried (the most actionable of what the round hit) and that cause's reason: " +
@@ -37,7 +37,7 @@ func newWorkflowMetrics() workflowMetrics {
 		active:     gauge("scheduler_active_executions", "Worker task occupancy, including preparation and execution, excluding pending result delivery."),
 		ready:      gauge("scheduler_ready_runners", "Runners in the outer ready queue."),
 		delayed:    gauge("scheduler_delayed_runners", "Runners in the outer delayed queue."),
-		permitWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_permit_wait_seconds", Help: "Actual query admission call wall duration including immediate grants and failures; parallel waits are not additive Slot time.", Buckets: []float64{0.001, 0.01, 0.1, 1, 5, 15, 30, 60}}, []string{"queue_kind"}),
+		permitWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "query_permit_wait_seconds", Help: "Actual query admission call wall duration including immediate grants and failures; parallel waits are not additive Slot time.", Buckets: []float64{0.001, 0.01, 0.1, 1, 5, 15, 30, 60}}, []string{"queue_kind"}),
 	}
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {

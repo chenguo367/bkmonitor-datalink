@@ -2020,10 +2020,10 @@ func TestPhaseTwoWorkerBundleReportsOwnedQueryGroupsAndFixedOwnershipTransitions
 		}
 	}
 	assertOwnershipTransitionMetrics(t, recorder, []string{
-		`bkmonitor_alarmd_ownership_transition_total{reason_class="none",result="started",transition="takeover_started"} 1`,
-		`bkmonitor_alarmd_ownership_transition_total{reason_class="none",result="success",transition="takeover_completed"} 1`,
-		`bkmonitor_alarmd_ownership_transition_total{reason_class="none",result="success",transition="assignment_acquired"} 1`,
-		`bkmonitor_alarmd_ownership_transition_total{reason_class="none",result="success",transition="assignment_lost"} 1`,
+		`alarmd_ownership_transition_total{reason_class="none",result="started",transition="takeover_started"} 1`,
+		`alarmd_ownership_transition_total{reason_class="none",result="success",transition="takeover_completed"} 1`,
+		`alarmd_ownership_transition_total{reason_class="none",result="success",transition="assignment_acquired"} 1`,
+		`alarmd_ownership_transition_total{reason_class="none",result="success",transition="assignment_lost"} 1`,
 	})
 	_ = bundle.Shutdown(context.Background())
 }
@@ -2051,25 +2051,25 @@ func TestPhaseTwoRuntimeObserverReportsRealFenceChecks(t *testing.T) {
 		t.Fatalf("fence observation = %+v, want admission result/reason/trace", got)
 	}
 	assertOwnershipTransitionMetrics(t, recorder, []string{
-		`bkmonitor_alarmd_ownership_transition_total{reason_class="none",result="success",transition="fence_checked"} 1`,
+		`alarmd_ownership_transition_total{reason_class="none",result="success",transition="fence_checked"} 1`,
 	})
 }
 
 func assertOwnedQueryGroupGauge(t *testing.T, recorder *metric.Recorder, count int) {
 	t.Helper()
-	want := strings.NewReader("# HELP bkmonitor_alarmd_worker_owned_query_groups Query groups currently owned by this complete worker role.\n" +
-		"# TYPE bkmonitor_alarmd_worker_owned_query_groups gauge\n" +
-		fmt.Sprintf("bkmonitor_alarmd_worker_owned_query_groups{worker_role=\"complete\"} %d\n", count))
-	if err := testutil.GatherAndCompare(recorder.Gatherer(), want, "bkmonitor_alarmd_worker_owned_query_groups"); err != nil {
+	want := strings.NewReader("# HELP alarmd_worker_owned_query_groups Query groups currently owned by this complete worker role.\n" +
+		"# TYPE alarmd_worker_owned_query_groups gauge\n" +
+		fmt.Sprintf("alarmd_worker_owned_query_groups{worker_role=\"complete\"} %d\n", count))
+	if err := testutil.GatherAndCompare(recorder.Gatherer(), want, "alarmd_worker_owned_query_groups"); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func assertOwnershipTransitionMetrics(t *testing.T, recorder *metric.Recorder, samples []string) {
 	t.Helper()
-	want := strings.NewReader("# HELP bkmonitor_alarmd_ownership_transition_total Ownership lifecycle transitions by bounded transition, result and reason class.\n" +
-		"# TYPE bkmonitor_alarmd_ownership_transition_total counter\n" + strings.Join(samples, "\n") + "\n")
-	if err := testutil.GatherAndCompare(recorder.Gatherer(), want, "bkmonitor_alarmd_ownership_transition_total"); err != nil {
+	want := strings.NewReader("# HELP alarmd_ownership_transition_total Ownership lifecycle transitions by bounded transition, result and reason class.\n" +
+		"# TYPE alarmd_ownership_transition_total counter\n" + strings.Join(samples, "\n") + "\n")
+	if err := testutil.GatherAndCompare(recorder.Gatherer(), want, "alarmd_ownership_transition_total"); err != nil {
 		t.Fatal(err)
 	}
 }

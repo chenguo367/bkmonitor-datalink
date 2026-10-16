@@ -141,7 +141,7 @@ func TestBuiltInPythonOutputUnreachableServiceRedisHoldsStartup(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "redis_legacy_output") {
 		t.Fatalf("err = %v, want startup held on the service Redis until the process stopped", err)
 	}
-	if got := counterValue(t, recorder, "bkmonitor_alarmd_startup_dependency_wait_total",
+	if got := counterValue(t, recorder, "alarmd_startup_dependency_wait_total",
 		map[string]string{"dependency": "redis_legacy_output"}); got < 2 {
 		t.Fatalf("startup_dependency_wait_total{redis_legacy_output} = %v, want the wait counted", got)
 	}

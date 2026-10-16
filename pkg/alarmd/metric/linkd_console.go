@@ -43,7 +43,7 @@ type linkdConsoleCollector struct {
 
 func newLinkdConsoleCollector() *linkdConsoleCollector {
 	return &linkdConsoleCollector{
-		state: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "linkd_console_state"),
+		state: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "linkd_console_state"),
 			"The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: "+
 				"not_configured (the deployment names no Console, so neither the open alert set's calibration nor "+
 				"the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events "+
@@ -51,12 +51,12 @@ func newLinkdConsoleCollector() *linkdConsoleCollector {
 				"failed), link_unhealthy (the Console answered and the link says its own set maintenance is "+
 				"failing, never succeeded or is behind; the close refuses every round) and reachable.",
 			[]string{"state"}, nil),
-		calls: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "linkd_console_calls_total"),
+		calls: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "linkd_console_calls_total"),
 			"Calls this replica made to the alert link's Console, by operation (roster, reconcile, alert_record) "+
 				"and result (ok, failed). Only the control leader walks the roster. An alert_record answered with "+
 				"'no such alert' is ok. Every cell exists once the source is bound, so a zero is a reading.",
 			[]string{"op", "result"}, nil),
-		failures: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "linkd_console_failures_total"),
+		failures: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "linkd_console_failures_total"),
 			"Failed calls to the alert link's Console, by operation and class: the transport's word for a request "+
 				"that got no answer (cancelled - the caller let go, timeout, connection_refused, connection_reset, dns, "+
 				"tls, eof, other - the same words a query provider's route detail uses), status (an answer other than "+

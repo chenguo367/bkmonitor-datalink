@@ -111,7 +111,7 @@ func TestAFallbackLeavesTheKeptSetAndANewTermStartsFromItUnlessItExpired(t *test
 	if after := client.Get(context.Background(), "test.fleet:lookback-plan").Val(); after != kept {
 		t.Fatalf("a fallback term changed the kept set:\n%s\n%s", kept, after)
 	}
-	if got := counterValue(t, recorder, "bkmonitor_alarmd_control_tier_paused_total", map[string]string{"function": metric.ControlTierLookbackPlanning}); got != 1 {
+	if got := counterValue(t, recorder, "alarmd_control_tier_paused_total", map[string]string{"function": metric.ControlTierLookbackPlanning}); got != 1 {
 		t.Fatalf("paused rounds = %v, want 1", got)
 	}
 

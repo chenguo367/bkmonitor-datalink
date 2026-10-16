@@ -111,30 +111,30 @@ var dueIndexAuditOvershootBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15,
 func newDueIndexMetrics() dueIndexMetrics {
 	metrics := dueIndexMetrics{
 		entries: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "due_index_entries",
+			Subsystem: metricSubsystem, Name: "due_index_entries",
 			Help: "Query Groups the due index currently holds a bound for on this replica.",
 		}),
 		predictions: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "due_index_prediction_total",
+			Subsystem: metricSubsystem, Name: "due_index_prediction_total",
 			Help: "Dispatched rounds by what the due index predicted and what the round found; " +
 				"prediction=not_due with actual=due is the index being wrong and must stay zero, " +
 				"and prediction=due with actual=due growing is the proof that the comparison is running.",
 		}, []string{"prediction", "actual"}),
 		recomputes: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "due_index_recomputed_total",
+			Subsystem: metricSubsystem, Name: "due_index_recomputed_total",
 			Help: "Due index bounds recomputed or dropped, by what forced it.",
 		}, []string{"trigger"}),
 		versionChecks: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "due_index_version_check_total",
+			Subsystem: metricSubsystem, Name: "due_index_version_check_total",
 			Help: "Activation header comparisons the due index made, by outcome; " +
 				"unchanged growing is what says the fail-open path is wired at all.",
 		}, []string{"result"}),
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dispatch_skipped_total",
+			Subsystem: metricSubsystem, Name: "dispatch_skipped_total",
 			Help: "Dispatches the due index held back, by why the Query Group was not worth dispatching.",
 		}, []string{"reason"}),
 		turnaways: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dispatch_queue_turnaways_total",
+			Subsystem: metricSubsystem, Name: "dispatch_queue_turnaways_total",
 			Help: "Query Groups a dispatcher queue turned away, by what happened and by the cohort of the " +
 				"Query Group's shortest due interval. normal_queue_full is an arrival the full ready queue " +
 				"held back, the walk resuming from it once a dispatch frees a place; normal_queue_evicted " +
@@ -146,7 +146,7 @@ func newDueIndexMetrics() dueIndexMetrics {
 				"its previous round.",
 		}, []string{"outcome", "cohort"}),
 		crowdedOut: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dispatch_crowded_out_total",
+			Subsystem: metricSubsystem, Name: "dispatch_crowded_out_total",
 			Help: "Turns a Query Group lost because the dispatcher still held it from a previous round, " +
 				"by what held it. These are not skips: the object was due and the pipeline took its turn, " +
 				"so a deployment starving this way reads zero on every dispatch_skipped_total reason. " +
@@ -170,7 +170,7 @@ func newDueIndexMetrics() dueIndexMetrics {
 		}, []string{"by"}),
 		auditOvershoot: newDueIndexAuditOvershoot(),
 		horizon: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "due_index_horizon_seconds",
+			Subsystem: metricSubsystem, Name: "due_index_horizon_seconds",
 			Help:    "How far ahead of now a newly written due index bound sits.",
 			Buckets: append([]float64(nil), dueIndexHorizonBuckets...),
 		}),
@@ -342,8 +342,8 @@ func (r *Recorder) RecordDispatchCrowdedOut(holder string) {
 // reader cannot skip.
 func newDueIndexAuditOvershoot() *prometheus.HistogramVec {
 	histogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem,
-		Name: "due_index_audit_overshoot_seconds",
+		Subsystem: metricSubsystem,
+		Name:      "due_index_audit_overshoot_seconds",
 		Help: "The due index's own bound minus the instant it was consulted, for an audited dispatch " +
 			"the index predicted was not due and the round then found due. It measures how much " +
 			"longer the index intended to hold that object back. It is NOT how late the Slot ran: " +

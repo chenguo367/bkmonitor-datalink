@@ -110,7 +110,11 @@ type TrendDefinition struct {
 	Lines []TrendLine
 }
 
-const metricPrefix = "bkmonitor_alarmd_"
+const metricPrefix = "alarmd_"
+
+// SelfSpaceProbe is the expression whose samples say a space holds alarmd's
+// own metrics.
+const SelfSpaceProbe = "count(" + metricPrefix + "build_info)"
 
 // trendCatalog is fixed at build time. The alarmd counters here are each
 // process's own work -- a physical query, a decision, an admission is

@@ -33,7 +33,7 @@ func TestTheProductionBundlePublishesTheViewItsWorkerHolds(t *testing.T) {
 		func(bundle *phaseTwoWorkerBundle) { bundle.dependencies.RunEffectiveTime = nil })
 	ctx := context.Background()
 	gathered := gatherPhaseTwoGauges(t, fixture)
-	if owned := gathered["bkmonitor_alarmd_worker_owned_query_groups{worker_role=complete}"]; owned != 2 {
+	if owned := gathered["alarmd_worker_owned_query_groups{worker_role=complete}"]; owned != 2 {
 		t.Fatalf("owned = %v, want the fixture's two", owned)
 	}
 	segment := fixture.initialSchedule.Segment
@@ -51,13 +51,13 @@ func TestTheProductionBundlePublishesTheViewItsWorkerHolds(t *testing.T) {
 	if wantObject == 0 || wantContexts == 0 {
 		t.Fatalf("the store holds nothing under the Segment's digests: object=%d contexts=%d", wantObject, wantContexts)
 	}
-	if got := gathered["bkmonitor_alarmd_local_view_query_groups"]; got != 1 {
+	if got := gathered["alarmd_local_view_query_groups"]; got != 1 {
 		t.Fatalf("local_view_query_groups = %v, want 1: the one Query Group whose Slot ran (owned is 2)", got)
 	}
-	if got := gathered["bkmonitor_alarmd_local_view_object_bytes{kind=query_group}"]; got != float64(wantObject) {
+	if got := gathered["alarmd_local_view_object_bytes{kind=query_group}"]; got != float64(wantObject) {
 		t.Fatalf("local_view_object_bytes{query_group} = %v, want the stored object's %d bytes", got, wantObject)
 	}
-	if got := gathered["bkmonitor_alarmd_local_view_object_bytes{kind=output_context}"]; got != float64(wantContexts) {
+	if got := gathered["alarmd_local_view_object_bytes{kind=output_context}"]; got != float64(wantContexts) {
 		t.Fatalf("local_view_object_bytes{output_context} = %v, want the stored contexts' %d bytes", got, wantContexts)
 	}
 }

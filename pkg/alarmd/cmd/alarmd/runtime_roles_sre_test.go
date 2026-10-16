@@ -102,7 +102,7 @@ func TestTheSREAuditSinkWritesALineAndCountsTheCall(t *testing.T) {
 	}
 	cells, counted := 0, 0.0
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_sre_actions_total" {
+		if family.GetName() != "alarmd_sre_actions_total" {
 			continue
 		}
 		for _, series := range family.Metric {
@@ -142,7 +142,7 @@ func TestTheRolloutSinkWritesALineAndCountsTheEnd(t *testing.T) {
 	}
 	cells, counted := 0, 0.0
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_sre_rollouts_total" {
+		if family.GetName() != "alarmd_sre_rollouts_total" {
 			continue
 		}
 		for _, series := range family.Metric {

@@ -65,7 +65,7 @@ func TestTheTrendSpacesAreDerivedFromTheOperatorsDataIDs(t *testing.T) {
 		dataID("exporter-9", "metric", "false", "false", "9"),
 		dataID("space-scoped", "metric", "true", "false", "-4"),
 	}
-	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
+	has := map[string]bool{"bkcc__2|alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
 	spaces, calls, _ := spacesUnder(items, nil, has, &at)
 	got := spaces.get(context.Background())
 	self, container := got[fleet.TrendSpaceSelf], got[fleet.TrendSpaceContainer]
@@ -102,7 +102,7 @@ func TestAnUnresolvedSpaceSaysWhy(t *testing.T) {
 	}
 	spaces, _, _ = spacesUnder([]unstructured.Unstructured{dataID("custommetricdataid", "metric", "true", "false", "7")}, nil, nil, &at)
 	if self := spaces.get(context.Background())[fleet.TrendSpaceSelf]; self.State != fleet.TrendSpaceUnresolved ||
-		!strings.Contains(self.Reason, "no candidate space has samples of count(bkmonitor_alarmd_build_info)") || len(self.Candidates) != 1 ||
+		!strings.Contains(self.Reason, "no candidate space has samples of count(alarmd_build_info)") || len(self.Candidates) != 1 ||
 		!strings.Contains(self.Reason, "; most likely alarmd's ServiceMonitor is not collected into this platform's metadata") {
 		t.Fatalf("no candidate with the metric: %+v", self)
 	}
@@ -119,7 +119,7 @@ func TestAnUnresolvedSpaceSaysWhy(t *testing.T) {
 func TestDerivedSpacesAnswerForTheirTime(t *testing.T) {
 	at := time.Unix(1789006380, 0)
 	items := []unstructured.Unstructured{dataID("c", "metric", "true", "false", "2"), dataID("k", "metric", "true", "true", "2")}
-	has := map[string]bool{"bkcc__2|bkmonitor_alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
+	has := map[string]bool{"bkcc__2|alarmd_build_info)": true, "bkcc__2|container_memory_working_set_bytes{namespace=\"alarmd-ns\"})": true}
 	spaces, _, lists := spacesUnder(items, nil, has, &at)
 	spaces.get(context.Background())
 	at = at.Add(trendSpaceResolvedFor - time.Second)

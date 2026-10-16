@@ -67,20 +67,20 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 		physicalQueries: work.WithLabelValues("physical_query"),
 		stateApplied:    work.WithLabelValues("state_apply"),
 		queryDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_query_duration_seconds",
+			Subsystem: metricSubsystem, Name: "access_query_duration_seconds",
 			Help: "Each physical query a Slot runs, every attempt including retries, by the time its provider took from " +
 				"request to answer or failure. Counted where worker_work_total{work_kind=\"physical_query\"} is, so the " +
 				"two agree; diagnostic reads are not in it. A query cut at 30 seconds lands in +Inf.",
 			Buckets: QueryDurationBuckets,
 		}),
 		queryFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "access_query_failure_total",
+			Subsystem: metricSubsystem, Name: "access_query_failure_total",
 			Help: "Physical queries that did not answer, by what their last failed attempt says: timeout, refused (the " +
 				"backend answered no), not_found (its status names something that does not exist), transport, decode " +
 				"(the answer broke the wire contract), other. Closed set.",
 		}, []string{"reason"}),
 		decisionLag: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "slot_decision_lag_seconds",
+			Subsystem: metricSubsystem, Name: "slot_decision_lag_seconds",
 			Help: "Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion " +
 				"being acknowledged, for every period, in normal rounds: a normal Slot and its retry. Replays, probes and " +
 				"supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions " +
@@ -88,7 +88,7 @@ func newFlowMetrics(work *prometheus.CounterVec) flowMetrics {
 			Buckets: DecisionLagBuckets,
 		}),
 		outputRejectedAll: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_rejected_all_total",
+			Subsystem: metricSubsystem, Name: "output_events_rejected_all_total",
 			Help: "Events refused on their way to the wire, all rules and strategies: output_events_rejected_total " +
 				"without its labels, counted at the same place.",
 		}),

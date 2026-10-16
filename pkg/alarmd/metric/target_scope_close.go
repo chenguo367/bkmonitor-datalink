@@ -21,7 +21,7 @@ type targetScopeCloseCollector struct {
 
 func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 	return &targetScopeCloseCollector{
-		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "target_scope_close_total"),
+		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "target_scope_close_total"),
 			"What the close of alerts whose target left the strategy's monitoring scope decided, by outcome. "+
 				"unconfirmed is a fingerprint of an open alert turned away by one Slot, waiting for a second; "+
 				"close_sent counts alerts a close was sent for, acknowledged by the broker, not alerts the link "+

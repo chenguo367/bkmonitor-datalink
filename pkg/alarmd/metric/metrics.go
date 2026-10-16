@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	metricNamespace = "bkmonitor"
 	metricSubsystem = "alarmd"
 	otherLabel      = "_other"
 )
@@ -69,7 +68,6 @@ func NewRecorder(build BuildInfo) *Recorder {
 	registry := prometheus.NewRegistry()
 	buildInfo := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Namespace: metricNamespace,
 			Subsystem: metricSubsystem,
 			Name:      "build_info",
 			Help:      "alarmd build information.",

@@ -115,7 +115,7 @@ func TestPhaseTwoRuntimeObserverReportsItsLinesByStage(t *testing.T) {
 	}
 	counts := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_log_lines_total" {
+		if family.GetName() != "alarmd_log_lines_total" {
 			continue
 		}
 		for _, sample := range family.GetMetric() {

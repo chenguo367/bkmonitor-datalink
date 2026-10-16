@@ -191,7 +191,7 @@ func TestPhaseTwoDispatcherFullReadyQueueGivesUpTheLatestDeadlineForAnEarlierOne
 		{"normal_queue_full", "10s"}:      0,
 		{"normal_queue_evicted", "10s"}:   0,
 	} {
-		got := counterValue(t, recorder, "bkmonitor_alarmd_dispatch_queue_turnaways_total", map[string]string{"outcome": labels[0], "cohort": labels[1]})
+		got := counterValue(t, recorder, "alarmd_dispatch_queue_turnaways_total", map[string]string{"outcome": labels[0], "cohort": labels[1]})
 		if got != want {
 			t.Fatalf("dispatch_queue_turnaways_total%v = %v, want %v", labels, got, want)
 		}
@@ -239,7 +239,7 @@ func TestAOneShotRunEvictsAsProductionDoesAndRunsTheEvictedAtTheNextTick(t *test
 	if !reflect.DeepEqual(order, want) {
 		t.Fatalf("dispatch order = %v, want %v: the evicted Query Group runs at the next tick, after the generation it was evicted from", order, want)
 	}
-	if got := counterValue(t, recorder, "bkmonitor_alarmd_dispatch_queue_turnaways_total",
+	if got := counterValue(t, recorder, "alarmd_dispatch_queue_turnaways_total",
 		map[string]string{"outcome": "normal_queue_evicted", "cohort": "other"}); got != 1 {
 		t.Fatalf("normal_queue_evicted = %v, want 1", got)
 	}

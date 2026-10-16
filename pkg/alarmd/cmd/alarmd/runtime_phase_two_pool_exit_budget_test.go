@@ -644,7 +644,7 @@ func TestTheProductionBundleCountsDownstreamDistressByContention(t *testing.T) {
 	}
 	counts := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_query_downstream_distress_total" {
+		if family.GetName() != "alarmd_query_downstream_distress_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {
@@ -693,7 +693,7 @@ func TestTheProductionBundleCountsHowEachGroupWasSeeded(t *testing.T) {
 	}
 	seeds := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_read_hold_seeds_total" {
+		if family.GetName() != "alarmd_read_hold_seeds_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {

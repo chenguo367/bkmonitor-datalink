@@ -223,9 +223,9 @@ func TestLivenessReadingCarriesOnlyStartedLoops(t *testing.T) {
 	for _, family := range families {
 		for _, sample := range family.GetMetric() {
 			switch family.GetName() {
-			case "bkmonitor_alarmd_loop_turn_age_seconds":
+			case "alarmd_loop_turn_age_seconds":
 				age = sample.GetGauge().GetValue()
-			case "bkmonitor_alarmd_loop_turn_duration_seconds":
+			case "alarmd_loop_turn_duration_seconds":
 				for _, label := range sample.GetLabel() {
 					if label.GetValue() == livenessLoopControl {
 						count = float64(sample.GetHistogram().GetSampleCount())

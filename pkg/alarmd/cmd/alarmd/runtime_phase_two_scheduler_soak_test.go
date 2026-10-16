@@ -204,7 +204,7 @@ func TestSoakTheSchedulerShapeStaggerAndHoldTogether(t *testing.T) {
 	if pooled != 0 {
 		t.Fatalf("%d Query Groups entered the query cooldown pool", pooled)
 	}
-	if timeouts := soakCounter(t, recorder, "bkmonitor_alarmd_worker_query_admission_total", "result", "timeout"); timeouts != 0 {
+	if timeouts := soakCounter(t, recorder, "alarmd_worker_query_admission_total", "result", "timeout"); timeouts != 0 {
 		t.Fatalf("%v queries timed out waiting for a permit", timeouts)
 	}
 	// The step was served: the groups added at its start were read while

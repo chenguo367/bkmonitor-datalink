@@ -23,7 +23,7 @@ type cliAuthMetrics struct {
 func newCLIAuthMetrics() *cliAuthMetrics {
 	return &cliAuthMetrics{
 		total: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cli_auth_total",
+			Subsystem: metricSubsystem, Name: "cli_auth_total",
 			Help: "CLI authorization events this process handled, by event: grants issued on the authorization page " +
 				"(grants_issued) and through the admin's front surface (front_grants_issued); front grants refused before " +
 				"the first roster sync (front_grants_refused_roster_not_synced) and for an operator off the roster " +
@@ -33,7 +33,7 @@ func newCLIAuthMetrics() *cliAuthMetrics {
 				"and anyone asking why a CLI login failed.",
 		}, []string{"event"}),
 		rosterApplied: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cli_roster_applied_timestamp_seconds",
+			Subsystem: metricSubsystem, Name: "cli_roster_applied_timestamp_seconds",
 			Help: "When this process last applied a new operator roster from the admin, as Unix seconds; 0 until one is. " +
 				"The roster is shared: another channel replica may have applied the latest one.",
 		}),

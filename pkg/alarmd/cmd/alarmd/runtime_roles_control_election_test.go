@@ -323,7 +323,7 @@ func (fixture *electionFixture) assertOneLeaderAtMost() { fixture.leader() }
 func (fixture *electionFixture) transitions(toClass, reason string) float64 {
 	total := 0.0
 	for _, process := range fixture.processes {
-		total += counterValue(fixture.t, process.recorder, "bkmonitor_alarmd_control_leader_transitions_total",
+		total += counterValue(fixture.t, process.recorder, "alarmd_control_leader_transitions_total",
 			map[string]string{"to_class": toClass, "reason": reason})
 	}
 	return total
@@ -513,7 +513,7 @@ func TestAWorkerLeadsWhileTheControlProcessIsGoneAndHandsBackOnceItIsSteady(t *t
 	// leaves the kept set as the control process left it, and sends no plan
 	// set, so every Worker keeps what it was sent.
 	fixture.tick()
-	if paused := counterValue(t, fallbackLeader.recorder, "bkmonitor_alarmd_control_tier_paused_total",
+	if paused := counterValue(t, fallbackLeader.recorder, "alarmd_control_tier_paused_total",
 		map[string]string{"function": metric.ControlTierLookbackPlanning}); paused == 0 {
 		t.Fatal("the fallback Leader's rounds were not counted as lookback planning paused")
 	}
@@ -802,7 +802,7 @@ func TestTheDefaultFormElectsAsBeforeButNeverAProcessThatIsStartingOrStopping(t 
 		t.Fatal(err)
 	}
 	first.alive = false
-	if got := counterValue(t, first.recorder, "bkmonitor_alarmd_control_leader_transitions_total",
+	if got := counterValue(t, first.recorder, "alarmd_control_leader_transitions_total",
 		map[string]string{"to_class": "none", "reason": "release"}); got != 1 {
 		t.Fatalf("releases counted at shutdown = %v, want 1", got)
 	}
@@ -868,12 +868,12 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 		}
 	}
 	outcome := func(process *electionProcess, word string) float64 {
-		return counterValue(t, process.recorder, "bkmonitor_alarmd_absent_strategy_close_total", map[string]string{"outcome": word})
+		return counterValue(t, process.recorder, "alarmd_absent_strategy_close_total", map[string]string{"outcome": word})
 	}
 	rounds := func(process *electionProcess) float64 {
 		total := 0.0
 		for _, refusal := range absentalerts.Refusals {
-			total += counterValue(t, process.recorder, "bkmonitor_alarmd_absent_strategy_round_total", map[string]string{"disposition": refusal})
+			total += counterValue(t, process.recorder, "alarmd_absent_strategy_round_total", map[string]string{"disposition": refusal})
 		}
 		return total
 	}
@@ -888,7 +888,7 @@ func TestAWorkerLeadingAsTheFallbackRunsTheDeletedStrategyClose(t *testing.T) {
 	if rosterReads.Load() == 0 {
 		t.Fatal("the fallback Leader's round never read the link's roster")
 	}
-	if got := counterValue(t, leading.recorder, "bkmonitor_alarmd_absent_strategy_difference", map[string]string{"side": "roster_strategies"}); got != 1 {
+	if got := counterValue(t, leading.recorder, "alarmd_absent_strategy_difference", map[string]string{"side": "roster_strategies"}); got != 1 {
 		t.Fatalf("roster strategies the Leader's round read = %v, want the deleted strategy", got)
 	}
 	if decided := outcome(leading, absentalerts.OutcomeWithinGrace) + outcome(leading, absentalerts.OutcomeCloseDecided); decided < 1 {
@@ -1036,7 +1036,7 @@ func TestALeadersLookbackPlanReachesTheOwningWorkersLookbackOverTheViewStream(t 
 		t.Fatalf("installed view %+v (%t), want the process's Query Groups", view, installed)
 	}
 	held := func() float64 {
-		return counterValue(t, process.recorder, "bkmonitor_alarmd_lookback_plan_entries", nil)
+		return counterValue(t, process.recorder, "alarmd_lookback_plan_entries", nil)
 	}
 	if got := held(); got != 0 {
 		t.Fatalf("plan entries held before any was planned = %v, want 0", got)

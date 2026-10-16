@@ -51,7 +51,7 @@ type controlSourceCollector struct {
 
 func newControlSourceCollector() *controlSourceCollector {
 	descriptor := func(name, help string, labels ...string) *prometheus.Desc {
-		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
+		return prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, name), help, labels, nil)
 	}
 	return &controlSourceCollector{
 		now: time.Now,

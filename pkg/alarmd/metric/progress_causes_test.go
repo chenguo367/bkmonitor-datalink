@@ -39,7 +39,7 @@ func TestAShortCompletionIsCountedByItsCauseAndReason(t *testing.T) {
 	}
 	counts := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_progress_completion_causes_total" {
+		if family.GetName() != "alarmd_progress_completion_causes_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {

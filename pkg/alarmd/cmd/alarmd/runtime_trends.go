@@ -101,8 +101,8 @@ type trendKind struct {
 // on the charts rather than unresolving the space.
 func (spaces *trendSpaces) spaceKinds() []trendKind {
 	return []trendKind{
-		{fleet.TrendSpaceSelf, "false", "count(bkmonitor_alarmd_build_info)",
-			"no candidate space has samples of count(bkmonitor_alarmd_build_info) in the last 10 minutes; most likely alarmd's ServiceMonitor is not collected into this platform's metadata"},
+		{fleet.TrendSpaceSelf, "false", fleet.SelfSpaceProbe,
+			"no candidate space has samples of " + fleet.SelfSpaceProbe + " in the last 10 minutes; most likely alarmd's ServiceMonitor is not collected into this platform's metadata"},
 		{fleet.TrendSpaceContainer, "true", fmt.Sprintf(`count(container_memory_working_set_bytes{namespace=%q})`, spaces.namespace),
 			fmt.Sprintf("no candidate space has container data for namespace %q in the last 10 minutes", spaces.namespace)},
 	}
