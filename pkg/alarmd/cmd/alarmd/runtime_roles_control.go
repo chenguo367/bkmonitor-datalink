@@ -358,7 +358,7 @@ func openProductionControlRoleBundle(
 	binding := cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer,
 		Metrics: recorder.Gatherer(), PublicWindows: fleet.NewPublicWindowsHandler(windows, external.Now),
 		RedisFailures: cliRedisFailures(recorder, observer), RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry,
-		AuthEvents: cliAuthEvents(recorder), RosterApplied: recorder.SetCLIRosterApplied}
+		AuthEvents: cliAuthEvents(recorder), RosterApplied: recorder.SetCLIRosterApplied, LinkdConsole: linkd.Console}
 	facts := func() *observability.RuntimeConfigFacts {
 		if bundle == nil {
 			return nil

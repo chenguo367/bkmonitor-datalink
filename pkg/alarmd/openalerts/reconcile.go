@@ -173,6 +173,13 @@ func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Va
 // module, or a Console of its own - and the deployment says which, not this
 // process. Only the operations' own paths are appended.
 func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query url.Values, out any) error {
+	return reader.getPathAnswering(ctx, path, query, out, false)
+}
+
+// getPathAnswering is getPath; with refusal, an answer other than 200 also
+// carries the link's own words for it (LinkRefusal), for a read an operator
+// asked for and has to see why the link turned down.
+func (reader *HTTPReconciler) getPathAnswering(ctx context.Context, path string, query url.Values, out any, refusal bool) error {
 	u := strings.TrimRight(reader.options.BaseURL, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -204,6 +211,9 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	if response.StatusCode != http.StatusOK {
 		if response.StatusCode == http.StatusNotFound && objectMissing(response.Body) {
 			return errObjectMissing
+		}
+		if refusal {
+			return linkRefusal(response.StatusCode, response.Body)
 		}
 		return statusError(response.StatusCode)
 	}
