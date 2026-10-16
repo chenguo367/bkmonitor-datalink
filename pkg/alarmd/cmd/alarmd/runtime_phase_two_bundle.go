@@ -733,8 +733,9 @@ func openProductionPhaseTwoBundleAssembly(
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
+	calendarEntries, calendarBytes := config.DeriveCalendarCacheCapacity(config.DetectCapacityInputs())
 	legacyTime := strategycache.NewLegacyEffectiveTime(redisForCaller(controlClient, redisfailure.CallerLegacyEffectiveTime),
-		redisForCaller(cmdbClient, redisfailure.CallerLegacyEffectiveTime), cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
+		redisForCaller(cmdbClient, redisfailure.CallerLegacyEffectiveTime), cfg.PlatformKeyPrefix(), external.Now, calendarEntries, calendarBytes)
 	legacyTime.SetFailureLine(effectiveTimeFailureLine(logger))
 	recorder.SetEffectiveTimeRefreshSource(legacyTime.RefreshCounts)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a

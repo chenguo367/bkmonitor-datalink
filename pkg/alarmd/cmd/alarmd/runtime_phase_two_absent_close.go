@@ -46,8 +46,8 @@ const absentCloseGrace = 10 * time.Minute
 // one.
 const absentCloseRosterPages = 2000
 
-// absentCloseAlertBatch bounds the alerts one strategy's close sends at
-// once.
+// absentCloseAlertBatch is the size of one write of a strategy's closes. All
+// of its alerts are closed in the round that decides them, a batch at a time.
 const absentCloseAlertBatch = 64
 
 // absentCloseIdentityReads bounds how many of a strategy's alert records are
@@ -404,23 +404,24 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		execution.word = found.outcome
 		return execution
 	}
-	batch := make([]linkdoutput.CloseRequest, 0, min(len(own), absentCloseAlertBatch))
-	for _, alert := range own {
-		batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint,
-			AlertInstanceID: alert.AlertID, StrategyID: strategyID,
-			StrategyRevision: identity.Revision, BusinessID: identity.BusinessID,
-			OccurredAt: now, Reason: linkdoutput.CloseReasonAbsent})
-		if len(batch) == absentCloseAlertBatch {
-			break
+	for start := 0; start < len(own); start += absentCloseAlertBatch {
+		batch := make([]linkdoutput.CloseRequest, 0, min(len(own)-start, absentCloseAlertBatch))
+		for _, alert := range own[start:min(len(own), start+absentCloseAlertBatch)] {
+			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint,
+				AlertInstanceID: alert.AlertID, StrategyID: strategyID,
+				StrategyRevision: identity.Revision, BusinessID: identity.BusinessID,
+				OccurredAt: now, Reason: linkdoutput.CloseReasonAbsent})
 		}
+		execution.batch += len(batch)
+		if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
+			// The rest are not sent this round; they are still open and the
+			// next round closes them.
+			loop.observe(ctx, absentalerts.OutcomeSendFailed, err, len(own)-start)
+			execution.word = absentalerts.OutcomeSendFailed
+			return execution
+		}
+		loop.count(absentalerts.OutcomeCloseSent, len(batch))
 	}
-	execution.batch = len(batch)
-	if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
-		loop.observe(ctx, absentalerts.OutcomeSendFailed, err, len(batch))
-		execution.word = absentalerts.OutcomeSendFailed
-		return execution
-	}
-	loop.count(absentalerts.OutcomeCloseSent, len(batch))
 	execution.word = absentalerts.OutcomeCloseSent
 	return execution
 }
