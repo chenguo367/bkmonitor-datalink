@@ -77,7 +77,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete}
+	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete, pod.OpPatch}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -339,6 +339,27 @@ func SREOperations(options SREOptions) []Operation {
 				v, err := pods.DeleteObject(ctx, pod.ObjectDeleteRequest{APIVersion: p.String("api_version"), Kind: p.String("kind"), Namespace: p.String("namespace"),
 					Name: p.String("name"), UID: p.String("uid"), ResourceVersion: p.String("resource_version")})
 				audit(ctx, started, SREAction{Op: pod.OpDelete, Namespace: p.String("namespace"), Kind: p.String("kind"), Name: p.String("name"), UID: p.String("uid"), Detail: writeDetail(v)}, err)
+				return wrapPod(v, err, err == nil)
+			}},
+		{ID: pod.OpPatch, Summary: "对一个对象做 RFC 6902 JSON Patch：按 api_version、kind、namespace、name 与读到的 uid（必填）定位，op 只允许 test / remove / replace / add；服务端在最前面加一条对 uid 的 test，apiserver 整份原子执行，任何一条 test 不符就什么都不改（test_failed，带 apiserver 原话）。按下标删列表元素时先 test 整条元素，同一列表从大到小删；注解键里的斜杠写成 ~1。答 updated / unchanged / test_failed / precondition_failed（uid 已不是读到的那个，补丁不发）/ gone / denied / not_granted_kind / rbac_not_writable，带改前改后字段差异（按 k8s.list 遮蔽，Secret 只显示键与指纹）与 will_roll（Pod 模板变了，工作负载会滚动）；对象带 helm 归属时写明 helm_release。用来删 helm 不拥有的手工字段（服务端 apply 删不掉其它管理者的字段）。每次调用都留审计记录，写明操作数与路径，不写值。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+			Fields: map[string]Field{"api_version": text, "kind": text, "namespace": text, "name": text, "uid": {Type: "string", MinLength: 1, MaxLength: 128, Source: "k8s.list items[].metadata.uid"},
+				"patch": {Type: "array", MinItems: 1, Items: &Field{Type: "object", Properties: map[string]Field{"op": {Type: "string", Enum: []string{"test", "remove", "replace", "add"}},
+					"path": {Type: "string", MinLength: 1, MaxLength: 4096}}, Required: []string{"op", "path"}, AdditionalProperties: true}}},
+			Required: []string{"api_version", "kind", "name", "uid", "patch"}, OutputSchema: SchemaOf(pod.WriteReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				started := now()
+				var ops []pod.PatchOp
+				encoded, err := json.Marshal(p["patch"])
+				if err == nil {
+					err = json.Unmarshal(encoded, &ops)
+				}
+				if err != nil {
+					return Outcome{Error: &Failure{Code: "invalid_request", Message: "patch must be an array of RFC 6902 operations"}}
+				}
+				v, err := pods.PatchObject(ctx, pod.ObjectPatchRequest{APIVersion: p.String("api_version"), Kind: p.String("kind"), Namespace: p.String("namespace"),
+					Name: p.String("name"), UID: p.String("uid"), Patch: ops})
+				audit(ctx, started, SREAction{Op: pod.OpPatch, Namespace: p.String("namespace"), Kind: p.String("kind"), Name: p.String("name"), UID: p.String("uid"),
+					Detail: writeDetail(v) + "; " + patchDetail(ops)}, err)
 				return wrapPod(v, err, err == nil)
 			}},
 		{ID: "pod.get", Summary: "读取一个 Pod 的容器身份、运行状态与 owner 链；首次可省略 UID，后续使用返回身份。", EvidenceScope: "sre_pod_target", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": inspectTarget}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.Observation{}),
@@ -738,6 +759,16 @@ func writeNames(receipt pod.WriteReceipt) string {
 
 // writeDetail is a write's outcomes by count, whether it forced ownership,
 // and the helm releases it touched.
+// patchDetail is what a patch's audit record says of it: how many
+// operations and their ops and paths, never a value.
+func patchDetail(ops []pod.PatchOp) string {
+	parts := make([]string, 0, len(ops))
+	for _, op := range ops {
+		parts = append(parts, op.Op+" "+op.Path)
+	}
+	return fmt.Sprintf("%d ops: %s", len(ops), strings.Join(parts, ", "))
+}
+
 func writeDetail(receipt pod.WriteReceipt) string {
 	var parts []string
 	for _, outcome := range pod.WriteOutcomes {

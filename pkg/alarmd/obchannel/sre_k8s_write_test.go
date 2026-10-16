@@ -6,6 +6,7 @@ package obchannel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -28,6 +29,10 @@ func (*configMapWriter) Apply(_ context.Context, _ schema.GroupVersionResource, 
 	}
 	object.SetUID(types.UID("uid-" + name))
 	return object, nil
+}
+
+func (w *configMapWriter) JSONPatch(_ context.Context, _ schema.GroupVersionResource, _, _ string, _ []byte) (*unstructured.Unstructured, error) {
+	return nil, errors.New("not served")
 }
 
 func (w *configMapWriter) Delete(_ context.Context, _ schema.GroupVersionResource, namespace, name string, uid types.UID, _ string) error {

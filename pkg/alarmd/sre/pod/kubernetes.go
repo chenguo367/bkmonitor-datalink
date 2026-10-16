@@ -301,6 +301,12 @@ func (c *KubernetesClient) Apply(ctx context.Context, resource schema.GroupVersi
 	return c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.ApplyPatchType, data, writePatchOptions(force))
 }
 
+// JSONPatch sends an RFC 6902 patch as alarmd-sre; the apiserver applies it
+// whole or not at all.
+func (c *KubernetesClient) JSONPatch(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, patch []byte) (*unstructured.Unstructured, error) {
+	return c.owners.Resource(resource).Namespace(namespace).Patch(ctx, name, types.JSONPatchType, patch, metav1.PatchOptions{FieldManager: applyFieldManager})
+}
+
 // Delete is k8s.delete's write: only the object the uid names, dependents in
 // the background; deleteOptions is fixed here.
 func (c *KubernetesClient) Delete(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, uid types.UID, resourceVersion string) error {

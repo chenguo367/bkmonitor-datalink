@@ -112,6 +112,11 @@ func (f *fakeWriter) Delete(_ context.Context, resource schema.GroupVersionResou
 	return nil
 }
 
+func (f *fakeWriter) JSONPatch(_ context.Context, resource schema.GroupVersionResource, namespace, name string, _ []byte) (*unstructured.Unstructured, error) {
+	f.asked = append(f.asked, fmt.Sprintf("patch %s %s/%s", resource.Resource, namespace, name))
+	return nil, errors.New("not served")
+}
+
 func writeProvider(t *testing.T, runner *fakeDryRunner, writer *fakeWriter) *Provider {
 	t.Helper()
 	provider := dryRunProvider(t, runner)

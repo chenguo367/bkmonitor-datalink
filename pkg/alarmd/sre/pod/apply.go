@@ -64,7 +64,7 @@ const (
 
 // WriteOutcomes is every outcome an apply or a delete can answer.
 var WriteOutcomes = []string{WriteCreated, WriteUpdated, WriteUnchanged, WriteConflict, WriteDenied, WriteNotChecked,
-	WriteNotGrantedKind, WriteRBACNotWritable, WriteDeleted, WriteGone, WritePrecondition, WriteProtected}
+	WriteNotGrantedKind, WriteRBACNotWritable, WriteDeleted, WriteGone, WritePrecondition, WriteProtected, WriteTestFailed}
 
 // protectedNamespaces cannot be deleted through the channel: losing one is
 // unrecoverable for the cluster. The process's own namespace is added at the
@@ -78,6 +78,9 @@ var namespacesResource = schema.GroupResource{Resource: "namespaces"}
 type Writer interface {
 	Apply(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, data []byte, force bool) (*unstructured.Unstructured, error)
 	Delete(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, uid types.UID, resourceVersion string) error
+	// JSONPatch applies an RFC 6902 patch; the apiserver applies all of it
+	// or none.
+	JSONPatch(ctx context.Context, resource schema.GroupVersionResource, namespace, name string, patch []byte) (*unstructured.Unstructured, error)
 }
 
 // ApplyRequest is a manifest stream to apply, the namespace a namespaced
@@ -111,6 +114,8 @@ type WriteObject struct {
 	Message    string        `json:"message,omitempty"`
 	Causes     []DryRunCause `json:"causes,omitempty"`
 	Changes    []FieldChange `json:"changes,omitempty"`
+	// WillRoll says the Pod template changed: the workload rolls.
+	WillRoll bool `json:"will_roll,omitempty"`
 	// ChangesOmitted is how many changed fields past maxApplyChanges are not
 	// listed.
 	ChangesOmitted int `json:"changes_omitted,omitempty"`
