@@ -14,7 +14,9 @@
 // here and no state is kept for it.
 //
 // The field names, the action words and the value rules are the consumer's,
-// copied from pkg/linkd/internal/cleaner/raw_event.go and its domain package
+// copied from pkg/linkd/internal/cleaner/raw_event.go and its domain package on
+// the consumer's own branch, upstream feat/linkd-dev (1e9617f2; this tree's
+// pkg/linkd is an older copy and not the deployed consumer),
 // rather than chosen here. Where the consumer is strict this side is strict
 // before it: a null dimension, a duplicate key between the two dimension maps
 // or a non-numeric value would have the whole message refused there, one
@@ -530,6 +532,13 @@ func SeverityIsBuiltIn(level contract.LevelResultV1) bool {
 	return builtIn || levelCodeCarriable(level.LevelCode)
 }
 
+// positiveHostID is a host id as the consumer accepts one: a positive int64
+// that reads back to the same text (linkd's positiveIntegerIdentity).
+func positiveHostID(id string) bool {
+	value, err := strconv.ParseInt(id, 10, 64)
+	return err == nil && value > 0 && strconv.FormatInt(value, 10) == id
+}
+
 // wireSubjectFor writes the object in the consumer's spelling.
 //
 // Every type the projection can produce has a spelling in subjectSystems -
@@ -537,9 +546,18 @@ func SeverityIsBuiltIn(level contract.LevelResultV1) bool {
 // unknown branch is the empty type: a record with no object, which is a real
 // answer (custom reporting with no target dimensions has none), and no
 // subject says so. Inventing one would attach the alert to something.
+//
+// A host is a subject only by its host id. The consumer reads a cmdb/host
+// subject as one and refuses anything else as an invalid id, without falling
+// back to the address and cloud it would otherwise resolve the host from; a
+// host placed by "<ip>|<cloud>" therefore writes no subject, and the record's
+// dimensions, which carry the address and cloud whole, name it.
 func wireSubjectFor(subject contract.MonitorSubject) *wireSubject {
 	naming, known := subjectSystems[subject.Type]
 	if !known || subject.ID == "" {
+		return nil
+	}
+	if subject.Type == contract.MonitorSubjectHost && !positiveHostID(subject.ID) {
 		return nil
 	}
 	return &wireSubject{System: naming.System, Type: naming.Type, ID: subject.ID}
