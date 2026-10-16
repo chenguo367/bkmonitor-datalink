@@ -97,12 +97,15 @@ func cliRedisFailures(recorder *metric.Recorder, observer observability.Observer
 	}
 }
 
-// cliRedisOptions are one CLI Redis client's options: a small pool that
-// connects on first use, whose dials are tried a second time when the first
-// fails (withDialRetry), counted under the client's name.
+// cliRedisOptions are one CLI Redis client's options: a pool that connects
+// on first use, whose dials are tried a second time when the first fails
+// (withDialRetry), counted under the client's name. Its reads are an
+// operator's, a handful next to the business pool, so sixteen connections
+// and five seconds' wait for one mean they never queue noticeably.
 func cliRedisOptions(connection config.RedisConnectionConfig, name string, retries func(client, reason string)) *redis.UniversalOptions {
 	options := observationRedisOptions(connection)
-	options.PoolSize = 2
+	options.PoolSize = 16
+	options.PoolTimeout = 5 * time.Second
 	options.MinIdleConns = 0
 	withDialRetry(options, goRedisDial(options), func(reason string) {
 		if retries != nil {
