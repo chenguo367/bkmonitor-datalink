@@ -30,6 +30,9 @@ var skillText []byte
 
 const skillName = "alarmd-cli"
 
+// reasonDifferentSkill is the one conflict --force resolves.
+const reasonDifferentSkill = "a different SKILL.md is already there"
+
 // skillTools and their directories are the same table the admin CLI that
 // ships beside alarmd installs its own skill by; the two change together.
 var skillTools = []string{"universal", "codex", "claude-code", "cursor", "copilot", "gemini-cli", "opencode"}
@@ -182,12 +185,13 @@ func (a *App) installSkill(args []string) int {
 		targets = append(targets, target)
 	}
 	var limitations []string
-	failed := false
+	failed, forceable := false, false
 	for _, target := range targets {
 		target.Status, target.Reason = planSkill(target.Path, force)
 		switch target.Status {
 		case "conflict":
 			limitations = append(limitations, fmt.Sprintf("target_conflict: %s: %s", target.Path, target.Reason))
+			forceable = forceable || target.Reason == reasonDifferentSkill
 			continue
 		case "unchanged":
 			continue
@@ -208,8 +212,19 @@ func (a *App) installSkill(args []string) int {
 		status, code, summary = "error", 1, "The skill could not be written to every target; each failure is named."
 	case len(limitations) > 0:
 		status, code, summary = "partial", 3, "Some targets already hold a different SKILL.md or a symbolic link and were left alone."
-		nextCall = append(nextCall, map[string]any{"command": "alarmd-cli skills install " + shellJoin(append(append([]string{}, args...), "--force")),
-			"reason": "Replace the differing SKILL.md files with this CLI's text; other files in those directories are kept. Symbolic links are refused even with --force."})
+		// Only a different SKILL.md is what --force replaces: a symbolic
+		// link, or a file that is not regular or not readable, stays a
+		// conflict with it, so the limitations alone say why.
+		if forceable && !force {
+			again := []string{}
+			for _, arg := range args {
+				if arg != "--dry-run" {
+					again = append(again, arg)
+				}
+			}
+			nextCall = append(nextCall, map[string]any{"command": "alarmd-cli skills install " + shellJoin(append(again, "--force")),
+				"reason": "Replace the differing SKILL.md files with this CLI's text; other files in those directories are kept. Symbolic links are refused even with --force."})
+		}
 	}
 	if dryRun {
 		summary = "Dry run, nothing written: every target would be installed or is already current."
@@ -265,7 +280,7 @@ func planSkill(path string, force bool) (string, string) {
 		return "unchanged", ""
 	}
 	if !force {
-		return "conflict", "a different SKILL.md is already there"
+		return "conflict", reasonDifferentSkill
 	}
 	return "updated", ""
 }

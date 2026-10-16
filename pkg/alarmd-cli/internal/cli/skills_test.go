@@ -251,6 +251,9 @@ func TestAnUnwritableDirectoryIsExitOne(t *testing.T) {
 	if run.code != 1 || run.targets(t)[0]["status"] != "failed" {
 		t.Fatalf("exit %d %v", run.code, run.out)
 	}
+	if limitations := run.out["evidence"].(map[string]any)["limitations"].([]any); len(limitations) != 1 || !strings.HasPrefix(limitations[0].(string), "write_failed: ") {
+		t.Fatalf("limitations %v, want the failed write named", limitations)
+	}
 }
 
 // Every command and flag the skill tells an agent to use is one the CLI
@@ -300,5 +303,42 @@ func TestSkillsReadNoProfileAndCallNoServer(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("ALARMD_CLI_CONFIG_DIR"))); !os.IsNotExist(err) {
 		t.Fatal("skills created the configuration directory")
+	}
+}
+
+// A conflict --force cannot resolve gets no next_call: --force over a
+// symbolic link is still a conflict, with the limitation saying why. With a
+// differing file beside it, next_call offers --force, and never repeats it
+// or the dry run.
+func TestNextCallOffersForceOnlyWhereItHelps(t *testing.T) {
+	home, elsewhere := t.TempDir(), t.TempDir()
+	outside := filepath.Join(elsewhere, "SKILL.md")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(home, ".agents", "skills", "alarmd-cli")
+	differing := filepath.Join(home, ".claude", "skills", "alarmd-cli")
+	for _, dir := range []string{linked, differing} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(linked, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(differing, "SKILL.md"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := runSkills(t, home, t.TempDir(), "install", "--force")
+	if run.code != 3 || len(run.out["next_call"].([]any)) != 0 || len(run.out["evidence"].(map[string]any)["limitations"].([]any)) != 1 {
+		t.Fatalf("--force over a symbolic link: exit %d %v, want 3, its limitation and no next_call", run.code, run.out)
+	}
+	if alone := runSkills(t, home, t.TempDir(), "install"); alone.code != 3 || len(alone.out["next_call"].([]any)) != 0 {
+		t.Fatalf("a symbolic link alone: exit %d %v, want 3 and no next_call", alone.code, alone.out)
+	}
+	mixed := runSkills(t, home, t.TempDir(), "install", "--tool", "universal", "--tool", "claude", "--dry-run")
+	next := mixed.out["next_call"].([]any)
+	if mixed.code != 3 || len(next) != 1 || next[0].(map[string]any)["command"] != "alarmd-cli skills install --tool universal --tool claude --force" {
+		t.Fatalf("mixed conflicts: exit %d next %v, want --force offered without --dry-run", mixed.code, next)
 	}
 }
