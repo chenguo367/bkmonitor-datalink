@@ -191,8 +191,8 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		}
 	}
 	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,
-		DialContext:     (&net.Dialer{Timeout: obchannel.RequestTimeout}).DialContext,
-		MaxConnsPerHost: 1, MaxIdleConns: 1, MaxIdleConnsPerHost: 1,
+		DialContext:  (&net.Dialer{Timeout: obchannel.RequestTimeout}).DialContext,
+		MaxIdleConns: 8, MaxIdleConnsPerHost: 8,
 		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: obchannel.RequestTimeout, ResponseHeaderTimeout: obchannel.MaxExecutionTimeout}
 	closeQuery = queryTransport.CloseIdleConnections
 	queryClient, _ := accessuq.NewDiagnosticClient(cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource,
