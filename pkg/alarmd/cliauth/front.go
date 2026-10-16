@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -38,12 +39,13 @@ const (
 	maxLinkdTokenBodyBytes = 8 << 10
 	// FrontReadPath is the front surface's read, served by the channel.
 	FrontReadPath = "/api/front/v1/invoke"
-	// MaxRosterOperators bounds one roster.
-	MaxRosterOperators = 1024
+	// MaxRosterOperators bounds one roster: about 64 bytes an operator, so
+	// the largest roster is a few megabytes in one Redis set.
+	MaxRosterOperators = 100000
 	// frontGrantsPerMinute bounds named grants per replica.
 	frontGrantsPerMinute = 30
-	// maxRosterBodyBytes holds a roster of MaxRosterOperators longest names.
-	maxRosterBodyBytes = 128 << 10
+	// maxRosterBodyBytes holds a roster of MaxRosterOperators names.
+	maxRosterBodyBytes = 8 << 20
 	// maxRevokedListed is how many revoked operators an answer names.
 	maxRevokedListed = 20
 	// revocationKept is how long an operator's revocation is kept: past it,
@@ -227,7 +229,7 @@ func (m *Manager) ApplyRoster(ctx context.Context, digestValue string, operators
 	}
 	if len(operators) == 0 || len(operators) > MaxRosterOperators {
 		m.count(CountRosterRejected)
-		return RosterApplied{}, rosterFailure("operators must name 1 to 1024 operators.")
+		return RosterApplied{}, rosterFailure(fmt.Sprintf("operators must name 1 to %d operators.", MaxRosterOperators))
 	}
 	sorted := slices.Clone(operators)
 	slices.Sort(sorted)
