@@ -66,10 +66,10 @@ type LogCounts struct {
 func contentField(field string) bool {
 	name := strings.ToLower(field)
 	switch name {
-	case "log", "message", "content", "msg":
+	case "log", "message", "content", "msg", "body":
 		return true
 	}
-	for _, suffix := range []string{".log", ".message", "_log", "_message"} {
+	for _, suffix := range []string{".log", ".message", "_log", "_message", ".body"} {
 		if strings.HasSuffix(name, suffix) {
 			return true
 		}

@@ -596,7 +596,7 @@ func SREOperations(options SREOptions) []Operation {
 		},
 	})
 	maxLogTop := int64(uq.LogCountMaxTop)
-	ops = append(ops, Operation{ID: OpLogCount, Summary: "按字段统计一个日志结果表在一段时间里的条数，不回传日志正文：一次聚合查询（count_over_time 覆盖整个窗口、按 by 的字段求和），只回每组的字段值（脱敏、截到 256 字节）与条数，按条数降序取前 top 组，total 是全部组的合计。query_string 原样下推用于筛选（Doris 存储按内容查写 log:*关键字*），应答里只回它的长度。不能按正文字段（log、message、content、msg 及 *.log、*_log、*.message、*_message）分组。窗口任意时长，至多 30 天。",
+	ops = append(ops, Operation{ID: OpLogCount, Summary: "按字段统计一个日志结果表在一段时间里的条数，不回传日志正文：一次聚合查询（count_over_time 覆盖整个窗口、按 by 的字段求和），只回每组的字段值（脱敏、截到 256 字节）与条数，按条数降序取前 top 组，total 是全部组的合计。query_string 原样下推用于筛选（Doris 存储按内容查写 log:*关键字*），应答里只回它的长度。不能按正文字段（log、message、content、msg、body 及 *.log、*_log、*.message、*_message、*.body）分组。窗口任意时长，至多 30 天。",
 		EvidenceScope: "sre_uq_log_count", ExecutionPool: "sre", ExecutionTimeout: uq.MaxTimeout + 5*time.Second, Availability: queryAvailable,
 		Limits: map[string]any{"max_top": uq.LogCountMaxTop, "default_top": uq.LogCountDefaultTop, "value_bytes": uq.LogCountValueBytes, "max_window_seconds": int64(uq.MaxWindow / time.Second), "redaction_contract": redact.Contract, "content": "field values and counts only; no log text"},
 		Fields: map[string]Field{"egress": text, "tenant": text, "space": text,
