@@ -31,6 +31,9 @@ type App struct {
 	Version  string
 	Store    Store
 	HTTP     *http.Client
+	// home and workdir stand in for the user's home and working directories
+	// when set; skills install resolves its targets from them.
+	home, workdir string
 }
 
 func New(in io.Reader, out, stderr io.Writer, version string) *App {
@@ -148,6 +151,9 @@ func (a *App) Run(args []string) int {
 	}
 	if len(args) == 0 {
 		return a.help(nil)
+	}
+	if args[0] == "skills" {
+		return a.skills(args[1:])
 	}
 	o, err := parse(args)
 	if err != nil {
