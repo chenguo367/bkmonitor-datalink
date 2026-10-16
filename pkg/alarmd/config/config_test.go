@@ -726,3 +726,14 @@ func TestObservedNamespacesSplitsTheListTheChartRenders(t *testing.T) {
 		t.Fatalf("unset list = %v, want none", got)
 	}
 }
+
+// The compiler's shape limits bound compile CPU, which the compile cache and
+// the trigger's compute cost already bound; they are generous, and a Plan
+// with a long IP list is not refused for its size.
+func TestCompilerLimitsAreGenerous(t *testing.T) {
+	c := Default().Limits.Compiler
+	if c.MaxAlgorithmsPerLevel != 64 || c.MaxGroupsPerAlgorithm != 256 || c.MaxConditionsPerAlgorithm != 1024 ||
+		c.MaxASTNodesPerLevel != 8192 || c.MaxPlanBytes != 2<<20 || c.MaxCompiledPlanBytes != 4<<20 {
+		t.Fatalf("compiler limits = %+v", c)
+	}
+}
