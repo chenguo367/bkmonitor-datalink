@@ -212,7 +212,7 @@ func (r *Reader) httpClient() (*http.Client, error) {
 	}
 	r.client = &http.Client{
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext, MaxIdleConnsPerHost: 2,
+			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext, MaxIdleConnsPerHost: eventReadsAtOnce,
 			IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 2 * time.Second},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}

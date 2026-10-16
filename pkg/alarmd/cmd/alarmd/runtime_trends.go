@@ -23,10 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kubeclient"
 )
 
 // The trends read this deployment's numbers back from the platform's
@@ -227,7 +227,7 @@ func inClusterDataIDs() dataIDLister {
 	var setup error
 	return func(ctx context.Context) ([]unstructured.Unstructured, error) {
 		once.Do(func() {
-			config, err := rest.InClusterConfig()
+			config, err := kubeclient.InCluster()
 			if err != nil {
 				setup = fmt.Errorf("not in a cluster: %w", err)
 				return
@@ -276,7 +276,7 @@ func inClusterPodNode(namespace string) func(ctx context.Context) (string, error
 		if err != nil {
 			return "", err
 		}
-		config, err := rest.InClusterConfig()
+		config, err := kubeclient.InCluster()
 		if err != nil {
 			return "", err
 		}

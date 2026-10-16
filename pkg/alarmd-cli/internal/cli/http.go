@@ -41,6 +41,13 @@ const maxResponse = 256<<20 + 64<<10
 // envelope, a whole chart's manifests in one call.
 const maxInputBytes = 16 << 20
 
+// requestBound is the largest request the CLI sends for an operation whose
+// server allows limit bytes: the smaller of the two, so a newer server's
+// larger limit is used, not refused.
+func requestBound(limit int64) int64 {
+	return min(limit, maxInputBytes)
+}
+
 // requestNotSent marks failures that happen before the channel can receive
 // an invocation. All other transport or response failures leave exec unknown.
 type requestNotSent struct{ error }

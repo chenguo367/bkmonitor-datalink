@@ -26,6 +26,8 @@ import (
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kubeclient"
 )
 
 type KubernetesClient struct {
@@ -51,7 +53,7 @@ func NewInCluster(options Options) (*Provider, error) {
 			options.DefaultNamespace = strings.TrimSpace(string(own))
 		}
 	}
-	config, err := rest.InClusterConfig()
+	config, err := kubeclient.InCluster()
 	if err != nil {
 		return nil, &Error{Code: "service_account_not_mounted", Message: "in-cluster configuration is unavailable"}
 	}
@@ -79,11 +81,12 @@ func NewInCluster(options Options) (*Provider, error) {
 func NewKubernetesClient(config *rest.Config) (*KubernetesClient, error) {
 	if config == nil {
 		var err error
-		config, err = rest.InClusterConfig()
+		config, err = kubeclient.InCluster()
 		if err != nil {
 			return nil, &Error{Code: "service_account_not_mounted", Message: "in-cluster configuration is unavailable"}
 		}
 	}
+	config = kubeclient.WithRate(config)
 	core, err := typedcore.NewForConfig(rest.CopyConfig(config))
 	if err != nil {
 		return nil, apiError(err)
@@ -205,12 +208,12 @@ type KubernetesExecutor struct {
 func NewKubernetesExecutor(config *rest.Config) (*KubernetesExecutor, error) {
 	if config == nil {
 		var err error
-		config, err = rest.InClusterConfig()
+		config, err = kubeclient.InCluster()
 		if err != nil {
 			return nil, &Error{Code: "service_account_not_mounted", Message: "in-cluster configuration is unavailable"}
 		}
 	}
-	copyConfig := rest.CopyConfig(config)
+	copyConfig := kubeclient.WithRate(config)
 	core, err := typedcore.NewForConfig(copyConfig)
 	if err != nil {
 		return nil, apiError(err)

@@ -11,9 +11,9 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kubeclient"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -111,7 +111,7 @@ func sreKeyPrefix(cfg config.Config, binding ChannelBinding) string {
 // another process left and watches those this one starts. Out of a cluster
 // there is none, and the reason says why.
 func channelRollouts(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) (*rollout.Driver, string, func()) {
-	restConfig, err := rest.InClusterConfig()
+	restConfig, err := kubeclient.InCluster()
 	if err != nil {
 		return nil, "rollout_unavailable: in-cluster configuration is unavailable", func() {}
 	}
