@@ -37,9 +37,9 @@ const (
 
 // The bounds of one apply.
 const (
-	MaxApplyObjects = 50
+	MaxApplyObjects = 1000
 	// maxApplyChanges bounds one object's diff as returned.
-	maxApplyChanges = 50
+	maxApplyChanges = 500
 	// maxChangeValueBytes bounds one value in a diff.
 	maxChangeValueBytes = 256
 	// applyFieldManager is the field manager every apply writes under.

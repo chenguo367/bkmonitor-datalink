@@ -21,7 +21,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/memoryline"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -485,28 +484,5 @@ func TestSplitChannelReadsAuthlessWorkerThroughRegisteredGRPC(t *testing.T) {
 	}
 	if nativeReads.Load() != reads {
 		t.Fatal("internal permission rejection executed the Worker provider")
-	}
-}
-
-// The channel's read pools admit by the observation memory line once the
-// process binds it, and not before.
-func TestTheBindingGivesTheChannelItsReadMemory(t *testing.T) {
-	runtime, err := openProductionRoleChannel(roleChannelAuthConfig("127.0.0.1:1"), ChannelBinding{Control: cliControlBinding{Incarnation: "boot"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-	if runtime.Executor.ReadMemoryAttached() {
-		t.Fatal("read memory attached before any binding")
-	}
-	runtime.Bind(ChannelBinding{Control: cliControlBinding{Incarnation: "boot"}})
-	if runtime.Executor.ReadMemoryAttached() {
-		t.Fatal("a binding without a memory line attached one")
-	}
-	line := memoryline.New()
-	defer line.Close()
-	runtime.Bind(ChannelBinding{Control: cliControlBinding{Incarnation: "boot"}, ReadMemory: observationHold(line, memoryline.ConsumerChannelReads)})
-	if !runtime.Executor.ReadMemoryAttached() {
-		t.Fatal("the binding's memory line was not attached")
 	}
 }

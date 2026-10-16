@@ -138,7 +138,6 @@ func TestEverySREOutcomeLandsInOneResult(t *testing.T) {
 		pod.RemoteUnknown:          SREResultUnknown,
 		pod.CodeInvalidRequest:     SREResultRefused,
 		pod.CodeCommandStartFailed: SREResultRefused,
-		pod.CodeBusy:               SREResultRefused,
 		pod.CodeKindNotInstalled:   SREResultRefused,
 		pod.CodeAPIError:           SREResultFailed,
 	}

@@ -319,13 +319,13 @@ func (a *App) inputObject(o options) (map[string]any, error) {
 			return nil, errors.New("cannot read --input file")
 		}
 		defer f.Close()
-		data, err = io.ReadAll(io.LimitReader(f, (1<<20)+1))
+		data, err = io.ReadAll(io.LimitReader(f, maxInputBytes+1))
 		if err != nil {
 			return nil, errors.New("cannot read --input file")
 		}
 	}
-	if len(data) > 1<<20 {
-		return nil, errors.New("--input exceeds 1 MiB")
+	if len(data) > maxInputBytes {
+		return nil, errors.New("--input exceeds 16 MiB")
 	}
 	result, err := decodeObject(data)
 	if err != nil {
@@ -542,7 +542,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 		if maximum, exists := contract["request_max_bytes"]; exists {
 			n, ok := maximum.(json.Number)
 			limit, err := n.Int64()
-			if !ok || err != nil || limit < 1 || limit > 1<<20 {
+			if !ok || err != nil || limit < 1 || limit > maxInputBytes {
 				return a.fail("protocol_error", "Operation request byte limit is invalid.", 1)
 			}
 			body := channelBody(mode, operation, params, revision)

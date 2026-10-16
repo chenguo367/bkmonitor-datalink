@@ -30,6 +30,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet/ui"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -196,6 +197,9 @@ func runPhaseTwoApplicationWithDependencies(
 	// --check-config reports the derived pair without being the process that
 	// has to run under it.
 	applyPhaseTwoGoRuntime(config.DeriveGoRuntime(config.DetectCapacityInputs()), runtimeGoBudgetSetters())
+	// The OB channel's one bound on a request is its answer's size, a share
+	// of the container's memory.
+	obchannel.SetMemoryLimit(config.DetectCapacityInputs().MemoryLimitBytes)
 	// Resolve the pool before the profile is derived so the startup facts carry
 	// the concrete size rather than the zero that means "derive".
 	cfg = cfg.WithResolvedRedisPoolSize()

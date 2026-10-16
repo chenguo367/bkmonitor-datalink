@@ -480,7 +480,7 @@ func TestConcurrentRequestsAndBudgets(t *testing.T) {
 	}
 	close(unblock)
 	done.Wait()
-	for _, request := range []ExecRequest{{Target: target}, {Target: target, Argv: []string{"true"}, Stdin: strings.Repeat("x", 32<<10+1)}, {Target: target, Argv: []string{"true"}, TimeoutMS: 30001}, {Target: target, Argv: []string{"true"}, OutputBytes: 512<<10 + 1}} {
+	for _, request := range []ExecRequest{{Target: target}, {Target: target, Argv: []string{"true"}, Stdin: strings.Repeat("x", MaxStdinBytes+1)}, {Target: target, Argv: []string{"true"}, TimeoutMS: MaxExecTimeout.Milliseconds() + 1}, {Target: target, Argv: []string{"true"}, OutputBytes: DefaultOutputBytes + 1}} {
 		_, err := provider.Exec(context.Background(), request)
 		requireCode(t, err, CodeInvalidRequest)
 	}
@@ -694,5 +694,35 @@ func TestAFormattedProviderCarriesNoCredential(t *testing.T) {
 	provider := mustProvider(t, Options{Client: client, LiteralSecrets: []string{"literalcredential"}})
 	if out := fmt.Sprintf("%v %+v", provider, provider); strings.Contains(out, "literalcredential") {
 		t.Fatalf("formatted provider %q", out)
+	}
+}
+
+// A filtered log read scans the stream here and keeps only the lines that
+// pass: holding contains, written by until_time. It says how many it scanned
+// and kept, asks the apiserver for timestamps only to judge until_time and
+// drops them from what it returns, and is not cut to the output bound before
+// filtering. Before, a log read could only take the last 1000 lines.
+func TestAFilteredLogReadKeepsOnlyTheMatchingLines(t *testing.T) {
+	client, target := fixture()
+	client.logs = "2026-10-16T01:00:00Z a match\n2026-10-16T02:00:00Z b match\n2026-10-16T03:00:00Z c other\n2026-10-16T04:00:00Z d match\n"
+	provider := mustProvider(t, Options{Client: client})
+	until := time.Date(2026, 10, 16, 3, 30, 0, 0, time.UTC)
+	result, err := provider.Logs(context.Background(), LogsRequest{Target: target, TailLines: MaxLogLines, Contains: "match", UntilTime: until})
+	if err != nil || result.Output != "a match\nb match\n" || result.ScannedLines != 4 || result.MatchedLines != 2 || result.Truncated {
+		t.Fatalf("filtered read: %+v err=%v", result, err)
+	}
+	if !client.logOptions.Timestamps || client.logOptions.LimitBytes != nil || *client.logOptions.TailLines != MaxLogLines {
+		t.Fatalf("options %+v, want timestamps, no byte limit and the tail asked", client.logOptions)
+	}
+	client.logs = "alpha one\nbeta two\nalpha three\n"
+	result, err = provider.Logs(context.Background(), LogsRequest{Target: target, Contains: "alpha"})
+	if err != nil || result.Output != "alpha one\nalpha three\n" || client.logOptions.Timestamps {
+		t.Fatalf("contains alone: %+v options %+v err=%v", result, client.logOptions, err)
+	}
+	for _, bad := range []LogsRequest{{Target: target, TailLines: MaxLogLines + 1}, {Target: target, SinceSeconds: 60, SinceTime: until},
+		{Target: target, SinceTime: until, UntilTime: until.Add(-time.Hour)}, {Target: target, SinceSeconds: int64(MaxLogWindow/time.Second) + 1}} {
+		if _, err := provider.Logs(context.Background(), bad); errorCode(err) != CodeInvalidRequest {
+			t.Errorf("request %+v: err=%v, want invalid_request", bad, err)
+		}
 	}
 }

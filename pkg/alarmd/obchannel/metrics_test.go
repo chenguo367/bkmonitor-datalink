@@ -332,6 +332,9 @@ func TestTheProductionRegistryIsListedWhole(t *testing.T) {
 func TestMetricsListPagesARegistryLargerThanAPage(t *testing.T) {
 	registry := metricsRegistry(t)
 	help := strings.Repeat("h", MaxListedHelpBytes)
+	pageBytes := MaxListedPageBytes
+	MaxListedPageBytes = 256 << 10
+	t.Cleanup(func() { MaxListedPageBytes = pageBytes })
 	const extra = 900
 	for i := 0; i < extra; i++ {
 		registry.MustRegister(prometheus.NewCounter(prometheus.CounterOpts{

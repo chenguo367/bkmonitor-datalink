@@ -337,7 +337,7 @@ func TestEventsFailuresAreNamedNotEmpty(t *testing.T) {
 func TestLogsAreScopedBoundedAndSayPreviousIsMissing(t *testing.T) {
 	api := &fakeAPI{t: t, logBody: "2026-09-23T07:59:00Z panic: out of memory\n"}
 	reader := newReader(t, api)
-	got, err := reader.Logs(context.Background(), LogRequest{Pod: crashPod, Previous: true, Lines: 5000})
+	got, err := reader.Logs(context.Background(), LogRequest{Pod: crashPod, Previous: true, Lines: MaxLogLines + 5000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestLogsAreScopedBoundedAndSayPreviousIsMissing(t *testing.T) {
 	}
 	// No limitBytes: the server would count it forward from the start of the
 	// tail and drop the newest lines.
-	if logQuery.Get("previous") != "true" || logQuery.Get("tailLines") != "1000" || logQuery.Has("limitBytes") || logQuery.Get("container") != "alarmd" {
+	if logQuery.Get("previous") != "true" || logQuery.Get("tailLines") != strconv.Itoa(MaxLogLines) || logQuery.Has("limitBytes") || logQuery.Get("container") != "alarmd" {
 		t.Errorf("the log was asked for as %v", logQuery)
 	}
 

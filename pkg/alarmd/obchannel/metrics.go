@@ -52,18 +52,18 @@ var MetricNamePattern = regexp.MustCompile(`^alarmd_[a-z0-9_]+$`)
 // MaxMetricNames bounds one read's names, MaxMetricSeries each family's
 // series and MaxMetricLabelFilters the label filter.
 const (
-	// MaxListedPageBytes bounds one metrics.list page: its families as they
-	// are encoded, which is what the bound is for. A count would be a guess
-	// at it that a longer help or a growing registry outruns; the families
-	// past one page are on the next, from next_cursor. MaxListedHelpBytes
-	// bounds each family's help text in it.
-	MaxListedPageBytes = 256 << 10
 	MaxListedHelpBytes = 320
 
-	MaxMetricNames        = 20
-	MaxMetricSeries       = 500
+	MaxMetricNames        = 200
+	MaxMetricSeries       = 5000
 	MaxMetricLabelFilters = 8
 )
+
+// MaxListedPageBytes bounds one metrics.list page: its families as they are
+// encoded, which is what the bound is for. A count would be a guess at it
+// that a longer help or a growing registry outruns; the families past one
+// page are on the next, from next_cursor. A test lowers it.
+var MaxListedPageBytes = 8 << 20
 
 // MetricSeries is one series: its labels and its value, or for a histogram
 // its cumulative buckets, count and sum.

@@ -38,12 +38,16 @@ const snapshotFormat = "alarmd-snapshot/v1"
 // -- one call's longest deadline (a k8s read's 30 s), since a call admitted
 // in the last slot can still run that long.
 const (
-	snapshotMaxDetails    = 50
-	snapshotMaxReplicas   = 64
-	snapshotLogLines      = 2000
-	snapshotReceipts      = 100
+	snapshotMaxDetails  = 500
+	snapshotMaxReplicas = 1024
+	snapshotLogLines    = 10000
+	snapshotReceipts    = 100
+	// snapshotReceiptPages is the most receipt pages one run reads: every
+	// receipt the deployment keeps (1024 changes and 4096 accesses), a page
+	// of snapshotReceipts at a time.
+	snapshotReceiptPages  = (1024 + 4096 + snapshotReceipts - 1) / snapshotReceipts
 	snapshotCallMargin    = 30 * time.Second
-	snapshotFallbackRate  = 30
+	snapshotFallbackRate  = 600
 	snapshotDetailCallsBy = 2
 	// snapshotRateAttempts is how many times one read is asked while the
 	// session's budget refuses it: the first, the one after the minute
@@ -53,7 +57,7 @@ const (
 
 // snapshotMaxBytes bounds the answers a snapshot keeps, and with them what
 // its reader unpacks; a test lowers it.
-var snapshotMaxBytes = 64 << 20
+var snapshotMaxBytes = 512 << 20
 
 // snapshotFixed are the reads every snapshot takes once, in order; one the
 // deployment's catalog does not offer is recorded as skipped.
@@ -214,7 +218,7 @@ func (a *App) snapshot(p Profile, out string) int {
 	// the time they take at the session's rate, with one call's deadline as
 	// the margin, are in the manifest whatever the run reaches.
 	estimatedPages := snapshotEstimatedPages(firstPage)
-	planned := run.calls + len(snapshotFixed) + 4*len(troubled) + (estimatedPages - pages) + snapshotDetailCallsBy*len(details) + len(offered)
+	planned := run.calls + len(snapshotFixed) + snapshotReceiptPages - 1 + 4*len(troubled) + (estimatedPages - pages) + snapshotDetailCallsBy*len(details) + len(offered)
 	run.manifest.PlannedCalls = planned
 	minutes := (planned + run.manifest.RatePerMinute - 1) / run.manifest.RatePerMinute
 	capacity := time.Duration(minutes)*time.Minute + snapshotCallMargin
@@ -237,7 +241,17 @@ func (a *App) snapshot(p Profile, out string) int {
 		}
 	}
 	for _, read := range snapshotFixed {
-		run.invoke(read, offered)
+		got := run.invoke(read, offered)
+		// Every receipt the deployment keeps, page by page.
+		for page := 2; read.operation == "sre.receipts" && page <= snapshotReceiptPages; page++ {
+			next, ok := objectField(got, "result")["next_offset"].(json.Number)
+			offset, err := next.Int64()
+			if !ok || err != nil || offset <= 0 {
+				break
+			}
+			got = run.invoke(snapshotRead{operation: read.operation, key: fmt.Sprintf("page-%04d", page),
+				params: map[string]any{"limit": snapshotReceipts, "offset": offset}}, offered)
+		}
 	}
 	for _, replica := range troubled {
 		run.invoke(snapshotRead{operation: "runtime.get", key: replica, params: map[string]any{"replica": replica}}, offered)

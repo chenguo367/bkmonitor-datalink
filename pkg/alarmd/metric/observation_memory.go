@@ -28,6 +28,7 @@ type observationMemoryCollector struct {
 	headroom   *prometheus.Desc
 	refused    *prometheus.Desc
 	admitted   *prometheus.Desc
+	over       *prometheus.Desc
 	held       *prometheus.Desc
 	budgetSize *prometheus.Desc
 	budgetHeld *prometheus.Desc
@@ -48,12 +49,15 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 				"fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; "+
 				"asked again each round while full, so this counts objects times rounds), "+
 				"fleet_restore (the record and every one after it are left for the next publish, spending no attempt), "+
-				"diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED), "+
-				"fleet_view (the view is not read and is the gap SNAPSHOTS_DEFERRED), "+
-				"channel_reads (an OB channel read waits for one in flight to end, and past its admission timeout is "+
-				"refused as request_budget_exceeded; a pool always admits one read, so this never refuses the only "+
-				"one; asked again while waiting, so this counts asks, not reads). "+
+				"diagnosis_progress and fleet_view are an operator's reads and are never refused (see "+
+				"observation_memory_over_total). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
+		over: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_over_total"),
+			"An operator's reads that went ahead past the line, by consumer: diagnosis_progress (a diagnosis page's "+
+				"Progress records) and fleet_view (a fleet view a reader asked for). They are reported here, never "+
+				"refused: an operator's reads are a handful next to the detection's work. Their bytes count in "+
+				"observation_memory_admitted_bytes_total and, while a page holds them, observation_memory_held_bytes.",
+			[]string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. A grant to state "+
 				"that stays is not given back - what it took is in the live heap from the next collection on; a hold, "+
@@ -80,6 +84,7 @@ func (c *observationMemoryCollector) Describe(descriptions chan<- *prometheus.De
 	descriptions <- c.headroom
 	descriptions <- c.refused
 	descriptions <- c.admitted
+	descriptions <- c.over
 	descriptions <- c.held
 	descriptions <- c.budgetSize
 	descriptions <- c.budgetHeld
@@ -92,6 +97,7 @@ func (c *observationMemoryCollector) Collect(metrics chan<- prometheus.Metric) {
 	for _, consumer := range memoryline.Consumers {
 		metrics <- prometheus.MustNewConstMetric(c.refused, prometheus.CounterValue, float64(reading.RefusedTotal[consumer]), string(consumer))
 		metrics <- prometheus.MustNewConstMetric(c.admitted, prometheus.CounterValue, float64(reading.AdmittedBytes[consumer]), string(consumer))
+		metrics <- prometheus.MustNewConstMetric(c.over, prometheus.CounterValue, float64(reading.OverTotal[consumer]), string(consumer))
 	}
 	for _, budget := range reading.Budgets {
 		metrics <- prometheus.MustNewConstMetric(c.budgetSize, prometheus.GaugeValue, float64(budget.SizeBytes), budget.Name)

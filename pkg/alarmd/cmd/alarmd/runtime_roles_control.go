@@ -302,7 +302,7 @@ func openProductionControlRoleBundle(
 		return nil, err
 	}
 	fleetStore.Meter(recorder)
-	fleetStore.HoldLoads(observationHold(observationMemory, memoryline.ConsumerFleetView))
+	operatorFleetLoads(fleetStore, observationMemory)
 	// A control process is the preferred candidate: it plans the lookback.
 	controlOwnership.WithLookbackPlanner(fleetStore, true, recorder)
 	service, err := fleet.NewService(controlPlaneExpectation{repository: core.Repository}, registryReplicas{store: core.Ownership},
@@ -345,10 +345,10 @@ func openProductionControlRoleBundle(
 		leaderForwarder(discovery, cfg.PhaseTwo.Worker.ID, nil, recorder.ObserveLeaderForward), strategyObjectLoader(core.Repository),
 		absence, strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration())
 	diagnosisWarmer := fleet.NewDiagnosisWarmer(service, strategyLookupSource(core.Reconciler),
-		diagnosisUniverse(core.StrategySource), diagnosisProgress(core.Progress, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)), external.Now, stallAfter)
+		diagnosisUniverse(core.StrategySource), diagnosisProgress(core.Progress, operatorProgressReads(observationMemory)), external.Now, stallAfter)
 	native = fleet.WithDiagnosis(native, service, strategyLookupSource(core.Reconciler),
 		leaderForwarderWithin(discovery, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout, "diagnosis", recorder.ObserveLeaderForward),
-		diagnosisUniverse(core.StrategySource), diagnosisProgress(core.Progress, observationAdmit(observationMemory, memoryline.ConsumerDiagnosisProgress)),
+		diagnosisUniverse(core.StrategySource), diagnosisProgress(core.Progress, operatorProgressReads(observationMemory)),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter, diagnosisWarmer)
 	absentPage := &absentCandidatePage{}
 	native = fleet.WithAbsentCandidates(native, absentPage.source,
@@ -368,8 +368,7 @@ func openProductionControlRoleBundle(
 	var channelBinding *ChannelBinding
 	if external.RoleRuntime != nil {
 		channelBinding = &ChannelBinding{Native: native, Catalog: core.Repository, Progress: core.Progress,
-			ReadMemory: observationHold(observationMemory, memoryline.ConsumerChannelReads),
-			Settings:   settings, Control: binding, Roles: cfg.EffectiveRoles()}
+			Settings: settings, Control: binding, Roles: cfg.EffectiveRoles()}
 		native, publicRestricted = external.RoleRuntime.Channel.Handler, external.RoleRuntime.Channel.Restricted
 	} else {
 		native, closeCLI, publicRestricted = buildPhaseTwoCLI(cfg, native, core.Repository, core.Progress, settings, facts, binding)

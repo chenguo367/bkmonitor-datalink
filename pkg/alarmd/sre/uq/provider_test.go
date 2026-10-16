@@ -140,7 +140,7 @@ func TestRejectedRequestsNeverReachEgress(t *testing.T) {
 		{"bkdata route alias", "uq_scope_denied", func(r *Request) { r.Body["query_list"].([]any)[0].(map[string]any)["DATA_SOURCE"] = "bk_data" }},
 		{"unsupported typed contract", "uq_contract_unsupported", func(r *Request) { delete(r.Body, "query_list"); r.Body["trace_query_v2"] = map[string]any{} }},
 		{"query aliases", "invalid_input", func(r *Request) { r.Body["QUERY_LIST"] = r.Body["query_list"] }},
-		{"window", "uq_window_exceeded", func(r *Request) { r.Body["end_time"] = "1700086401" }},
+		{"window", "uq_window_exceeded", func(r *Request) { r.Body["end_time"] = "1702592001" }},
 		{"reversed", "uq_window_exceeded", func(r *Request) { r.Body["start_time"] = "1700000061" }},
 		{"timestamp unit", "invalid_input", func(r *Request) { r.Body["start_time"] = "1657851600000" }},
 		{"numeric timestamp", "invalid_input", func(r *Request) { r.Body["start_time"] = json.Number("1700000000") }},
@@ -191,7 +191,7 @@ func TestResponseFailuresKeepNativeEvidence(t *testing.T) {
 		{"false result", `{"result":false,"message":"bad query"}`, "uq_query_error", 200},
 		{"denied", `{"error":"scope denied"}`, "uq_http_error", 403},
 		{"not JSON", `<html>gateway failed</html>`, "uq_response_invalid", 502},
-		{"response bound", `{"data":"` + strings.Repeat("x", MaxResponseBytes) + `"}`, "uq_response_bytes_exceeded", 200},
+		{"response bound", `{"data":"` + strings.Repeat("x", DefaultResponseBytes) + `"}`, "uq_response_bytes_exceeded", 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +228,7 @@ func TestRedirectDoesNotForwardScope(t *testing.T) {
 	}
 }
 
-func TestIsolatedBudgetAndCancellation(t *testing.T) {
+func TestACanceledQueryEnds(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -239,14 +239,10 @@ func TestIsolatedBudgetAndCancellation(t *testing.T) {
 	defer s.Close()
 	p, _ := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 	defer p.Close()
-	p.wait = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, err := p.Query(ctx, request()); done <- err }()
 	<-started
-	if _, err := p.Query(context.Background(), request()); code(err) != "uq_busy" {
-		t.Fatalf("concurrent query error=%v", err)
-	}
 	cancel()
 	if err := <-done; code(err) != "uq_canceled" {
 		t.Fatalf("canceled query error=%v", err)
@@ -283,14 +279,14 @@ func TestMillisecondsCannotHideAnActualSecondsLongWindow(t *testing.T) {
 	p, _ := NewWithQuerySource(e, nil, "alarmd-sre")
 	defer p.Close()
 	r := request()
-	r.Body["end_time"] = "1702592000" // 30 days under UQ's real 10-digit seconds rule.
+	r.Body["end_time"] = "1702678400" // 31 days under UQ's real 10-digit seconds rule.
 	if _, err := p.Query(context.Background(), r); code(err) != "invalid_input" || calls.Load() != 0 {
 		t.Fatalf("mismatched wire unit reached UQ: %v calls=%d", err, calls.Load())
 	}
 	r.Body["start_time"] = "1700000000000"
-	r.Body["end_time"] = "1702592000000"
+	r.Body["end_time"] = "1702678400000"
 	if _, err := p.Query(context.Background(), r); code(err) != "uq_window_exceeded" || calls.Load() != 0 {
-		t.Fatalf("30 day milliseconds window reached UQ: %v calls=%d", err, calls.Load())
+		t.Fatalf("31 day milliseconds window reached UQ: %v calls=%d", err, calls.Load())
 	}
 }
 

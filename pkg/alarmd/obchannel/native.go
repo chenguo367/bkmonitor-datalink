@@ -35,7 +35,7 @@ func NativeOperations(handler http.Handler) []Operation {
 	integer := func(description string, min, max int64) Field {
 		return Field{Type: "integer", Description: description, Minimum: &min, Maximum: &max}
 	}
-	limits := map[string]any{"timeout_ms": RequestTimeout.Milliseconds(), "response_bytes": MaxResponseBytes, "population": "existing Fleet snapshots; list limit bounds returned rows, not snapshot reads"}
+	limits := map[string]any{"timeout_ms": RequestTimeout.Milliseconds(), "response_bytes": MaxResponseBytes(), "population": "existing Fleet snapshots; list limit bounds returned rows, not snapshot reads"}
 	makeOp := func(id, summary string, fields map[string]Field, required []string, output any, route func(Params) (string, url.Values)) Operation {
 		return Operation{ID: id, Summary: summary, EvidenceScope: "deployment", Fields: fields, Required: required, OutputSchema: SchemaOf(output), Limits: limits, Run: func(ctx context.Context, p Params) Outcome {
 			path, query := route(p)
@@ -427,7 +427,7 @@ func (w *capture) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = 200
 	}
-	if w.body.Len()+len(b) > MaxResponseBytes {
+	if w.body.Len()+len(b) > MaxResponseBytes() {
 		w.overflow = true
 		return 0, errors.New("OB response limit")
 	}

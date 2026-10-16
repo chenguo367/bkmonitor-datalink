@@ -233,7 +233,7 @@ func (r *Router) send(ctx context.Context, workerID string, req *pb.EvidenceRequ
 		// The same private-deployment h2c transport as ControlService.Connect.
 		// Each bounded read owns its connection; there is no new discovery loop.
 		conn, dialErr := grpc.DialContext(ctx, worker.endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock(),
-			grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(obchannel.MaxRequestBytes), grpc.MaxCallRecvMsgSize(obchannel.MaxResponseBytes)))
+			grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(obchannel.MaxRequestBytes), grpc.MaxCallRecvMsgSize(obchannel.MaxResponseCeiling+64<<10)))
 		if dialErr != nil {
 			if err := ctx.Err(); err != nil {
 				return obchannel.Response{}, status.FromContextError(err).Err()
@@ -246,7 +246,7 @@ func (r *Router) send(ctx context.Context, workerID string, req *pb.EvidenceRequ
 	if err != nil {
 		return obchannel.Response{}, err
 	}
-	if result == nil || len(result.ResponseJson) > obchannel.MaxResponseBytes {
+	if result == nil || len(result.ResponseJson) > obchannel.MaxResponseCeiling {
 		return obchannel.Response{}, status.Error(codes.DataLoss, "Invalid evidence response.")
 	}
 	var response obchannel.Response
@@ -269,7 +269,7 @@ func (r *Router) send(ctx context.Context, workerID string, req *pb.EvidenceRequ
 
 func (r *Router) encode(response obchannel.Response) (*pb.EvidenceResult, error) {
 	encoded, err := json.Marshal(response)
-	if err != nil || len(encoded)+16 > obchannel.MaxResponseBytes {
+	if err != nil || len(encoded)+16 > obchannel.MaxResponseBytes() {
 		return nil, status.Error(codes.ResourceExhausted, "Evidence response exceeds its budget.")
 	}
 	return &pb.EvidenceResult{ResponseJson: encoded}, nil
@@ -286,7 +286,7 @@ func (r *Router) transportFailure(requestID string, err error) obchannel.Respons
 	case codes.Unimplemented:
 		code, message = "target_unsupported", "The Leader or target does not support control-plane evidence reads; upgrade that instance."
 	case codes.ResourceExhausted:
-		code, message = "request_budget_exceeded", "Control-plane evidence slots or byte limits were exceeded."
+		code, message = "evidence_response_too_large", "The target's evidence answer exceeds the response size bound; narrow the read."
 	case codes.Unauthenticated, codes.PermissionDenied:
 		code, message = "worker_identity_rejected", "The registered internal instance identity was not accepted."
 	case codes.FailedPrecondition:

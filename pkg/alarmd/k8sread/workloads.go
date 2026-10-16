@@ -26,7 +26,7 @@ import (
 const (
 	// MaxNamespaces bounds the namespaces one read covers: its own, the ones
 	// its dependencies' addresses name, and the ones the deployment lists.
-	MaxNamespaces = 8
+	MaxNamespaces = 64
 	// MaxNamespacePods and MaxNamespaceReplicaSets are the page each list asks
 	// for. A pod or ReplicaSet object is a few kilobytes, so a page stays well
 	// inside the response bound before it is decoded.

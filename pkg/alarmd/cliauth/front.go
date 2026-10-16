@@ -42,8 +42,6 @@ const (
 	// MaxRosterOperators bounds one roster: about 64 bytes an operator, so
 	// the largest roster is a few megabytes in one Redis set.
 	MaxRosterOperators = 100000
-	// frontGrantsPerMinute bounds named grants per replica.
-	frontGrantsPerMinute = 30
 	// maxRosterBodyBytes holds a roster of MaxRosterOperators names.
 	maxRosterBodyBytes = 8 << 20
 	// maxRevokedListed is how many revoked operators an answer names.
@@ -73,14 +71,6 @@ func (m *Manager) FrontHandler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		select {
-		case m.httpSlots <- struct{}{}:
-			defer func() { <-m.httpSlots }()
-		default:
-			defer boundBodyRead(w, r, 0)()
-			writeError(w, failure("auth_busy", "Too many concurrent authorization requests.", 429))
-			return
-		}
 		defer boundBodyRead(w, r, 3*time.Second)()
 		var err error
 		switch r.URL.Path {
@@ -150,7 +140,7 @@ func (m *Manager) handleFrontGrants(w http.ResponseWriter, r *http.Request) erro
 	if (input.CodeChallenge != "" || input.CodeChallengeMethod != "") && (input.CodeChallengeMethod != "S256" || !validSecret(input.CodeChallenge)) {
 		return failure("invalid_code_challenge", "A code challenge must be an S256 challenge of 43 URL-safe characters.", 400)
 	}
-	if !m.allow(&m.frontGrantWindow, frontGrantsPerMinute) {
+	if !m.allow(&m.frontGrantWindow, AuthEventsPerMinute) {
 		return failure("front_rate_limited", "The named grant limit was reached; try again in the next minute.", 429)
 	}
 	secret, err := randomSecret()

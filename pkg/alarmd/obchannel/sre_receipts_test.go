@@ -75,18 +75,18 @@ func TestSREReceiptsAreSelectedAndPaged(t *testing.T) {
 func TestSREReceiptsKeepTheNewest(t *testing.T) {
 	client := redistest.Start(t).Client()
 	receipts := NewSREReceipts(client, "test.sre:{env}:receipts", nil, nil)
-	for index := 0; index < MaxSREReceipts+5; index++ {
+	for index := 0; index < MaxSREChangeReceipts+5; index++ {
 		receipts.Record(SREAction{Op: "pod.delete", RequestID: fmt.Sprint(index), At: time.Unix(int64(1_700_000_000+index), 0)})
 	}
 	page, err := receipts.List(context.Background(), SREReceiptFilter{Limit: 1})
-	if err != nil || page.Stored != MaxSREReceipts || page.Receipts[0].RequestID != fmt.Sprint(MaxSREReceipts+4) {
-		t.Fatalf("%+v %v, want %d kept, the newest first", page.Stored, err, MaxSREReceipts)
+	if err != nil || page.Stored != MaxSREChangeReceipts || page.Receipts[0].RequestID != fmt.Sprint(MaxSREChangeReceipts+4) {
+		t.Fatalf("%+v %v, want %d kept, the newest first", page.Stored, err, MaxSREChangeReceipts)
 	}
 	if page, _ := receipts.List(context.Background(), SREReceiptFilter{RequestID: "4"}); page.Matched != 0 {
 		t.Fatal("the oldest receipts were kept past the bound")
 	}
-	if kept := client.LLen(context.Background(), "test.sre:{env}:receipts").Val(); kept != MaxSREReceipts {
-		t.Fatalf("the store holds %d receipts, want %d", kept, MaxSREReceipts)
+	if kept := client.LLen(context.Background(), "test.sre:{env}:receipts:change").Val(); kept != MaxSREChangeReceipts {
+		t.Fatalf("the store holds %d receipts, want %d", kept, MaxSREChangeReceipts)
 	}
 }
 

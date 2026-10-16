@@ -1167,11 +1167,17 @@ The Go soft memory limit less the live heap after the last collection and what t
 
 What observation holds now for work in progress, admitted by the line and counted against it until the work is done and lets it go. Zero between pages; one that stays above zero is a hold never released.
 
+## alarmd_observation_memory_over_total
+
+Labels: `consumer`
+
+An operator's reads that went ahead past the line, by consumer: diagnosis_progress (a diagnosis page's Progress records) and fleet_view (a fleet view a reader asked for). They are reported here, never refused: an operator's reads are a handful next to the detection's work. Their bytes count in observation_memory_admitted_bytes_total and, while a page holds them, observation_memory_held_bytes.
+
 ## alarmd_observation_memory_refused_total
 
 Labels: `consumer`
 
-Asks for more memory the line refused, by consumer: cost_summary (groups past the refusal are not tracked), cost_projection (the refresh reads no projections), series_sampler (a new sample window gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified), fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; asked again each round while full, so this counts objects times rounds), fleet_restore (the record and every one after it are left for the next publish, spending no attempt), diagnosis_progress (the page's objects from that record on are PROGRESS_DEFERRED), fleet_view (the view is not read and is the gap SNAPSHOTS_DEFERRED), channel_reads (an OB channel read waits for one in flight to end, and past its admission timeout is refused as request_budget_exceeded; a pool always admits one read, so this never refuses the only one; asked again while waiting, so this counts asks, not reads). Zero in normal running.
+Asks for more memory the line refused, by consumer: cost_summary (groups past the refusal are not tracked), cost_projection (the refresh reads no projections), series_sampler (a new sample window gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified), fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; asked again each round while full, so this counts objects times rounds), fleet_restore (the record and every one after it are left for the next publish, spending no attempt), diagnosis_progress and fleet_view are an operator's reads and are never refused (see observation_memory_over_total). Zero in normal running.
 
 ## alarmd_observation_total
 

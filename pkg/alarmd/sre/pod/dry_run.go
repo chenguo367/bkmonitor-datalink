@@ -38,8 +38,8 @@ const OpDryRun = "k8s.dry_run"
 // under the channel's 1 MiB request envelope, with room for the JSON
 // escaping around them. A larger render goes in several runs.
 const (
-	MaxDryRunObjects = 200
-	MaxDryRunBytes   = 900 << 10
+	MaxDryRunObjects = 1000
+	MaxDryRunBytes   = 15 << 20
 	// dryRunMessageBytes bounds one object's message as returned.
 	dryRunMessageBytes = 4096
 )

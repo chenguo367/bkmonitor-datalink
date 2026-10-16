@@ -40,6 +40,9 @@ type SREAction struct {
 	IssuedVia string `json:"issued_via,omitempty"`
 	// At is when the action ended.
 	At time.Time `json:"at"`
+	// Effect is the list the receipt was kept in, change or access; set on
+	// read, not stored.
+	Effect string `json:"effect,omitempty"`
 	// Exec is what a pod.exec run said about itself, without its output.
 	Exec *SREExec `json:"exec,omitempty"`
 	// Argv is an execution's command line, redacted and capped
@@ -106,7 +109,7 @@ func sreResult(err error) (string, string) {
 		return SREResultForbidden, named.Code
 	case pod.RemoteUnknown:
 		return SREResultUnknown, named.Code
-	case pod.CodeInvalidRequest, pod.CodeNotInScope, pod.CodeTargetNotRunning, pod.CodeCommandStartFailed, pod.CodeTimeoutUnsupported, pod.CodeBusy, pod.CodeNotFound, pod.CodeKindNotInstalled:
+	case pod.CodeInvalidRequest, pod.CodeNotInScope, pod.CodeTargetNotRunning, pod.CodeCommandStartFailed, pod.CodeTimeoutUnsupported, pod.CodeNotFound, pod.CodeKindNotInstalled:
 		return SREResultRefused, named.Code
 	}
 	return SREResultFailed, named.Code
@@ -180,7 +183,7 @@ func SREOperations(options SREOptions) []Operation {
 	}
 	text := Field{Type: "string", MinLength: 1, MaxLength: 256}
 	nonnegative, positive := int64(0), int64(1)
-	maxTimeout, maxOutput, maxTail, maxSince, maxLimit, maxReplicas := int64(30000), int64(512<<10), int64(1000), int64(86400), int64(32), int64(pod.MaxReplicas)
+	maxTimeout, maxOutput, maxTail, maxSince, maxLimit, maxReplicas := pod.MaxExecTimeout.Milliseconds(), int64(MaxResponseBytes()), int64(100000), int64(7*86400), int64(pod.MaxPodsPerPage), int64(pod.MaxReplicas)
 	target := Field{Type: "object", Properties: map[string]Field{"namespace": text, "pod": text, "uid": text, "container": text, "container_id": {Type: "string", MinLength: 1, MaxLength: 512}, "image_id": {Type: "string", MinLength: 1, MaxLength: 1024}}, Required: []string{"namespace", "pod", "uid", "container", "container_id", "image_id"}}
 	inspectTarget := target
 	inspectTarget.Required = []string{"namespace", "pod"}
@@ -197,7 +200,7 @@ func SREOperations(options SREOptions) []Operation {
 		}
 		return Availability{Available: true}
 	}
-	podLimits := map[string]any{"max_timeout_ms": maxTimeout, "max_output_bytes": maxOutput, "max_stdin_bytes": 32 << 10, "max_targets_per_page": 32,
+	podLimits := map[string]any{"max_timeout_ms": maxTimeout, "max_output_bytes": maxOutput, "max_stdin_bytes": pod.MaxStdinBytes, "max_targets_per_page": pod.MaxPodsPerPage,
 		"scope": "one namespace per request (this process's own when none is named) and its label selector; owner chain and container identity verified",
 		"retry": "explicit_only; canceled or unknown executions must be inspected before retry", "non_tty": true,
 		"supervisor": pod.TimeoutContract + ": the target's /bin/sh runs the command in its own process group (setsid, else job control; " +
@@ -297,6 +300,7 @@ func SREOperations(options SREOptions) []Operation {
 					next["continue"] = v.Continue
 					out.Next = []Call{{Operation: pod.OpListResources, Params: next, Reason: "读取下一页，直至 continue 为空。"}}
 				}
+				out.Summary = listSummary(v)
 				if len(v.OversizedItems) > 0 {
 					out.Limitations = append(out.Limitations, "Some objects were over the output bound alone and came back as their identity only (oversized_items); read them by name with paths.")
 				}
@@ -316,7 +320,7 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				return out
 			}},
-		{ID: pod.OpApply, Summary: "把一组清单（YAML 文档或 JSON 对象，至多 50 个）逐个以服务端 apply 写入集群（字段管理者 alarmd-sre，真写，不是 dry run）：每个对象答 created / updated / unchanged / conflict（字段归属冲突，force=true 接管这些字段）/ denied（准入、校验、配额、无权限，原样带 apiserver 的话）/ not_checked / not_granted_kind（chart 授权之外的种类）/ rbac_not_writable（Role、ClusterRole 与绑定不写），并给出改前改后的字段差异（按 k8s.list 的遮蔽显示，Secret 只显示键与指纹，从不显示值）；对象带 meta.helm.sh/release-name 时写明 helm_release：下一次 helm upgrade 会改回或冲突。命名空间级对象没写命名空间时用 namespace 参数。注意：本环境 CLI 到 alarmd 若是明文 HTTP，Secret 的值会以明文经过集群网络。每次调用都留审计记录，写明对象清单。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+		{ID: pod.OpApply, Summary: "把一组清单（YAML 文档或 JSON 对象，至多 1000 个）逐个以服务端 apply 写入集群（字段管理者 alarmd-sre，真写，不是 dry run）：每个对象答 created / updated / unchanged / conflict（字段归属冲突，force=true 接管这些字段）/ denied（准入、校验、配额、无权限，原样带 apiserver 的话）/ not_checked / not_granted_kind（chart 授权之外的种类）/ rbac_not_writable（Role、ClusterRole 与绑定不写），并给出改前改后的字段差异（按 k8s.list 的遮蔽显示，Secret 只显示键与指纹，从不显示值）；对象带 meta.helm.sh/release-name 时写明 helm_release：下一次 helm upgrade 会改回或冲突。命名空间级对象没写命名空间时用 namespace 参数。注意：本环境 CLI 到 alarmd 若是明文 HTTP，Secret 的值会以明文经过集群网络。每次调用都留审计记录，写明对象清单。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
 			Limits:   map[string]any{"max_objects": pod.MaxApplyObjects, "max_manifest_bytes": pod.MaxDryRunBytes, "field_manager": "alarmd-sre"},
 			Fields:   map[string]Field{"manifests": {Type: "string", MinLength: 1, MaxLength: pod.MaxDryRunBytes, Source: "要写入的清单；Secret 从本地文件经 --input @文件 传入"}, "namespace": text, "force": {Type: "boolean"}},
 			Required: []string{"manifests"}, OutputSchema: SchemaOf(pod.WriteReceipt{}),
@@ -342,17 +346,30 @@ func SREOperations(options SREOptions) []Operation {
 				v, err := pods.Inspect(ctx, pod.TargetRequest{Target: podTarget(p)})
 				return wrapPod(v, err, err == nil)
 			}},
-		{ID: "pod.logs", Summary: "读取指定 Pod/container 身份的有界日志，执行前后复核容器变化；init 容器同样可读（pod.discover 的结果里标 init: true），previous 读它上一次运行的日志。", EvidenceScope: "sre_pod_logs", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": target, "tail_lines": {Type: "integer", Minimum: &positive, Maximum: &maxTail}, "since_seconds": {Type: "integer", Minimum: &positive, Maximum: &maxSince}, "previous": {Type: "boolean"}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput}}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.LogsReceipt{}),
+		{ID: "pod.logs", Summary: "读取指定 Pod/container 身份的有界日志，执行前后复核容器变化；init 容器同样可读（pod.discover 的结果里标 init: true），previous 读它上一次运行的日志。contains、since_time、until_time 在服务端逐行过滤，只回传匹配的行，并给出扫描与匹配行数；tail_lines 最多 100000 行，回看最多 7 天。", EvidenceScope: "sre_pod_logs", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": target, "tail_lines": {Type: "integer", Minimum: &positive, Maximum: &maxTail}, "since_seconds": {Type: "integer", Minimum: &positive, Maximum: &maxSince}, "previous": {Type: "boolean"}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput},
+			"contains":   {Type: "string", MinLength: 1, MaxLength: 1024, Description: "keep only lines holding this text, scanned server-side"},
+			"since_time": {Type: "string", MaxLength: 64, Description: "RFC 3339; lines written at or after it"},
+			"until_time": {Type: "string", MaxLength: 64, Description: "RFC 3339; lines written at or before it"}}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.LogsReceipt{}),
 			Run: func(ctx context.Context, p Params) Outcome {
-				v, err := pods.Logs(ctx, pod.LogsRequest{Target: podTarget(p), TailLines: int64(p.Int("tail_lines", 0)), SinceSeconds: int64(p.Int("since_seconds", 0)), Previous: p.Bool("previous"), OutputBytes: int64(p.Int("output_bytes", 0))})
+				request := pod.LogsRequest{Target: podTarget(p), TailLines: int64(p.Int("tail_lines", 0)), SinceSeconds: int64(p.Int("since_seconds", 0)), Previous: p.Bool("previous"), OutputBytes: int64(p.Int("output_bytes", 0)), Contains: p.String("contains")}
+				for key, into := range map[string]*time.Time{"since_time": &request.SinceTime, "until_time": &request.UntilTime} {
+					if value := p.String(key); value != "" {
+						at, err := time.Parse(time.RFC3339Nano, value)
+						if err != nil {
+							return Outcome{Error: &Failure{Code: "invalid_input", Message: key + " is not an RFC 3339 time"}}
+						}
+						*into = at
+					}
+				}
+				v, err := pods.Logs(ctx, request)
 				out := wrapPod(v, err, err == nil && !v.Truncated && !v.TargetChanged && v.EvidenceScope == "identity_verified_before_and_after")
 				if v.ObservedAfter == nil {
 					out.Limitations = append(out.Limitations, "Post-read target identity verification did not complete.")
 				}
 				return out
 			}},
-		{ID: "pod.exec", Summary: "在目标容器运行非 TTY argv/stdin，返回远端执行回执；请求不会自动重试，每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_pod_exec", ExecutionPool: "exec", ExecutionTimeout: 45 * time.Second, Availability: podAvailable, Limits: podLimits,
-			Fields: map[string]Field{"target": target, "argv": {Type: "array", MinItems: 1, MaxItems: 128, Items: &Field{Type: "string", MaxLength: 32768}}, "stdin": {Type: "string", Source: "stdin", MaxLength: 32768}, "timeout_ms": {Type: "integer", Minimum: &positive, Maximum: &maxTimeout}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput}}, Required: []string{"target", "argv"}, OutputSchema: SchemaOf(pod.ExecReceipt{}),
+		{ID: "pod.exec", Summary: "在目标容器运行非 TTY argv/stdin，返回远端执行回执；请求不会自动重试，每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_pod_exec", ExecutionPool: "exec", ExecutionTimeout: MaxExecutionTimeout, Availability: podAvailable, Limits: podLimits,
+			Fields: map[string]Field{"target": target, "argv": {Type: "array", MinItems: 1, MaxItems: 128, Items: &Field{Type: "string", MaxLength: 32768}}, "stdin": {Type: "string", Source: "stdin", MaxLength: pod.MaxStdinBytes}, "timeout_ms": {Type: "integer", Minimum: &positive, Maximum: &maxTimeout}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput}}, Required: []string{"target", "argv"}, OutputSchema: SchemaOf(pod.ExecReceipt{}),
 			Run: func(ctx context.Context, p Params) Outcome {
 				started := now()
 				argv := []string{}
@@ -497,7 +514,13 @@ func SREOperations(options SREOptions) []Operation {
 		}
 		return Availability{Available: true}
 	}
-	uqLimits := map[string]any{"wire_contract": "structured_query_ts_v1", "max_timeout_ms": maxTimeout, "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": uq.MaxResponseBytes, "pagination": "explicit_native_cursor_or_offset_in_body; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "log_content": "status/count/digest only before SaaS topic masking; content and cursors omitted"}
+	maxQueryTimeout := uq.MaxTimeout.Milliseconds()
+	maxTracePages := int64(uq.MaxTracePages)
+	queryResponseBytes := uq.DefaultResponseBytes
+	if queries != nil {
+		queryResponseBytes = queries.ResponseBytes()
+	}
+	uqLimits := map[string]any{"wire_contract": "structured_query_ts_v1", "max_timeout_ms": uq.MaxTimeout.Milliseconds(), "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": queryResponseBytes, "pagination": "explicit_native_cursor_or_offset_in_body; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "log_content": "status/count/digest only before SaaS topic masking; content and cursors omitted"}
 	wrapQuery := func(v uq.Receipt, err error) Outcome {
 		if v.Native != nil {
 			v.Native = scrubber.JSON(v.Native)
@@ -518,8 +541,8 @@ func SREOperations(options SREOptions) []Operation {
 		return out
 	}
 	ops = append(ops, Operation{ID: "uq.egresses", Summary: "读取部署登记的 UQ 出口、端点、tenant/space 范围与时间单位合同。", EvidenceScope: "sre_uq_egresses", Availability: queryAvailable, Fields: map[string]Field{}, Limits: uqLimits, OutputSchema: SchemaOf([]uq.Egress{}), Run: func(context.Context, Params) Outcome { return Outcome{Value: queries.Egresses(), Complete: true} }}, Operation{
-		ID: "uq.query", Summary: "按登记出口和端点转发原生 UQ JSON 查询，保留实际出口、scope、下游状态与响应。", EvidenceScope: "sre_uq_native_query", ExecutionPool: "sre", ExecutionTimeout: 35 * time.Second, Availability: queryAvailable, Limits: uqLimits,
-		Fields: map[string]Field{"egress": text, "endpoint": {Type: "string", Source: "uq.egresses endpoints[].path", MinLength: 1, MaxLength: 256}, "tenant": text, "space": text, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxTimeout}}, Required: []string{"egress", "endpoint", "tenant", "space", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
+		ID: "uq.query", Summary: "按登记出口和端点转发原生 UQ JSON 查询，保留实际出口、scope、下游状态与响应。", EvidenceScope: "sre_uq_native_query", ExecutionPool: "sre", ExecutionTimeout: uq.MaxTimeout + 5*time.Second, Availability: queryAvailable, Limits: uqLimits,
+		Fields: map[string]Field{"egress": text, "endpoint": {Type: "string", Source: "uq.egresses endpoints[].path", MinLength: 1, MaxLength: 256}, "tenant": text, "space": text, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxQueryTimeout}}, Required: []string{"egress", "endpoint", "tenant", "space", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
 		Run: func(ctx context.Context, p Params) Outcome {
 			body, _ := p["body"].(map[string]any)
 			v, err := queries.Query(ctx, uq.Request{Egress: p.String("egress"), Endpoint: p.String("endpoint"), Tenant: p.String("tenant"), Space: p.String("space"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
@@ -536,18 +559,18 @@ func SREOperations(options SREOptions) []Operation {
 		}
 		return Availability{Reason: "uq_trace_unconfigured: register exact sre.uq.egresses trace_targets from the application datasource mapping"}
 	}
-	traceLimits := map[string]any{"wire_contract": "bkapm_raw_span_v1", "max_timeout_ms": maxTimeout, "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": uq.MaxResponseBytes, "max_rows": uq.MaxTraceRows, "window_time_unit": "s", "span_time_unit": "us", "pagination": "explicit_native_offset; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "scope": "registered_application_and_exact_table; no cross-application or retention expansion"}
-	ops = append(ops, Operation{ID: "uq.trace", Summary: "按登记应用与实际结果表转发原生 bkapm Span search/trace_id 查询，保留原始 Span、微秒时间和单页完整性。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: 35 * time.Second, Availability: traceAvailable, Limits: traceLimits,
-		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxTimeout}}, Required: []string{"egress", "target", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
+	traceLimits := map[string]any{"wire_contract": "bkapm_raw_span_v1", "max_timeout_ms": uq.MaxTimeout.Milliseconds(), "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": queryResponseBytes, "max_rows": uq.MaxTraceRows, "window_time_unit": "s", "span_time_unit": "us", "pagination": "explicit_native_offset; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "scope": "registered_application_and_exact_table; no cross-application or retention expansion"}
+	ops = append(ops, Operation{ID: "uq.trace", Summary: "按登记应用与实际结果表转发原生 bkapm Span search/trace_id 查询，保留原始 Span、微秒时间和单页完整性；pages 一次连续读至多 10 页并合成一份应答。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: MaxExecutionTimeout, Availability: traceAvailable, Limits: traceLimits,
+		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxQueryTimeout}, "pages": {Type: "integer", Minimum: &positive, Maximum: &maxTracePages, Description: "read this many consecutive pages of the same query as one answer"}}, Required: []string{"egress", "target", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
 		Run: func(ctx context.Context, p Params) Outcome {
 			body, _ := p["body"].(map[string]any)
-			v, err := queries.Trace(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
+			v, err := queries.TracePages(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))}, p.Int("pages", 1))
 			return wrapQuery(v, err)
 		},
 	})
-	ops = append(ops, Operation{ID: OpTraceTopFailures, Summary: "列出一个登记 trace 目标里失败最多的服务端接口：按服务、路由、HTTP 状态与业务码分组，给次数、首末次时间、耗时 P50/P95、至多 3 个示例 trace_id 与一条错误原文（脱敏、截断）。失败指 SERVER span 被标失败或 HTTP ≥500（include_4xx 时 ≥400），条件下推给 UQ；至多扫 5 页×1000 条，扫不完时标 sampled，total 到上限 10000 时写 total_at_least。end 可回看 7 天内某个时刻（UTC，以 Z 结尾）。示例 trace_id 用 uq.trace 下钻。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: 60 * time.Second, Availability: traceAvailable,
-		Limits: map[string]any{"max_pages": uq.TopFailuresPages, "page_rows": uq.MaxTraceRows, "max_groups": uq.TopFailuresGroups, "windows": []string{"1h", "6h"}, "retention_days": int(uq.TraceRetention / (24 * time.Hour)), "message_bytes": topFailureMessageBytes, "redaction_contract": redact.Contract},
-		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "window": {Type: "string", MaxLength: 8},
+	ops = append(ops, Operation{ID: OpTraceTopFailures, Summary: "列出一个登记 trace 目标里失败最多的服务端接口：按服务、路由、HTTP 状态与业务码分组，给次数、首末次时间、耗时 P50/P95、至多 3 个示例 trace_id 与一条错误原文（脱敏、截断）。失败指 SERVER span 被标失败或 HTTP ≥500（include_4xx 时 ≥400），条件下推给 UQ；至多扫 10 页×1000 条，扫不完时标 sampled，total 到上限 10000 时写 total_at_least。end 可回看 7 天内某个时刻（UTC，以 Z 结尾）。示例 trace_id 用 uq.trace 下钻。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: MaxExecutionTimeout, Availability: traceAvailable,
+		Limits: map[string]any{"max_pages": uq.TopFailuresPages, "page_rows": uq.MaxTraceRows, "max_groups": uq.TopFailuresGroups, "window": "a duration from 1m to the retention, such as 90m, 6h or 3d", "retention_days": int(uq.TraceRetention / (24 * time.Hour)), "message_bytes": topFailureMessageBytes, "redaction_contract": redact.Contract},
+		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "window": {Type: "string", MaxLength: 16},
 			"end": {Type: "string", MaxLength: 64, Description: "RFC 3339 UTC"}, "service": {Type: "string", MaxLength: 256}, "include_4xx": {Type: "boolean"}},
 		Required: []string{"egress", "target"}, OutputSchema: SchemaOf(uq.TopFailures{}),
 		Run: func(ctx context.Context, p Params) Outcome {
@@ -584,15 +607,17 @@ func SREOperations(options SREOptions) []Operation {
 	}
 	timestamp := Field{Type: "string", MinLength: 1, MaxLength: 64, Description: "RFC 3339 time"}
 	maxReceiptsPage, maxReceiptsOffset := int64(maxSREReceiptsPage), int64(MaxSREReceipts)
-	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名与 request_id 过滤，带分页。",
+	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id 与 effect 过滤，带分页。回执分两类分开保存，读多了也挤不掉改动：change（改镜像、apply、delete、删 Pod、重启、扩缩、dry run）与 access（执行、读 Secret 与 ConfigMap）。",
 		EvidenceScope: "sre_receipts", ExecutionPool: "sre", ExecutionTimeout: 10 * time.Second, Availability: receiptsAvailable,
-		Limits: map[string]any{"kept": MaxSREReceipts, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
+		Limits: map[string]any{"kept": MaxSREReceipts, "kept_change": MaxSREChangeReceipts, "kept_access": MaxSREAccessReceipts,
+			"receipt_bytes_change": SREChangeReceiptBytes, "receipt_bytes_access": SREAccessReceiptBytes, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
 			"content": "who, what, where and how each action ended; a pod.exec receipt carries its run's facts and its script digest, never its argv, stdin or output"},
 		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text,
-			"limit": {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
+			"effect": {Type: "string", Enum: []string{SREEffectChange, SREEffectAccess}},
+			"limit":  {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
 		OutputSchema: SchemaOf(SREReceiptPage{}),
 		Run: func(ctx context.Context, p Params) Outcome {
-			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
+			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Effect: p.String("effect"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
 			for key, into := range map[string]*time.Time{"since": &filter.Since, "until": &filter.Until} {
 				if value := p.String(key); value != "" {
 					at, err := time.Parse(time.RFC3339Nano, value)
@@ -609,7 +634,7 @@ func SREOperations(options SREOptions) []Operation {
 			out := Outcome{Value: page, Complete: page.NextOffset == 0}
 			if page.NextOffset > 0 {
 				next := Params{"offset": page.NextOffset}
-				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "limit"} {
+				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "effect", "limit"} {
 					if value, present := p[key]; present {
 						next[key] = value
 					}
@@ -620,6 +645,22 @@ func SREOperations(options SREOptions) []Operation {
 		},
 	})
 	return ops
+}
+
+// listSummary is a list page's one line: how many it holds and whether, and
+// how many, objects are past it, so a reader does not take a first page for
+// the whole list.
+func listSummary(v pod.ResourceReceipt) string {
+	switch {
+	case v.Truncated:
+		return fmt.Sprintf("本页 %d 个对象；超出应答上限漏了 %d 个，按 next_call 用更小的页再读。", v.Count, v.ItemsOmitted)
+	case v.Continue != "" && v.RemainingItems != nil:
+		pages := (*v.RemainingItems + int64(max(1, v.Count)) - 1) / int64(max(1, v.Count))
+		return fmt.Sprintf("本页 %d 个对象；还有 %d 个、约 %d 页，按 next_call 续读。", v.Count, *v.RemainingItems, pages)
+	case v.Continue != "":
+		return fmt.Sprintf("本页 %d 个对象；还有更多页（apiserver 未给总数），按 next_call 续读直至 continue 为空。", v.Count)
+	}
+	return fmt.Sprintf("共 %d 个对象，已全部列出。", v.Count)
 }
 
 func podTarget(p Params) pod.Target {

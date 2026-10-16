@@ -12,6 +12,7 @@ package k8sread
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -322,7 +323,7 @@ func TestWorkloadsSaysWhereItWasCut(t *testing.T) {
 	reader := newNamespaceReader(t, api, readAt, "ns")
 	var listed []string
 	for i := 0; i < MaxNamespaces+2; i++ {
-		listed = append(listed, "listed-"+string(rune('a'+i)))
+		listed = append(listed, fmt.Sprintf("listed-%d", i))
 	}
 	// A namespace past the bound named twice is named once.
 	listed = append(listed, listed[len(listed)-1])

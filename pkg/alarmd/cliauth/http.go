@@ -42,16 +42,6 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	select {
-	case m.httpSlots <- struct{}{}:
-		defer func() { <-m.httpSlots }()
-	default:
-		// Do not let net/http wait for an unaccepted request body while
-		// writing the busy response. No Redis or handler slot is needed.
-		defer boundBodyRead(w, r, 0)()
-		writeError(w, failure("auth_busy", "Too many concurrent authorization requests.", 429))
-		return
-	}
 	// The same listener also serves long-lived h2c/gRPC streams. Limit only
 	// this auth request, including body draining after an early rejection.
 	defer boundBodyRead(w, r, 3*time.Second)()
@@ -178,7 +168,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if (input.CodeChallenge != "" || input.CodeChallengeMethod != "") && (input.CodeChallengeMethod != "S256" || !validSecret(input.CodeChallenge)) {
 		return failure("invalid_code_challenge", "A code challenge must be an S256 challenge of 43 URL-safe characters.", 400)
 	}
-	if !m.allow(&m.grantWindow, 6) {
+	if !m.allow(&m.grantWindow, AuthEventsPerMinute) {
 		return failure("auth_rate_limited", "The grant issuance limit was reached; try again in the next minute.", 429)
 	}
 	secret, err := randomSecret()
@@ -247,7 +237,7 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return methodNotAllowed(w, "POST")
 	}
-	if !m.allow(&m.exchangeWindow, 60) {
+	if !m.allow(&m.exchangeWindow, AuthEventsPerMinute) {
 		return failure("auth_rate_limited", "The grant exchange limit was reached; try again in the next minute.", 429)
 	}
 	var input struct {
@@ -327,7 +317,7 @@ func (m *Manager) handleRefresh(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodPost {
 		return methodNotAllowed(w, "POST")
 	}
-	if !m.allow(&m.refreshWindow, 60) {
+	if !m.allow(&m.refreshWindow, AuthEventsPerMinute) {
 		return failure("auth_rate_limited", "The renewal limit was reached; try again in the next minute.", 429)
 	}
 	var input struct {

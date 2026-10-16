@@ -243,6 +243,12 @@ type OverviewReplicaResource struct {
 type OverviewPermits struct {
 	Held  int `json:"held"`
 	Limit int `json:"limit"`
+	// Peak is the most permits held at once in the last minute, and
+	// MemorySource where the memory the limit is derived from came from
+	// (fallback_default when not the container's); both absent when the
+	// replica reported no capacity.
+	Peak         *int   `json:"peak,omitempty"`
+	MemorySource string `json:"memory_source,omitempty"`
 }
 
 type OverviewRuntime struct {
@@ -385,7 +391,8 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 		resource := OverviewReplicaResource{Name: replica.Replica, MemoryRatio: overviewUnmeasured("ratio"),
 			LiveHeapBytes: overviewUnmeasured("bytes"), CPUThrottledSeconds: overviewUnmeasured("seconds")}
 		if capacity := replica.Capacity; capacity != nil {
-			resource.QueryPermits = OverviewPermits{Held: capacity.PermitsHeld, Limit: capacity.PermitBudget}
+			peak := capacity.PermitsPeak
+			resource.QueryPermits = OverviewPermits{Held: capacity.PermitsHeld, Limit: capacity.PermitBudget, Peak: &peak, MemorySource: capacity.MemorySource}
 			if capacity.MemoryLimit > 0 {
 				resource.MemoryRatio = overviewMeasured(float64(capacity.MemoryUsed)/float64(capacity.MemoryLimit), "ratio")
 			}

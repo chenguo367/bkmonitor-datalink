@@ -242,12 +242,15 @@ func TestDiagnosticBudgetsAreTheProductionOnesAndErrorsAreSafe(t *testing.T) {
 	}
 }
 
+// Re-queries are an operator's, a handful next to the business queries UQ
+// serves: two at once both reach UQ, each honours its cancellation, and
+// neither is retried.
 func TestDiagnosticCancellationConcurrencyAndNoRetry(t *testing.T) {
-	started := make(chan struct{})
+	started := make(chan struct{}, 2)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		close(started)
+		started <- struct{}{}
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, `{"series":[`)
 		w.(http.Flusher).Flush()
@@ -257,25 +260,31 @@ func TestDiagnosticCancellationConcurrencyAndNoRetry(t *testing.T) {
 	client, _ := NewDiagnosticClient(server.URL, "alarmd-diagnostic", server.Client())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
+	done := make(chan error, 2)
 	spec := validAttempt(t).Spec
-	go func() { _, err := client.Query(ctx, spec, DiagnosticSelection{}, 0); done <- err }()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("query did not start")
+	for i := 0; i < 2; i++ {
+		go func() { _, err := client.Query(ctx, spec, DiagnosticSelection{}, 0); done <- err }()
 	}
-	_, err := client.Query(context.Background(), spec, DiagnosticSelection{}, 0)
-	assertDiagnosticCode(t, err, "diagnostic_busy")
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case err := <-done:
+			t.Fatalf("query %d answered %v without reaching UQ", i+1, err)
+		case <-time.After(time.Second):
+			t.Fatalf("query %d did not reach UQ", i+1)
+		}
+	}
 	cancel()
-	select {
-	case err := <-done:
-		assertDiagnosticCode(t, err, "query_canceled")
-	case <-time.After(time.Second):
-		t.Fatal("query did not honor cancellation")
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			assertDiagnosticCode(t, err, "query_canceled")
+		case <-time.After(time.Second):
+			t.Fatal("query did not honor cancellation")
+		}
 	}
-	if calls.Load() != 1 {
-		t.Fatal("busy/canceled query retried")
+	if calls.Load() != 2 {
+		t.Fatalf("%d calls, want two and no retry", calls.Load())
 	}
 	var failedCalls atomic.Int32
 	client, _ = NewDiagnosticClient("http://fixture.invalid", "alarmd-diagnostic", &http.Client{Transport: diagnosticRoundTripper(func(*http.Request) (*http.Response, error) {
