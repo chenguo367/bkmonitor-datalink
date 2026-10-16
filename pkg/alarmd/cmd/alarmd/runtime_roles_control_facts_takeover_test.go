@@ -183,7 +183,7 @@ func TestATakeoverKeepsTheFleetViewDecidedBeforeTheNewLeadersFirstWrite(t *testi
 		after.ControlFacts.Replica != "takeover-replica-b" || after.ControlFacts.Unavailable != "" {
 		t.Fatalf("control facts after the new Leader's first write = %+v (gaps %+v)", after.ControlFacts, after.Gaps)
 	}
-	if written := counterValue(t, recorders["takeover-replica-b"], "bkmonitor_alarmd_fleet_control_facts_writes_total",
+	if written := counterValue(t, recorders["takeover-replica-b"], "alarmd_fleet_control_facts_writes_total",
 		map[string]string{"result": "written"}); written != 1 {
 		t.Fatalf("new Leader's control record writes = %v, want the one write counted", written)
 	}

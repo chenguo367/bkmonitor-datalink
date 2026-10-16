@@ -50,9 +50,9 @@ func TestALookbackPermitHeldReadsAsTheLookbacksOnThePermitSeries(t *testing.T) {
 					continue
 				}
 				switch family.GetName() {
-				case "bkmonitor_alarmd_worker_query_permits_held":
+				case "alarmd_worker_query_permits_held":
 					held = sample.GetGauge().GetValue()
-				case "bkmonitor_alarmd_worker_query_permit_seconds_total":
+				case "alarmd_worker_query_permit_seconds_total":
 					seconds = sample.GetCounter().GetValue()
 				}
 			}

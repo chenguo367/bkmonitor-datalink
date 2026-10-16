@@ -35,7 +35,7 @@ func gapGuardSeries(t *testing.T, recorder *Recorder) map[[3]string]float64 {
 	}
 	series := map[[3]string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_worker_gap_guard_scope_rounds_total" {
+		if family.GetName() != "alarmd_worker_gap_guard_scope_rounds_total" {
 			continue
 		}
 		for _, sample := range family.Metric {

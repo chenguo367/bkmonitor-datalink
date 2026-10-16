@@ -78,7 +78,7 @@ func lookbackSeriesUpperBounds() map[string]int {
 // engine's counts, zero included, and each count under its own words.
 func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	if series := gatherFamily(t, r, "bkmonitor_alarmd_lookback_first_reads_total"); len(series) != 0 {
+	if series := gatherFamily(t, r, "alarmd_lookback_first_reads_total"); len(series) != 0 {
 		t.Fatalf("a process not running the lookback emitted %v", series)
 	}
 	engine, err := lookback.New(lookback.Options{Refusals: scheduler.LookbackRefusals,
@@ -126,7 +126,7 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	r.SetLookbackSource(func() lookback.Stats { return stats })
 	for name, n := range lookbackSeriesUpperBounds() {
-		if got := len(gatherFamily(t, r, "bkmonitor_alarmd_"+name)); got != n {
+		if got := len(gatherFamily(t, r, "alarmd_"+name)); got != n {
 			t.Fatalf("%s has %d series, want every cell: %d", name, got, n)
 		}
 	}
@@ -149,57 +149,57 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 		return 0
 	}
 	// The rungs add up: each rung's counts are /api/lookback's.
-	if got := value("bkmonitor_alarmd_lookback_changes_total", map[string]string{"source": logs, "class": lookback.ChangePointsAdded}); got != 9 {
+	if got := value("alarmd_lookback_changes_total", map[string]string{"source": logs, "class": lookback.ChangePointsAdded}); got != 9 {
 		t.Fatalf("points added over the rungs = %v, want 9", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_rechecks_total", map[string]string{"source": logs, "outcome": lookback.RecheckOutcomes[0]}); got != 10 {
+	if got := value("alarmd_lookback_rechecks_total", map[string]string{"source": logs, "outcome": lookback.RecheckOutcomes[0]}); got != 10 {
 		t.Fatalf("%s rechecks over the rungs = %v, want 10", lookback.RecheckOutcomes[0], got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_changed_windows_total", map[string]string{"source": logs}); got != 3 {
+	if got := value("alarmd_lookback_changed_windows_total", map[string]string{"source": logs}); got != 3 {
 		t.Fatalf("changed windows over the rungs = %v, want 3", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
+	if got := value("alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": logs}); got != 6 {
+	if got := value("alarmd_lookback_preemptions_total", map[string]string{"source": logs}); got != 6 {
 		t.Fatalf("preemptions over the rungs = %v, want 6", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_permit_refusals_total", map[string]string{"reason": scheduler.LookbackRefusedWaiting}); got != 9 {
+	if got := value("alarmd_lookback_permit_refusals_total", map[string]string{"reason": scheduler.LookbackRefusedWaiting}); got != 9 {
 		t.Fatalf("refusals = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_coverage", map[string]string{"what": "owned"}); got != 7 {
+	if got := value("alarmd_lookback_coverage", map[string]string{"what": "owned"}); got != 7 {
 		t.Fatalf("owned = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_recheck_bytes_total", map[string]string{"source": logs}); got != 2048 {
+	if got := value("alarmd_lookback_recheck_bytes_total", map[string]string{"source": logs}); got != 2048 {
 		t.Fatalf("recheck bytes = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_supplement_hold_total", map[string]string{"source": logs, "bucket": "le_5s"}); got != 11 {
+	if got := value("alarmd_lookback_supplement_hold_total", map[string]string{"source": logs, "bucket": "le_5s"}); got != 11 {
 		t.Fatalf("supplement holds up to 5s = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_supplement_hold_max_seconds", map[string]string{"source": logs}); got != 3.5 {
+	if got := value("alarmd_lookback_supplement_hold_max_seconds", map[string]string{"source": logs}); got != 3.5 {
 		t.Fatalf("longest supplement hold = %v", got)
 	}
 	// The early reads by what the mechanism is read by: before_next over
 	// before_next and not_ahead.
 	for group, want := range map[string]float64{lookback.EarlyGroupBeforeNext: 12, lookback.EarlyGroupNotAhead: 4, lookback.EarlyGroupOutside: 2} {
-		if got := value("bkmonitor_alarmd_lookback_directed_early_total", map[string]string{"source": logs, "group": group}); got != want {
+		if got := value("alarmd_lookback_directed_early_total", map[string]string{"source": logs, "group": group}); got != want {
 			t.Fatalf("early reads %s = %v, want %v", group, got, want)
 		}
 	}
-	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_lookback_read_hold_ignored_total") {
+	for _, m := range gatherFamily(t, r, "alarmd_lookback_read_hold_ignored_total") {
 		for _, label := range m.GetLabel() {
 			if label.GetName() == "reason" && label.GetValue() == lookback.ClassPartialRevised {
 				t.Fatal("partial_revised is counted twice: here and in lookback_sample_classes_total")
 			}
 		}
 	}
-	if got := value("bkmonitor_alarmd_lookback_read_hold_ignored_total", map[string]string{"source": logs, "reason": lookback.IgnoredNoWholeWindowArrival}); got != 7 {
+	if got := value("alarmd_lookback_read_hold_ignored_total", map[string]string{"source": logs, "reason": lookback.IgnoredNoWholeWindowArrival}); got != 7 {
 		t.Fatalf("no whole-window arrival = %v, want 7", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_directed_early_undecided_total", map[string]string{"source": logs}); got != 13 {
+	if got := value("alarmd_lookback_directed_early_undecided_total", map[string]string{"source": logs}); got != 13 {
 		t.Fatalf("early undecided pairs = %v", got)
 	}
-	if got := value("bkmonitor_alarmd_lookback_directed_early_read_bytes_total", map[string]string{"source": logs}); got != 14 {
+	if got := value("alarmd_lookback_directed_early_read_bytes_total", map[string]string{"source": logs}); got != 14 {
 		t.Fatalf("early read bytes = %v", got)
 	}
 }
@@ -211,7 +211,7 @@ func TestTheReadHoldGaugesAreAbsentWhereNothingIsKnown(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	stats := lookback.Stats{}
 	r.SetLookbackSource(func() lookback.Stats { return stats })
-	for _, family := range []string{"bkmonitor_alarmd_read_hold_groups", "bkmonitor_alarmd_read_hold_max_seconds"} {
+	for _, family := range []string{"alarmd_read_hold_groups", "alarmd_read_hold_max_seconds"} {
 		if series := gatherFamily(t, r, family); len(series) != 0 {
 			t.Fatalf("a replica holding no group emitted %s %v", family, series)
 		}
@@ -222,7 +222,7 @@ func TestTheReadHoldGaugesAreAbsentWhereNothingIsKnown(t *testing.T) {
 		logs:                 {Held: 2, AtLimit: 1, Unknown: 1, MaxMillis: 308_500, MaxKnown: true},
 	}
 	groups := map[string]float64{}
-	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_read_hold_groups") {
+	for _, m := range gatherFamily(t, r, "alarmd_read_hold_groups") {
 		labels := map[string]string{}
 		for _, label := range m.GetLabel() {
 			labels[label.GetName()] = label.GetValue()
@@ -234,7 +234,7 @@ func TestTheReadHoldGaugesAreAbsentWhereNothingIsKnown(t *testing.T) {
 	if !reflect.DeepEqual(groups, want) {
 		t.Fatalf("groups %v, want %v", groups, want)
 	}
-	maxima := gatherFamily(t, r, "bkmonitor_alarmd_read_hold_max_seconds")
+	maxima := gatherFamily(t, r, "alarmd_read_hold_max_seconds")
 	if len(maxima) != 1 || maxima[0].GetGauge().GetValue() != 308.5 || maxima[0].GetLabel()[0].GetValue() != logs {
 		t.Fatalf("maxima %v, want only %s at 308.5 s", maxima, logs)
 	}

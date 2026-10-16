@@ -46,7 +46,7 @@ type queryPermitCollector struct {
 
 func newQueryPermitCollector(source QueryPermitOccupancySource) *queryPermitCollector {
 	descriptor := func(name, help string, labels []string) *prometheus.Desc {
-		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
+		return prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, name), help, labels, nil)
 	}
 	return &queryPermitCollector{
 		source: source,

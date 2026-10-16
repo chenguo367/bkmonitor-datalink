@@ -208,7 +208,7 @@ func TestTheTargetScopeCloseIsNotWiredWithoutTheLinkConsole(t *testing.T) {
 	}
 	found := 0
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_target_scope_close_total" {
+		if family.GetName() != "alarmd_target_scope_close_total" {
 			continue
 		}
 		for _, m := range family.GetMetric() {

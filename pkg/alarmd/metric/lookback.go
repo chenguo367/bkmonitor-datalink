@@ -72,7 +72,7 @@ type lookbackCollector struct {
 
 func newLookbackCollector() *lookbackCollector {
 	desc := func(name, help string, labels ...string) *prometheus.Desc {
-		return prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, name), help, labels, nil)
+		return prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, name), help, labels, nil)
 	}
 	return &lookbackCollector{
 		readHoldTransition: desc("read_hold_transition_total", "Slots whose first readiness preserves a preceding segment's completion deadline."),

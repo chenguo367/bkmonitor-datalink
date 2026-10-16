@@ -17,10 +17,10 @@ type cacheHeld struct{ compiled, objects, compileClears, objectClears float64 }
 func (fixture *electionFixture) cacheHeld(process *electionProcess) cacheHeld {
 	fixture.t.Helper()
 	entries := func(object string) float64 {
-		return counterValue(fixture.t, process.recorder, "bkmonitor_alarmd_control_cache_entries", map[string]string{"object": object})
+		return counterValue(fixture.t, process.recorder, "alarmd_control_cache_entries", map[string]string{"object": object})
 	}
 	clears := func(object string) float64 {
-		return counterValue(fixture.t, process.recorder, "bkmonitor_alarmd_control_cache_total",
+		return counterValue(fixture.t, process.recorder, "alarmd_control_cache_total",
 			map[string]string{"object": object, "result": "clear"})
 	}
 	return cacheHeld{

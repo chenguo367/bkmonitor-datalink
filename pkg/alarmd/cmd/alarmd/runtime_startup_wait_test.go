@@ -116,7 +116,7 @@ func TestTheStartupWaitRetriesCountsAndStopsOnAnAnswerOrARefusal(t *testing.T) {
 	if err != nil || attempts != 4 {
 		t.Fatalf("err %v after %d attempts, want an answer on the fourth", err, attempts)
 	}
-	if got := counterValue(t, recorder, "bkmonitor_alarmd_startup_dependency_wait_total", map[string]string{"dependency": "redis_runtime"}); got != 3 {
+	if got := counterValue(t, recorder, "alarmd_startup_dependency_wait_total", map[string]string{"dependency": "redis_runtime"}); got != 3 {
 		t.Fatalf("startup_dependency_wait_total{redis_runtime} = %v, want 3", got)
 	}
 
@@ -126,7 +126,7 @@ func TestTheStartupWaitRetriesCountsAndStopsOnAnAnswerOrARefusal(t *testing.T) {
 	if !errors.Is(err, refusal) || attempts != 1 {
 		t.Fatalf("err %v after %d attempts, want the refusal on the first", err, attempts)
 	}
-	if got := counterValue(t, recorder, "bkmonitor_alarmd_startup_dependency_wait_total", map[string]string{"dependency": "state_store"}); got != 0 {
+	if got := counterValue(t, recorder, "alarmd_startup_dependency_wait_total", map[string]string{"dependency": "state_store"}); got != 0 {
 		t.Fatalf("a refusal was counted as a wait: %v", got)
 	}
 }

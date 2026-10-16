@@ -88,7 +88,7 @@ func TestTrendsReadEachChartInItsSpaceScopedToThisDeployment(t *testing.T) {
 		if container && (call.space != "bkcc__3" || !strings.Contains(call.promQL, `namespace="alarmd-ns",container="alarmd"`)) {
 			t.Errorf("container expression %s in %s, want bkcc__3 scoped to this deployment", call.promQL, call.space)
 		}
-		if !container && (call.space != "bkcc__2" || !strings.Contains(call.promQL, "bkmonitor_alarmd_")) {
+		if !container && (call.space != "bkcc__2" || !strings.Contains(call.promQL, "alarmd_")) {
 			t.Errorf("self expression %s in %s, want bkcc__2 on alarmd's own metrics", call.promQL, call.space)
 		}
 		if strings.Contains(call.promQL, "rate(") && !strings.Contains(call.promQL, "[5m]") {

@@ -115,7 +115,7 @@ func TestMetricsRemainAvailableBeforeReady(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("metrics status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if !strings.Contains(response.Body.String(), "bkmonitor_alarmd_build_info") {
+	if !strings.Contains(response.Body.String(), "alarmd_build_info") {
 		t.Fatalf("metrics response does not contain build info:\n%s", response.Body.String())
 	}
 }

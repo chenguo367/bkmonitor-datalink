@@ -195,11 +195,11 @@ var redisDurationBuckets = []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0
 func newRedisCallMetrics() redisCallMetrics {
 	labels := []string{"client", "command", "pipelined"}
 	operations := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_operation_total",
+		Subsystem: metricSubsystem, Name: "redis_operation_total",
 		Help: "Redis operations issued, counting one per call or pipeline batch rather than per command.",
 	}, []string{"client"})
 	reasons := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_failure_reason_total",
+		Subsystem: metricSubsystem, Name: "redis_failure_reason_total",
 		Help: "Redis operations that failed, by client and by why, one per call or pipeline batch; a batch's first " +
 			"failing member decides the reason: connection_closed, connection_refused, sentinel_unreachable, timeout, " +
 			"pool_timeout, canceled, server_error, malformed_reply, other. The empty-result signal and a NOSCRIPT " +
@@ -214,7 +214,7 @@ func newRedisCallMetrics() redisCallMetrics {
 		reasons.WithLabelValues("other", reason)
 	}
 	callerOperations := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_operation_total",
+		Subsystem: metricSubsystem, Name: "redis_caller_operation_total",
 		Help: "Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that " +
 			"share one client: on the diagnostics client directory_read, diagnostic_write, " +
 			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
@@ -223,7 +223,7 @@ func newRedisCallMetrics() redisCallMetrics {
 			"store_census on the source and runtime clients.",
 	}, []string{"client", "caller"})
 	callerReasons := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_failure_reason_total",
+		Subsystem: metricSubsystem, Name: "redis_caller_failure_reason_total",
 		Help: "Redis operations of a named job that failed, by why, counted as redis_failure_reason_total is. The " +
 			"diagnostics client's cells exist from startup, so a zero is a count.",
 	}, []string{"client", "caller", "reason"})
@@ -237,16 +237,16 @@ func newRedisCallMetrics() redisCallMetrics {
 		operations: operations,
 		reasons:    reasons,
 		calls: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_total",
+			Subsystem: metricSubsystem, Name: "redis_command_total",
 			Help: "Redis commands issued by this process by bounded command name and pipelining.",
 		}, labels),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_duration_seconds",
+			Subsystem: metricSubsystem, Name: "redis_command_duration_seconds",
 			Help:    "Redis round-trip duration. A pipelined batch is recorded once for the whole batch.",
 			Buckets: redisDurationBuckets,
 		}, labels),
 		failures: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_failure_total",
+			Subsystem: metricSubsystem, Name: "redis_command_failure_total",
 			Help: "Redis commands that returned an error, excluding the empty-result signal. A NOSCRIPT reply to EVALSHA is counted here as the error reply it is, and is not a dependency failure: the client answers it with EVAL, and the fleet page keeps it apart as a script cache miss.",
 		}, labels),
 		callerOperations: callerOperations, callerReasons: callerReasons,

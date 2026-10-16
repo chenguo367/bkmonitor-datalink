@@ -26,7 +26,7 @@ type timelineRepairCollector struct {
 }
 
 func newTimelineRepairCollector() *timelineRepairCollector {
-	return &timelineRepairCollector{repairs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "timeline_repairs_total"),
+	return &timelineRepairCollector{repairs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "timeline_repairs_total"),
 		"Schedule timelines the Control Leader looked at because a Worker reported them unreadable or missing "+
 			"(SCHEDULE_UNREADABLE, SCHEDULE_MISSING), or because a cutover read bytes that did not decode, by what became "+
 			"of each. rewritten: still unreadable, "+
@@ -68,7 +68,7 @@ func (c *timelineRepairCollector) Collect(ch chan<- prometheus.Metric) {
 
 func newTimelineUnreadableReports() prometheus.Counter {
 	return prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "timeline_unreadable_reports_total",
+		Subsystem: metricSubsystem, Name: "timeline_unreadable_reports_total",
 		Help: "Owned Query Groups this replica began naming on its registration because a round met a Schedule timeline " +
 			"that does not decode or whose key is gone (SCHEDULE_UNREADABLE, SCHEDULE_MISSING): one per Query Group each " +
 			"time it goes from unnamed to named. " +

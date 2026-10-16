@@ -29,7 +29,7 @@ type effectiveCloseCollector struct {
 
 func newEffectiveCloseCollector() *effectiveCloseCollector {
 	return &effectiveCloseCollector{
-		outcomes: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "effective_close_total"),
+		outcomes: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "effective_close_total"),
 			"What the effective-time maintenance did, by outcome. close_acked counts alerts, one per alert the "+
 				"broker acknowledged a close for: the close was sent, at every level of the strategy (__ALL__); "+
 				"whether the alert closed is the consumer's to say. The others count "+

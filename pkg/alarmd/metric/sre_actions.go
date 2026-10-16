@@ -28,7 +28,7 @@ type sreActionMetrics struct {
 
 func newSREActionMetrics() *sreActionMetrics {
 	return &sreActionMetrics{actions: prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_actions_total",
+		Subsystem: metricSubsystem, Name: "sre_actions_total",
 		Help: "Execution, management and Secret-read calls the SRE channel made, by operation (pod.exec, pod.delete, " +
 			"workload.restart, workload.scale, workload.set_image, workload.revert, secret.get, configmap.get, and " +
 			"k8s.list when it lists Secrets) and result: done; target_changed (the Pod or workload was " +
@@ -42,7 +42,7 @@ func newSREActionMetrics() *sreActionMetrics {
 			"listing's line the Secrets it returned; neither carries a value, and no Secret read returns one.",
 	}, []string{"op", "result"}),
 		rollouts: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_rollouts_total",
+			Subsystem: metricSubsystem, Name: "sre_rollouts_total",
 			Help: "Image changes made through the SRE channel that ended, by final state, counted by the process that " +
 				"ended them: unchanged (the container already ran the image), not_applied (the image was not written), " +
 				"complete, reverted (the new image did not become ready and the previous one is back), revert_failed " +
@@ -53,7 +53,7 @@ func newSREActionMetrics() *sreActionMetrics {
 		}, []string{"state"}),
 		receipts: func() *prometheus.CounterVec {
 			v := prometheus.NewCounterVec(prometheus.CounterOpts{
-				Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_receipts_write_total",
+				Subsystem: metricSubsystem, Name: "sre_receipts_write_total",
 				Help: "Receipts of SRE actions written to the shared store sre.receipts reads, by result: ok, or error (the " +
 					"store refused or did not answer within its half second; the action itself went ahead, and its sre_action " +
 					"line is the only record). Both cells exist from the start.",
@@ -63,7 +63,7 @@ func newSREActionMetrics() *sreActionMetrics {
 			return v
 		}(),
 		watched: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "sre_rollouts_watched",
+			Subsystem: metricSubsystem, Name: "sre_rollouts_watched",
 			Help: "Image-change receipts this process is watching now: zero but in one process during a rollout. Summed " +
 				"over the processes, more than the changes in progress would be a receipt watched twice.",
 		}),

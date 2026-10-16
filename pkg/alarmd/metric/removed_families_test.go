@@ -270,7 +270,7 @@ func TestARemovedLabelValueIsNotEmitted(t *testing.T) {
 		}
 	}
 	for _, removed := range removedLabelValues {
-		name := "bkmonitor_alarmd_" + removed.family
+		name := "alarmd_" + removed.family
 		if len(emittedOf(emitted, name)) == 0 {
 			t.Fatalf("%s emitted nothing: the guard is not reading it", name)
 		}
@@ -346,8 +346,8 @@ func TestARemovedFamilyIsNotRegistered(t *testing.T) {
 		}
 	}
 	for _, name := range removedFamilies {
-		if registered["bkmonitor_alarmd_"+name] {
-			t.Errorf("%s is registered again", "bkmonitor_alarmd_"+name)
+		if registered["alarmd_"+name] {
+			t.Errorf("%s is registered again", "alarmd_"+name)
 		}
 	}
 }
@@ -415,10 +415,10 @@ func removedFamilyPattern(removed []string, labels map[string]bool) *regexp.Rege
 	}
 	var names []string
 	if len(bare) > 0 {
-		names = append(names, `(?:bkmonitor_alarmd_)?(`+strings.Join(bare, "|")+`)`)
+		names = append(names, `(?:alarmd_)?(`+strings.Join(bare, "|")+`)`)
 	}
 	if len(prefixed) > 0 {
-		names = append(names, `bkmonitor_alarmd_(`+strings.Join(prefixed, "|")+`)`)
+		names = append(names, `alarmd_(`+strings.Join(prefixed, "|")+`)`)
 	}
 	return regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:` + strings.Join(names, "|") + `)(?:_bucket|_sum|_count)?(?:[^A-Za-z0-9_]|$)`)
 }
@@ -426,12 +426,12 @@ func removedFamilyPattern(removed []string, labels map[string]bool) *regexp.Rege
 func TestARemovedNameIsFoundBareUnlessItIsALabel(t *testing.T) {
 	pattern := removedFamilyPattern([]string{"gone_total", "kind"}, map[string]bool{"kind": true})
 	for text, found := range map[string]bool{
-		"rate(gone_total[5m])":                  true,
-		"bkmonitor_alarmd_gone_total_bucket":    true,
-		"sum by (kind) (bkmonitor_alarmd_kind)": true,
-		`[]string{"kind"}`:                      false,
-		"still_gone_total":                      false,
-		"gone_totals":                           false,
+		"rate(gone_total[5m])":        true,
+		"alarmd_gone_total_bucket":    true,
+		"sum by (kind) (alarmd_kind)": true,
+		`[]string{"kind"}`:            false,
+		"still_gone_total":            false,
+		"gone_totals":                 false,
 	} {
 		if got := pattern.MatchString(text); got != found {
 			t.Errorf("%q: found %v, want %v", text, got, found)

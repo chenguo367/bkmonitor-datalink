@@ -29,7 +29,7 @@ func TestTheSelectorCounterHelpNamesEveryClosedReason(t *testing.T) {
 	}
 	help := ""
 	for _, family := range families {
-		if family.GetName() == "bkmonitor_alarmd_target_selector_resolutions_total" {
+		if family.GetName() == "alarmd_target_selector_resolutions_total" {
 			help = family.GetHelp()
 		}
 	}

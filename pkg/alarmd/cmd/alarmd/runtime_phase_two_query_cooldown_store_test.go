@@ -145,7 +145,7 @@ func TestTheProductionPoolStoreCountsOnTheRecorder(t *testing.T) {
 	}
 	written := -1.0
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_query_cooldown_saves_total" {
+		if family.GetName() != "alarmd_query_cooldown_saves_total" {
 			continue
 		}
 		for _, m := range family.GetMetric() {
@@ -166,7 +166,7 @@ func TestTheProductionPoolStoreCountsOnTheRecorder(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, family := range families {
-		if family.GetName() == "bkmonitor_alarmd_query_cooldown_loads_total" {
+		if family.GetName() == "alarmd_query_cooldown_loads_total" {
 			for _, m := range family.GetMetric() {
 				loaded[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
 			}

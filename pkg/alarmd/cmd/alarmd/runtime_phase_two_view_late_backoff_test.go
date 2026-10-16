@@ -95,7 +95,7 @@ func TestAWorkerWhoseViewArrivesLateReadsEachLongPeriodGroupOnceUntilItsSlot(t *
 	// Each Query Group is found not due once when its backoff ends, and the
 	// walk confirms that once more after a Slot it straddles. A Runner left
 	// ready runs thousands of rounds in this time.
-	misses := counterValue(t, recorder, "bkmonitor_alarmd_due_index_prediction_total",
+	misses := counterValue(t, recorder, "alarmd_due_index_prediction_total",
 		map[string]string{"prediction": "due", "actual": "not_due"})
 	if misses > 3*groups {
 		t.Fatalf("%v rounds were dispatched as due and found not due over %d long-period Query Groups, want at most %d: "+
@@ -105,7 +105,7 @@ func TestAWorkerWhoseViewArrivesLateReadsEachLongPeriodGroupOnceUntilItsSlot(t *
 
 func refusals(t *testing.T, recorder *metric.Recorder) float64 {
 	t.Helper()
-	return counterValue(t, recorder, "bkmonitor_alarmd_due_index_recomputed_total", map[string]string{"trigger": "deferral"})
+	return counterValue(t, recorder, "alarmd_due_index_recomputed_total", map[string]string{"trigger": "deferral"})
 }
 
 // viewLateStrategyDocument is one threshold strategy on its own table, so

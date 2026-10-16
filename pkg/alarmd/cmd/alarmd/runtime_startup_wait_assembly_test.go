@@ -103,7 +103,7 @@ func (f *startupWaitFixture) open(ctx context.Context) (*phaseTwoWorkerBundle, e
 
 func (f *startupWaitFixture) waits(t *testing.T, dependency string) float64 {
 	t.Helper()
-	return counterValue(t, f.recorder, "bkmonitor_alarmd_startup_dependency_wait_total", map[string]string{"dependency": dependency})
+	return counterValue(t, f.recorder, "alarmd_startup_dependency_wait_total", map[string]string{"dependency": dependency})
 }
 
 // runningGoroutines reports whether any goroutine is in the named function.

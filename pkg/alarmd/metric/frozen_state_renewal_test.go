@@ -13,7 +13,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-const frozenStateRenewalMetric = "bkmonitor_alarmd_worker_frozen_state_renewals_total"
+const frozenStateRenewalMetric = "alarmd_worker_frozen_state_renewals_total"
 
 func gatherFrozenStateRenewals(t *testing.T, observations ...observability.Observation) map[string]float64 {
 	t.Helper()
@@ -132,7 +132,7 @@ func gatherFrozenStateCensus(t *testing.T, observations ...observability.Observa
 	}
 	gathered := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_worker_frozen_state_census_total" {
+		if family.GetName() != "alarmd_worker_frozen_state_census_total" {
 			continue
 		}
 		for _, series := range family.Metric {

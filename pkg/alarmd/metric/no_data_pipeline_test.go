@@ -45,7 +45,7 @@ func TestNoDataObservationsReachTheCountersThroughTheRecorder(t *testing.T) {
 		NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(nodata.OutcomeEvaluated), Plans: 9},
 	})
 
-	if got := recorderCounterValue(t, recorder, "bkmonitor_alarmd_worker_no_data_plans_seen_total"); got != 9 {
+	if got := recorderCounterValue(t, recorder, "alarmd_worker_no_data_plans_seen_total"); got != 9 {
 		t.Fatalf("census = %v through the recorder, want 9. Between the worker and the series the "+
 			"observation passes a component/stage whitelist that folds what it does not know to "+
 			"(_other, _other); a counter fed from observations then reads as a computed zero, which is "+
@@ -85,7 +85,7 @@ func TestASlotWithNoNoDataPlansStillReportsItsCensus(t *testing.T) {
 		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 0},
 	})
 
-	if _, reported := recorderCounterSeries(t, recorder, "bkmonitor_alarmd_worker_no_data_plans_seen_total"); !reported {
+	if _, reported := recorderCounterSeries(t, recorder, "alarmd_worker_no_data_plans_seen_total"); !reported {
 		t.Fatal("no census series after a Slot that found no no-data Plan; absent and zero then mean the " +
 			"same thing, which is the reading this counter exists to split")
 	}
@@ -126,7 +126,7 @@ func noDataSlotSeriesFrom(t *testing.T, recorder *Recorder) map[string]float64 {
 	}
 	read := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_worker_no_data_slot_plans_total" {
+		if family.GetName() != "alarmd_worker_no_data_slot_plans_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {
@@ -198,7 +198,7 @@ func TestEachHopCountsUnderItsOwnLabel(t *testing.T) {
 	}
 	// And the standalone counter is the due hop, from the same emission, so
 	// the two cannot disagree about it.
-	if got := recorderCounterValue(t, recorder, "bkmonitor_alarmd_worker_no_data_plans_seen_total"); got != 3 {
+	if got := recorderCounterValue(t, recorder, "alarmd_worker_no_data_plans_seen_total"); got != 3 {
 		t.Fatalf("worker_no_data_plans_seen_total = %v, want the due hop's 3", got)
 	}
 }
@@ -211,7 +211,7 @@ func hopSeries(t *testing.T, recorder *Recorder) map[string]float64 {
 	}
 	read := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_no_data_plans_by_hop_total" {
+		if family.GetName() != "alarmd_no_data_plans_by_hop_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {
@@ -274,7 +274,7 @@ func segmentContentSeries(t *testing.T, recorder *Recorder) map[string]float64 {
 	}
 	read := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_segment_content_freshness_total" {
+		if family.GetName() != "alarmd_segment_content_freshness_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {
@@ -344,7 +344,7 @@ func cutoverSeries(t *testing.T, recorder *Recorder) map[string]float64 {
 	}
 	read := map[string]float64{}
 	for _, family := range families {
-		if family.GetName() != "bkmonitor_alarmd_schedule_cutover_total" {
+		if family.GetName() != "alarmd_schedule_cutover_total" {
 			continue
 		}
 		for _, series := range family.GetMetric() {

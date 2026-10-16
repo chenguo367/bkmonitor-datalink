@@ -78,13 +78,13 @@ var controlLeaderTransitions = [][2]string{
 func newControlFactsMetrics() controlFactsMetrics {
 	metrics := controlFactsMetrics{
 		read: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_facts_read_total",
+			Subsystem: metricSubsystem, Name: "control_facts_read_total",
 			Help: "Control-plane facts this replica read successfully, by fact. It exists to be read " +
 				"beside control_facts_unavailable_total: that one is zero on a healthy deployment, and " +
 				"a zero there means nothing only while this one is growing.",
 		}, []string{"fact"}),
 		unavailable: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_facts_unavailable_total",
+			Subsystem: metricSubsystem, Name: "control_facts_unavailable_total",
 			Help: "Control-plane reads that came back without the fact, by fact and by which answer the " +
 				"store gave. reason=missing is the record not being there, which somebody has to write " +
 				"back; reason=read_failed is the store not answering, which retrying fixes. Neither ends " +
@@ -93,7 +93,7 @@ func newControlFactsMetrics() controlFactsMetrics {
 				"is a replica that never joined.",
 		}, []string{"fact", "reason"}),
 		rebuilt: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_facts_rebuilt_total",
+			Subsystem: metricSubsystem, Name: "control_facts_rebuilt_total",
 			Help: "Control-plane facts the Control Leader wrote back because the store had none, by fact. " +
 				"fact=activation is the activation established again from the published Catalog after " +
 				"the record was found missing; one increment per lost record is what a recovered store " +
@@ -101,20 +101,20 @@ func newControlFactsMetrics() controlFactsMetrics {
 				"rising is a Leader that cannot rebuild it.",
 		}, []string{"fact"}),
 		applied: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_health_facts_total",
+			Subsystem: metricSubsystem, Name: "control_health_facts_total",
 			Help: "Control refresh results this replica applied, by the health fact each carried. " +
 				"status=invalid is a defect in this program rather than a deployment condition: the " +
 				"refresh returned something the replica cannot act on, and it keeps the previous fact " +
 				"and carries on instead of exiting.",
 		}, []string{"status"}),
 		invalid: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_health_invalid_total",
+			Subsystem: metricSubsystem, Name: "control_health_invalid_total",
 			Help: "Invalid control health facts by the field that was wrong. Read beside " +
 				"control_health_facts_total, which grows on every round; this one is zero on a correct " +
 				"program, and naming the field is what makes it actionable rather than a thing to watch.",
 		}, []string{"field"}),
 		transitions: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_leader_transitions_total",
+			Subsystem: metricSubsystem, Name: "control_leader_transitions_total",
 			Help: "Control Leader lease moves this process made, by the class the lease moved to (preferred, " +
 				"fallback, or none for a release nobody was named to take) and why: acquire_free (a preferred " +
 				"candidate took a free lease), fallback_takeover (a Worker without the control role took it because " +
