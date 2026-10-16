@@ -129,7 +129,7 @@ func (f *snapshotFixture) server(t *testing.T, p *Profile) *httptest.Server {
 					result = diagnosisPage(3, []string{"3"}, 1, true, "")
 				}
 			case "metrics.list":
-				result = map[string]any{"families": []any{map[string]any{"name": "bkmonitor_alarmd_worker_work_total"}, map[string]any{"name": "bkmonitor_alarmd_unrelated_total"}}}
+				result = map[string]any{"families": []any{map[string]any{"name": "alarmd_worker_work_total"}, map[string]any{"name": "alarmd_unrelated_total"}}}
 			case "strategy.get":
 				result = map[string]any{"plans": []any{map[string]any{"query_group": "qg-two"}}}
 				if f.malformed {

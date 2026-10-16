@@ -613,13 +613,13 @@ func snapshotEstimatedPages(page map[string]any) int {
 // resources and its pool. metrics.list keeps the name of every family it
 // has, for a reader that needs one of the others live.
 var snapshotKeyMetrics = []string{
-	"bkmonitor_alarmd_worker_work_total", "bkmonitor_alarmd_access_query_failure_total", "bkmonitor_alarmd_access_query_duration_seconds",
-	"bkmonitor_alarmd_progress_completed_total", "bkmonitor_alarmd_slot_decision_lag_seconds", "bkmonitor_alarmd_executions_past_deadline",
-	"bkmonitor_alarmd_state_admission_total", "bkmonitor_alarmd_state_version_conflict_total", "bkmonitor_alarmd_redis_command_failure_total",
-	"bkmonitor_alarmd_output_events_by_kind_total", "bkmonitor_alarmd_output_events_rejected_all_total",
-	"bkmonitor_alarmd_container_memory_used_bytes", "bkmonitor_alarmd_container_memory_limit_bytes", "bkmonitor_alarmd_container_cpu_throttled_seconds_total",
-	"bkmonitor_alarmd_heap_inuse_live_bytes", "bkmonitor_alarmd_worker_query_permits_held", "bkmonitor_alarmd_worker_query_permit_budget",
-	"bkmonitor_alarmd_fleet_query_cooldown_objects", "bkmonitor_alarmd_query_downstream_distress_total", "bkmonitor_alarmd_capacity_budget",
+	"alarmd_worker_work_total", "alarmd_access_query_failure_total", "alarmd_access_query_duration_seconds",
+	"alarmd_progress_completed_total", "alarmd_slot_decision_lag_seconds", "alarmd_executions_past_deadline",
+	"alarmd_state_admission_total", "alarmd_state_version_conflict_total", "alarmd_redis_command_failure_total",
+	"alarmd_output_events_by_kind_total", "alarmd_output_events_rejected_all_total",
+	"alarmd_container_memory_used_bytes", "alarmd_container_memory_limit_bytes", "alarmd_container_cpu_throttled_seconds_total",
+	"alarmd_heap_inuse_live_bytes", "alarmd_worker_query_permits_held", "alarmd_worker_query_permit_budget",
+	"alarmd_fleet_query_cooldown_objects", "alarmd_query_downstream_distress_total", "alarmd_capacity_budget",
 }
 
 // snapshotMetricNames are the key families the replica has.
