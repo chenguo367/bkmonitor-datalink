@@ -512,7 +512,9 @@ func (r *Reader) Events(ctx context.Context, pod string) (EventsResult, error) {
 	result := EventsResult{Scope: scope, Objects: objects, Events: []Event{}}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	slots := make(chan struct{}, 4)
+	// Sixteen event reads at a time inside one answer: courtesy to the
+	// apiserver across a long object list, never a refusal.
+	slots := make(chan struct{}, 16)
 	for _, object := range objects {
 		wg.Add(1)
 		go func(object ObjectRef) {
