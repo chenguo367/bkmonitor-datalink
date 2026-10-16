@@ -23,6 +23,8 @@ type topicSource struct {
 	published int64
 	deleted   bool
 	fail      bool
+	// answers is the id the definition says it is, when not its own.
+	answers string
 }
 
 func yes() *bool { v := true; return &v }
@@ -63,7 +65,11 @@ func topicServer(t *testing.T, listed string, sources map[string]*topicSource, t
 		if source.enabled != nil {
 			spec["enabled"] = *source.enabled
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "revision": source.published, "published": source.published, "deleted": source.deleted, "spec": spec})
+		answered := id
+		if source.answers != "" {
+			answered = source.answers
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": answered, "revision": source.published, "published": source.published, "deleted": source.deleted, "spec": spec})
 	}))
 	t.Cleanup(server.Close)
 	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Username: "user", Password: "secret",
@@ -125,6 +131,7 @@ func TestAnUnresolvedSourceIsNamedAndChangesNothing(t *testing.T) {
 		{"the reader is not released", map[string]*topicSource{"legacy": {topic: "legacy_events", published: 10}, "built_in_bk": {topic: "alarmd_event", published: 0}}, SourceReasonNone},
 		{"the reader is deleted", map[string]*topicSource{"legacy": {topic: "legacy_events", published: 10}, "built_in_bk": {topic: "alarmd_event", published: 4, deleted: true}}, SourceReasonNone},
 		{"a definition is unreadable", map[string]*topicSource{"legacy": {fail: true}, "built_in_bk": {topic: "alarmd_event", published: 4}}, SourceReasonUnreadable},
+		{"a definition answers for another source", map[string]*topicSource{"legacy": {topic: "legacy_events", published: 10}, "built_in_bk": {topic: "alarmd_event", published: 4, answers: "other"}}, SourceReasonUnreadable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, _ := topicServer(t, "legacy", tc.sources, "alarmd_event")
