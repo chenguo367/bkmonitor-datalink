@@ -6,6 +6,7 @@ package uq
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -274,5 +275,44 @@ func TestTraceAndOldQueryRunTogetherAndKeepLogProjection(t *testing.T) {
 	got, err := p.Query(context.Background(), request())
 	if err != nil || got.ContentOmitted != "log_masking_boundary" || strings.Contains(string(got.Native), "unmasked-log") || got.TracePage != nil {
 		t.Fatalf("old log query changed: %+v err=%v", got, err)
+	}
+}
+
+// pages reads consecutive pages of the same query as one answer: the rows
+// in order from the first offset, the total, and whether more remain.
+func TestTracePagesReadsConsecutivePagesAsOne(t *testing.T) {
+	var offsets []float64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		from, _ := body["from"].(float64)
+		offsets = append(offsets, from)
+		rows := []map[string]any{}
+		for i := 0; i < 2 && int(from)+i < 5; i++ {
+			rows = append(rows, map[string]any{"span_id": fmt.Sprintf("s%d", int(from)+i)})
+		}
+		encoded, _ := json.Marshal(map[string]any{"list": rows, "total": 5})
+		_, _ = w.Write(encoded)
+	}))
+	defer s.Close()
+	p, _ := NewWithQuerySource(traceFixture(s.URL, false), nil, "alarmd-sre")
+	defer p.Close()
+	request := traceRequest(false)
+	request.Body["limit"] = 2
+	receipt, err := p.TracePages(context.Background(), request, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := traceRows(receipt.Native)
+	if len(rows) != 5 || fmt.Sprint(offsets) != "[0 2 4]" || receipt.TracePage.Returned != 5 || receipt.TracePage.More || !receipt.Complete {
+		t.Fatalf("rows %d offsets %v page %+v complete %v, want all five over three pages", len(rows), offsets, receipt.TracePage, receipt.Complete)
+	}
+	offsets = nil
+	receipt, err = p.TracePages(context.Background(), request, 2)
+	if rows, _ = traceRows(receipt.Native); err != nil || len(rows) != 4 || !receipt.TracePage.More || receipt.Complete {
+		t.Fatalf("two pages: rows %d page %+v err %v, want four and more remaining", len(rows), receipt.TracePage, err)
+	}
+	if _, err := p.TracePages(context.Background(), request, MaxTracePages+1); code(err) != "invalid_input" {
+		t.Fatalf("pages past the bound: %v", err)
 	}
 }

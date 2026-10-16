@@ -156,19 +156,23 @@ type ResourceRequest struct {
 // Continue is empty, and ReadWith is the token this page was read with, to
 // read it again with a smaller limit.
 type ResourceReceipt struct {
-	Kind              string            `json:"kind"`
-	APIVersion        string            `json:"api_version"`
-	Namespace         string            `json:"namespace"`
-	ClusterWide       bool              `json:"cluster_wide"`
-	Items             []json.RawMessage `json:"items"`
-	Count             int               `json:"count"`
-	Continue          string            `json:"continue,omitempty"`
-	ResourceVersion   string            `json:"resource_version,omitempty"`
-	Truncated         bool              `json:"truncated"`
-	ItemsOmitted      int               `json:"items_omitted,omitempty"`
-	ReadWith          string            `json:"read_with,omitempty"`
-	OversizedItems    []string          `json:"oversized_items,omitempty"`
-	RedactionContract string            `json:"redaction_contract"`
+	Kind        string            `json:"kind"`
+	APIVersion  string            `json:"api_version"`
+	Namespace   string            `json:"namespace"`
+	ClusterWide bool              `json:"cluster_wide"`
+	Items       []json.RawMessage `json:"items"`
+	Count       int               `json:"count"`
+	Continue    string            `json:"continue,omitempty"`
+	// RemainingItems is how many objects the apiserver says are past this
+	// page, when it says; with Continue set and no count, more pages follow
+	// of a size it did not state.
+	RemainingItems    *int64   `json:"remaining_items,omitempty"`
+	ResourceVersion   string   `json:"resource_version,omitempty"`
+	Truncated         bool     `json:"truncated"`
+	ItemsOmitted      int      `json:"items_omitted,omitempty"`
+	ReadWith          string   `json:"read_with,omitempty"`
+	OversizedItems    []string `json:"oversized_items,omitempty"`
+	RedactionContract string   `json:"redaction_contract"`
 	// FingerprintScope is where a Secret's fingerprints compare; set on a
 	// Secret read only.
 	FingerprintScope string    `json:"fingerprint_scope,omitempty"`
@@ -250,7 +254,7 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		if err != nil {
 			return result, apiError(err)
 		}
-		objects, result.Continue, result.ResourceVersion = list.Items, list.GetContinue(), list.GetResourceVersion()
+		objects, result.Continue, result.ResourceVersion, result.RemainingItems = list.Items, list.GetContinue(), list.GetResourceVersion(), list.GetRemainingItemCount()
 	}
 	for cuts := 0; ; cuts++ {
 		fit, err := p.encodeResources(&result, kind, paths, objects, fingerprints)
@@ -269,7 +273,7 @@ func (p *Provider) ListResources(ctx context.Context, request ResourceRequest) (
 		if err != nil {
 			return result, apiError(err)
 		}
-		objects, result.Continue, result.ResourceVersion = list.Items, list.GetContinue(), list.GetResourceVersion()
+		objects, result.Continue, result.ResourceVersion, result.RemainingItems = list.Items, list.GetContinue(), list.GetResourceVersion(), list.GetRemainingItemCount()
 		result.Items, result.Count, result.OversizedItems = []json.RawMessage{}, 0, nil
 	}
 }

@@ -8,6 +8,10 @@
 # /dev/null.
 nonce=$1 t=$2
 shift 2
+# A command's output is read as it is written, so a timed-out command still
+# answers with what it printed. Python buffers a non-TTY stdout and loses
+# that buffer when the timer ends it; unbuffered, it has flushed every line.
+export PYTHONUNBUFFERED=1
 exec 3>&2 2>/dev/null
 if ! command -v sleep >/dev/null; then
 	printf '%s nosleep\n' "$nonce" >&3

@@ -4,6 +4,8 @@
 package pod
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -51,6 +53,9 @@ const (
 	MaxOutputCeiling   = 256 << 20
 	MaxStdinBytes      = 1 << 20
 	MaxPodsPerPage     = 500
+	// MaxLogLines and MaxLogWindow bound how far back one log read scans.
+	MaxLogLines  = 100000
+	MaxLogWindow = 7 * 24 * time.Hour
 )
 
 // DefaultNamespace is the namespace a request that names none reads.
@@ -543,7 +548,9 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 	if request.TailLines == 0 {
 		request.TailLines = 200
 	}
-	if request.TailLines < 1 || request.TailLines > 1000 || request.SinceSeconds < 0 || request.SinceSeconds > 86400 {
+	filtered := request.Contains != "" || !request.SinceTime.IsZero() || !request.UntilTime.IsZero()
+	if request.TailLines < 1 || request.TailLines > MaxLogLines || request.SinceSeconds < 0 || request.SinceSeconds > int64(MaxLogWindow/time.Second) ||
+		(request.SinceSeconds > 0 && !request.SinceTime.IsZero()) || (!request.UntilTime.IsZero() && request.UntilTime.Before(request.SinceTime)) {
 		return result, invalid("log window exceeds supported bounds")
 	}
 	limit, err := p.outputLimit(request.OutputBytes)
@@ -560,12 +567,28 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 	if request.SinceSeconds > 0 {
 		options.SinceSeconds = &request.SinceSeconds
 	}
+	if filtered {
+		// The scan is bounded by its lines and the read's deadline, not by
+		// bytes: only the kept lines are held.
+		options.LimitBytes = nil
+		options.Timestamps = !request.UntilTime.IsZero()
+		if !request.SinceTime.IsZero() {
+			since := metav1.NewTime(request.SinceTime)
+			options.SinceTime = &since
+		}
+	}
 	stream, err := p.options.Client.OpenLogs(ctx, request.Target.Namespace, request.Target.Pod, options)
 	if err != nil {
 		return result, apiError(err)
 	}
 	defer stream.Close()
-	data, readErr := io.ReadAll(io.LimitReader(stream, limit+1))
+	var data []byte
+	var readErr error
+	if filtered {
+		data, result.ScannedLines, result.MatchedLines, readErr = scanLogs(stream, request, limit)
+	} else {
+		data, readErr = io.ReadAll(io.LimitReader(stream, limit+1))
+	}
 	result.Truncated = int64(len(data)) > limit
 	if result.Truncated {
 		data = data[:limit]
@@ -581,6 +604,48 @@ func (p *Provider) Logs(ctx context.Context, request LogsRequest) (LogsReceipt, 
 		return result, &Error{Code: CodeTargetChanged, Message: "target identity changed while logs were read"}
 	}
 	return result, nil
+}
+
+// scanLogs keeps the lines of a log stream that the request's filters let
+// through, one past limit bytes at most so the caller sees the cut; it says
+// how many lines it scanned and kept. With UntilTime the stream carries
+// each line's timestamp, which decides and is then dropped.
+func scanLogs(stream io.Reader, request LogsRequest, limit int64) ([]byte, int64, int64, error) {
+	reader := bufio.NewReaderSize(stream, 64<<10)
+	var kept bytes.Buffer
+	var scanned, matched int64
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			scanned++
+			text := line
+			keep := true
+			if !request.UntilTime.IsZero() {
+				stamp, rest, found := strings.Cut(text, " ")
+				at, parseErr := time.Parse(time.RFC3339Nano, stamp)
+				if found && parseErr == nil {
+					text = rest
+					keep = !at.After(request.UntilTime)
+				}
+			}
+			if keep && request.Contains != "" {
+				keep = strings.Contains(text, request.Contains)
+			}
+			if keep {
+				matched++
+				kept.WriteString(text)
+				if int64(kept.Len()) > limit {
+					return kept.Bytes(), scanned, matched, nil
+				}
+			}
+		}
+		if err == io.EOF {
+			return kept.Bytes(), scanned, matched, nil
+		}
+		if err != nil {
+			return kept.Bytes(), scanned, matched, err
+		}
+	}
 }
 
 // String keeps a formatted Provider to its two plain settings: printed with

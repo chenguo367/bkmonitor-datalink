@@ -266,6 +266,12 @@ type LogsRequest struct {
 	SinceSeconds int64  `json:"since_seconds,omitempty"`
 	Previous     bool   `json:"previous,omitempty"`
 	OutputBytes  int64  `json:"output_bytes,omitempty"`
+	// Contains keeps only the lines holding it, and SinceTime and UntilTime
+	// only those written in that span; the lines are scanned here, as they
+	// stream, and only the kept ones are held.
+	Contains  string    `json:"contains,omitempty"`
+	SinceTime time.Time `json:"since_time,omitempty"`
+	UntilTime time.Time `json:"until_time,omitempty"`
 }
 type LogsReceipt struct {
 	Target            Target       `json:"target"`
@@ -277,6 +283,10 @@ type LogsReceipt struct {
 	EvidenceScope     string       `json:"evidence_scope"`
 	RedactionContract string       `json:"redaction_contract"`
 	ObservedAt        time.Time    `json:"observed_at"`
+	// ScannedLines and MatchedLines are what a filtered read went through
+	// and kept; absent on an unfiltered read.
+	ScannedLines int64 `json:"scanned_lines,omitempty"`
+	MatchedLines int64 `json:"matched_lines,omitempty"`
 }
 type ExecRequest struct {
 	// RequestID is the channel request the call came in on, so the receipt

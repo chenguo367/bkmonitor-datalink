@@ -300,6 +300,7 @@ func SREOperations(options SREOptions) []Operation {
 					next["continue"] = v.Continue
 					out.Next = []Call{{Operation: pod.OpListResources, Params: next, Reason: "读取下一页，直至 continue 为空。"}}
 				}
+				out.Summary = listSummary(v)
 				if len(v.OversizedItems) > 0 {
 					out.Limitations = append(out.Limitations, "Some objects were over the output bound alone and came back as their identity only (oversized_items); read them by name with paths.")
 				}
@@ -345,9 +346,22 @@ func SREOperations(options SREOptions) []Operation {
 				v, err := pods.Inspect(ctx, pod.TargetRequest{Target: podTarget(p)})
 				return wrapPod(v, err, err == nil)
 			}},
-		{ID: "pod.logs", Summary: "读取指定 Pod/container 身份的有界日志，执行前后复核容器变化；init 容器同样可读（pod.discover 的结果里标 init: true），previous 读它上一次运行的日志。", EvidenceScope: "sre_pod_logs", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": target, "tail_lines": {Type: "integer", Minimum: &positive, Maximum: &maxTail}, "since_seconds": {Type: "integer", Minimum: &positive, Maximum: &maxSince}, "previous": {Type: "boolean"}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput}}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.LogsReceipt{}),
+		{ID: "pod.logs", Summary: "读取指定 Pod/container 身份的有界日志，执行前后复核容器变化；init 容器同样可读（pod.discover 的结果里标 init: true），previous 读它上一次运行的日志。contains、since_time、until_time 在服务端逐行过滤，只回传匹配的行，并给出扫描与匹配行数；tail_lines 最多 100000 行，回看最多 7 天。", EvidenceScope: "sre_pod_logs", ExecutionPool: "sre", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits, Fields: map[string]Field{"target": target, "tail_lines": {Type: "integer", Minimum: &positive, Maximum: &maxTail}, "since_seconds": {Type: "integer", Minimum: &positive, Maximum: &maxSince}, "previous": {Type: "boolean"}, "output_bytes": {Type: "integer", Minimum: &positive, Maximum: &maxOutput},
+			"contains":   {Type: "string", MinLength: 1, MaxLength: 1024, Description: "keep only lines holding this text, scanned server-side"},
+			"since_time": {Type: "string", MaxLength: 64, Description: "RFC 3339; lines written at or after it"},
+			"until_time": {Type: "string", MaxLength: 64, Description: "RFC 3339; lines written at or before it"}}, Required: []string{"target"}, OutputSchema: SchemaOf(pod.LogsReceipt{}),
 			Run: func(ctx context.Context, p Params) Outcome {
-				v, err := pods.Logs(ctx, pod.LogsRequest{Target: podTarget(p), TailLines: int64(p.Int("tail_lines", 0)), SinceSeconds: int64(p.Int("since_seconds", 0)), Previous: p.Bool("previous"), OutputBytes: int64(p.Int("output_bytes", 0))})
+				request := pod.LogsRequest{Target: podTarget(p), TailLines: int64(p.Int("tail_lines", 0)), SinceSeconds: int64(p.Int("since_seconds", 0)), Previous: p.Bool("previous"), OutputBytes: int64(p.Int("output_bytes", 0)), Contains: p.String("contains")}
+				for key, into := range map[string]*time.Time{"since_time": &request.SinceTime, "until_time": &request.UntilTime} {
+					if value := p.String(key); value != "" {
+						at, err := time.Parse(time.RFC3339Nano, value)
+						if err != nil {
+							return Outcome{Error: &Failure{Code: "invalid_input", Message: key + " is not an RFC 3339 time"}}
+						}
+						*into = at
+					}
+				}
+				v, err := pods.Logs(ctx, request)
 				out := wrapPod(v, err, err == nil && !v.Truncated && !v.TargetChanged && v.EvidenceScope == "identity_verified_before_and_after")
 				if v.ObservedAfter == nil {
 					out.Limitations = append(out.Limitations, "Post-read target identity verification did not complete.")
@@ -501,6 +515,7 @@ func SREOperations(options SREOptions) []Operation {
 		return Availability{Available: true}
 	}
 	maxQueryTimeout := uq.MaxTimeout.Milliseconds()
+	maxTracePages := int64(uq.MaxTracePages)
 	queryResponseBytes := uq.DefaultResponseBytes
 	if queries != nil {
 		queryResponseBytes = queries.ResponseBytes()
@@ -545,11 +560,11 @@ func SREOperations(options SREOptions) []Operation {
 		return Availability{Reason: "uq_trace_unconfigured: register exact sre.uq.egresses trace_targets from the application datasource mapping"}
 	}
 	traceLimits := map[string]any{"wire_contract": "bkapm_raw_span_v1", "max_timeout_ms": uq.MaxTimeout.Milliseconds(), "max_window_seconds": int64(uq.MaxWindow / time.Second), "max_native_request_bytes": uq.MaxBodyBytes, "max_native_response_bytes": queryResponseBytes, "max_rows": uq.MaxTraceRows, "window_time_unit": "s", "span_time_unit": "us", "pagination": "explicit_native_offset; one_page_per_invocation", "authority": "deployment_operator_readonly; page_user_authorization_is_separate", "redaction_contract": redact.Contract, "scope": "registered_application_and_exact_table; no cross-application or retention expansion"}
-	ops = append(ops, Operation{ID: "uq.trace", Summary: "按登记应用与实际结果表转发原生 bkapm Span search/trace_id 查询，保留原始 Span、微秒时间和单页完整性。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: uq.MaxTimeout + 5*time.Second, Availability: traceAvailable, Limits: traceLimits,
-		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxQueryTimeout}}, Required: []string{"egress", "target", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
+	ops = append(ops, Operation{ID: "uq.trace", Summary: "按登记应用与实际结果表转发原生 bkapm Span search/trace_id 查询，保留原始 Span、微秒时间和单页完整性；pages 一次连续读至多 10 页并合成一份应答。", EvidenceScope: "sre_uq_native_trace", ExecutionPool: "sre", ExecutionTimeout: MaxExecutionTimeout, Availability: traceAvailable, Limits: traceLimits,
+		Fields: map[string]Field{"egress": text, "target": {Type: "string", Source: "uq.egresses trace_targets[].name", MinLength: 1, MaxLength: 256}, "body": {Type: "object", AdditionalProperties: true}, "timeout_ms": {Type: "integer", Minimum: &nonnegative, Maximum: &maxQueryTimeout}, "pages": {Type: "integer", Minimum: &positive, Maximum: &maxTracePages, Description: "read this many consecutive pages of the same query as one answer"}}, Required: []string{"egress", "target", "body"}, OutputSchema: SchemaOf(uq.Receipt{}),
 		Run: func(ctx context.Context, p Params) Outcome {
 			body, _ := p["body"].(map[string]any)
-			v, err := queries.Trace(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))})
+			v, err := queries.TracePages(ctx, uq.TraceRequest{Egress: p.String("egress"), Target: p.String("target"), Body: body, TimeoutMS: int64(p.Int("timeout_ms", 0))}, p.Int("pages", 1))
 			return wrapQuery(v, err)
 		},
 	})
@@ -630,6 +645,22 @@ func SREOperations(options SREOptions) []Operation {
 		},
 	})
 	return ops
+}
+
+// listSummary is a list page's one line: how many it holds and whether, and
+// how many, objects are past it, so a reader does not take a first page for
+// the whole list.
+func listSummary(v pod.ResourceReceipt) string {
+	switch {
+	case v.Truncated:
+		return fmt.Sprintf("本页 %d 个对象；超出应答上限漏了 %d 个，按 next_call 用更小的页再读。", v.Count, v.ItemsOmitted)
+	case v.Continue != "" && v.RemainingItems != nil:
+		pages := (*v.RemainingItems + int64(max(1, v.Count)) - 1) / int64(max(1, v.Count))
+		return fmt.Sprintf("本页 %d 个对象；还有 %d 个、约 %d 页，按 next_call 续读。", v.Count, *v.RemainingItems, pages)
+	case v.Continue != "":
+		return fmt.Sprintf("本页 %d 个对象；还有更多页（apiserver 未给总数），按 next_call 续读直至 continue 为空。", v.Count)
+	}
+	return fmt.Sprintf("共 %d 个对象，已全部列出。", v.Count)
 }
 
 func podTarget(p Params) pod.Target {

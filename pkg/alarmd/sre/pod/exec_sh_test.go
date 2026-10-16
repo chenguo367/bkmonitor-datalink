@@ -711,3 +711,21 @@ func TestExecUnderDashWithoutSetsidIsShPID(t *testing.T) {
 		t.Fatalf("dash run: %+v %v", result, err)
 	}
 }
+
+// The command runs with Python's output unbuffered, so a command the timer
+// ends has already flushed what it printed; the supervisor reads output as
+// it is written. Before, a timed-out Python script answered with nothing.
+func TestTheCommandRunsWithUnbufferedPythonOutput(t *testing.T) {
+	_, stdout, _ := supervise(t, recordDeadline, "/bin/sh", "-c", `printf '%s' "$PYTHONUNBUFFERED"`)
+	if stdout != "1" {
+		t.Fatalf("PYTHONUNBUFFERED in the command = %q, want 1", stdout)
+	}
+}
+
+// What a command printed before the timer ended it is in its output.
+func TestATimedOutCommandKeepsWhatItPrinted(t *testing.T) {
+	records, stdout, _ := supervise(t, "1", "/bin/sh", "-c", `echo before; sleep 30; echo after`)
+	if !strings.Contains(stdout, "before") || strings.Contains(stdout, "after") || !strings.Contains(strings.Join(records, "\n"), "expired") {
+		t.Fatalf("stdout %q records %v, want the line printed before the timer and an expired record", stdout, records)
+	}
+}
