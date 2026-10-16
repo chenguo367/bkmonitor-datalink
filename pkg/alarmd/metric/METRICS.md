@@ -341,6 +341,10 @@ What the latest CMDB index load read and could not use, set on every refresh: ho
 
 Service instances in the in-memory CMDB index the target filter decides on; zero while a series names an instance is an instance cache nobody writes, and such series are admitted with the gap named.
 
+## alarmd_config_unknown_keys
+
+Keys in the configuration file that no field reads, retired keys and misspellings: ignored, named on stderr at startup, never a reason to refuse to start. Non-zero means the chart renders something this image no longer reads.
+
 ## alarmd_container_cpu_cores
 
 Labels: `source`

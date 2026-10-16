@@ -199,8 +199,20 @@ func TestLoadRefusesWrittenCapacityBudgets(t *testing.T) {
 		"tick interval":   "  scheduler:\n    tick_interval: 1s\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("worker")+written), nil); err == nil {
-				t.Fatal("a written capacity budget must be refused, not obeyed")
+			cfg, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("worker")+written), nil)
+			if err != nil {
+				t.Fatalf("a written capacity budget refused the load: %v", err)
+			}
+			if len(cfg.UnknownKeys) != 1 {
+				t.Fatalf("ignored keys = %q, want the written budget, not obeyed", cfg.UnknownKeys)
+			}
+			plain, err := LoadWithRoles(writeConfig(t, validGoAccessRuntimeConfigYAML("worker")), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PhaseTwo.Scheduler != plain.PhaseTwo.Scheduler || cfg.PhaseTwo.Coordinator != plain.PhaseTwo.Coordinator ||
+				cfg.PhaseTwo.Ownership != plain.PhaseTwo.Ownership {
+				t.Fatal("a written capacity budget was obeyed")
 			}
 		})
 	}
@@ -311,9 +323,7 @@ func TestStateKeyLifetimesAreDerivedAndNotValuesKeys(t *testing.T) {
 			cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(), StateMaxTTL)
 	}
 	for _, key := range []string{"restart_margin", "min_ttl", "max_ttl"} {
-		if _, err := LoadWithRoles(writeConfig(t, "redis:\n  "+key+": 10m\n"), nil); err == nil || !strings.Contains(err.Error(), key) {
-			t.Fatalf("redis.%s in a values file: error = %v, want it refused by name", key, err)
-		}
+		requireIgnored(t, unknownKeysOf(t, "redis:\n  "+key+": 10m\n"), key)
 	}
 }
 
@@ -327,8 +337,5 @@ func TestTheOutputMessageBoundIsNotAValuesKey(t *testing.T) {
 		t.Fatalf("output bound = %d, want %d and at least the evidence bound %d",
 			cfg.Kafka.TriggerEvent.MaxMessageBytes, defaultOutputMaxMessageBytes, cfg.Limits.Trigger.MaxEvidenceBytesPerEvent)
 	}
-	if _, err := LoadWithRoles(writeConfig(t, "kafka:\n  trigger_event:\n    max_message_bytes: 1048576\n"), nil); err == nil ||
-		!strings.Contains(err.Error(), "max_message_bytes") {
-		t.Fatalf("kafka.trigger_event.max_message_bytes in a values file: error = %v, want it refused by name", err)
-	}
+	requireIgnored(t, unknownKeysOf(t, "kafka:\n  trigger_event:\n    max_message_bytes: 1048576\n"), "max_message_bytes")
 }
