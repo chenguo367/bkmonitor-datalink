@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -29,26 +30,23 @@ import (
 )
 
 const (
-	Version          = "alarmd-ob/v1"
-	MaxRequestBytes  = 64 << 10
-	MaxResponseBytes = 2 << 20
-	RequestTimeout   = 3 * time.Second
-	// EnvelopeMaxBytes is the transport ceiling. Each operation keeps its
-	// own smaller request bound; existing reads remain at MaxRequestBytes.
-	EnvelopeMaxBytes    = 1 << 20
+	Version         = "alarmd-ob/v1"
+	MaxRequestBytes = 64 << 10
+	RequestTimeout  = 3 * time.Second
+	// EnvelopeMaxBytes is the transport ceiling, large enough for a whole
+	// chart's manifests in one dry run or apply. Each operation keeps its
+	// own request bound; discovery and description stay at MaxRequestBytes.
+	EnvelopeMaxBytes    = 16 << 20
 	TransportMargin     = 5 * time.Second
 	MaxExecutionTimeout = 2 * time.Minute
 	// InvokesPerSessionPerMinute is one session's budget of executed
-	// invocations in a clock minute. Every native invocation is one whole
-	// fleet snapshot read on the replica that answers, bounded only per
-	// request (MaxResponseBytes, RequestTimeout) and by the one execution
-	// slot; nothing bounded how many of them one credential could line up,
-	// so a looping client held the slot against every other session for as
-	// long as it looped. An investigation asks a handful of questions a
-	// minute; thirty is well above that and caps a loop at thirty
-	// snapshot reads a minute. Discovery, description, refused inputs and
-	// refused budgets do not spend it: they read no evidence.
-	InvokesPerSessionPerMinute = 30
+	// invocations in a clock minute. The channel's traffic is a few people
+	// and agents, nothing next to the business queries, and it has no
+	// concurrency bound; this is only the stop for a client looping without
+	// pause. Ten a second is far above any person's or agent's pace (a
+	// busy investigation runs a few a minute). Discovery, description and
+	// refused inputs do not spend it: they read no evidence.
+	InvokesPerSessionPerMinute = 600
 	// sessionWindowSweep is how many sessions the gate remembers before it
 	// forgets the ones whose minute has passed. It is not a bound: a sweep
 	// forgets only past minutes, so a thousand sessions all live in the
@@ -58,6 +56,34 @@ const (
 	// carrying every session that ever was for the life of the process.
 	sessionWindowSweep = 1024
 )
+
+// The response bound is the one thing that keeps a single request from
+// taking the process's memory: an answer sits in memory about three times
+// over while it is built, encoded and written. It is a 32nd of the
+// container's memory, between 16 MiB and 256 MiB, so a handful of the
+// largest answers at once stay well inside the pod: 32 MiB at 1 GiB, 64 MiB
+// at 2 GiB, 256 MiB from 8 GiB.
+const (
+	responseShare      = 32
+	minResponseBytes   = 16 << 20
+	MaxResponseCeiling = 256 << 20
+)
+
+var maxResponseBytes atomic.Int64
+
+func init() { maxResponseBytes.Store(int64(ResponseCap(2 << 30))) }
+
+// ResponseCap is the response bound for a container of memoryLimit bytes.
+func ResponseCap(memoryLimit uint64) int {
+	return int(min(max(memoryLimit/responseShare, minResponseBytes), MaxResponseCeiling))
+}
+
+// SetMemoryLimit sets the response bound from the container's memory, once
+// at start before the channel is built.
+func SetMemoryLimit(memoryLimit uint64) { maxResponseBytes.Store(int64(ResponseCap(memoryLimit))) }
+
+// MaxResponseBytes is the most one answer may carry.
+func MaxResponseBytes() int { return int(maxResponseBytes.Load()) }
 
 type Authorizer interface {
 	Authenticate(context.Context, string) (cliauth.Session, error)
@@ -178,20 +204,14 @@ type Options struct {
 	RouteControlDefaults bool
 	RequireWorkerTarget  map[string]bool
 	Roles                roles.Set
-	// FrontCores is the CPU limit the front read budget is a share of;
-	// nil is GOMAXPROCS, which automaxprocs sets from the cgroup quota.
-	FrontCores func() int
 }
 type Channel struct {
 	*EvidenceExecutor
-	options   Options
-	httpSlots chan struct{}
+	options Options
 	// windows is each session's spend of its invocation budget in the
 	// current clock minute, keyed by session ID; see allowInvoke.
 	windowsMu sync.Mutex
 	windows   map[string]*sessionWindow
-	// front is the charged front reads' spend this minute.
-	front frontBudget
 }
 
 // sessionWindow is one session's count of executed invocations in one clock
@@ -203,10 +223,8 @@ type sessionWindow struct {
 
 // allowInvoke spends one of the session's invocations for this minute and
 // says whether there was one to spend, with the seconds left in the minute
-// when there was not. Same shape as the authorization gate's rate window,
-// per session rather than per process, because the thing being protected --
-// the one execution slot and the snapshot read behind it -- is shared by
-// every session, and one session must not be able to spend it all.
+// when there was not: the stop for a client looping without pause, per
+// session.
 func (c *Channel) allowInvoke(sessionID string) (allowed bool, retryAfter time.Duration) {
 	now := c.options.Now()
 	minute := now.Unix() / 60
@@ -309,7 +327,7 @@ func New(options Options) (*Channel, error) {
 	} else if executor.options.EnvironmentID != options.EnvironmentID || executor.options.Replica != options.Replica || executor.options.Incarnation != options.Incarnation {
 		return nil, errors.New("OB channel and evidence executor identities must match")
 	}
-	c := &Channel{EvidenceExecutor: executor, options: options, httpSlots: make(chan struct{}, 4), windows: make(map[string]*sessionWindow)}
+	c := &Channel{EvidenceExecutor: executor, options: options, windows: make(map[string]*sessionWindow)}
 	return c, nil
 }
 
@@ -326,9 +344,8 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
 	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout + TransportMargin))
-	admitted := false
-	// The slot and deadlines include draining and flushing, not just the
-	// handler body. Global deadlines would break the shared h2c streams.
+	// The deadlines include draining and flushing, not just the handler
+	// body. Global deadlines would break the shared h2c streams.
 	defer func() {
 		if r.Body != nil {
 			_ = r.Body.Close()
@@ -336,18 +353,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = controller.Flush()
 		_ = controller.SetReadDeadline(time.Time{})
 		_ = controller.SetWriteDeadline(time.Time{})
-		if admitted {
-			<-c.httpSlots
-		}
 	}()
-	select {
-	case c.httpSlots <- struct{}{}:
-		admitted = true
-	default:
-		_ = controller.SetReadDeadline(time.Now())
-		fail(429, "request_budget_exceeded", "OB channel request slots are busy.")
-		return
-	}
 	if r.Method != http.MethodPost {
 		fail(405, "method_not_allowed", "Use POST for the OB channel.")
 		return
@@ -464,8 +470,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The session's own budget, spent only by an invocation that would
 	// execute, here or on the replica it targets: a refused input, an
 	// unavailable operation or a missing route cost nothing and count for
-	// nothing. Spent before the slot, so a session over budget never contends
-	// for it, and before admission, so it never renews. The target executes
+	// nothing. Spent before admission, so a session over budget never renews. The target executes
 	// without the session and spends none, so a read routed back to this
 	// replica is counted once. A target that answers unavailable has still
 	// been asked, and the read is counted.
@@ -520,12 +525,6 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if overBudget() {
 		return
 	}
-	release, refusal := c.executionSlots(op).acquire(ctx, RequestTimeout)
-	if release == nil {
-		fail(429, "request_budget_exceeded", "OB evidence readers are busy: "+refusal+"; retry this read later.")
-		return
-	}
-	defer release()
 	// Final admission checks revocation again. Discovery, invalid inputs and
 	// rejected budgets do not count as activity and cannot prolong a session.
 	session, err = c.options.Auth.Admit(ctx, session, req.Renew)
@@ -609,7 +608,7 @@ func (c *EvidenceExecutor) prepareResponse(response Response) Response {
 		response.Next = []Call{}
 	}
 	encoded, err := json.Marshal(response)
-	if err != nil || len(encoded) > MaxResponseBytes {
+	if err != nil || len(encoded) > MaxResponseBytes() {
 		response.Status = "error"
 		response.Summary = "Evidence exceeds the response budget or cannot be encoded."
 		response.Result = nil

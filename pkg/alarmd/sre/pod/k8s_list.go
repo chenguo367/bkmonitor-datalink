@@ -29,7 +29,7 @@ const (
 	// DefaultResourceLimit and MaxResourceLimit bound one page: what the
 	// apiserver returns and this process decodes for one call.
 	DefaultResourceLimit = 50
-	MaxResourceLimit     = 100
+	MaxResourceLimit     = 500
 	// MaxResourcePaths bounds a projection.
 	MaxResourcePaths = 32
 	maxPathBytes     = 256

@@ -368,8 +368,7 @@ func openProductionControlRoleBundle(
 	var channelBinding *ChannelBinding
 	if external.RoleRuntime != nil {
 		channelBinding = &ChannelBinding{Native: native, Catalog: core.Repository, Progress: core.Progress,
-			ReadMemory: observationHold(observationMemory, memoryline.ConsumerChannelReads),
-			Settings:   settings, Control: binding, Roles: cfg.EffectiveRoles()}
+			Settings: settings, Control: binding, Roles: cfg.EffectiveRoles()}
 		native, publicRestricted = external.RoleRuntime.Channel.Handler, external.RoleRuntime.Channel.Restricted
 	} else {
 		native, closeCLI, publicRestricted = buildPhaseTwoCLI(cfg, native, core.Repository, core.Progress, settings, facts, binding)

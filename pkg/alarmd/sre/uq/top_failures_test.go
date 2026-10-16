@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// testResponseBytes is the response bound the page-size tests set, so a
+// page past it is cheap to send.
+const testResponseBytes = 1 << 20
+
 // failureServer answers raw Span pages from rows, recording each body.
 type failureServer struct {
 	mu     sync.Mutex
@@ -158,8 +162,8 @@ func TestTheFailurePredicateFollowsTheRequest(t *testing.T) {
 	}
 }
 
-// At most five pages are read; when more failures exist the answer says it
-// is a sample, and a total at the backend's cap is a lower bound.
+// At most ten pages are read; when more failures may exist the answer says
+// it is a sample, and a total at the backend's cap is a lower bound.
 func TestALargeFailureSetIsSampledAndSaysSo(t *testing.T) {
 	base := failureNow.Add(-time.Hour).UnixMilli()
 	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
@@ -178,7 +182,7 @@ func TestALargeFailureSetIsSampledAndSaysSo(t *testing.T) {
 	pages := len(server.bodies)
 	server.mu.Unlock()
 	if pages != TopFailuresPages || answer.Scanned != TopFailuresPages*MaxTraceRows || !answer.Sampled || !answer.TotalAtLeast || answer.Total != 10000 {
-		t.Fatalf("pages %d answer %+v, want five pages, sampled, total at least 10000", pages, answer)
+		t.Fatalf("pages %d answer %+v, want ten pages, sampled, total at least 10000", pages, answer)
 	}
 }
 
@@ -204,13 +208,15 @@ func TestAnUnreadableWindowIsRefusedBeforeAnyCall(t *testing.T) {
 	server := &failureServer{rows: func(int) ([]map[string]any, int) { return nil, 0 }}
 	p := failureProvider(t, server, false)
 	for name, request := range map[string]TopFailuresRequest{
-		"unlisted window":      {Window: "24h"},
-		"local time":           {End: "2026-10-15T21:10:00+08:00"},
-		"no zone":              {End: "2026-10-15T13:10:00"},
-		"future":               {End: "2026-10-15T14:10:00Z"},
-		"end past retention":   {End: "2026-10-08T13:00:00Z"},
-		"start past retention": {End: "2026-10-08T14:00:00Z", Window: "6h"},
-		"not a time":           {End: "yesterday"},
+		"window past retention": {Window: "8d"},
+		"window under a minute": {Window: "30s"},
+		"window not a duration": {Window: "a week"},
+		"local time":            {End: "2026-10-15T21:10:00+08:00"},
+		"no zone":               {End: "2026-10-15T13:10:00"},
+		"future":                {End: "2026-10-15T14:10:00Z"},
+		"end past retention":    {End: "2026-10-08T13:00:00Z"},
+		"start past retention":  {End: "2026-10-08T14:00:00Z", Window: "6h"},
+		"not a time":            {End: "yesterday"},
 	} {
 		request.Egress, request.Target, request.Now = "primary", "fixture", failureNow
 		if _, err := p.TopFailures(context.Background(), request); err == nil || !strings.Contains(err.Error(), "invalid_input") {
@@ -225,6 +231,20 @@ func TestAnUnreadableWindowIsRefusedBeforeAnyCall(t *testing.T) {
 	server.mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("calls = %d, want only the valid window sent", calls)
+	}
+}
+
+// Any window from a minute to the retention is read: minutes, hours and
+// whole days, the start that far before the end. Before, only 1h and 6h
+// were.
+func TestAnyWindowUpToTheRetentionIsRead(t *testing.T) {
+	server := &failureServer{rows: func(int) ([]map[string]any, int) { return nil, 0 }}
+	p := failureProvider(t, server, false)
+	for window, length := range map[string]time.Duration{"90m": 90 * time.Minute, "24h": 24 * time.Hour, "3d": 72 * time.Hour, "7d": TraceRetention} {
+		answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Window: window, Now: failureNow})
+		if err != nil || !answer.End.Equal(failureNow) || !answer.Start.Equal(failureNow.Add(-length)) {
+			t.Errorf("window %s: start %v end %v err %v, want %v before %v", window, answer.Start, answer.End, err, length, failureNow)
+		}
 	}
 }
 
@@ -259,7 +279,7 @@ func TestAPageTooLargeIsReadInSmallerPages(t *testing.T) {
 		limit, _ := body["limit"].(float64)
 		from, _ := body["from"].(float64)
 		if limit > 250 {
-			_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+			_, _ = w.Write([]byte(strings.Repeat(" ", testResponseBytes+16)))
 			return
 		}
 		rows := []map[string]any{}
@@ -274,6 +294,7 @@ func TestAPageTooLargeIsReadInSmallerPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.SetResponseBytes(testResponseBytes)
 	defer p.Close()
 	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
 	if err != nil {
@@ -292,13 +313,14 @@ func TestAPageTooLargeIsReadInSmallerPages(t *testing.T) {
 // a sample rather than a complete answer.
 func TestAReadThatStopsShortIsASample(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+		_, _ = w.Write([]byte(strings.Repeat(" ", testResponseBytes+16)))
 	}))
 	defer s.Close()
 	p, err := NewWithQuerySource(traceFixture(s.URL+"/prefix", false), nil, "fixture-runtime-source")
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.SetResponseBytes(testResponseBytes)
 	defer p.Close()
 	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
 	stopped := false
@@ -322,7 +344,7 @@ func TestShrunkPagesStopAtTheRequestCap(t *testing.T) {
 		limit, _ := body["limit"].(float64)
 		from, _ := body["from"].(float64)
 		if limit > 100 {
-			_, _ = w.Write([]byte(strings.Repeat(" ", MaxResponseBytes+16)))
+			_, _ = w.Write([]byte(strings.Repeat(" ", testResponseBytes+16)))
 			return
 		}
 		rows := []map[string]any{}
@@ -337,6 +359,7 @@ func TestShrunkPagesStopAtTheRequestCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.SetResponseBytes(testResponseBytes)
 	defer p.Close()
 	answer, err := p.TopFailures(context.Background(), TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
 	if err != nil || requests != TopFailuresRequests || answer.Pages != TopFailuresRequests || !answer.Sampled || answer.Scanned >= 5000 {

@@ -18,19 +18,19 @@ import (
 // TopFailuresPages bounds one read: at most this many raw Span pages of
 // MaxTraceRows each are scanned, and a larger failure set is answered as a
 // sample.
-const TopFailuresPages = 5
+const TopFailuresPages = 10
 
 // TopFailuresRows is the most failing spans one read scans; TopFailuresRequests
 // the most requests it makes, pages shrunk for the response budget included;
 // topFailuresMinRows the smallest page it shrinks to.
 const (
 	TopFailuresRows     = TopFailuresPages * MaxTraceRows
-	TopFailuresRequests = 20
+	TopFailuresRequests = 40
 	topFailuresMinRows  = 100
 )
 
 // TopFailuresGroups is how many groups an answer lists.
-const TopFailuresGroups = 20
+const TopFailuresGroups = 50
 
 // TraceRetention is how far back a window may start: the trace store keeps
 // spans this long.
@@ -44,7 +44,25 @@ const traceTotalCap = 10000
 // channel scrubs and bounds it again for its reader.
 const topFailuresMessageBytes = 1024
 
-var topFailuresWindows = map[string]time.Duration{"1h": time.Hour, "6h": 6 * time.Hour}
+// topFailuresWindow reads a window: a duration such as 90m, 6h or 36h, or
+// whole days such as 3d, from a minute up to the trace retention.
+func topFailuresWindow(window string) (time.Duration, bool) {
+	var length time.Duration
+	if days, found := strings.CutSuffix(window, "d"); found {
+		n, err := strconv.Atoi(days)
+		if err != nil {
+			return 0, false
+		}
+		length = time.Duration(n) * 24 * time.Hour
+	} else {
+		parsed, err := time.ParseDuration(window)
+		if err != nil {
+			return 0, false
+		}
+		length = parsed
+	}
+	return length, length >= time.Minute && length <= TraceRetention
+}
 
 // TopFailuresRequest names a registered trace target and the window to read
 // its failing server spans over: the hour or six hours before End (RFC 3339
@@ -108,9 +126,9 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 	if window == "" {
 		window = "1h"
 	}
-	length, ok := topFailuresWindows[window]
+	length, ok := topFailuresWindow(window)
 	if !ok {
-		return answer, fail("invalid_input", "window must be 1h or 6h.")
+		return answer, fail("invalid_input", "window must be a duration such as 90m, 6h or 3d, from 1m up to the 7 day trace retention.")
 	}
 	now := request.Now
 	if now.IsZero() {
@@ -207,8 +225,9 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 	}
 	answer.TotalAtLeast = answer.Total >= traceTotalCap
 	// A read that stopped short of the failures is a sample, whatever total
-	// it saw.
-	answer.Sampled = int64(answer.Scanned) < answer.Total || stopped
+	// it saw; so is one whose total is the backend's cap, past which there
+	// may be more than it read.
+	answer.Sampled = int64(answer.Scanned) < answer.Total || stopped || answer.TotalAtLeast
 	if answer.Sampled {
 		answer.Limitations = append(answer.Limitations, fmt.Sprintf("sampled: the %d most recent failing spans were scanned; groups, counts, percentiles and first_seen are over the scanned part only", answer.Scanned))
 	}

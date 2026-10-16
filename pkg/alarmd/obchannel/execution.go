@@ -106,11 +106,6 @@ func (c *EvidenceExecutor) ExecuteEvidence(ctx context.Context, invocation Invoc
 	if ctx.Err() != nil {
 		return fail("request_timeout", "Evidence execution context ended before execution.")
 	}
-	release, refusal := c.slots.acquire(ctx, RequestTimeout)
-	if release == nil {
-		return fail("request_budget_exceeded", "Target evidence readers are busy: "+refusal+"; retry this read later.")
-	}
-	defer release()
 	return c.prepareResponse(c.run(ctx, op, invocation.Params, invocation.Target, meta))
 }
 

@@ -480,7 +480,7 @@ func TestConcurrentRequestsAndBudgets(t *testing.T) {
 	}
 	close(unblock)
 	done.Wait()
-	for _, request := range []ExecRequest{{Target: target}, {Target: target, Argv: []string{"true"}, Stdin: strings.Repeat("x", 32<<10+1)}, {Target: target, Argv: []string{"true"}, TimeoutMS: 30001}, {Target: target, Argv: []string{"true"}, OutputBytes: 512<<10 + 1}} {
+	for _, request := range []ExecRequest{{Target: target}, {Target: target, Argv: []string{"true"}, Stdin: strings.Repeat("x", MaxStdinBytes+1)}, {Target: target, Argv: []string{"true"}, TimeoutMS: MaxExecTimeout.Milliseconds() + 1}, {Target: target, Argv: []string{"true"}, OutputBytes: DefaultOutputBytes + 1}} {
 		_, err := provider.Exec(context.Background(), request)
 		requireCode(t, err, CodeInvalidRequest)
 	}

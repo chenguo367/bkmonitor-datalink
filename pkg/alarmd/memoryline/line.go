@@ -72,14 +72,11 @@ const (
 	// asks for reads whole: the objects route, the diagnosis, the strategy
 	// standing. The verdict scrape's read does not ask.
 	ConsumerFleetView Consumer = "fleet_view"
-	// ConsumerChannelReads is the OB channel's reads while they run: each
-	// holds up to one response's bytes, and how many run at once follows.
-	ConsumerChannelReads Consumer = "channel_reads"
 )
 
 // Consumers is every consumer, in the order they are reported.
 var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds,
-	ConsumerFleetRestore, ConsumerDiagnosisProgress, ConsumerFleetView, ConsumerChannelReads}
+	ConsumerFleetRestore, ConsumerDiagnosisProgress, ConsumerFleetView}
 
 // Budget is one detection budget as the line reads it: its size - the most
 // it can come to hold, a cache's working set rather than its ceiling - and

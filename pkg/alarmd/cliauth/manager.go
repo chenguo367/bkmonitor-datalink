@@ -50,9 +50,16 @@ const (
 	// device that stopped asking: a month covers a holiday and not a
 	// forgotten laptop.
 	PairingIdleLifetime = 30 * 24 * time.Hour
-	// MaxPairings bounds the renewal credentials one environment holds. Past
-	// it an exchange still logs in, without renewal, and says so.
-	MaxPairings = 64
+	// MaxPairings bounds the renewal credentials one environment holds, a
+	// few hundred bytes of Redis each. Past it an exchange still logs in,
+	// without renewal, and says so.
+	MaxPairings = 1024
+	// AuthEventsPerMinute is each authorization route's rate per replica:
+	// grants, exchanges, renewals and named grants. The secrets are random
+	// and long, so the rate does not stand between them and a guess; it only
+	// stops a client looping without pause, at ten a second, far above
+	// people and agents logging in or renewing together.
+	AuthEventsPerMinute = 600
 )
 
 // ValidScope is whether an operation may require scope: there is one.
@@ -171,7 +178,6 @@ type Manager struct {
 	origin           string
 	adminHash        [sha256.Size]byte
 	now              func() time.Time
-	httpSlots        chan struct{}
 	limitMu          sync.Mutex
 	grantWindow      rateWindow
 	exchangeWindow   rateWindow
@@ -215,7 +221,7 @@ func New(o Options) (*Manager, error) {
 		environmentID: o.EnvironmentID, environmentName: o.EnvironmentName,
 		publicBaseURL: publicBaseURL, origin: origin,
 		adminHash: sha256.Sum256([]byte(o.AdminKey)),
-		now:       o.Now, httpSlots: make(chan struct{}, 4),
+		now:       o.Now,
 	}, nil
 }
 

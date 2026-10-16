@@ -33,7 +33,13 @@ const channelVersion = "alarmd-ob/v1"
 // session, execution and management included. The identifier is historical.
 const sessionScope = "deployment_ops_readonly"
 
-const maxResponse = 8 << 20
+// maxResponse is the largest answer the CLI reads: the channel's own
+// ceiling, a 32nd of the deployment's pod memory capped at 256 MiB.
+const maxResponse = 256<<20 + 64<<10
+
+// maxInputBytes is the largest request the CLI sends: the channel's
+// envelope, a whole chart's manifests in one call.
+const maxInputBytes = 16 << 20
 
 // requestNotSent marks failures that happen before the channel can receive
 // an invocation. All other transport or response failures leave exec unknown.

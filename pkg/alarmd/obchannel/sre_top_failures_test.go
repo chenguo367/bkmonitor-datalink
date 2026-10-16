@@ -38,7 +38,7 @@ func TestTopFailuresAreScrubbedAndBoundedForTheReader(t *testing.T) {
 	defer queries.Close()
 	c := testChannel(t, &testAuth{}, SREOperations(SREOptions{Queries: queries, Scrubber: redact.New("runtime-credential")})...)
 	_, description := call(t, c, envelope(c, "describe", OpTraceTopFailures, nil))
-	if desc := description.Result.(map[string]any); desc["availability"].(map[string]any)["available"] != true || desc["limits"].(map[string]any)["max_pages"] != float64(5) {
+	if desc := description.Result.(map[string]any); desc["availability"].(map[string]any)["available"] != true || desc["limits"].(map[string]any)["max_pages"] != float64(uq.TopFailuresPages) {
 		t.Fatalf("description = %+v", desc)
 	}
 	status, out := call(t, c, envelope(c, "invoke", OpTraceTopFailures, Params{"egress": "native", "target": "fixture"}))

@@ -157,7 +157,7 @@ func TestAResourceListIsClusterWideUnlessANamespaceIsNamed(t *testing.T) {
 	for _, request := range []ResourceRequest{
 		{Kind: "Pod", Namespace: "ns1", Name: "p1", LabelSelector: "app=x"},
 		{Kind: "Pod", Name: "p1"},
-		{Kind: "Pod", Limit: 101},
+		{Kind: "Pod", Limit: MaxResourceLimit + 1},
 		{Kind: "Pod", LabelSelector: "app in (x"},
 		{Kind: "Pod", Namespace: "Not_A_Namespace"},
 		{Kind: "Pod", Paths: []string{"status..phase"}},

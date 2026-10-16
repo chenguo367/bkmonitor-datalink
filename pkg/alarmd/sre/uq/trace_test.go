@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // All identifiers below are synthetic fixtures, never deployment evidence.
@@ -154,9 +153,9 @@ func TestTraceRejectedBodiesDoNoIO(t *testing.T) {
 		{"offset", "invalid_input", func(r *TraceRequest) { r.Body["from"] = -1 }},
 		{"fractional limit", "uq_trace_page_exceeded", func(r *TraceRequest) { r.Body["limit"] = json.Number("2.5") }},
 		{"timestamp ms", "invalid_input", func(r *TraceRequest) { r.Body["start_time"] = "1700000000000" }},
-		{"24h window", "uq_window_exceeded", func(r *TraceRequest) { r.Body["end_time"] = "1700086401" }},
+		{"30 day window", "uq_window_exceeded", func(r *TraceRequest) { r.Body["end_time"] = "1702592001" }},
 		{"reversed window", "uq_window_exceeded", func(r *TraceRequest) { r.Body["start_time"] = "1700000061" }},
-		{"timeout", "invalid_input", func(r *TraceRequest) { r.TimeoutMS = 30001 }},
+		{"timeout", "invalid_input", func(r *TraceRequest) { r.TimeoutMS = MaxTimeout.Milliseconds() + 1 }},
 		{"request budget", "uq_request_bytes_exceeded", func(r *TraceRequest) { traceQuery(r)["query_string"] = strings.Repeat("x", MaxBodyBytes) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,7 +248,7 @@ func TestTraceTargetConfigurationAndDiscoveryCopies(t *testing.T) {
 	}
 }
 
-func TestTraceAndOldQueryShareTransportBudgetButKeepLogProjection(t *testing.T) {
+func TestTraceAndOldQueryRunTogetherAndKeepLogProjection(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/query/ts/raw" {
@@ -261,12 +260,12 @@ func TestTraceAndOldQueryShareTransportBudgetButKeepLogProjection(t *testing.T) 
 	defer s.Close()
 	p, _ := NewWithQuerySource(traceFixture(s.URL, false), nil, "alarmd-sre")
 	defer p.Close()
-	p.wait = 50 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { _, err := p.Trace(context.Background(), traceRequest(false)); done <- err }()
 	<-started
-	if _, err := p.Query(context.Background(), request()); code(err) != "uq_busy" {
-		t.Fatalf("Trace/query budget split unexpectedly: %v", err)
+	// A query runs while the Trace read is still in flight.
+	if _, err := p.Query(context.Background(), request()); err != nil {
+		t.Fatalf("a query beside an unfinished Trace read: %v", err)
 	}
 	close(release)
 	if err := <-done; err != nil {

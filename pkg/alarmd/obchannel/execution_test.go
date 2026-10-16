@@ -203,10 +203,19 @@ func TestExecuteEvidenceRejectsBeforeRunAndDoesNotUseCLIAuth(t *testing.T) {
 	}
 }
 
-func TestRemoteCallDoesNotHoldEntryExecutionSlot(t *testing.T) {
+// A remote read and another local read both run beside a local read still
+// running.
+func TestRemoteAndLocalReadsRunBesideARunningOne(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	auth := &testAuth{}
-	op := targetOperation(func(context.Context, Params) Outcome { close(entered); <-release; return Outcome{Complete: true} })
+	var first atomic.Bool
+	op := targetOperation(func(context.Context, Params) Outcome {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return Outcome{Complete: true}
+	})
 	c := newTargetChannel(t, Options{Auth: auth, EnvironmentID: "test", Replica: "worker-a", Operations: []Operation{op}, Route: func(context.Context, Invocation) Response {
 		return Response{Status: "ok", Evidence: Evidence{Complete: true}, Meta: Meta{Version: Version, Revision: "target-revision", EnvironmentID: "test", AnsweredBy: "worker-b"}}
 	}})
@@ -218,8 +227,8 @@ func TestRemoteCallDoesNotHoldEntryExecutionSlot(t *testing.T) {
 		t.Errorf("remote route was blocked by local slot: %d %+v", status, out)
 	}
 	status, _ = call(t, c, envelope(c, "invoke", "process.read", Params{"id": "other-local"}))
-	if status != 429 || auth.calls.Load() != 2 {
-		t.Error("remote route released or bypassed local execution budget")
+	if status != 200 || auth.calls.Load() != 3 {
+		t.Errorf("a second local read beside a running one = %d, want run", status)
 	}
 	close(release)
 	<-done
@@ -250,11 +259,11 @@ func TestInvalidRouteAndRevokedAdmissionNeverDispatch(t *testing.T) {
 	}
 }
 
-func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
+// An internal read runs beside another still running, and a canceled
+// context ends one without evidence past the channel deadline.
+func TestInternalExecutionHonorsContextAndRunsBesideOthers(t *testing.T) {
 	entered := make(chan struct{})
 	var enter sync.Once
-	// hold keeps the first read in its slot past the others' admission
-	// waits, so they see the shared budget full however long they wait.
 	hold := make(chan struct{})
 	auth := &testAuth{}
 	op := targetOperation(func(ctx context.Context, _ Params) Outcome {
@@ -273,16 +282,15 @@ func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 	done := make(chan Response, 1)
 	go func() { done <- c.ExecuteEvidence(ctx, internalInvocation(c)) }()
 	<-entered
-	response := c.ExecuteEvidence(context.Background(), internalInvocation(c))
-	if response.Error == nil || response.Error.Code != "request_budget_exceeded" {
-		t.Fatal("internal read bypassed execution slots")
+	// The second read runs (its own short context ends it), rather than being
+	// refused while the first holds anything.
+	second, cancelSecond := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	go func() { <-second.Done(); close(hold) }()
+	response := c.ExecuteEvidence(second, internalInvocation(c))
+	cancelSecond()
+	if response.Error == nil || response.Error.Code != "request_timeout" {
+		t.Fatalf("a read beside a running one = %+v, want it run until its own deadline", response.Error)
 	}
-	status, _ := call(t, c, envelope(c, "invoke", "process.read", Params{"id": "object"}))
-	if status != 429 || auth.calls.Load() != 0 {
-		t.Fatal("external local read bypassed shared execution slots")
-	}
-	cancel()
-	close(hold)
 	response = <-done
 	if response.Error == nil || response.Error.Code != "request_timeout" || response.Evidence.Complete || response.Result != nil {
 		t.Fatal("cancelled read returned evidence beyond the channel deadline")
@@ -316,7 +324,7 @@ func TestTargetedNextCallsPinActualProcessWithoutTargetingCommonReads(t *testing
 
 func TestInternalEvidenceUsesSameResponseBudget(t *testing.T) {
 	op := targetOperation(func(context.Context, Params) Outcome {
-		return Outcome{Complete: true, Value: strings.Repeat("x", MaxResponseBytes)}
+		return Outcome{Complete: true, Value: strings.Repeat("x", MaxResponseBytes())}
 	})
 	c := newTargetChannel(t, Options{Auth: &internalAuthProbe{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
 	out := c.ExecuteEvidence(context.Background(), internalInvocation(c))

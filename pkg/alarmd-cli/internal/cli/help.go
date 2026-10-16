@@ -101,7 +101,7 @@ Storage and transport:
   profile list and meta.client_transport show the saved/actual verification mode.
   HTTP needs no TLS flags; meta.client_transport.encrypted=false identifies HTTP evidence.
   Invoke network deadline: described execution timeout plus 5 seconds; legacy server default 30 seconds.
-  Response limit 8 MiB; input file limit 1 MiB and each operation's described request/stdin limits.
+  Response limit 256 MiB; input file limit 16 MiB and each operation's described request/stdin limits.
   No automatic retry, schema cache, arbitrary endpoint or built-in business operations.`)
 	if err != nil {
 		return 1

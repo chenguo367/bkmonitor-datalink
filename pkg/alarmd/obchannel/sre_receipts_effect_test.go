@@ -125,8 +125,9 @@ func TestAnOversizedAccessIsCutAtCharacters(t *testing.T) {
 }
 
 // Both lists full of receipts at their sizes stay within half of a read's
-// hold, which the decoding doubles.
-func TestTwoFullListsFitHalfARead(t *testing.T) {
+// Both lists full of receipts at their sizes hold at most 8 MiB of the
+// shared Redis: 1024 changes of 4 KiB and 4096 accesses of 1 KiB.
+func TestTwoFullListsStayWithinTheirRedisFootprint(t *testing.T) {
 	client := redistest.Start(t).Client()
 	receipts := NewSREReceipts(client, effectKey, nil, nil)
 	big := strings.Repeat("x", 8<<10)
@@ -143,8 +144,9 @@ func TestTwoFullListsFitHalfARead(t *testing.T) {
 			total += len(entry)
 		}
 	}
-	if total > MaxResponseBytes/2 {
-		t.Fatalf("both lists hold %d bytes, want at most %d", total, MaxResponseBytes/2)
+	if footprint := 8 << 20; total > footprint || client.LLen(ctx, effectKey).Val() != 4096 || client.LLen(ctx, effectKey+":change").Val() != 1024 {
+		t.Fatalf("lists hold %d bytes in %d and %d receipts, want at most %d in 4096 and 1024", total,
+			client.LLen(ctx, effectKey).Val(), client.LLen(ctx, effectKey+":change").Val(), footprint)
 	}
 }
 

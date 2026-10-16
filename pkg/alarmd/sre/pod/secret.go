@@ -17,7 +17,7 @@ import (
 const OpReadSecret = "secret.get"
 
 // MaxSecretKeys bounds the keys one read returns.
-const MaxSecretKeys = 64
+const MaxSecretKeys = 1024
 
 // SecretReader is the one Kubernetes read a Secret read makes: a get by
 // name. The ServiceAccount may get only the Secrets the deployment's

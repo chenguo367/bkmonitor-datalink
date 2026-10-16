@@ -87,7 +87,7 @@ alarmd-cli invoke <operation> --env <environment_id> --input @input.json
 
 调用节奏：
 
-- 一次只发一个调用。服务端的既有取证、SRE 读取和执行使用各自的进程内预算，具体范围以 describe 的 `execution_pool` 与 limits 为准；忙时返回 `request_budget_exceeded`，会话限额返回 `rate_limited`。先核对回执确认请求未执行，再决定重试。
+- 调用可以并行：服务端不限制同时进行的调用数，每个调用只受自己的大小上限与期限约束（以 describe 的 limits 为准）。每会话每分钟 600 次调用的限额只用来拦住不停循环的客户端，超过时返回 `rate_limited`。
 - `catalog_changed`：操作目录在 describe 与 invoke 之间变了，这次调用没有执行。重新 describe 该操作，按新的 schema 核对参数后再 invoke。
 
 ### 3. 读结果
@@ -112,7 +112,7 @@ stdout 是一个 JSON 对象（`--help` 除外），进度和提示写在 stderr
 
 **没有 agent 的环境：先做一份诊断快照**
 
-1. `alarmd-cli snapshot --env <environment_id> [--out <目录>]`：按服务端 `discover` 给出的每会话调用速率，读操作目录、`fleet.get`、全部 `diagnose.environment` 分页、一组固定读取、`fleet.get` 里不正常的副本（逐个读运行配置、指标名单与关键指标族、日志）和不在检测的策略（`strategy.get` 与 `object.get`），写成一个 `alarmd-snapshot-<环境>-<UTC 时刻>.tar.gz` 和旁边的 `.sha256`。计划调用数和时长上限（调用数按速率折成分钟，再加一次调用的最长期限 30 秒）在开始收集前写进 `manifest.json`；超过时长或 64 MiB 的读取记为 `skipped_by_bound`。每会话调用速率由同一登录下的所有调用共用（另开终端跑的命令也算），所以一次读取可能被 `rate_limited` 拒绝；被拒的调用没有执行，快照按应答的 `Retry-After`（没有时等到本机时钟的下一分钟再多 1 秒）等待后重问同一读取，每项最多问 3 次。等待的时间没有调用能用，所以时长上限随每次等待顺延，顺延总量不超过上限本身（manifest 的 `budget_wait_seconds` 记总等待）；放不下的等待不等，该项记为 `refused`（原因 `rate_limited`）。其他拒绝（包括同为 429 的 `request_budget_exceeded`）不重问。退出码：0 每项都收到了；3 只在有没收到的项时（`refused`、`timeout`、`skipped_by_bound`、`not_in_catalog`，逐项写在 manifest 里）；应答状态为 `partial` 的读取算收到，按 `partial` 连同原因记进 manifest，不让退出码变成 3；1 什么都没写成。
+1. `alarmd-cli snapshot --env <environment_id> [--out <目录>]`：按服务端 `discover` 给出的每会话调用速率，读操作目录、`fleet.get`、全部 `diagnose.environment` 分页、一组固定读取、`fleet.get` 里不正常的副本（逐个读运行配置、指标名单与关键指标族、日志）和不在检测的策略（`strategy.get` 与 `object.get`），写成一个 `alarmd-snapshot-<环境>-<UTC 时刻>.tar.gz` 和旁边的 `.sha256`。计划调用数和时长上限（调用数按速率折成分钟，再加一次调用的最长期限 30 秒）在开始收集前写进 `manifest.json`；超过时长或 512 MiB 的读取记为 `skipped_by_bound`。每会话调用速率由同一登录下的所有调用共用（另开终端跑的命令也算），所以一次读取可能被 `rate_limited` 拒绝；被拒的调用没有执行，快照按应答的 `Retry-After`（没有时等到本机时钟的下一分钟再多 1 秒）等待后重问同一读取，每项最多问 3 次。等待的时间没有调用能用，所以时长上限随每次等待顺延，顺延总量不超过上限本身（manifest 的 `budget_wait_seconds` 记总等待）；放不下的等待不等，该项记为 `refused`（原因 `rate_limited`）。其他拒绝不重问。退出码：0 每项都收到了；3 只在有没收到的项时（`refused`、`timeout`、`skipped_by_bound`、`not_in_catalog`，逐项写在 manifest 里）；应答状态为 `partial` 的读取算收到，按 `partial` 连同原因记进 manifest，不让退出码变成 3；1 什么都没写成。
 2. 快照里保留主机地址、主机名和业务 ID（诊断要用），凭据已脱敏；交给谁就等于给了谁这个环境的这些信息。`manifest.json` 的 `redactions` 不为空，说明服务端漏脱了凭据，按缺陷上报。
 3. agent 读快照用同一套命令，加 `--snapshot <文件>`：`discover`、`describe <operation>`、`invoke <operation> --input …`、`diagnose`。读到的形状与在线相同，`meta.snapshot` 写明文件和收集时刻；快照里没有按这组参数读过的，返回 `not_in_snapshot` 并列出它读过的参数。读快照不连网络，`--env` 可省略；给了而与快照的环境不一致时返回退出码 2 并说出快照是哪个环境的，拿到一份不知来源的快照时可以这样核对。
 
@@ -247,7 +247,7 @@ HTTPS 默认使用系统信任库。私有 CA 可通过 `auth login --ca-cert /a
 
 凭据位于平台用户配置目录下的 `alarmd-cli/profiles.json`；`ALARMD_CLI_CONFIG_DIR` 可指定独立目录。目录权限 0700、凭据/锁/结果文件 0600。响应在 `results/` 下保留，客户端不自动删除证据。勿把凭据配置目录上传到工单或公开仓库。
 
-固定边界：invoke 网络期限取 describe 的操作期限、admission 期限和传输余量之和，旧服务端为 30 秒；服务端响应最大 8 MiB，超限拒绝解码；输入文件最大 1 MiB，并落实 describe 的请求和 stdin 上限；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
+固定边界：invoke 网络期限取 describe 的操作期限、admission 期限和传输余量之和，旧服务端为 30 秒；服务端响应最大 256 MiB（服务端自己的上限是所在 Pod 内存的 1/32，16–256 MiB），超限拒绝解码；输入文件最大 16 MiB，并落实 describe 的请求和 stdin 上限；授权码最大 64 KiB。没有不经服务端校验的任意 endpoint、operation 枚举或业务诊断逻辑。此版本不承诺 Windows。
 
 ## 构建与验证
 

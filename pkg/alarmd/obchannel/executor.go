@@ -33,23 +33,6 @@ type EvidenceExecutor struct {
 	ordered   []string
 	revision  string
 	contracts map[string]string
-	// The pools' gates. Evidence and SRE reads are admitted by the
-	// observation memory line once one is attached; exec, the writes, run one
-	// at a time by design and take no memory share.
-	slots     *admission
-	sreSlots  *admission
-	execSlots *admission
-}
-
-// AttachReadMemory gives the read pools the process's observation memory
-// line: from then on how many reads run at once follows the memory each may
-// take. Before it, each pool runs one read at a time.
-func (e *EvidenceExecutor) AttachReadMemory(memory ReadMemory) {
-	if memory == nil {
-		return
-	}
-	e.slots.attach(memory)
-	e.sreSlots.attach(memory)
 }
 
 func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
@@ -59,10 +42,7 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	// A read may take up to one response's bytes while it runs: that is what
-	// it holds on the memory line.
-	e := &EvidenceExecutor{options: options, ops: make(map[string]Operation), contracts: make(map[string]string),
-		slots: newAdmission(MaxResponseBytes), sreSlots: newAdmission(MaxResponseBytes), execSlots: newAdmission(MaxResponseBytes)}
+	e := &EvidenceExecutor{options: options, ops: make(map[string]Operation), contracts: make(map[string]string)}
 	for _, op := range options.Operations {
 		if op.ID == "" || op.Run == nil || op.Summary == "" {
 			return nil, errors.New("invalid OB operation registration")
@@ -163,22 +143,10 @@ func NewEvidenceExecutor(options ExecutorOptions) (*EvidenceExecutor, error) {
 	return e, err
 }
 
-func (e *EvidenceExecutor) executionSlots(op Operation) *admission {
-	if op.ExecutionPool == "exec" {
-		return e.execSlots
-	}
-	if op.ExecutionPool == "sre" {
-		return e.sreSlots
-	}
-	return e.slots
-}
-
 func (e *EvidenceExecutor) requestLimits(op Operation) map[string]any {
-	return map[string]any{"request_max_bytes": op.RequestMaxBytes, "response_max_bytes": MaxResponseBytes,
+	return map[string]any{"request_max_bytes": op.RequestMaxBytes, "response_max_bytes": MaxResponseBytes(),
 		"execution_timeout_ms": op.ExecutionTimeout.Milliseconds(), "transport_margin_ms": TransportMargin.Milliseconds(),
-		"admission_timeout_ms": RequestTimeout.Milliseconds(), "admission": admissionKind(op),
-		"read_memory_bytes": MaxResponseBytes,
-		"execution_pool":    op.ExecutionPool, "budget_scope": "process", "http_request_slots": 4,
+		"execution_pool": op.ExecutionPool, "concurrency": "unbounded",
 		"invokes_per_session_per_minute": InvokesPerSessionPerMinute}
 }
 
@@ -200,19 +168,4 @@ func (e *EvidenceExecutor) OperationContractRevision(operation string) string {
 func (e *EvidenceExecutor) AllowsTargetedOperation(operation string) bool {
 	op, found := e.ops[operation]
 	return found && (op.Targetable || op.DefaultControlLeader)
-}
-
-// ReadMemoryAttached says whether the read pools admit by the observation
-// memory line yet.
-func (e *EvidenceExecutor) ReadMemoryAttached() bool {
-	return e.slots.attached() && e.sreSlots.attached()
-}
-
-// admissionKind says how a pool admits: reads by the observation memory line,
-// at least one at a time; exec one at a time.
-func admissionKind(op Operation) string {
-	if op.ExecutionPool == "exec" {
-		return "one_at_a_time"
-	}
-	return "observation_memory_line; at_least_one"
 }

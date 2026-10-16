@@ -36,57 +36,36 @@ func frontRead(t *testing.T, c *Channel, op string) (int, Response) {
 	return w.Code, out
 }
 
-// The charged front reads' minute budget is a share of the CPU limit:
-// double the cores, double the budget.
-func TestTheFrontReadBudgetFollowsTheCPULimit(t *testing.T) {
-	two, four := frontReadAllowance(2), frontReadAllowance(4)
-	if two != 3*time.Second || four != 2*two {
-		t.Fatalf("budget at 2 cores %v, at 4 %v; want 3s and double", two, four)
-	}
-	var budget frontBudget
-	start := time.Unix(600, 0)
-	if open, _ := budget.open(start, two); !open {
-		t.Fatal("a fresh minute is closed")
-	}
-	budget.charge(start, two)
-	if open, refill := budget.open(start.Add(10*time.Second), two); open || refill != 50*time.Second {
-		t.Fatalf("after spending the minute: open %v, refills in %v; want closed for 50s", open, refill)
-	}
-	if open, _ := budget.open(start.Add(time.Minute), two); !open {
-		t.Fatal("the next minute did not refill")
-	}
-	// A read that started in a minute already over is not charged to the next.
-	budget.charge(start, time.Hour)
-	if open, _ := budget.open(start.Add(time.Minute), two); !open {
-		t.Fatal("a read from the previous minute was charged to this one")
-	}
-}
-
-// With the budget spent the charged reads are refused with when it refills,
-// and overview.get (its own cache) and runtime.get (process memory) still
-// answer.
-func TestOverviewAnswersWhenTheFrontBudgetIsSpent(t *testing.T) {
+// Front reads are never refused for a budget: the page's reads, a burst of
+// list reads included, all answer. Before, past 2.5% of the CPU limit a
+// minute the list reads were refused as front_rate_limited.
+func TestFrontReadsAreNeverRefusedForABudget(t *testing.T) {
 	read := func(id string) Operation {
 		return Operation{ID: id, Summary: id, Fields: map[string]Field{}, Run: func(context.Context, Params) Outcome {
+			time.Sleep(5 * time.Millisecond)
 			return Outcome{Complete: true, Value: map[string]string{"read": id}}
 		}}
 	}
 	c, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
-		Operations: []Operation{read("fleet.get"), read("overview.get"), read("runtime.get")}, FrontCores: func() int { return 0 }})
+		Operations: []Operation{read("fleet.get"), read("overview.get"), read("runtime.get"), read("object.list")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status, out := frontRead(t, c, "fleet.get"); status != 429 || out.Error == nil || out.Error.Code != "front_rate_limited" {
-		t.Fatalf("charged read with no budget = %d %+v, want 429 front_rate_limited", status, out.Error)
+	const together = 32
+	var done sync.WaitGroup
+	codes := make([]int, together)
+	for i := range codes {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			codes[i], _ = frontRead(t, c, []string{"fleet.get", "object.list", "overview.get", "runtime.get"}[i%4])
+		}()
 	}
-	for _, uncharged := range []string{"overview.get", "runtime.get"} {
-		if status, out := frontRead(t, c, uncharged); status != 200 || out.Status != "ok" {
-			t.Fatalf("%s with the budget spent = %d %+v, want answered", uncharged, status, out)
+	done.Wait()
+	for i, code := range codes {
+		if code != 200 {
+			t.Errorf("front read %d answered %d, want every one answered", i, code)
 		}
-	}
-	c.options.FrontCores = func() int { return 2 }
-	if status, out := frontRead(t, c, "fleet.get"); status != 200 || out.Status != "ok" {
-		t.Fatalf("charged read within the budget = %d %+v", status, out)
 	}
 }
 

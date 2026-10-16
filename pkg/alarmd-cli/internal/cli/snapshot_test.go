@@ -780,8 +780,10 @@ func TestASnapshotBudgetWaitMovesTheTimeCap(t *testing.T) {
 	files := readArchive(t, stringField(objectField(result, "result"), "file"))
 	var manifest SnapshotManifest
 	_ = json.Unmarshal(files["manifest.json"], &manifest)
-	if manifest.TimeCapSeconds != 150 {
-		t.Fatalf("time cap %d s, want the fixture's 150 s", manifest.TimeCapSeconds)
+	// The fixture's 88 planned calls, every receipt page included, at its
+	// 30 a minute: three minutes and the 30 s margin.
+	if manifest.TimeCapSeconds != 210 {
+		t.Fatalf("time cap %d s, want the fixture's 210 s", manifest.TimeCapSeconds)
 	}
 	if code != 0 || len(*slept) != 2 || manifest.BudgetWaitSeconds != 150 {
 		t.Fatalf("code %d waits %v budget wait %d s result %v, want both waits taken, 150 s, and a whole snapshot", code, *slept, manifest.BudgetWaitSeconds, result)
@@ -794,7 +796,7 @@ func TestSnapshotBudgetWaitsTogetherGrowTheCapByNoMoreThanItself(t *testing.T) {
 	snapshotPace = func(int) time.Duration { return 0 }
 	t.Cleanup(func() { snapshotPace = func(rate int) time.Duration { return time.Minute / time.Duration(rate) } })
 	fixtureDigest = universeDigest([]string{"1", "2", "3"})
-	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 2, retryAfter: "80"}
+	fixture := &snapshotFixture{invoked: map[string][]map[string]any{}, lookback: "partial", catalogWhole: true, limited: 2, retryAfter: "110"}
 	var p Profile
 	server := fixture.server(t, &p)
 	defer server.Close()
@@ -803,6 +805,6 @@ func TestSnapshotBudgetWaitsTogetherGrowTheCapByNoMoreThanItself(t *testing.T) {
 	code, result, _, _ := run(t, store, server.Client(), "", "snapshot", "--env", p.EnvironmentID, "--out", t.TempDir())
 	notWhole, _ := objectField(result, "result")["not_whole"].([]any)
 	if code != 3 || len(*slept) != 1 || len(notWhole) != 1 || notWhole[0] != "strategy.get" {
-		t.Fatalf("code %d waits %v result %v, want one 80 s wait, the second refused past the 150 s room", code, *slept, result)
+		t.Fatalf("code %d waits %v result %v, want one 110 s wait, the second refused past the 210 s room", code, *slept, result)
 	}
 }

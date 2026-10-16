@@ -34,7 +34,7 @@ import (
 func channelSREOperations(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) ([]obchannel.Operation, func(), error) {
 	secrets := sreDeploymentSecrets(cfg)
 	podReason := ""
-	pods, err := pod.NewInCluster(pod.Options{ModuleLabel: cfg.SRE.ModuleLabel, LiteralSecrets: secrets,
+	pods, err := pod.NewInCluster(pod.Options{ModuleLabel: cfg.SRE.ModuleLabel, LiteralSecrets: secrets, MaxOutputBytes: int64(obchannel.MaxResponseBytes()),
 		FingerprintKeySource: func() []byte { return sreFingerprintKey(client, sreKeyPrefix(cfg, binding)+"fingerprint-key") }})
 	if err != nil {
 		podReason = "pod_provider_unavailable: " + err.Error()
@@ -48,6 +48,7 @@ func channelSREOperations(cfg config.Config, binding ChannelBinding, client redi
 	if err != nil {
 		return nil, nil, err
 	}
+	queries.SetResponseBytes(obchannel.MaxResponseBytes())
 	// Every action's receipt goes to the deployment's shared list beside its
 	// audit line, so sre.receipts on any replica reads them all.
 	var receipts *obchannel.SREReceipts

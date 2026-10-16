@@ -9,83 +9,24 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"math"
 	"net/http"
-	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 // FrontReads is what the front surface may read, the admin server's page:
 // alarmd's own data and nothing of the cluster's, no raw store read, no
-// re-query and no write. The value says whether a read is charged to the
-// front read budget. overview.get and trends.get answer from their own
-// caches and runtime.get from process memory without Redis: all are bounded
-// without it, and a burst of list reads must not refuse the page its own
-// cheapest reads.
+// re-query and no write.
 var FrontReads = map[string]bool{
-	"overview.get":         false,
-	"trends.get":           false,
+	"overview.get":         true,
+	"trends.get":           true,
 	"fleet.get":            true,
 	"strategy.list":        true,
 	"strategy.get":         true,
 	"object.list":          true,
 	"object.get":           true,
 	"diagnose.environment": true,
-	"runtime.get":          false,
-}
-
-// FrontReadShare is the share of this process's CPU limit the charged front
-// reads may spend each minute, charged by their elapsed time since Go has no
-// per-request CPU. Elapsed time overstates CPU about twice (a measured list
-// read is about 120 ms of CPU in 230 ms), so the reads use about 1.3% of the
-// limit: below the 1.7-point CPU spread measured between two identical
-// replicas (20.19% against 21.91%), so detection cannot tell them from noise.
-// The reads share the runtime Redis pool with detection; this bound, not a
-// separate pool, is what keeps them apart. It is not exact: a read is
-// charged after it ends, so reads already running when the minute's budget
-// runs out finish over it -- at most the evidence pool's concurrency times
-// one read's elapsed time -- and a read that straddles a minute is not
-// charged to either.
-const FrontReadShare = 0.025
-
-// frontBudget is the charged front reads' spend of elapsed time in one
-// clock minute; a new minute starts over.
-type frontBudget struct {
-	mu     sync.Mutex
-	minute int64
-	spent  time.Duration
-}
-
-// frontReadAllowance is a minute's budget for a CPU limit of cores.
-func frontReadAllowance(cores int) time.Duration {
-	return time.Duration(FrontReadShare * float64(cores) * float64(time.Minute))
-}
-
-// open says whether the minute's budget has any left, and when it refills
-// if not.
-func (b *frontBudget) open(now time.Time, allowance time.Duration) (bool, time.Duration) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	minute := now.Unix() / 60
-	if b.minute != minute {
-		b.minute, b.spent = minute, 0
-	}
-	if b.spent >= allowance {
-		return false, time.Unix((minute+1)*60, 0).Sub(now)
-	}
-	return true, 0
-}
-
-// charge spends elapsed from the minute the read started in.
-func (b *frontBudget) charge(started time.Time, elapsed time.Duration) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.minute == started.Unix()/60 {
-		b.spent += elapsed
-	}
+	"runtime.get":          true,
 }
 
 // FrontReadHandler serves the front surface's read: an invoke of one of
@@ -103,7 +44,6 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
 	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout + TransportMargin))
-	admitted := false
 	defer func() {
 		if r.Body != nil {
 			_ = r.Body.Close()
@@ -111,18 +51,7 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 		_ = controller.Flush()
 		_ = controller.SetReadDeadline(time.Time{})
 		_ = controller.SetWriteDeadline(time.Time{})
-		if admitted {
-			<-c.httpSlots
-		}
 	}()
-	select {
-	case c.httpSlots <- struct{}{}:
-		admitted = true
-	default:
-		_ = controller.SetReadDeadline(time.Now())
-		fail(429, "request_budget_exceeded", "OB channel request slots are busy.")
-		return
-	}
 	if r.Method != http.MethodPost {
 		fail(405, "method_not_allowed", "Use POST for the front read.")
 		return
@@ -152,8 +81,7 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 		fail(400, "invalid_mode", "The front read takes invoke only.")
 		return
 	}
-	charged, permitted := FrontReads[req.Operation]
-	if !permitted {
+	if !FrontReads[req.Operation] {
 		fail(403, "op_not_permitted_for_front", "The front surface reads only alarmd's own data; use the CLI for this operation.")
 		return
 	}
@@ -193,25 +121,11 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 			return
 		}
 	}
-	if charged {
-		if open, refill := c.front.open(c.options.Now(), frontReadAllowance(c.frontCores())); !open {
-			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(refill.Seconds()))))
-			fail(429, "front_rate_limited", "This replica's front read budget for the minute is spent; retry when it refills.")
-			return
-		}
-	}
-	release, refusal := c.executionSlots(op).acquire(r.Context(), RequestTimeout)
-	if release == nil {
-		fail(429, "request_budget_exceeded", "OB evidence readers are busy: "+refusal+"; retry this read later.")
-		return
-	}
-	defer release()
 	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Now().Add(op.ExecutionTimeout + TransportMargin))
 	execCtx, cancel := context.WithTimeout(r.Context(), op.ExecutionTimeout)
 	defer cancel()
 	execCtx = WithCaller(execCtx, Caller{RequestID: meta.RequestID})
-	started, startedAt := time.Now(), c.options.Now()
 	var out Response
 	if target.Explicit() {
 		out = c.options.Route(execCtx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision,
@@ -220,21 +134,9 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 	} else {
 		out = c.runHere(execCtx, op, req, params, meta)
 	}
-	if charged {
-		c.front.charge(startedAt, time.Since(started))
-	}
 	code := 200
 	if out.Status == "error" {
 		code = 502
 	}
 	c.write(w, code, out)
-}
-
-// frontCores is the CPU limit the front read budget is a share of: the
-// container's, as GOMAXPROCS is set from the cgroup quota at start.
-func (c *Channel) frontCores() int {
-	if c.options.FrontCores != nil {
-		return c.options.FrontCores()
-	}
-	return runtime.GOMAXPROCS(0)
 }

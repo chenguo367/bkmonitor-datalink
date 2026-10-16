@@ -40,6 +40,19 @@ type Provider struct {
 	shellless shelllessMemo
 }
 
+// The provider's per-request bounds: how long one execution may run (inside
+// the channel's two-minute operation ceiling), how much one answer may carry
+// (the channel sets it from the pod's memory; DefaultOutputBytes until it
+// does), how much stdin one execution takes, and how many targets one page
+// lists. There is no bound on how many requests run at once.
+const (
+	MaxExecTimeout     = 110 * time.Second
+	DefaultOutputBytes = 64 << 20
+	MaxOutputCeiling   = 256 << 20
+	MaxStdinBytes      = 1 << 20
+	MaxPodsPerPage     = 500
+)
+
 // DefaultNamespace is the namespace a request that names none reads.
 func (p *Provider) DefaultNamespace() string { return p.options.DefaultNamespace }
 
@@ -67,21 +80,21 @@ func New(options Options) (*Provider, error) {
 		options.DefaultTimeout = 30 * time.Second
 	}
 	if options.MaxTimeout == 0 {
-		options.MaxTimeout = 30 * time.Second
+		options.MaxTimeout = MaxExecTimeout
 	}
 	if options.MaxOutputBytes == 0 {
-		options.MaxOutputBytes = 512 << 10
+		options.MaxOutputBytes = DefaultOutputBytes
 	}
 	if options.MaxStdinBytes == 0 {
-		options.MaxStdinBytes = 32 << 10
+		options.MaxStdinBytes = MaxStdinBytes
 	}
 	if options.MaxPods == 0 {
-		options.MaxPods = 32
+		options.MaxPods = MaxPodsPerPage
 	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.DefaultTimeout <= 0 || options.DefaultTimeout > options.MaxTimeout || options.MaxTimeout > 30*time.Second || options.MaxOutputBytes < 1 || options.MaxOutputBytes > 512<<10 || options.MaxStdinBytes < 1 || options.MaxStdinBytes > 32<<10 || options.MaxPods < 1 || options.MaxPods > 128 {
+	if options.DefaultTimeout <= 0 || options.DefaultTimeout > options.MaxTimeout || options.MaxTimeout > MaxExecTimeout || options.MaxOutputBytes < 1 || options.MaxOutputBytes > MaxOutputCeiling || options.MaxStdinBytes < 1 || options.MaxStdinBytes > MaxStdinBytes || options.MaxPods < 1 || options.MaxPods > MaxPodsPerPage {
 		return nil, invalid("provider budgets exceed supported bounds")
 	}
 	options.LiteralSecrets = append([]string(nil), options.LiteralSecrets...)

@@ -70,7 +70,6 @@ const (
 	CodeNotInScope         = "not_in_scope"
 	CodeTargetChanged      = "target_changed"
 	CodeTargetNotRunning   = "target_not_running"
-	CodeBusy               = "provider_busy"
 	CodeTimeoutUnsupported = "remote_timeout_unsupported"
 	CodeCommandStartFailed = "command_start_failed"
 	CodeAPIError           = "apiserver_error"

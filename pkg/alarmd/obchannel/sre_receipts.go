@@ -28,17 +28,16 @@ const (
 	// Receipts are kept in two lists by effect, so reads cannot push a
 	// change out: a change (an image, an apply or delete, a Pod deleted, a
 	// workload restarted or scaled, a dry run) and an access (an execution,
-	// a Secret or ConfigMap read). One sre.receipts read takes both lists
-	// whole inside its hold on the observation memory line
-	// (MaxResponseBytes); decoding about doubles the raw bytes, so the
-	// lists' raw bytes stay within half of it, a quarter each. Each receipt
-	// is cut to its effect's size when it is written, and each list keeps
-	// as many as fit its quarter.
-	sreReceiptListBytes   = MaxResponseBytes / 4
+	// a Secret or ConfigMap read). The lists live in the deployment's shared
+	// Redis, so what bounds them is their footprint there: each receipt is
+	// cut to its effect's size when it is written, and the lists keep 1024
+	// changes (far more than the 7 days of retention see) and 4096 accesses
+	// (about a day at the busiest rate seen, a session executing every 20
+	// seconds), 4 MiB each at most, about 3.5 MB at the sizes seen.
 	SREChangeReceiptBytes = 4 << 10
 	SREAccessReceiptBytes = 1 << 10
-	MaxSREChangeReceipts  = sreReceiptListBytes / SREChangeReceiptBytes
-	MaxSREAccessReceipts  = sreReceiptListBytes / SREAccessReceiptBytes
+	MaxSREChangeReceipts  = 1024
+	MaxSREAccessReceipts  = 4096
 	// MaxSREReceipts is how many receipts are kept in all.
 	MaxSREReceipts = MaxSREChangeReceipts + MaxSREAccessReceipts
 	// SREEffectChange and SREEffectAccess name the two lists.
