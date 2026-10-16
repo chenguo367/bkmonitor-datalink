@@ -112,6 +112,8 @@ type ConsoleRecord struct {
 	// read, and EventSourceReadAt when; zero until read.
 	EventSource       EventSourceKeying
 	EventSourceReadAt time.Time
+	// SourceByTopic is how the last resolution chose the event source.
+	SourceByTopic SourceByTopic
 }
 
 type consoleCalls struct {
@@ -175,6 +177,11 @@ func (calls *consoleCalls) observeLink(health LinkHealth, at time.Time) {
 // operation has an entry, zero included, so an operation never called reads
 // as never called rather than as missing.
 func (reader *HTTPReconciler) Record() ConsoleRecord {
+	// The choice is under the reader's lock, taken and let go before the
+	// calls' lock, never inside it.
+	reader.mu.Lock()
+	choice := reader.sourceChoice.clone()
+	reader.mu.Unlock()
 	reader.calls.mu.Lock()
 	defer reader.calls.mu.Unlock()
 	record := ConsoleRecord{Calls: make(map[string]ConsoleCall, len(ConsoleOps)),
@@ -183,6 +190,7 @@ func (reader *HTTPReconciler) Record() ConsoleRecord {
 	for _, op := range ConsoleOps {
 		record.Calls[op] = reader.calls.calls[op]
 	}
+	record.SourceByTopic = choice
 	return record
 }
 
