@@ -71,6 +71,12 @@ Commands:
                                            Send file content through the described stdin parameter.
                                            Scripts are data; no local shell is started.
                                            Fetch describe once, then invoke once with its revision.
+  skills list | show                       The AI tools the built-in agent skill installs for, and its text.
+  skills install [--tool <tool>]... [--scope user|project] [--directory <dir>] [--dry-run] [--force]
+                                           Write <tool skills dir>/alarmd-cli/SKILL.md (default tool universal,
+                                           all for every tool); same content is unchanged, a different one or a
+                                           symbolic link is a conflict (exit 3, with next_call adding --force for
+                                           the different ones). No configuration or network required.
   --help / -h                             This guide; no configuration or network required.
   --version                               JSON version; no configuration or network required.
 
