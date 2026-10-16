@@ -33,6 +33,11 @@ const (
 	Version         = "alarmd-ob/v1"
 	MaxRequestBytes = 64 << 10
 	RequestTimeout  = 3 * time.Second
+	// RequestReadTimeout bounds reading a request and admitting it:
+	// authentication and the envelope's decode. Thirty seconds lets a 16 MiB
+	// envelope arrive over a slow link; a stalled client holds nothing but
+	// its own connection while it waits.
+	RequestReadTimeout = 30 * time.Second
 	// EnvelopeMaxBytes is the transport ceiling, large enough for a whole
 	// chart's manifests in one dry run or apply. Each operation keeps its
 	// own request bound; discovery and description stay at MaxRequestBytes.
@@ -342,8 +347,8 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Error: &Failure{Code: cliauth.ErrorCode(err), Message: message, Reason: authReason(err)}, Meta: meta})
 	}
 	controller := http.NewResponseController(w)
-	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
-	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout + TransportMargin))
+	_ = controller.SetReadDeadline(time.Now().Add(RequestReadTimeout))
+	_ = controller.SetWriteDeadline(time.Now().Add(RequestReadTimeout + TransportMargin))
 	// The deadlines include draining and flushing, not just the handler
 	// body. Global deadlines would break the shared h2c streams.
 	defer func() {
@@ -358,7 +363,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(405, "method_not_allowed", "Use POST for the OB channel.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), RequestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), RequestReadTimeout)
 	defer cancel()
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {

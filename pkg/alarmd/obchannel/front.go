@@ -42,8 +42,8 @@ func (c *Channel) serveFront(w http.ResponseWriter, r *http.Request, authorize f
 		c.write(w, status, Response{Status: "error", Summary: message, Error: &Failure{Code: code, Message: message}, Meta: meta})
 	}
 	controller := http.NewResponseController(w)
-	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
-	_ = controller.SetWriteDeadline(time.Now().Add(RequestTimeout + TransportMargin))
+	_ = controller.SetReadDeadline(time.Now().Add(RequestReadTimeout))
+	_ = controller.SetWriteDeadline(time.Now().Add(RequestReadTimeout + TransportMargin))
 	defer func() {
 		if r.Body != nil {
 			_ = r.Body.Close()

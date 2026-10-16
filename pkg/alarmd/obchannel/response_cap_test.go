@@ -4,8 +4,12 @@
 package obchannel
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // An answer's bound is a 32nd of the container's memory, between 16 MiB and
@@ -42,5 +46,20 @@ func TestABusyAgentsPaceIsNotStopped(t *testing.T) {
 	}
 	if stopped != InvokesPerSessionPerMinute {
 		t.Fatalf("a loop was stopped at %s, want at %d", fmt.Sprint(stopped), InvokesPerSessionPerMinute)
+	}
+}
+
+// A request has 30 seconds to arrive and be admitted: the read deadline
+// set before its body is read.
+func TestARequestHasThirtySecondsToArrive(t *testing.T) {
+	c := testChannel(t, &testAuth{})
+	raw, _ := json.Marshal(envelope(c, "discover", "", nil))
+	r := httptest.NewRequest("POST", "/api/cli/channel", bytes.NewReader(raw))
+	r.Header.Set("Authorization", "Bearer test-only")
+	w := &requestDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	start := time.Now()
+	c.ServeHTTP(w, r)
+	if len(w.read) == 0 || w.read[0].Sub(start) < RequestReadTimeout-time.Second || RequestReadTimeout != 30*time.Second {
+		t.Fatalf("read deadlines %v from %v, want 30 s", w.read, start)
 	}
 }
