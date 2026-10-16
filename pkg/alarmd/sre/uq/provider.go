@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,10 @@ const (
 	MaxResponseBytes = 1 << 20
 	MaxTimeout       = 30 * time.Second
 	MaxWindow        = 24 * time.Hour
+	// AdmissionWait is how long a query finding the egress taken waits for
+	// it before being refused: the channel's own admission timeout, so a UQ
+	// read waits for the egress the way any read waits for its pool.
+	AdmissionWait = 3 * time.Second
 )
 
 // Endpoint describes the real native wire contract, including its time unit.
@@ -83,11 +88,18 @@ func (e *Error) Error() string        { return e.Code + ": " + e.Message }
 func fail(code, message string) error { return &Error{code, message} }
 
 type Provider struct {
-	egresses    map[string]Egress
-	client      *http.Client
-	transport   *http.Transport
+	egresses  map[string]Egress
+	client    *http.Client
+	transport *http.Transport
+	// slots lets one native query at a time reach UQ: it guards the shared
+	// query backend, not this process's memory, which the channel's read
+	// admission already holds for each read.
 	slots       chan struct{}
+	wait        time.Duration
 	querySource string
+
+	mu        sync.Mutex
+	heldSince time.Time
 }
 
 func Validate(egresses []Egress) error {
@@ -134,7 +146,7 @@ func NewWithQuerySource(egresses []Egress, client *http.Client, querySource stri
 	if !text(querySource) {
 		return nil, errors.New("sre.uq: a nonempty query source without control characters is required")
 	}
-	p := &Provider{egresses: map[string]Egress{}, slots: make(chan struct{}, 1), querySource: querySource}
+	p := &Provider{egresses: map[string]Egress{}, slots: make(chan struct{}, 1), wait: AdmissionWait, querySource: querySource}
 	for _, e := range egresses {
 		e.Tenants = append([]string(nil), e.Tenants...)
 		e.Spaces = append([]string(nil), e.Spaces...)
@@ -150,6 +162,56 @@ func NewWithQuerySource(egresses []Egress, client *http.Client, querySource stri
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	p.client = &copyClient
 	return p, nil
+}
+
+// admit takes the egress for one native query. Finding it taken, the query
+// waits for it, first come first served, up to the admission wait or until
+// its caller goes away; refused, it is told how long it waited and how long
+// the query in flight has held the egress.
+func (p *Provider) admit(ctx context.Context) (func(), error) {
+	select {
+	case p.slots <- struct{}{}:
+		return p.hold(), nil
+	default:
+	}
+	begin := time.Now()
+	timer := time.NewTimer(p.wait)
+	defer timer.Stop()
+	select {
+	case p.slots <- struct{}{}:
+		return p.hold(), nil
+	case <-timer.C:
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, fail("uq_canceled", fmt.Sprintf("Native query was canceled after waiting %s for the egress.", seconds(time.Since(begin))))
+		}
+	}
+	waited := time.Since(begin)
+	p.mu.Lock()
+	since := p.heldSince
+	p.mu.Unlock()
+	held := "the query in flight has just ended"
+	if !since.IsZero() {
+		held = "one native query has held the egress for " + seconds(time.Since(since))
+	}
+	return nil, fail("uq_busy", fmt.Sprintf("The UQ egress is taken: waited %s; %s. Native queries reach UQ one at a time; retry shortly.", seconds(waited), held))
+}
+
+func (p *Provider) hold() func() {
+	p.mu.Lock()
+	p.heldSince = time.Now()
+	p.mu.Unlock()
+	return func() {
+		p.mu.Lock()
+		p.heldSince = time.Time{}
+		p.mu.Unlock()
+		<-p.slots
+	}
+}
+
+// seconds writes a duration in tenths of a second, rounded down.
+func seconds(d time.Duration) string {
+	return strconv.FormatFloat(d.Truncate(100*time.Millisecond).Seconds(), 'f', 1, 64) + "s"
 }
 
 func (p *Provider) Close() {
@@ -237,12 +299,11 @@ func (p *Provider) query(ctx context.Context, request Request, trace bool) (rece
 	u.Path = strings.TrimRight(u.Path, "/") + endpoint.Path
 	u.RawPath = ""
 	receipt.ActualURL = u.String()
-	select {
-	case p.slots <- struct{}{}:
-		defer func() { <-p.slots }()
-	default:
-		return receipt, fail("uq_busy", "The independent UQ diagnostic query budget is busy.")
+	release, err := p.admit(ctx)
+	if err != nil {
+		return receipt, err
 	}
+	defer release()
 	timeout := MaxTimeout
 	if request.TimeoutMS > 0 {
 		timeout = time.Duration(request.TimeoutMS) * time.Millisecond
@@ -287,7 +348,9 @@ func (p *Provider) query(ctx context.Context, request Request, trace bool) (rece
 	if !json.Valid(data) {
 		return receipt, fail("uq_response_invalid", "Native response is not a JSON value.")
 	}
-	receipt.Native = append(json.RawMessage(nil), data...)
+	// data is this call's own read, never reused, so the receipt keeps it
+	// rather than a second copy of up to a whole response.
+	receipt.Native = data
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(data, &envelope); err != nil || envelope == nil {
 		receipt.Native = nil
