@@ -40,6 +40,9 @@ type SREAction struct {
 	IssuedVia string `json:"issued_via,omitempty"`
 	// At is when the action ended.
 	At time.Time `json:"at"`
+	// Effect is the list the receipt was kept in, change or access; set on
+	// read, not stored.
+	Effect string `json:"effect,omitempty"`
 	// Exec is what a pod.exec run said about itself, without its output.
 	Exec *SREExec `json:"exec,omitempty"`
 	// Argv is an execution's command line, redacted and capped
@@ -584,15 +587,17 @@ func SREOperations(options SREOptions) []Operation {
 	}
 	timestamp := Field{Type: "string", MinLength: 1, MaxLength: 64, Description: "RFC 3339 time"}
 	maxReceiptsPage, maxReceiptsOffset := int64(maxSREReceiptsPage), int64(MaxSREReceipts)
-	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名与 request_id 过滤，带分页。",
+	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id 与 effect 过滤，带分页。回执分两类分开保存，读多了也挤不掉改动：change（改镜像、apply、delete、删 Pod、重启、扩缩、dry run）与 access（执行、读 Secret 与 ConfigMap）。",
 		EvidenceScope: "sre_receipts", ExecutionPool: "sre", ExecutionTimeout: 10 * time.Second, Availability: receiptsAvailable,
-		Limits: map[string]any{"kept": MaxSREReceipts, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
+		Limits: map[string]any{"kept": MaxSREReceipts, "kept_change": MaxSREChangeReceipts, "kept_access": MaxSREAccessReceipts,
+			"receipt_bytes_change": SREChangeReceiptBytes, "receipt_bytes_access": SREAccessReceiptBytes, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
 			"content": "who, what, where and how each action ended; a pod.exec receipt carries its run's facts and its script digest, never its argv, stdin or output"},
 		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text,
-			"limit": {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
+			"effect": {Type: "string", Enum: []string{SREEffectChange, SREEffectAccess}},
+			"limit":  {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
 		OutputSchema: SchemaOf(SREReceiptPage{}),
 		Run: func(ctx context.Context, p Params) Outcome {
-			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
+			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Effect: p.String("effect"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
 			for key, into := range map[string]*time.Time{"since": &filter.Since, "until": &filter.Until} {
 				if value := p.String(key); value != "" {
 					at, err := time.Parse(time.RFC3339Nano, value)
@@ -609,7 +614,7 @@ func SREOperations(options SREOptions) []Operation {
 			out := Outcome{Value: page, Complete: page.NextOffset == 0}
 			if page.NextOffset > 0 {
 				next := Params{"offset": page.NextOffset}
-				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "limit"} {
+				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "effect", "limit"} {
 					if value, present := p[key]; present {
 						next[key] = value
 					}

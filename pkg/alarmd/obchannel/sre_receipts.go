@@ -7,22 +7,43 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisatomic"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
 
 const (
 	// OpSREReceipts reads the receipts of the SRE channel's actions.
 	OpSREReceipts = "sre.receipts"
-	// MaxSREReceipts is how many receipts are kept, newest first, and
-	// SREReceiptRetention how long the list lives past its latest write.
-	MaxSREReceipts      = 1024
+	// SREReceiptRetention is how long each receipt list lives past its own
+	// latest write.
 	SREReceiptRetention = 7 * 24 * time.Hour
+	// Receipts are kept in two lists by effect, so reads cannot push a
+	// change out: a change (an image, an apply or delete, a Pod deleted, a
+	// workload restarted or scaled, a dry run) and an access (an execution,
+	// a Secret or ConfigMap read). One sre.receipts read takes both lists
+	// whole inside its hold on the observation memory line
+	// (MaxResponseBytes); decoding about doubles the raw bytes, so the
+	// lists' raw bytes stay within half of it, a quarter each. Each receipt
+	// is cut to its effect's size when it is written, and each list keeps
+	// as many as fit its quarter.
+	sreReceiptListBytes   = MaxResponseBytes / 4
+	SREChangeReceiptBytes = 4 << 10
+	SREAccessReceiptBytes = 1 << 10
+	MaxSREChangeReceipts  = sreReceiptListBytes / SREChangeReceiptBytes
+	MaxSREAccessReceipts  = sreReceiptListBytes / SREAccessReceiptBytes
+	// MaxSREReceipts is how many receipts are kept in all.
+	MaxSREReceipts = MaxSREChangeReceipts + MaxSREAccessReceipts
+	// SREEffectChange and SREEffectAccess name the two lists.
+	SREEffectChange = "change"
+	SREEffectAccess = "access"
 	// sreReceiptWriteTimeout bounds one write: a store that does not answer
 	// does not hold the action's answer up for longer.
 	sreReceiptWriteTimeout = 500 * time.Millisecond
@@ -49,9 +70,10 @@ type SREExec struct {
 	StartFailure           string `json:"start_failure,omitempty"`
 }
 
-// SREReceipts keeps the SRE channel's receipts in the shared store, one list
-// for the deployment: every replica writes its actions and any replica
-// answers sre.receipts. A write that fails is counted and does not hold the
+// SREReceipts keeps the SRE channel's receipts in the shared store, two
+// lists for the deployment (changes under key+":change", accesses under
+// key): every replica writes its actions and any replica answers
+// sre.receipts. A write that fails is counted and does not hold the
 // action up; the sre_action line is then the only record.
 type SREReceipts struct {
 	client  redis.Cmdable
@@ -80,6 +102,22 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return 1
 `)
 
+// sreEffect is the list an action's receipt goes to.
+func sreEffect(op string) string {
+	switch op {
+	case OpSetImage, pod.OpApply, pod.OpDelete, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun:
+		return SREEffectChange
+	}
+	return SREEffectAccess
+}
+
+func (s *SREReceipts) keyOf(effect string) string {
+	if effect == SREEffectChange {
+		return s.key + ":change"
+	}
+	return s.key
+}
+
 // Record writes one action's receipt, the newest first, within its own
 // bound, and says whether it landed.
 func (s *SREReceipts) Record(action SREAction) {
@@ -96,13 +134,76 @@ func (s *SREReceipts) record(action SREAction) error {
 	if action.At.IsZero() {
 		action.At = s.now().UTC()
 	}
-	body, err := json.Marshal(action)
+	effect := sreEffect(action.Op)
+	size, kept := SREAccessReceiptBytes, MaxSREAccessReceipts
+	if effect == SREEffectChange {
+		size, kept = SREChangeReceiptBytes, MaxSREChangeReceipts
+	}
+	body, err := fitReceipt(action, size)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sreReceiptWriteTimeout)
 	defer cancel()
-	return sreReceiptWrite.Run(ctx, s.client, []string{s.key}, body, MaxSREReceipts-1, int64(SREReceiptRetention/time.Second))
+	return sreReceiptWrite.Run(ctx, s.client, []string{s.keyOf(effect)}, body, kept-1, int64(SREReceiptRetention/time.Second))
+}
+
+// fitReceipt encodes a receipt within size bytes. Past it, the object list
+// gives up names from its end for a "+N more", and then the free texts are
+// halved, longest first, until it fits.
+func fitReceipt(action SREAction, size int) ([]byte, error) {
+	body, err := json.Marshal(action)
+	if err != nil || len(body) <= size {
+		return body, err
+	}
+	names, more := strings.Split(action.Name, ","), 0
+	if last := names[len(names)-1]; len(names) > 1 && strings.HasPrefix(last, "+") && strings.HasSuffix(last, " more") {
+		if _, scanned := fmt.Sscanf(last, "+%d more", &more); scanned == nil {
+			names = names[:len(names)-1]
+		}
+	}
+	for len(names) > 1 {
+		names, more = names[:len(names)-1], more+1
+		action.Name = strings.Join(names, ",") + fmt.Sprintf(",+%d more", more)
+		if body, err = json.Marshal(action); err != nil || len(body) <= size {
+			return body, err
+		}
+	}
+	texts := []*string{&action.Name, &action.Detail, &action.Namespace, &action.UID, &action.Operator}
+	if action.Exec != nil {
+		exec := *action.Exec
+		action.Exec = &exec
+		texts = append(texts, &exec.StartFailure, &exec.UnsupervisedReason, &exec.Supervision, &exec.BootstrapClass)
+	}
+	for len(body) > size {
+		longest := texts[0]
+		for _, text := range texts[1:] {
+			if len(*text) > len(*longest) {
+				longest = text
+			}
+		}
+		if *longest == "" {
+			break
+		}
+		*longest = halveUTF8(*longest)
+		if body, err = json.Marshal(action); err != nil {
+			return nil, err
+		}
+	}
+	return body, nil
+}
+
+// halveUTF8 is the first half of text, cut at a character boundary, marked
+// as cut; a text of one character or less becomes empty.
+func halveUTF8(text string) string {
+	cut := len(text) / 2
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	if cut <= len("…") {
+		return ""
+	}
+	return strings.TrimSuffix(text[:cut], "…") + "…"
 }
 
 // SREReceiptFilter selects receipts: by time (since inclusive, until
@@ -113,38 +214,52 @@ type SREReceiptFilter struct {
 	Since, Until    time.Time
 	Namespace, Name string
 	RequestID       string
-	Offset, Limit   int
+	// Effect selects one list, change or access; empty reads both.
+	Effect        string
+	Offset, Limit int
 }
 
 // SREReceiptPage is one page of matching receipts, newest first: Matched is
 // all that match, Stored all kept, NextOffset the next page's offset while
 // there is one.
 type SREReceiptPage struct {
-	Receipts   []SREAction `json:"receipts"`
-	Matched    int         `json:"matched"`
-	Stored     int         `json:"stored"`
-	NextOffset int         `json:"next_offset,omitempty"`
+	Receipts []SREAction `json:"receipts"`
+	Matched  int         `json:"matched"`
+	Stored   int         `json:"stored"`
+	// StoredByEffect is what each list keeps.
+	StoredByEffect map[string]int `json:"stored_by_effect"`
+	NextOffset     int            `json:"next_offset,omitempty"`
 }
 
 // List reads the kept receipts and returns the page that matches.
 func (s *SREReceipts) List(ctx context.Context, filter SREReceiptFilter) (SREReceiptPage, error) {
-	page := SREReceiptPage{Receipts: []SREAction{}}
-	raw, err := s.client.LRange(ctx, s.key, 0, MaxSREReceipts-1).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return page, err
-	}
-	page.Stored = len(raw)
+	page := SREReceiptPage{Receipts: []SREAction{}, StoredByEffect: map[string]int{}}
 	limit := filter.Limit
 	if limit <= 0 || limit > maxSREReceiptsPage {
 		limit = maxSREReceiptsPage
 	}
-	matches := make([]SREAction, 0, len(raw))
-	for _, entry := range raw {
-		var action SREAction
-		if json.Unmarshal([]byte(entry), &action) != nil || !filter.matches(action) {
+	var matches []SREAction
+	for _, list := range []struct {
+		effect string
+		kept   int
+	}{{SREEffectChange, MaxSREChangeReceipts}, {SREEffectAccess, MaxSREAccessReceipts}} {
+		raw, err := s.client.LRange(ctx, s.keyOf(list.effect), 0, int64(list.kept-1)).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return page, err
+		}
+		page.Stored += len(raw)
+		page.StoredByEffect[list.effect] = len(raw)
+		if filter.Effect != "" && filter.Effect != list.effect {
 			continue
 		}
-		matches = append(matches, action)
+		for _, entry := range raw {
+			var action SREAction
+			if json.Unmarshal([]byte(entry), &action) != nil || !filter.matches(action) {
+				continue
+			}
+			action.Effect = list.effect
+			matches = append(matches, action)
+		}
 	}
 	// Written newest first; two replicas' writes can cross, so order by
 	// the receipts' own times.
