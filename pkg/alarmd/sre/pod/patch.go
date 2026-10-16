@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -122,9 +123,11 @@ func (p *Provider) PatchObject(ctx context.Context, request ObjectPatchRequest) 
 	patched, err := p.options.Writer.JSONPatch(ctx, resource, request.Namespace, request.Name, patch)
 	if err != nil {
 		refused := p.writeRefused(answer, err, object)
-		if path, failed := failedTest(err, live, request.Patch); failed {
-			refused.Outcome = WriteTestFailed
-			refused.Message = "test at " + path + " does not hold, evaluated against the object as read at resourceVersion " +
+		if failure, isTest := replayRefused(err, live, request.Patch); failure != "" {
+			if isTest {
+				refused.Outcome = WriteTestFailed
+			}
+			refused.Message = failure + ", evaluated against the object as read at resourceVersion " +
 				live.GetResourceVersion() + "; the apiserver applied nothing (" + refused.Message + ")"
 		}
 		return record(refused)
@@ -140,34 +143,39 @@ func (p *Provider) PatchObject(ctx context.Context, request ObjectPatchRequest) 
 	return record(answer)
 }
 
-// failedTest says the apiserver refused a patch because one of its tests did
-// not hold, and which. The apiserver answers a failed test with a bare 422
-// (no causes, no words of the patch library), the same as a validation or
-// admission refusal; so each test op is replayed against the raw object as
-// read (never the masked copy shown in receipts). One that does not hold
-// makes it a failed test; when every test holds the 422 is a denial. The
-// replay sees the object as read, not what the apiserver saw a moment later.
-func failedTest(err error, live *unstructured.Unstructured, ops []PatchOp) (string, bool) {
+// replayRefused says why the apiserver refused a patch with a 422, which it
+// answers bare (no causes, no words of the patch library) for a failed test
+// and for a validation or admission refusal alike. The request's ops are
+// replayed in order, each on the result of the ones before, as RFC 6902
+// applies them, starting from the raw object as read (never the masked copy
+// shown in receipts). The first op that does not apply names the reason: a
+// test makes it a failed test, any other op stays a denial with that op
+// named. When every op applies, the apiserver refused the result: a denial
+// with nothing to add. The replay sees the object as read, not what the
+// apiserver saw a moment later.
+func replayRefused(err error, live *unstructured.Unstructured, ops []PatchOp) (string, bool) {
 	var status apierrors.APIStatus
 	if !errors.As(err, &status) || status.Status().Code != http.StatusUnprocessableEntity {
 		return "", false
 	}
-	original, encodeErr := json.Marshal(live.Object)
+	doc, encodeErr := json.Marshal(live.Object)
 	if encodeErr != nil {
 		return "", false
 	}
-	for _, op := range ops {
-		if op.Op != "test" {
-			continue
-		}
+	for index, op := range ops {
 		single, _ := json.Marshal([]PatchOp{op})
 		decoded, decodeErr := jsonpatch.DecodePatch(single)
 		if decodeErr != nil {
-			continue
+			return "", false
 		}
-		if _, applyErr := decoded.Apply(original); applyErr != nil {
-			return op.Path, true
+		next, applyErr := decoded.Apply(doc)
+		if applyErr != nil {
+			if op.Op == "test" {
+				return "test at " + op.Path + " does not hold", true
+			}
+			return fmt.Sprintf("op %d %s %s does not apply", index, op.Op, op.Path), false
 		}
+		doc = next
 	}
 	return "", false
 }

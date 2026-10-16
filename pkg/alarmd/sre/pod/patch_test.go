@@ -236,3 +236,25 @@ func TestASecretTestIsReplayedOnTheRawValue(t *testing.T) {
 		t.Fatalf("a failing test on a Secret value: %s err %v", encoded, err)
 	}
 }
+
+// Ops apply in order: a test after a remove tests the state the remove left.
+// Here env/1 holds DROP only after env/0 is removed; with the apiserver
+// refusing for another reason, the in-order replay finds every op applies and
+// the outcome stays a denial, where replaying the test alone against the
+// object as read would have called it a failed test.
+func TestTheReplayAppliesOpsInOrder(t *testing.T) {
+	provider, _, writer := patchProvider(t)
+	writer.refuse = true
+	receipt, err := provider.PatchObject(context.Background(), patchRequest("uid-web",
+		PatchOp{Op: "remove", Path: "/spec/template/spec/containers/0/env/0"},
+		PatchOp{Op: "test", Path: "/spec/template/spec/containers/0/env/0", Value: raw(`{"name":"DROP","value":"d"}`)}))
+	if err != nil || receipt.Objects[0].Outcome != WriteDenied || strings.Contains(receipt.Objects[0].Message, "does not hold") {
+		t.Fatalf("in-order test after a remove: %+v err %v", receipt.Objects[0], err)
+	}
+	// A non-test op that does not apply is named, and stays a denial.
+	receipt, err = provider.PatchObject(context.Background(), patchRequest("uid-web",
+		PatchOp{Op: "remove", Path: "/spec/template/spec/containers/0/env/5"}))
+	if err != nil || receipt.Objects[0].Outcome != WriteDenied || !strings.Contains(receipt.Objects[0].Message, "op 0 remove /spec/template/spec/containers/0/env/5 does not apply") {
+		t.Fatalf("missing path: %+v err %v", receipt.Objects[0], err)
+	}
+}
