@@ -35,3 +35,13 @@ func TestAuthorizationRequestsArrivingTogetherAreAllServed(t *testing.T) {
 		}
 	}
 }
+
+// Many people and agents logging in within one minute are all served.
+func TestManyLoginsInAMinuteAreAllServed(t *testing.T) {
+	m := newTestManager(t, startRedis(t))
+	for i := 0; i < 300; i++ {
+		if code := authRequest(m, http.MethodPost, grantsPath, `{"confirm":true}`, true).Code; code != http.StatusOK {
+			t.Fatalf("grant %d in one minute answered %d", i+1, code)
+		}
+	}
+}

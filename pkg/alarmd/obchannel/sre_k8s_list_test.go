@@ -71,6 +71,9 @@ func TestTheChannelListsClusterResourcesAndPointsAtTheNextPage(t *testing.T) {
 		response.Next[0].Params["kind"] != "Node" {
 		t.Fatalf("next %+v, want the same read from page-2", response.Next)
 	}
+	if !strings.Contains(response.Summary, "还有更多页") {
+		t.Fatalf("summary %q, want it to say more pages follow", response.Summary)
+	}
 }
 
 // secretList answers a Secret list with two Secrets, or the apiserver's
