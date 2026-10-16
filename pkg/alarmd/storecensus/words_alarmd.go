@@ -1224,6 +1224,7 @@ var alarmdWords = []string{
 	"rejected",
 	"rejection",
 	"rejections",
+	"related",
 	"release",
 	"released",
 	"remembered",
