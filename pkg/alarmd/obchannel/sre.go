@@ -595,6 +595,44 @@ func SREOperations(options SREOptions) []Operation {
 			return out
 		},
 	})
+	maxLogTop := int64(uq.LogCountMaxTop)
+	ops = append(ops, Operation{ID: OpLogCount, Summary: "按字段统计一个日志结果表在一段时间里的条数，不回传日志正文：一次聚合查询（count_over_time 覆盖整个窗口、按 by 的字段求和），只回每组的字段值（脱敏、截到 256 字节）与条数，按条数降序取前 top 组，total 是全部组的合计。query_string 原样下推用于筛选（Doris 存储按内容查写 log:*关键字*），应答里只回它的长度。不能按正文字段（log、message、content、msg 及 *.log、*_log、*.message、*_message）分组。窗口任意时长，至多 30 天。",
+		EvidenceScope: "sre_uq_log_count", ExecutionPool: "sre", ExecutionTimeout: uq.MaxTimeout + 5*time.Second, Availability: queryAvailable,
+		Limits: map[string]any{"max_top": uq.LogCountMaxTop, "default_top": uq.LogCountDefaultTop, "value_bytes": uq.LogCountValueBytes, "max_window_seconds": int64(uq.MaxWindow / time.Second), "redaction_contract": redact.Contract, "content": "field values and counts only; no log text"},
+		Fields: map[string]Field{"egress": text, "tenant": text, "space": text,
+			"table_id":     {Type: "string", MinLength: 1, MaxLength: 256, Description: "<business>_bklog.<name>"},
+			"by":           {Type: "array", MinItems: 1, Items: &Field{Type: "string", MinLength: 1, MaxLength: 256}},
+			"query_string": {Type: "string", MaxLength: 8192},
+			"window":       {Type: "string", MaxLength: 16},
+			"end":          {Type: "string", MaxLength: 64, Description: "RFC 3339 UTC"},
+			"top":          {Type: "integer", Minimum: &positive, Maximum: &maxLogTop}},
+		Required: []string{"egress", "tenant", "space", "table_id", "by"}, OutputSchema: SchemaOf(uq.LogCounts{}),
+		Run: func(ctx context.Context, p Params) Outcome {
+			var by []string
+			if values, ok := p["by"].([]any); ok {
+				for _, value := range values {
+					by = append(by, value.(string))
+				}
+			}
+			v, err := queries.LogCount(ctx, uq.LogCountRequest{Egress: p.String("egress"), Tenant: p.String("tenant"), Space: p.String("space"),
+				TableID: p.String("table_id"), By: by, QueryString: p.String("query_string"), Window: p.String("window"), End: p.String("end"), Top: p.Int("top", 0)})
+			for i := range v.Groups {
+				for key, value := range v.Groups[i].Values {
+					v.Groups[i].Values[key] = boundedText(scrubber.Text(value), uq.LogCountValueBytes)
+				}
+			}
+			out := Outcome{Value: v, Complete: err == nil && !v.Truncated && !v.Partial, Limitations: v.Limitations}
+			if err != nil {
+				var named *uq.Error
+				if errors.As(err, &named) {
+					out.Error = &Failure{Code: named.Code, Message: named.Message}
+				} else {
+					out.Error = &Failure{Code: "uq_provider_failed", Message: "Native query did not complete."}
+				}
+			}
+			return out
+		},
+	})
 	receiptsAvailable := func() Availability {
 		if options.Receipts == nil {
 			reason := options.ReceiptsReason
@@ -763,6 +801,9 @@ func secretNames(receipt pod.ResourceReceipt) string {
 
 // OpTraceTopFailures lists a trace target's most failing server routes.
 const OpTraceTopFailures = "trace.top_failures"
+
+// OpLogCount counts a log table's lines by fields, without the log text.
+const OpLogCount = "log.count"
 
 // topFailureMessageBytes bounds a group's message for its reader.
 const topFailureMessageBytes = 200
