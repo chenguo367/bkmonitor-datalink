@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -297,5 +298,19 @@ func TestTheFrontReadRefusesClusterReadsAndEveryWrite(t *testing.T) {
 	h.ServeHTTP(refusal, sessionAsKey)
 	if refusal.Code != http.StatusForbidden {
 		t.Fatalf("front read with a CLI session = %d, want 403: the front surface takes the key", refusal.Code)
+	}
+}
+
+// A roster is about 64 bytes an operator; a hundred thousand of them is an
+// ordinary sync, and the last one on it can be granted.
+func TestARosterOfAHundredThousandOperatorsApplies(t *testing.T) {
+	h, cfg, _ := restrictedCLI(t)
+	operators := make([]string, 100000)
+	for i := range operators {
+		operators[i] = fmt.Sprintf("ops-%06d", i)
+	}
+	syncRoster(t, h, cfg, "admin-config-large", operators...)
+	if grant := namedGrant(h, cfg, operators[len(operators)-1]); grant.Code != http.StatusOK {
+		t.Fatalf("grant to the last operator of a large roster = %d %s", grant.Code, grant.Body.String())
 	}
 }

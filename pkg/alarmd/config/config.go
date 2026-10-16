@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -326,6 +327,10 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 }
 
 type Config struct {
+	// UnknownKeys names, with their lines, the keys the file carries that no
+	// field reads: retired keys and misspellings. They are ignored and named
+	// at startup and on /metrics, never a reason to refuse to start.
+	UnknownKeys []string `yaml:"-"`
 	// Roles is omitted for the default shared process. An explicit selection
 	// is validated before dependencies are checked.
 	Roles         roles.Set             `yaml:"roles,omitempty"`
@@ -720,6 +725,75 @@ func (c *Config) resolveCompatibilityServiceTimeouts() {
 	}
 }
 
+// decodeDocument decodes one YAML document onto cfg strictly: quoted
+// integers are refused, a value of the wrong type is refused, and a key no
+// field reads is ignored and recorded in cfg.UnknownKeys.
+func decodeDocument(raw []byte, cfg *Config) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("decode config: %w", err)
+	}
+	rewritten, err := strictIntegers(&document, reflect.TypeOf(*cfg), "")
+	if err != nil {
+		return fmt.Errorf("decode config: %w", err)
+	}
+	// Only a document with a quoted integer is re-encoded, so every other
+	// one is decoded from the bytes as written and its errors keep their
+	// lines.
+	if rewritten {
+		if raw, err = yaml.Marshal(&document); err != nil {
+			return fmt.Errorf("decode config: %w", err)
+		}
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		unknown, rest := splitUnknownKeys(err)
+		if rest != nil {
+			return fmt.Errorf("decode config: %w", rest)
+		}
+		cfg.UnknownKeys = unknown
+	}
+	// yaml.v3 decodes an explicit null as nil, just like omission. Preserve
+	// the declaration so roles: null cannot silently enable every role.
+	if cfg.Roles == nil && yamlRolesDeclared(&document) {
+		cfg.Roles = roles.Set{}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("decode config: multiple YAML documents are not allowed")
+		}
+		return fmt.Errorf("decode config: %w", err)
+	}
+	return nil
+}
+
+var unknownKeyError = regexp.MustCompile(`^line \d+: field \S+ not found in type \S+$`)
+
+// splitUnknownKeys separates, in a decode error, the keys no field reads from
+// everything else. yaml.v3 goes on decoding past an unknown key, so the
+// configuration is whole when they are the only errors; any other error,
+// a value of the wrong type above all, is returned and refuses the load.
+func splitUnknownKeys(err error) ([]string, error) {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return nil, err
+	}
+	var unknown, rest []string
+	for _, message := range typeErr.Errors {
+		if unknownKeyError.MatchString(message) {
+			unknown = append(unknown, message)
+		} else {
+			rest = append(rest, message)
+		}
+	}
+	if len(rest) > 0 {
+		return nil, &yaml.TypeError{Errors: rest}
+	}
+	return unknown, nil
+}
+
 // LoadWithRoles applies a CLI selection before validating dependencies. A nil
 // override keeps the file's selection; a non-nil empty override is refused.
 func LoadWithRoles(path string, override roles.Set) (Config, error) {
@@ -752,38 +826,8 @@ func LoadWithRoles(path string, override roles.Set) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
-	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	rewritten, err := strictIntegers(&document, reflect.TypeOf(cfg), "")
-	if err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	// Only a document with a quoted integer is re-encoded, so every other
-	// one is decoded from the bytes as written and its errors keep their
-	// lines.
-	if rewritten {
-		if raw, err = yaml.Marshal(&document); err != nil {
-			return Config{}, fmt.Errorf("decode config: %w", err)
-		}
-	}
-	decoder := yaml.NewDecoder(bytes.NewReader(raw))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	// yaml.v3 decodes an explicit null as nil, just like omission. Preserve
-	// the declaration so roles: null cannot silently enable every role.
-	if cfg.Roles == nil && yamlRolesDeclared(&document) {
-		cfg.Roles = roles.Set{}
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return Config{}, errors.New("decode config: multiple YAML documents are not allowed")
-		}
-		return Config{}, fmt.Errorf("decode config: %w", err)
+	if err := decodeDocument(raw, &cfg); err != nil {
+		return Config{}, err
 	}
 
 	if override != nil {

@@ -101,15 +101,32 @@ func (c LinkdConfig) Validate() error {
 
 type LinkdCapacity struct{ Bytes, Strategies, Members, LocalEntries, ReadBatch, GroupBatch, CloseBatch int }
 
+// linkdCloseBatch is how many closes one step sends. A close is a Kafka
+// write, which takes thousands a second; it is not CPU work to ration.
+const linkdCloseBatch = 1000
+
 func DeriveLinkdCapacity(in CapacityInputs) LinkdCapacity {
-	// The index and calibration metadata receive one percent of container
-	// memory. Local ACK/owner bookkeeping and the legacy calendar cache have
-	// separate derived limits. These admission estimates are not an RSS cap.
-	bytes := int(min(in.MemoryLimitBytes/100, uint64(^uint(0)>>1)))
+	// The index and calibration metadata receive a sixteenth of container
+	// memory, about 512 bytes an alert: 64k alerts and 16k strategies at
+	// 512Mi. Local ACK/owner bookkeeping has its own derived limit and the
+	// calendar cache its own share. These admission estimates are not an RSS
+	// cap, and they are not taken out of the execution share: a share filled
+	// to its bound puts the planned heap about a fifteenth over the Go soft
+	// limit (40Mi at 512Mi), which is collection pressure, not an OOM, and is
+	// reached only at tens of thousands of open alerts. Reserving it would
+	// cut a third of the executions for memory that is almost never held.
+	bytes := int(min(in.MemoryLimitBytes/16, uint64(^uint(0)>>1)))
 	if bytes < 64<<10 {
 		return LinkdCapacity{}
 	}
 	ops := max(1, min(in.CPUBudget*4, bytes/4096))
 	return LinkdCapacity{Bytes: bytes, Strategies: bytes / 2048, Members: bytes / 512,
-		LocalEntries: bytes / 2048, ReadBatch: ops, GroupBatch: ops, CloseBatch: min(64, ops*4)}
+		LocalEntries: bytes / 2048, ReadBatch: ops, GroupBatch: ops, CloseBatch: linkdCloseBatch}
+}
+
+// DeriveCalendarCacheCapacity is the legacy calendar (effective time) cache's
+// own share: a sixty-fourth of container memory, about 2 KiB an entry.
+func DeriveCalendarCacheCapacity(in CapacityInputs) (entries, bytes int) {
+	bytes = int(min(in.MemoryLimitBytes/64, uint64(^uint(0)>>1)))
+	return bytes / 2048, bytes
 }

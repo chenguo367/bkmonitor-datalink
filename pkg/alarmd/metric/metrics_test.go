@@ -235,6 +235,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	recorder := NewRecorder(BuildInfo{})
 	expected := map[string]string{
 		"alarmd_build_info":                                   "variableLabels: {version,commit,schema_version}",
+		"alarmd_config_unknown_keys":                          "variableLabels: {}",
 		"alarmd_observation_total":                            "variableLabels: {component,stage,result,reason_code}",
 		"alarmd_operation_total":                              "variableLabels: {operation,result,reason_code}",
 		"alarmd_observation_duration_seconds":                 "variableLabels: {component,stage,result}",
@@ -767,7 +768,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	}
 
 	bounds := map[string]int{
-		fqName("build_info"): 1,
+		fqName("build_info"):          1,
+		fqName("config_unknown_keys"): 1,
 
 		fqName("observation_total"): observationTotal,
 		fqName("operation_total"): len(observability.AllMetricOperations()) *

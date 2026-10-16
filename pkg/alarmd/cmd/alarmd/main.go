@@ -57,6 +57,11 @@ func main() {
 	os.Exit(code)
 }
 
+// checkConfigUnknownKeys is --check-config's exit code for a file that
+// loads but carries keys nothing reads: the facts are printed, the keys are
+// named on stderr, and the preflight does not pass.
+const checkConfigUnknownKeys = 3
+
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	eventLogger := observability.New(observability.ComponentTrigger, stderr)
 	return runWithRuntimeModeDependencies(ctx, args, stdout, stderr, runtimeModeDependencies{
@@ -137,10 +142,20 @@ func runWithRuntimeModeDependencies(
 		fmt.Fprintf(stderr, "load configuration: %v\n", err)
 		return 1
 	}
+	for _, key := range cfg.UnknownKeys {
+		fmt.Fprintf(stderr, "load configuration: ignored a key nothing reads: %s\n", key)
+	}
 	if *checkConfig {
 		if err := printResolvedRuntimeFacts(cfg, stdout); err != nil {
 			fmt.Fprintf(stderr, "report resolved configuration: %v\n", err)
 			return 1
+		}
+		// A process starts past a key nothing reads; a preflight does not
+		// pass one. A misspelled live key (roles:, say) falls back to its
+		// default, which can be broader than what was meant, and the
+		// preflight is where that is caught.
+		if len(cfg.UnknownKeys) > 0 {
+			return checkConfigUnknownKeys
 		}
 		return 0
 	}
@@ -149,6 +164,7 @@ func runWithRuntimeModeDependencies(
 		Commit:        commit,
 		SchemaVersion: schemaVersion,
 	})
+	recorder.SetConfigUnknownKeys(len(cfg.UnknownKeys))
 	var runErr error
 	if dependencies.phaseTwo.run == nil {
 		runErr = errPhaseTwoWorkerBundleNotAssembled

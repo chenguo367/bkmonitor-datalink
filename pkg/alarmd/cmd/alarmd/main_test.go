@@ -67,7 +67,8 @@ func TestRunChecksConfigurationWithoutStartingApplication(t *testing.T) {
 	}
 }
 
-func TestRunCheckConfigurationRejectsUnknownField(t *testing.T) {
+// An unknown key is ignored and named: check-config passes and says which.
+func TestRunCheckConfigurationNamesAnIgnoredUnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "alarmd.yaml")
 	contents := validGoAccessApplicationYAML() + "unknown_field: true\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -77,11 +78,14 @@ func TestRunCheckConfigurationRejectsUnknownField(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(context.Background(), []string{"--check-config", "--config", path}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	if code != checkConfigUnknownKeys {
+		t.Fatalf("run() code = %d, want %d: a preflight does not pass a key nothing reads; stderr = %q", code, checkConfigUnknownKeys, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "field unknown_field not found") {
-		t.Fatalf("run() stderr = %q, want strict field error", stderr.String())
+	if stdout.Len() == 0 {
+		t.Fatal("the resolved facts were not printed beside the ignored key")
+	}
+	if !strings.Contains(stderr.String(), "ignored") || !strings.Contains(stderr.String(), "field unknown_field not found") {
+		t.Fatalf("run() stderr = %q, want the ignored field named", stderr.String())
 	}
 }
 
@@ -116,20 +120,21 @@ func TestCheckCLIReleaseFailsABinaryBuiltWithoutOne(t *testing.T) {
 	}
 }
 
-func TestRunRejectsOwnerConfiguration(t *testing.T) {
+// The retired mode key never made a process an owner; a file that still says
+// owner is the same process, with the key named as ignored.
+func TestRunIgnoresAndNamesOwnerMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "alarmd.yaml")
-	if err := os.WriteFile(path, []byte("mode: owner\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(validGoAccessApplicationYAML()+"mode: owner\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", path}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("run() accepted owner configuration, stdout = %q", stdout.String())
+	if code := run(context.Background(), []string{"--check-config", "--config", path}, &stdout, &stderr); code != checkConfigUnknownKeys {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "mode") {
-		t.Fatalf("run() stderr = %q, want mode context", stderr.String())
+	if !strings.Contains(stderr.String(), "field mode not found") {
+		t.Fatalf("run() stderr = %q, want mode named as ignored", stderr.String())
 	}
 }
 

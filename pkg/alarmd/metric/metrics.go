@@ -31,7 +31,8 @@ type BuildInfo struct {
 }
 
 type Recorder struct {
-	registry *prometheus.Registry
+	registry          *prometheus.Registry
+	configUnknownKeys prometheus.Gauge
 	// build is kept beside the build_info series so the same facts can be
 	// published where the page reads them. Until now the running version was
 	// only a metric label: answering "which commit is this deployment on"
@@ -75,6 +76,13 @@ func NewRecorder(build BuildInfo) *Recorder {
 		[]string{"version", "commit", "schema_version"},
 	)
 	buildInfo.WithLabelValues(build.Version, build.Commit, build.SchemaVersion).Set(1)
+	configUnknownKeys := prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: metricSubsystem,
+		Name:      "config_unknown_keys",
+		Help: "Keys in the configuration file that no field reads, retired keys and misspellings: ignored, " +
+			"named on stderr at startup, never a reason to refuse to start. Non-zero means the chart renders " +
+			"something this image no longer reads.",
+	})
 	observations := newObservationMetrics()
 	phaseTwo := newPhaseTwoMetrics()
 	heap := newHeapSiteCollector(time.Now)
@@ -93,18 +101,29 @@ func NewRecorder(build BuildInfo) *Recorder {
 		// Where the live heap comes from, by allocating function; see heap_sites.go.
 		heap,
 		buildInfo,
+		configUnknownKeys,
 	}
 	collectorsToRegister = append(collectorsToRegister, observations.collectors()...)
 	collectorsToRegister = append(collectorsToRegister, phaseTwo.collectors()...)
 	registry.MustRegister(collectorsToRegister...)
 
 	return &Recorder{
-		heap:         heap,
-		registry:     registry,
-		build:        build,
-		observations: observations,
-		phaseTwo:     phaseTwo,
+		heap:              heap,
+		registry:          registry,
+		configUnknownKeys: configUnknownKeys,
+		build:             build,
+		observations:      observations,
+		phaseTwo:          phaseTwo,
 	}
+}
+
+// SetConfigUnknownKeys publishes how many keys of the loaded configuration
+// file no field reads.
+func (r *Recorder) SetConfigUnknownKeys(count int) {
+	if r == nil {
+		return
+	}
+	r.configUnknownKeys.Set(float64(count))
 }
 
 // Build is the build this process reports in build_info, for publishing the

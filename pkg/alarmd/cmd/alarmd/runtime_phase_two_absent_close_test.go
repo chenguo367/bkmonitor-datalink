@@ -600,3 +600,26 @@ func TestAStrategyWhoseDocumentLostItsTenantKeepsItsAlerts(t *testing.T) {
 		t.Fatalf("an existing strategy without a tenant in the snapshot had its alert closed: %+v", fixture.writer.batches)
 	}
 }
+
+// A deleted strategy's alerts are all closed in the round that decides them,
+// in batches, rather than one batch a round: a strategy with thousands of
+// open alerts is not hours of rounds from being closed.
+func TestEveryAlertOfADeletedStrategyIsClosedInOneRound(t *testing.T) {
+	var alerts []openalerts.Alert
+	for i := 0; i < 150; i++ {
+		alerts = append(alerts, nativeAlert("alert-"+itoaAbsent(i), fmt.Sprintf("%032x", i)))
+	}
+	fixture := newAbsentFixture(t, alerts)
+	fixture.link.pages[1].Rows[0].Members = members(len(alerts))
+	fixture.mature(context.Background())
+	sent := 0
+	for _, batch := range fixture.writer.batches {
+		if len(batch) > absentCloseAlertBatch {
+			t.Fatalf("a batch of %d is past the batch size %d", len(batch), absentCloseAlertBatch)
+		}
+		sent += len(batch)
+	}
+	if sent != len(alerts) || fixture.loop.Stats()[absentalerts.OutcomeCloseSent] != uint64(len(alerts)) {
+		t.Fatalf("closed %d of %d alerts in the deciding round (stats %+v)", sent, len(alerts), fixture.loop.Stats())
+	}
+}
