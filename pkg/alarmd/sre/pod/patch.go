@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -121,8 +122,10 @@ func (p *Provider) PatchObject(ctx context.Context, request ObjectPatchRequest) 
 	patched, err := p.options.Writer.JSONPatch(ctx, resource, request.Namespace, request.Name, patch)
 	if err != nil {
 		refused := p.writeRefused(answer, err, object)
-		if failedTest(err) {
+		if path, failed := failedTest(err, live, request.Patch); failed {
 			refused.Outcome = WriteTestFailed
+			refused.Message = "test at " + path + " does not hold, evaluated against the object as read at resourceVersion " +
+				live.GetResourceVersion() + "; the apiserver applied nothing (" + refused.Message + ")"
 		}
 		return record(refused)
 	}
@@ -138,14 +141,35 @@ func (p *Provider) PatchObject(ctx context.Context, request ObjectPatchRequest) 
 }
 
 // failedTest says the apiserver refused a patch because one of its tests did
-// not hold: 422 with the patch library's words. A 422 from validation or
-// admission is a denial.
-func failedTest(err error) bool {
+// not hold, and which. The apiserver answers a failed test with a bare 422
+// (no causes, no words of the patch library), the same as a validation or
+// admission refusal; so each test op is replayed against the raw object as
+// read (never the masked copy shown in receipts). One that does not hold
+// makes it a failed test; when every test holds the 422 is a denial. The
+// replay sees the object as read, not what the apiserver saw a moment later.
+func failedTest(err error, live *unstructured.Unstructured, ops []PatchOp) (string, bool) {
 	var status apierrors.APIStatus
 	if !errors.As(err, &status) || status.Status().Code != http.StatusUnprocessableEntity {
-		return false
+		return "", false
 	}
-	return strings.Contains(strings.ToLower(status.Status().Message), "testing value")
+	original, encodeErr := json.Marshal(live.Object)
+	if encodeErr != nil {
+		return "", false
+	}
+	for _, op := range ops {
+		if op.Op != "test" {
+			continue
+		}
+		single, _ := json.Marshal([]PatchOp{op})
+		decoded, decodeErr := jsonpatch.DecodePatch(single)
+		if decodeErr != nil {
+			continue
+		}
+		if _, applyErr := decoded.Apply(original); applyErr != nil {
+			return op.Path, true
+		}
+	}
+	return "", false
 }
 
 // templateOf is an object's Pod template, nil for an object without one.

@@ -26,10 +26,16 @@ import (
 type patchingWriter struct {
 	fakeWriter
 	patches []string
+	// refuse answers every patch with a bare 422, as validation would.
+	refuse bool
 }
 
 func (w *patchingWriter) JSONPatch(_ context.Context, resource schema.GroupVersionResource, namespace, name string, patch []byte) (*unstructured.Unstructured, error) {
 	w.patches = append(w.patches, string(patch))
+	if w.refuse {
+		return nil, &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusUnprocessableEntity,
+			Reason: metav1.StatusReasonInvalid, Message: "the server rejected our request due to an error in our request"}}
+	}
 	live := w.runner.live[namespace+"/"+name]
 	original, _ := json.Marshal(live.Object)
 	decoded, err := jsonpatch.DecodePatch(patch)
@@ -38,8 +44,10 @@ func (w *patchingWriter) JSONPatch(_ context.Context, resource schema.GroupVersi
 	}
 	modified, err := decoded.Apply(original)
 	if err != nil {
+		// The apiserver answers a failed test with a bare 422: no causes and
+		// none of the patch library's words (seen on a live apiserver).
 		return nil, &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusUnprocessableEntity,
-			Reason: metav1.StatusReasonInvalid, Message: "the server rejected our request due to an error in our request: " + err.Error()}}
+			Reason: metav1.StatusReasonInvalid, Message: "the server rejected our request due to an error in our request"}}
 	}
 	out := &unstructured.Unstructured{}
 	if err := out.UnmarshalJSON(modified); err != nil {
@@ -184,5 +192,47 @@ func TestThePatchIsAJSONPatchAsTheChannelsManager(t *testing.T) {
 	if seen.Method != http.MethodPatch || seen.Header.Get("Content-Type") != "application/json-patch+json" || seen.URL.Path != "/apis/apps/v1/namespaces/ns1/deployments/web" ||
 		query.Get("fieldManager") != "alarmd-sre" || query.Has("dryRun") || body != patch {
 		t.Fatalf("%s %s %s %v body %s", seen.Method, seen.URL.Path, seen.Header.Get("Content-Type"), query, body)
+	}
+}
+
+// A bare 422 is a failed test only when one of the patch's own tests does
+// not hold on the object as read; a 422 for a patch whose tests all hold is
+// the apiserver refusing the result, a denial.
+func TestABare422IsATestFailureOnlyWhenATestDoesNotHold(t *testing.T) {
+	provider, _, writer := patchProvider(t)
+	writer.refuse = true
+	receipt, err := provider.PatchObject(context.Background(), patchRequest("uid-web",
+		PatchOp{Op: "test", Path: "/spec/template/spec/containers/0/env/1", Value: raw(`{"name":"DROP","value":"d"}`)},
+		PatchOp{Op: "remove", Path: "/spec/template/spec/containers/0/env/1"}))
+	if err != nil || receipt.Objects[0].Outcome != WriteDenied {
+		t.Fatalf("tests hold, refused anyway: %+v err %v", receipt.Objects[0], err)
+	}
+}
+
+// A test of a Secret's value with the right value holds on the raw object:
+// a bare 422 for that patch is not relabeled a failed test because receipts
+// show the value masked.
+func TestASecretTestIsReplayedOnTheRawValue(t *testing.T) {
+	secret := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Secret",
+		"metadata": map[string]any{"name": "s", "namespace": "ns1", "uid": "uid-s", "resourceVersion": "7"}, "data": map[string]any{"KEY": "c2VjcmV0LXNlbnRpbmVs"}}}
+	runner := &fakeDryRunner{live: map[string]*unstructured.Unstructured{"ns1/s": secret}, mappings: map[string]schema.GroupVersionResource{
+		"v1/Secret": {Version: "v1", Resource: "secrets"}}}
+	writer := &patchingWriter{refuse: true}
+	provider := writeProvider(t, runner, &writer.fakeWriter)
+	writer.runner = runner
+	provider.options.Writer = writer
+	request := ObjectPatchRequest{APIVersion: "v1", Kind: "Secret", Namespace: "ns1", Name: "s", UID: "uid-s", Patch: []PatchOp{
+		{Op: "test", Path: "/data/KEY", Value: raw(`"c2VjcmV0LXNlbnRpbmVs"`)}, {Op: "remove", Path: "/data/KEY"}}}
+	receipt, err := provider.PatchObject(context.Background(), request)
+	if err != nil || receipt.Objects[0].Outcome != WriteDenied {
+		t.Fatalf("a holding test on a Secret value: %+v err %v", receipt.Objects[0], err)
+	}
+	request.Patch[0].Value = raw(`"d3Jvbmc="`)
+	receipt, err = provider.PatchObject(context.Background(), request)
+	o := receipt.Objects[0]
+	encoded, _ := json.Marshal(o)
+	if err != nil || o.Outcome != WriteTestFailed || !strings.Contains(o.Message, "/data/KEY") || !strings.Contains(o.Message, "resourceVersion 7") ||
+		strings.Contains(string(encoded), "c2VjcmV0LXNlbnRpbmVs") || strings.Contains(string(encoded), "d3Jvbmc=") {
+		t.Fatalf("a failing test on a Secret value: %s err %v", encoded, err)
 	}
 }
