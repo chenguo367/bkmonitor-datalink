@@ -910,6 +910,7 @@ var alarmdWords = []string{
 	"moved",
 	"moves",
 	"ms",
+	"msg",
 	"multi",
 	"mutatingwebhookconfigurations",
 	"mutation",
