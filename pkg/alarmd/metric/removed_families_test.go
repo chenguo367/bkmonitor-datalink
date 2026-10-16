@@ -438,3 +438,34 @@ func TestARemovedNameIsFoundBareUnlessItIsALabel(t *testing.T) {
 		}
 	}
 }
+
+// The families lost the bkmonitor_ namespace in one switch, so any name
+// still carrying it is wrong whether or not its family was removed: a reader
+// asking for it reads nothing and takes it for zero. A word that merely ends
+// in it (a topic such as 0bkmonitor_...) is not a metric name.
+func TestNoSourceNamesAFamilyWithTheOldNamespace(t *testing.T) {
+	pattern := regexp.MustCompile(`(?:^|[^0-9A-Za-z])` + "bkmonitor" + `_alarmd_[a-z0-9_]*`)
+	for _, root := range []string{"..", filepath.Join("..", "..", "alarmd-cli")} {
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			switch filepath.Ext(path) {
+			case ".go", ".html", ".js", ".md", ".yaml", ".json":
+			default:
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if match := pattern.Find(body); match != nil {
+				t.Errorf("%s names %s, a family under the old namespace", path, strings.TrimLeft(string(match), "\"'`([{ |^:\t\n"))
+			}
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+}
