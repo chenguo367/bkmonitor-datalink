@@ -486,4 +486,3 @@ func TestSplitChannelReadsAuthlessWorkerThroughRegisteredGRPC(t *testing.T) {
 		t.Fatal("internal permission rejection executed the Worker provider")
 	}
 }
-
