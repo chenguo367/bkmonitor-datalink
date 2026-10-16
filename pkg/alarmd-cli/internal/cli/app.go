@@ -516,23 +516,25 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 		if required != "" && !allowsScope(p.Scope, required) {
 			return a.fail("permission_denied", "Operation requires "+required+", which this earlier server grants only on a separate login; authorize again from its page.", 1)
 		}
+		// A newer server may advertise larger limits than this CLI knows:
+		// it waits as long as the server says the operation runs, and only
+		// a malformed value is refused.
 		if advertised, exists := contract["execution_timeout_ms"]; exists {
 			ms, ok := advertised.(json.Number)
 			v, err := ms.Int64()
-			if !ok || err != nil || v < 1 || v > 120000 {
+			if !ok || err != nil || v < 1 {
 				return a.fail("protocol_error", "Operation execution timeout is invalid.", 1)
 			}
 			admissionMS, marginMS := int64(0), int64(5000)
 			limits := objectField(contract, "request_limits")
 			for _, budget := range []struct {
-				key     string
-				maximum int64
-				value   *int64
-			}{{"admission_timeout_ms", 10000, &admissionMS}, {"transport_margin_ms", 30000, &marginMS}} {
+				key   string
+				value *int64
+			}{{"admission_timeout_ms", &admissionMS}, {"transport_margin_ms", &marginMS}} {
 				if declared, exists := limits[budget.key]; exists {
 					number, ok := declared.(json.Number)
 					ms, err := number.Int64()
-					if !ok || err != nil || ms < 1 || ms > budget.maximum {
+					if !ok || err != nil || ms < 1 {
 						return a.fail("protocol_error", "Operation "+budget.key+" is invalid.", 1)
 					}
 					*budget.value = ms
@@ -548,12 +550,12 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 		if maximum, exists := contract["request_max_bytes"]; exists {
 			n, ok := maximum.(json.Number)
 			limit, err := n.Int64()
-			if !ok || err != nil || limit < 1 || limit > maxInputBytes {
+			if !ok || err != nil || limit < 1 {
 				return a.fail("protocol_error", "Operation request byte limit is invalid.", 1)
 			}
 			body := channelBody(mode, operation, params, revision)
 			encoded, err := json.Marshal(body)
-			if err != nil || int64(len(encoded)) > limit {
+			if err != nil || int64(len(encoded)) > requestBound(limit) {
 				return a.fail("invalid_input", "Input exceeds the described operation request byte limit.", 2)
 			}
 		}

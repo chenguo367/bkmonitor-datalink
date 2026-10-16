@@ -309,9 +309,15 @@ func (p *Provider) Discover(ctx context.Context, request DiscoverRequest) (Disco
 	if len(pods.Items) > limit {
 		return result, &Error{Code: CodeAPIError, Message: "API ignored the discovery limit"}
 	}
+	// One discovery reads each owner once: replicas of a workload share
+	// their ReplicaSet and Deployment. Nothing is kept past the request.
+	owners := map[string]OwnerResource{}
 	for i := range pods.Items {
 		obj := &pods.Items[i]
-		observations, err := p.observe(ctx, obj, "")
+		if request.Workload != "" && !mayLeadTo(obj.OwnerReferences, request.Workload) {
+			continue
+		}
+		observations, err := p.observe(ctx, obj, "", owners)
 		if err != nil {
 			var failure *Error
 			if errors.As(err, &failure) && failure.Code == CodeNotInScope {
@@ -361,7 +367,7 @@ func (p *Provider) resolve(ctx context.Context, target Target, strict bool) (Obs
 	if err != nil {
 		return Observation{}, apiError(err)
 	}
-	observations, err := p.observe(ctx, obj, target.Container)
+	observations, err := p.observe(ctx, obj, target.Container, nil)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -374,8 +380,8 @@ func (p *Provider) resolve(ctx context.Context, target Target, strict bool) (Obs
 
 // observe reads a Pod's containers with the owner chain verified against
 // the live resources. The release and module are the Pod's own labels.
-func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container string) ([]Observation, error) {
-	chain, _, err := p.ownerChain(ctx, obj)
+func (p *Provider) observe(ctx context.Context, obj *corev1.Pod, container string, owners map[string]OwnerResource) ([]Observation, error) {
+	chain, _, err := p.ownerChain(ctx, obj, owners)
 	if err != nil {
 		return nil, err
 	}
@@ -462,14 +468,30 @@ func controller(owners []metav1.OwnerReference) (metav1.OwnerReference, error) {
 func rootKind(kind string) bool {
 	return kind == "Deployment" || kind == "StatefulSet" || kind == "DaemonSet" || kind == "CronJob" || kind == "Job"
 }
-func (p *Provider) ownerChain(ctx context.Context, obj *corev1.Pod) ([]Workload, []map[string]string, error) {
-	owners := obj.OwnerReferences
+
+// mayLeadTo says whether a Pod's controller could have workload at the root
+// of its chain: a StatefulSet, DaemonSet, Job or bare ReplicaSet is the name
+// itself, a Deployment's ReplicaSet and a CronJob's Job are the name and a
+// dash. It only spares the owner reads of Pods that cannot match; those that
+// can are still checked through the whole chain.
+func mayLeadTo(owners []metav1.OwnerReference, workload string) bool {
+	ref, err := controller(owners)
+	if err != nil {
+		return true
+	}
+	return ref.Name == workload || strings.HasPrefix(ref.Name, workload+"-")
+}
+
+// ownerChain reads a Pod's owners up to its workload. owners, when not nil,
+// holds those this request has read already, by kind, name and UID.
+func (p *Provider) ownerChain(ctx context.Context, obj *corev1.Pod, owners map[string]OwnerResource) ([]Workload, []map[string]string, error) {
+	refs := obj.OwnerReferences
 	var chain []Workload
 	var ownerLabels []map[string]string
 	childKind := "Pod"
 	childLabels := obj.Labels
 	for depth := 0; depth < 3; depth++ {
-		ref, err := controller(owners)
+		ref, err := controller(refs)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -477,9 +499,16 @@ func (p *Provider) ownerChain(ctx context.Context, obj *corev1.Pod) ([]Workload,
 		if !valid {
 			return nil, nil, denied("unsupported workload owner chain")
 		}
-		owner, err := p.options.Client.GetOwner(ctx, obj.Namespace, ref)
-		if err != nil {
-			return nil, nil, apiError(err)
+		key := obj.Namespace + "/" + ref.APIVersion + "/" + ref.Kind + "/" + ref.Name + "/" + string(ref.UID)
+		owner, read := owners[key]
+		if !read {
+			owner, err = p.options.Client.GetOwner(ctx, obj.Namespace, ref)
+			if err != nil {
+				return nil, nil, apiError(err)
+			}
+			if owners != nil {
+				owners[key] = owner
+			}
 		}
 		if owner.Namespace != obj.Namespace || owner.Name != ref.Name || owner.Kind != ref.Kind || owner.UID != string(ref.UID) {
 			return nil, nil, denied("owner reference identity does not match the live resource")
@@ -498,7 +527,7 @@ func (p *Provider) ownerChain(ctx context.Context, obj *corev1.Pod) ([]Workload,
 		if rootKind(ref.Kind) && len(owner.Owners) == 0 {
 			return chain, ownerLabels, nil
 		}
-		owners = owner.Owners
+		refs = owner.Owners
 		childKind = owner.Kind
 		childLabels = owner.Labels
 	}
