@@ -729,3 +729,45 @@ func TestATimedOutCommandKeepsWhatItPrinted(t *testing.T) {
 		t.Fatalf("stdout %q records %v, want the line printed before the timer and an expired record", stdout, records)
 	}
 }
+
+// The command reads the exec's stdin, whichever way it gets its group. A
+// shell without job control gives a background command /dev/null for stdin
+// before any redirection of its own (POSIX), which is the setsid path on a
+// Linux target; the supervisor keeps the stream's stdin on a descriptor of
+// its own and hands that to the command, so a script sent as stdin runs
+// rather than reading nothing and exiting 0.
+func TestTheShellSupervisorHandsTheCommandItsStdin(t *testing.T) {
+	shells := []string{"/bin/sh"}
+	// dash is the /bin/sh of Debian-based images, and the shell that applies
+	// the rule; a host that has it runs the supervisor under it too.
+	if _, err := os.Stat("/bin/dash"); err == nil {
+		shells = append(shells, "/bin/dash")
+	}
+	for _, shell := range shells {
+		for name, path := range map[string]string{"setsid": withSetsid(t), "job control or none": ""} {
+			t.Run(shell+" "+name, func(t *testing.T) {
+				superviseStdin(t, shell, path)
+			})
+		}
+	}
+}
+
+func superviseStdin(t *testing.T, shell, path string) {
+	t.Helper()
+	command := exec.Command(shell, "-c", remoteSupervisor, supervisorName, "N0NCE", "5", "cat")
+	if path != "" {
+		command.Env = append(os.Environ(), "PATH="+path)
+	}
+	command.Stdin = strings.NewReader("stdin-reached\n")
+	var out, errOut strings.Builder
+	command.Stdout, command.Stderr = &out, &errOut
+	if err := command.Run(); err != nil {
+		t.Fatalf("supervisor exited %v; stderr %q", err, errOut.String())
+	}
+	if !strings.HasPrefix(out.String(), "stdin-reached\n") {
+		t.Fatalf("stdout %q, want the command to have read its stdin; stderr %q", out.String(), errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "N0NCE complete 0") {
+		t.Fatalf("records %q", errOut.String())
+	}
+}

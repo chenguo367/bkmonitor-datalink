@@ -28,6 +28,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
@@ -71,6 +72,9 @@ type cliControlBinding struct {
 	// Maintenance is the effective-time maintenance, bound once the loop is
 	// built; read by maintenance.get.
 	Maintenance *maintenanceSource
+	// LinkdConsole is the process's linkd Console client, read by
+	// linkd.alerts; nil without a Console.
+	LinkdConsole *openalerts.HTTPReconciler
 }
 
 // cliAuthEvents counts the CLI authorization's events, every cell created

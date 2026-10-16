@@ -75,7 +75,7 @@ func ConsoleFailureClass(err error) string {
 
 // ConsoleOps is every operation a ConsoleRecord carries, in the order a
 // reader shows them.
-var ConsoleOps = []string{ConsoleOpRoster, ConsoleOpReconcile, ConsoleOpAlertRecord, ConsoleOpEventSource}
+var ConsoleOps = []string{ConsoleOpRoster, ConsoleOpReconcile, ConsoleOpAlertRecord, ConsoleOpEventSource, ConsoleOpAlertRead}
 
 // ConsoleCall is what this process has seen of one operation: how many
 // calls and failures, when it last completed, when it last failed and what

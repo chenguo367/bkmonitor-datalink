@@ -231,6 +231,9 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		}
 		return cliMaintenanceOperation(current.Control.Maintenance)
 	}))
+	ops = append(ops, dynamicChannelOperation(cliLinkdAlertsOperation(nil), func() obchannel.Operation {
+		return cliLinkdAlertsOperation(linkdConsoleOf(providers.read().Control.LinkdConsole))
+	}))
 	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
 	for i := range workload {
 		if workload[i].ID != "k8s.workloads" {
