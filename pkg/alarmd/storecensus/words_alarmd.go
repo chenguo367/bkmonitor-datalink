@@ -1610,6 +1610,7 @@ var alarmdWords = []string{
 	"unavailable",
 	"unaware",
 	"unbound",
+	"unbounded",
 	"unchanged",
 	"unclassified",
 	"uncompilable",
