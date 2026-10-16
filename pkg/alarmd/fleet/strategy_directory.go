@@ -122,11 +122,8 @@ func serveStrategyCatalog(w http.ResponseWriter, r *http.Request, directory Stra
 
 func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forward LeaderForward, absence CatalogAbsenceFunc,
 	replica string, now func() time.Time) http.Handler {
-	pageRead := make(chan struct{}, 1)
-	// Configuration reads are point reads but can decode a large shared group.
-	// Only one may run per process; the diagnostic request is rejected instead
-	// of occupying more execution connections or keeping a waiting queue.
-	configRead := make(chan struct{}, 1)
+	// Directory and configuration reads are an operator's, a handful next to
+	// the business work, and run side by side with no count of their own.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if r.URL.Path == "/api/objects" && q.Get("scope") == "strategy_catalog" {
@@ -146,13 +143,6 @@ func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forwa
 			return
 		}
 		if toLeader(w, r, directory, forward) {
-			return
-		}
-		select {
-		case pageRead <- struct{}{}:
-			defer func() { <-pageRead }()
-		default:
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "OBSERVATION_BUSY"})
 			return
 		}
 		limit := 20
@@ -235,13 +225,6 @@ func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forwa
 				} else {
 					writeJSON(w, 503, map[string]string{"error": "EFFECTIVE_CONFIG_UNKNOWN"})
 				}
-				return
-			}
-			select {
-			case configRead <- struct{}{}:
-				defer func() { <-configRead }()
-			default:
-				writeJSON(w, 429, map[string]string{"error": "OBSERVATION_BUSY"})
 				return
 			}
 			plan, err := directory.EffectivePlan(r.Context(), selected)
