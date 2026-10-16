@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // All identifiers below are synthetic fixtures, never deployment evidence.
@@ -260,6 +261,7 @@ func TestTraceAndOldQueryShareTransportBudgetButKeepLogProjection(t *testing.T) 
 	defer s.Close()
 	p, _ := NewWithQuerySource(traceFixture(s.URL, false), nil, "alarmd-sre")
 	defer p.Close()
+	p.wait = 50 * time.Millisecond
 	done := make(chan error, 1)
 	go func() { _, err := p.Trace(context.Background(), traceRequest(false)); done <- err }()
 	<-started

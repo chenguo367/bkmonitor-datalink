@@ -239,6 +239,7 @@ func TestIsolatedBudgetAndCancellation(t *testing.T) {
 	defer s.Close()
 	p, _ := NewWithQuerySource(fixture(s.URL), nil, "alarmd-sre")
 	defer p.Close()
+	p.wait = 50 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, err := p.Query(ctx, request()); done <- err }()
