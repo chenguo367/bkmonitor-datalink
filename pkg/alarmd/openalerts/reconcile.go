@@ -107,6 +107,10 @@ type HTTPReconcilerOptions struct {
 	// lasts, with the operation's failures so far; outside the record's
 	// lock. Nil tells no one.
 	OnFailure func(op, class string, failures uint64)
+	// OutputTopic is the Kafka topic this deployment's events are written
+	// to. The event source they arrive under is the target's candidate
+	// subscribed to it (chooseSource); empty leaves the link's name.
+	OutputTopic string
 }
 
 // HTTPReconciler reads the link's Console. Which target is this deployment's
@@ -126,6 +130,10 @@ type HTTPReconciler struct {
 	keyingTried, factsTried time.Time
 	// calls is what this process has seen of each Console operation.
 	calls consoleCalls
+	// sourceChoice is how the last resolution chose the event source, and
+	// chosenSource the source the last successful choice found.
+	sourceChoice SourceByTopic
+	chosenSource string
 }
 
 // bindingReuse is how long a resolved target is reused by the roster walk,
@@ -282,6 +290,7 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 	if err != nil {
 		return TargetBinding{}, err
 	}
+	binding = reader.chooseSource(ctx, binding)
 	reader.mu.Lock()
 	index := reader.options.Index
 	reader.mu.Unlock()

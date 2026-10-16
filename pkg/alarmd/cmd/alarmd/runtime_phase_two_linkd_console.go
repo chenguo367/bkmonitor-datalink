@@ -127,6 +127,7 @@ func linkdConsoleFacts(console *openalerts.HTTPReconciler, at time.Time) *fleet.
 		}
 	}
 	facts.EventSource = linkdEventSourceFacts(record, at)
+	facts.SourceByTopic = linkdSourceByTopicFacts(record.SourceByTopic)
 	linkWord := ""
 	if !record.LinkReadAt.IsZero() {
 		age := at.Sub(record.LinkReadAt).Seconds()
@@ -183,4 +184,19 @@ func linkdEventSourceFacts(record openalerts.ConsoleRecord, at time.Time) *fleet
 		Revision: keying.Revision, Published: keying.Published, Pending: keying.Pending, Deleted: keying.Deleted,
 		InEffect: keying.InEffect, KeyedByAlertID: keying.KeyedByAlertID,
 		ReadAgeSeconds: at.Sub(record.EventSourceReadAt).Seconds()}
+}
+
+// linkdSourceByTopicFacts is how the event source was chosen; nil until a
+// resolution has run.
+func linkdSourceByTopicFacts(choice openalerts.SourceByTopic) *fleet.LinkdSourceByTopicFacts {
+	if choice.Outcome == "" {
+		return nil
+	}
+	facts := &fleet.LinkdSourceByTopicFacts{Outcome: choice.Outcome, Topic: choice.Topic, Listed: choice.Listed,
+		EventSourceID: choice.EventSourceID, Reason: choice.Reason}
+	for _, candidate := range choice.Candidates {
+		facts.Candidates = append(facts.Candidates, fleet.LinkdSourceCandidate{EventSourceID: candidate.EventSourceID, Topic: candidate.Topic,
+			Enabled: candidate.Enabled, Published: candidate.Published, Deleted: candidate.Deleted, Unreadable: candidate.Unreadable})
+	}
+	return facts
 }

@@ -273,6 +273,34 @@ type LinkdConsoleFacts struct {
 	// lookup's key has to agree with. Absent until read; the control leader
 	// reads it at the start of each roster walk.
 	EventSource *LinkdEventSourceFacts `json:"event_source,omitempty"`
+	// SourceByTopic is how the event source was chosen among the target's:
+	// the one subscribed to the topic this deployment writes to. Absent
+	// until a resolution has run.
+	SourceByTopic *LinkdSourceByTopicFacts `json:"source_by_topic,omitempty"`
+}
+
+// LinkdSourceByTopicFacts is how this deployment's event source was chosen.
+// Listed is the link's own name for the target, EventSourceID the source the
+// binding carries; resolved means one candidate reads Topic, unresolved names
+// Reason and keeps the source the binding had.
+type LinkdSourceByTopicFacts struct {
+	Outcome       string                 `json:"outcome"`
+	Topic         string                 `json:"topic,omitempty"`
+	Listed        string                 `json:"listed,omitempty"`
+	EventSourceID string                 `json:"event_source_id,omitempty"`
+	Reason        string                 `json:"reason,omitempty"`
+	Candidates    []LinkdSourceCandidate `json:"candidates,omitempty"`
+}
+
+// LinkdSourceCandidate is one of the target's sources as its definition
+// reads; no broker or credential is part of it.
+type LinkdSourceCandidate struct {
+	EventSourceID string `json:"event_source_id"`
+	Topic         string `json:"topic,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	Published     int64  `json:"published"`
+	Deleted       bool   `json:"deleted,omitempty"`
+	Unreadable    bool   `json:"unreadable,omitempty"`
 }
 
 // LinkdEventSourceFacts is the link's definition of this deployment's

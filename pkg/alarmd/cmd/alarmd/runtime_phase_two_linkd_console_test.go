@@ -322,3 +322,38 @@ func TestTheProcesssConsoleWritesALineWhenItsFailuresStart(t *testing.T) {
 		t.Fatalf("the line carries the address or the credentials: %s", out.String())
 	}
 }
+
+// The process's Console chooses the event source by the topic the process
+// writes its events to, and the facts say how: a target the link names after
+// a source that receives nothing resolves to the source reading that topic,
+// with the candidates beside it.
+func TestTheProcesssConsoleChoosesTheSourceByItsOutputTopic(t *testing.T) {
+	cfg := config.Default()
+	topics := map[string]string{"legacy": "legacy_events", "built_in_bk": cfg.Kafka.TriggerEvent.Topic}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/modules/linkd/strategy-index/targets" {
+			target := consoleTestBinding()
+			target.EventSourceID, target.Sources = "legacy", []string{"built_in_bk", "legacy"}
+			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{target})
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/modules/linkd/event-sources/")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "revision": 2, "published": 2,
+			"spec": map[string]any{"storage": map[string]any{"kafka": map[string]any{"topic": topics[id]}}}})
+	}))
+	defer server.Close()
+	cfg.PhaseTwo.Linkd.ConsoleURL = server.URL + "/api/modules/linkd"
+	cfg.PhaseTwo.Linkd.Username, cfg.PhaseTwo.Linkd.Password = "user", "secret"
+	index, err := newLinkdIndex(cfg, nil, cfg.RuntimeStoreRedis(), nil, nil, nil, time.Now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No Redis is bound here, so the resolution stops at the location; the
+	// source is chosen before that.
+	_, _ = index.Console.Binding(context.Background())
+	facts := linkdConsoleFacts(index.Console, consoleTestNow).SourceByTopic
+	if facts == nil || facts.Outcome != openalerts.SourceByTopicResolved || facts.EventSourceID != "built_in_bk" || facts.Listed != "legacy" ||
+		facts.Topic != cfg.Kafka.TriggerEvent.Topic || len(facts.Candidates) != 2 {
+		t.Fatalf("source by topic = %+v", facts)
+	}
+}

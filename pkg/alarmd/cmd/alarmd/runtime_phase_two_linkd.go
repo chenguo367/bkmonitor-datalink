@@ -90,7 +90,10 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Token: token, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
 			Now: now, Index: index, LocationConfirmed: adopted, OnLocationMismatch: location.relocate,
-			KeyingEvery: config.LinkdCalibrationInterval, OnFailure: consoleFailureLine(logger)})
+			KeyingEvery: config.LinkdCalibrationInterval, OnFailure: consoleFailureLine(logger),
+			// The source this deployment's events arrive under is the one
+			// subscribed to the topic they are written to.
+			OutputTopic: cfg.Kafka.TriggerEvent.Topic})
 		if err != nil {
 			return linkdIndex{}, err
 		}
