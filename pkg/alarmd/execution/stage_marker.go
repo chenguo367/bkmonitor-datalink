@@ -66,6 +66,10 @@ type StageMarker struct {
 	stage    atomic.Value
 	deadline atomic.Int64
 	commit   atomic.Uint64
+	// queryReturned is when the execution's query returned (UnixNano), zero
+	// until it does: what follows it is the post-query tail the downstream
+	// execution reserve has to cover.
+	queryReturned atomic.Int64
 }
 
 // Begin starts a new execution in stage with no deadline yet, open to commit.
@@ -74,6 +78,7 @@ func (marker *StageMarker) Begin(stage string) {
 		return
 	}
 	marker.deadline.Store(0)
+	marker.queryReturned.Store(0)
 	marker.stage.Store(stage)
 	for {
 		word := marker.commit.Load()
@@ -127,6 +132,25 @@ func (marker *StageMarker) Deadline() time.Time {
 }
 
 // Stage is the stage last entered, empty when none is in flight.
+// QueryReturned records when the execution's query returned.
+func (marker *StageMarker) QueryReturned(at time.Time) {
+	if marker != nil {
+		marker.queryReturned.Store(at.UnixNano())
+	}
+}
+
+// QueryReturnedAt is when the execution's query returned; zero when it has
+// not, or when the execution ran no query.
+func (marker *StageMarker) QueryReturnedAt() time.Time {
+	if marker == nil {
+		return time.Time{}
+	}
+	if nanos := marker.queryReturned.Load(); nanos > 0 {
+		return time.Unix(0, nanos)
+	}
+	return time.Time{}
+}
+
 func (marker *StageMarker) Stage() string {
 	if marker == nil {
 		return ""
@@ -206,6 +230,12 @@ func MarkStage(ctx context.Context, stage string) {
 
 // ExtendDeadline raises the deadline of the execution running under ctx to
 // that of a query it starts at at (StageMarker.Extend).
+// MarkQueryReturned records on the execution running under ctx that its
+// query returned at at.
+func MarkQueryReturned(ctx context.Context, at time.Time) {
+	stageMarkerOf(ctx).QueryReturned(at)
+}
+
 func ExtendDeadline(ctx context.Context, deadline, at time.Time) {
 	stageMarkerOf(ctx).Extend(deadline, at)
 }

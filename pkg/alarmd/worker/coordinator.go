@@ -418,6 +418,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: query: %w", err)
 	}
+	execution.MarkQueryReturned(ctx, time.Now())
 	ctx, cancelCompletion := shortPeriodCompletionContext(ctx, request.Operation, stream.header)
 	defer cancelCompletion()
 	if err := ctx.Err(); err != nil {

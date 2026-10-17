@@ -44,7 +44,7 @@ func (source *Source) observeQueryTiming(ctx context.Context, request execution.
 					}
 					facts := observability.QueryTimingFacts{IntervalSeconds: spec.EvaluationIntervalSeconds, CompletionOffsetSeconds: spec.CompletionOffsetSeconds(), ReadyAtUnixMilli: ready,
 						FrozenQueryDeadlineUnixMilli: consumer.ConsumerDeadlineUnixMilli - consumer.DownstreamExecutionReserveMilliSec, CompletionDeadlineUnixMilli: consumer.ConsumerDeadlineUnixMilli}
-					facts.QueryDeadlineUnixMilli = facts.FrozenQueryDeadlineUnixMilli
+					facts.QueryDeadlineUnixMilli, _ = source.config.LiveReserve.QueryDeadlineUnixMilli(consumer, ready)
 					if request.Operation != execution.OperationNormal {
 						if recoveryDeadline.IsZero() {
 							continue

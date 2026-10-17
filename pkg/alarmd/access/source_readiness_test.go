@@ -98,7 +98,7 @@ func TestReadinessIsTheSameInstantForEveryOperation(t *testing.T) {
 				frozen.Requirements[0].Consumers[0].ConsumerDeadlineUnixMilli = frozen.DuePlans[0].CompletionDeadlineUnixMilli
 				contractRef = bindFrozenDueDigest(t, contractRef, frozen)
 
-				prepared, err := prepare(contractRef, frozen, 30*time.Second, recovery)
+				prepared, err := prepare(contractRef, frozen, 30*time.Second, recovery, nil)
 				if err != nil {
 					t.Fatalf("prepare(recovery=%t) error=%v", recovery, err)
 				}

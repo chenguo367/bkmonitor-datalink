@@ -298,6 +298,9 @@ type FlightCoordinator struct {
 	now             func() time.Time
 	// holds is the last day's normal permit holds (HoldReference).
 	holds HourlyDurations
+	// postQueryTails is the last day's post-query tails: from a Slot's query
+	// returning to the Slot returning (PostQueryTail).
+	postQueryTails HourlyDurations
 	// recoveryAcquires is the part of permitAcquires asked by a recovery
 	// operation; normalRequests the normal ones by second.
 	recoveryAcquires uint64
@@ -1063,6 +1066,9 @@ func (runner *Runner) runOneTracked(
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
+	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() {
+		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.lastExecutionReturnedAt.Sub(queried))
+	}
 	decidesPool, poolResult := runner.queryCooldownDecision(operation, result, busyUntil)
 	if err != nil {
 		// The gate is asked again at execution, and a lease that moved

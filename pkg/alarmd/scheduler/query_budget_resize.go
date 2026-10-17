@@ -10,6 +10,7 @@
 package scheduler
 
 import (
+	"math"
 	"math/bits"
 	"time"
 
@@ -111,6 +112,17 @@ func holdBucketMiddle(index int) time.Duration {
 	return time.Duration(low+high) * time.Millisecond / 2
 }
 
+// holdBucketHigh is a bucket's upper edge, what a tail read as a reserve
+// rounds up to: reserving the middle would leave the slower half of the
+// bucket's executions short.
+func holdBucketHigh(index int) time.Duration {
+	high := 1 << ((index + 1) / 2)
+	if (index+1)%2 == 1 {
+		high = high * 1414 / 1000
+	}
+	return time.Duration(high) * time.Millisecond
+}
+
 // Record keeps one duration, in the hour at falls in.
 func (history *HourlyDurations) Record(at time.Time, hold time.Duration) {
 	hour := at.Unix() / 3600
@@ -121,6 +133,45 @@ func (history *HourlyDurations) Record(at time.Time, hold time.Duration) {
 	slot.count++
 	slot.sum += max(hold, 0)
 	slot.buckets[holdBucket(hold)]++
+}
+
+// Quantile is the q-quantile (0 < q <= 1) of every duration of the day
+// before at, the current hour included, read at its bucket's upper edge;
+// zero before any duration. Unlike Reference it pools the hours instead of
+// taking the quietest one: it is read where the slow tail is the point - a
+// reserve sized from the quietest hour would be short in exactly the hour
+// that needs it.
+func (history *HourlyDurations) Quantile(at time.Time, q float64) time.Duration {
+	if q <= 0 || q > 1 {
+		return 0
+	}
+	now := at.Unix() / 3600
+	var pooled [holdHourBuckets]uint64
+	var total uint64
+	for index := range history.hours {
+		hour := &history.hours[index]
+		if hour.count == 0 || hour.start <= now-int64(len(history.hours)) || hour.start > now {
+			continue
+		}
+		for bucket, count := range hour.buckets {
+			pooled[bucket] += uint64(count)
+		}
+		total += hour.count
+	}
+	if total == 0 {
+		return 0
+	}
+	// The rank is rounded up, so with fewer durations than 1/(1-q) the
+	// quantile is the slowest one seen rather than one below it.
+	rank := uint64(math.Ceil(q * float64(total)))
+	var seen uint64
+	for bucket, count := range pooled {
+		seen += count
+		if seen >= rank {
+			return holdBucketHigh(bucket)
+		}
+	}
+	return holdBucketHigh(holdHourBuckets - 1)
 }
 
 // Reference is the lowest median of the hours of the day before at, the
@@ -185,6 +236,34 @@ func (hour *holdHour) median() time.Duration {
 		}
 	}
 	return holdBucketMiddle(holdHourBuckets - 1)
+}
+
+// PostQueryTailQuantile is the post-query tail's slow end that the downstream
+// execution reserve is sized from, the 99th percentile: the reserve exists so
+// a Slot that runs long after its query - a slow state read, a Kafka retry -
+// still completes, and sizing it from a typical Slot would leave one in a
+// hundred short.
+const PostQueryTailQuantile = 0.99
+
+// RecordPostQueryTail keeps one Slot's post-query tail.
+func (coordinator *FlightCoordinator) RecordPostQueryTail(at time.Time, tail time.Duration) {
+	if coordinator == nil || tail <= 0 {
+		return
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	coordinator.postQueryTails.Record(at, tail)
+}
+
+// PostQueryTail is the last day's post-query tail at PostQueryTailQuantile,
+// pooled over its hours; zero before any.
+func (coordinator *FlightCoordinator) PostQueryTail() time.Duration {
+	if coordinator == nil {
+		return 0
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	return coordinator.postQueryTails.Quantile(coordinator.now(), PostQueryTailQuantile)
 }
 
 // recordHoldLocked keeps a normal query's hold for HoldReference.
