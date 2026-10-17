@@ -133,9 +133,10 @@ func (p *Provider) PatchObject(ctx context.Context, request ObjectPatchRequest) 
 		return record(refused)
 	}
 	fingerprints := p.newFingerprints()
-	before, after := p.shown(live, fingerprints), p.shown(patched, fingerprints)
-	answer.Changes, answer.ChangesOmitted = changes(before, after)
-	answer.WillRoll = !reflect.DeepEqual(templateOf(before), templateOf(after))
+	answer.Changes, answer.ChangesOmitted = p.writeChanges(live, patched, fingerprints)
+	// Whether the Pods roll is the stored templates' question: a change the
+	// receipt masks rolls them all the same.
+	answer.WillRoll = !reflect.DeepEqual(templateOf(p.stored(live, fingerprints)), templateOf(p.stored(patched, fingerprints)))
 	answer.Outcome = WriteUpdated
 	if len(answer.Changes) == 0 {
 		answer.Outcome = WriteUnchanged
