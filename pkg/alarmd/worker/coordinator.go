@@ -1599,6 +1599,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive PRIMARY input fact: %w", err)
 	}
 	primary.EmptiedByTarget = query.emptiedByTarget(primary)
+	primary.Identity = query.identityEvidence(primary)
 	primary.QuietWhenEmpty = query.quietWhenEmpty(primary, header.Requirements)
 	completion := execution.SlotCompletion{Contract: request.Contract, Primary: &primary, TargetResolutions: targets}
 	// Observation only. The cause is deliberately not put on
@@ -2879,7 +2880,24 @@ func primaryInputFacts(primary *execution.PrimaryInputFact) *observability.Prima
 		return nil
 	}
 	return &observability.PrimaryInputFacts{Completeness: string(primary.Completeness), DataState: string(primary.DataState),
-		EmptiedByTarget: primary.EmptiedByTarget, QuietWhenEmpty: primary.QuietWhenEmpty}
+		EmptiedByTarget: primary.EmptiedByTarget, QuietWhenEmpty: primary.QuietWhenEmpty, Identity: identityFacts(primary.Identity)}
+}
+
+// identityFacts restates a round's identity evidence for the observation.
+func identityFacts(evidence *execution.IdentityEvidence) *observability.IdentityFacts {
+	if evidence == nil {
+		return nil
+	}
+	facts := &observability.IdentityFacts{Withheld: evidence.Withheld, OutsideTarget: evidence.OutsideTarget, KeyMissing: evidence.KeyMissing}
+	for _, sample := range evidence.Samples {
+		fields := make([]observability.IdentityField, 0, len(sample.Fields))
+		for _, field := range sample.Fields {
+			fields = append(fields, observability.IdentityField{Name: field.Name, Expected: field.Expected, Actual: field.Actual,
+				Present: field.Present, Canonical: field.Canonical})
+		}
+		facts.Samples = append(facts.Samples, observability.IdentitySample{Fields: fields})
+	}
+	return facts
 }
 
 // configDriftCompletion builds the completion of a Slot whose activations moved

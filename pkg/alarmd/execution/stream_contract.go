@@ -146,6 +146,12 @@ type ProviderCompletion struct {
 	// EMPTY, as it would had none been returned; these say it was not.
 	Withheld              uint64
 	WithheldOutsideTarget uint64
+	// WithheldKeyMissing is how many of the withheld series every Plan
+	// refused because its key could not be built (target_key_missing), and
+	// IdentitySamples a few of them, their identity fields by name and
+	// value: data that arrived and that the target's identity cannot read.
+	WithheldKeyMissing uint64           `json:",omitempty"`
+	IdentitySamples    []IdentitySample `json:",omitempty"`
 }
 
 type ProviderSeriesSink interface {
@@ -248,6 +254,12 @@ type PhysicalQueryCompletion struct {
 	// EMPTY, as it would had none been returned; these say it was not.
 	Withheld              uint64
 	WithheldOutsideTarget uint64
+	// WithheldKeyMissing is how many of the withheld series every Plan
+	// refused because its key could not be built (target_key_missing), and
+	// IdentitySamples a few of them, their identity fields by name and
+	// value: data that arrived and that the target's identity cannot read.
+	WithheldKeyMissing uint64           `json:",omitempty"`
+	IdentitySamples    []IdentitySample `json:",omitempty"`
 	// Range is how long a range the query asked the provider for and how
 	// long a range it accepts, and whether it serves a primary requirement:
 	// the request's facts, from the spec that was sent. Nil from a source

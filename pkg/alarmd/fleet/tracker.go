@@ -100,6 +100,16 @@ const (
 	// stopped or never came, so the object is on neither line above: it is
 	// detecting, and its row says why it has nothing to judge.
 	KindQuiet = "QUIET"
+	// KindIdentityUnmatched: an object whose rounds come back empty because
+	// every series its query returned was one the target's identity could
+	// not read -- the key's dimensions were missing or its model gate did
+	// not hold (target_key_missing). The data is there; the target's
+	// identity fields and the labels the data carries disagree, which is
+	// the strategy's identity fields or the collection's labels to align.
+	// Named after DefaultDegradedRounds such rounds, not the hour: the
+	// series are present, so there is no sparse source to wait out, and a
+	// legitimate empty target never refuses a series as key_missing.
+	KindIdentityUnmatched = "IDENTITY_UNMATCHED"
 	// KindAnswerTruncated: an object whose latest answered query came back
 	// with a terms level of its Elasticsearch aggregation holding exactly
 	// the query service's bucket cap - a suspected cut. Thresholds evaluate
@@ -375,6 +385,12 @@ type queryGroupState struct {
 	// emptiedByTarget says the latest empty round's query returned data the
 	// monitoring target selected none of.
 	emptiedByTarget bool
+	// identityRounds is how many empty rounds in a row came back empty
+	// because the target's identity could read none of the data, and
+	// identity the latest such round's evidence; any other round ends the
+	// count.
+	identityRounds int
+	identity       *observability.IdentityFacts
 	// quiet is whether the latest empty round was an event count answering
 	// with no group (KindQuiet). Every empty round sets it, and it is read
 	// only while an empty run lasts, which a round with records ends.
@@ -1639,6 +1655,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// a round with records -- degraded or not -- ends the empty run.
 		if completion == "FULL_EMPTY_COMPLETED" {
 			state.emptiedByTarget = observation.PrimaryInput != nil && observation.PrimaryInput.EmptiedByTarget
+			if observation.PrimaryInput != nil && observation.PrimaryInput.Identity != nil {
+				state.identityRounds++
+				state.identity = observation.PrimaryInput.Identity
+			} else {
+				state.identityRounds, state.identity = 0, nil
+			}
 			state.quiet = observation.PrimaryInput != nil && observation.PrimaryInput.QuietWhenEmpty
 			if state.emptyRuns == 0 {
 				state.emptySince = at
@@ -1711,6 +1733,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			tracker.joinRecordedRun(state)
 		} else {
 			state.emptyRuns = 0
+			state.identityRounds, state.identity = 0, nil
 			if completion == "FULL_COMPLETED" {
 				// Seen retires the Slot run for good: the line asks for no
 				// round known to have had records, and never reads the
@@ -2885,6 +2908,13 @@ func (tracker *Tracker) NoData() []Anomaly {
 			Since: state.emptySince, SinceFrom: state.emptySinceFrom, Replica: tracker.replica,
 		}
 		switch {
+		case state.identityRounds >= tracker.degradedRounds && state.identity != nil && state.currentKind == "":
+			// The data arrived and the target's identity read none of it, a
+			// few rounds running. Named whether or not records were ever
+			// seen: the series are there now, so this is neither data that
+			// stopped nor data that never came.
+			anomaly.Kind = KindIdentityUnmatched
+			anomaly.IdentityUnmatched = identityUnmatchedOf(state.identityRounds, state.identity)
 		case state.quiet:
 			// Quiet from its first empty round: no hour to wait out, and
 			// never the data's line or the strategy's - an event count with

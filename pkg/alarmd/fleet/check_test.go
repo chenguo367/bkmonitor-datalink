@@ -213,8 +213,15 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// that wait follows every Worker's start and every move by design, and
 	// filed as DEPENDENCY_DOWN it put a batch of objects there for the
 	// seconds the view took while a wait that really stuck read the same.
-	if got := len(Checks()); got != 40 || len(checkAnswers) != 40 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 40: a new check has to "+
+	// Forty: IDENTITY_UNMATCHED is a rule over a dimension the rows did not
+	// carry before - whether an empty round's every withheld series was one
+	// the target's identity could not read (target_key_missing) - because
+	// such data arrived and names its instance in labels the target does
+	// not read, and filed as EMPTY_EVERY_ROUND it waited an hour, read
+	// CAUSE_UNKNOWN and sent the strategy's owner to a source that was
+	// fine, or filed nowhere at all (leader 10-17, design 582cf16b).
+	if got := len(Checks()); got != 41 || len(checkAnswers) != 41 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 41: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -235,7 +242,7 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// This deployment's own before undetermined before the others, and the
 	// undetermined ones before what is confirmed as somebody else's: the order
 	// is the order the reader acts in.
-	rank := map[Owner]int{OwnerPlatform: 0, OwnerAlarmd: 0, OwnerUndetermined: 1, OwnerData: 2, OwnerStrategy: 2}
+	rank := map[Owner]int{OwnerPlatform: 0, OwnerAlarmd: 0, OwnerUndetermined: 1, OwnerData: 2, OwnerStrategy: 2, OwnerStrategyOrCollection: 2}
 	previous := -1
 	for _, check := range Checks() {
 		if r := rank[checkAnswers[check].Owner]; r < previous {
@@ -285,6 +292,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckNoDataPersistent:    {Kind: KindNoData},
 		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
 		CheckEmptyAfterTarget:    {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseOutsideTarget}},
+		CheckIdentityUnmatched:   {Kind: KindIdentityUnmatched, IdentityUnmatched: &IdentityUnmatchedFacts{Rounds: 3, Withheld: 2, KeyMissing: 2}},
 		CheckQuiet:               {Kind: KindQuiet},
 		CheckAnswerTruncated:     {Kind: KindAnswerTruncated},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},

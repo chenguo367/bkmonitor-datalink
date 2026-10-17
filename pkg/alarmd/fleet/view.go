@@ -1670,6 +1670,9 @@ type Anomaly struct {
 	// EmptyEveryRound is on rows of KindEmptyEveryRound: the run of empty
 	// completions, whole, with what the row can say about why.
 	EmptyEveryRound *EmptyEveryRoundFacts `json:"empty_every_round,omitempty"`
+	// IdentityUnmatched is on rows of KindIdentityUnmatched: the rounds, the
+	// withheld series by reason, and a few series' identity fields.
+	IdentityUnmatched *IdentityUnmatchedFacts `json:"identity_unmatched,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a

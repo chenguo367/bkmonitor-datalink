@@ -388,7 +388,7 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 			ReasonCode:        request.Completion.ReasonCode,
 			Contract:          request.Completion.Contract,
 			TargetResolutions: request.Completion.TargetResolutions,
-			Empty:             emptyRoundOf(request.Completion.Primary, request.ContentScope),
+			Empty:             emptyRoundOf(request.Completion.Primary, request.ContentScope, previousEmpty(current, missing)),
 		}}
 	if !missing {
 		next.LastFullSlot = current.LastFullSlot
@@ -649,13 +649,31 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 // carries nothing for it. Nil too when the commit declares no content: the
 // word is restored only under the content it was said under, and without
 // one it never would be.
-func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string) *execution.EmptyRoundSummary {
+func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string, previous *execution.EmptyRoundSummary) *execution.EmptyRoundSummary {
 	if contentScope == "" || primary == nil || primary.Completeness != execution.CompletenessFull ||
-		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget {
+		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget && primary.Identity == nil {
 		return nil
 	}
-	return &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
+	summary := &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
 		ContentScope: contentScope}
+	if primary.Identity != nil {
+		// The run continues the previous round's when that round was the
+		// same kind of empty under the same content.
+		summary.IdentityRounds = 1
+		if previous != nil && previous.IdentityRounds > 0 && previous.ContentScope == contentScope {
+			summary.IdentityRounds = previous.IdentityRounds + 1
+		}
+	}
+	return summary
+}
+
+// previousEmpty is the stored record's last round's empty summary, nil when
+// there is none to continue.
+func previousEmpty(current execution.ScheduleProgress, missing bool) *execution.EmptyRoundSummary {
+	if missing || current.LastCompletion == nil {
+		return nil
+	}
+	return current.LastCompletion.Empty
 }
 
 func decode(raw []byte) (execution.ScheduleProgress, error) {
