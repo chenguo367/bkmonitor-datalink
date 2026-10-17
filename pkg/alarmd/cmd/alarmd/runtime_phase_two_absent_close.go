@@ -38,12 +38,12 @@ const absentCloseInterval = 5 * time.Minute
 // absence whatever the writer states.
 const absentCloseGrace = 10 * time.Minute
 
-// absentCloseRosterPages bounds one walk of the link's roster. Each page is
-// the link scanning part of its key space on its own connection; the bound
-// is there so that a key space far larger than expected turns into an
-// incomplete walk that says so, not into a round that never ends. An
-// incomplete walk is a smaller roster, which delays closes and never makes
-// one.
+// absentCloseRosterPages bounds one walk of the link's roster, across the
+// rounds it takes. Each page is the link scanning part of its key space on
+// its own connection; the bound is there so that a key space far larger than
+// expected turns into an incomplete walk that says so, not into a walk that
+// never ends. An incomplete walk is a smaller roster, which delays closes and
+// never makes one.
 const absentCloseRosterPages = 2000
 
 // absentCloseAlertBatch is the size of one write of a strategy's closes. All
@@ -72,9 +72,15 @@ type absentStrategyClose struct {
 	writer  closeWriter
 	tracker *absentalerts.Tracker
 	bounds  absentalerts.Bounds
-	// lastDecided is the last strategy a round decided to close, where the
-	// next round's walk over the candidates starts.
+	// lastDecided is the last strategy a round closed, where the next
+	// round's walk over the candidates starts: a close decided and not
+	// executed, the round having ended first, is first in line next time.
 	lastDecided absentalerts.Key
+	// walk is the roster walk in progress, carried from the round it did not
+	// finish in to the next; walked is the last walk that reached the end,
+	// which a round whose walk is still going decides on. Both are dropped
+	// with the term.
+	walk, walked *rosterWalk
 	// wasLeader is whether the previous round ran as leader. Losing the
 	// term clears the candidate clocks: a replica that comes back after an
 	// hour must not close on memory it made in another term.
@@ -230,19 +236,23 @@ func (loop *absentStrategyClose) run(ctx context.Context) {
 	}
 }
 
+// step is one round. It may run until the next is due: the round has that
+// deadline and no other, and each request it makes to the Console is bounded
+// by the Console's own observed speed within it (openalerts.ConsoleLatency).
+// What a round does not finish -- a roster walk, closes it decided -- the
+// next one carries on with.
 func (loop *absentStrategyClose) step(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, absentCloseInterval/2)
+	ctx, cancel := context.WithTimeout(ctx, absentCloseInterval)
 	defer cancel()
-	loop.bundle.mu.RLock()
-	leader := loop.bundle.controlLeader && !loop.bundle.draining && !loop.bundle.closed
-	loop.bundle.mu.RUnlock()
-	if !leader {
+	ctx = openalerts.WithRequestCoverage(ctx, absentCloseInterval)
+	if !loop.leading() {
 		if loop.wasLeader {
 			// The term ended. Every candidate's clock restarts, so a replica
 			// that becomes leader again cannot close on an absence it
 			// observed under a term it no longer holds.
 			loop.tracker.Forget()
 			loop.table.forget()
+			loop.walk, loop.walked = nil, nil
 		}
 		loop.wasLeader = false
 		loop.count(absentalerts.OutcomeNotLeader, 1)
@@ -273,9 +283,6 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 		sizes.linkAge = int(now.Sub(health.LastSuccess) / time.Second)
 	}
 	result := loop.tracker.Round(round, loop.bounds)
-	if len(result.Close) > 0 {
-		loop.lastDecided = result.Close[len(result.Close)-1].Key
-	}
 	sizes.counts = result.Counts
 	loop.record(ctx, result, sizes)
 	loop.table.noteRound(now, result.Refusal)
@@ -283,30 +290,64 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 		loop.table.rebuild(now, result, round.Roster, unreadable)
 	}
 	for _, absent := range result.Close {
-		if ctx.Err() != nil {
+		// A round now runs for minutes: the term is asked again before each
+		// strategy, not only once at the start.
+		if ctx.Err() != nil || !loop.leading() {
 			return
 		}
 		loop.table.executed(absent.Key, loop.closeStrategy(ctx, absent, now))
+		loop.lastDecided = absent.Key
 	}
 }
 
-// readRoster walks the link's roster into the round. The first page is what
+// leading is whether this replica is the control leader and neither
+// draining nor closed, read from memory.
+func (loop *absentStrategyClose) leading() bool {
+	loop.bundle.mu.RLock()
+	defer loop.bundle.mu.RUnlock()
+	return loop.bundle.controlLeader && !loop.bundle.draining && !loop.bundle.closed
+}
+
+// rosterWalk is one walk of the link's roster: where it is, what it has
+// read, and how many pages it has taken over the rounds so far.
+type rosterWalk struct {
+	cursor     string
+	pages      int
+	roster     map[absentalerts.Key]int
+	unreadable map[absentalerts.Key]struct{}
+}
+
+func newRosterWalk() *rosterWalk {
+	return &rosterWalk{roster: make(map[absentalerts.Key]int), unreadable: make(map[absentalerts.Key]struct{})}
+}
+
+// readRoster walks the link's roster into the round, carrying on the walk
+// the previous round did not finish. The first page this round reads is what
 // says whether the link could be read at all and carries the link's own
-// health; a failure after it leaves the walk incomplete, which the round
-// reports and decides on anyway, since a smaller roster can only cost
-// closes. The strategies the link listed and could not read come back in
-// key order, for the candidate page to name.
+// health; a resumed walk whose first page fails starts again from the first
+// page, so a cursor the link no longer answers costs one request. A walk that
+// reaches the end is the round's roster, complete; one still going leaves
+// the round the last walk that reached the end, or, before there is one,
+// what this walk has read so far, incomplete. A failure after the first page
+// ends the round's part of the walk, which the next round carries on; a
+// smaller roster can only cost closes. The strategies the link listed and
+// could not read come back in key order, for the candidate page to name.
 func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, []absentalerts.Key, int) {
-	round.Roster = make(map[absentalerts.Key]int)
-	unreadable := make(map[absentalerts.Key]struct{})
 	if reader, ok := loop.link.(eventSourceReader); ok {
 		_, _ = reader.EventSource(ctx)
 	}
+	if loop.walk == nil {
+		loop.walk = newRosterWalk()
+	}
 	var health openalerts.LinkHealth
-	cursor, pages := "", 0
-	for pages < absentCloseRosterPages {
-		page, err := loop.link.Roster(ctx, cursor)
+	pages, ended, complete := 0, false, false
+	for {
+		page, err := loop.link.Roster(ctx, loop.walk.cursor)
 		if err != nil {
+			if pages == 0 && loop.walk.cursor != "" {
+				loop.walk = newRosterWalk()
+				continue
+			}
 			if pages == 0 {
 				loop.observe(ctx, absentalerts.RefusalLinkUnavailable, err, 0)
 			}
@@ -318,30 +359,49 @@ func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absental
 			round.LinkLastSuccess, round.LinkError = health.LastSuccess, health.Error
 		}
 		pages++
+		loop.walk.pages++
 		for _, row := range page.Rows {
 			key := absentalerts.Key{TenantID: row.TenantID, StrategyID: row.StrategyID}
 			switch {
 			case row.Members == nil:
-				unreadable[key] = struct{}{}
+				loop.walk.unreadable[key] = struct{}{}
 			case *row.Members > 0:
-				round.Roster[key] = *row.Members
+				loop.walk.roster[key] = *row.Members
 			}
 		}
+		loop.walk.cursor = page.Next
 		if page.Next == "" {
-			round.RosterComplete = true
+			ended, complete = true, true
 			break
 		}
-		cursor = page.Next
+		if loop.walk.pages >= absentCloseRosterPages {
+			ended = true
+			break
+		}
+	}
+	decided := loop.walk
+	switch {
+	case complete:
+		loop.walked = loop.walk
+	case !ended && loop.walked != nil:
+		decided, complete = loop.walked, true
+	}
+	if ended {
+		loop.walk = nil
+	}
+	round.RosterComplete = complete
+	round.Roster = make(map[absentalerts.Key]int, len(decided.roster))
+	for key, n := range decided.roster {
+		round.Roster[key] = n
 	}
 	// A strategy read on one page and unreadable on another was read.
-	for key := range round.Roster {
-		delete(unreadable, key)
+	keys := make([]absentalerts.Key, 0, len(decided.unreadable))
+	for key := range decided.unreadable {
+		if _, read := decided.roster[key]; !read {
+			keys = append(keys, key)
+		}
 	}
-	round.RosterUnreadable = len(unreadable)
-	keys := make([]absentalerts.Key, 0, len(unreadable))
-	for key := range unreadable {
-		keys = append(keys, key)
-	}
+	round.RosterUnreadable = len(keys)
 	sort.Slice(keys, func(i, j int) bool { return absentalerts.LessKey(keys[i], keys[j]) })
 	return health, keys, pages
 }
