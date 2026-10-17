@@ -23,6 +23,7 @@ var FrontReads = map[string]bool{
 	"fleet.get":            true,
 	"strategy.list":        true,
 	"strategy.get":         true,
+	"strategy.board":       true,
 	"object.list":          true,
 	"object.get":           true,
 	"diagnose.environment": true,

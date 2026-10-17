@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 )
@@ -73,6 +74,22 @@ func NativeOperations(handler http.Handler) []Operation {
 				if id == "fleet.get" {
 					absentNext(&out, result)
 				}
+				if id == "strategy.board" {
+					if code, ok := result["error"].(string); ok && code != "" {
+						reason, _ := result["reason"].(string)
+						return Outcome{Error: &Failure{Code: "diagnosis_refused", Message: strings.TrimSpace(code + " " + reason)}}
+					}
+					if cursor, _ := result["next_cursor"].(string); cursor != "" {
+						next := Params{"cursor": cursor, "limit": p.Int("limit", fleet.BoardDefaultRows)}
+						for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id"} {
+							if value := p.String(facet); value != "" {
+								next[facet] = value
+							}
+						}
+						out.Next = append(out.Next, Call{Operation: "strategy.board", Params: next,
+							Reason: "下一页；计算换过（约 30 秒）时答 reread，从第一页重读。"})
+					}
+				}
 				if id == "strategy.list" && p.String("scope") != strategyScopeAccepted {
 					// This endpoint lists fact rows, not every source strategy.
 					out.Limitations = append(out.Limitations, "Population is strategies represented by current Fleet fact rows, not the complete source catalog.")
@@ -117,6 +134,26 @@ func NativeOperations(handler http.Handler) []Operation {
 				return "/api/objects", query
 			}
 			return "/api/strategies", url.Values{"state": {p.String("state")}, "action": {p.String("action")}, "limit": {strconv.Itoa(p.Int("limit", 50))}}
+		}),
+		makeOp("strategy.board", "策略检测看板：全部策略（含能力上被拒的）每条一行——检测状态、谁来处理、能力类别、是否按时（取其检测对象里最坏的：超期>迟到>未知>还没开始>按时）、处于当前状态多久，"+
+			"分面计数按全集算；late_objects / late_strategies 是“N 个检测对象、M 条策略”迟到或超期，任一实例名单被截断时带 at_least 与原因，不是确数。"+
+			"与首屏计数同一次计算，由 Leader 算、30 秒内共用（generated_at、max_age_seconds）；游标绑定那次计算与那组筛选，换了计算或筛选都答 reread、从第一页重读。"+
+			"各分面可填逗号分隔的多个词；不含查询组、副本、修订号，研发细节用 diagnose.environment。", map[string]Field{
+			"state":       {Type: "string", Description: "检测状态词，逗号分隔多个；取自 fleet 词表（含 UNKNOWN）。", MinLength: 1, MaxLength: 512},
+			"action":      {Type: "string", Description: "处理方词，逗号分隔多个。", MinLength: 1, MaxLength: 256},
+			"capability":  {Type: "string", Description: "能力类别：supported、partial、unsupported_by_design、not_yet_supported，逗号分隔。", MinLength: 1, MaxLength: 256},
+			"punctuality": {Type: "string", Description: "按时：on_time、late、overdue、not_started、not_detecting、unknown，逗号分隔。", MinLength: 1, MaxLength: 256},
+			"strategy_id": text("只看这一条策略。", "用户给定或此前的看板行"),
+			"limit":       integer("每页行数；默认50，上限与 diagnose.environment 一页相同。分面总是按全集。", 1, fleet.BoardMaxRows),
+			"cursor":      text("上一页 next_call 的 cursor，不自行构造。", "上一页 next_call 的 cursor"),
+		}, nil, fleet.BoardResponse{}, func(p Params) (string, url.Values) {
+			query := url.Values{"board": {"1"}, "limit": {strconv.Itoa(p.Int("limit", fleet.BoardDefaultRows))}}
+			for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "cursor"} {
+				if value := p.String(facet); value != "" {
+					query.Set(facet, value)
+				}
+			}
+			return "/api/diagnose", query
 		}),
 		makeOp("strategy.get", "按策略ID读取接纳/拒绝、发布版本、运行对象和下一步证据入口。", map[string]Field{
 			"strategy_id": text("外部策略ID。", "用户给定或 strategy.list"), "tenant": text("可选租户筛选，不是授权范围。", "用户上下文或策略行"), "business": text("可选业务筛选。", "用户上下文或策略行"),
