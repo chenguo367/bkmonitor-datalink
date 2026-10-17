@@ -81,7 +81,7 @@ func NativeOperations(handler http.Handler) []Operation {
 					}
 					if cursor, _ := result["next_cursor"].(string); cursor != "" {
 						next := Params{"cursor": cursor, "limit": p.Int("limit", fleet.BoardDefaultRows)}
-						for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id"} {
+						for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "area", "reason"} {
 							if value := p.String(facet); value != "" {
 								next[facet] = value
 							}
@@ -144,11 +144,13 @@ func NativeOperations(handler http.Handler) []Operation {
 			"capability":  {Type: "string", Description: "能力类别：supported、partial、unsupported_by_design、not_yet_supported，逗号分隔。", MinLength: 1, MaxLength: 256},
 			"punctuality": {Type: "string", Description: "按时：on_time、late、overdue、not_started、not_detecting、unknown，逗号分隔。", MinLength: 1, MaxLength: 256},
 			"strategy_id": text("只看这一条策略。", "用户给定或此前的看板行"),
+			"area":        text("能力方面（source、target、algorithm、output、config），与 capability 一起用：按该方面的处理结果筛，没有该方面记录的算支持，与总览能力矩阵同一算法。", "overview.get capability.matrix[].drill"),
+			"reason":      text("拒绝原因码：只看带这个码的策略。", "overview.get capability.reasons[].drill"),
 			"limit":       integer("每页行数；默认50，上限与 diagnose.environment 一页相同。分面总是按全集。", 1, fleet.BoardMaxRows),
 			"cursor":      text("上一页 next_call 的 cursor，不自行构造。", "上一页 next_call 的 cursor"),
 		}, nil, fleet.BoardResponse{}, func(p Params) (string, url.Values) {
 			query := url.Values{"board": {"1"}, "limit": {strconv.Itoa(p.Int("limit", fleet.BoardDefaultRows))}}
-			for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "cursor"} {
+			for _, facet := range []string{"state", "action", "capability", "punctuality", "strategy_id", "area", "reason", "cursor"} {
 				if value := p.String(facet); value != "" {
 					query.Set(facet, value)
 				}

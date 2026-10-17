@@ -703,6 +703,27 @@ func parseBoardQuery(query url.Values) (BoardFilter, int, map[string]any) {
 		return filter, 0, refusal
 	}
 	filter.Capability = capabilities
+	// An area reads the capability words in that area, so it comes with
+	// them; a reason is any code, and one no strategy carries selects none.
+	if area := query.Get("area"); area != "" {
+		known := false
+		for _, candidate := range CapabilityAreas {
+			known = known || candidate == area
+		}
+		if !known {
+			return filter, 0, map[string]any{"error": "BOARD_FILTER_UNKNOWN", "facet": "area", "value": area}
+		}
+		if len(filter.Capability) == 0 {
+			return filter, 0, map[string]any{"error": "BOARD_AREA_WITHOUT_CAPABILITY", "detail": "area selects a capability outcome in that area: give capability too"}
+		}
+		filter.Area = area
+	}
+	if reason := query.Get("reason"); reason != "" {
+		if len(reason) > 256 {
+			return filter, 0, map[string]any{"error": "BOARD_FILTER_UNKNOWN", "facet": "reason", "value": reason[:64]}
+		}
+		filter.Reason = reason
+	}
 	punctualities, refusal := words("punctuality", func(word string) bool {
 		for _, known := range Punctualities {
 			if string(known) == word {

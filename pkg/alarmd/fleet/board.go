@@ -155,6 +155,12 @@ type BoardRow struct {
 	// not count it. The alerts themselves are read in Linkd.
 	OpenAlerts *BoardCount `json:"open_alerts,omitempty"`
 	KBAnchor   string      `json:"kb_anchor"`
+	// areas is the row's outcome in each capability area it has a record
+	// in, and reasons its refusal codes, counted as the Leader counts the
+	// overview's matrix (CountCapability): the overview's drill keys select
+	// on them. Neither is a page field.
+	areas   map[string]string
+	reasons map[string]bool
 }
 
 // BoardFacets counts the whole universe on each facet, never the page.
@@ -180,6 +186,11 @@ type BoardFilter struct {
 	Capability  map[string]bool
 	Punctuality map[Punctuality]bool
 	StrategyID  string
+	// Area reads Capability in one area: the row's outcome there, supported
+	// when it has no record in it, as the matrix counts a cell. Reason is a
+	// refusal code the row carries.
+	Area   string
+	Reason string
 }
 
 // BoardResponse is one page of the strategy board.
@@ -236,6 +247,32 @@ func capabilityOf(row DiagnosisRow) string {
 	return outcome
 }
 
+// capabilityFactsOf is the strategy's outcome per capability area and its
+// refusal codes by CountCapability's rules: a record with no area -- ignored
+// by design, or about the source's state -- is no capability fact; the first record in an area is its
+// outcome there, a later one counts only when more severe; the code is the
+// reason, the disposition when there is none.
+func capabilityFactsOf(row DiagnosisRow) (map[string]string, map[string]bool) {
+	areas, reasons := map[string]string{}, map[string]bool{}
+	for _, disposition := range row.Dispositions {
+		class, _ := ClassifyCapability(disposition.Disposition, disposition.Reason, disposition.Scope)
+		if class.Area == "" {
+			continue
+		}
+		if held, seen := areas[class.Area]; seen {
+			areas[class.Area] = MoreSevereCapability(held, class.Outcome)
+		} else {
+			areas[class.Area] = class.Outcome
+		}
+		code := disposition.Reason
+		if code == "" {
+			code = disposition.Disposition
+		}
+		reasons[code] = true
+	}
+	return areas, reasons
+}
+
 // boardLine is the row's one sentence: the state and who acts, and the wait's
 // reason when it is a wait.
 func boardLine(row BoardRow) string {
@@ -289,6 +326,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 			}
 		}
 		row.Line = boardLine(row)
+		row.areas, row.reasons = capabilityFactsOf(decided)
 		index.rows = append(index.rows, row)
 		index.views[row.StrategyID] = viewFactsOf(decided, due)
 		index.facets.State[row.State]++
@@ -339,7 +377,18 @@ func (filter BoardFilter) matches(row BoardRow) bool {
 	if len(filter.Action) > 0 && !filter.Action[row.Action] {
 		return false
 	}
-	if len(filter.Capability) > 0 && !filter.Capability[row.CapabilityClass] {
+	if filter.Area != "" {
+		outcome, recorded := row.areas[filter.Area]
+		if !recorded {
+			outcome = CapabilitySupported
+		}
+		if !filter.Capability[outcome] {
+			return false
+		}
+	} else if len(filter.Capability) > 0 && !filter.Capability[row.CapabilityClass] {
+		return false
+	}
+	if filter.Reason != "" && !row.reasons[filter.Reason] {
 		return false
 	}
 	if len(filter.Punctuality) > 0 && !filter.Punctuality[row.Punctuality] {
@@ -369,7 +418,7 @@ func (filter BoardFilter) key() string {
 	for word := range filter.Punctuality {
 		punctualities[string(word)] = true
 	}
-	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID}, ";")
+	return strings.Join([]string{words(states), words(actions), words(filter.Capability), words(punctualities), filter.StrategyID, filter.Area, filter.Reason}, ";")
 }
 
 // boardCursor binds a position to one computation and one selection: the
