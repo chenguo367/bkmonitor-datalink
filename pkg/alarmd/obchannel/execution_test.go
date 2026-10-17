@@ -332,3 +332,43 @@ func TestInternalEvidenceUsesSameResponseBudget(t *testing.T) {
 		t.Fatalf("unbounded internal evidence: %+v", out)
 	}
 }
+
+// A routed read runs with its operation's own time inside what the caller
+// has left, not a hop's 3 s: an operation of 20 s asked with 30 s left gets
+// 20 s; asked with 5 s left, 5 s.
+func TestARoutedReadKeepsItsOperationsTime(t *testing.T) {
+	deadlines := make(chan time.Duration, 1)
+	op := targetOperation(func(ctx context.Context, _ Params) Outcome {
+		deadline, _ := ctx.Deadline()
+		deadlines <- time.Until(deadline)
+		return Outcome{Complete: true, Value: map[string]any{}}
+	})
+	op.ExecutionTimeout = 20 * time.Second
+	c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
+	for _, tc := range []struct{ left, want time.Duration }{{30 * time.Second, 20 * time.Second}, {5 * time.Second, 5 * time.Second}} {
+		ctx, cancel := context.WithTimeout(context.Background(), tc.left)
+		if response := c.ExecuteEvidence(ctx, internalInvocation(c)); response.Error != nil {
+			t.Fatalf("with %v left: %+v", tc.left, response.Error)
+		}
+		cancel()
+		if got := <-deadlines; got > tc.want || got < tc.want-time.Second {
+			t.Errorf("with %v left the read had %v, want about %v", tc.left, got, tc.want)
+		}
+	}
+}
+
+// A caller's deadline is kept; only a caller without one gets the fallback.
+func TestCallerBoundedKeepsTheCallersDeadline(t *testing.T) {
+	long, cancelLong := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelLong()
+	kept, cancel := CallerBounded(long, RequestTimeout)
+	defer cancel()
+	if deadline, _ := kept.Deadline(); time.Until(deadline) < 50*time.Second {
+		t.Fatalf("a one-minute caller was cut to %v", time.Until(deadline))
+	}
+	unbounded, cancelUnbounded := CallerBounded(context.Background(), RequestTimeout)
+	defer cancelUnbounded()
+	if deadline, ok := unbounded.Deadline(); !ok || time.Until(deadline) > RequestTimeout {
+		t.Fatalf("a caller without a deadline got %v", time.Until(deadline))
+	}
+}

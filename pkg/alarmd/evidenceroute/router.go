@@ -60,7 +60,7 @@ func New(options Options) (*Router, error) {
 // Invoke is called only after the ingress has admitted the CLI session. New
 // channel/control identities may dispatch directly to the resolved provider.
 func (r *Router) Invoke(ctx context.Context, call obchannel.Invocation) obchannel.Response {
-	ctx, cancel := context.WithTimeout(ctx, obchannel.RequestTimeout)
+	ctx, cancel := obchannel.CallerBounded(ctx, obchannel.RequestTimeout)
 	defer cancel()
 	if response, handled := r.invokeDirect(ctx, call); handled {
 		return response
@@ -109,7 +109,7 @@ func (r *Router) Handle(ctx context.Context, req *pb.EvidenceRequest) (*pb.Evide
 	if req == nil || proto.Size(req) > obchannel.MaxRequestBytes {
 		return nil, status.Error(codes.InvalidArgument, "Evidence request exceeds its budget.")
 	}
-	ctx, cancel := context.WithTimeout(ctx, obchannel.RequestTimeout)
+	ctx, cancel := obchannel.CallerBounded(ctx, obchannel.RequestTimeout)
 	defer cancel()
 	if req.EnvironmentId != r.options.EnvironmentID || req.ChannelVersion != obchannel.Version || req.RequestId == "" {
 		return nil, status.Error(codes.FailedPrecondition, "Evidence environment or protocol does not match.")

@@ -91,6 +91,8 @@ type fixtureNode struct {
 	runs     atomic.Int32
 	server   *grpc.Server
 	rpcCalls atomic.Int32
+	// given is how long the last run of runtime.get had before its deadline.
+	given atomic.Int64
 }
 
 func fixture(t *testing.T) (map[string]*fixtureNode, *fixtureStore) {
@@ -99,8 +101,11 @@ func fixture(t *testing.T) (map[string]*fixtureNode, *fixtureStore) {
 	nodes := map[string]*fixtureNode{}
 	for _, id := range []string{"entry", "leader", "worker"} {
 		node := &fixtureNode{auth: &fixtureAuth{}}
-		op := obchannel.Operation{ID: "runtime.get", Summary: "Read process", EvidenceScope: "process", Targetable: true, Run: func(ctx context.Context, p obchannel.Params) obchannel.Outcome {
+		op := obchannel.Operation{ID: "runtime.get", Summary: "Read process", EvidenceScope: "process", Targetable: true, ExecutionTimeout: 20 * time.Second, Run: func(ctx context.Context, p obchannel.Params) obchannel.Outcome {
 			node.runs.Add(1)
+			if deadline, ok := ctx.Deadline(); ok {
+				node.given.Store(int64(time.Until(deadline)))
+			}
 			return obchannel.Outcome{Complete: true, Value: map[string]string{"process": id}, Next: []obchannel.Call{{Operation: "runtime.get", Params: obchannel.Params{}}}}
 		}}
 		shared := obchannel.Operation{ID: "shared.get", Summary: "Read shared", EvidenceScope: "deployment", Run: func(context.Context, obchannel.Params) obchannel.Outcome {
@@ -368,5 +373,19 @@ func TestControlLeaderTargetAnswersFromTheLeaseItWasRoutedBy(t *testing.T) {
 	result = invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
 	if result.Error == nil || result.Error.Code != "control_unavailable" || nodes["entry"].runs.Load() != 0 {
 		t.Fatalf("no Leader fell back to the ingress: %+v", result)
+	}
+}
+
+// A read routed entry -> Leader -> Worker keeps its operation's own time at
+// every hop: the Worker runs a 20-second operation with nearly all of it,
+// where each hop used to set 3 s again.
+func TestARoutedReadKeepsItsOperationsTimeAcrossHops(t *testing.T) {
+	nodes, _ := fixture(t)
+	result := invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"replica": "worker"})
+	if result.Status != "ok" || strings.Join(result.Meta.Via, ",") != "entry,leader" {
+		t.Fatalf("route %+v", result)
+	}
+	if given := time.Duration(nodes["worker"].given.Load()); given < 15*time.Second {
+		t.Fatalf("the worker ran a 20 s operation with %v, want nearly all of it", given)
 	}
 }
