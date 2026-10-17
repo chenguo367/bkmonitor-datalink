@@ -193,6 +193,15 @@ func TestFleetPublisherCarriesTheCensusAndWakeFacts(t *testing.T) {
 	if snapshot.Schedule.Overdue != 1 || snapshot.Schedule.Never != 2 {
 		t.Errorf("census = %+v, want one overdue (a, 100 s past a 60 s period) and two never (b, c)", *snapshot.Schedule)
 	}
+	// The same census names its objects: the overdue one and the two never
+	// evaluated, from the one pass, so the lists match the counts above.
+	if snapshot.Due == nil {
+		t.Fatal("the snapshot carried a census but no named due classes")
+	}
+	if !reflect.DeepEqual(snapshot.Due.Overdue, []string{"query-group-a"}) || len(snapshot.Due.Late) != 0 ||
+		!reflect.DeepEqual(snapshot.Due.Never, []string{"query-group-b", "query-group-c"}) {
+		t.Errorf("due classes = %+v, want overdue a and never b, c", *snapshot.Due)
+	}
 	wakes := map[string]*fleet.WakeFacts{}
 	for _, anomaly := range snapshot.Anomalies {
 		wakes[anomaly.QueryGroup] = anomaly.Wake
@@ -210,6 +219,9 @@ func TestFleetPublisherCarriesTheCensusAndWakeFacts(t *testing.T) {
 	plain := bare.snapshot(context.Background())
 	if plain.Schedule != nil {
 		t.Error("a publisher with no schedule source published a census")
+	}
+	if plain.Due != nil {
+		t.Error("a publisher with no schedule source published due classes")
 	}
 	for _, anomaly := range plain.Anomalies {
 		if anomaly.Wake != nil {

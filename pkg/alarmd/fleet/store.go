@@ -424,6 +424,19 @@ func (store *RedisStore) written(snapshot Snapshot) (Snapshot, error) {
 	// full count. The aggregate notices the shortfall and refuses to compare,
 	// rather than reporting set arithmetic done on half the objects.
 	snapshot.OwnedObjects = withinObjectBudget(snapshot.OwnedObjects, store.maxAnomalyBytes)
+	// The due lists likewise, each its own budget, cut on a copy so the
+	// caller's lists stay whole, and each cut said: a cut list is a lower
+	// bound and the page must never present it as the exact count.
+	if snapshot.Due != nil {
+		due := *snapshot.Due
+		late, overdue, never := withinObjectBudget(due.Late, store.maxAnomalyBytes),
+			withinObjectBudget(due.Overdue, store.maxAnomalyBytes), withinObjectBudget(due.Never, store.maxAnomalyBytes)
+		due.LateCut = due.LateCut || len(late) < len(due.Late)
+		due.OverdueCut = due.OverdueCut || len(overdue) < len(due.Overdue)
+		due.NeverCut = due.NeverCut || len(never) < len(due.Never)
+		due.Late, due.Overdue, due.Never = late, overdue, never
+		snapshot.Due = &due
+	}
 	held := withinReadHoldBudget(snapshot.ReadHolds, store.maxAnomalyBytes)
 	snapshot.ReadHoldsCut = snapshot.ReadHoldsCut || len(held) < len(snapshot.ReadHolds)
 	snapshot.ReadHolds = held
