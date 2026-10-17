@@ -162,7 +162,7 @@ func (ws *workerStream) send(message *pb.WorkerMessage) {
 	}
 }
 
-// recv returns the next message within a second.
+// recv returns the next message, waiting until the test's own deadline.
 func (ws *workerStream) recv() *pb.LeaderMessage {
 	ws.t.Helper()
 	type got struct {
@@ -180,8 +180,8 @@ func (ws *workerStream) recv() *pb.LeaderMessage {
 			ws.t.Fatalf("recv: %v", result.err)
 		}
 		return result.message
-	case <-time.After(2 * time.Second):
-		ws.t.Fatal("no message within two seconds")
+	case <-untilTestDeadline(ws.t):
+		ws.t.Fatal("no message before the test's deadline")
 		return nil
 	}
 }
@@ -241,14 +241,36 @@ func (ws *workerStream) probedReceipt(incarnation string, version *pb.Version, m
 
 func eventually(t *testing.T, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := untilTestDeadline(t)
+	for {
 		if condition() {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-deadline:
+			t.Fatalf("%s did not happen before the test's deadline", what)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
-	t.Fatalf("%s did not happen within two seconds", what)
+}
+
+// testDeadlineMargin is what is left of the test binary's deadline
+// (go test -timeout) when a wait gives up: enough to report which wait it
+// was, by name, before the binary's own timeout panics with every stack.
+const testDeadlineMargin = time.Second
+
+// untilTestDeadline fires when a wait for something that should happen has
+// waited as long as the test may run. A wait of its own (two seconds, once)
+// failed correct runs whenever the machine was busy -- a race build next to
+// other packages' tests -- and bought nothing a hang does not already show.
+func untilTestDeadline(t testing.TB) <-chan time.Time {
+	type deadliner interface{ Deadline() (time.Time, bool) }
+	if d, ok := t.(deadliner); ok {
+		if deadline, set := d.Deadline(); set {
+			return time.After(time.Until(deadline) - testDeadlineMargin)
+		}
+	}
+	return nil
 }
 
 // A Worker that says Hello gets the current snapshot; a publication that

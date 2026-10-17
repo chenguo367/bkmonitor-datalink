@@ -691,9 +691,9 @@ func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
 	leader.mu.Unlock()
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-untilTestDeadline(t):
 		close(hold)
-		t.Fatal("no heartbeat re-probed revision 1 within five seconds")
+		t.Fatal("no heartbeat re-probed revision 1 before the test's deadline")
 	}
 	eventually(t, "revision 2 is installed while the re-probe of 1 is held", func() bool {
 		view, ok := client.Installed()
