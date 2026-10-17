@@ -86,9 +86,12 @@ func TestTheConsoleDeadlineIsDerivedFromItsOwnRequests(t *testing.T) {
 	}
 }
 
-// Each request of a call is bounded on its own: a reconciliation that reads
-// the target and then asks a Console that never answers ends at the request
-// deadline, not at the call's, and the request is timed.
+// Each request of a call is bounded on its own: a reconciliation whose keying
+// read and reconcile request go to a Console that never answers ends after
+// two request deadlines, not at the call's, and both cut requests are timed.
+// The target is read first under a plain deadline and reused by the
+// reconciliation, so the 40 ms bound falls on the hung requests alone and not
+// on how fast a loaded test server answers the read.
 func TestEachConsoleRequestHasItsOwnDeadline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == testLinkdAPIRoot+"/strategy-index/targets" {
@@ -104,6 +107,9 @@ func TestEachConsoleRequestHasItsOwnDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	if _, err := reader.Binding(ctx); err != nil {
+		t.Fatalf("target read: %v", err)
+	}
 	started := time.Now()
 	_, err := reader.Reconcile(WithRequestCoverage(ctx, time.Minute), keyA)
 	if took := time.Since(started); err == nil || took > 5*time.Second {
@@ -112,8 +118,8 @@ func TestEachConsoleRequestHasItsOwnDeadline(t *testing.T) {
 	if ConsoleFailureClass(err) != execution.TransportFailureTimeout {
 		t.Fatalf("class %s, want timeout", ConsoleFailureClass(err))
 	}
-	if samples := len(reader.Latency().samples); samples < consoleLatencyColdStart+2 {
-		t.Fatalf("%d requests timed, want the target read and the cut request too", samples)
+	if samples := len(reader.Latency().samples); samples != consoleLatencyColdStart+3 {
+		t.Fatalf("%d requests timed, want the warm ones, the target read and the two cut requests", samples)
 	}
 }
 
