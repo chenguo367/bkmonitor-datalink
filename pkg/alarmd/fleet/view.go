@@ -2519,10 +2519,14 @@ type OpenAlertSetFacts struct {
 	// CalibrationShort is the strategies an interval at that capacity cannot
 	// reach, whose sets go unjudged and unclosed. CalibrationOverAge names the
 	// strategies past the calibration age, oldest first and bounded.
-	CalibrationNeeded   int                     `json:"calibration_needed,omitempty"`
-	CalibrationCapacity int                     `json:"calibration_capacity,omitempty"`
-	CalibrationShort    int                     `json:"calibration_short,omitempty"`
-	CalibrationOverAge  []CalibrationOverAgeRow `json:"calibration_over_age,omitempty"`
+	CalibrationNeeded   int `json:"calibration_needed,omitempty"`
+	CalibrationCapacity int `json:"calibration_capacity,omitempty"`
+	CalibrationShort    int `json:"calibration_short,omitempty"`
+	// RoundsSkipped is the copy's maintenance rounds not run because the
+	// previous one was still running (a slow Console holding a calibration
+	// to its own deadline); skipped, never stacked.
+	RoundsSkipped      uint64                  `json:"rounds_skipped,omitempty"`
+	CalibrationOverAge []CalibrationOverAgeRow `json:"calibration_over_age,omitempty"`
 	// TooLarge names the strategies whose open-alert sets were refused for
 	// their size, largest first and bounded: members, bytes and the budget.
 	// Their sets go unread, and so unjudged and unclosed.

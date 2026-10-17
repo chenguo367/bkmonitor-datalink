@@ -114,6 +114,9 @@ type ConsoleRecord struct {
 	EventSourceReadAt time.Time
 	// SourceByTopic is how the last resolution chose the event source.
 	SourceByTopic SourceByTopic
+	// UnansweredRequests is how many requests failed before the Console
+	// answered and before their deadline (ConsoleLatency.Unanswered).
+	UnansweredRequests uint64
 }
 
 type consoleCalls struct {
@@ -191,6 +194,7 @@ func (reader *HTTPReconciler) Record() ConsoleRecord {
 		record.Calls[op] = reader.calls.calls[op]
 	}
 	record.SourceByTopic = choice
+	record.UnansweredRequests = reader.latency.Unanswered()
 	return record
 }
 
@@ -211,6 +215,9 @@ func (reader *HTTPReconciler) now() time.Time {
 
 // Reconcile reads one strategy's reconciliation from the link's Console.
 func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (Reconciliation, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return Reconciliation{}, err
+	}
 	result, err := reader.reconcile(ctx, key)
 	reader.record(ConsoleOpReconcile, reader.now(), err)
 	return result, err
@@ -219,6 +226,9 @@ func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (R
 // Roster reads one page of the link's strategy list. An empty cursor starts
 // a walk.
 func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (RosterPage, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return RosterPage{}, err
+	}
 	page, err := reader.roster(ctx, cursor)
 	at := reader.now()
 	reader.record(ConsoleOpRoster, at, err)
@@ -230,6 +240,9 @@ func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (Roster
 
 // AlertRecord reads one alert's record from the link's Console.
 func (reader *HTTPReconciler) AlertRecord(ctx context.Context, tenantID, alertID string) (AlertRecord, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return AlertRecord{}, err
+	}
 	record, err := reader.alertRecord(ctx, tenantID, alertID)
 	outcome := err
 	if errors.Is(err, ErrAlertNotFound) {

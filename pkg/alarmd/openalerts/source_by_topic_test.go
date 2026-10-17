@@ -4,7 +4,6 @@
 package openalerts
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -92,7 +91,7 @@ func TestTheEventSourceIsTheCandidateReadingTheOutputTopic(t *testing.T) {
 		"legacy":      {topic: "legacy_events", enabled: yes(), published: 10},
 		"built_in_bk": {topic: "alarmd_event", enabled: yes(), published: 4},
 	}, "alarmd_event")
-	binding, err := reader.Binding(context.Background())
+	binding, err := reader.Binding(consoleCtx())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +107,7 @@ func TestTheEventSourceIsTheCandidateReadingTheOutputTopic(t *testing.T) {
 		t.Fatalf("a subscription credential was kept: %s", encoded)
 	}
 	// The keying is read for the source chosen, and the reconcile asks for it.
-	keying, err := reader.EventSource(context.Background())
+	keying, err := reader.EventSource(consoleCtx())
 	if err != nil || keying.EventSourceID != "built_in_bk" {
 		t.Fatalf("keying %+v err %v, want built_in_bk's", keying, err)
 	}
@@ -135,7 +134,7 @@ func TestAnUnresolvedSourceIsNamedAndChangesNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reader, _ := topicServer(t, "legacy", tc.sources, "alarmd_event")
-			binding, err := reader.Binding(context.Background())
+			binding, err := reader.Binding(consoleCtx())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,11 +148,11 @@ func TestAnUnresolvedSourceIsNamedAndChangesNothing(t *testing.T) {
 	// Once chosen, an unreadable refresh keeps the choice.
 	sources := map[string]*topicSource{"legacy": {topic: "legacy_events", published: 10}, "built_in_bk": {topic: "alarmd_event", published: 4}}
 	reader, _ := topicServer(t, "legacy", sources, "alarmd_event")
-	if binding, err := reader.Binding(context.Background()); err != nil || binding.EventSourceID != "built_in_bk" {
+	if binding, err := reader.Binding(consoleCtx()); err != nil || binding.EventSourceID != "built_in_bk" {
 		t.Fatalf("binding %+v err %v", binding, err)
 	}
 	sources["built_in_bk"].fail = true
-	binding, err := reader.resolve(context.Background())
+	binding, err := reader.resolve(consoleCtx())
 	if err != nil || binding.EventSourceID != "built_in_bk" || reader.Record().SourceByTopic.Outcome != SourceByTopicUnresolved {
 		t.Fatalf("binding %+v err %v choice %+v, want the earlier choice kept while unresolved", binding, err, reader.Record().SourceByTopic)
 	}
@@ -164,7 +163,7 @@ func TestWithoutAnOutputTopicTheLinksNameStands(t *testing.T) {
 	reader, reads := topicServer(t, "legacy", map[string]*topicSource{
 		"legacy": {topic: "legacy_events", published: 10}, "built_in_bk": {topic: "alarmd_event", published: 4},
 	}, "")
-	binding, err := reader.Binding(context.Background())
+	binding, err := reader.Binding(consoleCtx())
 	if err != nil || binding.EventSourceID != "legacy" {
 		t.Fatalf("binding %+v err %v", binding, err)
 	}
@@ -211,7 +210,7 @@ func TestTheReconciliationIsForTheChosenSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := reader.Reconcile(context.Background(), keyA)
+	result, err := reader.Reconcile(consoleCtx(), keyA)
 	if err != nil {
 		t.Fatal(err)
 	}

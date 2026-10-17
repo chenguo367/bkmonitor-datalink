@@ -42,6 +42,19 @@ type Alert struct {
 	Severity      string `json:"severity,omitempty"`
 }
 
+// ErrNoDeadline refuses a Console call whose context has no deadline. The
+// client has no timeout of its own -- each call is bounded by its caller,
+// who knows what the call is for -- so a call without one could wait
+// forever; it is refused before any request and is not a Console failure.
+var ErrNoDeadline = errors.New("alarmd openalerts: a Console call needs a context deadline")
+
+func requireDeadline(ctx context.Context) error {
+	if _, bounded := ctx.Deadline(); !bounded {
+		return ErrNoDeadline
+	}
+	return nil
+}
+
 type Reconciler interface {
 	Reconcile(context.Context, StrategyKey) (Reconciliation, error)
 }
@@ -130,6 +143,9 @@ type HTTPReconciler struct {
 	keyingTried, factsTried time.Time
 	// calls is what this process has seen of each Console operation.
 	calls consoleCalls
+	// latency is the durations of this client's requests, which bound each
+	// request a caller asks a coverage for (WithRequestCoverage).
+	latency *ConsoleLatency
 	// sourceChoice is how the last resolution chose the event source, and
 	// chosenSource the source the last successful choice found.
 	sourceChoice SourceByTopic
@@ -161,8 +177,12 @@ func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 	client := *options.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	options.Client = &client
-	return &HTTPReconciler{options: options, confirmed: options.LocationConfirmed}, nil
+	return &HTTPReconciler{options: options, confirmed: options.LocationConfirmed, latency: &ConsoleLatency{}}, nil
 }
+
+// Latency is how long this client's requests have taken, shared by every
+// caller of the client.
+func (reader *HTTPReconciler) Latency() *ConsoleLatency { return reader.latency }
 
 func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Values, out any) error {
 	return reader.getPath(ctx, "/strategy-index/"+path, query, out)
@@ -197,10 +217,32 @@ func (reader *HTTPReconciler) getPathAnswering(ctx context.Context, path string,
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	// The request itself, once the token is in hand: bounded by its own
+	// deadline when the caller named the coverage its work serves, and timed.
+	// A request that got an HTTP answer (any status) or ran to its deadline
+	// is a sample of the Console's latency; one that failed before either --
+	// refused, unresolved, reset -- is counted apart (ConsoleLatency).
+	requestCtx := ctx
+	if coverage, ok := requestCoverage(ctx); ok {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(ctx, reader.latency.Deadline(coverage))
+		defer cancel()
+		req = req.WithContext(requestCtx)
+	}
+	started, answered := time.Now(), false
+	defer func() {
+		switch {
+		case answered || errors.Is(requestCtx.Err(), context.DeadlineExceeded):
+			reader.latency.Observe(time.Since(started))
+		default:
+			reader.latency.NoteUnanswered()
+		}
+	}()
 	response, err := reader.options.Client.Do(req)
 	if err != nil {
 		return transportError(execution.ClassifyTransportFailure(err))
 	}
+	answered = true
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusUnauthorized && token != "" {
 		// The admin no longer accepts this token - its password or signing
@@ -270,8 +312,12 @@ func objectMissing(body io.Reader) bool {
 }
 
 // Binding is this deployment's target, read from the Console. It is reused
-// for up to bindingReuse; Reconcile always reads it afresh.
+// for up to bindingReuse; so is Reconcile's, which checks it against the
+// target the link answers for and reads it afresh when they differ.
 func (reader *HTTPReconciler) Binding(ctx context.Context) (TargetBinding, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return TargetBinding{}, err
+	}
 	reader.mu.Lock()
 	binding, at := reader.binding, reader.resolvedAt
 	reader.mu.Unlock()
@@ -392,35 +438,34 @@ func (reader *HTTPReconciler) reconcile(ctx context.Context, key StrategyKey) (R
 	if !validStrategyKey(key) {
 		return Reconciliation{}, errors.New("alarmd openalerts: invalid strategy identity")
 	}
-	b, err := reader.resolve(ctx)
-	if err != nil {
-		return Reconciliation{}, err
+	// The target is reused as Binding reuses it: reading the target list and
+	// each source before every strategy made one reconciliation three
+	// requests in sequence. The link names the target it answered for, so a
+	// target that moved is still found -- the answer differs, the target is
+	// read afresh (which moves where the sets are read when it must), and the
+	// strategy is asked once more against it.
+	reused := false
+	reader.mu.Lock()
+	b, at := reader.binding, reader.resolvedAt
+	reader.mu.Unlock()
+	if !at.IsZero() && reader.now().Sub(at) < bindingReuse {
+		reused = true
+	} else {
+		var err error
+		if b, err = reader.resolve(ctx); err != nil {
+			return Reconciliation{}, err
+		}
 	}
 	reader.refreshKeying(ctx, b)
-	var response struct {
-		Target     TargetBinding `json:"target"`
-		TenantID   string        `json:"tenantId"`
-		StrategyID string        `json:"strategyId"`
-		Key        string        `json:"key"`
-		Complete   bool          `json:"complete"`
-		Redis      struct {
-			Complete bool `json:"complete"`
-		} `json:"redis"`
-		Alerts struct {
-			Complete bool `json:"complete"`
-		} `json:"alerts"`
-		Rows []struct {
-			Fingerprint string  `json:"fingerprint"`
-			Status      string  `json:"status"`
-			Alerts      []Alert `json:"alerts"`
-		} `json:"rows"`
+	response, err := reader.askReconcile(ctx, b, key)
+	if err == nil && reused && !sameTarget(b, response.Target) {
+		if b, err = reader.resolve(ctx); err != nil {
+			return Reconciliation{}, err
+		}
+		response, err = reader.askReconcile(ctx, b, key)
 	}
-	query := url.Values{"event_source_id": {b.EventSourceID}, "hook_name": {b.HookName}, "bk_tenant_id": {key.TenantID}, "strategy_id": {key.StrategyID}}
-	if err := reader.get(ctx, "reconcile", query, &response); err != nil {
+	if err != nil {
 		return Reconciliation{}, err
-	}
-	if !response.Complete || !response.Redis.Complete || !response.Alerts.Complete || response.Rows == nil || len(response.Rows) > 10000 {
-		return Reconciliation{}, ErrIncomplete
 	}
 	if !sameTarget(b, response.Target) || response.TenantID != key.TenantID || response.StrategyID != key.StrategyID || response.Key != b.KeyPrefix+":"+key.TenantID+":"+key.StrategyID {
 		return Reconciliation{}, errors.New("alarmd openalerts: reconciliation identity mismatch")
@@ -462,6 +507,39 @@ func (reader *HTTPReconciler) reconcile(ctx context.Context, key StrategyKey) (R
 		}
 	}
 	return result, nil
+}
+
+// reconcileResponse is the link's reconciliation of one strategy.
+type reconcileResponse struct {
+	Target     TargetBinding `json:"target"`
+	TenantID   string        `json:"tenantId"`
+	StrategyID string        `json:"strategyId"`
+	Key        string        `json:"key"`
+	Complete   bool          `json:"complete"`
+	Redis      struct {
+		Complete bool `json:"complete"`
+	} `json:"redis"`
+	Alerts struct {
+		Complete bool `json:"complete"`
+	} `json:"alerts"`
+	Rows []struct {
+		Fingerprint string  `json:"fingerprint"`
+		Status      string  `json:"status"`
+		Alerts      []Alert `json:"alerts"`
+	} `json:"rows"`
+}
+
+// askReconcile is one reconcile request for the strategy against b.
+func (reader *HTTPReconciler) askReconcile(ctx context.Context, b TargetBinding, key StrategyKey) (reconcileResponse, error) {
+	var response reconcileResponse
+	query := url.Values{"event_source_id": {b.EventSourceID}, "hook_name": {b.HookName}, "bk_tenant_id": {key.TenantID}, "strategy_id": {key.StrategyID}}
+	if err := reader.get(ctx, "reconcile", query, &response); err != nil {
+		return reconcileResponse{}, err
+	}
+	if !response.Complete || !response.Redis.Complete || !response.Alerts.Complete || response.Rows == nil || len(response.Rows) > 10000 {
+		return reconcileResponse{}, ErrIncomplete
+	}
+	return response, nil
 }
 
 // transportError is a Console request that got no answer, named by the
