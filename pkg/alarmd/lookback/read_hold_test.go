@@ -372,3 +372,32 @@ func TestADecreaseThatOvertakesTheFirstReadIsNamedOvertaken(t *testing.T) {
 		t.Fatalf("hold decrease while first read ran: %+v", f.early())
 	}
 }
+
+// The trial starts as long before the candidate readiness point as a read of the group's query takes: RecheckTimeout
+// for a group whose reads are quick, and the longest of its last whole first reads for one whose reads are slower,
+// so the slow group's trial can still finish in time.
+func TestTheEarlierReadStartsAsEarlyAsTheGroupsReadsTake(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	q := heldQuery(f)
+	f.engine.Prepare(q)
+	state := f.group("qg")
+	if trial := state.prepared; trial == nil || !trial.at.Equal(trial.readyAt.Add(-RecheckTimeout)) {
+		t.Fatalf("quick group: trial %+v, want it to start RecheckTimeout before its readiness", trial)
+	}
+
+	slow := newFixture(t)
+	slow.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	q = heldQuery(slow)
+	slow.engine.mu.Lock()
+	slowState := slow.engine.groupLocked(q, slow.clock.now())
+	slowState.firstReads.add(8 * time.Second)
+	slow.engine.mu.Unlock()
+	slow.engine.Prepare(q)
+	if trial := slowState.prepared; trial == nil || !trial.at.Equal(trial.readyAt.Add(-8*time.Second)) {
+		t.Fatalf("slow group: trial %+v, want it to start 8 s before its readiness", trial)
+	}
+	if got := slow.engine.rereadTimeout("qg"); got != 8*time.Second {
+		t.Fatalf("the trial's read budget is the same bound: %v", got)
+	}
+}

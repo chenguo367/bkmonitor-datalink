@@ -662,9 +662,16 @@ func (engine *Engine) rereadTimeout(queryGroup execution.QueryGroupIdentity) tim
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if state := engine.groups[queryGroup]; state != nil {
-		return max(RecheckTimeout, state.firstReads.longest())
+		return state.rereadBound()
 	}
 	return RecheckTimeout
+}
+
+// rereadBound is how long a read of the group's query again may take: the
+// longest of its last whole first reads, never less than RecheckTimeout.
+// Caller holds the engine lock.
+func (state *group) rereadBound() time.Duration {
+	return max(RecheckTimeout, state.firstReads.longest())
 }
 
 // Forget drops a Query Group this process no longer owns, with its samples.
