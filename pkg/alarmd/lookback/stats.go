@@ -54,8 +54,13 @@ type counters struct {
 	// directedBytes, apart so the early read's own cost can be read.
 	earlyBytes   map[string]uint64
 	earlierReads map[string]uint64
-	earlierBytes map[string]uint64
-	holdIgnored  map[string]uint64
+	// earlierOvertaken is source|path: what overtook the trials counted
+	// overtaken; earlierPreparedLateMax, per source, the furthest past its
+	// candidate readiness point a trial's Slot was prepared.
+	earlierOvertaken       map[string]uint64
+	earlierPreparedLateMax map[string]time.Duration
+	earlierBytes           map[string]uint64
+	holdIgnored            map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -84,6 +89,7 @@ func newCounters(sources, refusals []string) counters {
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
+		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -137,6 +143,10 @@ func newCounters(sources, refusals []string) counters {
 		for _, outcome := range EarlierReadOutcomes {
 			c.earlierReads[key2(source, outcome)] = 0
 		}
+		for _, path := range EarlierOvertakenPaths {
+			c.earlierOvertaken[key2(source, path)] = 0
+		}
+		c.earlierPreparedLateMax[source] = 0
 		c.earlierBytes[source] = 0
 		for _, reason := range ReadHoldIgnoredReasons {
 			c.holdIgnored[key2(source, reason)] = 0
@@ -323,9 +333,15 @@ type SourceStats struct {
 	// DirectedReadBytes: the bytes reading early added.
 	EarlyReadBytes uint64 `json:"early_read_bytes"`
 	// EarlierReads compares h/2 samples only with their formal first reads.
-	EarlierReads     map[string]uint64 `json:"earlier_reads"`
-	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
-	ReadHoldIgnored  map[string]uint64 `json:"read_hold_ignored"`
+	EarlierReads map[string]uint64 `json:"earlier_reads"`
+	// EarlierOvertaken is what overtook the trials EarlierReads counts as
+	// overtaken (EarlierOvertakenPaths), and EarlierPreparedLateMaxSeconds
+	// the furthest past its candidate readiness point a trial's Slot was
+	// prepared.
+	EarlierOvertaken              map[string]uint64 `json:"earlier_overtaken"`
+	EarlierPreparedLateMaxSeconds float64           `json:"earlier_prepared_late_max_seconds"`
+	EarlierReadBytes              uint64            `json:"earlier_read_bytes"`
+	ReadHoldIgnored               map[string]uint64 `json:"read_hold_ignored"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -608,6 +624,11 @@ func (engine *Engine) Stats() Stats {
 		for _, outcome := range EarlierReadOutcomes {
 			entry.EarlierReads[outcome] = engine.counts.earlierReads[key2(source, outcome)]
 		}
+		entry.EarlierOvertaken = map[string]uint64{}
+		for _, path := range EarlierOvertakenPaths {
+			entry.EarlierOvertaken[path] = engine.counts.earlierOvertaken[key2(source, path)]
+		}
+		entry.EarlierPreparedLateMaxSeconds = engine.counts.earlierPreparedLateMax[source].Seconds()
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]
 		}

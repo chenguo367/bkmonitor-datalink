@@ -56,6 +56,9 @@ type lookbackCollector struct {
 	earlyUndecided      *prometheus.Desc
 	earlyBytes          *prometheus.Desc
 	earlierBytes        *prometheus.Desc
+	earlierReads        *prometheus.Desc
+	earlierOvertaken    *prometheus.Desc
+	earlierPreparedLate *prometheus.Desc
 	holdIgnored         *prometheus.Desc
 	readHoldTransition  *prometheus.Desc
 	readHoldOvertaken   *prometheus.Desc
@@ -183,7 +186,18 @@ func newLookbackCollector() *lookbackCollector {
 			"Bytes the early reads delivered, by source: part of lookback_directed_read_bytes_total, the bytes reading "+
 				"early added.", "source"),
 		earlierBytes: desc("lookback_earlier_read_bytes_total", "Bytes candidate h/2 reads delivered, by source.", "source"),
-		holdIgnored:  desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
+		earlierReads: desc("lookback_earlier_reads_total",
+			"Candidate h/2 read trials by how they ended, by source: equal or different from the formal first read, or why they supplied no evidence. "+
+				"Reader: the read-hold acceptance after each deploy, which needs completed trials (equal plus different) above zero; "+
+				"a deployment without the CLI reads it only here, since its lookback route is not public.",
+			"source", "outcome"),
+		earlierOvertaken: desc("lookback_earlier_overtaken_total",
+			"Candidate h/2 read trials that ended overtaken, by source and what overtook them first. "+
+				"Reader: the same acceptance, which names the cause when trials do not complete.", "source", "path"),
+		earlierPreparedLate: desc("lookback_earlier_prepared_late_max_seconds",
+			"The furthest past its candidate readiness point a trial's Slot was prepared, by source; zero while none was. "+
+				"Reader: the same acceptance, beside prepared_after_readiness: how late the Slots arrive.", "source"),
+		holdIgnored: desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		readBytes: desc("lookback_first_read_bytes_total",
 			"Bytes the formal first reads delivered, by source, counted as the rechecks' are.", "source"),
 		checkBytes: desc("lookback_recheck_bytes_total",
@@ -227,7 +241,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
@@ -314,6 +328,13 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		counter(c.earlyUndecided, source.EarlyUndecided, name)
 		counter(c.earlyBytes, source.EarlyReadBytes, name)
 		counter(c.earlierBytes, source.EarlierReadBytes, name)
+		for _, outcome := range lookback.EarlierReadOutcomes {
+			counter(c.earlierReads, source.EarlierReads[outcome], name, outcome)
+		}
+		for _, path := range lookback.EarlierOvertakenPaths {
+			counter(c.earlierOvertaken, source.EarlierOvertaken[path], name, path)
+		}
+		gauge(c.earlierPreparedLate, source.EarlierPreparedLateMaxSeconds, name)
 		for _, reason := range lookback.ReadHoldIgnoredReasons {
 			if reason == lookback.ClassPartialRevised {
 				// Every one of these is a partial_revised sample, counted in

@@ -508,7 +508,7 @@ func (engine *Engine) Begin(query Query) *Read {
 		read.earlier = state.prepared
 		read.earlier.formal = true
 		if !read.earlier.done {
-			read.earlier.done, read.earlier.outcome = true, EarlierOvertaken
+			read.earlier.overtake(OvertakenFormalFirst)
 			if read.earlier.cancel != nil {
 				read.earlier.cancel()
 			}
