@@ -152,8 +152,11 @@ func consoleFor(target openalerts.TargetBinding) http.HandlerFunc {
 // reconciliation that sees it withdraws the confirmation and moves the reads
 // to the place the Console now names; the calibration that follows is asked
 // for at once, not after the 30-minute interval, and confirms it. Until
-// then the gate answers from what this process sent, and the move is
-// counted as an entry into location_unconfirmed.
+// then the gate answers from what this process sent. The move is read from
+// the location itself (moved, at the Console's prefix): whether a read round
+// falls inside the brief unconfirmed span -- and so counts an entry into
+// location_unconfirmed -- depends on which round sees the move first, and
+// the Console round now runs on its own, usually before any read.
 func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 	runtimeAddress, runtimeClient := startPhaseTwoRedis(t)
 	linkdAddress, linkdClient := startPhaseTwoRedis(t)
@@ -213,8 +216,11 @@ func TestAReconciliationThatFindsTheLinkElsewhereMovesTheReads(t *testing.T) {
 	if !cache.Contains(key.TenantID, key.StrategyID, "fp-open") {
 		t.Fatal("after the move the gate did not answer from the link's set")
 	}
-	if got := cache.Stats().Unavailable[openalerts.UnavailableLocationUnconfirmed]; got != 1 {
-		t.Fatalf("location_unconfirmed counted %d, want the move counted once", got)
+	if _, prefix, moved := index.Location.Location(); !moved || prefix != "hook:open" {
+		t.Fatalf("location moved %v to prefix %q, want moved to the Console's hook:open", moved, prefix)
+	}
+	if got := cache.Stats().Unavailable[openalerts.UnavailableLocationUnconfirmed]; got > 1 {
+		t.Fatalf("location_unconfirmed counted %d for one move, want at most one entry", got)
 	}
 	if commands := linkCommands(); len(commands) == 0 {
 		t.Fatal("the link's Redis ran no command at its prefix: the reads did not move, or the count sees nothing")
