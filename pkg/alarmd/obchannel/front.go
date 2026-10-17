@@ -18,17 +18,20 @@ import (
 // alarmd's own data and nothing of the cluster's, no raw store read, no
 // re-query and no write.
 var FrontReads = map[string]bool{
-	"overview.get":         true,
-	"trends.get":           true,
-	"fleet.get":            true,
-	"strategy.list":        true,
-	"strategy.get":         true,
-	"strategy.board":       true,
-	"strategy.view":        true,
-	"object.list":          true,
-	"object.get":           true,
-	"diagnose.environment": true,
-	"runtime.get":          true,
+	"overview.get":   true,
+	"trends.get":     true,
+	"fleet.get":      true,
+	"strategy.list":  true,
+	"strategy.get":   true,
+	"strategy.board": true,
+	"strategy.view":  true,
+	// The drawer's Linkd block: Linkd's read, bounded by its own time and
+	// one in flight per replica (strategy.linkd_reconcile).
+	"strategy.linkd_reconcile": true,
+	"object.list":              true,
+	"object.get":               true,
+	"diagnose.environment":     true,
+	"runtime.get":              true,
 }
 
 // FrontReadHandler serves the front surface's read: an invoke of one of
