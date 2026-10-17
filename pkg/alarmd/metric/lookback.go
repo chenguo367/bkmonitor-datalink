@@ -195,7 +195,7 @@ func newLookbackCollector() *lookbackCollector {
 			"Candidate h/2 read trials that ended overtaken, by source and what overtook them first. "+
 				"Reader: the same acceptance, which names the cause when trials do not complete.", "source", "path"),
 		earlierPreparedLate: desc("lookback_earlier_prepared_late_max_seconds",
-			"The furthest past its candidate readiness point a trial's Slot was prepared, by source; zero while none was. "+
+			"The furthest past its candidate readiness point a trial's Slot was prepared since process start, by source; it never decays, and is zero while none was. "+
 				"Reader: the same acceptance, beside prepared_after_readiness: how late the Slots arrive.", "source"),
 		holdIgnored: desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		readBytes: desc("lookback_first_read_bytes_total",

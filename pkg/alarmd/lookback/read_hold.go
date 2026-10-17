@@ -219,7 +219,14 @@ func (engine *Engine) Prepare(query Query) {
 		}
 		state.prepared = nil
 	}
-	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
+	// The group's rest is judged at the Slot's formal read, where Begin
+	// takes the sample this reserves, not now: a held Slot is prepared at
+	// its first attempt, a hold before that read. Judged now, a rest ending
+	// between the two left the first attempt to skip and the readiness retry
+	// to reserve the trial past its own candidate point, where it is
+	// overtaken before it reads - almost every trial, on a hold near the
+	// period.
+	if state.capturing || state.sample != nil || query.ReadyAt.Before(state.nextAt) {
 		engine.mu.Unlock()
 		return
 	}

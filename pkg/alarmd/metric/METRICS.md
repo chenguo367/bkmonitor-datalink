@@ -959,7 +959,7 @@ Candidate h/2 read trials that ended overtaken, by source and what overtook them
 
 Labels: `source`
 
-The furthest past its candidate readiness point a trial's Slot was prepared, by source; zero while none was. Reader: the same acceptance, beside prepared_after_readiness: how late the Slots arrive.
+The furthest past its candidate readiness point a trial's Slot was prepared since process start, by source; it never decays, and is zero while none was. Reader: the same acceptance, beside prepared_after_readiness: how late the Slots arrive.
 
 ## alarmd_lookback_earlier_read_bytes_total
 

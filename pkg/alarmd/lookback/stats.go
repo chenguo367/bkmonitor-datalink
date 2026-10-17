@@ -337,7 +337,7 @@ type SourceStats struct {
 	// EarlierOvertaken is what overtook the trials EarlierReads counts as
 	// overtaken (EarlierOvertakenPaths), and EarlierPreparedLateMaxSeconds
 	// the furthest past its candidate readiness point a trial's Slot was
-	// prepared.
+	// prepared since the process started; it never decays.
 	EarlierOvertaken              map[string]uint64 `json:"earlier_overtaken"`
 	EarlierPreparedLateMaxSeconds float64           `json:"earlier_prepared_late_max_seconds"`
 	EarlierReadBytes              uint64            `json:"earlier_read_bytes"`

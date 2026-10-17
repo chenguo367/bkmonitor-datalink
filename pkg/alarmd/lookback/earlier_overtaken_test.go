@@ -130,3 +130,39 @@ func TestAPreparedLateTrialKeepsHowLateItWas(t *testing.T) {
 		t.Fatalf("a trial prepared in time lowered the max to %v", got)
 	}
 }
+
+// The group's rest is judged at the Slot's formal read. A held Slot's first attempt, before the rest ends, reserves
+// the trial of the Slot whose formal read comes after it; a Slot whose formal read comes before the rest ends
+// reserves none, at either attempt.
+func TestATrialIsReservedAtTheFirstAttemptOfTheSlotWhoseReadEndsTheRest(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	early := heldQuery(f)
+	f.engine.Prepare(early)
+	f.engine.mu.Lock()
+	state := f.engine.groups["qg"]
+	state.prepared = nil
+	state.nextAt = early.ReadyAt.Add(30 * time.Second)
+	f.engine.mu.Unlock()
+
+	f.engine.Prepare(early)
+	f.clock.set(early.ReadyAt)
+	f.engine.Prepare(early)
+	f.engine.mu.Lock()
+	reserved := state.prepared
+	f.engine.mu.Unlock()
+	if reserved != nil {
+		t.Fatal("a Slot read before the rest ends reserved a trial")
+	}
+
+	f.clock.set(early.ReadyAt.Add(-2 * time.Minute))
+	later := heldQuery(f)
+	later.Contract.Slot.EvaluationTime += 60
+	f.engine.Prepare(later)
+	f.engine.mu.Lock()
+	trial := state.prepared
+	f.engine.mu.Unlock()
+	if trial == nil || trial.query.Contract.Slot != later.Contract.Slot || trial.done {
+		t.Fatalf("the first attempt of the Slot read after the rest reserved %+v, want its live trial", trial)
+	}
+}
