@@ -55,9 +55,9 @@ const (
 	VerificationTimeout = 3 * time.Second
 	TerminationGrace    = 4 * time.Second
 	// StartupAllowance bounds connection setup and the supervisor's start
-	// before its started report. With VerificationTimeout before and after,
-	// the longest execution fits the exec operation's 45 s budget:
-	// 3 + 4 + 30 + 4 + 3 = 44 s.
+	// before its started report. With VerificationTimeout before and after
+	// and TerminationGrace after the command, it is what the operation
+	// ceiling keeps back from the command (MaxExecTimeout).
 	StartupAllowance = 4 * time.Second
 	RemoteNotStarted = "remote_not_started"
 	RemoteCompleted  = "remote_completed"
