@@ -346,16 +346,33 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		}
 		query := request.URL.Query()
 		summaryOnly := query.Get("summary") != ""
-		boardMode := query.Get("board") != ""
-		if boardMode {
-			if summaryOnly || query.Get("board") != "1" {
-				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_BOARD", "detail": "board=1 alone selects the strategy board"})
-				return
-			}
-			filter, limit, refusal := parseBoardQuery(query)
-			if refusal != nil {
-				writeJSON(response, http.StatusBadRequest, refusal)
-				return
+		boardMode, viewMode := query.Get("board") != "", query.Get("view") != ""
+		if boardMode || viewMode {
+			var filter BoardFilter
+			var limit int
+			if viewMode {
+				// One strategy's drawer: view=1 with its id and nothing else.
+				for name := range query {
+					if name != "view" && name != "strategy_id" {
+						writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_VIEW", "detail": "view=1 takes strategy_id only"})
+						return
+					}
+				}
+				if query.Get("view") != "1" || query.Get("strategy_id") == "" {
+					writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_VIEW", "detail": "view=1 takes strategy_id only"})
+					return
+				}
+			} else {
+				if summaryOnly || query.Get("board") != "1" {
+					writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_BOARD", "detail": "board=1 alone selects the strategy board"})
+					return
+				}
+				var refusal map[string]any
+				filter, limit, refusal = parseBoardQuery(query)
+				if refusal != nil {
+					writeJSON(response, http.StatusBadRequest, refusal)
+					return
+				}
 			}
 			if lookup == nil || universe == nil {
 				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "DIAGNOSIS_NOT_WIRED"})
@@ -390,6 +407,15 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			}
 			board := counted.board
 			counted.mu.Unlock()
+			if viewMode {
+				view, found := board.view(query.Get("strategy_id"), DiagnosisSummaryFreshFor)
+				if !found {
+					writeJSON(response, http.StatusNotFound, map[string]string{"error": "STRATEGY_NOT_IN_UNIVERSE"})
+					return
+				}
+				writeJSON(response, http.StatusOK, view)
+				return
+			}
 			writeJSON(response, http.StatusOK, board.page(filter, query.Get("cursor"), limit, DiagnosisSummaryFreshFor))
 			return
 		}

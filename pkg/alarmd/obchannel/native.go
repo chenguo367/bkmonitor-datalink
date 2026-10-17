@@ -201,6 +201,7 @@ func NativeOperations(handler http.Handler) []Operation {
 		}),
 	}
 	ops = append(ops, objectListOperation(handler, limits))
+	ops = append(ops, strategyViewOperation(handler, limits))
 	for i := range ops {
 		if ops[i].ID == "sample.get" || ops[i].ID == "observation.get" {
 			ops[i].EvidenceScope = "shared_records_with_process_diagnostics"

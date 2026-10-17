@@ -216,6 +216,8 @@ type boardIndex struct {
 	lateObjects BoardCount
 	lateStrats  BoardCount
 	atLeast     string
+	// views is each strategy's drawer facts beyond its row.
+	views map[string]boardViewFacts
 }
 
 // boardAtLeastReason is the page's sentence for a lower bound.
@@ -258,7 +260,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 	for _, line := range lines {
 		byStrategy[line.StrategyID] = line
 	}
-	index := &boardIndex{id: id, at: at, digest: digest, rows: make([]BoardRow, 0, len(universe)),
+	index := &boardIndex{id: id, at: at, digest: digest, rows: make([]BoardRow, 0, len(universe)), views: make(map[string]boardViewFacts, len(universe)),
 		facets: BoardFacets{State: map[StateWord]int{}, Action: map[ActionWord]int{}, Capability: map[string]int{},
 			Punctuality: map[Punctuality]int{}}}
 	for _, word := range DiagnosisVerdicts() {
@@ -288,6 +290,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		}
 		row.Line = boardLine(row)
 		index.rows = append(index.rows, row)
+		index.views[row.StrategyID] = viewFactsOf(decided, due)
 		index.facets.State[row.State]++
 		if row.Action != "" {
 			index.facets.Action[row.Action]++
