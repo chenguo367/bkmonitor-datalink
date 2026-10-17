@@ -252,6 +252,9 @@ type fleetPublisher struct {
 	// carries no facts, which the aggregate keeps apart from a copy that is
 	// fine.
 	openAlerts func() *fleet.OpenAlertSetFacts
+	// openAlertCounts is the copy's open alerts per tracked strategy, for the
+	// strategy board; nil without a copy.
+	openAlertCounts func() *fleet.OpenAlertCounts
 	// controlSource reports the state of this replica's control source
 	// refresh. Nil on a bundle that has none, and the snapshot then carries
 	// no facts.
@@ -698,6 +701,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	snapshot.TotalDemoted = len(demoted)
 	if publisher.openAlerts != nil {
 		snapshot.OpenAlertSet = publisher.openAlerts()
+	}
+	if publisher.openAlertCounts != nil {
+		snapshot.OpenAlerts = publisher.openAlertCounts()
 	}
 	if publisher.controlSource != nil {
 		snapshot.ControlSource = publisher.controlSource()

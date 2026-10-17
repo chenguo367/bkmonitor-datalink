@@ -150,7 +150,11 @@ type BoardRow struct {
 	Since           *time.Time  `json:"since,omitempty"`
 	SinceBasis      SinceBasis  `json:"since_basis,omitempty"`
 	SinceWord       string      `json:"since_word,omitempty"`
-	KBAnchor        string      `json:"kb_anchor"`
+	// OpenAlerts is the strategy's open alerts on alarmd's copy of the
+	// consumer's set; absent when not known, at_least when a replica could
+	// not count it. The alerts themselves are read in Linkd.
+	OpenAlerts *BoardCount `json:"open_alerts,omitempty"`
+	KBAnchor   string      `json:"kb_anchor"`
 }
 
 // BoardFacets counts the whole universe on each facet, never the page.
@@ -248,7 +252,7 @@ func boardLine(row BoardRow) string {
 // order the words give and then longest standing first, and counts every
 // facet over the whole universe.
 func buildBoard(id string, at time.Time, digest string, universe []string, decide func(string) DiagnosisRow,
-	lines []StrategyLine, due *DueView, census *ScheduleCensus) *boardIndex {
+	lines []StrategyLine, due *DueView, census *ScheduleCensus, open *OpenView) *boardIndex {
 	words := ProductWords()
 	byStrategy := make(map[string]StrategyLine, len(lines))
 	for _, line := range lines {
@@ -273,7 +277,7 @@ func buildBoard(id string, at time.Time, digest string, universe []string, decid
 		decided := decide(id)
 		row := BoardRow{StrategyID: decided.StrategyID, BusinessID: decided.Business, State: decided.Verdict,
 			StateWord: words.State[decided.Verdict], Action: decided.Action, ActionWord: words.Action[decided.Action],
-			CapabilityClass: capabilityOf(decided), Punctuality: strategyPunctuality(decided, due),
+			CapabilityClass: capabilityOf(decided), Punctuality: strategyPunctuality(decided, due), OpenAlerts: strategyOpenAlerts(decided, open),
 			KBAnchor: "state-" + string(decided.Verdict)}
 		if line, ok := byStrategy[decided.StrategyID]; ok {
 			row.Since, row.SinceBasis = line.Since, line.SinceBasis

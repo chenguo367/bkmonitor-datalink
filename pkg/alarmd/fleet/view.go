@@ -1900,6 +1900,9 @@ type Snapshot struct {
 	// Due names the objects Schedule counts as late, overdue and never
 	// evaluated (DueClasses). Absent with Schedule: no due index, no names.
 	Due *DueClasses `json:"due,omitempty"`
+	// OpenAlerts counts open alerts per strategy this replica's copy of the
+	// consumer's set tracks (OpenAlertCounts). Absent without a copy.
+	OpenAlerts *OpenAlertCounts `json:"open_alerts,omitempty"`
 	// Suppression is present only on a build whose dispatcher actually holds
 	// objects back. Absent, the overdue count above is structurally zero and
 	// must not be read as "nothing is overdue".
@@ -3007,6 +3010,9 @@ type View struct {
 	// (DueView). Kept in memory only, never in the health answer: the lists
 	// are the size of what is wrong and the health answer is read on every page.
 	Due *DueView `json:"-"`
+	// OpenAlerts is the replicas' open-alert counts for the strategy board
+	// (OpenView), in memory only like Due.
+	OpenAlerts *OpenView `json:"-"`
 	// Suppression says whether anything in this deployment can be parked at
 	// all. See DispatchSuppression: its absence, not its value, is the answer.
 	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
@@ -3593,6 +3599,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	aggregateOverdue(&view, counted)
 	aggregateSchedule(&view, counted)
 	aggregateDue(&view, counted)
+	aggregateOpenAlerts(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
 	aggregateTrackerDropped(&view, counted)

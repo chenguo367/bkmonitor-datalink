@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -1315,6 +1316,7 @@ func openProductionPhaseTwoBundleAssembly(
 		staleAfter:          stallAfter,
 		restoreBudget:       fleetRestoreBudgetPerPublish,
 		openAlerts:          openAlertFacts,
+		openAlertCounts:     openAlertCountsSource(openAlertCopy),
 		controlSource:       bundle.controlSourceFleetFacts,
 		platformSettings:    platformSettingsFactsSource(platformSettings, external.Now),
 		publicSurface:       surface,
@@ -1655,6 +1657,41 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 	return func() *fleet.OpenAlertSetFacts {
 		return openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
 	}
+}
+
+// openAlertCountsSource reads the copy's open-alert counts for the snapshot.
+func openAlertCountsSource(cache *openalerts.Cache) func() *fleet.OpenAlertCounts {
+	if cache == nil {
+		return nil
+	}
+	return func() *fleet.OpenAlertCounts { return openAlertCountsOf(cache.OpenCounts()) }
+}
+
+// openAlertCountsOf is the copy's counts by strategy id, sorted. One id under
+// two tenants takes the larger count; an id counted under any tenant is not
+// also listed unknown.
+func openAlertCountsOf(counts map[openalerts.StrategyKey]int, unknown []openalerts.StrategyKey) *fleet.OpenAlertCounts {
+	byStrategy := map[string]int{}
+	for key, count := range counts {
+		if count > byStrategy[key.StrategyID] {
+			byStrategy[key.StrategyID] = count
+		}
+	}
+	answer := &fleet.OpenAlertCounts{}
+	for strategy, count := range byStrategy {
+		answer.Counts = append(answer.Counts, fleet.StrategyOpenCount{Strategy: strategy, Count: count})
+	}
+	sort.Slice(answer.Counts, func(i, j int) bool { return answer.Counts[i].Strategy < answer.Counts[j].Strategy })
+	seen := map[string]bool{}
+	for _, key := range unknown {
+		if _, counted := byStrategy[key.StrategyID]; counted || seen[key.StrategyID] {
+			continue
+		}
+		seen[key.StrategyID] = true
+		answer.Unknown = append(answer.Unknown, key.StrategyID)
+	}
+	sort.Strings(answer.Unknown)
+	return answer
 }
 
 // openAlertSetFacts is the copy's stats as the replica publishes them.
