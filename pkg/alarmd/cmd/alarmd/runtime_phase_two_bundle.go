@@ -1030,7 +1030,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// published: no copy, no refresh, rows built for the page asked. A
 	// follower forwards to the Leader; a Leader before its first round
 	// answers not ready.
-	directoryView, err := controlplane.NewDirectoryView(reconciler, repository, directoryReadTimeout)
+	directoryView, err := controlplane.NewDirectoryView(reconciler, repository)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,6 +1084,8 @@ func openProductionPhaseTwoBundleAssembly(
 		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, absentForwardRoute, recorder.ObserveLeaderForward),
 		cfg.PhaseTwo.Worker.ID)
 	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, directoryForward, windowStore, diagnostics, seriesSampler, external.Now)
+	// A request a follower handed on answers by the deadline its hop carries.
+	fleetAPI = fleet.WithForwardedDeadline(fleetAPI)
 	observationRefresh := &observationRefresh{cost: costSummary, now: external.Now,
 		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), identity: repository.CachedExecutionIdentity}
 	// The same judgment the page shows, exported so the host writes alert rules

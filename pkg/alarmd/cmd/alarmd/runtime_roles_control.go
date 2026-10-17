@@ -332,7 +332,7 @@ func openProductionControlRoleBundle(
 		return nil, err
 	}
 	var bundle *phaseTwoWorkerBundle
-	directory, err := controlplane.NewDirectoryView(core.Reconciler, core.Repository, directoryReadTimeout)
+	directory, err := controlplane.NewDirectoryView(core.Reconciler, core.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -353,6 +353,8 @@ func openProductionControlRoleBundle(
 	absentPage := &absentCandidatePage{}
 	native = fleet.WithAbsentCandidates(native, absentPage.source,
 		leaderForwarderWithin(discovery, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, absentForwardRoute, recorder.ObserveLeaderForward), cfg.PhaseTwo.Worker.ID)
+	// A request a follower handed on answers by the deadline its hop carries.
+	native = fleet.WithForwardedDeadline(native)
 	var closeCLI = func() error { return nil }
 	publicRestricted := false
 	binding := cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer,

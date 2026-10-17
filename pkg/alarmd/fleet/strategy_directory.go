@@ -181,11 +181,19 @@ func WithStrategyDirectory(next http.Handler, directory StrategyDirectory, forwa
 			return
 		}
 		var nextCursor string
-		if len(snapshot.Rows) > limit {
+		cursorAt := func(next int) string {
+			return base64.RawURLEncoding.EncodeToString([]byte(snapshot.Revision + "\n" + strconv.Itoa(next) + "\n" + tenant + "\n" + business + "\n" + strategy))
+		}
+		switch {
+		case len(snapshot.Rows) > limit:
 			snapshot.Rows = snapshot.Rows[:limit]
 			if snapshot.Complete {
-				nextCursor = base64.RawURLEncoding.EncodeToString([]byte(snapshot.Revision + "\n" + strconv.Itoa(offset+limit) + "\n" + tenant + "\n" + business + "\n" + strategy))
+				nextCursor = cursorAt(offset + limit)
 			}
+		case snapshot.Partial && snapshot.Complete:
+			// Stopped short to answer in the reader's time: the next page
+			// starts at the first row this one did not reach.
+			nextCursor = cursorAt(offset + len(snapshot.Rows))
 		}
 		body := struct {
 			controlplane.StrategyDirectorySnapshot

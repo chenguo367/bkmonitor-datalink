@@ -769,9 +769,12 @@ func (holds *productionReadHolds) report(reason string, qg execution.QueryGroupI
 	}
 }
 
+// observation reads the Slot's schedule and applies one finding: about three
+// Redis calls, each bounded by the client's own timeouts, with no deadline
+// over them; one borrowed from the directory's used to drop the sample when
+// the three together ran past it.
 func (holds *productionReadHolds) observation(contractRef execution.FrozenExecutionContractRef, apply func(context.Context) error) {
-	ctx, cancel := context.WithTimeout(context.Background(), directoryReadTimeout)
-	defer cancel()
+	ctx := context.Background()
 	owner, err := holds.owner(contractRef.Slot.QueryGroup)
 	if err == nil {
 		var schedule execution.FrozenQueryGroupSchedule
