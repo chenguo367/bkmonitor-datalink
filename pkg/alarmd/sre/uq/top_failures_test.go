@@ -366,3 +366,59 @@ func TestShrunkPagesStopAtTheRequestCap(t *testing.T) {
 		t.Fatalf("answer %+v after %d requests err %v, want the cap", answer, requests, err)
 	}
 }
+
+// A read whose time runs out answers what it scanned: it stops between
+// pages when the next would not fit (twice the slowest page so far), the
+// groups of the scanned pages stand, and the answer is a sample saying why.
+func TestATopFailuresReadOutOfTimeAnswersWhatItScanned(t *testing.T) {
+	base := failureNow.Add(-time.Hour).UnixMilli()
+	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
+		time.Sleep(150 * time.Millisecond)
+		page := make([]map[string]any, 0, MaxTraceRows)
+		for i := 0; i < MaxTraceRows; i++ {
+			page = append(page, span(fmt.Sprintf("t%d", from+i), "web", "/busy", 500, nil, base+int64(from+i), 1, nil))
+		}
+		return page, 10000
+	}}
+	p := failureProvider(t, server, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	answer, err := p.TopFailures(ctx, TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
+	if err != nil {
+		t.Fatalf("a read out of time failed instead of answering what it scanned: %v", err)
+	}
+	if answer.Pages == 0 || answer.Pages >= TopFailuresPages || answer.Scanned == 0 || len(answer.Groups) == 0 || !answer.Sampled {
+		t.Fatalf("answer pages %d scanned %d groups %d sampled %v", answer.Pages, answer.Scanned, len(answer.Groups), answer.Sampled)
+	}
+	found := false
+	for _, limitation := range answer.Limitations {
+		found = found || strings.Contains(limitation, "time ran out")
+	}
+	if !found {
+		t.Fatalf("limitations %v, want the reason named", answer.Limitations)
+	}
+}
+
+// A page the operation's deadline cuts -- one far slower than the pages
+// before it, which the pre-check could not foresee -- ends the read with
+// what was scanned, rather than failing it.
+func TestATopFailuresPageCutByTheDeadlineKeepsThePagesBefore(t *testing.T) {
+	base := failureNow.Add(-time.Hour).UnixMilli()
+	server := &failureServer{rows: func(from int) ([]map[string]any, int) {
+		if from > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		page := make([]map[string]any, 0, MaxTraceRows)
+		for i := 0; i < MaxTraceRows; i++ {
+			page = append(page, span(fmt.Sprintf("t%d", from+i), "web", "/busy", 500, nil, base+int64(from+i), 1, nil))
+		}
+		return page, 10000
+	}}
+	p := failureProvider(t, server, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	answer, err := p.TopFailures(ctx, TopFailuresRequest{Egress: "primary", Target: "fixture", Now: failureNow})
+	if err != nil || answer.Scanned != MaxTraceRows || len(answer.Groups) == 0 || !answer.Sampled {
+		t.Fatalf("err %v scanned %d groups %d sampled %v, want the first page answered", err, answer.Scanned, len(answer.Groups), answer.Sampled)
+	}
+}
