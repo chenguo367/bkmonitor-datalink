@@ -1092,6 +1092,16 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 	if err := dependencies.Config.Validate(); err != nil {
 		return nil, err
 	}
+	// A publish keeps cursors and caches between calls; the maintenance
+	// ticker and anyone asking for a publish now take turns.
+	if publish := dependencies.PublishFleet; publish != nil {
+		var publishing sync.Mutex
+		dependencies.PublishFleet = func(ctx context.Context) {
+			publishing.Lock()
+			defer publishing.Unlock()
+			publish(ctx)
+		}
+	}
 	bundle := &phaseTwoWorkerBundle{dependencies: dependencies, outputSinkReady: true,
 		candidacy:      phaseTwoControlCandidacy(dependencies.Config),
 		flightReleased: make(chan execution.QueryGroupIdentity, flightReleasedNotices),
