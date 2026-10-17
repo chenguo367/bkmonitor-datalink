@@ -5,10 +5,12 @@ go 1.23.0
 require (
 	github.com/Shopify/sarama v1.27.1
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.19.0
 	github.com/prometheus/client_model v0.5.0
 	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/net v0.30.0
+	golang.org/x/sys v0.26.0
 	google.golang.org/grpc v1.67.0
 	google.golang.org/protobuf v1.35.1
 	gopkg.in/evanphx/json-patch.v4 v4.12.0
@@ -38,7 +40,6 @@ require (
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.2 // indirect
 	github.com/jcmturner/gofork v1.0.0 // indirect
@@ -59,7 +60,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.28.0 // indirect
 	golang.org/x/oauth2 v0.23.0 // indirect
-	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/term v0.25.0 // indirect
 	golang.org/x/text v0.19.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
