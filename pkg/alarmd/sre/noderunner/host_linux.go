@@ -135,3 +135,13 @@ func HostChild(input io.Reader) error {
 
 	return syscall.Exec(path, q.Argv, env)
 }
+
+func reapGroup(pgid int) {
+	for {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-pgid, &status, 0, nil)
+		if err != nil || pid <= 0 {
+			return
+		}
+	}
+}

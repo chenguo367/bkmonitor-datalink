@@ -180,7 +180,10 @@ func (r *Runner) start(q Request) error {
 	go func() {
 		err := cmd.Wait()
 		// Remove surviving members of our process group after the leader exits.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
+			reapGroup(cmd.Process.Pid)
+		}
 		stdout.flush()
 		stderr.flush()
 		r.mu.Lock()
@@ -197,7 +200,7 @@ func (r *Runner) start(q Request) error {
 		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			r.state.Signal = status.Signal().String()
 		}
-		r.state.ConfirmedTerminated = r.state.CancelRequested
+		r.state.ConfirmedTerminated = r.state.CancelRequested && (killErr == nil || errors.Is(killErr, syscall.ESRCH))
 		message := ""
 		if errors.Is(err, exec.ErrWaitDelay) {
 			message = "output pipe remained open after command exit; detached descendants are outside the supervision contract"
