@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // A slow post-query tail on a worker changes the deadlines that worker runs its queries under, never which
@@ -57,7 +58,9 @@ func TestTheShaperPublishesThePostQueryTailAsTheLiveReserve(t *testing.T) {
 	if got := live.Reserve(); got != 0 {
 		t.Fatalf("before any tail: live reserve %v, want none", got)
 	}
-	flights.RecordPostQueryTail(time.UnixMilli(clock.Load()), 3*time.Second)
+	for i := 0; i < scheduler.PostQueryTailMinSamples; i++ {
+		flights.RecordPostQueryTail(time.UnixMilli(clock.Load()), "g", 3*time.Second)
+	}
 	shaper.derive(1)
 	if got := live.Reserve(); got < 3*time.Second {
 		t.Fatalf("after a 3 s tail: live reserve %v", got)

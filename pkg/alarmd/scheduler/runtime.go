@@ -301,6 +301,10 @@ type FlightCoordinator struct {
 	// postQueryTails is the last day's post-query tails: from a Slot's query
 	// returning to the Slot returning (PostQueryTail).
 	postQueryTails HourlyDurations
+	// live is the runtime's live reserve, which also keeps each Query
+	// Group's own tails and the Slots that overran (SetLiveReserve); nil
+	// keeps only the pooled tails.
+	live *execution.LiveReserve
 	// recoveryAcquires is the part of permitAcquires asked by a recovery
 	// operation; normalRequests the normal ones by second.
 	recoveryAcquires uint64
@@ -1067,7 +1071,10 @@ func (runner *Runner) runOneTracked(
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
 	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() {
-		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.lastExecutionReturnedAt.Sub(queried))
+		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.queryGroup, runner.lastExecutionReturnedAt.Sub(queried))
+	}
+	if due := runner.stage.CompletionDeadline(); !due.IsZero() && runner.lastExecutionReturnedAt.After(due) {
+		runner.flights.CountOverrun()
 	}
 	decidesPool, poolResult := runner.queryCooldownDecision(operation, result, busyUntil)
 	if err != nil {

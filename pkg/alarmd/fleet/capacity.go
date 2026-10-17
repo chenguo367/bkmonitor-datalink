@@ -144,9 +144,14 @@ type SchedulerShape struct {
 	// because the live one left them no time; TightQueryGroups and
 	// TightStrategies are the groups that did so in the last hour, and their
 	// strategies. A warning, not a refusal: they keep running.
-	LiveReserveFallbacks uint64        `json:"live_reserve_fallbacks"`
-	TightQueryGroups     []string      `json:"tight_query_groups,omitempty"`
-	TightStrategies      []StrategyRef `json:"tight_strategies,omitempty"`
+	LiveReserveFallbacks uint64 `json:"live_reserve_fallbacks"`
+	// LiveReserveOverruns counts Slots that returned after their completion
+	// deadline: the other direction of the percentile's trade, up to one in
+	// a hundred long-query Slots retrying where the fixed reserve absorbed
+	// them.
+	LiveReserveOverruns uint64        `json:"live_reserve_overruns"`
+	TightQueryGroups    []string      `json:"tight_query_groups,omitempty"`
+	TightStrategies     []StrategyRef `json:"tight_strategies,omitempty"`
 }
 
 // MarshalJSON keeps a measured zero on the wire. throttled_seconds and

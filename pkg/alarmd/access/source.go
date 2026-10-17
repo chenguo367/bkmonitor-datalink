@@ -362,6 +362,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		// Where the budget ending at that deadline began: a recovery's is
 		// counted from its arrival, a normal query's from its Slot.
 		budgetStart := int64(request.Contract.Slot.EvaluationTime) * 1000
+		if request.Operation == execution.OperationNormal && query.CompletionDeadlineUnixMilli > 0 {
+			// A normal Slot is due by its consumers' completion deadline; a
+			// recovery runs under the budget it derives from its arrival.
+			execution.MarkCompletionDeadline(queryCtx, time.UnixMilli(query.CompletionDeadlineUnixMilli))
+		}
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
 			budgetStart = recoveryStartedAt.UnixMilli()
@@ -660,7 +665,7 @@ func deriveRecoveryQueryDeadline(
 				return time.Time{}, errors.New("alarmd access: frozen consumer schedule unavailable")
 			}
 			intervalMillis := spec.EvaluationIntervalSeconds * 1000
-			candidate, fellBack := live.QueryBudgetMilli(consumer, intervalMillis)
+			candidate, fellBack := live.QueryBudgetMilli(consumer, request.Contract.Slot.QueryGroup, intervalMillis)
 			if fellBack {
 				live.CountFallback(request.Contract.Slot.QueryGroup, startedAt)
 			}
@@ -751,6 +756,9 @@ type PlannedQuery struct {
 	// measured; the frozen one is the fallback when the live one has passed
 	// by the time the query starts.
 	FrozenDeadlineUnixMilli int64
+	// CompletionDeadlineUnixMilli is the earliest completion deadline of the
+	// consumers the query serves: a Slot returning after it overran.
+	CompletionDeadlineUnixMilli int64
 }
 
 func Prepare(contractRef execution.FrozenExecutionContractRef, frozen FrozenPlan, minReadyDelay time.Duration) (PreparedExecution, error) {
@@ -843,7 +851,7 @@ func prepare(
 				invalidRequirement.Consumers = append(invalidRequirement.Consumers, consumer)
 				continue
 			}
-			candidate, fellBack := live.QueryDeadlineUnixMilli(consumer, readyAt)
+			candidate, fellBack := live.QueryDeadlineUnixMilli(consumer, contractRef.Slot.QueryGroup, readyAt)
 			if fellBack {
 				live.CountFallback(contractRef.Slot.QueryGroup, time.UnixMilli(readyAt))
 			}
@@ -856,6 +864,9 @@ func prepare(
 			}
 			if planned.FrozenDeadlineUnixMilli == 0 || frozenCandidate < planned.FrozenDeadlineUnixMilli {
 				planned.FrozenDeadlineUnixMilli = frozenCandidate
+			}
+			if planned.CompletionDeadlineUnixMilli == 0 || consumer.ConsumerDeadlineUnixMilli < planned.CompletionDeadlineUnixMilli {
+				planned.CompletionDeadlineUnixMilli = consumer.ConsumerDeadlineUnixMilli
 			}
 		}
 		if len(validRequirement.Consumers) != 0 {

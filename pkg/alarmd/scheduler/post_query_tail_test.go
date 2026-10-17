@@ -10,8 +10,11 @@
 package scheduler
 
 import (
+	"math"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 func TestHourlyDurationsQuantileReadsThePooledSlowTail(t *testing.T) {
@@ -52,21 +55,62 @@ func TestHourlyDurationsQuantileReadsThePooledSlowTail(t *testing.T) {
 	}
 }
 
+// The minimum is the percentile's own: a p99 needs 1/(1-0.99) tails.
+func TestPostQueryTailMinSamplesFollowsFromTheQuantile(t *testing.T) {
+	if want := int(math.Round(1 / (1 - PostQueryTailQuantile))); PostQueryTailMinSamples != want {
+		t.Fatalf("PostQueryTailMinSamples %d, want %d", PostQueryTailMinSamples, want)
+	}
+}
+
+// After a restart, 99 fast Slots leave the frozen reserve in force; the 100th publishes the live one.
+func TestFastTailsAfterARestartKeepTheFrozenReserveUntilAP99Exists(t *testing.T) {
+	flights := NewFlightCoordinator()
+	live := &execution.LiveReserve{}
+	flights.SetLiveReserve(live)
+	consumer := execution.DataRequirementConsumer{ConsumerDeadlineUnixMilli: 60_000, DownstreamExecutionReserveMilliSec: 5_000}
+	for i := 0; i < PostQueryTailMinSamples-1; i++ {
+		flights.RecordPostQueryTail(time.Now(), "g", 200*time.Millisecond)
+	}
+	live.Set(flights.PostQueryTail())
+	if deadline, _ := live.QueryDeadlineUnixMilli(consumer, "g", 10_000); deadline != 55_000 {
+		t.Fatalf("after 99 fast tails: deadline %d, want the frozen 55000", deadline)
+	}
+	flights.RecordPostQueryTail(time.Now(), "g", 200*time.Millisecond)
+	live.Set(flights.PostQueryTail())
+	if deadline, _ := live.QueryDeadlineUnixMilli(consumer, "g", 10_000); deadline <= 55_000 {
+		t.Fatalf("after the 100th: deadline %d, want the live reserve's", deadline)
+	}
+	if live.GroupTail("g") != 200*time.Millisecond {
+		t.Fatalf("the coordinator records the group's own tail: %v", live.GroupTail("g"))
+	}
+	flights.CountOverrun()
+	if live.Overruns() != 1 {
+		t.Fatalf("overruns %d", live.Overruns())
+	}
+}
+
 func TestFlightCoordinatorPostQueryTail(t *testing.T) {
 	flights := NewFlightCoordinator()
 	if got := flights.PostQueryTail(); got != 0 {
 		t.Fatalf("before any tail: got %v", got)
 	}
-	flights.RecordPostQueryTail(time.Now(), 0)
+	flights.RecordPostQueryTail(time.Now(), "g", 0)
 	if got := flights.PostQueryTail(); got != 0 {
 		t.Fatalf("a zero tail is not recorded: got %v", got)
 	}
-	flights.RecordPostQueryTail(time.Now(), 3*time.Second)
+	for i := 0; i < PostQueryTailMinSamples-1; i++ {
+		flights.RecordPostQueryTail(time.Now(), "g", 3*time.Second)
+	}
+	if got := flights.PostQueryTail(); got != 0 {
+		t.Fatalf("with %d tails: got %v, want none until a p99 exists", PostQueryTailMinSamples-1, got)
+	}
+	flights.RecordPostQueryTail(time.Now(), "g", 3*time.Second)
 	if got := flights.PostQueryTail(); got < 3*time.Second {
 		t.Fatalf("got %v, want at least the recorded tail", got)
 	}
 	var none *FlightCoordinator
-	none.RecordPostQueryTail(time.Now(), time.Second)
+	none.RecordPostQueryTail(time.Now(), "g", time.Second)
+	none.CountOverrun()
 	if none.PostQueryTail() != 0 {
 		t.Fatal("nil coordinator")
 	}

@@ -135,6 +135,21 @@ func (history *HourlyDurations) Record(at time.Time, hold time.Duration) {
 	slot.buckets[holdBucket(hold)]++
 }
 
+// Count is how many durations the day before at holds, the current hour
+// included.
+func (history *HourlyDurations) Count(at time.Time) uint64 {
+	now := at.Unix() / 3600
+	var total uint64
+	for index := range history.hours {
+		hour := &history.hours[index]
+		if hour.count == 0 || hour.start <= now-int64(len(history.hours)) || hour.start > now {
+			continue
+		}
+		total += hour.count
+	}
+	return total
+}
+
 // Quantile is the q-quantile (0 < q <= 1) of every duration of the day
 // before at, the current hour included, read at its bucket's upper edge;
 // zero before any duration. Unlike Reference it pools the hours instead of
@@ -245,25 +260,63 @@ func (hour *holdHour) median() time.Duration {
 // hundred short.
 const PostQueryTailQuantile = 0.99
 
-// RecordPostQueryTail keeps one Slot's post-query tail.
-func (coordinator *FlightCoordinator) RecordPostQueryTail(at time.Time, tail time.Duration) {
-	if coordinator == nil || tail <= 0 {
+// PostQueryTailMinSamples is how many tails the day must hold before
+// PostQueryTail reads one: a 99th percentile exists only among a hundred
+// (1/(1-PostQueryTailQuantile)). Below that the quantile is the slowest tail
+// seen, and after a restart a handful of fast Slots would take the reserve
+// from the frozen value to a fraction of a second, leaving the first slow
+// state write short. Not a picked number: it follows from the percentile.
+const PostQueryTailMinSamples = 100
+
+// SetLiveReserve gives the coordinator the runtime's live reserve, which keeps
+// each Query Group's own tails beside the pooled ones and counts the Slots
+// that overran.
+func (coordinator *FlightCoordinator) SetLiveReserve(live *execution.LiveReserve) {
+	if coordinator == nil {
 		return
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	coordinator.live = live
+}
+
+// RecordPostQueryTail keeps one Slot's post-query tail, pooled and as
+// queryGroup's own.
+func (coordinator *FlightCoordinator) RecordPostQueryTail(at time.Time, queryGroup execution.QueryGroupIdentity, tail time.Duration) {
+	if coordinator == nil || tail <= 0 {
+		return
+	}
+	coordinator.mu.Lock()
 	coordinator.postQueryTails.Record(at, tail)
+	live := coordinator.live
+	coordinator.mu.Unlock()
+	live.RecordGroupTail(queryGroup, at, tail)
+}
+
+// CountOverrun counts a Slot that returned after its completion deadline.
+func (coordinator *FlightCoordinator) CountOverrun() {
+	if coordinator == nil {
+		return
+	}
+	coordinator.mu.Lock()
+	live := coordinator.live
+	coordinator.mu.Unlock()
+	live.CountOverrun()
 }
 
 // PostQueryTail is the last day's post-query tail at PostQueryTailQuantile,
-// pooled over its hours; zero before any.
+// pooled over its hours; zero until the day holds PostQueryTailMinSamples.
 func (coordinator *FlightCoordinator) PostQueryTail() time.Duration {
 	if coordinator == nil {
 		return 0
 	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	return coordinator.postQueryTails.Quantile(coordinator.now(), PostQueryTailQuantile)
+	now := coordinator.now()
+	if coordinator.postQueryTails.Count(now) < PostQueryTailMinSamples {
+		return 0
+	}
+	return coordinator.postQueryTails.Quantile(now, PostQueryTailQuantile)
 }
 
 // recordHoldLocked keeps a normal query's hold for HoldReference.

@@ -204,5 +204,6 @@ func (shaper *schedulerShaper) facts() *fleet.SchedulerShape {
 		PeakSlotsPerSecond: demand.PeakSlotsPerSecond, HoldMillis: demand.Hold.Milliseconds(),
 		ExecutionMillis: demand.Execution.Milliseconds(), OwnedQueryGroups: demand.OwnedQueryGroups,
 		PostQueryTailMillis: shaper.live.Reserve().Milliseconds(), LiveReserveFallbacks: shaper.live.Fallbacks(),
-		TightQueryGroups: tightQueryGroupKeys(shaper.live.TightQueryGroups(shaper.now()))}
+		LiveReserveOverruns: shaper.live.Overruns(),
+		TightQueryGroups:    tightQueryGroupKeys(shaper.live.TightQueryGroups(shaper.now()))}
 }

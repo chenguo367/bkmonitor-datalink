@@ -20,9 +20,88 @@ func withLiveReserve(reserve time.Duration) *LiveReserve {
 // consumer: deadline at 60 s, frozen reserve 5 s, so the frozen query deadline is 55 s.
 var liveReserveConsumer = DataRequirementConsumer{ConsumerDeadlineUnixMilli: 60_000, DownstreamExecutionReserveMilliSec: 5_000}
 
+const liveReserveGroup QueryGroupIdentity = "light"
+
+// A heavy group at 0.5% of the Slots: its 3 s tails are under the pooled p99 of 100 ms tails, and its query still
+// runs under its own longest tail.
+func TestAHeavyGroupsQueryRunsUnderItsOwnLongestTail(t *testing.T) {
+	live := withLiveReserve(128 * time.Millisecond) // the pooled p99 of 100 ms tails, at its bucket's upper edge
+	at := time.UnixMilli(0)
+	for i := 0; i < 199; i++ {
+		live.RecordGroupTail(liveReserveGroup, at, 100*time.Millisecond)
+	}
+	live.RecordGroupTail("heavy", at, 3*time.Second)
+	deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, "heavy", 10_000)
+	if fellBack || liveReserveConsumer.ConsumerDeadlineUnixMilli-deadline < 3_000 {
+		t.Fatalf("heavy group deadline %d (%d ms before its consumer deadline), fellBack=%v; want at least 3000 ms", deadline,
+			liveReserveConsumer.ConsumerDeadlineUnixMilli-deadline, fellBack)
+	}
+	if deadline, _ := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 60_000-128 {
+		t.Fatalf("light group deadline %d, want the pooled reserve's 59872", deadline)
+	}
+	if budget, _ := live.QueryBudgetMilli(liveReserveConsumer, "heavy", 60_000); budget != 57_000 {
+		t.Fatalf("heavy group recovery budget %d, want 57000", budget)
+	}
+	// a group's own tail never takes it off the frozen reserve before the pooled one is measured
+	none := &LiveReserve{}
+	none.RecordGroupTail("heavy", at, 100*time.Millisecond)
+	if deadline, _ := none.QueryDeadlineUnixMilli(liveReserveConsumer, "heavy", 10_000); deadline != 55_000 {
+		t.Fatalf("before a pooled tail: %d, want the frozen 55000", deadline)
+	}
+}
+
+// A group's tails are its last LiveReserveGroupTailsKept, and a group not seen for a day is dropped.
+func TestGroupTailsAreRecentAndAgeOut(t *testing.T) {
+	live := &LiveReserve{}
+	at := time.UnixMilli(0)
+	live.RecordGroupTail("g", at, 3*time.Second)
+	for i := 0; i < LiveReserveGroupTailsKept; i++ {
+		live.RecordGroupTail("g", at, 200*time.Millisecond)
+	}
+	if got := live.GroupTail("g"); got != 200*time.Millisecond {
+		t.Fatalf("after %d newer tails: %v, want 200ms", LiveReserveGroupTailsKept, got)
+	}
+	live.RecordGroupTail("other", at.Add(LiveReserveGroupTailAge+time.Second), time.Second)
+	if got := live.GroupTail("g"); got != 0 {
+		t.Fatalf("a day after its last tail: %v, want dropped", got)
+	}
+	// the sweep runs at most once a minute: a group aged out within a minute of the last sweep is dropped by the next
+	swept := at.Add(LiveReserveGroupTailAge + time.Second)
+	live.RecordGroupTail("late", swept.Add(-LiveReserveGroupTailAge-time.Second), time.Second)
+	live.RecordGroupTail("other", swept.Add(30*time.Second), time.Second)
+	if live.GroupTail("late") == 0 {
+		t.Fatal("swept again within a minute of the last sweep")
+	}
+	live.RecordGroupTail("other", swept.Add(liveReservePruneEvery), time.Second)
+	if live.GroupTail("late") != 0 {
+		t.Fatal("not swept a minute after the last sweep")
+	}
+	var nilLive *LiveReserve
+	nilLive.RecordGroupTail("g", at, time.Second)
+	nilLive.CountOverrun()
+	if nilLive.GroupTail("g") != 0 || nilLive.Overruns() != 0 {
+		t.Fatal("nil live reserve")
+	}
+}
+
+func TestStageMarkerKeepsTheEarliestCompletionDeadline(t *testing.T) {
+	marker := &StageMarker{}
+	marker.Begin("execute")
+	marker.LowerCompletionDeadline(time.UnixMilli(60_000))
+	marker.LowerCompletionDeadline(time.UnixMilli(70_000))
+	marker.LowerCompletionDeadline(time.UnixMilli(50_000))
+	if got := marker.CompletionDeadline(); !got.Equal(time.UnixMilli(50_000)) {
+		t.Fatalf("got %v, want the earliest", got)
+	}
+	marker.Begin("execute")
+	if !marker.CompletionDeadline().IsZero() {
+		t.Fatal("a new execution starts with none")
+	}
+}
+
 func TestQueryDeadlineUsesTheFrozenReserveUntilATailIsMeasured(t *testing.T) {
 	live := withLiveReserve(0)
-	deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000)
+	deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000)
 	if deadline != 55_000 || fellBack {
 		t.Fatalf("got %d fellBack=%v, want the frozen 55000", deadline, fellBack)
 	}
@@ -31,12 +110,12 @@ func TestQueryDeadlineUsesTheFrozenReserveUntilATailIsMeasured(t *testing.T) {
 func TestQueryDeadlineFollowsTheMeasuredTail(t *testing.T) {
 	// a tail shorter than today's fixed reserve gives the query more time ...
 	live := withLiveReserve(2 * time.Second)
-	if deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); deadline != 58_000 || fellBack {
+	if deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 58_000 || fellBack {
 		t.Fatalf("short tail: got %d fellBack=%v, want 58000", deadline, fellBack)
 	}
 	// ... and a longer one keeps more of the period for what follows the query
 	live.Set(12 * time.Second)
-	if deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); deadline != 48_000 || fellBack {
+	if deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 48_000 || fellBack {
 		t.Fatalf("long tail: got %d fellBack=%v, want 48000", deadline, fellBack)
 	}
 }
@@ -44,28 +123,28 @@ func TestQueryDeadlineFollowsTheMeasuredTail(t *testing.T) {
 func TestQueryDeadlineFallsBackWhenTheLiveReserveLeavesNoTime(t *testing.T) {
 	// a 55 s tail would put the deadline at 5 s, before the query can start at 10 s
 	live := withLiveReserve(55 * time.Second)
-	deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000)
+	deadline, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000)
 	if deadline != 55_000 || !fellBack {
 		t.Fatalf("got %d fellBack=%v, want the frozen 55000 and a fallback", deadline, fellBack)
 	}
 	// exactly at the start is no time either
 	live.Set(50 * time.Second)
-	if _, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); !fellBack {
+	if _, fellBack := live.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); !fellBack {
 		t.Fatal("a deadline equal to the start must fall back")
 	}
 }
 
 func TestQueryBudgetFollowsTheTailAndFallsBack(t *testing.T) {
 	live := withLiveReserve(0)
-	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, 60_000); budget != 55_000 || fellBack {
+	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, liveReserveGroup, 60_000); budget != 55_000 || fellBack {
 		t.Fatalf("no tail: got %d fellBack=%v", budget, fellBack)
 	}
 	live.Set(3 * time.Second)
-	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, 60_000); budget != 57_000 || fellBack {
+	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, liveReserveGroup, 60_000); budget != 57_000 || fellBack {
 		t.Fatalf("measured tail: got %d fellBack=%v", budget, fellBack)
 	}
 	live.Set(70 * time.Second)
-	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, 60_000); budget != 55_000 || !fellBack {
+	if budget, fellBack := live.QueryBudgetMilli(liveReserveConsumer, liveReserveGroup, 60_000); budget != 55_000 || !fellBack {
 		t.Fatalf("tail past the interval: got %d fellBack=%v, want the frozen budget", budget, fellBack)
 	}
 }
@@ -74,14 +153,14 @@ func TestQueryBudgetFollowsTheTailAndFallsBack(t *testing.T) {
 // runs every query under the frozen reserve.
 func TestLiveReservesAreIndependentAndNilIsFrozen(t *testing.T) {
 	slow, fast := withLiveReserve(20*time.Second), withLiveReserve(time.Second)
-	if deadline, _ := slow.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); deadline != 40_000 {
+	if deadline, _ := slow.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 40_000 {
 		t.Fatalf("slow runtime: %d", deadline)
 	}
-	if deadline, _ := fast.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); deadline != 59_000 {
+	if deadline, _ := fast.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 59_000 {
 		t.Fatalf("fast runtime: %d", deadline)
 	}
 	var none *LiveReserve
-	if deadline, fellBack := none.QueryDeadlineUnixMilli(liveReserveConsumer, 10_000); deadline != 55_000 || fellBack {
+	if deadline, fellBack := none.QueryDeadlineUnixMilli(liveReserveConsumer, liveReserveGroup, 10_000); deadline != 55_000 || fellBack {
 		t.Fatalf("no reserve: %d fellBack=%v", deadline, fellBack)
 	}
 	none.Set(time.Second)
