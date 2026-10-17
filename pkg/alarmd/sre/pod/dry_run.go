@@ -58,6 +58,9 @@ const (
 	DryRunDenied          = "denied"
 	DryRunManagerConflict = "manager_conflict"
 	DryRunNotChecked      = "not_checked"
+	// DryRunNotAttempted is an object the run did not reach before its time
+	// ran out.
+	DryRunNotAttempted = "not_attempted"
 	// DryRunRBACNotDryRun is a Role, ClusterRole or binding, not sent: the
 	// apiserver runs RBAC's escalation check even on a dry run, and passing
 	// it would need the bind and escalate verbs -- a path to any permission
@@ -146,6 +149,10 @@ type DryRunReceipt struct {
 	Objects []DryRunObject `json:"objects"`
 	Counts  map[string]int `json:"counts"`
 	Clean   bool           `json:"clean"`
+	// ResumeFrom is the index of the first object not checked when the
+	// operation's time ran out between objects; nil when every object was
+	// checked. The objects checked keep their verdicts.
+	ResumeFrom *int `json:"resume_from,omitempty"`
 }
 
 // DryRun runs the manifests through the apiserver with dryRun=All.
@@ -175,13 +182,27 @@ func (p *Provider) DryRun(ctx context.Context, request DryRunRequest) (DryRunRec
 		return receipt, err
 	}
 	defer release()
-	for _, object := range objects {
+	budget := newObjectBudget(ctx, p.options.Now)
+	for index, object := range objects {
+		if receipt.ResumeFrom == nil && !budget.canStart() {
+			resume := index
+			receipt.ResumeFrom = &resume
+		}
+		if receipt.ResumeFrom != nil {
+			receipt.Objects = append(receipt.Objects, DryRunObject{APIVersion: object.GetAPIVersion(), Kind: object.GetKind(),
+				Namespace: object.GetNamespace(), Name: object.GetName(), Verdict: DryRunNotAttempted,
+				Message: "the operation's time ran out before this object"})
+			receipt.Counts[DryRunNotAttempted]++
+			continue
+		}
+		started := p.options.Now()
 		answer := p.dryRunOne(ctx, object, request.Namespace)
+		budget.took(p.options.Now().Sub(started))
 		receipt.Objects = append(receipt.Objects, answer)
 		receipt.Counts[answer.Verdict]++
 	}
 	receipt.Clean = receipt.Counts[DryRunDenied] == 0 && receipt.Counts[DryRunManagerConflict] == 0 && receipt.Counts[DryRunNotChecked] == 0 &&
-		receipt.Counts[DryRunNotGrantedKind] == 0
+		receipt.Counts[DryRunNotGrantedKind] == 0 && receipt.Counts[DryRunNotAttempted] == 0
 	return receipt, nil
 }
 

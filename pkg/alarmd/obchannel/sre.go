@@ -324,7 +324,7 @@ func SREOperations(options SREOptions) []Operation {
 				}
 				return out
 			}},
-		{ID: pod.OpDryRun, Summary: "把一组清单（YAML 文档或 JSON 对象，如 chart 渲染出的）逐个以服务端 apply、dryRun=All 交给 apiserver：准入 webhook、schema、配额与冲突都照常检查，什么都不落库。每个对象答 would_create / would_update / unchanged / denied（webhook、校验、配额、无权限）/ manager_conflict（字段归属冲突，不是拒绝）/ not_checked（集群不认这个种类、没有名字或命名空间、没拿到应答）/ rbac_not_dry_run（Role、ClusterRole 与绑定不送：apiserver 即使 dry run 也做 RBAC 提权检查，通过它要 bind 与 escalate，通道不持有），拒绝时原样带 apiserver 的 reason、code、message 与 causes（Secret 自己的值被遮蔽）；would_update 带 changed_paths：apply 前后逐层比较出的每个变化字段路径（映射按键、列表按下标，只在一侧有的键与长度变化的列表各算一条；managedFields、resourceVersion、generation 与 status 不算），Secret 只给键名（data.KEY），值在本进程内比较、从不回传；服务端 apply 不删其它字段管理者写入而清单里没有的字段，这类回退看不见。clean 为真表示没有 denied、manager_conflict 与 not_checked。dryRun=All 写死在代码里，没有参数能关掉。命名空间级对象没写命名空间时用 namespace 参数；不给就不检查。每次调用都留审计记录，写明对象清单。", EvidenceScope: "sre_dry_run", ExecutionPool: "sre", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+		{ID: pod.OpDryRun, Summary: "把一组清单（YAML 文档或 JSON 对象，如 chart 渲染出的）逐个以服务端 apply、dryRun=All 交给 apiserver：准入 webhook、schema、配额与冲突都照常检查，什么都不落库。每个对象答 would_create / would_update / unchanged / denied（webhook、校验、配额、无权限）/ manager_conflict（字段归属冲突，不是拒绝）/ not_checked（集群不认这个种类、没有名字或命名空间、没拿到应答）/ rbac_not_dry_run（Role、ClusterRole 与绑定不送：apiserver 即使 dry run 也做 RBAC 提权检查，通过它要 bind 与 escalate，通道不持有），拒绝时原样带 apiserver 的 reason、code、message 与 causes（Secret 自己的值被遮蔽）；would_update 带 changed_paths：apply 前后逐层比较出的每个变化字段路径（映射按键、列表按下标，只在一侧有的键与长度变化的列表各算一条；managedFields、resourceVersion、generation 与 status 不算），Secret 只给键名（data.KEY），值在本进程内比较、从不回传；服务端 apply 不删其它字段管理者写入而清单里没有的字段，这类回退看不见。clean 为真表示没有 denied、manager_conflict 与 not_checked。dryRun=All 写死在代码里，没有参数能关掉。命名空间级对象没写命名空间时用 namespace 参数；不给就不检查。每次调用都留审计记录，写明对象清单。", EvidenceScope: "sre_dry_run", ExecutionPool: "sre", ExecutionTimeout: MaxExecutionTimeout, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
 			Limits:   map[string]any{"max_objects": pod.MaxDryRunObjects, "max_manifest_bytes": pod.MaxDryRunBytes, "dry_run": "All (fixed)", "field_manager": "alarmd-dry-run", "force": true},
 			Fields:   map[string]Field{"manifests": {Type: "string", MinLength: 1, MaxLength: pod.MaxDryRunBytes, Source: "helm template 的输出或任意清单"}, "namespace": text},
 			Required: []string{"manifests"}, OutputSchema: SchemaOf(pod.DryRunReceipt{}),
@@ -332,13 +332,16 @@ func SREOperations(options SREOptions) []Operation {
 				started := now()
 				v, err := pods.DryRun(ctx, pod.DryRunRequest{Manifests: p.String("manifests"), Namespace: p.String("namespace")})
 				audit(ctx, started, SREAction{Op: pod.OpDryRun, Namespace: p.String("namespace"), Kind: "objects", Name: dryRunNames(v), Detail: dryRunCounts(v)}, err)
-				out := wrapPod(v, err, err == nil)
+				out := wrapPod(v, err, err == nil && v.ResumeFrom == nil)
 				if err == nil && !v.Clean {
 					out.Summary = "dry run not clean: " + dryRunCounts(v)
 				}
+				if err == nil && v.ResumeFrom != nil {
+					out.Limitations = append(out.Limitations, fmt.Sprintf("The operation's time ran out between objects: objects from index %d were not checked (not_attempted); the verdicts above stand. Dry-run the rest by sending the manifests from that object on.", *v.ResumeFrom))
+				}
 				return out
 			}},
-		{ID: pod.OpApply, Summary: "把一组清单（YAML 文档或 JSON 对象，至多 1000 个）逐个以服务端 apply 写入集群（字段管理者 alarmd-sre，真写，不是 dry run）：每个对象答 created / updated / unchanged / conflict（字段归属冲突，force=true 接管这些字段）/ denied（准入、校验、配额、无权限，原样带 apiserver 的话）/ not_checked / not_granted_kind（chart 授权之外的种类）/ rbac_not_writable（Role、ClusterRole 与绑定不写），并给出改前改后的字段差异（按 k8s.list 的遮蔽显示，Secret 只显示键与指纹，从不显示值）；对象带 meta.helm.sh/release-name 时写明 helm_release：下一次 helm upgrade 会改回或冲突。命名空间级对象没写命名空间时用 namespace 参数。注意：本环境 CLI 到 alarmd 若是明文 HTTP，Secret 的值会以明文经过集群网络。每次调用都留审计记录，写明对象清单。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 60 * time.Second, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
+		{ID: pod.OpApply, Summary: "把一组清单（YAML 文档或 JSON 对象，至多 1000 个）逐个以服务端 apply 写入集群（字段管理者 alarmd-sre，真写，不是 dry run）：每个对象答 created / updated / unchanged / conflict（字段归属冲突，force=true 接管这些字段）/ denied（准入、校验、配额、无权限，原样带 apiserver 的话）/ not_checked / not_granted_kind（chart 授权之外的种类）/ rbac_not_writable（Role、ClusterRole 与绑定不写），并给出改前改后的字段差异（按 k8s.list 的遮蔽显示，Secret 只显示键与指纹，从不显示值）；对象带 meta.helm.sh/release-name 时写明 helm_release：下一次 helm upgrade 会改回或冲突。命名空间级对象没写命名空间时用 namespace 参数。注意：本环境 CLI 到 alarmd 若是明文 HTTP，Secret 的值会以明文经过集群网络。每次调用都留审计记录，写明对象清单。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: MaxExecutionTimeout, Availability: podAvailable, RequestMaxBytes: EnvelopeMaxBytes,
 			Limits:   map[string]any{"max_objects": pod.MaxApplyObjects, "max_manifest_bytes": pod.MaxDryRunBytes, "field_manager": "alarmd-sre"},
 			Fields:   map[string]Field{"manifests": {Type: "string", MinLength: 1, MaxLength: pod.MaxDryRunBytes, Source: "要写入的清单；Secret 从本地文件经 --input @文件 传入"}, "namespace": text, "force": {Type: "boolean"}},
 			Required: []string{"manifests"}, OutputSchema: SchemaOf(pod.WriteReceipt{}),
@@ -347,7 +350,11 @@ func SREOperations(options SREOptions) []Operation {
 				force, _ := p["force"].(bool)
 				v, err := pods.Apply(ctx, pod.ApplyRequest{Manifests: p.String("manifests"), Namespace: p.String("namespace"), Force: force})
 				audit(ctx, started, SREAction{Op: pod.OpApply, Namespace: p.String("namespace"), Kind: "objects", Name: writeNames(v), Detail: writeDetail(v)}, err)
-				return wrapPod(v, err, err == nil)
+				out := wrapPod(v, err, err == nil && v.ResumeFrom == nil)
+				if err == nil && v.ResumeFrom != nil {
+					out.Limitations = append(out.Limitations, fmt.Sprintf("The operation's time ran out between objects: objects from index %d were not applied (not_attempted, nothing sent). Applying the same manifests again is safe: objects already applied answer unchanged.", *v.ResumeFrom))
+				}
+				return out
 			}},
 		{ID: pod.OpDelete, Summary: "删除一个对象：按 api_version、kind、namespace、name 与读到的 uid（必填，来自先前的 k8s.list），给了 resource_version 时也须仍是它；依赖对象后台删除。答 deleted / gone（已不存在）/ precondition_failed（已不是读到的那个）/ denied / not_granted_kind / rbac_not_writable / protected_namespace（kube-system、kube-public、kube-node-lease、default 与本进程所在命名空间不删）；对象带 helm 归属时写明 helm_release。每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable,
 			Fields:   map[string]Field{"api_version": text, "kind": text, "namespace": text, "name": text, "uid": {Type: "string", MinLength: 1, MaxLength: 128, Source: "k8s.list items[].metadata.uid"}, "resource_version": {Type: "string", MinLength: 1, MaxLength: 64}},

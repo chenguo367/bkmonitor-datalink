@@ -33,3 +33,14 @@ func TestTheLongestExecFitsItsOperation(t *testing.T) {
 		}
 	}
 }
+
+// k8s.apply and k8s.dry_run take a whole chart's manifests: their budget is
+// the channel's ceiling, and a run that cannot finish stops between objects
+// and says where to resume.
+func TestManifestOperationsTakeTheCeiling(t *testing.T) {
+	for _, op := range SREOperations(SREOptions{}) {
+		if (op.ID == pod.OpApply || op.ID == pod.OpDryRun) && op.ExecutionTimeout != MaxExecutionTimeout {
+			t.Errorf("%s runs under %v, want the ceiling %v", op.ID, op.ExecutionTimeout, MaxExecutionTimeout)
+		}
+	}
+}

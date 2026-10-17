@@ -48,12 +48,15 @@ const (
 
 // The outcomes, closed.
 const (
-	WriteCreated         = "created"
-	WriteUpdated         = "updated"
-	WriteUnchanged       = "unchanged"
-	WriteConflict        = "conflict"
-	WriteDenied          = "denied"
-	WriteNotChecked      = "not_checked"
+	WriteCreated    = "created"
+	WriteUpdated    = "updated"
+	WriteUnchanged  = "unchanged"
+	WriteConflict   = "conflict"
+	WriteDenied     = "denied"
+	WriteNotChecked = "not_checked"
+	// WriteNotAttempted is an object the run did not reach before its time
+	// ran out; nothing was sent for it.
+	WriteNotAttempted    = "not_attempted"
 	WriteNotGrantedKind  = "not_granted_kind"
 	WriteRBACNotWritable = "rbac_not_writable"
 	WriteDeleted         = "deleted"
@@ -135,6 +138,11 @@ type WriteReceipt struct {
 	Objects []WriteObject  `json:"objects"`
 	Counts  map[string]int `json:"counts"`
 	Force   bool           `json:"force,omitempty"`
+	// ResumeFrom is the index of the first object not attempted when the
+	// operation's time ran out between objects; nil when every object was
+	// attempted. Applying the same manifests again is safe: objects already
+	// applied answer unchanged.
+	ResumeFrom *int `json:"resume_from,omitempty"`
 }
 
 // gate is the check every write and dry run makes before any call: the
@@ -207,8 +215,22 @@ func (p *Provider) Apply(ctx context.Context, request ApplyRequest) (WriteReceip
 		return receipt, err
 	}
 	defer release()
-	for _, object := range objects {
+	budget := newObjectBudget(ctx, p.options.Now)
+	for index, object := range objects {
+		if receipt.ResumeFrom == nil && !budget.canStart() {
+			resume := index
+			receipt.ResumeFrom = &resume
+		}
+		if receipt.ResumeFrom != nil {
+			receipt.Objects = append(receipt.Objects, WriteObject{APIVersion: object.GetAPIVersion(), Kind: object.GetKind(),
+				Namespace: object.GetNamespace(), Name: object.GetName(), Outcome: WriteNotAttempted,
+				Message: "the operation's time ran out before this object; nothing was sent for it"})
+			receipt.Counts[WriteNotAttempted]++
+			continue
+		}
+		started := p.options.Now()
 		answer := p.applyOne(ctx, object, request)
+		budget.took(p.options.Now().Sub(started))
 		receipt.Objects = append(receipt.Objects, answer)
 		receipt.Counts[answer.Outcome]++
 	}
