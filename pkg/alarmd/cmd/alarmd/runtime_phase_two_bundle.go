@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -1315,6 +1316,7 @@ func openProductionPhaseTwoBundleAssembly(
 		staleAfter:          stallAfter,
 		restoreBudget:       fleetRestoreBudgetPerPublish,
 		openAlerts:          openAlertFacts,
+		openAlertCounts:     openAlertCountsSource(openAlertCopy),
 		controlSource:       bundle.controlSourceFleetFacts,
 		platformSettings:    platformSettingsFactsSource(platformSettings, external.Now),
 		publicSurface:       surface,
@@ -1655,6 +1657,57 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 	return func() *fleet.OpenAlertSetFacts {
 		return openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
 	}
+}
+
+// openAlertCountsSource reads the copy's open-alert counts for the snapshot.
+func openAlertCountsSource(cache *openalerts.Cache) func([]string) *fleet.OpenAlertCounts {
+	if cache == nil {
+		return nil
+	}
+	return func(owned []string) *fleet.OpenAlertCounts {
+		counts, unknown := cache.OpenCounts()
+		return openAlertCountsOf(counts, unknown, owned)
+	}
+}
+
+// openAlertCountsOf is the copy's counts by strategy id, sorted, zeros left
+// out. One id under two tenants takes the larger count, and an id unknown
+// under any tenant stays unknown even when another tenant counts it: the
+// unread tenant could hold more, and count beside unknown reads at least. A
+// strategy of an owned object the copy tracks under no tenant is unknown, and
+// owned nil -- the strategies could not be named -- says so instead.
+// Strategy refs carry no tenant, so an owned id tracked under one tenant is
+// taken as tracked.
+func openAlertCountsOf(counts map[openalerts.StrategyKey]int, unknown []openalerts.StrategyKey, owned []string) *fleet.OpenAlertCounts {
+	byStrategy, tracked := map[string]int{}, map[string]bool{}
+	for key, count := range counts {
+		tracked[key.StrategyID] = true
+		if count > byStrategy[key.StrategyID] {
+			byStrategy[key.StrategyID] = count
+		}
+	}
+	answer := &fleet.OpenAlertCounts{OwnedUnnamed: owned == nil}
+	for strategy, count := range byStrategy {
+		if count > 0 {
+			answer.Counts = append(answer.Counts, fleet.StrategyOpenCount{Strategy: strategy, Count: count})
+		}
+	}
+	sort.Slice(answer.Counts, func(i, j int) bool { return answer.Counts[i].Strategy < answer.Counts[j].Strategy })
+	seen := map[string]bool{}
+	for _, key := range unknown {
+		if !seen[key.StrategyID] {
+			seen[key.StrategyID] = true
+			answer.Unknown = append(answer.Unknown, key.StrategyID)
+		}
+	}
+	for _, strategy := range owned {
+		if !tracked[strategy] && !seen[strategy] {
+			seen[strategy] = true
+			answer.Unknown = append(answer.Unknown, strategy)
+		}
+	}
+	sort.Strings(answer.Unknown)
+	return answer
 }
 
 // openAlertSetFacts is the copy's stats as the replica publishes them.
