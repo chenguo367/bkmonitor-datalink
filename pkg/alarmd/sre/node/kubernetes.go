@@ -9,18 +9,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kubeclient"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 	"io"
+	"os"
+	"strings"
+	"time"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"os"
-	"strings"
-	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kubeclient"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
 
 const runnerPath = "/data/bkmonitor/alarmd-node-runner"
@@ -89,8 +92,8 @@ func (p *Provider) job(r Record) *batchv1.Job {
 		Command:         []string{runnerPath, "serve", "--execution-id", r.ExecutionID, "--mode", r.Mode, "--retention-seconds", "900", "--idle-seconds", "60"},
 		SecurityContext: &corev1.SecurityContext{Privileged: &yes, RunAsUser: &root, RunAsNonRoot: &no},
 		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("32Mi")},
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("256Mi"), corev1.ResourceEphemeralStorage: resource.MustParse("32Mi")},
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("128Mi")},
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: "host", MountPath: "/host", ReadOnly: r.Mode == "filesystem"}, {Name: "state", MountPath: "/run/alarmd-node"}},
 	}
@@ -103,7 +106,7 @@ func (p *Provider) job(r Record) *batchv1.Job {
 			Containers:                   []corev1.Container{container},
 			Volumes: []corev1.Volume{
 				{Name: "host", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}},
-				{Name: "state", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: resource.NewQuantity(32<<20, resource.BinarySI)}}},
+				{Name: "state", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: resource.NewQuantity(128<<20, resource.BinarySI)}}},
 			},
 		},
 	}
@@ -122,11 +125,12 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 		_ = p.replace(context.Background(), r, next, false)
 	}
 	job, err := p.options.Client.BatchV1().Jobs(r.Namespace).Create(ctx, p.job(r), metav1.CreateOptions{})
+	createErr := err
 	if err != nil { // A create whose response was lost is recovered by name, never overwritten.
 		job, err = p.options.Client.BatchV1().Jobs(r.Namespace).Get(ctx, r.JobName, metav1.GetOptions{})
 	}
 	if err != nil {
-		failPreparation("carrier creation unconfirmed")
+		failPreparation("carrier creation unconfirmed: " + safeError(createErr))
 		return
 	}
 	if job.Labels[identityLabel] != p.label() || job.Labels["alarmd.blueking.com/execution-id"] != r.ExecutionID || job.Spec.Template.Spec.NodeName != r.Node.Name || job.UID == "" {
@@ -141,6 +145,7 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 	r = next
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	startupDetail := "runner did not become ready"
 	for {
 		_, _, cancelled, e := p.read(ctx, r.ExecutionID)
 		if e != nil {
@@ -156,8 +161,24 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 			return
 		}
 		pods, e := p.options.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + r.JobName})
+		if e != nil {
+			startupDetail = safeError(e)
+		}
 		if e == nil {
 			for _, candidate := range pods.Items {
+				for _, s := range candidate.Status.ContainerStatuses {
+					if s.State.Waiting != nil {
+						startupDetail = safeError(errors.New(s.State.Waiting.Reason + ": " + s.State.Waiting.Message))
+					}
+					if s.State.Terminated != nil {
+						startupDetail = safeError(errors.New(s.State.Terminated.Reason + ": " + s.State.Terminated.Message))
+					}
+				}
+				for _, c := range candidate.Status.Conditions {
+					if c.Status == corev1.ConditionFalse && c.Message != "" {
+						startupDetail = safeError(errors.New(c.Reason + ": " + c.Message))
+					}
+				}
 				if candidate.Spec.NodeName != r.Node.Name || candidate.Status.Phase != corev1.PodRunning || candidate.DeletionTimestamp != nil {
 					continue
 				}
@@ -178,6 +199,16 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 					if err = p.verify(ctx, next); err != nil {
 						failPreparation("target identity changed before dispatch")
 						return
+					}
+					// Running means the container process started, not that its
+					// local socket accepts controls. Probe with a replay-safe read
+					// before consuming the single dispatch opportunity.
+					probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Second)
+					_, probeErr := p.control(probeCtx, next, map[string]any{"action": "get", "execution_id": r.ExecutionID, "max_bytes": 1})
+					probeCancel()
+					if probeErr != nil {
+						startupDetail = "runner control unavailable: " + safeError(probeErr)
+						continue
 					}
 					if err = p.replace(ctx, r, next, true); err != nil {
 						return
@@ -214,7 +245,7 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 		}
 		select {
 		case <-ctx.Done():
-			failPreparation("runner startup deadline exceeded")
+			failPreparation("runner startup deadline exceeded: " + startupDetail)
 			return
 		case <-ticker.C:
 		}
@@ -288,5 +319,16 @@ func (p *Provider) control(ctx context.Context, r Record, request any) (json.Raw
 	return append(json.RawMessage(nil), out.Bytes()...), nil
 }
 func isNotFound(err error) bool { return apierrors.IsNotFound(err) }
+
+func safeError(err error) string {
+	if err == nil {
+		return "unknown API outcome"
+	}
+	message := redact.New().Text(err.Error())
+	if len(message) > 2048 {
+		message = message[:2048] + " [truncated]"
+	}
+	return message
+}
 
 var _ io.Writer = (*boundedBuffer)(nil)

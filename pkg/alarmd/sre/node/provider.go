@@ -8,10 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/google/uuid"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func New(o Options) (*Provider, error) {
@@ -31,6 +32,12 @@ func normalize(r *ExecRequest) error {
 	if r.Mode == "host" && (r.User == "" || !strings.HasPrefix(r.Cwd, "/")) {
 		return fail("invalid_params", "host mode requires user and absolute cwd")
 	}
+	if r.Mode == "filesystem" && r.Cwd == "" {
+		r.Cwd = "/"
+	}
+	if !strings.HasPrefix(r.Cwd, "/") {
+		return fail("invalid_params", "cwd must be absolute")
+	}
 	if r.TimeoutSeconds == 0 {
 		r.TimeoutSeconds = 60
 	}
@@ -41,8 +48,8 @@ func normalize(r *ExecRequest) error {
 		return fail("invalid_params", "execution exceeds time, output or input bounds")
 	}
 	b, _ := json.Marshal(r)
-	if len(b) > 2<<20 {
-		return fail("invalid_params", "request exceeds 2 MiB")
+	if len(b) > 16<<20 {
+		return fail("invalid_params", "request exceeds 16 MiB")
 	}
 	return nil
 }
@@ -242,7 +249,7 @@ func (p *Provider) observe(ctx context.Context) {
 					}
 				}
 			}
-			if r.PodUID == "" && time.Since(r.CreatedAt) > time.Minute {
+			if r.PodUID == "" && r.State == "preparing" && time.Since(r.CreatedAt) > time.Minute {
 				next := r
 				next.State = "unknown"
 				next.Detail = "preparation interrupted; input will not be replayed"

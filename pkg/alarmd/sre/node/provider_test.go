@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
-	"github.com/google/uuid"
 	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,10 +21,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	kt "k8s.io/client-go/testing"
-	"strings"
-	"sync"
-	"testing"
-	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 )
 
 type testExecutor struct {
@@ -218,5 +220,78 @@ func TestJobHasNoInputAndBoundedLifetime(t *testing.T) {
 	}
 	if len(s.Containers[0].Env) != 0 || len(s.Containers[0].Args) != 0 {
 		t.Fatal("job template carries input")
+	}
+}
+
+func TestRedisFailureRejectsBeforeCreatingCarrier(t *testing.T) {
+	p, client, e := setup(t, false)
+	_ = p.options.Redis.Close()
+	if _, err := p.Exec(context.Background(), request()); err == nil {
+		t.Fatal("accepted execution without shared store")
+	}
+	jobs, _ := client.BatchV1().Jobs("ns").List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 0 || e.count() != 0 {
+		t.Fatal("started carrier or command without shared store")
+	}
+}
+
+func TestOneMiBStdinJSONEscapingFitsContract(t *testing.T) {
+	q := request()
+	q.Stdin = strings.Repeat("\x01", 1<<20)
+	if err := normalize(&q); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilesystemDefaultCwdAndHostRequiresExplicitContext(t *testing.T) {
+	q := request()
+	q.Mode = "filesystem"
+	q.Cwd = ""
+	q.User = ""
+	if err := normalize(&q); err != nil || q.Cwd != "/" {
+		t.Fatalf("filesystem default %+v %v", q, err)
+	}
+	q.Mode = "host"
+	q.Cwd = ""
+	if err := normalize(&q); err == nil {
+		t.Fatal("host context silently defaulted")
+	}
+}
+
+func TestCreationRejectionKeepsActionableRedactedDetail(t *testing.T) {
+	p, client, _ := setup(t, false)
+	client.PrependReactor("create", "jobs", func(kt.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden by PodSecurity: privileged=true password=unsafe")
+	})
+	q := request()
+	if _, err := p.Exec(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { r, _, _, _ := p.read(context.Background(), q.ExecutionID); return r.State == "unknown" })
+	r, _, _, _ := p.read(context.Background(), q.ExecutionID)
+	if !strings.Contains(r.Detail, "PodSecurity") || strings.Contains(r.Detail, "unsafe") {
+		t.Fatalf("detail %q", r.Detail)
+	}
+}
+
+func TestCancelSelectedExecutionPersistsAcrossReplica(t *testing.T) {
+	p, _, e := setup(t, false)
+	ctx := context.Background()
+	q := request()
+	if _, err := p.Exec(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { return e.count() == 1 })
+	other := *p
+	result, err := other.Cancel(ctx, CancelRequest{ExecutionID: q.ExecutionID})
+	if err != nil || !result.CancelRequested || !strings.Contains(string(result.Runner), "cancelled") {
+		t.Fatalf("cancel %+v %v", result, err)
+	}
+	_, _, intent, err := p.read(ctx, q.ExecutionID)
+	if err != nil || !intent {
+		t.Fatal("cancel intent not durable")
+	}
+	if e.count() != 1 {
+		t.Fatal("cancel re-executed command")
 	}
 }
