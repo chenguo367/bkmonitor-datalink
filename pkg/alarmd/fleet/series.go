@@ -274,6 +274,10 @@ type TrendsAnswer struct {
 	ReadAt       time.Time             `json:"read_at"`
 	Spaces       map[string]TrendSpace `json:"spaces"`
 	Trends       []Trend               `json:"trends"`
+	// Cut says the shared read ran out of its time before every line
+	// answered: the lines that did not are unavailable, and the answer is
+	// not kept for TrendsMaxAge, so the next caller reads again.
+	Cut bool `json:"cut,omitempty"`
 }
 
 // Trends reads the catalog: through Range, in the spaces Spaces derives,
@@ -284,6 +288,11 @@ type Trends struct {
 	Scope  TrendScope
 	// Node says the node this replica runs on, or "" when it cannot.
 	Node func(ctx context.Context) string
+	// ComputeTimeout is the shared read's time: the parts' own bounds added
+	// (the space derivation, the node read, one line's query, the lines
+	// running side by side), set where they are known; zero takes
+	// trendsComputeTimeout, for a Trends built without them.
+	ComputeTimeout time.Duration
 
 	mu       sync.Mutex
 	answers  map[string]TrendsAnswer
@@ -297,8 +306,9 @@ type trendsFlight struct {
 	answer TrendsAnswer
 }
 
-// trendsComputeTimeout bounds one shared read: it runs on its own context,
-// since the callers it answers share it and any one of them may leave.
+// trendsComputeTimeout bounds one shared read of a Trends built without its
+// parts' bounds (ComputeTimeout): it runs on its own context, since the
+// callers it answers share it and any one of them may leave.
 const trendsComputeTimeout = 45 * time.Second
 
 // TrendsMaxAge is how long one read of a window answers: a page refresh
@@ -328,18 +338,27 @@ func (trends *Trends) read(ctx context.Context, window SeriesWindow, at time.Tim
 	trends.mu.Unlock()
 	defer func() {
 		trends.mu.Lock()
-		trends.answers[window.Key] = flight.answer
+		// A cut answer goes to the callers waiting for it and is not kept:
+		// kept, it would answer for TrendsMaxAge as if whole.
+		if !flight.answer.Cut {
+			trends.answers[window.Key] = flight.answer
+		}
 		delete(trends.inFlight, window.Key)
 		trends.mu.Unlock()
 		close(flight.done)
 	}()
-	shared, cancel := context.WithTimeout(context.Background(), trendsComputeTimeout)
+	budget := trends.ComputeTimeout
+	if budget <= 0 {
+		budget = trendsComputeTimeout
+	}
+	shared, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	scope := trends.Scope
 	if trends.Node != nil {
 		scope.Node = trends.Node(shared)
 	}
 	flight.answer = collectTrends(shared, trends.Range, trends.Spaces(shared), scope, window, at)
+	flight.answer.Cut = shared.Err() != nil
 	return flight.answer
 }
 
@@ -352,7 +371,32 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 	answer := TrendsAnswer{Window: window.Key, WindowChoice: seriesWindowKeys(), StartUnixMs: start.UnixMilli(), EndUnixMs: at.UnixMilli(),
 		StepSeconds: int(window.Step / time.Second), RateWindow: window.rate(), ReadAt: at.UTC(), Spaces: spaces,
 		Trends: make([]Trend, 0, len(trendCatalog))}
-	for _, definition := range trendCatalog {
+	// Every line of every chart is read side by side, each under the
+	// query's own bound: one after another, the catalog's queries shared one
+	// budget and the last lines were cut whenever the backend was slow.
+	type lineRead struct {
+		answers      []TrendLineAnswer
+		partial      bool
+		code, detail string
+	}
+	reads := make([][]lineRead, len(trendCatalog))
+	var wait sync.WaitGroup
+	for chart, definition := range trendCatalog {
+		space := spaces[definition.Space]
+		if space.State != TrendSpaceResolved {
+			continue
+		}
+		reads[chart] = make([]lineRead, len(definition.Lines))
+		for index, line := range definition.Lines {
+			wait.Add(1)
+			go func(read *lineRead, space string, line TrendLine) {
+				defer wait.Done()
+				read.answers, read.partial, read.code, read.detail = readLine(ctx, provider, space, line, scope, window, start, at)
+			}(&reads[chart][index], space.Space, line)
+		}
+	}
+	wait.Wait()
+	for chart, definition := range trendCatalog {
 		trend := Trend{Key: definition.Key, Title: definition.Title, Unit: definition.Unit, Space: definition.Space, Help: definition.Help,
 			Lines: []TrendLineAnswer{}}
 		space := spaces[definition.Space]
@@ -363,8 +407,9 @@ func collectTrends(ctx context.Context, provider RangeProvider, spaces map[strin
 		}
 		points, failed := 0, 0
 		var firstCode, firstDetail string
-		for _, line := range definition.Lines {
-			answers, partial, code, detail := readLine(ctx, provider, space.Space, line, scope, window, start, at)
+		for index, line := range definition.Lines {
+			read := reads[chart][index]
+			answers, partial, code, detail := read.answers, read.partial, read.code, read.detail
 			if code != "" {
 				failed++
 				if firstCode == "" {

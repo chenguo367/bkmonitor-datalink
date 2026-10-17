@@ -132,7 +132,7 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	// The page's own request carries no deadline - a reader is waiting and
 	// the handler lets them wait - so the query bounds itself. It is a
 	// ceiling on hanging, not a tuning knob.
-	ctx, cancel := context.WithTimeout(ctx, rangeDeadline)
+	ctx, cancel := context.WithTimeout(ctx, RangeDeadline)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, client.endpoint+"/query/ts/promql", bytes.NewReader(encoded))
@@ -205,5 +205,6 @@ func columnIndexes(columns []string) (int, int) {
 	return timeColumn, valueColumn
 }
 
-// rangeDeadline bounds one range query.
-const rangeDeadline = 20 * time.Second
+// RangeDeadline bounds one range query; a reader that runs several side by
+// side (the trends) takes it as one line's share of its time.
+const RangeDeadline = 20 * time.Second
