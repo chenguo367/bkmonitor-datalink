@@ -224,6 +224,9 @@ func (a *App) unknownExecution(operation string, params map[string]any, revision
 	digest := sha256.Sum256(body)
 	message := "Remote execution outcome is unconfirmed. Inspect the existing execution and target before an explicit retry; this CLI did not retry."
 	result := map[string]any{"remote_state": "remote_state_unknown", "operation": operation, "request_digest": "sha256:" + hex.EncodeToString(digest[:]), "started_at": started.Format(time.RFC3339Nano), "finished_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if operation == "node.exec" || operation == "node.execution.cancel" {
+		result["execution_id"] = params["execution_id"]
+	}
 	if target, exists := params["target"]; exists {
 		result["target"] = target
 	}
@@ -232,6 +235,9 @@ func (a *App) unknownExecution(operation string, params map[string]any, revision
 	}
 	response := map[string]any{"status": "error", "summary": message, "error": map[string]any{"code": "remote_state_unknown", "message": message}, "result": result,
 		"evidence": map[string]any{"complete": false, "limitations": []string{message, cause}}, "meta": map[string]any{"environment_id": p.EnvironmentID, "http_status": status}, "next_call": []any{}}
+	if operation == "node.exec" || operation == "node.execution.cancel" {
+		response["next_call"] = []any{map[string]any{"operation": "node.execution.get", "params": map[string]any{"execution_id": params["execution_id"]}, "reason": "Query the same execution; do not replay the command."}}
+	}
 	return a.emitResponse(response, []string{p.AccessToken, p.RefreshToken}, http.StatusOK)
 }
 

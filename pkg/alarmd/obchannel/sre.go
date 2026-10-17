@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/node"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
@@ -22,17 +23,18 @@ import (
 // it ended. An execution records the digest of its argv and stdin and the
 // stdin's length, never their text.
 type SREAction struct {
-	Op         string `json:"op"`
-	Namespace  string `json:"namespace"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
-	UID        string `json:"uid,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	Result     string `json:"result"`
-	Code       string `json:"code,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	SessionID  string `json:"session_id,omitempty"`
-	RequestID  string `json:"request_id,omitempty"`
+	Op          string `json:"op"`
+	Namespace   string `json:"namespace"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name"`
+	UID         string `json:"uid,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	Result      string `json:"result"`
+	Code        string `json:"code,omitempty"`
+	DurationMS  int64  `json:"duration_ms"`
+	SessionID   string `json:"session_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	ExecutionID string `json:"execution_id,omitempty"`
 	// Operator is the admin user the session was issued to; empty with
 	// IssuedVia admin_key, the deployment administrator. Both empty on a
 	// receipt from before 0.4.
@@ -77,7 +79,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{"pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete, pod.OpPatch}
+	SREActionOps     = []string{OpNodeExec, OpNodeGet, OpNodeCancel, OpNodeEnded, "pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete, pod.OpPatch}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -85,6 +87,20 @@ var (
 func sreResult(err error) (string, string) {
 	if err == nil {
 		return SREResultDone, ""
+	}
+	var nodeError *node.Error
+	if errors.As(err, &nodeError) {
+		switch nodeError.Code {
+		case "target_changed":
+			return SREResultTargetChanged, nodeError.Code
+		case "forbidden":
+			return SREResultForbidden, nodeError.Code
+		case "unknown":
+			return SREResultUnknown, nodeError.Code
+		case "invalid_request", "invalid_params", "invalid_execution_id", "execution_expired", "execution_conflict":
+			return SREResultRefused, nodeError.Code
+		}
+		return SREResultFailed, nodeError.Code
 	}
 	var change *rollout.Error
 	if errors.As(err, &change) {
@@ -142,10 +158,12 @@ func CallerFrom(ctx context.Context) Caller {
 // SREOptions is what the SRE operations are built from. Audit hears every
 // execution and management call once, after it ends; nil hears nothing.
 type SREOptions struct {
-	Pods      *pod.Provider
-	Queries   *uq.Provider
-	Scrubber  *redact.Scrubber
-	PodReason string
+	Nodes      NodeExecutions
+	NodeReason string
+	Pods       *pod.Provider
+	Queries    *uq.Provider
+	Scrubber   *redact.Scrubber
+	PodReason  string
 	// Rollouts changes images and reads their receipts; nil leaves both
 	// operations unavailable, for RolloutReason.
 	Rollouts      *rollout.Driver
@@ -666,17 +684,17 @@ func SREOperations(options SREOptions) []Operation {
 	}
 	timestamp := Field{Type: "string", MinLength: 1, MaxLength: 64, Description: "RFC 3339 time"}
 	maxReceiptsPage, maxReceiptsOffset := int64(maxSREReceiptsPage), int64(MaxSREReceipts)
-	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id 与 effect 过滤，带分页。回执分两类分开保存，读多了也挤不掉改动：change（改镜像、apply、delete、删 Pod、重启、扩缩、dry run）与 access（执行、读 Secret 与 ConfigMap）。",
+	ops = append(ops, Operation{ID: OpSREReceipts, Summary: "读取 SRE 动作（执行、管理、改镜像与回退）的回执，最新的在前；可按时间、命名空间、对象名、request_id、execution_id 与 effect 过滤，带分页。回执分两类分开保存，读多了也挤不掉改动：change（节点执行/取消/终态、改镜像、apply、delete、删 Pod、重启、扩缩、dry run）与 access（执行、读 Secret 与 ConfigMap）。",
 		EvidenceScope: "sre_receipts", ExecutionPool: "sre", ExecutionTimeout: 10 * time.Second, Availability: receiptsAvailable,
 		Limits: map[string]any{"kept": MaxSREReceipts, "kept_change": MaxSREChangeReceipts, "kept_access": MaxSREAccessReceipts,
 			"receipt_bytes_change": SREChangeReceiptBytes, "receipt_bytes_access": SREAccessReceiptBytes, "retention_seconds": int64(SREReceiptRetention / time.Second), "max_page": maxSREReceiptsPage,
 			"content": "who, what, where and how each action ended; a pod.exec receipt carries its run's facts and its script digest, never its argv, stdin or output"},
-		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text,
+		Fields: map[string]Field{"since": timestamp, "until": timestamp, "namespace": text, "name": text, "request_id": text, "execution_id": text,
 			"effect": {Type: "string", Enum: []string{SREEffectChange, SREEffectAccess}},
 			"limit":  {Type: "integer", Minimum: &positive, Maximum: &maxReceiptsPage}, "offset": {Type: "integer", Minimum: &nonnegative, Maximum: &maxReceiptsOffset}},
 		OutputSchema: SchemaOf(SREReceiptPage{}),
 		Run: func(ctx context.Context, p Params) Outcome {
-			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), Effect: p.String("effect"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
+			filter := SREReceiptFilter{Namespace: p.String("namespace"), Name: p.String("name"), RequestID: p.String("request_id"), ExecutionID: p.String("execution_id"), Effect: p.String("effect"), Offset: p.Int("offset", 0), Limit: p.Int("limit", 0)}
 			for key, into := range map[string]*time.Time{"since": &filter.Since, "until": &filter.Until} {
 				if value := p.String(key); value != "" {
 					at, err := time.Parse(time.RFC3339Nano, value)
@@ -693,7 +711,7 @@ func SREOperations(options SREOptions) []Operation {
 			out := Outcome{Value: page, Complete: page.NextOffset == 0}
 			if page.NextOffset > 0 {
 				next := Params{"offset": page.NextOffset}
-				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "effect", "limit"} {
+				for _, key := range []string{"since", "until", "namespace", "name", "request_id", "execution_id", "effect", "limit"} {
 					if value, present := p[key]; present {
 						next[key] = value
 					}
@@ -703,7 +721,7 @@ func SREOperations(options SREOptions) []Operation {
 			return out
 		},
 	})
-	return ops
+	return append(ops, nodeOperations(options, audit)...)
 }
 
 // listSummary is a list page's one line: how many it holds and whether, and

@@ -104,7 +104,7 @@ return 1
 // sreEffect is the list an action's receipt goes to.
 func sreEffect(op string) string {
 	switch op {
-	case OpSetImage, pod.OpApply, pod.OpDelete, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun:
+	case OpNodeExec, OpNodeCancel, OpNodeEnded, OpSetImage, pod.OpApply, pod.OpDelete, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun:
 		return SREEffectChange
 	}
 	return SREEffectAccess
@@ -213,6 +213,7 @@ type SREReceiptFilter struct {
 	Since, Until    time.Time
 	Namespace, Name string
 	RequestID       string
+	ExecutionID     string
 	// Effect selects one list, change or access; empty reads both.
 	Effect        string
 	Offset, Limit int
@@ -287,5 +288,5 @@ func (f SREReceiptFilter) matches(action SREAction) bool {
 	if f.Name != "" && action.Name != f.Name && !strings.HasPrefix(action.Name, f.Name+"/") {
 		return false
 	}
-	return f.RequestID == "" || action.RequestID == f.RequestID
+	return (f.RequestID == "" || action.RequestID == f.RequestID) && (f.ExecutionID == "" || action.ExecutionID == f.ExecutionID)
 }

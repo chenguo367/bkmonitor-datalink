@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/node"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/rollout"
@@ -59,9 +60,10 @@ func channelSREOperations(cfg config.Config, binding ChannelBinding, client redi
 	}
 	binding.SREAudit = auditWithReceipts(binding.SREAudit, receipts)
 	rollouts, rolloutReason, stopRollouts := channelRollouts(cfg, binding, client)
-	ops := obchannel.SREOperations(obchannel.SREOptions{Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason,
+	nodes, nodeReason, stopNodes := channelNodes(cfg, binding, client)
+	ops := obchannel.SREOperations(obchannel.SREOptions{Nodes: nodes, NodeReason: nodeReason, Pods: pods, Queries: queries, Scrubber: redact.New(secrets...), PodReason: podReason,
 		Rollouts: rollouts, RolloutReason: rolloutReason, Audit: binding.SREAudit, Receipts: receipts, ReceiptsReason: receiptsReason})
-	return ops, func() { stopRollouts(); queries.Close() }, nil
+	return ops, func() { stopNodes(); stopRollouts(); queries.Close() }, nil
 }
 
 // sreFingerprintKey is the deployment's fingerprint key: made once, by the
@@ -171,7 +173,7 @@ func sreAuditSink(logger *observability.Logger, recorder *metric.Recorder) func(
 		recorder.RecordSREAction(action.Op, action.Result)
 		attrs := []slog.Attr{slog.String("op", action.Op), slog.String("namespace", action.Namespace), slog.String("kind", action.Kind),
 			slog.String("name", action.Name), slog.String("uid", action.UID), slog.String("detail", action.Detail), slog.String("code", action.Code),
-			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID),
+			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID), slog.String("execution_id", action.ExecutionID),
 			slog.String("operator", action.Operator), slog.String("issued_via", action.IssuedVia)}
 		if action.Argv != "" {
 			attrs = append(attrs, slog.String("argv", action.Argv))
@@ -221,4 +223,41 @@ func sreDeploymentSecrets(cfg config.Config) []string {
 		values = append(values, cache.Connection.Password, cache.Connection.SentinelPassword)
 	}
 	return values
+}
+
+// channelNodes controls disposable runners through shared execution records.
+// Stopping the observer does not cancel commands already supervised on nodes.
+func channelNodes(cfg config.Config, binding ChannelBinding, client redis.UniversalClient) (obchannel.NodeExecutions, string, func()) {
+	if client == nil {
+		return nil, "node_provider_unavailable: shared runtime store is required", func() {}
+	}
+	provider, err := node.NewInCluster(node.Options{
+		Final: func(record node.Record) {
+			if binding.SREAudit == nil {
+				return
+			}
+			result := obchannel.SREResultDone
+			if record.State == "unknown" {
+				result = obchannel.SREResultUnknown
+			} else if record.State != "succeeded" {
+				result = obchannel.SREResultFailed
+			}
+			binding.SREAudit(obchannel.SREAction{Op: obchannel.OpNodeEnded, ExecutionID: record.ExecutionID, Namespace: record.Namespace, Kind: "Node", Name: record.Node.Name, UID: record.Node.UID, Result: result, Detail: record.State, At: time.Now().UTC(), DurationMS: time.Since(record.CreatedAt).Milliseconds(), SessionID: record.Caller.SessionID, RequestID: record.Caller.RequestID, Operator: record.Caller.Operator, IssuedVia: record.Caller.IssuedVia, Exec: &obchannel.SREExec{ExitCode: record.ExitCode}})
+		},
+		Redis: client, KeyPrefix: sreKeyPrefix(cfg, binding), DeploymentID: binding.EnvironmentID,
+		FingerprintKeySource: func() []byte { return sreFingerprintKey(client, sreKeyPrefix(cfg, binding)+"fingerprint-key") },
+	})
+	if err != nil {
+		return nil, "node_provider_unavailable: " + err.Error(), func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); provider.Run(ctx) }()
+	return provider, "", func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+	}
 }
