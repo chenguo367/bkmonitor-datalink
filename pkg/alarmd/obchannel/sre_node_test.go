@@ -3,6 +3,7 @@ package obchannel
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +74,26 @@ func TestNodeReceiptsLinkOneExecutionAcrossRequests(t *testing.T) {
 		}
 		if !f.matches(SREAction{Op: op, ExecutionID: "execution-a", RequestID: op}) || f.matches(SREAction{Op: op, ExecutionID: "execution-b"}) {
 			t.Fatalf("%s execution filter mismatched", op)
+		}
+	}
+}
+
+func TestNodeOutputGapsPreserveOutcomeButMarkEvidenceIncomplete(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		code := 0
+		f := &fakeNodes{result: node.Result{Record: node.Record{ExecutionID: "id", State: "succeeded", ExitCode: &code, OutputIncomplete: !unavailable}, OutputUnavailable: unavailable}}
+		ops := nodeOperations(SREOptions{Nodes: f}, func(context.Context, time.Time, SREAction, error) {})
+		out := ops[1].Run(context.Background(), Params{"execution_id": "id"})
+		value := out.Value.(node.Result)
+		if out.Complete || out.Error != nil || value.State != "succeeded" || value.ExitCode == nil || *value.ExitCode != 0 {
+			t.Fatalf("output gap changed confirmed outcome: %+v", out)
+		}
+		want := "output is incomplete"
+		if unavailable {
+			want = "output is unavailable"
+		}
+		if !strings.Contains(strings.Join(out.Limitations, " "), want) {
+			t.Fatalf("missing output limitation: %+v", out.Limitations)
 		}
 	}
 }

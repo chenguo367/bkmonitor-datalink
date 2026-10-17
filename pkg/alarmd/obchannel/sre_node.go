@@ -116,6 +116,11 @@ func nodeOperations(options SREOptions, audit func(context.Context, time.Time, S
 		}
 		if value.OutputUnavailable {
 			out.Complete = false
+			out.Limitations = append(out.Limitations, "Execution output is unavailable; the last confirmed command state is retained.")
+		}
+		if value.OutputIncomplete {
+			out.Complete = false
+			out.Limitations = append(out.Limitations, "Execution output is incomplete; missing bytes are not proof of absent events. The command state and available output remain usable.")
 		}
 		out.Next = []Call{{Operation: OpNodeGet, Params: next, Reason: "Read the same execution and its bounded output; do not submit a replacement command."}}
 		return out
