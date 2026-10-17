@@ -197,6 +197,10 @@ func (p *Provider) LogCount(ctx context.Context, request LogCountRequest) (LogCo
 				window, counted.Format(time.RFC3339), counted.Add(length).Format(time.RFC3339), counts.Start.Format(time.RFC3339), counts.End.Format(time.RFC3339)))
 			counts.Start, counts.End = counted, counted.Add(length)
 		}
+	} else {
+		// Zero groups then say only that nothing came back, not that the
+		// window holds no lines: the reader is told which one it read.
+		counts.Limitations = append(counts.Limitations, "UQ returned no points for this window")
 	}
 	for _, series := range answer.Series {
 		group := LogCountGroup{Values: map[string]string{}}

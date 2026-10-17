@@ -218,3 +218,25 @@ func TestLogCountNamesTheAlignedWindowItCounted(t *testing.T) {
 		t.Fatalf("counts %+v", counts)
 	}
 }
+
+// An answer without a single point counts zero, and says it is UQ's empty
+// answer rather than a window found to hold no lines.
+func TestLogCountSaysWhenUQReturnedNoPoints(t *testing.T) {
+	for name, native := range map[string]string{
+		"no series":         answer(false),
+		"series, no points": answer(false, series([]string{"level"}, []string{"error"})),
+	} {
+		server := &logServer{answer: native}
+		p := server.provider(t)
+		request := logRequest()
+		request.By = []string{"level"}
+		counts, err := p.LogCount(context.Background(), request)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if counts.Total != 0 || !counts.Start.Equal(logNow.Add(-time.Hour)) || !counts.End.Equal(logNow) ||
+			len(counts.Limitations) != 1 || counts.Limitations[0] != "UQ returned no points for this window" {
+			t.Fatalf("%s: counts %+v", name, counts)
+		}
+	}
+}
