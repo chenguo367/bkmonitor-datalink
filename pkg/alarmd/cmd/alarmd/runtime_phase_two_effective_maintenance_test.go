@@ -436,3 +436,22 @@ func TestEffectiveMaintenanceClosesWhenItsCallsTogetherOutlastTheOldStepBudget(t
 		})
 	}
 }
+
+// The source the closes are for is read once a step: with no step deadline
+// any more, a Console that does not answer would otherwise be waited on once
+// for every owned group in turn. Every group with a Plan to close still says
+// why it did not.
+func TestEffectiveMaintenanceReadsTheSourceOnceAStep(t *testing.T) {
+	f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), []openalerts.Alert{maintenanceAlert("native", "")})
+	for _, qg := range []execution.QueryGroupIdentity{"query-group-b", "query-group-c"} {
+		f.m.bundle.runners[qg] = &phaseTwoQueryGroupLifecycle{runner: f.runner}
+	}
+	f.m.capacity.GroupBatch = 3
+	f.m.sourceID = ""
+	asked := 0
+	f.m.sourceOf = func(context.Context) (string, error) { asked++; return "", errors.New("console unreachable") }
+	f.m.step(context.Background())
+	if asked != 1 || len(f.writer.batches) != 0 || f.m.Stats()["unavailable"] != 3 {
+		t.Fatalf("asked=%d batches=%v stats=%v, want one read, no close, three groups unavailable", asked, f.writer.batches, f.m.Stats())
+	}
+}

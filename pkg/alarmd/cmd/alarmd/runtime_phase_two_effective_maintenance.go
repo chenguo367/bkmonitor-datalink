@@ -422,6 +422,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	}
 
 	deletions := m.settleCalendarDeletions(calendarReads(readUnderCurrentLease(m.groups, runners)), now)
+	sourceErr := m.readSource(ctx, groups, runners)
 	for _, qg := range groups {
 		if ctx.Err() != nil {
 			return
@@ -432,8 +433,37 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 			continue
 		}
 		m.refreshLegacy(ctx, qg, known.legacy)
-		m.closeInactive(ctx, qg, runner, known.closable, deletions)
+		m.closeInactive(ctx, qg, runner, known.closable, deletions, sourceErr)
 	}
+}
+
+// effectiveSourceCoverage is what the read of the closes' source may take:
+// effective time is resolved to the minute (a time range is HH:MM, a Level's
+// step sixty seconds), so a close held back by the read for less than a
+// minute lands in the minute it would have, and past that the next step asks
+// again rather than this one waiting on.
+const effectiveSourceCoverage = time.Minute
+
+// readSource reads, once a step, the source the closes are for, when any
+// group has a Plan it may close: a Console that does not answer is asked
+// once, not once for each owned group in turn. The error is what every
+// group with a closable Plan reports this step.
+func (m *effectiveMaintenance) readSource(ctx context.Context, groups []execution.QueryGroupIdentity,
+	runners map[execution.QueryGroupIdentity]maintenanceRunner) error {
+	if m.sourceOf == nil {
+		return nil
+	}
+	for _, qg := range groups {
+		if known := m.groups[qg]; known != nil && runners[qg] != nil && len(known.closable) > 0 {
+			source, err := m.sourceOf(ctx)
+			if err != nil {
+				return err
+			}
+			m.sourceID = source
+			return nil
+		}
+	}
+	return nil
 }
 
 // readUnderCurrentLease is the groups whose Plans were read under the lease
@@ -645,17 +675,13 @@ func planHasSchedule(plan *strategy.CompiledPlan) bool {
 // when a batch is ready to send, for the owner check before the send and
 // the send itself. A Plan that reads a calendar deleted is not closed until
 // the deletion settles (settleCalendarDeletions).
-func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan, deletions calendarDeletions) {
+func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan, deletions calendarDeletions, sourceErr error) {
 	if len(plans) == 0 {
 		return
 	}
-	if m.sourceOf != nil {
-		source, err := m.sourceOf(ctx)
-		if err != nil {
-			m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
-			return
-		}
-		m.sourceID = source
+	if sourceErr != nil {
+		m.observe(ctx, qg, closeOutcomeUnavailable, sourceErr, 0)
+		return
 	}
 	at := m.bundle.dependencies.Now()
 	start := m.planCursor[qg]

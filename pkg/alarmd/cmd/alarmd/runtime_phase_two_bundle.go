@@ -1219,7 +1219,12 @@ func openProductionPhaseTwoBundleAssembly(
 		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	if linkd.Console != nil {
 		maintenance.sourceOf = func(ctx context.Context) (string, error) {
-			binding, err := linkd.Console.Binding(ctx)
+			// Answered from the client's copy within bindingReuse; past it,
+			// each request the read makes is bounded by the Console's own
+			// speed, within the coverage.
+			ctx, cancel := context.WithTimeout(ctx, effectiveSourceCoverage)
+			defer cancel()
+			binding, err := linkd.Console.Binding(openalerts.WithRequestCoverage(ctx, effectiveSourceCoverage))
 			return binding.EventSourceID, err
 		}
 	}
