@@ -14,7 +14,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -128,6 +130,10 @@ type summaryCache struct {
 	mu   sync.Mutex
 	at   time.Time
 	body *DiagnosisSummaryResponse
+	// board is the strategy board decided in the same pass as body: one
+	// computation answers both the first-screen count and the board's rows
+	// and facets, so the two read one instant.
+	board *boardIndex
 }
 
 // summarizeDiagnosis counts every id of the universe by the verdict its row
@@ -340,6 +346,53 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		}
 		query := request.URL.Query()
 		summaryOnly := query.Get("summary") != ""
+		boardMode := query.Get("board") != ""
+		if boardMode {
+			if summaryOnly || query.Get("board") != "1" {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_BOARD", "detail": "board=1 alone selects the strategy board"})
+				return
+			}
+			filter, limit, refusal := parseBoardQuery(query)
+			if refusal != nil {
+				writeJSON(response, http.StatusBadRequest, refusal)
+				return
+			}
+			if lookup == nil || universe == nil {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "DIAGNOSIS_NOT_WIRED"})
+				return
+			}
+			if !lookup("0").Available && forward != nil && request.Header.Get(forwardedHeader) == "" {
+				forwarded, refusal := forward(response, request)
+				if forwarded {
+					return
+				}
+				if refusal == ForwardFailed {
+					writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "LEADER_UNAVAILABLE", "reason": refusal})
+					return
+				}
+			}
+			at := now()
+			counted.mu.Lock()
+			if counted.board == nil || at.Sub(counted.at) >= DiagnosisSummaryFreshFor {
+				pageCtx, releaseHolds := withPageHolds(request.Context())
+				readCtx, cancel := context.WithTimeout(context.WithoutCancel(pageCtx), DiagnosisReadTimeout)
+				entry := readDiagnosisEntry(readCtx, service, universe, at, stallAfter)
+				cancel()
+				entry.id = newDiagnosisID()
+				if entry.readError != "" {
+					releaseHolds()
+					counted.mu.Unlock()
+					writeJSON(response, http.StatusOK, map[string]string{"error": "DIAGNOSIS_UNREADABLE", "reason": entry.readError})
+					return
+				}
+				countDiagnosis(counted, entry, replica, at, lookup, warmer)
+				releaseHolds()
+			}
+			board := counted.board
+			counted.mu.Unlock()
+			writeJSON(response, http.StatusOK, board.page(filter, query.Get("cursor"), limit, DiagnosisSummaryFreshFor))
+			return
+		}
 		if summaryOnly && (query.Get("summary") != "1" || query.Has("cursor") || query.Has("limit")) {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INVALID_SUMMARY",
 				"detail": "summary=1 takes no cursor or limit: it counts the whole universe"})
@@ -454,16 +507,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		ctx := newDiagnosisContext(entry.view, replica, at)
 		started := time.Now()
 		if summaryOnly {
-			summary := DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica, Universe: body.Universe,
-				Verdicts: body.Verdicts, Words: ProductWords(), Timing: body.Timing}
-			if entry.view != nil {
-				summary.OverdueEpisodes = entry.view.OverdueEpisodes
-			}
-			summary.Summary = summarizeDiagnosis(entry.universe, entry.view, func(id string) DiagnosisRow {
-				return diagnoseStrategy(id, lookup(id), ctx)
-			})
-			summary.Timing.RowsMillis = time.Since(started).Milliseconds()
-			counted.at, counted.body = at, &summary
+			summary := countDiagnosis(counted, entry, replica, at, lookup, warmer)
 			release()
 			writeJSON(response, http.StatusOK, summary)
 			return
@@ -530,4 +574,132 @@ func newDiagnosisID() string {
 	var raw [8]byte
 	_, _ = rand.Read(raw[:])
 	return hex.EncodeToString(raw[:])
+}
+
+// countDiagnosis decides every strategy of the entry's universe once and keeps
+// both answers that one pass makes: the first-screen count and the strategy
+// board. The caller holds counted.mu.
+func countDiagnosis(counted *summaryCache, entry *diagnosisEntry, replica string, at time.Time,
+	lookup func(string) StrategyLookupFacts, warmer *DiagnosisWarmer) *DiagnosisSummaryResponse {
+	started := time.Now()
+	universe := DiagnosisUniverse{Status: "ok", Source: "strategy_ids", Count: len(entry.universe), Digest: entry.digest}
+	if !entry.readAt.IsZero() {
+		readAt := entry.readAt
+		universe.ReadAt = &readAt
+	}
+	universe.Publication = lookup("0").Publication
+	summary := DiagnosisSummaryResponse{Diagnosis: entry.id, AnsweredBy: replica, Universe: universe,
+		Verdicts: DiagnosisVerdicts(), Words: ProductWords(), Timing: entry.timing()}
+	ctx := newDiagnosisContext(entry.view, replica, at)
+	decided := make(map[string]DiagnosisRow, len(entry.universe))
+	for _, id := range entry.universe {
+		decided[id] = diagnoseStrategy(id, lookup(id), ctx)
+	}
+	row := func(id string) DiagnosisRow { return decided[id] }
+	summary.Summary = summarizeDiagnosis(entry.universe, entry.view, row)
+	var lines []StrategyLine
+	var due *DueView
+	var census *ScheduleCensus
+	if entry.view != nil {
+		summary.OverdueEpisodes = entry.view.OverdueEpisodes
+		lines, due, census = StrategyLines(entry.view, at), entry.view.Due, entry.view.Schedule
+	}
+	summary.Timing.RowsMillis = time.Since(started).Milliseconds()
+	counted.at, counted.body = at, &summary
+	counted.board = buildBoard(entry.id, at, entry.digest, entry.universe, row, lines, due, census)
+	return &summary
+}
+
+// BoardMaxRows bounds one board page. It is the diagnosis page's bound over the
+// same universe -- a board row carries words only and is smaller than a
+// diagnosis row (about 390 bytes against about 1 KB measured on a 3,355-strategy
+// deployment), so whatever the channel carries for a diagnosis page it carries
+// for a board page. The facets always count the whole universe.
+const BoardMaxRows = DiagnosisPageRows
+
+// BoardDefaultRows is a board page when the page names no limit.
+const BoardDefaultRows = 50
+
+// parseBoardQuery reads the board's selection: each facet a comma list of its
+// closed words, a strategy id, and a page size.
+func parseBoardQuery(query url.Values) (BoardFilter, int, map[string]any) {
+	filter := BoardFilter{StrategyID: query.Get("strategy_id")}
+	words := func(name string, known func(string) bool) (map[string]bool, map[string]any) {
+		raw := query.Get(name)
+		if raw == "" {
+			return nil, nil
+		}
+		set := map[string]bool{}
+		for _, word := range strings.Split(raw, ",") {
+			if !known(word) {
+				return nil, map[string]any{"error": "BOARD_FILTER_UNKNOWN", "facet": name, "value": word}
+			}
+			set[word] = true
+		}
+		return set, nil
+	}
+	states, refusal := words("state", func(word string) bool {
+		for _, known := range DiagnosisVerdicts() {
+			if string(known) == word {
+				return true
+			}
+		}
+		return false
+	})
+	if refusal != nil {
+		return filter, 0, refusal
+	}
+	for word := range states {
+		if filter.State == nil {
+			filter.State = map[StateWord]bool{}
+		}
+		filter.State[StateWord(word)] = true
+	}
+	actions, refusal := words("action", func(word string) bool { return knownActionWord(ActionWord(word)) })
+	if refusal != nil {
+		return filter, 0, refusal
+	}
+	for word := range actions {
+		if filter.Action == nil {
+			filter.Action = map[ActionWord]bool{}
+		}
+		filter.Action[ActionWord(word)] = true
+	}
+	capabilities, refusal := words("capability", func(word string) bool {
+		switch word {
+		case CapabilitySupported, CapabilityPartial, CapabilityUnsupportedByDesign, CapabilityNotYetSupported:
+			return true
+		}
+		return false
+	})
+	if refusal != nil {
+		return filter, 0, refusal
+	}
+	filter.Capability = capabilities
+	punctualities, refusal := words("punctuality", func(word string) bool {
+		for _, known := range Punctualities {
+			if string(known) == word {
+				return true
+			}
+		}
+		return false
+	})
+	if refusal != nil {
+		return filter, 0, refusal
+	}
+	for word := range punctualities {
+		if filter.Punctuality == nil {
+			filter.Punctuality = map[Punctuality]bool{}
+		}
+		filter.Punctuality[Punctuality(word)] = true
+	}
+	limit := BoardDefaultRows
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > BoardMaxRows {
+			return filter, 0, map[string]any{"error": "INVALID_LIMIT", "max": BoardMaxRows}
+		}
+		limit = n
+	}
+	return filter, limit, nil
 }

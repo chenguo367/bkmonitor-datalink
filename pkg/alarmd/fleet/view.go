@@ -3003,6 +3003,10 @@ type View struct {
 	// time in the last hour and the last six. It is the sentence "is the
 	// deployment keeping up", and it is absent when no replica has an index.
 	Schedule *ScheduleCensus `json:"schedule,omitempty"`
+	// Due is the replicas' named due classes merged, for the strategy board
+	// (DueView). Kept in memory only, never in the health answer: the lists
+	// are the size of what is wrong and the health answer is read on every page.
+	Due *DueView `json:"-"`
 	// Suppression says whether anything in this deployment can be parked at
 	// all. See DispatchSuppression: its absence, not its value, is the answer.
 	Dispatch *DispatchSuppression `json:"dispatch,omitempty"`
@@ -3588,6 +3592,7 @@ func aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	// picked up describes a moment that has passed.
 	aggregateOverdue(&view, counted)
 	aggregateSchedule(&view, counted)
+	aggregateDue(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 	aggregateAddressDiffers(&view, counted)
 	aggregateTrackerDropped(&view, counted)
