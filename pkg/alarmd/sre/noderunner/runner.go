@@ -178,9 +178,17 @@ func (r *Runner) start(q Request) error {
 		}
 	}()
 	go func() {
-		err := cmd.Wait()
-		// Remove surviving members of our process group after the leader exits.
-		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// On Linux hold the exited leader as a zombie until group signalling
+		// completes. Its PID cannot be reused for an unrelated process group.
+		held := waitLeaderExit(cmd.Process.Pid)
+		var err, killErr error
+		if held {
+			killErr = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			err = cmd.Wait()
+		} else {
+			err = cmd.Wait()
+			killErr = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
 			reapGroup(cmd.Process.Pid)
 		}
