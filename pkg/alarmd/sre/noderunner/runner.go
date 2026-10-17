@@ -221,7 +221,6 @@ func (r *Runner) start(q Request) error {
 		}
 		r.finish(state, message, &code)
 		r.mu.Unlock()
-		reapAdopted()
 	}()
 	return nil
 }
@@ -423,6 +422,9 @@ func Serve(ctx context.Context, socket, id, mode string, retention, idle time.Du
 		return err
 	}
 	defer r.Close()
+	// Only the dedicated supervisor process owns orphan reaping. Library
+	// callers may have unrelated child processes that must not be reaped.
+	go func() { <-r.done; reapAdopted() }()
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		return err
