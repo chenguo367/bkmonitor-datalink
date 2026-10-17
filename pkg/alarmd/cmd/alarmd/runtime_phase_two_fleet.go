@@ -837,7 +837,23 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// them. From the same index and the same instant as the overdue facts, so
 	// the row and the sentence above it cannot read two clocks.
 	if publisher.schedule != nil {
-		census := publisher.schedule.Census(at, len(owned))
+		// The named late, overdue and never objects come from the census's own
+		// pass when the source can name them, so the lists and the counts are
+		// one instant (fleet.DueClasses); a source that cannot leaves Due absent.
+		var census fleet.ScheduleCensus
+		if named, ok := publisher.schedule.(fleet.DueClassSource); ok {
+			var classes fleet.DueClasses
+			// Empty rather than nil when nothing is owned: "name nothing" is
+			// still a named answer, not a census without names.
+			ids := ownedObjectIDs(owned)
+			if ids == nil {
+				ids = []string{}
+			}
+			census, classes = named.CensusWithDueClasses(at, ids)
+			snapshot.Due = &classes
+		} else {
+			census = publisher.schedule.Census(at, len(owned))
+		}
 		snapshot.Schedule = &census
 		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare, snapshot.ReadEarly, snapshot.ReadHeld} {
 			for index := range column {

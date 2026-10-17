@@ -1897,6 +1897,9 @@ type Snapshot struct {
 	// how its rounds have been finishing. Absent for the same reason Overdue
 	// can be: no due index, no census.
 	Schedule *ScheduleCensus `json:"schedule,omitempty"`
+	// Due names the objects Schedule counts as late, overdue and never
+	// evaluated (DueClasses). Absent with Schedule: no due index, no names.
+	Due *DueClasses `json:"due,omitempty"`
 	// Suppression is present only on a build whose dispatcher actually holds
 	// objects back. Absent, the overdue count above is structurally zero and
 	// must not be read as "nothing is overdue".
