@@ -143,6 +143,15 @@ const (
 	// one module while its target named another read EMPTY_EVERY_ROUND for a
 	// day.
 	CheckEmptyAfterTarget Check = "EMPTY_AFTER_TARGET"
+	// IdentityUnmatched is rounds that come back empty because every series
+	// the query returned was one the target's identity could not read: its
+	// key dimensions were missing or its model gate did not hold. The data
+	// is there and names its instance, only not the way the target reads
+	// it -- the strategy's identity fields or the collection's labels are
+	// to align. Named after a few such rounds, not the hour. Three MySQL
+	// strategies whose target gated on a legacy label the data no longer
+	// carried matched nothing for a day, one of them reading DETECTING.
+	CheckIdentityUnmatched Check = "IDENTITY_UNMATCHED"
 	// Quiet is an event count of groups answered whole with no group: no
 	// event in the range asked. Detecting, nothing to do: the row is there
 	// so that "no data" is never read into an event stream at rest, and so
@@ -340,6 +349,7 @@ var checkAnswers = map[Check]struct {
 
 	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
 	CheckEmptyAfterTarget:   {OwnerStrategy, GroupByStrategy},
+	CheckIdentityUnmatched:  {OwnerStrategyOrCollection, GroupByStrategy},
 	CheckQuiet:              {OwnerStrategy, GroupByStrategy},
 	CheckAnswerTruncated:    {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
@@ -413,6 +423,7 @@ var checkOrder = []Check{
 	CheckSeriesSparse,
 	CheckEmptyEveryRound,
 	CheckEmptyAfterTarget,
+	CheckIdentityUnmatched,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,

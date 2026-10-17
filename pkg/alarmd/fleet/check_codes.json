@@ -162,6 +162,12 @@
     "owner": "STRATEGY"
   },
   {
+    "check": "IDENTITY_UNMATCHED",
+    "state": "IDENTITY_MISMATCH",
+    "action": "IDENTITY_ALIGN",
+    "owner": "STRATEGY_OR_COLLECTION"
+  },
+  {
     "check": "SERIES_CHURNING",
     "state": "RESULT_UNTRUSTED",
     "action": "STRATEGY_EDIT",

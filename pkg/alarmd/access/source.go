@@ -4,6 +4,7 @@ package access
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -488,6 +489,7 @@ func appendQueryCompletion(
 		DataState: providerCompletion.DataState, Delivery: providerCompletion.Delivery,
 		RouteFacts: providerCompletion.RouteFacts, PartialEvidence: providerCompletion.PartialEvidence,
 		Stats: providerCompletion.Stats, Withheld: providerCompletion.Withheld, WithheldOutsideTarget: providerCompletion.WithheldOutsideTarget,
+		WithheldKeyMissing: providerCompletion.WithheldKeyMissing, IdentitySamples: providerCompletion.IdentitySamples,
 		Range: queryRange(query),
 	})
 	// Every valid requirement receives a completion binding, also when the
@@ -1073,13 +1075,18 @@ type seriesAdapter struct {
 	// outside its monitoring target on facts that were all there: data that
 	// exists and that the target did not select.
 	withheldOutside uint64
+	// withheldKeyMissing counts the withheld series every Plan refused
+	// because its key could not be built, and identitySamples keeps a few
+	// of them by their identity fields.
+	withheldKeyMissing uint64
+	identitySamples    []execution.IdentitySample
 }
 
 func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
 	if batch.PhysicalQuery != adapter.query.Spec.Digest || batch.CompletionRef == "" || batch.Dataset == nil || batch.Dataset.Len() == 0 {
 		return errors.New("alarmd access: provider delivered an invalid series")
 	}
-	admitted, outside := adapter.admittedPlans(batch)
+	admitted, outside, keyMissing := adapter.admittedPlans(batch)
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
@@ -1094,6 +1101,12 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 		adapter.withheld++
 		if outside {
 			adapter.withheldOutside++
+		}
+		if keyMissing != nil {
+			adapter.withheldKeyMissing++
+			if len(adapter.identitySamples) < execution.IdentitySamplesPerQuery {
+				adapter.identitySamples = append(adapter.identitySamples, *keyMissing)
+			}
 		}
 		return nil
 	}
@@ -1130,6 +1143,7 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 // subtract from the completion in the same layer that does the filtering.
 func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderCompletion) execution.ProviderCompletion {
 	completion.Withheld, completion.WithheldOutsideTarget = adapter.withheld, adapter.withheldOutside
+	completion.WithheldKeyMissing, completion.IdentitySamples = adapter.withheldKeyMissing, adapter.identitySamples
 	if adapter.withheld == 0 || completion.DataState != execution.DataStateData {
 		return completion
 	}
@@ -1150,11 +1164,15 @@ func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderC
 // plan, and says whether every plan refused it as outside its monitoring
 // target, decided on facts that were all there. A nil result means no
 // filtering is installed and every plan is admitted.
-func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool) {
+func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool, *execution.IdentitySample) {
 	if adapter.admission == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	outside := true
+	// keyMissing holds while every Plan refuses the series because its key
+	// could not be built; sample is the series' identity fields as the first
+	// such Plan's target reads them.
+	outside, keyMissing := true, true
+	var sample *execution.IdentitySample
 	dimensions := seriesDimensions(batch.Dataset)
 	// The plans of one query are one tenant's in practice: the facts are
 	// kept for the last tenant enriched for, and only a plan of another
@@ -1182,6 +1200,10 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 					GroupedByTargetIP: adapter.query.groupsByTargetIP(), Address: facts.ReportedAddress})
 			}
 			outside = outside && !admit && admission.DefinitelyOutside(plan, &facts, filter, reason)
+			keyMissing = keyMissing && !admit && reason == admission.TargetPlanReasonKeyMissing
+			if keyMissing && sample == nil && plan.TargetPlan != nil {
+				sample = identitySampleOf(plan.TargetPlan.Identity, dimensions)
+			}
 			if adapter.observe != nil {
 				switch {
 				case !admit:
@@ -1202,7 +1224,51 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			}
 		}
 	}
-	return decisions, outside && len(decisions) > 0
+	if !keyMissing || len(decisions) == 0 || sample == nil {
+		sample = nil
+	}
+	return decisions, outside && len(decisions) > 0, sample
+}
+
+// identitySampleOf is a series' identity fields as a target's identity reads
+// them -- the key dimensions, the model gate with the value it requires -- and
+// the canonical instance fields beside them, names and values only, values
+// cut to execution.IdentityValueBytes.
+func identitySampleOf(identity contract.TargetPlanIdentityV1, dimensions map[string]json.RawMessage) *execution.IdentitySample {
+	sample := &execution.IdentitySample{}
+	seen := map[string]bool{}
+	add := func(name, expected string, canonical bool) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		field := execution.IdentityField{Name: name, Expected: expected, Canonical: canonical}
+		if raw, ok := dimensions[name]; ok {
+			field.Present, field.Actual = true, identityValue(raw)
+		}
+		sample.Fields = append(sample.Fields, field)
+	}
+	add(identity.ModelDimension, identity.ModelValue, false)
+	for _, name := range identity.Dimensions {
+		add(name, "", false)
+	}
+	for _, name := range execution.CanonicalIdentityFields {
+		add(name, "", true)
+	}
+	return sample
+}
+
+// identityValue is a dimension's value as text: a JSON string unquoted,
+// anything else as written, cut to execution.IdentityValueBytes.
+func identityValue(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		text = string(raw)
+	}
+	if len(text) > execution.IdentityValueBytes {
+		text = text[:execution.IdentityValueBytes]
+	}
+	return text
 }
 
 func dataBindings(

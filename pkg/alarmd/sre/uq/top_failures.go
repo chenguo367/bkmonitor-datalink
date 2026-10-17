@@ -174,8 +174,18 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 	// response budget (spans carrying stack traces) is read again at half
 	// the rows, down to a floor: a noisy failing service is the case this
 	// read exists for, and must be answered rather than refused.
-	limit, shrunk, stopped := MaxTraceRows, false, false
+	limit, shrunk, stopped, outOfTime := MaxTraceRows, false, false, false
+	// A page does not start unless twice the slowest page so far still fits
+	// the operation's time, and a page the operation's deadline cuts ends
+	// the read with what was scanned: the backend's page latency is not
+	// known in advance, and the pages already scanned are the answer.
+	deadline, bounded := ctx.Deadline()
+	var slowest time.Duration
 	for answer.Scanned < TopFailuresRows && answer.Pages < TopFailuresRequests {
+		if bounded && slowest > 0 && time.Now().Add(2*slowest).After(deadline) {
+			outOfTime = true
+			break
+		}
 		limit = min(limit, TopFailuresRows-answer.Scanned)
 		query := map[string]any{"data_source": "bkapm", "table_id": target.TableID, "time_field": "start_time",
 			"query_string": answer.QueryString, "keep_columns": topFailureColumns}
@@ -187,7 +197,9 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 		}
 		body := map[string]any{"query_list": []any{query}, "start_time": strconv.FormatInt(start.Unix(), 10), "end_time": strconv.FormatInt(end.Unix(), 10),
 			"from": answer.Scanned, "limit": limit, "order_by": []any{"-start_time"}}
+		pageStarted := time.Now()
 		receipt, err := p.Trace(ctx, TraceRequest{Egress: request.Egress, Target: request.Target, Body: body})
+		slowest = max(slowest, time.Since(pageStarted))
 		answer.Pages++
 		var named *Error
 		if errors.As(err, &named) && named.Code == "uq_response_bytes_exceeded" {
@@ -196,6 +208,10 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 				continue
 			}
 			stopped = true
+			break
+		}
+		if err != nil && ctx.Err() != nil && answer.Scanned > 0 {
+			outOfTime = true
 			break
 		}
 		if err != nil {
@@ -222,6 +238,9 @@ func (p *Provider) TopFailures(ctx context.Context, request TopFailuresRequest) 
 	}
 	if stopped {
 		answer.Limitations = append(answer.Limitations, fmt.Sprintf("a page of %d spans still exceeded the response budget; the read stopped there", topFailuresMinRows))
+	}
+	if outOfTime {
+		answer.Limitations = append(answer.Limitations, fmt.Sprintf("the operation's time ran out after %d pages; the read stopped there and answers what was scanned", answer.Pages))
 	}
 	answer.TotalAtLeast = answer.Total >= traceTotalCap
 	// A read that stopped short of the failures is a sample, whatever total

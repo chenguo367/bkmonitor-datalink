@@ -41,8 +41,22 @@ const (
 	// EnvelopeMaxBytes is the transport ceiling, large enough for a whole
 	// chart's manifests in one dry run or apply. Each operation keeps its
 	// own request bound; discovery and description stay at MaxRequestBytes.
-	EnvelopeMaxBytes    = 16 << 20
-	TransportMargin     = 5 * time.Second
+	EnvelopeMaxBytes = 16 << 20
+	TransportMargin  = 5 * time.Second
+	// HopReturnMargin is what each hop of a routed read keeps back from the
+	// time it hands on, for the answer to come back: one transit on the
+	// cluster network and the copy of the body. Without it the target runs
+	// to the instant its caller stops waiting, and an answer kept on timeout
+	// (PartialOnTimeout) arrives after the wait for it has ended.
+	HopReturnMargin = time.Second
+	// RouteHops is the longest route a read takes: entry, Control Leader,
+	// target.
+	RouteHops = 2
+	// RouteAllowance is what the entry waits past the operation's own time
+	// for a routed read, so the target still has the operation's time and
+	// every hop its margin. It fits inside TransportMargin, the entry's
+	// allowance for writing the answer.
+	RouteAllowance      = RouteHops * HopReturnMargin
 	MaxExecutionTimeout = 2 * time.Minute
 	// InvokesPerSessionPerMinute is one session's budget of executed
 	// invocations in a clock minute. The channel's traffic is a few people
@@ -163,6 +177,10 @@ type Operation struct {
 	Effect           string
 	RequiredScope    string
 	ExecutionTimeout time.Duration
+	// PartialOnTimeout says a read answers in parts that each name their own
+	// failure (a namespace, an object): when its time runs out, what it did
+	// read is returned, incomplete, rather than dropped with the rest.
+	PartialOnTimeout bool
 	RequestMaxBytes  int
 	// ExecutionPool is evidence, sre or exec. Exec cannot enter an internal
 	// Worker route; SRE providers use their own local admission budget.
@@ -467,10 +485,13 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Input/authentication retains its short admission deadline. Execution
 	// starts from the request's original context so a longer operation is not
 	// accidentally capped by the legacy three-second context.
-	executionContext := func() (context.Context, context.CancelFunc) {
+	// A routed read waits RouteAllowance past the operation's time, inside
+	// the write allowance, so its hops' return margins come out of the
+	// transport's time and not the operation's.
+	executionContext := func(allowance time.Duration) (context.Context, context.CancelFunc) {
 		_ = controller.SetReadDeadline(time.Time{})
 		_ = controller.SetWriteDeadline(time.Now().Add(op.ExecutionTimeout + TransportMargin))
-		return context.WithTimeout(r.Context(), op.ExecutionTimeout)
+		return context.WithTimeout(r.Context(), op.ExecutionTimeout+allowance)
 	}
 	// The session's own budget, spent only by an invocation that would
 	// execute, here or on the replica it targets: a refused input, an
@@ -510,7 +531,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(403, "permission_denied", "Routing admission ended or no longer authorizes this operation.")
 			return
 		}
-		routeCtx, routeCancel := executionContext()
+		routeCtx, routeCancel := executionContext(RouteAllowance)
 		defer routeCancel()
 		out := c.options.Route(routeCtx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, OperationContractRevision: c.OperationContractRevision(op.ID), Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
 		out.Meta.Revision = c.revision
@@ -546,7 +567,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(403, "permission_denied", "The admitted session does not authorize this operation.")
 		return
 	}
-	execCtx, execCancel := executionContext()
+	execCtx, execCancel := executionContext(0)
 	defer execCancel()
 	// Who asked, for the audit record of an execution or management call.
 	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID, Operator: session.Operator, IssuedVia: session.IssuedVia})
@@ -675,6 +696,9 @@ func describe(op Operation) map[string]any {
 		input["allOf"] = rules
 	}
 	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "contract_version": op.ContractVersion, "effect": op.Effect, "required_scope": op.RequiredScope, "execution_timeout_ms": op.ExecutionTimeout.Milliseconds(), "execution_pool": op.ExecutionPool, "request_max_bytes": op.RequestMaxBytes, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	if op.PartialOnTimeout {
+		value["partial_on_timeout"] = true
+	}
 	if op.DefaultOwnerParam != "" {
 		value["default_owner_parameter"] = op.DefaultOwnerParam
 	}

@@ -132,6 +132,9 @@ type RestoredEmptyRound struct {
 	Quiet           bool   `json:"quiet,omitempty"`
 	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
 	ContentScope    string `json:"content_scope,omitempty"`
+	// IdentityRounds is how many rounds in a row ended empty because the
+	// target's identity could read none of the data, this one included.
+	IdentityRounds int `json:"identity_rounds,omitempty"`
 }
 
 // Restore seeds one object from what survived the restart. It reports whether
@@ -224,6 +227,7 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 		if round := restored.LastRound; round != nil && round.Empty != nil &&
 			round.Empty.ContentScope != "" && round.Empty.ContentScope == restored.ContentScopeNow {
 			state.quiet, state.emptiedByTarget = round.Empty.Quiet, round.Empty.EmptiedByTarget
+			state.identityRounds = round.Empty.IdentityRounds
 		}
 	}
 	if round := restored.LastRound; round != nil && healthyCompletion(restored.LastCompletion) && !round.CompletedAt.IsZero() {

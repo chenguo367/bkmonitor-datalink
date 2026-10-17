@@ -134,7 +134,7 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 	}
 	if empty := summary.Empty; empty != nil {
 		round.Empty = &fleet.RestoredEmptyRound{Quiet: empty.Quiet, EmptiedByTarget: empty.EmptiedByTarget,
-			ContentScope: empty.ContentScope}
+			ContentScope: empty.ContentScope, IdentityRounds: int(empty.IdentityRounds)}
 	}
 	for _, resolution := range summary.TargetResolutions {
 		restored := fleet.RestoredTargetResolution{StrategyID: resolution.StrategyID, State: resolution.State,

@@ -442,3 +442,60 @@ func TestTheStartingCallerLeavingDoesNotCancelTheSharedRead(t *testing.T) {
 		}
 	}
 }
+
+// The lines of the catalog are read side by side: with every query taking
+// 200 ms and a shared time far below the lines' sum, every line still
+// answers and the answer is whole and kept.
+func TestTheTrendLinesAreReadSideBySide(t *testing.T) {
+	lines := 0
+	for _, definition := range trendCatalog {
+		lines += len(definition.Lines)
+	}
+	if lines < 4 {
+		t.Fatalf("the catalog has %d lines; the test needs several", lines)
+	}
+	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
+		time.Sleep(200 * time.Millisecond)
+		return SeriesRange{}, nil
+	}}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope, ComputeTimeout: 600 * time.Millisecond}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	answer := trends.read(context.Background(), window, at)
+	if answer.Cut {
+		t.Fatalf("%d lines of 200 ms in 600 ms were cut: read one after another", lines)
+	}
+	for _, trend := range answer.Trends {
+		for _, line := range trend.Lines {
+			if line.Unavailable != "" {
+				t.Fatalf("line %s unavailable (%s)", line.Name, line.Unavailable)
+			}
+		}
+	}
+	calls := len(provider.calls)
+	trends.read(context.Background(), window, at.Add(time.Second))
+	if len(provider.calls) != calls {
+		t.Fatal("a whole answer was not kept")
+	}
+}
+
+// A read that runs out of its shared time is cut: the lines that did not
+// answer are unavailable, the answer says cut, and it is not kept -- the
+// next caller reads again rather than taking it as whole for TrendsMaxAge.
+func TestACutTrendsAnswerIsNotKept(t *testing.T) {
+	provider := &stubRange{answer: func(string, string) (SeriesRange, error) {
+		time.Sleep(300 * time.Millisecond)
+		return SeriesRange{}, nil
+	}}
+	trends := &Trends{Range: provider, Spaces: resolvedSpaces, Scope: trendTestScope, ComputeTimeout: 100 * time.Millisecond}
+	window, _ := lookupSeriesWindow("1h")
+	at := time.Unix(1789006380, 0)
+	if answer := trends.read(context.Background(), window, at); !answer.Cut {
+		t.Fatalf("a read past its time is not marked cut: %+v", answer.Cut)
+	}
+	calls := len(provider.calls)
+	trends.read(context.Background(), window, at.Add(time.Second))
+	if len(provider.calls) == calls {
+		t.Fatal("a cut answer was kept and served again")
+	}
+}

@@ -67,10 +67,14 @@ const (
 	// build that has the capability does. Not an action item: waiting for
 	// the build is the whole of what anyone can do.
 	OwnerCapability Owner = "CAPABILITY"
+	// OwnerStrategyOrCollection: the strategy's identity fields (its target)
+	// or the labels the collection writes -- the two disagree, and the
+	// row's identity evidence shows which side to align.
+	OwnerStrategyOrCollection Owner = "STRATEGY_OR_COLLECTION"
 )
 
 // Owners lists every owner, for the page's completeness check.
-var Owners = []Owner{OwnerAlarmd, OwnerData, OwnerStrategy, OwnerNobody, OwnerUndetermined, OwnerPlatform, OwnerCapability}
+var Owners = []Owner{OwnerAlarmd, OwnerData, OwnerStrategy, OwnerNobody, OwnerUndetermined, OwnerPlatform, OwnerCapability, OwnerStrategyOrCollection}
 
 // Finding is what the page renders for one object.
 type Finding struct {
@@ -149,6 +153,8 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckSlotsOverdue, true, false
 	case anomaly.Kind == KindNoData:
 		return CheckNoDataPersistent, true, false
+	case anomaly.Kind == KindIdentityUnmatched:
+		return CheckIdentityUnmatched, true, false
 	case anomaly.Kind == KindEmptyEveryRound && anomaly.EmptyEveryRound != nil &&
 		anomaly.EmptyEveryRound.Cause == EmptyEveryRoundCauseOutsideTarget:
 		return CheckEmptyAfterTarget, true, false

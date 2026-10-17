@@ -12,12 +12,14 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 )
 
@@ -228,5 +230,19 @@ func TestTheReplicasNodeIsReadOnceItAnswers(t *testing.T) {
 	}
 	if got := node(context.Background()); got != "node-7" || reads != 2 {
 		t.Fatalf("an answered node was read again: %q after %d reads", got, reads)
+	}
+}
+
+// The trends' shared read has its parts' own bounds added: the space
+// derivation, the node read, and one range query, the lines running side by
+// side.
+func TestTheTrendsReadHasItsPartsTime(t *testing.T) {
+	client, err := accessuq.NewClient("http://uq.invalid", "alarmd-test", &http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trends := fleetTrends(client, "alarmd-test", time.Now)
+	if want := trendSpaceDeriveTimeout + podNodeReadTimeout + accessuq.RangeDeadline; trends.ComputeTimeout != want {
+		t.Fatalf("shared read %v, want the parts' %v", trends.ComputeTimeout, want)
 	}
 }

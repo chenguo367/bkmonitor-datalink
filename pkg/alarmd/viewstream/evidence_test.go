@@ -215,4 +215,13 @@ func TestReadEvidenceHonorsCallerAndServerDeadlines(t *testing.T) {
 	if remaining := <-deadlines; remaining <= 0 || remaining > viewstream.EvidenceTimeout {
 		t.Fatal("handler did not inherit the server deadline")
 	}
+	// A caller with longer than EvidenceTimeout left keeps it: the hop does
+	// not cut an operation that was given more.
+	long, cancelLong := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelLong()
+	go func() { _, _ = client.ReadEvidence(long, &pb.EvidenceRequest{}) }()
+	if remaining := <-deadlines; remaining <= viewstream.EvidenceTimeout {
+		t.Fatalf("handler got %v of a 10 s caller, want the caller's deadline", remaining)
+	}
+	cancelLong()
 }

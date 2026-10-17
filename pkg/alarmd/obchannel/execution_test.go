@@ -332,3 +332,88 @@ func TestInternalEvidenceUsesSameResponseBudget(t *testing.T) {
 		t.Fatalf("unbounded internal evidence: %+v", out)
 	}
 }
+
+// A routed read runs with its operation's own time inside what the caller
+// has left, not a hop's 3 s: an operation of 20 s asked with 30 s left gets
+// 20 s; asked with 5 s left, 5 s.
+func TestARoutedReadKeepsItsOperationsTime(t *testing.T) {
+	deadlines := make(chan time.Duration, 1)
+	op := targetOperation(func(ctx context.Context, _ Params) Outcome {
+		deadline, _ := ctx.Deadline()
+		deadlines <- time.Until(deadline)
+		return Outcome{Complete: true, Value: map[string]any{}}
+	})
+	op.ExecutionTimeout = 20 * time.Second
+	c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
+	for _, tc := range []struct{ left, want time.Duration }{{30 * time.Second, 20 * time.Second}, {5 * time.Second, 5 * time.Second}} {
+		ctx, cancel := context.WithTimeout(context.Background(), tc.left)
+		if response := c.ExecuteEvidence(ctx, internalInvocation(c)); response.Error != nil {
+			t.Fatalf("with %v left: %+v", tc.left, response.Error)
+		}
+		cancel()
+		if got := <-deadlines; got > tc.want || got < tc.want-time.Second {
+			t.Errorf("with %v left the read had %v, want about %v", tc.left, got, tc.want)
+		}
+	}
+}
+
+// A caller's deadline is kept; only a caller without one gets the fallback.
+func TestCallerBoundedKeepsTheCallersDeadline(t *testing.T) {
+	long, cancelLong := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelLong()
+	kept, cancel := CallerBounded(long, RequestTimeout)
+	defer cancel()
+	if deadline, _ := kept.Deadline(); time.Until(deadline) < 50*time.Second {
+		t.Fatalf("a one-minute caller was cut to %v", time.Until(deadline))
+	}
+	unbounded, cancelUnbounded := CallerBounded(context.Background(), RequestTimeout)
+	defer cancelUnbounded()
+	if deadline, ok := unbounded.Deadline(); !ok || time.Until(deadline) > RequestTimeout {
+		t.Fatalf("a caller without a deadline got %v", time.Until(deadline))
+	}
+}
+
+// A read that answers in parts keeps what it read when its time runs out,
+// incomplete and saying so; any other read past its time is dropped.
+func TestAPartialOnTimeoutReadKeepsWhatItRead(t *testing.T) {
+	for _, partial := range []bool{true, false} {
+		op := targetOperation(func(ctx context.Context, _ Params) Outcome {
+			<-ctx.Done()
+			return Outcome{Complete: true, Value: map[string]any{"read": 2, "failed": []string{"ns-c"}}}
+		})
+		op.PartialOnTimeout = partial
+		c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		response := c.ExecuteEvidence(ctx, internalInvocation(c))
+		cancel()
+		switch {
+		case partial && (response.Error != nil || response.Result == nil || response.Evidence.Complete):
+			t.Fatalf("partial read: %+v", response)
+		case !partial && (response.Error == nil || response.Error.Code != "request_timeout"):
+			t.Fatalf("ordinary read past its time: %+v", response.Error)
+		}
+	}
+}
+
+// The reads that answer in parts -- a section per namespace, a failure per
+// object -- say so, so a read whose time runs out keeps what it read.
+func TestTheSectionedK8sReadsAnswerInParts(t *testing.T) {
+	want := map[string]bool{"k8s.workloads": true, "k8s.events": true}
+	for _, op := range K8sOperations(nil, nil, nil) {
+		if want[op.ID] && !op.PartialOnTimeout {
+			t.Errorf("%s does not keep what it read when its time runs out", op.ID)
+		}
+		delete(want, op.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("operations missing: %v", want)
+	}
+}
+
+// The hops' return margins come out of the entry's write allowance, not the
+// operation's time: the longest route's margins fit inside it.
+func TestTheRouteAllowanceFitsTheTransportMargin(t *testing.T) {
+	if RouteAllowance != RouteHops*HopReturnMargin || RouteAllowance >= TransportMargin {
+		t.Fatalf("route allowance %v for %d hops of %v, want it inside the %v transport margin", RouteAllowance, RouteHops, HopReturnMargin, TransportMargin)
+	}
+}

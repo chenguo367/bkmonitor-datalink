@@ -388,7 +388,7 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 			ReasonCode:        request.Completion.ReasonCode,
 			Contract:          request.Completion.Contract,
 			TargetResolutions: request.Completion.TargetResolutions,
-			Empty:             emptyRoundOf(request.Completion.Primary, request.ContentScope),
+			Empty:             emptyRoundOf(request.Completion.Primary, request.ContentScope, previousEmpty(current, missing)),
 		}}
 	if !missing {
 		next.LastFullSlot = current.LastFullSlot
@@ -636,6 +636,7 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 		if progress.UnfinishedRange.EligibilityV2 != nil {
 			schema = schemaRangeV2
 		}
+		progress.LastCompletion = rangeLastCompletion(progress.LastCompletion)
 	}
 	raw, err := json.Marshal(envelope{Schema: schema, Progress: progress})
 	if err == nil && progress.UnfinishedRange != nil && len(raw) > execution.MaxExpiredRangeProjectionBytes {
@@ -644,18 +645,59 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 	return raw, err
 }
 
+// rangeLastCompletion is the last completion a range record carries: the
+// summary without the fields the range decoder of a running release does not
+// know. Range records are decoded strictly (DisallowUnknownFields, below), and
+// during a rolling update or after a rollback an older replica reads what a
+// newer one wrote; a field it does not know makes the whole record corrupt to
+// it. IdentityRounds is such a field. Dropping it costs only the run: the
+// range is a run of expired Slots, which ends any run of identity-emptied
+// rounds anyway, so the count would start again after it.
+func rangeLastCompletion(summary *execution.LastCompletionSummary) *execution.LastCompletionSummary {
+	if summary == nil || summary.Empty == nil || summary.Empty.IdentityRounds == 0 {
+		return summary
+	}
+	copied, empty := *summary, *summary.Empty
+	empty.IdentityRounds = 0
+	copied.Empty = &empty
+	if !empty.Quiet && !empty.EmptiedByTarget {
+		// Nothing else was said about the round: no summary, as before
+		// the count was kept.
+		copied.Empty = nil
+	}
+	return &copied
+}
+
 // emptyRoundOf is what a whole, empty primary said about its emptiness, with
 // the content the round ran under; nil when it said nothing, so the record
 // carries nothing for it. Nil too when the commit declares no content: the
 // word is restored only under the content it was said under, and without
 // one it never would be.
-func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string) *execution.EmptyRoundSummary {
+func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string, previous *execution.EmptyRoundSummary) *execution.EmptyRoundSummary {
 	if contentScope == "" || primary == nil || primary.Completeness != execution.CompletenessFull ||
-		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget {
+		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget && primary.Identity == nil {
 		return nil
 	}
-	return &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
+	summary := &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
 		ContentScope: contentScope}
+	if primary.Identity != nil {
+		// The run continues the previous round's when that round was the
+		// same kind of empty under the same content.
+		summary.IdentityRounds = 1
+		if previous != nil && previous.IdentityRounds > 0 && previous.ContentScope == contentScope {
+			summary.IdentityRounds = previous.IdentityRounds + 1
+		}
+	}
+	return summary
+}
+
+// previousEmpty is the stored record's last round's empty summary, nil when
+// there is none to continue.
+func previousEmpty(current execution.ScheduleProgress, missing bool) *execution.EmptyRoundSummary {
+	if missing || current.LastCompletion == nil {
+		return nil
+	}
+	return current.LastCompletion.Empty
 }
 
 func decode(raw []byte) (execution.ScheduleProgress, error) {

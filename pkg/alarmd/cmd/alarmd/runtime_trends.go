@@ -255,8 +255,11 @@ func fleetTrends(client *accessuq.Client, namespace string, now func() time.Time
 	}
 	provider := trendRange{client: client}
 	spaces := &trendSpaces{list: inClusterDataIDs(), probe: probeWith(provider, now), namespace: namespace, now: now}
+	// The shared read's time is its parts' own bounds added: the space
+	// derivation, the node read, and one range query, the lines running side
+	// by side.
 	return &fleet.Trends{Range: provider, Spaces: spaces.get, Scope: fleet.TrendScope{Namespace: namespace, Container: trendContainer},
-		Node: cachedNode(inClusterPodNode(namespace))}
+		Node: cachedNode(inClusterPodNode(namespace)), ComputeTimeout: trendSpaceDeriveTimeout + podNodeReadTimeout + accessuq.RangeDeadline}
 }
 
 var podResource = schema.GroupVersionResource{Version: "v1", Resource: "pods"}

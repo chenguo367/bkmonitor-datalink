@@ -39,7 +39,14 @@ func (server *Server) SetEvidenceHandler(handler func(context.Context, *pb.Evide
 // context. Reads have no count of their own: they are an operator's, a
 // handful next to the business work.
 func (server *Server) ReadEvidence(ctx context.Context, request *pb.EvidenceRequest) (*pb.EvidenceResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, EvidenceTimeout)
+	// The caller's deadline, which gRPC carries across, is the operation's
+	// own; EvidenceTimeout bounds only a caller that sent none.
+	var cancel context.CancelFunc
+	if _, bounded := ctx.Deadline(); bounded {
+		ctx, cancel = context.WithCancel(ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, EvidenceTimeout)
+	}
 	defer cancel()
 	server.evidenceMu.RLock()
 	handler := server.evidenceHandler

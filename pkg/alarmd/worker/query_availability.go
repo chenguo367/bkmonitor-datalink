@@ -23,6 +23,16 @@ type queryAvailabilityEvidence struct {
 	// unproven.
 	primaryEmptiedOutside    bool
 	primaryWithheldOtherwise bool
+	// primaryEmptiedIdentity says a primary query came back empty because
+	// every series it returned was withheld as one the target's identity
+	// could not read (target_key_missing); primaryWithheldNotIdentity that a
+	// primary query withheld a series for any other reason, which leaves
+	// the claim unproven. withheld, withheldOutside and withheldKeyMissing
+	// add up the primary queries' counts, and identitySamples keeps a few.
+	primaryEmptiedIdentity                        bool
+	primaryWithheldNotIdentity                    bool
+	withheld, withheldOutside, withheldKeyMissing uint64
+	identitySamples                               []execution.IdentitySample
 	// clock is the slowest primary query's budget and elapsed time.
 	clock *execution.PhysicalQueryClock
 	// sentLateTimeout says a primary query timed out after being sent late
@@ -55,6 +65,19 @@ func (e *queryAvailabilityEvidence) observe(binding execution.NamedInputBinding,
 	} else if physical.Withheld > 0 && physical.DataState == execution.DataStateEmpty {
 		e.primaryEmptiedOutside = true
 	}
+	if physical.Withheld > physical.WithheldKeyMissing {
+		e.primaryWithheldNotIdentity = true
+	} else if physical.Withheld > 0 && physical.DataState == execution.DataStateEmpty {
+		e.primaryEmptiedIdentity = true
+	}
+	e.withheld += physical.Withheld
+	e.withheldOutside += physical.WithheldOutsideTarget
+	e.withheldKeyMissing += physical.WithheldKeyMissing
+	for _, sample := range physical.IdentitySamples {
+		if len(e.identitySamples) < execution.IdentitySamplesPerQuery {
+			e.identitySamples = append(e.identitySamples, sample)
+		}
+	}
 	if physical.Completeness == execution.CompletenessUnavailable && e.reason == "" {
 		e.reason = execution.AttributedReason(binding.ReasonCode, binding.UnavailableAttribution)
 	}
@@ -80,6 +103,24 @@ func (e queryAvailabilityEvidence) availability() execution.QueryAvailability {
 func (e queryAvailabilityEvidence) emptiedByTarget(primary execution.PrimaryInputFact) bool {
 	return primary.Completeness == execution.CompletenessFull && primary.DataState == execution.DataStateEmpty &&
 		e.primaryEmptiedOutside && !e.primaryWithheldOtherwise
+}
+
+// emptiedByIdentity says a FULL, EMPTY primary was empty because every series
+// its queries returned was one the target's identity could not read: data
+// arrived and none of it built the target's key or passed its model gate.
+func (e queryAvailabilityEvidence) emptiedByIdentity(primary execution.PrimaryInputFact) bool {
+	return primary.Completeness == execution.CompletenessFull && primary.DataState == execution.DataStateEmpty &&
+		e.primaryEmptiedIdentity && !e.primaryWithheldNotIdentity
+}
+
+// identityEvidence is what a round emptied by identity carries: the withheld
+// counts by reason and the samples; nil for any other round.
+func (e queryAvailabilityEvidence) identityEvidence(primary execution.PrimaryInputFact) *execution.IdentityEvidence {
+	if !e.emptiedByIdentity(primary) {
+		return nil
+	}
+	return &execution.IdentityEvidence{Withheld: e.withheld, OutsideTarget: e.withheldOutside, KeyMissing: e.withheldKeyMissing,
+		Samples: append([]execution.IdentitySample(nil), e.identitySamples...)}
 }
 
 // quietWhenEmpty says a FULL, EMPTY primary is an event count of groups that

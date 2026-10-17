@@ -42,13 +42,20 @@ type Provider struct {
 	shellless shelllessMemo
 }
 
-// The provider's per-request bounds: how long one execution may run (inside
-// the channel's two-minute operation ceiling), how much one answer may carry
+// The provider's per-request bounds: how long one execution may run (what the
+// channel's two-minute operation ceiling leaves once the checks before and
+// after, the start and the termination grace are kept back), how much one answer may carry
 // (the channel sets it from the pod's memory; DefaultOutputBytes until it
 // does), how much stdin one execution takes, and how many targets one page
 // lists. There is no bound on how many requests run at once.
 const (
-	MaxExecTimeout     = 110 * time.Second
+	// ExecOperationCeiling is the channel's operation ceiling the whole run
+	// fits in (obchannel.MaxExecutionTimeout; a test keeps the two equal).
+	ExecOperationCeiling = 2 * time.Minute
+	// MaxExecTimeout is the command's share: 120 - (3 + 4 + 4 + 3) = 106 s.
+	// It was 110 s, and a command run that long had its termination record
+	// and final check cut by the operation's deadline (timeout audit D08).
+	MaxExecTimeout     = ExecOperationCeiling - (2*VerificationTimeout + StartupAllowance + TerminationGrace)
 	DefaultOutputBytes = 64 << 20
 	MaxOutputCeiling   = 256 << 20
 	MaxStdinBytes      = 1 << 20

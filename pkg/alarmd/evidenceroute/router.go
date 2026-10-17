@@ -60,7 +60,7 @@ func New(options Options) (*Router, error) {
 // Invoke is called only after the ingress has admitted the CLI session. New
 // channel/control identities may dispatch directly to the resolved provider.
 func (r *Router) Invoke(ctx context.Context, call obchannel.Invocation) obchannel.Response {
-	ctx, cancel := context.WithTimeout(ctx, obchannel.RequestTimeout)
+	ctx, cancel := obchannel.CallerBounded(ctx, obchannel.RequestTimeout)
 	defer cancel()
 	if response, handled := r.invokeDirect(ctx, call); handled {
 		return response
@@ -109,8 +109,23 @@ func (r *Router) Handle(ctx context.Context, req *pb.EvidenceRequest) (*pb.Evide
 	if req == nil || proto.Size(req) > obchannel.MaxRequestBytes {
 		return nil, status.Error(codes.InvalidArgument, "Evidence request exceeds its budget.")
 	}
-	ctx, cancel := context.WithTimeout(ctx, obchannel.RequestTimeout)
+	ctx, cancel := obchannel.CallerBounded(ctx, obchannel.RequestTimeout)
 	defer cancel()
+	// A hop works to its caller's deadline less HopReturnMargin, so it
+	// answers -- with what it has, for a read that keeps it on timeout --
+	// while the caller is still waiting for the answer. The caller's wait
+	// is the deadline gRPC carried; only the work here ends earlier.
+	if deadline, bounded := ctx.Deadline(); bounded {
+		left := time.Until(deadline) - obchannel.HopReturnMargin
+		if left <= 0 {
+			// The caller reads this as its target's timeout, as it would a
+			// hop that ran out of time on the way.
+			return nil, status.Error(codes.DeadlineExceeded, "No time is left to answer the caller within.")
+		}
+		var cancelWork context.CancelFunc
+		ctx, cancelWork = context.WithTimeout(ctx, left)
+		defer cancelWork()
+	}
 	if req.EnvironmentId != r.options.EnvironmentID || req.ChannelVersion != obchannel.Version || req.RequestId == "" {
 		return nil, status.Error(codes.FailedPrecondition, "Evidence environment or protocol does not match.")
 	}

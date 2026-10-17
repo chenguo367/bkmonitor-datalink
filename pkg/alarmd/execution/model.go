@@ -3303,6 +3303,12 @@ type PrimaryInputFact struct {
 	// target: the data was there, the target selected none of it. Set by
 	// the worker from the query completions.
 	EmptiedByTarget bool
+	// Identity says a FULL, EMPTY primary was empty because every series
+	// its queries returned was one the target's identity could not read
+	// (target_key_missing), with the counts and samples; nil otherwise. Set
+	// by the worker from the query completions, observation only like the
+	// two flags beside it.
+	Identity *IdentityEvidence
 	// QuietWhenEmpty says a FULL, EMPTY primary is an event count of groups
 	// that came back with no group: no event in the range asked. Set by the
 	// worker the same way.
@@ -4077,6 +4083,12 @@ type EmptyRoundSummary struct {
 	Quiet           bool   `json:"quiet,omitempty"`
 	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
 	ContentScope    string `json:"content_scope,omitempty"`
+	// IdentityRounds is how many rounds in a row, this one included, came
+	// back empty because every series was one the target's identity could
+	// not read (PrimaryInputFact.Identity), under this content; zero for
+	// any other empty round. Kept so a restart resumes the count rather
+	// than starting it again.
+	IdentityRounds uint32 `json:"identity_rounds,omitempty"`
 }
 
 type UnfinishedSlotProjection struct {
