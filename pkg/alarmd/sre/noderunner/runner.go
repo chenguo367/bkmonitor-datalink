@@ -219,6 +219,9 @@ func (r *Runner) start(q Request) error {
 		if errors.Is(err, exec.ErrWaitDelay) {
 			message = "output pipe remained open after command exit; detached descendants are outside the supervision contract"
 		}
+		// Release argv, environment, stdin readers and redactor literals when
+		// the execution ends; retained evidence needs only the final status.
+		r.cmd = nil
 		r.finish(state, message, &code)
 		r.mu.Unlock()
 	}()
