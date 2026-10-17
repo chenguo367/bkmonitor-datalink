@@ -316,9 +316,14 @@ func (m *effectiveMaintenance) run(ctx context.Context) {
 // Group's Plans from the store on every tick, whether or not one of them had
 // a schedule: on a deployment where none did, that was a constant read rate
 // against the control store that answered nothing.
+//
+// The step has no deadline of its own, and neither has a group's read or a
+// send: every call in it is bounded by its own client, a Redis command by
+// the configured dial, read and write timeouts and the close write by the
+// producer's (decisionProducerTimeout). A budget over the whole step used to
+// be shared by every owned group's reads and sends, less than one Kafka write
+// may take, so a slow store cut the step at whichever call came last.
 func (m *effectiveMaintenance) step(ctx context.Context) {
-	ctx, cancelStep := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelStep()
 	m.bundle.mu.RLock()
 	owned := make(map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime, len(m.bundle.runners))
 	if !m.bundle.draining && !m.bundle.closed {
@@ -400,11 +405,9 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		}
 		qg := stale[(start+n)%len(stale)]
 		m.readCursor = qg
-		round, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := runners[qg].withMaintenance(round, func(round context.Context, _ func(context.Context) error) error {
+		err := runners[qg].withMaintenance(ctx, func(round context.Context, _ func(context.Context) error) error {
 			return m.readGroup(round, qg, runners[qg])
 		})
-		cancel()
 		if err != nil {
 			// The view not allowing the read yet is a rollout's shape, every
 			// owned Query Group once in a replica's first seconds; the store
@@ -741,8 +744,6 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 // time unreadable at the send, the producer failing.
 func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan, key openalerts.StrategyKey, batch []linkdoutput.CloseRequest) (int, error) {
 	sent := 0
-	round, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 	// Counted in flight on the Query Group's lifecycle, as a Slot is: a
 	// handover waits for the send before releasing the lease it is under.
 	lifecycle, owned := m.bundle.enterOwnedWork(qg)
@@ -755,7 +756,7 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		return 0, err
 	}
 	defer m.bundle.exitOwnedWork(lifecycle)
-	err := runner.withMaintenance(round, func(round context.Context, check func(context.Context) error) error {
+	err := runner.withMaintenance(ctx, func(round context.Context, check func(context.Context) error) error {
 		// Recheck current ownership and rules immediately before side effects;
 		// never retry an old inactive judgment across an active boundary.
 		if err := check(round); err != nil {
@@ -774,8 +775,10 @@ func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.Query
 		case fact.Status() != strategy.EffectiveTimeInactive:
 			return errCloseTimeUnknown
 		}
-		// Sarama's synchronous ACK wait follows the existing producer timeout;
-		// a context deadline cannot cancel a message already handed to Kafka.
+		// Sarama's synchronous ACK wait follows the producer's timeout
+		// (decisionProducerTimeout, 10s: a picked number, on the timeout
+		// audit's follow-up list); a context deadline cannot cancel a
+		// message already handed to Kafka.
 		if err := m.writer.WriteCloseBatch(round, batch); err != nil {
 			return fmt.Errorf("%w: %w", errCloseSend, err)
 		}

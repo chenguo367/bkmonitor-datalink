@@ -26,10 +26,18 @@ type maintenanceTestCatalog struct {
 	uncompilable int
 	reads        int
 	err          error
+	// took, when set, is the read's cost, answered against the caller's
+	// deadline.
+	took func(context.Context) error
 }
 
-func (c *maintenanceTestCatalog) CurrentPlans(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (controlplane.MaintenancePlans, error) {
+func (c *maintenanceTestCatalog) CurrentPlans(ctx context.Context, _ execution.QueryGroupIdentity, _ execution.EvaluationTime) (controlplane.MaintenancePlans, error) {
 	c.reads++
+	if c.took != nil {
+		if err := c.took(ctx); err != nil {
+			return controlplane.MaintenancePlans{}, err
+		}
+	}
 	if c.err != nil {
 		return controlplane.MaintenancePlans{}, c.err
 	}
@@ -377,5 +385,54 @@ func TestEffectiveMaintenanceTakesItsSourceFromTheLinksTarget(t *testing.T) {
 	g.m.step(context.Background())
 	if len(g.writer.batches) != 0 || g.m.Stats()["unavailable"] == 0 {
 		t.Fatalf("a Console that could not name the source still closed, or said nothing: %v %v", g.writer.batches, g.m.Stats())
+	}
+}
+
+// slowStore spends time against the caller's deadline without sleeping: a
+// call of cost d fails as a deadline would when the caller has less than
+// what was spent so far plus d left, and otherwise counts d as spent.
+type slowStore struct {
+	mu    sync.Mutex
+	spent time.Duration
+}
+
+func (s *slowStore) take(d time.Duration) func(context.Context) error {
+	return func(ctx context.Context) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < s.spent+d {
+			return context.DeadlineExceeded
+		}
+		s.spent += d
+		return nil
+	}
+}
+
+// Each call the loop makes is bounded by its own client (the Redis
+// command by the configured timeouts, the Kafka write by the producer's), so
+// a store slow on every call but answering each one inside its timeout still
+// closes: a Plans read and an owner check that together outlast the five
+// seconds the whole step used to have, and either one alone outlasting the
+// five seconds its own round used to have (two Redis round trips near the
+// default three-second read timeout).
+func TestEffectiveMaintenanceClosesWhenItsCallsTogetherOutlastTheOldStepBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		read, check time.Duration
+	}{
+		{"read-and-check-together", 3 * time.Second, 2500 * time.Millisecond},
+		{"read-alone", 5500 * time.Millisecond, 0},
+		{"check-alone", 0, 5500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), []openalerts.Alert{maintenanceAlert("native", "critical")})
+			store := &slowStore{}
+			f.m.catalog.(*maintenanceTestCatalog).took = store.take(tc.read)
+			f.runner.check = store.take(tc.check)
+			f.m.step(context.Background())
+			if f.runner.lastErr != nil || len(f.writer.batches) != 1 {
+				t.Fatalf("err=%v batches=%v spent=%s", f.runner.lastErr, f.writer.batches, store.spent)
+			}
+		})
 	}
 }
