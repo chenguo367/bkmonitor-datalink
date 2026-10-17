@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -64,6 +65,10 @@ type schedulerShaper struct {
 		recovery uint64
 	}
 	reading atomic.Pointer[schedulerShapeReading]
+	// live is the runtime's live reserve, set from the measured post-query
+	// tail at every derivation; nil when the runtime sizes no query deadline
+	// from it.
+	live *execution.LiveReserve
 }
 
 func newSchedulerShaper(flights *scheduler.FlightCoordinator, cfg config.Config, now func() time.Time) *schedulerShaper {
@@ -148,21 +153,36 @@ func (shaper *schedulerShaper) derive(owned int) schedulerShapeReading {
 		replayRate = float64(recovery-shaper.last.recovery) / elapsed
 	}
 	shaper.last.at, shaper.last.recovery = now, recovery
-	execution := shaper.executions.Reference(now)
+	executionReference := shaper.executions.Reference(now)
 	peakSlots := shaper.ready.Peak(now)
 	shaper.mu.Unlock()
 
 	demand := config.SchedulerDemand{PeakSlotsPerSecond: float64(peakSlots),
 		PeakQueriesPerSecond: float64(shaper.flights.PeakNormalRequestsPerSecond()), ReplayQueriesPerSecond: replayRate,
-		Hold: shaper.flights.HoldReference(), Execution: execution,
+		Hold: shaper.flights.HoldReference(), Execution: executionReference,
 		OwnedQueryGroups: owned, MaxQueuedItemsPerQG: shaper.limits.MaxQueuedItemsPerQG}
 	shape := config.DeriveSchedulerShape(shaper.ceiling, demand)
+	// The query deadlines of this worker's Slots keep the measured post-query
+	// tail free for what follows the query; before the first measurement it is
+	// zero and the frozen reserve applies (execution.QueryDeadlineUnixMilli).
+	shaper.live.Set(shaper.flights.PostQueryTail())
 	limits := shaper.limits
 	limits.ProcessQueryPermits, limits.RecoveryQueryPermits = shape.ProcessQueryPermits, shape.RecoveryQueryPermits
 	limits.ReadyQueueCapacity, limits.RecoveryQueueCapacity = shape.ReadyQueueCapacity, shape.RecoveryQueueCapacity
 	reading := schedulerShapeReading{Shape: shape, Demand: demand, At: now, Applied: shaper.flights.ResizeQueryLimits(limits) == nil}
 	shaper.reading.Store(&reading)
 	return reading
+}
+
+func tightQueryGroupKeys(groups []execution.QueryGroupIdentity) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	keys := make([]string, len(groups))
+	for index, group := range groups {
+		keys[index] = string(group)
+	}
+	return keys
 }
 
 // facts is the shape in force and its inputs as the replica's capacity
@@ -182,5 +202,8 @@ func (shaper *schedulerShaper) facts() *fleet.SchedulerShape {
 		RecoveryQueueCapacity: shape.RecoveryQueueCapacity, ActiveExecutionCeiling: shape.ActiveExecutionCeiling,
 		PeakQueriesPerSecond: demand.PeakQueriesPerSecond, ReplayQueriesPerSecond: demand.ReplayQueriesPerSecond,
 		PeakSlotsPerSecond: demand.PeakSlotsPerSecond, HoldMillis: demand.Hold.Milliseconds(),
-		ExecutionMillis: demand.Execution.Milliseconds(), OwnedQueryGroups: demand.OwnedQueryGroups}
+		ExecutionMillis: demand.Execution.Milliseconds(), OwnedQueryGroups: demand.OwnedQueryGroups,
+		PostQueryTailMillis: shaper.live.Reserve().Milliseconds(), LiveReserveFallbacks: shaper.live.Fallbacks(),
+		LiveReserveOverruns: shaper.live.Overruns(),
+		TightQueryGroups:    tightQueryGroupKeys(shaper.live.TightQueryGroups(shaper.now()))}
 }

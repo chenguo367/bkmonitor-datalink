@@ -72,7 +72,7 @@ func (source *Source) executeSupplement(
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, fmt.Errorf("alarmd access: resolve frozen plan: %w", err)
 	}
-	prepared, err := Prepare(request.Contract, frozen, source.config.MinReadyDelay)
+	prepared, err := prepare(request.Contract, frozen, source.config.MinReadyDelay, false, source.config.LiveReserve)
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}

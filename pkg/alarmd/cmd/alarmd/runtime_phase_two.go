@@ -638,13 +638,17 @@ type phaseTwoWorkerBundleDependencies struct {
 	// Flights is the process's query coordinator, whose budget the bundle
 	// sizes from the work it owns (schedulerShaper); nil keeps the startup
 	// shape.
-	Flights    *scheduler.FlightCoordinator
-	Health     *phaseTwoApplicationHealth
-	Control    phaseTwoControlRuntime
-	Ownership  phaseTwoOwnershipRuntime
-	Recorder   *metric.Recorder
-	Observer   observability.Observer
-	TargetFlow *observability.TargetFlow
+	Flights *scheduler.FlightCoordinator
+	// LiveReserve is this runtime's measured post-query tail, published by the
+	// bundle's shaper and read by its access source when it sizes query
+	// deadlines; nil runs queries under the frozen reserve.
+	LiveReserve *execution.LiveReserve
+	Health      *phaseTwoApplicationHealth
+	Control     phaseTwoControlRuntime
+	Ownership   phaseTwoOwnershipRuntime
+	Recorder    *metric.Recorder
+	Observer    observability.Observer
+	TargetFlow  *observability.TargetFlow
 	// FleetAPI serves the object facts once this runtime is open, and
 	// RefreshOpenAlerts reads the consumer's open alert publication into the
 	// process copy; run once at start and then on its own cadence.
@@ -1110,6 +1114,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		liveness:       newPhaseTwoLiveness(dependencies.Now, dependencies.Recorder)}
 	if dependencies.Flights != nil {
 		bundle.shaper = newSchedulerShaper(dependencies.Flights, dependencies.Config, dependencies.Now)
+		bundle.shaper.live = dependencies.LiveReserve
 	}
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)

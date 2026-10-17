@@ -160,6 +160,10 @@ type Config struct {
 	// compare later reads of the same window with; see package lookback. It
 	// sees the query and hands nothing back into the pipeline. Optional.
 	Lookback *lookback.Engine
+	// LiveReserve is this runtime's measured post-query tail, which sizes the
+	// deadline its queries run under (execution.LiveReserve); nil runs every
+	// query under the plan's frozen reserve.
+	LiveReserve *execution.LiveReserve
 }
 
 type Source struct {
@@ -212,11 +216,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, fmt.Errorf("alarmd access: resolve frozen plan: %w", err)
 	}
-	prepared, err := prepare(request.Contract, frozen, source.config.MinReadyDelay, request.Operation != execution.OperationNormal)
+	prepared, err := prepare(request.Contract, frozen, source.config.MinReadyDelay, request.Operation != execution.OperationNormal, source.config.LiveReserve)
 	if err != nil {
 		return execution.QueryExecutionCompletion{}, err
 	}
-	recoveryDeadline, budgetErr := deriveRecoveryQueryDeadline(request, frozen, recoveryStartedAt)
+	recoveryDeadline, budgetErr := deriveRecoveryQueryDeadline(request, frozen, recoveryStartedAt, source.config.LiveReserve)
 	source.observeQueryTiming(ctx, request, frozen, prepared, recoveryStartedAt, recoveryDeadline)
 	// The deadline this recovery runs under, from here on: its channel wait
 	// and its queries are bounded by it, not by the frozen Slot's first
@@ -260,7 +264,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				if err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
-				prepared, err = prepare(request.Contract, frozen, source.config.MinReadyDelay, true)
+				prepared, err = prepare(request.Contract, frozen, source.config.MinReadyDelay, true, source.config.LiveReserve)
 				if err != nil {
 					return execution.QueryExecutionCompletion{}, err
 				}
@@ -278,7 +282,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			if err != nil {
 				return execution.QueryExecutionCompletion{}, err
 			}
-			prepared, err = prepare(request.Contract, frozen, source.config.MinReadyDelay, true)
+			prepared, err = prepare(request.Contract, frozen, source.config.MinReadyDelay, true, source.config.LiveReserve)
 			if err != nil {
 				return execution.QueryExecutionCompletion{}, err
 			}
@@ -349,9 +353,20 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			}
 		}
 		queryDeadline := time.UnixMilli(query.DeadlineUnixMilli)
+		if now := source.now(); !queryDeadline.After(now) && query.FrozenDeadlineUnixMilli > now.UnixMilli() {
+			// The live reserve left this query no time; the frozen one still
+			// does. Run it under the frozen reserve rather than fail it now.
+			queryDeadline = time.UnixMilli(query.FrozenDeadlineUnixMilli)
+			source.config.LiveReserve.CountFallback(request.Contract.Slot.QueryGroup, now)
+		}
 		// Where the budget ending at that deadline began: a recovery's is
 		// counted from its arrival, a normal query's from its Slot.
 		budgetStart := int64(request.Contract.Slot.EvaluationTime) * 1000
+		if request.Operation == execution.OperationNormal && query.CompletionDeadlineUnixMilli > 0 {
+			// A normal Slot is due by its consumers' completion deadline; a
+			// recovery runs under the budget it derives from its arrival.
+			execution.MarkCompletionDeadline(queryCtx, time.UnixMilli(query.CompletionDeadlineUnixMilli))
+		}
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
 			budgetStart = recoveryStartedAt.UnixMilli()
@@ -629,6 +644,7 @@ func deriveRecoveryQueryDeadline(
 	request execution.QueryExecutionRequest,
 	frozen FrozenPlan,
 	startedAt time.Time,
+	live *execution.LiveReserve,
 ) (time.Time, error) {
 	if request.Operation == execution.OperationNormal {
 		return time.Time{}, nil
@@ -649,7 +665,10 @@ func deriveRecoveryQueryDeadline(
 				return time.Time{}, errors.New("alarmd access: frozen consumer schedule unavailable")
 			}
 			intervalMillis := spec.EvaluationIntervalSeconds * 1000
-			candidate := intervalMillis - consumer.DownstreamExecutionReserveMilliSec
+			candidate, fellBack := live.QueryBudgetMilli(consumer, request.Contract.Slot.QueryGroup, intervalMillis)
+			if fellBack {
+				live.CountFallback(request.Contract.Slot.QueryGroup, startedAt)
+			}
 			if intervalMillis <= 0 || consumer.DownstreamExecutionReserveMilliSec <= 0 || candidate <= 0 {
 				return time.Time{}, errors.New("alarmd access: recovery query budget is invalid")
 			}
@@ -732,10 +751,18 @@ type PlannedQuery struct {
 	ReadinessInvalidRequirements []execution.DataRequirement
 	ReadyAtUnixMilli             int64
 	DeadlineUnixMilli            int64
+	// FrozenDeadlineUnixMilli is the deadline under the plan's frozen reserve.
+	// DeadlineUnixMilli is under this worker's live reserve when one is
+	// measured; the frozen one is the fallback when the live one has passed
+	// by the time the query starts.
+	FrozenDeadlineUnixMilli int64
+	// CompletionDeadlineUnixMilli is the earliest completion deadline of the
+	// consumers the query serves: a Slot returning after it overran.
+	CompletionDeadlineUnixMilli int64
 }
 
 func Prepare(contractRef execution.FrozenExecutionContractRef, frozen FrozenPlan, minReadyDelay time.Duration) (PreparedExecution, error) {
-	return prepare(contractRef, frozen, minReadyDelay, false)
+	return prepare(contractRef, frozen, minReadyDelay, false, nil)
 }
 
 // prepare plans one Slot's physical queries.
@@ -752,6 +779,7 @@ func prepare(
 	frozen FrozenPlan,
 	minReadyDelay time.Duration,
 	allowExhaustedRecoveryBudget bool,
+	live *execution.LiveReserve,
 ) (PreparedExecution, error) {
 	if err := contractRef.Validate(); err != nil {
 		return PreparedExecution{}, err
@@ -815,10 +843,17 @@ func prepare(
 			if err != nil {
 				return PreparedExecution{}, err
 			}
-			candidate := consumer.ConsumerDeadlineUnixMilli - consumer.DownstreamExecutionReserveMilliSec
-			if candidate <= readyAt && !allowExhaustedRecoveryBudget {
+			// Whether the consumer can run at all is decided on the frozen
+			// reserve, as the plan was built: a slow post-query tail on this
+			// worker never takes a consumer out of execution.
+			frozenCandidate := consumer.ConsumerDeadlineUnixMilli - consumer.DownstreamExecutionReserveMilliSec
+			if frozenCandidate <= readyAt && !allowExhaustedRecoveryBudget {
 				invalidRequirement.Consumers = append(invalidRequirement.Consumers, consumer)
 				continue
+			}
+			candidate, fellBack := live.QueryDeadlineUnixMilli(consumer, contractRef.Slot.QueryGroup, readyAt)
+			if fellBack {
+				live.CountFallback(contractRef.Slot.QueryGroup, time.UnixMilli(readyAt))
 			}
 			validRequirement.Consumers = append(validRequirement.Consumers, consumer)
 			if planned.ReadyAtUnixMilli == 0 || readyAt < planned.ReadyAtUnixMilli {
@@ -826,6 +861,12 @@ func prepare(
 			}
 			if planned.DeadlineUnixMilli == 0 || candidate < planned.DeadlineUnixMilli {
 				planned.DeadlineUnixMilli = candidate
+			}
+			if planned.FrozenDeadlineUnixMilli == 0 || frozenCandidate < planned.FrozenDeadlineUnixMilli {
+				planned.FrozenDeadlineUnixMilli = frozenCandidate
+			}
+			if planned.CompletionDeadlineUnixMilli == 0 || consumer.ConsumerDeadlineUnixMilli < planned.CompletionDeadlineUnixMilli {
+				planned.CompletionDeadlineUnixMilli = consumer.ConsumerDeadlineUnixMilli
 			}
 		}
 		if len(validRequirement.Consumers) != 0 {

@@ -571,6 +571,10 @@ func openProductionPhaseTwoBundleAssembly(
 	// The latest records whose address is not their host's, for fleet.get to
 	// name beside the count.
 	addressDiffers := &fleet.AddressDiffersSamples{}
+	// One runtime, one measured post-query tail: its shaper publishes it, its
+	// access source sizes query deadlines from it.
+	liveReserve := &execution.LiveReserve{}
+	flights.SetLiveReserve(liveReserve)
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:             cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                       external.Now,
@@ -583,6 +587,7 @@ func openProductionPhaseTwoBundleAssembly(
 		ScopeDrops:                scopeDrops,
 		ObserveSeriesPulled:       seriesPullTally.Add,
 		Lookback:                  lookbackEngine,
+		LiveReserve:               liveReserve,
 	})
 	if err != nil {
 		return nil, err
@@ -1139,6 +1144,7 @@ func openProductionPhaseTwoBundleAssembly(
 	surface.warn(logger)
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Flights:           flights,
+		LiveReserve:       liveReserve,
 		Lookback:          lookbackEngine,
 		ReadHolds:         readHolds,
 		ActivationBlocked: repository.ActivationBlockedReading,

@@ -181,7 +181,12 @@ func (engine *Engine) Prepare(query Query) {
 	candidate := execution.LoweredReadHold(base, state.step)
 	baseline := query.ReadyAt.Add(-hold)
 	readyAt := baseline.Add(candidate)
-	start := readyAt.Add(-RecheckTimeout)
+	// The trial starts as long before the candidate readiness point as a read
+	// of this group's query takes (rereadBound), so a query slower than
+	// RecheckTimeout can still finish before that point and prove the lower
+	// hold; a fixed RecheckTimeout cut every trial of such a group short and
+	// kept its alerts later than they need to be.
+	start := readyAt.Add(-state.rereadBound())
 	if start.Before(baseline) {
 		start = baseline
 	}
@@ -314,7 +319,9 @@ func (engine *Engine) earlyQueueLocked(now time.Time, free int) time.Time {
 }
 
 func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, release func(), yield <-chan struct{}) {
-	budget := min(RecheckTimeout, max(trial.readyAt.Sub(engine.options.Now()), 0))
+	// As long as a read of the group's query takes, never past the candidate
+	// readiness point: the trial can never delay the formal read.
+	budget := min(engine.rereadTimeout(trial.query.Contract.Slot.QueryGroup), max(trial.readyAt.Sub(engine.options.Now()), 0))
 	readCtx, cancel := context.WithTimeout(ctx, budget)
 	engine.mu.Lock()
 	trial.cancel = cancel
