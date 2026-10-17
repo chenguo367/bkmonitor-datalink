@@ -162,12 +162,18 @@ func TestAHeldSlotsTrialReadIsItsPrimaryWindow(t *testing.T) {
 	// the primary, and the reservation must be the primary's either way.
 	for _, dependencyFirst := range []bool{true, false} {
 		t.Run(map[bool]string{true: "dependency planned first", false: "primary planned first"}[dependencyFirst], func(t *testing.T) {
-			heldSlotTrialRead(t, dependencyFirst)
+			heldSlotTrialRead(t, dependencyFirst, false)
 		})
 	}
 }
 
-func heldSlotTrialRead(t *testing.T, dependencyFirst bool) {
+// While the Query Group's queries are failing, a held Slot reserves no earlier-read trial: the trial would be one
+// more read of a backend not answering in time.
+func TestAHeldSlotWhoseBackendIsFailingReservesNoTrial(t *testing.T) {
+	heldSlotTrialRead(t, false, true)
+}
+
+func heldSlotTrialRead(t *testing.T, dependencyFirst, failing bool) {
 	hold := 300 * time.Second
 	var contractRef execution.FrozenExecutionContractRef
 	var frozen FrozenPlan
@@ -222,7 +228,7 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst bool) {
 	source.now = at
 	source.wait = func(context.Context, time.Duration) error { return nil }
 	request := execution.QueryExecutionRequest{Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1}
-	_, err = source.Execute(context.Background(), request, &recordingConsumer{})
+	_, err = source.Execute(execution.WithBackendFailing(context.Background(), failing), request, &recordingConsumer{})
 	heldReady, deferred := ReadinessDeferredAt(err)
 	if !deferred || !heldReady.After(evaluation.Add(hold)) {
 		t.Fatalf("fixture: the held Slot answered %v (ready at %s) at its evaluation time %s, want it deferred past its hold", err, heldReady, evaluation)
@@ -233,6 +239,15 @@ func heldSlotTrialRead(t *testing.T, dependencyFirst bool) {
 	step := time.Duration(frozen.QueryFacts[frozen.Requirements[0].LogicalQueryRef].StepMillis) * time.Millisecond
 	set(heldReady.Add(-hold + execution.LoweredReadHold(hold, step) - lookback.RecheckTimeout))
 	engine.StepEarly(context.Background())
+	if failing {
+		time.Sleep(50 * time.Millisecond)
+		recheck.mu.Lock()
+		defer recheck.mu.Unlock()
+		if len(recheck.specs) != 0 {
+			t.Fatalf("a Slot whose backend is failing made %d trial reads", len(recheck.specs))
+		}
+		return
+	}
 	// Wait for the trial read to have finished, not only to have asked: the
 	// engine counts its bytes in the same step that files its answer, and a
 	// formal first read that finds it still running takes it as overtaken.

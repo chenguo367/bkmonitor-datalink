@@ -207,7 +207,10 @@ func TestAStaleCandidateCannotSupplyEvidenceForANewBaseHold(t *testing.T) {
 	}
 }
 
-func TestAnEarlierReadDoesNotStartBeforeReadinessWithoutTheHold(t *testing.T) {
+// A trial of no hold - half the hold under a step - has the readiness without the hold as its own candidate point,
+// so it starts the group's reread bound before that point, never at it: held to it, it had no time to read. It
+// still reads nothing before its own start.
+func TestATrialOfNoHoldStartsTheRereadBoundBeforeTheReadinessWithoutTheHold(t *testing.T) {
 	f := newFixture(t)
 	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
 	q := heldQuery(f)
@@ -215,18 +218,29 @@ func TestAnEarlierReadDoesNotStartBeforeReadinessWithoutTheHold(t *testing.T) {
 	q.ReadyAt = f.clock.now().Add(68 * time.Second)
 	f.engine.Prepare(q)
 	trial := f.group("qg").prepared
-	// Half of 8 s is less than a step: the trial tries no hold at all, at
-	// the readiness without h and no earlier.
 	baseline := q.ReadyAt.Add(-8 * time.Second)
-	if trial.candidateHold != 0 || !trial.at.Equal(baseline) || !trial.readyAt.Equal(baseline) {
-		t.Fatalf("short hold trial %+v does not try zero at the no-h readiness %v", trial, baseline)
+	if trial.candidateHold != 0 || !trial.readyAt.Equal(baseline) || !trial.at.Equal(baseline.Add(-RecheckTimeout)) {
+		t.Fatalf("short hold trial %+v, want no hold tried at %v from %v", trial, baseline, baseline.Add(-RecheckTimeout))
 	}
-	f.clock.set(baseline.Add(-time.Millisecond))
+	f.clock.set(trial.at.Add(-time.Millisecond))
 	f.engine.StepEarly(context.Background())
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.specs) != 0 {
-		t.Fatal("trial read started before readiness without h")
+		t.Fatal("trial read started before its own start")
+	}
+}
+
+// A trial of a lower hold still starts no earlier than the readiness without the hold.
+func TestATrialOfALowerHoldStartsNoEarlierThanTheReadinessWithoutTheHold(t *testing.T) {
+	f := newFixture(t)
+	f.engine.options.OnEarlierRead = func(EarlierReadEvidence) {}
+	q := heldQuery(f) // a two-minute hold on a one-minute step: the trial tries one minute
+	f.engine.Prepare(q)
+	trial := f.group("qg").prepared
+	baseline := q.ReadyAt.Add(-2 * time.Minute)
+	if trial.candidateHold != time.Minute || trial.at.Before(baseline) {
+		t.Fatalf("lower hold trial %+v starts before the readiness without the hold %v", trial, baseline)
 	}
 }
 

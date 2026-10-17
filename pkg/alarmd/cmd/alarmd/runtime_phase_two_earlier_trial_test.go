@@ -82,3 +82,125 @@ func TestAHeldSlotReservesItsEarlierReadTrialAtItsFirstAttempt(t *testing.T) {
 		t.Fatalf("trials reserved up to %.1f s past their candidate point on a %v hold: reserved at the readiness retry", lateMax, hold)
 	}
 }
+
+// heldTrialRun drives a held group's Slots through the production Worker, the clock taken to each Slot's first
+// attempt as the dispatcher wakes it and stepped between, the lookback stepped as its loop steps it, for up to
+// span or until done says so. It returns the group's lowest hold after it was first raised, the trials' outcomes,
+// and the raised hold.
+func heldTrialRun(t *testing.T, f *cutoverStallFixture, span time.Duration, trialPartial bool,
+	done func(elapsed, lowest, raised time.Duration, outcomes map[string]uint64) bool,
+) (lowest, raised time.Duration, outcomes map[string]uint64) {
+	t.Helper()
+	ctx := context.Background()
+	engine := f.bundle.dependencies.Lookback
+	holds := f.bundle.dependencies.ReadHolds
+	last := f.progress(ctx).LastCompletion
+	if engine == nil || last == nil {
+		t.Fatal("fixture: no lookback, or no Slot completed")
+	}
+	// The group measures its data landing half a minute late, as the lookback reports a window read early: its
+	// hold rises under two steps, so a trial tries no hold at all, and short of the period, as the seeds are.
+	if err := holds.controller.Observe(ctx, readhold.Evidence{Contract: last.Contract, ArrivalAge: 30 * time.Second,
+		Rung: lookback.RungNames[0], Buckets: []int64{int64(last.Contract.Slot.EvaluationTime)}}); err != nil {
+		t.Fatal(err)
+	}
+	raised = holds.controller.ReadHold(f.queryGroup)
+	lowest = raised
+	// When asked to, a read of a window before its held readiness answers partial - its data was not whole yet -
+	// and one at or after it whole: a trial's read comes back incomplete, the formal read complete.
+	if trialPartial {
+		f.uqPartial = func(end int64) bool { return f.now().Before(time.Unix(end, 0).Add(raised)) }
+	}
+	const step = 5 * time.Second
+	immediate := 0
+	outcomesNow := func() map[string]uint64 {
+		counts := map[string]uint64{}
+		for _, source := range engine.Stats().Sources {
+			for outcome, count := range source.EarlierReads {
+				counts[outcome] += count
+			}
+		}
+		return counts
+	}
+	started := f.now()
+	for deadline := started.Add(span); f.now().Before(deadline); {
+		if done(f.now().Sub(started), lowest, raised, outcomesNow()) {
+			break
+		}
+		if next := f.runner.NextReadyAt(); !next.After(f.now()) {
+			if _, _, err := f.runner.RunOne(ctx); err != nil {
+				t.Logf("RunOne at %s: %v", f.now().UTC().Format(time.TimeOnly), err)
+			}
+		}
+		engine.StepEarly(ctx)
+		// The trial reads on its own goroutine: let it answer before the clock moves.
+		for settle := time.Now().Add(20 * time.Millisecond); time.Now().Before(settle); {
+			time.Sleep(time.Millisecond)
+		}
+		if hold := holds.controller.ReadHold(f.queryGroup); hold < lowest {
+			lowest = hold
+		}
+		// A Slot due now runs now, as the dispatcher runs it: the clock moves only when none is due, or when the
+		// Runner stays due without moving on.
+		wake := f.runner.NextReadyAt()
+		if !wake.After(f.now()) && immediate < 5 {
+			immediate++
+			continue
+		}
+		immediate = 0
+		next := f.now().Add(step)
+		if wake.After(f.now()) && wake.Before(next) {
+			next = wake.Add(time.Millisecond)
+		}
+		f.clock.Store(next.UnixMilli())
+	}
+	outcomes = map[string]uint64{}
+	overtaken := map[string]uint64{}
+	for _, source := range engine.Stats().Sources {
+		for outcome, count := range source.EarlierReads {
+			outcomes[outcome] += count
+		}
+		for path, count := range source.EarlierOvertaken {
+			if count > 0 {
+				overtaken[path] += count
+			}
+		}
+	}
+	t.Logf("hold %v -> lowest %v; trials %v, overtaken by %v", raised, lowest, outcomes, overtaken)
+	return lowest, raised, outcomes
+}
+
+// A held group's trial of no hold reads before the Slot's readiness without the hold - the reread bound before
+// it - finds the data the formal read later reads, and after the matches and quiet the controller asks for, the
+// hold comes down. Before, a trial of no hold was confined to that readiness itself and had no time to read.
+func TestAHeldGroupsTrialOfNoHoldCompletesAndTheHoldComesDown(t *testing.T) {
+	f := startCutoverFixture(t, nil)
+	lowest, raised, outcomes := heldTrialRun(t, f, 6*time.Hour, false,
+		func(_, lowest, raised time.Duration, _ map[string]uint64) bool { return lowest < raised })
+	if raised < 20*time.Second {
+		t.Fatalf("fixture: hold raised to %v", raised)
+	}
+	if outcomes[lookback.EarlierEqual] == 0 {
+		t.Fatalf("no trial matched its formal read: %v", outcomes)
+	}
+	if lowest >= raised {
+		t.Fatalf("hold stayed at %v (lowest %v) after %d matching trials", raised, lowest, outcomes[lookback.EarlierEqual])
+	}
+}
+
+// Reading earlier moves only when the trial looks, never what proves a lower hold: a trial whose read comes back
+// incomplete supplies no evidence, and the hold does not come down.
+func TestAnIncompleteTrialOfNoHoldLeavesTheHold(t *testing.T) {
+	f := startCutoverFixture(t, nil)
+	// Long enough that the matches and quiet the controller asks for would have lowered it had they counted.
+	lowest, raised, outcomes := heldTrialRun(t, f, 6*time.Hour, true,
+		func(elapsed, _, _ time.Duration, outcomes map[string]uint64) bool {
+			return elapsed >= 2*time.Hour && outcomes[lookback.EarlierReadFailed] > readhold.EarlierMatchesRequired
+		})
+	if outcomes[lookback.EarlierReadFailed] == 0 {
+		t.Fatalf("fixture: no trial read came back incomplete: %v", outcomes)
+	}
+	if outcomes[lookback.EarlierEqual] != 0 || lowest < raised {
+		t.Fatalf("an incomplete trial lowered the hold %v -> %v: %v", raised, lowest, outcomes)
+	}
+}

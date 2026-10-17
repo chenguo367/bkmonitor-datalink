@@ -238,8 +238,17 @@ func (engine *Engine) Prepare(query Query) {
 	// RecheckTimeout can still finish before that point and prove the lower
 	// hold; a fixed RecheckTimeout cut every trial of such a group short and
 	// kept its alerts later than they need to be.
+	//
+	// A trial of a lower hold starts no earlier than the readiness without
+	// the hold (baseline). A trial of no hold - half the hold under a step -
+	// has that readiness as its own candidate point, so held to it the
+	// trial had no time to read: with the step equal to the period, every
+	// hold under two periods. It starts the reread bound before instead.
+	// Only when it looks moves: its read is still compared whole with the
+	// formal first read, and one that is incomplete, or finds less, proves
+	// nothing.
 	start := readyAt.Add(-state.rereadBound())
-	if start.Before(baseline) {
+	if candidate > 0 && start.Before(baseline) {
 		start = baseline
 	}
 	state.prepared = &earlierSample{query: query, source: state.source, candidateHold: candidate,

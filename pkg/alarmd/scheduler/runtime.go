@@ -1064,6 +1064,7 @@ func (runner *Runner) runOneTracked(
 	}
 	executeCtx := execution.WithFollowingSlot(execution.ContextWithLeaseAuthority(ctx, runner.session), slot.FollowingSlot)
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
+	executeCtx = execution.WithBackendFailing(executeCtx, runner.queryCooldown.failures > 0)
 	if runner.flights.recoveryEnabled {
 		executeCtx = WithFailureRetried(executeCtx)
 	}
