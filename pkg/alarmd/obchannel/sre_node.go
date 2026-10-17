@@ -105,6 +105,9 @@ func nodeOperations(options SREOptions, audit func(context.Context, time.Time, S
 		if out.Error == nil {
 			switch value.State {
 			case "failed", "timed_out", "cancelled":
+				if op == OpNodeCancel {
+					break
+				}
 				out.Error = &Failure{Code: "node_execution_" + value.State, Message: "Node command ended in " + value.State + "; inspect exit_code and output before any new execution."}
 			case "unknown":
 				out.Complete = false

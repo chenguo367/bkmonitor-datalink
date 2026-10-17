@@ -55,6 +55,10 @@ func TestNodeSchemaAndRecoveryContract(t *testing.T) {
 	if got := ops[1].Run(context.Background(), Params{"execution_id": p["execution_id"]}); got.Error == nil || got.Error.Code != "node_execution_failed" {
 		t.Fatalf("exit failure lost: %+v", got)
 	}
+	f.result.State = "cancelled"
+	if got := ops[2].Run(context.Background(), Params{"execution_id": p["execution_id"]}); got.Error != nil {
+		t.Fatalf("confirmed cancellation incorrectly failed: %+v", got)
+	}
 	p["env"] = map[string]any{"HOME": 42}
 	if err := validate(ops[0], p); err == nil {
 		t.Fatal("nonstring env accepted")
