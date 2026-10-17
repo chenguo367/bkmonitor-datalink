@@ -144,7 +144,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 		go func() { _, err := client.ReadEvidence(ctx, &pb.EvidenceRequest{}); done <- err }()
 		select {
 		case <-entered:
-		case <-time.After(time.Second):
+		case <-untilTestDeadline(t):
 			t.Fatalf("handler %d did not start", i+1)
 		}
 		cancel()
@@ -153,7 +153,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 			if status.Code(err) != codes.Canceled {
 				t.Fatalf("cancel code=%s", status.Code(err))
 			}
-		case <-time.After(time.Second):
+		case <-untilTestDeadline(t):
 			t.Fatal("canceled RPC did not return")
 		}
 	}
@@ -164,7 +164,7 @@ func TestReadEvidenceHasNoCountOfItsOwn(t *testing.T) {
 	case <-entered:
 	case err := <-done:
 		t.Fatalf("the ninth request was answered %s without reaching its handler", status.Code(err))
-	case <-time.After(time.Second):
+	case <-untilTestDeadline(t):
 		t.Fatal("the ninth request did not reach its handler")
 	}
 	cancel()
