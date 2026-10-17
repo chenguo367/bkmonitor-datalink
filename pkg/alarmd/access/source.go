@@ -357,7 +357,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			// The live reserve left this query no time; the frozen one still
 			// does. Run it under the frozen reserve rather than fail it now.
 			queryDeadline = time.UnixMilli(query.FrozenDeadlineUnixMilli)
-			source.config.LiveReserve.CountFallback()
+			source.config.LiveReserve.CountFallback(request.Contract.Slot.QueryGroup, now)
 		}
 		// Where the budget ending at that deadline began: a recovery's is
 		// counted from its arrival, a normal query's from its Slot.
@@ -662,7 +662,7 @@ func deriveRecoveryQueryDeadline(
 			intervalMillis := spec.EvaluationIntervalSeconds * 1000
 			candidate, fellBack := live.QueryBudgetMilli(consumer, intervalMillis)
 			if fellBack {
-				live.CountFallback()
+				live.CountFallback(request.Contract.Slot.QueryGroup, startedAt)
 			}
 			if intervalMillis <= 0 || consumer.DownstreamExecutionReserveMilliSec <= 0 || candidate <= 0 {
 				return time.Time{}, errors.New("alarmd access: recovery query budget is invalid")
@@ -845,7 +845,7 @@ func prepare(
 			}
 			candidate, fellBack := live.QueryDeadlineUnixMilli(consumer, readyAt)
 			if fellBack {
-				live.CountFallback()
+				live.CountFallback(contractRef.Slot.QueryGroup, time.UnixMilli(readyAt))
 			}
 			validRequirement.Consumers = append(validRequirement.Consumers, consumer)
 			if planned.ReadyAtUnixMilli == 0 || readyAt < planned.ReadyAtUnixMilli {

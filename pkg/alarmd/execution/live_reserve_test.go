@@ -85,7 +85,7 @@ func TestLiveReservesAreIndependentAndNilIsFrozen(t *testing.T) {
 		t.Fatalf("no reserve: %d fellBack=%v", deadline, fellBack)
 	}
 	none.Set(time.Second)
-	none.CountFallback()
+	none.CountFallback("qg", time.Now())
 	if none.Reserve() != 0 || none.Fallbacks() != 0 {
 		t.Fatal("a nil reserve holds nothing")
 	}
@@ -108,4 +108,28 @@ func TestStageMarkerQueryReturnedIsPerExecution(t *testing.T) {
 		t.Fatal("the next execution must not inherit the last one's query return")
 	}
 	MarkQueryReturned(context.Background(), at) // no marker: no effect, no panic
+}
+
+// A runtime names a group as tight for an hour after its last fallback, most recent first, at most
+// LiveReserveTightGroupsKept of them; the count stays exact.
+func TestTightQueryGroupsAgeOutAndAreBounded(t *testing.T) {
+	live := &LiveReserve{}
+	at := time.Unix(100_000, 0)
+	live.CountFallback("old", at)
+	live.CountFallback("new", at.Add(30*time.Minute))
+	if got := live.TightQueryGroups(at.Add(30 * time.Minute)); len(got) != 2 || got[0] != "new" || got[1] != "old" {
+		t.Fatalf("got %v, want new then old", got)
+	}
+	if got := live.TightQueryGroups(at.Add(61 * time.Minute)); len(got) != 1 || got[0] != "new" {
+		t.Fatalf("an hour after its last fallback a group is no longer tight: %v", got)
+	}
+	for i := 0; i < LiveReserveTightGroupsKept+5; i++ {
+		live.CountFallback(QueryGroupIdentity(time.Duration(i).String()), at.Add(40*time.Minute))
+	}
+	if got := live.TightQueryGroups(at.Add(40 * time.Minute)); len(got) != LiveReserveTightGroupsKept {
+		t.Fatalf("listed %d, want the bound %d", len(got), LiveReserveTightGroupsKept)
+	}
+	if live.Fallbacks() != uint64(LiveReserveTightGroupsKept+7) {
+		t.Fatalf("the count is exact: %d", live.Fallbacks())
+	}
 }

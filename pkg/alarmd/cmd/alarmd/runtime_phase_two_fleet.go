@@ -900,6 +900,12 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.capacity != nil {
 		snapshot.Capacity = publisher.capacity()
+		if snapshot.Capacity == nil {
+		} else if shape := snapshot.Capacity.Shape; shape != nil && len(shape.TightQueryGroups) > 0 && publisher.strategies != nil {
+			for _, group := range shape.TightQueryGroups {
+				shape.TightStrategies = append(shape.TightStrategies, publisher.strategies(group)...)
+			}
+		}
 	}
 	if publisher.flow != nil {
 		snapshot.Flow = publisher.flow()

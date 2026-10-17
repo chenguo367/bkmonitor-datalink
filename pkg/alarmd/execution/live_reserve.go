@@ -6,9 +6,21 @@
 package execution
 
 import (
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// LiveReserveTightWindow is how far back a fallback names its Query Group as
+// tight: an hour, the window the overview's other recent signals use, so a
+// group stops being reported an hour after its last fallback.
+const LiveReserveTightWindow = time.Hour
+
+// LiveReserveTightGroupsKept bounds the tight Query Groups a runtime reports,
+// the same bound as the overdue wakes a replica publishes: it bounds the list a
+// reader sees, not what is counted - Fallbacks stays exact.
+const LiveReserveTightGroupsKept = 50
 
 // LiveReserve is one worker runtime's downstream execution reserve: the time a
 // Slot keeps after its query for everything that follows it - state reads and
@@ -34,6 +46,10 @@ type LiveReserve struct {
 	// fallbacks counts query deadlines that fell back to the frozen reserve
 	// because the live one left the query no time.
 	fallbacks atomic.Uint64
+
+	mu sync.Mutex
+	// tight is when each Query Group last fell back.
+	tight map[QueryGroupIdentity]time.Time
 }
 
 // Set publishes the runtime's measured post-query tail. Zero or negative
@@ -60,12 +76,52 @@ func (live *LiveReserve) Fallbacks() uint64 {
 	return live.fallbacks.Load()
 }
 
-// CountFallback counts a query that ran under the frozen reserve because the
-// live one left it no time.
-func (live *LiveReserve) CountFallback() {
-	if live != nil {
-		live.fallbacks.Add(1)
+// CountFallback counts a query of queryGroup that ran under the frozen reserve
+// at at because the live one left it no time.
+func (live *LiveReserve) CountFallback(queryGroup QueryGroupIdentity, at time.Time) {
+	if live == nil {
+		return
 	}
+	live.fallbacks.Add(1)
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	if live.tight == nil {
+		live.tight = make(map[QueryGroupIdentity]time.Time)
+	}
+	live.tight[queryGroup] = at
+	for group, last := range live.tight {
+		if at.Sub(last) > LiveReserveTightWindow {
+			delete(live.tight, group)
+		}
+	}
+}
+
+// TightQueryGroups is the Query Groups that fell back within
+// LiveReserveTightWindow before at, most recent first, at most
+// LiveReserveTightGroupsKept of them: the ones whose interval does not hold
+// the measured post-query tail, reported as a warning - they keep running.
+func (live *LiveReserve) TightQueryGroups(at time.Time) []QueryGroupIdentity {
+	if live == nil {
+		return nil
+	}
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	groups := make([]QueryGroupIdentity, 0, len(live.tight))
+	for group, last := range live.tight {
+		if at.Sub(last) <= LiveReserveTightWindow {
+			groups = append(groups, group)
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if left, right := live.tight[groups[i]], live.tight[groups[j]]; !left.Equal(right) {
+			return left.After(right)
+		}
+		return groups[i] < groups[j]
+	})
+	if len(groups) > LiveReserveTightGroupsKept {
+		groups = groups[:LiveReserveTightGroupsKept]
+	}
+	return groups
 }
 
 // QueryDeadlineUnixMilli is the consumer's query deadline in this runtime: the

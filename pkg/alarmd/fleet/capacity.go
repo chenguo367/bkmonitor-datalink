@@ -137,6 +137,16 @@ type SchedulerShape struct {
 	HoldMillis             int64     `json:"hold_ms"`
 	ExecutionMillis        int64     `json:"execution_ms"`
 	OwnedQueryGroups       int       `json:"owned_query_groups"`
+	// PostQueryTailMillis is the measured post-query tail the replica's query
+	// deadlines are sized from (its live reserve); zero before any.
+	PostQueryTailMillis int64 `json:"post_query_tail_ms"`
+	// LiveReserveFallbacks counts queries that ran under the frozen reserve
+	// because the live one left them no time; TightQueryGroups and
+	// TightStrategies are the groups that did so in the last hour, and their
+	// strategies. A warning, not a refusal: they keep running.
+	LiveReserveFallbacks uint64        `json:"live_reserve_fallbacks"`
+	TightQueryGroups     []string      `json:"tight_query_groups,omitempty"`
+	TightStrategies      []StrategyRef `json:"tight_strategies,omitempty"`
 }
 
 // MarshalJSON keeps a measured zero on the wire. throttled_seconds and

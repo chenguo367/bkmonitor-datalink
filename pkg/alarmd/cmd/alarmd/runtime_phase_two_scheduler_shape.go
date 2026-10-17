@@ -174,6 +174,17 @@ func (shaper *schedulerShaper) derive(owned int) schedulerShapeReading {
 	return reading
 }
 
+func tightQueryGroupKeys(groups []execution.QueryGroupIdentity) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	keys := make([]string, len(groups))
+	for index, group := range groups {
+		keys[index] = string(group)
+	}
+	return keys
+}
+
 // facts is the shape in force and its inputs as the replica's capacity
 // reports them; nil before the first derivation.
 func (shaper *schedulerShaper) facts() *fleet.SchedulerShape {
@@ -191,5 +202,7 @@ func (shaper *schedulerShaper) facts() *fleet.SchedulerShape {
 		RecoveryQueueCapacity: shape.RecoveryQueueCapacity, ActiveExecutionCeiling: shape.ActiveExecutionCeiling,
 		PeakQueriesPerSecond: demand.PeakQueriesPerSecond, ReplayQueriesPerSecond: demand.ReplayQueriesPerSecond,
 		PeakSlotsPerSecond: demand.PeakSlotsPerSecond, HoldMillis: demand.Hold.Milliseconds(),
-		ExecutionMillis: demand.Execution.Milliseconds(), OwnedQueryGroups: demand.OwnedQueryGroups}
+		ExecutionMillis: demand.Execution.Milliseconds(), OwnedQueryGroups: demand.OwnedQueryGroups,
+		PostQueryTailMillis: shaper.live.Reserve().Milliseconds(), LiveReserveFallbacks: shaper.live.Fallbacks(),
+		TightQueryGroups: tightQueryGroupKeys(shaper.live.TightQueryGroups(shaper.now()))}
 }

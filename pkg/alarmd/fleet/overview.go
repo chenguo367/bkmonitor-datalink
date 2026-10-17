@@ -447,11 +447,58 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 		}
 		overview.Runtime.Replicas = append(overview.Runtime.Replicas, row)
 	}
+	if notice, tight := overviewTightIntervalNotice(health); tight {
+		overview.Runtime.Attention = append(overview.Runtime.Attention, notice)
+	}
 	if activation := health.Activation; activation != nil && activation.BehindBeyondBound {
 		overview.Runtime.Attention = append(overview.Runtime.Attention, OverviewNotice{Kind: "config_behind",
 			Line: fmt.Sprintf("已发布的策略配置还没在检测里生效：连续 %d 轮没有应用成功", activation.ConsecutiveFailures)})
 	}
 	return overview
+}
+
+// overviewTightIntervalNotice is the warning that some strategies' interval
+// does not hold the measured post-query tail: their queries ran under the
+// plan's frozen reserve in the last hour instead of the live one. They keep
+// running - the notice says so - and it names them, so the strategy owner can
+// lengthen the interval or the operator can look at what makes the tail long.
+func overviewTightIntervalNotice(health HealthResponse) (OverviewNotice, bool) {
+	seen := map[StrategyRef]bool{}
+	var strategies []StrategyRef
+	groups := 0
+	var tail int64
+	for _, replica := range health.PerReplica {
+		if replica.Capacity == nil || replica.Capacity.Shape == nil {
+			continue
+		}
+		shape := replica.Capacity.Shape
+		groups += len(shape.TightQueryGroups)
+		tail = max(tail, shape.PostQueryTailMillis)
+		for _, ref := range shape.TightStrategies {
+			if !seen[ref] {
+				seen[ref] = true
+				strategies = append(strategies, ref)
+			}
+		}
+	}
+	if groups == 0 {
+		return OverviewNotice{}, false
+	}
+	sort.Slice(strategies, func(i, j int) bool {
+		if strategies[i].BusinessID != strategies[j].BusinessID {
+			return strategies[i].BusinessID < strategies[j].BusinessID
+		}
+		return strategies[i].StrategyID < strategies[j].StrategyID
+	})
+	names := make([]string, len(strategies))
+	for index, ref := range strategies {
+		names[index] = ref.StrategyID
+	}
+	line := fmt.Sprintf("%d 个检测对象的周期放不下实测的查询后耗时（%s），近一小时这些查询改按固定预留执行，检测照常进行", groups, time.Duration(tail)*time.Millisecond)
+	if len(names) > 0 {
+		line += "；涉及策略 " + strings.Join(names, "、")
+	}
+	return OverviewNotice{Kind: "interval_tight", Line: line}, true
 }
 
 func overviewVerdictOf(health HealthResponse, funnel OverviewFunnel) OverviewVerdict {
