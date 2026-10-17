@@ -10,7 +10,6 @@
 package main
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -39,7 +38,7 @@ func writersTestConfig() config.Config {
 
 func noteRedisSuccess(recorder *metric.Recorder, client string) {
 	hook := recorder.RedisHook(client)
-	ctx, _ := hook.BeforeProcess(context.Background(), nil)
+	ctx, _ := hook.BeforeProcess(consoleCtx(), nil)
 	_ = hook.AfterProcess(ctx, redis.NewStringCmd(ctx, "get", "a"))
 }
 

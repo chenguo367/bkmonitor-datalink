@@ -1030,7 +1030,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// published: no copy, no refresh, rows built for the page asked. A
 	// follower forwards to the Leader; a Leader before its first round
 	// answers not ready.
-	directoryView, err := controlplane.NewDirectoryView(reconciler, repository, directoryReadTimeout)
+	directoryView, err := controlplane.NewDirectoryView(reconciler, repository)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,6 +1084,8 @@ func openProductionPhaseTwoBundleAssembly(
 		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, absentForwardTimeout, absentForwardRoute, recorder.ObserveLeaderForward),
 		cfg.PhaseTwo.Worker.ID)
 	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, directoryForward, windowStore, diagnostics, seriesSampler, external.Now)
+	// A request a follower handed on answers by the deadline its hop carries.
+	fleetAPI = fleet.WithForwardedDeadline(fleetAPI)
 	observationRefresh := &observationRefresh{cost: costSummary, now: external.Now,
 		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), identity: repository.CachedExecutionIdentity}
 	// The same judgment the page shows, exported so the host writes alert rules
@@ -1219,7 +1221,12 @@ func openProductionPhaseTwoBundleAssembly(
 		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	if linkd.Console != nil {
 		maintenance.sourceOf = func(ctx context.Context) (string, error) {
-			binding, err := linkd.Console.Binding(ctx)
+			// Answered from the client's copy within bindingReuse; past it,
+			// each request the read makes is bounded by the Console's own
+			// speed, within the coverage.
+			ctx, cancel := context.WithTimeout(ctx, effectiveSourceCoverage)
+			defer cancel()
+			binding, err := linkd.Console.Binding(openalerts.WithRequestCoverage(ctx, effectiveSourceCoverage))
 			return binding.EventSourceID, err
 		}
 	}
@@ -1728,6 +1735,7 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 	}
 	facts.IndexStaleAfterSeconds, facts.StaleSets = stats.StaleAfter.Seconds(), stats.Stale
 	facts.CalibrationNeeded, facts.CalibrationCapacity, facts.CalibrationShort = stats.CalibrationNeeded, stats.CalibrationCapacity, stats.CalibrationShort
+	facts.RoundsSkipped = stats.RoundsSkipped
 	for _, large := range stats.TooLarge {
 		facts.TooLarge = append(facts.TooLarge, fleet.TooLargeSetRow{TenantID: large.Strategy.TenantID, StrategyID: large.Strategy.StrategyID,
 			Members: large.Refusal.Members, Bytes: large.Refusal.Bytes, MaxMembers: large.Refusal.MaxMembers, MaxBytes: large.Refusal.MaxBytes})

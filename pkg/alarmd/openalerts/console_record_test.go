@@ -4,7 +4,6 @@
 package openalerts
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,10 +46,10 @@ func consoleServer(t *testing.T, browse, alert http.HandlerFunc) *HTTPReconciler
 // the calibration reads as answering, beside each other.
 func TestALinkOlderThanTheRosterFailsTheRosterAloneAndSaysSo(t *testing.T) {
 	reader := consoleServer(t, http.NotFound, http.NotFound)
-	if _, err := reader.Roster(context.Background(), ""); err == nil {
+	if _, err := reader.Roster(consoleCtx(), ""); err == nil {
 		t.Fatal("a 404 browse was read as a page")
 	}
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	record := reader.Record()
@@ -88,7 +87,7 @@ func TestAConsoleNeverCalledListsEveryOperationAtZero(t *testing.T) {
 // close looked for a record the link had already let go.
 func TestAnAlertTheLinkDoesNotHaveIsAnAnswerNotAFailure(t *testing.T) {
 	reader := consoleServer(t, http.NotFound, objectMissingAnswer)
-	if _, err := reader.AlertRecord(context.Background(), "system", "a-1"); err != ErrAlertNotFound {
+	if _, err := reader.AlertRecord(consoleCtx(), "system", "a-1"); err != ErrAlertNotFound {
 		t.Fatalf("err = %v", err)
 	}
 	if call := reader.Record().Calls[ConsoleOpAlertRecord]; call.LatestFailed || call.Failures != 0 || call.Calls != 1 {
@@ -97,7 +96,7 @@ func TestAnAlertTheLinkDoesNotHaveIsAnAnswerNotAFailure(t *testing.T) {
 	failing := consoleServer(t, http.NotFound, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	_, _ = failing.AlertRecord(context.Background(), "system", "a-1")
+	_, _ = failing.AlertRecord(consoleCtx(), "system", "a-1")
 	if call := failing.Record().Calls[ConsoleOpAlertRecord]; !call.LatestFailed || call.Failures != 1 {
 		t.Fatalf("a 500 alert record was recorded as %+v", call)
 	}
@@ -110,7 +109,7 @@ func TestTheLinksOwnHealthIsKeptFromTheRosterPage(t *testing.T) {
 		body["health"].(map[string]any)["error"] = "discovery_failed"
 		_ = json.NewEncoder(w).Encode(body)
 	}, http.NotFound)
-	if _, err := reader.Roster(context.Background(), ""); err != nil {
+	if _, err := reader.Roster(consoleCtx(), ""); err != nil {
 		t.Fatal(err)
 	}
 	record := reader.Record()

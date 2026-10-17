@@ -42,6 +42,9 @@ type EntityPage struct {
 // to accept or refuse, and a refusal comes back with its words
 // (LinkRefusal) rather than this process copying the link's bounds.
 func (reader *HTTPReconciler) Entities(ctx context.Context, entity string, query url.Values) (EntityPage, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return EntityPage{}, err
+	}
 	if !slices.Contains(LinkEntities, entity) {
 		return EntityPage{}, errors.New("alarmd openalerts: not a record the link lists for an operator")
 	}

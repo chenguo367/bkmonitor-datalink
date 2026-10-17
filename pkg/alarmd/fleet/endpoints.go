@@ -240,6 +240,10 @@ var EndpointRoles = []string{
 type LinkdConsoleFacts struct {
 	// State is one of LinkdConsoleStates.
 	State string `json:"state"`
+	// UnansweredRequests is how many Console requests failed before any
+	// answer and before their deadline (refused, unresolved, reset); they
+	// are not samples of the Console's latency.
+	UnansweredRequests uint64 `json:"unanswered_requests,omitempty"`
 	// Reason says which part: for unreadable the first failing operation,
 	// for link_unhealthy the link's own word (discovery_failing,
 	// discovery_never_succeeded, discovery_stale).

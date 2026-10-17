@@ -40,7 +40,11 @@ func (stub *consoleStub) serve(w http.ResponseWriter, r *http.Request) {
 		stub.reads++
 		stub.eventSource(w)
 	default:
-		_ = json.NewEncoder(w).Encode(reconciliationJSON())
+		// The link answers a reconciliation for the target its current
+		// configuration names, as the admin module's inspect does.
+		answer := reconciliationJSON()
+		answer["target"] = stub.target
+		_ = json.NewEncoder(w).Encode(answer)
 	}
 }
 
@@ -71,7 +75,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	keyed, first, known := reader.KeyedByAlertID()
@@ -81,7 +85,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 
 	// Inside KeyingEvery nothing is read again.
 	c.advance(10 * time.Minute)
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	if stub.reads != 1 {
@@ -91,7 +95,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 	// Due, and failing: the last answer stands, with its time.
 	stub.answer(func(w http.ResponseWriter) { http.Error(w, "unavailable", http.StatusBadGateway) })
 	c.advance(25 * time.Minute)
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	if stub.reads != 2 {
@@ -104,7 +108,7 @@ func TestTheKeyingIsKeptWhileReadsFailAndChangesOnTheNextAnswer(t *testing.T) {
 	// Due again, and the source is deleted: no longer keyed, on that read.
 	stub.answer(eventSourceAnswer(3, true))
 	c.advance(31 * time.Minute)
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	if keyed, at, known := reader.KeyedByAlertID(); keyed || !known || !at.Equal(c.now()) {
@@ -142,7 +146,7 @@ func TestAReconciliationConfirmsOrWithdrawsTheLocation(t *testing.T) {
 	if reader.LocationConfirmed() {
 		t.Fatal("a location not taken from the Console started confirmed")
 	}
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil || !reader.LocationConfirmed() {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil || !reader.LocationConfirmed() {
 		t.Fatalf("err %v confirmed %v, want an agreeing reconciliation to confirm", err, reader.LocationConfirmed())
 	}
 	moved := testBinding()
@@ -150,7 +154,7 @@ func TestAReconciliationConfirmsOrWithdrawsTheLocation(t *testing.T) {
 	stub.mu.Lock()
 	stub.target = moved
 	stub.mu.Unlock()
-	if _, err := reader.Reconcile(context.Background(), keyA); err == nil || reader.LocationConfirmed() {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err == nil || reader.LocationConfirmed() {
 		t.Fatalf("err %v confirmed %v, want a mismatch refused and the confirmation withdrawn", err, reader.LocationConfirmed())
 	}
 	if len(handed) != 1 || !reflect.DeepEqual(handed[0], moved) {
@@ -170,7 +174,7 @@ func TestAKeyingReadForAnotherSourceIsNoAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, known := reader.KeyedByAlertID(); !known {
@@ -181,7 +185,7 @@ func TestAKeyingReadForAnotherSourceIsNoAnswer(t *testing.T) {
 	stub.mu.Lock()
 	stub.target = other
 	stub.mu.Unlock()
-	_, _ = reader.Reconcile(context.Background(), keyA)
+	_, _ = reader.Reconcile(consoleCtx(), keyA)
 	if keyed, _, known := reader.KeyedByAlertID(); known {
 		t.Fatalf("keyed %v known for the new source on the old source's read", keyed)
 	}
@@ -202,19 +206,19 @@ func TestAMoveIsConfirmedByTheNextResolutionAndRereadsTheKeying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reader.Reconcile(context.Background(), keyA); err != nil {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err != nil {
 		t.Fatal(err)
 	}
 	stub.mu.Lock()
 	stub.target = moved
 	stub.mu.Unlock()
-	_, _ = reader.Reconcile(context.Background(), keyA)
+	_, _ = reader.Reconcile(consoleCtx(), keyA)
 	if reader.LocationConfirmed() {
 		t.Fatal("fixture: the mismatch did not withdraw the confirmation")
 	}
 	// A refresh while the link writes elsewhere asks once and then waits its
 	// minute; the move starts that wait over.
-	reader.Refresh(context.Background())
+	reader.Refresh(consoleCtx())
 	if err := reader.SetIndexLocation(IndexLocation{KeyPrefix: moved.KeyPrefix, Address: moved.Address, Database: moved.Database}); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +229,7 @@ func TestAMoveIsConfirmedByTheNextResolutionAndRereadsTheKeying(t *testing.T) {
 		t.Fatal("the keying counts as asked for the new place before it was")
 	}
 	reads := stub.reads
-	reader.Refresh(context.Background())
+	reader.Refresh(consoleCtx())
 	if !reader.LocationConfirmed() || !reader.KeyingAsked() {
 		t.Fatal("the refresh after the move neither confirmed the place the Console names nor asked the keying")
 	}
@@ -249,14 +253,14 @@ func TestRefreshLearnsBothFactsWithNoStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader.Refresh(context.Background())
+	reader.Refresh(consoleCtx())
 	if keyed, _, known := reader.KeyedByAlertID(); !reader.LocationConfirmed() || !known || !keyed {
 		t.Fatalf("confirmed %v keyed %v known %v after one refresh, want both facts", reader.LocationConfirmed(), keyed, known)
 	}
 	targets := stub.targets
 	for _, after := range []time.Duration{time.Second, 2 * time.Minute} {
 		c.advance(after)
-		reader.Refresh(context.Background())
+		reader.Refresh(consoleCtx())
 	}
 	if stub.targets != targets {
 		t.Fatalf("targets asked %d times, want %d: a confirmed place is not asked again by the refresh", stub.targets, targets)
@@ -266,13 +270,13 @@ func TestRefreshLearnsBothFactsWithNoStrategy(t *testing.T) {
 	stub.mu.Lock()
 	stub.target = moved
 	stub.mu.Unlock()
-	if _, err := reader.Reconcile(context.Background(), keyA); err == nil || reader.LocationConfirmed() {
+	if _, err := reader.Reconcile(consoleCtx(), keyA); err == nil || reader.LocationConfirmed() {
 		t.Fatal("fixture: the reconciliation did not find the link elsewhere")
 	}
 	targets = stub.targets
 	for round := 0; round < 59; round++ {
 		c.advance(time.Second)
-		reader.Refresh(context.Background())
+		reader.Refresh(consoleCtx())
 	}
 	if stub.targets != targets+1 {
 		t.Fatalf("targets asked %d times in 59 one-second rounds while the link writes elsewhere, want once", stub.targets-targets)

@@ -55,7 +55,7 @@ func TestOnlyTheLinksOwnObjectMissingAnswerIsNoSuchAlert(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			reader := consoleServer(t, http.NotFound, answer)
-			_, err := reader.AlertRecord(context.Background(), "system", "a-1")
+			_, err := reader.AlertRecord(consoleCtx(), "system", "a-1")
 			if err == nil || errors.Is(err, ErrAlertNotFound) {
 				t.Fatalf("a %s answer was read as no such alert: %v", name, err)
 			}
@@ -84,7 +84,7 @@ func TestAURLThatIsNotTheAPIRootIsRefusedAsNotAPI(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(page)
 			t.Cleanup(server.Close)
-			_, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
+			_, err := DiscoverTarget(consoleCtx(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
 				Username: "user", Password: "secret", MaxResponseBytes: 1 << 20})
 			if !errors.Is(err, ErrNotAPI) || ConsoleFailureClass(err) != ConsoleFailureNotAPI || !strings.Contains(err.Error(), "API root") {
 				t.Fatalf("a web page at the root was read as %v (class %s)", err, ConsoleFailureClass(err))
@@ -107,8 +107,8 @@ func TestTheOperationsAreAskedForUnderTheRootTheURLNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = reader.Roster(context.Background(), "")
-	_, _ = reader.AlertRecord(context.Background(), "system", "a-1")
+	_, _ = reader.Roster(consoleCtx(), "")
+	_, _ = reader.AlertRecord(consoleCtx(), "system", "a-1")
 	want := []string{"/admin/api/modules/linkd/strategy-index/targets", "/admin/api/modules/linkd/alerts/a-1"}
 	if len(paths) < 2 || paths[0] != want[0] || paths[len(paths)-1] != want[1] {
 		t.Fatalf("asked for %v, want first %s and last %s", paths, want[0], want[1])
@@ -149,14 +149,14 @@ func TestWithoutABasicPairTheCallsCarryTheAdminsToken(t *testing.T) {
 	t.Cleanup(server.Close)
 	tokens := &fakeTokens{token: "head.claims.signature"}
 	options := HTTPReconcilerOptions{BaseURL: server.URL + testLinkdAPIRoot, Client: server.Client(), Token: tokens, MaxResponseBytes: 1 << 20}
-	if _, err := DiscoverTarget(context.Background(), options); err != nil {
+	if _, err := DiscoverTarget(consoleCtx(), options); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen) != 1 || seen[0] != "Bearer head.claims.signature" {
 		t.Fatalf("the call carried %q", seen)
 	}
 	refuse = true
-	if _, err := DiscoverTarget(context.Background(), options); err == nil || ConsoleFailureClass(err) != ConsoleFailureStatus {
+	if _, err := DiscoverTarget(consoleCtx(), options); err == nil || ConsoleFailureClass(err) != ConsoleFailureStatus {
 		t.Fatalf("a refused call read as %v", err)
 	}
 	if len(tokens.rejected) != 1 || tokens.rejected[0] != "head.claims.signature" {
@@ -164,14 +164,14 @@ func TestWithoutABasicPairTheCallsCarryTheAdminsToken(t *testing.T) {
 	}
 	calls := len(seen)
 	tokens.err = linkdtoken.ErrNoToken{State: linkdtoken.StateRejected}
-	if _, err := DiscoverTarget(context.Background(), options); ConsoleFailureClass(err) != ConsoleFailureNoToken || len(seen) != calls {
+	if _, err := DiscoverTarget(consoleCtx(), options); ConsoleFailureClass(err) != ConsoleFailureNoToken || len(seen) != calls {
 		t.Fatalf("no token read as %v (class %s) after %d calls", err, ConsoleFailureClass(err), len(seen)-calls)
 	}
 	asked := tokens.asked
 	refuse = false
 	basic := options
 	basic.Username, basic.Password = "user", "secret"
-	if _, err := DiscoverTarget(context.Background(), basic); err != nil || tokens.asked != asked ||
+	if _, err := DiscoverTarget(consoleCtx(), basic); err != nil || tokens.asked != asked ||
 		!strings.HasPrefix(seen[len(seen)-1], "Basic ") {
 		t.Fatalf("a Basic pair asked the token source (%d) or did not carry Basic (%q): %v", tokens.asked-asked, seen[len(seen)-1], err)
 	}
@@ -188,7 +188,7 @@ func TestAJSONAnswerLabelledHTMLIsStillTheAPIs(t *testing.T) {
 		_, _ = w.Write([]byte(`[{"eventSourceId":"source","hookName":"active","keyPrefix":"test:active","address":"redis:6379","database":3,"sources":["source"]}]`))
 	}))
 	t.Cleanup(server.Close)
-	if _, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
+	if _, err := DiscoverTarget(consoleCtx(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(),
 		Username: "user", Password: "secret", MaxResponseBytes: 1 << 20}); err != nil {
 		t.Fatalf("a JSON answer labelled text/html was refused: %v", err)
 	}

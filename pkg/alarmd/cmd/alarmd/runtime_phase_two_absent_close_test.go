@@ -47,11 +47,21 @@ type absentTestLink struct {
 	alertsErr error
 	records   map[string]openalerts.AlertRecord
 	reads     int
+	// perRound, when set, is how many pages a round has time for: the page
+	// after them fails as the round's deadline would. served counts this
+	// round's pages; the test resets it between rounds.
+	perRound, served int
 }
 
 func (link *absentTestLink) Roster(_ context.Context, cursor string) (openalerts.RosterPage, error) {
 	if link.rosterErr != nil {
 		return openalerts.RosterPage{}, link.rosterErr
+	}
+	if link.perRound > 0 {
+		if link.served >= link.perRound {
+			return openalerts.RosterPage{}, context.DeadlineExceeded
+		}
+		link.served++
 	}
 	index := 0
 	if cursor != "" {
@@ -82,6 +92,8 @@ func (link *absentTestLink) AlertRecord(_ context.Context, _, alertID string) (o
 type absentTestWriter struct {
 	batches [][]linkdoutput.CloseRequest
 	err     error
+	// onWrite, when set, runs after a batch is written.
+	onWrite func()
 }
 
 func (w *absentTestWriter) WriteCloseBatch(_ context.Context, requests []linkdoutput.CloseRequest) error {
@@ -89,6 +101,9 @@ func (w *absentTestWriter) WriteCloseBatch(_ context.Context, requests []linkdou
 		return w.err
 	}
 	w.batches = append(w.batches, append([]linkdoutput.CloseRequest(nil), requests...))
+	if w.onWrite != nil {
+		w.onWrite()
+	}
 	return nil
 }
 
@@ -621,5 +636,66 @@ func TestEveryAlertOfADeletedStrategyIsClosedInOneRound(t *testing.T) {
 	}
 	if sent != len(alerts) || fixture.loop.Stats()[absentalerts.OutcomeCloseSent] != uint64(len(alerts)) {
 		t.Fatalf("closed %d of %d alerts in the deciding round (stats %+v)", sent, len(alerts), fixture.loop.Stats())
+	}
+}
+
+// A roster walk longer than one round carries on where it stopped in the
+// next, and the rounds in between decide on the last walk that reached its
+// end: with time for one page a round, the strategy on the second page is
+// still found missing, matures and is closed. Walking from the first page
+// every round, it was never reached.
+func TestARosterWalkLongerThanARoundCarriesOver(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	fixture.link.perRound = 1
+	ctx := context.Background()
+	for round, observation := range []string{"observation-one", "observation-two", "observation-three"} {
+		if round > 0 {
+			fixture.now = fixture.now.Add(absentCloseGrace + time.Minute)
+		}
+		fixture.control.snapshot = liveSnapshot(observation, fixture.now, 100)
+		for i := range fixture.link.pages {
+			fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+		}
+		fixture.link.served = 0
+		fixture.loop.step(ctx)
+	}
+	if len(fixture.writer.batches) != 1 || fixture.writer.batches[0][0].StrategyID != 10 {
+		t.Fatalf("the strategy on the walk's second page was not closed: %+v %+v", fixture.writer.batches, fixture.loop.Stats())
+	}
+}
+
+// A round cut while it closes leaves the strategies it did not reach first
+// in line: the next round starts at the first close not executed, not past
+// the last one decided, which would go round to the first again and cut
+// there every time.
+func TestARoundCutWhileClosingResumesAtTheFirstCloseNotExecuted(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	health := fixture.link.pages[0].Health
+	fixture.link.pages[1] = openalerts.RosterPage{Health: health, Rows: []openalerts.RosterRow{
+		{TenantID: "system", StrategyID: "10", Members: members(1)},
+		{TenantID: "system", StrategyID: "11", Members: members(1)},
+		{TenantID: "system", StrategyID: "12", Members: members(1)}}}
+	for _, id := range []string{"10", "11", "12"} {
+		fixture.control.departed = append(fixture.control.departed, controlplane.DepartedStrategy{TenantID: "system", StrategyID: id, BusinessID: 5, Revision: 9})
+	}
+	fixture.mature(context.Background())
+	fixture.writer.batches = nil
+	var closed []int64
+	for round := 0; round < 3; round++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		fixture.writer.onWrite = cancel
+		fixture.now = fixture.now.Add(absentCloseInterval)
+		fixture.control.snapshot = liveSnapshot("observation-"+itoaAbsent(round+3), fixture.now, 100)
+		for i := range fixture.link.pages {
+			fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+		}
+		fixture.loop.step(ctx)
+		cancel()
+		for _, batch := range fixture.writer.batches[len(closed):] {
+			closed = append(closed, batch[0].StrategyID)
+		}
+	}
+	if len(closed) != 3 || closed[0] == closed[1] || closed[1] == closed[2] || closed[0] == closed[2] {
+		t.Fatalf("rounds cut after one close each closed %v, want each strategy once", closed)
 	}
 }

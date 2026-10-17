@@ -42,6 +42,27 @@ func TestStrategyBoardReadsTheDiagnosisBoardAsAFrontRead(t *testing.T) {
 	}
 }
 
+// The overview's drill keys pass through as the board's area and reason, and
+// stay on the next page's call.
+func TestStrategyBoardPassesTheOverviewsDrillKeys(t *testing.T) {
+	var asked *url.URL
+	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = r.URL
+		_, _ = w.Write([]byte(`{"generated_at":"2026-10-17T00:00:00Z","max_age_seconds":30,"universe_digest":"d","universe":1,` +
+			`"facets":{"state":{},"action":{},"capability":{},"punctuality":{}},"late_objects":{"value":0},"late_strategies":{"value":0},` +
+			`"matched":2,"rows":[],"next_cursor":"next"}`))
+	})
+	c := testChannel(t, &testAuth{}, NativeOperations(native)...)
+	_, out := call(t, c, envelope(c, "invoke", "strategy.board", Params{"area": "source", "capability": "not_yet_supported", "reason": "QUERY_SOURCE_NOT_MIGRATED"}))
+	if asked == nil || asked.Query().Get("area") != "source" || asked.Query().Get("reason") != "QUERY_SOURCE_NOT_MIGRATED" {
+		t.Fatalf("asked %v", asked)
+	}
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), `"area":"source"`) || !strings.Contains(string(raw), `"reason":"QUERY_SOURCE_NOT_MIGRATED"`) {
+		t.Fatalf("the next page dropped the drill keys: %s", raw)
+	}
+}
+
 // A universe the diagnosis cannot read is the op's failure, said by name, not
 // an empty board.
 func TestStrategyBoardSaysAnUnreadableUniverse(t *testing.T) {

@@ -71,7 +71,30 @@ type Overview struct {
 	FlowCoverage OverviewCoverage  `json:"flow_coverage"`
 	Resources    OverviewResources `json:"resources"`
 	Runtime      OverviewRuntime   `json:"runtime"`
+	// Late is the evaluate stage's late and overdue objects as the page's
+	// one line, with the strategy page's selection for them.
+	Late OverviewLate `json:"late"`
 }
+
+// BoardDrill is a strategy.board selection the overview writes for a count it
+// shows: the board's parameters as they are passed, so the page links to the
+// strategy page without composing one.
+type BoardDrill map[string]string
+
+// OverviewLate is "N 个检测对象迟到或超期": N is the scheduling census, the
+// number the evaluate stage's failures carry. The strategies they touch (M)
+// and whether either is a lower bound are read from strategy.board with
+// Drill: the board's facets and the strategy page's list are one
+// computation, so M there is the list's count by construction, which a
+// number computed here would not be.
+type OverviewLate struct {
+	Objects OverviewNumber `json:"objects"`
+	Line    string         `json:"line"`
+	Drill   BoardDrill     `json:"drill"`
+}
+
+// overviewLateDrill selects the strategies with a late or overdue object.
+var overviewLateDrill = BoardDrill{"punctuality": string(PunctualityLate) + "," + string(PunctualityOverdue)}
 
 type OverviewBuild struct {
 	Versions []OverviewVersion `json:"versions"`
@@ -115,6 +138,9 @@ type OverviewCapabilityRow struct {
 	Partial             int    `json:"partial"`
 	UnsupportedByDesign int    `json:"unsupported_by_design"`
 	NotYetSupported     int    `json:"not_yet_supported"`
+	// Drill is each non-zero cell's selection on the strategy page, by
+	// outcome; the board counts the cell as the Leader does.
+	Drill map[string]BoardDrill `json:"drill"`
 }
 
 // OverviewReason is one refusal reason with what it means, in the words the
@@ -126,6 +152,8 @@ type OverviewReason struct {
 	What       string   `json:"what"`
 	Strategies int      `json:"strategies"`
 	SampleIDs  []string `json:"sample_ids"`
+	// Drill selects the strategies carrying this code on the strategy page.
+	Drill BoardDrill `json:"drill"`
 }
 
 type OverviewOmitted struct {
@@ -347,6 +375,12 @@ func overviewOf(health HealthResponse, running map[StateWord]int, runningKnown b
 	overview.Capability = overviewCapabilityOf(health.Source)
 	overview.Capability.Funnel = funnel
 	overview.Verdict = overviewVerdictOf(health, funnel)
+	overview.Late = OverviewLate{Objects: overviewUnmeasured("objects"), Line: "迟到或超期的检测对象数还没读到", Drill: overviewLateDrill}
+	if health.Schedule != nil {
+		late := health.Schedule.Late + health.Schedule.Overdue
+		overview.Late.Objects = overviewMeasured(float64(late), "objects")
+		overview.Late.Line = fmt.Sprintf("%d 个检测对象迟到或超期", late)
+	}
 
 	degradedReplicas := map[string]bool{}
 	for _, degradation := range health.Degradations {
@@ -530,6 +564,7 @@ func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
 	rows := make(map[string]*OverviewCapabilityRow, len(CapabilityAreas))
 	for index, area := range CapabilityAreas {
 		capability.Matrix[index].Area = area
+		capability.Matrix[index].Drill = map[string]BoardDrill{}
 		rows[area] = &capability.Matrix[index]
 	}
 	for _, cell := range source.Capability.Cells {
@@ -546,6 +581,11 @@ func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
 			row.UnsupportedByDesign = cell.Strategies
 		case CapabilityNotYetSupported:
 			row.NotYetSupported = cell.Strategies
+		default:
+			continue
+		}
+		if cell.Strategies > 0 {
+			row.Drill[cell.Outcome] = BoardDrill{"area": cell.Area, "capability": cell.Outcome}
 		}
 	}
 	for index, reason := range source.Capability.Reasons {
@@ -555,7 +595,8 @@ func overviewCapabilityOf(source *SourceFacts) OverviewCapability {
 			continue
 		}
 		capability.Reasons = append(capability.Reasons, OverviewReason{Code: reason.Code, Area: reason.Area, Outcome: reason.Outcome,
-			What: WithheldWordsOf(reason.Code).What, Strategies: reason.Strategies, SampleIDs: reason.SampleIDs})
+			What: WithheldWordsOf(reason.Code).What, Strategies: reason.Strategies, SampleIDs: reason.SampleIDs,
+			Drill: BoardDrill{"reason": reason.Code}})
 	}
 	for _, reason := range source.Capability.IgnoredByDesign {
 		capability.IgnoredByDesign = append(capability.IgnoredByDesign, OverviewIgnoredReason{Code: reason.Code, Strategies: reason.Strategies})

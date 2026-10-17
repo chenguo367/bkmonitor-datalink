@@ -85,7 +85,7 @@ func browsePage(lastSuccess *time.Time, linkError string) http.HandlerFunc {
 }
 
 func readRoster(console *openalerts.HTTPReconciler) {
-	_, _ = console.Roster(context.Background(), "")
+	_, _ = console.Roster(consoleCtx(), "")
 }
 
 // A deployment without a Console carries the reading from the configuration
@@ -247,7 +247,7 @@ func TestEachRosterWalkAsksTheLinkHowItKeysOurAlerts(t *testing.T) {
 	link := &keyingLink{absentTestLink: absentTestLink{pages: []openalerts.RosterPage{{}}}, err: errors.New("unreachable")}
 	loop := &absentStrategyClose{link: link}
 	round := &absentalerts.Round{}
-	loop.readRoster(context.Background(), round)
+	loop.readRoster(consoleCtx(), round)
 	if link.asked != 1 || !round.LinkRead {
 		t.Fatalf("asked %d times, roster read %v; want one ask per walk and the walk unaffected by its failure", link.asked, round.LinkRead)
 	}
@@ -283,7 +283,7 @@ func TestTheConsoleFactsCarryTheKeyingOnceRead(t *testing.T) {
 	if facts := linkdConsoleFacts(console, consoleTestNow); facts.EventSource != nil {
 		t.Fatalf("keying published before it was read: %+v", facts.EventSource)
 	}
-	if _, err := console.EventSource(context.Background()); err != nil {
+	if _, err := console.EventSource(consoleCtx()); err != nil {
 		t.Fatal(err)
 	}
 	facts := linkdConsoleFacts(console, consoleTestNow)
@@ -310,9 +310,14 @@ func TestTheProcesssConsoleWritesALineWhenItsFailuresStart(t *testing.T) {
 	}
 	key := openalerts.StrategyKey{TenantID: "tenant", StrategyID: "101"}
 	for i := 0; i < 3; i++ {
-		if _, err := index.Console.Reconcile(context.Background(), key); err == nil {
+		if _, err := index.Console.Reconcile(consoleCtx(), key); err == nil {
 			t.Fatal("a closed Console answered")
 		}
+	}
+	// Refused before any answer: counted apart from the Console's latency,
+	// and shown in the facts fleet.get reads.
+	if unanswered := linkdConsoleFacts(index.Console, time.Now()).UnansweredRequests; unanswered != 3 {
+		t.Fatalf("facts show %d unanswered requests, want the 3 refused", unanswered)
 	}
 	lines := strings.Count(out.String(), `"stage":"console_call_failed"`)
 	if lines != 1 || !strings.Contains(out.String(), `"class":"connection_refused"`) || !strings.Contains(out.String(), `"op":"reconcile"`) {
@@ -350,7 +355,7 @@ func TestTheProcesssConsoleChoosesTheSourceByItsOutputTopic(t *testing.T) {
 	}
 	// No Redis is bound here, so the resolution stops at the location; the
 	// source is chosen before that.
-	_, _ = index.Console.Binding(context.Background())
+	_, _ = index.Console.Binding(consoleCtx())
 	facts := linkdConsoleFacts(index.Console, consoleTestNow).SourceByTopic
 	if facts == nil || facts.Outcome != openalerts.SourceByTopicResolved || facts.EventSourceID != "built_in_bk" || facts.Listed != "legacy" ||
 		facts.Topic != cfg.Kafka.TriggerEvent.Topic || len(facts.Candidates) != 2 {

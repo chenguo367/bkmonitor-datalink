@@ -102,6 +102,7 @@ func linkdConsoleFacts(console *openalerts.HTTPReconciler, at time.Time) *fleet.
 	if console != nil {
 		record = console.Record()
 	}
+	facts.UnansweredRequests = record.UnansweredRequests
 	called := false
 	for _, op := range openalerts.ConsoleOps {
 		call := record.Calls[op]

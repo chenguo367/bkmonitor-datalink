@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +64,7 @@ func runLinkdAlerts(t *testing.T, console linkdConsoleReader, params obchannel.P
 	if err := op.Validate(params); err != nil {
 		t.Fatalf("valid params refused: %v", err)
 	}
-	return readLinkdAlerts(context.Background(), console, params, func() time.Time { return time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC) })
+	return readLinkdAlerts(consoleCtx(), console, params, func() time.Time { return time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC) })
 }
 
 // By strategy, the read is the link's reconciliation of the strategy for the
