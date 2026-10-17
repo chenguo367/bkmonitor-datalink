@@ -48,10 +48,13 @@ func logRequest() LogCountRequest {
 		By: []string{"__ext.io_kubernetes_pod"}, Window: "1h", Now: logNow}
 }
 
+// series is one group's answer to a one-hour count ending at logNow: a point
+// per whole bucket from the window's start, as UQ answers - the first is the
+// window's, any after it the next window's.
 func series(keys []string, values []string, counts ...float64) map[string]any {
 	points := []any{}
 	for i, count := range counts {
-		points = append(points, []any{logNow.Add(time.Duration(i) * time.Minute).UnixMilli(), count})
+		points = append(points, []any{logNow.Add(-time.Hour).Add(time.Duration(i) * time.Hour).UnixMilli(), count})
 	}
 	return map[string]any{"name": "_result0", "group_keys": keys, "group_values": values, "values": points}
 }
@@ -76,21 +79,21 @@ func TestLogCountCountsLinesByTheFieldsAsked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Total != 60 || counts.GroupsTotal != 3 || counts.Truncated || counts.Partial || counts.QueryStringBytes != len("log:*timeout*") {
+	if counts.Total != 55 || counts.GroupsTotal != 3 || counts.Truncated || counts.Partial || counts.QueryStringBytes != len("log:*timeout*") {
 		t.Fatalf("counts %+v", counts)
 	}
 	var order []string
 	for _, group := range counts.Groups {
 		order = append(order, fmt.Sprintf("%s=%d", group.Values["__ext.io_kubernetes_pod"], group.Count))
 	}
-	if fmt.Sprint(order) != "[web-0=30 web-1=15 web-2=15]" {
+	if fmt.Sprint(order) != "[web-0=30 web-2=15 web-1=10]" {
 		t.Fatalf("groups %v, want by count then by value", order)
 	}
 	body := server.bodies[0]
 	query := body["query_list"].([]any)[0].(map[string]any)
 	aggregation := query["time_aggregation"].(map[string]any)
 	function := query["function"].([]any)[0].(map[string]any)
-	if body["start_time"] != fmt.Sprint(logNow.Add(-time.Hour).Unix()) || body["end_time"] != fmt.Sprint(logNow.Unix()) || body["step"] != "3600s" ||
+	if body["start_time"] != fmt.Sprint(logNow.Add(-time.Hour).Unix()) || body["end_time"] != fmt.Sprint(logNow.Add(-time.Second).Unix()) || body["step"] != "3600s" ||
 		query["data_source"] != "bklog" || query["table_id"] != "2_bklog.fixture" || query["query_string"] != "log:*timeout*" ||
 		aggregation["function"] != "count_over_time" || aggregation["window"] != "3600s" ||
 		function["method"] != "sum" || fmt.Sprint(function["dimensions"]) != "[__ext.io_kubernetes_pod]" {
@@ -165,5 +168,53 @@ func TestLogCountGroupsByAnyNumberOfFields(t *testing.T) {
 	counts, err := p.LogCount(context.Background(), request)
 	if err != nil || counts.Total != 7 || counts.Groups[0].Values["d"] != "4" {
 		t.Fatalf("counts %+v err %v", counts, err)
+	}
+}
+
+// UQ answers a count_over_time range with a point at every step from start
+// through its closed end, each the whole window from there: asked up to the
+// window's end it also answers the next window. Only the window's own bucket
+// is counted, so the count is the window's lines, not twice the window; the
+// end asked stops a second short of the next step.
+func TestLogCountCountsOnlyTheWindowsOwnBucket(t *testing.T) {
+	server := &logServer{answer: answer(false,
+		series([]string{"level"}, []string{"error"}, 40, 900),
+		series([]string{"level"}, []string{"info"}, 2, 70))}
+	p := server.provider(t)
+	request := logRequest()
+	request.By = []string{"level"}
+	counts, err := p.LogCount(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Total != 42 || counts.Groups[0].Count != 40 || counts.Groups[1].Count != 2 {
+		t.Fatalf("counts %+v, want only the window's bucket (40 + 2)", counts)
+	}
+	if !counts.Start.Equal(logNow.Add(-time.Hour)) || !counts.End.Equal(logNow) || len(counts.Limitations) != 0 {
+		t.Fatalf("window %s to %s, limitations %v", counts.Start, counts.End, counts.Limitations)
+	}
+	body := server.bodies[0]
+	if body["start_time"] != fmt.Sprint(logNow.Add(-time.Hour).Unix()) || body["end_time"] != fmt.Sprint(logNow.Add(-time.Second).Unix()) || body["step"] != "3600s" {
+		t.Fatalf("body %v", body)
+	}
+}
+
+// A window that does not begin on a bucket is counted from the bucket it
+// begins in, as UQ aligns it, and the answer names the window it counted:
+// asked 04:40 to 05:40, UQ answers the 04:00 and 05:00 buckets and the
+// count is 04:00's.
+func TestLogCountNamesTheAlignedWindowItCounted(t *testing.T) {
+	bucket := logNow.Add(-2 * time.Hour)
+	server := &logServer{answer: answer(false, map[string]any{"name": "_result0", "group_keys": []string{"level"}, "group_values": []string{"error"},
+		"values": []any{[]any{bucket.UnixMilli(), 5}, []any{bucket.Add(time.Hour).UnixMilli(), 8}}})}
+	p := server.provider(t)
+	request := logRequest()
+	request.By, request.End = []string{"level"}, logNow.Add(-20*time.Minute).Format(time.RFC3339)
+	counts, err := p.LogCount(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Total != 5 || !counts.Start.Equal(bucket) || !counts.End.Equal(bucket.Add(time.Hour)) || len(counts.Limitations) != 1 || !strings.Contains(counts.Limitations[0], "whole 1h buckets") {
+		t.Fatalf("counts %+v", counts)
 	}
 }

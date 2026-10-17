@@ -151,8 +151,14 @@ func (p *Provider) LogCount(ctx context.Context, request LogCountRequest) (LogCo
 	if request.QueryString != "" {
 		query["query_string"] = request.QueryString
 	}
+	// UQ's range is closed at its end and evaluates at every step from start
+	// through end, each point counting the whole window that begins there: an
+	// end_time of end would also answer the window from end on, and summing
+	// both counted twice the window. end_time is a second before end, so the
+	// window's own step is the only one asked, and the answer is still read
+	// for the one bucket it begins in (below) whatever UQ returns past it.
 	body := map[string]any{"query_list": []any{query}, "metric_merge": "a", "step": seconds,
-		"start_time": strconv.FormatInt(counts.Start.Unix(), 10), "end_time": strconv.FormatInt(end.Unix(), 10)}
+		"start_time": strconv.FormatInt(counts.Start.Unix(), 10), "end_time": strconv.FormatInt(end.Add(-time.Second).Unix(), 10)}
 	// The answer is read here and only its counts leave: the log masking that
 	// keeps native log answers out of a receipt is not needed for it.
 	receipt, err := p.query(ctx, Request{Egress: request.Egress, Endpoint: endpoint, Tenant: request.Tenant, Space: request.Space, Body: body}, true)
@@ -174,6 +180,24 @@ func (p *Provider) LogCount(ctx context.Context, request LogCountRequest) (LogCo
 	if answer.IsPartial {
 		counts.Limitations = append(counts.Limitations, "UQ marked the answer partial: some storage did not answer, so the counts are a lower bound")
 	}
+	// The count is the earliest bucket's: UQ aligns the window to whole
+	// buckets, so a window that does not start on one is counted from the
+	// bucket it starts in, and any later bucket is the next window's lines.
+	bucket, found := int64(0), false
+	for _, series := range answer.Series {
+		for _, point := range series.Values {
+			if at, ok := pointMillis(point); ok && (!found || at < bucket) {
+				bucket, found = at, true
+			}
+		}
+	}
+	if found {
+		if counted := time.UnixMilli(bucket).UTC(); !counted.Equal(counts.Start) {
+			counts.Limitations = append(counts.Limitations, fmt.Sprintf("UQ counts whole %s buckets; the counted window is %s to %s, not the %s to %s asked",
+				window, counted.Format(time.RFC3339), counted.Add(length).Format(time.RFC3339), counts.Start.Format(time.RFC3339), counts.End.Format(time.RFC3339)))
+			counts.Start, counts.End = counted, counted.Add(length)
+		}
+	}
 	for _, series := range answer.Series {
 		group := LogCountGroup{Values: map[string]string{}}
 		for i, key := range series.GroupKeys {
@@ -182,7 +206,7 @@ func (p *Provider) LogCount(ctx context.Context, request LogCountRequest) (LogCo
 			}
 		}
 		for _, point := range series.Values {
-			if len(point) == 2 {
+			if at, ok := pointMillis(point); ok && at == bucket {
 				if value, ok := point[1].(float64); ok {
 					group.Count += int64(value)
 				}
@@ -203,6 +227,15 @@ func (p *Provider) LogCount(ctx context.Context, request LogCountRequest) (LogCo
 		counts.Limitations = append(counts.Limitations, fmt.Sprintf("the %d largest of %d groups; total counts every group", top, counts.GroupsTotal))
 	}
 	return counts, nil
+}
+
+// pointMillis is a [time, value] point's time, in milliseconds.
+func pointMillis(point []any) (int64, bool) {
+	if len(point) != 2 {
+		return 0, false
+	}
+	at, ok := point[0].(float64)
+	return int64(at), ok
 }
 
 func logGroupKey(group LogCountGroup, by []string) string {
