@@ -10,10 +10,11 @@
 package openalerts
 
 // OpenCounts is, for every strategy this copy tracks, how many open alerts its
-// set holds as the gate reads it, calibration applied -- only the strategies
-// with at least one -- and the strategies it cannot count: a set never loaded,
-// stale past its bound, or refused for its size. Those are unknown and must
-// never read as zero; a loaded set with no member is in neither and is zero.
+// set holds as the gate reads it, calibration applied -- a loaded set with no
+// member is there as zero -- and the strategies it cannot count: a set never
+// loaded, stale past its bound, or refused for its size. Those are unknown and
+// must never read as zero. Every tracked strategy is in exactly one of the
+// two, so a strategy in neither is one this copy does not track.
 func (cache *Cache) OpenCounts() (map[StrategyKey]int, []StrategyKey) {
 	if cache == nil {
 		return nil, nil
@@ -32,9 +33,7 @@ func (cache *Cache) OpenCounts() (map[StrategyKey]int, []StrategyKey) {
 			unknown = append(unknown, key)
 			continue
 		}
-		if members := len(cache.indexMembers(key)); members > 0 {
-			counts[key] = members
-		}
+		counts[key] = len(cache.indexMembers(key))
 	}
 	return counts, unknown
 }

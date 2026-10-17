@@ -92,3 +92,14 @@ func TestBoardOpenAlertsAreAtLeastWhenAReplicaCut(t *testing.T) {
 		t.Fatalf("strategy 1 %+v strategy 2 %+v, want at least 2 and unknown", rows["1"].OpenAlerts, rows["2"].OpenAlerts)
 	}
 }
+
+// A replica that could not name its owned objects' strategies may not track
+// one of them, so absence there is not zero: no exact count, never Value 0.
+func TestBoardOpenAlertsAreNotExactWhenAReplicaCouldNotNameItsStrategies(t *testing.T) {
+	rows := openBoard(t, []Snapshot{
+		{Replica: "a", OpenAlerts: &OpenAlertCounts{Counts: []StrategyOpenCount{{Strategy: "1", Count: 2}}, OwnedUnnamed: true}},
+	}, map[string][]DiagnosisPlan{"1": {boardPlan("g1", "a")}, "2": {boardPlan("g2", "a")}})
+	if !reflect.DeepEqual(rows["1"].OpenAlerts, &BoardCount{Value: 2, AtLeast: true}) || rows["2"].OpenAlerts != nil {
+		t.Fatalf("strategy 1 %+v strategy 2 %+v, want at least 2 and unknown", rows["1"].OpenAlerts, rows["2"].OpenAlerts)
+	}
+}

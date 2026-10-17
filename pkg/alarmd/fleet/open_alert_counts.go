@@ -16,11 +16,17 @@ import "strconv"
 // owns -- as its gate reads them. Only strategies with at least one are
 // listed; a tracked strategy whose set the copy cannot count (not loaded,
 // stale, refused for its size) is in Unknown and must never read as zero.
-// Both lists take the store's per-list budget, and Cut says one was cut.
+// A strategy of an owned object the copy does not track -- refused for the
+// copy's capacity, or not taken up yet after a takeover -- is in Unknown too.
+// Both lists take the store's per-list budget, and Cut says one was cut;
+// OwnedUnnamed says the replica could not name its owned objects' strategies,
+// so an untracked one could be in neither list. Either way absence is not
+// zero.
 type OpenAlertCounts struct {
-	Counts  []StrategyOpenCount `json:"counts,omitempty"`
-	Unknown []string            `json:"unknown,omitempty"`
-	Cut     bool                `json:"cut,omitempty"`
+	Counts       []StrategyOpenCount `json:"counts,omitempty"`
+	Unknown      []string            `json:"unknown,omitempty"`
+	Cut          bool                `json:"cut,omitempty"`
+	OwnedUnnamed bool                `json:"owned_unnamed,omitempty"`
 }
 
 // StrategyOpenCount is one strategy's open alerts on one replica's copy.
@@ -73,7 +79,7 @@ func aggregateOpenAlerts(view *View, snapshots []Snapshot) {
 			unknown[strategy] = true
 		}
 		open.counts[snapshot.Replica], open.unknown[snapshot.Replica] = counts, unknown
-		open.complete[snapshot.Replica] = !snapshot.OpenAlerts.Cut
+		open.complete[snapshot.Replica] = !snapshot.OpenAlerts.Cut && !snapshot.OpenAlerts.OwnedUnnamed
 	}
 	view.OpenAlerts = open
 }

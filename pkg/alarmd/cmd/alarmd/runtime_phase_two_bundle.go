@@ -1660,35 +1660,51 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 }
 
 // openAlertCountsSource reads the copy's open-alert counts for the snapshot.
-func openAlertCountsSource(cache *openalerts.Cache) func() *fleet.OpenAlertCounts {
+func openAlertCountsSource(cache *openalerts.Cache) func([]string) *fleet.OpenAlertCounts {
 	if cache == nil {
 		return nil
 	}
-	return func() *fleet.OpenAlertCounts { return openAlertCountsOf(cache.OpenCounts()) }
+	return func(owned []string) *fleet.OpenAlertCounts {
+		counts, unknown := cache.OpenCounts()
+		return openAlertCountsOf(counts, unknown, owned)
+	}
 }
 
-// openAlertCountsOf is the copy's counts by strategy id, sorted. One id under
-// two tenants takes the larger count; an id counted under any tenant is not
-// also listed unknown.
-func openAlertCountsOf(counts map[openalerts.StrategyKey]int, unknown []openalerts.StrategyKey) *fleet.OpenAlertCounts {
-	byStrategy := map[string]int{}
+// openAlertCountsOf is the copy's counts by strategy id, sorted, zeros left
+// out. One id under two tenants takes the larger count, and an id unknown
+// under any tenant stays unknown even when another tenant counts it: the
+// unread tenant could hold more, and count beside unknown reads at least. A
+// strategy of an owned object the copy tracks under no tenant is unknown, and
+// owned nil -- the strategies could not be named -- says so instead.
+// Strategy refs carry no tenant, so an owned id tracked under one tenant is
+// taken as tracked.
+func openAlertCountsOf(counts map[openalerts.StrategyKey]int, unknown []openalerts.StrategyKey, owned []string) *fleet.OpenAlertCounts {
+	byStrategy, tracked := map[string]int{}, map[string]bool{}
 	for key, count := range counts {
+		tracked[key.StrategyID] = true
 		if count > byStrategy[key.StrategyID] {
 			byStrategy[key.StrategyID] = count
 		}
 	}
-	answer := &fleet.OpenAlertCounts{}
+	answer := &fleet.OpenAlertCounts{OwnedUnnamed: owned == nil}
 	for strategy, count := range byStrategy {
-		answer.Counts = append(answer.Counts, fleet.StrategyOpenCount{Strategy: strategy, Count: count})
+		if count > 0 {
+			answer.Counts = append(answer.Counts, fleet.StrategyOpenCount{Strategy: strategy, Count: count})
+		}
 	}
 	sort.Slice(answer.Counts, func(i, j int) bool { return answer.Counts[i].Strategy < answer.Counts[j].Strategy })
 	seen := map[string]bool{}
 	for _, key := range unknown {
-		if _, counted := byStrategy[key.StrategyID]; counted || seen[key.StrategyID] {
-			continue
+		if !seen[key.StrategyID] {
+			seen[key.StrategyID] = true
+			answer.Unknown = append(answer.Unknown, key.StrategyID)
 		}
-		seen[key.StrategyID] = true
-		answer.Unknown = append(answer.Unknown, key.StrategyID)
+	}
+	for _, strategy := range owned {
+		if !tracked[strategy] && !seen[strategy] {
+			seen[strategy] = true
+			answer.Unknown = append(answer.Unknown, strategy)
+		}
 	}
 	sort.Strings(answer.Unknown)
 	return answer

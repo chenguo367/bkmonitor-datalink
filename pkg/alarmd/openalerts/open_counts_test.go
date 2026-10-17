@@ -19,7 +19,7 @@ import (
 // The copy counts each tracked strategy's open alerts as the gate reads them,
 // and lists the strategies it cannot count -- a set not loaded yet -- apart:
 // those are unknown, never zero. A loaded set with nothing in it is counted
-// by its absence from both, which reads zero.
+// as zero, so a strategy in neither list is one the copy does not track.
 func TestOpenCountsCountLoadedSetsAndNameTheUnknown(t *testing.T) {
 	c := &clock{at: time.Unix(1700000000, 0)}
 	options := indexOptions(c)
@@ -35,7 +35,7 @@ func TestOpenCountsCountLoadedSetsAndNameTheUnknown(t *testing.T) {
 	}
 	cache.Refresh(context.Background())
 	counts, unknown = cache.OpenCounts()
-	if !reflect.DeepEqual(counts, map[StrategyKey]int{keyA: 3}) || len(unknown) != 0 {
+	if !reflect.DeepEqual(counts, map[StrategyKey]int{keyA: 3, keyB: 0}) || len(unknown) != 0 {
 		t.Fatalf("after reading: counts %v unknown %v, want keyA 3 and keyB counted as zero", counts, unknown)
 	}
 }
