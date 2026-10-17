@@ -409,3 +409,11 @@ func TestTheSectionedK8sReadsAnswerInParts(t *testing.T) {
 		t.Fatalf("operations missing: %v", want)
 	}
 }
+
+// The hops' return margins come out of the entry's write allowance, not the
+// operation's time: the longest route's margins fit inside it.
+func TestTheRouteAllowanceFitsTheTransportMargin(t *testing.T) {
+	if RouteAllowance != RouteHops*HopReturnMargin || RouteAllowance >= TransportMargin {
+		t.Fatalf("route allowance %v for %d hops of %v, want it inside the %v transport margin", RouteAllowance, RouteHops, HopReturnMargin, TransportMargin)
+	}
+}
