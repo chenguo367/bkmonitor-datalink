@@ -636,12 +636,36 @@ func encode(progress execution.ScheduleProgress) ([]byte, error) {
 		if progress.UnfinishedRange.EligibilityV2 != nil {
 			schema = schemaRangeV2
 		}
+		progress.LastCompletion = rangeLastCompletion(progress.LastCompletion)
 	}
 	raw, err := json.Marshal(envelope{Schema: schema, Progress: progress})
 	if err == nil && progress.UnfinishedRange != nil && len(raw) > execution.MaxExpiredRangeProjectionBytes {
 		return nil, execution.ErrExpiredRangeProofTooLarge
 	}
 	return raw, err
+}
+
+// rangeLastCompletion is the last completion a range record carries: the
+// summary without the fields the range decoder of a running release does not
+// know. Range records are decoded strictly (DisallowUnknownFields, below), and
+// during a rolling update or after a rollback an older replica reads what a
+// newer one wrote; a field it does not know makes the whole record corrupt to
+// it. IdentityRounds is such a field. Dropping it costs only the run: the
+// range is a run of expired Slots, which ends any run of identity-emptied
+// rounds anyway, so the count would start again after it.
+func rangeLastCompletion(summary *execution.LastCompletionSummary) *execution.LastCompletionSummary {
+	if summary == nil || summary.Empty == nil || summary.Empty.IdentityRounds == 0 {
+		return summary
+	}
+	copied, empty := *summary, *summary.Empty
+	empty.IdentityRounds = 0
+	copied.Empty = &empty
+	if !empty.Quiet && !empty.EmptiedByTarget {
+		// Nothing else was said about the round: no summary, as before
+		// the count was kept.
+		copied.Empty = nil
+	}
+	return &copied
 }
 
 // emptyRoundOf is what a whole, empty primary said about its emptiness, with
