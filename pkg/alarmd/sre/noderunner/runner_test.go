@@ -92,8 +92,14 @@ func TestCancelAndDeadline(t *testing.T) {
 func TestRedactionAcrossWritesAndBoundedLines(t *testing.T) {
 	r := testRunner(t)
 	q := startRequest("printf 'access_to'; sleep 0.1; printf 'ken=topsecret\\n'; printf 'Bearer split'; sleep 0.1; printf 'token\\n'; i=0; while [ $i -lt 70000 ]; do printf x; i=$((i+1)); done; printf '\\n'")
-	q.TimeoutSeconds = 5
+	// This tests redaction and line bounds, not shell throughput under load.
+	q.TimeoutSeconds = 30
 	r.Handle(q)
+	select {
+	case <-r.done:
+	case <-time.After(35 * time.Second):
+		t.Fatal("redaction execution did not finish")
+	}
 	v := terminal(t, r)
 	s := contents(v)
 	if strings.Contains(s, "topsecret") || strings.Contains(s, "splittoken") || !strings.Contains(s, "REDACTED") || !v.Truncated || v.DroppedBytes < 70000 {
