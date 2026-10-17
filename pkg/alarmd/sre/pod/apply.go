@@ -99,6 +99,11 @@ type FieldChange struct {
 	Path   string `json:"path"`
 	Before string `json:"before,omitempty"`
 	After  string `json:"after,omitempty"`
+	// BeforeFingerprint and AfterFingerprint are set when Before and After
+	// print the same although the stored values differ (cut at the printed
+	// length, or masked): HMAC fingerprints of the two stored values.
+	BeforeFingerprint string `json:"before_fingerprint,omitempty"`
+	AfterFingerprint  string `json:"after_fingerprint,omitempty"`
 }
 
 // WriteObject is one object's answer.
@@ -241,13 +246,12 @@ func (p *Provider) applyOne(ctx context.Context, object *unstructured.Unstructur
 		answer.HelmRelease = helmRelease(applied)
 	}
 	fingerprints := p.newFingerprints()
-	var before map[string]any
-	if existed {
-		before = p.shown(live, fingerprints)
+	if !existed {
+		live = nil
 	}
-	answer.Changes, answer.ChangesOmitted = changes(before, p.shown(applied, fingerprints))
-	// Unchanged is judged on the object as shown, the same comparison the
-	// changes listed come from: what a reader sees changed is what changed.
+	answer.Changes, answer.ChangesOmitted = p.writeChanges(live, applied, fingerprints)
+	// Unchanged is judged on the objects as stored (writeChanges): a value
+	// changed past the printed length or inside a masked span is a change.
 	switch {
 	case !existed:
 		answer.Outcome = WriteCreated
@@ -374,24 +378,67 @@ func (p *Provider) shown(object *unstructured.Unstructured, fingerprints *finger
 	return cleaned
 }
 
-// changes lists the leaves that differ between before and after, by path,
-// sorted, at most maxApplyChanges, and how many more.
-func changes(before, after map[string]any) ([]FieldChange, int) {
-	left, right := map[string]string{}, map[string]string{}
-	flatten("", before, left)
-	flatten("", after, right)
-	paths := map[string]bool{}
-	for path := range left {
-		paths[path] = true
+// stored is an object as a write's comparison judges it: every value whole
+// and unmasked (a Secret as its keys and fingerprints, since its values are
+// never compared in clear), without the fields every write moves. Nothing of
+// it is shown; it decides what changed.
+func (p *Provider) stored(object *unstructured.Unstructured, fingerprints *fingerprints) map[string]any {
+	if object == nil {
+		return nil
 	}
-	for path := range right {
-		paths[path] = true
+	raw := object.DeepCopy().Object
+	if object.GetKind() == "Secret" {
+		raw = p.keysOnlyRow(raw, true, fingerprints)
+	}
+	for _, field := range []string{"managedFields", "resourceVersion", "generation", "uid", "creationTimestamp"} {
+		unstructured.RemoveNestedField(raw, "metadata", field)
+	}
+	unstructured.RemoveNestedField(raw, "metadata", "annotations", lastAppliedAnnotation)
+	delete(raw, "status")
+	return raw
+}
+
+// writeChanges lists what a write changed, before (nil when it created the
+// object) to after. A path is a change when its stored value differs, so a
+// value changed past maxChangeValueBytes or inside a masked span counts; the
+// values are printed as k8s.list shows them, and when the two print the same
+// the change carries the stored values' fingerprints to tell them apart.
+func (p *Provider) writeChanges(before, after *unstructured.Unstructured, fingerprints *fingerprints) ([]FieldChange, int) {
+	var shownBefore map[string]any
+	if before != nil {
+		shownBefore = p.shown(before, fingerprints)
+	}
+	left, right := map[string]string{}, map[string]string{}
+	flatten("", shownBefore, left)
+	flatten("", p.shown(after, fingerprints), right)
+	storedLeft, storedRight := map[string]string{}, map[string]string{}
+	flattenWhole("", p.stored(before, fingerprints), storedLeft)
+	flattenWhole("", p.stored(after, fingerprints), storedRight)
+	paths := map[string]bool{}
+	for _, leaves := range []map[string]string{left, right, storedLeft, storedRight} {
+		for path := range leaves {
+			paths[path] = true
+		}
 	}
 	var listed []FieldChange
 	for path := range paths {
-		if left[path] != right[path] {
-			listed = append(listed, FieldChange{Path: path, Before: left[path], After: right[path]})
+		if left[path] == right[path] && storedLeft[path] == storedRight[path] {
+			continue
 		}
+		change := FieldChange{Path: path, Before: left[path], After: right[path]}
+		if change.Before == change.After {
+			// The shown values print the same (both cut, both masked, or a key
+			// added or removed with an empty value): only the fingerprint, taken
+			// over each side's stored value, tells them apart. A side absent from
+			// stored gets no fingerprint, so an added or removed key shows one.
+			if value, ok := storedLeft[path]; ok {
+				change.BeforeFingerprint = fingerprints.sum([]byte(value))
+			}
+			if value, ok := storedRight[path]; ok {
+				change.AfterFingerprint = fingerprints.sum([]byte(value))
+			}
+		}
+		listed = append(listed, change)
 	}
 	sort.Slice(listed, func(i, j int) bool { return listed[i].Path < listed[j].Path })
 	if len(listed) > maxApplyChanges {
@@ -400,15 +447,26 @@ func changes(before, after map[string]any) ([]FieldChange, int) {
 	return listed, 0
 }
 
+// flatten is an object's leaves by path as a receipt prints them, each value
+// cut at maxChangeValueBytes.
 func flatten(prefix string, value any, into map[string]string) {
+	flattenBounded(prefix, value, into, maxChangeValueBytes)
+}
+
+// flattenWhole is an object's leaves by path, each value whole.
+func flattenWhole(prefix string, value any, into map[string]string) {
+	flattenBounded(prefix, value, into, 0)
+}
+
+func flattenBounded(prefix string, value any, into map[string]string, bound int) {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, item := range v {
-			flatten(join(prefix, key), item, into)
+			flattenBounded(join(prefix, key), item, into, bound)
 		}
 	case []any:
 		for index, item := range v {
-			flatten(fmt.Sprintf("%s[%d]", prefix, index), item, into)
+			flattenBounded(fmt.Sprintf("%s[%d]", prefix, index), item, into, bound)
 		}
 	case nil:
 		if prefix != "" {
@@ -419,8 +477,8 @@ func flatten(prefix string, value any, into map[string]string) {
 		if encoded, err := json.Marshal(v); err == nil && !reflect.DeepEqual(v, text) {
 			text = string(encoded)
 		}
-		if len(text) > maxChangeValueBytes {
-			text = strings.ToValidUTF8(text[:maxChangeValueBytes], "") + "..."
+		if bound > 0 && len(text) > bound {
+			text = strings.ToValidUTF8(text[:bound], "") + "..."
 		}
 		into[prefix] = text
 	}
