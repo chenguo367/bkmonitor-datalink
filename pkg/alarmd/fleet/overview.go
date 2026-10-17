@@ -494,7 +494,7 @@ func overviewTightIntervalNotice(health HealthResponse) (OverviewNotice, bool) {
 	for index, ref := range strategies {
 		names[index] = ref.StrategyID
 	}
-	line := fmt.Sprintf("%d 个检测对象的周期放不下实测的查询后耗时（%s），近一小时这些查询改按固定预留执行，检测照常进行", groups, time.Duration(tail)*time.Millisecond)
+	line := fmt.Sprintf("%d 个检测对象的周期放不下查询后的实际耗时（%s），近一小时这些查询改按固定预留执行，检测照常进行", groups, time.Duration(tail)*time.Millisecond)
 	if len(names) > 0 {
 		line += "；涉及策略 " + strings.Join(names, "、")
 	}
