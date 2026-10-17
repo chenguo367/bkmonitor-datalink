@@ -179,3 +179,62 @@ func TestExecutableUsesRequestedPATH(t *testing.T) {
 		t.Fatal(v)
 	}
 }
+
+func TestUTF8PagingPreservesText(t *testing.T) {
+	r := testRunner(t)
+	want := "甲乙😀终点"
+	r.Handle(startRequest("printf '" + want + "'"))
+	terminal(t, r)
+	for _, size := range []int{1, 2, 3, 4, 5, 7} {
+		cursor := ""
+		got := ""
+		for i := 0; i < 20; i++ {
+			v := r.Handle(Request{Action: "get", ExecutionID: r.id, OutputCursor: cursor, MaxBytes: size})
+			if v.ControlError {
+				t.Fatal(v)
+			}
+			got += contents(v)
+			if cursor == v.NextCursor {
+				break
+			}
+			cursor = v.NextCursor
+		}
+		if got != want {
+			t.Fatalf("page %d = %q", size, got)
+		}
+	}
+}
+func TestBareTokenAcrossReads(t *testing.T) {
+	r := testRunner(t)
+	r.Handle(startRequest("printf to; sleep 0.1; printf 'ken=credential\\n'"))
+	v := terminal(t, r)
+	if strings.Contains(contents(v), "credential") || !strings.Contains(contents(v), "REDACTED") {
+		t.Fatal(v)
+	}
+}
+func TestControlErrorDoesNotChangeExecution(t *testing.T) {
+	r := testRunner(t)
+	v := r.Handle(Request{Action: "bogus", ExecutionID: r.id})
+	if !v.ControlError {
+		t.Fatal(v)
+	}
+	v = r.Handle(Request{Action: "get", ExecutionID: r.id})
+	if v.ControlError || v.Error != "" || v.State != "preparing" {
+		t.Fatal(v)
+	}
+}
+
+func TestCredentialFieldsNeverReachSpool(t *testing.T) {
+	r := testRunner(t)
+	r.Handle(startRequest("printf 'to'; sleep 0.1; printf 'ken=bare-value\\n{\"token\":\"json-value\"}\\napi-key=api-value\\n'"))
+	v := terminal(t, r)
+	raw, err := os.ReadFile(r.spool.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"bare-value", "json-value", "api-value"} {
+		if strings.Contains(contents(v), secret) || strings.Contains(string(raw), secret) {
+			t.Fatalf("credential reached output or spool: %s", secret)
+		}
+	}
+}

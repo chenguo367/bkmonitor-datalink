@@ -15,8 +15,8 @@ import (
 
 const Contract = "deployment_known_credentials_and_common_fields/v1"
 
-var assignment = regexp.MustCompile(`(?i)(["']?(?:password|passwd|secret|client_secret|api_key|private_key|admin_key|access_token|refresh_token|authorization|cookie)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,\s}\]]+)`)
-var bearer = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_.=-]+`)
+var assignment = regexp.MustCompile(`(?i)(["']?(?:password|passwd|secret|client[_-]?secret|api[_-]?key|private[_-]?key|admin[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|cookie)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^,\s}\]]+)`)
+var bearer = regexp.MustCompile(`(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_~.=-]+`)
 
 // urlCredential is URL userinfo under any scheme: a connection string's
 // credentials (redis://, mysql://, http://) sit there.

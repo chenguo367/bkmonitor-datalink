@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/redact"
 )
@@ -85,7 +86,12 @@ func (r *Runner) Handle(q Request) Response {
 	}
 	return r.snapshot(q)
 }
-func (r *Runner) failure(message string) Response { v := r.state; v.Error = message; return v }
+func (r *Runner) failure(message string) Response {
+	v := r.state
+	v.Error = message
+	v.ControlError = true
+	return v
+}
 func (r *Runner) finish(state, message string, code *int) {
 	now := time.Now().UTC()
 	until := now.Add(r.retention)
@@ -311,10 +317,10 @@ func (w *lineWriter) flush() {
 	if strings.Contains(line, "-----END ") {
 		w.pem = false
 	}
-	data := []byte(masked)
+	data := []byte(strings.ToValidUTF8(masked, "\uFFFD"))
 	w.pending = nil
 	remaining := w.r.limit - w.r.state.TotalBytes
-	if int64(len(data)) > remaining {
+	if int64(len(data)) > remaining || len(data) > maxLine {
 		w.r.state.DroppedBytes += int64(len(data))
 		w.r.state.Truncated = true
 		return
@@ -375,9 +381,22 @@ func (r *Runner) snapshot(q Request) Response {
 			if pos < offset {
 				start = offset - pos
 			}
+			if !utf8.RuneStart(data[start]) {
+				return r.failure("output cursor splits a UTF-8 character")
+			}
 			take := int64(size) - start
 			if take > int64(max)-(next-offset) {
 				take = int64(max) - (next - offset)
+			}
+			for take > 0 && start+take < int64(size) && !utf8.RuneStart(data[start+take]) {
+				take--
+			}
+			if take == 0 {
+				if next != offset {
+					break
+				}
+				_, width := utf8.DecodeRune(data[start:])
+				take = int64(width)
 			}
 			stream := "stdout"
 			if h[0] == 2 {
@@ -385,6 +404,9 @@ func (r *Runner) snapshot(q Request) Response {
 			}
 			v.Output = append(v.Output, Chunk{Stream: stream, Data: string(data[start : start+take]), Offset: next})
 			next += take
+			if start+take < int64(size) {
+				break
+			}
 		}
 		pos = end
 	}

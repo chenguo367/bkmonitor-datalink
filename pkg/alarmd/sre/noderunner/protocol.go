@@ -42,6 +42,7 @@ type Response struct {
 	Truncated           bool       `json:"truncated"`
 	CancelRequested     bool       `json:"cancel_requested"`
 	ConfirmedTerminated bool       `json:"confirmed_terminated"`
+	ControlError        bool       `json:"control_error,omitempty"`
 	Error               string     `json:"error,omitempty"`
 	StartedAt           *time.Time `json:"started_at,omitempty"`
 	FinishedAt          *time.Time `json:"finished_at,omitempty"`
