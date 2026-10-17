@@ -1,0 +1,222 @@
+// Copyright (C) 2017-2026 Tencent. All rights reserved.
+// Licensed under the MIT License.
+package node
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
+	"github.com/google/uuid"
+	"io"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+	kt "k8s.io/client-go/testing"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type testExecutor struct {
+	mu        sync.Mutex
+	starts    int
+	cancelled bool
+	lost      bool
+}
+
+func (e *testExecutor) Stream(ctx context.Context, r pod.StreamRequest) (pod.StreamResult, error) {
+	var q map[string]any
+	_ = json.NewDecoder(r.Stdin).Decode(&q)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	state := "preparing"
+	switch q["action"] {
+	case "start":
+		if !e.cancelled {
+			e.starts++
+		}
+		if e.lost {
+			return pod.StreamResult{}, errors.New("connection lost after start")
+		}
+	case "cancel":
+		e.cancelled = true
+	}
+	if e.starts > 0 {
+		state = "succeeded"
+	}
+	if e.cancelled {
+		state = "cancelled"
+	}
+	_, _ = io.WriteString(r.Stdout, `{"state":"`+state+`","exit_code":0,"next_cursor":"cursor"}`)
+	z := 0
+	return pod.StreamResult{ExitCode: &z}, nil
+}
+func (e *testExecutor) count() int { e.mu.Lock(); defer e.mu.Unlock(); return e.starts }
+func setup(t *testing.T, lostCreate bool) (*Provider, *fake.Clientset, *testExecutor) {
+	t.Helper()
+	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node", UID: "node-uid"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{OperatingSystem: "linux"}}})
+	client.PrependReactor("create", "jobs", func(a kt.Action) (bool, runtime.Object, error) {
+		j := a.(kt.CreateAction).GetObject().(*batchv1.Job).DeepCopy()
+		j.UID = "job-uid"
+		if err := client.Tracker().Create(schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}, j, j.Namespace); err != nil {
+			return true, nil, err
+		}
+		yes := true
+		target := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: j.Name + "-pod", Namespace: j.Namespace, UID: "pod-uid", Labels: map[string]string{"job-name": j.Name}, OwnerReferences: []metav1.OwnerReference{{Kind: "Job", UID: j.UID, Controller: &yes}}}, Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "runner", ContainerID: "container-id", ImageID: "image-id", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}
+		_ = client.Tracker().Create(schema.GroupVersionResource{Version: "v1", Resource: "pods"}, target, target.Namespace)
+		if lostCreate {
+			return true, nil, errors.New("lost creation response")
+		}
+		return true, j, nil
+	})
+	executor := &testExecutor{}
+	p, err := New(Options{Redis: redistest.Start(t).Client(), KeyPrefix: "test:{node}:", FingerprintKeySource: func() []byte { return []byte("shared-key") }, DefaultNamespace: "ns", Image: "alarmd:1", DeploymentID: "deployment", Client: client, Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, client, executor
+}
+func request() ExecRequest {
+	id, _ := uuid.NewV7()
+	return ExecRequest{ExecutionID: id.String(), Node: Node{Name: "node", UID: "node-uid"}, Mode: "host", User: "root", Cwd: "/tmp", Argv: []string{"sh", "-s"}, Stdin: "secret-script"}
+}
+func await(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition did not become true")
+}
+
+func TestConcurrentDuplicateAndCreateResponseLossDoNotReplay(t *testing.T) {
+	p, client, executor := setup(t, true)
+	ctx := context.Background()
+	q := request()
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Exec(ctx, q); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	await(t, func() bool { return executor.count() == 1 })
+	other := *p
+	for i := 0; i < 10; i++ {
+		if _, err := other.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q.Stdin = "different"
+	if _, err := p.Exec(ctx, q); err == nil {
+		t.Fatal("conflicting replay accepted")
+	}
+	jobs, _ := client.BatchV1().Jobs("ns").List(ctx, metav1.ListOptions{})
+	if len(jobs.Items) != 1 || executor.count() != 1 {
+		t.Fatalf("jobs %d starts %d", len(jobs.Items), executor.count())
+	}
+	stored, _ := p.options.Redis.HGetAll(ctx, p.key(q.ExecutionID)).Result()
+	raw, _ := json.Marshal(stored)
+	if strings.Contains(string(raw), "secret-script") {
+		t.Fatal("stored input")
+	}
+	result, err := other.Get(ctx, GetRequest{ExecutionID: q.ExecutionID})
+	if err != nil || result.State != "succeeded" {
+		t.Fatalf("cross-replica result %+v %v", result, err)
+	}
+}
+func TestLostDispatchAndReplacedPodNeverRestart(t *testing.T) {
+	p, client, e := setup(t, false)
+	e.lost = true
+	ctx := context.Background()
+	q := request()
+	_, err := p.Exec(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { return e.count() == 1 })
+	await(t, func() bool { r, _, _, _ := p.read(ctx, q.ExecutionID); return r.State == "unknown" })
+	r, _, _, _ := p.read(ctx, q.ExecutionID)
+	candidate, _ := client.CoreV1().Pods("ns").Get(ctx, r.PodName, metav1.GetOptions{})
+	candidate.UID = types.UID("replacement")
+	_, _ = client.CoreV1().Pods("ns").Update(ctx, candidate, metav1.UpdateOptions{})
+	result, err := p.Get(ctx, GetRequest{ExecutionID: q.ExecutionID})
+	if err != nil || !result.OutputUnavailable {
+		t.Fatalf("replacement %+v %v", result, err)
+	}
+	for i := 0; i < 3; i++ {
+		_, _ = p.Exec(ctx, q)
+	}
+	if e.count() != 1 {
+		t.Fatal("replayed command")
+	}
+}
+func TestCancelBeforeDispatchAndCAS(t *testing.T) {
+	p, _, e := setup(t, false)
+	ctx := context.Background()
+	q := request()
+	if err := normalize(&q); err != nil {
+		t.Fatal(err)
+	}
+	r := Record{ExecutionID: q.ExecutionID, State: "preparing"}
+	raw, _ := json.Marshal(r)
+	_, err := createScript.Run(ctx, p.options.Redis, []string{p.key(r.ExecutionID), p.index()}, string(raw), "digest", time.Now().Unix(), r.ExecutionID).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := p.Cancel(ctx, CancelRequest{ExecutionID: r.ExecutionID})
+	if err != nil || !result.CancelRequested {
+		t.Fatal(err)
+	}
+	next := r
+	next.State = "dispatching"
+	if p.replace(ctx, r, next, true) == nil {
+		t.Fatal("dispatch accepted after cancel")
+	}
+	p.prepare(q, r)
+	if e.count() != 0 {
+		t.Fatal("cancelled input executed")
+	}
+}
+func TestExpiredIDAndMissingSharedKeyRefused(t *testing.T) {
+	p, client, _ := setup(t, false)
+	q := request()
+	q.ExecutionID = "01800000-0000-7000-8000-000000000001"
+	if _, err := p.Exec(context.Background(), q); err == nil {
+		t.Fatal("expired ID accepted")
+	}
+	q = request()
+	p.options.FingerprintKeySource = func() []byte { return nil }
+	if _, err := p.Exec(context.Background(), q); err == nil {
+		t.Fatal("missing shared key accepted")
+	}
+	jobs, _ := client.BatchV1().Jobs("ns").List(context.Background(), metav1.ListOptions{})
+	if len(jobs.Items) != 0 {
+		t.Fatal("created job on refusal")
+	}
+}
+func TestJobHasNoInputAndBoundedLifetime(t *testing.T) {
+	p, _, _ := setup(t, false)
+	j := p.job(Record{ExecutionID: "id", Node: Node{Name: "node"}, Mode: "filesystem", Deadline: time.Now().Add(time.Hour)})
+	s := j.Spec.Template.Spec
+	if s.HostPID || !s.Containers[0].VolumeMounts[0].ReadOnly || *s.AutomountServiceAccountToken || *j.Spec.BackoffLimit != 0 || *j.Spec.TTLSecondsAfterFinished <= 0 {
+		t.Fatal("unsafe job template")
+	}
+	if len(s.Containers[0].Env) != 0 || len(s.Containers[0].Args) != 0 {
+		t.Fatal("job template carries input")
+	}
+}
