@@ -135,7 +135,12 @@ func (c *EvidenceExecutor) run(ctx context.Context, op Operation, params Params,
 		return failure(meta, "request_timeout", "Evidence execution context ended before execution.")
 	}
 	out := op.Run(ctx, params)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && op.PartialOnTimeout && op.Effect != "exec" && out.Value != nil && out.Error == nil {
+		// The parts it read stand; the ones it did not name their failure
+		// in the answer.
+		out.Complete = false
+		out.Limitations = append(out.Limitations, "The operation's time ran out; the parts not read are named in the answer.")
+	} else if ctx.Err() != nil {
 		if op.Effect != "exec" || out.Value == nil {
 			return failure(meta, "request_timeout", "Evidence execution exceeded its request context; no complete result is returned.")
 		}

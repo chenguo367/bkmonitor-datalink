@@ -163,6 +163,10 @@ type Operation struct {
 	Effect           string
 	RequiredScope    string
 	ExecutionTimeout time.Duration
+	// PartialOnTimeout says a read answers in parts that each name their own
+	// failure (a namespace, an object): when its time runs out, what it did
+	// read is returned, incomplete, rather than dropped with the rest.
+	PartialOnTimeout bool
 	RequestMaxBytes  int
 	// ExecutionPool is evidence, sre or exec. Exec cannot enter an internal
 	// Worker route; SRE providers use their own local admission budget.
@@ -675,6 +679,9 @@ func describe(op Operation) map[string]any {
 		input["allOf"] = rules
 	}
 	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "contract_version": op.ContractVersion, "effect": op.Effect, "required_scope": op.RequiredScope, "execution_timeout_ms": op.ExecutionTimeout.Milliseconds(), "execution_pool": op.ExecutionPool, "request_max_bytes": op.RequestMaxBytes, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	if op.PartialOnTimeout {
+		value["partial_on_timeout"] = true
+	}
 	if op.DefaultOwnerParam != "" {
 		value["default_owner_parameter"] = op.DefaultOwnerParam
 	}

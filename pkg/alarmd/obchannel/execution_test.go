@@ -372,3 +372,40 @@ func TestCallerBoundedKeepsTheCallersDeadline(t *testing.T) {
 		t.Fatalf("a caller without a deadline got %v", time.Until(deadline))
 	}
 }
+
+// A read that answers in parts keeps what it read when its time runs out,
+// incomplete and saying so; any other read past its time is dropped.
+func TestAPartialOnTimeoutReadKeepsWhatItRead(t *testing.T) {
+	for _, partial := range []bool{true, false} {
+		op := targetOperation(func(ctx context.Context, _ Params) Outcome {
+			<-ctx.Done()
+			return Outcome{Complete: true, Value: map[string]any{"read": 2, "failed": []string{"ns-c"}}}
+		})
+		op.PartialOnTimeout = partial
+		c := newTargetChannel(t, Options{Auth: &testAuth{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		response := c.ExecuteEvidence(ctx, internalInvocation(c))
+		cancel()
+		switch {
+		case partial && (response.Error != nil || response.Result == nil || response.Evidence.Complete):
+			t.Fatalf("partial read: %+v", response)
+		case !partial && (response.Error == nil || response.Error.Code != "request_timeout"):
+			t.Fatalf("ordinary read past its time: %+v", response.Error)
+		}
+	}
+}
+
+// The reads that answer in parts -- a section per namespace, a failure per
+// object -- say so, so a read whose time runs out keeps what it read.
+func TestTheSectionedK8sReadsAnswerInParts(t *testing.T) {
+	want := map[string]bool{"k8s.workloads": true, "k8s.events": true}
+	for _, op := range K8sOperations(nil, nil, nil) {
+		if want[op.ID] && !op.PartialOnTimeout {
+			t.Errorf("%s does not keep what it read when its time runs out", op.ID)
+		}
+		delete(want, op.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("operations missing: %v", want)
+	}
+}
