@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -131,27 +132,45 @@ func (p *Provider) Get(ctx context.Context, q GetRequest) (Result, error) {
 		return result, nil
 	}
 	var state struct {
-		State    string `json:"state"`
-		ExitCode *int   `json:"exit_code"`
-		Error    string `json:"error"`
+		State        string `json:"state"`
+		ExitCode     *int   `json:"exit_code"`
+		Error        string `json:"error"`
+		ControlError bool   `json:"control_error"`
 	}
 	if err = json.Unmarshal(response, &state); err != nil {
 		return Result{}, err
 	}
-	if state.Error != "" {
-		return Result{}, fail("runner_error", state.Error)
+	if state.Error != "" && state.ControlError {
+		return Result{Record: r, Runner: response, CancelRequested: cancel}, fail("runner_error", safeError(errors.New(state.Error)))
 	}
 	result.Runner = response
-	if state.State != "" && state.State != r.State {
+	// Execution/output errors accompany useful execution facts. Preserve the
+	// page, exit status and terminal state; only invalid controls are refused.
+	if state.State != "" {
 		next := r
 		next.State = state.State
 		next.ExitCode = state.ExitCode
-		if err = p.replace(ctx, r, next, false); err == nil {
-			result.Record = next
+		if state.Error != "" {
+			next.OutputIncomplete = true
+			next.Detail = safeError(errors.New(state.Error))
+		}
+		result.Record = next
+		if !sameRecord(r, next) {
+			err = p.replace(ctx, r, next, false)
+		} else {
+			err = nil
+		}
+		if err == nil {
 			p.finish(ctx, next)
 		}
 	}
 	return result, nil
+}
+
+func sameRecord(a, b Record) bool {
+	left, _ := json.Marshal(a)
+	right, _ := json.Marshal(b)
+	return string(left) == string(right)
 }
 func (p *Provider) Cancel(ctx context.Context, q CancelRequest) (Result, error) {
 	r, _, _, err := p.read(ctx, q.ExecutionID)

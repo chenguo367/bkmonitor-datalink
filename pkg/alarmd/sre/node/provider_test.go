@@ -27,10 +27,11 @@ import (
 )
 
 type testExecutor struct {
-	mu        sync.Mutex
-	starts    int
-	cancelled bool
-	lost      bool
+	mu          sync.Mutex
+	starts      int
+	cancelled   bool
+	lost        bool
+	getResponse string
 }
 
 func (e *testExecutor) Stream(ctx context.Context, r pod.StreamRequest) (pod.StreamResult, error) {
@@ -38,6 +39,11 @@ func (e *testExecutor) Stream(ctx context.Context, r pod.StreamRequest) (pod.Str
 	_ = json.NewDecoder(r.Stdin).Decode(&q)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if q["action"] == "get" && e.getResponse != "" && e.starts > 0 {
+		_, _ = io.WriteString(r.Stdout, e.getResponse)
+		z := 0
+		return pod.StreamResult{ExitCode: &z}, nil
+	}
 	state := "preparing"
 	switch q["action"] {
 	case "start":
@@ -272,6 +278,69 @@ func TestCreationRejectionKeepsActionableRedactedDetail(t *testing.T) {
 	if !strings.Contains(r.Detail, "PodSecurity") || strings.Contains(r.Detail, "unsafe") {
 		t.Fatalf("detail %q", r.Detail)
 	}
+}
+
+func TestOutputFailurePreservesTerminalStateAndPartialEvidence(t *testing.T) {
+	for _, message := range []string{"output storage failed", "output pipe remained open after command exit"} {
+		t.Run(message, func(t *testing.T) {
+			p, _, e := setup(t, false)
+			ctx := context.Background()
+			q := request()
+			e.getResponse = `{"state":"failed","exit_code":7,"error":"` + message + `","output":[{"stream":"stdout","data":"saved evidence"}],"next_cursor":"cursor"}`
+			if _, err := p.Exec(ctx, q); err != nil {
+				t.Fatal(err)
+			}
+			await(t, func() bool { return e.count() == 1 })
+			await(t, func() bool { r, _, _, _ := p.read(ctx, q.ExecutionID); return r.State == "failed" })
+			result, err := p.Get(ctx, GetRequest{ExecutionID: q.ExecutionID})
+			if err != nil || result.State != "failed" || result.ExitCode == nil || *result.ExitCode != 7 || !result.OutputIncomplete || !strings.Contains(string(result.Runner), "saved evidence") {
+				t.Fatalf("lost terminal/output facts: %+v %v", result, err)
+			}
+			stored, _, _, err := p.read(ctx, q.ExecutionID)
+			if err != nil || stored.State != "failed" || !stored.OutputIncomplete || stored.ExitCode == nil || *stored.ExitCode != 7 {
+				t.Fatalf("not persisted: %+v %v", stored, err)
+			}
+			if e.count() != 1 {
+				t.Fatal("execution replayed")
+			}
+		})
+	}
+}
+
+func TestInvalidCursorRemainsControlError(t *testing.T) {
+	p, _, e := setup(t, false)
+	ctx := context.Background()
+	q := request()
+	_, err := p.Exec(ctx, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool { return e.count() == 1 })
+	e.mu.Lock()
+	e.getResponse = `{"state":"succeeded","exit_code":0,"error":"invalid output cursor","control_error":true}`
+	e.mu.Unlock()
+	if _, err = p.Get(ctx, GetRequest{ExecutionID: q.ExecutionID, OutputCursor: "bad"}); err == nil {
+		t.Fatal("invalid cursor accepted")
+	}
+}
+
+func TestRetryWithNewRequestAndRenewedSessionUsesOriginalExecution(t *testing.T) {
+	p, _, e := setup(t, false)
+	ctx := context.Background()
+	q := request()
+	q.Caller = Caller{SessionID: "old-session", RequestID: "first-request"}
+	if _, err := p.Exec(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	q.Caller = Caller{SessionID: "renewed-session", RequestID: "second-request"}
+	result, err := p.Exec(ctx, q)
+	if err != nil {
+		t.Fatalf("caller metadata changed command digest: %v", err)
+	}
+	if result.Caller.RequestID != "first-request" {
+		t.Fatal("original audit caller replaced")
+	}
+	await(t, func() bool { return e.count() == 1 })
 }
 
 func TestCancelSelectedExecutionPersistsAcrossReplica(t *testing.T) {

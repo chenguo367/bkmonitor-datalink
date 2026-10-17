@@ -42,23 +42,24 @@ type CancelRequest struct {
 	ExecutionID string `json:"execution_id"`
 }
 type Record struct {
-	Caller      Caller    `json:"caller"`
-	ExitCode    *int      `json:"exit_code,omitempty"`
-	ExecutionID string    `json:"execution_id"`
-	Node        Node      `json:"node"`
-	Mode        string    `json:"mode"`
-	Namespace   string    `json:"namespace"`
-	JobName     string    `json:"job_name"`
-	JobUID      string    `json:"job_uid,omitempty"`
-	PodName     string    `json:"pod_name,omitempty"`
-	PodUID      string    `json:"pod_uid,omitempty"`
-	ContainerID string    `json:"container_id,omitempty"`
-	ImageID     string    `json:"image_id,omitempty"`
-	State       string    `json:"state"`
-	CreatedAt   time.Time `json:"created_at"`
-	Deadline    time.Time `json:"deadline"`
-	Cleanup     string    `json:"cleanup"`
-	Detail      string    `json:"detail,omitempty"`
+	OutputIncomplete bool      `json:"output_incomplete,omitempty"`
+	Caller           Caller    `json:"caller"`
+	ExitCode         *int      `json:"exit_code,omitempty"`
+	ExecutionID      string    `json:"execution_id"`
+	Node             Node      `json:"node"`
+	Mode             string    `json:"mode"`
+	Namespace        string    `json:"namespace"`
+	JobName          string    `json:"job_name"`
+	JobUID           string    `json:"job_uid,omitempty"`
+	PodName          string    `json:"pod_name,omitempty"`
+	PodUID           string    `json:"pod_uid,omitempty"`
+	ContainerID      string    `json:"container_id,omitempty"`
+	ImageID          string    `json:"image_id,omitempty"`
+	State            string    `json:"state"`
+	CreatedAt        time.Time `json:"created_at"`
+	Deadline         time.Time `json:"deadline"`
+	Cleanup          string    `json:"cleanup"`
+	Detail           string    `json:"detail,omitempty"`
 }
 type Result struct {
 	Record

@@ -226,10 +226,11 @@ func (p *Provider) prepare(request ExecRequest, r Record) {
 						return
 					}
 					var ack struct {
-						Error string `json:"error"`
+						Error        string `json:"error"`
+						ControlError bool   `json:"control_error"`
 					}
 					_ = json.Unmarshal(response, &ack)
-					if ack.Error != "" {
+					if ack.Error != "" && ack.ControlError {
 						next = r
 						next.State = "failed"
 						next.Detail = "runner rejected start"
