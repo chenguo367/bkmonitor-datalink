@@ -19,8 +19,11 @@
 # copies files: no shell or useradd is needed there, so RUNTIME_IMAGE can be any
 # base, including a distroless one.
 
+ARG NODE_TOOLS_IMAGE=busybox:1.37.0-musl
 ARG GO_IMAGE=golang:1.26.7
 ARG RUNTIME_IMAGE=tencentos/tencentos4-minimal
+FROM ${NODE_TOOLS_IMAGE} AS node-tools
+RUN mkdir -p /data/bkmonitor/node-tools && cp /bin/busybox /data/bkmonitor/node-tools/busybox && /data/bkmonitor/node-tools/busybox --install -s /data/bkmonitor/node-tools
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
 
 ARG GOPROXY=direct
@@ -56,13 +59,16 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
  && GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath \
       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${GIT_COMMIT} -X main.schemaVersion=$(cat SCHEMA_VERSION)" \
-      -o /out/data/bkmonitor/alarmd ./cmd/alarmd
+      -o /out/data/bkmonitor/alarmd ./cmd/alarmd \
+ && GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" \
+      -o /out/data/bkmonitor/alarmd-node-runner ./cmd/alarmd-node-runner
 
 FROM ${RUNTIME_IMAGE}
 
 # /etc/alarmd is where the chart mounts alarmd.yaml; /data/bkmonitor holds the
 # binary. Both are owned by the unprivileged uid the process runs as.
 COPY --from=builder --chown=65532:65532 /out/data/bkmonitor /data/bkmonitor
+COPY --from=node-tools /data/bkmonitor/node-tools /data/bkmonitor/node-tools
 COPY --from=builder --chown=65532:65532 /out/etc/alarmd /etc/alarmd
 
 WORKDIR /data/bkmonitor

@@ -65,6 +65,8 @@ else
 endif
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/alarmd
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+	$(GO) build -trimpath -ldflags "-s -w" -o $(RELEASE_PATH)/alarmd-node-runner ./cmd/alarmd-node-runner
 ifneq ($(CLI_RELEASE),0)
 	if [ "$$($(GO) env GOHOSTOS)/$$($(GO) env GOHOSTARCH)" = linux/amd64 ]; then $(BIN) --check-cli-release; fi
 endif
