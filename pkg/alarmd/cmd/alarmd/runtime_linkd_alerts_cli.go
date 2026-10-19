@@ -76,6 +76,7 @@ type linkdConsoleReader interface {
 	Binding(context.Context) (openalerts.TargetBinding, error)
 	Reconcile(context.Context, openalerts.StrategyKey) (openalerts.Reconciliation, error)
 	Entities(context.Context, string, url.Values) (openalerts.EntityPage, error)
+	Alert(context.Context, string, string) (json.RawMessage, error)
 	Record() openalerts.ConsoleRecord
 }
 
@@ -110,8 +111,8 @@ func cliLinkdAlertsOperation(console linkdConsoleReader) obchannel.Operation {
 			"tenant":          text("租户，默认 system。", 256),
 			"from":            text("按告警问的起点，RFC 3339；默认 to 前 24 小时。", 64),
 			"to":              text("按告警问的终点，RFC 3339；默认现在。", 64),
-			"limit":           {Type: "integer", Description: "按告警问的每页条数，原样交给 linkd；不给用 linkd 的默认。", Minimum: &minLimit},
-			"cursor":          text("告警段上一页的 next_cursor。", 16384),
+			"limit":           {Type: "integer", Description: "按 source_alert_id 问的每页条数，原样交给 linkd；不给用 linkd 的默认。按 alert_id 问只读那一条。", Minimum: &minLimit},
+			"cursor":          text("按 source_alert_id 问时：告警段上一页的 next_cursor（按 alert_id 问只有一条，没有下一页）。", 16384),
 			"logs_cursor":     text("只给 alert_id 时：流水段上一页的 logs_next_cursor。", 16384),
 			"events_cursor":   text("只给 alert_id 时：事件段上一页的 events_next_cursor。", 16384),
 		},
@@ -136,6 +137,9 @@ func cliLinkdAlertsOperation(console linkdConsoleReader) obchannel.Operation {
 			}
 			if (p.String("logs_cursor") != "" || p.String("events_cursor") != "") && p.String("alert_id") == "" {
 				return errors.New("logs_cursor and events_cursor continue one alert's segments: give its alert_id")
+			}
+			if p.String("cursor") != "" && p.String("alert_id") != "" {
+				return errors.New("an alert_id names one alert, which has no next page: cursor continues a source_alert_id read")
 			}
 			return nil
 		},
@@ -186,20 +190,32 @@ func readLinkdAlerts(ctx context.Context, console linkdConsoleReader, p obchanne
 	if from != "" {
 		query.Set("from", from)
 	}
+	var page openalerts.EntityPage
 	if id := p.String("alert_id"); id != "" {
-		query.Set("alert_id", id)
+		// The link's list takes no alert id and would answer every alert in
+		// range; the alert is read on the route that addresses it.
+		item, err := console.Alert(ctx, tenant, id)
+		switch {
+		case errors.Is(err, openalerts.ErrAlertNotFound):
+			answer.Alerts = []linkdAlertRecord{}
+			return obchannel.Outcome{Value: answer, Complete: true, Limitations: []string{
+				"The link has no alert with this alert_id."}}
+		case err != nil:
+			return linkdAlertsFailure(err)
+		}
+		page.Items = []json.RawMessage{item}
 	} else {
 		query.Set("source_alert_id", p.String("source_alert_id"))
-	}
-	if limit := p.Int("limit", 0); limit > 0 {
-		query.Set("limit", strconv.Itoa(limit))
-	}
-	if cursor := p.String("cursor"); cursor != "" {
-		query.Set("cursor", cursor)
-	}
-	page, err := console.Entities(ctx, openalerts.EntityAlerts, query)
-	if err != nil {
-		return linkdAlertsFailure(err)
+		if limit := p.Int("limit", 0); limit > 0 {
+			query.Set("limit", strconv.Itoa(limit))
+		}
+		if cursor := p.String("cursor"); cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		var err error
+		if page, err = console.Entities(ctx, openalerts.EntityAlerts, query); err != nil {
+			return linkdAlertsFailure(err)
+		}
 	}
 	answer.NextCursor, answer.Warnings = page.NextCursor, page.Warnings
 	answer.Alerts = []linkdAlertRecord{}
