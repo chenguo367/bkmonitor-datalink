@@ -210,6 +210,13 @@ type DataRequirement struct {
 	// quiet in the answer until it can recover. Zero for every other
 	// requirement; a whole number of steps.
 	ProviderLeadSeconds int64 `json:",omitempty"`
+	// UnfilledCounts says the primary answers counts its provider does not
+	// zero-fill: a log count, or a log time series counted, read from an
+	// Elasticsearch date histogram, where a group with no document in the
+	// range is absent from the answer rather than zero. Its empty answer
+	// cannot tell a quiet group from a missing one. False for every other
+	// requirement; on a primary only.
+	UnfilledCounts bool `json:",omitempty"`
 }
 
 func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) error {
@@ -226,7 +233,8 @@ func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) erro
 		return errors.New("alarmd execution: invalid DataRequirement result window contract")
 	}
 	if requirement.ProviderLeadSeconds < 0 || requirement.ProviderLeadSeconds*1000%requirement.StepMillis != 0 ||
-		requirement.ProviderLeadSeconds > 0 && requirement.Role != InputRolePrimary {
+		requirement.ProviderLeadSeconds > 0 && requirement.Role != InputRolePrimary ||
+		requirement.UnfilledCounts && requirement.Role != InputRolePrimary {
 		return errors.New("alarmd execution: a provider lead is a whole number of steps, on a primary requirement")
 	}
 	if requirement.ReadinessClass != ReadinessEager && requirement.ReadinessClass != ReadinessFinalizedRequired {

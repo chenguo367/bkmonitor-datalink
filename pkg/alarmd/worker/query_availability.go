@@ -144,6 +144,25 @@ func (e queryAvailabilityEvidence) quietWhenEmpty(primary execution.PrimaryInput
 	return false
 }
 
+// unfilledWhenEmpty says a FULL, EMPTY primary is a grouped count its
+// provider does not zero-fill (DataRequirement.UnfilledCounts): a log count
+// whose groups are absent, not zero, while they have no document, so the
+// empty answer cannot say whether a group was quiet or its data missing.
+// Withholding rules as for quiet: a group the target turned away is the
+// target's empty, and any other withholding leaves the answer unproven.
+func (e queryAvailabilityEvidence) unfilledWhenEmpty(primary execution.PrimaryInputFact, requirements []execution.DataRequirement) bool {
+	if primary.Completeness != execution.CompletenessFull || primary.DataState != execution.DataStateEmpty ||
+		e.primaryEmptiedOutside || e.primaryWithheldOtherwise {
+		return false
+	}
+	for _, requirement := range requirements {
+		if requirement.Role == execution.InputRolePrimary && requirement.UnfilledCounts && len(requirement.RequiredColumns) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // unavailableReason is why the primary query was unavailable, when it was.
 func (e queryAvailabilityEvidence) unavailableReason() execution.ReasonCode {
 	if e.availability() != execution.QueryAvailabilityUnavailable {

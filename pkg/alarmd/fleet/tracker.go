@@ -100,6 +100,13 @@ const (
 	// stopped or never came, so the object is on neither line above: it is
 	// detecting, and its row says why it has nothing to judge.
 	KindQuiet = "QUIET"
+	// KindLogCountEmpty: a grouped log count whose rounds came back empty
+	// for as long as the data lines above wait - empty; log counts aren't
+	// zero-filled, so quiet and missing look the same. Its provider answers
+	// a group with no document by leaving it out, not with a zero, so the
+	// same empty answer is a group at rest and a group whose data stopped,
+	// and the row does not claim either.
+	KindLogCountEmpty = "LOG_COUNT_EMPTY"
 	// KindIdentityUnmatched: an object whose rounds come back empty because
 	// every series its query returned was one the target's identity could
 	// not read -- the key's dimensions were missing or its model gate did
@@ -394,8 +401,11 @@ type queryGroupState struct {
 	// quiet is whether the latest empty round was an event count answering
 	// with no group (KindQuiet). Every empty round sets it, and it is read
 	// only while an empty run lasts, which a round with records ends.
-	quiet   bool
-	sawData bool
+	quiet bool
+	// unfilled is whether the latest empty round was a grouped count its
+	// provider does not zero-fill (KindLogCountEmpty), read like quiet.
+	unfilled bool
+	sawData  bool
 	// emptySinceSlot and lastEmptySlot bound the run of empty completions on
 	// the source's own clock: the Slot of the first empty round of the run and
 	// of the latest. The "every round" line gates on their distance, Slot to
@@ -1682,6 +1692,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.identityRounds, state.identity = 0, nil
 			}
 			state.quiet = observation.PrimaryInput != nil && observation.PrimaryInput.QuietWhenEmpty
+			state.unfilled = observation.PrimaryInput != nil && observation.PrimaryInput.UnfilledWhenEmpty
 			if state.emptyRuns == 0 {
 				state.emptySince = at
 				state.emptySinceFrom = SinceSnapshotContinuity
@@ -2978,6 +2989,13 @@ func (tracker *Tracker) NoData() []Anomaly {
 			}
 		default:
 			continue
+		}
+		// A log count's empty answer is the same for a quiet group and a
+		// missing one, so it is not told back as data that stopped or never
+		// came: same clock, its own line. Data the target turned away is
+		// still the target's.
+		if state.unfilled && (anomaly.Kind == KindNoData || anomaly.Kind == KindEmptyEveryRound && !state.emptiedByTarget) {
+			anomaly.Kind, anomaly.EmptyEveryRound = KindLogCountEmpty, nil
 		}
 		for strategy := range state.strategies {
 			anomaly.Strategies = append(anomaly.Strategies, strategy)

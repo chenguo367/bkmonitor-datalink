@@ -227,8 +227,14 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// positions never fills a window yet has its recovery decided, as
 	// Python's is, and it sat on the undecidable column and the data's
 	// SERIES_SPARSE line as if one of those were true of it (leader 10-20).
-	if got := len(Checks()); got != 42 || len(checkAnswers) != 42 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 42: a new check has to "+
+	// Forty-two: LOG_COUNT_EMPTY is a rule over a dimension the rows did not
+	// carry before - whether an empty round's primary is a grouped count its
+	// provider does not zero-fill - because a log count's empty answer is
+	// the same for a quiet group and a missing one, and NO_DATA_PERSISTENT or
+	// EMPTY_EVERY_ROUND told it back as data missing (leader 10-20: log
+	// counts are not widened, the diagnosis is made honest instead).
+	if got := len(Checks()); got != 43 || len(checkAnswers) != 43 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 43: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -301,6 +307,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckEmptyAfterTarget:    {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseOutsideTarget}},
 		CheckIdentityUnmatched:   {Kind: KindIdentityUnmatched, IdentityUnmatched: &IdentityUnmatchedFacts{Rounds: 3, Withheld: 2, KeyMissing: 2}},
 		CheckQuiet:               {Kind: KindQuiet},
+		CheckLogCountEmpty:       {Kind: KindLogCountEmpty},
 		CheckAnswerTruncated:     {Kind: KindAnswerTruncated},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,

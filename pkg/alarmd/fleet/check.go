@@ -158,6 +158,12 @@ const (
 	// that a storage that failed silently - which answers the same way - is
 	// one look away.
 	CheckQuiet Check = "QUIET"
+	// LogCountEmpty is a grouped log count answered whole with no group for
+	// as long as NO_DATA_PERSISTENT or EMPTY_EVERY_ROUND would wait: empty;
+	// log counts aren't zero-filled, so quiet and missing look the same. Its
+	// provider leaves a group with no document out of the answer instead of
+	// counting it zero, and the line does not claim either reading.
+	CheckLogCountEmpty Check = "LOG_COUNT_EMPTY"
 	// AnswerTruncated is an answer that may have been cut at the query
 	// service's terms cap: thresholds evaluate the groups that came back,
 	// and a Plan that detects no data judges nothing that round
@@ -364,8 +370,12 @@ var checkAnswers = map[Check]struct {
 	CheckEmptyAfterTarget:  {OwnerStrategy, GroupByStrategy},
 	CheckIdentityUnmatched: {OwnerStrategyOrCollection, GroupByStrategy},
 	CheckQuiet:             {OwnerStrategy, GroupByStrategy},
-	CheckAnswerTruncated:   {OwnerStrategy, GroupByStrategy},
-	CheckSeriesChurning:    {OwnerStrategy, GroupByStrategy},
+	// The strategy's, as QUIET is: whether a quiet group is expected is the
+	// strategy owner's to say, and the data owner can say whether data went
+	// missing; the answer alone cannot.
+	CheckLogCountEmpty:   {OwnerStrategy, GroupByStrategy},
+	CheckAnswerTruncated: {OwnerStrategy, GroupByStrategy},
+	CheckSeriesChurning:  {OwnerStrategy, GroupByStrategy},
 	// The strategy's: its window and step against how often its series
 	// report. Folded on the cadence, which is what its owner reads.
 	CheckSeriesSparserThanWindow: {OwnerStrategy, GroupByCadence},
@@ -460,6 +470,8 @@ var checkOrder = []Check{
 	// The event counts at rest: detecting, with nothing to judge. Any other
 	// row of the strategy decides it.
 	CheckQuiet,
+	// A log count answered empty: detecting, quiet or missing unknown.
+	CheckLogCountEmpty,
 	// Detecting and recovering as Python does; only NORMAL never comes.
 	CheckSeriesSparserThanWindow,
 	// An answer that may have been cut: thresholds evaluate what came back,

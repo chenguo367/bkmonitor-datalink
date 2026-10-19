@@ -238,6 +238,10 @@ var checkWords = map[Check]wordPair{
 	CheckIdentityUnmatched: {StateIdentityMismatch, ActionIdentityAlign},
 	// Detecting: an event count with no event to judge.
 	CheckQuiet: {StateDetecting, ActionNone},
+	// Detecting: a log count with nothing in the answer, which may be a
+	// group at rest or data gone missing; the row says the answer cannot
+	// tell them apart.
+	CheckLogCountEmpty: {StateDetecting, ActionNone},
 	// Detecting what came back; the grouping is the strategy's to narrow.
 	CheckAnswerTruncated: {StateDetecting, ActionStrategyEdit},
 	CheckSeriesChurning:  {StateResultUntrusted, ActionStrategyEdit},

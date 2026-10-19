@@ -675,11 +675,11 @@ func rangeLastCompletion(summary *execution.LastCompletionSummary) *execution.La
 // one it never would be.
 func emptyRoundOf(primary *execution.PrimaryInputFact, contentScope string, previous *execution.EmptyRoundSummary) *execution.EmptyRoundSummary {
 	if contentScope == "" || primary == nil || primary.Completeness != execution.CompletenessFull ||
-		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget && primary.Identity == nil {
+		primary.DataState != execution.DataStateEmpty || !primary.QuietWhenEmpty && !primary.EmptiedByTarget && !primary.UnfilledWhenEmpty && primary.Identity == nil {
 		return nil
 	}
 	summary := &execution.EmptyRoundSummary{Quiet: primary.QuietWhenEmpty, EmptiedByTarget: primary.EmptiedByTarget,
-		ContentScope: contentScope}
+		Unfilled: primary.UnfilledWhenEmpty, ContentScope: contentScope}
 	if primary.Identity != nil {
 		// The run continues the previous round's when that round was the
 		// same kind of empty under the same content.
