@@ -232,7 +232,7 @@ func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operati
 			ops[i].RouteWhenElsewhere = objectElsewhere
 		}
 		if ops[i].ID == "strategy.get" {
-			ops[i].Examples = []Params{{"strategy_id": "1001"}}
+			ops[i].Examples = []Params{{"strategy_id": "101"}}
 			f := ops[i].Fields["strategy_id"]
 			f.Pattern = "^[1-9][0-9]*$"
 			ops[i].Fields["strategy_id"] = f

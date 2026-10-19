@@ -22,14 +22,14 @@ import (
 // whose group this replica kept none for carries nothing, and the route the
 // answer was read from never had them.
 func TestStrategyGetCarriesTheKeptRejectionOfEachPlan(t *testing.T) {
-	body := `{"strategy_id":"1001","line":"策略 1001","plans":[{"query_group":"q1","existence":"present"},{"query_group":"q2","existence":"present"}]}`
+	body := `{"strategy_id":"101","line":"策略 101","plans":[{"query_group":"q1","existence":"present"},{"query_group":"q2","existence":"present"}]}`
 	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) })
 	kept := fleet.KeptRejection{Class: "VM_SAMPLE_LIMIT", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", HTTPStatus: 400,
 		Excerpt: `{"error":"cannot select more than 10000000 samples; password=<redacted>"}`, At: time.Unix(1_700_000_000, 0).UTC()}
 	c := testChannel(t, &testAuth{}, NativeOperationsWith(native, NativeOptions{Rejections: func(group string) (fleet.KeptRejection, bool) {
 		return kept, group == "q1"
 	}})...)
-	status, out := call(t, c, envelope(c, "invoke", "strategy.get", Params{"strategy_id": "1001"}))
+	status, out := call(t, c, envelope(c, "invoke", "strategy.get", Params{"strategy_id": "101"}))
 	if status != 200 {
 		t.Fatalf("status %d: %+v", status, out)
 	}
