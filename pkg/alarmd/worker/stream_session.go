@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -395,32 +394,10 @@ func (stream *streamedExecution) releaseProvisional() {
 }
 
 func streamedRetainedSize(bindings []execution.NamedInputBinding, delivery execution.SeriesDelivery) (uint64, error) {
-	compact := make([]execution.NamedInputBinding, len(bindings))
-	copy(compact, bindings)
-	for index := range compact {
-		compact[index].Dataset = nil
-		compact[index].View = nil
-	}
-	// Only the length is wanted, so the encoding is counted rather than kept:
-	// Marshal copies out a document that was read once for its length. The
-	// encoder escapes as Marshal does and ends with a newline Marshal does not
-	// write, which is taken off so the size is the one Marshal gave.
-	var counted encodedLength
-	if err := json.NewEncoder(&counted).Encode(struct {
-		Bindings []execution.NamedInputBinding
-		Delivery execution.SeriesDelivery
-	}{Bindings: compact, Delivery: delivery}); err != nil {
-		return 0, err
-	}
-	return uint64(counted) - 1 + delivery.Bytes, nil
-}
-
-// encodedLength is a writer that keeps only how many bytes it was given.
-type encodedLength uint64
-
-func (length *encodedLength) Write(p []byte) (int, error) {
-	*length += encodedLength(len(p))
-	return len(p), nil
+	// The length the bindings without their datasets and the delivery encode
+	// to, counted field by field (retained_size.go): encoding them only to
+	// measure them was a twentieth of reading a large answer.
+	return uint64(retainedDocumentLength(bindings, delivery)) + delivery.Bytes, nil
 }
 
 func prepareNamedInputIndex(header execution.InternalExecutionHeader) (preparedNamedInputIndex, error) {

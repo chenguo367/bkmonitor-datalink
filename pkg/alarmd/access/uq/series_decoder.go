@@ -23,6 +23,16 @@ type seriesDecoder struct {
 	offGrid                                       bool
 	receivedAt                                    int64
 	decodeStarted                                 time.Time
+	// framed is set on an answer read a frame at a time, which hands on a
+	// frame's series before it reads the next (handOn): only its series are
+	// made canonical side by side. An answer read as one document hands each
+	// on before it reads on, so a series that came is delivered even when
+	// the rest does not. pending is the series accepted and not yet handed
+	// on, oldest first; failed is the first error handing one on met, after
+	// which none is.
+	framed  bool
+	pending []normalizing
+	failed  error
 }
 
 func (client *Client) newSeriesDecoder(attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) *seriesDecoder {
@@ -31,6 +41,9 @@ func (client *Client) newSeriesDecoder(attempt queryIdentity, sink execution.Pro
 }
 
 func (session *seriesDecoder) accept(ctx context.Context, series responseSeries, encodedBytes uint64) error {
+	if session.failed != nil {
+		return session.failed
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -50,7 +63,37 @@ func (session *seriesDecoder) accept(ctx context.Context, series responseSeries,
 		return ErrTotalRecordsExceeded
 	}
 	session.totalRecords += uint64(len(series.Values))
-	batch, nullFields, err := normalizeSeries(session.attempt.Spec, session.ref, series, session.receivedAt)
+	session.pending = append(session.pending, normalizing{series: series, encodedBytes: encodedBytes})
+	if session.framed {
+		return nil
+	}
+	return session.handOn(ctx)
+}
+
+// handOn makes the series accepted canonical - side by side on the workers
+// free (normalizeSideBySide) - and hands them on here, one after another in
+// the order they came, as when each was handed on as it came: the sink sees
+// the same series in the same order, and the delivery digest chains them
+// the same way. The first error one meets ends the answer's deliveries: the
+// series after it are not handed on.
+func (session *seriesDecoder) handOn(ctx context.Context) error {
+	if session.failed != nil || len(session.pending) == 0 {
+		return session.failed
+	}
+	normalizeSideBySide(session.pending, session.attempt.Spec, session.ref, session.receivedAt)
+	for index := range session.pending {
+		if session.failed = session.deliver(ctx, &session.pending[index]); session.failed != nil {
+			break
+		}
+	}
+	clear(session.pending)
+	session.pending = session.pending[:0]
+	return session.failed
+}
+
+// deliver hands one canonical series on.
+func (session *seriesDecoder) deliver(ctx context.Context, job *normalizing) error {
+	batch, err := job.batch, job.err
 	if errors.Is(err, errOffRequestGrid) {
 		session.offGrid = true
 		return nil
@@ -58,16 +101,29 @@ func (session *seriesDecoder) accept(ctx context.Context, series responseSeries,
 	if err != nil {
 		return err
 	}
-	session.nullIdentityFields += nullFields
+	session.nullIdentityFields += job.nullFields
 	if batch.Dataset.Len() == 0 {
 		return nil
 	}
-	batch.Delivery.Bytes = encodedBytes
+	batch.Delivery.Bytes = job.encodedBytes
 	if err := session.sink.ConsumeProviderSeries(ctx, batch); err != nil {
 		return err
 	}
 	session.delivery, err = execution.AccumulateSeriesDelivery(session.delivery, batch.Delivery)
 	return err
+}
+
+// settle hands on what an answer that ended early had accepted, as each
+// series was handed on as it came before it ended, and keeps the earlier
+// error: a series accepted before the one that ended the answer failed
+// first.
+func (session *seriesDecoder) settle(ctx context.Context, err *error) {
+	if len(session.pending) == 0 {
+		return
+	}
+	if failed := session.handOn(ctx); failed != nil {
+		*err = failed
+	}
 }
 
 // limitCompletion preserves the existing deterministic response-limit outcome,
@@ -87,7 +143,10 @@ func (session *seriesDecoder) limitCompletion(completion *execution.ProviderComp
 	*err = nil
 }
 
-func (session *seriesDecoder) finish(status *responseStatus, isPartial *bool, resultTableIDs []string) (execution.ProviderCompletion, error) {
+func (session *seriesDecoder) finish(ctx context.Context, status *responseStatus, isPartial *bool, resultTableIDs []string) (execution.ProviderCompletion, error) {
+	if err := session.handOn(ctx); err != nil {
+		return execution.ProviderCompletion{}, err
+	}
 	client, attempt, ref := session.client, session.attempt, session.ref
 	delivery, nullIdentityFields := session.delivery, session.nullIdentityFields
 	decodeStarted, offGrid, cut := session.decodeStarted, session.offGrid, session.cut
