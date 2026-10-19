@@ -440,6 +440,32 @@ func lookbackQueryLatency(engine *lookback.Engine) scheduler.QueryLatency {
 	return queryLatencyOf(engine)
 }
 
+// lookbackBusy is what the lookback has of a Query Group in flight or
+// reserved, read when a Slot of it is finalised as skipped; none without a
+// lookback.
+func lookbackBusy(engine *lookback.Engine) scheduler.LookbackBusy {
+	if engine == nil {
+		return nil
+	}
+	return lookbackBusyOf(engine)
+}
+
+// lookbackBusyReading is the lookback's read of what it holds of a group.
+type lookbackBusyReading interface {
+	Busy(execution.QueryGroupIdentity) (lookback.Busy, bool)
+}
+
+func lookbackBusyOf(engine lookbackBusyReading) scheduler.LookbackBusy {
+	return func(queryGroup execution.QueryGroupIdentity) (observability.LookbackBusyFacts, bool) {
+		busy, known := engine.Busy(queryGroup)
+		return observability.LookbackBusyFacts{
+			Capturing: busy.Capturing, SamplePending: busy.SamplePending, ProbePending: busy.ProbePending,
+			ProbationRereads: busy.ProbationRereads, DirectedPending: busy.DirectedPending,
+			ReadsInFlight: busy.ReadsInFlight, TrialPrepared: busy.TrialPrepared,
+		}, known
+	}
+}
+
 // lookbackReadings is what the lookback reads of a Query Group's queries:
 // how long its whole first reads took, and how long a read again is given.
 type lookbackReadings interface {

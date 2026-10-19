@@ -117,6 +117,17 @@ type SlotRecoveryFacts struct {
 	// between a report someone can act on and one they have to reproduce.
 	ReadyAtUnixMilli          int64
 	DistanceBoundaryUnixMilli int64
+	// SlotAgeMillis, AgeLimit and DistanceLimit are what an expiry was decided
+	// against, taken where it was decided (expiryDecided): the decision
+	// instant less the Slot's evaluation time, and the two configured limits
+	// the age and the distance were compared with. Set on REPLAY_EXPIRED only,
+	// for the slot_skipped line of the Slot it gives up.
+	SlotAgeMillis int64
+	AgeLimit      time.Duration
+	DistanceLimit uint32
+	// RangeDistance is the distance a range built this round was sized by,
+	// for the same line.
+	RangeDistance *observability.RangeDistanceFacts
 	// Decision is what the source judged when it let a live Slot run as a
 	// normal round (classifyRecoveryOf), carried to the Slot's completion so
 	// a round that then times out says on its own line why it was not sent

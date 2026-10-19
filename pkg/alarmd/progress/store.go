@@ -248,6 +248,9 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 		return execution.ProgressBeginResult{Status: execution.ProgressRetryableIO, ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, nil
 	}
 	current := execution.ScheduleProgress{Identity: request.Identity, NextSlot: request.Projection.Contract.Slot.EvaluationTime}
+	// abandoned is the unfinished Slot a later Segment skipped, reported once
+	// the write that records the skip applies.
+	var abandoned *execution.UnfinishedSlotProjection
 	if !missing {
 		current, err = decode(raw)
 		if err != nil {
@@ -274,12 +277,16 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 			case current.NextSlot != requested && newerSegment:
 				// A later Segment owns the unfinished Slot's time and moves the
 				// cursor: the persisted contract can never be re-frozen.
+				abandonedAt := current.NextSlot
 				conflict, abandonErr := store.abandonUnfinishedSlot(ctx, &current, requested)
 				if abandonErr != nil {
 					return execution.ProgressBeginResult{}, abandonErr
 				}
 				if conflict {
 					return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
+				}
+				if requested > abandonedAt {
+					abandoned = &persisted
 				}
 			default:
 				// Another Slot on the same or an older Segment, or the same Slot
@@ -312,6 +319,9 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 	})
 	switch status {
 	case ownership.FencedCASApplied:
+		if abandoned != nil {
+			store.observeAbandonedSlot(ctx, request, *abandoned)
+		}
 		return execution.ProgressBeginResult{Status: execution.ProgressCommitted}, nil
 	case ownership.FencedCASConflict:
 		return execution.ProgressBeginResult{Status: execution.ProgressConflict}, nil
@@ -841,4 +851,20 @@ func (store *Store) SkipPrunedRange(ctx context.Context, request execution.Progr
 		_ = applyErr
 		return execution.ProgressSkipResult{Status: execution.ProgressRetryableIO}, nil
 	}
+}
+
+// observeAbandonedSlot reports the unfinished Slot a later Segment moved the
+// cursor past, once the write recording the skip applied. Nothing queried it
+// and no Plan marker is written for it: the skip is the recent gap on the
+// Progress record.
+func (store *Store) observeAbandonedSlot(ctx context.Context, request execution.ProgressBeginRequest, abandoned execution.UnfinishedSlotProjection) {
+	evaluation := int64(abandoned.Contract.Slot.EvaluationTime)
+	observability.ObserveSlotSkipped(ctx, store.options.Observer, observability.TraceFields{
+		QueryGroupKey: string(request.Identity.QueryGroup), EvaluationTime: evaluation,
+		SnapshotRevision: string(abandoned.Contract.SnapshotRevision), ScheduleSegmentStart: int64(abandoned.Contract.ScheduleSegmentStart),
+		OwnerID: request.OwnerFence.OwnerID, OwnerEpoch: request.OwnerFence.OwnerEpoch,
+	}, observability.OperationWrite, observability.SlotSkippedFacts{
+		Path: observability.SlotSkippedProgressStore, FirstSlot: evaluation, LastSlot: evaluation, SlotCount: 1,
+		Reason: contract.ReasonGapSkipped, GapGuard: observability.SkipGapProgressOnly,
+	})
 }

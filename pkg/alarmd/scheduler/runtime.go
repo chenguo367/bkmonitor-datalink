@@ -592,6 +592,10 @@ type Runner struct {
 	// the far side of the source call, which is why it has to survive the
 	// round that produced it rather than being passed down it.
 	heldBy observability.HeldByFacts
+	// skipObserver and lookbackBusy report the Slots this Runner's rounds
+	// finalise as skipped (WithSlotSkipReport); nil reports none.
+	skipObserver observability.Observer
+	lookbackBusy LookbackBusy
 	// nextDeadline is the query deadline of the Slot this Runner froze and did
 	// not complete -- deferred for readiness, refused admission, or failed and
 	// backing off -- so a dispatcher can order it against the others by when
@@ -910,6 +914,7 @@ func (runner *Runner) runOneTracked(
 	// called because the source is where the decision to give up is taken, and
 	// again available to the executor below, which reports the completion.
 	ctx = withHeldBy(ctx, runner.heldBy)
+	ctx = runner.withLookbackBusy(ctx)
 	if err := ctx.Err(); err != nil {
 		decision = "cancelled"
 		return execution.SlotExecutionResult{}, false, err
@@ -1083,6 +1088,9 @@ func (runner *Runner) runOneTracked(
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
+	if err == nil && result.Completed && result.CompletionKind == execution.CompletionGapSkipped {
+		runner.observeSlotSkipped(ctx, slot, operation, fence)
+	}
 	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() {
 		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.queryGroup, runner.lastExecutionReturnedAt.Sub(queried))
 	}

@@ -114,6 +114,7 @@ const (
 	StageReplayTakeover         = "replay_takeover"
 	StageSlotDiverted           = "slot_diverted"
 	StageRangeDistanceExpired   = "range_distance_expired"
+	StageSlotSkipped            = "slot_skipped"
 	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
@@ -2511,8 +2512,10 @@ type Observation struct {
 	// before it ran, and the two want opposite investigations. Its own field
 	// rather than ProgressCompletionKind, which target flow reads to fill
 	// Completion on a line that already emits its own.
-	SlotCompletionKind  string
-	RangeDistance       *RangeDistanceFacts
+	SlotCompletionKind string
+	RangeDistance      *RangeDistanceFacts
+	// SlotSkipped is one Slot, or range, finalised as skipped.
+	SlotSkipped         *SlotSkippedFacts
 	RangeGate           *RangeGateFacts
 	SlotWait            *SlotWaitFacts
 	ObjectCatalog       *ObjectCatalogFacts
@@ -2671,6 +2674,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.Rebalance = normalizeRebalanceFacts(observation.Rebalance)
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
+	observation.SlotSkipped = normalizeSlotSkippedFacts(observation.SlotSkipped)
 	observation.RangeGate = normalizeRangeGateFacts(observation.RangeGate)
 	observation.HeldBy = normalizeHeldByFacts(observation.HeldBy)
 	if observation.ReplayExpiry != nil {
@@ -3544,6 +3548,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageReplayTakeover},
 	{ComponentScheduler, StageSlotDiverted},
 	{ComponentScheduler, StageRangeDistanceExpired},
+	{ComponentScheduler, StageSlotSkipped},
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},
 	{ComponentAccess, StageQueryCompleted},

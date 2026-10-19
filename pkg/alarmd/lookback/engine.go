@@ -771,6 +771,66 @@ func (engine *Engine) QueryDuration(queryGroup execution.QueryGroupIdentity) (ti
 	return longest, longest > 0
 }
 
+// Busy is what the lookback has of a Query Group in flight or reserved at
+// this moment, read under the engine lock: its capture, its sample and probe
+// waiting for a rung, its probation rereads and directed reads, how many of
+// all those are being read right now, and a prepared earlier-read trial.
+// False when the engine is absent. Read-only.
+type Busy struct {
+	Capturing        bool
+	SamplePending    bool
+	ProbePending     bool
+	ProbationRereads int
+	DirectedPending  int
+	ReadsInFlight    int
+	TrialPrepared    bool
+}
+
+func (engine *Engine) Busy(queryGroup execution.QueryGroupIdentity) (Busy, bool) {
+	if engine == nil {
+		return Busy{}, false
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.groups[queryGroup]
+	if state == nil {
+		return Busy{}, true
+	}
+	busy := Busy{Capturing: state.capturing}
+	count := func(candidate *sample) bool {
+		if candidate == nil || candidate.dropped {
+			return false
+		}
+		if candidate.running {
+			busy.ReadsInFlight++
+		}
+		return true
+	}
+	busy.SamplePending = count(state.sample)
+	busy.ProbePending = count(state.probe)
+	for _, candidate := range state.probations {
+		if count(candidate) {
+			busy.ProbationRereads++
+		}
+	}
+	for _, slot := range state.directed {
+		if slot == nil || slot.dropped {
+			continue
+		}
+		busy.DirectedPending++
+		if slot.running {
+			busy.ReadsInFlight++
+		}
+	}
+	if trial := state.prepared; trial != nil && !trial.done {
+		busy.TrialPrepared = true
+		if trial.running {
+			busy.ReadsInFlight++
+		}
+	}
+	return busy, true
+}
+
 // rereadBound is how long a read of the group's query again may take: the
 // longest of its last whole first reads, never less than RecheckTimeout.
 // Caller holds the engine lock.

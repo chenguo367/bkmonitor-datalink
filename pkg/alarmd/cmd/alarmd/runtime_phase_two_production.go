@@ -1280,7 +1280,10 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// takes (the lookback's), which decides whether a round taken over late
 	// can still run as a normal round. Optional: without it every such round
 	// is judged by RecoveryLimits.TakeoverDivertFloor.
-	QueryLatency              scheduler.QueryLatency
+	QueryLatency scheduler.QueryLatency
+	// LookbackBusy reads what the lookback has of a Query Group in flight
+	// or reserved, for the slot_skipped line. Optional.
+	LookbackBusy              scheduler.LookbackBusy
 	PostRecoveryTerminalDelay time.Duration
 	QueryDeadlineReserve      time.Duration
 	SnapshotRetention         time.Duration
@@ -2620,6 +2623,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if runtime.dependencies.QueryCooldowns != nil {
 		runner.WithQueryCooldownStore(runtime.dependencies.QueryCooldowns)
 	}
+	runner.WithSlotSkipReport(runtime.dependencies.Observer, runtime.dependencies.LookbackBusy)
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
 		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate,
