@@ -82,3 +82,36 @@ func TestTheConfigMapEditIsAnAuditedWriteWithoutValues(t *testing.T) {
 		t.Fatal("configmap.edit_text is not a counted change")
 	}
 }
+
+// The description a caller reads names the codes a refusal comes back with:
+// every word the provider refuses with, under the pod_ prefix the channel
+// gives every Pod provider failure, and a refusal comes back under it.
+func TestTheConfigMapEditNamesTheCodesItRefusesWith(t *testing.T) {
+	client := &postObservationClient{target: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "web-0", UID: "pod-uid"}}}
+	provider, err := pod.New(pod.Options{Client: client, DryRun: editableConfigMap{}, Writer: &patchWriter{}, DefaultNamespace: "fixture",
+		FingerprintKey: []byte("fixed-test-fingerprint-key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := SREOperations(SREOptions{Pods: provider})
+	summary := ""
+	for _, operation := range operations {
+		if operation.ID == pod.OpEditConfigMapText {
+			summary = operation.Summary
+		}
+	}
+	for _, word := range []string{pod.EditKeyNotFound, pod.EditFingerprintChanged, pod.EditNewTextNotPlain, pod.EditOldTextNotShown, pod.EditNotShownExactly} {
+		if !strings.Contains(summary, "pod_"+word) {
+			t.Errorf("the description does not name pod_%s: %s", word, summary)
+		}
+	}
+	channel, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1", Operations: operations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, response := call(t, channel, envelope(channel, "invoke", pod.OpEditConfigMapText, Params{"namespace": "ns1", "name": "app", "key": "config.yaml",
+		"old_text": "http://old.example.test/", "new_text": "http://new.example.test/", "expected_fingerprint": "0000000000000000"}))
+	if response.Error == nil || response.Error.Code != "pod_"+pod.EditFingerprintChanged {
+		t.Fatalf("stale fingerprint answered %+v", response.Error)
+	}
+}
