@@ -515,6 +515,174 @@
    "window": 2
   },
   {
+   "id": "four_of_five_dense",
+   "lifecycle": {
+    "at": 61320,
+    "every_window_has_a_point": true,
+    "outcome": "RECOVERED"
+   },
+   "lifecycle_recovery_nodata": {
+    "at": 61320,
+    "every_window_has_a_point": true,
+    "outcome": "RECOVERED"
+   },
+   "opened_at": 60960,
+   "points": [
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60780
+    },
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60840
+    },
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60900
+    },
+    {
+     "anomalous": true,
+     "recovered": false,
+     "time": 60960
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61020
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61080
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61140
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61200
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61260
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61320
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61380
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61440
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61500
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61560
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61620
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61680
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61740
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61800
+    }
+   ],
+   "recovery": 5,
+   "required": 4,
+   "window": 5
+  },
+  {
+   "id": "four_of_five_sparse_after",
+   "lifecycle": {
+    "at": 61560,
+    "every_window_has_a_point": true,
+    "outcome": "RECOVERED"
+   },
+   "lifecycle_recovery_nodata": {
+    "at": 61560,
+    "every_window_has_a_point": true,
+    "outcome": "RECOVERED"
+   },
+   "opened_at": 60960,
+   "points": [
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60780
+    },
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60840
+    },
+    {
+     "anomalous": true,
+     "recovered": true,
+     "time": 60900
+    },
+    {
+     "anomalous": true,
+     "recovered": false,
+     "time": 60960
+    },
+    {
+     "anomalous": false,
+     "recovered": false,
+     "time": 61260
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61560
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 61860
+    },
+    {
+     "anomalous": false,
+     "recovered": true,
+     "time": 62160
+    }
+   ],
+   "recovery": 5,
+   "required": 4,
+   "window": 5
+  },
+  {
    "id": "burst_09_11_then_13_quiet",
    "lifecycle": {
     "at": 61500,

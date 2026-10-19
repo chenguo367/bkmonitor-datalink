@@ -653,3 +653,69 @@ func TestARequestWithNoReadEndSettlesNothing(t *testing.T) {
 		t.Fatalf("recovery evidence = %+v, want no window counted", window.Recovery)
 	}
 }
+
+// A window is a miss when it holds fewer anomalies than the strategy's
+// required count, not when it holds none: four of five, five recovery
+// windows, anomalies at :13 to :16. The window ending :17 holds four and
+// still triggers; the one ending :18 holds three and is the first miss, so
+// the fifth miss is the window ending :22, the last anomaly plus 360 s -
+// Python's decision minute in production and in the oracle. Read in the Slot
+// a minute after each point, alarmd decides RECOVERY on the :22 point, in the
+// :23 Slot. With a point every five minutes after the anomalies, the first
+// point whose windows all hold fewer than four is :26, for both.
+func TestFourOfFiveRecoversWhenAWindowHoldsFewerThanFour(t *testing.T) {
+	cases := pythonRecoveryCases(t)
+	for _, want := range []struct {
+		id     string
+		minute int64
+	}{{"four_of_five_dense", 22}, {"four_of_five_sparse_after", 26}} {
+		item := cases[want.id]
+		if item.Required != 4 || item.Window != 5 || item.Recovery != 5 {
+			t.Fatalf("%s: oracle case %d of %d, R %d, want 4 of 5, R 5", want.id, item.Required, item.Window, item.Recovery)
+		}
+		if item.Lifecycle.Outcome != pythonRecovered || item.Lifecycle.At != pythonBase+want.minute*60 {
+			t.Fatalf("%s: oracle = %+v, want RECOVERED at minute %d", want.id, item.Lifecycle, want.minute)
+		}
+		compareWithPython(t, item)
+		plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 4, 5, nil)})
+		points := item.series()
+		first := int64(-1)
+		for index, point := range points {
+			if point.time <= *item.OpenedAt {
+				continue
+			}
+			slot := point.time + 60
+			if recoveredV2(evaluateSlotV2(t, plan, points, index, slot, slot, 0, true)) {
+				first = point.time
+				break
+			}
+		}
+		if first != item.Lifecycle.At {
+			t.Fatalf("%s: read a Slot after each point, alarmd first recovered on minute %d, Python on %d",
+				want.id, (first-pythonBase)/60, want.minute)
+		}
+	}
+	if dense := cases["four_of_five_dense"]; dense.Lifecycle.At-(pythonBase+16*60) != 360 {
+		t.Fatalf("dense recovery %d s after the last anomaly, want 360", dense.Lifecycle.At-(pythonBase+16*60))
+	}
+}
+
+// Shaped like a real Plan detected every 60 s over a 120 s aggregation
+// window (fictional ids): it compiles, its walk positions are 60 s apart -
+// one per Slot - and its gap marker waits for as many Slots as its walk has
+// positions to read.
+func TestADetectionEveryMinuteOverATwoMinuteAggregation(t *testing.T) {
+	shape := func(plan *contract.EvaluationPlanV2) {
+		plan.StrategyIR.ExecutionSemantics.EvaluationInterval = 60
+		plan.StrategyIR.ExecutionSemantics.AggregationInterval = 120
+		plan.StrategyIR.ExecutionSemantics.QueryWindow = 120
+	}
+	plan := compilePlanV2WithOutput(t, []contract.LevelIRV2{levelV2(5, 1, 5, 4, 5, nil)}, shape)
+	level := plan.Levels().At(0)
+	if step := level.Trigger().StepSeconds; step != 60 || plan.EvaluationSemantics().EvaluationInterval != 60 {
+		t.Fatalf("trigger step %d s, evaluation interval %d s, want 60 and 60", step, plan.EvaluationSemantics().EvaluationInterval)
+	}
+	if got, want := plan.RequiredFullSlots(), level.RequiredDetectHistoryPoints(); got != want || want != 5+5-1 {
+		t.Fatalf("marker waits %d Slots, the walk reads %d positions, want both W + R - 1 = 9", got, want)
+	}
+}

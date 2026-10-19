@@ -223,6 +223,12 @@ def cases():
     # is under the threshold of two. Python recovered it a minute after :33.
     yield {"id": "production_w2_n2_r5", "window": 2, "required": 2, "recovery": 5,
            "minutes": [22, 23, 32, 33], "anomalous": [True, True, True, False]}
+    # Four of five, five recovery windows: anomalies at :13 to :16, then a
+    # point every minute, and the same with a point every five minutes after.
+    yield {"id": "four_of_five_dense", "window": 5, "required": 4, "recovery": 5,
+           "minutes": list(range(13, 31)), "anomalous": [13 <= minute <= 16 for minute in range(13, 31)]}
+    yield {"id": "four_of_five_sparse_after", "window": 5, "required": 4, "recovery": 5,
+           "minutes": [13, 14, 15, 16, 21, 26, 31, 36], "anomalous": [True, True, True, True, False, False, False, False]}
     # Bursts of one to three minutes with six to thirteen minutes of nothing
     # between them, the shape Python closes for no data.
     bursts = {
