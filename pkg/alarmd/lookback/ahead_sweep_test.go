@@ -208,6 +208,7 @@ func TestASlotThatDropsATrialReservedAheadReservesAgain(t *testing.T) {
 	if trial == nil || !trial.ahead {
 		t.Fatalf("fixture: reserved %+v", trial)
 	}
+	reserved := time.Duration(trial.query.Contract.ReadHoldMillis) * time.Millisecond
 	// Its Slot frozen a hold of 3 minutes, first attempted past where its own
 	// trial had to start.
 	next := scheduledQuery(t, slot+60)
@@ -222,8 +223,8 @@ func TestASlotThatDropsATrialReservedAheadReservesAgain(t *testing.T) {
 	// The drop reaches the per-group reading at the loop's next step.
 	f.engine.Step(context.Background())
 	if len(ends) != 1 || ends[0].Outcome != EarlierOvertaken || ends[0].OvertakenBy != OvertakenHoldMoved || ends[0].AheadSlots != 1 ||
-		ends[0].Contract.Slot != next.Contract.Slot {
-		t.Fatalf("trial ends %+v, want the dropped trial once, hold_moved, one Slot ahead", ends)
+		ends[0].Contract.Slot != next.Contract.Slot || ends[0].ReservedHold != reserved || ends[0].FrozenHold != 3*time.Minute {
+		t.Fatalf("trial ends %+v, want the dropped trial once, hold_moved, one Slot ahead, reserved at %v and frozen at 3 minutes", ends, reserved)
 	}
 	again := preparedTrial(f)
 	if again == nil || again == trial || !again.ahead || again.query.Contract.Slot.EvaluationTime <= next.Contract.Slot.EvaluationTime ||

@@ -89,6 +89,28 @@ func TestALoweredHoldComesDownAStepPerSlot(t *testing.T) {
 	}
 }
 
+// A limit configured under the hold takes effect at once: the stepping
+// never freezes a Slot past the limit.
+func TestALoweredLimitIsNotStepped(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	spec.Step = time.Minute
+	prepare(t, c, spec)
+	observeEarly(t, c, "qg", 10*time.Minute+spec.SettlingWait, 0)
+	schedule := scheduleEvery(t, "qg", 60, 60)
+	ctx := context.Background()
+	if got, err := c.SlotReadHold(ctx, schedule, 120, holdFence("qg")); err != nil || got != 10*time.Minute {
+		t.Fatalf("fixture: %v %v", got, err)
+	}
+	spec.HoldLimit = 5 * time.Minute
+	if err := c.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.SlotReadHold(ctx, schedule, 180, holdFence("qg")); err != nil || got != 5*time.Minute {
+		t.Fatalf("under a limit lowered to 5 minutes frozen at %v %v, want the limit at once", got, err)
+	}
+}
+
 // A raise is not stepped: a Slot frozen with more hold than the one before
 // it is ready after it, and a raise is the data landing later than the hold.
 func TestARaisedHoldTakesEffectAtOnce(t *testing.T) {

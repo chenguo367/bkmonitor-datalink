@@ -97,7 +97,10 @@ func (trial *earlierSample) overtake(path string) {
 
 // EarlierTrialEnd is how one trial ended: its Slot, its outcome and, when it
 // was overtaken, what overtook it; its candidate hold, and how many Slots
-// ahead it was reserved (0 at its own Slot).
+// ahead it was reserved (0 at its own Slot). Overtaken by a moved hold, it
+// also has the hold the trial was reserved under and the hold its Slot froze
+// at: a hold lowered a step per Slot moves under every trial reserved on the
+// way down, and the two tell such a step from any other move.
 type EarlierTrialEnd struct {
 	Contract      execution.FrozenExecutionContractRef
 	Source        string
@@ -105,6 +108,8 @@ type EarlierTrialEnd struct {
 	OvertakenBy   string
 	CandidateHold time.Duration
 	AheadSlots    int
+	ReservedHold  time.Duration
+	FrozenHold    time.Duration
 }
 
 // endTrialLocked keeps how trial ended for OnEarlierTrialEnd.
@@ -116,6 +121,13 @@ func (engine *Engine) endTrialLocked(trial *earlierSample, outcome string) {
 		CandidateHold: trial.candidateHold, AheadSlots: trial.aheadSlots}
 	if outcome == EarlierOvertaken {
 		end.OvertakenBy = trial.overtakenBy
+	}
+	if end.OvertakenBy == OvertakenHoldMoved {
+		end.ReservedHold = time.Duration(trial.query.Contract.ReadHoldMillis) * time.Millisecond
+		end.FrozenHold = end.ReservedHold
+		if trial.frozenHold != nil {
+			end.FrozenHold = *trial.frozenHold
+		}
 	}
 	engine.trialEnds = append(engine.trialEnds, end)
 }
@@ -208,6 +220,10 @@ type earlierSample struct {
 	// adopts the frozen query.
 	ahead      bool
 	aheadSlots int
+	// frozenHold is the hold the Slot of a trial reserved ahead froze at
+	// when it dropped the trial for it; a trial at its own Slot was read
+	// under the hold its Slot froze at.
+	frozenHold *time.Duration
 }
 
 // dropTrialLocked ends a trial whose Slot will not compare it, counted
@@ -388,6 +404,8 @@ func (engine *Engine) Prepare(query Query) {
 			// it first.
 			if previous.overtakenBy == "" {
 				previous.overtakenBy = OvertakenHoldMoved
+				frozen := time.Duration(query.Contract.ReadHoldMillis) * time.Millisecond
+				previous.frozenHold = &frozen
 			}
 		case previous.query.Contract.Slot == query.Contract.Slot,
 			previous.ahead && previous.query.Contract.Slot.EvaluationTime > query.Contract.Slot.EvaluationTime:

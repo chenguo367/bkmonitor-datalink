@@ -924,6 +924,8 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 	// halved at the limit was. Frozen no more than a step below the Slot
 	// before, each Slot is ready when the one before it is, and the hold
 	// reaches the lower one Slot by Slot while the lower one stays pending.
+	// The limit below still wins: a limit configured under the hold is a
+	// bound no Slot is frozen past, and it takes effect at once.
 	if step := state.spec.Step.Milliseconds(); step > 0 && next.SinceSlot > 0 && at > next.SinceSlot && hold < next.HoldMillis-step {
 		hold = next.HoldMillis - step
 	}
