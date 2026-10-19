@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -29,8 +30,8 @@ func (source *Source) observeQueryTiming(ctx context.Context, request execution.
 					// renders it, so a lost round of any plan says what window its
 					// read had. The query_budget_resolved line below stays the
 					// short-period cohort's.
-					if capture != nil && request.Operation == execution.OperationNormal {
-						source.captureQueryBudget(capture, request, requirement, consumer, spec, query.Spec.PlanFacts.QueryDelaySeconds)
+					if capture != nil {
+						source.captureQueryBudget(capture, request, requirement, consumer, spec, query.Spec.PlanFacts.QueryDelaySeconds, recoveryStart, recoveryDeadline)
 					}
 					if source.config.Observer == nil {
 						continue
@@ -92,6 +93,7 @@ func (source *Source) captureQueryBudget(
 	consumer execution.DataRequirementConsumer,
 	spec execution.ScheduleSpec,
 	queryDelaySeconds int64,
+	recoveryStart, recoveryDeadline time.Time,
 ) {
 	ready, err := frozenConsumerReadyAt(request.Contract, requirement, requirement.AbsoluteWindow(request.Contract.Slot.EvaluationTime), spec, source.config.MinReadyDelay,
 		time.Duration(consumer.DownstreamExecutionReserveMilliSec)*time.Millisecond, queryDelaySeconds)
@@ -104,7 +106,83 @@ func (source *Source) captureQueryBudget(
 	if live != frozen {
 		inForce = consumer.ConsumerDeadlineUnixMilli - live
 	}
-	capture.Record(observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: consumer.ConsumerDeadlineUnixMilli,
+	facts := observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: consumer.ConsumerDeadlineUnixMilli,
 		FrozenReserveMillis: consumer.DownstreamExecutionReserveMilliSec, LiveReserveMillis: inForce, ReadyAtUnixMilli: ready,
-		FrozenQueryDeadlineUnixMilli: frozen, LiveQueryDeadlineUnixMilli: live})
+		FrozenQueryDeadlineUnixMilli: frozen, LiveQueryDeadlineUnixMilli: live, QueryDeadlineUnixMilli: live}
+	// A replay, retry or probe runs under the deadline access derived for it
+	// from its arrival, not under the frozen Slot's.
+	if request.Operation != execution.OperationNormal && !recoveryDeadline.IsZero() {
+		facts.QueryDeadlineUnixMilli = recoveryDeadline.UnixMilli()
+		facts.RecoveryBudgetMillis = recoveryDeadline.Sub(recoveryStart).Milliseconds()
+	}
+	capture.Record(facts)
+}
+
+// plannedQueryFacts is query as access planned it, for a failed attempt of it
+// to carry (execution.PlannedQueryFacts): the primary input when it serves
+// one, its first input otherwise.
+func plannedQueryFacts(query PlannedQuery, fellBack bool) *execution.PlannedQueryFacts {
+	facts := &execution.PlannedQueryFacts{DeadlineUnixMilli: query.DeadlineUnixMilli,
+		FrozenDeadlineUnixMilli: query.FrozenDeadlineUnixMilli, CompletionDeadlineUnixMilli: query.CompletionDeadlineUnixMilli,
+		FellBack: fellBack}
+	for index, requirement := range query.Requirements {
+		if index == 0 || requirement.Role == execution.InputRolePrimary {
+			facts.Role, facts.Dataset = string(requirement.Role), string(requirement.DatasetName)
+		}
+		if requirement.Role == execution.InputRolePrimary {
+			break
+		}
+	}
+	return facts
+}
+
+// annotatePlanned puts planned on each attempt of completion that failed or
+// named a reason: the attempts a failure reports.
+func annotatePlanned(completion *execution.ProviderCompletion, planned *execution.PlannedQueryFacts) {
+	for index := range completion.RouteFacts.Attempts {
+		if attempt := &completion.RouteFacts.Attempts[index]; attempt.Result == execution.RouteAttemptFailed || attempt.ReasonCode != "" {
+			attempt.Planned = planned
+		}
+	}
+}
+
+// plannedQueryError is a physical query's failure with its plan: it adds the
+// plan and changes nothing else about the error it wraps.
+type plannedQueryError struct {
+	err     error
+	planned *execution.PlannedQueryFacts
+}
+
+func (e *plannedQueryError) Error() string                                     { return e.err.Error() }
+func (e *plannedQueryError) Unwrap() error                                     { return e.err }
+func (e *plannedQueryError) QueryFailurePlanned() *execution.PlannedQueryFacts { return e.planned }
+
+// recordFailedQuery keeps a failed physical query's request facts and plan
+// with the round's budget, for the round's own line: from its failed attempt,
+// or from the error it returned.
+func recordFailedQuery(ctx context.Context, completion execution.ProviderCompletion, err error, planned *execution.PlannedQueryFacts) {
+	capture := observability.BudgetCaptureFromContext(ctx)
+	if capture == nil {
+		return
+	}
+	if err != nil {
+		var requested interface {
+			QueryFailureRequest() *execution.RequestFacts
+		}
+		var request *execution.RequestFacts
+		if errors.As(err, &requested) {
+			request = requested.QueryFailureRequest()
+		}
+		capture.RecordFailedQuery(request.Observed(), planned.Observed())
+		return
+	}
+	if completion.Completeness != execution.CompletenessUnavailable {
+		return
+	}
+	for index := len(completion.RouteFacts.Attempts) - 1; index >= 0; index-- {
+		if attempt := completion.RouteFacts.Attempts[index]; attempt.Result == execution.RouteAttemptFailed || attempt.ReasonCode != "" {
+			capture.RecordFailedQuery(attempt.Request.Observed(), planned.Observed())
+			return
+		}
+	}
 }

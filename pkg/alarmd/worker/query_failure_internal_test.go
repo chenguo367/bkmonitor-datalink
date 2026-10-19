@@ -387,3 +387,64 @@ func TestProviderFailureFactsCarryTheRejection(t *testing.T) {
 		t.Fatalf("facts %+v", facts)
 	}
 }
+
+// A query whose deadline passed while alarmd was decoding the answer that
+// had begun names alarmd's own timeout on the line, not internal_unknown, and
+// says how far the answer got; like a lost round, it carries the decision
+// that let it run and the budget it ran under.
+func TestADeliveryTimeoutNamesItselfAndHowFarTheAnswerGot(t *testing.T) {
+	var got observability.Observation
+	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+	ctx := observability.ContextWithDivertDecision(context.Background(), observability.DivertDecisionFacts{
+		ClassifiedAtUnixMilli: 1_700_000_000_000, FrozenDeadlineUnixMilli: 1_700_000_009_000, LiveDeadlineUnixMilli: 1_700_000_009_000,
+		BoundMillis: 5_000, BoundSource: "fallback", RemainingMillis: 9_000})
+	ctx, capture := observability.ContextWithBudgetCapture(ctx)
+	capture.Record(observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: 1_700_000_010_000, LiveQueryDeadlineUnixMilli: 1_700_000_009_000})
+	named := fmt.Errorf("alarmd access: execute physical query: %w", deliveryTimeoutError{error: errors.New("context deadline exceeded")})
+	c.observeQueryFailure(ctx, execution.OperationNormal, time.Now(), "execute", named)
+	if got.ReasonCode != observability.ReasonCode(contract.ReasonQueryDeliveryTimeout) {
+		t.Fatalf("reason = %q, want QUERY_DELIVERY_TIMEOUT rather than internal_unknown", got.ReasonCode)
+	}
+	if f := got.QueryFailure; f == nil || f.Category != observability.QueryFailureCategoryDelivery || f.Code != contract.ReasonQueryDeliveryTimeout ||
+		f.Volume == nil || *f.Volume != (observability.QueryVolume{BytesRead: 48_213, SeriesDelivered: 151}) {
+		t.Fatalf("failure facts = %+v, want delivery / QUERY_DELIVERY_TIMEOUT with the volume read", got.QueryFailure)
+	}
+	if got.DivertDecision == nil || got.DivertDecision.BoundSource != "fallback" || got.QueryBudget == nil ||
+		got.QueryBudget.ConsumerDeadlineUnixMilli != 1_700_000_010_000 {
+		t.Fatalf("decision %+v budget %+v, want both carried on the failed query's line", got.DivertDecision, got.QueryBudget)
+	}
+}
+
+type deliveryTimeoutError struct{ error }
+
+func (e deliveryTimeoutError) Unwrap() error { return e.error }
+func (deliveryTimeoutError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout
+}
+func (deliveryTimeoutError) QueryFailureDetail() string { return "delivery=timeout" }
+func (deliveryTimeoutError) QueryFailureVolume() *observability.QueryVolume {
+	return &observability.QueryVolume{BytesRead: 48_213, SeriesDelivered: 151}
+}
+
+// A degraded query line carries the decision and budget it ran under, as a
+// failed one does; a successful line carries neither, so ordinary lines stay
+// as they were.
+func TestOnlyALostQueryLineCarriesItsDecisionAndBudget(t *testing.T) {
+	for _, tc := range []struct {
+		result observability.Result
+		want   bool
+	}{{observability.ResultDegraded, true}, {observability.ResultSuccess, false}} {
+		var got observability.Observation
+		c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = o })}}
+		ctx := observability.ContextWithDivertDecision(context.Background(), observability.DivertDecisionFacts{
+			ClassifiedAtUnixMilli: 1_700_000_000_000, BoundSource: "fallback"})
+		ctx, capture := observability.ContextWithBudgetCapture(ctx)
+		capture.Record(observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: 1_700_000_010_000})
+		c.observeQueryCompleted(ctx, execution.OperationNormal, time.Now(), tc.result, "",
+			execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{{}}}, execution.EvaluationResult{})
+		if carried := got.DivertDecision != nil && got.QueryBudget != nil; carried != tc.want ||
+			(!tc.want && (got.DivertDecision != nil || got.QueryBudget != nil)) {
+			t.Fatalf("%s: decision %+v budget %+v, want carried %v", tc.result, got.DivertDecision, got.QueryBudget, tc.want)
+		}
+	}
+}

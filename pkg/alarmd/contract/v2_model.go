@@ -124,6 +124,12 @@ const (
 	// storage's. 408 and 429 are the backend asking for time and stay
 	// QUERY_UNAVAILABLE.
 	ReasonQueryRejected = "QUERY_REJECTED"
+	// ReasonQueryDeliveryTimeout names a query whose deadline passed while
+	// alarmd was still decoding or delivering an answer that had begun to
+	// arrive: the backend answered, and the time ran out on alarmd's side.
+	// It fails the attempt and never rides a query result, so it is not a
+	// coverage reason and has no rank among them; the next attempt retries.
+	ReasonQueryDeliveryTimeout = "QUERY_DELIVERY_TIMEOUT"
 	// ReasonQueryTargetMissing names a query the backend answered and
 	// refused because the table or field it names does not route in the
 	// strategy's space: a statement about where the data is, not about

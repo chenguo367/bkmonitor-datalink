@@ -1066,6 +1066,15 @@ func (runner *Runner) runOneTracked(
 	executeCtx = execution.WithStageMarker(executeCtx, &runner.stage)
 	if decision := slot.Recovery.Decision; decision != nil {
 		executeCtx = observability.ContextWithDivertDecision(executeCtx, *decision)
+	} else if operation != execution.OperationNormal {
+		// A replay, retry or probe is not judged by the divert, and its line
+		// still says when it was taken up and from which frozen deadline, so
+		// a lost one shows the time between there and its send. Its remaining
+		// time is against the recovery deadline access derives, filled in on
+		// the completion line.
+		executeCtx = observability.ContextWithDivertDecision(executeCtx, observability.DivertDecisionFacts{
+			ClassifiedAtUnixMilli: runner.now().UnixMilli(), FrozenDeadlineUnixMilli: slot.EarliestQueryDeadlineUnixMilli,
+			BoundSource: observability.DivertBoundNone})
 	}
 	executeCtx = execution.WithBackendFailing(executeCtx, runner.queryCooldown.failures > 0)
 	if runner.flights.recoveryEnabled {

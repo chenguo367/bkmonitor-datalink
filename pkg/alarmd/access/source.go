@@ -359,12 +359,15 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			}
 		}
 		queryDeadline := time.UnixMilli(query.DeadlineUnixMilli)
+		fellBack := false
 		if now := source.now(); !queryDeadline.After(now) && query.FrozenDeadlineUnixMilli > now.UnixMilli() {
 			// The live reserve left this query no time; the frozen one still
 			// does. Run it under the frozen reserve rather than fail it now.
 			queryDeadline = time.UnixMilli(query.FrozenDeadlineUnixMilli)
 			source.config.LiveReserve.CountFallback(request.Contract.Slot.QueryGroup, now)
+			fellBack = true
 		}
+		planned := plannedQueryFacts(query, fellBack)
 		// Where the budget ending at that deadline began: a recovery's is
 		// counted from its arrival, a normal query's from its Slot.
 		budgetStart := int64(request.Contract.Slot.EvaluationTime) * 1000
@@ -413,8 +416,11 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		// earlier one's that has passed.
 		execution.ExtendDeadline(ctx, queryDeadline, source.now())
 		// What the query has from its send to its deadline, read here on the
-		// dispatch loop just before it is sent.
-		budgetMillis := attempt.DeadlineUnixMilli - source.now().UnixMilli()
+		// dispatch loop just before it is sent; and when it was sent, for a
+		// lost round's line.
+		sentAt := source.now()
+		budgetMillis := attempt.DeadlineUnixMilli - sentAt.UnixMilli()
+		observability.BudgetCaptureFromContext(ctx).MarkStarted(sentAt)
 		sent++
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
@@ -426,6 +432,14 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				lookback: kept}
 			adapters[index] = adapter
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
+			// A failed physical query says which input it was and the
+			// deadlines it was planned under, its own rather than the
+			// round's binding consumer's.
+			annotatePlanned(&completion, planned)
+			if err != nil {
+				err = &plannedQueryError{err: err, planned: planned}
+			}
+			recordFailedQuery(ctx, completion, err, planned)
 			// The time it took is the provider's own measure, from its
 			// request to its answer or failure; this goroutine reads no
 			// clock of the Source's, which the dispatch loop owns.

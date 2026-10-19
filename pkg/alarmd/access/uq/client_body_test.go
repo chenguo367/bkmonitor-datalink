@@ -136,6 +136,11 @@ func TestAQueryWhoseBodyStopsPartwayNamesItself(t *testing.T) {
 	if len(sink.batches) != 1 {
 		t.Fatalf("delivered %d batches, want the one series that arrived", len(sink.batches))
 	}
+	// How far the answer got before it stopped: the series handed on and the
+	// bytes read, so a failure that came partway says how much there was.
+	if volume := failure.QueryFailureVolume(); volume == nil || volume.SeriesDelivered != 1 || volume.BytesRead == 0 {
+		t.Fatalf("volume = %+v, want the one series delivered and the bytes read", volume)
+	}
 
 	late := partialBodyServer(t, false, 200*time.Millisecond)
 	client, err = NewClient(late.URL, "alarmd-shadow", late.Client())
@@ -159,7 +164,7 @@ func TestAQueryWhoseBodyStopsPartwayNamesItself(t *testing.T) {
 	_, err = slow.Execute(context.Background(), attempt, &slowSink{delay: 500 * time.Millisecond})
 	failure = bodyFailureOf(t, err)
 	timing = failure.QueryFailureTiming()
-	if category, code := failure.QueryFailure(); category != "other" || code != "OTHER" || failure.QueryFailureDetail() != "delivery=timeout" ||
+	if category, code := failure.QueryFailure(); category != "delivery" || code != "QUERY_DELIVERY_TIMEOUT" || failure.QueryFailureDetail() != "delivery=timeout" ||
 		timing == nil || !whole(timing, attempt) || timing.LocalMillis < 400 || timing.LocalMillis > timing.ElapsedMillis {
 		t.Fatalf("a sink that did not keep up = %s/%s %q timing %+v, want alarmd's own delivery timeout, spent mostly local",
 			category, code, failure.QueryFailureDetail(), timing)
@@ -245,12 +250,12 @@ func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 		category, code, detail string
 	}{
 		"a read the deadline ended":       {-time.Second, 10 * time.Millisecond, "provider_transport", "QUERY_TIMEOUT", "body=timeout"},
-		"a read begun after the deadline": {10 * time.Millisecond, 20 * time.Millisecond, "other", "OTHER", "delivery=timeout"},
+		"a read begun after the deadline": {10 * time.Millisecond, 20 * time.Millisecond, "delivery", "QUERY_DELIVERY_TIMEOUT", "delivery=timeout"},
 		"a connection broken before it":   {-2 * time.Second, -time.Second, "provider_transport", "QUERY_UNAVAILABLE", "body=connection_reset"},
 	} {
 		body := &countingReader{failed: syscall.ECONNRESET, failedBegan: deadline.Add(testCase.began), failedAt: deadline.Add(testCase.returned)}
 		err := client.bodyFailure(context.Background(), expired, attempt, fmt.Errorf("alarmd access uq: decode series payload: %w", syscall.ECONNRESET),
-			body, started, started.Add(time.Second))
+			body, 0, started, started.Add(time.Second))
 		failure := bodyFailureOf(t, err)
 		if category, code := failure.QueryFailure(); category != testCase.category || code != testCase.code || failure.QueryFailureDetail() != testCase.detail {
 			t.Errorf("%s = %s/%s %q, want %s/%s %q", name, category, code, failure.QueryFailureDetail(), testCase.category, testCase.code, testCase.detail)
@@ -259,7 +264,7 @@ func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 	// With no deadline at all, nothing expired: a broken connection is the
 	// backend's unavailability whenever its read returned.
 	body := &countingReader{failed: syscall.ECONNRESET, failedBegan: time.Now(), failedAt: time.Now()}
-	err := client.bodyFailure(context.Background(), context.Background(), attempt, fmt.Errorf("decode: %w", syscall.ECONNRESET), body, started, started)
+	err := client.bodyFailure(context.Background(), context.Background(), attempt, fmt.Errorf("decode: %w", syscall.ECONNRESET), body, 0, started, started)
 	if failure := bodyFailureOf(t, err); failure.QueryFailureDetail() != "body=connection_reset" {
 		t.Errorf("a reset under no deadline = %q, want body=connection_reset", failure.QueryFailureDetail())
 	}

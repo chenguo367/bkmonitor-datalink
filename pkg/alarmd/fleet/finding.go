@@ -256,10 +256,11 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
 	// A round that failed on a query whose deadline ran out while this
 	// deployment was still delivering the answer is this deployment's,
-	// whichever word the round ended with. The failure's code is OTHER,
-	// which decides nothing, and the round's own word would file it as an
-	// unnamed failure at no step or, from a source error, as a dependency
-	// down - when the detail says where the time went.
+	// whichever word the round ended with. The failure's code says so
+	// (QUERY_DELIVERY_TIMEOUT), and so does its detail, which a replica of
+	// an earlier build still writes with code OTHER; the round's own word
+	// would file it as an unnamed failure at no step or, from a source
+	// error, as a dependency down.
 	if deliveryTimedOutThisRound(anomaly) {
 		return CheckDefect, true
 	}
@@ -809,6 +810,10 @@ var codeChecks = map[string]verdict{
 	// window (guardHeld) - not whether the backend answers, which it did.
 	"GAP_GUARD_WARMING": lands(CheckWindowUndecided),
 
+	// The backend answered and the deadline passed while this deployment was
+	// decoding and delivering it: this deployment's, as the delivery detail
+	// already files a round that failed on one (deliveryTimedOutThisRound).
+	"QUERY_DELIVERY_TIMEOUT": lands(CheckDefect),
 	// The backend was asked and did not answer usefully.
 	"QUERY_TIMEOUT":     lands(CheckBackendNotAnswering),
 	"QUERY_UNAVAILABLE": lands(CheckBackendNotAnswering),

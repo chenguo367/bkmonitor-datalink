@@ -114,6 +114,9 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonQueryTimeout:     {ReasonQueryTimeout, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryUnavailable: {ReasonQueryUnavailable, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryRejected:    {ReasonQueryRejected, ReasonClassCoverage, reasonQueryDomainsV2},
+	// Retryable and observed only: a failed attempt's word, never a query
+	// result's, so it has no rank in GapReasonFoldOrder.
+	ReasonQueryDeliveryTimeout: {ReasonQueryDeliveryTimeout, ReasonClassRetryable, reasonMessageDomainsV2},
 	ReasonQueryTargetMissing: {
 		ReasonQueryTargetMissing, ReasonClassCoverage, reasonQueryDomainsV2,
 	},

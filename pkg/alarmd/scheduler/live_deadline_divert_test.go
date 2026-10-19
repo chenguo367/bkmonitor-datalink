@@ -164,3 +164,35 @@ func TestTheRunnerHandsTheDecisionToTheExecutor(t *testing.T) {
 		t.Fatalf("executor heard %+v, want %+v", executor.heard, decision)
 	}
 }
+
+// A replay the divert did not judge still hands the executor when it was
+// taken up and its frozen deadline, with bound source none: its lost line
+// measures what was left against the recovery deadline access derives. A
+// normal round the divert did not judge hands nothing.
+func TestAnUnjudgedReplayHandsTheExecutorWhenItWasTakenUp(t *testing.T) {
+	for _, operation := range []execution.Operation{execution.OperationReplay, execution.OperationNormal} {
+		slot := frozenSlot("query-group-1")
+		slot.Dispatch.Operation = operation
+		executor := &decisionExecutor{}
+		now := time.UnixMilli(slot.EarliestQueryDeadlineUnixMilli - 30_000)
+		runner, err := NewRunner("query-group-1", &fakeSession{fence: slot.Dispatch.OwnerFence},
+			&fakeSlotSource{slot: slot, facts: SlotDueFacts{IntervalSeconds: 60}}, executor, NewFlightCoordinator(), func() time.Time { return now })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
+			t.Fatalf("%s: RunOne() = attempted %t, %v", operation, attempted, err)
+		}
+		if operation == execution.OperationNormal {
+			if executor.heard != nil {
+				t.Fatalf("an unjudged normal round handed %+v", executor.heard)
+			}
+			continue
+		}
+		want := observability.DivertDecisionFacts{ClassifiedAtUnixMilli: now.UnixMilli(),
+			FrozenDeadlineUnixMilli: slot.EarliestQueryDeadlineUnixMilli, BoundSource: observability.DivertBoundNone}
+		if executor.heard == nil || *executor.heard != want {
+			t.Fatalf("replay handed %+v, want %+v", executor.heard, want)
+		}
+	}
+}

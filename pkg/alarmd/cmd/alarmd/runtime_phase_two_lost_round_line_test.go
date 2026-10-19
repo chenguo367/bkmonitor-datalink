@@ -11,12 +11,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // A round let run as a normal one that then times out says on its own
@@ -69,5 +71,95 @@ func TestALostRoundExplainsItselfOnItsCompletionLine(t *testing.T) {
 		if completion.DivertDecision == nil || *completion.DivertDecision != decision || completion.QueryBudget == nil || *completion.QueryBudget != budget {
 			t.Fatalf("%s: decision %+v budget %+v, want %+v %+v", tc.name, completion.DivertDecision, completion.QueryBudget, decision, budget)
 		}
+	}
+}
+
+// Every round that is lost or fails explains itself, not only one that timed
+// out: a failed round and a failed attempt being retried carry the decision
+// and the budget, with when the round was classified and when its read was
+// sent. A round waiting for its data does not.
+func TestEveryFailedRoundCarriesItsDecisionAndBudget(t *testing.T) {
+	decision := observability.DivertDecisionFacts{ClassifiedAtUnixMilli: 1_700_000_010_000, FrozenDeadlineUnixMilli: 1_700_000_055_000,
+		LiveDeadlineUnixMilli: 1_700_000_055_000, BoundMillis: 300, BoundSource: observability.DivertBoundQueryDuration, RemainingMillis: 45_000}
+	budget := observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: 1_700_000_060_000, FrozenReserveMillis: 5_000, ReadyAtUnixMilli: 1_700_000_010_000,
+		FrozenQueryDeadlineUnixMilli: 1_700_000_055_000, LiveQueryDeadlineUnixMilli: 1_700_000_055_000, QueryDeadlineUnixMilli: 1_700_000_055_000}
+	sentAt := time.UnixMilli(1_700_000_054_400)
+	request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: execution.OperationNormal}
+	request.Contract.Slot.EvaluationTime = execution.EvaluationTime(1_700_000_000)
+	for _, tc := range []struct {
+		name    string
+		retried bool
+		err     error
+		want    observability.Result
+	}{
+		{"failed", false, errors.New("alarmd access: execute physical query: context deadline exceeded"), observability.ResultFailed},
+		{"retrying after a failure", true, errors.New("alarmd access: execute physical query: context deadline exceeded"), observability.ResultRetrying},
+	} {
+		var completion *observability.Observation
+		executor := observedProductionSlotExecutor{
+			next: slotExecutorFunc(func(ctx context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+				capture := observability.BudgetCaptureFromContext(ctx)
+				capture.Record(budget)
+				capture.MarkStarted(sentAt)
+				return execution.SlotExecutionResult{}, tc.err
+			}),
+			observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+				if o.Stage == observability.StageSlotCompleted {
+					completion = &o
+				}
+			}),
+			decisionLag: func(time.Duration) {},
+		}
+		ctx := observability.ContextWithDivertDecision(context.Background(), decision)
+		if tc.retried {
+			ctx = scheduler.WithFailureRetried(ctx)
+		}
+		_, _ = executor.Execute(ctx, request)
+		if completion == nil || completion.Result != tc.want {
+			t.Fatalf("%s: completion %+v, want result %s", tc.name, completion, tc.want)
+		}
+		if completion.DivertDecision == nil || completion.DivertDecision.ClassifiedAtUnixMilli != decision.ClassifiedAtUnixMilli ||
+			completion.QueryBudget == nil || completion.QueryBudget.QueryStartedAtUnixMilli != sentAt.UnixMilli() {
+			t.Fatalf("%s: decision %+v budget %+v, want the classification and the send time on the line", tc.name, completion.DivertDecision, completion.QueryBudget)
+		}
+	}
+}
+
+// A replay is not judged by the divert, and when it times out its line says
+// so: bound source none, when it was taken up, and the time it had against
+// the recovery deadline access derived, which the budget carries with the
+// recovery budget.
+func TestAReplaysLostRoundCarriesItsRecoveryBudget(t *testing.T) {
+	taken := observability.DivertDecisionFacts{ClassifiedAtUnixMilli: 1_700_000_100_000, FrozenDeadlineUnixMilli: 1_700_000_055_000,
+		BoundSource: observability.DivertBoundNone}
+	budget := observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: 1_700_000_060_000, FrozenReserveMillis: 5_000, ReadyAtUnixMilli: 1_700_000_010_000,
+		FrozenQueryDeadlineUnixMilli: 1_700_000_055_000, LiveQueryDeadlineUnixMilli: 1_700_000_055_000,
+		QueryDeadlineUnixMilli: 1_700_000_155_000, RecoveryBudgetMillis: 55_000}
+	request := execution.SlotExecutionRequest{AttemptNo: 1, Operation: execution.OperationReplay}
+	request.Contract.Slot.EvaluationTime = execution.EvaluationTime(1_700_000_000)
+	var completion *observability.Observation
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(ctx context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			capture := observability.BudgetCaptureFromContext(ctx)
+			capture.Record(budget)
+			capture.MarkStarted(time.UnixMilli(1_700_000_101_000))
+			return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+				Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout)}, nil
+		}),
+		observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+			if o.Stage == observability.StageSlotCompleted {
+				completion = &o
+			}
+		}),
+		decisionLag: func(time.Duration) {},
+	}
+	if _, err := executor.Execute(observability.ContextWithDivertDecision(context.Background(), taken), request); err != nil {
+		t.Fatal(err)
+	}
+	if completion == nil || completion.DivertDecision == nil || completion.DivertDecision.BoundSource != observability.DivertBoundNone ||
+		completion.DivertDecision.RemainingMillis != 55_000 || completion.QueryBudget == nil ||
+		completion.QueryBudget.QueryDeadlineUnixMilli != 1_700_000_155_000 || completion.QueryBudget.RecoveryBudgetMillis != 55_000 ||
+		completion.QueryBudget.QueryStartedAtUnixMilli != 1_700_000_101_000 {
+		t.Fatalf("replay line %+v / %+v, want bound none, 55 s against the recovery deadline, and the recovery budget", completion.DivertDecision, completion.QueryBudget)
 	}
 }

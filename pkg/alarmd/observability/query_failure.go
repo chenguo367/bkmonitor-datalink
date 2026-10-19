@@ -22,6 +22,46 @@ type QueryFailureFacts struct {
 	// are log fields; its excerpt is kept with the Query Group's last
 	// failure for an operator to read and is never written to a log line.
 	Rejection *QueryRejection
+	// Volume is how much of the answer had been read and handed on when the
+	// query failed; nil where the failure came before any answer.
+	Volume *QueryVolume
+	// Request is which deadline governed the failed request and which had
+	// expired (execution.RequestFacts); Planned is the physical query's own
+	// plan (execution.PlannedQueryFacts). Nil where not known.
+	Request *QueryRequestFacts
+	Planned *QueryPlannedFacts
+}
+
+// QueryRequestFacts is execution.RequestFacts as a line renders it.
+type QueryRequestFacts struct {
+	DeadlineUnixMilli  int64
+	DeadlineLeftAtDoMs int64
+	DeadlineSource     string
+	Expired            string
+	ErrorChain         string
+	ErrorTypes         []string
+	// TraceID is the trace id the request was sent with (32 lower-case hex);
+	// it renders as failure_provider_trace_id.
+	TraceID string
+}
+
+// QueryPlannedFacts is execution.PlannedQueryFacts as a line renders it.
+type QueryPlannedFacts struct {
+	Role                        string
+	Dataset                     string
+	DeadlineUnixMilli           int64
+	FrozenDeadlineUnixMilli     int64
+	CompletionDeadlineUnixMilli int64
+	FellBack                    bool
+}
+
+// QueryVolume is how far a failed query's answer got: the bytes of the
+// answer read, and the series handed to the round's sink. A query whose
+// deadline passed while alarmd was still decoding what had arrived says by
+// these how much it had to decode.
+type QueryVolume struct {
+	BytesRead       uint64
+	SeriesDelivered uint64
 }
 
 // QueryRejection is a provider's non-success answer as alarmd keeps it: a
@@ -99,6 +139,13 @@ const (
 	// the result contract rejected.
 	QueryFailureCategoryEvaluation = "evaluation"
 	QueryFailureCategoryOther      = "other"
+	// QueryFailureCategoryDelivery names a query whose deadline passed while
+	// alarmd was decoding or delivering an answer that had begun to arrive:
+	// the time ran out on alarmd's side, not the backend's, so it is neither
+	// the provider's transport nor a defect without a name.
+	QueryFailureCategoryDelivery = "delivery"
+	// QueryFailureCodeDeliveryTimeout is the delivery category's one code.
+	QueryFailureCodeDeliveryTimeout = "QUERY_DELIVERY_TIMEOUT"
 	// QueryFailureCategoryOutput is a failure writing the round's events.
 	QueryFailureCategoryOutput = "output"
 
@@ -120,7 +167,7 @@ var (
 		QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity, QueryFailureCategoryBudget,
 		QueryFailureCategoryCompletionContract, QueryFailureCategoryNamedInput, QueryFailureCategoryProviderTransport,
 		QueryFailureCategoryAdmission, QueryFailureCategoryEvaluation, QueryFailureCategoryOther,
-		QueryFailureCategoryOutput,
+		QueryFailureCategoryOutput, QueryFailureCategoryDelivery,
 	}
 )
 
@@ -216,7 +263,7 @@ func normalizeQueryFailure(component Component, stage Stage, input *QueryFailure
 	case QueryFailureCategoryBudget, QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity,
 		QueryFailureCategoryCompletionContract,
 		QueryFailureCategoryNamedInput, QueryFailureCategoryProviderTransport, QueryFailureCategoryAdmission,
-		QueryFailureCategoryEvaluation:
+		QueryFailureCategoryEvaluation, QueryFailureCategoryDelivery:
 		f.Code = NormalizeQueryFailureCode(f.Code)
 	default:
 		f.Category = QueryFailureCategoryOther
