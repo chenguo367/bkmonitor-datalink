@@ -288,6 +288,11 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	markReplayable(request)
 	started := client.now()
 	deadline, left := requestDeadline(ctx, time.Now())
+	// The trace id is known at the send, so every failure from here names
+	// it, whether or not an answer came back.
+	failedRequest := func(err error) *execution.RequestFacts {
+		return requestFacts(callerCtx, ctx, err, deadline, left, traceID)
+	}
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		if callerCtx.Err() != nil {
@@ -302,7 +307,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		// Which deadline was on the request, which ran out, and what failed:
 		// a deadline error from the transport names none of them.
-		completion.RouteFacts.Attempts[0].Request = requestFacts(callerCtx, ctx, err, deadline, left)
+		completion.RouteFacts.Attempts[0].Request = failedRequest(err)
 		return completion, nil
 	}
 	answered := client.now()
@@ -324,6 +329,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion := client.unavailableCompletion(attempt, statusReason(response.StatusCode), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.RouteFacts.Attempts[0].HTTPStatus = response.StatusCode
 		completion.RouteFacts.Attempts[0].Rejection = rejection
+		completion.RouteFacts.Attempts[0].Request = failedRequest(nil)
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
@@ -331,7 +337,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	counted := &countingReader{reader: response.Body, now: client.now}
 	shared, err := selectSharedDecoder(response.Header.Get("Content-Type"), attempt.SharedSchema)
 	if err != nil {
-		return execution.ProviderCompletion{}, err
+		return execution.ProviderCompletion{}, &requestFailureError{err: err, request: failedRequest(err)}
 	}
 	bounded := &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}
 	delivered := &countingSink{sink: sink}
@@ -349,7 +355,9 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		failure := client.bodyFailure(callerCtx, ctx, attempt, err, counted, delivered.series, started, answered)
 		var named *bodyFailureError
 		if errors.As(failure, &named) {
-			named.request = requestFacts(callerCtx, ctx, err, deadline, left)
+			named.request = failedRequest(err)
+		} else {
+			failure = &requestFailureError{err: failure, request: failedRequest(err)}
 		}
 		return execution.ProviderCompletion{}, failure
 	}
@@ -360,6 +368,14 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion.Stats.ResponseCodec = "shared_json_v1"
 	}
 	completion.Stats.SharedSchemaRequested = attempt.SharedSchema
+	// An answer whose status said it failed (the decoder's unavailable or
+	// rejected completion) names the request it answered.
+	for index := range completion.RouteFacts.Attempts {
+		if failed := &completion.RouteFacts.Attempts[index]; failed.Request == nil &&
+			(failed.Result == execution.RouteAttemptFailed || failed.ReasonCode != "") {
+			failed.Request = failedRequest(nil)
+		}
+	}
 	return completion, nil
 }
 

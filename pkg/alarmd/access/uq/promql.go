@@ -150,7 +150,9 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 
 	response, err := client.httpClient.Do(httpRequest)
 	if err != nil {
-		return RangeResult{}, fmt.Errorf("alarmd access uq: range request: %w", err)
+		// The trace id it was sent with, as a refusal names it, so a timeout
+		// or a cut connection can be found on the provider's side too.
+		return RangeResult{}, fmt.Errorf("alarmd access uq: range request (trace %s): %w", traceID, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
@@ -164,11 +166,11 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, client.limits.MaxBodyBytes))
 	if err != nil {
-		return RangeResult{}, fmt.Errorf("alarmd access uq: read range response: %w", err)
+		return RangeResult{}, fmt.Errorf("alarmd access uq: read range response (trace %s): %w", traceID, err)
 	}
 	var decoded promQLResponseBody
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return RangeResult{}, fmt.Errorf("alarmd access uq: decode range response: %w", err)
+		return RangeResult{}, fmt.Errorf("alarmd access uq: decode range response (trace %s): %w", traceID, err)
 	}
 
 	result := RangeResult{Partial: decoded.IsPartial}

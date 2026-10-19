@@ -55,3 +55,15 @@ func (e *bodyFailureError) QueryFailureDetail() string                     { ret
 func (e *bodyFailureError) QueryFailureTiming() *execution.AttemptTiming   { return e.timing }
 func (e *bodyFailureError) QueryFailureVolume() *observability.QueryVolume { return e.volume }
 func (e *bodyFailureError) QueryFailureRequest() *execution.RequestFacts   { return e.request }
+
+// requestFailureError is a query's failure that names nothing of its own,
+// with the request it failed: which deadline was on it and the trace id it
+// was sent with. It changes nothing else about the error it wraps.
+type requestFailureError struct {
+	err     error
+	request *execution.RequestFacts
+}
+
+func (e *requestFailureError) Error() string                                { return e.err.Error() }
+func (e *requestFailureError) Unwrap() error                                { return e.err }
+func (e *requestFailureError) QueryFailureRequest() *execution.RequestFacts { return e.request }

@@ -40,6 +40,9 @@ type QueryRequestFacts struct {
 	Expired            string
 	ErrorChain         string
 	ErrorTypes         []string
+	// TraceID is the trace id the request was sent with (32 lower-case hex);
+	// it renders as failure_provider_trace_id.
+	TraceID string
 }
 
 // QueryPlannedFacts is execution.PlannedQueryFacts as a line renders it.

@@ -538,10 +538,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		}
 		// The class and the provider's trace id only: the excerpt can echo the
 		// request and stays with the Query Group's last failure.
+		rejectionTrace := false
 		if r := f.Rejection; r != nil {
 			attributes = append(attributes, slog.String("failure_rejection_class", r.Class))
 			if r.TraceID != "" {
 				attributes = append(attributes, slog.String("failure_provider_trace_id", r.TraceID))
+				rejectionTrace = true
 			}
 		}
 		if f.Request != nil && f.Detail != "" {
@@ -549,7 +551,10 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			// which deadline was on it.
 			attributes = append(attributes, slog.String("transport_detail", f.Detail))
 		}
-		attributes = appendQueryRequestAttributes(attributes, f.Request)
+		// The trace id the request was sent with, for a failure with no
+		// rejection to name the provider's: a timeout, a cut connection, an
+		// answer that broke.
+		attributes = appendQueryRequestAttributes(attributes, f.Request, !rejectionTrace)
 		attributes = appendQueryPlannedAttributes(attributes, f.Planned)
 		if volume := f.Volume; volume != nil {
 			attributes = append(attributes, slog.Uint64("failure_bytes_read", volume.BytesRead),
@@ -1351,7 +1356,7 @@ func appendSlotCompletionKind(attributes []slog.Attr, kind string) []slog.Attr {
 
 // appendQueryRequestAttributes writes which deadline governed a failed
 // request and which had expired, as flat keys.
-func appendQueryRequestAttributes(attributes []slog.Attr, request *QueryRequestFacts) []slog.Attr {
+func appendQueryRequestAttributes(attributes []slog.Attr, request *QueryRequestFacts, withTrace bool) []slog.Attr {
 	if request == nil {
 		return attributes
 	}
@@ -1364,7 +1369,15 @@ func appendQueryRequestAttributes(attributes []slog.Attr, request *QueryRequestF
 	if len(request.ErrorTypes) > 0 {
 		attributes = append(attributes, slog.String("error_types", strings.Join(request.ErrorTypes, " > ")))
 	}
+	if withTrace && validTraceID(request.TraceID) {
+		attributes = append(attributes, slog.String("failure_provider_trace_id", request.TraceID))
+	}
 	return attributes
+}
+
+// validTraceID is a W3C trace id: 32 lower-case hex, not all zero.
+func validTraceID(id string) bool {
+	return len(id) == 32 && strings.Trim(id, "0123456789abcdef") == "" && strings.Trim(id, "0") != ""
 }
 
 // appendQueryPlannedAttributes writes a failed physical query's own plan as
@@ -1395,7 +1408,7 @@ func appendQueryBudgetAttributes(attributes []slog.Attr, budget *QueryBudgetFact
 		slog.Int64("budget_recovery_budget_ms", budget.RecoveryBudgetMillis),
 		slog.Int64("budget_query_started_at_ms", budget.QueryStartedAtUnixMilli),
 	)
-	attributes = appendQueryRequestAttributes(attributes, budget.FailedRequest)
+	attributes = appendQueryRequestAttributes(attributes, budget.FailedRequest, true)
 	return appendQueryPlannedAttributes(attributes, budget.FailedPlanned)
 }
 

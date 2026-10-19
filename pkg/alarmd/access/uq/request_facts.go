@@ -37,9 +37,9 @@ func requestDeadline(ctx context.Context, at time.Time) (deadline time.Time, lef
 }
 
 // requestFacts is a failed request against its deadline (execution.RequestFacts).
-func requestFacts(callerCtx, ctx context.Context, err error, deadline time.Time, left int64) *execution.RequestFacts {
+func requestFacts(callerCtx, ctx context.Context, err error, deadline time.Time, left int64, traceID string) *execution.RequestFacts {
 	facts := &execution.RequestFacts{DeadlineLeftAtDoMs: left, DeadlineSource: execution.RequestDeadlineAttempt,
-		Expired: execution.RequestExpiredNone}
+		Expired: execution.RequestExpiredNone, TraceID: traceID}
 	if !deadline.IsZero() {
 		facts.DeadlineUnixMilli = deadline.UnixMilli()
 	}

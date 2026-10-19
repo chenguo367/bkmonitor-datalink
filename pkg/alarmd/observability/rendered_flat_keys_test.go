@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -209,7 +210,8 @@ func TestALostRoundCompletionCarriesItsDecisionAndBudgetAsFlatKeys(t *testing.T)
 // ran under.
 func TestAFailedQuerysLineSaysWhichDeadlineAndWhichQuery(t *testing.T) {
 	request := &QueryRequestFacts{DeadlineUnixMilli: 31, DeadlineLeftAtDoMs: 32, DeadlineSource: "attempt", Expired: "none",
-		ErrorChain: "Post <url>: read tcp: i/o timeout", ErrorTypes: []string{"*url.Error", "*net.OpError"}}
+		ErrorChain: "Post <url>: read tcp: i/o timeout", ErrorTypes: []string{"*url.Error", "*net.OpError"},
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736"}
 	planned := &QueryPlannedFacts{Role: "ALGORITHM_DEPENDENCY", Dataset: "history_86400", DeadlineUnixMilli: 41, FrozenDeadlineUnixMilli: 42,
 		CompletionDeadlineUnixMilli: 43, FellBack: true}
 	event := renderObservation(t, Observation{
@@ -223,6 +225,7 @@ func TestAFailedQuerysLineSaysWhichDeadlineAndWhichQuery(t *testing.T) {
 		"error_types": "*url.Error > *net.OpError", "query_role": "ALGORITHM_DEPENDENCY", "query_dataset": "history_86400",
 		"planned_deadline_ms": float64(41), "frozen_planned_deadline_ms": float64(42), "completion_deadline_ms": float64(43),
 		"fell_back": true, "failure_bytes_read": float64(51), "failure_series_delivered": float64(52),
+		"failure_provider_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
 	} {
 		if event[key] != want {
 			t.Fatalf("query line[%q] = %#v, want %#v; line=%#v", key, event[key], want, event)
@@ -236,9 +239,26 @@ func TestAFailedQuerysLineSaysWhichDeadlineAndWhichQuery(t *testing.T) {
 	for key, want := range map[string]any{
 		"budget_query_deadline_ms": float64(61), "budget_recovery_budget_ms": float64(62), "budget_query_started_at_ms": float64(63),
 		"request_deadline_ms": float64(31), "error_types": "*url.Error > *net.OpError", "planned_deadline_ms": float64(41), "query_role": "ALGORITHM_DEPENDENCY",
+		"failure_provider_trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
 	} {
 		if slot[key] != want {
 			t.Fatalf("slot line[%q] = %#v, want %#v; line=%#v", key, slot[key], want, slot)
 		}
+	}
+}
+
+// A refusal that names the provider's own trace id writes that one, once:
+// the request's trace id does not write the key a second time.
+func TestARejectionsTraceIDIsWrittenOnce(t *testing.T) {
+	var output bytes.Buffer
+	renderTo(&output, Observation{
+		Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded, ReasonCode: "QUERY_REJECTED",
+		QueryFailure: &QueryFailureFacts{Stage: QueryFailureStageProvider, Category: QueryFailureCategoryProviderTransport, Code: "QUERY_REJECTED",
+			Detail: "http_status=400", Rejection: &QueryRejection{Class: "QUERY_REJECTED", TraceID: "0af7651916cd43dd8448eb211c80319c"},
+			Request: &QueryRequestFacts{DeadlineSource: "attempt", Expired: "none", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736"}},
+	})
+	if got := strings.Count(output.String(), `"failure_provider_trace_id"`); got != 1 ||
+		!strings.Contains(output.String(), `"failure_provider_trace_id":"0af7651916cd43dd8448eb211c80319c"`) {
+		t.Fatalf("written %d times, want the provider's own once: %s", got, output.String())
 	}
 }

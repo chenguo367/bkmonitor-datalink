@@ -11,6 +11,7 @@ package uq
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -73,5 +74,31 @@ func TestATransportDeadlineSaysWhichDeadlineWasOnTheRequest(t *testing.T) {
 	}
 	if request := completion.RouteFacts.Attempts[0].Request; request == nil || request.DeadlineSource != execution.RequestDeadlineCaller {
 		t.Fatalf("request facts %+v, want the caller's deadline named", request)
+	}
+}
+
+// A provider that answered with a failing status names, on the failed
+// attempt, the trace id the request was sent with: the round's own line
+// takes the failed query's request facts, and a 503 has no rejection of its
+// own to say it there.
+func TestAFailingStatusKeepsTheTraceItWasSentWith(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusBadRequest} {
+		var sent string
+		httpClient := &http.Client{Transport: diagnosticRoundTripper(func(request *http.Request) (*http.Response, error) {
+			sent = request.Header.Get(headerTraceParent)
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"error":"no"}`)), Header: http.Header{}}, nil
+		})}
+		client, err := NewClient("http://uq.example.test", "alarmd", httpClient)
+		if err != nil {
+			t.Fatal(err)
+		}
+		completion, err := client.Execute(context.Background(), validAttempt(t), &collectingSink{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.Split(sent, "-")
+		if request := completion.RouteFacts.Attempts[0].Request; request == nil || len(parts) != 4 || request.TraceID != parts[1] {
+			t.Fatalf("%d: request facts %+v, want the sent trace id of %q", status, request, sent)
+		}
 	}
 }

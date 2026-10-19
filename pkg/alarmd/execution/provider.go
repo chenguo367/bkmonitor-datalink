@@ -232,6 +232,9 @@ type RequestFacts struct {
 	Expired            string   `json:"expired"`
 	ErrorChain         string   `json:"error_chain,omitempty"`
 	ErrorTypes         []string `json:"error_types,omitempty"`
+	// TraceID is the trace id of the traceparent the request was sent with,
+	// known at the send whether or not an answer came back.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // MaxRequestErrorBytes bounds RequestFacts.ErrorChain, and
@@ -553,7 +556,7 @@ func (request *RequestFacts) Observed() *observability.QueryRequestFacts {
 	}
 	return &observability.QueryRequestFacts{DeadlineUnixMilli: request.DeadlineUnixMilli, DeadlineLeftAtDoMs: request.DeadlineLeftAtDoMs,
 		DeadlineSource: request.DeadlineSource, Expired: request.Expired, ErrorChain: request.ErrorChain,
-		ErrorTypes: append([]string(nil), request.ErrorTypes...)}
+		ErrorTypes: append([]string(nil), request.ErrorTypes...), TraceID: request.TraceID}
 }
 
 // Observed is planned as a line renders it; nil for nil.
