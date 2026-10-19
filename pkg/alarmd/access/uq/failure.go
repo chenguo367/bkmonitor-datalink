@@ -1,6 +1,8 @@
 package uq
 
 import (
+	"time"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -49,6 +51,9 @@ type bodyFailureError struct {
 	// timeoutSource is which branch filed a timeout
 	// (observability.QueryTimeoutSources), copied onto request.
 	timeoutSource string
+	// failedAt is when bodyFailure timed the failure: the end of timing,
+	// and the request's CompletedUnixMilli.
+	failedAt time.Time
 }
 
 func (e *bodyFailureError) Error() string                                  { return e.err.Error() }

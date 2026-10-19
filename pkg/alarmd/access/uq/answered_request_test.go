@@ -203,6 +203,59 @@ func TestPartialAndEmptyAnswersNameTheirRequest(t *testing.T) {
 	}
 }
 
+// A full answer with data, no failure and no message carries no request
+// facts: a success names nothing new.
+func TestAFullSuccessfulAnswerCarriesNoRequestFacts(t *testing.T) {
+	var sent string
+	body := `{"series":[` + answeredSeries + `],"is_partial":false}`
+	client := answeringClient(t, http.StatusOK, func() io.ReadCloser { return io.NopCloser(strings.NewReader(body)) }, &sent)
+	completion, err := client.Execute(context.Background(), validAttempt(t), &collectingSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completion.Completeness != execution.CompletenessFull || completion.DataState != execution.DataStateData {
+		t.Fatalf("completion %s/%s, want FULL with data", completion.Completeness, completion.DataState)
+	}
+	for _, attempt := range completion.RouteFacts.Attempts {
+		if attempt.Request != nil {
+			t.Fatalf("a full success carries request facts %+v", *attempt.Request)
+		}
+	}
+}
+
+// steppingClock reads whole milliseconds, a step later at every read, so
+// two reads of it never agree.
+type steppingClock struct{ at time.Time }
+
+func (clock *steppingClock) now() time.Time {
+	clock.at = clock.at.Add(7 * time.Millisecond)
+	return clock.at
+}
+
+// A body failure's request ends at the instant bodyFailure timed it: its
+// completed time is its send plus its timing's elapsed, to the millisecond.
+func TestABodyFailureEndsWhenItsTimingEnds(t *testing.T) {
+	var sent string
+	client := answeringClient(t, http.StatusOK, func() io.ReadCloser {
+		return &headThenFail{head: `{"series":[`, err: readTimeout{}}
+	}, &sent)
+	clock := &steppingClock{at: time.Now().Truncate(time.Second)}
+	client.WithNow(clock.now)
+	attempt := validAttempt(t)
+	attempt.BudgetStartUnixMilli = clock.at.Add(-time.Second).UnixMilli()
+	attempt.ReadyAtUnixMilli = attempt.BudgetStartUnixMilli
+	_, err := client.Execute(context.Background(), attempt, &collectingSink{})
+	failure := bodyFailureOf(t, err)
+	timing, request := failure.QueryFailureTiming(), failure.QueryFailureRequest()
+	if timing == nil || request == nil {
+		t.Fatalf("timing %+v request %+v, want both", timing, request)
+	}
+	sentAt := attempt.DeadlineUnixMilli - timing.BudgetMillis
+	if request.CompletedUnixMilli != sentAt+timing.ElapsedMillis {
+		t.Fatalf("completed %d, want the timing's end %d", request.CompletedUnixMilli, sentAt+timing.ElapsedMillis)
+	}
+}
+
 func quoteJSON(text string) string {
 	var out strings.Builder
 	out.WriteByte('"')

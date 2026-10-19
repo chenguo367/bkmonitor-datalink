@@ -373,8 +373,10 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		if errors.As(failure, &named) {
 			named.request = answeredRequest(err)
 			// Which branch filed it: a timeout before the deadline is told
-			// apart from one at it by this, not by the reason.
+			// apart from one at it by this, not by the reason. It ended
+			// when bodyFailure timed it, the instant its timing ends at.
 			named.request.TimeoutSource = named.timeoutSource
+			named.request.CompletedUnixMilli = named.failedAt.UnixMilli()
 		} else {
 			failure = &requestFailureError{err: failure, request: answeredRequest(err)}
 		}
@@ -391,12 +393,20 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	// whose status said it failed (the decoder's unavailable completion), and
 	// one that succeeded partial or empty, which a degraded round reads. The
 	// decoder leaves only the provider's message on it.
+	// A full answer with data that failed nothing and said nothing carries
+	// none: nothing reads it, and a success line names no request.
+	degraded := completion.Completeness != execution.CompletenessFull || completion.DataState != execution.DataStateData
 	for index := range completion.RouteFacts.Attempts {
 		answeredAttempt := &completion.RouteFacts.Attempts[index]
-		request := answeredRequest(nil)
+		excerpt := ""
 		if decoded := answeredAttempt.Request; decoded != nil {
-			request.Excerpt = decoded.Excerpt
+			excerpt = decoded.Excerpt
 		}
+		if !degraded && excerpt == "" && answeredAttempt.Result != execution.RouteAttemptFailed && answeredAttempt.ReasonCode == "" {
+			continue
+		}
+		request := answeredRequest(nil)
+		request.Excerpt = excerpt
 		answeredAttempt.Request = request
 	}
 	return completion, nil
@@ -457,7 +467,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	// What was not spent waiting - for the answer to begin, or inside a read
 	// of its body - was alarmd's own decoding and delivery.
 	local := failed.Sub(answered) - body.waited
-	return &bodyFailureError{err: err, category: category, code: code, detail: detail, timeoutSource: source,
+	return &bodyFailureError{err: err, category: category, code: code, detail: detail, timeoutSource: source, failedAt: failed,
 		timing: attemptTiming(attempt.Budget, started, failed, local),
 		volume: &observability.QueryVolume{BytesRead: body.bytes, SeriesDelivered: series}}
 }
