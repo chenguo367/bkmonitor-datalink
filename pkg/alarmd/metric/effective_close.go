@@ -44,7 +44,9 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"deleted for too short a time, read present elsewhere, or every calendar this replica's strategies "+
 				"name read deleted at once, a calendar source gone; close_boundary_active is a Plan the recheck just "+
 				"before a send found active again, its batch not sent while the Query Group's other Plans go on "+
-				"(effective_time_unknown counts the same recheck finding the time unreadable). Every cell exists from the "+
+				"(effective_time_unknown counts the same recheck finding the time unreadable); close_business_unknown "+
+				"counts alerts of a global business Plan whose record names no business they were filed under, not "+
+				"closed that round. Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }

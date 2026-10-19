@@ -108,6 +108,7 @@ const (
 	closeOutcomeViewNotExecutable    = string(observability.EffectiveCloseViewNotExecutable)
 	closeOutcomeDeletionUnsettled    = string(observability.EffectiveCloseCalendarDeletionUnsettled)
 	closeOutcomeBoundaryActive       = string(observability.EffectiveCloseBoundaryActive)
+	closeOutcomeBusinessUnknown      = string(observability.EffectiveCloseBusinessUnknown)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -143,7 +144,11 @@ type effectiveMaintenance struct {
 	// sourceOf, when set, is where sourceID comes from: the source of the
 	// target the alert link's Console lists for this deployment, read rather
 	// than configured.
-	sourceOf             func(context.Context) (string, error)
+	sourceOf func(context.Context) (string, error)
+	// businesses answers, for a global business Plan, which business each
+	// of its alerts was filed under; nil without the link's Console, where
+	// such a Plan's alerts are not closed.
+	businesses           *openalerts.AlertBusinesses
 	byGroup              map[execution.QueryGroupIdentity][]openalerts.StrategyKey
 	refs                 map[openalerts.StrategyKey]int
 	calibrationRequested map[openalerts.StrategyKey]time.Time
@@ -732,7 +737,12 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			m.observe(ctx, qg, closeOutcomeIdentityInvalid, err, 0)
 			continue
 		}
+		// A global business Plan's alerts are each filed under the business
+		// they are about, and a close carries its alert's, read from the
+		// alert's record; every other Plan's carry the Plan's business.
+		global := plan.Compiled.GlobalBusiness()
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
+		unknown := 0
 		for _, alert := range alerts {
 			if alert.EventSourceID != m.sourceID {
 				continue
@@ -741,11 +751,27 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			if _, sent := m.sent[sentKey]; sent {
 				continue
 			}
+			alertBusiness := business
+			if global {
+				if ctx.Err() != nil {
+					break
+				}
+				read, err := m.alertBusiness(ctx, key, alert)
+				if err != nil {
+					unknown++
+					continue
+				}
+				alertBusiness = read
+			}
 			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint, AlertInstanceID: alert.AlertID,
-				StrategyID: strategyID, StrategyRevision: ref.SnapshotRevision, BusinessID: business, OccurredAt: at})
+				StrategyID: strategyID, StrategyRevision: ref.SnapshotRevision, BusinessID: alertBusiness, OccurredAt: at})
 			if len(batch) == remaining {
 				break
 			}
+		}
+		if unknown > 0 {
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeBusinessUnknown, errors.New("an alert's record names no business for a global business Plan"), unknown)
 		}
 		if len(batch) == 0 {
 			continue
@@ -991,6 +1017,16 @@ func (m *effectiveMaintenance) requestCalibration(key openalerts.StrategyKey, at
 // observe writes the line and counts the outcome. count is what the outcome
 // is measured in - alerts for close_acked - and
 // one for the outcomes that are events in their own right.
+// alertBusiness is the business a global business Plan's alert was filed
+// under, from its record. Without the Console there is no record to read and
+// the alert is not closed.
+func (m *effectiveMaintenance) alertBusiness(ctx context.Context, key openalerts.StrategyKey, alert openalerts.Alert) (int64, error) {
+	if m.businesses == nil {
+		return 0, openalerts.ErrAlertBusinessUnknown
+	}
+	return m.businesses.Of(ctx, key.TenantID, alert.EventSourceID, key.StrategyID, alert.AlertID)
+}
+
 func (m *effectiveMaintenance) observe(ctx context.Context, qg execution.QueryGroupIdentity, outcome string, err error, count int) {
 	m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg)}, outcome, err, count)
 }

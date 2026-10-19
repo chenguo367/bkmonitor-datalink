@@ -94,6 +94,9 @@ type absentStrategyClose struct {
 	// reads source_now with, nil where the source has none.
 	table     *absentCandidateTable
 	documents controlplane.StrategyDocumentPresence
+	// businesses answers, for a global business strategy, which business
+	// each of its alerts was filed under.
+	businesses *openalerts.AlertBusinesses
 }
 
 // absentRoundSizes is what the last round read, beside what it decided on.
@@ -150,8 +153,9 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseCon
 			MaxLinkHealthAge:   absentCloseMaxLinkHealthAge,
 			MaxCloseStrategies: 8,
 		},
-		counts: make(map[string]uint64),
-		table:  newAbsentCandidateTable(controlplane.MaxDepartedStrategies),
+		counts:     make(map[string]uint64),
+		table:      newAbsentCandidateTable(controlplane.MaxDepartedStrategies),
+		businesses: openalerts.NewAlertBusinesses(link.AlertRecord),
 	}
 }
 
@@ -464,13 +468,44 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		execution.word = found.outcome
 		return execution
 	}
+	// A global business strategy's alerts are each filed under the business
+	// they are about, so each close carries its own alert's, read from the
+	// alert's record. So does a strategy the catalog never knew (it
+	// remembers no business for it): whether it was global is not written
+	// anywhere else. Every other strategy's alerts are filed under the
+	// strategy's business and nothing is read.
+	perAlert := identity.GlobalBusiness || absent.Identity.BusinessID == 0
 	for start := 0; start < len(own); start += absentCloseAlertBatch {
 		batch := make([]linkdoutput.CloseRequest, 0, min(len(own)-start, absentCloseAlertBatch))
+		unknown := 0
 		for _, alert := range own[start:min(len(own), start+absentCloseAlertBatch)] {
+			business := identity.BusinessID
+			if perAlert {
+				if ctx.Err() != nil {
+					break
+				}
+				read, err := loop.businesses.Of(ctx, key.TenantID, reconciliation.EventSourceID, absent.Key.StrategyID, alert.AlertID)
+				if err != nil {
+					// Not closed on a guess: it stays open, and the next
+					// round reads its record again.
+					unknown++
+					continue
+				}
+				business = read
+			}
 			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint,
 				AlertInstanceID: alert.AlertID, StrategyID: strategyID,
-				StrategyRevision: identity.Revision, BusinessID: identity.BusinessID,
+				StrategyRevision: identity.Revision, BusinessID: business,
 				OccurredAt: now, Reason: linkdoutput.CloseReasonAbsent})
+		}
+		if unknown > 0 {
+			loop.observe(ctx, absentalerts.OutcomeBusinessUnknown, errors.New("an alert's record names no business for a global business strategy"), unknown)
+		}
+		if len(batch) == 0 {
+			if ctx.Err() != nil {
+				break
+			}
+			continue
 		}
 		execution.batch += len(batch)
 		if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {
@@ -578,7 +613,7 @@ func identitiesByKey(entries []controlplane.DepartedStrategy) map[absentalerts.K
 	identities := make(map[absentalerts.Key]absentalerts.Identity, len(entries))
 	for _, entry := range entries {
 		identities[absentalerts.Key{TenantID: entry.TenantID, StrategyID: entry.StrategyID}] =
-			absentalerts.Identity{BusinessID: entry.BusinessID, Revision: entry.Revision}
+			absentalerts.Identity{BusinessID: entry.BusinessID, Revision: entry.Revision, GlobalBusiness: entry.GlobalBusiness}
 	}
 	return identities
 }

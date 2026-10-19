@@ -3550,6 +3550,11 @@ const (
 	// time its batch was ready. The batch is not sent, and the step goes on
 	// to the Query Group's next Plan.
 	EffectiveCloseBoundaryActive ReasonCode = "close_boundary_active"
+	// EffectiveCloseBusinessUnknown is an alert of a global business Plan
+	// whose record could not be read or names no business. Such a Plan's
+	// alerts are each filed under the business they are about, and a close
+	// must carry it; the alert is not closed this round. Counts alerts.
+	EffectiveCloseBusinessUnknown ReasonCode = "close_business_unknown"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3559,6 +3564,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled, EffectiveCloseBoundaryActive,
+	EffectiveCloseBusinessUnknown,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.

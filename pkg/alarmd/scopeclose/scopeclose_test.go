@@ -625,3 +625,67 @@ func TestAnObservationExpiringAtTheStepIsCounted(t *testing.T) {
 	f.closer.Step(context.Background())
 	f.want(t, "expired at the step", map[string]uint64{OutcomeUnconfirmed: 1, OutcomeObservationExpired: 1})
 }
+
+// alertBusinesses is the link's record of which business each alert was
+// filed under, counting the reads.
+type alertBusinesses struct {
+	byAlert map[string]int64
+	reads   int
+}
+
+func (b *alertBusinesses) of(_ context.Context, tenantID, source, strategyID, alertID string) (int64, error) {
+	b.reads++
+	business, ok := b.byAlert[alertID]
+	if !ok || tenantID != tenant || source != ownSrc || strategyID != strategy {
+		return 0, openalerts.ErrAlertBusinessUnknown
+	}
+	return business, nil
+}
+
+func globalDrop(fingerprint string) Drop {
+	d := drop(fingerprint, 0)
+	d.BusinessID, d.GlobalBusiness = "9", true
+	return d
+}
+
+// A global business strategy files each alert under the business it is
+// about, and the close of each carries that one, read from the alert's
+// record - not the strategy's own. An alert whose record names none is not
+// closed and is tried again at the next step; the others go out.
+func TestAGlobalStrategysCloseCarriesEachAlertsBusiness(t *testing.T) {
+	f := newFixture(openSet(ownSrc, fp(1), fp(2), fp(3)), nil)
+	records := &alertBusinesses{byAlert: map[string]int64{"alert-0": 2, "alert-1": 3}}
+	f.closer.BindAlertBusiness(records.of)
+	f.slot(1700000000, globalDrop(fp(1)), globalDrop(fp(2)), globalDrop(fp(3)))
+	f.slot(1700000060, globalDrop(fp(1)), globalDrop(fp(2)), globalDrop(fp(3)))
+	got := map[string]int64{}
+	for _, request := range f.writer.sent() {
+		got[request.AlertInstanceID] = request.BusinessID
+	}
+	if len(got) != 2 || got["alert-0"] != 2 || got["alert-1"] != 3 {
+		t.Fatalf("closes carried %v, want alert-0 under 2 and alert-1 under 3, alert-2 not sent", got)
+	}
+	if f.closer.Stats()[OutcomeBusinessUnknown] != 1 {
+		t.Fatalf("the alert with no business on its record was not counted: %v", f.closer.Stats())
+	}
+	records.byAlert["alert-2"] = 4
+	f.slot(1700000120, globalDrop(fp(3)))
+	sent := f.writer.sent()
+	if last := sent[len(sent)-1]; last.AlertInstanceID != "alert-2" || last.BusinessID != 4 {
+		t.Fatalf("the kept close was not sent once its record named a business: %+v", last)
+	}
+}
+
+// Every other strategy's alerts are filed under the strategy's business:
+// its close carries that and reads no record.
+func TestAnOrdinaryStrategysCloseReadsNoRecord(t *testing.T) {
+	f := newFixture(openSet(ownSrc, fp(1), fp(2)), nil)
+	records := &alertBusinesses{byAlert: map[string]int64{"alert-0": 5, "alert-1": 6}}
+	f.closer.BindAlertBusiness(records.of)
+	f.slot(1700000000, drop(fp(1), 0), drop(fp(2), 0))
+	f.slot(1700000060, drop(fp(1), 0), drop(fp(2), 0))
+	sent := f.writer.sent()
+	if len(sent) != 2 || sent[0].BusinessID != 2 || sent[1].BusinessID != 2 || records.reads != 0 {
+		t.Fatalf("sent %+v with %d record reads, want both under the strategy's business and no read", sent, records.reads)
+	}
+}

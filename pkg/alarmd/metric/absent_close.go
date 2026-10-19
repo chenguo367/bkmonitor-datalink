@@ -39,12 +39,15 @@ func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
 		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "absent_strategy_close_total"),
 			"What the control leader's difference against disabled or deleted strategies decided, by outcome. "+
-				"Counted per strategy except close_sent, send_failed, producer_foreign and producer_unknown, "+
+				"Counted per strategy except close_sent, send_failed, producer_foreign, producer_unknown and "+
+				"business_unknown, "+
 				"which count alerts. close_decided counts decisions and close_sent counts what went out, "+
 				"acknowledged by the broker; neither says the link closed anything, which absent.list reads "+
 				"per strategy as the alerts its reconcile still lists active after an earlier send. "+
 				"identity_unknown and revision_unknown are strategies decided and not sent because no business or "+
-				"revision could be found for them. Why a whole round decided nothing is "+
+				"revision could be found for them; business_unknown are alerts of a global business strategy not "+
+				"closed that round because their record names no business they were filed under. Why a whole round "+
+				"decided nothing is "+
 				"absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a "+
 				"reading and not an absence.", []string{"outcome"}, nil),
 		roundIs: prometheus.NewDesc(prometheus.BuildFQName("", metricSubsystem, "absent_strategy_round_total"),
