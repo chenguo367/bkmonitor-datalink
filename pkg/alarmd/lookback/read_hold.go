@@ -284,13 +284,12 @@ func shiftedSpec(spec execution.PhysicalQuerySpec, shift int64) (execution.Physi
 // and its readiness the same offset after its evaluation time, under the
 // group's hold now. Its own first attempt keeps the trial only when its frozen
 // query is that one (Prepare); the Slots between keep it standing.
-func (engine *Engine) aheadTrialLocked(state *group, query Query, hold, base time.Duration, now time.Time) *earlierSample {
+func (engine *Engine) aheadTrialLocked(state *group, query Query, hold, base, candidate time.Duration, now time.Time) *earlierSample {
 	step := int64(query.FollowingSlot - query.Contract.Slot.EvaluationTime)
 	if query.FollowingSlot == 0 || step <= 0 {
 		return nil
 	}
 	bound := state.rereadBound()
-	candidate := execution.LoweredReadHold(base, state.step)
 	limit := int((hold+bound)/(time.Duration(step)*time.Second)) + 2
 	for slots := 1; slots <= limit; slots++ {
 		shift := step * int64(slots)
@@ -358,6 +357,15 @@ func (engine *Engine) Prepare(query Query) {
 	if base <= 0 {
 		return
 	}
+	// The candidate is the controller's when it has one to give, asked
+	// outside the engine's lock as the hold is; none to give, no trial.
+	given, hasGiven := time.Duration(0), engine.options.CurrentCandidate != nil
+	if hasGiven {
+		var tries bool
+		if given, tries = engine.options.CurrentCandidate(query.Contract.Slot.QueryGroup); !tries {
+			return
+		}
+	}
 	engine.mu.Lock()
 	state := engine.groupLocked(query, now)
 	if previous := state.prepared; previous != nil {
@@ -401,7 +409,10 @@ func (engine *Engine) Prepare(query Query) {
 		engine.mu.Unlock()
 		return
 	}
-	candidate := execution.LoweredReadHold(base, state.step)
+	candidate := given
+	if !hasGiven {
+		candidate = execution.LoweredReadHold(base, state.step)
+	}
 	baseline := query.ReadyAt.Add(-hold)
 	readyAt := baseline.Add(candidate)
 	start := trialStart(readyAt, baseline, candidate, state.rereadBound())
@@ -409,7 +420,7 @@ func (engine *Engine) Prepare(query Query) {
 	// every one is under a hold past the period less the reread bound: the
 	// next Slot's trial is reserved now instead.
 	if now.After(start) {
-		if ahead := engine.aheadTrialLocked(state, query, hold, base, now); ahead != nil {
+		if ahead := engine.aheadTrialLocked(state, query, hold, base, candidate, now); ahead != nil {
 			state.prepared = ahead
 			engine.counts.earlierAhead[key2(state.source, aheadSlotsLabel(ahead.aheadSlots))]++
 			state.reading.ahead[wordIndex(EarlierAheadSlots, aheadSlotsLabel(ahead.aheadSlots))]++
@@ -453,7 +464,13 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 	engine := read.engine
 	owned := engine.options.Owns(trial.query.Contract.Slot.QueryGroup)
 	candidateCurrent := true
-	if engine.options.CurrentReadHold != nil {
+	switch {
+	case engine.options.CurrentCandidate != nil:
+		// The trial's candidate is still the one to try: the hold and the
+		// search below it have not moved under it.
+		given, tries := engine.options.CurrentCandidate(trial.query.Contract.Slot.QueryGroup)
+		candidateCurrent = tries && given == trial.candidateHold
+	case engine.options.CurrentReadHold != nil:
 		hold := engine.options.CurrentReadHold(trial.query.Contract.Slot.QueryGroup)
 		candidateCurrent = hold > 0 && execution.LoweredReadHold(hold, trial.group.step) == trial.candidateHold
 	}

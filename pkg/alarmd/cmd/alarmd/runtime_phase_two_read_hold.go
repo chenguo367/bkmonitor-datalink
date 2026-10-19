@@ -796,6 +796,7 @@ func (holds *productionReadHolds) observation(contractRef execution.FrozenExecut
 
 func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	options.CurrentReadHold, options.ReadHoldAt = holds.controller.ReadHold, holds.controller.ReadHoldAt
+	options.CurrentCandidate = holds.controller.EarlierCandidate
 	options.OnWholeWindowReadEarly = func(e lookback.ReadHoldEvidence) {
 		holds.observation(e.Contract, func(ctx context.Context) error {
 			return holds.controller.Observe(ctx, readhold.Evidence{Contract: e.Contract, ArrivalAge: e.ArrivalAge,
@@ -816,10 +817,20 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 		if holds.logger == nil {
 			return
 		}
+		// The search below the hold as the controller has it when the line is
+		// written: its floor (-1 while none) and different trials in a row.
+		floor, differents := int64(-1), 0
+		if record, loaded := holds.controller.Reading(e.Contract.Slot.QueryGroup); loaded {
+			if record.EarlierFloorMillis != nil {
+				floor = *record.EarlierFloorMillis
+			}
+			differents = record.EarlierDifferents
+		}
 		holds.logger.Info("lookback", "earlier_trial", 0, 0, slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
 			slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("outcome", e.Outcome),
 			slog.String("overtaken_by", e.OvertakenBy), slog.Int64("candidate_hold_ms", e.CandidateHold.Milliseconds()),
-			slog.Int64("read_hold_ms", e.Contract.ReadHoldMillis), slog.Int("ahead_slots", e.AheadSlots))
+			slog.Int64("read_hold_ms", e.Contract.ReadHoldMillis), slog.Int("ahead_slots", e.AheadSlots),
+			slog.Int64("floor_ms", floor), slog.Int("floor_differents", differents))
 	}
 	options.OnReadHoldIgnored = func(e lookback.ReadHoldEvidence, reason string) {
 		inspection := holds.controller.Inspect(e.Contract.Slot.QueryGroup)

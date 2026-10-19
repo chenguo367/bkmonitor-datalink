@@ -91,6 +91,28 @@ func LoweredReadHold(hold, step time.Duration) time.Duration {
 	return half
 }
 
+// CandidateReadHold is the hold the next earlier-read trial tries under hold,
+// and false when there is none to try. floor, when floored, is the largest
+// candidate already shown too early under this hold: data still changing
+// there. Without one the step is LoweredReadHold, half the hold. With one the
+// candidate is halfway between the floor and the hold, so a group whose data
+// lands anywhere between the two is found by halving the gap, not by trying
+// half the hold again and again; once the gap is no wider than a step there
+// is nothing left a read can tell apart, and nothing is tried. A floor at or
+// past the hold says nothing about it.
+func CandidateReadHold(hold, floor time.Duration, floored bool, step time.Duration) (time.Duration, bool) {
+	if hold <= 0 {
+		return 0, false
+	}
+	if !floored || floor < 0 || floor >= hold {
+		return LoweredReadHold(hold, step), true
+	}
+	if hold-floor <= step {
+		return 0, false
+	}
+	return floor + time.Duration((hold-floor).Milliseconds()/2)*time.Millisecond, true
+}
+
 func (ref FrozenExecutionContractRef) Validate() error {
 	switch {
 	case ref.Slot.QueryGroup == "":

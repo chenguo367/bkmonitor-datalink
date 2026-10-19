@@ -50,18 +50,26 @@ type Record struct {
 	QuietSinceMillis       int64                    `json:"quiet_since_ms,omitempty"`
 	EarlierMatches         int                      `json:"earlier_matches,omitempty"`
 	LastEarlierSlot        execution.EvaluationTime `json:"last_earlier_slot,omitempty"`
-	RaisedAfterLowering    uint64                   `json:"raised_after_lowering,omitempty"`
-	Lowered                bool                     `json:"lowered,omitempty"`
-	Noise                  uint64                   `json:"noise,omitempty"`
-	AtLimit                bool                     `json:"at_limit,omitempty"`
-	LimitMillis            int64                    `json:"limit_ms,omitempty"`
-	Rung                   string                   `json:"rung,omitempty"`
-	Buckets                []int64                  `json:"buckets,omitempty"`
-	SegmentStart           execution.EvaluationTime `json:"segment_start,omitempty"`
-	Closed                 bool                     `json:"closed,omitempty"`
-	Plans                  []PlanRecord             `json:"plans,omitempty"`
-	Transitions            []Transition             `json:"transitions,omitempty"`
-	RenewedAtMillis        int64                    `json:"renewed_at_ms,omitempty"`
+	// EarlierFloorMillis is the largest candidate shown too early under the
+	// current hold (execution.CandidateReadHold), nil while none is; and
+	// EarlierDifferents the different trials in a row at the current
+	// candidate, which move the floor once there are FloorDifferentsRequired
+	// of them. Both are cleared when the hold is raised or seeded and at
+	// each renewal.
+	EarlierFloorMillis  *int64                   `json:"earlier_floor_ms,omitempty"`
+	EarlierDifferents   int                      `json:"earlier_differents,omitempty"`
+	RaisedAfterLowering uint64                   `json:"raised_after_lowering,omitempty"`
+	Lowered             bool                     `json:"lowered,omitempty"`
+	Noise               uint64                   `json:"noise,omitempty"`
+	AtLimit             bool                     `json:"at_limit,omitempty"`
+	LimitMillis         int64                    `json:"limit_ms,omitempty"`
+	Rung                string                   `json:"rung,omitempty"`
+	Buckets             []int64                  `json:"buckets,omitempty"`
+	SegmentStart        execution.EvaluationTime `json:"segment_start,omitempty"`
+	Closed              bool                     `json:"closed,omitempty"`
+	Plans               []PlanRecord             `json:"plans,omitempty"`
+	Transitions         []Transition             `json:"transitions,omitempty"`
+	RenewedAtMillis     int64                    `json:"renewed_at_ms,omitempty"`
 }
 
 // ErrRecordInvalid is a record that does not decode or holds out of range.
@@ -77,6 +85,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierDifferents < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 {

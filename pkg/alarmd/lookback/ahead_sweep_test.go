@@ -231,3 +231,64 @@ func TestASlotThatDropsATrialReservedAheadReservesAgain(t *testing.T) {
 		t.Fatalf("after the drop reserved %+v, want a later Slot's trial under the moved hold", again)
 	}
 }
+
+// With the controller's candidate given, the trial tries that, not half the
+// hold: its point and its evidence are the given candidate's, a candidate that
+// moves before the formal read leaves it hold_moved, and none given reserves
+// none.
+func TestATrialTriesTheGivenCandidate(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		moved  bool
+		none   bool
+		reason string
+	}{
+		{"the given candidate", false, false, ""},
+		{"moved before the read", true, false, OvertakenHoldMoved},
+		{"none given", false, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			observed := make(chan EarlierReadEvidence, 1)
+			f.engine.options.OnEarlierRead = func(evidence EarlierReadEvidence) { observed <- evidence }
+			given := 90 * time.Second
+			f.engine.options.CurrentCandidate = func(execution.QueryGroupIdentity) (time.Duration, bool) { return given, !c.none }
+			q := heldQuery(f)
+			f.engine.Prepare(q)
+			f.engine.mu.Lock()
+			var trial *earlierSample
+			if state := f.engine.groups["qg"]; state != nil {
+				trial = state.prepared
+			}
+			f.engine.mu.Unlock()
+			if c.none {
+				if trial != nil {
+					t.Fatalf("no candidate given, reserved %+v", trial)
+				}
+				return
+			}
+			baseline := q.ReadyAt.Add(-2 * time.Minute)
+			if trial == nil || trial.candidateHold != given || !trial.readyAt.Equal(baseline.Add(given)) {
+				t.Fatalf("reserved %+v, want the given 90 s candidate", trial)
+			}
+			f.clock.set(trial.at)
+			f.answers <- full(point(int64(q.Contract.Slot.EvaluationTime), "1"))
+			f.engine.StepEarly(context.Background())
+			f.waitFor(func(stats Stats) bool { return stats.PendingBytes == summaryEntryBytes })
+			if c.moved {
+				given = 105 * time.Second
+			}
+			formalRead(f, q)
+			evidence := <-observed
+			if c.moved {
+				if evidence.Observed || overtakenPaths(f)[OvertakenHoldMoved] != 1 {
+					t.Fatalf("a moved candidate's trial: evidence %+v, overtaken %v", evidence, overtakenPaths(f))
+				}
+				return
+			}
+			if !evidence.Equal || evidence.CandidateHold != 90*time.Second {
+				t.Fatalf("evidence %+v, want an equal trial of 90 s", evidence)
+			}
+		})
+	}
+}
