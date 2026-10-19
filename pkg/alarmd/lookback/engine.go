@@ -224,6 +224,10 @@ type Options struct {
 	OnWholeWindowReadEarly func(ReadHoldEvidence)
 	OnEarlierRead          func(EarlierReadEvidence)
 	OnReadHoldIgnored      func(ReadHoldEvidence, string)
+	// OnEarlierTrialEnd sees every trial end, completed or dropped, with its
+	// Query Group: the per-group reading of a deployment whose lookback route
+	// is not public.
+	OnEarlierTrialEnd func(EarlierTrialEnd)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -273,6 +277,7 @@ type Engine struct {
 	woken           chan struct{}
 	holdEvidence    []ReadHoldEvidence
 	ignoredEvidence []ignoredReadHold
+	trialEnds       []EarlierTrialEnd
 	// plans is the control plane's plan set for this Worker (plan.go).
 	plans map[execution.QueryGroupIdentity]Plan
 }

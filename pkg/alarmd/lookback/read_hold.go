@@ -75,12 +75,64 @@ const (
 var EarlierOvertakenPaths = []string{OvertakenPreparedLate, OvertakenNextSlot, OvertakenFormalFirst, OvertakenHoldMoved,
 	OvertakenStartedLate, OvertakenFinishedLate}
 
+// EarlierAheadSlots counts trials reserved ahead by how many Slots ahead
+// (aheadTrialLocked): a hold far past the period needs the trial of a Slot
+// further on than the next.
+var EarlierAheadSlots = []string{"1", "2", "3", "4+"}
+
+func aheadSlotsLabel(slots int) string {
+	if slots >= len(EarlierAheadSlots) {
+		return EarlierAheadSlots[len(EarlierAheadSlots)-1]
+	}
+	return EarlierAheadSlots[slots-1]
+}
+
 // overtake ends trial as overtaken by path unless something ended it first.
 func (trial *earlierSample) overtake(path string) {
 	if trial.done {
 		return
 	}
 	trial.done, trial.outcome, trial.overtakenBy = true, EarlierOvertaken, path
+}
+
+// EarlierTrialEnd is how one trial ended: its Slot, its outcome and, when it
+// was overtaken, what overtook it; its candidate hold, and how many Slots
+// ahead it was reserved (0 at its own Slot).
+type EarlierTrialEnd struct {
+	Contract      execution.FrozenExecutionContractRef
+	Source        string
+	Outcome       string
+	OvertakenBy   string
+	CandidateHold time.Duration
+	AheadSlots    int
+}
+
+// endTrialLocked keeps how trial ended for OnEarlierTrialEnd.
+func (engine *Engine) endTrialLocked(trial *earlierSample, outcome string) {
+	if engine.options.OnEarlierTrialEnd == nil {
+		return
+	}
+	end := EarlierTrialEnd{Contract: trial.query.Contract, Source: trial.source, Outcome: outcome,
+		CandidateHold: trial.candidateHold, AheadSlots: trial.aheadSlots}
+	if outcome == EarlierOvertaken {
+		end.OvertakenBy = trial.overtakenBy
+	}
+	engine.trialEnds = append(engine.trialEnds, end)
+}
+
+// publishTrialEnds hands the kept trial ends to OnEarlierTrialEnd, outside
+// the engine's lock.
+func (engine *Engine) publishTrialEnds() {
+	if engine.options.OnEarlierTrialEnd == nil {
+		return
+	}
+	engine.mu.Lock()
+	ends := engine.trialEnds
+	engine.trialEnds = nil
+	engine.mu.Unlock()
+	for _, end := range ends {
+		engine.options.OnEarlierTrialEnd(end)
+	}
 }
 
 // countOvertakenLocked counts what overtook a trial counted EarlierOvertaken.
@@ -150,10 +202,12 @@ type earlierSample struct {
 	overtakenBy string
 	cancel      context.CancelFunc
 	group       *group
-	// ahead marks a trial reserved at the previous Slot's first attempt for
-	// the Slot its schedule has next. Its query is the previous one moved to
-	// that Slot until the Slot's own first attempt adopts the frozen query.
-	ahead bool
+	// ahead marks a trial reserved at an earlier Slot's first attempt for a
+	// Slot its schedule has later, aheadSlots Slots on. Its query is the
+	// earlier one moved to that Slot until the Slot's own first attempt
+	// adopts the frozen query.
+	ahead      bool
+	aheadSlots int
 }
 
 // dropTrialLocked ends a trial whose Slot will not compare it, counted
@@ -169,6 +223,7 @@ func (engine *Engine) dropTrialLocked(trial *earlierSample, path string) {
 	engine.counts.earlierReads[key2(trial.source, EarlierOvertaken)]++
 	engine.countOvertakenLocked(trial)
 	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOvertaken)]++
+	engine.endTrialLocked(trial, EarlierOvertaken)
 }
 
 // trialStart is when a trial of candidate starts: as long before its point
@@ -208,45 +263,56 @@ func shiftedSpec(spec execution.PhysicalQuerySpec, shift int64) (execution.Physi
 	return moved, true
 }
 
-// aheadTrialLocked reserves, at query's first attempt, the trial of the Slot
-// its schedule has next, or returns nil. Slots of a Query Group run one after
+// aheadTrialLocked reserves, at query's first attempt, the trial of a Slot its
+// schedule has later, or returns nil. Slots of a Query Group run one after
 // another, so a Slot's first attempt comes no earlier than the previous Slot's
 // held read. With a hold past the period less the reread bound that is past
 // where the Slot's own trial had to start - under two steps, a trial of no
 // hold whose point is the readiness without the hold; from two steps, a trial
 // of half the hold - and the trial reserved there is overtaken before it
-// reads. Reserved here instead, a hold early, it reads in time.
+// reads.
 //
-// The next Slot is this one moved by the schedule's step: its window, and its
-// readiness the same offset after its evaluation time, under the group's hold
-// now. Its own first attempt keeps the trial only when its frozen query is that
-// one (Prepare); its rest is judged at its own formal read, as any trial's.
+// The next Slot's trial can be past its start as well: its start is a period
+// after this Slot's, and this Slot's first attempt is itself a hold after
+// the Slot before it was due. So the trial reserved is that of the first Slot
+// on, k Slots ahead, whose trial starts after now and whose formal read ends
+// the group's rest. k is bounded by the hold: k Slots ahead are k periods
+// later, and a first attempt is no more than a hold and a reread bound late,
+// so a k past that, and two Slots of slack, never needs looking at.
+//
+// The Slot k on is this one moved by k of the schedule's steps: its window,
+// and its readiness the same offset after its evaluation time, under the
+// group's hold now. Its own first attempt keeps the trial only when its frozen
+// query is that one (Prepare); the Slots between keep it standing.
 func (engine *Engine) aheadTrialLocked(state *group, query Query, hold, base time.Duration, now time.Time) *earlierSample {
-	shift := int64(query.FollowingSlot - query.Contract.Slot.EvaluationTime)
-	if query.FollowingSlot == 0 || shift <= 0 {
+	step := int64(query.FollowingSlot - query.Contract.Slot.EvaluationTime)
+	if query.FollowingSlot == 0 || step <= 0 {
 		return nil
 	}
-	spec, derived := shiftedSpec(query.Spec, shift)
-	if !derived {
-		return nil
-	}
-	next := query
-	next.Spec, next.FollowingSlot = spec, 0
-	next.Contract.Slot.EvaluationTime = query.FollowingSlot
-	next.Contract.ReadHoldMillis = base.Milliseconds()
-	baseline := query.ReadyAt.Add(-hold).Add(time.Duration(shift) * time.Second)
-	next.ReadyAt = baseline.Add(base)
-	if next.ReadyAt.Before(state.nextAt) {
-		return nil
-	}
+	bound := state.rereadBound()
 	candidate := execution.LoweredReadHold(base, state.step)
-	readyAt := baseline.Add(candidate)
-	start := trialStart(readyAt, baseline, candidate, state.rereadBound())
-	if !now.Before(start) {
-		return nil
+	limit := int((hold+bound)/(time.Duration(step)*time.Second)) + 2
+	for slots := 1; slots <= limit; slots++ {
+		shift := step * int64(slots)
+		baseline := query.ReadyAt.Add(-hold).Add(time.Duration(shift) * time.Second)
+		readyAt := baseline.Add(candidate)
+		start := trialStart(readyAt, baseline, candidate, bound)
+		if !now.Before(start) || baseline.Add(base).Before(state.nextAt) {
+			continue
+		}
+		spec, derived := shiftedSpec(query.Spec, shift)
+		if !derived {
+			return nil
+		}
+		next := query
+		next.Spec, next.FollowingSlot = spec, 0
+		next.Contract.Slot.EvaluationTime = query.Contract.Slot.EvaluationTime + execution.EvaluationTime(shift)
+		next.Contract.ReadHoldMillis = base.Milliseconds()
+		next.ReadyAt = baseline.Add(base)
+		return &earlierSample{query: next, source: state.source, candidateHold: candidate, group: state, ahead: true,
+			aheadSlots: slots, at: start, readyAt: readyAt, keptFrom: tailFrom(next.Spec.LogicalWindow, state.step, tailSteps)}
 	}
-	return &earlierSample{query: next, source: state.source, candidateHold: candidate, group: state, ahead: true,
-		at: start, readyAt: readyAt, keptFrom: tailFrom(next.Spec.LogicalWindow, state.step, tailSteps)}
+	return nil
 }
 
 func (engine *Engine) groupLocked(query Query, now time.Time) *group {
@@ -301,18 +367,20 @@ func (engine *Engine) Prepare(query Query) {
 			// attempt: the trial was read for this frozen query only if the
 			// Slot's window, hold and readiness are those it was moved to. A
 			// Slot frozen otherwise - its hold moved, its schedule or query
-			// revised - drops it, and the Slot reserves nothing of its own,
-			// past its point as it is.
+			// revised - drops it and goes on to reserve as any Slot does, so a
+			// moved hold costs one trial, not the next one too.
 			previous.ahead = false
-			if query.Spec.Digest != previous.query.Spec.Digest || query.Contract.ReadHoldMillis != previous.query.Contract.ReadHoldMillis ||
-				!query.ReadyAt.Equal(previous.query.ReadyAt) {
-				engine.dropTrialLocked(previous, OvertakenHoldMoved)
-				state.prepared = nil
-			} else {
+			if query.Spec.Digest == previous.query.Spec.Digest && query.Contract.ReadHoldMillis == previous.query.Contract.ReadHoldMillis &&
+				query.ReadyAt.Equal(previous.query.ReadyAt) {
 				previous.query = query
+				engine.mu.Unlock()
+				return
 			}
-			engine.mu.Unlock()
-			return
+			// Dropped below, once, as hold_moved unless something overtook
+			// it first.
+			if previous.overtakenBy == "" {
+				previous.overtakenBy = OvertakenHoldMoved
+			}
 		case previous.query.Contract.Slot == query.Contract.Slot,
 			previous.ahead && previous.query.Contract.Slot.EvaluationTime > query.Contract.Slot.EvaluationTime:
 			// The same Slot prepared again, its readiness deferred and
@@ -343,6 +411,8 @@ func (engine *Engine) Prepare(query Query) {
 	if now.After(start) {
 		if ahead := engine.aheadTrialLocked(state, query, hold, base, now); ahead != nil {
 			state.prepared = ahead
+			engine.counts.earlierAhead[key2(state.source, aheadSlotsLabel(ahead.aheadSlots))]++
+			state.reading.ahead[wordIndex(EarlierAheadSlots, aheadSlotsLabel(ahead.aheadSlots))]++
 			heap.Push(&engine.earlyWork, earlyWork{at: ahead.at, trial: ahead})
 			engine.mu.Unlock()
 			engine.poke()
@@ -412,12 +482,15 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 		engine.countOvertakenLocked(trial)
 	}
 	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, outcome)]++
+	engine.endTrialLocked(trial, outcome)
 	engine.mu.Unlock()
+	defer engine.publishTrialEnds()
 	engine.options.OnEarlierRead(EarlierReadEvidence{Contract: trial.query.Contract, CandidateHold: trial.candidateHold,
 		Observed: outcome == EarlierEqual || outcome == EarlierDifferent, Equal: outcome == EarlierEqual, Outcome: outcome})
 }
 
 func (engine *Engine) publishReadHold() {
+	engine.publishTrialEnds()
 	if engine.options.OnWholeWindowReadEarly == nil && engine.options.OnReadHoldIgnored == nil {
 		return
 	}

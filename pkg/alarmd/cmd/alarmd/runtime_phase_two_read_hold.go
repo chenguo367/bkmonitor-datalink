@@ -808,6 +808,19 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 				readhold.EarlierEvidence{Contract: e.Contract, CandidateHold: e.CandidateHold, Observed: e.Observed, Equal: e.Equal})
 		})
 	}
+	// One line per trial end, so a deployment whose lookback route is not
+	// public can still read, group by group, whether its trials complete and
+	// what overtakes those that do not. A group has at most one trial per
+	// rest, so the lines are as many as the trials.
+	options.OnEarlierTrialEnd = func(e lookback.EarlierTrialEnd) {
+		if holds.logger == nil {
+			return
+		}
+		holds.logger.Info("lookback", "earlier_trial", 0, 0, slog.String("query_group", string(e.Contract.Slot.QueryGroup)),
+			slog.Int64("slot", int64(e.Contract.Slot.EvaluationTime)), slog.String("source", e.Source), slog.String("outcome", e.Outcome),
+			slog.String("overtaken_by", e.OvertakenBy), slog.Int64("candidate_hold_ms", e.CandidateHold.Milliseconds()),
+			slog.Int64("read_hold_ms", e.Contract.ReadHoldMillis), slog.Int("ahead_slots", e.AheadSlots))
+	}
 	options.OnReadHoldIgnored = func(e lookback.ReadHoldEvidence, reason string) {
 		inspection := holds.controller.Inspect(e.Contract.Slot.QueryGroup)
 		if reason != lookback.IgnoredNoWholeWindowArrival || !inspection.Loaded || inspection.Missing || holds.controller.ReadHold(e.Contract.Slot.QueryGroup) == 0 {

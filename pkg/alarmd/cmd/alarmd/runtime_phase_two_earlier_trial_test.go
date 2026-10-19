@@ -221,6 +221,13 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 	}{
 		{"under two steps", 100 * time.Second},
 		{"two steps and more", 160 * time.Second},
+		// Past twice the period less the reread bound: the next Slot's trial is
+		// past its start too, and the trial two Slots ahead is reserved.
+		{"just past one Slot ahead", 118 * time.Second},
+		{"five periods", 300500 * time.Millisecond},
+		// Measured past the hold limit: the hold is the limit, the trial
+		// reserved as far ahead as the limit needs.
+		{"the hold limit", 700 * time.Second},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
