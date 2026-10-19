@@ -61,6 +61,14 @@ type LevelOutcome struct {
 	// own for it. Set by the evaluator, which is the only place that knows;
 	// read by the completion's cause (SlotInputWholeness.UnknownIsGuardTail).
 	GuardTail bool
+	// ReasonCarried marks an UNKNOWN outcome whose reason is a stored guard's
+	// - the Level's saved state reason or a loaded gap marker scope's - and
+	// not anything this round's inputs said. ReasonOrigin is where that
+	// guard came from, zero when it was stamped without one. Observation
+	// only: set by the evaluator, read by the lines and counters that must
+	// not file a carried reason as this round's failure.
+	ReasonCarried bool
+	ReasonOrigin  ReasonOrigin
 }
 
 type levelOutcomeIdentity struct {
@@ -1085,6 +1093,7 @@ func runtimeLevelsFromMutation(levels []RuntimeLevelStateMutation) []RuntimeLeve
 			LevelID: level.LevelID, HistoryCompleteness: level.HistoryCompleteness,
 			GapReasonCode: level.GapReasonCode, WarmupRequirementRef: level.WarmupRequirementRef,
 			LevelStateCompatibility: level.LevelStateCompatibility,
+			GapReasonOriginSlot:     level.GapReasonOriginSlot, GapReasonOriginCause: level.GapReasonOriginCause,
 		}
 	}
 	return result

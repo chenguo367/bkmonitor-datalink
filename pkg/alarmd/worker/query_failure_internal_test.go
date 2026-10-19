@@ -431,17 +431,25 @@ func (deliveryTimeoutError) QueryFailureVolume() *observability.QueryVolume {
 // as they were.
 func TestOnlyALostQueryLineCarriesItsDecisionAndBudget(t *testing.T) {
 	for _, tc := range []struct {
-		result observability.Result
-		want   bool
-	}{{observability.ResultDegraded, true}, {observability.ResultSuccess, false}} {
+		result       observability.Result
+		completeness execution.Completeness
+		want         bool
+	}{
+		{observability.ResultDegraded, execution.CompletenessUnavailable, true},
+		{observability.ResultSuccess, execution.CompletenessFull, false},
+		// An evaluation degraded over a query that answered whole lost no
+		// query: no decision, no budget.
+		{observability.ResultDegraded, execution.CompletenessFull, false},
+	} {
 		var got observability.Observation
 		c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = o })}}
 		ctx := observability.ContextWithDivertDecision(context.Background(), observability.DivertDecisionFacts{
 			ClassifiedAtUnixMilli: 1_700_000_000_000, BoundSource: "fallback"})
 		ctx, capture := observability.ContextWithBudgetCapture(ctx)
 		capture.Record(observability.QueryBudgetFacts{ConsumerDeadlineUnixMilli: 1_700_000_010_000})
-		c.observeQueryCompleted(ctx, execution.OperationNormal, time.Now(), tc.result, "",
-			execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{{}}}, execution.EvaluationResult{})
+		c.observeQueryCompleted(ctx, execution.OperationNormal, time.Now(),
+			execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{{Completeness: tc.completeness}}},
+			execution.EvaluationResult{Result: tc.result})
 		if carried := got.DivertDecision != nil && got.QueryBudget != nil; carried != tc.want ||
 			(!tc.want && (got.DivertDecision != nil || got.QueryBudget != nil)) {
 			t.Fatalf("%s: decision %+v budget %+v, want carried %v", tc.result, got.DivertDecision, got.QueryBudget, tc.want)

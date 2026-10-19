@@ -101,6 +101,16 @@ type RuntimeLevelStateMutation struct {
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
+	// GapReasonOriginSlot and GapReasonOriginCause are where GapReasonCode
+	// came from (ReasonOrigin): the Slot that first stamped the guard and the
+	// reason it stamped it with. Optional: absent on a record written before
+	// they existed, or by a build that does not write them, and then absent
+	// on the guard it carries. The JSON keys are the Go names, as the
+	// fields beside them are; omitempty keeps a record without them
+	// byte-identical to one written before they existed. Not in the State
+	// mutation digest (stateMutationDigestPayloadOf).
+	GapReasonOriginSlot  EvaluationTime `json:",omitempty"`
+	GapReasonOriginCause ReasonCode     `json:",omitempty"`
 }
 
 // StateRetentionRequirement is one Level's retention need. It is the single
@@ -526,5 +536,5 @@ func validateRuntimeLevelMutation(level RuntimeLevelStateMutation) error {
 	default:
 		return errors.New("alarmd execution: invalid State mutation Level completeness")
 	}
-	return nil
+	return validateReasonOrigin(level.ReasonOrigin(), level.HistoryCompleteness)
 }

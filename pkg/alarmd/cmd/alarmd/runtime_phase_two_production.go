@@ -2946,8 +2946,16 @@ func (executor observedProductionSlotExecutor) Execute(
 		// which is indistinguishable on the reason alone from a Slot that was
 		// given up on before it ran.
 		SlotCompletionKind: string(result.CompletionKind),
-		ExecuteOutcome:     executeReturnOutcome(result, err),
-		Result:             observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
+		// And which of the conditions folded into that kind happened, with
+		// its reason: the attribution the progress line reports. Without it
+		// this line said UNAVAILABLE and QUERY_TIMEOUT for a Slot whose
+		// queries all answered and whose Level only waited on a guard an
+		// earlier timeout raised (GAP_GUARD_WARMING).
+		SlotCompletionCause:  string(result.CompletionCause.Cause),
+		SlotCompletionReason: string(result.CompletionCause.Reason),
+		CarriedReason:        result.CompletionCause.CarriedReason(),
+		ExecuteOutcome:       executeReturnOutcome(result, err),
+		Result:               observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),

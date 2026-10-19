@@ -146,11 +146,12 @@ func TestEveryFailedQueryLineNamesTheTraceItWasSentWith(t *testing.T) {
 			case err != nil:
 				c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", err)
 			case done.Completeness == execution.CompletenessUnavailable:
-				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(), observability.ResultDegraded,
-					done.RouteFacts.Attempts[0].ReasonCode, execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{
-						{Completeness: done.Completeness, RouteFacts: done.RouteFacts}}}, execution.EvaluationResult{})
+				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(),
+					execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{
+						{Completeness: done.Completeness, RouteFacts: done.RouteFacts}}},
+					execution.EvaluationResult{Result: observability.ResultDegraded, ReasonCode: done.RouteFacts.Attempts[0].ReasonCode})
 			default:
-				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(), observability.ResultSuccess, "",
+				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(),
 					execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{
 						{Completeness: done.Completeness, RouteFacts: done.RouteFacts}}}, execution.EvaluationResult{})
 			}

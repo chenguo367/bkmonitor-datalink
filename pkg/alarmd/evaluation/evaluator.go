@@ -92,6 +92,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 	case execution.PlanDecided:
 	case execution.PlanDecidedDegraded, execution.PlanUnavailable, execution.PlanReadinessGap:
 		result.Result, result.ReasonCode = observability.ResultDegraded, plan.ReasonCode
+		result.ReasonCarried, result.ReasonOrigin = plan.ReasonCarried, plan.ReasonOrigin
 		// A Plan degraded by a Level that ended TERMINAL reports TERMINAL in
 		// the aggregate, whatever its disposition says. That is the contract's
 		// rule and not a second opinion about it: a localized terminal outcome
@@ -229,6 +230,10 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	// that does not converge it leaves that guard in place, and every UNKNOWN
 	// outcome under it must preserve its reason.
 	durableGuardReasons := make(map[uint32]execution.ReasonCode, levels.Len())
+	// durableGuardOrigins is where each of those reasons came from, read from
+	// the same record that supplied the reason: the Level's state, or the gap
+	// marker scope that superseded it. Absent for a guard stamped without one.
+	durableGuardOrigins := make(map[uint32]execution.ReasonOrigin, levels.Len())
 	effective := make([]trigger.LevelEffectiveTimeFact, levels.Len())
 	// Observation only. Summarize is the one place that knows both how much of
 	// the window arrived and how much was asked for, and until now it kept both
@@ -262,6 +267,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			guarded := current.HistoryCompleteness == execution.HistoryGapped || current.HistoryCompleteness == execution.HistoryWarming
 			if guarded && current.GapReasonCode != "" {
 				durableGuardReasons[l.Definition().LevelID] = current.GapReasonCode
+				durableGuardOrigins[l.Definition().LevelID] = current.ReasonOrigin()
 			}
 			// A WARMING or GAPPED Level keeps forcing its completeness onto the
 			// trigger until the loaded history already forms the required full
@@ -273,9 +279,10 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				completeness = string(current.HistoryCompleteness)
 			}
 		}
-		if guarded, reason, found := gapCompleteness(request.Gaps, due, l.Definition().LevelID); found {
+		if guarded, reason, origin, found := gapCompleteness(request.Gaps, due, l.Definition().LevelID); found {
 			completeness = guarded
 			durableGuardReasons[l.Definition().LevelID] = reason
+			durableGuardOrigins[l.Definition().LevelID] = origin
 		}
 		held := historyView{HistoryView: h, completeness: completeness}
 		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held}
@@ -427,6 +434,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// because of that guard alone, this round adding nothing of its own
 		// (unknownOnlyForItsHistory).
 		guardTail := false
+		// carried: the reason is the stored guard's, not anything this
+		// round's inputs said; origin is where that guard came from.
+		carried, origin := false, execution.ReasonOrigin{}
 		if kind == "" {
 			kind = execution.LevelOutcomeUnknown
 			reason = execution.ReasonCode(o.UnavailableReason)
@@ -453,6 +463,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 					Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind})
 			if guarded, found := durableGuardReasons[o.LevelID]; found && !suppressed && guardStaysActive(o, historyCompleteness[o.LevelID]) {
 				reason, guardTail = guarded, unknownOnlyForItsHistory(o)
+				carried, origin = true, durableGuardOrigins[o.LevelID]
 				// Unless this round has incomplete inputs of its own for the
 				// Level. Then the guard that ends up covering this outcome is
 				// the one this round proposes, carrying the fold of those
@@ -467,6 +478,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 					inputs(), due.Identity, o.LevelID,
 				); proposed {
 					reason, guardTail = folded, false
+					carried, origin = false, execution.ReasonOrigin{}
 				}
 			}
 		}
@@ -475,7 +487,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// business outcome. A record the recovery gate held has RECOVERY
 			// outcomes and no envelope, and says so on each of them.
 			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
-			GuardTail:    guardTail}
+			GuardTail:    guardTail, ReasonCarried: carried, ReasonOrigin: origin}
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
@@ -516,7 +528,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	events, withoutMessage := keptEvents(tr, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
 	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
 	if advance || len(missingInputGuards) > 0 {
-		mutation, err := buildMutation(request, due, record, view, facts, tr.LevelOutcomes, historyCompleteness, durableGuardReasons, missingInputGuards)
+		mutation, err := buildMutation(request, due, record, view, facts, tr.LevelOutcomes, historyCompleteness,
+			durableGuards{reasons: durableGuardReasons, origins: durableGuardOrigins}, missingInputGuards)
 		if err != nil {
 			return recordResult{}, err
 		}
@@ -741,6 +754,9 @@ func (e *Evaluator) evaluateSeries(
 		for _, outcome := range result.LevelOutcomes {
 			if outcome.Outcome == execution.LevelOutcomeUnknown || outcome.Outcome == execution.LevelOutcomeTerminal {
 				result.Disposition, result.ReasonCode = execution.PlanDecidedDegraded, outcome.ReasonCode
+				// The Plan's reason is this outcome's, and so is whether it
+				// was carried from a stored guard and where that came from.
+				result.ReasonCarried, result.ReasonOrigin = outcome.ReasonCarried, outcome.ReasonOrigin
 				break
 			}
 		}
@@ -1013,20 +1029,24 @@ func levelState(v execution.RuntimeStateView, id uint32) (execution.RuntimeLevel
 	}
 	return execution.RuntimeLevelStateView{}, false
 }
-func gapCompleteness(gaps execution.GapLoadResult, due execution.DuePlan, levelID uint32) (string, execution.ReasonCode, bool) {
+
+// gapCompleteness is the completeness a loaded gap marker forces on the
+// Level, the scope's reason and where that reason came from (the Slot that
+// opened the scope).
+func gapCompleteness(gaps execution.GapLoadResult, due execution.DuePlan, levelID uint32) (string, execution.ReasonCode, execution.ReasonOrigin, bool) {
 	gap, ok := gaps.Find(due.GapIdentity())
 	if !ok || gap.Status != execution.GapFound {
-		return "", "", false
+		return "", "", execution.ReasonOrigin{}, false
 	}
 	for _, scope := range gap.Scopes {
 		if !scope.Scope.HasLevel || scope.Scope.LevelID == levelID {
 			if scope.Status == execution.GapStatusGapped {
-				return trigger.HistoryGapped, scope.ReasonCode, true
+				return trigger.HistoryGapped, scope.ReasonCode, scope.ReasonOrigin(), true
 			}
-			return trigger.HistoryWarming, scope.ReasonCode, true
+			return trigger.HistoryWarming, scope.ReasonCode, scope.ReasonOrigin(), true
 		}
 	}
-	return "", "", false
+	return "", "", execution.ReasonOrigin{}, false
 }
 
 // applyProvisional is the window the next record of this Slot reads: what the
@@ -1041,7 +1061,8 @@ func applyProvisional(view execution.RuntimeStateView, mutation execution.StateM
 	view.History = merged
 	view.Levels = make([]execution.RuntimeLevelStateView, len(mutation.Levels))
 	for i, l := range mutation.Levels {
-		view.Levels[i] = execution.RuntimeLevelStateView{LevelID: l.LevelID, LevelStateCompatibility: l.LevelStateCompatibility, HistoryCompleteness: l.HistoryCompleteness, GapReasonCode: l.GapReasonCode, WarmupRequirementRef: l.WarmupRequirementRef, LastProcessedEventTime: l.LastProcessedEventTime}
+		view.Levels[i] = execution.RuntimeLevelStateView{LevelID: l.LevelID, LevelStateCompatibility: l.LevelStateCompatibility, HistoryCompleteness: l.HistoryCompleteness, GapReasonCode: l.GapReasonCode, WarmupRequirementRef: l.WarmupRequirementRef, LastProcessedEventTime: l.LastProcessedEventTime,
+			GapReasonOriginSlot: l.GapReasonOriginSlot, GapReasonOriginCause: l.GapReasonOriginCause}
 	}
 	view.SeriesGuard = mutation.SeriesGuard
 	return view, nil
@@ -1123,15 +1144,48 @@ func evaluationBindings(request execution.EvaluationRequest) []execution.NamedIn
 	return bindings
 }
 
-func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, facts []detect.LevelFact, outcomes []trigger.LevelOutcomeV2, summaries map[uint32]execution.HistoryCompleteness, durableGuardReasons, missingInputGuards map[uint32]execution.ReasonCode) (execution.StateMutation, error) {
+// durableGuards is the guard each Level is held by before this record: its
+// reason and where that reason came from.
+type durableGuards struct {
+	reasons map[uint32]execution.ReasonCode
+	origins map[uint32]execution.ReasonOrigin
+}
+
+// originFor is the origin a Level written with completeness and reason
+// carries. The origin is written once, when the guard is first stamped:
+//
+//   - a Level that holds no guard has none;
+//   - a guard already up for this reason - the durable guard, from the
+//     Level's state or the gap marker - keeps the origin it has, which is
+//     none for a guard stamped without one; nothing invents one later;
+//   - anything else is this record stamping a guard: this Slot, this reason.
+func (guards durableGuards) originFor(view execution.RuntimeStateView, slot execution.EvaluationTime, levelID uint32,
+	completeness execution.HistoryCompleteness, reason execution.ReasonCode) execution.ReasonOrigin {
+	if completeness != execution.HistoryWarming && completeness != execution.HistoryGapped {
+		return execution.ReasonOrigin{}
+	}
+	if durable, found := guards.reasons[levelID]; found && durable == reason {
+		return guards.origins[levelID]
+	}
+	if current, found := levelState(view, levelID); found && current.GapReasonCode == reason &&
+		(current.HistoryCompleteness == execution.HistoryWarming || current.HistoryCompleteness == execution.HistoryGapped) {
+		return current.ReasonOrigin()
+	}
+	return execution.StampReasonOrigin(slot, reason)
+}
+
+func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, facts []detect.LevelFact, outcomes []trigger.LevelOutcomeV2, summaries map[uint32]execution.HistoryCompleteness, guards durableGuards, missingInputGuards map[uint32]execution.ReasonCode) (execution.StateMutation, error) {
 	refs, err := execution.LevelContractRefsFor(due, view.Levels)
 	if err != nil {
 		return execution.StateMutation{}, err
 	}
+	durableGuardReasons := guards.reasons
+	slot := request.Header.Contract.Slot.EvaluationTime
 	levels := make([]execution.RuntimeLevelStateMutation, len(refs))
 	for i, r := range refs {
 		if reason, missing := missingInputGuards[r.LevelID]; missing {
-			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryGapped, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}
+			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryGapped, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}.
+				WithReasonOrigin(guards.originFor(view, slot, r.LevelID, execution.HistoryGapped, reason))
 			continue
 		}
 		advances := false
@@ -1143,10 +1197,15 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 		}
 		if !advances {
 			if current, found := levelState(view, r.LevelID); found {
+				// Carried as it is, origin and all.
 				levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: current.HistoryCompleteness, GapReasonCode: current.GapReasonCode, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: current.LastProcessedEventTime}
+				if current.HistoryCompleteness == execution.HistoryWarming || current.HistoryCompleteness == execution.HistoryGapped {
+					levels[i] = levels[i].WithReasonOrigin(current.ReasonOrigin())
+				}
 				continue
 			}
-			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryWarming, GapReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), WarmupRequirementRef: r.WarmupRequirementRef}
+			levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: execution.HistoryWarming, GapReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), WarmupRequirementRef: r.WarmupRequirementRef}.
+				WithReasonOrigin(execution.StampReasonOrigin(slot, execution.ReasonCode(contract.ReasonHistoryWarming)))
 			continue
 		}
 		completeness := summaries[r.LevelID]
@@ -1177,7 +1236,8 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 			(completeness == execution.HistoryWarming || completeness == execution.HistoryGapped) {
 			reason = guarded
 		}
-		levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: completeness, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}
+		levels[i] = execution.RuntimeLevelStateMutation{LevelID: r.LevelID, LevelStateCompatibility: r.LevelStateCompatibility, HistoryCompleteness: completeness, GapReasonCode: reason, WarmupRequirementRef: r.WarmupRequirementRef, LastProcessedEventTime: record.SourceTime()}.
+			WithReasonOrigin(guards.originFor(view, slot, r.LevelID, completeness, reason))
 	}
 	advancing := make(map[uint32]bool, len(outcomes))
 	for _, outcome := range outcomes {

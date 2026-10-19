@@ -646,6 +646,8 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 		if nextScopes == nil {
 			nextScopes = applyGapScopes(previous.Scopes, mutation.Scopes, previous.ScheduleRevision, mutation.ScheduleRevision)
 		}
+		// Where each held reason came from, by one rule for every path above.
+		nextScopes = execution.StampGapScopeOrigins(previous.Scopes, nextScopes, mutation)
 		if err := validatePersistedGapScopes(nextScopes); err != nil {
 			item.Status, item.ReasonCode = execution.GapGuardRejected, execution.ReasonCode(contract.ReasonStateCorrupt)
 			result.Items[index] = item

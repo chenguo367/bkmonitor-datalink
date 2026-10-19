@@ -606,8 +606,10 @@ func mergeProvisional(target *execution.EvaluationResult, next execution.Evaluat
 func appendProvisional(target *execution.EvaluationResult, next execution.EvaluationResult) error {
 	if target.Contract == (execution.FrozenExecutionContractRef{}) {
 		target.Contract, target.Result, target.ReasonCode = next.Contract, next.Result, next.ReasonCode
+		target.ReasonCarried, target.ReasonOrigin = next.ReasonCarried, next.ReasonOrigin
 	} else if resultRank(next.Result) > resultRank(target.Result) {
 		target.Result, target.ReasonCode = next.Result, next.ReasonCode
+		target.ReasonCarried, target.ReasonOrigin = next.ReasonCarried, next.ReasonOrigin
 	}
 	for _, nextPlan := range next.Plans {
 		index := -1
@@ -1712,6 +1714,9 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
 		LevelOutcomes:    levelOutcomeFacts(due, evaluated),
 		OutputWireFormat: planWireFormat(due), PlanSeriesMatched: stream.planSeriesMatched(due),
+		// The series' reason was a stored guard's, and where it came from.
+		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluated.Result != observability.ResultSuccess,
+			evaluated.ReasonOrigin),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }
@@ -1773,24 +1778,34 @@ func levelOutcomeFacts(due execution.DuePlan, evaluated execution.EvaluationResu
 	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 		return nil
 	}
-	type cell struct{ outcome, reason string }
+	type cell struct {
+		outcome, reason string
+		carried         bool
+	}
 	counts := make(map[cell]uint64)
 	for _, outcome := range evaluated.Plans[0].LevelOutcomes {
 		key := cell{outcome: string(outcome.Outcome)}
 		if outcome.Outcome == execution.LevelOutcomeUnknown || outcome.Outcome == execution.LevelOutcomeTerminal {
 			key.reason = string(outcome.ReasonCode)
 		}
+		// A stored guard's reason repeated on this round is its own cell:
+		// QUERY_TIMEOUT carried from the round that timed out is not this
+		// round timing out.
+		key.carried = outcome.Outcome == execution.LevelOutcomeUnknown && outcome.ReasonCarried
 		counts[key]++
 	}
 	facts := make([]observability.LevelOutcomeFact, 0, len(counts))
 	for key, count := range counts {
-		facts = append(facts, observability.LevelOutcomeFact{Outcome: key.outcome, Reason: key.reason, Count: count})
+		facts = append(facts, observability.LevelOutcomeFact{Outcome: key.outcome, Reason: key.reason, Carried: key.carried, Count: count})
 	}
 	sort.Slice(facts, func(i, j int) bool {
 		if facts[i].Outcome != facts[j].Outcome {
 			return facts[i].Outcome < facts[j].Outcome
 		}
-		return facts[i].Reason < facts[j].Reason
+		if facts[i].Reason != facts[j].Reason {
+			return facts[i].Reason < facts[j].Reason
+		}
+		return !facts[i].Carried && facts[j].Carried
 	})
 	return facts
 }

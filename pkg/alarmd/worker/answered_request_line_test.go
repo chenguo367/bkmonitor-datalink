@@ -151,16 +151,24 @@ func TestEveryAnsweredQueryLineNamesTheRequestItAnswered(t *testing.T) {
 			if err != nil {
 				c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", err)
 			} else {
-				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(), observability.ResultDegraded,
-					execution.ReasonCode(tc.reason), execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{
-						{Completeness: done.Completeness, DataState: done.DataState, RouteFacts: done.RouteFacts}}}, execution.EvaluationResult{})
+				c.observeQueryCompleted(context.Background(), execution.OperationNormal, time.Now(),
+					execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{
+						{Completeness: done.Completeness, DataState: done.DataState, RouteFacts: done.RouteFacts}}},
+					execution.EvaluationResult{Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(tc.reason)})
 			}
 			parts := strings.Split(sent, "-")
 			if len(parts) != 4 {
 				t.Fatalf("sent traceparent %q", sent)
 			}
 			line := renderedQueryLine(t, output.Bytes())
-			if line["reason_code"] != tc.reason {
+			// An empty answer is a whole one: the query succeeded and the
+			// evaluation is what it degraded.
+			if tc.reason == contract.ReasonQueryEmpty {
+				if line["result"] != "success" || line["reason_code"] != string(observability.ReasonNone) || line["evaluation_reason"] != tc.reason {
+					t.Fatalf("empty answer: result %v reason %v evaluation_reason %v: %s", line["result"], line["reason_code"],
+						line["evaluation_reason"], output.String())
+				}
+			} else if line["reason_code"] != tc.reason {
 				t.Fatalf("reason %v, want %s: %s", line["reason_code"], tc.reason, output.String())
 			}
 			want := map[string]any{

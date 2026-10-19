@@ -431,8 +431,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		// day was a state read of ours timing out, with the query fine.
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
 	}
+	// The Slot's result is the evaluation's; the query line reports the
+	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
-	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
+	coordinator.observeQueryCompleted(ctx, request.Operation, started, completion, stream.evaluated)
 	if len(stream.evaluated.Plans) == 0 {
 		// The timing travels with the usage here for the same reason it does at
 		// the other exit: this Slot ran. A round that produced no Plan result
@@ -1620,6 +1622,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		var derived execution.CompletionAttribution
 		completion.Kind, derived, err = execution.DeriveStreamingCompletionAttribution(header, bindings, evaluated)
 		attribution.Cause, attribution.Reason, attribution.Scope = derived.Cause, derived.Reason, derived.Scope
+		attribution.ReasonCarried, attribution.ReasonOrigin = derived.ReasonCarried, derived.ReasonOrigin
 		if err != nil {
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive completion: %w", err)
 		}
@@ -1759,9 +1762,10 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		observationReason = completion.ReasonCode
 	}
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
-		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionScopeFacts(completionCause),
-		completionCause.Coverage, completion.Evidence, completion.Primary)
-	committed := execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}
+		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.SlotCause().CarriedReason(),
+		completionScopeFacts(completionCause), completionCause.Coverage, completion.Evidence, completion.Primary)
+	committed := execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode,
+		CompletionCause: completionCause.SlotCause()}
 	if completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable {
 		committed.QueryFreeCause = queryFreeCause(completionCause.Cause)
 	}
@@ -2772,7 +2776,7 @@ func indexStatePreflight(result execution.StatePreflightResult) map[execution.St
 }
 
 // Called only after this invocation received and validated ProgressCommitted.
-func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, scope *observability.CompletionScopeFacts, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence, primary *execution.PrimaryInputFact) {
+func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, carried *observability.CarriedReasonFacts, scope *observability.CompletionScopeFacts, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence, primary *execution.PrimaryInputFact) {
 	if reason == "" {
 		reason = observability.ReasonNone
 	}
@@ -2794,6 +2798,7 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason, ProgressCompletionScope: scope,
+		CarriedReason:   carried,
 		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
 		PrimaryInput: primaryInputFacts(primary),
 		HeldBy:       heldBy,

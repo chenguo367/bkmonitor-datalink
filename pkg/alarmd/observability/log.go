@@ -83,7 +83,7 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // and not written, and how many earlier lines of the same bucket were merged
 // into a logged one.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
-	if routineResult(observation.Result) {
+	if routineResult(observation.Result) && !evaluationHeldQuery(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
@@ -681,6 +681,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	attributes = appendQueryBudgetAttributes(attributes, observation.QueryBudget)
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
 	attributes = appendCompletionCause(attributes, observation)
+	attributes = appendEvaluationOutcome(attributes, observation)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
