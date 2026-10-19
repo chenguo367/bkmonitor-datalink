@@ -16,11 +16,15 @@ import (
 
 // The paths that finalise a Slot as skipped, one word each.
 const (
-	// SlotSkippedQueryFree is one Slot past its replay window, finalised
-	// without a query (an expired replay: by age, by distance, or by a
-	// readiness wait that outlasts the distance).
+	// SlotSkippedQueryFree is one Slot finalised without a query: an expired
+	// replay (by age, by distance, or by a readiness wait that outlasts the
+	// distance) as GAP_SKIPPED, or as SNAPSHOT_UNAVAILABLE once past its
+	// recovery bound, and a Slot whose Snapshot is missing or corrupt past
+	// that bound. The cause says which.
 	SlotSkippedQueryFree = "query_free"
-	// SlotSkippedExpiredRange is a run of such Slots finalised as one range.
+	// SlotSkippedExpiredRange is a run of expired Slots finalised as one
+	// range: GAP_SKIPPED for a distance-expired range, SNAPSHOT_UNAVAILABLE
+	// for an age-expired one.
 	SlotSkippedExpiredRange = "expired_range"
 	// SlotSkippedProgressStore is an unfinished Slot the Progress store
 	// dropped because a later Segment moved the cursor past it.
@@ -168,7 +172,7 @@ func ObserveSlotSkipped(ctx context.Context, observer Observer, trace TraceField
 	}
 	observer.Observe(ctx, Observation{
 		Component: ComponentScheduler, Stage: StageSlotSkipped, Operation: operation,
-		Result: ResultDegraded, ReasonCode: ReasonCode("GAP_SKIPPED"), Direction: DirectionInternal,
+		Result: ResultDegraded, ReasonCode: ReasonCode(facts.Reason), Direction: DirectionInternal,
 		Trace: trace, HeldBy: HeldByFromContext(ctx), SlotSkipped: &facts, RangeDistance: facts.Range,
 	})
 }

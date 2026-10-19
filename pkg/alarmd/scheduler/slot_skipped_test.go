@@ -63,7 +63,7 @@ func (source withoutRangeFlight) Next(ctx context.Context, queryGroup execution.
 
 func gapSkippedResult() execution.SlotExecutionResult {
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionGapSkipped,
-		Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped)}
+		Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped), QueryFreeCause: execution.CauseExpiredReplay}
 }
 
 func number(line map[string]any, key string) int64 {
@@ -118,9 +118,9 @@ func TestAReplayGivenUpForDistanceWritesOneUnsampledSlotSkippedLine(t *testing.T
 	limits := testRecoveryLimits()
 	for key, want := range map[string]any{
 		"finalizing_path": observability.SlotSkippedQueryFree, "skip_cause": string(execution.CauseExpiredReplay),
-		"skip_reason": string(ReplayExpiredByDistance), "replay_expiry_reason": string(ReplayExpiredByDistance),
+		"skip_reason": contract.ReasonGapSkipped, "replay_expiry_reason": string(ReplayExpiredByDistance),
 		"query_group_key": "query-group-1", "operation": string(execution.OperationNormal),
-		"held_by": observability.HeldByReadinessDeferred, "held_by_lookback": true,
+		"held_by": observability.HeldByReadinessDeferred, "held_by_lookback": true, "reason_code": contract.ReasonGapSkipped,
 		"skip_gap_guard": observability.SkipGapPlanMarkers,
 	} {
 		if line[key] != want {
@@ -205,6 +205,55 @@ func TestAnExpiredRangeWritesOneSlotSkippedLineForItsSpan(t *testing.T) {
 		number(line, "skipped_slot_count") != int64(proof.Count) || proof.Count < 2 ||
 		number(line, "range_slot_count") != int64(proof.Count) || number(line, "range_head_steps") == 0 {
 		t.Fatalf("range line %v does not describe the range %+v", line, proof)
+	}
+}
+
+// Every query-free finalization is a Slot given up on, SNAPSHOT_UNAVAILABLE as
+// well as GAP_SKIPPED: an expired replay past its recovery bound, a Snapshot
+// missing or corrupt past it. The line's reason and cause are the
+// finalization's own, so the two can be told apart; a completion that names
+// no query-free cause -- a range an earlier attempt already committed --
+// writes none.
+func TestEveryQueryFreeFinalizationWritesOneSlotSkippedLine(t *testing.T) {
+	snapshotUnavailable := execution.ReasonCode(contract.ReasonSnapshotUnavailable)
+	for _, test := range []struct {
+		name   string
+		result execution.SlotExecutionResult
+		want   int
+	}{
+		{name: "expired replay past its recovery bound", want: 1, result: execution.SlotExecutionResult{Completed: true,
+			CompletionKind: execution.CompletionSnapshotUnavailable, ReasonCode: snapshotUnavailable, QueryFreeCause: execution.CauseExpiredReplay}},
+		{name: "snapshot missing past its bound", want: 1, result: execution.SlotExecutionResult{Completed: true,
+			CompletionKind: execution.CompletionSnapshotUnavailable, ReasonCode: snapshotUnavailable, QueryFreeCause: execution.CauseSnapshotUnavailablePastBound}},
+		{name: "snapshot corrupt", want: 1, result: execution.SlotExecutionResult{Completed: true,
+			CompletionKind: execution.CompletionSnapshotUnavailable, ReasonCode: snapshotUnavailable, QueryFreeCause: execution.CauseSnapshotCorrupt}},
+		{name: "already committed", want: 0, result: execution.SlotExecutionResult{Completed: true,
+			CompletionKind: execution.CompletionGapSkipped, ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped)}},
+	} {
+		observer, output := sampledLog(t)
+		slot := frozenSlot("query-group-1")
+		runner, err := NewRunner("query-group-1", &fakeSession{fence: slot.Dispatch.OwnerFence}, &fakeSlotSource{slot: slot},
+			&scriptedExecutor{results: []execution.SlotExecutionResult{test.result}}, NewFlightCoordinator(), func() time.Time { return time.Unix(100, 0) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner.WithSlotSkipReport(observer, nil)
+		if _, attempted, err := runner.RunOne(context.Background()); err != nil || !attempted {
+			t.Fatalf("%s: RunOne() = %t %v", test.name, attempted, err)
+		}
+		lines := logLines(t, output, observability.StageSlotSkipped)
+		if len(lines) != test.want {
+			t.Fatalf("%s: slot_skipped lines = %d, want %d: %s", test.name, len(lines), test.want, output.String())
+		}
+		if test.want == 0 {
+			continue
+		}
+		line := lines[0]
+		if line["finalizing_path"] != observability.SlotSkippedQueryFree || line["skip_reason"] != contract.ReasonSnapshotUnavailable ||
+			line["reason_code"] != contract.ReasonSnapshotUnavailable || line["skip_cause"] != string(test.result.QueryFreeCause) ||
+			line["skip_gap_guard"] != observability.SkipGapPlanMarkers {
+			t.Fatalf("%s: line = %v", test.name, line)
+		}
 	}
 }
 

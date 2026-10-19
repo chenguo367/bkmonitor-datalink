@@ -1947,6 +1947,10 @@ RECOVERY records decided while another Level of the same record was in the named
 
 Replicated per-Pod view of retired Query Groups still requiring ownership until their retirement boundary is drained; aggregate replicas with max, not sum.
 
+## alarmd_unfinished_slots_abandoned_total
+
+Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it.
+
 ## alarmd_unmapped_severity_total
 
 Labels: `level`

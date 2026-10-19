@@ -11,6 +11,7 @@ type workflowMetrics struct {
 	run, execute, progress *prometheus.CounterVec
 	progressCauses         *prometheus.CounterVec
 	active, ready, delayed prometheus.Gauge
+	abandonedSlots         prometheus.Counter
 	permitWait             *prometheus.HistogramVec
 }
 
@@ -34,6 +35,8 @@ func newWorkflowMetrics() workflowMetrics {
 				"which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, " +
 				"completion_level, completion_query). NONE is a completion that carried no cause."},
 			[]string{"completion_kind", "cause", "reason"}),
+		abandonedSlots: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "unfinished_slots_abandoned_total",
+			Help: "Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it."}),
 		active:     gauge("scheduler_active_executions", "Worker task occupancy, including preparation and execution, excluding pending result delivery."),
 		ready:      gauge("scheduler_ready_runners", "Runners in the outer ready queue."),
 		delayed:    gauge("scheduler_delayed_runners", "Runners in the outer delayed queue."),
@@ -41,7 +44,7 @@ func newWorkflowMetrics() workflowMetrics {
 	}
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots}
+	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots}
 }
 func (m workflowMetrics) observe(o observability.Observation) {
 	switch {
@@ -59,6 +62,12 @@ func (m workflowMetrics) observe(o observability.Observation) {
 					}
 				}
 			}
+		}
+	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageSlotSkipped:
+		// The line and the count are one event: the store reports the dropped
+		// Slot once its write applied, and nowhere else.
+		if f := o.SlotSkipped; f != nil && f.Path == observability.SlotSkippedProgressStore {
+			m.abandonedSlots.Inc()
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageRunnerReturned:
 		if observability.ValidRunOutcome(o.RunOutcome) {

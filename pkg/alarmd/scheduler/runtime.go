@@ -1088,8 +1088,8 @@ func (runner *Runner) runOneTracked(
 	busyUntil := runner.lastExecutionReturnedAt
 	result, err := runner.executor.Execute(executeCtx, request)
 	runner.lastExecutionReturnedAt = runner.now()
-	if err == nil && result.Completed && result.CompletionKind == execution.CompletionGapSkipped {
-		runner.observeSlotSkipped(ctx, slot, operation, fence)
+	if err == nil && result.Completed && result.QueryFreeCause != "" {
+		runner.observeSlotSkipped(ctx, slot, operation, fence, result)
 	}
 	if queried := runner.stage.QueryReturnedAt(); err == nil && !queried.IsZero() {
 		runner.flights.RecordPostQueryTail(runner.lastExecutionReturnedAt, runner.queryGroup, runner.lastExecutionReturnedAt.Sub(queried))

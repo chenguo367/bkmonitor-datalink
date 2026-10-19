@@ -93,7 +93,7 @@ func rangeStrategies(targets execution.FrozenDuePlanTargets) []observability.Exp
 	return strategies
 }
 
-func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Context, request execution.SlotExecutionRequest, completion execution.SlotCompletion) (execution.SlotExecutionResult, error) {
+func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Context, request execution.SlotExecutionRequest, completion execution.SlotCompletion, attribution execution.CompletionAttribution) (execution.SlotExecutionResult, error) {
 	if completion.Kind != request.ExpiredRange.CompletionKind() || completion.ReasonCode != request.ExpiredRange.CompletionReason() || completion.Contract != request.Contract {
 		return execution.SlotExecutionResult{}, errors.New("alarmd worker: range completion differs from proof")
 	}
@@ -108,12 +108,14 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 	if result.Status != execution.ProgressCommitted {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: range %w", progressNotCommitted(result.Status))
 	}
+	completed := expiredRangeCompletedFor(request)
 	if !result.AlreadyCommitted {
 		if count, ok := ctx.Value(rangeCommittedCountKey{}).(*uint32); ok {
 			*count = request.ExpiredRange.Count
 		}
+		completed.QueryFreeCause = attribution.Cause
 	}
-	return expiredRangeCompletedFor(request), nil
+	return completed, nil
 }
 
 func expiredRangeCompletedFor(request execution.SlotExecutionRequest) execution.SlotExecutionResult {

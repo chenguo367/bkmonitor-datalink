@@ -1720,7 +1720,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		return execution.SlotExecutionResult{}, err
 	}
 	if request.ExpiredRange != nil {
-		return coordinator.commitExpiredRange(ctx, request, completion)
+		return coordinator.commitExpiredRange(ctx, request, completion, completionCause)
 	}
 	started := time.Now()
 	progressRequest := execution.ProgressCommitRequest{
@@ -1761,7 +1761,11 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
 		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionScopeFacts(completionCause),
 		completionCause.Coverage, completion.Evidence, completion.Primary)
-	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
+	committed := execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}
+	if completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable {
+		committed.QueryFreeCause = completionCause.Cause
+	}
+	return committed, nil
 }
 
 // progressNotCommitted is the error for a Progress commit the store did not

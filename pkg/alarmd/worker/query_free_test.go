@@ -57,6 +57,10 @@ func TestSlotExecutionCoordinatorFinalizesSnapshotUnavailableWithoutQuery(t *tes
 	if lastObservation.ProgressCompletionCause != string(execution.CauseSnapshotCorrupt) {
 		t.Fatalf("completion cause on the line = %q, want the finalization's %s", lastObservation.ProgressCompletionCause, execution.CauseSnapshotCorrupt)
 	}
+	// And on the result, for the Runner's slot_skipped line of the Slot.
+	if result.QueryFreeCause != execution.CauseSnapshotCorrupt {
+		t.Fatalf("result query-free cause = %q, want %s", result.QueryFreeCause, execution.CauseSnapshotCorrupt)
+	}
 }
 
 // A query-free finalization that names no cause is refused before anything
@@ -624,6 +628,9 @@ func TestSlotExecutionCoordinatorUsesSameQueryFreePathForGapSkipped(t *testing.T
 		lastObservation.Result != observability.ResultDegraded ||
 		lastObservation.ReasonCode != execution.ReasonCode(contract.ReasonGapSkipped) {
 		t.Fatalf("GAP_SKIPPED completion observation=%+v", lastObservation)
+	}
+	if result.QueryFreeCause != fixture.ports.finalization.Cause || result.QueryFreeCause == "" {
+		t.Fatalf("result query-free cause = %q, want the finalization's %q", result.QueryFreeCause, fixture.ports.finalization.Cause)
 	}
 }
 

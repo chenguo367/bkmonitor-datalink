@@ -44,16 +44,18 @@ func (runner *Runner) withLookbackBusy(ctx context.Context) context.Context {
 }
 
 // observeSlotSkipped reports a Slot, or range, the execution just finalised
-// as skipped: a replay past its window finalised without a query, alone or
-// as a range. Both open a whole-Plan gap marker on every due Plan.
-func (runner *Runner) observeSlotSkipped(ctx context.Context, slot FrozenSlot, operation execution.Operation, fence execution.OwnerFence) {
+// without a query (execution.SlotExecutionResult.QueryFreeCause): GAP_SKIPPED
+// or SNAPSHOT_UNAVAILABLE, for an expired replay or a Snapshot gone past its
+// bound, alone or as a range. Every one opens a whole-Plan gap marker on each
+// due Plan (contract.GapScopeQueryFreeReasons).
+func (runner *Runner) observeSlotSkipped(ctx context.Context, slot FrozenSlot, operation execution.Operation, fence execution.OwnerFence, result execution.SlotExecutionResult) {
 	if runner.skipObserver == nil {
 		return
 	}
 	evaluation := int64(slot.Contract.Slot.EvaluationTime)
 	facts := observability.SlotSkippedFacts{
 		Path: observability.SlotSkippedQueryFree, FirstSlot: evaluation, LastSlot: evaluation, SlotCount: 1,
-		Reason: string(slot.Recovery.Reason), Cause: string(execution.CauseExpiredReplay),
+		Reason: string(result.ReasonCode), Cause: string(result.QueryFreeCause),
 		Range: slot.Recovery.RangeDistance,
 	}
 	if r := slot.ExpiredRange; r != nil {
