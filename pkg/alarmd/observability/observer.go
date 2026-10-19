@@ -1202,20 +1202,35 @@ var ReplayExpiryReasons = []string{
 // failed replay is not reported again, and one replayed and later given up
 // on for its age is reported under each. A Query Group the degraded pool
 // holds reports none: its Slots are given up on for distance as before.
+//
+// A diverted Slot is one not yet at its query deadline but with less budget
+// left than its query takes (RemainingSeconds below FloorSeconds), sent to
+// replay before it starts; FloorSource says whether the floor was the
+// group's own reading or the configured fallback.
 type ReplayTakeoverFacts struct {
 	Outcome               string  `json:"outcome"`
 	AgeSeconds            float64 `json:"age_seconds"`
 	TakeoverOffsetSeconds float64 `json:"takeover_offset_seconds"`
+	RemainingSeconds      float64 `json:"remaining_seconds,omitempty"`
+	FloorSeconds          float64 `json:"floor_seconds,omitempty"`
+	FloorSource           string  `json:"floor_source,omitempty"`
 }
 
 // The outcomes of a Slot due before a takeover, closed.
 const (
 	ReplayTakeoverReplayed    = "replayed"
 	ReplayTakeoverAgeExceeded = "age_exceeded"
+	ReplayTakeoverDiverted    = "diverted"
+)
+
+// Where a diverted Slot's floor came from.
+const (
+	TakeoverFloorObserved = "observed"
+	TakeoverFloorFallback = "fallback"
 )
 
 // ReplayTakeoverOutcomes is every outcome, for the metric to pre-create.
-var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeExceeded}
+var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeExceeded, ReplayTakeoverDiverted}
 
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for

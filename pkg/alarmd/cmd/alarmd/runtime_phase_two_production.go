@@ -1273,9 +1273,14 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// Leader, so the readings that belong to the role can be taken off the
 	// scrape. Optional; a runtime without it keeps its last readings, which
 	// is what every runtime did before.
-	SteppedDownAsLeader       func()
-	Flights                   *scheduler.FlightCoordinator
-	RecoveryLimits            scheduler.RecoveryLimits
+	SteppedDownAsLeader func()
+	Flights             *scheduler.FlightCoordinator
+	RecoveryLimits      scheduler.RecoveryLimits
+	// QueryLatency is each Query Group's own reading of how long its query
+	// takes (the lookback's), which decides whether a round taken over late
+	// can still run as a normal round. Optional: without it every such round
+	// is judged by RecoveryLimits.TakeoverDivertFloor.
+	QueryLatency              scheduler.QueryLatency
 	PostRecoveryTerminalDelay time.Duration
 	QueryDeadlineReserve      time.Duration
 	SnapshotRetention         time.Duration
@@ -2595,6 +2600,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithObserver(runtime.dependencies.Observer),
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),
+		scheduler.WithQueryLatency(runtime.dependencies.QueryLatency),
 	)
 	if err != nil {
 		release()

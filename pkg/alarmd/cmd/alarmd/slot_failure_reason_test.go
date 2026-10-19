@@ -52,6 +52,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			err:  fmt.Errorf("alarmd worker: query: %w", admissionFailure{}),
 			want: "QUERY_PERMIT_DEADLINE",
 		},
+		{
+			name: "the query's request was cancelled at its deadline",
+			err:  fmt.Errorf("alarmd worker: query: %w", providerTimeout{}),
+			want: observability.ReasonCode(contract.ReasonQueryTimeout),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reason, site := slotFailureReason(test.err)
@@ -113,4 +118,13 @@ func (admissionFailure) Error() string {
 }
 func (admissionFailure) QueryFailure() (string, string) {
 	return observability.QueryFailureCategoryAdmission, "QUERY_PERMIT_DEADLINE"
+}
+
+// providerTimeout is a query failure that names the provider's timeout, as a
+// query ended by its own deadline does.
+type providerTimeout struct{}
+
+func (providerTimeout) Error() string { return "execute request: context canceled" }
+func (providerTimeout) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryProviderTransport, contract.ReasonQueryTimeout
 }

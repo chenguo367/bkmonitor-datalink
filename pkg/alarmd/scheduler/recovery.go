@@ -37,6 +37,13 @@ type RecoveryLimits struct {
 	MaxReplayAge          time.Duration
 	RetryMinDelay         time.Duration
 	RetryMaxDelay         time.Duration
+	// TakeoverDivertFloor is the least query budget a round due before this
+	// process took its Query Group over must have left to run as a normal
+	// round, when the group has no reading of its own query's duration
+	// (WithQueryLatency). Below it the round goes to replay at once, under
+	// replay's own deadline, instead of starting a normal attempt that cannot
+	// finish. Zero turns the diversion off.
+	TakeoverDivertFloor time.Duration
 }
 
 func (limits RecoveryLimits) Validate() error {
@@ -46,7 +53,8 @@ func (limits RecoveryLimits) Validate() error {
 		limits.MaxQueuedItemsPerQG <= 0 || limits.MaxQueuedItemsPerQG >= limits.ReadyQueueCapacity ||
 		limits.MaxQueuedItemsPerQG >= limits.RecoveryQueueCapacity ||
 		limits.MaxReplaySlots == 0 || limits.MaxReplayAge <= 0 ||
-		limits.RetryMinDelay <= 0 || limits.RetryMaxDelay < limits.RetryMinDelay {
+		limits.RetryMinDelay <= 0 || limits.RetryMaxDelay < limits.RetryMinDelay ||
+		limits.TakeoverDivertFloor < 0 || limits.TakeoverDivertFloor >= limits.MaxReplayAge {
 		return ErrRecoveryLimitsInvalid
 	}
 	return nil

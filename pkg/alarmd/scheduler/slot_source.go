@@ -225,6 +225,23 @@ type ProductionSlotSource struct {
 	// readHolds answers the Query Group's current read hold, which a Slot
 	// frozen for the first time carries; nil holds none.
 	readHolds ReadHolds
+	// queryLatency is the Query Group's own reading of how long its query
+	// takes (WithQueryLatency); nil, or no reading, falls back to
+	// RecoveryLimits.TakeoverDivertFloor.
+	queryLatency QueryLatency
+}
+
+// QueryLatency answers how long a Query Group's query has taken here, and
+// false when this process has no reading for it.
+type QueryLatency func(execution.QueryGroupIdentity) (time.Duration, bool)
+
+// WithQueryLatency lets the source judge whether a round taken over with
+// little time left can still run, by the group's own query duration.
+func WithQueryLatency(latency QueryLatency) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		source.queryLatency = latency
+		return nil
+	}
 }
 
 // ReadHolds answers a Query Group's current read hold: how much later than
@@ -1034,15 +1051,20 @@ func (source *ProductionSlotSource) classifyRecovery(
 	if deadline <= 0 {
 		return "", SlotRecoveryFacts{}, ErrSlotContractDrift
 	}
-	if at.UnixMilli() < deadline {
-		return execution.OperationNormal, SlotRecoveryFacts{Disposition: ReplayLive, RecheckAtUnixMilli: deadline}, nil
-	}
-	age := at.Sub(time.UnixMilli(deadline))
 	takenOver := source.takeovers.Anchor(source.queryGroup, fence, at)
 	// Not for a Query Group the degraded pool holds (withQueryCooldownHeld):
 	// its replay could not run, and the pool gives its Slots up for distance
 	// as it always did.
 	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver) && !queryCooldownHeld(ctx)
+	if at.UnixMilli() < deadline {
+		if beforeTakeover {
+			if diverted, facts := source.divertTakenOver(ctx, evaluationTime, deadline, at, takenOver); diverted {
+				return execution.OperationReplay, facts, nil
+			}
+		}
+		return execution.OperationNormal, SlotRecoveryFacts{Disposition: ReplayLive, RecheckAtUnixMilli: deadline}, nil
+	}
+	age := at.Sub(time.UnixMilli(deadline))
 	if age >= source.recovery.MaxReplayAge {
 		aged := SlotRecoveryFacts{
 			Disposition: ReplayExpired,
@@ -1125,6 +1147,70 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 			HeldBy: HeldByFromContext(ctx),
 		},
 	})
+}
+
+// divertTakenOver decides whether a round due before this process took its
+// Query Group over, and not yet at its query deadline, goes to replay now.
+//
+// A takeover can land late in a round: a rebalance after a leader change
+// handed a worker hundreds of Query Groups a second or two before their
+// current round's frozen deadline. Each was started as a normal round, queued
+// for a permit with all the others, and at the deadline the waiting ones gave
+// up and the running ones timed out - the timed-out rounds completed with no
+// data and were never run again. Replay is the path that already runs a
+// taken-over round late but whole, under a deadline of its own counted from
+// when it starts (access deriveRecoveryQueryDeadline) and on the recovery
+// permits, so a round that cannot finish where it is goes there before it
+// starts rather than after it fails.
+//
+// What "cannot finish" means is the group's own query duration where this
+// process has read it, and TakeoverDivertFloor otherwise - which is every
+// group just taken over, the case this is for. A round with more budget left
+// than that runs as a normal round, as any round does.
+func (source *ProductionSlotSource) divertTakenOver(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	deadline int64,
+	at time.Time,
+	takenOver time.Time,
+) (bool, SlotRecoveryFacts) {
+	// The fallback is a guess for a query not timed here. A group whose every
+	// round is given less than it - a short period, whose whole budget from
+	// evaluation time to deadline is below the floor - has queries that do
+	// finish in less, so the guess says nothing about it, and applied it would
+	// divert every taken-over round of the group at any point of its period.
+	// Such a group is judged only by its own reading. The reading is evidence
+	// and applies to any group.
+	floor, floorSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
+	if floor >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
+		floor = 0
+	}
+	if source.queryLatency != nil {
+		if observed, ok := source.queryLatency(source.queryGroup); ok {
+			floor, floorSource = observed, observability.TakeoverFloorObserved
+		}
+	}
+	remaining := time.UnixMilli(deadline).Sub(at)
+	if floor <= 0 || remaining >= floor {
+		return false, SlotRecoveryFacts{}
+	}
+	if source.observer != nil && source.takeovers.FirstClassification(source.queryGroup, evaluationTime, observability.ReplayTakeoverDiverted) {
+		func() {
+			defer func() { _ = recover() }()
+			source.observer.Observe(ctx, observability.Observation{
+				Component: observability.ComponentScheduler, Stage: observability.StageReplayTakeover,
+				Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
+				Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+				ReplayTakeover: &observability.ReplayTakeoverFacts{
+					Outcome: observability.ReplayTakeoverDiverted, TakeoverOffsetSeconds: at.Sub(takenOver).Seconds(),
+					RemainingSeconds: remaining.Seconds(), FloorSeconds: floor.Seconds(), FloorSource: floorSource,
+				},
+			})
+		}()
+	}
+	// Eligible at distance one and age zero: it is not behind, only short of
+	// time. RecheckAt is its deadline, where the ordinary rules take it over.
+	return true, SlotRecoveryFacts{Disposition: ReplayEligible, Distance: 1, RecheckAtUnixMilli: deadline}
 }
 
 // observeReplayTakeover reports one Slot due before this process took its
