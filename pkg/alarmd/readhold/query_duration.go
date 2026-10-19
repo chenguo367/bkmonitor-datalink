@@ -55,6 +55,14 @@ const (
 
 // queryDurationBucket is a measured duration rounded up to the second, in
 // milliseconds: a reading moves the record only when it moves a second.
+// known is the group's entry when the controller has one, without making one:
+// a group forgotten stays forgotten.
+func (controller *Controller) known(qg execution.QueryGroupIdentity) *entry {
+	controller.mu.RLock()
+	defer controller.mu.RUnlock()
+	return controller.groups[qg]
+}
+
 func queryDurationBucket(measured time.Duration) int64 {
 	return int64((measured + time.Second - 1) / time.Second * 1000)
 }
@@ -64,10 +72,10 @@ func queryDurationBucket(measured time.Duration) int64 {
 // keep (noteQueryDurationLocked). It is given outside every lock: the
 // measuring side calls into the controller under its own.
 func (controller *Controller) MeasureQueryDuration(qg execution.QueryGroupIdentity, measured time.Duration) {
-	if measured <= 0 {
+	state := controller.known(qg)
+	if measured <= 0 || state == nil {
 		return
 	}
-	state := controller.group(qg)
 	state.mu.Lock()
 	state.measuredQueryDuration = measured
 	state.mu.Unlock()
@@ -75,37 +83,54 @@ func (controller *Controller) MeasureQueryDuration(qg execution.QueryGroupIdenti
 
 // noteQueryDurationLocked keeps the group's measured duration on next when it
 // moved by a second and the last write is a minute old, or when the reading
-// it keeps is half way to stale: the reason written, or "" for none. Called
-// with the group's lock held.
-func (controller *Controller) noteQueryDurationLocked(state *entry, next *Record) string {
+// it keeps is half way to stale. Called with the group's lock held.
+func (controller *Controller) noteQueryDurationLocked(state *entry, next *Record) {
 	if state.measuredQueryDuration <= 0 {
-		return ""
+		return
 	}
 	now := controller.options.Now().UnixMilli()
 	bucket, age := queryDurationBucket(state.measuredQueryDuration), now-next.QueryDurationAtMillis
-	reason := ""
 	switch {
 	case bucket != next.QueryDurationMillis && (next.QueryDurationAtMillis == 0 || age >= queryDurationWriteEvery.Milliseconds()):
-		reason = QueryDurationWriteChanged
 	case bucket == next.QueryDurationMillis && age >= queryDurationRefreshAfter.Milliseconds():
-		reason = QueryDurationWriteRefreshed
 	default:
-		return ""
+		return
 	}
 	next.QueryDurationMillis, next.QueryDurationAtMillis = bucket, now
-	return reason
 }
 
-// InheritedQueryDuration is how long the group's query took as the record
-// says - its last owner's reading, or this process's once written - and
-// false when the record keeps none, is not read, or keeps one older than
-// QueryDurationStaleAfter.
+// queryDurationWrite is why writing next writes a reading, against the one
+// the store keeps (durable, none when it keeps no record): a reading noted
+// while the record was kept only here is counted when the record is first
+// written with it. "" when next keeps the store's reading as it is.
+func queryDurationWrite(next Record, durable *Record) string {
+	var millis, at int64
+	if durable != nil {
+		millis, at = durable.QueryDurationMillis, durable.QueryDurationAtMillis
+	}
+	switch {
+	case next.QueryDurationMillis != millis:
+		return QueryDurationWriteChanged
+	case next.QueryDurationAtMillis != at:
+		return QueryDurationWriteRefreshed
+	}
+	return ""
+}
+
+// InheritedQueryDuration is how long the group's query took as its stored
+// record says - its last owner's reading, or this process's once written -
+// and false when there is no stored record, it is not read, or it keeps no
+// reading or one older than QueryDurationStaleAfter. A reading kept only
+// here, with no record stored, is not one: the store has nothing of it.
 func (controller *Controller) InheritedQueryDuration(qg execution.QueryGroupIdentity) (time.Duration, bool) {
-	state := controller.group(qg)
+	state := controller.known(qg)
+	if state == nil {
+		return 0, false
+	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	record := state.record
-	if !state.loaded || record.QueryDurationMillis <= 0 ||
+	if !state.loaded || len(state.raw) == 0 || record.QueryDurationMillis <= 0 ||
 		controller.options.Now().UnixMilli()-record.QueryDurationAtMillis >= QueryDurationStaleAfter.Milliseconds() {
 		return 0, false
 	}

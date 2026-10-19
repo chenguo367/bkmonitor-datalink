@@ -606,6 +606,14 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 	if _, err := Decode(raw); err != nil {
 		return err
 	}
+	// Counted against what the store keeps, whatever writes it: a reading
+	// noted while the record was kept only here is first written by whichever
+	// change first stores the record.
+	var durable *Record
+	if len(state.raw) > 0 && !state.corrupt {
+		durable = &state.record
+	}
+	durationWrite := queryDurationWrite(next, durable)
 	status, err := controller.options.Control.FencedCompareAndSet(ctx, ownership.FencedCASRequest{
 		Fence: owner.Fence, ContentScope: owner.ContentScope, Namespace: controller.options.Prefix + ":" + Namespace,
 		ExpectedMissing: len(state.raw) == 0, Expected: state.raw, Value: raw, TTL: RecordTTL,
@@ -616,6 +624,9 @@ func (controller *Controller) persist(ctx context.Context, qg execution.QueryGro
 	switch status {
 	case ownership.FencedCASApplied:
 		state.record, state.raw, state.corrupt = next, raw, false
+		if durationWrite != "" {
+			controller.counted(controller.durationWrites, durationWrite)
+		}
 		return nil
 	case ownership.FencedCASConflict:
 		state.loaded = false
@@ -861,7 +872,7 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		controller.counted(controller.clamped, frozen.clamp)
 	}
 	next, hold := frozen.next, frozen.hold
-	durationWrite := controller.noteQueryDurationLocked(state, &next)
+	controller.noteQueryDurationLocked(state, &next)
 	if !reflect.DeepEqual(next, state.record) {
 		// A first zero hold has no durable value to protect. Remember the
 		// segment locally without creating a record for the full population
@@ -874,9 +885,6 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		}
 		if err := controller.persist(ctx, qg, state, next, &owner); err != nil {
 			return 0, err
-		}
-		if durationWrite != "" {
-			controller.counted(controller.durationWrites, durationWrite)
 		}
 	}
 	state.seeded = true

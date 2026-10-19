@@ -114,8 +114,38 @@ func TestAQueryDurationAloneKeepsNoRecord(t *testing.T) {
 	if _, ok := nextOwner(t, store, now, spec).InheritedQueryDuration("qg"); ok {
 		t.Fatal("a group without a record read as having a query duration")
 	}
+	if got, ok := c.InheritedQueryDuration("qg"); ok {
+		t.Fatalf("a reading kept only in memory read as the record's: %v", got)
+	}
 	if got := c.Stats().QueryDurationWrites[QueryDurationWriteChanged]; got != 0 {
 		t.Fatalf("%d writes counted, want none", got)
+	}
+	// The hold rises and the record is first written, the reading with it:
+	// that write is the reading's first, and counted.
+	observeEarly(t, c, "qg", 60*time.Second+spec.SettlingWait, 0)
+	if _, err := c.SlotReadHold(context.Background(), scheduleFor(t, "qg", 60, nil), 180, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := nextOwner(t, store, now, spec).InheritedQueryDuration("qg"); !ok || got != 9*time.Second {
+		t.Fatalf("once the record is written the next owner reads %v %v, want 9 s", got, ok)
+	}
+	if got := c.Stats().QueryDurationWrites[QueryDurationWriteChanged]; got != 1 {
+		t.Fatalf("the reading's first write counted %d times, want once", got)
+	}
+}
+
+// Asking a forgotten group for its reading, or giving it one, makes it no
+// entry again.
+func TestAForgottenGroupStaysForgotten(t *testing.T) {
+	c, _, _ := controllerFixture(t)
+	prepare(t, c, groupSpec("qg", 0))
+	c.Forget("qg")
+	c.MeasureQueryDuration("qg", 9*time.Second)
+	if _, ok := c.InheritedQueryDuration("qg"); ok {
+		t.Fatal("a forgotten group read as having a query duration")
+	}
+	if c.known("qg") != nil {
+		t.Fatal("a forgotten group was made an entry again")
 	}
 }
 
