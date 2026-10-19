@@ -523,8 +523,8 @@ func SREOperations(options SREOptions) []Operation {
 			"按 namespace、name、key 定位，expected_fingerprint 填 configmap.get 给这个键的指纹（键变过或换了指纹密钥就拒绝）。old_text 必须在这个键的显示结果里恰好出现一次，" +
 			"并且只在显示出来的地方改：落在遮蔽值里、跨遮蔽值、落在注释里的都不算，所以不能拿来试探遮蔽内容；new_text 改完后也必须照常显示，形如密钥或落到凭据名下会被遮蔽的拒绝（密钥走 Secret）。" +
 			"old_text、new_text 各一行。服务端用一次 JSON Patch 写入，同时 test uid、resourceVersion 与键的原值，apiserver 整份原子执行，期间有人改过就什么都不改（test_failed）。" +
-			"回执只给出现次数、改动所在行号、改前改后指纹和改后这一行的显示结果，从不给值；dry_run 只做全部检查不写。拒绝的原因字：key_not_found、fingerprint_mismatch、new_text_not_plain、" +
-			"old_text_not_shown_once、edit_not_shown_exactly。每次调用都留审计记录，写明键、行号与结果，不写值。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
+			"回执只给出现次数、改动所在行号、改前改后指纹和改后这一行的显示结果，从不给值；dry_run 只做全部检查不写。拒绝时的错误码（与其它 Pod 类操作同样带 pod_ 前缀）：pod_key_not_found、pod_fingerprint_mismatch、" +
+			"pod_new_text_not_plain、pod_old_text_not_shown_once、pod_edit_not_shown_exactly。每次调用都留审计记录，写明键、行号与结果，不写值。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
 			Fields: map[string]Field{"namespace": text, "name": text, "key": text,
 				"old_text":             {Type: "string", MinLength: 1, MaxLength: 4096, Description: "one line of text configmap.get shows exactly once in the key"},
 				"new_text":             {Type: "string", MaxLength: 4096, Description: "its replacement, one line, which must itself be shown in clear"},
