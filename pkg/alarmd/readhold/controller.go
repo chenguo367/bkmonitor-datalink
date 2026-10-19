@@ -915,6 +915,18 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 	}
 	pruneTransitions(&next, int64(at)*1000+state.spec.SettlingWait.Milliseconds())
 	hold := holdAt(next, at, state.spec.SettlingWait)
+	// A lower hold takes effect a step at a time. The Query Group's Slots
+	// run one after another, so a Slot frozen with less hold than the one
+	// before it is ready before that one is read, and is first attempted
+	// only when it is: a hold come down by more than a few steps at once
+	// leaves that Slot already past its deadline and behind by more Slots
+	// than a replay may cover, and it is skipped unevaluated - as a hold
+	// halved at the limit was. Frozen no more than a step below the Slot
+	// before, each Slot is ready when the one before it is, and the hold
+	// reaches the lower one Slot by Slot while the lower one stays pending.
+	if step := state.spec.Step.Milliseconds(); step > 0 && next.SinceSlot > 0 && at > next.SinceSlot && hold < next.HoldMillis-step {
+		hold = next.HoldMillis - step
+	}
 	clamp := ""
 	if limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds(); hold > limit {
 		// Refusing the Slot refused it on every retry, and the group stopped
