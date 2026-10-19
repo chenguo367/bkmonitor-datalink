@@ -57,3 +57,26 @@ func TestTheEarlierTrialLineOfAMovedHoldHasItsHolds(t *testing.T) {
 		t.Errorf("a matched trial's line %s has the moved hold's fields", lines[1])
 	}
 }
+
+// A limit that cuts a group's hold by more Slots than a replay covers is
+// logged once, with the holds and the Slots it is expected to skip; a cut a
+// replay covers, or the same cut again, is not.
+func TestALimitCutPastTheReplayIsLoggedOnce(t *testing.T) {
+	var out bytes.Buffer
+	holds := &productionReadHolds{logger: observability.New("alarmd", &out)}
+	holds.cfg.PhaseTwo.Scheduler.MaxReplaySlots = 3
+	cut := readhold.LimitCut{QueryGroup: "qg", Slot: 180, From: 10 * time.Minute, To: 5 * time.Minute, Period: time.Minute}
+	holds.limitCut(cut)
+	holds.limitCut(cut)
+	holds.limitCut(readhold.LimitCut{QueryGroup: "covered", Slot: 180, From: 10 * time.Minute, To: 7 * time.Minute, Period: time.Minute})
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("lines %q, want one", lines)
+	}
+	for _, field := range []string{`"limit_cut"`, `"query_group":"qg"`, `"from_hold_ms":600000`, `"to_hold_ms":300000`,
+		`"max_replay_slots":3`, `"expected_skipped_slots":2`} {
+		if !strings.Contains(lines[0], field) {
+			t.Errorf("the line %s lacks %s", lines[0], field)
+		}
+	}
+}

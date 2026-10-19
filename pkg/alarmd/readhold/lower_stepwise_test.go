@@ -40,6 +40,7 @@ func TestALoweredHoldComesDownAStepPerSlot(t *testing.T) {
 	for _, period := range []int64{60, 30} {
 		t.Run(time.Duration(period*int64(time.Second)).String(), func(t *testing.T) {
 			c, _, now := controllerFixture(t)
+			c.options.OnLimitCut = func(cut LimitCut) { t.Errorf("a lowering stepped down told a limit cut %+v", cut) }
 			spec := groupSpec("qg", 0)
 			spec.Step = time.Duration(period) * time.Second
 			spec.HoldLimit = 10 * time.Minute
@@ -90,9 +91,12 @@ func TestALoweredHoldComesDownAStepPerSlot(t *testing.T) {
 }
 
 // A limit configured under the hold takes effect at once: the stepping
-// never freezes a Slot past the limit.
+// never freezes a Slot past the limit. The cut is told, once, with the
+// holds and the period, for the operator who lowered the limit to see.
 func TestALoweredLimitIsNotStepped(t *testing.T) {
 	c, _, _ := controllerFixture(t)
+	var cuts []LimitCut
+	c.options.OnLimitCut = func(cut LimitCut) { cuts = append(cuts, cut) }
 	spec := groupSpec("qg", 0)
 	spec.Step = time.Minute
 	prepare(t, c, spec)
@@ -108,6 +112,13 @@ func TestALoweredLimitIsNotStepped(t *testing.T) {
 	}
 	if got, err := c.SlotReadHold(ctx, schedule, 180, holdFence("qg")); err != nil || got != 5*time.Minute {
 		t.Fatalf("under a limit lowered to 5 minutes frozen at %v %v, want the limit at once", got, err)
+	}
+	if got, err := c.SlotReadHold(ctx, schedule, 240, holdFence("qg")); err != nil || got != 5*time.Minute {
+		t.Fatalf("the Slot after frozen at %v %v, want the limit", got, err)
+	}
+	want := LimitCut{QueryGroup: "qg", Slot: 180, From: 10 * time.Minute, To: 5 * time.Minute, Period: time.Minute}
+	if len(cuts) != 1 || cuts[0] != want {
+		t.Fatalf("cuts told %+v, want %+v once", cuts, want)
 	}
 }
 

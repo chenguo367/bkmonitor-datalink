@@ -50,7 +50,12 @@ type productionReadHolds struct {
 	// sources indexes the owned groups by the data they read
 	// (productionReadHoldGroup.querySource), so a new group's seed walks its
 	// peers and not every owned group.
-	sources     map[string]map[execution.QueryGroupIdentity]struct{}
+	sources map[string]map[execution.QueryGroupIdentity]struct{}
+	// limitCuts is the hold each group was last logged cut to by a limit
+	// configured under it, so a cut is logged once per group. Its own lock:
+	// a cut is told with the controller's group lock held.
+	limitCutsMu sync.Mutex
+	limitCuts   map[execution.QueryGroupIdentity]time.Duration
 	nextRenew   time.Time
 	transitions atomic.Uint64
 	overtaken   atomic.Uint64
@@ -113,8 +118,36 @@ func newProductionReadHolds(cfg config.Config, control readhold.Control, reposit
 	var err error
 	holds.controller, err = readhold.NewController(readhold.Options{Control: control,
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), MaxHold: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-		Now: now, Owner: holds.owner})
+		Now: now, Owner: holds.owner, OnLimitCut: holds.limitCut})
 	return holds, err
+}
+
+// limitCut logs, once per group and cut, a Slot the limit froze more Slots
+// below the one before it than a replay covers: an operator who lowered the
+// limit sees which group pays for it and about how many Slots it skips.
+func (holds *productionReadHolds) limitCut(cut readhold.LimitCut) {
+	maxReplay := int64(holds.cfg.PhaseTwo.Scheduler.MaxReplaySlots)
+	if holds.logger == nil || cut.Period <= 0 {
+		return
+	}
+	steps := int64((cut.From - cut.To) / cut.Period)
+	if steps <= maxReplay {
+		return
+	}
+	holds.limitCutsMu.Lock()
+	if holds.limitCuts == nil {
+		holds.limitCuts = make(map[execution.QueryGroupIdentity]time.Duration)
+	}
+	logged, ok := holds.limitCuts[cut.QueryGroup]
+	holds.limitCuts[cut.QueryGroup] = cut.To
+	holds.limitCutsMu.Unlock()
+	if ok && logged == cut.To {
+		return
+	}
+	holds.logger.Warn("read_hold", "limit_cut", 0, 0, slog.String("query_group", string(cut.QueryGroup)),
+		slog.Int64("slot", int64(cut.Slot)), slog.Int64("from_hold_ms", cut.From.Milliseconds()), slog.Int64("to_hold_ms", cut.To.Milliseconds()),
+		slog.Int64("period_s", int64(cut.Period/time.Second)), slog.Int64("max_replay_slots", maxReplay),
+		slog.Int64("expected_skipped_slots", steps-maxReplay))
 }
 
 func (holds *productionReadHolds) owner(qg execution.QueryGroupIdentity) (readhold.Owner, error) {

@@ -126,6 +126,23 @@ type Options struct {
 	MaxHold time.Duration
 	Now     func() time.Time
 	Owner   func(execution.QueryGroupIdentity) (Owner, error)
+	// OnLimitCut, when set, is told of each Slot frozen more than a step
+	// below the Slot before it because the limit was configured under the
+	// hold. Called with the group's lock held, after the Slot is frozen.
+	OnLimitCut func(LimitCut)
+}
+
+// LimitCut is a Slot frozen at a limit configured under the hold, more than
+// a step below the Slot before it: a cut the stepping does not soften, so
+// the Slot may be ready before the one before it is read and fall behind by
+// more Slots than a replay covers. Period is the shortest interval the
+// group's Plans are detected at.
+type LimitCut struct {
+	QueryGroup execution.QueryGroupIdentity
+	Slot       execution.EvaluationTime
+	From       time.Duration
+	To         time.Duration
+	Period     time.Duration
 }
 
 type PlanRef struct {
@@ -829,6 +846,16 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		}
 	}
 	state.seeded = true
+	if frozen.cutFrom > 0 && controller.options.OnLimitCut != nil {
+		period := int64(0)
+		for _, plan := range schedule.Plans {
+			if interval := plan.Spec.EvaluationIntervalSeconds; interval > 0 && (period == 0 || interval < period) {
+				period = interval
+			}
+		}
+		controller.options.OnLimitCut(LimitCut{QueryGroup: qg, Slot: at, From: time.Duration(frozen.cutFrom) * time.Millisecond,
+			To: time.Duration(hold) * time.Millisecond, Period: time.Duration(period) * time.Second})
+	}
 	return time.Duration(hold) * time.Millisecond, nil
 }
 
@@ -890,6 +917,9 @@ type frozenHold struct {
 	hold  int64
 	next  Record
 	clamp string
+	// cutFrom is the hold of the Slot before when the limit cut this one
+	// more than a step below it, and 0 otherwise.
+	cutFrom int64
 }
 
 // slotHoldOf computes, on a working copy of the group's record, the hold
@@ -926,10 +956,12 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 	// reaches the lower one Slot by Slot while the lower one stays pending.
 	// The limit below still wins: a limit configured under the hold is a
 	// bound no Slot is frozen past, and it takes effect at once.
-	if step := state.spec.Step.Milliseconds(); step > 0 && next.SinceSlot > 0 && at > next.SinceSlot && hold < next.HoldMillis-step {
+	step := state.spec.Step.Milliseconds()
+	stepped := step > 0 && next.SinceSlot > 0 && at > next.SinceSlot
+	if stepped && hold < next.HoldMillis-step {
 		hold = next.HoldMillis - step
 	}
-	clamp := ""
+	clamp, cutFrom := "", int64(0)
 	if limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds(); hold > limit {
 		// Refusing the Slot refused it on every retry, and the group stopped
 		// on it. Frozen at the limit, the old group's last Slot may overtake
@@ -946,6 +978,9 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 			clamp = ClampKnown
 		}
 		hold = limit
+		if stepped && limit < next.HoldMillis-step {
+			cutFrom = next.HoldMillis
+		}
 	}
 	if next.HoldMillis != hold || next.PendingHoldMillis != nil {
 		next.PreviousHoldMillis, next.PreviousSinceSlot = next.HoldMillis, next.SinceSlot
@@ -962,7 +997,7 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 			next.PendingHoldMillis = nil
 		}
 	}
-	return frozenHold{hold: hold, next: next, clamp: clamp}, nil
+	return frozenHold{hold: hold, next: next, clamp: clamp, cutFrom: cutFrom}, nil
 }
 
 // CloseSchedule fixes the old hold and each Plan's last legal Slot before a
