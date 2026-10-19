@@ -4390,6 +4390,12 @@ type SlotExecutionResult struct {
 	Result         Result
 	ReasonCode     ReasonCode
 	SourceRetry    bool
+	// QueryFreeCause is the cause of a query-free finalization this call
+	// wrote down -- GAP_SKIPPED or SNAPSHOT_UNAVAILABLE, one Slot or a range
+	// -- and empty on every other result, a range an earlier attempt already
+	// committed included. Observation only: the Runner reports each such
+	// Slot given up on, once.
+	QueryFreeCause CompletionCause
 	// Usage is what this Slot took of each budget, carried out so the
 	// completion row can report it.
 	//

@@ -1114,6 +1114,7 @@ func (source *ProductionSlotSource) classifyRecoveryOf(
 			Distance:    1,
 			Age:         age,
 		}
+		aged = source.expiryDecided(aged, evaluationTime, at)
 		source.observeReplayExpiry(ctx, evaluationTime, aged)
 		if beforeTakeover {
 			source.observeReplayTakeover(ctx, evaluationTime, observability.ReplayTakeoverAgeExceeded, age, at.Sub(takenOver))
@@ -1143,16 +1144,29 @@ func (source *ProductionSlotSource) classifyRecoveryOf(
 		return "", SlotRecoveryFacts{}, err
 	}
 	if expired {
+		facts = source.expiryDecided(facts, evaluationTime, at)
 		source.observeReplayExpiry(ctx, evaluationTime, facts)
 		return execution.OperationNormal, facts, nil
 	}
 	if distance > source.recovery.MaxReplaySlots {
 		facts.Disposition = ReplayExpired
 		facts.Reason = ReplayExpiredByDistance
+		facts = source.expiryDecided(facts, evaluationTime, at)
 		source.observeReplayExpiry(ctx, evaluationTime, facts)
 		return execution.OperationNormal, facts, nil
 	}
 	return execution.OperationReplay, facts, nil
+}
+
+// expiryDecided records, on an expiry, the values it was decided against:
+// the decision instant less the Slot's evaluation time, on the clock the age
+// and distance rules read, and the two limits they were compared with. Taken
+// here, at the decision, so the slot_skipped line of the Slot reports what
+// was compared rather than a later recomputation.
+func (source *ProductionSlotSource) expiryDecided(facts SlotRecoveryFacts, evaluationTime execution.EvaluationTime, at time.Time) SlotRecoveryFacts {
+	facts.SlotAgeMillis = at.UnixMilli() - int64(evaluationTime)*1000
+	facts.AgeLimit, facts.DistanceLimit = source.recovery.MaxReplayAge, source.recovery.MaxReplaySlots
+	return facts
 }
 
 // observeReplayExpiry reports one Slot given up on, with the reason and the
@@ -1840,6 +1854,19 @@ func (source *ProductionSlotSource) observeCursorAdvance(
 	}
 	if source.observer != nil {
 		source.observer.Observe(ctx, observed)
+	}
+	if facts.Status == observability.CursorAdvanceApplied {
+		// The span is uncounted: the Slots it held are gone from the
+		// timeline, so the line names the cursor it left, as the recorded
+		// gap does.
+		gap := request.SkipGap()
+		observability.ObserveSlotSkipped(ctx, source.observer, observability.TraceFields{
+			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(request.ExpectedNextSlot),
+			OwnerID: request.OwnerFence.OwnerID, OwnerEpoch: request.OwnerFence.OwnerEpoch,
+		}, observability.OperationWrite, observability.SlotSkippedFacts{
+			Path: observability.SlotSkippedCursorSkip, FirstSlot: int64(gap.FirstSlot), LastSlot: int64(gap.LastSlot),
+			Reason: string(gap.ReasonCode), GapGuard: observability.SkipGapProgressOnly,
+		})
 	}
 	return facts.Status
 }

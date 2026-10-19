@@ -672,6 +672,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		}
 		attributes = appendHeldByAttributes(attributes, facts.HeldBy)
 	}
+	attributes = appendSlotSkippedAttributes(attributes, observation.SlotSkipped)
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
 	attributes = appendDivertDecisionAttributes(attributes, observation.DivertDecision)
 	attributes = appendQueryBudgetAttributes(attributes, observation.QueryBudget)
@@ -1263,6 +1264,12 @@ func mandatoryLogStage(stage Stage) bool {
 	case StageAssignmentApplied:
 		// One line per assignment change in place of one per Query Group
 		// acquired, lost or taken over: about 2,100 a Pod at every start.
+		return true
+	case StageSlotSkipped:
+		// Every Slot finalised as skipped, one line each: the gap guard a
+		// GAP_SKIPPED Level is held by goes back to exactly one of them, and
+		// a sampled line leaves which Slot, which path and why unreadable.
+		// The volume is the skips themselves.
 		return true
 	case StageWarmingPeak:
 		// One line an hour per replica, and only for an hour that had a
