@@ -5,7 +5,9 @@ package pod
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"unicode"
@@ -128,6 +130,10 @@ func plainValue(text string) bool {
 type configMasker struct {
 	fingerprints *fingerprints
 	masked       int
+	// splitPEM is set by a scalar holding part of a PEM block - its BEGIN
+	// without its END, or an END alone - which the leaf rule cannot judge
+	// whole (document).
+	splitPEM bool
 }
 
 func (m *configMasker) mask(text string) string {
@@ -166,21 +172,49 @@ func (m *configMasker) value(key, text string) string {
 	return m.lines(text)
 }
 
-// document is text as a YAML (or JSON) document with every scalar decided on
-// its own, or false when it is not one.
+// document is text as a YAML (or JSON) document - every document of it, when
+// it holds several - with every scalar decided on its own, or false when it
+// is not one.
+//
+// A PEM block split across scalars, one line in each, is not a document the
+// leaf rule can judge: its short last line and its END line read as plain
+// alone. Such text is false too, and read line by line, where the block is
+// masked from BEGIN to END.
 func (m *configMasker) document(text string) (string, bool) {
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(text), &root); err != nil || len(root.Content) == 0 {
+	var nodes []*yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(text))
+	for {
+		var root yaml.Node
+		err := decoder.Decode(&root)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+		if len(root.Content) == 0 {
+			continue
+		}
+		node := root.Content[0]
+		if node.Kind != yaml.MappingNode && node.Kind != yaml.SequenceNode {
+			return "", false
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
 		return "", false
 	}
-	node := root.Content[0]
-	if node.Kind != yaml.MappingNode && node.Kind != yaml.SequenceNode {
+	masked := m.masked
+	for _, node := range nodes {
+		m.walk(node, "")
+	}
+	if m.splitPEM {
+		m.masked, m.splitPEM = masked, false
 		return "", false
 	}
-	m.walk(node, "")
-	if strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[") {
+	if len(nodes) == 1 && (strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[")) {
 		var decoded any
-		if err := node.Decode(&decoded); err == nil {
+		if err := nodes[0].Decode(&decoded); err == nil {
 			if encoded, err := json.MarshalIndent(decoded, "", "  "); err == nil {
 				return string(encoded), true
 			}
@@ -189,7 +223,12 @@ func (m *configMasker) document(text string) (string, bool) {
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
-	if err := encoder.Encode(node); err != nil {
+	for _, node := range nodes {
+		if err := encoder.Encode(node); err != nil {
+			return "", false
+		}
+	}
+	if err := encoder.Close(); err != nil {
 		return "", false
 	}
 	return out.String(), true
@@ -229,6 +268,9 @@ func (m *configMasker) walk(node *yaml.Node, name string) {
 }
 
 func (m *configMasker) scalar(node *yaml.Node, name string) {
+	if begins, ends := pemBlock.MatchString(node.Value), strings.Contains(node.Value, "-----END "); begins != ends {
+		m.splitPEM = true
+	}
 	if node.Tag == "!!bool" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!null" {
 		if !configKey.MatchString(name) {
 			return
