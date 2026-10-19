@@ -1231,7 +1231,7 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 // previous owner's reading, as the group's read-hold record keeps it; and
 // TakeoverDivertFloor otherwise. A group that never completes a first read in
 // time never gets a reading, and stays on the fallback, as does a group whose
-// record carries nothing (a hold of zero keeps no record). A round with more
+// record keeps no reading (a group never measured keeps no record). A round with more
 // budget left than that runs as a normal round, as any round does. A round
 // due before the takeover is reported as a takeover diverted
 // (ReplayTakeoverFacts), any other as readiness_late (SlotDiversionFacts):
@@ -1288,7 +1288,7 @@ func (source *ProductionSlotSource) divertShortOfTime(
 // record keeps (InheritedQueryDuration), a measurement of the same query and
 // so a reading too. A group that never completes a first read in time never
 // gets a reading, and stays on the fallback, as does a group whose record
-// carries nothing (a hold of zero keeps no record).
+// keeps no reading (a group never measured keeps no record).
 //
 // The inherited reading is asked only when there is no own one, and outside
 // every lock of the source's: the read-hold controller takes the group's own
