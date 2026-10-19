@@ -307,11 +307,27 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		// Which deadline was on the request, which ran out, and what failed:
 		// a deadline error from the transport names none of them.
-		completion.RouteFacts.Attempts[0].Request = failedRequest(err)
+		request := failedRequest(err)
+		request.CompletedUnixMilli = client.now().UnixMilli()
+		if reason == execution.ReasonCode(contract.ReasonQueryTimeout) {
+			request.TimeoutSource = observability.QueryTimeoutSourceTransportClass
+			if ctx.Err() != nil {
+				request.TimeoutSource = observability.QueryTimeoutSourceDeadlinePassed
+			}
+		}
+		completion.RouteFacts.Attempts[0].Request = request
 		return completion, nil
 	}
 	answered := client.now()
 	defer response.Body.Close()
+	// Every request from here got an answer: its facts say what status it
+	// was, when it came and when the attempt ended, whatever became of it.
+	answeredRequest := func(err error) *execution.RequestFacts {
+		request := failedRequest(err)
+		request.AnswerStatus, request.AnsweredUnixMilli = response.StatusCode, answered.UnixMilli()
+		request.CompletedUnixMilli = client.now().UnixMilli()
+		return request
+	}
 	if response.StatusCode != http.StatusOK {
 		// UQ error bodies can echo the request (table ids, conditions,
 		// dimension values), so the body is never parsed for business state
@@ -329,7 +345,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion := client.unavailableCompletion(attempt, statusReason(response.StatusCode), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.RouteFacts.Attempts[0].HTTPStatus = response.StatusCode
 		completion.RouteFacts.Attempts[0].Rejection = rejection
-		completion.RouteFacts.Attempts[0].Request = failedRequest(nil)
+		completion.RouteFacts.Attempts[0].Request = answeredRequest(nil)
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
@@ -337,7 +353,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	counted := &countingReader{reader: response.Body, now: client.now}
 	shared, err := selectSharedDecoder(response.Header.Get("Content-Type"), attempt.SharedSchema)
 	if err != nil {
-		return execution.ProviderCompletion{}, &requestFailureError{err: err, request: failedRequest(err)}
+		return execution.ProviderCompletion{}, &requestFailureError{err: err, request: answeredRequest(err)}
 	}
 	bounded := &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}
 	delivered := &countingSink{sink: sink}
@@ -355,9 +371,12 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		failure := client.bodyFailure(callerCtx, ctx, attempt, err, counted, delivered.series, started, answered)
 		var named *bodyFailureError
 		if errors.As(failure, &named) {
-			named.request = failedRequest(err)
+			named.request = answeredRequest(err)
+			// Which branch filed it: a timeout before the deadline is told
+			// apart from one at it by this, not by the reason.
+			named.request.TimeoutSource = named.timeoutSource
 		} else {
-			failure = &requestFailureError{err: failure, request: failedRequest(err)}
+			failure = &requestFailureError{err: failure, request: answeredRequest(err)}
 		}
 		return execution.ProviderCompletion{}, failure
 	}
@@ -368,13 +387,17 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion.Stats.ResponseCodec = "shared_json_v1"
 	}
 	completion.Stats.SharedSchemaRequested = attempt.SharedSchema
-	// An answer whose status said it failed (the decoder's unavailable or
-	// rejected completion) names the request it answered.
+	// Every attempt the provider answered names the request it answered: one
+	// whose status said it failed (the decoder's unavailable completion), and
+	// one that succeeded partial or empty, which a degraded round reads. The
+	// decoder leaves only the provider's message on it.
 	for index := range completion.RouteFacts.Attempts {
-		if failed := &completion.RouteFacts.Attempts[index]; failed.Request == nil &&
-			(failed.Result == execution.RouteAttemptFailed || failed.ReasonCode != "") {
-			failed.Request = failedRequest(nil)
+		answeredAttempt := &completion.RouteFacts.Attempts[index]
+		request := answeredRequest(nil)
+		if decoded := answeredAttempt.Request; decoded != nil {
+			request.Excerpt = decoded.Excerpt
 		}
+		answeredAttempt.Request = request
 	}
 	return completion, nil
 }
@@ -406,21 +429,27 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	passed := func(at time.Time) bool { return bounded && !at.Before(deadline) }
 	broken := body.failed != nil && errors.Is(err, body.failed)
 	category, code := "provider_transport", contract.ReasonQueryTimeout
-	var detail string
+	var detail, source string
 	switch {
 	case broken && passed(body.failedAt):
-		detail = execution.BodyRouteDetail(execution.TransportFailureTimeout)
+		detail, source = execution.BodyRouteDetail(execution.TransportFailureTimeout), observability.QueryTimeoutSourceDeadlinePassed
 		if passed(body.failedBegan) {
 			category, code, detail = observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout, execution.DeliveryTimeoutRouteDetail
+			source = observability.QueryTimeoutSourceDelivery
 		}
 	case broken:
+		// The deadline is still ahead: a timeout here is the read's own
+		// error reading as one (ClassifyTransportFailure), not the deadline.
 		class := execution.ClassifyTransportFailure(body.failed)
 		if class != execution.TransportFailureTimeout {
 			code = contract.ReasonQueryUnavailable
+		} else {
+			source = observability.QueryTimeoutSourceBodyReadClass
 		}
 		detail = execution.BodyRouteDetail(class)
 	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		category, code, detail = observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout, execution.DeliveryTimeoutRouteDetail
+		source = observability.QueryTimeoutSourceDelivery
 	default:
 		return err
 	}
@@ -428,7 +457,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	// What was not spent waiting - for the answer to begin, or inside a read
 	// of its body - was alarmd's own decoding and delivery.
 	local := failed.Sub(answered) - body.waited
-	return &bodyFailureError{err: err, category: category, code: code, detail: detail,
+	return &bodyFailureError{err: err, category: category, code: code, detail: detail, timeoutSource: source,
 		timing: attemptTiming(attempt.Budget, started, failed, local),
 		volume: &observability.QueryVolume{BytesRead: body.bytes, SeriesDelivered: series}}
 }

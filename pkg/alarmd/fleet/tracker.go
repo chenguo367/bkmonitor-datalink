@@ -1493,6 +1493,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if rejection := failure.Rejection; rejection != nil {
 			state.lastFailure.Rejection = &RejectionRef{Class: rejection.Class, TraceID: rejection.TraceID}
 			tracker.keepRejectionLocked(trace.QueryGroupKey, *rejection, failure.HTTPStatus, at)
+		} else if request := failure.Request; request != nil && request.Excerpt != "" {
+			// A failure the provider answered with its own message - a body
+			// status, an answer that broke - is kept by the same rule as a
+			// refusal: the words on this replica alone, for the session-gated
+			// read, and nothing of them on the row.
+			tracker.keepRejectionLocked(trace.QueryGroupKey, observability.QueryRejection{Class: failure.Code,
+				TraceID: request.TraceID, Excerpt: request.Excerpt}, request.AnswerStatus, at)
 		}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {

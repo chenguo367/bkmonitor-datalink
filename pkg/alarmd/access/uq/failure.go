@@ -46,6 +46,9 @@ type bodyFailureError struct {
 	timing   *execution.AttemptTiming
 	volume   *observability.QueryVolume
 	request  *execution.RequestFacts
+	// timeoutSource is which branch filed a timeout
+	// (observability.QueryTimeoutSources), copied onto request.
+	timeoutSource string
 }
 
 func (e *bodyFailureError) Error() string                                  { return e.err.Error() }

@@ -41,6 +41,11 @@ func TestAQueryEndedAtItsOwnDeadlineIsItsTimeout(t *testing.T) {
 		if err.Error() != cause.Error() || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("%s: %v lost its text or cause", name, err)
 		}
+		// It names its branch, so its line says the round filed it.
+		var sourced interface{ QueryFailureTimeoutSource() string }
+		if !errors.As(err, &sourced) || sourced.QueryFailureTimeoutSource() != observability.QueryTimeoutSourceRoundDeadline {
+			t.Fatalf("%s: %v names no round_deadline timeout source", name, err)
+		}
 	}
 }
 

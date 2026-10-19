@@ -151,6 +151,12 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 	if errors.As(err, &requested) {
 		facts.Request = requested.QueryFailureRequest().Observed()
 	}
+	// A timeout the round filed at the query's own deadline names that
+	// branch over whatever the request's own error said.
+	var sourced interface{ QueryFailureTimeoutSource() string }
+	if facts.Request != nil && errors.As(err, &sourced) {
+		facts.Request.TimeoutSource = sourced.QueryFailureTimeoutSource()
+	}
 	var planned interface {
 		QueryFailurePlanned() *execution.PlannedQueryFacts
 	}
@@ -222,9 +228,43 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 	if result == observability.ResultDegraded || result == observability.ResultFailed {
 		observation.DivertDecision = observability.DivertDecisionWithBudget(ctx, observability.BudgetCaptureFromContext(ctx))
 		observation.QueryBudget = queryLineBudget(ctx)
+		// An answer degraded without failing (partial, empty) names the
+		// request it answered, as a failed one does in its failure facts.
+		if facts == nil || facts.Request == nil {
+			observation.QueryRequest = answeredRequestFacts(completion)
+		}
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// answeredRequestFacts is the request of the completion's first degraded
+// answer - partial, empty or unavailable, in that order of physical query -
+// or of its first answered query when none is; nil when no attempt carries
+// one.
+func answeredRequestFacts(completion execution.QueryExecutionCompletion) *observability.QueryRequestFacts {
+	var first *execution.RequestFacts
+	for _, item := range completion.PhysicalQueries {
+		attempt := lastAttempt(item.RouteFacts)
+		if attempt == nil || attempt.Request == nil {
+			continue
+		}
+		if item.Completeness != execution.CompletenessFull || item.DataState != execution.DataStateData {
+			return attempt.Request.Observed()
+		}
+		if first == nil {
+			first = attempt.Request
+		}
+	}
+	return first.Observed()
+}
+
+// lastAttempt is a physical query's last route attempt; nil for none.
+func lastAttempt(route execution.ProviderRouteFacts) *execution.RouteAttemptFact {
+	if len(route.Attempts) == 0 {
+		return nil
+	}
+	return &route.Attempts[len(route.Attempts)-1]
 }
 
 // providerStatusFacts projects every physical query that carried a backend

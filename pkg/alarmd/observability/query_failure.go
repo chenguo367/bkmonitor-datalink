@@ -43,6 +43,77 @@ type QueryRequestFacts struct {
 	// TraceID is the trace id the request was sent with (32 lower-case hex);
 	// it renders as failure_provider_trace_id.
 	TraceID string
+	// AnswerStatus is the HTTP status the provider answered with, 200
+	// included (provider_http_status); AnsweredUnixMilli when its headers
+	// arrived (answered_at_ms) and CompletedUnixMilli when the attempt ended
+	// (completed_at_ms). Zero where not known. The line's own time is when
+	// it was written, after its round's work, and is neither.
+	AnswerStatus       int
+	AnsweredUnixMilli  int64
+	CompletedUnixMilli int64
+	// TimeoutSource is which branch filed a timeout, one of
+	// QueryTimeoutSources (timeout_source); empty otherwise.
+	TimeoutSource string
+	// Excerpt is the provider's own message from an answer's body,
+	// sanitized and at most MaxRejectionExcerptBytes. It is never written to
+	// a log line or a row: like a refusal's excerpt, it is kept on the
+	// replica with the Query Group's last refusal.
+	Excerpt string
+}
+
+// Which branch filed a query's timeout. A timeout met while its request's
+// own deadline was still ahead and one met at the deadline are different
+// failures; the reason code alone is the same word for both.
+const (
+	// QueryTimeoutSourceDeadlinePassed: the request's deadline had passed
+	// when the request or a read of its body failed.
+	QueryTimeoutSourceDeadlinePassed = "deadline_passed"
+	// QueryTimeoutSourceTransportClass: the request got no answer and the
+	// transport's error reads as a timeout with its deadline still ahead.
+	QueryTimeoutSourceTransportClass = "transport_class_timeout"
+	// QueryTimeoutSourceBodyReadClass: the answer began and a read of its
+	// body failed with an error that reads as a timeout, its deadline still
+	// ahead (execution.ClassifyTransportFailure).
+	QueryTimeoutSourceBodyReadClass = "body_read_class_timeout"
+	// QueryTimeoutSourceDelivery: the deadline passed while alarmd was
+	// decoding or delivering what had arrived (QUERY_DELIVERY_TIMEOUT).
+	QueryTimeoutSourceDelivery = "delivery_deadline"
+	// QueryTimeoutSourceRoundDeadline: the round ended the query at its own
+	// deadline with a bare cancellation or expiry the provider did not name.
+	QueryTimeoutSourceRoundDeadline = "round_deadline"
+)
+
+// QueryTimeoutSources is the closed list a rendered timeout_source comes from.
+var QueryTimeoutSources = []string{QueryTimeoutSourceDeadlinePassed, QueryTimeoutSourceTransportClass,
+	QueryTimeoutSourceBodyReadClass, QueryTimeoutSourceDelivery, QueryTimeoutSourceRoundDeadline}
+
+func validQueryTimeoutSource(source string) bool {
+	for _, known := range QueryTimeoutSources {
+		if source == known {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeQueryRequest keeps a request's facts within their grammar: an
+// unknown timeout source, a status outside 100 to 599 and an excerpt past
+// its bound are dropped.
+func normalizeQueryRequest(input *QueryRequestFacts) *QueryRequestFacts {
+	if input == nil {
+		return nil
+	}
+	r := *input
+	if !validQueryTimeoutSource(r.TimeoutSource) {
+		r.TimeoutSource = ""
+	}
+	if r.AnswerStatus < 100 || r.AnswerStatus > 599 {
+		r.AnswerStatus = 0
+	}
+	if len(r.Excerpt) > MaxRejectionExcerptBytes {
+		r.Excerpt = ""
+	}
+	return &r
 }
 
 // QueryPlannedFacts is execution.PlannedQueryFacts as a line renders it.
@@ -276,5 +347,6 @@ func normalizeQueryFailure(component Component, stage Stage, input *QueryFailure
 		f.HTTPStatus = 0
 	}
 	f.Rejection = normalizeQueryRejection(f.Rejection)
+	f.Request = normalizeQueryRequest(f.Request)
 	return &f
 }

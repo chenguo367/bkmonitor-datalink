@@ -574,6 +574,12 @@ func (e *queryDeadlineError) QueryFailure() (string, string) {
 	return observability.QueryFailureCategoryProviderTransport, contract.ReasonQueryTimeout
 }
 
+// QueryFailureTimeoutSource names this branch on the request facts the
+// wrapped error carries.
+func (e *queryDeadlineError) QueryFailureTimeoutSource() string {
+	return observability.QueryTimeoutSourceRoundDeadline
+}
+
 // endedByDeadline is err named as the query's timeout when it is a bare
 // cancellation or expiry and the query's own deadline had passed by now. A
 // cancellation before that deadline - the process stopping, the Query

@@ -2472,8 +2472,13 @@ type Observation struct {
 	SegmentContent      *SegmentContentFacts
 	RuntimeConfig       *RuntimeConfigFacts
 	QueryFailure        *QueryFailureFacts
-	QueryStatus         []QueryStatusFacts
-	QueryCodec          []QueryCodecFacts
+	// QueryRequest is the request a degraded or failed query_completed
+	// line's answer came from, for a line whose failure facts name none: a
+	// partial or empty answer, which the provider gave without failing. It
+	// is log-only and renders the same keys a failure's request does.
+	QueryRequest *QueryRequestFacts
+	QueryStatus  []QueryStatusFacts
+	QueryCodec   []QueryCodecFacts
 	// QueryTruncation is every physical query of the completion whose
 	// answer may have been cut by the query service's terms cap.
 	QueryTruncation []QueryTruncationFacts
@@ -2656,6 +2661,11 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
 	observation.QueryFailure = normalizeQueryFailure(observation.Component, observation.Stage, observation.QueryFailure)
+	if observation.Component != ComponentAccess || observation.Stage != StageQueryCompleted ||
+		(observation.QueryFailure != nil && observation.QueryFailure.Request != nil) {
+		observation.QueryRequest = nil
+	}
+	observation.QueryRequest = normalizeQueryRequest(observation.QueryRequest)
 	observation.QueryStatus = normalizeQueryStatus(observation.Component, observation.Stage, observation.QueryStatus)
 	observation.QueryCodec = normalizeQueryCodec(observation.Component, observation.Stage, observation.QueryCodec)
 	observation.QueryTruncation = normalizeQueryTruncation(observation.QueryTruncation)

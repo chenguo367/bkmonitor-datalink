@@ -143,7 +143,30 @@ func (session *seriesDecoder) limitCompletion(completion *execution.ProviderComp
 	*err = nil
 }
 
+// finish completes the answer, and leaves the provider's own message, when
+// its status carried one, on the attempt for the client to keep with the
+// request it answered (statusExcerpt).
 func (session *seriesDecoder) finish(ctx context.Context, status *responseStatus, isPartial *bool, resultTableIDs []string) (execution.ProviderCompletion, error) {
+	completion, err := session.complete(ctx, status, isPartial, resultTableIDs)
+	if excerpt := statusExcerpt(status); err == nil && excerpt != "" {
+		for index := range completion.RouteFacts.Attempts {
+			completion.RouteFacts.Attempts[index].Request = &execution.RequestFacts{Excerpt: excerpt}
+		}
+	}
+	return completion, err
+}
+
+// statusExcerpt is a body status's message as an operator may read it,
+// sanitized and bounded as a refusal's body is (providerErrorExcerpt); empty
+// for no status or no message.
+func statusExcerpt(status *responseStatus) string {
+	if status == nil || status.Message == "" {
+		return ""
+	}
+	return providerErrorExcerpt([]byte(status.Message))
+}
+
+func (session *seriesDecoder) complete(ctx context.Context, status *responseStatus, isPartial *bool, resultTableIDs []string) (execution.ProviderCompletion, error) {
 	if err := session.handOn(ctx); err != nil {
 		return execution.ProviderCompletion{}, err
 	}
