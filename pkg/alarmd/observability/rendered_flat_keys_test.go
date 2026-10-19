@@ -200,3 +200,45 @@ func TestALostRoundCompletionCarriesItsDecisionAndBudgetAsFlatKeys(t *testing.T)
 		}
 	}
 }
+
+// A failed query's line says, as flat keys, which deadline was on its request
+// and which ran out, its transport detail, the error chain and its types, how
+// far the answer got, and the physical query's own plan: whose input it was
+// and the deadlines it was planned under. Its round's line carries the same
+// for the query that failed, with when the read was sent and the deadline it
+// ran under.
+func TestAFailedQuerysLineSaysWhichDeadlineAndWhichQuery(t *testing.T) {
+	request := &QueryRequestFacts{DeadlineUnixMilli: 31, DeadlineLeftAtDoMs: 32, DeadlineSource: "attempt", Expired: "none",
+		ErrorChain: "Post <url>: read tcp: i/o timeout", ErrorTypes: []string{"*url.Error", "*net.OpError"}}
+	planned := &QueryPlannedFacts{Role: "ALGORITHM_DEPENDENCY", Dataset: "history_86400", DeadlineUnixMilli: 41, FrozenDeadlineUnixMilli: 42,
+		CompletionDeadlineUnixMilli: 43, FellBack: true}
+	event := renderObservation(t, Observation{
+		Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded, ReasonCode: "QUERY_TIMEOUT",
+		QueryFailure: &QueryFailureFacts{Stage: QueryFailureStageProvider, Category: QueryFailureCategoryProviderTransport, Code: "QUERY_TIMEOUT",
+			Detail: "transport=timeout", Request: request, Planned: planned, Volume: &QueryVolume{BytesRead: 51, SeriesDelivered: 52}},
+	})
+	for key, want := range map[string]any{
+		"transport_detail": "transport=timeout", "request_deadline_ms": float64(31), "deadline_left_at_do_ms": float64(32),
+		"deadline_source": "attempt", "expired": "none", "error_chain": "Post <url>: read tcp: i/o timeout",
+		"error_types": "*url.Error > *net.OpError", "query_role": "ALGORITHM_DEPENDENCY", "query_dataset": "history_86400",
+		"planned_deadline_ms": float64(41), "frozen_planned_deadline_ms": float64(42), "completion_deadline_ms": float64(43),
+		"fell_back": true, "failure_bytes_read": float64(51), "failure_series_delivered": float64(52),
+	} {
+		if event[key] != want {
+			t.Fatalf("query line[%q] = %#v, want %#v; line=%#v", key, event[key], want, event)
+		}
+	}
+	slot := renderObservation(t, Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultDegraded, ReasonCode: "QUERY_TIMEOUT",
+		QueryBudget: &QueryBudgetFacts{QueryDeadlineUnixMilli: 61, RecoveryBudgetMillis: 62, QueryStartedAtUnixMilli: 63,
+			FailedRequest: request, FailedPlanned: planned},
+	})
+	for key, want := range map[string]any{
+		"budget_query_deadline_ms": float64(61), "budget_recovery_budget_ms": float64(62), "budget_query_started_at_ms": float64(63),
+		"request_deadline_ms": float64(31), "error_types": "*url.Error > *net.OpError", "planned_deadline_ms": float64(41), "query_role": "ALGORITHM_DEPENDENCY",
+	} {
+		if slot[key] != want {
+			t.Fatalf("slot line[%q] = %#v, want %#v; line=%#v", key, slot[key], want, slot)
+		}
+	}
+}

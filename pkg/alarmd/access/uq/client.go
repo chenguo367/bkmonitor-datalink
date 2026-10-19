@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 const (
@@ -286,6 +287,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	}
 	markReplayable(request)
 	started := client.now()
+	deadline, left := requestDeadline(ctx, time.Now())
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		if callerCtx.Err() != nil {
@@ -298,6 +300,9 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(execution.ClassifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
+		// Which deadline was on the request, which ran out, and what failed:
+		// a deadline error from the transport names none of them.
+		completion.RouteFacts.Attempts[0].Request = requestFacts(callerCtx, ctx, err, deadline, left)
 		return completion, nil
 	}
 	answered := client.now()
@@ -329,18 +334,24 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 		return execution.ProviderCompletion{}, err
 	}
 	bounded := &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}
+	delivered := &countingSink{sink: sink}
 	var completion execution.ProviderCompletion
 	if shared {
-		completion, err = client.decodeShared(ctx, bounded, attempt, sink)
+		completion, err = client.decodeShared(ctx, bounded, attempt, delivered)
 	} else {
-		completion, err = client.decodeQuery(ctx, bounded, attempt, sink, scanned)
+		completion, err = client.decodeQuery(ctx, bounded, attempt, delivered, scanned)
 	}
 	if scanned != nil {
 		scanned.Bytes = counted.bytes
 		scanned.Complete = err == nil
 	}
 	if err != nil {
-		return execution.ProviderCompletion{}, client.bodyFailure(callerCtx, ctx, attempt, err, counted, started, answered)
+		failure := client.bodyFailure(callerCtx, ctx, attempt, err, counted, delivered.series, started, answered)
+		var named *bodyFailureError
+		if errors.As(failure, &named) {
+			named.request = requestFacts(callerCtx, ctx, err, deadline, left)
+		}
+		return execution.ProviderCompletion{}, failure
 	}
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
@@ -370,7 +381,7 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 // completion cannot describe a body that stopped partway. A failure that
 // names itself - a response budget, a sink's own - keeps its name, and a
 // caller that gave up keeps its error, as it does before the answer.
-func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryIdentity, err error, body *countingReader, started, answered time.Time) error {
+func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryIdentity, err error, body *countingReader, series uint64, started, answered time.Time) error {
 	var declared interface{ QueryFailure() (string, string) }
 	if callerCtx.Err() != nil || errors.As(err, &declared) {
 		return err
@@ -384,7 +395,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	case broken && passed(body.failedAt):
 		detail = execution.BodyRouteDetail(execution.TransportFailureTimeout)
 		if passed(body.failedBegan) {
-			category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
+			category, code, detail = observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout, execution.DeliveryTimeoutRouteDetail
 		}
 	case broken:
 		class := execution.ClassifyTransportFailure(body.failed)
@@ -393,7 +404,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 		}
 		detail = execution.BodyRouteDetail(class)
 	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
-		category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
+		category, code, detail = observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout, execution.DeliveryTimeoutRouteDetail
 	default:
 		return err
 	}
@@ -402,7 +413,8 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	// of its body - was alarmd's own decoding and delivery.
 	local := failed.Sub(answered) - body.waited
 	return &bodyFailureError{err: err, category: category, code: code, detail: detail,
-		timing: attemptTiming(attempt.Budget, started, failed, local)}
+		timing: attemptTiming(attempt.Budget, started, failed, local),
+		volume: &observability.QueryVolume{BytesRead: body.bytes, SeriesDelivered: series}}
 }
 
 // attemptTiming splits a failed Slot query's budget where its window could
@@ -444,6 +456,21 @@ func (client *Client) unavailableCompletion(attempt queryIdentity, reason execut
 
 func providerResultRef(attempt queryIdentity) execution.ProviderResultRef {
 	return execution.ProviderResultRef(string(attempt.Spec.Digest) + ":" + strconv.FormatUint(uint64(attempt.AttemptNo), 10))
+}
+
+// countingSink counts the series a query's answer handed on before it ended,
+// so a query that failed partway says how much it had delivered.
+type countingSink struct {
+	sink   execution.ProviderSeriesSink
+	series uint64
+}
+
+func (counting *countingSink) ConsumeProviderSeries(ctx context.Context, batch execution.ProviderSeriesBatch) error {
+	err := counting.sink.ConsumeProviderSeries(ctx, batch)
+	if err == nil {
+		counting.series += batch.Delivery.Series
+	}
+	return err
 }
 
 type countingReader struct {

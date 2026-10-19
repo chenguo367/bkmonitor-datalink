@@ -1269,6 +1269,19 @@ type QueryBudgetFacts struct {
 	ReadyAtUnixMilli             int64 `json:"ready_at_ms"`
 	FrozenQueryDeadlineUnixMilli int64 `json:"frozen_query_deadline_ms"`
 	LiveQueryDeadlineUnixMilli   int64 `json:"live_query_deadline_ms"`
+	// QueryDeadlineUnixMilli is the deadline the read actually ran under: the
+	// live one for a normal round, the recovery deadline access derived for
+	// a replay, retry or probe, whose budget is RecoveryBudgetMillis.
+	QueryDeadlineUnixMilli int64 `json:"query_deadline_ms"`
+	RecoveryBudgetMillis   int64 `json:"recovery_budget_ms,omitempty"`
+	// QueryStartedAtUnixMilli is when the round's last query was sent: the
+	// gap from its classification to here is time it spent before reading.
+	QueryStartedAtUnixMilli int64 `json:"query_started_at_ms,omitempty"`
+	// FailedRequest and FailedPlanned are the round's first failed physical
+	// query's request deadline facts and own plan, so the round's line says
+	// which query was cut and under which deadline; nil when none failed.
+	FailedRequest *QueryRequestFacts `json:"-"`
+	FailedPlanned *QueryPlannedFacts `json:"-"`
 }
 
 // Where a divert decision's bound came from: the Query Group's own measured

@@ -440,3 +440,17 @@ func TestARefusalSlowerThanAnyAnswerIsTheCut(t *testing.T) {
 		t.Fatalf("ceiling %d after a 30 s refusal, want the refusal's time", got)
 	}
 }
+
+// A query whose deadline passed while alarmd was delivering the answer is
+// alarmd's own timeout: however slow, it is not where the backend cuts, and
+// it sets no ceiling and holds nothing back.
+func TestADeliveryTimeoutIsNoBackendCut(t *testing.T) {
+	pool := newCeilingPool(t, nil, 1)
+	for _, run := range slowRuns {
+		pool.round(timed(run, ""))
+	}
+	pool.round(timed(30_000, contract.ReasonQueryDeliveryTimeout))
+	if got := pool.runner.cooldownMemory.ceiling; got != 0 {
+		t.Fatalf("ceiling %d after a 30 s delivery timeout, want none", got)
+	}
+}

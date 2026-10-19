@@ -1,6 +1,9 @@
 package uq
 
-import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+)
 
 // These errors retain existing error text; only QueryFailure is safe to log.
 // They do not change provider completeness, retry or cancellation behavior.
@@ -41,10 +44,14 @@ type bodyFailureError struct {
 	code     string
 	detail   string
 	timing   *execution.AttemptTiming
+	volume   *observability.QueryVolume
+	request  *execution.RequestFacts
 }
 
-func (e *bodyFailureError) Error() string                                { return e.err.Error() }
-func (e *bodyFailureError) Unwrap() error                                { return e.err }
-func (e *bodyFailureError) QueryFailure() (string, string)               { return e.category, e.code }
-func (e *bodyFailureError) QueryFailureDetail() string                   { return e.detail }
-func (e *bodyFailureError) QueryFailureTiming() *execution.AttemptTiming { return e.timing }
+func (e *bodyFailureError) Error() string                                  { return e.err.Error() }
+func (e *bodyFailureError) Unwrap() error                                  { return e.err }
+func (e *bodyFailureError) QueryFailure() (string, string)                 { return e.category, e.code }
+func (e *bodyFailureError) QueryFailureDetail() string                     { return e.detail }
+func (e *bodyFailureError) QueryFailureTiming() *execution.AttemptTiming   { return e.timing }
+func (e *bodyFailureError) QueryFailureVolume() *observability.QueryVolume { return e.volume }
+func (e *bodyFailureError) QueryFailureRequest() *execution.RequestFacts   { return e.request }

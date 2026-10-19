@@ -55,7 +55,7 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	var admission interface{ QueryFailure() (string, string) }
 	if errors.As(err, &admission) {
 		if category, code := admission.QueryFailure(); category == observability.QueryFailureCategoryAdmission ||
-			category == observability.QueryFailureCategoryProviderTransport {
+			category == observability.QueryFailureCategoryProviderTransport || category == observability.QueryFailureCategoryDelivery {
 			reason = observability.ReasonCode(code)
 		}
 	}

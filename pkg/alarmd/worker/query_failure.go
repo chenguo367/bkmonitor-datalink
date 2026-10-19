@@ -130,6 +130,32 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 		if facts.Category == observability.QueryFailureCategoryAdmission {
 			reason = observability.ReasonCode(facts.Code)
 		}
+		// A deadline that passed while alarmd was decoding or delivering an
+		// answer that had begun: alarmd's own timeout, by its name.
+		if facts.Category == observability.QueryFailureCategoryDelivery {
+			reason = observability.ReasonCode(facts.Code)
+		}
+	}
+	// How far the answer got before the query failed.
+	var sized interface {
+		QueryFailureVolume() *observability.QueryVolume
+	}
+	if errors.As(err, &sized) {
+		facts.Volume = sized.QueryFailureVolume()
+	}
+	// Which deadline was on the request and which ran out, and the physical
+	// query's own plan.
+	var requested interface {
+		QueryFailureRequest() *execution.RequestFacts
+	}
+	if errors.As(err, &requested) {
+		facts.Request = requested.QueryFailureRequest().Observed()
+	}
+	var planned interface {
+		QueryFailurePlanned() *execution.PlannedQueryFacts
+	}
+	if errors.As(err, &planned) {
+		facts.Planned = planned.QueryFailurePlanned().Observed()
 	}
 	// A query stopped because the Slot's context was cancelled from above --
 	// the process stopping or the Query Group leaving -- says so rather than
@@ -151,7 +177,11 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 	if errors.As(err, &timed) {
 		facts.Timing = queryTimingOf(timed.QueryFailureTiming())
 	}
-	observation := observability.Observation{Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: observability.ResultFailed, Operation: observability.Operation(operation), Direction: observability.DirectionInternal, ReasonCode: reason, Duration: time.Since(started), Err: err, QueryFailure: &facts}
+	observation := observability.Observation{Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: observability.ResultFailed, Operation: observability.Operation(operation), Direction: observability.DirectionInternal, ReasonCode: reason, Duration: time.Since(started), Err: err, QueryFailure: &facts,
+		// A failed query explains itself as a lost round does: the decision
+		// that let it run as a normal round and the budget it ran under.
+		DivertDecision: observability.DivertDecisionWithBudget(ctx, observability.BudgetCaptureFromContext(ctx)),
+		QueryBudget:    queryLineBudget(ctx)}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
 }
@@ -187,6 +217,11 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion), QueryCodec: providerCodecFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
 		QueryRanges: providerRangeFacts(completion),
+	}
+	// A degraded or failed query explains itself as a lost round does.
+	if result == observability.ResultDegraded || result == observability.ResultFailed {
+		observation.DivertDecision = observability.DivertDecisionWithBudget(ctx, observability.BudgetCaptureFromContext(ctx))
+		observation.QueryBudget = queryLineBudget(ctx)
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
@@ -313,6 +348,8 @@ func providerFailureFacts(completion execution.QueryExecutionCompletion) *observ
 			if r := attempt.Rejection; r != nil {
 				facts.Rejection = &observability.QueryRejection{Class: r.Class, TraceID: r.TraceID, Excerpt: r.Excerpt}
 			}
+			facts.Request = attempt.Request.Observed()
+			facts.Planned = attempt.Planned.Observed()
 		}
 		return facts
 	}
@@ -329,6 +366,16 @@ func lastFailedAttempt(route execution.ProviderRouteFacts) *execution.RouteAttem
 		}
 	}
 	return nil
+}
+
+// queryLineBudget is the round's budget as a query line carries it: without
+// the failed query's facts, which the line's own failure facts already say.
+func queryLineBudget(ctx context.Context) *observability.QueryBudgetFacts {
+	budget := observability.BudgetCaptureFromContext(ctx).Facts()
+	if budget != nil {
+		budget.FailedRequest, budget.FailedPlanned = nil, nil
+	}
+	return budget
 }
 
 // queryTimingOf is a failed attempt's timing as its failure reports it; nil

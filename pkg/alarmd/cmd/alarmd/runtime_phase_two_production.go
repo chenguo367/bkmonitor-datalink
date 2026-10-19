@@ -2926,8 +2926,8 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		HeldBy: heldBy, GapApplySite: gapApplySite, DivertDecision: timedOutRoundDecision(ctx, observedResult, reason),
-		QueryBudget: degradedRoundBudget(observedResult, budget),
+		HeldBy: heldBy, GapApplySite: gapApplySite, DivertDecision: lostRoundDecision(ctx, observedResult, retryingAfterFailure, budget),
+		QueryBudget: lostRoundBudget(observedResult, retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
@@ -2947,24 +2947,35 @@ func (executor observedProductionSlotExecutor) Execute(
 	return result, err
 }
 
-// degradedRoundBudget is the binding query budget access resolved for a
-// round, on the completion of a round that ended degraded; nil on every
+// lostRound says a round's completion is one that lost it or failed it: it
+// ended degraded or failed, or its attempt failed and is being retried. A
+// round that succeeded, or that is only waiting for its data, is none.
+func lostRound(result observability.Result, retryingAfterFailure bool) bool {
+	return result == observability.ResultDegraded || result == observability.ResultFailed ||
+		(result == observability.ResultRetrying && retryingAfterFailure)
+}
+
+// lostRoundBudget is the binding query budget access resolved for a round,
+// on the completion of a round lost or failed for any reason; nil on every
 // other completion.
-func degradedRoundBudget(result observability.Result, budget *observability.BudgetCapture) *observability.QueryBudgetFacts {
-	if result != observability.ResultDegraded {
+func lostRoundBudget(result observability.Result, retryingAfterFailure bool, budget *observability.BudgetCapture) *observability.QueryBudgetFacts {
+	if !lostRound(result, retryingAfterFailure) {
 		return nil
 	}
 	return budget.Facts()
 }
 
-// timedOutRoundDecision is the decision that let a round run as a normal one,
-// on the completion of a round that then ended degraded for its query's
-// deadline; nil on every other completion, so normal lines stay as they were.
-func timedOutRoundDecision(ctx context.Context, result observability.Result, reason observability.ReasonCode) *observability.DivertDecisionFacts {
-	if result != observability.ResultDegraded || reason != observability.ReasonCode(contract.ReasonQueryTimeout) {
+// lostRoundDecision is the decision that let a round run as a normal one, on
+// the completion of a round that then was lost or failed for any reason; nil
+// on every other completion, so normal lines stay as they were.
+//
+// A round not judged by the divert (a replay, retry or probe) has its
+// remaining time measured against the deadline access derived for it.
+func lostRoundDecision(ctx context.Context, result observability.Result, retryingAfterFailure bool, budget *observability.BudgetCapture) *observability.DivertDecisionFacts {
+	if !lostRound(result, retryingAfterFailure) {
 		return nil
 	}
-	return observability.DivertDecisionFromContext(ctx)
+	return observability.DivertDecisionWithBudget(ctx, budget)
 }
 
 func frozenSlotTrace(

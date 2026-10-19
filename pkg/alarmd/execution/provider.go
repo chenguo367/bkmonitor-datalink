@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 type ProviderRouteRef string
@@ -197,6 +198,61 @@ type RouteAttemptFact struct {
 	// Rejection is what the backend said when it refused the query: nil
 	// where the attempt got no non-success answer.
 	Rejection *ProviderRejection `json:",omitempty"`
+	// Request is which deadline governed a failed attempt's request and which
+	// had expired when it failed; nil where the attempt did not fail on its
+	// request or body.
+	Request *RequestFacts `json:",omitempty"`
+	// Planned is the physical query's own plan: whose input it was and the
+	// deadlines access planned it under; nil until access annotates a
+	// failed attempt.
+	Planned *PlannedQueryFacts `json:",omitempty"`
+}
+
+// Which context's deadline governed a request, and which context had expired
+// when it failed (RequestFacts).
+const (
+	RequestDeadlineCaller  = "caller"
+	RequestDeadlineAttempt = "attempt"
+	RequestExpiredNone     = "none"
+	RequestExpiredBoth     = "both"
+)
+
+// RequestFacts is a failed request against its own deadline: the effective
+// deadline of the request's context at send (zero when it had none) and how
+// much of it was left just before the request was sent (-1 when there was no
+// deadline), whether the caller's context or the attempt's own deadline set
+// it, which of the two had expired when the request failed (none when
+// neither had: a transport's own timeout), the error as text, sanitized and
+// at most MaxRequestErrorBytes, and the Go types along its chain, at most
+// MaxRequestErrorTypes.
+type RequestFacts struct {
+	DeadlineUnixMilli  int64    `json:"deadline_ms"`
+	DeadlineLeftAtDoMs int64    `json:"deadline_left_at_do_ms"`
+	DeadlineSource     string   `json:"deadline_source"`
+	Expired            string   `json:"expired"`
+	ErrorChain         string   `json:"error_chain,omitempty"`
+	ErrorTypes         []string `json:"error_types,omitempty"`
+}
+
+// MaxRequestErrorBytes bounds RequestFacts.ErrorChain, and
+// MaxRequestErrorTypes RequestFacts.ErrorTypes.
+const (
+	MaxRequestErrorBytes = 300
+	MaxRequestErrorTypes = 8
+)
+
+// PlannedQueryFacts is a physical query as access planned it: the role and
+// dataset of the input it serves (the primary one when it serves several),
+// its planned deadline, the deadline under the frozen reserve, the earliest
+// completion deadline of its consumers, and whether the live reserve left it
+// no time at its send so the frozen deadline replaced the planned one.
+type PlannedQueryFacts struct {
+	Role                        string `json:"role"`
+	Dataset                     string `json:"dataset"`
+	DeadlineUnixMilli           int64  `json:"deadline_ms"`
+	FrozenDeadlineUnixMilli     int64  `json:"frozen_deadline_ms"`
+	CompletionDeadlineUnixMilli int64  `json:"completion_deadline_ms"`
+	FellBack                    bool   `json:"fell_back"`
 }
 
 // ProviderRejection is a non-success answer as it may be kept: the class
@@ -488,4 +544,24 @@ func (evidence *PartialEvidence) Validate() error {
 		return errors.New("alarmd execution: invalid typed PARTIAL evidence")
 	}
 	return nil
+}
+
+// Observed is request as a line renders it; nil for nil.
+func (request *RequestFacts) Observed() *observability.QueryRequestFacts {
+	if request == nil {
+		return nil
+	}
+	return &observability.QueryRequestFacts{DeadlineUnixMilli: request.DeadlineUnixMilli, DeadlineLeftAtDoMs: request.DeadlineLeftAtDoMs,
+		DeadlineSource: request.DeadlineSource, Expired: request.Expired, ErrorChain: request.ErrorChain,
+		ErrorTypes: append([]string(nil), request.ErrorTypes...)}
+}
+
+// Observed is planned as a line renders it; nil for nil.
+func (planned *PlannedQueryFacts) Observed() *observability.QueryPlannedFacts {
+	if planned == nil {
+		return nil
+	}
+	return &observability.QueryPlannedFacts{Role: planned.Role, Dataset: planned.Dataset, DeadlineUnixMilli: planned.DeadlineUnixMilli,
+		FrozenDeadlineUnixMilli: planned.FrozenDeadlineUnixMilli, CompletionDeadlineUnixMilli: planned.CompletionDeadlineUnixMilli,
+		FellBack: planned.FellBack}
 }

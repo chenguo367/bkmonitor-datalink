@@ -331,6 +331,9 @@ var failureFacets = map[string]facets{
 	"BUDGET_GAP_MUTATIONS":   {StageEvaluate, ClassCapacity, DependencyNone},
 	"BUDGET_OTHER":           {StageEvaluate, ClassCapacity, DependencyNone},
 	"QUERY_PERMIT_DEADLINE":  {StageQuery, ClassTimeout, DependencyNone},
+	// The backend answered and the deadline passed while this deployment
+	// was decoding and delivering it: a timeout of its own, no dependency's.
+	"QUERY_DELIVERY_TIMEOUT": {StageQuery, ClassTimeout, DependencyNone},
 
 	// Budgets the compiler applies to a definition.
 	"PLAN_BUDGET_EXCEEDED":  {StageConfig, ClassConfig, DependencyNone},
@@ -438,7 +441,7 @@ var failureFacets = map[string]facets{
 // wait that ended at the query deadline. They have a reading here and no
 // row in codeChecks, and the test that holds the two tables together knows
 // them by name.
-var failureRefCodes = []string{"EVALUATION_FAILED", "GAP_SCOPE_REASON_CONFLICT", "QUERY_PERMIT_DEADLINE"}
+var failureRefCodes = []string{"EVALUATION_FAILED", "GAP_SCOPE_REASON_CONFLICT", "QUERY_PERMIT_DEADLINE", "QUERY_DELIVERY_TIMEOUT"}
 
 // categoryStages reads the step from a query failure's category when no
 // code named it: the categories are the pipeline's own words for where the
@@ -447,6 +450,7 @@ var categoryStages = map[string]Stage{
 	"source_backend":      StageQuery,
 	"provider_transport":  StageQuery,
 	"admission":           StageQuery,
+	"delivery":            StageQuery,
 	"series_identity":     StageEvaluate,
 	"named_input":         StageEvaluate,
 	"completion_contract": StageEvaluate,

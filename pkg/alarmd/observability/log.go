@@ -544,6 +544,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				attributes = append(attributes, slog.String("failure_provider_trace_id", r.TraceID))
 			}
 		}
+		if f.Request != nil && f.Detail != "" {
+			// The request's own failure: its transport or body detail beside
+			// which deadline was on it.
+			attributes = append(attributes, slog.String("transport_detail", f.Detail))
+		}
+		attributes = appendQueryRequestAttributes(attributes, f.Request)
+		attributes = appendQueryPlannedAttributes(attributes, f.Planned)
+		if volume := f.Volume; volume != nil {
+			attributes = append(attributes, slog.Uint64("failure_bytes_read", volume.BytesRead),
+				slog.Uint64("failure_series_delivered", volume.SeriesDelivered))
+		}
 		if timing := f.Timing; timing != nil {
 			attributes = append(attributes, slog.Int64("failure_settle_ms", timing.SettleMillis), slog.Int64("failure_start_late_ms", timing.StartLateMillis),
 				slog.Int64("failure_budget_ms", timing.BudgetMillis), slog.Int64("failure_elapsed_ms", timing.ElapsedMillis),
@@ -1338,20 +1349,54 @@ func appendSlotCompletionKind(attributes []slog.Attr, kind string) []slog.Attr {
 	return append(attributes, slog.String("completion_kind", kind))
 }
 
+// appendQueryRequestAttributes writes which deadline governed a failed
+// request and which had expired, as flat keys.
+func appendQueryRequestAttributes(attributes []slog.Attr, request *QueryRequestFacts) []slog.Attr {
+	if request == nil {
+		return attributes
+	}
+	attributes = append(attributes, slog.Int64("request_deadline_ms", request.DeadlineUnixMilli),
+		slog.Int64("deadline_left_at_do_ms", request.DeadlineLeftAtDoMs),
+		slog.String("deadline_source", request.DeadlineSource), slog.String("expired", request.Expired))
+	if request.ErrorChain != "" {
+		attributes = append(attributes, slog.String("error_chain", request.ErrorChain))
+	}
+	if len(request.ErrorTypes) > 0 {
+		attributes = append(attributes, slog.String("error_types", strings.Join(request.ErrorTypes, " > ")))
+	}
+	return attributes
+}
+
+// appendQueryPlannedAttributes writes a failed physical query's own plan as
+// flat keys.
+func appendQueryPlannedAttributes(attributes []slog.Attr, planned *QueryPlannedFacts) []slog.Attr {
+	if planned == nil {
+		return attributes
+	}
+	return append(attributes, slog.String("query_role", planned.Role), slog.String("query_dataset", planned.Dataset),
+		slog.Int64("planned_deadline_ms", planned.DeadlineUnixMilli), slog.Int64("frozen_planned_deadline_ms", planned.FrozenDeadlineUnixMilli),
+		slog.Int64("completion_deadline_ms", planned.CompletionDeadlineUnixMilli), slog.Bool("fell_back", planned.FellBack))
+}
+
 // appendQueryBudgetAttributes writes a degraded round's binding query budget
 // as flat keys.
 func appendQueryBudgetAttributes(attributes []slog.Attr, budget *QueryBudgetFacts) []slog.Attr {
 	if budget == nil {
 		return attributes
 	}
-	return append(attributes,
+	attributes = append(attributes,
 		slog.Int64("budget_consumer_deadline_ms", budget.ConsumerDeadlineUnixMilli),
 		slog.Int64("budget_frozen_reserve_ms", budget.FrozenReserveMillis),
 		slog.Int64("budget_live_reserve_ms", budget.LiveReserveMillis),
 		slog.Int64("budget_ready_at_ms", budget.ReadyAtUnixMilli),
 		slog.Int64("budget_frozen_query_deadline_ms", budget.FrozenQueryDeadlineUnixMilli),
 		slog.Int64("budget_live_query_deadline_ms", budget.LiveQueryDeadlineUnixMilli),
+		slog.Int64("budget_query_deadline_ms", budget.QueryDeadlineUnixMilli),
+		slog.Int64("budget_recovery_budget_ms", budget.RecoveryBudgetMillis),
+		slog.Int64("budget_query_started_at_ms", budget.QueryStartedAtUnixMilli),
 	)
+	attributes = appendQueryRequestAttributes(attributes, budget.FailedRequest)
+	return appendQueryPlannedAttributes(attributes, budget.FailedPlanned)
 }
 
 // appendDivertDecisionAttributes writes the decision that let a timed-out

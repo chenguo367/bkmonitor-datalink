@@ -57,6 +57,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			err:  fmt.Errorf("alarmd worker: query: %w", providerTimeout{}),
 			want: observability.ReasonCode(contract.ReasonQueryTimeout),
 		},
+		{
+			name: "the query's deadline passed while alarmd delivered its answer",
+			err:  fmt.Errorf("alarmd worker: query: %w", deliveryTimeout{}),
+			want: observability.ReasonCode(contract.ReasonQueryDeliveryTimeout),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reason, site := slotFailureReason(test.err)
@@ -127,4 +132,11 @@ type providerTimeout struct{}
 func (providerTimeout) Error() string { return "execute request: context canceled" }
 func (providerTimeout) QueryFailure() (string, string) {
 	return observability.QueryFailureCategoryProviderTransport, contract.ReasonQueryTimeout
+}
+
+type deliveryTimeout struct{}
+
+func (deliveryTimeout) Error() string { return "decode answer: context deadline exceeded" }
+func (deliveryTimeout) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout
 }

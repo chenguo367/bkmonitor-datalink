@@ -88,3 +88,34 @@ func TestEveryPlansQueryBudgetIsCapturedForTheRound(t *testing.T) {
 		}
 	}
 }
+
+// A replay's round budget is the one it runs under: the recovery deadline,
+// counted from its arrival, and the recovery budget that makes it, beside the
+// frozen and live deadlines of its first attempt; and when its read was sent.
+func TestAReplaysRoundBudgetIsItsRecoveryDeadline(t *testing.T) {
+	ref, frozen := frozenExecution(t)
+	frozen.DuePlans[0].ScheduleSpec = execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Timezone: "UTC", CompletionDeadlineOffsetSeconds: 60}
+	eval := int64(ref.Slot.EvaluationTime) * 1000
+	frozen.DuePlans[0].CompletionDeadlineUnixMilli = eval + 60000
+	frozen.Requirements[0].Consumers[0].ConsumerDeadlineUnixMilli = eval + 60000
+	ref = bindFrozenDueDigest(t, ref, frozen)
+	consumer := frozen.Requirements[0].Consumers[0]
+	arrived := time.UnixMilli(eval + 300_000)
+	source, _ := NewSource(staticFrozenPlan{plan: frozen}, &fakeProvider{}, &recordingQueryPermits{},
+		Config{MinReadyDelay: 30 * time.Second, Now: func() time.Time { return arrived }})
+	source.wait = func(context.Context, time.Duration) error { return nil }
+	ctx, capture := observability.ContextWithBudgetCapture(context.Background())
+	_, _ = source.Execute(ctx, execution.QueryExecutionRequest{Contract: ref, Operation: execution.OperationReplay, AttemptNo: 2}, &recordingConsumer{})
+	budget := capture.Facts()
+	if budget == nil {
+		t.Fatal("a replay's budget was not captured")
+	}
+	recovery := 60000 - consumer.DownstreamExecutionReserveMilliSec
+	if budget.RecoveryBudgetMillis != recovery || budget.QueryDeadlineUnixMilli != arrived.UnixMilli()+recovery ||
+		budget.FrozenQueryDeadlineUnixMilli != eval+60000-consumer.DownstreamExecutionReserveMilliSec {
+		t.Fatalf("budget %+v, want the recovery deadline %d and budget %d", budget, arrived.UnixMilli()+recovery, recovery)
+	}
+	if budget.QueryStartedAtUnixMilli != arrived.UnixMilli() {
+		t.Fatalf("query started at %d, want the send at %d", budget.QueryStartedAtUnixMilli, arrived.UnixMilli())
+	}
+}

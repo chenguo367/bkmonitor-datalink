@@ -132,6 +132,7 @@ func MetricFailureCategory(category string) string {
 		observability.QueryFailureCategoryProviderTransport,
 		observability.QueryFailureCategoryAdmission,
 		observability.QueryFailureCategoryEvaluation,
+		observability.QueryFailureCategoryDelivery,
 		observability.QueryFailureCategoryOther:
 		return category
 	default:
