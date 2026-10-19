@@ -10,6 +10,7 @@
 package uq
 
 import (
+	"context"
 	"regexp"
 	"slices"
 
@@ -37,7 +38,7 @@ import (
 // applications, would change the join.
 const apmAppDimension = "app_name"
 
-var apmTable = regexp.MustCompile(`^(?:space_)?\d+_bkapm_(?:metric|trace)_[A-Za-z0-9_-]+(?:\.__default__)?$`)
+var apmTable = regexp.MustCompile(`^(?:space_)?\d+_bkapm_(metric|trace)_[A-Za-z0-9_-]+(?:\.__default__)?$`)
 
 // carriesAPMApp says whether spec's request asks for the APM application.
 func carriesAPMApp(spec execution.PhysicalQuerySpec) bool {
@@ -77,4 +78,92 @@ func withAPMApp(clause execution.QueryClause) execution.QueryClause {
 	}
 	clause.Functions = functions
 	return clause
+}
+
+// APMCarriedResponse is one response read with the APM application carried:
+// the kind of APM table (metric or trace), the series and bytes it held
+// before it was handed on, and whether an identity came back more than once.
+type APMCarriedResponse struct {
+	Table         string
+	Series, Bytes uint64
+	NotUnique     bool
+}
+
+// APM table kinds, the label APMCarriedResponse reports them under.
+const (
+	APMTableMetric = "metric"
+	APMTableTrace  = "trace"
+)
+
+// WithAPMObserver hears every response read with the APM application
+// carried; nil keeps none.
+func (client *Client) WithAPMObserver(observe func(APMCarriedResponse)) *Client {
+	if client != nil {
+		client.observeAPM = observe
+	}
+	return client
+}
+
+// executeCarryingAPMApp reads a query with the APM application carried and
+// hands its series on only once it has checked the premise the carry rests
+// on: that the extra key splits nothing. Each identity must come back once.
+// An identity that comes back twice is a table holding two applications;
+// grouping by app_name has then split one series into two, each with part
+// of the data, and evaluating them would be evaluating values the strategy
+// never asked for. The response is discarded, said (NotUnique), and the
+// query read again exactly as the strategy asks it, without the
+// application: the values are the ones the strategy always had and the
+// records carry no app_name, so no APM object is named from a guess either.
+//
+// The series wait for the whole response, bounded by the response limits
+// every read has; APMCarriedResponse reports what that held.
+func (client *Client) executeCarryingAPMApp(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+	held := &apmHeldSeries{seen: map[string]struct{}{}}
+	completion, err := client.executeRequest(callerCtx, ctx, attempt, held, nil)
+	if client.observeAPM != nil {
+		client.observeAPM(APMCarriedResponse{Table: apmTableKind(attempt.Spec), Series: uint64(len(held.batches)), Bytes: held.bytes, NotUnique: held.repeated})
+	}
+	if err != nil {
+		return completion, err
+	}
+	if held.repeated {
+		attempt.NoAppCarry = true
+		return client.executeRequest(callerCtx, ctx, attempt, sink, nil)
+	}
+	for _, batch := range held.batches {
+		if err := sink.ConsumeProviderSeries(ctx, batch); err != nil {
+			return execution.ProviderCompletion{}, err
+		}
+	}
+	return completion, nil
+}
+
+func apmTableKind(spec execution.PhysicalQuerySpec) string {
+	if len(spec.PlanFacts.QueryList) > 0 {
+		if match := apmTable.FindStringSubmatch(spec.PlanFacts.QueryList[0].TableID); len(match) == 2 && match[1] == APMTableTrace {
+			return APMTableTrace
+		}
+	}
+	return APMTableMetric
+}
+
+// apmHeldSeries keeps a carried response's series until it is known whole.
+type apmHeldSeries struct {
+	batches  []execution.ProviderSeriesBatch
+	seen     map[string]struct{}
+	bytes    uint64
+	repeated bool
+}
+
+func (held *apmHeldSeries) ConsumeProviderSeries(_ context.Context, batch execution.ProviderSeriesBatch) error {
+	held.bytes += batch.Delivery.Bytes
+	if records := batch.Dataset.Records(); len(records) > 0 {
+		identity := records[0].DimensionIdentity.Digest
+		if _, again := held.seen[identity]; again {
+			held.repeated = true
+		}
+		held.seen[identity] = struct{}{}
+	}
+	held.batches = append(held.batches, batch)
+	return nil
 }

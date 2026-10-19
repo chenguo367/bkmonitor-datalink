@@ -467,6 +467,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
 	expected["alarmd_catalog_strategy_returned_after_removal_total"] = "variableLabels: {}"
 	expected["alarmd_leader_forward_duration_seconds"] = "variableLabels: {route,result}"
+	expected["alarmd_apm_app_carried_responses_total"] = "variableLabels: {table,outcome}"
+	expected["alarmd_apm_app_carried_response_bytes"] = "variableLabels: {table}"
 	expected["alarmd_control_source_mode"] = "variableLabels: {role,mode}"
 	expected["alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
 	expected["alarmd_leader_rounds_total"] = "variableLabels: {result}"
@@ -1071,6 +1073,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
 	bounds[fqName("catalog_strategy_returned_after_removal_total")] = 1
 	bounds[fqName("leader_forward_duration_seconds")] = histogramSeries(len(LeaderForwardRoutes)*len(LeaderForwardResults), len(leaderForwardBuckets))
+	bounds[fqName("apm_app_carried_responses_total")] = len(APMCarriedTables) * len(APMCarriedOutcomes)
+	bounds[fqName("apm_app_carried_response_bytes")] = histogramSeries(len(APMCarriedTables), 10)
 	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
@@ -1333,6 +1337,45 @@ func TestLeaderForwardSeriesExistFromTheStartAndTakeOnlyTheClosedWords(t *testin
 	}
 	if len(after) != len(start) || total != 1 || after["result=timeout,route=diagnosis,"] != 1 {
 		t.Fatalf("after = %v, want only the closed-word hop recorded and no new series", after)
+	}
+}
+
+// A carried APM response is counted by table kind and outcome, its bytes
+// observed; the series exist from the start, and an unknown kind is dropped.
+func TestAPMCarriedResponsesAreCountedByKindAndOutcome(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	read := func() (map[string]float64, uint64) {
+		families, err := r.Gatherer().Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts, samples := map[string]float64{}, uint64(0)
+		for _, family := range families {
+			for _, m := range family.GetMetric() {
+				key := ""
+				for _, label := range m.GetLabel() {
+					key += label.GetName() + "=" + label.GetValue() + ","
+				}
+				switch family.GetName() {
+				case "alarmd_apm_app_carried_responses_total":
+					counts[key] = m.GetCounter().GetValue()
+				case "alarmd_apm_app_carried_response_bytes":
+					samples += m.GetHistogram().GetSampleCount()
+				}
+			}
+		}
+		return counts, samples
+	}
+	start, _ := read()
+	if len(start) != len(APMCarriedTables)*len(APMCarriedOutcomes) {
+		t.Fatalf("series at construction %v", start)
+	}
+	r.ObserveAPMCarriedResponse("metric", false, 4096)
+	r.ObserveAPMCarriedResponse("metric", true, 8192)
+	r.ObserveAPMCarriedResponse("logs", false, 1)
+	after, samples := read()
+	if after["outcome=unique,table=metric,"] != 1 || after["outcome=not_unique,table=metric,"] != 1 || samples != 2 || len(after) != len(start) {
+		t.Fatalf("after %v samples %d", after, samples)
 	}
 }
 

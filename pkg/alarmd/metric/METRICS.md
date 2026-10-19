@@ -153,6 +153,18 @@ Labels: `algorithm_family`, `input_name`, `dependency_point`, `result`
 
 Named algorithm input completion by fixed source family, input, dependency point and result.
 
+## alarmd_apm_app_carried_response_bytes
+
+Labels: `table`
+
+Bytes of each query response read with the APM application carried, held whole before its series were handed on, by table kind: the cost of checking that the carry split nothing.
+
+## alarmd_apm_app_carried_responses_total
+
+Labels: `table`, `outcome`
+
+Query responses read with the APM application carried (app_name added to the group-by of a query whose clauses all read one APM table), by table kind (metric or trace) and outcome: unique, every identity came back once and the series were handed on; not_unique, an identity came back more than once -- a table holding two applications, whose extra key split one series -- so the response was discarded and the query read again without the application. not_unique above zero is the premise the carry rests on not holding.
+
 ## alarmd_assignment_index_confirm_total
 
 Labels: `result`

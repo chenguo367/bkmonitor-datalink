@@ -509,6 +509,9 @@ func openProductionPhaseTwoBundleAssembly(
 		return nil, err
 	}
 	queryClient.WithNow(external.QueryClock)
+	queryClient.WithAPMObserver(func(response accessuq.APMCarriedResponse) {
+		recorder.ObserveAPMCarriedResponse(response.Table, response.NotUnique, response.Bytes)
+	})
 	flights, err := scheduler.NewFlightCoordinatorWithRecovery(recoveryLimits, external.Now, observer)
 	if err != nil {
 		return nil, err

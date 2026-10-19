@@ -103,6 +103,9 @@ type Client struct {
 	querySource string
 	limits      Limits
 	now         func() time.Time
+	// observeAPM hears each response read with the APM application carried
+	// (WithAPMObserver); nil hears nothing.
+	observeAPM func(APMCarriedResponse)
 }
 
 // markReplayable lets the transport send a query again, once, when the
@@ -250,6 +253,13 @@ func buildWireRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (
 }
 
 func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (execution.ProviderCompletion, error) {
+	if scanned != nil || attempt.NoAppCarry || !carriesAPMApp(attempt.Spec) {
+		return client.executeRequest(callerCtx, ctx, attempt, sink, scanned)
+	}
+	return client.executeCarryingAPMApp(callerCtx, ctx, attempt, sink)
+}
+
+func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (execution.ProviderCompletion, error) {
 	path, encoded, err := buildWireRequestCarrying(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry)
 	if err != nil {
 		return execution.ProviderCompletion{}, err

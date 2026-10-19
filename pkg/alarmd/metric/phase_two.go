@@ -167,6 +167,8 @@ type phaseTwoMetrics struct {
 	targetScopeClose                *targetScopeCloseCollector
 	linkdConsole                    *linkdConsoleCollector
 	controlSourceRounds             *prometheus.CounterVec
+	apmCarried                      *prometheus.CounterVec
+	apmCarriedBytes                 *prometheus.HistogramVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
 	controlFactsWrites              *prometheus.CounterVec
@@ -1359,6 +1361,26 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.leaderForward.WithLabelValues(route, result)
 		}
 	}
+	metrics.apmCarried = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "apm_app_carried_responses_total",
+		Help: "Query responses read with the APM application carried (app_name added to the group-by of a query whose " +
+			"clauses all read one APM table), by table kind (metric or trace) and outcome: unique, every identity came back " +
+			"once and the series were handed on; not_unique, an identity came back more than once -- a table holding two " +
+			"applications, whose extra key split one series -- so the response was discarded and the query read again " +
+			"without the application. not_unique above zero is the premise the carry rests on not holding.",
+	}, []string{"table", "outcome"})
+	metrics.apmCarriedBytes = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Subsystem: metricSubsystem, Name: "apm_app_carried_response_bytes",
+		Help: "Bytes of each query response read with the APM application carried, held whole before its series were " +
+			"handed on, by table kind: the cost of checking that the carry split nothing.",
+		Buckets: prometheus.ExponentialBuckets(1024, 4, 10),
+	}, []string{"table"})
+	for _, table := range APMCarriedTables {
+		metrics.apmCarriedBytes.WithLabelValues(table)
+		for _, outcome := range APMCarriedOutcomes {
+			metrics.apmCarried.WithLabelValues(table, outcome)
+		}
+	}
 	metrics.controlSourceRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "control_source_refresh_total",
 		Help: "Refresh rounds of the control plane's strategy source on this process, every round, by outcome " +
@@ -1773,7 +1795,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2713,6 +2735,28 @@ func (r *Recorder) AddStrategiesReturnedAfterRemoval(n int) {
 // ObserveLeaderForward records one hop a replica handed to the Control
 // Leader, by route and result from the closed lists; a value outside them
 // is dropped rather than creating a series.
+// APMCarriedTables and APMCarriedOutcomes are the closed label values of
+// apm_app_carried_responses_total.
+var (
+	APMCarriedTables   = []string{"metric", "trace"}
+	APMCarriedOutcomes = []string{"unique", "not_unique"}
+)
+
+// ObserveAPMCarriedResponse records one response read with the APM
+// application carried: its table kind, whether an identity repeated, and
+// the bytes held before its series were handed on.
+func (r *Recorder) ObserveAPMCarriedResponse(table string, notUnique bool, bytes uint64) {
+	if r == nil || r.phaseTwo.apmCarried == nil || !slices.Contains(APMCarriedTables, table) {
+		return
+	}
+	outcome := "unique"
+	if notUnique {
+		outcome = "not_unique"
+	}
+	r.phaseTwo.apmCarried.WithLabelValues(table, outcome).Inc()
+	r.phaseTwo.apmCarriedBytes.WithLabelValues(table).Observe(float64(bytes))
+}
+
 func (r *Recorder) ObserveLeaderForward(route, result string, duration time.Duration) {
 	if r == nil || r.phaseTwo.leaderForward == nil || !slices.Contains(LeaderForwardRoutes, route) || !slices.Contains(LeaderForwardResults, result) {
 		return

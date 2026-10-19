@@ -10,10 +10,15 @@
 package uq
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -108,5 +113,96 @@ func TestACarriedApplicationLeavesTheSeriesIdentityAsItWas(t *testing.T) {
 	}
 	if string(b[0].Dimensions["app_name"]) != `"cross-bank-trade"` {
 		t.Fatalf("carried record dimensions %v, want app_name as written", b[0].Dimensions)
+	}
+}
+
+// apmServer answers an APM query: carried when the request groups by
+// app_name, plain when it does not, and counts each kind.
+func apmServer(t *testing.T, carried, plain string) (*httptest.Server, *[]bool) {
+	t.Helper()
+	var asked []bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		withApp := strings.Contains(string(body), `"app_name"`)
+		asked = append(asked, withApp)
+		writer.Header().Set("Content-Type", "application/json")
+		answer := plain
+		if withApp {
+			answer = carried
+		}
+		_, _ = writer.Write([]byte(`{"series":[` + answer + `],"status":null,"trace_id":"t","is_partial":false,"result_table_id":["2_bkapm_metric_cross_bank_trade"]}`))
+	}))
+	t.Cleanup(server.Close)
+	return server, &asked
+}
+
+func apmSeries(app string, value string) string {
+	keys, values := `"service_name"`, `"transfer"`
+	if app != "" {
+		keys, values = keys+`,"app_name"`, values+`,"`+app+`"`
+	}
+	return `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],"group_keys":[` + keys + `],"group_values":[` + values + `],"values":[[1700123460000,` + value + `]]}`
+}
+
+func apmAttempt(t *testing.T) execution.QueryAttempt {
+	return execution.QueryAttempt{Spec: compiledSpec(t, apmConfig), Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: 1_700_124_000},
+		Operation: execution.OperationNormal, AttemptNo: 1, DeadlineUnixMilli: time.Now().Add(time.Minute).UnixMilli()}
+}
+
+// A carried response is handed on whole once every identity came back once:
+// one request, its series carrying the application, and the response's
+// size reported.
+func TestACarriedResponseIsHandedOnWhenNothingSplit(t *testing.T) {
+	server, asked := apmServer(t, apmSeries("cross-bank-trade", "7"), apmSeries("", "7"))
+	client, err := NewClient(server.URL, "alarmd", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var heard []APMCarriedResponse
+	client.WithAPMObserver(func(response APMCarriedResponse) { heard = append(heard, response) })
+	sink := &collectingSink{}
+	if _, err := client.Execute(context.Background(), apmAttempt(t), sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(*asked) != 1 || !(*asked)[0] || len(sink.batches) != 1 {
+		t.Fatalf("asked %v, batches %d, want one carried request handed on", *asked, len(sink.batches))
+	}
+	if record := sink.batches[0].Dataset.Records()[0]; string(record.Dimensions["app_name"]) != `"cross-bank-trade"` {
+		t.Fatalf("record dimensions %v", record.Dimensions)
+	}
+	if len(heard) != 1 || heard[0].NotUnique || heard[0].Series != 1 || heard[0].Bytes == 0 || heard[0].Table != APMTableMetric {
+		t.Fatalf("heard %+v", heard)
+	}
+}
+
+// An identity that comes back twice is a table holding two applications, and
+// the extra key has split one series into parts. Nothing of that response is
+// handed on: it is said, and the query read again without the application,
+// so detection sees the strategy's own series and no application is named.
+func TestASplitResponseIsReadAgainWithoutTheApplication(t *testing.T) {
+	server, asked := apmServer(t, apmSeries("cross-bank-trade", "3")+","+apmSeries("cross-bank-trade-old", "4"), apmSeries("", "7"))
+	client, err := NewClient(server.URL, "alarmd", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var heard []APMCarriedResponse
+	client.WithAPMObserver(func(response APMCarriedResponse) { heard = append(heard, response) })
+	sink := &collectingSink{}
+	completion, err := client.Execute(context.Background(), apmAttempt(t), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*asked) != 2 || !(*asked)[0] || (*asked)[1] {
+		t.Fatalf("asked %v, want a carried read then one without", *asked)
+	}
+	if len(sink.batches) != 1 {
+		t.Fatalf("handed on %d batches, want only the plain read's", len(sink.batches))
+	}
+	record := sink.batches[0].Dataset.Records()[0]
+	if _, carried := record.Dimensions["app_name"]; carried || string(record.Values["value"]) != "7" {
+		t.Fatalf("record %v %v, want the plain series' value and no application", record.Dimensions, record.Values)
+	}
+	if completion.Delivery.Series != 1 || len(heard) != 1 || !heard[0].NotUnique || heard[0].Series != 2 {
+		t.Fatalf("completion %+v heard %+v", completion.Delivery, heard)
 	}
 }
