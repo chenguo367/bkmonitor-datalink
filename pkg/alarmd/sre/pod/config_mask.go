@@ -151,9 +151,15 @@ func (m *configMasker) value(key, text string) string {
 	if !strings.ContainsAny(text, "\n") {
 		return m.leaf(key, text)
 	}
-	if pemBlock.MatchString(text) {
+	// A value that is a PEM block, or a bundle of them, is key material
+	// whole.
+	if strings.HasPrefix(strings.TrimSpace(text), "-----BEGIN ") {
 		return m.mask(text)
 	}
+	// A PEM block inside a document is one scalar, masked by the leaf rule
+	// as key material whatever it is called; in other text its lines are
+	// masked from BEGIN to END (lines). Neither masks the plain
+	// configuration around it.
 	if shown, ok := m.document(text); ok {
 		return shown
 	}
@@ -237,11 +243,27 @@ func (m *configMasker) scalar(node *yaml.Node, name string) {
 
 // lines is text that is not a document, line by line: a line of key and
 // value decided as a leaf, a blank kept, and any other line kept only when
-// the whole of it is plain and no word in it names a credential.
+// the whole of it is plain and no word in it names a credential. Every line
+// of a PEM block, from its BEGIN line to its END line (or the end of the
+// text), is masked: the block's last line can be a short run that reads as
+// plain on its own.
 func (m *configMasker) lines(text string) string {
 	lines := strings.Split(text, "\n")
+	inPEM := false
 	for index, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if pemBlock.MatchString(line) {
+			inPEM = true
+		}
+		if inPEM {
+			if trimmed != "" {
+				lines[index] = m.mask(line)
+			}
+			if strings.Contains(line, "-----END ") {
+				inPEM = false
+			}
+			continue
+		}
 		if trimmed == "" {
 			continue
 		}
