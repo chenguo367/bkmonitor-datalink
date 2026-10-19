@@ -310,6 +310,9 @@ func providerFailureFacts(completion execution.QueryExecutionCompletion) *observ
 			facts.Detail = attempt.Detail
 			facts.HTTPStatus = attempt.HTTPStatus
 			facts.Timing = queryTimingOf(attempt.Timing)
+			if r := attempt.Rejection; r != nil {
+				facts.Rejection = &observability.QueryRejection{Class: r.Class, TraceID: r.TraceID, Excerpt: r.Excerpt}
+			}
 		}
 		return facts
 	}

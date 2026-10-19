@@ -426,3 +426,17 @@ func TestAReplayTheReasonDoesNotCoverSpendsNothingOfThePool(t *testing.T) {
 		t.Fatalf("a held replay refused for the table: decides %t, read %+v; want it to decide on the refusal", decides, read)
 	}
 }
+
+// A storage that gives up on a query too large for it answers with a client
+// error: a refusal slower than every answer is the backend's cut as an
+// unavailable answer is, and sets the ceiling the same way.
+func TestARefusalSlowerThanAnyAnswerIsTheCut(t *testing.T) {
+	pool := newCeilingPool(t, nil, 1)
+	for _, run := range slowRuns {
+		pool.round(timed(run, ""))
+	}
+	pool.round(timed(30_000, contract.ReasonQueryRejected))
+	if got := pool.runner.cooldownMemory.ceiling; got != 30_000 {
+		t.Fatalf("ceiling %d after a 30 s refusal, want the refusal's time", got)
+	}
+}

@@ -1,5 +1,7 @@
 package observability
 
+import "strings"
+
 // QueryFailureFacts is log-only: no raw error, query, URL or dimension values.
 // Stage names the actual Coordinator boundary, not an inferred root cause.
 // Code is a stable machine code drawn from a bounded grammar (UQ status codes,
@@ -15,6 +17,42 @@ type QueryFailureFacts struct {
 	// Timing is a failed provider query read against its budget; nil where
 	// the attempt did not measure it. See QueryTiming.
 	Timing *QueryTiming
+	// Rejection is what the provider said when it refused the query; nil
+	// where the failure got no non-success answer. Its class and trace id
+	// are log fields; its excerpt is kept with the Query Group's last
+	// failure for an operator to read and is never written to a log line.
+	Rejection *QueryRejection
+}
+
+// QueryRejection is a provider's non-success answer as alarmd keeps it: a
+// bounded class (QUERY_FAILURE code grammar), the provider's trace id (32
+// lower-case hex), and the sanitized start of its body, at most
+// MaxRejectionExcerptBytes.
+type QueryRejection struct {
+	Class   string `json:"class"`
+	TraceID string `json:"trace_id,omitempty"`
+	Excerpt string `json:"excerpt,omitempty"`
+}
+
+// MaxRejectionExcerptBytes bounds a kept excerpt; the provider client
+// already cuts it shorter (with its "..." marker).
+const MaxRejectionExcerptBytes = 400
+
+func normalizeQueryRejection(input *QueryRejection) *QueryRejection {
+	if input == nil {
+		return nil
+	}
+	r := *input
+	if !ValidQueryFailureCode(r.Class) {
+		r.Class = QueryFailureCodeOther
+	}
+	if len(r.TraceID) != 32 || strings.Trim(r.TraceID, "0123456789abcdef") != "" {
+		r.TraceID = ""
+	}
+	if len(r.Excerpt) > MaxRejectionExcerptBytes {
+		r.Excerpt = ""
+	}
+	return &r
 }
 
 // QueryTiming splits a Slot query's budget - from its Slot's evaluation
@@ -190,5 +228,6 @@ func normalizeQueryFailure(component Component, stage Stage, input *QueryFailure
 	if f.HTTPStatus < 100 || f.HTTPStatus > 599 {
 		f.HTTPStatus = 0
 	}
+	f.Rejection = normalizeQueryRejection(f.Rejection)
 	return &f
 }

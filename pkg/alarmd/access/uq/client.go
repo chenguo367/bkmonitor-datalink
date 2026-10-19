@@ -172,7 +172,8 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		SharedSchema: attempt.Spec.PlanFacts.PromQL == nil &&
 			attempt.Spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1",
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
-			DeadlineUnixMilli: attempt.DeadlineUnixMilli}}, sink, nil)
+			DeadlineUnixMilli: attempt.DeadlineUnixMilli},
+		Strategies: attempt.Strategies}, sink, nil)
 }
 
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
@@ -187,6 +188,8 @@ type queryIdentity struct {
 	// NoAppCarry asks the provider without the APM application a query
 	// would otherwise carry (carriesAPMApp).
 	NoAppCarry bool
+	// Strategies are the strategy ids the query serves (headerStrategy).
+	Strategies []string
 }
 
 // queryBudget is a Slot query's budget as its attempt carries it: where it
@@ -276,6 +279,11 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
 		request.Header.Set(name, value)
 	}
+	traceParent, traceID := newTraceParent()
+	request.Header.Set(headerTraceParent, traceParent)
+	if strategies := strategyHeader(attempt.Strategies); strategies != "" {
+		request.Header.Set(headerStrategy, strategies)
+	}
 	markReplayable(request)
 	started := client.now()
 	response, err := client.httpClient.Do(request)
@@ -295,20 +303,22 @@ func (client *Client) executeRequest(callerCtx, ctx context.Context, attempt que
 	answered := client.now()
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		// The body is drained and discarded on purpose: UQ error bodies can echo
-		// the request (table ids, conditions, dimension values) and must not be
-		// parsed for business state or copied into logs. The status code alone
-		// is the bounded diagnostic detail. A diagnostic read -- an operator
-		// asking why the provider refused this query -- keeps the body's start,
-		// sanitized, for its own answer alone.
+		// UQ error bodies can echo the request (table ids, conditions,
+		// dimension values), so the body is never parsed for business state
+		// nor copied into a log. What is kept is the rejection: a bounded
+		// class, the provider's trace id, and the body's start sanitized
+		// (providerErrorExcerpt), with the Query Group's last failure for an
+		// operator to read. A client error other than 408 and 429 is the
+		// provider refusing the query as written (QUERY_REJECTED); anything
+		// else is the provider not answering (QUERY_UNAVAILABLE).
+		body, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyRead))
+		rejection := providerRejection(response.StatusCode, body, traceID)
 		if scanned != nil {
-			body, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyRead))
-			scanned.Bytes, scanned.errorExcerpt = uint64(len(body)), providerErrorExcerpt(body)
-		} else {
-			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, errorBodyRead))
+			scanned.Bytes, scanned.errorExcerpt = uint64(len(body)), rejection.Excerpt
 		}
-		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
+		completion := client.unavailableCompletion(attempt, statusReason(response.StatusCode), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.RouteFacts.Attempts[0].HTTPStatus = response.StatusCode
+		completion.RouteFacts.Attempts[0].Rejection = rejection
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil

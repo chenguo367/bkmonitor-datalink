@@ -113,6 +113,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonQueryEmpty:       {ReasonQueryEmpty, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryTimeout:     {ReasonQueryTimeout, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryUnavailable: {ReasonQueryUnavailable, ReasonClassCoverage, reasonQueryDomainsV2},
+	ReasonQueryRejected:    {ReasonQueryRejected, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryTargetMissing: {
 		ReasonQueryTargetMissing, ReasonClassCoverage, reasonQueryDomainsV2,
 	},

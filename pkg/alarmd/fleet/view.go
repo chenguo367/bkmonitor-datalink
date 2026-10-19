@@ -316,6 +316,11 @@ type FailureRef struct {
 	// failure got no HTTP answer. Detail spells it for a person; this is
 	// the number readings decide on.
 	HTTPStatus int `json:"http_status,omitempty"`
+	// Rejection is what the provider said when it refused the query: its
+	// class, its own trace id to find the request by on its side, and the
+	// start of its body, sanitized and cut short. Absent where the failure
+	// got no non-success answer.
+	Rejection *observability.QueryRejection `json:"rejection,omitempty"`
 }
 
 // NoDataMemoryRefusal is what the store said when it would not take a Plan's

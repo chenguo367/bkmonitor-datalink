@@ -812,6 +812,9 @@ var codeChecks = map[string]verdict{
 	// The backend was asked and did not answer usefully.
 	"QUERY_TIMEOUT":     lands(CheckBackendNotAnswering),
 	"QUERY_UNAVAILABLE": lands(CheckBackendNotAnswering),
+	// The backend answered and refused the query as written: the strategy's
+	// query is what to look at, not whether the backend is up.
+	"QUERY_REJECTED": lands(CheckQueryRefused),
 	// The backend answered and the table or field the strategy names does
 	// not route in its space: the strategy's, the same line the refusal's
 	// detail files it under.

@@ -536,6 +536,14 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if f.HTTPStatus != 0 {
 			attributes = append(attributes, slog.Int("failure_http_status", f.HTTPStatus))
 		}
+		// The class and the provider's trace id only: the excerpt can echo the
+		// request and stays with the Query Group's last failure.
+		if r := f.Rejection; r != nil {
+			attributes = append(attributes, slog.String("failure_rejection_class", r.Class))
+			if r.TraceID != "" {
+				attributes = append(attributes, slog.String("failure_provider_trace_id", r.TraceID))
+			}
+		}
 		if timing := f.Timing; timing != nil {
 			attributes = append(attributes, slog.Int64("failure_settle_ms", timing.SettleMillis), slog.Int64("failure_start_late_ms", timing.StartLateMillis),
 				slog.Int64("failure_budget_ms", timing.BudgetMillis), slog.Int64("failure_elapsed_ms", timing.ElapsedMillis),

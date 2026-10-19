@@ -137,6 +137,12 @@ type QueryAttempt struct {
 	// only time a failure (see AttemptTiming); zero leaves it untimed.
 	BudgetStartUnixMilli int64
 	ReadyAtUnixMilli     int64
+
+	// Strategies are the strategy ids of the Plans the query serves, sorted
+	// and unique, for the provider to correlate its own logs with: they ride
+	// on a request header and decide nothing. Empty for a read that serves
+	// no Plan.
+	Strategies []string
 }
 
 func (attempt QueryAttempt) Validate() error {
@@ -188,6 +194,22 @@ type RouteAttemptFact struct {
 	// Timing is when a failed attempt ran against the time it was given;
 	// nil where the attempt did not measure it.
 	Timing *AttemptTiming
+	// Rejection is what the backend said when it refused the query: nil
+	// where the attempt got no non-success answer.
+	Rejection *ProviderRejection `json:",omitempty"`
+}
+
+// ProviderRejection is a non-success answer as it may be kept: the class
+// the provider's body names (VM_SAMPLE_LIMIT, PROMQL_PARSE, ... or HTTP_<code>),
+// the provider's own trace id when the body carries one, and the start of the
+// body, sanitized - credential values, URLs and addresses replaced and cut
+// short - so an operator can read why without the request it may echo. It is
+// kept with the Query Group's last failure and never written to a log line:
+// a log keeps the class and the trace id only.
+type ProviderRejection struct {
+	Class   string `json:"class"`
+	TraceID string `json:"trace_id,omitempty"`
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // AttemptTiming reads a query that did not come back against its budget,

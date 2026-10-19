@@ -116,6 +116,14 @@ const (
 	ReasonQueryEmpty       = "QUERY_EMPTY"
 	ReasonQueryTimeout     = "QUERY_TIMEOUT"
 	ReasonQueryUnavailable = "QUERY_UNAVAILABLE"
+	// ReasonQueryRejected names a query the backend answered with a client
+	// error (HTTP 4xx other than 408 and 429): it read the request and
+	// refused it - an expression it cannot parse, a filter it rejects, a
+	// range over its sample limit. The backend is up; the query as written
+	// is what it will not run, so the reading is the strategy's, not the
+	// storage's. 408 and 429 are the backend asking for time and stay
+	// QUERY_UNAVAILABLE.
+	ReasonQueryRejected = "QUERY_REJECTED"
 	// ReasonQueryTargetMissing names a query the backend answered and
 	// refused because the table or field it names does not route in the
 	// strategy's space: a statement about where the data is, not about

@@ -1485,6 +1485,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			copied := *timing
 			state.lastFailure.Timing = &copied
 		}
+		if rejection := failure.Rejection; rejection != nil {
+			copied := *rejection
+			state.lastFailure.Rejection = &copied
+		}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
 			copy := *state.lastFailure

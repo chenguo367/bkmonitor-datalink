@@ -849,3 +849,44 @@ func TestANotDueAnswerStartsNoRunAndLendsNoStart(t *testing.T) {
 		}
 	}
 }
+
+// A query the provider refused as written is the strategy's: its row reads
+// refused, files under the query refused, and carries what the provider
+// said - its class, its trace id and the sanitized start of its answer - for
+// whoever opens the strategy to read.
+func TestARejectedQuerysRowCarriesWhatTheProviderSaid(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	rejection := observability.QueryRejection{Class: "VM_SAMPLE_LIMIT", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		Excerpt: `{"error":"cannot select more than 10000000 samples; password=<redacted>"}`}
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(100 + 60*round)
+		reported := rejection
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "source_backend", Code: "QUERY_REJECTED",
+				Detail: "http_status=400", HTTPStatus: 400, Rejection: &reported},
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Millisecond)
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "QUERY_REJECTED",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	rows := tracker.Anomalies()
+	Attribute(rows, at.at)
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Rejection == nil || *rows[0].Failure.Rejection != rejection {
+		t.Fatalf("rows = %+v, want the failure carrying the rejection", rows)
+	}
+	encoded, _ := json.Marshal(rows[0].Failure)
+	if !strings.Contains(string(encoded), `"rejection":{"class":"VM_SAMPLE_LIMIT","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"`) {
+		t.Fatalf("failure encodes as %s", encoded)
+	}
+	if rows[0].Finding.Check != CheckQueryRefused {
+		t.Fatalf("finding %+v, want the query refused", rows[0].Finding)
+	}
+	if code, known := failureFacets["QUERY_REJECTED"]; !known || code.class != ClassRefused {
+		t.Fatalf("QUERY_REJECTED blocked as %+v (known %v), want refused", code, known)
+	}
+}

@@ -109,7 +109,10 @@ func (runner *Runner) noteRunFacts(slot FrozenSlot, operation execution.Operatio
 		// The backend's own refusal, not alarmd's deadline, and slower than
 		// any answer: where the backend stopped waiting. A failure that came
 		// back quicker than an answer is an error, not a cut.
-		if result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryUnavailable) ||
+		// A refusal counts as the cut the same way: a storage that gives up on
+		// a query too large for it answers with a client error.
+		if (result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryUnavailable) &&
+			result.QueryUnavailableReason != execution.ReasonCode(contract.ReasonQueryRejected)) ||
 			len(memory.runTimes) == 0 || elapsed <= longestRun(memory.runTimes) {
 			return false
 		}
