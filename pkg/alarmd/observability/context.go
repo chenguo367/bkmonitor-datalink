@@ -5,7 +5,10 @@
 
 package observability
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 type traceFieldsContextKey struct{}
 
@@ -49,6 +52,90 @@ func HeldByFromContext(ctx context.Context) *HeldByFacts {
 		return &HeldByFacts{Decision: HeldByNothing}
 	}
 	return &facts
+}
+
+type divertDecisionContextKey struct{}
+
+// ContextWithDivertDecision carries the decision that let a Slot run as a
+// normal round: the scheduler's Runner sets it before the executor is
+// called, and the executor's completion line names it when the round ends
+// timed out. Through the context for the reason HeldBy is.
+func ContextWithDivertDecision(ctx context.Context, facts DivertDecisionFacts) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, divertDecisionContextKey{}, facts)
+}
+
+// DivertDecisionFromContext is the decision that let this Slot run as a
+// normal round, or nil when the Slot was not judged (a replay, a probe, or
+// a source without recovery limits).
+func DivertDecisionFromContext(ctx context.Context) *DivertDecisionFacts {
+	if ctx == nil {
+		return nil
+	}
+	facts, ok := ctx.Value(divertDecisionContextKey{}).(DivertDecisionFacts)
+	if !ok {
+		return nil
+	}
+	return &facts
+}
+
+type budgetCaptureContextKey struct{}
+
+// BudgetCapture keeps the query budget of the round's binding consumer, as
+// access resolved it, for the round's completion line. The executor puts one
+// on the context of each attempt; access records into it; the completion
+// line of a round that ends degraded renders it, so a lost round carries its
+// own budget without a line on every round that succeeds.
+type BudgetCapture struct {
+	mu    sync.Mutex
+	facts *QueryBudgetFacts
+}
+
+// Record keeps facts when they bind the round tighter than what is kept: the
+// earliest query deadline the read is cut at.
+func (capture *BudgetCapture) Record(facts QueryBudgetFacts) {
+	if capture == nil {
+		return
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.facts == nil || facts.LiveQueryDeadlineUnixMilli < capture.facts.LiveQueryDeadlineUnixMilli {
+		capture.facts = &facts
+	}
+}
+
+// Facts is the binding consumer's budget recorded so far, or nil.
+func (capture *BudgetCapture) Facts() *QueryBudgetFacts {
+	if capture == nil {
+		return nil
+	}
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if capture.facts == nil {
+		return nil
+	}
+	facts := *capture.facts
+	return &facts
+}
+
+// ContextWithBudgetCapture carries a fresh BudgetCapture for one attempt.
+func ContextWithBudgetCapture(ctx context.Context) (context.Context, *BudgetCapture) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	capture := &BudgetCapture{}
+	return context.WithValue(ctx, budgetCaptureContextKey{}, capture), capture
+}
+
+// BudgetCaptureFromContext is the attempt's BudgetCapture, or nil.
+func BudgetCaptureFromContext(ctx context.Context) *BudgetCapture {
+	if ctx == nil {
+		return nil
+	}
+	capture, _ := ctx.Value(budgetCaptureContextKey{}).(*BudgetCapture)
+	return capture
 }
 
 func ContextWithTraceFields(ctx context.Context, fields TraceFields) context.Context {

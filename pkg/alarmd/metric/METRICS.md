@@ -903,6 +903,10 @@ Labels: `state`
 
 The alert link's Console as this replica last saw it, one cell per state and 1 on the current one: not_configured (the deployment names no Console, so neither the open alert set's calibration nor the close of disabled or deleted strategies' alerts runs; by design on a deployment whose events all go the Python-compatible way), not_called, unreadable (the latest call of some operation failed), link_unhealthy (the Console answered and the link says its own set maintenance is failing, never succeeded or is behind; the close refuses every round) and reachable.
 
+## alarmd_live_query_reserve_seconds
+
+This process's measured post-query tail, pooled across its Query Groups: a read's deadline is its consumer deadline less this (or a group's own longer tail) instead of the frozen reserve, and a round is judged short of time against that deadline. Zero before enough Slots are measured, when the frozen reserve applies.
+
 ## alarmd_local_view_object_bytes
 
 Labels: `kind`

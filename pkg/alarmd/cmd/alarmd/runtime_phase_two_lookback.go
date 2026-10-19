@@ -22,6 +22,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -450,4 +451,21 @@ type lookbackReadings interface {
 // the query duration, never the reread bound.
 func queryLatencyOf(readings lookbackReadings) scheduler.QueryLatency {
 	return readings.QueryDuration
+}
+
+// newRuntimeLiveReserve is the runtime's one measured post-query tail: its
+// shaper publishes it, its access source cuts each read at it, through
+// flights its slot sources judge a round short of time by it, and recorder
+// exports it.
+func newRuntimeLiveReserve(flights *scheduler.FlightCoordinator, recorder *metric.Recorder) *execution.LiveReserve {
+	live := &execution.LiveReserve{}
+	flights.SetLiveReserve(live)
+	recorder.SetLiveReserveSource(live.Reserve)
+	return live
+}
+
+// slotSourceLiveReserve is the measured post-query tail a slot source judges
+// a round short of time by: the one access cuts the round's read at.
+func slotSourceLiveReserve(flights *scheduler.FlightCoordinator) *execution.LiveReserve {
+	return flights.LiveReserve()
 }

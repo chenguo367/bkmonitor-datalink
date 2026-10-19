@@ -280,6 +280,17 @@ func (coordinator *FlightCoordinator) SetLiveReserve(live *execution.LiveReserve
 	coordinator.live = live
 }
 
+// LiveReserve is the measured post-query tail SetLiveReserve gave the
+// coordinator; nil before one is set.
+func (coordinator *FlightCoordinator) LiveReserve() *execution.LiveReserve {
+	if coordinator == nil {
+		return nil
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	return coordinator.live
+}
+
 // RecordPostQueryTail keeps one Slot's post-query tail, pooled and as
 // queryGroup's own.
 func (coordinator *FlightCoordinator) RecordPostQueryTail(at time.Time, queryGroup execution.QueryGroupIdentity, tail time.Duration) {

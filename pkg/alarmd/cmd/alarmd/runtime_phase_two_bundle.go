@@ -576,8 +576,7 @@ func openProductionPhaseTwoBundleAssembly(
 	addressDiffers := &fleet.AddressDiffersSamples{}
 	// One runtime, one measured post-query tail: its shaper publishes it, its
 	// access source sizes query deadlines from it.
-	liveReserve := &execution.LiveReserve{}
-	flights.SetLiveReserve(liveReserve)
+	liveReserve := newRuntimeLiveReserve(flights, recorder)
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:             cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                       external.Now,

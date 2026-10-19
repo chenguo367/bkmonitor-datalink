@@ -178,3 +178,25 @@ func TestHeldByNothingIsWrittenAsAWord(t *testing.T) {
 		}
 	}
 }
+
+// A lost round's completion line carries its divert decision and its binding
+// query budget as flat keys, readable by anything filtering the line.
+func TestALostRoundCompletionCarriesItsDecisionAndBudgetAsFlatKeys(t *testing.T) {
+	event := renderObservation(t, Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultDegraded, ReasonCode: "QUERY_TIMEOUT",
+		DivertDecision: &DivertDecisionFacts{ClassifiedAtUnixMilli: 11, FrozenDeadlineUnixMilli: 12, LiveDeadlineUnixMilli: 13,
+			BoundMillis: 14, BoundSource: DivertBoundQueryDuration, RemainingMillis: 15},
+		QueryBudget: &QueryBudgetFacts{ConsumerDeadlineUnixMilli: 21, FrozenReserveMillis: 22, LiveReserveMillis: 23,
+			ReadyAtUnixMilli: 24, FrozenQueryDeadlineUnixMilli: 25, LiveQueryDeadlineUnixMilli: 26},
+	})
+	for key, want := range map[string]any{
+		"divert_classified_at_ms": float64(11), "divert_frozen_deadline_ms": float64(12), "divert_live_deadline_ms": float64(13),
+		"divert_bound_ms": float64(14), "divert_bound_source": DivertBoundQueryDuration, "divert_remaining_ms": float64(15),
+		"budget_consumer_deadline_ms": float64(21), "budget_frozen_reserve_ms": float64(22), "budget_live_reserve_ms": float64(23),
+		"budget_ready_at_ms": float64(24), "budget_frozen_query_deadline_ms": float64(25), "budget_live_query_deadline_ms": float64(26),
+	} {
+		if event[key] != want {
+			t.Fatalf("line[%q] = %#v, want %#v; line=%#v", key, event[key], want, event)
+		}
+	}
+}

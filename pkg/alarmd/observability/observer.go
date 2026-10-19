@@ -1240,6 +1240,45 @@ var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeE
 // group's own reading or the configured fallback (BoundSource, one of the
 // TakeoverFloor words). Reported once per Slot. A Slot due before a takeover
 // is reported under ReplayTakeoverFacts instead, as diverted there.
+// DivertDecisionFacts is what the scheduler judged when it let a Slot run as
+// a normal round rather than send it to replay: when it judged, the frozen
+// query deadline and the one the read is cut at under the measured
+// post-query tail, the time a read was taken to need and where that came
+// from, and what was left by the deadline it judged against. A round that
+// then times out carries them on its completion line, so the line says
+// whether the round should have been sent away and on what reading.
+type DivertDecisionFacts struct {
+	ClassifiedAtUnixMilli   int64  `json:"classified_at_ms"`
+	FrozenDeadlineUnixMilli int64  `json:"frozen_deadline_ms"`
+	LiveDeadlineUnixMilli   int64  `json:"live_deadline_ms"`
+	BoundMillis             int64  `json:"bound_ms"`
+	BoundSource             string `json:"bound_source"`
+	RemainingMillis         int64  `json:"remaining_ms"`
+}
+
+// QueryBudgetFacts is the query budget of a round's binding consumer - the
+// one whose deadline its read is cut at - as access resolved it: the
+// consumer deadline, the frozen downstream reserve and the measured one in
+// force (zero when none is published or it fell back), when the consumer's
+// data is due, and the query deadlines under each reserve. The window a read
+// has is from ReadyAt to LiveQueryDeadline.
+type QueryBudgetFacts struct {
+	ConsumerDeadlineUnixMilli    int64 `json:"consumer_deadline_ms"`
+	FrozenReserveMillis          int64 `json:"frozen_reserve_ms"`
+	LiveReserveMillis            int64 `json:"live_reserve_ms"`
+	ReadyAtUnixMilli             int64 `json:"ready_at_ms"`
+	FrozenQueryDeadlineUnixMilli int64 `json:"frozen_query_deadline_ms"`
+	LiveQueryDeadlineUnixMilli   int64 `json:"live_query_deadline_ms"`
+}
+
+// Where a divert decision's bound came from: the Query Group's own measured
+// query duration, the configured fallback, or none (no bound applied).
+const (
+	DivertBoundQueryDuration = "query_duration"
+	DivertBoundFallback      = "fallback"
+	DivertBoundNone          = "none"
+)
+
 type SlotDiversionFacts struct {
 	Reason           string  `json:"reason"`
 	RemainingSeconds float64 `json:"remaining_seconds"`
@@ -2443,6 +2482,12 @@ type Observation struct {
 	// whose Slots are being skipped -- has no such bundle, so their
 	// completion lines carried no cause at all.
 	HeldBy *HeldByFacts
+	// DivertDecision is the decision that let a timed-out round run as a
+	// normal one; set only on such a round's completion.
+	DivertDecision *DivertDecisionFacts
+	// QueryBudget is the binding consumer's query budget, set only on the
+	// completion of a round that ended degraded.
+	QueryBudget *QueryBudgetFacts
 	// SlotCompletionKind is the completion the Slot reached, beside the reason
 	// the line reports.
 	//

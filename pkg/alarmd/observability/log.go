@@ -657,6 +657,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = appendHeldByAttributes(attributes, facts.HeldBy)
 	}
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
+	attributes = appendDivertDecisionAttributes(attributes, observation.DivertDecision)
+	attributes = appendQueryBudgetAttributes(attributes, observation.QueryBudget)
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
 	attributes = appendCompletionCause(attributes, observation)
 	if facts := observation.SegmentContent; facts != nil {
@@ -1334,6 +1336,38 @@ func appendSlotCompletionKind(attributes []slog.Attr, kind string) []slog.Attr {
 		return attributes
 	}
 	return append(attributes, slog.String("completion_kind", kind))
+}
+
+// appendQueryBudgetAttributes writes a degraded round's binding query budget
+// as flat keys.
+func appendQueryBudgetAttributes(attributes []slog.Attr, budget *QueryBudgetFacts) []slog.Attr {
+	if budget == nil {
+		return attributes
+	}
+	return append(attributes,
+		slog.Int64("budget_consumer_deadline_ms", budget.ConsumerDeadlineUnixMilli),
+		slog.Int64("budget_frozen_reserve_ms", budget.FrozenReserveMillis),
+		slog.Int64("budget_live_reserve_ms", budget.LiveReserveMillis),
+		slog.Int64("budget_ready_at_ms", budget.ReadyAtUnixMilli),
+		slog.Int64("budget_frozen_query_deadline_ms", budget.FrozenQueryDeadlineUnixMilli),
+		slog.Int64("budget_live_query_deadline_ms", budget.LiveQueryDeadlineUnixMilli),
+	)
+}
+
+// appendDivertDecisionAttributes writes the decision that let a timed-out
+// round run as a normal one, as flat keys.
+func appendDivertDecisionAttributes(attributes []slog.Attr, decision *DivertDecisionFacts) []slog.Attr {
+	if decision == nil {
+		return attributes
+	}
+	return append(attributes,
+		slog.Int64("divert_classified_at_ms", decision.ClassifiedAtUnixMilli),
+		slog.Int64("divert_frozen_deadline_ms", decision.FrozenDeadlineUnixMilli),
+		slog.Int64("divert_live_deadline_ms", decision.LiveDeadlineUnixMilli),
+		slog.Int64("divert_bound_ms", decision.BoundMillis),
+		slog.String("divert_bound_source", decision.BoundSource),
+		slog.Int64("divert_remaining_ms", decision.RemainingMillis),
+	)
 }
 
 func appendHeldByAttributes(attributes []slog.Attr, held *HeldByFacts) []slog.Attr {
