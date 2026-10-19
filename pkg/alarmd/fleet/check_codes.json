@@ -234,6 +234,12 @@
     "owner": "STRATEGY"
   },
   {
+    "check": "SERIES_SPARSER_THAN_WINDOW",
+    "state": "DETECTING",
+    "action": "NONE",
+    "owner": "STRATEGY"
+  },
+  {
     "check": "ANSWER_TRUNCATED",
     "state": "DETECTING",
     "action": "STRATEGY_EDIT",

@@ -163,10 +163,19 @@ const (
 	// and a Plan that detects no data judges nothing that round
 	// (SKIPPED_ANSWER_TRUNCATED). The strategy groups by something wider than
 	// the cap.
-	CheckAnswerTruncated   Check = "ANSWER_TRUNCATED"
-	CheckSeriesChurning    Check = "SERIES_CHURNING"
-	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
-	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
+	CheckAnswerTruncated Check = "ANSWER_TRUNCATED"
+	CheckSeriesChurning  Check = "SERIES_CHURNING"
+	// SeriesSparserThanWindow is a long-lived series that reports less often
+	// than its window has positions (HistoryCoverage.SparserThanWindow), folded
+	// on about how many steps lie between its points. Detecting: an anomaly
+	// fires, and an alert closes when Python's recovery check would close it,
+	// because a settled hole counts as a minute with no anomaly. Only NORMAL
+	// never comes, since that needs a whole window. The strategy's cadence
+	// against the data's, nothing to fix on either side unless the owner wants
+	// whole windows.
+	CheckSeriesSparserThanWindow Check = "SERIES_SPARSER_THAN_WINDOW"
+	CheckSeriesDataMissing       Check = "SERIES_DATA_MISSING"
+	CheckWindowUndecided         Check = "WINDOW_UNDECIDED"
 	// CoverageReadingRefused is a window reason whose counts the observer
 	// refused: the round's own window facts broke one of the observer's
 	// rules, so nothing can say whether the window is filling. It is this
@@ -288,6 +297,10 @@ const (
 	GroupByDetail   GroupBy = "detail"
 	GroupByStrategy GroupBy = "strategy"
 	GroupByGapKind  GroupBy = "gap_kind"
+	// GroupByCadence folds on how often a series reports, in its window's
+	// steps (HistoryCoverage.PointEverySteps): "every_5_steps" is a point
+	// about every five steps, five minutes on a one minute step.
+	GroupByCadence GroupBy = "cadence"
 	// GroupByCause folds on what the window counts say happened: the reason
 	// the detection could not use the record, or that the series are a mix of
 	// new and old. It is the fold for the one check whose objects share a
@@ -308,7 +321,7 @@ const (
 // GroupBys is the closed list of folds, for the page's completeness test:
 // a fold the page has no words for renders as its key on the line a reader
 // opens a check with.
-var GroupBys = []GroupBy{GroupByReplica, GroupByReasonCode, GroupByDetail, GroupByStrategy, GroupByGapKind, GroupByCause, GroupByDegradation, GroupByLoss, GroupByBlocked, GroupByHour}
+var GroupBys = []GroupBy{GroupByReplica, GroupByReasonCode, GroupByDetail, GroupByStrategy, GroupByGapKind, GroupByCause, GroupByDegradation, GroupByLoss, GroupByBlocked, GroupByHour, GroupByCadence}
 
 // checkAnswers is the closed table: who acts on each check and what its
 // objects fold on. Twenty rows, and a test holds the count there. A check
@@ -347,14 +360,17 @@ var checkAnswers = map[Check]struct {
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 	CheckSeriesSparse:     {OwnerData, GroupByStrategy},
 
-	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
-	CheckEmptyAfterTarget:   {OwnerStrategy, GroupByStrategy},
-	CheckIdentityUnmatched:  {OwnerStrategyOrCollection, GroupByStrategy},
-	CheckQuiet:              {OwnerStrategy, GroupByStrategy},
-	CheckAnswerTruncated:    {OwnerStrategy, GroupByStrategy},
-	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
-	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
-	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
+	CheckEmptyEveryRound:   {OwnerStrategy, GroupByStrategy},
+	CheckEmptyAfterTarget:  {OwnerStrategy, GroupByStrategy},
+	CheckIdentityUnmatched: {OwnerStrategyOrCollection, GroupByStrategy},
+	CheckQuiet:             {OwnerStrategy, GroupByStrategy},
+	CheckAnswerTruncated:   {OwnerStrategy, GroupByStrategy},
+	CheckSeriesChurning:    {OwnerStrategy, GroupByStrategy},
+	// The strategy's: its window and step against how often its series
+	// report. Folded on the cadence, which is what its owner reads.
+	CheckSeriesSparserThanWindow: {OwnerStrategy, GroupByCadence},
+	CheckPlanUnevaluable:         {OwnerStrategy, GroupByStrategy},
+	CheckQueryTargetMissing:      {OwnerStrategy, GroupByDetail},
 	// The strategy's, as the refusal it warns of is: what fits in a share is
 	// the strategy's size, and the remedy is to shard or reshape it.
 	CheckRetainedShareApproaching: {OwnerStrategy, GroupByStrategy},
@@ -444,6 +460,8 @@ var checkOrder = []Check{
 	// The event counts at rest: detecting, with nothing to judge. Any other
 	// row of the strategy decides it.
 	CheckQuiet,
+	// Detecting and recovering as Python does; only NORMAL never comes.
+	CheckSeriesSparserThanWindow,
 	// An answer that may have been cut: thresholds evaluate what came back,
 	// and no data is judged that round.
 	CheckAnswerTruncated,
@@ -567,6 +585,8 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		return gapRestoredWithoutCause
 	case GroupByCause:
 		return windowCause(anomaly.Coverage, anomaly.CauseReason)
+	case GroupByCadence:
+		return fmt.Sprintf("every_%d_steps", anomaly.Coverage.PointEverySteps())
 	case GroupByLoss:
 		// An object a column put on the line folds on the code that put it
 		// there, which for these lines is a budget rejection -- the fold a

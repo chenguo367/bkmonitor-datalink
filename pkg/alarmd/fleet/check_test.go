@@ -220,8 +220,15 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// not read, and filed as EMPTY_EVERY_ROUND it waited an hour, read
 	// CAUSE_UNKNOWN and sent the strategy's owner to a source that was
 	// fine, or filed nowhere at all (leader 10-17, design 582cf16b).
-	if got := len(Checks()); got != 41 || len(checkAnswers) != 41 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 41: a new check has to "+
+	// Forty-one: SERIES_SPARSER_THAN_WINDOW is a rule over dimensions the
+	// rows already carry - the worst window's and each named window's valid
+	// count against its positions, and the holes' verdicts - because a
+	// long-lived series that reports less often than its window has
+	// positions never fills a window yet has its recovery decided, as
+	// Python's is, and it sat on the undecidable column and the data's
+	// SERIES_SPARSE line as if one of those were true of it (leader 10-20).
+	if got := len(Checks()); got != 42 || len(checkAnswers) != 42 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 42: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -314,6 +321,12 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckSeriesSparse: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 1, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Windows: []WindowRow{{
 				Verdict: VerdictDataAbsentWhenQueried, MissingTotal: 2, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: 2}}}}},
+		// A point every five minutes under a nine position window: two of
+		// nine valid, and every hole a minute answered without the series.
+		CheckSeriesSparserThanWindow: {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 1, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Windows: []WindowRow{{
+				Valid: 2, Required: 9, Verdict: VerdictDataAbsentWhenQueried, MissingTotal: 7,
+				HolesBy: WindowHoleCounts{AnsweredWithoutSeries: 7}}}}},
 		CheckWindowUndecided: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}},
 		CheckCoverageReadingRefused: {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED",
