@@ -1071,6 +1071,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// missing count would read the same as "not counted", and the count is
 		// what the line is kept for.
 		attributes = append(attributes, slog.Bool("sampled", true), slog.Uint64("suppressed_logs", admission.Suppressed))
+		// When the window this line opened began: the lines merged into
+		// suppressed_logs are the bucket's since the window before it.
+		if !admission.SampleWindowStart.IsZero() {
+			attributes = append(attributes, slog.Int64("sampling_window_start_ms", admission.SampleWindowStart.UnixMilli()))
+		}
 	} else if admission.Suppressed > 0 {
 		attributes = append(attributes, slog.Uint64("suppressed_logs", admission.Suppressed))
 	}
