@@ -117,14 +117,16 @@ func TestTheGroupsOwnQueryDurationDecidesOverTheFallback(t *testing.T) {
 }
 
 // A round due after this process took its Query Group over is its own: short
-// of time, it runs and fails as any round of a group held here does, and is
-// not moved to replay.
-func TestARoundDueAfterTheTakeoverIsNotDiverted(t *testing.T) {
+// of time, it is not a takeover's and says nothing as one. It goes to replay
+// for the same reason any round of a group held here does (readiness_late).
+func TestARoundDueAfterTheTakeoverIsNotATakeoverDiversion(t *testing.T) {
 	source, observer := divertSource(t, divertLimits(5*time.Second))
 	source.takeovers.Anchor(source.queryGroup, testFence(7), time.Unix(int64(divertSlot)-30, 0))
 	operation, facts, err := source.classifyRecovery(context.Background(), divertSlot, divertDeadline, 0, time.UnixMilli(divertDeadline-1_500), testFence(7))
-	if err != nil || operation != execution.OperationNormal || facts.Disposition != ReplayLive || len(observer.facts) != 0 {
-		t.Fatalf("%s %+v %v, facts %+v: want a normal live round", operation, facts, err, observer.facts)
+	if err != nil || operation != execution.OperationReplay || facts.Disposition != ReplayEligible || len(observer.facts) != 0 ||
+		len(observer.diversions) != 1 || observer.diversions[0].Reason != observability.SlotDiversionReadinessLate {
+		t.Fatalf("%s %+v %v, takeover facts %+v, diversions %+v: want replay as readiness_late, no takeover fact",
+			operation, facts, err, observer.facts, observer.diversions)
 	}
 }
 

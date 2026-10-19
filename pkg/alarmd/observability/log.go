@@ -300,6 +300,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.ReplayTakeover; f != nil {
 		attributes = append(attributes, slog.Any("replay_takeover", f))
 	}
+	// How much time the read would have had and how much it takes: a Slot
+	// sent to replay for its readiness is read from these beside its minute.
+	if f := observation.SlotDiversion; f != nil {
+		attributes = append(attributes, slog.Any("slot_diversion", f))
+	}
 	if f := observation.QueryTiming; f != nil {
 		attributes = append(attributes, slog.Any("query_timing", f))
 	}

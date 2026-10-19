@@ -1693,6 +1693,12 @@ Duration of the committed executor call, excluding SlotSource preparation and ea
 
 Seconds from a Slot's data being readable (its evaluation time plus the read hold) to its completion being acknowledged, for every period, in normal rounds: a normal Slot and its retry. Replays, probes and supplements are late by what they are and are not in it; skipped and snapshot-unavailable completions are not decisions and are not in it either.
 
+## alarmd_slot_diversions_total
+
+Labels: `reason`
+
+Slots of Query Groups this process holds that were sent to replay before their normal read started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait and read hold - landed so near its query deadline that less time was left than its query takes (the group's own reading, or the configured floor), so a normal read would have been cut off at the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due before a takeover is counted under replay_takeover_slots_total{outcome="diverted"} instead. Read with progress_completion_causes_total{cause="PRIMARY_INPUT_UNAVAILABLE",reason="QUERY_TIMEOUT"}: the rounds counted here are the ones that no longer appear there.
+
 ## alarmd_slot_operation_duration_seconds
 
 Labels: `stage`

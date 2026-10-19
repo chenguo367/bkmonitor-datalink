@@ -99,6 +99,7 @@ type phaseTwoMetrics struct {
 	scheduleCutovers               *prometheus.CounterVec
 	replayExpiries                 *prometheus.CounterVec
 	replayTakeovers                *prometheus.CounterVec
+	slotDiversions                 *prometheus.CounterVec
 	rangeGateDecisions             *prometheus.CounterVec
 	statePreflights                *prometheus.CounterVec
 	stateAdmissions                *prometheus.CounterVec
@@ -972,6 +973,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.ReplayTakeoverOutcomes {
 		metrics.replayTakeovers.WithLabelValues(outcome)
 	}
+	metrics.slotDiversions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "slot_diversions_total",
+		Help: "Slots of Query Groups this process holds that were sent to replay before their normal read " +
+			"started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait " +
+			"and read hold - landed so near its query deadline that less time was left than its query takes " +
+			"(the group's own reading, or the configured floor), so a normal read would have been cut off at " +
+			"the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due " +
+			"before a takeover is counted under replay_takeover_slots_total{outcome=\"diverted\"} instead. " +
+			"Read with progress_completion_causes_total{cause=\"PRIMARY_INPUT_UNAVAILABLE\",reason=\"QUERY_TIMEOUT\"}: " +
+			"the rounds counted here are the ones that no longer appear there.",
+	}, []string{"reason"})
+	for _, reason := range observability.SlotDiversionReasons {
+		metrics.slotDiversions.WithLabelValues(reason)
+	}
 	// The word each round that gave up on a Slot puts on its range_gate line,
 	// as a series: the log had the thirteen words and the metric had none, so
 	// "which refusal is holding the Query Groups that never catch up" could
@@ -1791,7 +1806,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverReadHoldLinks, m.fleetOverdueEpisodes, m.scheduleCutoverTimelinesRead, m.scheduleCutoverFirstDuration,
-		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
+		m.scheduleCutoverFirstTimelines, m.replayExpiries, m.replayTakeovers, m.slotDiversions, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
@@ -1934,6 +1949,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.ReplayTakeover; facts != nil {
 		m.replayTakeovers.WithLabelValues(facts.Outcome).Inc()
+	}
+	if facts := observation.SlotDiversion; facts != nil {
+		m.slotDiversions.WithLabelValues(facts.Reason).Inc()
 	}
 	if facts := observation.RangeGate; facts != nil {
 		// The normalized word: an outcome outside the list has already been
