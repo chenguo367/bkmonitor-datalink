@@ -59,8 +59,11 @@ type counters struct {
 	// candidate readiness point a trial's Slot was prepared.
 	earlierOvertaken       map[string]uint64
 	earlierPreparedLateMax map[string]time.Duration
-	earlierBytes           map[string]uint64
-	holdIgnored            map[string]uint64
+	// earlierAhead is source|slots: trials reserved ahead, by how many Slots
+	// ahead (EarlierAheadSlots).
+	earlierAhead map[string]uint64
+	earlierBytes map[string]uint64
+	holdIgnored  map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -89,7 +92,7 @@ func newCounters(sources, refusals []string) counters {
 		supplementHold: map[string]uint64{}, supplementHoldMax: map[string]time.Duration{},
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
-		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{},
+		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -145,6 +148,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, path := range EarlierOvertakenPaths {
 			c.earlierOvertaken[key2(source, path)] = 0
+		}
+		for _, slots := range EarlierAheadSlots {
+			c.earlierAhead[key2(source, slots)] = 0
 		}
 		c.earlierPreparedLateMax[source] = 0
 		c.earlierBytes[source] = 0
@@ -340,8 +346,12 @@ type SourceStats struct {
 	// prepared since the process started; it never decays.
 	EarlierOvertaken              map[string]uint64 `json:"earlier_overtaken"`
 	EarlierPreparedLateMaxSeconds float64           `json:"earlier_prepared_late_max_seconds"`
-	EarlierReadBytes              uint64            `json:"earlier_read_bytes"`
-	ReadHoldIgnored               map[string]uint64 `json:"read_hold_ignored"`
+	// EarlierAhead is trials reserved ahead by how many Slots ahead
+	// (EarlierAheadSlots): a group whose hold is far past its period needs
+	// more than one.
+	EarlierAhead     map[string]uint64 `json:"earlier_ahead"`
+	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
+	ReadHoldIgnored  map[string]uint64 `json:"read_hold_ignored"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -402,6 +412,7 @@ type groupCounts struct {
 	ignored      [2]uint64
 	earlier      [8]uint64
 	overtaken    [6]uint64
+	ahead        [4]uint64
 	earlierBytes uint64
 }
 
@@ -439,6 +450,9 @@ type GroupReading struct {
 	// (EarlierOvertakenPaths): whether its data was late or its trials could
 	// not be tried in time is told group by group.
 	EarlierOvertaken map[string]uint64 `json:"earlier_overtaken"`
+	// EarlierAhead is the group's trials reserved ahead by how many Slots
+	// ahead (EarlierAheadSlots).
+	EarlierAhead     map[string]uint64 `json:"earlier_ahead"`
 	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
 }
 
@@ -491,7 +505,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	reading := GroupReading{QueryGroup: queryGroup, Source: source, Since: counts.since,
 		Compared: map[string]map[string]uint64{}, ChangedWindows: map[string]map[string]uint64{},
 		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{}, EarlierOvertaken: map[string]uint64{},
-		EarlierReadBytes: counts.earlierBytes}
+		EarlierAhead: map[string]uint64{}, EarlierReadBytes: counts.earlierBytes}
 	for hold, name := range GroupReadHoldClasses {
 		reading.Compared[name], reading.ChangedWindows[name] = map[string]uint64{}, map[string]uint64{}
 		for rung, word := range RungNames {
@@ -510,6 +524,9 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	}
 	for index, path := range EarlierOvertakenPaths {
 		reading.EarlierOvertaken[path] = counts.overtaken[index]
+	}
+	for index, slots := range EarlierAheadSlots {
+		reading.EarlierAhead[slots] = counts.ahead[index]
 	}
 	return reading, true
 }
@@ -638,6 +655,10 @@ func (engine *Engine) Stats() Stats {
 			entry.EarlierOvertaken[path] = engine.counts.earlierOvertaken[key2(source, path)]
 		}
 		entry.EarlierPreparedLateMaxSeconds = engine.counts.earlierPreparedLateMax[source].Seconds()
+		entry.EarlierAhead = map[string]uint64{}
+		for _, slots := range EarlierAheadSlots {
+			entry.EarlierAhead[slots] = engine.counts.earlierAhead[key2(source, slots)]
+		}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]
 		}

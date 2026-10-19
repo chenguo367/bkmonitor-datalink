@@ -121,7 +121,9 @@ func TestATrialReservedAheadIsDroppedWhenItsSlotIsFrozenOtherwise(t *testing.T) 
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
 			f.engine.options.OnEarlierRead = func(evidence EarlierReadEvidence) {
-				t.Errorf("a dropped trial gave evidence %+v", evidence)
+				if evidence.Observed {
+					t.Errorf("a trial gave evidence %+v", evidence)
+				}
 			}
 			slot := f.clock.now().Unix()
 			q := scheduledQuery(t, slot)
@@ -144,7 +146,7 @@ func TestATrialReservedAheadIsDroppedWhenItsSlotIsFrozenOtherwise(t *testing.T) 
 			if got := aheadOvertaken(f); len(got) != 1 || got[OvertakenHoldMoved] != 1 {
 				t.Fatalf("overtaken by %v, want hold_moved once", got)
 			}
-			if preparedTrial(f) != nil {
+			if preparedTrial(f) == trial {
 				t.Fatal("the dropped trial is still reserved")
 			}
 			formalRead(f, next)
@@ -152,16 +154,17 @@ func TestATrialReservedAheadIsDroppedWhenItsSlotIsFrozenOtherwise(t *testing.T) 
 	}
 }
 
-// A trial reserved ahead rests as any trial: its rest is judged at the formal read of the Slot it is for, not of
-// the Slot that reserves it.
+// A trial reserved ahead rests as any trial: its rest is judged at the formal
+// read of the Slot it is for, not of the Slot that reserves it, and the Slot
+// reserved is the first whose formal read ends the rest.
 func TestATrialReservedAheadIsJudgedRestedAtItsOwnSlotsRead(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		restEnds time.Duration // after the reserving Slot's readiness
-		reserved bool
+		slots    int
 	}{
-		{"rest ends before the next Slot's read", 30 * time.Second, true},
-		{"rest ends after it", 90 * time.Second, false},
+		{"rest ends before the next Slot's read", 30 * time.Second, 1},
+		{"rest ends after it", 90 * time.Second, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -174,8 +177,9 @@ func TestATrialReservedAheadIsJudgedRestedAtItsOwnSlotsRead(t *testing.T) {
 			state.nextAt = q.ReadyAt.Add(c.restEnds)
 			f.engine.mu.Unlock()
 			f.engine.Prepare(q)
-			if trial := preparedTrial(f); (trial != nil) != c.reserved || trial != nil && !trial.ahead {
-				t.Fatalf("reserved %+v, want reserved ahead %v", trial, c.reserved)
+			trial := preparedTrial(f)
+			if trial == nil || !trial.ahead || trial.aheadSlots != c.slots || trial.query.ReadyAt.Before(q.ReadyAt.Add(c.restEnds)) {
+				t.Fatalf("reserved %+v, want the trial %d Slots ahead, read after the rest", trial, c.slots)
 			}
 		})
 	}

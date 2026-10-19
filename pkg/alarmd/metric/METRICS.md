@@ -961,6 +961,12 @@ Labels: `source`
 
 Bytes the directed reads delivered, by source: a Slot's frozen query each, read against lookback_first_read_bytes_total over lookback_first_reads_total.
 
+## alarmd_lookback_earlier_ahead_total
+
+Labels: `source`, `slots`
+
+Candidate h/2 read trials reserved at an earlier Slot's first attempt, by source and how many Slots ahead (1, 2, 3, 4+). Reader: the same acceptance, which shows which sources' holds needed a trial reserved further than the next Slot.
+
 ## alarmd_lookback_earlier_overtaken_total
 
 Labels: `source`, `path`
