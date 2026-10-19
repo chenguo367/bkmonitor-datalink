@@ -58,7 +58,11 @@ type productionReadHolds struct {
 	limitCuts   map[execution.QueryGroupIdentity]time.Duration
 	nextRenew   time.Time
 	transitions atomic.Uint64
-	overtaken   atomic.Uint64
+	// queryDuration is the lookback's reading of each group's query
+	// duration, for the controller to keep in its record; nil until the
+	// lookback is built, and in a process without one.
+	queryDuration atomic.Pointer[func(execution.QueryGroupIdentity) (time.Duration, bool)]
+	overtaken     atomic.Uint64
 	// links counts the predecessor links a prepare skipped, by why
 	// (self_link, invalid_link, expired); retireCloseFailed the retired
 	// groups whose closing failed and that retired all the same.
@@ -163,6 +167,28 @@ func (holds *productionReadHolds) owner(qg execution.QueryGroupIdentity) (readho
 		return readhold.Owner{}, ownership.ErrStaleFence
 	}
 	return readhold.Owner{Fence: lease.Fence, ContentScope: lease.ContentScope}, nil
+}
+
+// readHoldInheritedQueryLatency is the previous owner's reading of each Query
+// Group's query duration, as its read-hold record keeps it, for the slot
+// source to judge a group it has no reading of its own for; none without
+// read holds. The controller is looked up when asked, so a source built
+// before it has one, and has no reading until it does. It takes the group's
+// controller lock and nothing else: the source asks it under none of its own.
+func readHoldInheritedQueryLatency(holds *productionReadHolds) scheduler.QueryLatency {
+	if holds == nil {
+		return nil
+	}
+	return holds.inheritedQueryDuration
+}
+
+// inheritedQueryDuration is the group's record's query duration
+// (readhold.Controller.InheritedQueryDuration); none without a controller.
+func (holds *productionReadHolds) inheritedQueryDuration(qg execution.QueryGroupIdentity) (time.Duration, bool) {
+	if holds == nil || holds.controller == nil {
+		return 0, false
+	}
+	return holds.controller.InheritedQueryDuration(qg)
 }
 
 func (holds *productionReadHolds) bind(qg execution.QueryGroupIdentity, session *ownership.Session) {
@@ -755,6 +781,13 @@ func (holds *productionReadHolds) countDegraded(segment execution.ScheduleSegmen
 }
 
 func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
+	// Read before the controller is: the lookback asks the controller under
+	// its own lock, so it is never asked under the controller's.
+	if measure := holds.queryDuration.Load(); measure != nil {
+		if measured, ok := (*measure)(schedule.Segment.QueryGroup); ok {
+			holds.controller.MeasureQueryDuration(schedule.Segment.QueryGroup, measured)
+		}
+	}
 	hold, err := holds.controller.SlotReadHold(ctx, schedule, at, fence)
 	holds.mu.Lock()
 	currentGroup := holds.groups[schedule.Segment.QueryGroup]

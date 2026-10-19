@@ -964,7 +964,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"degraded pool holds, whose Slots are given up on for distance as before: " +
 			"replayed, because nobody here could have run them and they are within the replay age; " +
 			"age_exceeded, given up on like any Slot that old; diverted, not yet at its query deadline but with " +
-			"less budget left than its query takes (the group's own reading, or the configured floor), sent to " +
+			"less budget left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), sent to " +
 			"replay before it started instead of a normal attempt that could not finish. The distance rule, which gives up on Slots a " +
 			"Query Group fell behind on while it held them, does not apply to these. A rollout's handover " +
 			"is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero " +
@@ -979,7 +979,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Slots of Query Groups this process holds that were sent to replay before their normal read " +
 			"started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait " +
 			"and read hold - landed so near its query deadline that less time was left than its query takes " +
-			"(the group's own reading, or the configured floor), so a normal read would have been cut off at " +
+			"(the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), so a normal read would have been cut off at " +
 			"the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due " +
 			"before a takeover is counted under replay_takeover_slots_total{outcome=\"diverted\"} instead. " +
 			"Read with progress_completion_causes_total{cause=\"PRIMARY_INPUT_UNAVAILABLE\",reason=\"QUERY_TIMEOUT\"}: " +

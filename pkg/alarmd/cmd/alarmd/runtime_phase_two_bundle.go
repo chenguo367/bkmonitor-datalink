@@ -859,6 +859,7 @@ func openProductionPhaseTwoBundleAssembly(
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
 		QueryLatency:              lookbackQueryLatency(lookbackEngine),
 		LookbackBusy:              lookbackBusy(lookbackEngine),
+		InheritedQueryLatency:     readHoldInheritedQueryLatency(readHolds),
 		PostRecoveryTerminalDelay: retention.TerminalDelay,
 		QueryDeadlineReserve:      retention.QueryReserve,
 		SettlingWait:              cfg.PhaseTwo.Access.MinReadyDelay.Duration(),

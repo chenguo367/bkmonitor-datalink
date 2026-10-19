@@ -1283,7 +1283,13 @@ type productionPhaseTwoOwnershipDependencies struct {
 	QueryLatency scheduler.QueryLatency
 	// LookbackBusy reads what the lookback has of a Query Group in flight
 	// or reserved, for the slot_skipped line. Optional.
-	LookbackBusy              scheduler.LookbackBusy
+	LookbackBusy scheduler.LookbackBusy
+	// InheritedQueryLatency is the previous owner's reading of a Query
+	// Group's query duration, as the group's read-hold record keeps it,
+	// asked when the group has no reading of its own here: what a group just
+	// taken over is judged by before the fallback. Optional: without it no
+	// group has an inherited reading.
+	InheritedQueryLatency     scheduler.QueryLatency
 	PostRecoveryTerminalDelay time.Duration
 	QueryDeadlineReserve      time.Duration
 	SnapshotRetention         time.Duration
@@ -2604,6 +2610,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),
 		scheduler.WithQueryLatency(runtime.dependencies.QueryLatency),
+		scheduler.WithInheritedQueryLatency(runtime.dependencies.InheritedQueryLatency),
 		scheduler.WithLiveReserve(slotSourceLiveReserve(runtime.dependencies.Flights)),
 	)
 	if err != nil {

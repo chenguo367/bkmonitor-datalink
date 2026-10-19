@@ -194,6 +194,9 @@ type Stats struct {
 	// ReadHoldSeeds is the groups that started from a seeded arrival age, by
 	// where it came from: peer or cold_start.
 	ReadHoldSeeds map[string]uint64 `json:"read_hold_seeds,omitempty"`
+	// ReadHoldQueryDurationWrites is the read-hold records written for the
+	// query duration they keep for a successor: changed or refreshed.
+	ReadHoldQueryDurationWrites map[string]uint64 `json:"read_hold_query_duration_writes,omitempty"`
 	// ReadHoldClamped is the Slots frozen at the hold limit because a
 	// transition asked for more: known or fallback.
 	ReadHoldClamped map[string]uint64 `json:"read_hold_transition_clamped,omitempty"`

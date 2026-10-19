@@ -1467,6 +1467,12 @@ Labels: `reason`
 
 Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold bound, which costs the successor's first Slots a later read and never a Slot -- record_open, record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.
 
+## alarmd_read_hold_query_duration_writes_total
+
+Labels: `reason`
+
+Read-hold records written for the query duration they keep, by why: changed (the owner's measured duration moved by a second, a minute or more after the last write) or refreshed (the same reading rewritten at half its 24-hour life). A process that takes a group over judges its first rounds by that reading. Read it as the write rate the reading costs.
+
 ## alarmd_read_hold_record_corrupt_total
 
 Query Groups whose own read hold record did not decode: read as missing, the hold relearned, and the record replaced at the group's next write.
@@ -1579,7 +1585,7 @@ Slots the scheduler gave up replaying, by reason. REPLAY_AGE_EXCEEDED and REPLAY
 
 Labels: `outcome`
 
-Slots evaluated before this process took their Query Group over from another owner, by outcome, counted once per Slot and outcome however often it is classified, and not for a Query Group the degraded pool holds, whose Slots are given up on for distance as before: replayed, because nobody here could have run them and they are within the replay age; age_exceeded, given up on like any Slot that old; diverted, not yet at its query deadline but with less budget left than its query takes (the group's own reading, or the configured floor), sent to replay before it started instead of a normal attempt that could not finish. The distance rule, which gives up on Slots a Query Group fell behind on while it held them, does not apply to these. A rollout's handover is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero while a handover takes less than the replay age. Compared on the Slot's evaluation time, not on when it became ready: one evaluated just before the takeover and ready after it counts too.
+Slots evaluated before this process took their Query Group over from another owner, by outcome, counted once per Slot and outcome however often it is classified, and not for a Query Group the degraded pool holds, whose Slots are given up on for distance as before: replayed, because nobody here could have run them and they are within the replay age; age_exceeded, given up on like any Slot that old; diverted, not yet at its query deadline but with less budget left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), sent to replay before it started instead of a normal attempt that could not finish. The distance rule, which gives up on Slots a Query Group fell behind on while it held them, does not apply to these. A rollout's handover is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero while a handover takes less than the replay age. Compared on the Slot's evaluation time, not on when it became ready: one evaluated just before the takeover and ready after it counts too.
 
 ## alarmd_retained_peak_census_groups
 
@@ -1713,7 +1719,7 @@ Seconds from a Slot's data being readable (its evaluation time plus the read hol
 
 Labels: `reason`
 
-Slots of Query Groups this process holds that were sent to replay before their normal read started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait and read hold - landed so near its query deadline that less time was left than its query takes (the group's own reading, or the configured floor), so a normal read would have been cut off at the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due before a takeover is counted under replay_takeover_slots_total{outcome="diverted"} instead. Read with progress_completion_causes_total{cause="PRIMARY_INPUT_UNAVAILABLE",reason="QUERY_TIMEOUT"}: the rounds counted here are the ones that no longer appear there.
+Slots of Query Groups this process holds that were sent to replay before their normal read started, by reason, counted once per Slot: readiness_late, the Slot's readiness - its settling wait and read hold - landed so near its query deadline that less time was left than its query takes (the group's own reading, the previous owner's as the group's read-hold record keeps it, or the configured floor), so a normal read would have been cut off at the deadline with no data; replay reads it late but whole under a deadline of its own. A Slot due before a takeover is counted under replay_takeover_slots_total{outcome="diverted"} instead. Read with progress_completion_causes_total{cause="PRIMARY_INPUT_UNAVAILABLE",reason="QUERY_TIMEOUT"}: the rounds counted here are the ones that no longer appear there.
 
 ## alarmd_slot_operation_duration_seconds
 
