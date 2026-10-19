@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -131,6 +132,16 @@ type PhaseTwoSchedulerConfig struct {
 	MaxReplayAge           Duration `yaml:"-"`
 	RetryMinDelay          Duration `yaml:"-"`
 	RetryMaxDelay          Duration `yaml:"-"`
+	// TakeoverDivertFloor is the query budget a round taken over before its
+	// deadline must have left to start as a normal round when the group has
+	// no reading of its own query's duration - which is every group a
+	// process has just taken over. Below it the round goes to replay at once
+	// (scheduler.RecoveryLimits.TakeoverDivertFloor). The default is
+	// lookback.RecheckTimeout: the least time the lookback gives a read of a
+	// group's query when it has no reading of that query either, so both
+	// paths assume the same of a query they have not timed. Positive, and
+	// below MaxReplayAge.
+	TakeoverDivertFloor Duration `yaml:"-"`
 }
 
 func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits {
@@ -140,6 +151,7 @@ func (config PhaseTwoSchedulerConfig) RecoveryLimits() scheduler.RecoveryLimits 
 		MaxQueuedItemsPerQG: config.MaxQueuedItemsPerQG,
 		MaxReplaySlots:      config.MaxReplaySlots, MaxReplayAge: config.MaxReplayAge.Duration(),
 		RetryMinDelay: config.RetryMinDelay.Duration(), RetryMaxDelay: config.RetryMaxDelay.Duration(),
+		TakeoverDivertFloor: config.TakeoverDivertFloor.Duration(),
 	}
 }
 
@@ -326,6 +338,7 @@ func defaultPhaseTwoRuntime() PhaseTwoRuntimeConfig {
 			TickInterval:        Duration(time.Second),
 			MaxQueuedItemsPerQG: 16, MaxReplaySlots: 3, MaxReplayAge: Duration(10 * time.Minute),
 			RetryMinDelay: Duration(time.Second), RetryMaxDelay: Duration(30 * time.Second),
+			TakeoverDivertFloor: Duration(lookback.RecheckTimeout),
 		},
 		Access: PhaseTwoAccessConfig{
 			// The query source is the product's name on every unify-query
@@ -401,6 +414,11 @@ func (c PhaseTwoRuntimeConfig) validateRoles(selected roles.Set) error {
 	// here that turns the bound off.
 	if c.Scheduler.ActiveExecutionLimit <= 0 || c.Scheduler.TickInterval.Duration() <= 0 || c.Scheduler.RecoveryLimits().Validate() != nil {
 		return errors.New("phase_two scheduler cadence and recovery limits are invalid")
+	}
+	// The limits accept zero, which turns the diversion off for a scheduler
+	// built without it; a configured process always has a floor.
+	if c.Scheduler.TakeoverDivertFloor.Duration() <= 0 {
+		return errors.New("phase_two scheduler takeover_divert_floor must be positive and below the replay age")
 	}
 	// The compiler freezes completion offsets using this reserve, so Control
 	// needs it even though only Worker performs the downstream UQ request.

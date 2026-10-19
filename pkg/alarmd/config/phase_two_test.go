@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 )
 
 func TestDefaultPhaseTwoRegistrationSurvivesShortStoreOutage(t *testing.T) {
@@ -152,6 +153,12 @@ func TestGoAccessRequiresCompletePhaseTwoProductionCoordinates(t *testing.T) {
 		},
 		"retry delay": func(cfg *Config) {
 			cfg.PhaseTwo.Scheduler.RetryMaxDelay = cfg.PhaseTwo.Scheduler.RetryMinDelay - 1
+		},
+		"no takeover divert floor": func(cfg *Config) {
+			cfg.PhaseTwo.Scheduler.TakeoverDivertFloor = 0
+		},
+		"takeover divert floor at the replay age": func(cfg *Config) {
+			cfg.PhaseTwo.Scheduler.TakeoverDivertFloor = cfg.PhaseTwo.Scheduler.MaxReplayAge
 		},
 		"state mutation chunked store budget": func(cfg *Config) {
 			cfg.PhaseTwo.Coordinator.MaxStateMutations = uint64(cfg.Limits.Store.MaxKeysPerBatch)*execution.StateApplyMaxChunks + 1
@@ -338,4 +345,15 @@ func TestTheOutputMessageBoundIsNotAValuesKey(t *testing.T) {
 			cfg.Kafka.TriggerEvent.MaxMessageBytes, defaultOutputMaxMessageBytes, cfg.Limits.Trigger.MaxEvidenceBytesPerEvent)
 	}
 	requireIgnored(t, unknownKeysOf(t, "kafka:\n  trigger_event:\n    max_message_bytes: 1048576\n"), "max_message_bytes")
+}
+
+// A round taken over with less budget left than its query takes goes to
+// replay; for a group with no reading of its own the floor is the least the
+// lookback gives a read it has not timed either, and it reaches the limits.
+func TestTheTakeoverDivertFloorDefaultsToTheLookbacksUntimedReadBound(t *testing.T) {
+	cfg := Default()
+	if cfg.PhaseTwo.Scheduler.TakeoverDivertFloor.Duration() != lookback.RecheckTimeout ||
+		cfg.PhaseTwo.Scheduler.RecoveryLimits().TakeoverDivertFloor != lookback.RecheckTimeout {
+		t.Fatalf("floor %v / limits %v, want %v", cfg.PhaseTwo.Scheduler.TakeoverDivertFloor, cfg.PhaseTwo.Scheduler.RecoveryLimits().TakeoverDivertFloor, lookback.RecheckTimeout)
+	}
 }

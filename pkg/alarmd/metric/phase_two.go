@@ -961,7 +961,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"counted once per Slot and outcome however often it is classified, and not for a Query Group the " +
 			"degraded pool holds, whose Slots are given up on for distance as before: " +
 			"replayed, because nobody here could have run them and they are within the replay age; " +
-			"age_exceeded, given up on like any Slot that old. The distance rule, which gives up on Slots a " +
+			"age_exceeded, given up on like any Slot that old; diverted, not yet at its query deadline but with " +
+			"less budget left than its query takes (the group's own reading, or the configured floor), sent to " +
+			"replay before it started instead of a normal attempt that could not finish. The distance rule, which gives up on Slots a " +
 			"Query Group fell behind on while it held them, does not apply to these. A rollout's handover " +
 			"is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero " +
 			"while a handover takes less than the replay age. Compared on the Slot's evaluation time, not on " +
