@@ -82,6 +82,9 @@ func TestAPEMSplitAcrossScalarsIsMaskedWhole(t *testing.T) {
 		// rest of the block as values.
 		"begin in a comment": "host: a.example.test\n# " + pemLines("EC PRIVATE KEY", true)[0] + "\nl2: " + pemBody + "\nl3: " + pemLastLine +
 			"\nl4: \"" + pemLines("EC PRIVATE KEY", true)[3] + "\"\n",
+		// Both its BEGIN and its END in comments: no scalar holds either.
+		"begin and end in comments": "host: a.example.test\n# " + pemLines("EC PRIVATE KEY", true)[0] + "\nl2: " + pemBody + "\nl3: " + pemLastLine +
+			"\n# " + pemLines("EC PRIVATE KEY", true)[3] + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			shown := shownValue(t, "runcfg", text)

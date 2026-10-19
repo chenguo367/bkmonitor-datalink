@@ -134,6 +134,10 @@ type configMasker struct {
 	// without its END, or an END alone - which the leaf rule cannot judge
 	// whole (document).
 	splitPEM bool
+	// scalarPEM is set by a scalar holding a BEGIN line: a value whose PEM
+	// header is in no scalar has it in a comment or a key, both of which a
+	// document drops or shows unjudged (document).
+	scalarPEM bool
 }
 
 func (m *configMasker) mask(text string) string {
@@ -179,7 +183,8 @@ func (m *configMasker) value(key, text string) string {
 // A PEM block split across scalars, one line in each, is not a document the
 // leaf rule can judge: its short last line and its END line read as plain
 // alone. Such text is false too, and read line by line, where the block is
-// masked from BEGIN to END.
+// masked from BEGIN to END - as is text whose PEM header is in no scalar but
+// in a comment or a key, which the walk never judges.
 func (m *configMasker) document(text string) (string, bool) {
 	var nodes []*yaml.Node
 	decoder := yaml.NewDecoder(strings.NewReader(text))
@@ -208,10 +213,11 @@ func (m *configMasker) document(text string) (string, bool) {
 	for _, node := range nodes {
 		m.walk(node, "")
 	}
-	if m.splitPEM {
-		m.masked, m.splitPEM = masked, false
+	if m.splitPEM || !m.scalarPEM && pemBlock.MatchString(text) {
+		m.masked, m.splitPEM, m.scalarPEM = masked, false, false
 		return "", false
 	}
+	m.scalarPEM = false
 	if len(nodes) == 1 && (strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[")) {
 		var decoded any
 		if err := nodes[0].Decode(&decoded); err == nil {
@@ -268,9 +274,11 @@ func (m *configMasker) walk(node *yaml.Node, name string) {
 }
 
 func (m *configMasker) scalar(node *yaml.Node, name string) {
-	if begins, ends := pemBlock.MatchString(node.Value), strings.Contains(node.Value, "-----END "); begins != ends {
+	begins, ends := pemBlock.MatchString(node.Value), strings.Contains(node.Value, "-----END ")
+	if begins != ends {
 		m.splitPEM = true
 	}
+	m.scalarPEM = m.scalarPEM || begins
 	if node.Tag == "!!bool" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!null" {
 		if !configKey.MatchString(name) {
 			return
