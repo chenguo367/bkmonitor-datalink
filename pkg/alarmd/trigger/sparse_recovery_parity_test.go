@@ -518,3 +518,76 @@ func TestAProductionShapedSeriesWithGapsRecoversAtPythonsMinute(t *testing.T) {
 		t.Fatalf("read a Slot after each point, alarmd first recovered on %d, Python at %d", first, item.Lifecycle.At)
 	}
 }
+
+// The settled boundary's cost, pinned. A point every five minutes, window 5,
+// one anomaly, five recovery windows; each point is read in the Slot a minute
+// after it (a 60 s delay). Python recovers ten minutes after the anomaly. With
+// a 96 s hold alarmd does too: one window is inside the hold and stepped over,
+// and the five behind it still start after the anomaly at the next point.
+// With a 600 s hold nine windows are inside it, and this Level retains nine
+// positions, so no settled window is left to count: alarmd does not recover
+// this series at all within the hour, where Python recovered at minute 10.
+func TestTheReadHoldsCostOnASparseSeries(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 5, nil)})
+	if retained := plan.Levels().At(0).StateRequirement().RetentionPoints; retained != 9 {
+		t.Fatalf("the Level retains %d positions, want 9: the case reads off that bound", retained)
+	}
+	const delay = int64(60)
+	points := []sparsePoint{}
+	for m := int64(0); m <= 60; m += 5 {
+		points = append(points, sparsePoint{time: pythonBase + m*60, anomalous: m == 0})
+	}
+	firstRecovery := func(holdSeconds int64) int64 {
+		for index := 1; index < len(points); index++ {
+			if recoveredV2(evaluateSeenAtV2(t, plan, points, index, points[index].time+delay, holdSeconds*1000, true)) {
+				return (points[index].time - pythonBase) / 60
+			}
+		}
+		return -1
+	}
+	const python = 10
+	if got := firstRecovery(96); got != python {
+		t.Fatalf("with a 96 s hold alarmd first recovered at minute %d, Python at %d", got, python)
+	}
+	if got := firstRecovery(600); got != -1 {
+		t.Fatalf("with a 600 s hold alarmd first recovered at minute %d, want none within the hour (Python: %d)", got, python)
+	}
+}
+
+// A gap marker clears after RequiredFullSlots whole Slots, the most history
+// points any Level needs (W + R - 1), and the recovery walk reads positions on
+// the trigger's step. The two count the same thing only if a Slot advances the
+// window by one position, so a Plan detected more often than it aggregates -
+// a 60 s detection over a 300 s aggregation - is the case to check.
+//
+// It does: the trigger's step must equal the evaluation interval, which is
+// the Slot cadence (strategy compiler; controlplane planScheduleSpec holds the
+// schedule to the same value). A 60 s interval over a 300 s aggregation runs
+// its windows on 60 s positions, one per Slot, so W + R - 1 Slots are W + R - 1
+// positions; a 300 s step under a 60 s interval is refused rather than run.
+func TestAGapMarkerCountsSlotsInTheWalksOwnPositions(t *testing.T) {
+	notTimeAligned := func(plan *contract.EvaluationPlanV2) {
+		plan.StrategyIR.ExecutionSemantics.EvaluationInterval = 60
+		plan.StrategyIR.ExecutionSemantics.AggregationInterval = 300
+		plan.StrategyIR.ExecutionSemantics.QueryWindow = 300
+	}
+	level := levelV2(5, 1, 5, 1, 5, nil)
+	plan := compilePlanV2WithOutput(t, []contract.LevelIRV2{level}, notTimeAligned)
+	compiled := plan.Levels().At(0)
+	if step := compiled.Trigger().StepSeconds; step != plan.EvaluationSemantics().EvaluationInterval {
+		t.Fatalf("trigger step %d s under a %d s interval: a Slot would move the window by more or less than one position",
+			step, plan.EvaluationSemantics().EvaluationInterval)
+	}
+	if points := compiled.RequiredDetectHistoryPoints(); points != 5+5-1 {
+		t.Fatalf("required history %d positions, want W + R - 1 = 9 Slots of 60 s", points)
+	}
+
+	stepped := levelV2(5, 1, 5, 1, 5, nil)
+	config := map[string]any{"window_size": 5, "required_anomalies": 1, "step_seconds": 300}
+	stepped.TriggerPlan.Config = mustJSONV2(config)
+	result := compileResultV2(t, []contract.LevelIRV2{stepped}, notTimeAligned)
+	if _, ok := result.Plan(); ok && len(result.LevelTerminals()) == 0 {
+		t.Fatal("a 300 s trigger step compiled under a 60 s evaluation interval: a marker counted in Slots would " +
+			"clear while its unread bucket is still inside the walk")
+	}
+}

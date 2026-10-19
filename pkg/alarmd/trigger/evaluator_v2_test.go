@@ -874,7 +874,9 @@ func compilePlanV2(t testing.TB, levels []contract.LevelIRV2) *strategy.Compiled
 	return compilePlanV2WithOutput(t, levels, nil)
 }
 
-func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape func(*contract.EvaluationPlanV2), options ...strategy.CompilerOption) *strategy.CompiledPlan {
+// compileResultV2 compiles the fixture Plan and returns what the compiler
+// said, for a test about what it refuses.
+func compileResultV2(t testing.TB, levels []contract.LevelIRV2, shape func(*contract.EvaluationPlanV2), options ...strategy.CompilerOption) strategy.CompileResult {
 	t.Helper()
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
@@ -907,6 +909,12 @@ func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape fu
 	if err != nil {
 		t.Fatal(err)
 	}
+	return result
+}
+
+func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape func(*contract.EvaluationPlanV2), options ...strategy.CompilerOption) *strategy.CompiledPlan {
+	t.Helper()
+	result := compileResultV2(t, levels, shape, options...)
 	compiled, ok := result.Plan()
 	if !ok {
 		t.Fatalf("compiler terminals = %#v / %#v", result.PlanTerminal(), result.LevelTerminals())

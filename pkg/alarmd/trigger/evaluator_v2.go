@@ -377,6 +377,18 @@ func evaluateLevelV2(
 	// The hold is how long the group's data is measured to keep landing, so
 	// a position younger than that may still be filled by a point that has
 	// not arrived. The validation bounds both terms, so this cannot overflow.
+	//
+	// It is conservative on purpose. What the Slot read was whole when read,
+	// up to the evaluation time less the query's delay, so with a hold longer
+	// than the delay the positions between the two are unsettled though they
+	// were read whole; the boundary is "wholly past the read hold", the
+	// condition the rule was accepted on, not the read's own edge. The cost
+	// falls on sparse series only - a window with no hole answers either way
+	// - and it is a delay: the walk steps over the windows inside the hold
+	// and counts settled ones behind them, so the recovery comes later than
+	// Python's by about the hold less the delay, rounded up to the series'
+	// next point, and not at all once those windows plus the R it needs
+	// reach past the positions the Level retains.
 	settledThrough := request.EvaluationTime - (request.ReadHoldMillis+999)/1000
 	// A round of the Plan not read whole is not settled data either: its
 	// hole is a round nobody read. Until the gap marker clears, which takes

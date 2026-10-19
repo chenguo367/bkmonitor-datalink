@@ -2350,16 +2350,7 @@ func (stream *streamedExecution) gapMutationForReasons(
 }
 
 func requiredFullSlots(plan *strategy.CompiledPlan) uint32 {
-	if plan == nil {
-		return 0
-	}
-	var required uint32
-	for _, level := range plan.Levels().All() {
-		if points := level.RequiredDetectHistoryPoints(); points > required {
-			required = points
-		}
-	}
-	return required
+	return plan.RequiredFullSlots()
 }
 
 // physicalFailureReason picks the code an unavailable physical completion
