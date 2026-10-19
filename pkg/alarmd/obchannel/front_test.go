@@ -88,7 +88,7 @@ type namedSessionAuth struct{}
 
 func (namedSessionAuth) Authenticate(context.Context, string) (cliauth.Session, error) {
 	return cliauth.Session{ID: "named-session", EnvironmentID: "test", Scope: cliauth.ScopeReadonly, ExpiresAt: time.Now().Add(time.Hour),
-		Operator: "ops-a", IssuedVia: cliauth.IssuedViaFront}, nil
+		Operator: "ops-a", IssuedVia: cliauth.IssuedViaFront, FallbackBaseURLs: []string{"https://ops.example/own-alarmd/"}}, nil
 }
 
 func (namedSessionAuth) Admit(_ context.Context, session cliauth.Session, _ bool) (cliauth.Session, error) {
@@ -118,8 +118,14 @@ func TestAnSREReceiptNamesTheOperator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, response := call(t, c, envelope(c, "invoke", pod.OpDeletePod, Params{"target": map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid"}})); response.Error != nil {
+	_, response := call(t, c, envelope(c, "invoke", pod.OpDeletePod, Params{"target": map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid"}}))
+	if response.Error != nil {
 		t.Fatalf("delete: %+v", response)
+	}
+	// Every answer tells the session its fallback entry, so a session kept
+	// alive in-band learns it without a new login.
+	if response.Meta.Session == nil || len(response.Meta.Session.FallbackBaseURLs) != 1 || response.Meta.Session.FallbackBaseURLs[0] != "https://ops.example/own-alarmd/" {
+		t.Fatalf("meta.session = %+v, want the session's fallback entry", response.Meta.Session)
 	}
 	if len(actions) != 1 || actions[0].Operator != "ops-a" || actions[0].IssuedVia != cliauth.IssuedViaFront || actions[0].SessionID != "named-session" {
 		t.Fatalf("actions %+v, want one naming ops-a issued through the front surface", actions)

@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -217,5 +218,50 @@ func TestAnOperatorCanSendACallThroughTheDeclaredEntryDeliberately(t *testing.T)
 	}
 	if _, err := parse([]string{"invoke", "x", "--entry", "https://elsewhere.example/"}); err == nil {
 		t.Fatal("--entry accepted a URL")
+	}
+}
+
+// A session renewed in-band never sees a login answer; every channel answer
+// declares its fallback entry, and the CLI keeps it under the same checks as
+// a login's. A malformed declaration is ignored, an absent one leaves the
+// profile as it was.
+func TestAChannelAnswerTeachesTheSessionItsFallbackEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		declared any
+		want     []string
+	}{
+		{"declared", []any{"https://ops.example/own-alarmd"}, []string{"https://ops.example/own-alarmd/"}},
+		{"the session's own entry", []any{"SELF"}, nil},
+		{"absent", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var self string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				answer := envelope(fixtureProfile("http://unused"), "ok", map[string]any{})
+				if tc.declared != nil {
+					declared := tc.declared
+					if list, _ := declared.([]any); len(list) == 1 && list[0] == "SELF" {
+						declared = []any{self}
+					}
+					answer["meta"].(map[string]any)["session"].(map[string]any)["fallback_base_urls"] = declared
+				}
+				_ = json.NewEncoder(w).Encode(answer)
+			}))
+			defer server.Close()
+			p := fixtureProfile(server.URL)
+			self = p.PublicBaseURL
+			a, _ := fallbackApp(t)
+			if err := a.Store.save(p, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := a.channelRequestTimeout("discover", "", nil, "", p, 5*time.Second, false); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := a.Store.get(p.EnvironmentID)
+			if err != nil || !reflect.DeepEqual(stored.FallbackBaseURLs, tc.want) {
+				t.Fatalf("stored %v (%v), want %v", stored.FallbackBaseURLs, err, tc.want)
+			}
+		})
 	}
 }

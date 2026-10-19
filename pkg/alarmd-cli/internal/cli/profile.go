@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -226,6 +227,21 @@ func (s Store) updateExpiry(expected Profile, expiry string) error {
 			return false, nil
 		}
 		current.ExpiresAt = expiry
+		c.Profiles[current.EnvironmentID] = current
+		return true, nil
+	})
+}
+
+// updateFallback stores the fallback entries a server declared for the
+// session expected still holds; a profile another login replaced meanwhile
+// is left alone.
+func (s Store) updateFallback(expected Profile, list []string) error {
+	return s.locked(func(c *config) (bool, error) {
+		current, ok := c.Profiles[expected.EnvironmentID]
+		if !ok || !sameSession(current, expected) || slices.Equal(current.FallbackBaseURLs, list) {
+			return false, nil
+		}
+		current.FallbackBaseURLs = list
 		c.Profiles[current.EnvironmentID] = current
 		return true, nil
 	})

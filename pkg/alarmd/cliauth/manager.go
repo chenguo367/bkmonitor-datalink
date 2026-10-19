@@ -104,10 +104,14 @@ type Session struct {
 	Operator string `json:"operator,omitempty"`
 	// IssuedVia is the route that issued it: IssuedViaFront or
 	// IssuedViaAdminKey; empty on a session from before 0.4.
-	IssuedVia     string `json:"issued_via,omitempty"`
-	TokenHash     string `json:"-"`
-	pairingID     string
-	publicBaseURL string
+	IssuedVia string `json:"issued_via,omitempty"`
+	// FallbackBaseURLs is the deployment's own address for a session issued
+	// through the admin (fallbackFor), carried on every channel answer so a
+	// session kept alive in-band learns it without a new login.
+	FallbackBaseURLs []string `json:"fallback_base_urls,omitempty"`
+	TokenHash        string   `json:"-"`
+	pairingID        string
+	publicBaseURL    string
 }
 
 // The routes a credential is issued through.
@@ -391,7 +395,9 @@ func (m *Manager) sessionOperation(ctx context.Context, hash, expectedID, action
 	if err != nil {
 		return Session{}, err
 	}
-	return record.session(hash, renewed), nil
+	session := record.session(hash, renewed)
+	session.FallbackBaseURLs = m.fallbackFor(record.PublicBaseURL)
+	return session, nil
 }
 
 type rateWindow struct {

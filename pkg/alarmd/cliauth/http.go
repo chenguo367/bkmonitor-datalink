@@ -219,6 +219,16 @@ type loginResponse struct {
 	BoundToChallenge bool `json:"bound_to_challenge"`
 }
 
+// fallbackFor is the fallback entry of a session issued at entry: this
+// deployment's own address when the session came through the admin (entry
+// set and not it), none otherwise.
+func (m *Manager) fallbackFor(entry string) []string {
+	if entry == "" || entry == m.publicBaseURL || m.publicBaseURL == "" {
+		return nil
+	}
+	return []string{m.publicBaseURL}
+}
+
 func (m *Manager) login(record storedRecord, token, refresh string) loginResponse {
 	baseURL := m.publicBaseURL
 	if record.PublicBaseURL != "" {
@@ -229,9 +239,7 @@ func (m *Manager) login(record storedRecord, token, refresh string) loginRespons
 	response := loginResponse{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName, PublicBaseURL: baseURL,
 		AccessToken: token, SessionID: record.SessionID, ExpiresAt: time.UnixMilli(record.ExpiresAtMS).UTC(), Scope: record.Scope,
 		Pairing: "paired"}
-	if baseURL != m.publicBaseURL && m.publicBaseURL != "" {
-		response.FallbackBaseURLs = []string{m.publicBaseURL}
-	}
+	response.FallbackBaseURLs = m.fallbackFor(record.PublicBaseURL)
 	if refresh == "" {
 		response.Pairing = "pairing_limit_reached"
 		return response

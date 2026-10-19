@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -637,6 +638,17 @@ func (a *App) channelRequestTimeout(mode, operation string, params map[string]an
 	s := objectField(objectField(m, "meta"), "session")
 	if err := a.Store.updateExpiry(p, stringField(s, "expires_at")); err != nil {
 		fmt.Fprintln(a.Err, "Warning: server response received, but local expiry hint could not be saved.")
+	}
+	// The fallback entry the server declares on every answer: a session
+	// renewed in-band learns it as a login would, under the same checks.
+	if raw, declared := s["fallback_base_urls"]; declared {
+		if primary, err := normalizedURL(p.PublicBaseURL); err == nil {
+			if list, err := fallbackEntries(raw, primary); err == nil && !slices.Equal(list, p.FallbackBaseURLs) {
+				if err := a.Store.updateFallback(p, list); err != nil {
+					fmt.Fprintln(a.Err, "Warning: server response received, but the fallback entry could not be saved.")
+				}
+			}
+		}
 	}
 	return m, status, nil
 }

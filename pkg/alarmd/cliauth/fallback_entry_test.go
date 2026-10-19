@@ -32,3 +32,18 @@ func TestASessionIssuedThroughTheAdminIsToldTheDeploymentsOwnEntry(t *testing.T)
 		t.Errorf("issued here: entry %q fallback %v, want the deployment's own and no fallback", got.PublicBaseURL, got.FallbackBaseURLs)
 	}
 }
+
+// The same rule names the fallback on a channel answer's session as on a
+// login answer: the deployment's own address for an admin-issued entry,
+// none for a session issued at that address or with no entry recorded.
+func TestTheFallbackEntryRuleIsOneForLoginAndChannel(t *testing.T) {
+	m := &Manager{publicBaseURL: "https://ops.example/ops-alarmd/"}
+	if got := m.fallbackFor("https://ops.example/ops-admin/alarmd/"); !slices.Equal(got, []string{m.publicBaseURL}) {
+		t.Errorf("admin entry: %v", got)
+	}
+	for _, entry := range []string{"", m.publicBaseURL} {
+		if got := m.fallbackFor(entry); got != nil {
+			t.Errorf("entry %q: %v, want none", entry, got)
+		}
+	}
+}

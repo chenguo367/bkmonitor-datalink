@@ -208,7 +208,9 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 		return Renewal{}, err
 	}
 	m.count(CountRenewed)
-	return Renewal{Session: record.session(digest(token), false), AccessToken: token, RefreshToken: next, PairingID: record.PairingID}, nil
+	session := record.session(digest(token), false)
+	session.FallbackBaseURLs = m.fallbackFor(record.PublicBaseURL)
+	return Renewal{Session: session, AccessToken: token, RefreshToken: next, PairingID: record.PairingID}, nil
 }
 
 // Upgrade pairs a live session that has none: one exchanged before this

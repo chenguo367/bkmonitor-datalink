@@ -288,6 +288,9 @@ type SessionMeta struct {
 	ID        string    `json:"session_id"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Renewed   bool      `json:"renewed"`
+	// FallbackBaseURLs is the session's fallback entry (cliauth), on every
+	// answer, so a session renewed in-band learns it without a new login.
+	FallbackBaseURLs []string `json:"fallback_base_urls,omitempty"`
 }
 type Meta struct {
 	Version       string       `json:"channel_version"`
@@ -402,7 +405,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(403, "permission_denied", "Session does not authorize this deployment.")
 		return
 	}
-	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt}
+	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, FallbackBaseURLs: session.FallbackBaseURLs}
 	var req request
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, EnvelopeMaxBytes))
 	if err != nil {
@@ -558,7 +561,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failAuth(err, "Session unavailable at execution admission.")
 		return
 	}
-	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
+	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed, FallbackBaseURLs: session.FallbackBaseURLs}
 	if ctx.Err() != nil {
 		fail(408, "request_timeout", "Admission context ended before operation execution.")
 		return
