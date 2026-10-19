@@ -32,3 +32,19 @@ func TestAWriteDiffShowsAConfigMapAsTheReadDoes(t *testing.T) {
 		}
 	}
 }
+
+// A path of short words between slashes is configuration; a run of base64
+// is key material whether it carries a digit or is one long stretch, and
+// whether or not slashes cut it.
+func TestAPathIsNotKeyMaterialButBase64Is(t *testing.T) {
+	for _, path := range []string{"/etc/coredns/NodeHosts", "/var/lib/Kubelet/pods/Volumes", "conf/AlarmDefinitions/Default"} {
+		if keyMaterial(path) {
+			t.Errorf("path %q read as key material", path)
+		}
+	}
+	for _, key := range []string{"QWxhZGRpbjpvcGVuIHNlc2FtZQ", "ab3D/ef5G/hi7J/kl9M/no1P/qr", "abcDEFghiJKLmnoPQRstuVWX=="} {
+		if !keyMaterial(key) {
+			t.Errorf("base64 %q not read as key material", key)
+		}
+	}
+}

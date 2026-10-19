@@ -36,8 +36,9 @@ const ConfigValueContract = "config_values_deny_by_default_v1"
 //     boolean, or text whose every word is short or reads like a word - a
 //     host, a path, a duration - and not like a generated string.
 //
-// Text that is neither a document nor lines of key and value is masked
-// whole.
+// A line of other text - a Corefile directive, a hosts entry, a comment - is
+// shown only when the whole line is plain and names nothing credential-like
+// (configKey anywhere in it); every other line is masked.
 
 // configKey is a name whose value is secret by what it names.
 var configKey = regexp.MustCompile(`(?i)(passw|passwd|pwd|secret|token|credential|auth|cookie|session|private|crypt|cipher|sign|cert|salt|seed|nonce|apikey|api[_-]?key|access[_-]?key|(^|[_.\-])(key|iv|pin)([_.\-]|$)|(key|iv)$)`)
@@ -58,11 +59,28 @@ func keyMaterial(text string) bool {
 		return true
 	}
 	for _, run := range base64Run.FindAllString(text, -1) {
-		if mixedCase(run) {
+		if mixedCase(run) && (hasDigit(run) || longestSegment(run) >= 20) {
 			return true
 		}
 	}
 	return false
+}
+
+// A run of base64 characters is key material when it reads like one: mixed
+// case with a digit somewhere, or a long stretch with no separator. A path
+// such as /etc/coredns/NodeHosts is also a long run of those characters,
+// but of short words between slashes and with no digit; 16 random bytes in
+// base64 almost never are.
+func hasDigit(text string) bool {
+	return strings.IndexFunc(text, unicode.IsDigit) >= 0
+}
+
+func longestSegment(run string) int {
+	longest := 0
+	for _, segment := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '+' || r == '_' || r == '-' }) {
+		longest = max(longest, len(segment))
+	}
+	return longest
 }
 
 func mixedCase(text string) bool {
@@ -218,8 +236,8 @@ func (m *configMasker) scalar(node *yaml.Node, name string) {
 }
 
 // lines is text that is not a document, line by line: a line of key and
-// value decided as a leaf, a comment or a blank kept when it holds nothing
-// shaped like a key, any other line masked.
+// value decided as a leaf, a blank kept, and any other line kept only when
+// the whole of it is plain and no word in it names a credential.
 func (m *configMasker) lines(text string) string {
 	lines := strings.Split(text, "\n")
 	for index, line := range lines {
@@ -231,7 +249,7 @@ func (m *configMasker) lines(text string) string {
 			lines[index] = match[1] + match[2] + match[3] + m.leaf(match[2], strings.Trim(match[4], `"'`))
 			continue
 		}
-		if (strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, ";")) && plainValue(trimmed) {
+		if plainValue(trimmed) && !configKey.MatchString(trimmed) {
 			continue
 		}
 		lines[index] = m.mask(line)

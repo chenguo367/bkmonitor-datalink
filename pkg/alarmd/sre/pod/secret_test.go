@@ -238,6 +238,47 @@ func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
 	}
 }
 
+// Plain text that is neither a document nor lines of key and value - a
+// Corefile, a hosts file - is shown line by line where each line is plain,
+// and a line that names a credential, or carries something shaped like one,
+// is still masked.
+func TestPlainTextConfigurationIsShownLineByLine(t *testing.T) {
+	corefile := ".:1053 {\n    errors\n    health {\n       lameduck 5s\n    }\n    ready\n" +
+		"    kubernetes cluster.local in-addr.arpa ip6.arpa {\n       pods insecure\n       fallthrough in-addr.arpa ip6.arpa\n       ttl 30\n    }\n" +
+		"    hosts /etc/coredns/NodeHosts {\n      ttl 60\n      reload 15s\n      fallthrough\n    }\n    prometheus :9153\n" +
+		"    forward . /etc/resolv.conf\n    cache 30\n    loop\n    reload\n    loadbalance\n}\n"
+	hosts := "192.0.2.13 node-192-0-2-13\n192.0.2.14 node-192-0-2-14\n192.0.2.20 node-192-0-2-20\n"
+	credentials := "upstream mirror.example.com\npassword hunter2\napi token abcdefgh\nmirror Xk7pQ2mZ9wLr\n"
+	client, _ := fixture()
+	configMaps := configMapFixture{"kube-system/coredns": {ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "coredns", UID: "cm-uid"},
+		Data: map[string]string{"Corefile": corefile, "NodeHosts": hosts, "notes": credentials}}}
+	provider := mustProvider(t, Options{Client: client, ConfigMaps: configMaps, DefaultNamespace: "own", FingerprintKey: testFingerprintKey})
+	receipt, err := provider.ReadConfigMap(context.Background(), ConfigMapRequest{Namespace: "kube-system", Name: "coredns"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]ConfigMapKey{}
+	for _, key := range receipt.Keys {
+		keys[key.Key] = key
+	}
+	if keys["Corefile"].Value != corefile || keys["Corefile"].Masked != 0 {
+		t.Errorf("Corefile masked %d: %s", keys["Corefile"].Masked, keys["Corefile"].Value)
+	}
+	if keys["NodeHosts"].Value != hosts || keys["NodeHosts"].Masked != 0 {
+		t.Errorf("NodeHosts masked %d: %s", keys["NodeHosts"].Masked, keys["NodeHosts"].Value)
+	}
+	notes := keys["notes"]
+	if !strings.Contains(notes.Value, "upstream mirror.example.com") || notes.Masked != 3 {
+		t.Errorf("notes masked %d: %s", notes.Masked, notes.Value)
+	}
+	encoded, _ := json.Marshal(receipt)
+	for _, secret := range []string{"hunter2", "abcdefgh", "Xk7pQ2mZ9wLr"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("%q returned: %s", secret, encoded)
+		}
+	}
+}
+
 // A Secret read also says what owns it and who made it, so a reader can tell
 // whether removing a release would delete it: labels, annotations with the
 // last-applied copy dropped and a credential-named one masked, owner
