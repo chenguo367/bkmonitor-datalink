@@ -45,7 +45,21 @@ func linkdAlertsConsole(t *testing.T, pages map[string]any, refuse int) (*openal
 			}
 			_ = json.NewEncoder(w).Encode(pages[path])
 		default:
-			http.NotFound(w, r)
+			if !strings.HasPrefix(path, "/alerts/") {
+				http.NotFound(w, r)
+				return
+			}
+			if refuse != 0 {
+				w.WriteHeader(refuse)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "invalid_query", "message": "query range must not exceed 604800 seconds"}})
+				return
+			}
+			if page, ok := pages[path]; ok {
+				_ = json.NewEncoder(w).Encode(page)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"对象不存在","requestId":"req-1"}}`))
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -142,11 +156,54 @@ func TestLinkdAlertsByAlertReadsTheRecordItsLogsAndEvents(t *testing.T) {
 	}
 }
 
+// An alert_id is read on the link's route for that one alert, never the
+// list: the list takes no alert id and answers every alert in range, page
+// after page. The alert's logs and events keep their cursors; there is no
+// alert page to continue.
+func TestLinkdAlertsByAlertIDReadsThatAlertOnly(t *testing.T) {
+	alert := map[string]any{"tenantId": "system", "id": "a7",
+		"payload": map[string]any{"alert_id": "a7", "status": "active", "event_source_id": "source", "labels": map[string]any{"strategy_id": "136"}}}
+	pages := map[string]any{
+		"/alerts/a7":  alert,
+		"/alerts":     map[string]any{"items": []any{map[string]any{"tenantId": "system", "id": "other", "payload": map[string]any{"alert_id": "other"}}}, "nextCursor": "more"},
+		"/alert-logs": map[string]any{"items": []any{}, "nextCursor": "logs-next"},
+		"/events":     map[string]any{"items": []any{}, "nextCursor": "events-next"},
+	}
+	console, asked := linkdAlertsConsole(t, pages, 0)
+	out := runLinkdAlerts(t, console, obchannel.Params{"alert_id": "a7", "logs_cursor": "l0", "events_cursor": "e0"})
+	if out.Error != nil {
+		t.Fatalf("error %+v", out.Error)
+	}
+	answer := out.Value.(linkdAlertsAnswer)
+	if len(answer.Alerts) != 1 || answer.Alerts[0].AlertID != "a7" || answer.Alerts[0].StrategyID != "136" || answer.NextCursor != "" || !out.Complete {
+		t.Fatalf("answer %+v complete %v", answer, out.Complete)
+	}
+	if _, listed := asked.Load("/alerts"); listed {
+		t.Fatal("the alert list was asked for an alert_id")
+	}
+	q, _ := asked.Load("/alerts/a7")
+	if q == nil || q.(url.Values).Get("bk_tenant_id") != "system" {
+		t.Fatalf("alert route asked %v", q)
+	}
+	logs, _ := asked.Load("/alert-logs")
+	events, _ := asked.Load("/events")
+	if logs.(url.Values).Get("cursor") != "l0" || events.(url.Values).Get("cursor") != "e0" ||
+		answer.Alerts[0].LogsNextCursor != "logs-next" || answer.Alerts[0].EventsNextCursor != "events-next" {
+		t.Fatalf("logs asked %v events asked %v record %+v", logs, events, answer.Alerts[0])
+	}
+
+	missing := runLinkdAlerts(t, console, obchannel.Params{"alert_id": "gone"})
+	if missing.Error != nil || len(missing.Value.(linkdAlertsAnswer).Alerts) != 0 || !missing.Complete ||
+		len(missing.Limitations) == 0 || !strings.Contains(missing.Limitations[0], "no alert") {
+		t.Fatalf("missing alert: %+v", missing)
+	}
+}
+
 // Exactly one way of asking; a segment cursor belongs to one alert.
 func TestLinkdAlertsAsksOneWay(t *testing.T) {
 	op := cliLinkdAlertsOperation(nil)
 	for _, params := range []obchannel.Params{{}, {"strategy_id": "1", "alert_id": "a"}, {"alert_id": "a", "source_alert_id": "b"},
-		{"source_alert_id": "b", "logs_cursor": "x"}} {
+		{"source_alert_id": "b", "logs_cursor": "x"}, {"alert_id": "a", "cursor": "x"}} {
 		if op.Validate(params) == nil {
 			t.Fatalf("params %v accepted", params)
 		}

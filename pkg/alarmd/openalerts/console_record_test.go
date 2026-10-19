@@ -102,6 +102,33 @@ func TestAnAlertTheLinkDoesNotHaveIsAnAnswerNotAFailure(t *testing.T) {
 	}
 }
 
+// An alert read by id is the alert asked for: an answer naming another
+// alert or tenant is not taken as it, and the link not having the alert is
+// an answer rather than a failure.
+func TestAnAlertReadByIDIsTheAlertAskedFor(t *testing.T) {
+	answering := func(tenant, id string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"tenantId": tenant, "id": id, "payload": map[string]any{"alert_id": id}})
+		}
+	}
+	item, err := consoleServer(t, http.NotFound, answering("system", "a-1")).Alert(consoleCtx(), "system", "a-1")
+	if err != nil || !strings.Contains(string(item), `"a-1"`) {
+		t.Fatalf("item %s err %v", item, err)
+	}
+	for _, other := range []http.HandlerFunc{answering("system", "a-2"), answering("other", "a-1")} {
+		if _, err := consoleServer(t, http.NotFound, other).Alert(consoleCtx(), "system", "a-1"); err != ErrIncomplete {
+			t.Fatalf("another alert's answer taken: err = %v", err)
+		}
+	}
+	reader := consoleServer(t, http.NotFound, objectMissingAnswer)
+	if _, err := reader.Alert(consoleCtx(), "system", "a-1"); err != ErrAlertNotFound {
+		t.Fatalf("err = %v", err)
+	}
+	if call := reader.Record().Calls[ConsoleOpAlertRead]; call.Failures != 0 || call.Calls != 1 {
+		t.Fatalf("a missing alert was recorded as %+v", call)
+	}
+}
+
 // The link's own health rides on the roster page, and is kept from it.
 func TestTheLinksOwnHealthIsKeptFromTheRosterPage(t *testing.T) {
 	reader := consoleServer(t, func(w http.ResponseWriter, r *http.Request) {

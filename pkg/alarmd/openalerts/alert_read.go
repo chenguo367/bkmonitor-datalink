@@ -64,6 +64,40 @@ func (reader *HTTPReconciler) Entities(ctx context.Context, entity string, query
 	return EntityPage{Items: response.Items, NextCursor: response.NextCursor, Warnings: response.Warnings}, nil
 }
 
+// Alert reads one of the link's alerts on the route that addresses it by id,
+// as the link wrote it ({tenantId, id, payload}). The link's list of alerts
+// takes no alert id: asked with one, it answers every alert in range, page
+// by page, so an alert asked for by id is read where the link addresses it.
+// ErrAlertNotFound is the link having no such alert.
+func (reader *HTTPReconciler) Alert(ctx context.Context, tenantID, alertID string) (json.RawMessage, error) {
+	if err := requireDeadline(ctx); err != nil {
+		return nil, err
+	}
+	if tenantID == "" || alertID == "" || len(alertID) > 1024 || len(tenantID) > 256 {
+		return nil, errors.New("alarmd openalerts: invalid alert identity")
+	}
+	var item json.RawMessage
+	err := reader.getPathAnswering(ctx, "/alerts/"+url.PathEscape(alertID), url.Values{"bk_tenant_id": {tenantID}}, &item, true)
+	if errors.Is(err, errObjectMissing) {
+		reader.record(ConsoleOpAlertRead, reader.now(), nil)
+		return nil, ErrAlertNotFound
+	}
+	if err == nil {
+		var identity struct {
+			TenantID string `json:"tenantId"`
+			ID       string `json:"id"`
+		}
+		if json.Unmarshal(item, &identity) != nil || identity.TenantID != tenantID || identity.ID != alertID {
+			err = ErrIncomplete
+		}
+	}
+	reader.record(ConsoleOpAlertRead, reader.now(), err)
+	if err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
 // LinkRefusal is the link answering other than 200 with its own words: the
 // code and message of its error body, cut to maxRefusalBytes. It is a status
 // failure (ConsoleFailureClass) like any other.
