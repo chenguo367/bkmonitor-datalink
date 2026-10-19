@@ -155,15 +155,87 @@ func TestAConfigMapIsAlwaysRedacted(t *testing.T) {
 		t.Fatalf("a plain value was changed: %s", encoded)
 	}
 	for _, key := range receipt.Keys {
-		if key.Key == "REDIS_PASSWORD" && (key.Value != "<redacted>" || key.Fingerprint != fingerprintOf(testFingerprintKey, "plain-redis-credential")) {
+		if key.Key == "REDIS_PASSWORD" && (!strings.HasPrefix(key.Value, "<redacted bytes=22 ") || key.Fingerprint != fingerprintOf(testFingerprintKey, "plain-redis-credential")) {
 			t.Fatalf("a credential-named key = %+v, want masked with the fingerprint a Secret holding it would show", key)
 		}
-		if key.Key == "LOG_LEVEL" && key.Fingerprint != "" {
-			t.Fatalf("a plain value carries a fingerprint: %+v", key)
+		if key.Key == "LOG_LEVEL" && (key.Value != "info" || key.Fingerprint != fingerprintOf(testFingerprintKey, "info") || key.Masked != 0) {
+			t.Fatalf("a plain value = %+v, want it shown, with its fingerprint", key)
 		}
 	}
 	_, err = provider.ReadConfigMap(context.Background(), ConfigMapRequest{Name: "missing"})
 	requireCode(t, err, CodeNotFound)
+}
+
+// A ConfigMap shows a value only where it is plain configuration. Keys
+// rendered into configuration under names no credential word covers - a
+// crypt root key and its IV, an instance key, a signing key - are masked,
+// in a file-valued key leaf by leaf and in a plain key whole, while the
+// hosts, ports and switches beside them stay readable; a PEM block or a
+// generated string is masked under any name.
+func TestAConfigMapShowsOnlyPlainConfiguration(t *testing.T) {
+	random := func(n int) string {
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		out := make([]byte, n)
+		for index := range out {
+			out[index] = alphabet[(index*37+11)%len(alphabet)]
+		}
+		return string(out)
+	}
+	rootKey, iv, instanceKey, signing, shortPassword := random(44), random(24), random(32), random(64), "X70lY9PA91"
+	hexKey := strings.Repeat("9f3a", 16)
+	pem := "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUAwggE8AgEAAkEA\n-----END PRIVATE KEY-----\n"
+	file := "crypt:\n  root_key: " + rootKey + "\n  root_iv: " + iv + "\ninstance:\n  key: " + instanceKey + "\n  host: databus.data.svc\n  port: 8080\n" +
+		"trace:\n  trusted_signing: " + signing + "\n  enabled: true\n  sample_ratio: 0.1\n  timeout: 30s\nnote: " + hexKey + "\n"
+	client, _ := fixture()
+	configMaps := configMapFixture{"data/platform-config": {ObjectMeta: metav1.ObjectMeta{Namespace: "data", Name: "platform-config", UID: "cm-uid"},
+		Data: map[string]string{
+			"config.yaml":    file,
+			"CRYPT_ROOT_KEY": rootKey, "CRYPT_ROOT_IV": iv, "INSTANCE_KEY": instanceKey, "TRACE_SIGNING_SECRET": signing,
+			"DB_HOST": "mysql.kb-storage.svc.cluster.local", "DB_PORT": "3306", "FEATURE_X": "true", "CA_BUNDLE": pem,
+			"LABEL": shortPassword, "SIGNING_KEY": "changeme", "app.properties": "server.port=8080\napp.master_key=" + rootKey + "\n# comment\n",
+		}}}
+	provider := mustProvider(t, Options{Client: client, ConfigMaps: configMaps, DefaultNamespace: "own", FingerprintKey: testFingerprintKey})
+	receipt, err := provider.ReadConfigMap(context.Background(), ConfigMapRequest{Namespace: "data", Name: "platform-config"})
+	if err != nil || receipt.ValueContract != ConfigValueContract {
+		t.Fatalf("read: %+v err=%v", receipt, err)
+	}
+	encoded, _ := json.Marshal(receipt)
+	for _, material := range []string{rootKey, iv, instanceKey, signing, shortPassword, hexKey, "MIIBVgIBADANBgkq", "BEGIN PRIVATE KEY"} {
+		if strings.Contains(string(encoded), material) {
+			t.Fatalf("key material %q returned: %s", material[:8], encoded)
+		}
+	}
+	keys := map[string]ConfigMapKey{}
+	for _, key := range receipt.Keys {
+		keys[key.Key] = key
+		if key.Fingerprint != fingerprintOf(testFingerprintKey, configMaps["data/platform-config"].Data[key.Key]) {
+			t.Errorf("%s: fingerprint %q, want the whole value's", key.Key, key.Fingerprint)
+		}
+	}
+	for _, plain := range []string{"DB_HOST", "DB_PORT", "FEATURE_X"} {
+		if keys[plain].Value != configMaps["data/platform-config"].Data[plain] || keys[plain].Masked != 0 {
+			t.Errorf("plain %s = %+v, want it shown", plain, keys[plain])
+		}
+	}
+	// A value that reads like a word is still masked under a key's name.
+	for _, secret := range []string{"CRYPT_ROOT_KEY", "CRYPT_ROOT_IV", "INSTANCE_KEY", "TRACE_SIGNING_SECRET", "CA_BUNDLE", "LABEL", "SIGNING_KEY"} {
+		if !strings.HasPrefix(keys[secret].Value, "<redacted bytes=") || keys[secret].Masked != 1 {
+			t.Errorf("%s = %+v, want masked", secret, keys[secret])
+		}
+	}
+	document := keys["config.yaml"]
+	for _, kept := range []string{"host: databus.data.svc", "port: 8080", "enabled: true", "sample_ratio: 0.1", "timeout: 30s"} {
+		if !strings.Contains(document.Value, kept) {
+			t.Errorf("config.yaml lost %q: %s", kept, document.Value)
+		}
+	}
+	if document.Masked != 5 || !strings.Contains(document.Value, "root_key: <redacted bytes=44 ") {
+		t.Errorf("config.yaml masked %d: %s", document.Masked, document.Value)
+	}
+	properties := keys["app.properties"]
+	if !strings.Contains(properties.Value, "server.port=8080") || properties.Masked != 1 {
+		t.Errorf("app.properties = %+v", properties)
+	}
 }
 
 // A Secret read also says what owns it and who made it, so a reader can tell

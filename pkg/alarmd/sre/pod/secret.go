@@ -159,15 +159,18 @@ type ConfigMapRequest struct {
 	Name      string `json:"name"`
 }
 
-// ConfigMapKey is one key of a ConfigMap: its value through the output
-// redaction, and the size of the value as stored.
+// ConfigMapKey is one key of a ConfigMap: the size and fingerprint of its
+// value as stored, and the value as it may be shown (ConfigValueContract):
+// plain configuration in clear, everything else masked as its size and
+// fingerprint; Masked counts the masked parts.
 type ConfigMapKey struct {
 	Key   string `json:"key"`
 	Bytes int    `json:"bytes"`
 	Value string `json:"value"`
-	// Fingerprint is a value masked under a credential name, shown as a
-	// Secret value is, so it can be compared with the Secret that holds it.
-	Fingerprint string `json:"fingerprint,omitempty"`
+	// Fingerprint is the whole value's, as a Secret value's is, so it can be
+	// compared with the Secret that should hold it.
+	Fingerprint string `json:"fingerprint"`
+	Masked      int    `json:"masked,omitempty"`
 }
 
 // ConfigMapReceipt is what one ConfigMap read returned. Values are always
@@ -182,6 +185,7 @@ type ConfigMapReceipt struct {
 	BinaryKeys        []string       `json:"binary_keys,omitempty"`
 	Truncated         bool           `json:"truncated"`
 	RedactionContract string         `json:"redaction_contract"`
+	ValueContract     string         `json:"value_contract"`
 	At                time.Time      `json:"at"`
 }
 
@@ -191,10 +195,12 @@ type ConfigMapReceipt struct {
 var credentialKey = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|access[_-]?key|auth)`)
 
 // ReadConfigMap reads one ConfigMap in the namespace the request names, this
-// process's own by default, every value through the output redaction, and a
-// value under a credential-named key masked whole.
+// process's own by default: each key with its value's size and fingerprint,
+// and the value shown only where it is plain configuration
+// (ConfigValueContract), then through the output redaction.
 func (p *Provider) ReadConfigMap(ctx context.Context, request ConfigMapRequest) (ConfigMapReceipt, error) {
-	result := ConfigMapReceipt{Namespace: request.Namespace, Name: request.Name, Keys: []ConfigMapKey{}, RedactionContract: RedactionContract, At: p.options.Now().UTC()}
+	result := ConfigMapReceipt{Namespace: request.Namespace, Name: request.Name, Keys: []ConfigMapKey{}, RedactionContract: RedactionContract,
+		ValueContract: ConfigValueContract, At: p.options.Now().UTC()}
 	if p.options.ConfigMaps == nil {
 		return result, &Error{Code: CodeAPIError, Message: "Kubernetes ConfigMap adapter is unavailable"}
 	}
@@ -230,14 +236,13 @@ func (p *Provider) ReadConfigMap(ctx context.Context, request ConfigMapRequest) 
 	fingerprints := p.newFingerprints()
 	for _, key := range keys {
 		value := configMap.Data[key]
-		masked, fingerprint := value, ""
-		if credentialKey.MatchString(key) && value != "" {
-			masked, fingerprint = "<redacted>", fingerprints.sum([]byte(value))
-		}
-		redacted, cut := p.redactor.bounded(masked, max(remaining, 0))
+		masker := &configMasker{fingerprints: fingerprints}
+		shown := masker.value(key, value)
+		redacted, cut := p.redactor.bounded(shown, max(remaining, 0))
 		remaining -= int64(len(redacted))
 		result.Truncated = result.Truncated || cut
-		result.Keys = append(result.Keys, ConfigMapKey{Key: key, Bytes: len(value), Value: redacted, Fingerprint: fingerprint})
+		result.Keys = append(result.Keys, ConfigMapKey{Key: key, Bytes: len(value), Value: redacted,
+			Fingerprint: fingerprints.sum([]byte(value)), Masked: masker.masked})
 	}
 	for key := range configMap.BinaryData {
 		result.BinaryKeys = append(result.BinaryKeys, key)

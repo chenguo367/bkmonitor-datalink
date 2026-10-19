@@ -511,7 +511,7 @@ func SREOperations(options SREOptions) []Operation {
 				audit(ctx, started, SREAction{Op: pod.OpReadSecret, Namespace: v.Namespace, Kind: "Secret", Name: v.Name, UID: v.UID, Detail: fmt.Sprintf("keys %d, no values", len(v.Keys))}, err)
 				return wrapPod(v, err, err == nil && !v.Truncated)
 			}},
-		{ID: pod.OpReadConfigMap, Summary: "读一个 ConfigMap（任意命名空间，不指定时是本进程所在的命名空间）：每个值都经过脱敏，名字像凭据的键（password、secret、token 等）整值遮蔽；各模块渲染进 ConfigMap 的明文口令因此不会原样返回。每次调用都留审计记录。", Effect: "exec", EvidenceScope: "sre_configmap", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
+		{ID: pod.OpReadConfigMap, Summary: "读一个 ConfigMap（任意命名空间，不指定时是本进程所在的命名空间）：每个键给出值的字节数与指纹；值默认遮蔽，只有确认是普通配置的部分才明文显示（value_contract=config_values_deny_by_default_v1）——YAML/JSON 文件逐个叶子判、其他文本逐行判：键名像凭据或密钥（password、secret、token、key、iv、crypt、sign、cert、salt 等）的遮蔽，形如密钥的值（PEM、JWT、16 字节以上的 base64/hex、大小写数字混排的生成串）不论键名都遮蔽，遮蔽处写成 <redacted bytes=N fingerprint=F>，masked 是遮蔽的个数；主机、端口、开关、路径、时长等照常显示。每次调用都留审计记录，只记键数。", Effect: "exec", EvidenceScope: "sre_configmap", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
 			Fields: map[string]Field{"namespace": text, "name": text}, Required: []string{"name"}, OutputSchema: SchemaOf(pod.ConfigMapReceipt{}),
 			Run: func(ctx context.Context, p Params) Outcome {
 				started := now()

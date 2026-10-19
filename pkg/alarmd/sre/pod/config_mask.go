@@ -1,0 +1,240 @@
+// Copyright (C) 2017-2026 Tencent. All rights reserved.
+// Licensed under the MIT License.
+package pod
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"unicode"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ConfigValueContract names how a ConfigMap value is shown: masked unless
+// it is shown to be plain configuration.
+const ConfigValueContract = "config_values_deny_by_default_v1"
+
+// A ConfigMap is configuration, and configuration carries keys: crypt root
+// keys and their IVs, instance keys, signing keys, rendered next to hosts and
+// ports under names no list of credential words covers. Masking the values
+// whose key names look like credentials showed every other value, and those
+// keys with them.
+//
+// So a value is shown only when it is shown to be plain configuration, and
+// otherwise masked as its size and fingerprint. The decision is made per
+// value - per leaf of a YAML or JSON document, per line of other text - so
+// a configuration file keeps its hosts, ports, switches and paths readable
+// while the keys inside it are masked:
+//
+//   - a value under a credential-like name (configKey) is masked;
+//   - a value that looks like key material (keyMaterial) is masked under any
+//     name: a PEM block, a JWT, a run of base64 or hex of 16 bytes or more;
+//   - otherwise it is shown only if it is plain (plainValue): a number, a
+//     boolean, or text whose every word is short or reads like a word - a
+//     host, a path, a duration - and not like a generated string.
+//
+// Text that is neither a document nor lines of key and value is masked
+// whole.
+
+// configKey is a name whose value is secret by what it names.
+var configKey = regexp.MustCompile(`(?i)(passw|passwd|pwd|secret|token|credential|auth|cookie|session|private|crypt|cipher|sign|cert|salt|seed|nonce|apikey|api[_-]?key|access[_-]?key|(^|[_.\-])(key|iv|pin)([_.\-]|$)|(key|iv)$)`)
+
+var (
+	pemBlock   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----`)
+	jwtLike    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`)
+	base64Run  = regexp.MustCompile(`[A-Za-z0-9+/_-]{22,}={0,2}`)
+	hexRun     = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
+	wordSplit  = regexp.MustCompile(`[\s,;:/=@?&#()\[\]{}"'<>|.]+`)
+	lineKeyVal = regexp.MustCompile(`^(\s*(?:export\s+)?)([A-Za-z0-9_.\-]+)(\s*[:=]\s*)(.*)$`)
+)
+
+// keyMaterial says text holds something shaped like a key, whatever it is
+// called.
+func keyMaterial(text string) bool {
+	if pemBlock.MatchString(text) || jwtLike.MatchString(text) || hexRun.MatchString(text) {
+		return true
+	}
+	for _, run := range base64Run.FindAllString(text, -1) {
+		if mixedCase(run) {
+			return true
+		}
+	}
+	return false
+}
+
+func mixedCase(text string) bool {
+	upper, lower := false, false
+	for _, r := range text {
+		upper = upper || unicode.IsUpper(r)
+		lower = lower || unicode.IsLower(r)
+	}
+	return upper && lower
+}
+
+// generated says a word reads like a generated string rather than a word: a
+// password, an identifier minted at random. Short words and words of one
+// kind of character (a host label, a number, a constant) are not.
+func generated(word string) bool {
+	upper, lower, digit := false, false, false
+	for _, r := range word {
+		switch {
+		case unicode.IsUpper(r):
+			upper = true
+		case unicode.IsLower(r):
+			lower = true
+		case unicode.IsDigit(r):
+			digit = true
+		}
+	}
+	return len(word) >= 8 && upper && lower && digit
+}
+
+// plainValue says a scalar can be shown: short enough to read, and every
+// word of it a word.
+func plainValue(text string) bool {
+	if len(text) > 512 || strings.ContainsAny(text, "\r\n") || keyMaterial(text) {
+		return false
+	}
+	for _, word := range wordSplit.Split(text, -1) {
+		if generated(word) {
+			return false
+		}
+	}
+	return true
+}
+
+// configMasker masks one ConfigMap value and counts what it masked.
+type configMasker struct {
+	fingerprints *fingerprints
+	masked       int
+}
+
+func (m *configMasker) mask(text string) string {
+	m.masked++
+	return fmt.Sprintf("<redacted bytes=%d fingerprint=%s>", len(text), m.fingerprints.sum([]byte(text)))
+}
+
+// leaf is text under name, shown or masked.
+func (m *configMasker) leaf(name, text string) string {
+	if text == "" {
+		return text
+	}
+	if configKey.MatchString(name) || !plainValue(text) {
+		return m.mask(text)
+	}
+	return text
+}
+
+// value is one ConfigMap value under its key, as it may be shown.
+func (m *configMasker) value(key, text string) string {
+	if !strings.ContainsAny(text, "\n") {
+		return m.leaf(key, text)
+	}
+	if pemBlock.MatchString(text) {
+		return m.mask(text)
+	}
+	if shown, ok := m.document(text); ok {
+		return shown
+	}
+	return m.lines(text)
+}
+
+// document is text as a YAML (or JSON) document with every scalar decided on
+// its own, or false when it is not one.
+func (m *configMasker) document(text string) (string, bool) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &root); err != nil || len(root.Content) == 0 {
+		return "", false
+	}
+	node := root.Content[0]
+	if node.Kind != yaml.MappingNode && node.Kind != yaml.SequenceNode {
+		return "", false
+	}
+	m.walk(node, "")
+	if strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[") {
+		var decoded any
+		if err := node.Decode(&decoded); err == nil {
+			if encoded, err := json.MarshalIndent(decoded, "", "  "); err == nil {
+				return string(encoded), true
+			}
+		}
+	}
+	var out bytes.Buffer
+	encoder := yaml.NewEncoder(&out)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(node); err != nil {
+		return "", false
+	}
+	return out.String(), true
+}
+
+func (m *configMasker) walk(node *yaml.Node, name string) {
+	// A comment is free text; it is not shown.
+	node.HeadComment, node.LineComment, node.FootComment = "", "", ""
+	switch node.Kind {
+	case yaml.MappingNode:
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			keyNode := node.Content[index]
+			keyNode.HeadComment, keyNode.LineComment, keyNode.FootComment = "", "", ""
+			key := keyNode.Value
+			value := node.Content[index+1]
+			if value.Kind == yaml.ScalarNode {
+				m.scalar(value, key)
+				continue
+			}
+			m.walk(value, key)
+		}
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			if item.Kind == yaml.ScalarNode {
+				m.scalar(item, name)
+				continue
+			}
+			m.walk(item, name)
+		}
+	case yaml.ScalarNode:
+		m.scalar(node, name)
+	case yaml.AliasNode, yaml.DocumentNode:
+		for _, item := range node.Content {
+			m.walk(item, name)
+		}
+	}
+}
+
+func (m *configMasker) scalar(node *yaml.Node, name string) {
+	if node.Tag == "!!bool" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!null" {
+		if !configKey.MatchString(name) {
+			return
+		}
+	}
+	shown := m.leaf(name, node.Value)
+	if shown != node.Value {
+		node.Value, node.Tag, node.Style = shown, "!!str", 0
+	}
+	node.LineComment, node.HeadComment, node.FootComment = "", "", ""
+}
+
+// lines is text that is not a document, line by line: a line of key and
+// value decided as a leaf, a comment or a blank kept when it holds nothing
+// shaped like a key, any other line masked.
+func (m *configMasker) lines(text string) string {
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if match := lineKeyVal.FindStringSubmatch(line); match != nil {
+			lines[index] = match[1] + match[2] + match[3] + m.leaf(match[2], strings.Trim(match[4], `"'`))
+			continue
+		}
+		if (strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, ";")) && plainValue(trimmed) {
+			continue
+		}
+		lines[index] = m.mask(line)
+	}
+	return strings.Join(lines, "\n")
+}

@@ -384,13 +384,26 @@ func helmRelease(object *unstructured.Unstructured) string {
 	return name
 }
 
-// shown is an object as a write's diff compares it: as k8s.list shows it
-// (a Secret as its keys, sizes and fingerprints; credential-named values
-// masked), without the fields every write moves.
+// shown is an object as a write's diff compares it: as the reads show it (a
+// Secret as its keys, sizes and fingerprints; a ConfigMap's values as
+// configmap.get shows them; credential-named values masked), without the
+// fields every write moves.
 func (p *Provider) shown(object *unstructured.Unstructured, fingerprints *fingerprints) map[string]any {
 	raw := object.DeepCopy().Object
 	if object.GetKind() == "Secret" {
 		raw = p.keysOnlyRow(raw, true, fingerprints)
+	}
+	if object.GetKind() == "ConfigMap" {
+		// A ConfigMap's values as configmap.get shows them: plain
+		// configuration in clear, the rest masked (ConfigValueContract).
+		if data, ok := raw["data"].(map[string]any); ok {
+			masker := &configMasker{fingerprints: fingerprints}
+			for key, value := range data {
+				if text, isText := value.(string); isText {
+					data[key] = masker.value(key, text)
+				}
+			}
+		}
 	}
 	cleaned := p.cleanObject(raw, fingerprints)
 	for _, field := range []string{"managedFields", "resourceVersion", "generation", "uid", "creationTimestamp"} {

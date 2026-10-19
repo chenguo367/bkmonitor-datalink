@@ -443,8 +443,8 @@ func sliceHasEmpty(values []string) bool {
 // cleanObject is an object as the read returns it:
 //   - metadata.managedFields dropped, and the last-applied annotation, which
 //     can carry env values in clear;
-//   - an annotation under a credential-like key masked whole, as configmap.get
-//     masks such a key;
+//   - an annotation under a credential-like key, or holding something shaped
+//     like a key under any name, masked whole, as configmap.get masks it;
 //   - in any env list, the value of an entry whose name is credential-like
 //     masked whole;
 //   - every string through the output redaction.
@@ -458,7 +458,7 @@ func (p *Provider) cleanObject(object map[string]any, fingerprints *fingerprints
 		if annotations, ok := metadata["annotations"].(map[string]any); ok {
 			delete(annotations, lastAppliedAnnotation)
 			for key, value := range annotations {
-				if text, isText := value.(string); isText && text != "" && credentialKey.MatchString(key) {
+				if text, isText := value.(string); isText && text != "" && (credentialKey.MatchString(key) || configKey.MatchString(key) || keyMaterial(text)) {
 					annotations[key] = "<redacted>"
 				}
 			}
