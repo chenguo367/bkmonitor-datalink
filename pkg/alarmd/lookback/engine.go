@@ -233,6 +233,9 @@ type Options struct {
 	// Query Group: the per-group reading of a deployment whose lookback route
 	// is not public.
 	OnEarlierTrialEnd func(EarlierTrialEnd)
+	// ProbationRounds overrides ProbationRounds when positive; only a test
+	// sets it.
+	ProbationRounds int
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -360,6 +363,13 @@ type group struct {
 	incompleteFirstReads uint64
 	completeFirstRead    bool
 	reading              groupCounts
+	// lastHold is the hold its latest round was frozen with, once holdSeen;
+	// probation is set while its rounds are read again after the hold was
+	// lowered, and probations is those rereads in flight (probation.go).
+	lastHold   int64
+	holdSeen   bool
+	probation  *probationState
+	probations []*sample
 }
 
 type sample struct {
@@ -439,6 +449,11 @@ type sample struct {
 	seriesAdded     bool
 	seriesAddedRung int
 	seriesUnknown   bool
+	// probation marks a reread of a round of a Query Group in probation,
+	// kept apart from its samples; readFailed that a rung of it was read and
+	// did not come back whole.
+	probation  bool
+	readFailed bool
 }
 
 // Recent is one recheck that found a change, kept whole for a reader.
@@ -508,7 +523,12 @@ func (engine *Engine) Begin(query Query) *Read {
 	if state.seriesLate != nil && engine.options.Supplement != nil {
 		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
 	}
+	engine.noteRoundHoldLocked(state, query.Contract.ReadHoldMillis)
+	read.probation = state.probation != nil
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
+		if read.probation {
+			engine.trackLocked(read, query, step, now, state.depth)
+		}
 		return read
 	}
 	if state.prepared != nil {
@@ -524,11 +544,17 @@ func (engine *Engine) Begin(query Query) *Read {
 			}
 		}
 	}
-	state.capturing = true
-	read.query, read.step, read.readAt, read.depth = query, step, now, state.depth
-	read.keptFrom = tailFrom(query.Spec.LogicalWindow, step, tailSteps)
-	read.summary = newSummarizer(facts.Normalization.CanonicalValueField).trackSeries(read.keptFrom, engine.options.Memory)
+	state.capturing, read.sampled = true, true
+	engine.trackLocked(read, query, step, now, state.depth)
 	return read
+}
+
+// trackLocked has a first read keep its series sums over the window's tail,
+// for its group's sample, its probation reread, or both.
+func (engine *Engine) trackLocked(read *Read, query Query, step time.Duration, now time.Time, depth int) {
+	read.query, read.step, read.readAt, read.depth = query, step, now, depth
+	read.keptFrom = tailFrom(query.Spec.LogicalWindow, step, tailSteps)
+	read.summary = newSummarizer(query.Spec.PlanFacts.Normalization.CanonicalValueField).trackSeries(read.keptFrom, engine.options.Memory)
 }
 
 // Read is one formal first read. The access layer calls Series for every
@@ -553,6 +579,10 @@ type Read struct {
 	// read, on a directed Query Group; nil otherwise.
 	directed *directedQuery
 	earlier  *earlierSample
+	// sampled is a read taken as its group's sample, probation one kept as
+	// a probation reread; either keeps summary.
+	sampled   bool
+	probation bool
 }
 
 // Series counts one delivered series' bytes, and on a sample adds it to the
@@ -603,13 +633,22 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	state := engine.groups[queryGroup]
+	whole := err == nil && completion.Completeness == execution.CompletenessFull
+	if read.probation && state != nil && whole && !read.summary.faulted && owned {
+		// A first read not whole has nothing to compare a reread with, and is
+		// no round read clean; the next round is.
+		engine.captureProbationLocked(state, read, readLookback(read, lookback, lookbackKnown))
+	}
+	if !read.sampled {
+		return
+	}
 	if state == nil || !state.capturing {
 		engine.counts.samples[key2(read.source, OutcomeOwnerLost)]++
 		return
 	}
 	state.capturing = false
 	switch {
-	case err != nil || completion.Completeness != execution.CompletenessFull:
+	case !whole:
 		engine.counts.samples[key2(read.source, OutcomeFirstReadIncomplete)]++
 		state.incompleteFirstReads++
 		return
@@ -624,19 +663,9 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		return
 	}
 	if !lookbackKnown {
-		// Read from a step early: the tail's first bucket may still differ
-		// where a window reaches further back than that.
 		engine.counts.unknownLookback[read.source]++
-		lookback = read.step
 	}
-	if read.query.Spec.PlanFacts.NotTimeAlign && read.step > 0 {
-		// An unaligned query buckets from where its request starts, so a
-		// tail read that starts anywhere but a whole number of data steps
-		// before the kept tail reads every bucket at another phase than the
-		// first read did, and every one of them reads as changed. An aligned
-		// query is aligned by the query service and does not need it.
-		lookback = (lookback + read.step - 1) / read.step * read.step
-	}
+	lookback = readLookback(read, lookback, lookbackKnown)
 	keptFrom := read.keptFrom
 	engine.nextID++
 	state.sample = &sample{id: engine.nextID, source: read.source, queryGroup: queryGroup,
@@ -648,6 +677,24 @@ func (read *Read) Complete(completion execution.ProviderCompletion, err error) {
 		probe: state.sinceProbe >= probeEvery-1, settles: state.settle, emptyFirstRead: len(read.summary.buckets) == 0,
 		first: read.summary.series, delaySeconds: read.query.Spec.PlanFacts.QueryDelaySeconds}
 	engine.counts.samples[key2(read.source, OutcomeCaptured)]++
+}
+
+// readLookback is how far before its kept tail a reread of read reads.
+func readLookback(read *Read, lookback time.Duration, known bool) time.Duration {
+	if !known {
+		// Read from a step early: the tail's first bucket may still differ
+		// where a window reaches further back than that.
+		lookback = read.step
+	}
+	if read.query.Spec.PlanFacts.NotTimeAlign && read.step > 0 {
+		// An unaligned query buckets from where its request starts, so a
+		// tail read that starts anywhere but a whole number of data steps
+		// before the kept tail reads every bucket at another phase than the
+		// first read did, and every one of them reads as changed. An aligned
+		// query is aligned by the query service and does not need it.
+		lookback = (lookback + read.step - 1) / read.step * read.step
+	}
+	return lookback
 }
 
 func (engine *Engine) faultLocked(reason, source string, queryGroup execution.QueryGroupIdentity) {
@@ -730,6 +777,9 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 			engine.counts.rechecks[key3(candidate.source, RungNames[candidate.rung], RecheckOwnerLost)]++
 		}
 	}
+	for _, candidate := range state.probations {
+		candidate.dropped = true
+	}
 	for _, slot := range state.directed {
 		slot.dropped = true
 	}
@@ -787,7 +837,7 @@ func (engine *Engine) Step(ctx context.Context) {
 	var directed []*directedSlot
 	for _, state := range engine.groups {
 		directed = append(directed, engine.dueDirectedLocked(state, now)...)
-		for _, candidate := range [...]*sample{state.sample, state.probe} {
+		for _, candidate := range append([]*sample{state.sample, state.probe}, state.probations...) {
 			if candidate != nil && candidate.running {
 				// A read asked to yield that still holds its permit past its
 				// own deadline has stopped honouring either.
@@ -813,7 +863,14 @@ func (engine *Engine) Step(ctx context.Context) {
 		}
 	}
 	engine.mu.Unlock()
-	sort.Slice(due, func(i, j int) bool { return due[i].id < due[j].id })
+	// A probation reread goes before the samples: it is the one read of its
+	// round, where a sample's rung is one of several.
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].probation != due[j].probation {
+			return due[i].probation
+		}
+		return due[i].id < due[j].id
+	})
 	sort.Slice(directed, func(i, j int) bool { return directed[i].id < directed[j].id })
 	// A directed read is the Slot's supplement: it goes before the samples,
 	// which measure and can wait for their next rung.
@@ -876,6 +933,10 @@ func (engine *Engine) Step(ctx context.Context) {
 func (engine *Engine) advanceLocked(state *group, candidate *sample, now time.Time) {
 	candidate.rung++
 	if candidate.rung < candidate.planned {
+		return
+	}
+	if candidate.probation {
+		engine.finishProbationLocked(state, candidate)
 		return
 	}
 	if candidate.probing {
@@ -1132,6 +1193,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	// A rung compared covers any rung before it that was not read: it is
 	// compared with the last read kept, not with the rung it follows.
 	candidate.unread = outcome != RecheckCompared
+	candidate.readFailed = candidate.readFailed || outcome == RecheckFailed || outcome == RecheckPartial
 	// The series stand as this rung read them against the first read, not as
 	// any rung once did: a value that changed and came back was judged as it
 	// stands, and a series that came and went was not late. The rung a
@@ -1175,7 +1237,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 		engine.remember(Recent{Source: candidate.source, QueryGroup: candidate.queryGroup, EvaluationTime: candidate.evaluation,
 			Rung: rung, ReadAgeSeconds: int64(age / time.Second), Changes: changes, At: started})
 	}
-	if state := engine.groups[candidate.queryGroup]; state != nil && (state.sample == candidate || state.probe == candidate) {
+	if state := engine.groups[candidate.queryGroup]; state != nil && (state.sample == candidate || state.probe == candidate || candidate.probation) {
 		engine.advanceLocked(state, candidate, engine.options.Now())
 	}
 }
