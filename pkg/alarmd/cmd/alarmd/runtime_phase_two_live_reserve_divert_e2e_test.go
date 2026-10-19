@@ -13,6 +13,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // slotDiversions reads alarmd_slot_diversions_total for reason.
@@ -39,15 +41,29 @@ func slotDiversions(t *testing.T, fixture *cutoverStallFixture, reason string) f
 
 // Through the production runtime, a round is judged short of time against the
 // deadline its read is cut at under the runtime's measured post-query tail.
-// The tail here is thirty seconds, well past the frozen reserve: twenty-eight
-// seconds after evaluation the round has two seconds before that deadline,
-// short of the five a read is given, and goes to replay as readiness_late,
+// The tail here is measured at about thirty seconds, well past the frozen
+// reserve: two seconds before the deadline it puts the read at, the round is
+// short of the five a read is given and goes to replay as readiness_late,
 // though by its frozen deadline it had well over five.
 func TestTheProductionRuntimeDivertsByTheMeasuredTail(t *testing.T) {
 	fixture := startCutoverFixture(t, nil)
-	fixture.production.dependencies.Flights.LiveReserve().Set(30 * time.Second)
+	// The tail is measured, as a deployment measures it, so the shaper that
+	// republishes the reserve on its own ticks publishes this one too.
+	flights := fixture.production.dependencies.Flights
+	for range scheduler.PostQueryTailMinSamples {
+		flights.RecordPostQueryTail(fixture.now(), fixture.queryGroup, 30*time.Second)
+	}
+	tail := flights.PostQueryTail()
+	if tail < 30*time.Second || tail > 40*time.Second {
+		t.Fatalf("measured tail %v, want about 30s", tail)
+	}
+	flights.LiveReserve().Set(tail)
 	before := slotDiversions(t, fixture, "readiness_late")
-	fixture.clock.Store((fixture.base + 60 + 28) * 1000)
+	// The round's consumer deadline is a period after it; its read is cut the
+	// tail before that. Two seconds before that cut is well over five before
+	// its frozen deadline.
+	consumerDeadline := (fixture.base + 120) * 1000
+	fixture.clock.Store(consumerDeadline - tail.Milliseconds() - 2_000)
 	if _, _, err := fixture.runner.RunOne(context.Background()); err != nil {
 		t.Fatalf("RunOne() = %v", err)
 	}
