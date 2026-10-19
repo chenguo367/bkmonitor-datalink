@@ -63,7 +63,10 @@ type counters struct {
 	// ahead (EarlierAheadSlots).
 	earlierAhead map[string]uint64
 	earlierBytes map[string]uint64
-	holdIgnored  map[string]uint64
+	// probations is source|outcome: probation rereads by what they came to
+	// (ProbationOutcomes).
+	probations  map[string]uint64
+	holdIgnored map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -93,6 +96,7 @@ func newCounters(sources, refusals []string) counters {
 		early: map[string]uint64{}, earlyUndecided: map[string]uint64{}, earlyBytes: map[string]uint64{},
 		earlierReads: map[string]uint64{}, earlierBytes: map[string]uint64{}, holdIgnored: map[string]uint64{},
 		earlierOvertaken: map[string]uint64{}, earlierPreparedLateMax: map[string]time.Duration{}, earlierAhead: map[string]uint64{},
+		probations:      map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{}, plans: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -148,6 +152,9 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, path := range EarlierOvertakenPaths {
 			c.earlierOvertaken[key2(source, path)] = 0
+		}
+		for _, outcome := range ProbationOutcomes {
+			c.probations[key2(source, outcome)] = 0
 		}
 		for _, slots := range EarlierAheadSlots {
 			c.earlierAhead[key2(source, slots)] = 0
@@ -352,6 +359,12 @@ type SourceStats struct {
 	EarlierAhead     map[string]uint64 `json:"earlier_ahead"`
 	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
 	ReadHoldIgnored  map[string]uint64 `json:"read_hold_ignored"`
+	// ProbationRereads is the rounds of Query Groups in probation read again,
+	// by what they came to (ProbationOutcomes), and ProbationGroups the
+	// source's Query Groups in probation now: what probation costs and what
+	// it catches.
+	ProbationRereads map[string]uint64 `json:"probation_rereads"`
+	ProbationGroups  uint64            `json:"probation_groups"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -621,7 +634,7 @@ func (engine *Engine) Stats() Stats {
 				CompletionSeconds: int64(state.completion / time.Second), StepSeconds: int64(state.step / time.Second),
 				MeasuredAt: state.measuredAt}
 		}
-		for _, pending := range [...]*sample{state.sample, state.probe} {
+		for _, pending := range append([]*sample{state.sample, state.probe}, state.probations...) {
 			if pending != nil {
 				stats.Pending++
 				stats.PendingBytes += pending.last.bytes() + len(pending.first)*seriesEntryBytes
@@ -629,6 +642,7 @@ func (engine *Engine) Stats() Stats {
 		}
 		candidates = append(candidates, entry)
 	}
+	probationGroups := engine.probationGroupsLocked()
 	for _, source := range Sources {
 		entry := SourceStats{FirstReads: engine.counts.firstReads[source], FirstReadBytes: engine.firstReadBytes[source].Load(),
 			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
@@ -658,6 +672,10 @@ func (engine *Engine) Stats() Stats {
 		entry.EarlierAhead = map[string]uint64{}
 		for _, slots := range EarlierAheadSlots {
 			entry.EarlierAhead[slots] = engine.counts.earlierAhead[key2(source, slots)]
+		}
+		entry.ProbationRereads, entry.ProbationGroups = map[string]uint64{}, probationGroups[source]
+		for _, outcome := range ProbationOutcomes {
+			entry.ProbationRereads[outcome] = engine.counts.probations[key2(source, outcome)]
 		}
 		for _, outcome := range EarlyOutcomes {
 			entry.EarlyReads[outcome] = engine.counts.early[key2(source, outcome)]

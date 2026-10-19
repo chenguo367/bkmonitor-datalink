@@ -450,6 +450,21 @@ func (controller *Controller) ReadHoldAt(qg execution.QueryGroupIdentity, at exe
 	return time.Duration(holdAt(state.record, at, state.spec.SettlingWait)) * time.Millisecond
 }
 
+// LastLowering is the Slot the group's frozen hold last changed at, while
+// that change was a lowering - each step of a lowering a step per Slot among
+// them - and false when it was not, or the record is not loaded. A process
+// that takes the group over reads it from the record the old owner left, so
+// the probation after a lowering outlives the process it began in.
+func (controller *Controller) LastLowering(qg execution.QueryGroupIdentity) (execution.EvaluationTime, bool) {
+	state := controller.group(qg)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.loaded || state.record.SinceSlot <= 0 || state.record.PreviousHoldMillis <= state.record.HoldMillis {
+		return 0, false
+	}
+	return state.record.SinceSlot, true
+}
+
 func (controller *Controller) Reading(qg execution.QueryGroupIdentity) (Record, bool) {
 	state := controller.group(qg)
 	state.mu.Lock()

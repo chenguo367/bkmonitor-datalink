@@ -1041,6 +1041,18 @@ Labels: `source`
 
 Recheck reads stopped because a formal query had to wait for a query permit, by source, over every rung; each rung's are in /api/lookback. The rung is tried again within its window and counted in lookback_rechecks_total by what it comes to.
 
+## alarmd_lookback_probation_groups
+
+Labels: `source`
+
+The source's Query Groups in probation now: their hold lowered, each of their rounds read again until lookback.ProbationRounds of them read clean.
+
+## alarmd_lookback_probation_rereads_total
+
+Labels: `source`, `outcome`
+
+Rounds of Query Groups in probation - their hold lowered, and not yet read clean lookback.ProbationRounds times - read again at their first rung, by source and what they came to: clean, window_read_early (raises the hold when the whole window came later), skipped_for_permits, read_failed, unclassified. Only clean counts towards the end of a probation. Reader: what probation costs and what it catches.
+
 ## alarmd_lookback_read_early_groups
 
 Labels: `source`

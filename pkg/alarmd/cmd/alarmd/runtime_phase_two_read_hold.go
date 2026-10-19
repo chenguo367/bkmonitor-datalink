@@ -846,6 +846,9 @@ func (holds *productionReadHolds) bindLookback(options *lookback.Options) {
 	// public can still read, group by group, whether its trials complete and
 	// what overtakes those that do not. A group has at most one trial per
 	// rest, so the lines are as many as the trials.
+	// The probation after a lowering is resumed by the process that takes
+	// the group over, from the lowering its record names.
+	options.LastLowering = holds.controller.LastLowering
 	options.OnEarlierTrialEnd = func(e lookback.EarlierTrialEnd) {
 		if holds.logger == nil {
 			return

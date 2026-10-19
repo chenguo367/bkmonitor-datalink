@@ -60,6 +60,8 @@ type lookbackCollector struct {
 	earlierOvertaken    *prometheus.Desc
 	earlierPreparedLate *prometheus.Desc
 	earlierAhead        *prometheus.Desc
+	probationRereads    *prometheus.Desc
+	probationGroups     *prometheus.Desc
 	holdIgnored         *prometheus.Desc
 	readHoldTransition  *prometheus.Desc
 	readHoldOvertaken   *prometheus.Desc
@@ -201,6 +203,14 @@ func newLookbackCollector() *lookbackCollector {
 		earlierAhead: desc("lookback_earlier_ahead_total",
 			"Candidate h/2 read trials reserved at an earlier Slot's first attempt, by source and how many Slots ahead (1, 2, 3, 4+). "+
 				"Reader: the same acceptance, which shows which sources' holds needed a trial reserved further than the next Slot.", "source", "slots"),
+		probationRereads: desc("lookback_probation_rereads_total",
+			"Rounds of Query Groups in probation - their hold lowered, and not yet read clean lookback.ProbationRounds times - "+
+				"read again at their first rung, by source and what they came to: clean, window_read_early (raises the hold when "+
+				"the whole window came later), skipped_for_permits, read_failed, unclassified. Only clean counts towards the end "+
+				"of a probation. Reader: what probation costs and what it catches.", "source", "outcome"),
+		probationGroups: desc("lookback_probation_groups",
+			"The source's Query Groups in probation now: their hold lowered, each of their rounds read again until "+
+				"lookback.ProbationRounds of them read clean.", "source"),
 		holdIgnored: desc("lookback_read_hold_ignored_total", "Findings that cannot raise a whole-window read hold, by source and reason.", "source", "reason"),
 		readBytes: desc("lookback_first_read_bytes_total",
 			"Bytes the formal first reads delivered, by source, counted as the rechecks' are.", "source"),
@@ -245,7 +255,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
-		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.probationRereads, c.probationGroups, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
 		c.readHoldPredecessor, c.readHoldSeed, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
@@ -338,6 +348,10 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, path := range lookback.EarlierOvertakenPaths {
 			counter(c.earlierOvertaken, source.EarlierOvertaken[path], name, path)
 		}
+		for _, outcome := range lookback.ProbationOutcomes {
+			counter(c.probationRereads, source.ProbationRereads[outcome], name, outcome)
+		}
+		gauge(c.probationGroups, float64(source.ProbationGroups), name)
 		gauge(c.earlierPreparedLate, source.EarlierPreparedLateMaxSeconds, name)
 		for _, slots := range lookback.EarlierAheadSlots {
 			counter(c.earlierAhead, source.EarlierAhead[slots], name, slots)
