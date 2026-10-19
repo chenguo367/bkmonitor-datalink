@@ -301,8 +301,12 @@ func WithAbsentCandidates(next http.Handler, source func() AbsentCandidateSource
 				if forwarded {
 					return
 				}
-				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "LEADER_UNAVAILABLE", "reason": reason})
-				return
+				// No reason: the Leader is this replica, not yet leading
+				// its own round; it says so below.
+				if reason != "" {
+					writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "LEADER_UNAVAILABLE", "reason": reason})
+					return
+				}
 			}
 			writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "NOT_LEADER", "replica": replica})
 			return

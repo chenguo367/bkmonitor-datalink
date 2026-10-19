@@ -437,7 +437,8 @@ func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.Lea
 			if instance.Endpoint == "" {
 				return viewstream.LeaderEndpoint{}, viewstream.MissLeaderNoEndpoint, nil
 			}
-			return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: instance.Endpoint}, "", nil
+			return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: instance.Endpoint,
+				InternalToken: instance.InternalToken}, "", nil
 		}
 	}
 	registration, found, err := discovery.store.ReadWorker(ctx, leader.OwnerID)
@@ -450,7 +451,8 @@ func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.Lea
 	if registration.Endpoint == "" {
 		return viewstream.LeaderEndpoint{}, viewstream.MissLeaderNoEndpoint, nil
 	}
-	return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: registration.Endpoint}, "", nil
+	return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: registration.Endpoint,
+		InternalToken: registration.StreamToken}, "", nil
 }
 
 // newViewStreamIncarnation names this process for the stream: the id the

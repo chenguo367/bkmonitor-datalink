@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -287,8 +288,18 @@ func (standing publicSurfaceStanding) warn(logger *observability.Logger) {
 // named. The CLI routes -- the page's, issuing, exchange, pairing, renewal --
 // are composed in front of it and stay public, so a caller whose every
 // credential has expired can still get a new one.
-func publicAPI(native, windows http.Handler) http.Handler {
+//
+// A replica's hop to this Leader (leaderForwarderWithin) reaches the same
+// listener. peer admits it: a request marked as forwarded that presents
+// this process's internal token is served by native as the Leader would
+// answer it; one without the token, or with another, is the public's and
+// refused like any other.
+func publicAPI(native, windows http.Handler, peer func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if peer != nil && peer(r) {
+			native.ServeHTTP(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/health":
 			publicHealth(w, r, native)
@@ -377,4 +388,16 @@ func composeCLI(native, channel, auth, front http.Handler) http.Handler {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "error": map[string]string{"code": "cli_not_configured", "message": "CLI configuration is invalid or unavailable; check environment identity, HTTP(S) public URL and administrator key configuration."}})
 	})
+}
+
+// forwardedPeer admits a hop from another replica: marked as forwarded and
+// carrying token(), this process's internal token, compared in constant
+// time. An empty token admits nothing.
+func forwardedPeer(token func() string) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		own := token()
+		presented := r.Header.Get(fleet.ForwardTokenHeader())
+		return own != "" && r.Header.Get(fleet.ForwardedHeader()) != "" &&
+			subtle.ConstantTimeCompare([]byte(own), []byte(presented)) == 1
+	}
 }

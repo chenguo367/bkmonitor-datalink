@@ -310,7 +310,7 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 				http.NotFound(w, r)
 			}
 		})
-		publicNative = publicAPI(providers, windows)
+		publicNative = publicAPI(providers, windows, forwardedPeer(func() string { return providers.read().Control.StreamToken }))
 	}
 	// Explicit Worker/Control processes serve business evidence through
 	// authenticated internal RPC regardless of a local HTTP key. Shared

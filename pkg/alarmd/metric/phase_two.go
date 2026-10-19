@@ -243,7 +243,7 @@ var leaderForwardBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5}
 // route or result "other" would be, which is not at all.
 var (
 	LeaderForwardRoutes  = []string{"strategy", "diagnosis", "directory", "absent"}
-	LeaderForwardResults = []string{"answered", "timeout", "refused", "error", "no_leader", "canceled"}
+	LeaderForwardResults = []string{"answered", "timeout", "refused", "error", "no_leader", "canceled", "self"}
 )
 
 // controlReadDurationBuckets spans a single pipelined batch on a healthy
@@ -1346,7 +1346,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"answered (the Leader replied, whatever its status), timeout (the hop's own bound ran out, which " +
 			"includes a Leader still reading what the reply needs), refused (nothing listening at the Leader's " +
 			"endpoint), error (any other failure of the hop), no_leader (discovery named none, or none with an " +
-			"endpoint), canceled (the reader went away first, so nothing is known of the Leader). The duration is the replica's wait, the Leader's work included. Before this the hop's " +
+			"endpoint), canceled (the reader went away first, so nothing is known of the Leader), self (the Leader discovery named is " +
+			"this replica: nothing was sent, the request is answered here). The duration is the replica's wait, the Leader's work included. Before this the hop's " +
 			"failure was one word on the reply, FORWARD_FAILED, and which of these it was was not kept anywhere.",
 		Buckets: leaderForwardBuckets,
 	}, []string{"route", "result"})

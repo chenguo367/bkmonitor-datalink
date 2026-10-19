@@ -179,6 +179,22 @@ type forwardObserver func(route, result string, waited time.Duration)
 // the reply only ever said FORWARD_FAILED, and a Leader that timed out, one
 // not listening and one that reset the connection are three different
 // things to go and look at.
+//
+// A request is handed on only by a process that cannot answer it: no
+// catalog (a standing, a diagnosis page), no directory, not leading (the
+// absent candidates). The Leader itself is in that state before its first
+// successful refresh round, which with a source that fails from the start
+// is for as long as it fails (2026-10-19: the strategy cache had lapsed
+// and the restarted Leader never got a catalog). Discovery then names
+// this replica, and the hop went to its own listener; on a deployment
+// whose public surface is restricted that listener refuses the route, so
+// every such read answered "moved behind the CLI" instead of why there is
+// no catalog. A Leader that is this replica is never dialed: the forward
+// reports nothing sent and no refusal, and the caller answers here.
+//
+// A hop to another replica presents the Leader's internal token, the one
+// its registration carries and the evidence RPC is admitted by, so a
+// restricted listener can tell a peer from the public.
 func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *http.Client, timeout time.Duration, route string, observe forwardObserver) fleet.LeaderForward {
 	if discovery == nil {
 		return nil
@@ -199,6 +215,10 @@ func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *ht
 		if miss != "" {
 			observe(route, "no_leader", time.Since(started))
 			return false, miss
+		}
+		if self := strategyStandingReplica(replica); self != "" && strategyStandingReplica(leader.WorkerID) == self {
+			observe(route, "self", time.Since(started))
+			return false, ""
 		}
 		if _, _, splitErr := net.SplitHostPort(leader.Endpoint); splitErr != nil {
 			observe(route, "no_leader", time.Since(started))
@@ -236,6 +256,9 @@ func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *ht
 			forwarded.Header.Set("Content-Type", contentType)
 		}
 		forwarded.Header.Set(fleet.ForwardedHeader(), replica)
+		if leader.InternalToken != "" {
+			forwarded.Header.Set(fleet.ForwardTokenHeader(), leader.InternalToken)
+		}
 		reply, err := client.Do(forwarded)
 		if err != nil {
 			// The reader leaving first is not the Leader failing: a CLI

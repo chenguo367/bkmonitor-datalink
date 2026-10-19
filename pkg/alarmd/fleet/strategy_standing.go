@@ -652,6 +652,15 @@ const forwardedHeader = "X-Alarmd-Forwarded"
 // ForwardedHeader is the header's name, for the runtime's forwarder.
 func ForwardedHeader() string { return forwardedHeader }
 
+// forwardTokenHeader carries the Leader's internal token on a hop: what a
+// restricted listener, which refuses these routes to the public, admits a
+// peer by.
+const forwardTokenHeader = "X-Alarmd-Forward-Token"
+
+// ForwardTokenHeader is that header's name, for the forwarder and the
+// listener that admits it.
+func ForwardTokenHeader() string { return forwardTokenHeader }
+
 // serveStrategyList is GET /api/strategies[?state=&action=&limit=]: one
 // line per strategy over the fleet's view, most severe first, with the
 // vocabulary the words are rendered from. The filter words are the closed

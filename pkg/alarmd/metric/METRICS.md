@@ -835,7 +835,7 @@ Unix timestamp of the latest successful phase-two completion boundary.
 
 Labels: `route`, `result`
 
-Requests a replica handed to the Control Leader's listener because it could not answer them itself, by route (strategy: one strategy's standing; diagnosis: an environment diagnosis page) and result: answered (the Leader replied, whatever its status), timeout (the hop's own bound ran out, which includes a Leader still reading what the reply needs), refused (nothing listening at the Leader's endpoint), error (any other failure of the hop), no_leader (discovery named none, or none with an endpoint), canceled (the reader went away first, so nothing is known of the Leader). The duration is the replica's wait, the Leader's work included. Before this the hop's failure was one word on the reply, FORWARD_FAILED, and which of these it was was not kept anywhere.
+Requests a replica handed to the Control Leader's listener because it could not answer them itself, by route (strategy: one strategy's standing; diagnosis: an environment diagnosis page) and result: answered (the Leader replied, whatever its status), timeout (the hop's own bound ran out, which includes a Leader still reading what the reply needs), refused (nothing listening at the Leader's endpoint), error (any other failure of the hop), no_leader (discovery named none, or none with an endpoint), canceled (the reader went away first, so nothing is known of the Leader), self (the Leader discovery named is this replica: nothing was sent, the request is answered here). The duration is the replica's wait, the Leader's work included. Before this the hop's failure was one word on the reply, FORWARD_FAILED, and which of these it was was not kept anywhere.
 
 ## alarmd_leader_round_stage_seconds_total
 

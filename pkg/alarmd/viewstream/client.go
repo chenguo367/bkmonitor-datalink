@@ -60,11 +60,15 @@ const (
 
 // LeaderEndpoint is where the Leader's stream is served, as discovery
 // found it: the Leader's worker id, its term, and the endpoint its
-// registration advertises.
+// registration advertises. InternalToken is the token that registration
+// carries, the one a peer presents to the Leader's internal routes (the
+// evidence RPC, a hop to its listener); empty for a registration that has
+// none.
 type LeaderEndpoint struct {
-	WorkerID     string
-	ControlEpoch uint64
-	Endpoint     string
+	WorkerID      string
+	ControlEpoch  uint64
+	Endpoint      string
+	InternalToken string
 }
 
 // Discovery answers who leads and where. False with no error is "no
