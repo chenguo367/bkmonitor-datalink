@@ -48,9 +48,14 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 	// A Slot whose query never reached its backend because the permit wait
 	// ran out at the query's deadline: the query's own word, which the query
 	// failure facts have carried all along.
+	// A query that ran out of its time at the provider - its request
+	// cancelled or expired at its own deadline, or the provider stopping
+	// partway - names the provider's word too, as its query_completed line
+	// does, rather than reading as an internal error.
 	var admission interface{ QueryFailure() (string, string) }
 	if errors.As(err, &admission) {
-		if category, code := admission.QueryFailure(); category == observability.QueryFailureCategoryAdmission {
+		if category, code := admission.QueryFailure(); category == observability.QueryFailureCategoryAdmission ||
+			category == observability.QueryFailureCategoryProviderTransport {
 			reason = observability.ReasonCode(code)
 		}
 	}

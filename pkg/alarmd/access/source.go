@@ -319,6 +319,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	adapters := make([]*seriesAdapter, len(prepared.Queries))
 	var queryFailure sync.Once
 	var firstQueryErr error
+	// firstQueryDeadline is the deadline the first failed query ran under,
+	// read with its error once every query has returned.
+	var firstQueryDeadline int64
 	consumer = &serializedQueryConsumer{QueryExecutionConsumer: consumer}
 	results := make([]physicalQueryResult, len(prepared.Queries))
 	pending := make([]int, len(prepared.Queries))
@@ -441,7 +444,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			results[index].completion = completion
 			if err != nil {
 				queryFailure.Do(func() {
-					firstQueryErr = err
+					firstQueryErr, firstQueryDeadline = err, attempt.DeadlineUnixMilli
 					cancel()
 				})
 			}
@@ -453,7 +456,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	running.Wait()
 	flushScopeDrops(source.config.ScopeDrops, adapters, request.Contract.Slot, outputs)
 	if firstQueryErr != nil {
-		return execution.QueryExecutionCompletion{}, firstQueryErr
+		return execution.QueryExecutionCompletion{}, endedByDeadline(firstQueryErr, firstQueryDeadline, source.now())
 	}
 	if dispatchErr != nil {
 		return execution.QueryExecutionCompletion{}, dispatchErr
@@ -541,6 +544,36 @@ func (e *queryPermitDeadlineError) Error() string { return e.err.Error() }
 func (e *queryPermitDeadlineError) Unwrap() error { return e.err }
 func (e *queryPermitDeadlineError) QueryFailure() (string, string) {
 	return observability.QueryFailureCategoryAdmission, "QUERY_PERMIT_DEADLINE"
+}
+
+// queryDeadlineError names a query that ended because its own deadline
+// passed: its request cancelled when the round gave up at that deadline, or
+// its context expired at it. The provider never failed - the query's time
+// ran out - so it is the query's timeout, the word the same deadline met
+// before the request was sent completes with, and not an internal error.
+type queryDeadlineError struct{ err error }
+
+func (e *queryDeadlineError) Error() string { return e.err.Error() }
+func (e *queryDeadlineError) Unwrap() error { return e.err }
+func (e *queryDeadlineError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryProviderTransport, contract.ReasonQueryTimeout
+}
+
+// endedByDeadline is err named as the query's timeout when it is a bare
+// cancellation or expiry and the query's own deadline had passed by now. A
+// cancellation before that deadline - the process stopping, the Query
+// Group's lease lost, another query of the round failing first - is not a
+// timeout and keeps its error, and an error that already names its cause
+// keeps that name.
+func endedByDeadline(err error, deadlineUnixMilli int64, now time.Time) error {
+	var declared interface{ QueryFailure() (string, string) }
+	if err == nil || errors.As(err, &declared) || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+		return err
+	}
+	if deadlineUnixMilli <= 0 || now.UnixMilli() < deadlineUnixMilli {
+		return err
+	}
+	return &queryDeadlineError{err: err}
 }
 
 // prepared queries already have stable deadline ordering. Select the first
