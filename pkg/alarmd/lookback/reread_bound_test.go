@@ -47,3 +47,33 @@ func TestRereadBoundIsTheGroupsOwnReading(t *testing.T) {
 		t.Fatal("no engine has a reading")
 	}
 }
+
+// The query duration is the group's reading as measured, with no floor: a
+// quick query reads as quick. A group never read, or never read whole, has
+// none.
+func TestQueryDurationIsTheGroupsReadingAsMeasured(t *testing.T) {
+	f := newFixture(t)
+	if _, ok := f.engine.QueryDuration("qg"); ok {
+		t.Fatal("a group never read has a reading")
+	}
+	q := heldQuery(f)
+	f.engine.mu.Lock()
+	state := f.engine.groupLocked(q, f.clock.now())
+	f.engine.mu.Unlock()
+	if _, ok := f.engine.QueryDuration("qg"); ok {
+		t.Fatal("a group with no whole first read has a reading")
+	}
+	f.engine.mu.Lock()
+	state.firstReads.add(300 * time.Millisecond)
+	f.engine.mu.Unlock()
+	if got, ok := f.engine.QueryDuration("qg"); !ok || got != 300*time.Millisecond {
+		t.Fatalf("quick group: %v %v, want 300ms", got, ok)
+	}
+	if got, _ := f.engine.RereadBound("qg"); got != RecheckTimeout {
+		t.Fatalf("the reread bound %v, want RecheckTimeout still", got)
+	}
+	var none *Engine
+	if _, ok := none.QueryDuration("qg"); ok {
+		t.Fatal("no engine has a reading")
+	}
+}

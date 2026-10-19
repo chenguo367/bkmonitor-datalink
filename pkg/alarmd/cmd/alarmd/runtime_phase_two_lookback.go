@@ -429,10 +429,12 @@ func lookbackLateRungs(engine *lookback.Engine) func() map[string]int {
 }
 
 // lookbackQueryLatency is the lookback's reading of each Query Group's query
-// duration, as the slot source asks it; none without a lookback.
+// duration, as the slot source asks it; none without a lookback. It is what
+// the query takes, not the reread bound: that is RecheckTimeout at least, and
+// a round that still has time for its quick query would be sent to replay.
 func lookbackQueryLatency(engine *lookback.Engine) scheduler.QueryLatency {
 	if engine == nil {
 		return nil
 	}
-	return engine.RereadBound
+	return engine.QueryDuration
 }

@@ -685,6 +685,27 @@ func (engine *Engine) RereadBound(queryGroup execution.QueryGroupIdentity) (time
 	return state.rereadBound(), true
 }
 
+// QueryDuration is the group's own reading of how long its query takes - the
+// longest of its last whole first reads, as measured - and false when this
+// process has no such reading. RereadBound keeps that reading at
+// RecheckTimeout or more, the least a read again is given; a scheduler asking
+// whether a round still has time to finish needs what the query takes, and a
+// quick query given RecheckTimeout would be judged short of time with seconds
+// to spare. Read-only.
+func (engine *Engine) QueryDuration(queryGroup execution.QueryGroupIdentity) (time.Duration, bool) {
+	if engine == nil {
+		return 0, false
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	state := engine.groups[queryGroup]
+	if state == nil {
+		return 0, false
+	}
+	longest := state.firstReads.longest()
+	return longest, longest > 0
+}
+
 // rereadBound is how long a read of the group's query again may take: the
 // longest of its last whole first reads, never less than RecheckTimeout.
 // Caller holds the engine lock.
