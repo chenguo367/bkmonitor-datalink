@@ -14,20 +14,20 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// unfilledRound is one empty completion of a grouped log count: answered
-// whole with no group, by a provider that does not zero-fill.
+// unfilledRound is one empty completion of a log count, grouped or not:
+// answered whole and empty, by a provider that does not zero-fill.
 func unfilledRound(queryGroup string, slot time.Time) observability.Observation {
 	observed := emptyAt(queryGroup, "4102", slot)
 	observed.PrimaryInput = &observability.PrimaryInputFacts{Completeness: "FULL", DataState: "EMPTY", UnfilledWhenEmpty: true}
 	return observed
 }
 
-// A grouped log count that answers empty for as long as the data lines wait
+// A log count, grouped or not, that answers empty for as long as the data lines wait
 // is on its own line - empty; log counts aren't zero-filled, so quiet and
 // missing look the same - and on neither NO_DATA_PERSISTENT nor
 // EMPTY_EVERY_ROUND, whether or not it ever had data. A time series that
 // answers empty the same way keeps today's line.
-func TestAGroupedLogCountsEmptyAnswerIsNotDataMissing(t *testing.T) {
+func TestALogCountsEmptyAnswerIsNotDataMissing(t *testing.T) {
 	for _, sawData := range []bool{false, true} {
 		at := &clock{at: now}
 		tracker := newTracker(t, at)

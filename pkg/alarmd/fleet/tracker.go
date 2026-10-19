@@ -100,7 +100,7 @@ const (
 	// stopped or never came, so the object is on neither line above: it is
 	// detecting, and its row says why it has nothing to judge.
 	KindQuiet = "QUIET"
-	// KindLogCountEmpty: a grouped log count whose rounds came back empty
+	// KindLogCountEmpty: a log count, grouped or not, whose rounds came back empty
 	// for as long as the data lines above wait - empty; log counts aren't
 	// zero-filled, so quiet and missing look the same. Its provider answers
 	// a group with no document by leaving it out, not with a zero, so the

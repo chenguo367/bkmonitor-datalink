@@ -158,7 +158,7 @@ const (
 	// that a storage that failed silently - which answers the same way - is
 	// one look away.
 	CheckQuiet Check = "QUIET"
-	// LogCountEmpty is a grouped log count answered whole with no group for
+	// LogCountEmpty is a log count, grouped or not, answered whole and empty for
 	// as long as NO_DATA_PERSISTENT or EMPTY_EVERY_ROUND would wait: empty;
 	// log counts aren't zero-filled, so quiet and missing look the same. Its
 	// provider leaves a group with no document out of the answer instead of

@@ -3342,8 +3342,8 @@ type PrimaryInputFact struct {
 	// round's - its target - so they go stale when the content moves, and a
 	// reader trusts the copy only under the same content.
 	QuietWhenEmpty bool
-	// UnfilledWhenEmpty says a FULL, EMPTY primary is a grouped count its
-	// provider does not zero-fill (DataRequirement.UnfilledCounts): the
+	// UnfilledWhenEmpty says a FULL, EMPTY primary is a count its provider
+	// does not zero-fill (DataRequirement.UnfilledCounts), grouped or not: the
 	// answer is empty, and a quiet group and a missing one look the same.
 	// Set by the worker the same way, observation only.
 	UnfilledWhenEmpty bool

@@ -12,14 +12,18 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// An empty answer is a log count's empty only for a grouped primary its
-// provider does not zero-fill, answered whole and empty with nothing
-// withheld. An event count stays quiet, and a time series is neither.
-func TestOnlyAGroupedUnfilledCountIsALogCountsEmpty(t *testing.T) {
+// An empty answer is a log count's empty for a primary its provider does not
+// zero-fill, grouped or not, answered whole and empty with nothing withheld.
+// An event count stays quiet, and a time series is neither, grouped or not.
+func TestOnlyAnUnfilledCountIsALogCountsEmpty(t *testing.T) {
 	grouped := []execution.DataRequirement{{Role: execution.InputRolePrimary, UnfilledCounts: true, RequiredColumns: []string{"host", "value"}}}
 	whole := execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateEmpty}
 	if !(queryAvailabilityEvidence{}).unfilledWhenEmpty(whole, grouped) {
 		t.Fatal("a grouped log count answered whole with no group is not labelled")
+	}
+	ungrouped := []execution.DataRequirement{{Role: execution.InputRolePrimary, UnfilledCounts: true, RequiredColumns: []string{"value"}}}
+	if !(queryAvailabilityEvidence{}).unfilledWhenEmpty(whole, ungrouped) {
+		t.Fatal("an ungrouped log count answered with no series is not labelled")
 	}
 	if (queryAvailabilityEvidence{}).quietWhenEmpty(whole, grouped) {
 		t.Fatal("a log count read as an event count at rest")
@@ -33,12 +37,13 @@ func TestOnlyAGroupedUnfilledCountIsALogCountsEmpty(t *testing.T) {
 		primary      execution.PrimaryInputFact
 		requirements []execution.DataRequirement
 	}{
-		"time series":       {primary: whole, requirements: []execution.DataRequirement{{Role: execution.InputRolePrimary, RequiredColumns: []string{"host", "value"}}}},
-		"ungrouped":         {primary: whole, requirements: []execution.DataRequirement{{Role: execution.InputRolePrimary, UnfilledCounts: true, RequiredColumns: []string{"value"}}}},
-		"with data":         {primary: execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateData}, requirements: grouped},
-		"partial":           {primary: execution.PrimaryInputFact{Completeness: execution.CompletenessPartial, DataState: execution.DataStateEmpty}, requirements: grouped},
-		"emptied by target": {evidence: queryAvailabilityEvidence{primaryEmptiedOutside: true}, primary: whole, requirements: grouped},
-		"withheld":          {evidence: queryAvailabilityEvidence{primaryWithheldOtherwise: true}, primary: whole, requirements: grouped},
+		"time series":           {primary: whole, requirements: []execution.DataRequirement{{Role: execution.InputRolePrimary, RequiredColumns: []string{"host", "value"}}}},
+		"ungrouped time series": {primary: whole, requirements: []execution.DataRequirement{{Role: execution.InputRolePrimary, RequiredColumns: []string{"value"}}}},
+		"ungrouped with zeros":  {primary: execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateData}, requirements: ungrouped},
+		"with data":             {primary: execution.PrimaryInputFact{Completeness: execution.CompletenessFull, DataState: execution.DataStateData}, requirements: grouped},
+		"partial":               {primary: execution.PrimaryInputFact{Completeness: execution.CompletenessPartial, DataState: execution.DataStateEmpty}, requirements: grouped},
+		"emptied by target":     {evidence: queryAvailabilityEvidence{primaryEmptiedOutside: true}, primary: whole, requirements: grouped},
+		"withheld":              {evidence: queryAvailabilityEvidence{primaryWithheldOtherwise: true}, primary: whole, requirements: grouped},
 	} {
 		if test.evidence.unfilledWhenEmpty(test.primary, test.requirements) {
 			t.Errorf("%s: labelled as a log count's empty", name)
