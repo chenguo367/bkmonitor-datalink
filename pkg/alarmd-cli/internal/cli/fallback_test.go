@@ -88,14 +88,15 @@ func TestARequestMovesToTheDeclaredEntryOnlyWhenTheSessionsEntryDidNotReachAlarm
 		body       string // empty: nothing listens
 		exec, move bool
 		why        string
+		hint       bool // an executing call not moved: told where it could go
 	}{
 		{name: "nothing listening", why: fallbackUnsent, move: true},
 		{name: "nothing listening, exec", why: fallbackUnsent, exec: true, move: true},
 		{name: "admin cannot reach alarmd", status: 502, body: adminDown, why: fallbackAdminUnreachable, move: true},
 		{name: "proxy 503 without JSON", status: 503, body: "<html>no healthy upstream</html>", why: fallbackGateway, move: true},
 		{name: "proxy 502 without JSON", status: 502, body: "bad gateway", why: fallbackGateway, move: true},
-		{name: "admin cannot reach alarmd, exec", status: 502, body: adminDown, exec: true},
-		{name: "proxy 503, exec", status: 503, body: "upstream down", exec: true},
+		{name: "admin cannot reach alarmd, exec", status: 502, body: adminDown, exec: true, hint: true},
+		{name: "proxy 503, exec", status: 503, body: "upstream down", exec: true, hint: true},
 		{name: "admin timed out", status: 504, body: adminTimeout},
 		{name: "proxy 504 without JSON", status: 504, body: "gateway timeout"},
 		{name: "alarmd's own error", status: 502, body: alarmdRefusal},
@@ -111,13 +112,20 @@ func TestARequestMovesToTheDeclaredEntryOnlyWhenTheSessionsEntryDidNotReachAlarm
 			a, stderr := fallbackApp(t)
 			p := fixtureProfile(entry)
 			p.FallbackBaseURLs = []string{own.URL + "/ops-alarmd/"}
-			m, _, _ := a.requestVia(p, http.MethodPost, "api/cli/channel", map[string]any{}, 5*time.Second, tc.exec)
+			m, _, err := a.requestVia(p, http.MethodPost, "api/cli/channel", map[string]any{}, 5*time.Second, tc.exec)
 			if moved := own.calls.Load() == 1; moved != tc.move {
 				t.Fatalf("reached the declared entry %d times, want moved=%v", own.calls.Load(), tc.move)
 			}
 			if !tc.move {
-				if strings.Contains(stderr.String(), "Warning") {
-					t.Fatalf("warned without moving: %s", stderr)
+				hinted := strings.Contains(stderr.String(), "re-run with --entry alarmd")
+				// The hint is in meta when there is an answer, in the error
+				// when there is none (a proxy's bare page).
+				available := stringField(objectField(objectField(m, "meta"), "client_entry"), "fallback_available")
+				if m == nil && err != nil && strings.Contains(err.Error(), "re-run with --entry alarmd") {
+					available = "/ops-alarmd/"
+				}
+				if hinted != tc.hint || (tc.hint && !strings.Contains(available, "/ops-alarmd/")) || (!tc.hint && strings.Contains(stderr.String(), "Warning")) {
+					t.Fatalf("hint %v (want %v), fallback_available %q, stderr %q", hinted, tc.hint, available, stderr)
 				}
 				return
 			}
@@ -182,5 +190,32 @@ func TestTheFallbackEntriesAreOnlyWhatTheServerDeclared(t *testing.T) {
 		if _, err := validateExchange(answer(fallback), p); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// --entry alarmd sends a call through the entry the server declared, marked
+// as such, for an operator re-running an executing call deliberately. It
+// needs a declared entry and names no other.
+func TestAnOperatorCanSendACallThroughTheDeclaredEntryDeliberately(t *testing.T) {
+	own := newAlarmdEntry(t)
+	var adminCalls atomic.Int32
+	p := fixtureProfile(answering(t, 502, `{"error":{"code":"alarmd_unreachable","message":"x"}}`, &adminCalls))
+	p.FallbackBaseURLs = []string{own.URL + "/ops-alarmd/"}
+	via, err := onEntry(p, entryAlarmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := fallbackApp(t)
+	m, _, err := a.requestVia(via, http.MethodPost, "api/cli/channel", map[string]any{}, 5*time.Second, true)
+	client := objectField(objectField(m, "meta"), "client_entry")
+	if err != nil || adminCalls.Load() != 0 || own.calls.Load() != 1 || <-own.entries != entryAlarmd ||
+		stringField(client, "entry") != entryAlarmd || stringField(client, "reason") != "requested" {
+		t.Fatalf("deliberate call: admin %d own %d meta %v err %v", adminCalls.Load(), own.calls.Load(), client, err)
+	}
+	if _, err := onEntry(fixtureProfile(own.URL), entryAlarmd); err == nil {
+		t.Fatal("--entry alarmd accepted on a session that declares no entry")
+	}
+	if _, err := parse([]string{"invoke", "x", "--entry", "https://elsewhere.example/"}); err == nil {
+		t.Fatal("--entry accepted a URL")
 	}
 }

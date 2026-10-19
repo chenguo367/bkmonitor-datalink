@@ -198,8 +198,21 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 // meta.client_entry says which entry answered.
 func (a *App) requestVia(p Profile, method, endpoint string, body any, timeout time.Duration, unsentOnly bool) (map[string]any, int, error) {
 	moves := func(why string) bool { return why != "" && (!unsentOnly || why == fallbackUnsent) }
-	result, status, err, why := a.attempt(p, method, endpoint, body, timeout, "")
+	result, status, err, why := a.attempt(p, method, endpoint, body, timeout, p.via)
 	entry := map[string]any{"entry": "session", "url": p.PublicBaseURL}
+	if p.via != "" {
+		entry = map[string]any{"entry": p.via, "url": p.PublicBaseURL, "reason": "requested"}
+	}
+	if why != "" && !moves(why) && len(p.FallbackBaseURLs) > 0 {
+		// An executing call that may have reached alarmd is not repeated;
+		// the operator is told where it could go once they have checked.
+		hint := fmt.Sprintf("the session's entry did not reach alarmd (%s) and this call executes something that may already have run, so it was not repeated through the deployment's own entry %s; check sre.receipts and re-run with --entry alarmd if it did not run", why, p.FallbackBaseURLs[0])
+		fmt.Fprintln(a.Err, "Warning: "+hint+".")
+		entry["fallback_available"] = p.FallbackBaseURLs[0]
+		if err != nil {
+			err = fmt.Errorf("%w; %s", err, hint)
+		}
+	}
 	for _, fallback := range p.FallbackBaseURLs {
 		if !moves(why) {
 			break

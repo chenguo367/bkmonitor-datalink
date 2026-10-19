@@ -47,11 +47,14 @@ type options struct {
 	timeout               time.Duration
 	expectBuild           string
 	out, snapshot         string
-	window                time.Duration
-	hasWindow             bool
-	hasInput, rebind      bool
-	insecureTLS           bool
-	args                  []string
+	// entry is --entry: alarmd sends the call through the fallback entry
+	// the server declared, for an operator re-running deliberately.
+	entry            string
+	window           time.Duration
+	hasWindow        bool
+	hasInput, rebind bool
+	insecureTLS      bool
+	args             []string
 }
 
 func parse(args []string) (options, error) {
@@ -61,7 +64,7 @@ func parse(args []string) (options, error) {
 		arg := args[i]
 		name, value, equal := strings.Cut(arg, "=")
 		if name == "--env" || name == "--input" || name == "--ca-cert" || name == "--url" || name == "--port" || name == "--state" || name == "--timeout" ||
-			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--out" || name == "--snapshot" {
+			name == "--expect-build" || name == "--window" || name == "--params-file" || name == "--stdin-file" || name == "--script-file" || name == "--out" || name == "--snapshot" || name == "--entry" {
 			if seen[name] {
 				return o, errors.New("flags may only be provided once")
 			}
@@ -78,6 +81,11 @@ func parse(args []string) (options, error) {
 			}
 			if name == "--expect-build" {
 				o.expectBuild = value
+			} else if name == "--entry" {
+				if value != entryAlarmd {
+					return o, errors.New("--entry takes alarmd: the deployment's own entry its server declared")
+				}
+				o.entry = value
 			} else if name == "--out" {
 				o.out = value
 			} else if name == "--snapshot" {
@@ -186,6 +194,9 @@ func (a *App) Run(args []string) int {
 	}
 	if o.hasInput && command != "invoke" {
 		return a.fail("invalid_input", "--input is only valid with invoke", 2)
+	}
+	if o.entry != "" && command != "invoke" {
+		return a.fail("invalid_input", "--entry is only valid with invoke", 2)
 	}
 	if (o.paramsFile != "" || o.stdinFile != "") && command != "invoke" {
 		return a.fail("invalid_input", "--params-file, --stdin-file and --script-file are only valid with invoke", 2)
@@ -490,6 +501,10 @@ func (a *App) session(command string, p Profile) int {
 }
 
 func (a *App) channel(mode, operation string, params map[string]any, p Profile, o options) int {
+	p, err := onEntry(p, o.entry)
+	if err != nil {
+		return a.fail("invalid_input", err.Error(), 2)
+	}
 	revision := ""
 	timeout := 30 * time.Second // Legacy servers do not describe their deadline.
 	exec := false
@@ -574,7 +589,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 	// the pairing; an unpaired one is reported as it is.
 	if status == http.StatusUnauthorized && p.RefreshToken != "" && !exec {
 		if renewed, renewErr := a.ensureSession(p.EnvironmentID, true); renewErr == nil {
-			p = renewed
+			p, _ = onEntry(renewed, o.entry)
 			m, status, err = a.channelRequestTimeout(mode, operation, params, revision, p, timeout, exec)
 			if err != nil {
 				return a.fail("request_failed", err.Error(), 1)
@@ -637,4 +652,18 @@ func channelBody(mode, operation string, params map[string]any, revision string)
 		body["renew_if_due"] = true
 	}
 	return body
+}
+
+// onEntry is p sent through the entry --entry names: the first fallback
+// entry its server declared, marked so the request says so. An empty entry
+// is p as it is.
+func onEntry(p Profile, entry string) (Profile, error) {
+	if entry == "" {
+		return p, nil
+	}
+	if len(p.FallbackBaseURLs) == 0 {
+		return p, errors.New("this session's server declared no other entry; --entry alarmd needs a session issued through the admin")
+	}
+	p.PublicBaseURL, p.FallbackBaseURLs, p.via = p.FallbackBaseURLs[0], nil, entryAlarmd
+	return p, nil
 }

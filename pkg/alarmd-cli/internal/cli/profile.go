@@ -43,6 +43,9 @@ type Profile struct {
 	// upgrade_refused. Empty is a session from before this client, which is
 	// offered for pairing once.
 	Pairing string `json:"pairing,omitempty"`
+	// via is the entry a request through this profile names (onEntry);
+	// never stored.
+	via string
 }
 
 type config struct {
