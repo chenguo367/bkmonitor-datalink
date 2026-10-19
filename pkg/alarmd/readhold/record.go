@@ -56,8 +56,11 @@ type Record struct {
 	// candidate, which move the floor once there are FloorDifferentsRequired
 	// of them. Both are cleared when the hold is raised or seeded and at
 	// each renewal.
-	EarlierFloorMillis  *int64                   `json:"earlier_floor_ms,omitempty"`
-	EarlierDifferents   int                      `json:"earlier_differents,omitempty"`
+	EarlierFloorMillis *int64 `json:"earlier_floor_ms,omitempty"`
+	EarlierDifferents  int    `json:"earlier_differents,omitempty"`
+	// LoweredFromMillis is the hold the last lowering came from, while the
+	// group stays Lowered: a raise right after it goes back there at least.
+	LoweredFromMillis   int64                    `json:"lowered_from_ms,omitempty"`
 	RaisedAfterLowering uint64                   `json:"raised_after_lowering,omitempty"`
 	Lowered             bool                     `json:"lowered,omitempty"`
 	Noise               uint64                   `json:"noise,omitempty"`
@@ -85,7 +88,7 @@ func Decode(raw []byte) (Record, error) {
 	if !inRange(record.HoldMillis) || !inRange(record.PreviousHoldMillis) || record.SinceSlot <= 0 ||
 		record.PreviousSinceSlot < 0 || record.PreviousSinceSlot > record.SinceSlot ||
 		(record.PendingHoldMillis != nil && !inRange(*record.PendingHoldMillis)) ||
-		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierDifferents < 0 ||
+		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierDifferents < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
 		record.SegmentStart < 0 {

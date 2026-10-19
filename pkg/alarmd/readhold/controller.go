@@ -1135,8 +1135,23 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 		next.AtLimit, next.LimitMillis = target > limit, limit
 		if !next.Closed && min(target, limit) > current(next) {
 			hold := min(target, limit)
-			next.PendingHoldMillis = &hold
+			// A raise right after a lowering shows the lowered hold too early:
+			// a whole window read there was still arriving. The lowering is
+			// undone - the hold goes back at least to where it came from, not
+			// only to the one round's arrival, which under an arrival that
+			// moves round to round leaves it inside the spread and reads its
+			// later rounds early one after another - and the lowered hold is
+			// the search's floor, so the next lowering lands above it. Any
+			// other raise starts the search afresh.
+			raisedFrom := current(next)
 			clearFloor(&next)
+			if next.Lowered {
+				hold = min(max(hold, next.LoweredFromMillis), limit)
+				if raisedFrom < hold {
+					next.EarlierFloorMillis = &raisedFrom
+				}
+			}
+			next.PendingHoldMillis = &hold
 			if next.Lowered {
 				next.RaisedAfterLowering++
 				next.Lowered = false
@@ -1185,6 +1200,7 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 			quiet = SingleEventQuiet.Milliseconds()
 		}
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
+			next.LoweredFromMillis = hold
 			next.PendingHoldMillis = &candidate
 			next.Lowered, next.EarlierMatches, next.QuietSinceMillis = true, 0, now
 			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
