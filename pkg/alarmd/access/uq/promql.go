@@ -142,6 +142,8 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set(headerQuerySource, client.querySource)
 	httpRequest.Header.Set(headerSpace, request.SpaceUID)
+	traceParent, traceID := newTraceParent()
+	httpRequest.Header.Set(headerTraceParent, traceParent)
 	// A connection the server dropped while idle is re-dialed by the
 	// transport, as for an evaluation query (markReplayable).
 	markReplayable(httpRequest)
@@ -152,7 +154,13 @@ func (client *Client) Range(ctx context.Context, request RangeRequest) (RangeRes
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return RangeResult{}, fmt.Errorf("alarmd access uq: range query returned %d", response.StatusCode)
+		// The error can reach a log, so it names the status, the refusal's
+		// class and the trace id to find it by on the provider's side; never
+		// the body, which can echo the expression.
+		body, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyRead))
+		rejection := providerRejection(response.StatusCode, body, traceID)
+		return RangeResult{}, fmt.Errorf("alarmd access uq: range query returned %d (%s, trace %s)",
+			response.StatusCode, rejection.Class, rejection.TraceID)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, client.limits.MaxBodyBytes))
 	if err != nil {

@@ -399,7 +399,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		}
 		attempt := execution.QueryAttempt{Spec: query.Spec, Slot: request.Contract.Slot, Operation: request.Operation,
 			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit(),
-			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli}
+			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli,
+			Strategies: queryStrategies(query)}
 		if err := attempt.Validate(); err != nil {
 			permit.Release()
 			dispatchErr = err
@@ -1455,4 +1456,25 @@ func (consumer *serializedQueryConsumer) RetainedInputBytesNow() uint64 {
 		return reporter.RetainedInputBytesNow()
 	}
 	return 0
+}
+
+// queryStrategies are the strategy ids of the Plans a planned query serves,
+// sorted and unique: the provider's request carries them for correlation.
+func queryStrategies(query PlannedQuery) []string {
+	seen := map[string]struct{}{}
+	for _, requirements := range [][]execution.DataRequirement{query.Requirements, query.ReadinessInvalidRequirements} {
+		for _, requirement := range requirements {
+			for _, consumer := range requirement.Consumers {
+				if id := consumer.Consumer.Plan.StrategyID; id != "" {
+					seen[id] = struct{}{}
+				}
+			}
+		}
+	}
+	strategies := make([]string, 0, len(seen))
+	for id := range seen {
+		strategies = append(strategies, id)
+	}
+	sort.Strings(strategies)
+	return strategies
 }

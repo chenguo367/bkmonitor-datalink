@@ -369,3 +369,21 @@ func TestAQueryCancelledFromAboveSaysSo(t *testing.T) {
 		t.Fatalf("evaluation cancelled from above: reason = %q, want %q", got.ReasonCode, observability.ReasonSlotCancelled)
 	}
 }
+
+// The refusal an attempt kept rides on the failure facts beside its status:
+// the class, the provider's trace id and the sanitized excerpt.
+func TestProviderFailureFactsCarryTheRejection(t *testing.T) {
+	refused := execution.PhysicalQueryCompletion{
+		Completeness: execution.CompletenessUnavailable,
+		RouteFacts: execution.ProviderRouteFacts{Attempts: []execution.RouteAttemptFact{{
+			AttemptNo: 1, Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryRejected),
+			Detail: execution.HTTPStatusRouteDetail(400), HTTPStatus: 400,
+			Rejection: &execution.ProviderRejection{Class: "PROMQL_PARSE", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", Excerpt: "parse error"},
+		}}},
+	}
+	facts := providerFailureFacts(execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{refused}})
+	if facts == nil || facts.Code != contract.ReasonQueryRejected || facts.Rejection == nil ||
+		*facts.Rejection != (observability.QueryRejection{Class: "PROMQL_PARSE", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", Excerpt: "parse error"}) {
+		t.Fatalf("facts %+v", facts)
+	}
+}

@@ -1014,7 +1014,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
 		// A refused query is the strategy's too: governance, not 待确认.
 		{"GOV ::", "后端拒绝了 1 个对象的查询"},
-		{"GOV ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
+		{"GOV ::", "证据：分组的后端回答：状态码、拒绝类别与后端 trace_id（行上\"最近一次错误\"带类别与 trace_id；遮蔽后的后端原文片段只留在持有该组的副本上，经 OB 通道的 strategy.get 读，不上公开页面）"},
 		{"GOV ::", "若平台检测器对同一条策略的查询能过，就是 alarmd 构造的问题，回 alarmd"},
 		// The timeout and the short old-series window are not the data side's
 		// until the query path and the fetch are ruled out: both are here, not

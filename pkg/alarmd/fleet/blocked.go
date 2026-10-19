@@ -340,6 +340,10 @@ var failureFacets = map[string]facets{
 	// or a partial answer does not say where the time went.
 	"QUERY_TIMEOUT":     {StageQuery, ClassTimeout, ""},
 	"QUERY_UNAVAILABLE": {StageQuery, ClassUnavailable, ""},
+	// Answered and refused as written: the provider read the query and will
+	// not run it (a client error other than 408 and 429). The strategy's,
+	// not the storage's.
+	"QUERY_REJECTED": {StageQuery, ClassRefused, ""},
 	// Answered and refused: the table or field does not route in the space.
 	"QUERY_TARGET_MISSING": {StageQuery, ClassRefused, ""},
 	// The answer came back bucketed on the aggregation grid, which a Plan

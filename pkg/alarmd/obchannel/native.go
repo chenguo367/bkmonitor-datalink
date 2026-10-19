@@ -30,6 +30,20 @@ const (
 )
 
 func NativeOperations(handler http.Handler) []Operation {
+	return NativeOperationsWith(handler, NativeOptions{})
+}
+
+// NativeOptions are the facts the native operations add to an answer from
+// this process alone, never from the route they read.
+type NativeOptions struct {
+	// Rejections is the latest refusal this replica kept for a Query Group,
+	// with the words of the provider's answer (fleet.KeptRejection): served
+	// on strategy.get, which a session reads, and on no route. Nil adds none.
+	Rejections func(queryGroup string) (fleet.KeptRejection, bool)
+}
+
+// NativeOperationsWith is NativeOperations with what options add.
+func NativeOperationsWith(handler http.Handler, options NativeOptions) []Operation {
 	text := func(description, source string) Field {
 		return Field{Type: "string", Description: description, Source: source, MinLength: 1, MaxLength: 256}
 	}
@@ -48,6 +62,7 @@ func NativeOperations(handler http.Handler) []Operation {
 				if id == "strategy.get" {
 					strategyNext(&out, p, result)
 					strategyGuardWarming(&out, result)
+					strategyRejections(result, options.Rejections)
 				}
 				if id == "object.get" {
 					objectSlotNext(&out, p, result)
@@ -551,4 +566,26 @@ func objectElsewhere(p Params, result any) (string, bool) {
 	holder, _ := body["tracked_by"].(string)
 	group := p.String("query_group")
 	return group, holder != "" && group != ""
+}
+
+// strategyRejections gives each Plan whose Query Group this replica kept a
+// refusal for that refusal, with the sanitized start of the provider's
+// answer. Only the replica tracking the group keeps it: a Plan held
+// elsewhere carries none here, and is read there by targeting strategy.get
+// at its plans[].replica.
+func strategyRejections(result map[string]any, rejections func(string) (fleet.KeptRejection, bool)) {
+	if rejections == nil {
+		return
+	}
+	plans, _ := result["plans"].([]any)
+	for _, entry := range plans {
+		plan, _ := entry.(map[string]any)
+		group, _ := plan["query_group"].(string)
+		if group == "" {
+			continue
+		}
+		if kept, ok := rejections(group); ok {
+			plan["rejection"] = kept
+		}
+	}
 }
