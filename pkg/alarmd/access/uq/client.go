@@ -181,6 +181,9 @@ type queryIdentity struct {
 	// Budget is the Slot query's, which a failure is timed against; zero
 	// for a read that is not a Slot's, which then reports no timing.
 	Budget queryBudget
+	// NoAppCarry asks the provider without the APM application a query
+	// would otherwise carry (carriesAPMApp).
+	NoAppCarry bool
 }
 
 // queryBudget is a Slot query's budget as its attempt carries it: where it
@@ -214,7 +217,13 @@ func bodySpace(facts execution.QueryPlanFacts) string {
 }
 
 func buildWireRequest(spec execution.PhysicalQuerySpec) (string, []byte, error) {
-	body, err := buildRequest(spec)
+	return buildWireRequestCarrying(spec, carriesAPMApp(spec))
+}
+
+// buildWireRequestCarrying is buildWireRequest with the APM application
+// carried or not (carriesAPMApp), for the read that has to go without it.
+func buildWireRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (string, []byte, error) {
+	body, err := buildRequestCarrying(spec, carryApp)
 	if err != nil {
 		return "", nil, err
 	}
@@ -241,7 +250,7 @@ func buildWireRequest(spec execution.PhysicalQuerySpec) (string, []byte, error) 
 }
 
 func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (execution.ProviderCompletion, error) {
-	path, encoded, err := buildWireRequest(attempt.Spec)
+	path, encoded, err := buildWireRequestCarrying(attempt.Spec, carriesAPMApp(attempt.Spec) && !attempt.NoAppCarry)
 	if err != nil {
 		return execution.ProviderCompletion{}, err
 	}
@@ -468,11 +477,18 @@ func (reader *countingReader) Read(buffer []byte) (int, error) {
 }
 
 func buildRequest(spec execution.PhysicalQuerySpec) (request, error) {
+	return buildRequestCarrying(spec, carriesAPMApp(spec))
+}
+
+func buildRequestCarrying(spec execution.PhysicalQuerySpec, carryApp bool) (request, error) {
 	if err := spec.Validate(); err != nil {
 		return request{}, err
 	}
 	queries := make([]queryClause, 0, len(spec.PlanFacts.QueryList))
 	for _, source := range spec.PlanFacts.QueryList {
+		if carryApp {
+			source = withAPMApp(source)
+		}
 		functions, err := mapFunctions(source.Functions)
 		if err != nil {
 			return request{}, err

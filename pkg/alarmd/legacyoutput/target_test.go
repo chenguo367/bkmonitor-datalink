@@ -85,6 +85,13 @@ func TestTheAPMApplicationIsNeverReadFromTheResultTable(t *testing.T) {
 		string(got.Target) != `"cross-bank-trade:transfer"` || string(got.AdditionalDimensions["app_name"]) != `"cross-bank-trade"` {
 		t.Errorf("label: %s, want the labelled application", mustJSON(got))
 	}
+	// The application the APM query carries beside the identity dimensions
+	// names the object, before any label, and is reported as supplementary.
+	carried := map[string]json.RawMessage{"app_name": json.RawMessage(`"cross-bank-trade"`), "service_name": json.RawMessage(`"transfer"`)}
+	if got := project(t, strategy("APM-APP(other)"), carried, []string{"service_name"}); string(got.Target) != `"cross-bank-trade:transfer"` ||
+		string(got.AdditionalDimensions["app_name"]) != `"cross-bank-trade"` {
+		t.Errorf("carried application: %s, want it to name the object", mustJSON(got))
+	}
 	both := map[string]json.RawMessage{"app_name": json.RawMessage(`"cross-bank-trade"`), "service_name": json.RawMessage(`"transfer"`)}
 	if got := project(t, strategy("APM-APP(other)"), both, []string{"app_name", "service_name"}); string(got.Target) != `"cross-bank-trade:transfer"` || got.AdditionalDimensions["app_name"] != nil {
 		t.Errorf("dimension and label: %s, want the dimension's application, not repeated", mustJSON(got))

@@ -84,7 +84,7 @@ func (plan *PreparedTarget) Project(ctx context.Context, scope TargetScope, dime
 	if _, ok := data["bcs_cluster_id"]; ok {
 		return projectK8S(ctx, scope, p, pods)
 	}
-	return plan.projectAPM(p)
+	return plan.projectAPM(p, dimensions)
 }
 
 func rawString(value string) json.RawMessage { raw, _ := json.Marshal(value); return raw }
@@ -204,8 +204,14 @@ func PrepareTarget(strategy json.RawMessage) (*PreparedTarget, error) {
 	return &PreparedTarget{labelApp: labelValue(apmAppLabel), labelService: labelValue(apmServiceLabel)}, nil
 }
 
-func (plan *PreparedTarget) projectAPM(p TargetProjection) (TargetProjection, error) {
+// projectAPM places an APM record. The application the record carries
+// beside its identity dimensions (the APM query asks for it, access/uq
+// carriesAPMApp) comes before the strategy's label.
+func (plan *PreparedTarget) projectAPM(p TargetProjection, dimensions map[string]json.RawMessage) (TargetProjection, error) {
 	app, service := p.Dimensions["app_name"], p.Dimensions["service_name"]
+	if !truthy(app) {
+		app = dimensions["app_name"]
+	}
 	if !truthy(app) {
 		app = plan.labelApp
 	}

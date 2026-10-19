@@ -108,7 +108,7 @@ func ProjectMonitorSubject(
 	if subject, matched := projectK8sSubject(data); matched {
 		return subject, data, nil
 	}
-	if subject, matched := projectAPMSubject(data, facts); matched {
+	if subject, matched := projectAPMSubject(data, dimensions, facts); matched {
 		return subject, data, nil
 	}
 	return MonitorSubject{}, data, nil
@@ -171,8 +171,16 @@ func projectK8sSubject(data map[string]json.RawMessage) (MonitorSubject, bool) {
 // data source, because a value was supplied. A record whose dimensions and
 // labels do not name the application gets no APM object and no app_name, and
 // is projected as any other record.
-func projectAPMSubject(data map[string]json.RawMessage, facts *MonitorSubjectFacts) (MonitorSubject, bool) {
+//
+// The application a record carries beside its identity dimensions counts as
+// its dimension: the APM query asks the provider for it (access/uq
+// carriesAPMApp) without making it part of the series' identity, so it is in
+// dimensions and not in data, and reported as supplementary like a label's.
+func projectAPMSubject(data, dimensions map[string]json.RawMessage, facts *MonitorSubjectFacts) (MonitorSubject, bool) {
 	app := monitorFirstText(data, monitorAPMAppNameDimension)
+	if app == "" {
+		app = monitorFirstText(dimensions, monitorAPMAppNameDimension)
+	}
 	service := monitorFirstText(data, monitorAPMServiceNameDimensio)
 	if app == "" || service == "" {
 		if facts == nil {
