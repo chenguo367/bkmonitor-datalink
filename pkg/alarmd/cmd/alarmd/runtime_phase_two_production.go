@@ -2895,6 +2895,8 @@ func (executor observedProductionSlotExecutor) Execute(
 	reason := result.ReasonCode
 	observedErr := err
 	retryingAfterFailure := false
+	// What a Slot turned away as not ready waits for, on its line.
+	var readiness *observability.ReadinessDeferralFacts
 	var notExecutable *scheduler.ViewNotExecutableError
 	if err != nil {
 		if errors.As(err, &notExecutable) {
@@ -2915,6 +2917,7 @@ func (executor observedProductionSlotExecutor) Execute(
 			observedResult = observability.ResultRetrying
 			reason = observability.ReasonCode(contract.ReasonQueryNotReady)
 			observedErr = nil
+			readiness = access.ReadinessDeferralOf(err)
 		} else {
 			observedResult = observability.ResultFailed
 			reason, gapApplySite = slotFailureReason(err)
@@ -2954,6 +2957,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		SlotCompletionCause:  string(result.CompletionCause.Cause),
 		SlotCompletionReason: string(result.CompletionCause.Reason),
 		CarriedReason:        result.CompletionCause.CarriedReason(),
+		ReadinessDeferral:    readiness,
 		ExecuteOutcome:       executeReturnOutcome(result, err),
 		Result:               observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,

@@ -2234,6 +2234,11 @@ func TestObservedProductionSlotExecutorDoesNotReportReadinessDeferralAsFailure(t
 	if metricReason := observability.NormalizeMetricReason(observability.ComponentScheduler, observations[1].ReasonCode, observations[1].Result); metricReason == observability.ReasonNotReported {
 		t.Fatalf("deferral metric reason=%q, want a named class", metricReason)
 	}
+	// And what the Slot waits for, as the query line names it.
+	if facts := completed.ReadinessDeferral; facts == nil || facts.PhysicalQuery != "physical-305" || facts.Requirement != "primary" ||
+		facts.ReadyAtUnixMilli != readyAt.UnixMilli() || facts.Basis != observability.ReadinessBasisReadHold || facts.ReadHoldMillis != 300_000 {
+		t.Fatalf("deferral readiness facts=%+v, want the deferral's query, requirement, time, basis and hold", facts)
+	}
 }
 
 // A failed attempt the Runner will retry completes retrying, with the
@@ -2272,6 +2277,10 @@ type phaseTwoReadinessDeferredError struct{ readyAt time.Time }
 
 func (err phaseTwoReadinessDeferredError) Error() string               { return "readiness deferred" }
 func (err phaseTwoReadinessDeferredError) ReadinessReadyAt() time.Time { return err.readyAt }
+func (err phaseTwoReadinessDeferredError) ReadinessDeferral() *observability.ReadinessDeferralFacts {
+	return &observability.ReadinessDeferralFacts{Requirement: "primary", PhysicalQuery: "physical-305",
+		ReadyAtUnixMilli: err.readyAt.UnixMilli(), Basis: observability.ReadinessBasisReadHold, ReadHoldMillis: 300_000}
+}
 
 func productionRequest(fact execution.FrozenSlotContractFact, operation execution.Operation) execution.SlotExecutionRequest {
 	targets, deadline, err := frozenExecutionFacts(fact)

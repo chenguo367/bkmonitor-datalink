@@ -113,6 +113,20 @@ func TestAWholeQueryUnderACarriedTimeoutGuardSaysSoOnEveryLine(t *testing.T) {
 		if !ok || evaluation.CarriedReason == nil || evaluation.CarriedReason.OriginSlot != opened {
 			t.Fatalf("round %d: evaluation_completed carried %+v, want the origin %d", round, evaluation.CarriedReason, opened)
 		}
+		// The algorithm reads "unavailable QUERY_TIMEOUT" because the guard
+		// held its Level, not because it met a timeout: the fact says so.
+		carriedAlgorithm := false
+		for _, fact := range evaluation.AlgorithmEvaluations {
+			if fact.ReasonCode == contract.ReasonQueryTimeout {
+				if !fact.ReasonCarried {
+					t.Fatalf("round %d: algorithm fact %+v reads as this round's timeout", round, fact)
+				}
+				carriedAlgorithm = true
+			}
+		}
+		if !carriedAlgorithm {
+			t.Fatalf("round %d: no algorithm fact under the guard's reason: %+v", round, evaluation.AlgorithmEvaluations)
+		}
 	})
 	if held == 0 {
 		t.Fatal("no round evaluated a series under the guard, so the carried reason was never exercised")

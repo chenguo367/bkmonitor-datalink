@@ -682,6 +682,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
 	attributes = appendCompletionCause(attributes, observation)
 	attributes = appendEvaluationOutcome(attributes, observation)
+	attributes = appendReadinessDeferral(attributes, observation.ReadinessDeferral)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}

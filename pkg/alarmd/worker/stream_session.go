@@ -1913,7 +1913,8 @@ func (stream *streamedExecution) algorithmObservationFacts(
 			evaluations = append(evaluations, observability.AlgorithmEvaluationFact{
 				SourceAlgorithmFamily: algorithm.family, DetectorKind: algorithm.detector,
 				Result: algorithmEvaluationResult(outcome.Outcome), ReasonCode: outcome.ReasonCode,
-				Provenance: observability.AlgorithmProvenance{LevelID: outcome.LevelID, SourceTime: outcome.Record.SourceTime},
+				ReasonCarried: outcome.Outcome == execution.LevelOutcomeUnknown && outcome.ReasonCarried,
+				Provenance:    observability.AlgorithmProvenance{LevelID: outcome.LevelID, SourceTime: outcome.Record.SourceTime},
 			})
 			input, found := inputsByLevel[outcome.LevelID]
 			if !found {

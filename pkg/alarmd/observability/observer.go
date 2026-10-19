@@ -2146,7 +2146,13 @@ type AlgorithmEvaluationFact struct {
 	DetectorKind          AlgorithmDetectorKind     `json:"detector_kind"`
 	Result                AlgorithmEvaluationResult `json:"result"`
 	ReasonCode            ReasonCode                `json:"reason_code"`
-	Provenance            AlgorithmProvenance       `json:"provenance,omitempty"`
+	// ReasonCarried says the unavailable result's reason is the Level's
+	// stored guard's, copied from its UNKNOWN outcome, and not anything the
+	// algorithm met this round: an algorithm that detected nothing because a
+	// guard held its Level reads "unavailable QUERY_TIMEOUT" over a query
+	// that answered whole.
+	ReasonCarried bool                `json:"reason_carried,omitempty"`
+	Provenance    AlgorithmProvenance `json:"provenance,omitempty"`
 }
 
 // RecoveryGateCause is the state of the first other Level a RECOVERY record
@@ -2432,6 +2438,9 @@ type Observation struct {
 	// progress line's cause counts a Slot twice.
 	SlotCompletionCause  string
 	SlotCompletionReason string
+	// ReadinessDeferral is what a Slot turned away as not ready waits for, on
+	// its QUERY_NOT_READY query_completed and slot_completed lines.
+	ReadinessDeferral *ReadinessDeferralFacts
 	// HistoryCoverage says how far short of the required window the series in
 	// this run actually were. HISTORY_WARMING alone cannot tell a series two
 	// rounds into its life, which converges by itself, from a series whose
@@ -2687,6 +2696,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
 	observation.QueryFailure = normalizeQueryFailure(observation.Component, observation.Stage, observation.QueryFailure)
 	observation = normalizeEvaluationOutcome(observation)
+	observation.ReadinessDeferral = normalizeReadinessDeferral(observation)
 	if observation.Component != ComponentAccess || observation.Stage != StageQueryCompleted ||
 		(observation.QueryFailure != nil && observation.QueryFailure.Request != nil) {
 		observation.QueryRequest = nil

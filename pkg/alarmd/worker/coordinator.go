@@ -411,8 +411,14 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 			// normalizes to internal_unknown (observability.NormalizeReason),
 			// which made every deferral read as an unclassified internal error -
 			// in the logs and in the stage counter's reason label alike.
-			coordinator.observe(ctx, observability.ComponentAccess, observability.StageQueryCompleted, request.Operation,
-				started, observability.ResultRetrying, observability.ReasonCode(contract.ReasonQueryNotReady), nil)
+			// And what it waits for: the query, its requirement, when it is
+			// ready and on what basis.
+			coordinator.emitObservation(ctx, observability.Observation{
+				Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
+				Result: observability.ResultRetrying, Operation: observability.Operation(request.Operation),
+				Direction: observability.DirectionInternal, ReasonCode: observability.ReasonCode(contract.ReasonQueryNotReady),
+				Duration: time.Since(started), ReadinessDeferral: readinessDeferralOf(err),
+			})
 		} else {
 			coordinator.observeQueryFailure(ctx, request.Operation, started, "execute", err)
 		}
@@ -536,6 +542,18 @@ func eventsWithoutMessage(result execution.EvaluationResult) uint64 {
 		}
 	}
 	return count
+}
+
+// readinessDeferralOf is what a deferred Slot waits for, as its error names
+// it; nil when it names nothing.
+func readinessDeferralOf(err error) *observability.ReadinessDeferralFacts {
+	var deferred interface {
+		ReadinessDeferral() *observability.ReadinessDeferralFacts
+	}
+	if !errors.As(err, &deferred) {
+		return nil
+	}
+	return deferred.ReadinessDeferral()
 }
 
 func isReadinessDeferred(err error) bool {

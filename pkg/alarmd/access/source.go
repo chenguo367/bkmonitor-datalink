@@ -70,9 +70,61 @@ func slotFirstRead(queries []PlannedQuery) int {
 	return first
 }
 
-type ReadinessDeferredError struct{ readyAt time.Time }
+// ReadinessDeferredError is a Slot turned away as not ready: when it comes
+// back, and what that time was decided on (ReadinessDeferral).
+type ReadinessDeferredError struct {
+	readyAt time.Time
+	facts   observability.ReadinessDeferralFacts
+}
 
 func (err *ReadinessDeferredError) Error() string { return "alarmd access: execution is not ready" }
+
+// ReadinessDeferral is what the Slot waits for: the query whose readiness set
+// readyAt, the requirement it serves, and the basis of that time.
+func (err *ReadinessDeferredError) ReadinessDeferral() *observability.ReadinessDeferralFacts {
+	if err == nil {
+		return nil
+	}
+	facts := err.facts
+	return &facts
+}
+
+// ReadinessDeferralOf is the readiness detail err carries; nil when it
+// carries none.
+func ReadinessDeferralOf(err error) *observability.ReadinessDeferralFacts {
+	var deferred interface {
+		ReadinessDeferral() *observability.ReadinessDeferralFacts
+	}
+	if !errors.As(err, &deferred) {
+		return nil
+	}
+	return deferred.ReadinessDeferral()
+}
+
+// readinessDeferral names the query at index and its readiness basis for a
+// Slot coming back at readyAt.
+func readinessDeferral(queries []PlannedQuery, index int, readyAt time.Time, readHoldMillis int64) observability.ReadinessDeferralFacts {
+	facts := observability.ReadinessDeferralFacts{ReadyAtUnixMilli: readyAt.UnixMilli(), Basis: observability.ReadinessBasisSettleWait}
+	if readHoldMillis > 0 {
+		facts.Basis, facts.ReadHoldMillis = observability.ReadinessBasisReadHold, readHoldMillis
+	}
+	if index < 0 || index >= len(queries) {
+		return facts
+	}
+	query := queries[index]
+	facts.PhysicalQuery = string(query.Spec.Digest)
+	// The primary requirement when the query serves one, else its first:
+	// the name a strategy's data reads by.
+	for _, requirement := range query.Requirements {
+		if facts.Requirement == "" || requirement.Role == execution.InputRolePrimary {
+			facts.Requirement = string(requirement.RequirementID)
+			if requirement.Role == execution.InputRolePrimary {
+				break
+			}
+		}
+	}
+	return facts
+}
 
 func (err *ReadinessDeferredError) ReadinessReadyAt() time.Time {
 	if err == nil {
@@ -242,8 +294,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				index != firstRead))
 		}
 	}
-	if readyAt := slotPendingReadiness(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {
-		return execution.QueryExecutionCompletion{}, &ReadinessDeferredError{readyAt: readyAt}
+	if readyAt, pending := slotPendingReadinessOf(prepared.Queries, request.Contract.ReadHoldMillis, source.now()); !readyAt.IsZero() {
+		return execution.QueryExecutionCompletion{}, &ReadinessDeferredError{readyAt: readyAt,
+			facts: readinessDeferral(prepared.Queries, pending, readyAt, request.Contract.ReadHoldMillis)}
 	}
 	// Past the turn-away, so this arrival is one that goes on to do the work.
 	// Deferred arrivals are already counted as deferrals; recording them here
@@ -1036,40 +1089,55 @@ func frozenSchedules(frozen FrozenPlan) (map[execution.PlanIdentity]execution.Sc
 // deferred only when every query waits for the same moment, otherwise the
 // settling wait for the earliest is spent inside the execution.
 func slotPendingReadiness(queries []PlannedQuery, readHoldMillis int64, now time.Time) time.Time {
+	readyAt, _ := slotPendingReadinessOf(queries, readHoldMillis, now)
+	return readyAt
+}
+
+// slotPendingReadinessOf is slotPendingReadiness with the index of the query
+// whose readiness decided it: the latest pending one under a read hold, the
+// first of the shared moment without; -1 with a zero time.
+func slotPendingReadinessOf(queries []PlannedQuery, readHoldMillis int64, now time.Time) (time.Time, int) {
 	if readHoldMillis <= 0 {
-		return sharedPendingReadiness(queries, now)
+		return sharedPendingReadinessOf(queries, now)
 	}
 	var latest time.Time
-	for _, query := range queries {
+	index := -1
+	for position, query := range queries {
 		if len(query.Requirements) == 0 {
 			continue
 		}
 		if readyAt := time.UnixMilli(query.ReadyAtUnixMilli); readyAt.After(now) && readyAt.After(latest) {
-			latest = readyAt
+			latest, index = readyAt, position
 		}
 	}
-	return latest
+	return latest, index
 }
 
 func sharedPendingReadiness(queries []PlannedQuery, now time.Time) time.Time {
+	readyAt, _ := sharedPendingReadinessOf(queries, now)
+	return readyAt
+}
+
+func sharedPendingReadinessOf(queries []PlannedQuery, now time.Time) (time.Time, int) {
 	var shared time.Time
-	for _, query := range queries {
+	index := -1
+	for position, query := range queries {
 		if len(query.Requirements) == 0 {
 			continue
 		}
 		readyAt := time.UnixMilli(query.ReadyAtUnixMilli)
 		if !readyAt.After(now) {
-			return time.Time{}
+			return time.Time{}, -1
 		}
 		if shared.IsZero() {
-			shared = readyAt
+			shared, index = readyAt, position
 			continue
 		}
 		if !shared.Equal(readyAt) {
-			return time.Time{}
+			return time.Time{}, -1
 		}
 	}
-	return shared
+	return shared, index
 }
 
 func frozenRequirementReadyAt(
