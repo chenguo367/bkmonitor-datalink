@@ -91,7 +91,7 @@ func TestAHeldSlotReservesItsEarlierReadTrialAtItsFirstAttempt(t *testing.T) {
 // and the raised hold.
 func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Duration, trialPartial bool,
 	done func(elapsed, lowest, raised time.Duration, outcomes map[string]uint64) bool,
-) (lowest, raised time.Duration, outcomes, overtaken map[string]uint64) {
+) (lowest, raised time.Duration, outcomes, overtaken map[string]uint64, skipped int) {
 	t.Helper()
 	ctx := context.Background()
 	engine := f.bundle.dependencies.Lookback
@@ -129,8 +129,13 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 			break
 		}
 		if next := f.runner.NextReadyAt(); !next.After(f.now()) {
-			if _, _, err := f.runner.RunOne(ctx); err != nil {
+			result, _, err := f.runner.RunOne(ctx)
+			if err != nil {
 				t.Logf("RunOne at %s: %v", f.now().UTC().Format(time.TimeOnly), err)
+			}
+			// A Slot the scheduler gave up on and skipped unevaluated.
+			if result.ReasonCode == "GAP_SKIPPED" {
+				skipped++
 			}
 		}
 		engine.StepEarly(ctx)
@@ -166,8 +171,8 @@ func heldTrialRun(t *testing.T, f *cutoverStallFixture, arrival, span time.Durat
 			}
 		}
 	}
-	t.Logf("hold %v -> lowest %v; trials %v, overtaken by %v", raised, lowest, outcomes, overtaken)
-	return lowest, raised, outcomes, overtaken
+	t.Logf("hold %v -> lowest %v; trials %v, overtaken by %v; skipped %d", raised, lowest, outcomes, overtaken, skipped)
+	return lowest, raised, outcomes, overtaken, skipped
 }
 
 // A held group's trial of no hold reads before the Slot's readiness without the hold - the reread bound before
@@ -178,7 +183,7 @@ func TestAHeldGroupsTrialOfNoHoldCompletesAndTheHoldComesDown(t *testing.T) {
 	f := startCutoverFixture(t, nil)
 	// Half a minute late: the hold rises under two steps, so a trial tries no hold at all, and short of the
 	// period, as the seeds are.
-	lowest, raised, outcomes, _ := heldTrialRun(t, f, 30*time.Second, 6*time.Hour, false,
+	lowest, raised, outcomes, _, _ := heldTrialRun(t, f, 30*time.Second, 6*time.Hour, false,
 		func(_, lowest, raised time.Duration, _ map[string]uint64) bool { return lowest < raised })
 	if raised < 20*time.Second {
 		t.Fatalf("fixture: hold raised to %v", raised)
@@ -197,7 +202,7 @@ func TestAnIncompleteTrialOfNoHoldLeavesTheHold(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, nil)
 	// Long enough that the matches and quiet the controller asks for would have lowered it had they counted.
-	lowest, raised, outcomes, _ := heldTrialRun(t, f, 30*time.Second, 6*time.Hour, true,
+	lowest, raised, outcomes, _, _ := heldTrialRun(t, f, 30*time.Second, 6*time.Hour, true,
 		func(elapsed, _, _ time.Duration, outcomes map[string]uint64) bool {
 			return elapsed >= 2*time.Hour && outcomes[lookback.EarlierReadFailed] > readhold.EarlierMatchesRequired
 		})
@@ -232,8 +237,15 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			f := startCutoverFixture(t, nil)
-			lowest, raised, outcomes, overtaken := heldTrialRun(t, f, c.arrival, 6*time.Hour, false,
-				func(_, lowest, raised time.Duration, _ map[string]uint64) bool { return lowest < raised })
+			// Run on half an hour past the first lowering: the Slots frozen under the lowered hold run too.
+			loweredAt := time.Duration(-1)
+			lowest, raised, outcomes, overtaken, skipped := heldTrialRun(t, f, c.arrival, 6*time.Hour, false,
+				func(elapsed, lowest, raised time.Duration, _ map[string]uint64) bool {
+					if lowest < raised && loweredAt < 0 {
+						loweredAt = elapsed
+					}
+					return loweredAt >= 0 && elapsed >= loweredAt+30*time.Minute
+				})
 			if raised <= time.Minute-lookback.RecheckTimeout {
 				t.Fatalf("fixture: hold raised to %v, want past the period less the reread bound", raised)
 			}
@@ -246,6 +258,21 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 			if overtaken[lookback.OvertakenPreparedLate] != 0 {
 				t.Fatalf("%d trials prepared past their point", overtaken[lookback.OvertakenPreparedLate])
 			}
+			// Lowering the hold never costs a Slot: none is skipped unevaluated.
+			if skipped != 0 {
+				t.Fatalf("%d Slots skipped unevaluated as the hold came down from %v to %v", skipped, raised, lowest)
+			}
+			// At the limit the trials are reserved many Slots ahead; that alone
+			// skips nothing, the hold coming down a step per Slot.
+			if c.name == "the hold limit" {
+				deep := uint64(0)
+				for _, source := range f.bundle.dependencies.Lookback.Stats().Sources {
+					deep += source.EarlierAhead["4+"]
+				}
+				if deep == 0 {
+					t.Fatal("fixture: no trial reserved four or more Slots ahead at the hold limit")
+				}
+			}
 		})
 	}
 }
@@ -255,7 +282,7 @@ func TestAHoldPastThePeriodIsTriedFromThePreviousSlotAndComesDown(t *testing.T) 
 func TestAnIncompleteTrialFromThePreviousSlotLeavesTheHold(t *testing.T) {
 	t.Parallel()
 	f := startCutoverFixture(t, nil)
-	lowest, raised, outcomes, _ := heldTrialRun(t, f, 100*time.Second, 6*time.Hour, true,
+	lowest, raised, outcomes, _, _ := heldTrialRun(t, f, 100*time.Second, 6*time.Hour, true,
 		func(elapsed, _, _ time.Duration, outcomes map[string]uint64) bool {
 			return elapsed >= 3*time.Hour && outcomes[lookback.EarlierReadFailed] > readhold.EarlierMatchesRequired
 		})

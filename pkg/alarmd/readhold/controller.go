@@ -23,6 +23,10 @@ const (
 	RenewInterval          = 24 * time.Hour
 	SingleEventQuiet       = time.Hour
 	EarlierMatchesRequired = 3
+	// FloorDifferentsRequired is the different trials in a row at one
+	// candidate that move the search floor up to it: one late round alone
+	// does not, as one early round alone does not lower the hold.
+	FloorDifferentsRequired = 2
 )
 
 var (
@@ -122,6 +126,23 @@ type Options struct {
 	MaxHold time.Duration
 	Now     func() time.Time
 	Owner   func(execution.QueryGroupIdentity) (Owner, error)
+	// OnLimitCut, when set, is told of each Slot frozen more than a step
+	// below the Slot before it because the limit was configured under the
+	// hold. Called with the group's lock held, after the Slot is frozen.
+	OnLimitCut func(LimitCut)
+}
+
+// LimitCut is a Slot frozen at a limit configured under the hold, more than
+// a step below the Slot before it: a cut the stepping does not soften, so
+// the Slot may be ready before the one before it is read and fall behind by
+// more Slots than a replay covers. Period is the shortest interval the
+// group's Plans are detected at.
+type LimitCut struct {
+	QueryGroup execution.QueryGroupIdentity
+	Slot       execution.EvaluationTime
+	From       time.Duration
+	To         time.Duration
+	Period     time.Duration
 }
 
 type PlanRef struct {
@@ -394,6 +415,34 @@ func (controller *Controller) ReadHold(qg execution.QueryGroupIdentity) time.Dur
 	return time.Duration(current(state.record)) * time.Millisecond
 }
 
+// nextCandidate is the hold the next earlier-read trial of record tries
+// (execution.CandidateReadHold), in milliseconds, and false when none is.
+func nextCandidate(record Record, step time.Duration) (int64, bool) {
+	floor, floored := time.Duration(0), record.EarlierFloorMillis != nil
+	if floored {
+		floor = time.Duration(*record.EarlierFloorMillis) * time.Millisecond
+	}
+	hold, ok := execution.CandidateReadHold(time.Duration(current(record))*time.Millisecond, floor, floored, step)
+	return hold.Milliseconds(), ok
+}
+
+// clearFloor forgets the search below the hold: the hold moved up or was
+// set anew, so what was too early under the old one says nothing now.
+func clearFloor(record *Record) {
+	record.EarlierFloorMillis, record.EarlierDifferents = nil, 0
+}
+
+// EarlierCandidate is the hold the group's next earlier-read trial tries,
+// and false when there is none: the one candidate both the lookback that
+// reserves the trial and EarlierRead that takes its evidence use.
+func (controller *Controller) EarlierCandidate(qg execution.QueryGroupIdentity) (time.Duration, bool) {
+	state := controller.group(qg)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	hold, ok := nextCandidate(state.record, state.spec.Step)
+	return time.Duration(hold) * time.Millisecond, ok
+}
+
 func (controller *Controller) ReadHoldAt(qg execution.QueryGroupIdentity, at execution.EvaluationTime) time.Duration {
 	state := controller.group(qg)
 	state.mu.Lock()
@@ -485,6 +534,10 @@ func clone(record Record) Record {
 	if record.PendingHoldMillis != nil {
 		hold := *record.PendingHoldMillis
 		record.PendingHoldMillis = &hold
+	}
+	if record.EarlierFloorMillis != nil {
+		floor := *record.EarlierFloorMillis
+		record.EarlierFloorMillis = &floor
 	}
 	record.Buckets = append([]int64(nil), record.Buckets...)
 	record.Plans = append([]PlanRecord(nil), record.Plans...)
@@ -680,6 +733,7 @@ func (controller *Controller) seed(state *entry, predecessors map[execution.Quer
 		if hold != current(next) {
 			next.PendingHoldMillis = &hold
 			next.EarlierMatches, next.QuietSinceMillis = 0, controller.options.Now().UnixMilli()
+			clearFloor(&next)
 		}
 	}
 	return next, nil
@@ -792,6 +846,16 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		}
 	}
 	state.seeded = true
+	if frozen.cutFrom > 0 && controller.options.OnLimitCut != nil {
+		period := int64(0)
+		for _, plan := range schedule.Plans {
+			if interval := plan.Spec.EvaluationIntervalSeconds; interval > 0 && (period == 0 || interval < period) {
+				period = interval
+			}
+		}
+		controller.options.OnLimitCut(LimitCut{QueryGroup: qg, Slot: at, From: time.Duration(frozen.cutFrom) * time.Millisecond,
+			To: time.Duration(hold) * time.Millisecond, Period: time.Duration(period) * time.Second})
+	}
 	return time.Duration(hold) * time.Millisecond, nil
 }
 
@@ -853,6 +917,9 @@ type frozenHold struct {
 	hold  int64
 	next  Record
 	clamp string
+	// cutFrom is the hold of the Slot before when the limit cut this one
+	// more than a step below it, and 0 otherwise.
+	cutFrom int64
 }
 
 // slotHoldOf computes, on a working copy of the group's record, the hold
@@ -878,7 +945,23 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 	}
 	pruneTransitions(&next, int64(at)*1000+state.spec.SettlingWait.Milliseconds())
 	hold := holdAt(next, at, state.spec.SettlingWait)
-	clamp := ""
+	// A lower hold takes effect a step at a time. The Query Group's Slots
+	// run one after another, so a Slot frozen with less hold than the one
+	// before it is ready before that one is read, and is first attempted
+	// only when it is: a hold come down by more than a few steps at once
+	// leaves that Slot already past its deadline and behind by more Slots
+	// than a replay may cover, and it is skipped unevaluated - as a hold
+	// halved at the limit was. Frozen no more than a step below the Slot
+	// before, each Slot is ready when the one before it is, and the hold
+	// reaches the lower one Slot by Slot while the lower one stays pending.
+	// The limit below still wins: a limit configured under the hold is a
+	// bound no Slot is frozen past, and it takes effect at once.
+	step := state.spec.Step.Milliseconds()
+	stepped := step > 0 && next.SinceSlot > 0 && at > next.SinceSlot
+	if stepped && hold < next.HoldMillis-step {
+		hold = next.HoldMillis - step
+	}
+	clamp, cutFrom := "", int64(0)
 	if limit := min(state.spec.HoldLimit, controller.options.MaxHold).Milliseconds(); hold > limit {
 		// Refusing the Slot refused it on every retry, and the group stopped
 		// on it. Frozen at the limit, the old group's last Slot may overtake
@@ -895,6 +978,9 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 			clamp = ClampKnown
 		}
 		hold = limit
+		if stepped && limit < next.HoldMillis-step {
+			cutFrom = next.HoldMillis
+		}
 	}
 	if next.HoldMillis != hold || next.PendingHoldMillis != nil {
 		next.PreviousHoldMillis, next.PreviousSinceSlot = next.HoldMillis, next.SinceSlot
@@ -911,7 +997,7 @@ func (controller *Controller) slotHoldOf(state *entry, predecessors map[executio
 			next.PendingHoldMillis = nil
 		}
 	}
-	return frozenHold{hold: hold, next: next, clamp: clamp}, nil
+	return frozenHold{hold: hold, next: next, clamp: clamp, cutFrom: cutFrom}, nil
 }
 
 // CloseSchedule fixes the old hold and each Plan's last legal Slot before a
@@ -1098,6 +1184,22 @@ func (controller *Controller) Observe(ctx context.Context, evidence Evidence) er
 		next.AtLimit, next.LimitMillis = target > limit, limit
 		if !next.Closed && min(target, limit) > current(next) {
 			hold := min(target, limit)
+			// A raise right after a lowering shows the lowered hold too early:
+			// a whole window read there was still arriving. The lowering is
+			// undone - the hold goes back at least to where it came from, not
+			// only to the one round's arrival, which under an arrival that
+			// moves round to round leaves it inside the spread and reads its
+			// later rounds early one after another - and the lowered hold is
+			// the search's floor, so the next lowering lands above it. Any
+			// other raise starts the search afresh.
+			raisedFrom := current(next)
+			clearFloor(&next)
+			if next.Lowered {
+				hold = min(max(hold, next.LoweredFromMillis), limit)
+				if raisedFrom < hold {
+					next.EarlierFloorMillis = &raisedFrom
+				}
+			}
 			next.PendingHoldMillis = &hold
 			if next.Lowered {
 				next.RaisedAfterLowering++
@@ -1122,8 +1224,8 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 		return nil
 	}
 	hold := current(state.record)
-	candidate := execution.LoweredReadHold(time.Duration(hold)*time.Millisecond, state.spec.Step).Milliseconds()
-	if !evidence.Observed || hold == 0 || evidence.CandidateHold.Milliseconds() != candidate || evidence.Contract.Slot.EvaluationTime <= state.record.LastEarlierSlot {
+	candidate, tries := nextCandidate(state.record, state.spec.Step)
+	if !evidence.Observed || hold == 0 || !tries || evidence.CandidateHold.Milliseconds() != candidate || evidence.Contract.Slot.EvaluationTime <= state.record.LastEarlierSlot {
 		return nil
 	}
 	next := clone(state.record)
@@ -1131,13 +1233,23 @@ func (controller *Controller) EarlierRead(ctx context.Context, evidence EarlierE
 	now := controller.options.Now().UnixMilli()
 	if !evidence.Equal {
 		next.EarlierMatches, next.QuietSinceMillis = 0, now
+		// Data still changing at the candidate, in rounds enough in a row:
+		// the search moves up to it, and the next candidate is halfway
+		// between it and the hold.
+		next.EarlierDifferents++
+		if next.EarlierDifferents >= FloorDifferentsRequired {
+			floor := candidate
+			next.EarlierFloorMillis, next.EarlierDifferents = &floor, 0
+		}
 	} else {
+		next.EarlierDifferents = 0
 		next.EarlierMatches = min(next.EarlierMatches+1, EarlierMatchesRequired)
 		quiet := next.MaxEarlyIntervalMillis
 		if quiet == 0 {
 			quiet = SingleEventQuiet.Milliseconds()
 		}
 		if next.QuietSinceMillis > 0 && now-next.QuietSinceMillis >= quiet && next.EarlierMatches >= EarlierMatchesRequired {
+			next.LoweredFromMillis = hold
 			next.PendingHoldMillis = &candidate
 			next.Lowered, next.EarlierMatches, next.QuietSinceMillis = true, 0, now
 			next.ArrivalAgeMillis = state.spec.Delay.Milliseconds() + state.spec.SettlingWait.Milliseconds() + candidate
@@ -1160,7 +1272,11 @@ func (controller *Controller) RenewDue(ctx context.Context) error {
 	for qg, state := range groups {
 		state.mu.Lock()
 		if state.loaded && state.configured && !state.record.Closed && len(state.raw) > 0 && current(state.record) > 0 && controller.options.Now().UnixMilli()-state.record.RenewedAtMillis >= RenewInterval.Milliseconds() {
-			if err := controller.persist(ctx, qg, state, clone(state.record), nil); err != nil && first == nil {
+			// A floor learned a day ago may not hold now that the data comes
+			// in sooner: the search starts again from half the hold.
+			next := clone(state.record)
+			clearFloor(&next)
+			if err := controller.persist(ctx, qg, state, next, nil); err != nil && first == nil {
 				first = err
 			}
 		}

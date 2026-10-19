@@ -208,6 +208,7 @@ func TestASlotThatDropsATrialReservedAheadReservesAgain(t *testing.T) {
 	if trial == nil || !trial.ahead {
 		t.Fatalf("fixture: reserved %+v", trial)
 	}
+	reserved := time.Duration(trial.query.Contract.ReadHoldMillis) * time.Millisecond
 	// Its Slot frozen a hold of 3 minutes, first attempted past where its own
 	// trial had to start.
 	next := scheduledQuery(t, slot+60)
@@ -222,12 +223,73 @@ func TestASlotThatDropsATrialReservedAheadReservesAgain(t *testing.T) {
 	// The drop reaches the per-group reading at the loop's next step.
 	f.engine.Step(context.Background())
 	if len(ends) != 1 || ends[0].Outcome != EarlierOvertaken || ends[0].OvertakenBy != OvertakenHoldMoved || ends[0].AheadSlots != 1 ||
-		ends[0].Contract.Slot != next.Contract.Slot {
-		t.Fatalf("trial ends %+v, want the dropped trial once, hold_moved, one Slot ahead", ends)
+		ends[0].Contract.Slot != next.Contract.Slot || ends[0].ReservedHold != reserved || ends[0].FrozenHold != 3*time.Minute {
+		t.Fatalf("trial ends %+v, want the dropped trial once, hold_moved, one Slot ahead, reserved at %v and frozen at 3 minutes", ends, reserved)
 	}
 	again := preparedTrial(f)
 	if again == nil || again == trial || !again.ahead || again.query.Contract.Slot.EvaluationTime <= next.Contract.Slot.EvaluationTime ||
 		again.query.Contract.ReadHoldMillis != (3*time.Minute).Milliseconds() {
 		t.Fatalf("after the drop reserved %+v, want a later Slot's trial under the moved hold", again)
+	}
+}
+
+// With the controller's candidate given, the trial tries that, not half the
+// hold: its point and its evidence are the given candidate's, a candidate that
+// moves before the formal read leaves it hold_moved, and none given reserves
+// none.
+func TestATrialTriesTheGivenCandidate(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		moved  bool
+		none   bool
+		reason string
+	}{
+		{"the given candidate", false, false, ""},
+		{"moved before the read", true, false, OvertakenHoldMoved},
+		{"none given", false, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			observed := make(chan EarlierReadEvidence, 1)
+			f.engine.options.OnEarlierRead = func(evidence EarlierReadEvidence) { observed <- evidence }
+			given := 90 * time.Second
+			f.engine.options.CurrentCandidate = func(execution.QueryGroupIdentity) (time.Duration, bool) { return given, !c.none }
+			q := heldQuery(f)
+			f.engine.Prepare(q)
+			f.engine.mu.Lock()
+			var trial *earlierSample
+			if state := f.engine.groups["qg"]; state != nil {
+				trial = state.prepared
+			}
+			f.engine.mu.Unlock()
+			if c.none {
+				if trial != nil {
+					t.Fatalf("no candidate given, reserved %+v", trial)
+				}
+				return
+			}
+			baseline := q.ReadyAt.Add(-2 * time.Minute)
+			if trial == nil || trial.candidateHold != given || !trial.readyAt.Equal(baseline.Add(given)) {
+				t.Fatalf("reserved %+v, want the given 90 s candidate", trial)
+			}
+			f.clock.set(trial.at)
+			f.answers <- full(point(int64(q.Contract.Slot.EvaluationTime), "1"))
+			f.engine.StepEarly(context.Background())
+			f.waitFor(func(stats Stats) bool { return stats.PendingBytes == summaryEntryBytes })
+			if c.moved {
+				given = 105 * time.Second
+			}
+			formalRead(f, q)
+			evidence := <-observed
+			if c.moved {
+				if evidence.Observed || overtakenPaths(f)[OvertakenHoldMoved] != 1 {
+					t.Fatalf("a moved candidate's trial: evidence %+v, overtaken %v", evidence, overtakenPaths(f))
+				}
+				return
+			}
+			if !evidence.Equal || evidence.CandidateHold != 90*time.Second {
+				t.Fatalf("evidence %+v, want an equal trial of 90 s", evidence)
+			}
+		})
 	}
 }

@@ -217,7 +217,12 @@ type Options struct {
 	// ReadHoldAt is a Slot's effective hold, including a decrease transition.
 	// With neither callback, directed reads keep the original frozen hold.
 	CurrentReadHold func(execution.QueryGroupIdentity) time.Duration
-	ReadHoldAt      func(execution.QueryGroupIdentity, execution.EvaluationTime) time.Duration
+	// CurrentCandidate is the hold the group's next trial tries, and false
+	// when there is none to try: the controller's, which narrows on the
+	// trials' own evidence (readhold.Controller.EarlierCandidate). Nil tries
+	// half the base hold (execution.LoweredReadHold).
+	CurrentCandidate func(execution.QueryGroupIdentity) (time.Duration, bool)
+	ReadHoldAt       func(execution.QueryGroupIdentity, execution.EvaluationTime) time.Duration
 	// Callbacks run outside the engine lock. Only confirmed whole-window
 	// arrival raises a hold; a decrease compares an earlier read with the
 	// formal first read, never with a later rung.
