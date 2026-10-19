@@ -39,11 +39,15 @@ type RecoveryLimits struct {
 	RetryMaxDelay         time.Duration
 	// TakeoverDivertFloor is the least query budget a round must have left to
 	// run as a normal round, when the group has no reading of its own query's
-	// duration (WithQueryLatency): a round due before this process took its
-	// Query Group over, or one whose readiness landed at the edge of its
-	// deadline (divertShortOfTime). Below it the round goes to replay at once,
-	// under replay's own deadline, instead of starting a normal attempt that
-	// cannot finish. Zero turns the diversion off where there is no reading.
+	// duration (WithQueryLatency) and its read-hold record keeps none from
+	// its previous owner (WithInheritedQueryLatency): a round due before this
+	// process took its Query Group over, or one whose readiness landed at the
+	// edge of its deadline (divertShortOfTime). Below it the round goes to
+	// replay at once, under replay's own deadline, instead of starting a
+	// normal attempt that cannot finish. A group that never completes a first
+	// read in time never gets a reading, and stays on the fallback, as does a
+	// group whose record carries nothing (a hold of zero keeps no record).
+	// Zero turns the diversion off where there is no reading.
 	TakeoverDivertFloor time.Duration
 }
 

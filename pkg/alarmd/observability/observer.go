@@ -1207,7 +1207,8 @@ var ReplayExpiryReasons = []string{
 // A diverted Slot is one not yet at its query deadline but with less budget
 // left than its query takes (RemainingSeconds below FloorSeconds), sent to
 // replay before it starts; FloorSource says whether the floor was the
-// group's own reading or the configured fallback.
+// group's own reading, the previous owner's as the group's read-hold record
+// keeps it, or the configured fallback.
 type ReplayTakeoverFacts struct {
 	Outcome               string  `json:"outcome"`
 	AgeSeconds            float64 `json:"age_seconds"`
@@ -1224,10 +1225,12 @@ const (
 	ReplayTakeoverDiverted    = "diverted"
 )
 
-// Where a diverted Slot's floor came from.
+// Where a diverted Slot's floor came from: the group's own reading here, the
+// previous owner's reading its read-hold record keeps, or the fallback.
 const (
-	TakeoverFloorObserved = "observed"
-	TakeoverFloorFallback = "fallback"
+	TakeoverFloorObserved  = "observed"
+	TakeoverFloorInherited = "inherited"
+	TakeoverFloorFallback  = "fallback"
 )
 
 // ReplayTakeoverOutcomes is every outcome, for the metric to pre-create.
@@ -1237,9 +1240,10 @@ var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeE
 // that was sent to replay before its normal read started, because the read
 // would have started with less time before its query deadline than the
 // group's query takes: RemainingSeconds below BoundSeconds, the bound the
-// group's own reading or the configured fallback (BoundSource, one of the
-// TakeoverFloor words). Reported once per Slot. A Slot due before a takeover
-// is reported under ReplayTakeoverFacts instead, as diverted there.
+// group's own reading, the previous owner's its read-hold record keeps, or
+// the configured fallback (BoundSource, one of the TakeoverFloor words).
+// Reported once per Slot. A Slot due before a takeover is reported under
+// ReplayTakeoverFacts instead, as diverted there.
 // DivertDecisionFacts is what the scheduler judged when it let a Slot run as
 // a normal round rather than send it to replay: when it judged, the frozen
 // query deadline and the one the read is cut at under the measured
@@ -1285,9 +1289,11 @@ type QueryBudgetFacts struct {
 }
 
 // Where a divert decision's bound came from: the Query Group's own measured
-// query duration, the configured fallback, or none (no bound applied).
+// query duration, the previous owner's its read-hold record keeps, the
+// configured fallback, or none (no bound applied).
 const (
 	DivertBoundQueryDuration = "query_duration"
+	DivertBoundInherited     = "inherited"
 	DivertBoundFallback      = "fallback"
 	DivertBoundNone          = "none"
 )

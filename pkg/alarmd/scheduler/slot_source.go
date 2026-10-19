@@ -227,9 +227,12 @@ type ProductionSlotSource struct {
 	// frozen for the first time carries; nil holds none.
 	readHolds ReadHolds
 	// queryLatency is the Query Group's own reading of how long its query
-	// takes (WithQueryLatency); nil, or no reading, falls back to
-	// RecoveryLimits.TakeoverDivertFloor.
-	queryLatency QueryLatency
+	// takes (WithQueryLatency), and inheritedLatency the previous owner's as
+	// the group's read-hold record keeps it (WithInheritedQueryLatency),
+	// asked when there is no reading of its own; nil, or no reading from
+	// either, falls back to RecoveryLimits.TakeoverDivertFloor.
+	queryLatency     QueryLatency
+	inheritedLatency QueryLatency
 	// liveReserve is the runtime's measured post-query tail, the one access
 	// cuts each read at (WithLiveReserve); nil judges by the frozen reserve.
 	liveReserve *execution.LiveReserve
@@ -249,6 +252,17 @@ type QueryLatency func(execution.QueryGroupIdentity) (time.Duration, bool)
 func WithQueryLatency(latency QueryLatency) ProductionSlotSourceOption {
 	return func(source *ProductionSlotSource) error {
 		source.queryLatency = latency
+		return nil
+	}
+}
+
+// WithInheritedQueryLatency lets the source judge a round of a group it has
+// no reading of its own for - every group just taken over - by the reading
+// its previous owner left in the group's read-hold record, before the
+// fallback.
+func WithInheritedQueryLatency(latency QueryLatency) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		source.inheritedLatency = latency
 		return nil
 	}
 }
@@ -1213,11 +1227,15 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 // before it starts rather than after it fails.
 //
 // What "cannot finish" means is the group's own query duration where this
-// process has read it, and TakeoverDivertFloor otherwise - which is every
-// group just taken over. A round with more budget left than that runs as a
-// normal round, as any round does. A round due before the takeover is
-// reported as a takeover diverted (ReplayTakeoverFacts), any other as
-// readiness_late (SlotDiversionFacts): each once.
+// process has read it; where it has not - every group just taken over - the
+// previous owner's reading, as the group's read-hold record keeps it; and
+// TakeoverDivertFloor otherwise. A group that never completes a first read in
+// time never gets a reading, and stays on the fallback, as does a group whose
+// record carries nothing (a hold of zero keeps no record). A round with more
+// budget left than that runs as a normal round, as any round does. A round
+// due before the takeover is reported as a takeover diverted
+// (ReplayTakeoverFacts), any other as readiness_late (SlotDiversionFacts):
+// each once.
 func (source *ProductionSlotSource) divertShortOfTime(
 	ctx context.Context,
 	evaluationTime execution.EvaluationTime,
@@ -1265,19 +1283,41 @@ func (source *ProductionSlotSource) divertShortOfTime(
 // budget from evaluation time to deadline is below the floor - has queries
 // that do finish in less, so the guess says nothing about it, and applied it
 // would divert every round of the group that is not started at once. Such a
-// group is judged only by its own reading. The reading is evidence and
-// applies to any group.
+// group is judged only by a reading. A reading is evidence and applies to any
+// group: the group's own first, then the previous owner's its read-hold
+// record keeps (InheritedQueryDuration), a measurement of the same query and
+// so a reading too. A group that never completes a first read in time never
+// gets a reading, and stays on the fallback, as does a group whose record
+// carries nothing (a hold of zero keeps no record).
+//
+// The inherited reading is asked only when there is no own one, and outside
+// every lock of the source's: the read-hold controller takes the group's own
+// lock to answer it.
 func (source *ProductionSlotSource) divertBound(evaluationTime execution.EvaluationTime, deadline int64) (time.Duration, string) {
 	bound, boundSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
 	if bound >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
 		bound = 0
 	}
-	if source.queryLatency != nil {
-		if observed, ok := source.queryLatency(source.queryGroup); ok {
-			bound, boundSource = observed, observability.TakeoverFloorObserved
-		}
+	if reading, readingSource, ok := source.queryReading(); ok {
+		bound, boundSource = reading, readingSource
 	}
 	return bound, boundSource
+}
+
+// queryReading is how long the group's query takes by the first reading
+// there is - its own here, then its previous owner's - and which it was.
+func (source *ProductionSlotSource) queryReading() (time.Duration, string, bool) {
+	if source.queryLatency != nil {
+		if observed, ok := source.queryLatency(source.queryGroup); ok {
+			return observed, observability.TakeoverFloorObserved, true
+		}
+	}
+	if source.inheritedLatency != nil {
+		if inherited, ok := source.inheritedLatency(source.queryGroup); ok {
+			return inherited, observability.TakeoverFloorInherited, true
+		}
+	}
+	return 0, "", false
 }
 
 // divertDecision is what a live round that runs as a normal one was judged
@@ -1300,9 +1340,13 @@ func (source *ProductionSlotSource) divertDecision(
 		return decision
 	}
 	decision.BoundMillis = bound.Milliseconds()
-	decision.BoundSource = observability.DivertBoundFallback
-	if boundSource == observability.TakeoverFloorObserved {
+	switch boundSource {
+	case observability.TakeoverFloorObserved:
 		decision.BoundSource = observability.DivertBoundQueryDuration
+	case observability.TakeoverFloorInherited:
+		decision.BoundSource = observability.DivertBoundInherited
+	default:
+		decision.BoundSource = observability.DivertBoundFallback
 	}
 	return decision
 }

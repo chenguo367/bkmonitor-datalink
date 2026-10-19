@@ -169,6 +169,28 @@ func (holds *productionReadHolds) owner(qg execution.QueryGroupIdentity) (readho
 	return readhold.Owner{Fence: lease.Fence, ContentScope: lease.ContentScope}, nil
 }
 
+// readHoldInheritedQueryLatency is the previous owner's reading of each Query
+// Group's query duration, as its read-hold record keeps it, for the slot
+// source to judge a group it has no reading of its own for; none without
+// read holds. The controller is looked up when asked, so a source built
+// before it has one, and has no reading until it does. It takes the group's
+// controller lock and nothing else: the source asks it under none of its own.
+func readHoldInheritedQueryLatency(holds *productionReadHolds) scheduler.QueryLatency {
+	if holds == nil {
+		return nil
+	}
+	return holds.inheritedQueryDuration
+}
+
+// inheritedQueryDuration is the group's record's query duration
+// (readhold.Controller.InheritedQueryDuration); none without a controller.
+func (holds *productionReadHolds) inheritedQueryDuration(qg execution.QueryGroupIdentity) (time.Duration, bool) {
+	if holds == nil || holds.controller == nil {
+		return 0, false
+	}
+	return holds.controller.InheritedQueryDuration(qg)
+}
+
 func (holds *productionReadHolds) bind(qg execution.QueryGroupIdentity, session *ownership.Session) {
 	holds.mu.Lock()
 	defer holds.mu.Unlock()
