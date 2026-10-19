@@ -85,6 +85,7 @@ func (trial *earlierSample) overtake(path string) {
 // countOvertakenLocked counts what overtook a trial counted EarlierOvertaken.
 func (engine *Engine) countOvertakenLocked(trial *earlierSample) {
 	engine.counts.earlierOvertaken[key2(trial.source, trial.overtakenBy)]++
+	trial.group.reading.overtaken[wordIndex(EarlierOvertakenPaths, trial.overtakenBy)]++
 }
 
 // ReadHoldIgnoredReasons count findings that cannot raise a whole-window hold.

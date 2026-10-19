@@ -391,7 +391,8 @@ type GroupLateness struct {
 var GroupReadHoldClasses = []string{"h0", "h_positive"}
 
 // groupCounts has only the closed dimensions: two hold classes, six rungs,
-// five sample classes, two ignored reasons and eight earlier-read outcomes.
+// five sample classes, two ignored reasons, eight earlier-read outcomes and
+// six paths an earlier-read trial is overtaken by.
 // It belongs to the live group and is discarded by Forget, like supplements.
 type groupCounts struct {
 	since        time.Time
@@ -400,6 +401,7 @@ type groupCounts struct {
 	classes      [5]uint64
 	ignored      [2]uint64
 	earlier      [8]uint64
+	overtaken    [6]uint64
 	earlierBytes uint64
 }
 
@@ -425,15 +427,19 @@ func wordIndex(words []string, wanted string) int {
 // only closed, classified samples. Refused earlier reads count as unobserved
 // outcomes, and their delivered bytes are counted even when comparison fails.
 type GroupReading struct {
-	QueryGroup       execution.QueryGroupIdentity `json:"query_group"`
-	Source           string                       `json:"source"`
-	Since            time.Time                    `json:"since"`
-	Compared         map[string]map[string]uint64 `json:"compared"`
-	ChangedWindows   map[string]map[string]uint64 `json:"changed_windows"`
-	Classes          map[string]uint64            `json:"classes"`
-	ReadHoldIgnored  map[string]uint64            `json:"read_hold_ignored"`
-	EarlierReads     map[string]uint64            `json:"earlier_reads"`
-	EarlierReadBytes uint64                       `json:"earlier_read_bytes"`
+	QueryGroup      execution.QueryGroupIdentity `json:"query_group"`
+	Source          string                       `json:"source"`
+	Since           time.Time                    `json:"since"`
+	Compared        map[string]map[string]uint64 `json:"compared"`
+	ChangedWindows  map[string]map[string]uint64 `json:"changed_windows"`
+	Classes         map[string]uint64            `json:"classes"`
+	ReadHoldIgnored map[string]uint64            `json:"read_hold_ignored"`
+	EarlierReads    map[string]uint64            `json:"earlier_reads"`
+	// EarlierOvertaken is what overtook the group's trials counted overtaken
+	// (EarlierOvertakenPaths): whether its data was late or its trials could
+	// not be tried in time is told group by group.
+	EarlierOvertaken map[string]uint64 `json:"earlier_overtaken"`
+	EarlierReadBytes uint64            `json:"earlier_read_bytes"`
 }
 
 // ReadHoldGroups is one source's Query Groups this process holds by their
@@ -484,7 +490,7 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	}
 	reading := GroupReading{QueryGroup: queryGroup, Source: source, Since: counts.since,
 		Compared: map[string]map[string]uint64{}, ChangedWindows: map[string]map[string]uint64{},
-		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{},
+		Classes: map[string]uint64{}, ReadHoldIgnored: map[string]uint64{}, EarlierReads: map[string]uint64{}, EarlierOvertaken: map[string]uint64{},
 		EarlierReadBytes: counts.earlierBytes}
 	for hold, name := range GroupReadHoldClasses {
 		reading.Compared[name], reading.ChangedWindows[name] = map[string]uint64{}, map[string]uint64{}
@@ -501,6 +507,9 @@ func (engine *Engine) GroupReading(queryGroup execution.QueryGroupIdentity) (Gro
 	}
 	for index, word := range EarlierReadOutcomes {
 		reading.EarlierReads[word] = counts.earlier[index]
+	}
+	for index, path := range EarlierOvertakenPaths {
+		reading.EarlierOvertaken[path] = counts.overtaken[index]
 	}
 	return reading, true
 }

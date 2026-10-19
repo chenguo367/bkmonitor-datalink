@@ -111,6 +111,16 @@ func TestAnOvertakenTrialIsCountedByWhatOvertookIt(t *testing.T) {
 			if f.engine.Stats().Sources[sourceLog].EarlierReads[EarlierOvertaken] != 1 {
 				t.Fatal("the trial was not counted overtaken once")
 			}
+			// The group's own reading says the same, so groups can be told apart.
+			reading, found := f.engine.GroupReading("qg")
+			if !found || reading.EarlierOvertaken[c.path] != 1 {
+				t.Fatalf("the group's reading overtaken by %v, want %s once", reading.EarlierOvertaken, c.path)
+			}
+			for path, count := range reading.EarlierOvertaken {
+				if path != c.path && count != 0 {
+					t.Fatalf("the group's reading also counts %s: %v", path, reading.EarlierOvertaken)
+				}
+			}
 		})
 	}
 }
