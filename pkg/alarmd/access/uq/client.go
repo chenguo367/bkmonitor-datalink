@@ -663,6 +663,7 @@ func (client *Client) decode(ctx context.Context, reader io.Reader, attempt exec
 func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (completion execution.ProviderCompletion, err error) {
 	session := client.newSeriesDecoder(attempt, sink, scanned)
 	defer session.limitCompletion(&completion, &err)
+	defer session.settle(ctx, &err)
 	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
 	opening, err := decoder.Token()
@@ -746,7 +747,7 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		}
 		return completion, fmt.Errorf("alarmd access uq: unexpected trailing token %v", token)
 	}
-	return session.finish(status, isPartial, resultTableIDs)
+	return session.finish(ctx, status, isPartial, resultTableIDs)
 }
 
 // usableDespiteStatus reports whether a response carrying code should still be
