@@ -19,7 +19,7 @@ import (
 // reaching alarmd when the admin cannot. A session issued here already uses
 // that address and is told none.
 func TestASessionIssuedThroughTheAdminIsToldTheDeploymentsOwnEntry(t *testing.T) {
-	m := &Manager{environmentID: "env", environmentName: "Env", publicBaseURL: "https://ops.example/ops-alarmd/"}
+	m := &Manager{environmentID: "env", environmentName: "Env", publicBaseURL: "https://ops.example/ops-alarmd/", origin: "https://ops.example"}
 	front := storedRecord{SessionID: "s1", Scope: ScopeReadonly, IssuedVia: IssuedViaFront, PublicBaseURL: "https://ops.example/ops-admin/alarmd/"}
 	for name, refresh := range map[string]string{"exchange": "", "renewal": "next-refresh"} {
 		got := m.login(front, "token", refresh)
@@ -37,11 +37,13 @@ func TestASessionIssuedThroughTheAdminIsToldTheDeploymentsOwnEntry(t *testing.T)
 // login answer: the deployment's own address for an admin-issued entry,
 // none for a session issued at that address or with no entry recorded.
 func TestTheFallbackEntryRuleIsOneForLoginAndChannel(t *testing.T) {
-	m := &Manager{publicBaseURL: "https://ops.example/ops-alarmd/"}
+	m := &Manager{publicBaseURL: "https://ops.example/ops-alarmd/", origin: "https://ops.example"}
 	if got := m.fallbackFor("https://ops.example/ops-admin/alarmd/"); !slices.Equal(got, []string{m.publicBaseURL}) {
 		t.Errorf("admin entry: %v", got)
 	}
-	for _, entry := range []string{"", m.publicBaseURL} {
+	// The fallback shares the admin's origin; an admin entry on another
+	// host, scheme or port is offered nothing.
+	for _, entry := range []string{"", m.publicBaseURL, "https://admin.example/ops-admin/alarmd/", "http://ops.example/ops-admin/alarmd/", "https://ops.example:8443/ops-admin/alarmd/"} {
 		if got := m.fallbackFor(entry); got != nil {
 			t.Errorf("entry %q: %v, want none", entry, got)
 		}

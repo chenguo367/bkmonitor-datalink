@@ -71,11 +71,12 @@ Commands:
                                            Send file content through the described stdin parameter.
                                            Scripts are data; no local shell is started.
                                            Fetch describe once, then invoke once with its revision.
-             [--entry alarmd]              Send through the deployment's own entry, which a session issued
-                                           through the admin is told at login. A read moves there by itself
-                                           when the admin cannot reach alarmd; an executing call does not
-                                           (it may have run), and says so: check sre.receipts, then re-run
-                                           with this.
+             [--entry alarmd]              Send through the deployment's own entry on the admin's domain,
+                                           which a session issued through the admin is told by the server.
+                                           A read moves there by itself when the admin is down (no admin
+                                           backend, or it cannot reach alarmd), never for a network failure;
+                                           an executing call never moves by itself (it may have run) and
+                                           says so: check sre.receipts, then re-run with this.
   skills list | show                       The AI tools the built-in agent skill installs for, and its text.
   skills install [--tool <tool>]... [--scope user|project] [--directory <dir>] [--dry-run] [--force]
                                            Write <tool skills dir>/alarmd-cli/SKILL.md (default tool universal,

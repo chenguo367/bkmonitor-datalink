@@ -52,17 +52,9 @@ func requestBound(limit int64) int64 {
 
 // requestNotSent marks failures that happen before the channel can receive
 // an invocation. All other transport or response failures leave exec unknown.
-// unreachable says the entry itself could not be reached (no address, no
-// listener, no route): the one not-sent failure another entry can mend.
-type requestNotSent struct {
-	error
-	unreachable bool
-}
+type requestNotSent struct{ error }
 
-func notSent(message string) error { return &requestNotSent{error: errors.New(message)} }
-func unreachable(message string) error {
-	return &requestNotSent{error: errors.New(message), unreachable: true}
-}
+func notSent(message string) error { return &requestNotSent{errors.New(message)} }
 
 // entryHeader tells the deployment a request came through its own address
 // rather than the entry the session was issued through. The admin forwards
@@ -71,21 +63,23 @@ func unreachable(message string) error {
 const entryHeader = "X-Alarmd-Entry"
 const entryAlarmd = "alarmd"
 
-// Why a request is handed to a fallback entry. Each means the call never
-// reached alarmd through the session's entry: unsent, the entry could not
-// be reached; admin_unreachable, the admin answered that it could not reach
-// alarmd; gateway, a 502 or 503 with no JSON in it, a proxy in front of an
-// entry that is down. A 504 (the admin's alarmd_timeout) is never one:
-// alarmd may have run the call.
+// Why a request is handed to the fallback entry: the admin application
+// itself is down, which is all the fallback is for (the user's ruling of
+// 2026-10-19: it shares the admin's domain and covers the admin failing,
+// not the network). admin_unreachable, the admin answered that it could not
+// reach alarmd; gateway, the ingress answered 502 or 503 with no JSON in it,
+// because no admin backend was ready to take the request. A failure to reach
+// the domain at all - no address, refused, no route - is never one: on one
+// origin the fallback fails the same way. Nor is a 504 (the admin's
+// alarmd_timeout): alarmd may have run the call.
 const (
-	fallbackUnsent           = "unsent"
 	fallbackAdminUnreachable = "admin_unreachable"
 	fallbackGateway          = "gateway"
 )
 
-// maxFallbackEntries bounds what a server may declare: its own address,
-// and room for a second listener.
-const maxFallbackEntries = 4
+// maxFallbackEntries is how many fallback entries a server may declare: the
+// deployment's own address, one.
+const maxFallbackEntries = 1
 
 // validScope and allowsScope know the one scope. No server a CLI talks to
 // ever issued another: the execution scope an earlier build defined was
@@ -187,17 +181,18 @@ func (a *App) requestTimeout(p Profile, method, endpoint string, body any, timeo
 	return a.requestVia(p, method, endpoint, body, timeout, false)
 }
 
-// requestVia sends the request through the session's entry and, when that
-// entry did not get it to alarmd, through each fallback entry the server
-// declared at login (Profile.FallbackBaseURLs), in order. The server's
-// login answer is the only source of that list; there is no option that
-// adds to it. unsentOnly is for a call that executes something: it moves to
-// a fallback only when the request never left this process, because an
-// admin that lost alarmd mid-call, or a proxy in front of it, answers the
-// same way whether or not alarmd had already started the command.
-// meta.client_entry says which entry answered.
-func (a *App) requestVia(p Profile, method, endpoint string, body any, timeout time.Duration, unsentOnly bool) (map[string]any, int, error) {
-	moves := func(why string) bool { return why != "" && (!unsentOnly || why == fallbackUnsent) }
+// requestVia sends the request through the session's entry and, when the
+// admin application behind it is down, through the fallback entry the server
+// declared (Profile.FallbackBaseURLs) on the same origin. The server is the
+// only source of that entry; there is no option that adds to it, and one on
+// another origin is never used. exec is a call that executes something: it
+// never moves by itself, because an admin that lost alarmd mid-call, or an
+// ingress in front of it, answers the same way whether or not alarmd had
+// already started the command; it says where it could go instead, for the
+// operator to re-run with --entry alarmd. meta.client_entry says which
+// entry answered.
+func (a *App) requestVia(p Profile, method, endpoint string, body any, timeout time.Duration, exec bool) (map[string]any, int, error) {
+	moves := func(why string) bool { return why != "" && !exec }
 	result, status, err, why := a.attempt(p, method, endpoint, body, timeout, p.via)
 	entry := map[string]any{"entry": "session", "url": p.PublicBaseURL}
 	if p.via != "" {
@@ -214,7 +209,7 @@ func (a *App) requestVia(p Profile, method, endpoint string, body any, timeout t
 		}
 	}
 	for _, fallback := range p.FallbackBaseURLs {
-		if !moves(why) {
+		if !moves(why) || !sameOrigin(fallback, p.PublicBaseURL) {
 			break
 		}
 		fmt.Fprintf(a.Err, "Warning: the session's entry did not reach alarmd (%s); calling the deployment's own entry %s.\n", why, fallback)
@@ -233,10 +228,7 @@ func (a *App) requestVia(p Profile, method, endpoint string, body any, timeout t
 // shows the request did not reach alarmd through it (see requestVia).
 func (a *App) attempt(p Profile, method, endpoint string, body any, timeout time.Duration, entry string) (result map[string]any, status int, err error, why string) {
 	result, status, err = a.send(p, method, endpoint, body, timeout, entry)
-	var unsent *requestNotSent
 	switch {
-	case errors.As(err, &unsent) && unsent.unreachable:
-		why = fallbackUnsent
 	case status == http.StatusBadGateway && err == nil && result["status"] == nil &&
 		stringField(objectField(result, "error"), "code") == "alarmd_unreachable":
 		why = fallbackAdminUnreachable
@@ -286,11 +278,11 @@ func (a *App) send(p Profile, method, endpoint string, body any, timeout time.Du
 		var dial *net.OpError
 		switch {
 		case errors.As(err, &dns):
-			return nil, 0, unreachable("DNS resolution failed; check the deployment hostname and DNS access")
+			return nil, 0, notSent("DNS resolution failed; check the deployment hostname and DNS access")
 		case errors.Is(err, syscall.ECONNREFUSED):
-			return nil, 0, unreachable("connection refused; check the deployment address, port and listener")
+			return nil, 0, notSent("connection refused; check the deployment address, port and listener")
 		case errors.As(err, &dial) && dial.Op == "dial":
-			return nil, 0, unreachable("cannot connect to the deployment entry; check its address and network route")
+			return nil, 0, notSent("cannot connect to the deployment entry; check its address and network route")
 		case errors.As(err, &hostname):
 			return nil, 0, notSent("TLS certificate hostname mismatch; check the entry URL or log in with --insecure-tls for this environment")
 		case errors.As(err, &authority):
@@ -422,10 +414,10 @@ func validateExchange(m map[string]any, p Profile) (Profile, error) {
 	return out, nil
 }
 
-// fallbackEntries are the fallback entries a login answer declares, each a
-// valid entry URL other than the session's own, at most maxFallbackEntries.
-// Absent is none; anything malformed refuses the answer, as any other field
-// of it would.
+// fallbackEntries are the fallback entries a server declares: at most one, a
+// valid entry URL on the session's own origin (scheme, host and port) with
+// another path. Absent is none; anything else refuses the answer, as any
+// other malformed field of it would.
 func fallbackEntries(raw any, primary string) ([]string, error) {
 	if raw == nil {
 		return nil, nil
@@ -438,12 +430,22 @@ func fallbackEntries(raw any, primary string) ([]string, error) {
 	for _, item := range list {
 		text, _ := item.(string)
 		u, err := normalizedURL(text)
-		if err != nil || u == primary || slices.Contains(out, u) {
+		if err != nil || u == primary || !sameOrigin(u, primary) || slices.Contains(out, u) {
 			return nil, errors.New("server returned an invalid fallback entry")
 		}
 		out = append(out, u)
 	}
 	return out, nil
+}
+
+// sameOrigin says two entry URLs share scheme, host and port.
+func sameOrigin(a, b string) bool {
+	left, err := baseURL(a)
+	if err != nil {
+		return false
+	}
+	right, err := baseURL(b)
+	return err == nil && left.Scheme == right.Scheme && left.Host == right.Host
 }
 
 func validateStatus(m map[string]any, p Profile) (string, error) {

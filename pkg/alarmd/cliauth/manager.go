@@ -173,13 +173,16 @@ func (m *Manager) storeFailed(reason, detail string) *Error {
 type Manager struct {
 	// linkdTokens is the token the front surface takes for the link's API;
 	// nil keeps none (ServeLinkdTokens).
-	linkdTokens      LinkdTokens
-	client           redis.UniversalClient
-	prefix           string
-	environmentID    string
-	environmentName  string
-	publicBaseURL    string
-	origin           string
+	linkdTokens     LinkdTokens
+	client          redis.UniversalClient
+	prefix          string
+	environmentID   string
+	environmentName string
+	publicBaseURL   string
+	origin          string
+	// crossOrigin logs, once per process, a fallback not declared because
+	// this deployment's address is on another origin than the admin entry.
+	crossOrigin      sync.Once
 	adminHash        [sha256.Size]byte
 	now              func() time.Time
 	limitMu          sync.Mutex

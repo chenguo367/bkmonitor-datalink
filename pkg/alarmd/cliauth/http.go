@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
@@ -221,9 +222,23 @@ type loginResponse struct {
 
 // fallbackFor is the fallback entry of a session issued at entry: this
 // deployment's own address when the session came through the admin (entry
-// set and not it), none otherwise.
+// set and not it) and that address is on the admin entry's origin - the same
+// scheme, host and port, another path - and none otherwise.
+//
+// The fallback is for the admin being down, not for the network: on one
+// origin, whatever keeps the admin's address from answering at the network
+// level keeps this one from answering too, and nothing on another origin is
+// offered (the user's ruling of 2026-10-19: the fallback shares the admin's
+// domain; an infrastructure failure needs no fallback).
 func (m *Manager) fallbackFor(entry string) []string {
 	if entry == "" || entry == m.publicBaseURL || m.publicBaseURL == "" {
+		return nil
+	}
+	if _, origin, err := canonicalBaseURL(entry); err != nil || origin != m.origin {
+		m.crossOrigin.Do(func() {
+			slog.Warn("alarmd cli: no fallback entry declared: the deployment's public address is not on the admin entry's origin",
+				slog.String("public_origin", m.origin))
+		})
 		return nil
 	}
 	return []string{m.publicBaseURL}
