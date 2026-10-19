@@ -83,7 +83,7 @@ const (
 )
 
 var (
-	SREActionOps     = []string{OpNodeExec, OpNodeGet, OpNodeCancel, OpNodeEnded, "pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete, pod.OpPatch}
+	SREActionOps     = []string{OpNodeExec, OpNodeGet, OpNodeCancel, OpNodeEnded, "pod.exec", pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpReadSecret, pod.OpReadConfigMap, OpSetImage, OpRevert, pod.OpListResources, pod.OpDryRun, pod.OpApply, pod.OpDelete, pod.OpPatch, pod.OpEditConfigMapText}
 	SREActionResults = []string{SREResultDone, SREResultTargetChanged, SREResultForbidden, SREResultRefused, SREResultFailed, SREResultUnknown}
 )
 
@@ -519,6 +519,25 @@ func SREOperations(options SREOptions) []Operation {
 				audit(ctx, started, SREAction{Op: pod.OpReadConfigMap, Namespace: v.Namespace, Kind: "ConfigMap", Name: v.Name, UID: v.UID, Detail: fmt.Sprintf("keys %d", len(v.Keys))}, err)
 				return wrapPod(v, err, err == nil && !v.Truncated)
 			}},
+		{ID: pod.OpEditConfigMapText, Summary: "在一个 ConfigMap 键里把一段 configmap.get 显示出来的文字换成新文字，用来改整份配置文件（config.yaml、environment.yaml）里的地址这类普通值：键整份读回来是遮蔽的，没法整份写回。" +
+			"按 namespace、name、key 定位，expected_fingerprint 填 configmap.get 给这个键的指纹（键变过或换了指纹密钥就拒绝）。old_text 必须在这个键的显示结果里恰好出现一次，" +
+			"并且只在显示出来的地方改：落在遮蔽值里、跨遮蔽值、落在注释里的都不算，所以不能拿来试探遮蔽内容；new_text 改完后也必须照常显示，形如密钥或落到凭据名下会被遮蔽的拒绝（密钥走 Secret）。" +
+			"old_text、new_text 各一行。服务端用一次 JSON Patch 写入，同时 test uid、resourceVersion 与键的原值，apiserver 整份原子执行，期间有人改过就什么都不改（test_failed）。" +
+			"回执只给出现次数、改动所在行号、改前改后指纹和改后这一行的显示结果，从不给值；dry_run 只做全部检查不写。拒绝的原因字：key_not_found、fingerprint_mismatch、new_text_not_plain、" +
+			"old_text_not_shown_once、edit_not_shown_exactly。每次调用都留审计记录，写明键、行号与结果，不写值。", Effect: "exec", EvidenceScope: "sre_manage", ExecutionPool: "exec", ExecutionTimeout: 30 * time.Second, Availability: podAvailable, Limits: podLimits,
+			Fields: map[string]Field{"namespace": text, "name": text, "key": text,
+				"old_text":             {Type: "string", MinLength: 1, MaxLength: 4096, Description: "one line of text configmap.get shows exactly once in the key"},
+				"new_text":             {Type: "string", MaxLength: 4096, Description: "its replacement, one line, which must itself be shown in clear"},
+				"expected_fingerprint": {Type: "string", MinLength: 1, MaxLength: 64, Source: "configmap.get keys[].fingerprint"},
+				"dry_run":              {Type: "boolean", Description: "make every check and write nothing"}},
+			Required: []string{"name", "key", "old_text", "new_text", "expected_fingerprint"}, OutputSchema: SchemaOf(pod.ConfigMapEditReceipt{}),
+			Run: func(ctx context.Context, p Params) Outcome {
+				started := now()
+				v, err := pods.EditConfigMapText(ctx, pod.ConfigMapEditRequest{Namespace: p.String("namespace"), Name: p.String("name"), Key: p.String("key"),
+					OldText: p.String("old_text"), NewText: p.String("new_text"), ExpectedFingerprint: p.String("expected_fingerprint"), DryRun: p.Bool("dry_run")})
+				audit(ctx, started, SREAction{Op: pod.OpEditConfigMapText, Namespace: v.Namespace, Kind: "ConfigMap", Name: v.Name, UID: v.UID, Detail: editDetail(v)}, err)
+				return wrapPod(v, err, err == nil)
+			}},
 	}
 	rollouts := options.Rollouts
 	rolloutAvailable := func() Availability {
@@ -811,6 +830,16 @@ func writeNames(receipt pod.WriteReceipt) string {
 // and the helm releases it touched.
 // patchDetail is what a patch's audit record says of it: how many
 // operations and their ops and paths, never a value.
+// editDetail is an edit's audit line: the key, the lines changed and the
+// outcome, never a value.
+func editDetail(receipt pod.ConfigMapEditReceipt) string {
+	detail := fmt.Sprintf("key %s; lines %v; outcome %s", receipt.Key, receipt.ChangedLines, receipt.Outcome)
+	if receipt.DryRun {
+		detail += "; dry_run"
+	}
+	return detail
+}
+
 func patchDetail(ops []pod.PatchOp) string {
 	parts := make([]string, 0, len(ops))
 	for _, op := range ops {

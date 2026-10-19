@@ -1,0 +1,84 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2026 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package obchannel
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/sre/pod"
+)
+
+const editedConfig = "server:\n  url: http://old.example.test/\n  password: Hidden9ValueForTest\n"
+
+// editableConfigMap answers the read of one ConfigMap holding editedConfig.
+type editableConfigMap struct{ ingressDenier }
+
+func (editableConfigMap) GetResource(_ context.Context, _ schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
+	return &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": name, "namespace": namespace, "uid": "uid-app", "resourceVersion": "7"},
+		"data":     map[string]any{"config.yaml": editedConfig}}}, nil
+}
+
+// configmap.edit_text is a write offered with the others: counted, kept with
+// the change receipts, and audited by key, lines and outcome, never a value.
+func TestTheConfigMapEditIsAnAuditedWriteWithoutValues(t *testing.T) {
+	client := &postObservationClient{target: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "web-0", UID: "pod-uid"}}}
+	writer := &patchWriter{}
+	key := []byte("fixed-test-fingerprint-key")
+	provider, err := pod.New(pod.Options{Client: client, DryRun: editableConfigMap{}, Writer: writer, DefaultNamespace: "fixture", FingerprintKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(editedConfig))
+	fingerprint := hex.EncodeToString(mac.Sum(nil))[:16]
+	var actions []SREAction
+	channel, err := New(Options{Auth: postObservationAuth{}, EnvironmentID: "test", Replica: "replica-1",
+		Operations: SREOperations(SREOptions{Pods: provider, Audit: func(action SREAction) { actions = append(actions, action) }})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, response := call(t, channel, envelope(channel, "invoke", pod.OpEditConfigMapText, Params{"namespace": "ns1", "name": "app", "key": "config.yaml",
+		"old_text": "http://old.example.test/", "new_text": "http://new.example.test/", "expected_fingerprint": fingerprint}))
+	if status != 200 || response.Error != nil {
+		t.Fatalf("edit: HTTP %d %+v", status, response)
+	}
+	if len(writer.sent) != 1 || !strings.Contains(writer.sent[0], `"path":"/metadata/resourceVersion","value":"7"`) {
+		t.Fatalf("sent %v", writer.sent)
+	}
+	if len(actions) != 1 || actions[0].Op != pod.OpEditConfigMapText || actions[0].UID != "uid-app" ||
+		actions[0].Detail != "key config.yaml; lines [2]; outcome updated" {
+		t.Fatalf("audit %+v", actions)
+	}
+	line, _ := json.Marshal(actions[0])
+	answer, _ := json.Marshal(response)
+	if strings.Contains(string(answer), "Hidden9ValueForTest") || strings.Contains(string(line), "Hidden9ValueForTest") ||
+		strings.Contains(string(line), "example.test") {
+		t.Fatalf("a value came back: answer %s audit %s", answer, line)
+	}
+	found := false
+	for _, counted := range SREActionOps {
+		found = found || counted == pod.OpEditConfigMapText
+	}
+	if !found || sreEffect(pod.OpEditConfigMapText) != SREEffectChange {
+		t.Fatal("configmap.edit_text is not a counted change")
+	}
+}
