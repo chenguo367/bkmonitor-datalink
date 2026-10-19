@@ -194,8 +194,11 @@ type EvaluationRequestV2 struct {
 	// input ends, exclusive: the evaluation time plus the primary
 	// requirement's EndOffsetSeconds, which is minus the query delay
 	// (controlplane buildRequirements). A position before it counts as
-	// settled. Zero is a caller with no read to name, and settles every
-	// position up to EvaluationTime.
+	// settled. Zero names no read and settles nothing: every window keeps the
+	// skip rule. Production always names one - every due Level has exactly
+	// one PRIMARY requirement (execution/named_input_request.go, the worker's
+	// named-input index) - so zero comes only from a caller that builds the
+	// request without the header's requirements.
 	ReadEnd int64
 	// SeriesSeenBefore says the series' state held history before this
 	// round: it was observed before this record, even where retention has

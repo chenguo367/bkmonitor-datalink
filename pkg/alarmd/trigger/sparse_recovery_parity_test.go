@@ -39,9 +39,13 @@ func evaluateSeenAtV2(t *testing.T, plan *strategy.CompiledPlan, points []sparse
 }
 
 // evaluateSlotV2 is evaluateSeenAtV2 with the Slot's read end named: the
-// evaluation time less the query delay, exclusive. Zero reads as the
-// evaluation time.
+// evaluation time less the query delay, exclusive. Zero is the Slot a minute
+// after evaluationTime with no delay, whose read covers every point up to it.
 func evaluateSlotV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePoint, index int, evaluationTime, readEnd, hold int64, seen bool) EvaluationResultV2 {
+	if readEnd == 0 {
+		evaluationTime += 60
+		readEnd = evaluationTime
+	}
 	t.Helper()
 	level := plan.Levels().At(0)
 	history := pointHistory{step: 60, points: make(map[int64]bool, index+1)}
@@ -61,6 +65,16 @@ func evaluateSlotV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePo
 		t.Fatalf("EvaluateV2(%d) error = %v", points[index].time, err)
 	}
 	return evaluated
+}
+
+// readInTheNextSlot evaluates request in the Slot a minute after its record,
+// with no query delay: that Slot's read covers every position up to the
+// record's, so they are settled.
+func readInTheNextSlot(t *testing.T, request *EvaluationRequestV2) {
+	t.Helper()
+	request.EvaluationTime = request.Record.SourceTime + 60
+	request.ReadEnd = request.EvaluationTime
+	request.EffectiveTimeFacts = activeFactsV2(t, request.Plan, request.EvaluationTime)
 }
 
 func recoveredV2(result EvaluationResultV2) bool {
@@ -392,6 +406,7 @@ func TestARecoveryWalkOverNoPointIsNotARecovery(t *testing.T) {
 	history := pointHistory{step: 60, points: map[int64]bool{source - 20*60: false}}
 	request := requestV2(t, plan, source, []DetectionFact{factV2(level, DetectionNormal)},
 		[]LevelHistory{{LevelID: 5, View: history}}, activeFactsV2(t, plan, source))
+	readInTheNextSlot(t, &request)
 	result, err := EvaluateV2(request)
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +457,7 @@ func TestAnOpenReadGapKeepsEveryWindowUnsettled(t *testing.T) {
 		request := requestV2(t, plan, minute(56), []DetectionFact{factV2(level, DetectionNormal)},
 			[]LevelHistory{{LevelID: 5, View: history, ReadGapOpen: open}}, activeFactsV2(t, plan, minute(56)))
 		request.SeriesSeenBefore = true
+		readInTheNextSlot(t, &request)
 		result, err := EvaluateV2(request)
 		if err != nil {
 			t.Fatal(err)
@@ -607,5 +623,33 @@ func TestAGapMarkerCountsSlotsInTheWalksOwnPositions(t *testing.T) {
 	if _, ok := result.Plan(); ok && len(result.LevelTerminals()) == 0 {
 		t.Fatal("a 300 s trigger step compiled under a 60 s evaluation interval: a marker counted in Slots would " +
 			"clear while its unread bucket is still inside the walk")
+	}
+}
+
+// A request that names no read settles nothing: every window keeps the skip
+// rule, so a missing requirement can delay a recovery and never bring one
+// early. The traced case recovers at :56 read in the next Slot, and does not
+// when the same request names no read end.
+func TestARequestWithNoReadEndSettlesNothing(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 5, nil)})
+	minute := func(m int64) int64 { return 6000 + m*60 }
+	history := pointHistory{step: 60, points: map[int64]bool{minute(42): true, minute(47): false, minute(56): false}}
+	request := requestV2(t, plan, minute(56), []DetectionFact{factV2(plan.Levels().At(0), DetectionNormal)},
+		[]LevelHistory{{LevelID: 5, View: history}}, activeFactsV2(t, plan, minute(56)))
+	request.SeriesSeenBefore = true
+	readInTheNextSlot(t, &request)
+	if result, err := EvaluateV2(request); err != nil || !recoveredV2(result) {
+		t.Fatalf("read in the next Slot :56 did not recover (err %v)", err)
+	}
+	request.ReadEnd = 0
+	result, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredV2(result) {
+		t.Fatal("with no read end alarmd recovered: holes no read is known to have covered were read as quiet minutes")
+	}
+	if window := result.LevelOutcomes[0].DecisionWindow; window != nil && window.Recovery.ObservedConsecutiveMisses != 0 {
+		t.Fatalf("recovery evidence = %+v, want no window counted", window.Recovery)
 	}
 }

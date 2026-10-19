@@ -1122,7 +1122,14 @@ func guardStaysActive(outcome trigger.LevelOutcomeV2, summary execution.HistoryC
 // requirement's EndOffsetSeconds - the field the query window's end is
 // resolved from, minus the query delay (controlplane buildRequirements). The
 // newest such end when several Levels of the Plan read a primary; zero, which
-// the trigger reads as the evaluation time, when the header names none.
+// the trigger reads as nothing settled, when the header names none. That
+// cannot happen on the production path: every due Level has exactly one
+// PRIMARY requirement (execution/named_input_request.go, the worker's
+// named-input index), so zero is only a header built without them.
+//
+// The newest end across Levels holds because a Plan's Levels share one
+// primary read today: one query, one window. If Levels ever read different
+// primaries, the end must become per Level.
 func primaryReadEnd(header execution.InternalExecutionHeader, plan execution.PlanIdentity) int64 {
 	evaluationTime := int64(header.Contract.Slot.EvaluationTime)
 	end := int64(0)

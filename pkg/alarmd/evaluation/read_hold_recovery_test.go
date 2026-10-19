@@ -83,3 +83,23 @@ func atSlot(t *testing.T, plan *strategy.CompiledPlan, request execution.Evaluat
 	request.Inputs[0].Inputs[0].QueryWindow = execution.QueryWindow{Start: at - 60, End: at}
 	return request
 }
+
+// A header that names no PRIMARY requirement for the Plan gives no read end,
+// which the trigger reads as nothing settled. The production path cannot
+// build one - every due Level has exactly one PRIMARY - so this is the
+// function's own fail-safe, checked on its own.
+func TestNoPrimaryRequirementGivesNoReadEnd(t *testing.T) {
+	plan := compiledWindow(t, 3, 1)
+	records := []contract.CanonicalRecordV2{{RecordID: strings.Repeat("b", 64), SourceTime: 6000, BusinessID: "2",
+		DimensionIdentity: contract.DimensionIdentityV2{Digest: strings.Repeat("c", 64)},
+		Values:            map[string]json.RawMessage{"value": json.RawMessage(`10`)}, Dimensions: map[string]json.RawMessage{}, ReceivedTime: 6000}}
+	request := atSlot(t, plan, requestFixtureForPlan(t, plan, records, nil), 6060)
+	due := request.Header.DuePlans[0].Identity
+	if end := primaryReadEnd(request.Header, due); end != 6060 {
+		t.Fatalf("read end = %d, want the Slot's evaluation time less a zero delay", end)
+	}
+	request.Header.Requirements[0].Role = execution.InputRoleAlgorithmDependency
+	if end := primaryReadEnd(request.Header, due); end != 0 {
+		t.Fatalf("with no PRIMARY requirement the read end is %d, want 0: nothing settled", end)
+	}
+}

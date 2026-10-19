@@ -382,7 +382,11 @@ func evaluateLevelV2(
 	// A hold set too low reads data before it has all landed; that is the
 	// read hold's own probation to catch and raise (lookback/probation.go),
 	// not this boundary's to guess at.
-	settledThrough := request.EvaluationTime
+	//
+	// No read end means no read is known to have covered anything, so
+	// nothing is settled and every window keeps the skip rule: a missing
+	// requirement can delay a recovery, never bring one early.
+	settledThrough := int64(math.MinInt64)
 	if request.ReadEnd > 0 {
 		settledThrough = request.ReadEnd - 1
 	}
