@@ -50,13 +50,28 @@ func newTraceParent() (header, traceID string) {
 
 // strategyHeader is the strategy ids joined by commas, cut before the id
 // that would pass maxStrategyHeaderBytes and followed by "+N" for the N left
-// out; empty for none.
+// out; empty for none. Only canonical decimal ids are named - an id that
+// is anything else is counted into N - so the header is digits, commas and
+// "+N" whatever an id holds.
 func strategyHeader(ids []string) string {
+	named := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if contract.CanonicalDecimal(id) {
+			named = append(named, id)
+		}
+	}
+	skipped := len(ids) - len(named)
+	tail := func(left int) string {
+		if left == 0 {
+			return ""
+		}
+		return "+" + strconv.Itoa(left)
+	}
 	var out strings.Builder
-	for index, id := range ids {
+	for index, id := range named {
 		more := ""
-		if left := len(ids) - index - 1; left > 0 {
-			more = ",+" + strconv.Itoa(left)
+		if left := len(named) - index - 1 + skipped; left > 0 {
+			more = "," + tail(left)
 		}
 		next := id
 		if out.Len() > 0 {
@@ -64,11 +79,17 @@ func strategyHeader(ids []string) string {
 		}
 		if out.Len()+len(next)+len(more) > maxStrategyHeaderBytes {
 			if out.Len() == 0 {
-				return "+" + strconv.Itoa(len(ids))
+				return tail(len(ids))
 			}
-			return out.String() + ",+" + strconv.Itoa(len(ids)-index)
+			return out.String() + "," + tail(len(named)-index+skipped)
 		}
 		out.WriteString(next)
+	}
+	if skipped > 0 {
+		if out.Len() == 0 {
+			return tail(skipped)
+		}
+		out.WriteString("," + tail(skipped))
 	}
 	return out.String()
 }

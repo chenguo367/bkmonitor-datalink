@@ -45,6 +45,10 @@ type cliRuntimeFacts struct {
 }
 
 type cliControlBinding struct {
+	// Rejections is this replica's tracker's latest refusal per Query Group,
+	// with the words of the provider's answer, which strategy.get serves and
+	// no route does; nil serves none.
+	Rejections  func(queryGroup string) (fleet.KeptRejection, bool)
 	Incarnation string
 	StreamToken string
 	Server      *viewstream.Server

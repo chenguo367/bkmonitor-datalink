@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdtoken"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -199,7 +200,12 @@ func openProductionRoleChannel(cfg config.Config, binding ChannelBinding) (_ *ro
 		&http.Client{Transport: queryTransport, Timeout: obchannel.MaxExecutionTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	// The operation schemas stay the same across roles; only their currently
 	// bound providers and the ingress's default routing differ.
-	ops := obchannel.NativeOperations(providers)
+	ops := obchannel.NativeOperationsWith(providers, obchannel.NativeOptions{Rejections: func(queryGroup string) (fleet.KeptRejection, bool) {
+		if rejections := providers.read().Control.Rejections; rejections != nil {
+			return rejections(queryGroup)
+		}
+		return fleet.KeptRejection{}, false
+	}})
 	for i := range ops {
 		ops[i].DefaultControlLeader = true
 		// object.list already has a replica domain filter. Preserve that

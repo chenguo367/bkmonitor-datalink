@@ -941,6 +941,10 @@ type Tracker struct {
 
 	mu     sync.Mutex
 	groups map[string]*queryGroupState
+	// rejections are the latest refusal of each Query Group with the words
+	// of the provider's answer, kept on this replica only and never in a
+	// row (KeptRejection).
+	rejections map[string]KeptRejection
 	// Cumulative since this process started, never reset by anything the pool
 	// does. They are a pair on purpose: the size of the pool alone cannot tell a
 	// backend that is still down from an exit path that has stopped working, and
@@ -988,6 +992,7 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		now:                  now,
 		startedAt:            now(),
 		groups:               make(map[string]*queryGroupState),
+		rejections:           make(map[string]KeptRejection),
 	}
 }
 
@@ -1486,8 +1491,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.lastFailure.Timing = &copied
 		}
 		if rejection := failure.Rejection; rejection != nil {
-			copied := *rejection
-			state.lastFailure.Rejection = &copied
+			state.lastFailure.Rejection = &RejectionRef{Class: rejection.Class, TraceID: rejection.TraceID}
+			tracker.keepRejectionLocked(trace.QueryGroupKey, *rejection, failure.HTTPStatus, at)
 		}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
@@ -2619,6 +2624,11 @@ func (tracker *Tracker) Forget(owned map[string]struct{}) {
 			delete(tracker.groups, queryGroup)
 		}
 	}
+	for queryGroup := range tracker.rejections {
+		if _, kept := owned[queryGroup]; !kept {
+			delete(tracker.rejections, queryGroup)
+		}
+	}
 }
 
 // HasConclusion reports whether the object already has conclusive evidence.
@@ -3354,4 +3364,51 @@ func (tracker *Tracker) PrunedSkips() map[string]PrunedSkip {
 		skips[queryGroup] = *state.prunedSkip
 	}
 	return skips
+}
+
+// MaxKeptRejections bounds the refusals a replica keeps the words of: one
+// per Query Group, the oldest given up for a new group past the bound.
+const MaxKeptRejections = 512
+
+// KeptRejection is the latest refusal of a Query Group as this replica
+// keeps it: the class, the provider's trace id and status, the sanitized
+// start of its answer, and when it was seen. The excerpt can echo label and
+// dimension values, so it is never in a row or a snapshot; only the OB
+// channel's session-gated strategy read serves it, from the replica that
+// tracks the group.
+type KeptRejection struct {
+	Class      string    `json:"class"`
+	TraceID    string    `json:"trace_id,omitempty"`
+	HTTPStatus int       `json:"http_status,omitempty"`
+	Excerpt    string    `json:"excerpt,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+func (tracker *Tracker) keepRejectionLocked(queryGroup string, rejection observability.QueryRejection, status int, at time.Time) {
+	if queryGroup == "" {
+		return
+	}
+	if _, known := tracker.rejections[queryGroup]; !known && len(tracker.rejections) >= MaxKeptRejections {
+		oldest, oldestAt := "", time.Time{}
+		for group, kept := range tracker.rejections {
+			if oldest == "" || kept.At.Before(oldestAt) {
+				oldest, oldestAt = group, kept.At
+			}
+		}
+		delete(tracker.rejections, oldest)
+	}
+	tracker.rejections[queryGroup] = KeptRejection{Class: rejection.Class, TraceID: rejection.TraceID, HTTPStatus: status,
+		Excerpt: rejection.Excerpt, At: at}
+}
+
+// LocalRejection is the latest refusal this replica kept for queryGroup,
+// with the words of the provider's answer; false when it kept none.
+func (tracker *Tracker) LocalRejection(queryGroup string) (KeptRejection, bool) {
+	if tracker == nil {
+		return KeptRejection{}, false
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	kept, ok := tracker.rejections[queryGroup]
+	return kept, ok
 }

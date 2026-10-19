@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -851,20 +852,21 @@ func TestANotDueAnswerStartsNoRunAndLendsNoStart(t *testing.T) {
 }
 
 // A query the provider refused as written is the strategy's: its row reads
-// refused, files under the query refused, and carries what the provider
-// said - its class, its trace id and the sanitized start of its answer - for
-// whoever opens the strategy to read.
-func TestARejectedQuerysRowCarriesWhatTheProviderSaid(t *testing.T) {
+// refused, files under the query refused, and names the refusal's class and
+// the provider's trace id. The words of the provider's answer - which can
+// echo label values - are not in the row, which every reader of the
+// strategy route sees: they stay on this replica, for the session-gated
+// strategy read.
+func TestARejectedQuerysRowNamesTheRefusalButNotItsWords(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
-	rejection := observability.QueryRejection{Class: "VM_SAMPLE_LIMIT", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
-		Excerpt: `{"error":"cannot select more than 10000000 samples; password=<redacted>"}`}
+	excerpt := `{"error":"cannot select more than 10000000 samples for pod=\"payments-7f9c\"; password=<redacted>"}`
 	for round := 0; round < DefaultDegradedRounds; round++ {
 		slot := int64(100 + 60*round)
-		reported := rejection
 		tracker.Observe(context.Background(), observability.Observation{
 			QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "source_backend", Code: "QUERY_REJECTED",
-				Detail: "http_status=400", HTTPStatus: 400, Rejection: &reported},
+				Detail: "http_status=400", HTTPStatus: 400,
+				Rejection: &observability.QueryRejection{Class: "VM_SAMPLE_LIMIT", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", Excerpt: excerpt}},
 			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
 		})
 		at.at = at.at.Add(time.Millisecond)
@@ -876,17 +878,66 @@ func TestARejectedQuerysRowCarriesWhatTheProviderSaid(t *testing.T) {
 	}
 	rows := tracker.Anomalies()
 	Attribute(rows, at.at)
-	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Rejection == nil || *rows[0].Failure.Rejection != rejection {
-		t.Fatalf("rows = %+v, want the failure carrying the rejection", rows)
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Rejection == nil ||
+		*rows[0].Failure.Rejection != (RejectionRef{Class: "VM_SAMPLE_LIMIT", TraceID: "4bf92f3577b34da6a3ce929d0e0e4736"}) {
+		t.Fatalf("rows = %+v, want the failure naming the rejection", rows)
 	}
-	encoded, _ := json.Marshal(rows[0].Failure)
-	if !strings.Contains(string(encoded), `"rejection":{"class":"VM_SAMPLE_LIMIT","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"`) {
-		t.Fatalf("failure encodes as %s", encoded)
+	for _, row := range []any{rows[0]} {
+		encoded, _ := json.Marshal(row)
+		for _, word := range []string{"payments-7f9c", "password", "samples for", "excerpt"} {
+			if strings.Contains(string(encoded), word) {
+				t.Fatalf("the row carries %q: %s", word, encoded)
+			}
+		}
+	}
+	if tracked, ok := tracker.TrackedRow("qg-1"); ok {
+		encoded, _ := json.Marshal(tracked)
+		if strings.Contains(string(encoded), "payments-7f9c") {
+			t.Fatalf("the tracked row carries the excerpt: %s", encoded)
+		}
+	}
+	kept, ok := tracker.LocalRejection("qg-1")
+	if !ok || kept.Excerpt != excerpt || kept.HTTPStatus != 400 || kept.Class != "VM_SAMPLE_LIMIT" {
+		t.Fatalf("kept %+v (%v), want the excerpt on this replica", kept, ok)
 	}
 	if rows[0].Finding.Check != CheckQueryRefused {
 		t.Fatalf("finding %+v, want the query refused", rows[0].Finding)
 	}
 	if code, known := failureFacets["QUERY_REJECTED"]; !known || code.class != ClassRefused {
 		t.Fatalf("QUERY_REJECTED blocked as %+v (known %v), want refused", code, known)
+	}
+}
+
+// The kept refusals are bounded: a group's latest replaces its earlier one,
+// past the bound the oldest group's is given up, and a group this replica
+// no longer owns keeps none.
+func TestKeptRejectionsAreBoundedReplacedAndForgotten(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	reject := func(group, class string) {
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "source_backend", Code: "QUERY_REJECTED",
+				HTTPStatus: 400, Rejection: &observability.QueryRejection{Class: class, Excerpt: "x"}},
+			Trace: observability.TraceFields{QueryGroupKey: group, EvaluationTime: 100},
+		})
+		at.at = at.at.Add(time.Second)
+	}
+	reject("qg-a", "HTTP_400")
+	reject("qg-a", "PROMQL_PARSE")
+	if kept, _ := tracker.LocalRejection("qg-a"); kept.Class != "PROMQL_PARSE" {
+		t.Fatalf("kept %+v, want the latest refusal", kept)
+	}
+	for index := 0; index < MaxKeptRejections; index++ {
+		reject(fmt.Sprintf("qg-%d", index), "HTTP_400")
+	}
+	if _, kept := tracker.LocalRejection("qg-a"); kept {
+		t.Fatal("the oldest group's refusal was kept past the bound")
+	}
+	if len(tracker.rejections) != MaxKeptRejections {
+		t.Fatalf("%d kept, want the bound %d", len(tracker.rejections), MaxKeptRejections)
+	}
+	tracker.Forget(map[string]struct{}{"qg-1": {}})
+	if _, kept := tracker.LocalRejection("qg-2"); kept || len(tracker.rejections) != 1 {
+		t.Fatalf("%d kept after the handover, want only the owned group's", len(tracker.rejections))
 	}
 }

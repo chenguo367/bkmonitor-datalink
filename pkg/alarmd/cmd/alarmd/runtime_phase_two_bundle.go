@@ -1123,7 +1123,7 @@ func openProductionPhaseTwoBundleAssembly(
 		}
 		return bundle.runtimeConfig
 	}
-	cliBinding := cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
+	cliBinding := cliControlBinding{Rejections: fleetTracker.LocalRejection, Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
 		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
 		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry, AuthEvents: cliAuthEvents(recorder), RosterApplied: recorder.SetCLIRosterApplied,
 		Lookback: lookbackEngine, LookbackStanding: lookbackState, ReadHolds: readHolds, Maintenance: maintenanceReadings,

@@ -158,3 +158,25 @@ func TestARefusalWithoutATraceIDKeepsTheOneSent(t *testing.T) {
 		t.Fatalf("rejection %+v, sent %v", rejection, sent)
 	}
 }
+
+// The header is digits, commas and "+N" by construction: an id that is not
+// a canonical decimal - one carrying a line break, a space or letters - is
+// not named, only counted, and the request goes out all the same.
+func TestTheStrategyHeaderNamesOnlyDecimalIDs(t *testing.T) {
+	ids := []string{"101", "1\r\nX-Injected: yes", "2 3", "abc", "007", "202"}
+	if got := strategyHeader(ids); got != "101,202,+4" {
+		t.Fatalf("header %q", got)
+	}
+	if got := strategyHeader([]string{"x\n"}); got != "+1" {
+		t.Fatalf("header %q for no decimal id", got)
+	}
+	client, seen := headerServer(t, http.StatusOK, `{"series":[],"status":null,"trace_id":"t","is_partial":false}`)
+	attempt := apmAttempt(t)
+	attempt.Strategies = ids
+	if _, err := client.Execute(context.Background(), attempt, &collectingSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*seen) != 1 || (*seen)[0].Get(headerStrategy) != "101,202,+4" || (*seen)[0].Get("X-Injected") != "" {
+		t.Fatalf("headers sent %v", *seen)
+	}
+}
