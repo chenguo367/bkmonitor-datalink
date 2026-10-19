@@ -140,3 +140,53 @@ func TestARaisedHoldTakesEffectAtOnce(t *testing.T) {
 		t.Fatalf("a raise frozen at %v %v, want 8 minutes at once", got, err)
 	}
 }
+
+// A group's last lowering is read from its record, so the process that takes
+// it over - a restart, a takeover - knows where it was lowered, and a raise
+// after it is no lowering.
+func TestTheLastLoweringIsReadFromTheRecordByTheNextOwner(t *testing.T) {
+	c, store, now := controllerFixture(t)
+	spec := groupSpec("qg", 0)
+	spec.Step = time.Minute
+	prepare(t, c, spec)
+	observeEarly(t, c, "qg", 10*time.Minute+spec.SettlingWait, 0)
+	schedule := scheduleEvery(t, "qg", 60, 60)
+	ctx := context.Background()
+	if _, err := c.SlotReadHold(ctx, schedule, 120, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, lowered := c.LastLowering("qg"); lowered {
+		t.Fatal("a hold never lowered has a lowering")
+	}
+	*now = now.Add(time.Hour)
+	for index := range EarlierMatchesRequired {
+		if err := c.EarlierRead(ctx, EarlierEvidence{Contract: holdContract("qg", execution.EvaluationTime(120+index), 600_000),
+			CandidateHold: 5 * time.Minute, Observed: true, Equal: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.SlotReadHold(ctx, schedule, 180, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	next, err := NewController(Options{Control: store, Prefix: "schedule", MaxHold: 10 * time.Minute, Now: func() time.Time { return *now },
+		Owner: func(qg execution.QueryGroupIdentity) (Owner, error) {
+			return Owner{Fence: holdFence(qg), ContentScope: "view"}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, lowered := next.LastLowering("qg"); lowered {
+		t.Fatal("a record not loaded has a lowering")
+	}
+	prepare(t, next, spec)
+	if slot, lowered := next.LastLowering("qg"); !lowered || slot != 180 {
+		t.Fatalf("the next owner reads the last lowering at %d %v, want the Slot 180 was frozen lower at", slot, lowered)
+	}
+	observeEarly(t, next, "qg", 10*time.Minute+spec.SettlingWait, 180_000)
+	if _, err := next.SlotReadHold(ctx, schedule, 240, holdFence("qg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, lowered := next.LastLowering("qg"); lowered {
+		t.Fatal("a raise after the lowering still reads as one")
+	}
+}

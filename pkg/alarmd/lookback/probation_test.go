@@ -30,9 +30,21 @@ type probationFixture struct {
 }
 
 func newProbationFixture(t *testing.T, rounds int) *probationFixture {
+	return newResumingFixture(t, rounds, nil)
+}
+
+// newResumingFixture is a probationFixture of a process that has seen no
+// round of qg, whose record says its hold was last lowered at lowering.
+func newResumingFixture(t *testing.T, rounds int, lowering *int64) *probationFixture {
 	t.Helper()
 	f := &probationFixture{fixture: newFixture(t)}
 	f.engine.options.ProbationRounds = rounds
+	f.engine.options.LastLowering = func(execution.QueryGroupIdentity) (execution.EvaluationTime, bool) {
+		if lowering == nil {
+			return 0, false
+		}
+		return execution.EvaluationTime(*lowering), true
+	}
 	f.engine.options.OnWholeWindowReadEarly = func(evidence ReadHoldEvidence) {
 		f.raisesMu.Lock()
 		f.raises = append(f.raises, evidence)
@@ -53,6 +65,7 @@ func (f *probationFixture) round(hold time.Duration, first string) (int64, time.
 	f.clock.set(time.Unix(f.slot, 0))
 	q := query("qg", f.slot, minute, sourceTimeSeries)
 	q.Contract.ReadHoldMillis = hold.Milliseconds()
+	q.FollowingSlot = execution.EvaluationTime(f.slot + 120)
 	read := f.engine.Begin(q)
 	read.Series(point(f.slot, first), 100)
 	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
@@ -202,5 +215,45 @@ func TestAFailedProbationRereadDoesNotCount(t *testing.T) {
 	})
 	if clean, in := f.engine.InProbation("qg"); !in || clean != 0 {
 		t.Fatalf("a failed reread counted: in probation %v with %d clean", in, clean)
+	}
+}
+
+// A process that takes over a group lowered a few rounds ago - a restart, a
+// takeover - resumes its probation, its count from none: the rounds since
+// were not all read again, and only a round read again counts. Here the
+// lowering was two of three rounds back, and the probation ends only after
+// three clean rounds on the new owner. A lowering as old as a probation, or
+// none, resumes nothing.
+func TestAProbationContinuesOnTheNextOwner(t *testing.T) {
+	start := time.Unix(1_700_000_100, 0).Unix()
+	lowering := start + 120 - 2*120
+	f := newResumingFixture(t, 3, &lowering)
+	for round := 1; round <= 3; round++ {
+		if clean, in := f.engine.InProbation("qg"); round > 1 && (!in || clean != round-1) {
+			t.Fatalf("before round %d on the new owner: in probation %v with %d clean", round, in, clean)
+		}
+		f.cleanRound(time.Minute)
+	}
+	if _, in := f.engine.InProbation("qg"); in {
+		t.Fatal("the probation did not end after its rounds read clean on the new owner")
+	}
+	if got := f.rereads()[ProbationClean]; got != 3 {
+		t.Fatalf("rereads %v, want every round of the probation read again on the new owner", f.rereads())
+	}
+	f.round(time.Minute, "3")
+	if f.pending() != 0 {
+		t.Fatal("a round after the resumed probation ended was read again")
+	}
+
+	old := start + 120 - 3*120
+	f = newResumingFixture(t, 3, &old)
+	f.round(time.Minute, "3")
+	if _, in := f.engine.InProbation("qg"); in || f.pending() != 0 {
+		t.Fatal("a lowering as old as a probation resumed one")
+	}
+	f = newResumingFixture(t, 3, nil)
+	f.round(time.Minute, "3")
+	if _, in := f.engine.InProbation("qg"); in {
+		t.Fatal("a group never lowered resumed a probation")
 	}
 }

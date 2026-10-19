@@ -40,6 +40,13 @@ func TestTheEarlierTrialLineOfAMovedHoldHasItsHolds(t *testing.T) {
 	}
 	var options lookback.Options
 	holds.bindLookback(&options)
+	// The probation after a lowering is resumed from the controller's record.
+	if options.LastLowering == nil {
+		t.Fatal("the lookback is not told where a group taken over was lowered")
+	}
+	if _, lowered := options.LastLowering("qg"); lowered {
+		t.Fatal("a group whose record is not loaded reads as lowered")
+	}
 	contract := execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: 180}, ReadHoldMillis: 300_000}
 	options.OnEarlierTrialEnd(lookback.EarlierTrialEnd{Contract: contract, Outcome: lookback.EarlierOvertaken, OvertakenBy: lookback.OvertakenHoldMoved,
 		CandidateHold: 150 * time.Second, AheadSlots: 4, ReservedHold: 5 * time.Minute, FrozenHold: 9 * time.Minute})

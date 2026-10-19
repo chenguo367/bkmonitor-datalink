@@ -236,6 +236,11 @@ type Options struct {
 	// ProbationRounds overrides ProbationRounds when positive; only a test
 	// sets it.
 	ProbationRounds int
+	// LastLowering is the Slot a Query Group's hold was last lowered at,
+	// while its last change was a lowering (readhold.Controller.LastLowering).
+	// A group this process has not seen a round of resumes the probation of
+	// a lowering that recent; nil resumes none.
+	LastLowering func(execution.QueryGroupIdentity) (execution.EvaluationTime, bool)
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -365,7 +370,9 @@ type group struct {
 	reading              groupCounts
 	// lastHold is the hold its latest round was frozen with, once holdSeen;
 	// probation is set while its rounds are read again after the hold was
-	// lowered, and probations is those rereads in flight (probation.go).
+	// lowered, and probations is those rereads in flight (probation.go): one
+	// a round, each until its rung is read or passed, so no more than the
+	// rounds a rung window and the rung after it span.
 	lastHold   int64
 	holdSeen   bool
 	probation  *probationState
@@ -498,6 +505,7 @@ func (engine *Engine) Begin(query Query) *Read {
 	step := time.Duration(facts.StepMillis) * time.Millisecond
 	slot := query.Contract.Slot
 	now := engine.options.Now()
+	lowering := engine.lastLowering(query)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	engine.counts.firstReads[source]++
@@ -523,7 +531,7 @@ func (engine *Engine) Begin(query Query) *Read {
 	if state.seriesLate != nil && engine.options.Supplement != nil {
 		read.directed = engine.captureDirectedLocked(state, query, source, step, now)
 	}
-	engine.noteRoundHoldLocked(state, query.Contract.ReadHoldMillis)
+	engine.noteRoundHoldLocked(state, query, lowering)
 	read.probation = state.probation != nil
 	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
 		if read.probation {

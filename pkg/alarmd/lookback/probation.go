@@ -74,14 +74,55 @@ func (engine *Engine) probationRounds() int {
 	return ProbationRounds
 }
 
-// noteRoundHoldLocked takes the hold a Query Group's round was frozen with. A hold
-// lower than the round before's starts its probation again, a lowering a
-// step at a time among them; a higher one ends it: the hold went back past
-// the data, which is what probation watches for. The first round a process
-// sees knows nothing before it and starts none.
-func (engine *Engine) noteRoundHoldLocked(state *group, hold int64) {
+// lastLowering asks, outside the engine's lock, where the hold of a Query
+// Group this process has seen no round of was last lowered: its first round
+// here resumes that lowering's probation (noteRoundHoldLocked).
+func (engine *Engine) lastLowering(query Query) *execution.EvaluationTime {
+	if engine.options.LastLowering == nil || query.Secondary {
+		return nil
+	}
+	qg := query.Contract.Slot.QueryGroup
+	engine.mu.Lock()
+	state := engine.groups[qg]
+	seen := state != nil && state.holdSeen
+	engine.mu.Unlock()
+	if seen {
+		return nil
+	}
+	if slot, lowered := engine.options.LastLowering(qg); lowered {
+		return &slot
+	}
+	return nil
+}
+
+// noteRoundHoldLocked takes the hold a Query Group's round was frozen with. A
+// hold lower than the round before's starts its probation again, a lowering
+// a step at a time among them; a higher one ends it: the hold went back past
+// the data, which is what probation watches for.
+//
+// The first round a process sees of a group - after a restart, or taken over
+// from another process - has no round before it here, and resumes the
+// probation of the lowering its record names, lowering, while that is fewer
+// than ProbationRounds rounds back: a deployment or a takeover moves groups
+// exactly while their reads are least settled. Its count starts again from
+// none: the rounds since were not all read again - the rollout's own gap,
+// rounds the old owner skipped for permits, rereads it had in flight - and a
+// round not read again is no evidence. With its schedule's next Slot
+// unknown, the lowering is taken as recent.
+func (engine *Engine) noteRoundHoldLocked(state *group, query Query, lowering *execution.EvaluationTime) {
+	hold, slot := query.Contract.ReadHoldMillis, query.Contract.Slot.EvaluationTime
 	switch {
 	case !state.holdSeen:
+		if lowering == nil || *lowering > slot {
+			break
+		}
+		since := 0
+		if period := int64(query.FollowingSlot - slot); period > 0 {
+			since = int(int64(slot-*lowering) / period)
+		}
+		if since < engine.probationRounds() {
+			state.probation = &probationState{}
+		}
 	case hold < state.lastHold:
 		state.probation = &probationState{}
 	case hold > state.lastHold:
