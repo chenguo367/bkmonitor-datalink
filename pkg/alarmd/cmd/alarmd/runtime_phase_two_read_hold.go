@@ -58,7 +58,11 @@ type productionReadHolds struct {
 	limitCuts   map[execution.QueryGroupIdentity]time.Duration
 	nextRenew   time.Time
 	transitions atomic.Uint64
-	overtaken   atomic.Uint64
+	// queryDuration is the lookback's reading of each group's query
+	// duration, for the controller to keep in its record; nil until the
+	// lookback is built, and in a process without one.
+	queryDuration atomic.Pointer[func(execution.QueryGroupIdentity) (time.Duration, bool)]
+	overtaken     atomic.Uint64
 	// links counts the predecessor links a prepare skipped, by why
 	// (self_link, invalid_link, expired); retireCloseFailed the retired
 	// groups whose closing failed and that retired all the same.
@@ -755,6 +759,13 @@ func (holds *productionReadHolds) countDegraded(segment execution.ScheduleSegmen
 }
 
 func (holds *productionReadHolds) slotReadHold(ctx context.Context, schedule execution.FrozenQueryGroupSchedule, at execution.EvaluationTime, fence execution.OwnerFence) (time.Duration, error) {
+	// Read before the controller is: the lookback asks the controller under
+	// its own lock, so it is never asked under the controller's.
+	if measure := holds.queryDuration.Load(); measure != nil {
+		if measured, ok := (*measure)(schedule.Segment.QueryGroup); ok {
+			holds.controller.MeasureQueryDuration(schedule.Segment.QueryGroup, measured)
+		}
+	}
 	hold, err := holds.controller.SlotReadHold(ctx, schedule, at, fence)
 	holds.mu.Lock()
 	currentGroup := holds.groups[schedule.Segment.QueryGroup]

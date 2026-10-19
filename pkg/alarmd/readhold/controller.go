@@ -106,6 +106,9 @@ type Stats struct {
 	// Seeds is the groups that started from a seeded arrival age, by where
 	// it came from (SeedOrigins).
 	Seeds map[string]uint64
+	// QueryDurationWrites is the records written for the query duration they
+	// keep, by why (QueryDurationWriteReasons).
+	QueryDurationWrites map[string]uint64
 }
 
 // Control uses the existing ownership store. A value and its Plan
@@ -248,6 +251,9 @@ type entry struct {
 	// validated is the Segment whose schedule SlotReadHold last checked: a
 	// frozen schedule is checked once per Segment, not once per Slot.
 	validated execution.ScheduleSegmentFact
+	// measuredQueryDuration is the group's query duration as this process
+	// last measured it (MeasureQueryDuration), for its record to keep.
+	measuredQueryDuration time.Duration
 }
 
 type Controller struct {
@@ -260,6 +266,9 @@ type Controller struct {
 	clamped      map[string]uint64
 	seeds        map[string]uint64
 	ownCorrupt   uint64
+	// durationWrites is the records written for a query duration, by why
+	// (QueryDurationWriteReasons).
+	durationWrites map[string]uint64
 }
 
 func NewController(options Options) (*Controller, error) {
@@ -271,7 +280,8 @@ func NewController(options Options) (*Controller, error) {
 		options.Now = time.Now
 	}
 	return &Controller{options: options, groups: make(map[execution.QueryGroupIdentity]*entry),
-		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64)}, nil
+		predecessors: make(map[string]uint64), clamped: make(map[string]uint64), seeds: make(map[string]uint64),
+		durationWrites: make(map[string]uint64)}, nil
 }
 
 // Stats copies the counts.
@@ -291,6 +301,10 @@ func (controller *Controller) Stats() Stats {
 		for origin, count := range controller.seeds {
 			stats.Seeds[origin] = count
 		}
+	}
+	stats.QueryDurationWrites = make(map[string]uint64, len(QueryDurationWriteReasons))
+	for _, reason := range QueryDurationWriteReasons {
+		stats.QueryDurationWrites[reason] = controller.durationWrites[reason]
 	}
 	return stats
 }
@@ -832,17 +846,22 @@ func (controller *Controller) SlotReadHold(ctx context.Context, schedule executi
 		controller.counted(controller.clamped, frozen.clamp)
 	}
 	next, hold := frozen.next, frozen.hold
+	durationWrite := controller.noteQueryDurationLocked(state, &next)
 	if !reflect.DeepEqual(next, state.record) {
 		// A first zero hold has no durable value to protect. Remember the
 		// segment locally without creating a record for the full population
 		// -- nor for a group that closed a Segment at zero: a missing record
-		// is what tells its successor its hold was zero.
+		// is what tells its successor its hold was zero. A query duration
+		// alone does not make one either (query_duration.go).
 		if len(state.raw) == 0 && !carries(next) {
 			state.record, state.seeded = next, true
 			return 0, nil
 		}
 		if err := controller.persist(ctx, qg, state, next, &owner); err != nil {
 			return 0, err
+		}
+		if durationWrite != "" {
+			controller.counted(controller.durationWrites, durationWrite)
 		}
 	}
 	state.seeded = true

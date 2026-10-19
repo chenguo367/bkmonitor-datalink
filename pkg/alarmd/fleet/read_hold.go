@@ -49,6 +49,12 @@ type ReadHoldFacts struct {
 	// a Slot is ready, which the suggestion was reckoned net of: why the
 	// time_delay suggested can be less than the arrival age.
 	SettlingWaitSeconds int64 `json:"settling_wait_seconds,omitempty"`
+	// QueryDurationMillis is how long the group's query takes as its record
+	// keeps it for a successor - the owner's measured whole first read,
+	// rounded up to the second - and QueryDurationAtMillis when it was
+	// written, Unix milliseconds; zero while the record keeps none.
+	QueryDurationMillis   int64 `json:"query_duration_ms,omitempty"`
+	QueryDurationAtMillis int64 `json:"query_duration_at_ms,omitempty"`
 }
 
 func withinReadHoldBudget(facts map[string]ReadHoldFacts, budget int) map[string]ReadHoldFacts {

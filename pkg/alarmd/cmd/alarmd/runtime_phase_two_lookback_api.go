@@ -143,6 +143,10 @@ func productionLookbackStats(engine *lookback.Engine, holds *productionReadHolds
 		for _, origin := range readhold.SeedOrigins {
 			stats.ReadHoldSeeds[origin] = controller.Seeds[origin]
 		}
+		stats.ReadHoldQueryDurationWrites = make(map[string]uint64, len(readhold.QueryDurationWriteReasons))
+		for _, reason := range readhold.QueryDurationWriteReasons {
+			stats.ReadHoldQueryDurationWrites[reason] = controller.QueryDurationWrites[reason]
+		}
 		stats.ReadHoldClamped = map[string]uint64{readhold.ClampKnown: controller.Clamped[readhold.ClampKnown],
 			readhold.ClampFallback: controller.Clamped[readhold.ClampFallback]}
 		stats.ReadHoldOwnCorrupt, stats.ReadHoldRetireCloseFailed = controller.OwnCorrupt, holds.retireCloseFailed.Load()
@@ -262,6 +266,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 		if record.HoldMillis > 0 {
 			entry.HeldSince = int64(record.SinceSlot)
 		}
+		entry.QueryDurationMillis, entry.QueryDurationAtMillis = record.QueryDurationMillis, record.QueryDurationAtMillis
 		if basis := bases[qg]; basis.known {
 			entry.DelaySeconds = int64(basis.delay / time.Second)
 			entry.SettlingWaitSeconds = int64(basis.settlingWait / time.Second)

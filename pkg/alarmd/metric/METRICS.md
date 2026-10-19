@@ -1455,6 +1455,12 @@ Labels: `reason`
 
 Moved Plans a successor Query Group seeded, by what it took the Plan's previous hold from: inherited (the old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold bound, which costs the successor's first Slots a later read and never a Slot -- record_open, record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.
 
+## alarmd_read_hold_query_duration_writes_total
+
+Labels: `reason`
+
+Read-hold records written for the query duration they keep, by why: changed (the owner's measured duration moved by a second, a minute or more after the last write) or refreshed (the same reading rewritten at half its 24-hour life). A process that takes a group over judges its first rounds by that reading. Read it as the write rate the reading costs.
+
 ## alarmd_read_hold_record_corrupt_total
 
 Query Groups whose own read hold record did not decode: read as missing, the hold relearned, and the record replaced at the group's next write.

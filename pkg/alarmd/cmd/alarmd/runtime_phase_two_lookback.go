@@ -203,6 +203,10 @@ func buildLookback(
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
+	if len(holds) > 0 && holds[0] != nil {
+		measure := engine.QueryDuration
+		holds[0].queryDuration.Store(&measure)
+	}
 	return engine, lookbackStanding{Running: true}, nil
 }
 
