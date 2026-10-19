@@ -569,6 +569,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["alarmd_replay_expired_total"] = "variableLabels: {reason}"
 	expected["alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
+	expected["alarmd_slot_diversions_total"] = "variableLabels: {reason}"
 	expected["alarmd_range_gate_total"] = "variableLabels: {outcome}"
 	expected["alarmd_state_preflight_total"] = "variableLabels: {result,reason}"
 	expected["alarmd_state_admission_total"] = "variableLabels: {result,reason}"
@@ -1203,6 +1204,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
 	bounds[fqName("replay_takeover_slots_total")] = len(observability.ReplayTakeoverOutcomes)
+	bounds[fqName("slot_diversions_total")] = len(observability.SlotDiversionReasons)
 	// One per word the range gate can put on a round, applied included, and
 	// no more: the label is written from the facts after normalization, which
 	// folds any other word to unexplained.

@@ -112,6 +112,7 @@ const (
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
 	StageReplayExpired          = "replay_expired"
 	StageReplayTakeover         = "replay_takeover"
+	StageSlotDiverted           = "slot_diverted"
 	StageRangeDistanceExpired   = "range_distance_expired"
 	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
@@ -1231,6 +1232,28 @@ const (
 
 // ReplayTakeoverOutcomes is every outcome, for the metric to pre-create.
 var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeExceeded, ReplayTakeoverDiverted}
+
+// SlotDiversionFacts is one live Slot of a Query Group this process holds
+// that was sent to replay before its normal read started, because the read
+// would have started with less time before its query deadline than the
+// group's query takes: RemainingSeconds below BoundSeconds, the bound the
+// group's own reading or the configured fallback (BoundSource, one of the
+// TakeoverFloor words). Reported once per Slot. A Slot due before a takeover
+// is reported under ReplayTakeoverFacts instead, as diverted there.
+type SlotDiversionFacts struct {
+	Reason           string  `json:"reason"`
+	RemainingSeconds float64 `json:"remaining_seconds"`
+	BoundSeconds     float64 `json:"bound_seconds"`
+	BoundSource      string  `json:"bound_source"`
+}
+
+// SlotDiversionReadinessLate is a Slot whose readiness - its settling wait
+// and read hold - landed so near its query deadline that the read could not
+// finish before it.
+const SlotDiversionReadinessLate = "readiness_late"
+
+// SlotDiversionReasons is every reason, for the metric to pre-create.
+var SlotDiversionReasons = []string{SlotDiversionReadinessLate}
 
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for
@@ -2412,6 +2435,7 @@ type Observation struct {
 	ScheduleCutover      *ScheduleCutoverFacts
 	ReplayExpiry         *ReplayExpiryFacts
 	ReplayTakeover       *ReplayTakeoverFacts
+	SlotDiversion        *SlotDiversionFacts
 	// HeldBy is what the round before this one did with the Query Group. It
 	// sits on the Observation rather than inside one cohort's fact bundle:
 	// it first shipped inside ShortPeriodCompletionFacts, and every Query
@@ -3460,6 +3484,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
 	{ComponentScheduler, StageReplayTakeover},
+	{ComponentScheduler, StageSlotDiverted},
 	{ComponentScheduler, StageRangeDistanceExpired},
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -229,6 +230,11 @@ type ProductionSlotSource struct {
 	// takes (WithQueryLatency); nil, or no reading, falls back to
 	// RecoveryLimits.TakeoverDivertFloor.
 	queryLatency QueryLatency
+	// readinessDiverted is the evaluation time of the last Slot sent to
+	// replay for starting too late (divertShortOfTime), so that a Slot
+	// classified again is reported once. Slots are classified in evaluation
+	// order, so the latest is all it keeps.
+	readinessDiverted atomic.Int64
 }
 
 // QueryLatency answers how long a Query Group's query has taken here, and
@@ -1057,8 +1063,8 @@ func (source *ProductionSlotSource) classifyRecovery(
 	// as it always did.
 	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver) && !queryCooldownHeld(ctx)
 	if at.UnixMilli() < deadline {
-		if beforeTakeover {
-			if diverted, facts := source.divertTakenOver(ctx, evaluationTime, deadline, at, takenOver); diverted {
+		if !queryCooldownHeld(ctx) {
+			if diverted, facts := source.divertShortOfTime(ctx, evaluationTime, deadline, at, takenOver, beforeTakeover); diverted {
 				return execution.OperationReplay, facts, nil
 			}
 		}
@@ -1149,68 +1155,93 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 	})
 }
 
-// divertTakenOver decides whether a round due before this process took its
-// Query Group over, and not yet at its query deadline, goes to replay now.
+// divertShortOfTime decides whether a round not yet at its query deadline
+// goes to replay now, because a normal read started now could not finish
+// before that deadline (execution.StartsTooLate).
 //
-// A takeover can land late in a round: a rebalance after a leader change
-// handed a worker hundreds of Query Groups a second or two before their
-// current round's frozen deadline. Each was started as a normal round, queued
-// for a permit with all the others, and at the deadline the waiting ones gave
-// up and the running ones timed out - the timed-out rounds completed with no
-// data and were never run again. Replay is the path that already runs a
-// taken-over round late but whole, under a deadline of its own counted from
-// when it starts (access deriveRecoveryQueryDeadline) and on the recovery
-// permits, so a round that cannot finish where it is goes there before it
-// starts rather than after it fails.
+// It meets two kinds of round. A takeover can land late in a round: a
+// rebalance after a leader change handed a worker hundreds of Query Groups a
+// second or two before their current round's frozen deadline. Each was started
+// as a normal round, queued for a permit with all the others, and at the
+// deadline the waiting ones gave up and the running ones timed out - the
+// timed-out rounds completed with no data and were never run again. And a
+// round of a group held here all along can reach its read at the edge of its
+// deadline: the runner waits for the Slot's readiness - its settling wait and
+// its read hold - and asks the source again when it comes (Runner, the
+// readiness deferral), so the time it is classified at is when its read
+// would start; a hold that lands a fraction of a second before the deadline
+// left the read that fraction and the round was lost with it. Replay is the
+// path that already runs such a round late but whole, under a deadline of its
+// own counted from when it starts (access deriveRecoveryQueryDeadline) and on
+// the recovery permits, so a round that cannot finish where it is goes there
+// before it starts rather than after it fails.
 //
 // What "cannot finish" means is the group's own query duration where this
 // process has read it, and TakeoverDivertFloor otherwise - which is every
-// group just taken over, the case this is for. A round with more budget left
-// than that runs as a normal round, as any round does.
-func (source *ProductionSlotSource) divertTakenOver(
+// group just taken over. A round with more budget left than that runs as a
+// normal round, as any round does. A round due before the takeover is
+// reported as a takeover diverted (ReplayTakeoverFacts), any other as
+// readiness_late (SlotDiversionFacts): each once.
+func (source *ProductionSlotSource) divertShortOfTime(
 	ctx context.Context,
 	evaluationTime execution.EvaluationTime,
 	deadline int64,
 	at time.Time,
 	takenOver time.Time,
+	beforeTakeover bool,
 ) (bool, SlotRecoveryFacts) {
 	// The fallback is a guess for a query not timed here. A group whose every
 	// round is given less than it - a short period, whose whole budget from
 	// evaluation time to deadline is below the floor - has queries that do
 	// finish in less, so the guess says nothing about it, and applied it would
-	// divert every taken-over round of the group at any point of its period.
-	// Such a group is judged only by its own reading. The reading is evidence
-	// and applies to any group.
-	floor, floorSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
-	if floor >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
-		floor = 0
+	// divert every round of the group that is not started at once. Such a
+	// group is judged only by its own reading. The reading is evidence and
+	// applies to any group.
+	bound, boundSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
+	if bound >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
+		bound = 0
 	}
 	if source.queryLatency != nil {
 		if observed, ok := source.queryLatency(source.queryGroup); ok {
-			floor, floorSource = observed, observability.TakeoverFloorObserved
+			bound, boundSource = observed, observability.TakeoverFloorObserved
 		}
 	}
-	remaining := time.UnixMilli(deadline).Sub(at)
-	if floor <= 0 || remaining >= floor {
+	if !execution.StartsTooLate(at.UnixMilli(), deadline, bound) {
 		return false, SlotRecoveryFacts{}
 	}
-	if source.observer != nil && source.takeovers.FirstClassification(source.queryGroup, evaluationTime, observability.ReplayTakeoverDiverted) {
-		func() {
-			defer func() { _ = recover() }()
-			source.observer.Observe(ctx, observability.Observation{
+	remaining := time.UnixMilli(deadline).Sub(at)
+	if beforeTakeover {
+		if source.observer != nil && source.takeovers.FirstClassification(source.queryGroup, evaluationTime, observability.ReplayTakeoverDiverted) {
+			source.observe(ctx, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageReplayTakeover,
 				Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
 				Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 				ReplayTakeover: &observability.ReplayTakeoverFacts{
 					Outcome: observability.ReplayTakeoverDiverted, TakeoverOffsetSeconds: at.Sub(takenOver).Seconds(),
-					RemainingSeconds: remaining.Seconds(), FloorSeconds: floor.Seconds(), FloorSource: floorSource,
+					RemainingSeconds: remaining.Seconds(), FloorSeconds: bound.Seconds(), FloorSource: boundSource,
 				},
 			})
-		}()
+		}
+	} else if previous := source.readinessDiverted.Swap(int64(evaluationTime)); previous != int64(evaluationTime) && source.observer != nil {
+		source.observe(ctx, observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageSlotDiverted,
+			Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
+			Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+			SlotDiversion: &observability.SlotDiversionFacts{
+				Reason: observability.SlotDiversionReadinessLate, RemainingSeconds: remaining.Seconds(),
+				BoundSeconds: bound.Seconds(), BoundSource: boundSource,
+			},
+		})
 	}
 	// Eligible at distance one and age zero: it is not behind, only short of
 	// time. RecheckAt is its deadline, where the ordinary rules take it over.
 	return true, SlotRecoveryFacts{Disposition: ReplayEligible, Distance: 1, RecheckAtUnixMilli: deadline}
+}
+
+// observe reports one observation, a panicking observer contained.
+func (source *ProductionSlotSource) observe(ctx context.Context, observation observability.Observation) {
+	defer func() { _ = recover() }()
+	source.observer.Observe(ctx, observation)
 }
 
 // observeReplayTakeover reports one Slot due before this process took its

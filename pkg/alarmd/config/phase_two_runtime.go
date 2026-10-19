@@ -132,11 +132,13 @@ type PhaseTwoSchedulerConfig struct {
 	MaxReplayAge           Duration `yaml:"-"`
 	RetryMinDelay          Duration `yaml:"-"`
 	RetryMaxDelay          Duration `yaml:"-"`
-	// TakeoverDivertFloor is the query budget a round taken over before its
-	// deadline must have left to start as a normal round when the group has
-	// no reading of its own query's duration - which is every group a
-	// process has just taken over. Below it the round goes to replay at once
-	// (scheduler.RecoveryLimits.TakeoverDivertFloor). The default is
+	// TakeoverDivertFloor is the query budget a round must have left to start
+	// as a normal round when the group has no reading of its own query's
+	// duration - which is every group a process has just taken over, and any
+	// group whose reads this process has not timed yet. Below it the round
+	// goes to replay at once (scheduler.RecoveryLimits.TakeoverDivertFloor):
+	// one taken over late in its period, or one whose readiness landed at the
+	// edge of its deadline (execution.StartsTooLate). The default is
 	// lookback.RecheckTimeout: the least time the lookback gives a read of a
 	// group's query when it has no reading of that query either, so both
 	// paths assume the same of a query they have not timed. Positive, and

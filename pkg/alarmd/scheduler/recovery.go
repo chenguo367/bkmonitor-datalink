@@ -37,12 +37,13 @@ type RecoveryLimits struct {
 	MaxReplayAge          time.Duration
 	RetryMinDelay         time.Duration
 	RetryMaxDelay         time.Duration
-	// TakeoverDivertFloor is the least query budget a round due before this
-	// process took its Query Group over must have left to run as a normal
-	// round, when the group has no reading of its own query's duration
-	// (WithQueryLatency). Below it the round goes to replay at once, under
-	// replay's own deadline, instead of starting a normal attempt that cannot
-	// finish. Zero turns the diversion off.
+	// TakeoverDivertFloor is the least query budget a round must have left to
+	// run as a normal round, when the group has no reading of its own query's
+	// duration (WithQueryLatency): a round due before this process took its
+	// Query Group over, or one whose readiness landed at the edge of its
+	// deadline (divertShortOfTime). Below it the round goes to replay at once,
+	// under replay's own deadline, instead of starting a normal attempt that
+	// cannot finish. Zero turns the diversion off where there is no reading.
 	TakeoverDivertFloor time.Duration
 }
 
