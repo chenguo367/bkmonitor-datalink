@@ -41,6 +41,7 @@ package scopeclose
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
@@ -103,12 +104,17 @@ const (
 	// strategy plus its Slot's read wait, at least ObservationTTL - and were
 	// forgotten. A strategy counted here is one this close could not reach.
 	OutcomeObservationExpired = "observation_expired"
+	// OutcomeBusinessUnknown counts closes of a global business strategy's
+	// alerts whose record could not be read or names no business. Such a
+	// strategy files each alert under the business it is about, and a close
+	// must carry it; the fingerprint is kept and tried at the next step.
+	OutcomeBusinessUnknown = "business_unknown"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
-	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired}
+	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired, OutcomeBusinessUnknown}
 
 // The bounds of what the facts carry.
 const (
@@ -123,6 +129,10 @@ const (
 // Screen cleared.
 type Drop struct {
 	TenantID, BusinessID, StrategyID string
+	// GlobalBusiness is a strategy that files each alert under the business
+	// the alert is about. BusinessID is then the strategy's own, and the
+	// close carries the alert's, read from its record.
+	GlobalBusiness bool
 	// Fingerprint is the evaluator's dedupe identity of the record; empty
 	// when there is none to compute.
 	Fingerprint      string
@@ -149,6 +159,10 @@ type OpenSet interface {
 	ActiveAlerts(key openalerts.StrategyKey) []openalerts.Alert
 	OwnEventSourceID() string
 }
+
+// AlertBusiness answers which business one alert was filed under, from the
+// alert's own record (openalerts.AlertBusinesses.Of).
+type AlertBusiness func(ctx context.Context, tenantID, source, strategyID, alertID string) (int64, error)
 
 // Writer sends closes; the same producer path every other close uses.
 type Writer interface {
@@ -179,6 +193,7 @@ type entryKey struct {
 
 type entry struct {
 	businessID string
+	global     bool
 	revision   int64
 	firstRound int64
 	confirmed  bool
@@ -219,7 +234,10 @@ type Closer struct {
 	mu      sync.Mutex
 	set     OpenSet
 	writer  Writer
-	entries map[entryKey]*entry
+	// business is where a global business strategy's close finds its
+	// alert's business; nil, and such a close is not sent.
+	business AlertBusiness
+	entries  map[entryKey]*entry
 	// decided remembers what was closed or would have been, so the Slots
 	// that keep turning the same series away before the link's set catches
 	// up do not decide it again.
@@ -257,6 +275,14 @@ func New(options Options) *Closer {
 func (closer *Closer) Bind(set OpenSet, writer Writer) {
 	closer.mu.Lock()
 	closer.set, closer.writer = set, writer
+	closer.mu.Unlock()
+}
+
+// BindAlertBusiness attaches where a global business strategy's close reads
+// its alert's business.
+func (closer *Closer) BindAlertBusiness(business AlertBusiness) {
+	closer.mu.Lock()
+	closer.business = business
 	closer.mu.Unlock()
 }
 
@@ -356,13 +382,13 @@ func (closer *Closer) Observe(drop Drop) {
 			closer.countLocked(key, OutcomeMemoryFull, 1)
 			return
 		}
-		closer.entries[ek] = &entry{businessID: drop.BusinessID, revision: drop.StrategyRevision, firstRound: drop.Round, lastSeen: now,
-			ttl: closer.lifetime(drop)}
+		closer.entries[ek] = &entry{businessID: drop.BusinessID, global: drop.GlobalBusiness, revision: drop.StrategyRevision,
+			firstRound: drop.Round, lastSeen: now, ttl: closer.lifetime(drop)}
 		closer.countLocked(key, OutcomeUnconfirmed, 1)
 		return
 	}
 	existing.lastSeen = now
-	existing.businessID, existing.revision = drop.BusinessID, drop.StrategyRevision
+	existing.businessID, existing.global, existing.revision = drop.BusinessID, drop.GlobalBusiness, drop.StrategyRevision
 	existing.ttl = closer.lifetime(drop)
 	if drop.Round != existing.firstRound {
 		existing.confirmed = true
@@ -390,7 +416,7 @@ func (closer *Closer) Step(ctx context.Context) {
 			confirmed = append(confirmed, ek)
 		}
 	}
-	set, writer, after := closer.set, closer.writer, closer.after
+	set, writer, after, business := closer.set, closer.writer, closer.after, closer.business
 	closer.mu.Unlock()
 	if len(confirmed) == 0 {
 		return
@@ -441,7 +467,7 @@ func (closer *Closer) Step(ctx context.Context) {
 			closer.forget(ek, OutcomeProducerForeign)
 			continue
 		}
-		request, built := closer.request(ek, alert, now)
+		request, global, built := closer.request(ek, alert, now)
 		switch built {
 		case requestGone:
 			// Forgotten meanwhile, and counted where it was.
@@ -449,6 +475,20 @@ func (closer *Closer) Step(ctx context.Context) {
 		case requestIdentityInvalid:
 			closer.forget(ek, OutcomeIdentityInvalid)
 			continue
+		}
+		if global {
+			// The strategy files each alert under the business it is
+			// about: the close carries the alert's, or is not sent and is
+			// tried again at the next step.
+			if ctx.Err() != nil {
+				break
+			}
+			read, err := closer.alertBusiness(ctx, business, ek, alert)
+			if err != nil {
+				closer.count(ek.key, OutcomeBusinessUnknown, 1)
+				continue
+			}
+			request.BusinessID = read
 		}
 		batch = append(batch, request)
 		decided = append(decided, ek)
@@ -489,24 +529,40 @@ const (
 	requestIdentityInvalid
 )
 
-func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time) (linkdoutput.CloseRequest, requestBuilt) {
+// request builds the close of ek's alert under the strategy's business, and
+// says whether the strategy is a global business one, whose close carries
+// its alert's business instead.
+func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time) (linkdoutput.CloseRequest, bool, requestBuilt) {
 	closer.mu.Lock()
 	e := closer.entries[ek]
+	var global bool
+	if e != nil {
+		global = e.global
+	}
 	closer.mu.Unlock()
 	if e == nil {
-		return linkdoutput.CloseRequest{}, requestGone
+		return linkdoutput.CloseRequest{}, false, requestGone
 	}
 	strategyID, err := strconv.ParseInt(ek.key.StrategyID, 10, 64)
 	if err != nil || strategyID <= 0 {
-		return linkdoutput.CloseRequest{}, requestIdentityInvalid
+		return linkdoutput.CloseRequest{}, false, requestIdentityInvalid
 	}
 	businessID, err := strconv.ParseInt(e.businessID, 10, 64)
 	if err != nil || businessID == 0 || e.revision <= 0 {
-		return linkdoutput.CloseRequest{}, requestIdentityInvalid
+		return linkdoutput.CloseRequest{}, false, requestIdentityInvalid
 	}
 	return linkdoutput.CloseRequest{TenantID: ek.key.TenantID, Fingerprint: ek.fingerprint, AlertInstanceID: alert.AlertID,
 		StrategyID: strategyID, StrategyRevision: e.revision, BusinessID: businessID, OccurredAt: now,
-		Reason: linkdoutput.CloseReasonTargetOutOfScope}, requestReady
+		Reason: linkdoutput.CloseReasonTargetOutOfScope}, global, requestReady
+}
+
+// alertBusiness is the business ek's alert was filed under, read through
+// business; without one there is nothing to read it from.
+func (closer *Closer) alertBusiness(ctx context.Context, business AlertBusiness, ek entryKey, alert openalerts.Alert) (int64, error) {
+	if business == nil {
+		return 0, errors.New("alarmd scopeclose: no alert record reader bound")
+	}
+	return business(ctx, ek.key.TenantID, alert.EventSourceID, ek.key.StrategyID, alert.AlertID)
 }
 
 func (closer *Closer) forget(ek entryKey, outcome string) {

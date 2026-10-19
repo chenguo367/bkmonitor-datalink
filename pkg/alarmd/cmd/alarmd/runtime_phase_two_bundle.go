@@ -1228,7 +1228,12 @@ func openProductionPhaseTwoBundleAssembly(
 	bundle.workerPorts = workerPorts
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
+	// One memory of which business each alert was filed under, for every
+	// close that carries a global business Plan's alert.
+	var alertBusinesses *openalerts.AlertBusinesses
 	if linkd.Console != nil {
+		alertBusinesses = openalerts.NewAlertBusinesses(linkd.Console.AlertRecord)
+		maintenance.businesses = alertBusinesses
 		maintenance.sourceOf = func(ctx context.Context) (string, error) {
 			// Answered from the client's copy within bindingReuse; past it,
 			// each request the read makes is bounded by the Console's own
@@ -1241,7 +1246,7 @@ func openProductionPhaseTwoBundleAssembly(
 	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
 	maintenanceReadings.bind(maintenance)
-	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, events, recorder)
+	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, events, alertBusinesses, recorder)
 	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
@@ -1252,6 +1257,7 @@ func openProductionPhaseTwoBundleAssembly(
 	if absentCloseWired(cfg, linkd.Console != nil) {
 		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events)
 		absentClose.documents, _ = strategySource.(controlplane.StrategyDocumentPresence)
+		absentClose.businesses = alertBusinesses
 		absentPage.bind(absentClose)
 		bundle.dependencies.RunAbsentClose = absentClose.run
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)

@@ -42,6 +42,10 @@ type ScopeDrop struct {
 	Filter, Reason   string
 	Fingerprint      string
 	StrategyRevision int64
+	// GlobalBusiness is a Plan that files each record under the business it
+	// is about: a close of its alert carries the alert's business, not the
+	// Plan's.
+	GlobalBusiness bool
 	// Round is the Slot's evaluation time: two drops of one fingerprint are
 	// two observations only when they come from two Slots.
 	Round int64
@@ -133,6 +137,9 @@ type planOutput struct {
 	shard execution.ShardRef
 	// intervalSeconds is the Plan's evaluation period.
 	intervalSeconds int64
+	// globalBusiness is a Plan that files each record under the business it
+	// is about rather than its own.
+	globalBusiness bool
 }
 
 type planOutputs map[execution.PlanIdentity]planOutput
@@ -158,7 +165,7 @@ func buildPlanOutputs(duePlans []execution.DuePlan, queries []PlannedQuery) plan
 		ref := due.CompiledPlan.StrategyRef()
 		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision), shard: due.Shard,
 			identity: due.CompiledPlan.OutputIdentity(), multiInput: len(inputs[due.Identity]) > 1,
-			intervalSeconds: due.ScheduleSpec.EvaluationIntervalSeconds}
+			intervalSeconds: due.ScheduleSpec.EvaluationIntervalSeconds, globalBusiness: due.CompiledPlan.GlobalBusiness()}
 	}
 	return outputs
 }
@@ -250,7 +257,7 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 		readOffset = max(0, time.Duration(ready-adapter.round*1000)*time.Millisecond)
 	}
 	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: fingerprint,
-		StrategyRevision: output.revision, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
+		StrategyRevision: output.revision, GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds, ReadOffset: readOffset})
 }
 
 func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word string) {

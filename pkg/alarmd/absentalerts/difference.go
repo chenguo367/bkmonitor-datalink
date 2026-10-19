@@ -57,6 +57,10 @@ type Key struct {
 type Identity struct {
 	BusinessID int64
 	Revision   int64
+	// GlobalBusiness is a strategy whose alerts are each filed under the
+	// business they are about: BusinessID is the strategy's own, and each
+	// close carries its alert's business instead.
+	GlobalBusiness bool
 }
 
 // Absence is this loop's own memory of a candidate: when it first found the
@@ -204,6 +208,10 @@ const (
 	// OutcomeRevisionUnknown: the business is known and the snapshot
 	// revision is not. The close contract requires one. Per strategy.
 	OutcomeRevisionUnknown = "revision_unknown"
+	// OutcomeBusinessUnknown: the strategy files each alert under the
+	// business it is about, and this alert's record could not be read or
+	// names none. That alert is not closed this round. Per alert.
+	OutcomeBusinessUnknown = "business_unknown"
 	// OutcomeEvidenceUnavailable: the strategy's alerts could not be read
 	// from the link, so there is nothing to address a close to. Per
 	// strategy.
@@ -236,7 +244,7 @@ const (
 
 // Outcomes is the closed list, for the metric that reports every cell.
 var Outcomes = []string{OutcomeCloseDecided, OutcomeWithinGrace, OutcomeUnconfirmed,
-	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown,
+	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown, OutcomeBusinessUnknown,
 	OutcomeEvidenceUnavailable, OutcomeCloseSent, OutcomeSendFailed,
 	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
 
