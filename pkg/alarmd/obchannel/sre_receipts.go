@@ -104,7 +104,7 @@ return 1
 // sreEffect is the list an action's receipt goes to.
 func sreEffect(op string) string {
 	switch op {
-	case OpNodeExec, OpNodeCancel, OpNodeEnded, OpSetImage, pod.OpApply, pod.OpDelete, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun, pod.OpEditConfigMapText:
+	case OpNodeExec, OpNodeCancel, OpNodeEnded, OpSetImage, OpRevert, pod.OpApply, pod.OpDelete, pod.OpPatch, pod.OpDeletePod, pod.OpRestartWorkload, pod.OpScaleWorkload, pod.OpDryRun, pod.OpEditConfigMapText:
 		return SREEffectChange
 	}
 	return SREEffectAccess
