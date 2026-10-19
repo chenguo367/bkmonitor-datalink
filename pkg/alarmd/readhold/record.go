@@ -73,6 +73,13 @@ type Record struct {
 	Plans               []PlanRecord             `json:"plans,omitempty"`
 	Transitions         []Transition             `json:"transitions,omitempty"`
 	RenewedAtMillis     int64                    `json:"renewed_at_ms,omitempty"`
+	// QueryDurationMillis is how long the group's query took as its owner
+	// last measured it, rounded up to the second, and QueryDurationAtMillis
+	// when that was written: what a process that takes the group over judges
+	// its first rounds by (query_duration.go). A record without them, as one
+	// a build before this one wrote, has no reading.
+	QueryDurationMillis   int64 `json:"query_duration_ms,omitempty"`
+	QueryDurationAtMillis int64 `json:"query_duration_at_ms,omitempty"`
 }
 
 // ErrRecordInvalid is a record that does not decode or holds out of range.
@@ -91,7 +98,7 @@ func Decode(raw []byte) (Record, error) {
 		(record.EarlierFloorMillis != nil && *record.EarlierFloorMillis < 0) || record.EarlierDifferents < 0 || record.LoweredFromMillis < 0 ||
 		record.ArrivalAgeMillis < 0 || record.MaxEarlyIntervalMillis < 0 ||
 		record.EarlierMatches < 0 || record.EarlierMatches > EarlierMatchesRequired || !inRange(record.LimitMillis) ||
-		record.SegmentStart < 0 {
+		record.SegmentStart < 0 || record.QueryDurationMillis < 0 || record.QueryDurationAtMillis < 0 {
 		return Record{}, ErrRecordInvalid
 	}
 	for _, plan := range record.Plans {

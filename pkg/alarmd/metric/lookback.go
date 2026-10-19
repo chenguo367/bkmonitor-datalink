@@ -67,6 +67,7 @@ type lookbackCollector struct {
 	readHoldOvertaken   *prometheus.Desc
 	readHoldPredecessor *prometheus.Desc
 	readHoldSeed        *prometheus.Desc
+	readHoldDuration    *prometheus.Desc
 	readHoldClamped     *prometheus.Desc
 	readHoldCorrupt     *prometheus.Desc
 	readHoldRetireClose *prometheus.Desc
@@ -88,6 +89,11 @@ func newLookbackCollector() *lookbackCollector {
 				"old group's closed record, exactly), zero (no record: a group never held), or -- each read as the hold "+
 				"bound, which costs the successor's first Slots a later read and never a Slot -- record_open, "+
 				"record_corrupt, record_unreadable; and the links it skipped: self_link, invalid_link, expired.", "reason"),
+		readHoldDuration: desc("read_hold_query_duration_writes_total",
+			"Read-hold records written for the query duration they keep, by why: changed (the owner's measured "+
+				"duration moved by a second, a minute or more after the last write) or refreshed (the same reading "+
+				"rewritten at half its 24-hour life). A process that takes a group over judges its first rounds by "+
+				"that reading. Read it as the write rate the reading costs.", "reason"),
 		readHoldSeed: desc("read_hold_seeds_total",
 			"Query Groups with no read-hold record of their own that started from a seeded arrival age, by where it "+
 				"came from: peer (the 90th percentile of what the groups reading the same tables and data sources "+
@@ -257,7 +263,7 @@ func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.checks, c.changed, c.changes, c.classes, c.readEarly, c.seriesLate, c.supplementWindows, c.supplementUnobserved, c.supplementSeries,
 		c.supplementPoints, c.directedBytes, c.supplementHold, c.supplementHoldMax, c.earlyReads, c.earlyUndecided, c.earlyBytes, c.earlierBytes, c.earlierReads, c.earlierOvertaken, c.earlierPreparedLate, c.earlierAhead, c.probationRereads, c.probationGroups, c.holdIgnored, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.plans, c.planHeld, c.readHoldTransition, c.readHoldOvertaken,
-		c.readHoldPredecessor, c.readHoldSeed, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
+		c.readHoldPredecessor, c.readHoldSeed, c.readHoldDuration, c.readHoldClamped, c.readHoldCorrupt, c.readHoldRetireClose, c.readHoldCloseSkip, c.readHoldDegraded,
 		c.readHoldGroups, c.readHoldMax} {
 		ch <- desc
 	}
@@ -288,6 +294,9 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, origin := range readhold.SeedOrigins {
 		counter(c.readHoldSeed, stats.ReadHoldSeeds[origin], origin)
+	}
+	for _, reason := range readhold.QueryDurationWriteReasons {
+		counter(c.readHoldDuration, stats.ReadHoldQueryDurationWrites[reason], reason)
 	}
 	for _, source := range readhold.ClampSources {
 		counter(c.readHoldClamped, stats.ReadHoldClamped[source], source)
