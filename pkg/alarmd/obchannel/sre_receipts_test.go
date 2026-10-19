@@ -154,3 +154,27 @@ func TestSREReceiptsReadAnExecutionBack(t *testing.T) {
 	}
 	t.Fatal("sre.receipts is missing")
 }
+
+// Every action the channel records is filed on purpose: a write goes to the
+// change list, where whoever asks what was changed reads it, and a read to
+// the access list. An action added without being decided here fails, so a
+// write cannot drift into the access list unnoticed.
+func TestEveryRecordedActionIsFiledAsAChangeOrAnAccess(t *testing.T) {
+	want := map[string]string{
+		OpNodeExec: SREEffectChange, OpNodeCancel: SREEffectChange, OpNodeEnded: SREEffectChange, OpNodeGet: SREEffectAccess,
+		"pod.exec": SREEffectAccess, pod.OpDeletePod: SREEffectChange, pod.OpRestartWorkload: SREEffectChange, pod.OpScaleWorkload: SREEffectChange,
+		pod.OpReadSecret: SREEffectAccess, pod.OpReadConfigMap: SREEffectAccess, OpSetImage: SREEffectChange, OpRevert: SREEffectChange,
+		pod.OpListResources: SREEffectAccess, pod.OpDryRun: SREEffectChange, pod.OpApply: SREEffectChange, pod.OpDelete: SREEffectChange,
+		pod.OpPatch: SREEffectChange, pod.OpEditConfigMapText: SREEffectChange,
+	}
+	for _, op := range SREActionOps {
+		effect, decided := want[op]
+		if !decided {
+			t.Errorf("action %s is recorded but not decided here as a change or an access", op)
+			continue
+		}
+		if got := sreEffect(op); got != effect {
+			t.Errorf("action %s filed as %s, want %s", op, got, effect)
+		}
+	}
+}
