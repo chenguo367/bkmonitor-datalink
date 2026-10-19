@@ -949,11 +949,29 @@ Labels: `source`
 
 Bytes the directed reads delivered, by source: a Slot's frozen query each, read against lookback_first_read_bytes_total over lookback_first_reads_total.
 
+## alarmd_lookback_earlier_overtaken_total
+
+Labels: `source`, `path`
+
+Candidate h/2 read trials that ended overtaken, by source and what overtook them first. Reader: the same acceptance, which names the cause when trials do not complete.
+
+## alarmd_lookback_earlier_prepared_late_max_seconds
+
+Labels: `source`
+
+The furthest past its candidate readiness point a trial's Slot was prepared since process start, by source; it never decays, and is zero while none was. Reader: the same acceptance, beside prepared_after_readiness: how late the Slots arrive.
+
 ## alarmd_lookback_earlier_read_bytes_total
 
 Labels: `source`
 
 Bytes candidate h/2 reads delivered, by source.
+
+## alarmd_lookback_earlier_reads_total
+
+Labels: `source`, `outcome`
+
+Candidate h/2 read trials by how they ended, by source: equal or different from the formal first read, or why they supplied no evidence. Reader: the read-hold acceptance after each deploy, which needs completed trials (equal plus different) above zero; a deployment without the CLI reads it only here, since its lookback route is not public.
 
 ## alarmd_lookback_faults_total
 

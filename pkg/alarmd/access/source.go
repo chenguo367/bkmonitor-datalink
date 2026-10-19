@@ -234,7 +234,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		return completeBudgetExhaustedQueries(execution.QueryExecutionCompletion{}, prepared.Queries, request.AttemptNo), nil
 	}
 	firstRead := slotFirstRead(prepared.Queries)
-	if request.Operation == execution.OperationNormal && source.config.Lookback != nil {
+	// An earlier-read trial is one more read of the same backend: none is
+	// reserved while the Query Group's queries are failing.
+	if request.Operation == execution.OperationNormal && source.config.Lookback != nil && !execution.BackendFailing(ctx) {
 		for index, query := range prepared.Queries {
 			source.config.Lookback.Prepare(lookbackQuery(ctx, request, query.Spec, request.AttemptNo, query.ReadyAtUnixMilli,
 				index != firstRead))

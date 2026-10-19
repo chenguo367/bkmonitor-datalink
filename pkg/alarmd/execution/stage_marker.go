@@ -275,6 +275,27 @@ func MarkCompletionDeadline(ctx context.Context, deadline time.Time) {
 	stageMarkerOf(ctx).LowerCompletionDeadline(deadline)
 }
 
+// backendFailingKey marks an execution whose Query Group's queries failed
+// recently (WithBackendFailing).
+type backendFailingKey struct{}
+
+// WithBackendFailing marks the execution running under ctx as one whose
+// Query Group's recent queries failed - the degraded pool's failures, in it
+// or on the way: work that only adds reads, such as an earlier-read trial,
+// is left out while its backend is not answering in time.
+func WithBackendFailing(ctx context.Context, failing bool) context.Context {
+	if !failing {
+		return ctx
+	}
+	return context.WithValue(ctx, backendFailingKey{}, true)
+}
+
+// BackendFailing reports what WithBackendFailing said; false when nothing did.
+func BackendFailing(ctx context.Context) bool {
+	failing, _ := ctx.Value(backendFailingKey{}).(bool)
+	return failing
+}
+
 // ExtendDeadline raises the deadline of the execution running under ctx to
 // that of a query it starts at at (StageMarker.Extend).
 func ExtendDeadline(ctx context.Context, deadline, at time.Time) {

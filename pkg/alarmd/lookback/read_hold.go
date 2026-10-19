@@ -51,6 +51,43 @@ const (
 var EarlierReadOutcomes = []string{EarlierEqual, EarlierDifferent, EarlierPermitRefused, EarlierMemoryRefused,
 	EarlierReadFailed, EarlierFirstIncomplete, EarlierOwnerLost, EarlierOvertaken}
 
+// What overtook a trial counted EarlierOvertaken, the first that did: one
+// outcome has six causes, and which of them ends the trials decides the fix.
+const (
+	// OvertakenPreparedLate: the Slot was prepared after the candidate
+	// readiness point had passed, so no trial could start in time.
+	OvertakenPreparedLate = "prepared_after_readiness"
+	// OvertakenNextSlot: the group's next Slot was prepared while this
+	// trial's Slot had not reached its formal read.
+	OvertakenNextSlot = "next_slot_first"
+	// OvertakenFormalFirst: the formal read began before the trial was done.
+	OvertakenFormalFirst = "formal_read_first"
+	// OvertakenHoldMoved: the group's hold changed under the trial, so its
+	// candidate is no longer the next step down.
+	OvertakenHoldMoved = "hold_moved"
+	// OvertakenStartedLate and OvertakenFinishedLate: the trial's read began,
+	// or ended, after the candidate readiness point.
+	OvertakenStartedLate  = "started_after_readiness"
+	OvertakenFinishedLate = "finished_after_readiness"
+)
+
+var EarlierOvertakenPaths = []string{OvertakenPreparedLate, OvertakenNextSlot, OvertakenFormalFirst, OvertakenHoldMoved,
+	OvertakenStartedLate, OvertakenFinishedLate}
+
+// overtake ends trial as overtaken by path unless something ended it first.
+func (trial *earlierSample) overtake(path string) {
+	if trial.done {
+		return
+	}
+	trial.done, trial.outcome, trial.overtakenBy = true, EarlierOvertaken, path
+}
+
+// countOvertakenLocked counts what overtook a trial counted EarlierOvertaken.
+func (engine *Engine) countOvertakenLocked(trial *earlierSample) {
+	engine.counts.earlierOvertaken[key2(trial.source, trial.overtakenBy)]++
+	trial.group.reading.overtaken[wordIndex(EarlierOvertakenPaths, trial.overtakenBy)]++
+}
+
 // ReadHoldIgnoredReasons count findings that cannot raise a whole-window hold.
 var ReadHoldIgnoredReasons = []string{ClassPartialRevised, IgnoredNoWholeWindowArrival}
 
@@ -107,8 +144,11 @@ type earlierSample struct {
 	done          bool
 	formal        bool
 	outcome       string
-	cancel        context.CancelFunc
-	group         *group
+	// overtakenBy is what overtook the trial when outcome is EarlierOvertaken
+	// (EarlierOvertakenPaths).
+	overtakenBy string
+	cancel      context.CancelFunc
+	group       *group
 }
 
 func (engine *Engine) groupLocked(query Query, now time.Time) *group {
@@ -165,16 +205,29 @@ func (engine *Engine) Prepare(query Query) {
 		}
 		// A frozen Slot that never reached a first read supplies no evidence.
 		if !previous.formal {
+			// A trial that finished still waits for its Slot's formal read;
+			// the next Slot's arrival overtakes it whatever its own outcome.
+			if previous.overtakenBy == "" {
+				previous.overtakenBy = OvertakenNextSlot
+			}
 			previous.done, previous.outcome = true, EarlierOvertaken
 			if previous.cancel != nil {
 				previous.cancel()
 			}
 			engine.counts.earlierReads[key2(previous.source, EarlierOvertaken)]++
+			engine.countOvertakenLocked(previous)
 			previous.group.reading.earlier[wordIndex(EarlierReadOutcomes, EarlierOvertaken)]++
 		}
 		state.prepared = nil
 	}
-	if state.capturing || state.sample != nil || now.Before(state.nextAt) {
+	// The group's rest is judged at the Slot's formal read, where Begin
+	// takes the sample this reserves, not now: a held Slot is prepared at
+	// its first attempt, a hold before that read. Judged now, a rest ending
+	// between the two left the first attempt to skip and the readiness retry
+	// to reserve the trial past its own candidate point, where it is
+	// overtaken before it reads - almost every trial, on a hold near the
+	// period.
+	if state.capturing || state.sample != nil || query.ReadyAt.Before(state.nextAt) {
 		engine.mu.Unlock()
 		return
 	}
@@ -186,8 +239,17 @@ func (engine *Engine) Prepare(query Query) {
 	// RecheckTimeout can still finish before that point and prove the lower
 	// hold; a fixed RecheckTimeout cut every trial of such a group short and
 	// kept its alerts later than they need to be.
+	//
+	// A trial of a lower hold starts no earlier than the readiness without
+	// the hold (baseline). A trial of no hold - half the hold under a step -
+	// has that readiness as its own candidate point, so held to it the
+	// trial had no time to read: with the step equal to the period, every
+	// hold under two periods. It starts the reread bound before instead.
+	// Only when it looks moves: its read is still compared whole with the
+	// formal first read, and one that is incomplete, or finds less, proves
+	// nothing.
 	start := readyAt.Add(-state.rereadBound())
-	if start.Before(baseline) {
+	if candidate > 0 && start.Before(baseline) {
 		start = baseline
 	}
 	state.prepared = &earlierSample{query: query, source: state.source, candidateHold: candidate,
@@ -196,8 +258,9 @@ func (engine *Engine) Prepare(query Query) {
 		// readiness point. Data already whole here proves it whole at h/2;
 		// starting after that point cannot prove a decrease.
 		at: start, readyAt: readyAt, keptFrom: tailFrom(query.Spec.LogicalWindow, state.step, tailSteps)}
-	if now.UnixMilli() > readyAt.UnixMilli() {
-		state.prepared.done, state.prepared.outcome = true, EarlierOvertaken
+	if late := now.Sub(readyAt); now.UnixMilli() > readyAt.UnixMilli() {
+		state.prepared.overtake(OvertakenPreparedLate)
+		engine.counts.earlierPreparedLateMax[state.source] = max(engine.counts.earlierPreparedLateMax[state.source], late)
 	}
 	heap.Push(&engine.earlyWork, earlyWork{at: start, trial: state.prepared})
 	engine.mu.Unlock()
@@ -225,6 +288,7 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 		outcome = EarlierFirstIncomplete
 	case outcome == "" && !candidateCurrent:
 		outcome = EarlierOvertaken
+		trial.overtakenBy = OvertakenHoldMoved
 	case outcome == "":
 		outcome = EarlierEqual
 		if len(compareSummaries(trial.summary, trimSummary(read.summary.buckets, trial.keptFrom))) > 0 {
@@ -236,6 +300,9 @@ func (read *Read) completeEarlier(completion execution.ProviderCompletion, err e
 		state.prepared = nil
 	}
 	engine.counts.earlierReads[key2(trial.source, outcome)]++
+	if outcome == EarlierOvertaken {
+		engine.countOvertakenLocked(trial)
+	}
 	trial.group.reading.earlier[wordIndex(EarlierReadOutcomes, outcome)]++
 	engine.mu.Unlock()
 	engine.options.OnEarlierRead(EarlierReadEvidence{Contract: trial.query.Contract, CandidateHold: trial.candidateHold,
@@ -325,8 +392,8 @@ func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, rel
 	readCtx, cancel := context.WithTimeout(ctx, budget)
 	engine.mu.Lock()
 	trial.cancel = cancel
-	if engine.options.Now().UnixMilli() > trial.readyAt.UnixMilli() && !trial.formal && !trial.done {
-		trial.done, trial.outcome = true, EarlierOvertaken
+	if engine.options.Now().UnixMilli() > trial.readyAt.UnixMilli() && !trial.formal {
+		trial.overtake(OvertakenStartedLate)
 	}
 	skipped := trial.formal || trial.done
 	if skipped {
@@ -369,7 +436,7 @@ func (engine *Engine) earlierRead(ctx context.Context, trial *earlierSample, rel
 		trial.done = true
 		switch {
 		case finished.After(trial.readyAt):
-			trial.outcome = EarlierOvertaken
+			trial.outcome, trial.overtakenBy = EarlierOvertaken, OvertakenFinishedLate
 		case sink.refused:
 			trial.outcome = EarlierMemoryRefused
 		case err != nil || completion.Completeness != execution.CompletenessFull || sink.summary.faulted || closed(yield):

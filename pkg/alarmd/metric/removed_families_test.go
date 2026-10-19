@@ -33,7 +33,9 @@ var removedFamilies = []string{
 	"lookback_samples_total", "lookback_completion_total", "lookback_completion_max_seconds", "lookback_probes_total",
 	"lookback_empty_first_reads_total", "lookback_empty_first_read_completion_total", "lookback_groups",
 	"lookback_rest_seconds", "lookback_yield_releases_total", "lookback_yield_release_seconds_total",
-	"lookback_yield_release_max_seconds", "lookback_earlier_reads_total",
+	"lookback_yield_release_max_seconds",
+	// lookback_earlier_reads_total is back with a reader: the read-hold
+	// acceptance, on deployments whose lookback route is not public.
 	"active_qg_set_encode_duration_seconds", "run_one_attempted_total", "schedule_cutover_last_duration_seconds",
 	"schedule_cutover_payload_size_bytes", "state_write_change_reason_total",
 	"platform_setting_enabled", "platform_setting_entries", "platform_setting_source",
