@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -66,6 +67,42 @@ func TestThePrimaryRequirementSaysALogCountIsUnfilled(t *testing.T) {
 		}
 		if len(requirements) != 1 || requirements[0].UnfilledCounts != want {
 			t.Fatalf("%s: requirements %+v, want one with UnfilledCounts %t", source, requirements, want)
+		}
+	}
+}
+
+// The word is observation only, so a log count's primary requirement keeps
+// the identity and the due Plan set digest it had before the word existed:
+// labelling the empty answer cuts no log Plan over. The values are the ones
+// the build before (d03b7a7b4) derives for this group and Plan.
+func TestALogCountsRequirementDigestIsUnchangedByTheWord(t *testing.T) {
+	const (
+		wantRequirement = "e43f63d66b5fb85ab5d2f82f647b29d6d2995e7380add0df9ec8964119d1699e"
+		wantDigest      = "20d9c7a73b097f7bc7c051bf52a6e6f9afe751319974515c28564894ff034f1c"
+	)
+	runtime := &RedisCatalogRuntime{downstreamReserve: time.Second}
+	due := []execution.DuePlan{{Identity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "101"},
+		ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60}, CompletionDeadlineUnixMilli: 90000}}
+	levels := map[execution.PlanIdentity]map[uint32]struct{}{due[0].Identity: {1: {}}}
+	for _, source := range []string{"bk_log_search/log", "bk_monitor/log", "bk_log_search/time_series"} {
+		group := QueryGroup{QueryPlan: execution.QueryPlanFacts{SourceSemantics: []string{source}, QueryRevision: "query-r1",
+			QueryDelaySeconds: 30, StepMillis: 60000, AlignmentMillis: 60000,
+			QueryList:     []execution.QueryClause{{TimeAggregation: execution.QueryFunction{Method: "count_over_time"}}},
+			Normalization: execution.DatasetNormalizationSpec{DatasetContract: contract.DatasetContractV2{IdentityFields: []string{"host"}}}}}
+		requirements, err := runtime.primaryRequirements(group, due, levels)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(requirements) != 1 || !requirements[0].UnfilledCounts {
+			t.Fatalf("%s: requirements %+v, want one carrying UnfilledCounts", source, requirements)
+		}
+		digest, err := execution.DeriveDuePlanSetDigest(nil, requirements)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(requirements[0].RequirementID) != wantRequirement || string(digest) != wantDigest {
+			t.Fatalf("%s: requirement %s digest %s, want %s and %s as the build before derived them",
+				source, requirements[0].RequirementID, digest, wantRequirement, wantDigest)
 		}
 	}
 }

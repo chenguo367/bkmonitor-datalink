@@ -216,7 +216,13 @@ type DataRequirement struct {
 	// range is absent from the answer rather than zero. Its empty answer
 	// cannot tell a quiet group from a missing one. False for every other
 	// requirement; on a primary only.
-	UnfilledCounts bool `json:",omitempty"`
+	//
+	// Observation only, like SlotExecutionRequest.ShortPeriodCohort: it
+	// labels an empty answer and changes nothing the Slot computes, so it is
+	// never part of the requirement's identity or the due Plan set digest.
+	// The controlplane derives it from the query each time it builds the
+	// primary requirement; nothing persists it.
+	UnfilledCounts bool `json:"-"`
 }
 
 func (requirement DataRequirement) Validate(plans map[PlanIdentity]DuePlan) error {
