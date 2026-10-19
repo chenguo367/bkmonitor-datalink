@@ -174,7 +174,7 @@ func sreAuditSink(logger *observability.Logger, recorder *metric.Recorder) func(
 		attrs := []slog.Attr{slog.String("op", action.Op), slog.String("namespace", action.Namespace), slog.String("kind", action.Kind),
 			slog.String("name", action.Name), slog.String("uid", action.UID), slog.String("detail", action.Detail), slog.String("code", action.Code),
 			slog.String("session_id", action.SessionID), slog.String("request_id", action.RequestID), slog.String("execution_id", action.ExecutionID),
-			slog.String("operator", action.Operator), slog.String("issued_via", action.IssuedVia)}
+			slog.String("operator", action.Operator), slog.String("issued_via", action.IssuedVia), slog.String("entry", action.Entry)}
 		if action.Argv != "" {
 			attrs = append(attrs, slog.String("argv", action.Argv))
 		}

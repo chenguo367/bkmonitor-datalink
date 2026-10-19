@@ -570,7 +570,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	execCtx, execCancel := executionContext(0)
 	defer execCancel()
 	// Who asked, for the audit record of an execution or management call.
-	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID, Operator: session.Operator, IssuedVia: session.IssuedVia})
+	execCtx = WithCaller(execCtx, Caller{SessionID: session.ID, RequestID: meta.RequestID, Operator: session.Operator, IssuedVia: session.IssuedVia, Entry: EntryOf(r)})
 	out := c.runHere(execCtx, op, req, params, meta)
 	code := 200
 	if out.Status == "error" {

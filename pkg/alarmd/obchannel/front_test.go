@@ -124,4 +124,25 @@ func TestAnSREReceiptNamesTheOperator(t *testing.T) {
 	if len(actions) != 1 || actions[0].Operator != "ops-a" || actions[0].IssuedVia != cliauth.IssuedViaFront || actions[0].SessionID != "named-session" {
 		t.Fatalf("actions %+v, want one naming ops-a issued through the front surface", actions)
 	}
+	// The receipt also names the entry the call came in on when it was not
+	// the session's: alarmd's own address, which the CLI falls back to when
+	// the admin cannot reach alarmd. Any other value is no entry.
+	for _, tc := range []struct{ header, want string }{{EntryAlarmd, EntryAlarmd}, {"admin", ""}, {"", ""}} {
+		raw, _ := json.Marshal(envelope(c, "invoke", pod.OpDeletePod, Params{"target": map[string]any{"namespace": "fixture", "pod": "web-0", "uid": "pod-uid"}}))
+		r := httptest.NewRequest("POST", "/api/cli/channel", bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer test-only")
+		if tc.header != "" {
+			r.Header.Set(EntryHeader, tc.header)
+		}
+		c.ServeHTTP(httptest.NewRecorder(), r)
+		mu.Lock()
+		last := actions[len(actions)-1]
+		mu.Unlock()
+		if last.Entry != tc.want {
+			t.Errorf("header %q: receipt entry %q, want %q", tc.header, last.Entry, tc.want)
+		}
+	}
+	if len(actions) != 4 {
+		t.Fatalf("recorded %d actions, want 4", len(actions))
+	}
 }

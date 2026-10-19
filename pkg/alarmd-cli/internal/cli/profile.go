@@ -23,12 +23,17 @@ type Profile struct {
 	EnvironmentID   string `json:"environment_id"`
 	EnvironmentName string `json:"environment_name"`
 	PublicBaseURL   string `json:"public_base_url"`
-	AccessToken     string `json:"access_token,omitempty"`
-	SessionID       string `json:"session_id,omitempty"`
-	ExpiresAt       string `json:"expires_at,omitempty"`
-	Scope           string `json:"scope,omitempty"`
-	CACert          string `json:"ca_cert,omitempty"`
-	InsecureTLS     bool   `json:"insecure_tls,omitempty"`
+	// FallbackBaseURLs are the deployment's own addresses, declared by the
+	// server at login for a session issued through the admin: where a
+	// request goes when the admin entry cannot get it to alarmd. Only the
+	// server's answer sets them (validateExchange).
+	FallbackBaseURLs []string `json:"fallback_base_urls,omitempty"`
+	AccessToken      string   `json:"access_token,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	Scope            string   `json:"scope,omitempty"`
+	CACert           string   `json:"ca_cert,omitempty"`
+	InsecureTLS      bool     `json:"insecure_tls,omitempty"`
 	// RefreshToken is the pairing's renewal credential: spent for a new
 	// session and the next credential whenever the session runs out.
 	RefreshToken string `json:"refresh_token,omitempty"`
@@ -244,7 +249,7 @@ func (s Store) list() (map[string]any, error) {
 	err := s.locked(func(c *config) (bool, error) {
 		profiles := map[string]any{}
 		for id, p := range c.Profiles {
-			profiles[id] = map[string]any{"environment_id": p.EnvironmentID, "environment_name": p.EnvironmentName, "public_base_url": p.PublicBaseURL, "session_id": p.SessionID, "expires_at": p.ExpiresAt, "authenticated": p.AccessToken != "", "paired": p.RefreshToken != "", "ca_cert": p.CACert, "insecure_tls": p.InsecureTLS}
+			profiles[id] = map[string]any{"environment_id": p.EnvironmentID, "environment_name": p.EnvironmentName, "public_base_url": p.PublicBaseURL, "fallback_base_urls": p.FallbackBaseURLs, "session_id": p.SessionID, "expires_at": p.ExpiresAt, "authenticated": p.AccessToken != "", "paired": p.RefreshToken != "", "ca_cert": p.CACert, "insecure_tls": p.InsecureTLS}
 		}
 		result["profiles"], result["default_environment"] = profiles, c.DefaultEnvironment
 		return false, nil

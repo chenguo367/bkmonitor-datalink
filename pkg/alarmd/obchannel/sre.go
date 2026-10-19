@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -40,6 +41,9 @@ type SREAction struct {
 	// receipt from before 0.4.
 	Operator  string `json:"operator,omitempty"`
 	IssuedVia string `json:"issued_via,omitempty"`
+	// Entry is the caller's entry when it was not the session's own
+	// (Caller.Entry).
+	Entry string `json:"entry,omitempty"`
 	// At is when the action ended.
 	At time.Time `json:"at"`
 	// Effect is the list the receipt was kept in, change or access; set on
@@ -140,6 +144,27 @@ type Caller struct {
 	// through which route (cliauth.IssuedViaFront or IssuedViaAdminKey).
 	Operator  string
 	IssuedVia string
+	// Entry is the address the request came in on when it was not the one
+	// the session was issued through: EntryAlarmd, the deployment's own
+	// address, which the CLI falls back to when the admin cannot reach
+	// alarmd. Empty is the session's entry.
+	Entry string
+}
+
+// EntryHeader carries the entry a CLI request took (Caller.Entry). The admin
+// forwards a fixed list of headers and this is not on it, so it is never
+// seen on a request that came through the admin.
+const EntryHeader = "X-Alarmd-Entry"
+
+// EntryAlarmd is the one entry a request names: alarmd's own address.
+const EntryAlarmd = "alarmd"
+
+// EntryOf is the entry r names, or empty for any other value.
+func EntryOf(r *http.Request) string {
+	if r.Header.Get(EntryHeader) == EntryAlarmd {
+		return EntryAlarmd
+	}
+	return ""
 }
 
 type callerKey struct{}
@@ -196,7 +221,7 @@ func SREOperations(options SREOptions) []Operation {
 		ended := now()
 		action.DurationMS, action.At = ended.Sub(started).Milliseconds(), ended.UTC()
 		action.SessionID, action.RequestID = caller.SessionID, caller.RequestID
-		action.Operator, action.IssuedVia = caller.Operator, caller.IssuedVia
+		action.Operator, action.IssuedVia, action.Entry = caller.Operator, caller.IssuedVia, caller.Entry
 		options.Audit(action)
 	}
 	text := Field{Type: "string", MinLength: 1, MaxLength: 256}

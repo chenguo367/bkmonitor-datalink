@@ -562,7 +562,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 	}
 	fmt.Fprintln(a.Err, "Calling the OB channel...")
 	started := time.Now().UTC()
-	m, status, err := a.channelRequestTimeout(mode, operation, params, revision, p, timeout)
+	m, status, err := a.channelRequestTimeout(mode, operation, params, revision, p, timeout, exec)
 	if err != nil {
 		var unsent *requestNotSent
 		if exec && !errors.As(err, &unsent) {
@@ -575,7 +575,7 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 	if status == http.StatusUnauthorized && p.RefreshToken != "" && !exec {
 		if renewed, renewErr := a.ensureSession(p.EnvironmentID, true); renewErr == nil {
 			p = renewed
-			m, status, err = a.channelRequestTimeout(mode, operation, params, revision, p, timeout)
+			m, status, err = a.channelRequestTimeout(mode, operation, params, revision, p, timeout, exec)
 			if err != nil {
 				return a.fail("request_failed", err.Error(), 1)
 			}
@@ -601,12 +601,15 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile, 
 }
 
 func (a *App) channelRequest(mode, operation string, params map[string]any, revision string, p Profile) (map[string]any, int, error) {
-	return a.channelRequestTimeout(mode, operation, params, revision, p, 30*time.Second)
+	return a.channelRequestTimeout(mode, operation, params, revision, p, 30*time.Second, false)
 }
 
-func (a *App) channelRequestTimeout(mode, operation string, params map[string]any, revision string, p Profile, timeout time.Duration) (map[string]any, int, error) {
+// channelRequestTimeout is one channel call. exec says it executes
+// something, which moves to a fallback entry only when it was never sent
+// (requestVia).
+func (a *App) channelRequestTimeout(mode, operation string, params map[string]any, revision string, p Profile, timeout time.Duration, exec bool) (map[string]any, int, error) {
 	body := channelBody(mode, operation, params, revision)
-	m, status, err := a.requestTimeout(p, http.MethodPost, "api/cli/channel", body, timeout)
+	m, status, err := a.requestVia(p, http.MethodPost, "api/cli/channel", body, timeout, exec)
 	if err != nil {
 		return m, status, err
 	}

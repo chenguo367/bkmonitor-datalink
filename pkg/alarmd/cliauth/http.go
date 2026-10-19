@@ -198,9 +198,14 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 // and, when the environment holds a pairing for it, the next renewal
 // credential. Pairing names why there is none.
 type loginResponse struct {
-	EnvironmentID      string    `json:"environment_id"`
-	EnvironmentName    string    `json:"environment_name"`
-	PublicBaseURL      string    `json:"public_base_url"`
+	EnvironmentID   string `json:"environment_id"`
+	EnvironmentName string `json:"environment_name"`
+	PublicBaseURL   string `json:"public_base_url"`
+	// FallbackBaseURLs is this deployment's own address, for a session
+	// issued through the admin: where the CLI goes when the admin cannot get
+	// a request to alarmd. Absent for a session issued here, whose entry is
+	// that address already.
+	FallbackBaseURLs   []string  `json:"fallback_base_urls,omitempty"`
 	AccessToken        string    `json:"access_token"`
 	SessionID          string    `json:"session_id"`
 	ExpiresAt          time.Time `json:"expires_at"`
@@ -224,6 +229,9 @@ func (m *Manager) login(record storedRecord, token, refresh string) loginRespons
 	response := loginResponse{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName, PublicBaseURL: baseURL,
 		AccessToken: token, SessionID: record.SessionID, ExpiresAt: time.UnixMilli(record.ExpiresAtMS).UTC(), Scope: record.Scope,
 		Pairing: "paired"}
+	if baseURL != m.publicBaseURL && m.publicBaseURL != "" {
+		response.FallbackBaseURLs = []string{m.publicBaseURL}
+	}
 	if refresh == "" {
 		response.Pairing = "pairing_limit_reached"
 		return response
