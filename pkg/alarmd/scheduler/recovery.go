@@ -117,6 +117,11 @@ type SlotRecoveryFacts struct {
 	// between a report someone can act on and one they have to reproduce.
 	ReadyAtUnixMilli          int64
 	DistanceBoundaryUnixMilli int64
+	// Decision is what the source judged when it let a live Slot run as a
+	// normal round (classifyRecoveryOf), carried to the Slot's completion so
+	// a round that then times out says on its own line why it was not sent
+	// to replay. Nil on every other disposition.
+	Decision *observability.DivertDecisionFacts
 }
 
 func (facts SlotRecoveryFacts) validate(operation execution.Operation) error {

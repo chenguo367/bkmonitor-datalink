@@ -230,6 +230,9 @@ type ProductionSlotSource struct {
 	// takes (WithQueryLatency); nil, or no reading, falls back to
 	// RecoveryLimits.TakeoverDivertFloor.
 	queryLatency QueryLatency
+	// liveReserve is the runtime's measured post-query tail, the one access
+	// cuts each read at (WithLiveReserve); nil judges by the frozen reserve.
+	liveReserve *execution.LiveReserve
 	// readinessDiverted is the evaluation time of the last Slot sent to
 	// replay for starting too late (divertShortOfTime), so that a Slot
 	// classified again is reported once. Slots are classified in evaluation
@@ -246,6 +249,16 @@ type QueryLatency func(execution.QueryGroupIdentity) (time.Duration, bool)
 func WithQueryLatency(latency QueryLatency) ProductionSlotSourceOption {
 	return func(source *ProductionSlotSource) error {
 		source.queryLatency = latency
+		return nil
+	}
+}
+
+// WithLiveReserve gives the source the runtime's measured post-query tail,
+// the same one access sizes each read's deadline from, so a round is judged
+// short of time against the deadline its read will actually be cut at.
+func WithLiveReserve(live *execution.LiveReserve) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		source.liveReserve = live
 		return nil
 	}
 }
@@ -685,7 +698,8 @@ func (source *ProductionSlotSource) Next(
 	if err := source.validateSnapshotRetention(fact.Contract.Slot.EvaluationTime, queryDeadline); err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
-	operation, recovery, err := source.classifyRecovery(ctx, fact.Contract.Slot.EvaluationTime, queryDeadline, fact.Contract.ReadHoldMillis, at, initialFence)
+	operation, recovery, err := source.classifyRecoveryOf(ctx, fact.Contract.Slot.EvaluationTime, queryDeadline, slotConsumers(fact),
+		fact.Contract.ReadHoldMillis, at, initialFence)
 	if err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
 	}
@@ -1051,6 +1065,25 @@ func (source *ProductionSlotSource) classifyRecovery(
 	at time.Time,
 	fence execution.OwnerFence,
 ) (execution.Operation, SlotRecoveryFacts, error) {
+	return source.classifyRecoveryOf(ctx, evaluationTime, deadline, nil, hold, at, fence)
+}
+
+// classifyRecoveryOf is classifyRecovery for a Slot whose consumers are
+// known. The Slot's recovery - whether it is live, replayed or given up on -
+// stays on the frozen deadline: that is the contract the Slot was frozen
+// under, and what its replay age and retention are counted from. Only the
+// decision to send a live round to replay before it starts is judged against
+// the deadline its read will be cut at (divertDeadline), which the measured
+// post-query tail can bring earlier than the frozen one.
+func (source *ProductionSlotSource) classifyRecoveryOf(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	deadline int64,
+	consumers []execution.DataRequirementConsumer,
+	hold int64,
+	at time.Time,
+	fence execution.OwnerFence,
+) (execution.Operation, SlotRecoveryFacts, error) {
 	if source.recovery == nil {
 		return execution.OperationNormal, SlotRecoveryFacts{}, nil
 	}
@@ -1063,12 +1096,15 @@ func (source *ProductionSlotSource) classifyRecovery(
 	// as it always did.
 	beforeTakeover := !takenOver.IsZero() && time.Unix(int64(evaluationTime), 0).Before(takenOver) && !queryCooldownHeld(ctx)
 	if at.UnixMilli() < deadline {
-		if !queryCooldownHeld(ctx) {
-			if diverted, facts := source.divertShortOfTime(ctx, evaluationTime, deadline, at, takenOver, beforeTakeover); diverted {
+		live := source.divertDeadline(deadline, consumers, at)
+		held := queryCooldownHeld(ctx)
+		if !held {
+			if diverted, facts := source.divertShortOfTime(ctx, evaluationTime, live, at, takenOver, beforeTakeover); diverted {
 				return execution.OperationReplay, facts, nil
 			}
 		}
-		return execution.OperationNormal, SlotRecoveryFacts{Disposition: ReplayLive, RecheckAtUnixMilli: deadline}, nil
+		decision := source.divertDecision(evaluationTime, deadline, live, at, held)
+		return execution.OperationNormal, SlotRecoveryFacts{Disposition: ReplayLive, RecheckAtUnixMilli: deadline, Decision: &decision}, nil
 	}
 	age := at.Sub(time.UnixMilli(deadline))
 	if age >= source.recovery.MaxReplayAge {
@@ -1190,22 +1226,7 @@ func (source *ProductionSlotSource) divertShortOfTime(
 	takenOver time.Time,
 	beforeTakeover bool,
 ) (bool, SlotRecoveryFacts) {
-	// The fallback is a guess for a query not timed here. A group whose every
-	// round is given less than it - a short period, whose whole budget from
-	// evaluation time to deadline is below the floor - has queries that do
-	// finish in less, so the guess says nothing about it, and applied it would
-	// divert every round of the group that is not started at once. Such a
-	// group is judged only by its own reading. The reading is evidence and
-	// applies to any group.
-	bound, boundSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
-	if bound >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
-		bound = 0
-	}
-	if source.queryLatency != nil {
-		if observed, ok := source.queryLatency(source.queryGroup); ok {
-			bound, boundSource = observed, observability.TakeoverFloorObserved
-		}
-	}
+	bound, boundSource := source.divertBound(evaluationTime, deadline)
 	if !execution.StartsTooLate(at.UnixMilli(), deadline, bound) {
 		return false, SlotRecoveryFacts{}
 	}
@@ -1236,6 +1257,54 @@ func (source *ProductionSlotSource) divertShortOfTime(
 	// Eligible at distance one and age zero: it is not behind, only short of
 	// time. RecheckAt is its deadline, where the ordinary rules take it over.
 	return true, SlotRecoveryFacts{Disposition: ReplayEligible, Distance: 1, RecheckAtUnixMilli: deadline}
+}
+
+// divertBound is the time a round's read is taken to need, and where that
+// came from. The fallback is a guess for a query not timed here. A group
+// whose every round is given less than it - a short period, whose whole
+// budget from evaluation time to deadline is below the floor - has queries
+// that do finish in less, so the guess says nothing about it, and applied it
+// would divert every round of the group that is not started at once. Such a
+// group is judged only by its own reading. The reading is evidence and
+// applies to any group.
+func (source *ProductionSlotSource) divertBound(evaluationTime execution.EvaluationTime, deadline int64) (time.Duration, string) {
+	bound, boundSource := source.recovery.TakeoverDivertFloor, observability.TakeoverFloorFallback
+	if bound >= time.UnixMilli(deadline).Sub(time.Unix(int64(evaluationTime), 0)) {
+		bound = 0
+	}
+	if source.queryLatency != nil {
+		if observed, ok := source.queryLatency(source.queryGroup); ok {
+			bound, boundSource = observed, observability.TakeoverFloorObserved
+		}
+	}
+	return bound, boundSource
+}
+
+// divertDecision is what a live round that runs as a normal one was judged
+// on: the deadline it was judged against (live) beside the frozen one, the
+// bound and its source, and what was left. A round the degraded pool holds
+// is not judged, and says so with no bound.
+func (source *ProductionSlotSource) divertDecision(
+	evaluationTime execution.EvaluationTime,
+	frozen, live int64,
+	at time.Time,
+	held bool,
+) observability.DivertDecisionFacts {
+	decision := observability.DivertDecisionFacts{ClassifiedAtUnixMilli: at.UnixMilli(), FrozenDeadlineUnixMilli: frozen,
+		LiveDeadlineUnixMilli: live, RemainingMillis: live - at.UnixMilli(), BoundSource: observability.DivertBoundNone}
+	if held {
+		return decision
+	}
+	bound, boundSource := source.divertBound(evaluationTime, live)
+	if bound <= 0 {
+		return decision
+	}
+	decision.BoundMillis = bound.Milliseconds()
+	decision.BoundSource = observability.DivertBoundFallback
+	if boundSource == observability.TakeoverFloorObserved {
+		decision.BoundSource = observability.DivertBoundQueryDuration
+	}
+	return decision
 }
 
 // observe reports one observation, a panicking observer contained.
@@ -1406,6 +1475,37 @@ func frozenSlotExecutionFacts(
 		return execution.FrozenDuePlanTargets{}, 0, ErrSlotContractDrift
 	}
 	return targets, deadline, nil
+}
+
+// slotConsumers is every consumer of a frozen Slot's data requirements.
+func slotConsumers(fact execution.FrozenSlotContractFact) []execution.DataRequirementConsumer {
+	var consumers []execution.DataRequirementConsumer
+	for _, requirement := range fact.Requirements {
+		consumers = append(consumers, requirement.Consumers...)
+	}
+	return consumers
+}
+
+// divertDeadline is the deadline a live round's read will be cut at: the
+// earliest of its consumers' query deadlines under the runtime's measured
+// post-query tail (LiveReserve.QueryDeadlineUnixMilli), as access derives it
+// for the read, with at as the earliest the read can start. Without a
+// measured tail, or without the Slot's consumers, it is the frozen deadline.
+func (source *ProductionSlotSource) divertDeadline(frozen int64, consumers []execution.DataRequirementConsumer, at time.Time) int64 {
+	if source.liveReserve == nil || len(consumers) == 0 {
+		return frozen
+	}
+	deadline := int64(0)
+	for _, consumer := range consumers {
+		candidate, _ := source.liveReserve.QueryDeadlineUnixMilli(consumer, source.queryGroup, at.UnixMilli())
+		if deadline == 0 || candidate < deadline {
+			deadline = candidate
+		}
+	}
+	if deadline <= 0 {
+		return frozen
+	}
+	return deadline
 }
 
 // replayDistance counts the grid points after first that at has passed, on

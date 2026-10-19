@@ -2601,6 +2601,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithTakeoverClock(runtime.takeovers),
 		scheduler.WithReadHolds(readHolds),
 		scheduler.WithQueryLatency(runtime.dependencies.QueryLatency),
+		scheduler.WithLiveReserve(slotSourceLiveReserve(runtime.dependencies.Flights)),
 	)
 	if err != nil {
 		release()
@@ -2825,6 +2826,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		Result:    observability.ResultStarted, Direction: observability.DirectionInternal, Trace: trace,
 	})
 	started := time.Now()
+	// The attempt's query budget, recorded by access for whichever plan binds
+	// the round, rendered on the completion only when the round ends degraded.
+	ctx, budget := observability.ContextWithBudgetCapture(ctx)
 	result, err := executor.next.Execute(ctx, request)
 	if executor.readHolds != nil {
 		if reason, known := worker.StateConflictReason(err); known && reason == execution.ReasonCode(contract.ReasonStateStaleVersion) {
@@ -2922,7 +2926,8 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		HeldBy: heldBy, GapApplySite: gapApplySite,
+		HeldBy: heldBy, GapApplySite: gapApplySite, DivertDecision: timedOutRoundDecision(ctx, observedResult, reason),
+		QueryBudget: degradedRoundBudget(observedResult, budget),
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
@@ -2940,6 +2945,26 @@ func (executor observedProductionSlotExecutor) Execute(
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err
+}
+
+// degradedRoundBudget is the binding query budget access resolved for a
+// round, on the completion of a round that ended degraded; nil on every
+// other completion.
+func degradedRoundBudget(result observability.Result, budget *observability.BudgetCapture) *observability.QueryBudgetFacts {
+	if result != observability.ResultDegraded {
+		return nil
+	}
+	return budget.Facts()
+}
+
+// timedOutRoundDecision is the decision that let a round run as a normal one,
+// on the completion of a round that then ended degraded for its query's
+// deadline; nil on every other completion, so normal lines stay as they were.
+func timedOutRoundDecision(ctx context.Context, result observability.Result, reason observability.ReasonCode) *observability.DivertDecisionFacts {
+	if result != observability.ResultDegraded || reason != observability.ReasonCode(contract.ReasonQueryTimeout) {
+		return nil
+	}
+	return observability.DivertDecisionFromContext(ctx)
 }
 
 func frozenSlotTrace(
