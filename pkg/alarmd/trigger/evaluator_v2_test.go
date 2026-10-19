@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -146,6 +147,7 @@ func TestEvaluatorV2KeepsWarmingAndLevelIsolationExplicit(t *testing.T) {
 	warming.Record.LevelFacts = []DetectionFact{factV2(warming.Plan.Levels().At(0), DetectionNormal)}
 	warming.Histories = []LevelHistory{{LevelID: 5, View: pointHistory{step: 60, points: map[int64]bool{300: false}}}}
 	warming.EffectiveTimeFacts = activeFactsV2(t, warming.Plan, 300)
+	unsettled(&warming)
 	warmingResult, err := EvaluateV2(warming)
 	if err != nil {
 		t.Fatalf("warming EvaluateV2() error = %v", err)
@@ -429,6 +431,7 @@ func TestEvaluatorV2IncompleteWindowAllowsAbnormalAndEvidencedRecovery(t *testin
 	request := requestV2(t, plan, 300, []DetectionFact{factV2(level, DetectionAnomalous)},
 		[]LevelHistory{{LevelID: 5, View: pointHistory{step: 60, points: map[int64]bool{240: true, 300: true}}}},
 		activeFactsV2(t, plan, 300))
+	unsettled(&request)
 	result, err := EvaluateV2(request)
 	if err != nil {
 		t.Fatalf("EvaluateV2() error = %v", err)
@@ -493,6 +496,7 @@ func TestEvaluatorV2RecoveryWalkPassesSkippedWindowsToReachTheRetainedOnes(t *te
 	history := pointHistory{step: 60, points: map[int64]bool{60: false, 120: false, 300: false, 360: false}}
 	request := requestV2(t, plan, 360, []DetectionFact{factV2(level, DetectionNormal)},
 		[]LevelHistory{{LevelID: 5, View: history}}, activeFactsV2(t, plan, 360))
+	unsettled(&request)
 	result, err := EvaluateV2(request)
 	if err != nil {
 		t.Fatalf("EvaluateV2() error = %v", err)
@@ -551,6 +555,7 @@ func TestEvaluatorV2RecoveryWalkReadsThePositionsRetainedPastTheWindow(t *testin
 
 	request := requestV2(t, plan, source, []DetectionFact{factV2(level, DetectionNormal)},
 		[]LevelHistory{{LevelID: 5, View: pointHistory{step: step, points: points}}}, activeFactsV2(t, plan, source))
+	unsettled(&request)
 	result, err := EvaluateV2(request)
 	if err != nil {
 		t.Fatalf("EvaluateV2() error = %v", err)
@@ -699,6 +704,14 @@ func activeFactsBenchmark(b *testing.B, plan *strategy.CompiledPlan, evaluationT
 		result[index] = LevelEffectiveTimeFact{LevelID: level.Definition().LevelID, Fact: facts[index]}
 	}
 	return result
+}
+
+// unsettled freezes request with the longest read hold a contract may carry,
+// so that every window the walk reaches is still inside it and keeps the
+// skip rule. The cases that call it are about windows whose holes may still
+// fill; with no hold their holes are settled and count as non-anomalous.
+func unsettled(request *EvaluationRequestV2) {
+	request.ReadHoldMillis = execution.MaxReadHoldMillis
 }
 
 type pointHistory struct {

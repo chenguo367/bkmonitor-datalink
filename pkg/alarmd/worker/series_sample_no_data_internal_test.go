@@ -121,8 +121,15 @@ func runNoDataSampleRounds(t *testing.T, due execution.DuePlan, store *state.Exe
 				mutations = append(mutations, result.Mutation)
 			}
 		}
-		if index < 4 && len(events) != 0 {
-			t.Fatalf("round %d bridged an unavailable period: %+v", index+1, events)
+		// The unavailable round is a hole, never an absent period: no round
+		// before the fifth reaches three absent in three. Once the hole is
+		// settled it is a minute with no anomaly, as in Python's recovery
+		// check, so a window over it that stays under the threshold may read
+		// RECOVERY - with no alert open, which the consumer's gate drops.
+		for _, event := range events {
+			if index < 4 && event.EventKind != contract.TriggerEventRecovery {
+				t.Fatalf("round %d bridged an unavailable period: %+v", index+1, events)
+			}
 		}
 		if index >= 4 {
 			want := contract.TriggerEventAbnormal

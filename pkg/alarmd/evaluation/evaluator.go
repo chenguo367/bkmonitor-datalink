@@ -273,12 +273,14 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				completeness = string(current.HistoryCompleteness)
 			}
 		}
+		readGapOpen := false
 		if guarded, reason, found := gapCompleteness(request.Gaps, due, l.Definition().LevelID); found {
 			completeness = guarded
 			durableGuardReasons[l.Definition().LevelID] = reason
+			readGapOpen = true
 		}
 		held := historyView{HistoryView: h, completeness: completeness}
-		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held}
+		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held, ReadGapOpen: readGapOpen}
 		// One walk for the counts and the holes: the summary visits every
 		// position and classifies it, and a second walk over a day-long
 		// window would double the dearest read on this path for exactly the
@@ -396,7 +398,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
 		return string(folded), proposed
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
 	if err != nil {
 		return recordResult{}, err
 	}

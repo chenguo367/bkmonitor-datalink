@@ -149,6 +149,13 @@ type HistoryView interface {
 type LevelHistory struct {
 	LevelID uint32
 	View    HistoryView
+	// ReadGapOpen says a round of this Level's Plan was not read whole and
+	// its gap marker is still open: a marker clears only after as many whole
+	// rounds as the Level's history needs, so while it is open the unread
+	// round may lie inside any window the recovery walk reads, and a hole
+	// there is a round nobody read rather than a minute with no point. The
+	// walk treats every window as unsettled until it clears.
+	ReadGapOpen bool
 }
 
 type LevelEffectiveTimeFact struct {
@@ -176,9 +183,24 @@ type EvaluationRequestV2 struct {
 	Histories          []LevelHistory
 	EffectiveTimeFacts []LevelEffectiveTimeFact
 	EvaluationTime     int64
-	ExecutionID        string
-	LateAccepted       bool
-	Limits             EvaluationLimitsV2
+	// ReadHoldMillis is the read hold of the Slot this record is evaluated
+	// in, as its frozen execution contract carries it
+	// (execution.FrozenExecutionContractRef.ReadHoldMillis). It sets the
+	// settled boundary of the recovery walk: a position at or before
+	// EvaluationTime less the hold is settled, and a position after it may
+	// still be filled by a point that has not arrived yet. Zero is a group
+	// read without a hold, the same encoding the contract uses, and every
+	// position up to EvaluationTime is settled.
+	ReadHoldMillis int64
+	// SeriesSeenBefore says the series' state held history before this
+	// round: it was observed before this record, even where retention has
+	// since dropped those positions. A series without it is new, and the
+	// recovery walk does not read minutes before its first position as quiet
+	// ones.
+	SeriesSeenBefore bool
+	ExecutionID      string
+	LateAccepted     bool
+	Limits           EvaluationLimitsV2
 	// OpenAlerts is the consumer's open alert set for the second recovery
 	// gate. Nil means the caller has no such gate, which is a different
 	// thing from a set that could not be loaded: the latter is a set that

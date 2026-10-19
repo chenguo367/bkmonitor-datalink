@@ -336,15 +336,15 @@ func recordIDFor(sourceTime int64) string {
 	return id[:60] + fmt.Sprintf("%04d", sourceTime%10000)
 }
 
-// A point that lands between the positions its history is kept on reads as a
-// window that is still filling, and nothing says otherwise.
+// A point that lands between the positions its history is kept on reads as an
+// ordinary short window, and nothing says otherwise.
 //
 // This is the reason the worker refuses an unaligned Slot before building any
 // point, and the reason that refusal cannot be left to something downstream.
 // The history summary does check alignment - and passes, because it measures
 // the window from the point's own time, so an unaligned point is aligned with
-// itself. What comes back is DECIDED_DEGRADED with HISTORY_WARMING: the same
-// answer a genuinely warming window gives, every round, forever.
+// itself. What comes back is HISTORY_WARMING, or a recovery read off settled
+// holes: the answers a genuinely short window gives, every round, forever.
 //
 // The test states the silence rather than the guard, because the guard lives in
 // another package and a comment there asserting this would be a claim with
@@ -371,9 +371,15 @@ func TestAnOffGridPointIsIndistinguishableFromAWarmingWindow(t *testing.T) {
 	if len(result.Plans) != 1 || len(result.Plans[0].LevelOutcomes) != 1 {
 		t.Fatalf("result = %+v, want one level outcome", result.Plans)
 	}
+	// Nothing in the outcome names the misalignment. The window is short, so
+	// the round reads either a window still filling or - its positions being
+	// settled, with the series already known - a recovery read off those
+	// settled holes, the way a sparse series' is. Either is an answer a real
+	// series gives every round, and neither says the point was off the grid.
 	outcome := result.Plans[0].LevelOutcomes[0]
-	if outcome.ReasonCode != execution.ReasonCode(contract.ReasonHistoryWarming) {
-		t.Fatalf("an off-grid round reported %q; this test exists to record that it reports warming, "+
-			"and if that changed the worker's guard should be reconsidered", outcome.ReasonCode)
+	warming := outcome.ReasonCode == execution.ReasonCode(contract.ReasonHistoryWarming)
+	if !warming && outcome.Outcome != execution.LevelOutcomeRecovery {
+		t.Fatalf("an off-grid round reported %s / %q; this test exists to record that it reads as an ordinary "+
+			"short window, and if that changed the worker's guard should be reconsidered", outcome.Outcome, outcome.ReasonCode)
 	}
 }
