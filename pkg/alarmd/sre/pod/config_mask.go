@@ -5,7 +5,9 @@ package pod
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"unicode"
@@ -128,6 +130,14 @@ func plainValue(text string) bool {
 type configMasker struct {
 	fingerprints *fingerprints
 	masked       int
+	// splitPEM is set by a scalar holding part of a PEM block - its BEGIN
+	// without its END, or an END alone - which the leaf rule cannot judge
+	// whole (document).
+	splitPEM bool
+	// scalarPEM is set by a scalar holding a BEGIN line: a value whose PEM
+	// header is in no scalar has it in a comment or a key, both of which a
+	// document drops or shows unjudged (document).
+	scalarPEM bool
 }
 
 func (m *configMasker) mask(text string) string {
@@ -151,30 +161,66 @@ func (m *configMasker) value(key, text string) string {
 	if !strings.ContainsAny(text, "\n") {
 		return m.leaf(key, text)
 	}
-	if pemBlock.MatchString(text) {
+	// A value that is a PEM block, or a bundle of them, is key material
+	// whole.
+	if strings.HasPrefix(strings.TrimSpace(text), "-----BEGIN ") {
 		return m.mask(text)
 	}
+	// A PEM block inside a document is one scalar, masked by the leaf rule
+	// as key material whatever it is called; in other text its lines are
+	// masked from BEGIN to END (lines). Neither masks the plain
+	// configuration around it.
 	if shown, ok := m.document(text); ok {
 		return shown
 	}
 	return m.lines(text)
 }
 
-// document is text as a YAML (or JSON) document with every scalar decided on
-// its own, or false when it is not one.
+// document is text as a YAML (or JSON) document - every document of it, when
+// it holds several - with every scalar decided on its own, or false when it
+// is not one.
+//
+// A PEM block split across scalars, one line in each, is not a document the
+// leaf rule can judge: its short last line and its END line read as plain
+// alone. Such text is false too, and read line by line, where the block is
+// masked from BEGIN to END - as is text whose PEM header is in no scalar but
+// in a comment or a key, which the walk never judges.
 func (m *configMasker) document(text string) (string, bool) {
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(text), &root); err != nil || len(root.Content) == 0 {
+	var nodes []*yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(text))
+	for {
+		var root yaml.Node
+		err := decoder.Decode(&root)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+		if len(root.Content) == 0 {
+			continue
+		}
+		node := root.Content[0]
+		if node.Kind != yaml.MappingNode && node.Kind != yaml.SequenceNode {
+			return "", false
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
 		return "", false
 	}
-	node := root.Content[0]
-	if node.Kind != yaml.MappingNode && node.Kind != yaml.SequenceNode {
+	masked := m.masked
+	for _, node := range nodes {
+		m.walk(node, "")
+	}
+	if m.splitPEM || !m.scalarPEM && pemBlock.MatchString(text) {
+		m.masked, m.splitPEM, m.scalarPEM = masked, false, false
 		return "", false
 	}
-	m.walk(node, "")
-	if strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[") {
+	m.scalarPEM = false
+	if len(nodes) == 1 && (strings.HasPrefix(strings.TrimSpace(text), "{") || strings.HasPrefix(strings.TrimSpace(text), "[")) {
 		var decoded any
-		if err := node.Decode(&decoded); err == nil {
+		if err := nodes[0].Decode(&decoded); err == nil {
 			if encoded, err := json.MarshalIndent(decoded, "", "  "); err == nil {
 				return string(encoded), true
 			}
@@ -183,7 +229,12 @@ func (m *configMasker) document(text string) (string, bool) {
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
-	if err := encoder.Encode(node); err != nil {
+	for _, node := range nodes {
+		if err := encoder.Encode(node); err != nil {
+			return "", false
+		}
+	}
+	if err := encoder.Close(); err != nil {
 		return "", false
 	}
 	return out.String(), true
@@ -223,6 +274,11 @@ func (m *configMasker) walk(node *yaml.Node, name string) {
 }
 
 func (m *configMasker) scalar(node *yaml.Node, name string) {
+	begins, ends := pemBlock.MatchString(node.Value), strings.Contains(node.Value, "-----END ")
+	if begins != ends {
+		m.splitPEM = true
+	}
+	m.scalarPEM = m.scalarPEM || begins
 	if node.Tag == "!!bool" || node.Tag == "!!int" || node.Tag == "!!float" || node.Tag == "!!null" {
 		if !configKey.MatchString(name) {
 			return
@@ -237,11 +293,27 @@ func (m *configMasker) scalar(node *yaml.Node, name string) {
 
 // lines is text that is not a document, line by line: a line of key and
 // value decided as a leaf, a blank kept, and any other line kept only when
-// the whole of it is plain and no word in it names a credential.
+// the whole of it is plain and no word in it names a credential. Every line
+// of a PEM block, from its BEGIN line to its END line (or the end of the
+// text), is masked: the block's last line can be a short run that reads as
+// plain on its own.
 func (m *configMasker) lines(text string) string {
 	lines := strings.Split(text, "\n")
+	inPEM := false
 	for index, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if pemBlock.MatchString(line) {
+			inPEM = true
+		}
+		if inPEM {
+			if trimmed != "" {
+				lines[index] = m.mask(line)
+			}
+			if strings.Contains(line, "-----END ") {
+				inPEM = false
+			}
+			continue
+		}
 		if trimmed == "" {
 			continue
 		}

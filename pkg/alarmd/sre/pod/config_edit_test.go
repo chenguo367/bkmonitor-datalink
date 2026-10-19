@@ -261,3 +261,58 @@ func TestOldTextRepeatedPastTheBoundIsRefused(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+// A run configuration that carries a PEM public key among plain settings is
+// shown setting by setting: the key and the password masked, the hosts and
+// ports readable, and a shown setting editable.
+const pemRunConfig = "storage:\n  redis:\n    host: redis.example.test\n    port: 6379\n    password: Hunter9Secret\njwt:\n  enabled: true\n" +
+	"  public_key: |\n    -----BEGIN PUBLIC KEY-----\n    MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf\n    AB==\n    -----END PUBLIC KEY-----\n"
+
+func TestAConfigWithAPEMKeyShowsItsPlainSettings(t *testing.T) {
+	provider, _, _ := editProvider(t, pemRunConfig)
+	masker := &configMasker{fingerprints: provider.newFingerprints()}
+	shown := masker.value("runcfg", pemRunConfig)
+	for _, kept := range []string{"host: redis.example.test", "port: 6379", "enabled: true"} {
+		if !strings.Contains(shown, kept) {
+			t.Errorf("lost %q:\n%s", kept, shown)
+		}
+	}
+	for _, hidden := range []string{"BEGIN PUBLIC KEY", "MFwwDQYJKoZIhvcNAQEBBQ", "Hunter9Secret", "AB=="} {
+		if strings.Contains(shown, hidden) {
+			t.Errorf("%q shown:\n%s", hidden, shown)
+		}
+	}
+	if masker.masked != 2 {
+		t.Errorf("masked %d, want the key and the password:\n%s", masker.masked, shown)
+	}
+	request := editRequest(provider, pemRunConfig, "redis.example.test", "redis-2.example.test")
+	receipt, err := provider.EditConfigMapText(context.Background(), request)
+	carriesNoSecret(t, receipt, err)
+	if err != nil || receipt.Outcome != WriteUpdated {
+		t.Fatalf("edit beside a PEM key: receipt %+v err %v", receipt, err)
+	}
+}
+
+// In text that is not a document, every line of a PEM block is masked, the
+// short last line too, and the plain lines around it are shown.
+func TestEveryLineOfAPEMBlockInPlainTextIsMasked(t *testing.T) {
+	provider, _, _ := editProvider(t, "")
+	masker := &configMasker{fingerprints: provider.newFingerprints()}
+	text := "upstream mirror.example.test\n-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ2xhdWRlVGVzdENlcnRpZmljYXRlMA\nAB==\n-----END CERTIFICATE-----\ncache 30\n"
+	shown := masker.lines(text)
+	if !strings.Contains(shown, "upstream mirror.example.test") || !strings.Contains(shown, "cache 30") {
+		t.Errorf("plain lines lost:\n%s", shown)
+	}
+	for _, hidden := range []string{"BEGIN CERTIFICATE", "MIIBszCCAVmg", "AB==", "END CERTIFICATE"} {
+		if strings.Contains(shown, hidden) {
+			t.Errorf("%q shown:\n%s", hidden, shown)
+		}
+	}
+	if masker.masked != 4 {
+		t.Errorf("masked %d lines, want the block's 4:\n%s", masker.masked, shown)
+	}
+	whole := &configMasker{fingerprints: provider.newFingerprints()}
+	if got := whole.value("ca.crt", text[strings.Index(text, "-----BEGIN"):strings.Index(text, "cache")]); !strings.HasPrefix(got, "<redacted bytes=") || whole.masked != 1 {
+		t.Errorf("a value that is a PEM block: %q masked %d, want it whole", got, whole.masked)
+	}
+}
