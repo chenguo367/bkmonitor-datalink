@@ -113,7 +113,7 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 		if count, ok := ctx.Value(rangeCommittedCountKey{}).(*uint32); ok {
 			*count = request.ExpiredRange.Count
 		}
-		completed.QueryFreeCause = attribution.Cause
+		completed.QueryFreeCause = queryFreeCause(attribution.Cause)
 	}
 	return completed, nil
 }
@@ -121,4 +121,16 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 func expiredRangeCompletedFor(request execution.SlotExecutionRequest) execution.SlotExecutionResult {
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: request.ExpiredRange.CompletionKind(),
 		Result: observability.ResultDegraded, ReasonCode: request.ExpiredRange.CompletionReason()}
+}
+
+// queryFreeCause is the cause a committed query-free finalization names for
+// its slot_skipped line. The line is written when it names one and the
+// completion counter counts the kind, so a finalization without a cause still
+// names one -- NONE, the cause word the progress observation uses for it --
+// and is never counted without its line.
+func queryFreeCause(cause execution.CompletionCause) execution.CompletionCause {
+	if cause == "" {
+		return execution.CompletionCause(observability.ProgressCompletionCauseNone)
+	}
+	return cause
 }

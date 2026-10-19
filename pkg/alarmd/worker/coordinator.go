@@ -1763,7 +1763,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		completionCause.Coverage, completion.Evidence, completion.Primary)
 	committed := execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}
 	if completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable {
-		committed.QueryFreeCause = completionCause.Cause
+		committed.QueryFreeCause = queryFreeCause(completionCause.Cause)
 	}
 	return committed, nil
 }
