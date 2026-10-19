@@ -2,6 +2,7 @@ package noderunner
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -242,5 +243,52 @@ func TestCredentialFieldsNeverReachSpool(t *testing.T) {
 		if strings.Contains(contents(v), secret) || strings.Contains(string(raw), secret) {
 			t.Fatalf("credential reached output or spool: %s", secret)
 		}
+	}
+}
+
+// The output is read to its end however long the runner takes over it. A
+// command that exits with lines still in its pipe used to get two seconds
+// (exec's WaitDelay) for the runner to read them; a runner slower than that
+// -- here its lock held past them, as redaction and spooling under load do
+// -- had the copy cut, the execution failed, and the message blamed a
+// detached descendant there was none of.
+func TestOutputIsReadToTheEndHoweverLongTheReaderTakes(t *testing.T) {
+	r := testRunner(t)
+	// The runner takes the first line and waits on its lock; the second is
+	// still in the pipe when the command and its group are gone.
+	r.Handle(startRequest("printf 'first\\n'; sleep 0.2; printf 'second\\n'"))
+	r.mu.Lock()
+	time.Sleep(2500 * time.Millisecond)
+	r.mu.Unlock()
+	v := terminal(t, r)
+	if v.State != "succeeded" || v.Error != "" || contents(v) != "first\nsecond\n" {
+		t.Fatalf("%+v", v)
+	}
+}
+
+// A descendant that left the command's process group and still holds its
+// output is outside what the runner supervises: once the group is gone and
+// the pipe is empty, the execution ends at once and says so, rather than
+// waiting on a process it does not own.
+func TestADetachedDescendantHoldingTheOutputIsNamed(t *testing.T) {
+	detach := ""
+	if _, err := exec.LookPath("setsid"); err == nil {
+		detach = "setsid sleep 3 &"
+	} else if _, err := exec.LookPath("perl"); err == nil {
+		detach = "perl -e 'setpgrp(0,0); sleep 3' &"
+	} else {
+		t.Skip("neither setsid nor perl to leave the process group with")
+	}
+	r := testRunner(t)
+	started := time.Now()
+	// The command outlives the descendant's leaving the group by a moment;
+	// a group signalled before it left would take it down with the rest.
+	r.Handle(startRequest("echo before; " + detach + " sleep 0.5"))
+	v := terminal(t, r)
+	if v.State != "failed" || !strings.Contains(v.Error, "detached descendants") || contents(v) != "before\n" {
+		t.Fatalf("%+v", v)
+	}
+	if waited := time.Since(started); waited > 2500*time.Millisecond {
+		t.Fatalf("ended after %s, want once the group was gone, not when the descendant exits", waited)
 	}
 }

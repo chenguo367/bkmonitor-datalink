@@ -138,7 +138,6 @@ func (r *Runner) start(q Request) error {
 		return err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second
 	secrets := []string{}
 	for k, v := range q.Env {
 		k = strings.ToLower(k)
@@ -149,18 +148,34 @@ func (r *Runner) start(q Request) error {
 	scrub := redact.New(secrets...)
 	stdout := &lineWriter{r: r, stream: 1, scrub: scrub}
 	stderr := &lineWriter{r: r, stream: 2, scrub: scrub}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	r.limit = int64(q.OutputLimitBytes)
-	if err = cmd.Start(); err != nil {
+	// The runner holds the read ends itself rather than letting exec copy
+	// them, so that the end of the output is a fact read from the pipe
+	// (outputPipe.drain) and not a fixed wait after exit.
+	outPipe, errPipe, err := openOutputPipes()
+	if err != nil {
 		for _, f := range cmd.ExtraFiles {
 			_ = f.Close()
 		}
-		return errors.New("command start failed: " + scrub.Text(err.Error()))
+		return errors.New("output pipe failed: " + err.Error())
 	}
+	cmd.Stdout = outPipe.write
+	cmd.Stderr = errPipe.write
+	r.limit = int64(q.OutputLimitBytes)
+	err = cmd.Start()
 	for _, f := range cmd.ExtraFiles {
 		_ = f.Close()
 	}
+	// The child holds its own copies of the write ends; the runner's would
+	// keep the pipes open for ever.
+	outPipe.closeWrite()
+	errPipe.closeWrite()
+	if err != nil {
+		outPipe.closeRead()
+		errPipe.closeRead()
+		return errors.New("command start failed: " + scrub.Text(err.Error()))
+	}
+	outDrained := outPipe.drain(stdout)
+	errDrained := errPipe.drain(stderr)
 	r.cmd = cmd
 	r.state.State = "running"
 	now := time.Now().UTC()
@@ -198,11 +213,20 @@ func (r *Runner) start(q Request) error {
 		if killErr == nil || errors.Is(killErr, syscall.ESRCH) {
 			reapGroup(cmd.Process.Pid)
 		}
+		// The group is gone: what is left in the pipes is all it wrote, and
+		// is read to the end however long that takes. A pipe still open
+		// once it is empty is held by a process outside the group.
+		outPipe.finish()
+		errPipe.finish()
+		detached := <-outDrained
+		detached = <-errDrained || detached
+		outPipe.closeRead()
+		errPipe.closeRead()
 		stdout.flush()
 		stderr.flush()
 		r.mu.Lock()
 		state := "succeeded"
-		if err != nil {
+		if err != nil || detached {
 			state = "failed"
 		}
 		if r.timedOut {
@@ -216,7 +240,7 @@ func (r *Runner) start(q Request) error {
 		}
 		r.state.ConfirmedTerminated = r.state.CancelRequested && (killErr == nil || errors.Is(killErr, syscall.ESRCH))
 		message := ""
-		if errors.Is(err, exec.ErrWaitDelay) {
+		if detached {
 			message = "output pipe remained open after command exit; detached descendants are outside the supervision contract"
 		}
 		// Release argv, environment, stdin readers and redactor literals when
