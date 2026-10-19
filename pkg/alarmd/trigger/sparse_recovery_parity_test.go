@@ -35,6 +35,13 @@ func evaluateAtV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePoin
 }
 
 func evaluateSeenAtV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePoint, index int, evaluationTime, hold int64, seen bool) EvaluationResultV2 {
+	return evaluateSlotV2(t, plan, points, index, evaluationTime, 0, hold, seen)
+}
+
+// evaluateSlotV2 is evaluateSeenAtV2 with the Slot's read end named: the
+// evaluation time less the query delay, exclusive. Zero reads as the
+// evaluation time.
+func evaluateSlotV2(t *testing.T, plan *strategy.CompiledPlan, points []sparsePoint, index int, evaluationTime, readEnd, hold int64, seen bool) EvaluationResultV2 {
 	t.Helper()
 	level := plan.Levels().At(0)
 	history := pointHistory{step: 60, points: make(map[int64]bool, index+1)}
@@ -48,6 +55,7 @@ func evaluateSeenAtV2(t *testing.T, plan *strategy.CompiledPlan, points []sparse
 	request := requestV2(t, plan, points[index].time, []DetectionFact{factV2(level, result)},
 		[]LevelHistory{{LevelID: level.Definition().LevelID, View: history}}, activeFactsV2(t, plan, evaluationTime))
 	request.EvaluationTime, request.ReadHoldMillis, request.SeriesSeenBefore = evaluationTime, hold, seen
+	request.ReadEnd = readEnd
 	evaluated, err := EvaluateV2(request)
 	if err != nil {
 		t.Fatalf("EvaluateV2(%d) error = %v", points[index].time, err)
@@ -269,40 +277,48 @@ func TestSparseSeriesRecoverAtTheEvaluationsPythonDoes(t *testing.T) {
 	}
 }
 
-// Inside the read hold a hole may still fill, so a window there keeps the
-// skip rule, and once the hold has passed a late anomalous point that landed
-// in it blocks the recovery it would have pre-empted.
+// A point that arrives late, but inside the current Slot's read, is read by
+// that Slot and blocks the recovery it would otherwise have pre-empted. The
+// read was made under the group's hold precisely so that such a point lands
+// first. Window 5, one anomaly, five recovery windows, a point every five
+// minutes and an anomaly at :40: at :50, read in the Slot a minute later with
+// a 96 s hold, the series recovers - and with the late anomalous :48 in the
+// same read, it does not. Python reads the same, and so does the next point:
+// at :55 a window still holds :48, at :60 none does.
 //
-// Window 5, one anomaly, five recovery windows, a point every five minutes,
-// and a three minute hold: at :50 the windows ending :48 to :50 are inside the
-// hold and stepped over, three settled ones are counted, and the fourth meets
-// the anomaly at :40 - no recovery, where with no hold alarmd and Python both
-// recover at :50. An anomalous point for :48 then arrives late. At :55 the
-// newest settled window, ending :52, holds it and stops the walk. At :60 every
-// window counted starts after :48 and the alert closes, as Python's does.
-func TestARecoveryInsideTheReadHoldWaitsAndALateAnomalyBlocksIt(t *testing.T) {
+// A point later than the hold - a hold set too low - is not this test's: the
+// read hold's probation finds such reads and raises the hold
+// (lookback/probation.go), and is tested there.
+//
+// A window no read has covered yet keeps the skip rule: with the read ending
+// at :48, the windows ending :48 to :50 are stepped over, three are counted
+// behind them, and the fourth meets :40.
+func TestALateAnomalyInsideTheSlotsReadBlocksRecovery(t *testing.T) {
 	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 5, nil)})
-	const hold = int64(3 * 60 * 1000)
+	const hold = int64(96 * 1000)
 	minute := func(m int64) int64 { return 6000 + m*60 }
+	slot := func(m int64) int64 { return minute(m) + 60 }
 	before := []sparsePoint{{minute(40), true}, {minute(45), false}, {minute(50), false}}
-
-	if !recoveredV2(evaluateAtV2(t, plan, before, 2, minute(50), 0)) {
-		t.Fatal("with no hold :50 does not recover; the fixture does not separate the two rules")
+	if !recoveredV2(evaluateSlotV2(t, plan, before, 2, slot(50), slot(50), hold, true)) {
+		t.Fatal("at :50 without the late point alarmd did not recover; the fixture does not separate the two")
 	}
-	held := evaluateAtV2(t, plan, before, 2, minute(50), hold)
-	if recoveredV2(held) {
-		t.Fatalf("at :50 inside a three minute hold alarmd recovered: holes the hold may still fill were read as normal")
-	}
-	if recovery := held.LevelOutcomes[0].DecisionWindow; recovery != nil && recovery.Recovery.SkippedWindows != 3 {
-		t.Fatalf("recovery evidence = %+v, want the three windows inside the hold stepped over", recovery.Recovery)
-	}
-
 	late := []sparsePoint{{minute(40), true}, {minute(45), false}, {minute(48), true}, {minute(50), false}, {minute(55), false}, {minute(60), false}}
-	if recoveredV2(evaluateAtV2(t, plan, late, 4, minute(55), hold)) {
-		t.Fatal("at :55 alarmd recovered over the late anomaly at :48 once it was settled")
+	if recoveredV2(evaluateSlotV2(t, plan, late, 3, slot(50), slot(50), hold, true)) {
+		t.Fatal("at :50 alarmd recovered over the anomalous :48 its own read covered")
 	}
-	if !recoveredV2(evaluateAtV2(t, plan, late, 5, minute(60), hold)) {
-		t.Fatal("at :60 every counted window starts after :48 and alarmd still did not recover")
+	if recoveredV2(evaluateSlotV2(t, plan, late, 4, slot(55), slot(55), hold, true)) {
+		t.Fatal("at :55 alarmd recovered over the anomalous :48")
+	}
+	if !recoveredV2(evaluateSlotV2(t, plan, late, 5, slot(60), slot(60), hold, true)) {
+		t.Fatal("at :60 every window starts after :48 and alarmd did not recover")
+	}
+
+	uncovered := evaluateSlotV2(t, plan, before, 2, slot(50), minute(48), hold, true)
+	if recoveredV2(uncovered) {
+		t.Fatal("with the read ending at :48 alarmd recovered from windows no read had covered")
+	}
+	if window := uncovered.LevelOutcomes[0].DecisionWindow; window != nil && window.Recovery.SkippedWindows != 3 {
+		t.Fatalf("recovery evidence = %+v, want the three windows past the read stepped over", window.Recovery)
 	}
 }
 
@@ -463,28 +479,27 @@ func TestEveryFiveMinutesUnderWindowsOfTwoAndFiveRecoversAtPythonsMinute(t *test
 // The whole-range-empty branch, recover.py:429-431: an open alert whose
 // recovery range, as Python bounds it, holds no present settled point is not
 // recovered, and stays open - the no-data close is not ported. The alert
-// opened at :00; at :20 the Slot is frozen with a two minute hold, so the
-// record's own point is inside the hold, and Python's range :10 to :20 holds
+// opened at :00; at :20 the Slot's read ends at :20, so the record's own
+// point is past it - not settled - and Python's range :10 to :20 holds
 // nothing else. Its pair is the same range with one present normal settled
 // point, at :12, which recovers at :20 as Python's check does.
 func TestAnOpenAlertWithNoSettledPointInItsRecoveryRangeStaysOpen(t *testing.T) {
 	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 5, nil)})
 	minute := func(m int64) int64 { return 6000 + m*60 }
-	const hold = int64(2 * 60 * 1000)
 	if start := pythonRecoveryRangeStartV2(minute(20), plan.Levels().At(0).Trigger(), plan.Levels().At(0).Recovery()); start != minute(10)+1 {
 		t.Fatalf("Python's range starts at %d, want one second past :10", start)
 	}
 	empty := []sparsePoint{{minute(0), true}, {minute(20), false}}
-	result := evaluateSeenAtV2(t, plan, empty, 1, minute(20), hold, true)
+	result := evaluateSlotV2(t, plan, empty, 1, minute(20), minute(20), 0, true)
 	if recoveredV2(result) {
 		t.Fatal("alarmd recovered an alert whose recovery range holds no present settled point")
 	}
 	one := []sparsePoint{{minute(0), true}, {minute(12), false}, {minute(20), false}}
-	if !recoveredV2(evaluateSeenAtV2(t, plan, one, 2, minute(20), hold, true)) {
+	if !recoveredV2(evaluateSlotV2(t, plan, one, 2, minute(20), minute(20), 0, true)) {
 		t.Fatal("with one present normal settled point in the range alarmd did not recover at :20")
 	}
-	// The same pair with no hold, so the record's own point is settled: it is
-	// the one present point, and the alert recovers, as Python's does.
+	// The same with the read covering the record's own point: it is the one
+	// present settled point, and the alert recovers, as Python's does.
 	if !recoveredV2(evaluateSeenAtV2(t, plan, empty, 1, minute(20), 0, true)) {
 		t.Fatal("with the record's own point settled alarmd did not recover at :20")
 	}
@@ -519,38 +534,41 @@ func TestAProductionShapedSeriesWithGapsRecoversAtPythonsMinute(t *testing.T) {
 	}
 }
 
-// The settled boundary's cost, pinned. A point every five minutes, window 5,
-// one anomaly, five recovery windows; each point is read in the Slot a minute
-// after it (a 60 s delay). Python recovers ten minutes after the anomaly. With
-// a 96 s hold alarmd does too: one window is inside the hold and stepped over,
-// and the five behind it still start after the anomaly at the next point.
-// With a 600 s hold nine windows are inside it, and this Level retains nine
-// positions, so no settled window is left to count: alarmd does not recover
-// this series at all within the hour, where Python recovered at minute 10.
-func TestTheReadHoldsCostOnASparseSeries(t *testing.T) {
-	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 5, nil)})
-	if retained := plan.Levels().At(0).StateRequirement().RetentionPoints; retained != 9 {
-		t.Fatalf("the Level retains %d positions, want 9: the case reads off that bound", retained)
-	}
+// The read hold does not delay a sparse series' recovery. Every point is read
+// in the Slot a minute after it plus a 60 s query delay, under holds of 96,
+// 120, 300 and 600 s, for points every three and every five minutes under
+// windows of two and five with five recovery windows: alarmd recovers at the
+// oracle's minute every time. A position counts once the current Slot's own
+// read covered it, and the hold only decides how late that read was made.
+// Before, the boundary was the evaluation time less the hold, and a 600 s
+// hold under window 5 put every retained window past it: no recovery at all.
+func TestTheReadHoldDoesNotDelayASparseSeriesRecovery(t *testing.T) {
+	cases := pythonRecoveryCases(t)
 	const delay = int64(60)
-	points := []sparsePoint{}
-	for m := int64(0); m <= 60; m += 5 {
-		points = append(points, sparsePoint{time: pythonBase + m*60, anomalous: m == 0})
-	}
-	firstRecovery := func(holdSeconds int64) int64 {
-		for index := 1; index < len(points); index++ {
-			if recoveredV2(evaluateSeenAtV2(t, plan, points, index, points[index].time+delay, holdSeconds*1000, true)) {
-				return (points[index].time - pythonBase) / 60
+	for _, id := range []string{"every_three_minutes_window_2", "every_three_minutes_window_5",
+		"every_five_minutes_window_2", "every_five_minutes_window_5"} {
+		item := cases[id]
+		if item.Lifecycle.Outcome != pythonRecovered || item.OpenedAt == nil {
+			t.Fatalf("%s: oracle = %+v, want a RECOVERED alert", id, item.Lifecycle)
+		}
+		plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, item.Window, item.Required, item.Recovery, nil)})
+		points := item.series()
+		for _, holdSeconds := range []int64{96, 120, 300, 600} {
+			first := int64(-1)
+			for index, point := range points {
+				if point.time <= *item.OpenedAt {
+					continue
+				}
+				slot := point.time + 60 + delay
+				if recoveredV2(evaluateSlotV2(t, plan, points, index, slot, slot-delay, holdSeconds*1000, true)) {
+					first = point.time
+					break
+				}
+			}
+			if first != item.Lifecycle.At {
+				t.Errorf("%s, %d s hold: alarmd first recovered at %d, Python at %d", id, holdSeconds, first-pythonBase, item.Lifecycle.At-pythonBase)
 			}
 		}
-		return -1
-	}
-	const python = 10
-	if got := firstRecovery(96); got != python {
-		t.Fatalf("with a 96 s hold alarmd first recovered at minute %d, Python at %d", got, python)
-	}
-	if got := firstRecovery(600); got != -1 {
-		t.Fatalf("with a 600 s hold alarmd first recovered at minute %d, want none within the hour (Python: %d)", got, python)
 	}
 }
 

@@ -209,6 +209,8 @@ def cases():
     for window in (2, 5):
         yield {"id": f"every_five_minutes_window_{window}", "window": window, "required": 1, "recovery": 5,
                "minutes": [index * 5 for index in range(8)], "anomalous": [index == 1 for index in range(8)]}
+        yield {"id": f"every_three_minutes_window_{window}", "window": window, "required": 1, "recovery": 5,
+               "minutes": [index * 3 for index in range(12)], "anomalous": [index == 1 for index in range(12)]}
     # The shape of a production series under trigger window 2 and five
     # recovery windows: gaps of 8, 9 and 16 minutes between its points.
     yield {"id": "gaps_8_9_16_window_2", "window": 2, "required": 1, "recovery": 5,

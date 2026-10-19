@@ -18,19 +18,21 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-// The settled boundary of the recovery walk is the Slot's own: its
-// evaluation time less the read hold its frozen contract carries. A series
-// with state and a point three minutes before this one, under a three minute
-// window and one recovery window, recovers when the Slot was read with no
-// hold - the window's two holes are settled minutes with no anomaly - and
-// does not when the contract froze the Slot with a ten minute hold, inside
-// which those holes may still fill.
+// The settled boundary of the recovery walk is the current Slot's own read:
+// a position counts once that read, made under the group's hold, covered it,
+// up to the evaluation time less the query delay - the primary
+// requirement's EndOffsetSeconds, from which the query window's end is
+// resolved. A series with state and a point three minutes before this one,
+// under a three minute window and one recovery window, is read in the Slot a
+// minute later: its two holes are covered and settled, and it recovers,
+// whatever the hold the Slot was frozen with. With the requirement ending ten
+// minutes earlier - a read that did not cover them - it does not.
 //
 // The earlier point is older than this Level retains, so the window holds
 // only this record: the series is known to be past its first position from
 // its state alone, which is what a sparse series' recovery depends on once
 // retention has dropped every point before its oldest window.
-func TestTheContractsReadHoldSetsTheSettledBoundary(t *testing.T) {
+func TestTheSlotsOwnReadSetsTheSettledBoundary(t *testing.T) {
 	plan := compiledWindow(t, 3, 1)
 	fingerprint := plan.Levels().At(0).Fingerprints().Detect
 	const at = int64(6000)
@@ -39,22 +41,26 @@ func TestTheContractsReadHoldSetsTheSettledBoundary(t *testing.T) {
 		Values:            map[string]json.RawMessage{"value": json.RawMessage(`10`)}, Dimensions: map[string]json.RawMessage{}, ReceivedTime: at}}
 	history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("d", 64), SourceTime: at - 3*60,
 		Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: fingerprint, Result: execution.LevelFactNormal}}}}
-	outcome := func(holdMillis int64) execution.LevelOutcomeKind {
+	outcome := func(endOffsetSeconds, holdMillis int64) execution.LevelOutcomeKind {
 		t.Helper()
-		request := atSlot(t, plan, requestFixtureForPlan(t, plan, records, history), at)
+		request := atSlot(t, plan, requestFixtureForPlan(t, plan, records, history), at+60)
+		request.Header.Requirements[0].RelativeWindow.StartOffsetSeconds = endOffsetSeconds - 60
+		request.Header.Requirements[0].RelativeWindow.EndOffsetSeconds = endOffsetSeconds
 		request.Header.Contract.ReadHoldMillis = holdMillis
 		request.Inputs[0].Contract = request.Header.Contract
 		result, err := newEvaluator(t).Evaluate(context.Background(), request)
 		if err != nil {
-			t.Fatalf("Evaluate(hold %d) = %v", holdMillis, err)
+			t.Fatalf("Evaluate(end %d, hold %d) = %v", endOffsetSeconds, holdMillis, err)
 		}
 		return result.Plans[0].LevelOutcomes[0].Outcome
 	}
-	if got := outcome(0); got != execution.LevelOutcomeRecovery {
-		t.Fatalf("with no read hold the outcome is %s, want RECOVERY: settled holes did not count as non-anomalous", got)
+	for _, hold := range []int64{0, int64(10 * time.Minute / time.Millisecond)} {
+		if got := outcome(0, hold); got != execution.LevelOutcomeRecovery {
+			t.Fatalf("with the read covering the window and a %d ms hold the outcome is %s, want RECOVERY", hold, got)
+		}
 	}
-	if got := outcome(int64(10 * time.Minute / time.Millisecond)); got == execution.LevelOutcomeRecovery {
-		t.Fatal("inside a ten minute read hold the walk recovered: the contract's hold did not reach the trigger")
+	if got := outcome(-600, 0); got == execution.LevelOutcomeRecovery {
+		t.Fatal("with the read ending ten minutes back the walk recovered: the read's end did not reach the trigger")
 	}
 }
 

@@ -185,13 +185,18 @@ type EvaluationRequestV2 struct {
 	EvaluationTime     int64
 	// ReadHoldMillis is the read hold of the Slot this record is evaluated
 	// in, as its frozen execution contract carries it
-	// (execution.FrozenExecutionContractRef.ReadHoldMillis). It sets the
-	// settled boundary of the recovery walk: a position at or before
-	// EvaluationTime less the hold is settled, and a position after it may
-	// still be filled by a point that has not arrived yet. Zero is a group
-	// read without a hold, the same encoding the contract uses, and every
-	// position up to EvaluationTime is settled.
+	// (execution.FrozenExecutionContractRef.ReadHoldMillis): how much later
+	// than its schedule the Slot's read was made. It does not move the
+	// settled boundary - ReadEnd does - because the read it delays is the
+	// one that settles what it covers.
 	ReadHoldMillis int64
+	// ReadEnd is where the current Slot's own read of the Plan's primary
+	// input ends, exclusive: the evaluation time plus the primary
+	// requirement's EndOffsetSeconds, which is minus the query delay
+	// (controlplane buildRequirements). A position before it counts as
+	// settled. Zero is a caller with no read to name, and settles every
+	// position up to EvaluationTime.
+	ReadEnd int64
 	// SeriesSeenBefore says the series' state held history before this
 	// round: it was observed before this record, even where retention has
 	// since dropped those positions. A series without it is new, and the

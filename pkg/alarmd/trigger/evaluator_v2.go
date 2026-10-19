@@ -261,6 +261,7 @@ func validateRequestV2(request EvaluationRequestV2) (strategy.LevelList, error) 
 	if request.Plan == nil || !request.Limits.valid() || request.TenantID == "" || request.BusinessID == "" ||
 		request.Record.RecordID == "" || request.Record.SourceTime < 0 || request.EvaluationTime < 0 || request.ExecutionID == "" ||
 		request.ReadHoldMillis < 0 || request.ReadHoldMillis > execution.MaxReadHoldMillis ||
+		request.ReadEnd < 0 || request.ReadEnd > request.EvaluationTime ||
 		request.RecordRef.RecordID != request.Record.RecordID || request.RecordRef.SourceTime != request.Record.SourceTime ||
 		request.RecordRef.Dimensions == nil || request.Observed.Values == nil {
 		return strategy.LevelList{}, invariantV2("validate request", 0, errors.New("missing identity, value, time, or budget"))
@@ -371,25 +372,20 @@ func evaluateLevelV2(
 	// the settled range guard below is for.
 	settledHoleMisses := uint32(0)
 	oldestWindowStart := triggerStart
-	// settledThrough is the newest source time this Slot's data is settled
-	// through: its evaluation time less the read hold it was frozen with,
-	// rounded so that a part second of hold still holds the whole second.
-	// The hold is how long the group's data is measured to keep landing, so
-	// a position younger than that may still be filled by a point that has
-	// not arrived. The validation bounds both terms, so this cannot overflow.
+	// settledThrough is the newest source time the walk counts as settled.
+	// A position counts once a read made under the group's hold has covered
+	// it, meaning the current Slot's own read, up to E - delay: the Slot was
+	// read its hold later than its schedule, so what that read covered had
+	// landed, and every earlier position was covered by an earlier Slot's
+	// read under the same rule. ReadEnd is that read's end, exclusive.
 	//
-	// It is conservative on purpose. What the Slot read was whole when read,
-	// up to the evaluation time less the query's delay, so with a hold longer
-	// than the delay the positions between the two are unsettled though they
-	// were read whole; the boundary is "wholly past the read hold", the
-	// condition the rule was accepted on, not the read's own edge. The cost
-	// falls on sparse series only - a window with no hole answers either way
-	// - and it is a delay: the walk steps over the windows inside the hold
-	// and counts settled ones behind them, so the recovery comes later than
-	// Python's by about the hold less the delay, rounded up to the series'
-	// next point, and not at all once those windows plus the R it needs
-	// reach past the positions the Level retains.
-	settledThrough := request.EvaluationTime - (request.ReadHoldMillis+999)/1000
+	// A hold set too low reads data before it has all landed; that is the
+	// read hold's own probation to catch and raise (lookback/probation.go),
+	// not this boundary's to guess at.
+	settledThrough := request.EvaluationTime
+	if request.ReadEnd > 0 {
+		settledThrough = request.ReadEnd - 1
+	}
 	// A round of the Plan not read whole is not settled data either: its
 	// hole is a round nobody read. Until the gap marker clears, which takes
 	// as many whole rounds as this history needs, that round may be in any
@@ -442,8 +438,8 @@ func evaluateLevelV2(
 				break
 			}
 			oldestWindowStart = windowStart
-			// Inside the read hold, a window nobody observed is evidence of
-			// neither recovery nor its opposite: its holes may still fill.
+			// Unsettled, a window nobody observed is evidence of neither
+			// recovery nor its opposite: its holes may still fill.
 			// Counting it as a miss would build a recovery on points that
 			// have not arrived; breaking on it would make a single hole cost
 			// the whole run. It is stepped over, and said so on the evidence.
@@ -494,10 +490,11 @@ func evaluateLevelV2(
 			// window's positions and the lateness tolerance, and a point every
 			// five minutes need leave none of them before the oldest window.
 			//
-			// A window that is not settled keeps the skip. A point inside the
-			// read hold may still arrive, and it may be the anomaly that fires
-			// the window; counting its hole as normal would close the alert
-			// before that point could say otherwise.
+			// A window that is not settled keeps the skip: a window no read has
+			// covered yet, or one an unread round may still be in. A point may
+			// still arrive there, and it may be the anomaly that fires the
+			// window; counting its hole as normal would close the alert before
+			// that point could say otherwise.
 			if windowEnd <= settledThrough && (request.SeriesSeenBefore || windowStart > 0 && history.CountObserved(0, windowStart-1) > 0) {
 				observedMisses++
 				settledHoleMisses++
@@ -515,8 +512,8 @@ func evaluateLevelV2(
 	//
 	// The same range, read at the settled boundary, when a settled hole was
 	// counted: a quiet minute is a fact only beside a point that was read
-	// whole, and a range whose only points are inside the read hold has
-	// none. No RECOVERY then; the alert stays as it is, since the no-data
+	// whole, and a range whose only points are past the settled boundary
+	// has none. No RECOVERY then; the alert stays as it is, since the no-data
 	// close Python takes elsewhere (recover.py:309-321) is not ported.
 	rangeObserved := true
 	if observedMisses >= recoveryPlan.ConsecutiveWindows {

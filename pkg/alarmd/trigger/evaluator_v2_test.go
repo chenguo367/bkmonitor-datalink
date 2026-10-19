@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -706,12 +705,12 @@ func activeFactsBenchmark(b *testing.B, plan *strategy.CompiledPlan, evaluationT
 	return result
 }
 
-// unsettled freezes request with the longest read hold a contract may carry,
-// so that every window the walk reaches is still inside it and keeps the
-// skip rule. The cases that call it are about windows whose holes may still
-// fill; with no hold their holes are settled and count as non-anomalous.
+// unsettled ends the Slot's read before every window the walk reaches, so
+// that none of them is settled and each keeps the skip rule. The cases that
+// call it are about windows whose holes may still fill; covered by the read,
+// their holes are settled and count as non-anomalous.
 func unsettled(request *EvaluationRequestV2) {
-	request.ReadHoldMillis = execution.MaxReadHoldMillis
+	request.ReadEnd = 1
 }
 
 type pointHistory struct {
