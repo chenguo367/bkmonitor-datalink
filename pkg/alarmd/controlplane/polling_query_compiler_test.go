@@ -45,6 +45,25 @@ func TestPollingSourceQuerySemantics(t *testing.T) {
 	}
 }
 
+// A filter with no matcher in it compiles to no match. "{}" is not a
+// selector: the provider refused the query beside it on every round, and a
+// strategy saved with an empty filter detected nothing.
+func TestPollingPromQLFilterWithoutAMatcherIsNoMatch(t *testing.T) {
+	planner, _ := NewLegacyPrimaryQueryCompiler("uq", "UTC", LegacyQueryRuntimeFacts{})
+	for _, filter := range []string{`null`, `{}`, `{"labels":{}}`, `{"ignored":1}`, `{"labels":{"nested":{}},"count":2}`} {
+		t.Run(filter, func(t *testing.T) {
+			source := pollingTestSource(`{"data_source_label":"prometheus","data_type_label":"time_series","promql":"avg_over_time(up[60s])","agg_interval":60,"filter_dict":` + filter + `}`)
+			facts, err := planner.CompilePrimaryQuery(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if facts.PromQL == nil || facts.PromQL.Match != "" {
+				t.Fatalf("promql=%+v, want no match", facts.PromQL)
+			}
+		})
+	}
+}
+
 func TestPollingPromQLDynamicIdentityAndImmutableSourceFacts(t *testing.T) {
 	planner, _ := NewLegacyPrimaryQueryCompiler("uq", "UTC", LegacyQueryRuntimeFacts{})
 	source := pollingTestSource(`{"data_source_label":"prometheus","data_type_label":"time_series","promql":"sum by (pod) (up)","agg_interval":60,"filter_dict":{"labels":{"job":"api"},"ignored":1}}`)

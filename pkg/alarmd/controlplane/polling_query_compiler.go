@@ -138,6 +138,11 @@ func promQLMatch(raw json.RawMessage) (string, error) {
 		}
 	}
 	visit(fields)
+	// No matcher is no match: "{}" is not a selector, and the provider
+	// refuses the query beside it rather than reading it as no filter.
+	if len(parts) == 0 {
+		return "", nil
+	}
 	return "{" + strings.Join(parts, ",") + "}", nil
 }
 
