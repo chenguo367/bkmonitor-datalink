@@ -10,6 +10,8 @@
 package observability
 
 import (
+	"bytes"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -37,13 +39,17 @@ import (
 // literal or an assignment, through a local name bound to one, through a
 // parameter from each call that passes it, through the return of a function
 // of the module, and through a field of a struct from every write of that
-// field - and fails on any value the set's own normaliser would fold.
+// field - and fails on any value the set's own normaliser would fold. A
+// name is the declaration visible where it is read; a local's field is what
+// the statements before the read last wrote; and a read inside a branch on
+// the very expression it reads (if x == A, if x != "", a switch on x, a
+// result the site replaces when the call's ok is false) keeps only the
+// values that branch admits.
 //
 // Where the source does not say what a value is - a map lookup, a value
 // decoded from a store, a word handed through a func value - the scan cannot
 // check it, and it does not skip it quietly either: every such expression is
-// listed in closedLabelSetUnresolved, and a new one, or one more at a listed
-// place, fails.
+// listed in closedLabelSetUnresolved, and a new one fails.
 
 // labelSetFoldAllowed lists values the scan finds reaching a set that are
 // not in it, by set and value, each with why it is not a fold.
@@ -54,46 +60,27 @@ var labelSetFoldAllowed = map[string]string{
 	// reaches NormalizeResult from there.
 	"result|": "emitObservation fills an empty result from Err",
 
-	// PENDING triage, each a value the scan sees reach the set along a
-	// path it does not tell apart from the one the value really takes, or a
-	// fold whose design is still to be decided.
-	//
-	// The query_completed reason of a failed query takes the failure's code
-	// only for provider transport, admission and delivery failures; the
-	// budget codes and OTHER reach the code field on other branches.
-	"reason|BUDGET_EVENTS":          "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|BUDGET_GAP_MUTATIONS":   "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|BUDGET_OTHER":           "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|BUDGET_RETAINED_BYTES":  "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|BUDGET_SERIES":          "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|BUDGET_STATE_MUTATIONS": "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|OTHER":                  "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	"reason|UNEXPLAINED_OUTCOME":    "pending: path-guarded in worker/query_failure.go observeQueryFailure",
-	// slot_skipped's reason is the query-free result's reason code; whether
-	// a Level's history state can reach it is not yet traced.
-	"reason|GAPPED":  "pending: slot_skipped reason path not yet traced",
-	"reason|WARMING": "pending: slot_skipped reason path not yet traced",
-	// LevelOutcomeReasonLabel keeps only coverage reasons for the metric by
-	// design (the log line keeps the exact reason); whether these belong in
-	// it is a decision still to be made.
-	"level_outcome_reason|BACKEND_CAPABILITY_MISSING": "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|GAPPED":                     "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|REDIS_UNAVAILABLE":          "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|STATE_BUDGET_EXCEEDED":      "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|STATE_CORRUPT":              "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|STATE_READ_DEADLINE":        "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|STATE_READ_TIMEOUT":         "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|STATE_SCHEMA_UNSUPPORTED":   "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|WARMING":                    "pending: metric keeps coverage reasons only, by design",
-	"level_outcome_reason|none":                       "pending: metric keeps coverage reasons only, by design",
-	// Each of these is guarded at its site (an empty format becomes
-	// WireFormatOther before it is counted, an unnamed rule becomes
-	// OutputRejectOther, a NORMAL record builds no event), which the scan
-	// does not yet read; the gap scope's empty reason is still to be traced.
-	"wire_format|":             "pending: guarded by format == \"\" in worker/coordinator.go writeEvents",
-	"output_reject_rule|":      "pending: guarded by !named in kafka/trigger_event_sink.go",
-	"output_event_kind|NORMAL": "pending: NORMAL records build no event in trigger/evaluator_v2.go",
-	"gap_scope_reason|":        "pending: empty fold of no reasons not yet traced",
+	// (c) folded by design. LevelOutcomeReasonLabel keeps a Level outcome's
+	// reason as the level_outcome_total label only when it is a coverage
+	// reason, to keep that family bounded; the log line keeps the exact
+	// reason, and storage failures are counted by their own State and Redis
+	// families. Bounded by TestLevelOutcomeReasonIsExactOnTheLineAndFoldedOnTheMetric.
+	"level_outcome_reason|BACKEND_CAPABILITY_MISSING": "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|GAPPED":                     "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|REDIS_UNAVAILABLE":          "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|STATE_BUDGET_EXCEEDED":      "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|STATE_CORRUPT":              "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|STATE_READ_DEADLINE":        "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|STATE_READ_TIMEOUT":         "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|STATE_SCHEMA_UNSUPPORTED":   "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|WARMING":                    "(c) folded by design: LevelOutcomeReasonLabel",
+	"level_outcome_reason|none":                       "(c) folded by design: LevelOutcomeReasonLabel",
+	// (b) a gap scope that opens, strengthens or warms is refused by its
+	// mutation's builder and digest check without a reason, and the scopes
+	// a snapshot reports are only written from such mutations; FoldGapReason
+	// returns empty only when every reason it folds is empty. Bounded by
+	// TestAGapScopeThatIsNotAClearCannotBeBuiltWithoutAReason (execution).
+	"gap_scope_reason|": "(b) TestAGapScopeThatIsNotAClearCannotBeBuiltWithoutAReason",
 }
 
 // labelSet is one closed set: where its values come in and what it keeps.
@@ -371,17 +358,15 @@ func closedSetMembers(dir, name string) []string {
 
 func TestEveryValueTheCodeWritesIsInItsClosedLabelSet(t *testing.T) {
 	index := alarmdScanIndex(t)
-	found := map[string]int{}
-	where := map[string]string{}
+	found := map[string]string{}
 	for _, set := range closedLabelSets() {
 		values, unresolved, at := index.collect(set)
 		if len(values) == 0 && len(unresolved) == 0 {
 			t.Errorf("%s: the scan found no value and nothing it could not read; it is reading nothing", set.name)
 		}
 		checkLabelSet(t, set.name, values, set.known)
-		for key, count := range unresolved {
-			found[set.name+"|"+key] += count
-			where[set.name+"|"+key] = at[key]
+		for key := range unresolved {
+			found[set.name+"|"+key] = at[key]
 		}
 	}
 	keys := make([]string, 0, len(found)+len(closedLabelSetUnresolved))
@@ -395,13 +380,40 @@ func TestEveryValueTheCodeWritesIsInItsClosedLabelSet(t *testing.T) {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		switch got, listed := found[key], closedLabelSetUnresolved[key]; {
-		case got > listed:
-			t.Errorf("%s: %d values the scan cannot read, %d listed (first at %s): make the value one the source "+
-				"says, or list it with what bounds it", key, got, listed, where[key])
-		case got < listed:
-			t.Errorf("%s: %d values the scan cannot read, %d listed: lower the count", key, got, listed)
+		where, seen := found[key]
+		_, listed := closedLabelSetUnresolved[key]
+		switch {
+		case seen && !listed:
+			t.Errorf("%s (at %s): a value the scan cannot read reaches a closed set: make it one the source says, "+
+				"or list it with what bounds it", key, where)
+		case listed && !seen:
+			t.Errorf("%s: listed as unreadable and no longer reached: remove it", key)
 		}
+	}
+}
+
+// A Level outcome's reason outside the coverage list is folded to other on
+// level_outcome_total, by design, and kept exact on the evaluation line.
+func TestLevelOutcomeReasonIsExactOnTheLineAndFoldedOnTheMetric(t *testing.T) {
+	const reason = "STATE_CORRUPT"
+	if got := LevelOutcomeReasonLabel(reason); got != LevelOutcomeReasonOther {
+		t.Fatalf("LevelOutcomeReasonLabel(%s) = %q, want %q", reason, got, LevelOutcomeReasonOther)
+	}
+	var output bytes.Buffer
+	renderTo(&output, Observation{
+		Component: ComponentEvaluation, Stage: StageEvaluationCompleted, Result: ResultSuccess,
+		LevelOutcomes: []LevelOutcomeFact{{Outcome: "UNKNOWN", Reason: reason, Count: 3}},
+	})
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode evaluation line: %v; log=%s", err, output.String())
+	}
+	outcomes, ok := event["level_outcomes"].([]any)
+	if !ok || len(outcomes) != 1 {
+		t.Fatalf("level_outcomes = %#v; log=%s", event["level_outcomes"], output.String())
+	}
+	if got := outcomes[0].(map[string]any)["reason"]; got != reason {
+		t.Fatalf("level outcome reason on the line = %#v, want %q", got, reason)
 	}
 }
 
@@ -991,13 +1003,232 @@ type scanResolver struct {
 	// does not say the value of, by file, function and expression.
 	unresolved map[string]int
 	where      map[string]string
+	// okGuard is the result position of a call whose false makes the site
+	// replace the value it was asked for (x, ok := f(); if !ok { x = ... }),
+	// or -1: the returns that say false there do not reach the site.
+	okGuard int
 }
 
 func newScanResolver(index *scanIndex, sinks map[string]bool) *scanResolver {
 	return &scanResolver{
 		index: index, sinks: sinks, seen: map[string]bool{},
-		unresolved: map[string]int{}, where: map[string]string{},
+		unresolved: map[string]int{}, where: map[string]string{}, okGuard: -1,
 	}
+}
+
+// replacedValues are the values a function replaces a name's value with
+// something else when it holds them: if x == K { x = ... } drops K, as an
+// empty format becoming WireFormatOther before it is counted does.
+func (r *scanResolver) replacedValues(scope *scanScope, name string) map[string]bool {
+	replaced := map[string]bool{}
+	ast.Inspect(scope.function.decl.Body, func(node ast.Node) bool {
+		statement, ok := node.(*ast.IfStmt)
+		if !ok || statement.Init != nil || !assignsName(statement.Body, name) {
+			return true
+		}
+		condition, ok := statement.Cond.(*ast.BinaryExpr)
+		if !ok || condition.Op != token.EQL {
+			return true
+		}
+		other := condition.Y
+		if ident, ok := condition.Y.(*ast.Ident); ok && ident.Name == name {
+			other = condition.X
+		} else if ident, ok := condition.X.(*ast.Ident); !ok || ident.Name != name {
+			return true
+		}
+		for _, value := range newScanResolver(r.index, nil).values(scope, other, 0) {
+			replaced[value] = true
+		}
+		return true
+	})
+	return replaced
+}
+
+// assignsName says a block's own statements assign a name, unconditionally.
+func assignsName(block *ast.BlockStmt, name string) bool {
+	for _, statement := range block.List {
+		assign, ok := statement.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for _, left := range assign.Lhs {
+			if ident, ok := left.(*ast.Ident); ok && ident.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// okGuardPosition is, for x, ok := f() followed by if !ok { x = ... }, the
+// position of ok among the call's results, or -1.
+func okGuardPosition(body *ast.BlockStmt, assign *ast.AssignStmt, name string) int {
+	if assign == nil {
+		return -1
+	}
+	position := -1
+	for index, left := range assign.Lhs {
+		ok, isIdent := left.(*ast.Ident)
+		if !isIdent || ok.Name == name || ok.Name == "_" {
+			continue
+		}
+		ast.Inspect(body, func(node ast.Node) bool {
+			statement, isIf := node.(*ast.IfStmt)
+			if !isIf {
+				return true
+			}
+			negation, isNot := statement.Cond.(*ast.UnaryExpr)
+			if !isNot || negation.Op != token.NOT {
+				return true
+			}
+			if guard, isIdent := negation.X.(*ast.Ident); isIdent && guard.Name == ok.Name && assignsName(statement.Body, name) {
+				position = index
+			}
+			return true
+		})
+	}
+	return position
+}
+
+// fieldWrite is one write of a local's field: an expression, one result of a
+// call, or the zero value of a literal that leaves the field out.
+type fieldWrite struct {
+	expr   ast.Expr
+	result int
+	zero   bool
+}
+
+// reachingFieldWrites are the writes of name.field that can reach a read at
+// pos, by statement order: walking back from the read through each enclosing
+// block, a write that is one of those blocks' own statements is the last word
+// and ends the walk; one nested in an earlier statement may or may not have
+// run, so it is kept and the walk goes on. settled is false when the walk
+// reaches the top of the function, or a binding of the name to something
+// other than a composite literal, without such a write: the field then holds
+// whatever its writes anywhere put there.
+func reachingFieldWrites(body *ast.BlockStmt, name, field string, pos token.Pos) ([]fieldWrite, bool) {
+	var path []ast.Node
+	ast.Inspect(body, func(node ast.Node) bool {
+		if node == nil || pos < node.Pos() || pos >= node.End() {
+			return false
+		}
+		path = append(path, node)
+		return true
+	})
+	var writes []fieldWrite
+	for index := len(path) - 1; index >= 0; index-- {
+		var list []ast.Stmt
+		switch block := path[index].(type) {
+		case *ast.BlockStmt:
+			list = block.List
+		case *ast.CaseClause:
+			list = block.Body
+		case *ast.CommClause:
+			list = block.Body
+		default:
+			continue
+		}
+		for at := len(list) - 1; at >= 0; at-- {
+			statement := list[at]
+			if statement.Pos() > pos || (pos >= statement.Pos() && pos < statement.End()) {
+				continue
+			}
+			own, kills, known := directFieldWrites(statement, name, field)
+			if kills {
+				return append(writes, own...), known
+			}
+			ast.Inspect(statement, func(node ast.Node) bool {
+				if nested, ok := node.(ast.Stmt); ok && nested != statement {
+					found, _, _ := directFieldWrites(nested, name, field)
+					writes = append(writes, found...)
+				}
+				return true
+			})
+		}
+	}
+	return writes, false
+}
+
+// directFieldWrites are the writes one statement makes of name.field, whether
+// it is the last word on the field (an assignment to it, or a new binding of
+// the name), and, for a new binding, whether its value is read from the
+// source: a binding to anything but a composite literal is not.
+func directFieldWrites(statement ast.Stmt, name, field string) ([]fieldWrite, bool, bool) {
+	var lefts, rights []ast.Expr
+	switch typed := statement.(type) {
+	case *ast.AssignStmt:
+		lefts, rights = typed.Lhs, typed.Rhs
+	case *ast.DeclStmt:
+		general, ok := typed.Decl.(*ast.GenDecl)
+		if !ok || general.Tok != token.VAR {
+			return nil, false, false
+		}
+		for _, spec := range general.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for index, ident := range value.Names {
+				if ident.Name != name {
+					continue
+				}
+				if len(value.Values) == 0 {
+					// Filled through its address (errors.As, a decoder) or
+					// a pointer: the declaration says nothing of the field.
+					return nil, true, false
+				}
+				if index < len(value.Values) {
+					return literalFieldWrite(value.Values[index], field)
+				}
+				return nil, true, false
+			}
+		}
+		return nil, false, false
+	default:
+		return nil, false, false
+	}
+	for index, left := range lefts {
+		switch target := left.(type) {
+		case *ast.Ident:
+			if target.Name != name {
+				continue
+			}
+			if len(lefts) == len(rights) {
+				return literalFieldWrite(rights[index], field)
+			}
+			return nil, true, false
+		case *ast.SelectorExpr:
+			owner, ok := target.X.(*ast.Ident)
+			if !ok || owner.Name != name || target.Sel.Name != field {
+				continue
+			}
+			if len(lefts) == len(rights) {
+				return []fieldWrite{{expr: rights[index], result: -1}}, true, true
+			}
+			if len(rights) == 1 {
+				return []fieldWrite{{expr: rights[0], result: index}}, true, true
+			}
+			return nil, true, false
+		}
+	}
+	return nil, false, false
+}
+
+func literalFieldWrite(value ast.Expr, field string) ([]fieldWrite, bool, bool) {
+	literal, ok := unwrapLiteral(value)
+	if !ok {
+		return nil, true, false
+	}
+	for _, element := range literal.Elts {
+		pair, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, true, false
+		}
+		if key, ok := pair.Key.(*ast.Ident); ok && key.Name == field {
+			return []fieldWrite{{expr: pair.Value, result: -1}}, true, true
+		}
+	}
+	return []fieldWrite{{zero: true}}, true, true
 }
 
 // leaf records an expression the scan could not read a value from.
@@ -1071,16 +1302,186 @@ func (r *scanResolver) values(scope *scanScope, expression ast.Expr, depth int) 
 				return r.packageValue(dir, typed.Sel.Name, depth)
 			}
 		}
-		return r.field(scope, typed, depth)
+		return r.guarded(scope, typed, r.field(scope, typed, depth))
 	case *ast.Ident:
-		return r.ident(scope, typed, depth)
+		return r.guarded(scope, typed, r.ident(scope, typed, depth))
 	}
 	return r.leaf(scope, expression)
+}
+
+// guarded keeps the values a read can have where it is: inside the branch of
+// an if or a switch on the very expression it reads, only the values that
+// branch admits. A read in if x == A || x == B { ... } is A or B; one in
+// if x != "" && ... { ... } is not empty; one in the default of a switch on x
+// is none of its cases.
+func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []string) []string {
+	if len(values) == 0 || scope.function == nil || scope.function.decl.Body == nil {
+		return values
+	}
+	text := types.ExprString(expression)
+	constants := func(expressions ...ast.Expr) map[string]bool {
+		found := map[string]bool{}
+		for _, expression := range expressions {
+			for _, value := range newScanResolver(r.index, nil).values(scope, expression, maxScanDepth-2) {
+				found[value] = true
+			}
+		}
+		return found
+	}
+	// terms splits a condition on op into comparisons of the expression with
+	// a constant under compare, or reports that some term is not one.
+	terms := func(condition ast.Expr, op, compare token.Token) ([]ast.Expr, bool) {
+		var compared []ast.Expr
+		var walk func(ast.Expr) bool
+		walk = func(node ast.Expr) bool {
+			if paren, ok := node.(*ast.ParenExpr); ok {
+				return walk(paren.X)
+			}
+			binary, ok := node.(*ast.BinaryExpr)
+			if !ok {
+				return false
+			}
+			if binary.Op == op {
+				return walk(binary.X) && walk(binary.Y)
+			}
+			if binary.Op != compare {
+				return false
+			}
+			switch {
+			case types.ExprString(binary.X) == text:
+				compared = append(compared, binary.Y)
+			case types.ExprString(binary.Y) == text:
+				compared = append(compared, binary.X)
+			default:
+				return false
+			}
+			return true
+		}
+		return compared, walk(condition)
+	}
+	// excluded collects the terms of a conjunction that rule a value out,
+	// ignoring the terms that say nothing about the expression.
+	excluded := func(condition ast.Expr, op, compare token.Token) []ast.Expr {
+		var out []ast.Expr
+		var walk func(ast.Expr)
+		walk = func(node ast.Expr) {
+			if paren, ok := node.(*ast.ParenExpr); ok {
+				walk(paren.X)
+				return
+			}
+			binary, ok := node.(*ast.BinaryExpr)
+			if !ok {
+				return
+			}
+			if binary.Op == op {
+				walk(binary.X)
+				walk(binary.Y)
+				return
+			}
+			if binary.Op == compare {
+				if types.ExprString(binary.X) == text {
+					out = append(out, binary.Y)
+				} else if types.ExprString(binary.Y) == text {
+					out = append(out, binary.X)
+				}
+			}
+		}
+		walk(condition)
+		return out
+	}
+	var allowed []map[string]bool
+	forbidden := map[string]bool{}
+	pos := expression.Pos()
+	inside := func(node ast.Node) bool { return node != nil && pos >= node.Pos() && pos < node.End() }
+	ast.Inspect(scope.function.decl.Body, func(node ast.Node) bool {
+		if !inside(node) {
+			return false
+		}
+		switch typed := node.(type) {
+		case *ast.IfStmt:
+			switch {
+			case inside(typed.Body):
+				if compared, ok := terms(typed.Cond, token.LOR, token.EQL); ok {
+					allowed = append(allowed, constants(compared...))
+				}
+				for value := range constants(excluded(typed.Cond, token.LAND, token.NEQ)...) {
+					forbidden[value] = true
+				}
+			case typed.Else != nil && inside(typed.Else):
+				if compared, ok := terms(typed.Cond, token.LAND, token.NEQ); ok {
+					allowed = append(allowed, constants(compared...))
+				}
+				for value := range constants(excluded(typed.Cond, token.LOR, token.EQL)...) {
+					forbidden[value] = true
+				}
+			}
+		case *ast.SwitchStmt:
+			if typed.Tag == nil || types.ExprString(typed.Tag) != text {
+				return true
+			}
+			for _, statement := range typed.Body.List {
+				clause, ok := statement.(*ast.CaseClause)
+				if !ok || !inside(clause) {
+					continue
+				}
+				if clause.List != nil {
+					allowed = append(allowed, constants(clause.List...))
+					continue
+				}
+				for _, other := range typed.Body.List {
+					if otherClause, ok := other.(*ast.CaseClause); ok && otherClause.List != nil {
+						for value := range constants(otherClause.List...) {
+							forbidden[value] = true
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	kept := values[:0:0]
+	for _, value := range values {
+		admitted := !forbidden[value]
+		for _, set := range allowed {
+			admitted = admitted && set[value]
+		}
+		if admitted {
+			kept = append(kept, value)
+		}
+	}
+	return kept
 }
 
 // field is every value written to a field, where the source says whose field
 // it is and something writes it.
 func (r *scanResolver) field(scope *scanScope, selector *ast.SelectorExpr, depth int) []string {
+	if owner, ok := selector.X.(*ast.Ident); ok && scope.function != nil && scope.function.decl.Body != nil {
+		if writes, settled := reachingFieldWrites(scope.function.decl.Body, owner.Name, selector.Sel.Name, selector.Pos()); settled {
+			var values []string
+			for _, write := range writes {
+				switch {
+				case write.zero:
+					values = append(values, "")
+				case write.result >= 0:
+					call, _ := write.expr.(*ast.CallExpr)
+					if call == nil {
+						r.leaf(scope, selector)
+						continue
+					}
+					values = append(values, r.returns(scope, call, write.result, depth+1)...)
+				default:
+					values = append(values, r.values(scope, write.expr, depth+1)...)
+				}
+			}
+			return values
+		}
+	}
+	return r.globalField(scope, selector, depth)
+}
+
+// globalField is every value written to a field anywhere, where the source
+// says whose field it is and something writes it.
+func (r *scanResolver) globalField(scope *scanScope, selector *ast.SelectorExpr, depth int) []string {
 	owner := r.typeOf(scope, selector.X)
 	if owner == "" {
 		return r.leaf(scope, selector)
@@ -1135,25 +1536,46 @@ func (r *scanResolver) packageValue(dir, name string, depth int) []string {
 
 func (r *scanResolver) ident(scope *scanScope, ident *ast.Ident, depth int) []string {
 	if scope.function != nil {
-		if bound, found := boundValues(scope.function.decl.Body, ident.Name); found {
-			var values []string
-			for _, binding := range bound {
-				switch {
-				case binding.expr == nil:
+		bound, declared := boundValues(scope.function.decl.Body, ident.Name, ident.Pos())
+		replaced := r.replacedValues(scope, ident.Name)
+		var values []string
+		for _, binding := range bound {
+			switch {
+			case binding.zero:
+				values = append(values, "")
+			case binding.expr == nil:
+				r.leaf(scope, ident)
+			case binding.result < 0:
+				values = append(values, r.values(scope, binding.expr, depth+1)...)
+			default:
+				call, _ := binding.expr.(*ast.CallExpr)
+				if call == nil {
 					r.leaf(scope, ident)
-				case binding.result < 0:
-					values = append(values, r.values(scope, binding.expr, depth+1)...)
-				default:
-					call, _ := binding.expr.(*ast.CallExpr)
-					if call == nil {
-						r.leaf(scope, ident)
-						continue
-					}
-					values = append(values, r.returns(scope, call, binding.result, depth+1)...)
+					continue
 				}
+				r.okGuard = okGuardPosition(scope.function.decl.Body, binding.assign, ident.Name)
+				values = append(values, r.returns(scope, call, binding.result, depth+1)...)
+				r.okGuard = -1
 			}
-			return values
 		}
+		if !declared {
+			values = append(values, r.unbound(scope, ident, depth)...)
+		}
+		kept := values[:0]
+		for _, value := range values {
+			if !replaced[value] {
+				kept = append(kept, value)
+			}
+		}
+		return kept
+	}
+	return r.unbound(scope, ident, depth)
+}
+
+// unbound is what a name not declared in its function is: a parameter, or a
+// package-level constant or variable.
+func (r *scanResolver) unbound(scope *scanScope, ident *ast.Ident, depth int) []string {
+	if scope.function != nil {
 		if position, ok := parameterIndex(scope.function.decl, ident.Name); ok {
 			if arg, entered := scope.args[position]; entered {
 				return r.values(arg.scope, arg.expr, depth+1)
@@ -1176,55 +1598,147 @@ func (r *scanResolver) ident(scope *scanScope, ident *ast.Ident, depth int) []st
 type binding struct {
 	expr   ast.Expr
 	result int
+	assign *ast.AssignStmt
+	zero   bool
 }
 
-// boundValues is every value a function gives a name, and whether it
-// declares or assigns the name at all.
-func boundValues(body *ast.BlockStmt, name string) ([]binding, bool) {
-	var bound []binding
-	found := false
+// boundValues is every value a function gives the name a read at pos
+// refers to, and whether that name is declared in the function at all. A
+// name declared again in an inner scope is another variable: its bindings
+// count only for reads inside that scope, and an assignment counts for the
+// declaration it assigns. Where no declaration in the function is visible at
+// pos, the name is a parameter or a package-level name; the assignments to it
+// are returned with declared false.
+func boundValues(body *ast.BlockStmt, name string, pos token.Pos) ([]binding, bool) {
+	type declaration struct {
+		scope ast.Node
+		pos   token.Pos
+	}
+	type assignment struct {
+		binding
+		pos token.Pos
+	}
+	var declarations []declaration
+	var defined = map[token.Pos][]binding{}
+	var assignments []assignment
+	var stack []ast.Node
+	innermost := func() ast.Node {
+		if len(stack) == 0 {
+			return body
+		}
+		return stack[len(stack)-1]
+	}
+	declare := func(at token.Pos, value binding) {
+		scope := innermost()
+		found := false
+		for _, existing := range declarations {
+			if existing.pos == at {
+				found = true
+			}
+		}
+		if !found {
+			declarations = append(declarations, declaration{scope: scope, pos: at})
+		}
+		defined[at] = append(defined[at], value)
+	}
 	ast.Inspect(body, func(node ast.Node) bool {
-		switch node := node.(type) {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		switch typed := node.(type) {
 		case *ast.AssignStmt:
-			for i, left := range node.Lhs {
+			for i, left := range typed.Lhs {
 				ident, ok := left.(*ast.Ident)
 				if !ok || ident.Name != name {
 					continue
 				}
-				found = true
+				value := binding{}
 				switch {
-				case len(node.Lhs) == len(node.Rhs):
-					bound = append(bound, binding{expr: node.Rhs[i], result: -1})
-				case len(node.Rhs) == 1:
-					bound = append(bound, binding{expr: node.Rhs[0], result: i})
-				default:
-					bound = append(bound, binding{})
+				case len(typed.Lhs) == len(typed.Rhs):
+					value = binding{expr: typed.Rhs[i], result: -1}
+				case len(typed.Rhs) == 1:
+					value = binding{expr: typed.Rhs[0], result: i, assign: typed}
+				}
+				if typed.Tok == token.DEFINE {
+					declare(ident.Pos(), value)
+				} else {
+					assignments = append(assignments, assignment{binding: value, pos: ident.Pos()})
 				}
 			}
 		case *ast.ValueSpec:
-			for i, ident := range node.Names {
+			for i, ident := range typed.Names {
 				if ident.Name != name {
 					continue
 				}
-				found = true
 				switch {
-				case len(node.Names) == len(node.Values):
-					bound = append(bound, binding{expr: node.Values[i], result: -1})
-				case len(node.Values) == 1:
-					bound = append(bound, binding{expr: node.Values[0], result: i})
+				case len(typed.Names) == len(typed.Values):
+					declare(ident.Pos(), binding{expr: typed.Values[i], result: -1})
+				case len(typed.Values) == 1:
+					declare(ident.Pos(), binding{expr: typed.Values[0], result: i})
+				case len(typed.Values) == 0:
+					declare(ident.Pos(), binding{zero: true})
+				default:
+					declare(ident.Pos(), binding{})
 				}
 			}
 		case *ast.RangeStmt:
-			for _, variable := range []ast.Expr{node.Key, node.Value} {
+			for _, variable := range []ast.Expr{typed.Key, typed.Value} {
 				if ident, ok := variable.(*ast.Ident); ok && ident.Name == name {
-					found = true
-					bound = append(bound, binding{})
+					stack = append(stack, typed)
+					if typed.Tok == token.DEFINE {
+						declare(ident.Pos(), binding{})
+					} else {
+						assignments = append(assignments, assignment{pos: ident.Pos()})
+					}
+					stack = stack[:len(stack)-1]
 				}
 			}
+		case *ast.FuncLit:
+			stack = append(stack, typed)
+			for _, field := range typed.Type.Params.List {
+				for _, ident := range field.Names {
+					if ident.Name == name {
+						declare(ident.Pos(), binding{})
+					}
+				}
+			}
+			stack = stack[:len(stack)-1]
+		}
+		switch node.(type) {
+		case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt,
+			*ast.CaseClause, *ast.CommClause, *ast.SelectStmt, *ast.FuncLit:
+			stack = append(stack, node)
+		default:
+			stack = append(stack, innermost())
 		}
 		return true
 	})
-	return bound, found
+	visible := func(at token.Pos) (token.Pos, bool) {
+		best, bestSize, found := token.NoPos, token.Pos(0), false
+		for _, candidate := range declarations {
+			if candidate.pos > at || at < candidate.scope.Pos() || at >= candidate.scope.End() {
+				continue
+			}
+			size := candidate.scope.End() - candidate.scope.Pos()
+			if !found || size < bestSize || (size == bestSize && candidate.pos > best) {
+				best, bestSize, found = candidate.pos, size, true
+			}
+		}
+		return best, found
+	}
+	target, declared := visible(pos)
+	var bound []binding
+	if declared {
+		bound = append(bound, defined[target]...)
+	}
+	for _, assigned := range assignments {
+		owner, owned := visible(assigned.pos)
+		if owned == declared && (!declared || owner == target) {
+			bound = append(bound, assigned.binding)
+		}
+	}
+	return bound, declared
 }
 
 func parameterIndex(decl *ast.FuncDecl, name string) (int, bool) {
@@ -1389,6 +1903,8 @@ func (r *scanResolver) resultType(scope *scanScope, call *ast.CallExpr, result i
 // returns is what a call to a function of the module can return as one of
 // its results.
 func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, depth int) []string {
+	guard := r.okGuard
+	r.okGuard = -1
 	var values []string
 	matched := 0
 	for _, callee := range r.callees(scope, call) {
@@ -1416,6 +1932,7 @@ func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, dep
 				return true
 			}
 			switch {
+			case len(ret.Results) == results && guard >= 0 && guard < results && isFalse(ret.Results[guard]):
 			case len(ret.Results) == results:
 				values = append(values, r.values(calleeScope, ret.Results[result], depth+1)...)
 			case len(ret.Results) == 0:
@@ -1433,89 +1950,94 @@ func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, dep
 }
 
 // closedLabelSetUnresolved is every expression a value comes into a closed
-// set from that the scan cannot read, by set, file, function and expression,
-// with how many times it is reached. A new one, or one reached more often,
-// fails; one that goes away fails until its count is lowered.
+// set from that the scan cannot read, by set, file, function and expression.
+// A new one fails, and so does one listed that is no longer reached.
 //
-// PENDING: these are listed as found and not yet classified. Each is still
-// to be made readable by the scan, bounded by a test that enumerates what
-// its producer can return, or shown to be outside any closed set.
-var closedLabelSetUnresolved = map[string]int{
-	"capacity_budget|worker/gap_reservation.go|retainTargetBytes|err.budget":                                                                                                            1,
-	"capacity_budget|worker/sideeffect_reservation.go|checkEffectCounts|check.kind":                                                                                                     25,
-	"completion_cause|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Cause":                                                                                  1,
-	"completion_cause|execution/model.go|deriveCompletionAttribution|candidate":                                                                                                         4,
-	"fleet_anomaly_kind|cmd/alarmd/runtime_phase_two_fleet.go|fleetVerdictOf|kind":                                                                                                      2,
-	"fleet_failure_category|cmd/alarmd/runtime_phase_two_fleet.go|fleetVerdictOf|category":                                                                                              1,
-	"gap_scope_reason|contract/gap_reason_fold.go|FoldGapReason|reason":                                                                                                                 16,
-	"gap_scope_reason|metric/phase_two.go|observe|facts.Reason":                                                                                                                         1,
-	"gap_scope_reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                                    16,
-	"level_outcome_reason|contract/gap_reason_fold.go|FoldGapReason|reason":                                                                                                             32,
-	"level_outcome_reason|evaluation/evaluator.go|buildMutation|guarded":                                                                                                                18,
-	"level_outcome_reason|evaluation/evaluator.go|buildMutation|reason":                                                                                                                 18,
-	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|current.HistoryCompleteness == execution.HistoryGapped || current.HistoryCompleteness == execution.HistoryWarming": 1,
-	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|f.ReasonCode":                                                                                                      1,
-	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|guarded":                                                                                                           2,
-	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|reason":                                                                                                            1,
-	"level_outcome_reason|execution/gap_scope_reason.go|RoundGuardReasonForLevel|reason":                                                                                                8,
-	"level_outcome_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                             3,
-	"level_outcome_reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                                         1,
-	"level_outcome_reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                                32,
-	"operation|cmd/alarmd/runtime_phase_two_production.go|AcquireQueryPermit|operation":                                                                                                 41,
-	"operation|scheduler/slot_source.go|classifyRecovery|source.classifyRecoveryOf(ctx, evaluationTime, deadline, nil, hold, at, fence)":                                                276,
-	"output_event_kind|kafka/trigger_event_sink.go|WriteBatch|key.eventKind":                                                                                                            1,
-	"output_event_kind|metric/phase_two.go|observe|key.EventKind":                                                                                                                       1,
-	"output_event_kind|worker/coordinator.go|withoutMessageReported|k.kind":                                                                                                             1,
-	"output_event_kind|worker/coordinator.go|writeEvents|dropped.EventKind":                                                                                                             1,
-	"query_failure_code|access/uq/rejection.go|rejectionClass|strconv.Itoa(status)":                                                                                                     1,
-	"query_failure_code|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":                    1,
-	"query_status_code|access/uq/series_decoder.go|complete|status.Code":                                                                                                                2,
-	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Reason":                                                                                           1,
-	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.ReasonCode":                                                                                                       1,
-	"reason|cmd/alarmd/slot_failure_reason.go|slotFailureReason|admission.QueryFailure()":                                                                                               1,
-	"reason|contract/gap_reason_fold.go|FoldGapReason|reason":                                                                                                                           7840,
-	"reason|evaluation/evaluator.go|buildMutation|guarded":                                                                                                                              9488,
-	"reason|evaluation/evaluator.go|buildMutation|reason":                                                                                                                               9488,
-	"reason|evaluation/evaluator.go|evaluateRecordWith|current.HistoryCompleteness == execution.HistoryGapped || current.HistoryCompleteness == execution.HistoryWarming":               244,
-	"reason|evaluation/evaluator.go|evaluateRecordWith|f.ReasonCode":                                                                                                                    244,
-	"reason|evaluation/evaluator.go|evaluateRecordWith|guarded":                                                                                                                         488,
-	"reason|evaluation/evaluator.go|evaluateRecordWith|reason":                                                                                                                          244,
-	"reason|execution/gap_scope_reason.go|RoundGuardReasonForLevel|reason":                                                                                                              1952,
-	"reason|execution/guard_origin.go|StampGapScopeOrigins|before.ReasonOriginCause":                                                                                                    1,
-	"reason|execution/model.go|deriveCompletionAttribution|candidateReason":                                                                                                             2,
-	"reason|execution/unavailable_attribution.go|AttributeUnavailable|facts.Attempts[index].ReasonCode":                                                                                 161,
-	"reason|scheduler/slot_source.go|repairedLanding|repair.ReasonCode()":                                                                                                               2,
-	"reason|state/execution_v2_no_data.go|applyOneNoData|reason":                                                                                                                        2,
-	"reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                                           1214,
-	"reason|viewstream/client.go|reprobe|fmt.Sprintf(\"missing=%d probed=%t\", missing, probed)":                                                                                        2,
-	"reason|viewstream/client.go|serveOnce|client.discovery.Leader(ctx)":                                                                                                                2,
-	"reason|viewstream/client.go|serveOnce|leader.Endpoint":                                                                                                                             8,
-	"reason|viewstream/client.go|session|body.Refusal.Reason":                                                                                                                           2,
-	"reason|viewstream/server.go|admit|server.admission.Admit(ctx, hello.WorkerId, hello.StreamToken)":                                                                                  4,
-	"reason|worker/coordinator.go|Execute|begin.ReasonCode":                                                                                                                             1,
-	"reason|worker/coordinator.go|Execute|finalization.ReasonCode":                                                                                                                      1,
-	"reason|worker/coordinator.go|admitPlan|result.ReasonCode":                                                                                                                          1,
-	"reason|worker/coordinator.go|applyState|&StateConflictError{…}":                                                                                                                    2,
-	"reason|worker/coordinator.go|commitProgress|progress.ReasonCode":                                                                                                                   1,
-	"reason|worker/coordinator.go|finalizePreparedWithGaps|planResult.ReasonCode":                                                                                                       1,
-	"reason|worker/coordinator.go|finalizePreparedWithGaps|reason":                                                                                                                      22,
-	"reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                                                     1,
-	"reason|worker/coordinator.go|firstStateApplyFailureReason|item.ReasonCode":                                                                                                         1,
-	"reason|worker/coordinator.go|outputRejectionReason|rejection.OutputRejectionReason()":                                                                                              23,
-	"reason|worker/no_data_skip_streak.go|noteNoDataStreaks|stream.noDataOutcomes[index]":                                                                                               1,
-	"reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                                                       524,
-	"reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                                              7840,
-	"reason|worker/stream_session.go|observeCompletionOnlyProbe|binding.ReasonCode":                                                                                                     40,
-	"reason|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":                                4,
-	"reason|worker/supplement.go|supplementAdmitted|result.ReasonCode":                                                                                                                  1,
-	"result|cmd/alarmd/runtime_phase_two_production.go|Execute|result.Result":                                                                                                           1,
-	"state_admission_reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                                     1,
-	"state_preflight_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                           2,
-	"wire_format|controlplane/object_catalog_read.go|AssembleQueryGroup|context.WireFormat":                                                                                             2,
-	"wire_format|kafka/output_partial.go|partialRejection|formats[index]":                                                                                                               1,
-	"wire_format|kafka/trigger_event_sink.go|WriteBatch|key.format":                                                                                                                     1,
-	"wire_format|metric/phase_two.go|observe|format":                                                                                                                                    1,
-	"wire_format|metric/phase_two.go|observe|key.Format":                                                                                                                                1,
-	"wire_format|worker/coordinator.go|withoutMessageReported|k.format":                                                                                                                 1,
-	"wire_format|worker/coordinator.go|writeEvents|dropped.Format":                                                                                                                      1,
+// PENDING: each is still to be made readable by the scan, bounded by a test
+// that enumerates what its producer can return, or shown to be outside any
+// closed set. By kind:
+//
+//	B1 (19): a range variable or a slice or map element whose producers are other closed lists;
+//	B2 (11): a map key or composite key of an output aggregation;
+//	B3 (10): a call through an interface or a func value;
+//	B4 (4): a value decoded from the store;
+//	B5 (4): external or free text;
+//	B6 (23): a field of a result whose type the scan does not see.
+var closedLabelSetUnresolved = map[string]string{
+	"capacity_budget|worker/sideeffect_reservation.go|checkEffectCounts|check.kind":                                                                                  "PENDING B6",
+	"completion_cause|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Cause":                                                               "PENDING B6",
+	"completion_cause|execution/model.go|deriveCompletionAttribution|candidate":                                                                                      "PENDING B1",
+	"fleet_anomaly_kind|cmd/alarmd/runtime_phase_two_fleet.go|fleetVerdictOf|kind":                                                                                   "PENDING B1",
+	"fleet_failure_category|cmd/alarmd/runtime_phase_two_fleet.go|fleetVerdictOf|category":                                                                           "PENDING B1",
+	"gap_scope_reason|contract/gap_reason_fold.go|FoldGapReason|reason":                                                                                              "PENDING B1",
+	"gap_scope_reason|metric/phase_two.go|observe|facts.Reason":                                                                                                      "PENDING B6",
+	"gap_scope_reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                 "PENDING B1",
+	"level_outcome_reason|evaluation/evaluator.go|buildMutation|guarded":                                                                                             "PENDING B1",
+	"level_outcome_reason|evaluation/evaluator.go|buildMutation|reason":                                                                                              "PENDING B1",
+	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|f.ReasonCode":                                                                                   "PENDING B6",
+	"level_outcome_reason|evaluation/evaluator.go|evaluateRecordWith|guarded":                                                                                        "PENDING B1",
+	"level_outcome_reason|execution/gap_scope_reason.go|RoundGuardReasonForLevel|reason":                                                                             "PENDING B1",
+	"level_outcome_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                          "PENDING B4",
+	"level_outcome_reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                      "PENDING B6",
+	"operation|cmd/alarmd/runtime_phase_two_production.go|AcquireQueryPermit|operation":                                                                              "PENDING B3",
+	"operation|scheduler/slot_source.go|classifyRecovery|source.classifyRecoveryOf(ctx, evaluationTime, deadline, nil, hold, at, fence)":                             "PENDING B3",
+	"output_event_kind|kafka/trigger_event_sink.go|WriteBatch|key.eventKind":                                                                                         "PENDING B2",
+	"output_event_kind|metric/phase_two.go|observe|key.EventKind":                                                                                                    "PENDING B2",
+	"output_event_kind|worker/coordinator.go|withoutMessageReported|k.kind":                                                                                          "PENDING B2",
+	"output_event_kind|worker/coordinator.go|writeEvents|dropped.EventKind":                                                                                          "PENDING B2",
+	"query_failure_code|access/uq/rejection.go|rejectionClass|strconv.Itoa(status)":                                                                                  "PENDING B5",
+	"query_failure_code|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))": "PENDING B3",
+	"query_status_code|access/uq/series_decoder.go|complete|status.Code":                                                                                             "PENDING B5",
+	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Reason":                                                                        "PENDING B6",
+	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.ReasonCode":                                                                                    "PENDING B6",
+	"reason|cmd/alarmd/slot_failure_reason.go|slotFailureReason|admission.QueryFailure()":                                                                            "PENDING B3",
+	"reason|contract/gap_reason_fold.go|FoldGapReason|reason":                                                                                                        "PENDING B1",
+	"reason|evaluation/evaluator.go|buildMutation|guarded":                                                                                                           "PENDING B1",
+	"reason|evaluation/evaluator.go|buildMutation|reason":                                                                                                            "PENDING B1",
+	"reason|evaluation/evaluator.go|evaluateRecordWith|f.ReasonCode":                                                                                                 "PENDING B6",
+	"reason|evaluation/evaluator.go|evaluateRecordWith|guarded":                                                                                                      "PENDING B1",
+	"reason|execution/gap_scope_reason.go|RoundGuardReasonForLevel|reason":                                                                                           "PENDING B1",
+	"reason|execution/guard_origin.go|StampGapScopeOrigins|before.ReasonOriginCause":                                                                                 "PENDING B6",
+	"reason|execution/model.go|deriveCompletionAttribution|candidateReason":                                                                                          "PENDING B1",
+	"reason|execution/unavailable_attribution.go|AttributeUnavailable|facts.Attempts[index].ReasonCode":                                                              "PENDING B1",
+	"reason|scheduler/query_cooldown.go|restoreQueryCooldown|record.Reason":                                                                                          "PENDING B6",
+	"reason|scheduler/slot_source.go|repairedLanding|repair.ReasonCode()":                                                                                            "PENDING B3",
+	"reason|state/execution_v2_no_data.go|applyOneNoData|reason":                                                                                                     "PENDING B4",
+	"reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                        "PENDING B4",
+	"reason|viewstream/client.go|reprobe|fmt.Sprintf(\"missing=%d probed=%t\", missing, probed)":                                                                     "PENDING B5",
+	"reason|viewstream/client.go|serveOnce|client.discovery.Leader(ctx)":                                                                                             "PENDING B3",
+	"reason|viewstream/client.go|serveOnce|leader.Endpoint":                                                                                                          "PENDING B5",
+	"reason|viewstream/client.go|session|body.Refusal.Reason":                                                                                                        "PENDING B6",
+	"reason|viewstream/server.go|admit|server.admission.Admit(ctx, hello.WorkerId, hello.StreamToken)":                                                               "PENDING B3",
+	"reason|worker/coordinator.go|Execute|begin.ReasonCode":                                                                                                          "PENDING B6",
+	"reason|worker/coordinator.go|Execute|finalization.ReasonCode":                                                                                                   "PENDING B6",
+	"reason|worker/coordinator.go|admitPlan|result.ReasonCode":                                                                                                       "PENDING B6",
+	"reason|worker/coordinator.go|commitProgress|progress.ReasonCode":                                                                                                "PENDING B6",
+	"reason|worker/coordinator.go|finalizePreparedWithGaps|planResult.ReasonCode":                                                                                    "PENDING B6",
+	"reason|worker/coordinator.go|finalizePreparedWithGaps|reason":                                                                                                   "PENDING B1",
+	"reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                                  "PENDING B6",
+	"reason|worker/coordinator.go|firstStateApplyFailureReason|item.ReasonCode":                                                                                      "PENDING B6",
+	"reason|worker/coordinator.go|outputRejectionReason|rejection.OutputRejectionReason()":                                                                           "PENDING B3",
+	"reason|worker/no_data_skip_streak.go|noteNoDataStreaks|stream.noDataOutcomes[index]":                                                                            "PENDING B1",
+	"reason|worker/query_failure.go|observeQueryFailure|diagnostic.QueryFailure()":                                                                                   "PENDING B3",
+	"reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                                    "PENDING B6",
+	"reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                           "PENDING B1",
+	"reason|worker/stream_session.go|observeCompletionOnlyProbe|binding.ReasonCode":                                                                                  "PENDING B6",
+	"reason|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":             "PENDING B3",
+	"reason|worker/supplement.go|supplementAdmitted|result.ReasonCode":                                                                                               "PENDING B6",
+	"result|cmd/alarmd/runtime_phase_two_production.go|Execute|result.Result":                                                                                        "PENDING B6",
+	"state_admission_reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                  "PENDING B6",
+	"state_preflight_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                        "PENDING B4",
+	"wire_format|controlplane/object_catalog_read.go|AssembleQueryGroup|context.WireFormat":                                                                          "PENDING B2",
+	"wire_format|kafka/output_partial.go|partialRejection|formats[index]":                                                                                            "PENDING B2",
+	"wire_format|kafka/trigger_event_sink.go|WriteBatch|key.format":                                                                                                  "PENDING B2",
+	"wire_format|metric/phase_two.go|observe|format":                                                                                                                 "PENDING B2",
+	"wire_format|metric/phase_two.go|observe|key.Format":                                                                                                             "PENDING B2",
+	"wire_format|worker/coordinator.go|withoutMessageReported|k.format":                                                                                              "PENDING B2",
+	"wire_format|worker/coordinator.go|writeEvents|dropped.Format":                                                                                                   "PENDING B2",
+}
+
+func isFalse(expression ast.Expr) bool {
+	ident, ok := expression.(*ast.Ident)
+	return ok && ident.Name == "false"
 }

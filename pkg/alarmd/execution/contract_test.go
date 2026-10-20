@@ -279,6 +279,32 @@ func TestPlanGapOpenAndStrengthenShareIdempotentDigest(t *testing.T) {
 	}
 }
 
+// A gap scope that opens, strengthens or warms names its reason: one built
+// without is refused, so the scopes a snapshot reports, written only from such
+// mutations, never put an empty reason on gap_guard_scope_rounds_total.
+func TestAGapScopeThatIsNotAClearCannotBeBuiltWithoutAReason(t *testing.T) {
+	input := validInternalExecution()
+	for _, kind := range []execution.GapMutationKind{execution.GapOpen, execution.GapStrengthen, execution.GapWarmup} {
+		_, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
+			Identity: input.GapPreflight[0].Identity, ApplyVersion: input.GapPreflight[0].ApplyVersion,
+			ScheduleRevision: input.GapPreflight[0].ScheduleRevision,
+			Scopes:           []execution.GapScopeMutation{{Kind: kind, RequiredFullSlots: 1}},
+		})
+		if err == nil {
+			t.Errorf("%s scope without a reason was built", kind)
+		}
+		if _, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
+			Identity: input.GapPreflight[0].Identity, ApplyVersion: input.GapPreflight[0].ApplyVersion,
+			ScheduleRevision: input.GapPreflight[0].ScheduleRevision,
+			Scopes: []execution.GapScopeMutation{{
+				Kind: kind, ReasonCode: execution.ReasonCode(contract.ReasonQueryPartial), RequiredFullSlots: 1,
+			}},
+		}); err != nil {
+			t.Errorf("%s scope with a reason was refused: %v", kind, err)
+		}
+	}
+}
+
 func TestDependencyCompletenessDoesNotReplacePrimaryCompletionFact(t *testing.T) {
 	input := validInternalExecution()
 	dependency := input.Inputs[0]
