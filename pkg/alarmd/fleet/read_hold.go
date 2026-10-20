@@ -20,10 +20,12 @@ type ReadHoldFacts struct {
 	// TransitionMillis the part of Millis a Plan's transition (or a
 	// predecessor's bound standing in for an unread hold) froze above it,
 	// which falls back by itself and suggests no time_delay.
-	BaseMillis          int64  `json:"base_ms"`
-	TransitionMillis    int64  `json:"transition_ms,omitempty"`
-	ArrivalAgeMillis    int64  `json:"arrival_age_ms"`
-	LimitMillis         int64  `json:"limit_ms"`
+	BaseMillis       int64 `json:"base_ms"`
+	TransitionMillis int64 `json:"transition_ms,omitempty"`
+	ArrivalAgeMillis int64 `json:"arrival_age_ms"`
+	LimitMillis      int64 `json:"limit_ms"`
+	// AtLimit says the group is held at its limit now (readhold
+	// Record.HeldAtLimit): false once trials lower the hold below it.
 	AtLimit             bool   `json:"at_limit"`
 	RaisedAfterLowering uint64 `json:"raised_after_lowering"`
 	// NoWholeWindowArrival is the samples classed window read early in

@@ -198,7 +198,7 @@ func (holds *productionReadHolds) groupsBySource(engine *lookback.Engine) map[st
 		if hold > 0 {
 			entry.Held++
 		}
-		if inspection.Record.AtLimit {
+		if inspection.Record.HeldAtLimit() {
 			entry.AtLimit++
 		}
 		if !entry.MaxKnown || hold > entry.MaxMillis {
@@ -260,7 +260,7 @@ func (holds *productionReadHolds) fleetFacts() map[string]fleet.ReadHoldFacts {
 		millis := reading.millis
 		entry := fleet.ReadHoldFacts{Millis: millis, BaseMillis: base, TransitionMillis: reading.transition,
 			ArrivalAgeMillis: record.ArrivalAgeMillis, LimitMillis: record.LimitMillis,
-			AtLimit: record.AtLimit, RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
+			AtLimit: record.HeldAtLimit(), RaisedAfterLowering: record.RaisedAfterLowering, NoWholeWindowArrival: record.Noise, Rung: record.Rung,
 			Buckets:    append([]int64(nil), record.Buckets[:min(len(record.Buckets), fleet.MaxReadEarlyBuckets)]...),
 			Annotation: reading.annotation}
 		if record.HoldMillis > 0 {

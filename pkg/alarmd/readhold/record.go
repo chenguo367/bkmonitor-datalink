@@ -60,19 +60,23 @@ type Record struct {
 	EarlierDifferents  int    `json:"earlier_differents,omitempty"`
 	// LoweredFromMillis is the hold the last lowering came from, while the
 	// group stays Lowered: a raise right after it goes back there at least.
-	LoweredFromMillis   int64                    `json:"lowered_from_ms,omitempty"`
-	RaisedAfterLowering uint64                   `json:"raised_after_lowering,omitempty"`
-	Lowered             bool                     `json:"lowered,omitempty"`
-	Noise               uint64                   `json:"noise,omitempty"`
-	AtLimit             bool                     `json:"at_limit,omitempty"`
-	LimitMillis         int64                    `json:"limit_ms,omitempty"`
-	Rung                string                   `json:"rung,omitempty"`
-	Buckets             []int64                  `json:"buckets,omitempty"`
-	SegmentStart        execution.EvaluationTime `json:"segment_start,omitempty"`
-	Closed              bool                     `json:"closed,omitempty"`
-	Plans               []PlanRecord             `json:"plans,omitempty"`
-	Transitions         []Transition             `json:"transitions,omitempty"`
-	RenewedAtMillis     int64                    `json:"renewed_at_ms,omitempty"`
+	LoweredFromMillis   int64  `json:"lowered_from_ms,omitempty"`
+	RaisedAfterLowering uint64 `json:"raised_after_lowering,omitempty"`
+	Lowered             bool   `json:"lowered,omitempty"`
+	Noise               uint64 `json:"noise,omitempty"`
+	// AtLimit says the latest arrival reading (an observed arrival, or the
+	// seed) wanted a hold past LimitMillis. It is written only there, so it
+	// still says so after trials have lowered the hold below the limit: read
+	// HeldAtLimit for whether the group is held at its limit now.
+	AtLimit         bool                     `json:"at_limit,omitempty"`
+	LimitMillis     int64                    `json:"limit_ms,omitempty"`
+	Rung            string                   `json:"rung,omitempty"`
+	Buckets         []int64                  `json:"buckets,omitempty"`
+	SegmentStart    execution.EvaluationTime `json:"segment_start,omitempty"`
+	Closed          bool                     `json:"closed,omitempty"`
+	Plans           []PlanRecord             `json:"plans,omitempty"`
+	Transitions     []Transition             `json:"transitions,omitempty"`
+	RenewedAtMillis int64                    `json:"renewed_at_ms,omitempty"`
 	// QueryDurationMillis is how long the group's query took as its owner
 	// last measured it, rounded up to the second, and QueryDurationAtMillis
 	// when that was written: what a process that takes the group over judges
@@ -133,4 +137,13 @@ func (record Record) HoldAt(slot execution.EvaluationTime) (int64, bool) {
 
 func inRange(hold int64) bool {
 	return hold >= 0 && hold <= execution.MaxReadHoldMillis
+}
+
+// HeldAtLimit says the group is held at its limit now: its latest arrival
+// reading wanted more than the limit, and its hold - the pending one when a
+// change is pending - has not been lowered below the limit since. Derived on
+// read rather than stored, so a lowering that writes nothing about arrivals
+// cannot leave it standing.
+func (record Record) HeldAtLimit() bool {
+	return record.AtLimit && record.LimitMillis > 0 && current(record) >= record.LimitMillis
 }
