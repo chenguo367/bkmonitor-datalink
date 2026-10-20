@@ -158,17 +158,19 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 // with no placement, so no filter or scope decides on it - by its true
 // bk_host_id, else by agent. A record that names either while the store has
 // never held an index with hosts is held (Facts.HostIdentityUnavailable)
-// only until the store's first load has returned: the identity may yet be
-// read. After it, the store's cache holds no host - empty, or never
-// written - and the record goes out under its own address, as Python's
-// does when CMDB holds no host for it (admission.HostIdentityRawNoIndex).
+// only while no read of the cache has succeeded and the store has not been
+// trying for longer than its hold bound (Store.IdentityPending): the
+// identity may yet be read. After a read that found no host - an empty
+// cache, or one never written - or past the bound, the record goes out under
+// its own address, as Python's does when CMDB holds no host for it
+// (admission.HostIdentityRawNoIndex).
 func identityOverlay(store *Store, dimensions map[string]json.RawMessage, facts *admission.Facts, agent, source string) {
 	id := facts.HostNaming.IDKey
 	if id == "" && agent == "" {
 		return
 	}
 	if !store.IdentityHeld() {
-		if store.FirstLoadAttempted() {
+		if !store.IdentityPending() {
 			facts.HostOverlaySource = admission.HostIdentityRawNoIndex
 			return
 		}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -122,9 +123,27 @@ func buildSeriesAdmission(
 // it is out, the filters admit by name and the alert identity of host-placed
 // series is read from the last index that held their hosts.
 func cmdbIndexTransitionLine(logger *observability.Logger) func(cmdbcache.Transition) {
+	return cmdbIndexTransitionLineAt(logger, time.Now)
+}
+
+// cmdbIndexTransitionInterval is the least time between two lines of the
+// same transition of one tenant: a writer flapping across the bound would
+// otherwise write one a minute. The next line written carries how many were
+// held back.
+const cmdbIndexTransitionInterval = 10 * time.Minute
+
+// cmdbIndexTransitionLineAt is cmdbIndexTransitionLine on a stated clock.
+func cmdbIndexTransitionLineAt(logger *observability.Logger, now func() time.Time) func(cmdbcache.Transition) {
 	if logger == nil {
 		return nil
 	}
+	type key struct{ tenant, from, to string }
+	type written struct {
+		at         time.Time
+		suppressed int
+	}
+	var mu sync.Mutex
+	last := map[key]*written{}
 	word := func(reason string) string {
 		if reason == "" {
 			return "usable"
@@ -132,7 +151,22 @@ func cmdbIndexTransitionLine(logger *observability.Logger) func(cmdbcache.Transi
 		return reason
 	}
 	return func(transition cmdbcache.Transition) {
+		k, at := key{transition.Tenant, transition.From, transition.To}, now()
+		mu.Lock()
+		entry := last[k]
+		if entry != nil && at.Sub(entry.at) < cmdbIndexTransitionInterval {
+			entry.suppressed++
+			mu.Unlock()
+			return
+		}
+		suppressed := 0
+		if entry != nil {
+			suppressed = entry.suppressed
+		}
+		last[k] = &written{at: at}
+		mu.Unlock()
 		logger.Warn("cmdb_index_transition", observability.ResultDegraded, 0, 0,
+			slog.Int("suppressed", suppressed),
 			slog.String("bk_tenant_id", transition.Tenant),
 			slog.String("from", word(transition.From)), slog.String("to", word(transition.To)),
 			slog.Float64("published_age_seconds", transition.PublishedAge.Seconds()),

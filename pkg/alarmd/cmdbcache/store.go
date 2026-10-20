@@ -88,11 +88,16 @@ type Store struct {
 	carried        map[string]*HostFacts
 	identityAgents map[string]string
 	lastError      error
-	// attempted says a load has been attempted and has returned, whatever
-	// it found: before then a record whose identity no index can give is
-	// held (FirstLoadAttempted), after it such a record is emitted under
-	// its own address, as Python emits a record CMDB holds no host for.
-	attempted bool
+	// loaded says a read of the cache has succeeded, whatever it found, and
+	// firstAttempt is when the store first tried one. Until either a read
+	// succeeded or identityHoldBound has passed since the first try, a
+	// record whose identity no index can give is held (IdentityPending);
+	// after, it goes out under its own address, as Python emits a record
+	// CMDB holds no host for.
+	loaded       bool
+	firstAttempt time.Time
+	// holdBound is identityHoldRefreshes refresh intervals.
+	holdBound time.Duration
 	refreshes uint64
 	unchanged uint64
 }
@@ -173,7 +178,8 @@ func NewStore(reader indexLoader, options StoreOptions) (*Store, error) {
 	}
 	return &Store{reader: reader, maxAge: options.MaxAge, publishedMaxAge: options.PublishedMaxAge, now: now,
 		observeRead: options.ObserveRead, publishedMaxAgeCap: options.PublishedMaxAgeCap,
-		onTransition: options.OnTransition, tenant: DefaultTenant, lastJudged: IndexNeverLoaded}, nil
+		onTransition: options.OnTransition, tenant: DefaultTenant, lastJudged: IndexNeverLoaded,
+		holdBound: identityHoldRefreshes * options.RefreshInterval}, nil
 }
 
 // The reasons an index is not one to decide on, as Health and every caller
@@ -313,9 +319,14 @@ func carryRefused(index *Index, previous *Index, carried map[string]*HostFacts) 
 	if index.Refused().Hosts == 0 || previous == nil {
 		return nil
 	}
+	// The cap is the identity's own size - the hosts it placed and those it
+	// carried - which is CMDB's: a load that refused most of its hosts is
+	// exactly when every one of them has to be kept, and the cap does not
+	// grow, since what is carried never exceeds what was placed.
+	limit := previous.Hosts() + len(carried)
 	next := make(map[string]*HostFacts)
 	carry := func(id string, host *HostFacts) bool {
-		if len(next) >= index.Hosts() {
+		if len(next) >= limit {
 			return false
 		}
 		if _, present := index.byHostID[id]; !present {
@@ -373,15 +384,30 @@ func (store *Store) IdentityHeld() bool {
 	return store.identity != nil
 }
 
-// FirstLoadAttempted is whether a load of this store has been attempted and
-// returned, whatever it found.
-func (store *Store) FirstLoadAttempted() bool {
+// identityHoldRefreshes is how many refresh intervals a store whose reads
+// keep failing holds host-placed records before it lets them go out under
+// their own address: five minutes at the minute's cadence, a Redis
+// restart or a failover, during which a held Slot is retried rather than
+// filed under another fingerprint. Past it the cache is not coming back
+// soon, and holding further would lose the detection itself; a later read
+// that succeeds still gives the records their identity from then on.
+const identityHoldRefreshes = 5
+
+// IdentityPending is whether a record whose identity no index can give
+// should still be held: no read of the cache has succeeded yet, and the
+// store has not been trying for longer than its hold bound. A store that
+// has not tried at all is pending: its first read is under way.
+func (store *Store) IdentityPending() bool {
 	if store == nil {
 		return false
 	}
 	store.mutex.RLock()
-	defer store.mutex.RUnlock()
-	return store.attempted
+	loaded, first := store.loaded, store.firstAttempt
+	store.mutex.RUnlock()
+	if loaded {
+		return false
+	}
+	return first.IsZero() || store.now().Sub(first) < store.holdBound
 }
 
 // Current returns the index in force, or nil before the first successful load.
@@ -425,15 +451,19 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.mutex.Lock()
 		store.lastError = nil
 		store.unchanged++
-		store.attempted = true
+		store.loaded = true
 		store.mutex.Unlock()
 		store.observe(ReadUnchanged)
 		store.noteJudgement()
 		return nil
 	}
+	store.mutex.Lock()
+	if store.firstAttempt.IsZero() {
+		store.firstAttempt = store.now()
+	}
+	store.mutex.Unlock()
 	index, err := store.reader.Load(ctx, store.now())
 	store.mutex.Lock()
-	store.attempted = true
 	if err != nil {
 		store.lastError = err
 		store.mutex.Unlock()
@@ -441,6 +471,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.noteJudgement()
 		return err
 	}
+	store.loaded = true
 	index.carryOptional(store.index)
 	store.index = index
 	store.notePublish(index.PublishedAt())

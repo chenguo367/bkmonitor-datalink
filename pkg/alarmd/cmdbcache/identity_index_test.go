@@ -8,6 +8,8 @@ package cmdbcache
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -226,5 +228,68 @@ func TestTheIdentityOverlaySourceIsNamed(t *testing.T) {
 	c.refresh(identityLoad(nil, map[string]string{}, published, 0))
 	if source := c.chain.Enrich(c.record).HostOverlaySource; source != admission.HostOverlayFromLastPopulatedIndex {
 		t.Fatalf("empty index: source %q, want %s", source, admission.HostOverlayFromLastPopulatedIndex)
+	}
+}
+
+// refreshFailing hands the store a load that fails, as a Redis timeout does.
+func (c *identityCase) refreshFailing() {
+	c.t.Helper()
+	c.loads.loads = append(c.loads.loads, func() (*Index, error) { return nil, errors.New("i/o timeout") })
+	_ = c.store.Refresh(context.Background())
+}
+
+// A first load that fails does not end the hold: a tenant whose cache holds
+// hosts but could not be read is held, not emitted raw; a read that later
+// succeeds gives the record its identity. Reads that keep failing end the
+// hold after five refresh intervals since the first try, and the record goes
+// out under its own address, named raw_no_index.
+func TestAFailedFirstLoadHoldsUntilAReadSucceedsOrTheBoundPasses(t *testing.T) {
+	record := `{"bk_agent_id":"agent-live","bk_target_ip":"198.51.100.9"}`
+	c := newIdentityCase(t, record)
+	c.refreshFailing()
+	for minute := 1; minute <= 4; minute++ {
+		c.now = c.now.Add(time.Minute)
+		c.refreshFailing()
+		if facts := c.chain.Enrich(c.record); !facts.HostIdentityUnavailable {
+			t.Fatalf("minute %d of failed reads: not held (source %q), want held", minute, facts.HostOverlaySource)
+		}
+	}
+	c.refresh(identityLoad([]string{"720002", identityLive}, map[string]string{"agent-live": "720002"}, c.now, 0))
+	if got, _ := c.overlay(); got != wantLiveOverlay {
+		t.Fatalf("after a read succeeded: overlay %s, want %s", got, wantLiveOverlay)
+	}
+
+	failing := newIdentityCase(t, record)
+	failing.refreshFailing()
+	failing.now = failing.now.Add(5 * time.Minute)
+	failing.refreshFailing()
+	facts := failing.chain.Enrich(failing.record)
+	if facts.HostIdentityUnavailable || facts.HostOverlay != nil || facts.HostOverlaySource != admission.HostIdentityRawNoIndex {
+		t.Fatalf("five minutes of failed reads: held %t overlay %v source %q, want raw, named %s",
+			facts.HostIdentityUnavailable, facts.HostOverlay, facts.HostOverlaySource, admission.HostIdentityRawNoIndex)
+	}
+}
+
+// A load that refused most of CMDB's hosts keeps every one of them: the
+// carry is bounded by the identity's own size, not by the few hosts the
+// refusing load still held.
+func TestAMassRefusalKeepsEveryRefusedHost(t *testing.T) {
+	host := func(id int) string {
+		return `{"bk_host_id":` + strconv.Itoa(id) + `,"bk_host_innerip":"192.0.2.` + strconv.Itoa(id%250) + `","bk_cloud_id":0,"bk_biz_id":999}`
+	}
+	var ten, two []string
+	for id := 730001; id <= 730010; id++ {
+		ten = append(ten, strconv.Itoa(id), host(id))
+		if id > 730008 {
+			two = append(two, strconv.Itoa(id), host(id))
+		}
+	}
+	c := newIdentityCase(t, `{"bk_host_id":"730001"}`)
+	c.refresh(identityLoad(ten, map[string]string{}, c.now, 0))
+	c.refresh(identityLoad(two, map[string]string{}, c.now, 8))
+	for id := 730001; id <= 730008; id++ {
+		if _, found := c.store.IdentityHost(strconv.Itoa(id)); !found {
+			t.Errorf("host %d, refused with seven others by a load holding two, lost its identity", id)
+		}
 	}
 }
