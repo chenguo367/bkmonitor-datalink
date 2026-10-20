@@ -790,9 +790,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// alerting question; the share refusal after it stops a strategy whole.
 	metrics.retainedShareApproaching = prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem,
 		Name: "state_retained_share_approaching_slots_total",
-		Help: "Completed Slots whose retained bytes reached at least 95 percent of the one-object share of the " +
-			"retained pool they were admitted under. A Slot past the share is refused as QG_BUDGET_SHARE_EXCEEDED " +
-			"every round and its strategy stops; these are the Slots before that. The objects are listed by name " +
+		Help: "Slots whose retained bytes reached at least 95 percent of the one-object share of the retained " +
+			"pool they were admitted under: completed Slots at or past the threshold, and Slots given up because " +
+			"the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name " +
 			"under RETAINED_SHARE_APPROACHING on the page and in fleet.get."})
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: scheduleCutoverDurationBuckets}, []string{"result"})
@@ -1979,6 +1979,13 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			observability.RetainedShareApproaching(usage.RetainedBytes, usage.RetainedShareBytes) {
 			m.retainedShareApproaching.Inc()
 		}
+	}
+	// A Slot given up at its share is past the threshold, not short of it:
+	// counted here too, or an object refused on every Slot - the one this
+	// counter exists to warn about - would leave it at zero, since none of
+	// its Slots complete. One per Slot given up, not per refused attempt.
+	if skipped := observation.SlotSkipped; observation.Stage == observability.StageSlotSkipped && skipped != nil && skipped.Share != nil {
+		m.retainedShareApproaching.Add(float64(max(skipped.SlotCount, 1)))
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

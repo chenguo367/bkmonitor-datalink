@@ -3302,7 +3302,15 @@ func publishedComposition(
 // against. Both halves arrive from the execution that produced them, so the
 // row is readable against the numbers that were in force when it was written
 // rather than against a configuration a reader looks up later.
+//
+// A Slot that ended without a finished result has no usage (the coordinator
+// fills it at the one exit that has both), and the line carries none rather
+// than a row of zeros: retained_bytes 0 beside a refusal read as a Slot that
+// held nothing when the share refused it.
 func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBudgetUsageFacts {
+	if usage == (execution.SlotBudgetUsage{}) {
+		return nil
+	}
 	return &observability.SlotBudgetUsageFacts{
 		StateMutations: usage.StateMutations, GapMutations: usage.GapMutations, Events: usage.Events,
 		EventsWithoutMessage: usage.EventsWithoutMessage,

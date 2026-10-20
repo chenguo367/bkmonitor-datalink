@@ -1849,7 +1849,7 @@ Times this process forgot every generation-scoped key life it had remembered, be
 
 ## alarmd_state_retained_share_approaching_slots_total
 
-Completed Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under. A Slot past the share is refused as QG_BUDGET_SHARE_EXCEEDED every round and its strategy stops; these are the Slots before that. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get.
+Slots whose retained bytes reached at least 95 percent of the one-object share of the retained pool they were admitted under: completed Slots at or past the threshold, and Slots given up because the share refused them (RESOURCE_SHARE_EXCEEDED), which are past it. The objects are listed by name under RETAINED_SHARE_APPROACHING on the page and in fleet.get.
 
 ## alarmd_state_version_conflict_total
 

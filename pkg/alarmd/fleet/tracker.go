@@ -1180,6 +1180,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	}
 	if shareSkip != nil {
 		state.noteShareRefusal(shareSkip.Share, shareSkip.FirstSlot, shareSkip.LastSlot, shareSkip.SlotCount, at)
+		state.noteShareRefusedUsage(shareSkip.Share, shareSkip.LastSlot, at)
 		return
 	}
 	// The round's events went to the sink: for an object whose own failure
@@ -1198,13 +1199,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// own and prunes the scopes it did not report.
 	switch {
 	case string(observation.ReasonCode) == contract.ReasonQGBudgetShareExceeded:
-		// Past the share: the object is on the refusal's line now, and a
-		// warning that it is near the share would say less than that line
-		// and say it twice. The reading stays, marked, so the next completion
-		// keeps the Since this one had.
-		if state.shareUsage != nil {
-			state.shareUsage.refused = true
-		}
+		// A refused attempt, which the Slot retries: the reading stays as it
+		// is and so does the row. The Slot given up at the share replaces it
+		// with the refusal's bytes (noteShareRefusedUsage); an object refused
+		// on every Slot completes none, and dropping it from the row on each
+		// attempt hid exactly the object the row is for.
 	case observation.Stage == observability.StageSlotCompleted && observation.Err == nil:
 		state.noteShareUsage(observation.SlotBudgetUsage, trace.EvaluationTime, at)
 	}
