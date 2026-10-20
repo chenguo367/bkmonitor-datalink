@@ -157,6 +157,17 @@ var redisCommandNames = map[string]struct{}{
 	// Outside the list they all read as "other", which is where every one of
 	// that client's failures sat.
 	"getrange": {}, "lrange": {}, "lpush": {}, "ltrim": {},
+	// The rest of what the code issues, which read as "other" until a scan
+	// of every call held the list to them (TestEveryRedisCommandTheCodeIssuesIsNamed):
+	// the store census's draw, weighing and count; the ownership registry's
+	// pruning and counting; first-writer-wins writes; the open alert index's
+	// set reads; the diagnostic reads of a key's type and a field; and the
+	// rollout store's newest-first read.
+	"randomkey": {}, "memory": {}, "dbsize": {},
+	"zremrangebyscore": {}, "zcount": {}, "zrevrange": {},
+	"setnx": {}, "hsetnx": {},
+	"scard": {}, "sscan": {},
+	"type": {}, "hexists": {}, "hstrlen": {}, "hkeys": {},
 }
 
 type redisCallMetrics struct {
