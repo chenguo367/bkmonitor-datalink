@@ -93,6 +93,11 @@ var warnCursorRefusals = makeReasonSet([]ReasonCode{
 	CursorRefusalProgressMissing, CursorRefusalRangeInFlight, CursorRefusalCursorMoved, CursorRefusalCASConflict,
 })
 
+// warnSlotPathReasons are the Slot path's own words for a Slot attempt held
+// up: a wait inside it that outlasted a settling wait. It was written at
+// WARN as reason_not_reported and keeps it.
+var warnSlotPathReasons = makeReasonSet([]ReasonCode{ReasonSlotWaitSlow})
+
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range
 // decided by design.
@@ -121,7 +126,7 @@ func ReasonLogLevel(reason ReasonCode) slog.Level {
 	case reason == ReasonNone:
 		return slog.LevelInfo
 	case inReasonSet(warnReasons, reason), inReasonSet(warnViewStreamReasons, reason), inReasonSet(warnDecisionReasons, reason),
-		inReasonSet(warnRunOutcomes, reason), inReasonSet(warnCursorRefusals, reason),
+		inReasonSet(warnRunOutcomes, reason), inReasonSet(warnCursorRefusals, reason), inReasonSet(warnSlotPathReasons, reason),
 		inReasonSet(warnMaintenanceReasons, reason), inReasonSet(warnAbsentCloseReasons, reason):
 		return slog.LevelWarn
 	case inReasonSet(activationFailureReasonSet, reason):

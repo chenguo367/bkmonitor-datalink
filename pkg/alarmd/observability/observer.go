@@ -1194,6 +1194,10 @@ var SlotWaits = []string{SlotWaitProgressBegin, SlotWaitFinalization, SlotWaitOb
 // to land is long enough to be the answer to "why did this Slot take so long".
 const SlowSlotWait = 10 * time.Second
 
+// ReasonSlotWaitSlow is a slot_wait line's reason: one wait inside a Slot
+// attempt that took SlowSlotWait or longer.
+const ReasonSlotWaitSlow ReasonCode = "SLOT_WAIT_SLOW"
+
 // ReplayExpiryReasons is the closed vocabulary of why a replay expired. The
 // scheduler's typed constants are held to this list by a test rather than by
 // hand, so a new reason cannot arrive without a series to count it.
@@ -3844,9 +3848,11 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 // reason that no other list holds: a Runner round's outcome on its
 // runner_returned line (RunOutcomes), which said terminal with no reason,
 // and the refusal a store found against skipping a pruned cursor
-// (CursorRefusals), which said retrying with none.
+// (CursorRefusals), which said retrying with none; and a slow wait inside a
+// Slot attempt, which said degraded with none.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals))
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+1)
+	reasons = append(reasons, ReasonSlotWaitSlow)
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
 	}
@@ -3997,17 +4003,18 @@ func ObserveSlotWait(
 	if elapsed < 0 {
 		return
 	}
-	result := Result(ResultSuccess)
+	result, reason := Result(ResultSuccess), ReasonNone
 	if elapsed >= SlowSlotWait {
 		// Not a failure -- nothing went wrong and nothing will report one.
 		// Degraded is what a Slot attempt that spent this long waiting is,
-		// and it is what keeps the line out of the success population.
-		result = Result(ResultDegraded)
+		// and it is what keeps the line out of the success population; its
+		// reason says that, and not that the site failed to report one.
+		result, reason = Result(ResultDegraded), ReasonSlotWaitSlow
 	}
 	// Observability is a fail-open side channel, as at every other boundary.
 	defer func() { _ = recover() }()
 	observer.Observe(ctx, Observation{
-		Component: ComponentScheduler, Stage: StageSlotWait, Result: result, Operation: operation,
+		Component: ComponentScheduler, Stage: StageSlotWait, Result: result, ReasonCode: reason, Operation: operation,
 		Duration: elapsed, SlotWait: &SlotWaitFacts{Wait: wait},
 	})
 }

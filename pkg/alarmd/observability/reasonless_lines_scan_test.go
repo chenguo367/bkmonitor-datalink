@@ -42,7 +42,6 @@ var reasonlessLinesAllowed = map[string]int{
 	"controlplane/object_catalog_store.go|renewObjectCatalog|StageObjectCatalog":                      1,
 	"controlplane/redis_catalog.go|RenewCurrentActivationObjects|StageActiveQGSet":                    1,
 	"controlplane/timeline_prune.go|observeCutover|StageScheduleCutover":                              1,
-	"observability/observer.go|ObserveSlotWait|StageSlotWait":                                         1,
 }
 
 // A line whose result is not a success names its reason. One built without
