@@ -799,6 +799,15 @@ func TestSlotExecutionCoordinatorDiscardsProvisionalEffectsForPartialData(t *tes
 		fixture.ports.lastProgress.Completion.Primary.Completeness != execution.CompletenessPartial {
 		t.Fatalf("Progress=%+v", fixture.ports.lastProgress)
 	}
+	// The completion line's lost-round facts key on this, not on the cause.
+	if !result.PhysicalQueryLoss {
+		t.Fatal("a PARTIAL physical query did not mark the Slot's physical loss")
+	}
+	whole := newFixture(t, true, "")
+	if result, err := whole.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil ||
+		result.PhysicalQueryLoss {
+		t.Fatalf("whole round: result=%+v error=%v, want no physical loss", result, err)
+	}
 }
 
 func TestSlotExecutionCoordinatorShortCircuitsAlreadyAppliedState(t *testing.T) {

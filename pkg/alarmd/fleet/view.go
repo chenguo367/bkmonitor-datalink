@@ -1084,11 +1084,22 @@ func unknownCauseOrigin() *CauseOrigin {
 	return &CauseOrigin{Origin: CauseOriginUnknown}
 }
 
-// settleCauseOrigin gives a row that has a reason and no origin the unknown
-// one, so an absent origin means only an absent reason.
+// heldCauseOrigin is the origin of a reason held without one - restored, or
+// from a replica on an older build: derived for a cause word a round is
+// filed under (FiledCauses), which is alarmd's own on every build, and
+// unknown for any other reason, which could have been either.
+func heldCauseOrigin(reason string) *CauseOrigin {
+	if slices.Contains(FiledCauses, reason) {
+		return &CauseOrigin{Origin: CauseOriginDerived}
+	}
+	return unknownCauseOrigin()
+}
+
+// settleCauseOrigin gives a row that has a reason and no origin the one a
+// held reason has, so an absent origin means only an absent reason.
 func settleCauseOrigin(anomaly *Anomaly) {
 	if anomaly.CauseReason != "" && anomaly.CauseOrigin == nil {
-		anomaly.CauseOrigin = unknownCauseOrigin()
+		anomaly.CauseOrigin = heldCauseOrigin(anomaly.CauseReason)
 	}
 }
 

@@ -53,6 +53,15 @@ func TestALostRoundExplainsItselfOnItsCompletionLine(t *testing.T) {
 			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseGapGuardWarming,
 				Reason: execution.ReasonCode(contract.ReasonQueryTimeout), ReasonCarried: true,
 				ReasonOrigin: execution.ReasonOrigin{Slot: 1_699_999_940, Cause: execution.ReasonCode(contract.ReasonQueryTimeout)}}}, false},
+		// Two Plans: B's Level held by a carried guard, A's primary came
+		// back PARTIAL. The carried Level outranks the partial primary in
+		// the attribution, and a query was short all the same.
+		{"carried cause over a partial primary", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseLevelOutcomeUnknown,
+				Reason: execution.ReasonCode(contract.ReasonQueryTimeout), ReasonCarried: true,
+				ReasonOrigin: execution.ReasonOrigin{Slot: 1_699_999_940, Cause: execution.ReasonCode(contract.ReasonQueryTimeout)}},
+			PhysicalQueryLoss: true}, true},
 	} {
 		var completion *observability.Observation
 		executor := observedProductionSlotExecutor{

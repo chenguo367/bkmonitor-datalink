@@ -257,7 +257,7 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 			state.causeReason = round.ReasonCode
 			// The summary never recorded whose the reason was.
 			if state.causeReason != "" {
-				state.causeOrigin = unknownCauseOrigin()
+				state.causeOrigin = heldCauseOrigin(state.causeReason)
 			}
 			if !round.CompletedAt.IsZero() {
 				// The round said its reason when it was committed: that is

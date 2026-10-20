@@ -2941,8 +2941,8 @@ func (executor observedProductionSlotExecutor) Execute(
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
 		HeldBy: heldBy, GapApplySite: gapApplySite,
-		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result.CompletionCause), retryingAfterFailure, budget),
-		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result.CompletionCause), retryingAfterFailure, budget),
+		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result), retryingAfterFailure, budget),
+		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
@@ -2976,16 +2976,20 @@ func (executor observedProductionSlotExecutor) Execute(
 // round that succeeded, or that is only waiting for its data, is none.
 // queryLossResult is the result the lost-round facts are keyed on: the
 // Slot's own, except for a completion whose cause's reason was carried from
-// a stored guard. That Slot's queries answered; it is degraded only because
-// a guard an earlier round raised still holds a Level, and it lost no query
-// for a decision or a budget to explain - the rule the query line follows
-// (worker observeQueryCompleted). The Slot's result and reason on the line
-// are unchanged.
-func queryLossResult(result observability.Result, cause execution.SlotCompletionCause) observability.Result {
-	if cause.Cause != "" && cause.ReasonCarried {
+// a stored guard while none of its physical queries answered short. That
+// Slot's queries answered; it is degraded only because a guard an earlier
+// round raised still holds a Level, and it lost no query for a decision or
+// a budget to explain - the rule the query line follows (worker
+// observeQueryCompleted). The physical loss is asked of the round, not of
+// the cause: the attribution ranks a carried Level outcome above a primary
+// input that came back PARTIAL, and a Query Group whose one Plan was held by
+// a guard while another Plan's query was short lost that query all the
+// same. The Slot's result and reason on the line are unchanged.
+func queryLossResult(observed observability.Result, result execution.SlotExecutionResult) observability.Result {
+	if result.CompletionCause.Cause != "" && result.CompletionCause.ReasonCarried && !result.PhysicalQueryLoss {
 		return observability.ResultSuccess
 	}
-	return result
+	return observed
 }
 
 func lostRound(result observability.Result, retryingAfterFailure bool) bool {

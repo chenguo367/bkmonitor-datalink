@@ -441,6 +441,9 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// physical queries' own beside it (observeQueryCompleted).
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, completion, stream.evaluated)
+	// Whether a physical query of the round answered short, by the rule the
+	// query line reports it by, for the completion line's lost-round facts.
+	physicalLoss, _ := physicalQueryFailure(completion)
 	if len(stream.evaluated.Plans) == 0 {
 		// The timing travels with the usage here for the same reason it does at
 		// the other exit: this Slot ran. A round that produced no Plan result
@@ -448,7 +451,8 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		// budgets it used beside an empty clock would read as a Slot that was
 		// never measured rather than one that found nothing to decide.
 		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason,
-			Usage: stream.budgetUsage(), Timing: stream.timing(), InPlaceWait: completion.InPlaceWait}, nil
+			Usage: stream.budgetUsage(), Timing: stream.timing(), InPlaceWait: completion.InPlaceWait,
+			PhysicalQueryLoss: physicalLoss}, nil
 	}
 
 	var result execution.SlotExecutionResult
@@ -468,6 +472,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: converge changed activation: %w", convergeErr)
 			}
 			result.InPlaceWait = completion.InPlaceWait
+			result.PhysicalQueryLoss = physicalLoss
 			return result, nil
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
@@ -478,6 +483,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	result.Usage = stream.budgetUsage()
 	result.Timing = stream.timing()
 	result.InPlaceWait = completion.InPlaceWait
+	result.PhysicalQueryLoss = physicalLoss
 	return result, nil
 }
 

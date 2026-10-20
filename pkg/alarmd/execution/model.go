@@ -4462,6 +4462,11 @@ type SlotExecutionResult struct {
 	// completion line (slot_completed): the same attribution the Progress
 	// commit reported. Zero on a Slot that did not commit.
 	CompletionCause SlotCompletionCause
+	// PhysicalQueryLoss says a physical query of the round answered short of
+	// FULL - PARTIAL or UNAVAILABLE - by the rule the query line reports it
+	// by. Observation only: it decides whether the completion line explains
+	// a lost query, whatever cause outranked it in the attribution.
+	PhysicalQueryLoss bool
 	// Usage is what this Slot took of each budget, carried out so the
 	// completion row can report it.
 	//
