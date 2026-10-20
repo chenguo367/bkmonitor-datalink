@@ -1393,6 +1393,33 @@ func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []s
 	forbidden := map[string]bool{}
 	pos := expression.Pos()
 	inside := func(node ast.Node) bool { return node != nil && pos >= node.Pos() && pos < node.End() }
+	// rebound reports a write to, or a new declaration of, the guarded
+	// expression inside the branch before the read: from there the guard no
+	// longer says what the expression holds.
+	rebound := func(branch ast.Node) bool {
+		found := false
+		ast.Inspect(branch, func(node ast.Node) bool {
+			if found || node == nil || node.Pos() >= pos {
+				return false
+			}
+			switch typed := node.(type) {
+			case *ast.AssignStmt:
+				for _, left := range typed.Lhs {
+					if types.ExprString(left) == text {
+						found = true
+					}
+				}
+			case *ast.ValueSpec:
+				for _, name := range typed.Names {
+					if name.Name == text {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+		return found
+	}
 	ast.Inspect(scope.function.decl.Body, func(node ast.Node) bool {
 		if !inside(node) {
 			return false
@@ -1400,6 +1427,7 @@ func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []s
 		switch typed := node.(type) {
 		case *ast.IfStmt:
 			switch {
+			case inside(typed.Body) && rebound(typed.Body):
 			case inside(typed.Body):
 				if compared, ok := terms(typed.Cond, token.LOR, token.EQL); ok {
 					allowed = append(allowed, constants(compared...))
@@ -1407,6 +1435,7 @@ func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []s
 				for value := range constants(excluded(typed.Cond, token.LAND, token.NEQ)...) {
 					forbidden[value] = true
 				}
+			case typed.Else != nil && inside(typed.Else) && rebound(typed.Else):
 			case typed.Else != nil && inside(typed.Else):
 				if compared, ok := terms(typed.Cond, token.LAND, token.NEQ); ok {
 					allowed = append(allowed, constants(compared...))
@@ -1421,7 +1450,7 @@ func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []s
 			}
 			for _, statement := range typed.Body.List {
 				clause, ok := statement.(*ast.CaseClause)
-				if !ok || !inside(clause) {
+				if !ok || !inside(clause) || rebound(clause) {
 					continue
 				}
 				if clause.List != nil {
@@ -1958,11 +1987,11 @@ func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, dep
 // closed set. By kind:
 //
 //	B1 (19): a range variable or a slice or map element whose producers are other closed lists;
-//	B2 (11): a map key or composite key of an output aggregation;
-//	B3 (10): a call through an interface or a func value;
-//	B4 (4): a value decoded from the store;
-//	B5 (4): external or free text;
-//	B6 (23): a field of a result whose type the scan does not see.
+//	B2 (10): a map key or composite key of an output aggregation;
+//	B3 (8): a call through an interface or a func value;
+//	B4 (5): a value decoded from the store;
+//	B5 (5): external or free text;
+//	B6 (24): a field of a result whose type the scan does not see, or the result of a call it does not follow.
 var closedLabelSetUnresolved = map[string]string{
 	"capacity_budget|worker/sideeffect_reservation.go|checkEffectCounts|check.kind":                                                                                  "PENDING B6",
 	"completion_cause|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Cause":                                                               "PENDING B6",
@@ -1986,7 +2015,7 @@ var closedLabelSetUnresolved = map[string]string{
 	"output_event_kind|worker/coordinator.go|withoutMessageReported|k.kind":                                                                                          "PENDING B2",
 	"output_event_kind|worker/coordinator.go|writeEvents|dropped.EventKind":                                                                                          "PENDING B2",
 	"query_failure_code|access/uq/rejection.go|rejectionClass|strconv.Itoa(status)":                                                                                  "PENDING B5",
-	"query_failure_code|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))": "PENDING B3",
+	"query_failure_code|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))": "PENDING B6",
 	"query_status_code|access/uq/series_decoder.go|complete|status.Code":                                                                                             "PENDING B5",
 	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.CompletionCause.Reason":                                                                        "PENDING B6",
 	"reason|cmd/alarmd/runtime_phase_two_production.go|Execute|result.ReasonCode":                                                                                    "PENDING B6",
@@ -2000,14 +2029,14 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|execution/guard_origin.go|StampGapScopeOrigins|before.ReasonOriginCause":                                                                                 "PENDING B6",
 	"reason|execution/model.go|deriveCompletionAttribution|candidateReason":                                                                                          "PENDING B1",
 	"reason|execution/unavailable_attribution.go|AttributeUnavailable|facts.Attempts[index].ReasonCode":                                                              "PENDING B1",
-	"reason|scheduler/query_cooldown.go|restoreQueryCooldown|record.Reason":                                                                                          "PENDING B6",
+	"reason|scheduler/query_cooldown.go|restoreQueryCooldown|record.Reason":                                                                                          "PENDING B4",
 	"reason|scheduler/slot_source.go|repairedLanding|repair.ReasonCode()":                                                                                            "PENDING B3",
 	"reason|state/execution_v2_no_data.go|applyOneNoData|reason":                                                                                                     "PENDING B4",
 	"reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                        "PENDING B4",
 	"reason|viewstream/client.go|reprobe|fmt.Sprintf(\"missing=%d probed=%t\", missing, probed)":                                                                     "PENDING B5",
 	"reason|viewstream/client.go|serveOnce|client.discovery.Leader(ctx)":                                                                                             "PENDING B3",
 	"reason|viewstream/client.go|serveOnce|leader.Endpoint":                                                                                                          "PENDING B5",
-	"reason|viewstream/client.go|session|body.Refusal.Reason":                                                                                                        "PENDING B6",
+	"reason|viewstream/client.go|session|body.Refusal.Reason":                                                                                                        "PENDING B5",
 	"reason|viewstream/server.go|admit|server.admission.Admit(ctx, hello.WorkerId, hello.StreamToken)":                                                               "PENDING B3",
 	"reason|worker/coordinator.go|Execute|begin.ReasonCode":                                                                                                          "PENDING B6",
 	"reason|worker/coordinator.go|Execute|finalization.ReasonCode":                                                                                                   "PENDING B6",
@@ -2023,12 +2052,12 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|worker/resume_applied_series.go|resumedSeriesResult|guard.ReasonCode":                                                                                    "PENDING B6",
 	"reason|worker/stream_session.go|gapMutationForReasons|reasons[scope]":                                                                                           "PENDING B1",
 	"reason|worker/stream_session.go|observeCompletionOnlyProbe|binding.ReasonCode":                                                                                  "PENDING B6",
-	"reason|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":             "PENDING B3",
+	"reason|worker/stream_session.go|physicalFailureReason|execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))":             "PENDING B6",
 	"reason|worker/supplement.go|supplementAdmitted|result.ReasonCode":                                                                                               "PENDING B6",
 	"result|cmd/alarmd/runtime_phase_two_production.go|Execute|result.Result":                                                                                        "PENDING B6",
 	"state_admission_reason|worker/coordinator.go|firstStateAdmissionFailureReason|item.ReasonCode":                                                                  "PENDING B6",
 	"state_preflight_reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                        "PENDING B4",
-	"wire_format|controlplane/object_catalog_read.go|AssembleQueryGroup|context.WireFormat":                                                                          "PENDING B2",
+	"wire_format|controlplane/object_catalog_read.go|AssembleQueryGroup|context.WireFormat":                                                                          "PENDING B6",
 	"wire_format|kafka/output_partial.go|partialRejection|formats[index]":                                                                                            "PENDING B2",
 	"wire_format|kafka/trigger_event_sink.go|WriteBatch|key.format":                                                                                                  "PENDING B2",
 	"wire_format|metric/phase_two.go|observe|format":                                                                                                                 "PENDING B2",
