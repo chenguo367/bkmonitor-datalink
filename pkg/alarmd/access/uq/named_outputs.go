@@ -29,10 +29,13 @@ const (
 	answerError        = "ERROR"
 )
 
-// namedOutputName is the label the provider names a PromQL series' metric
-// by. Two outputs of one expression differ in it whenever one is a bare
-// selector, so it is left out of the key the outputs are aligned on - and
-// only there: the series' own identity keeps every label it has.
+// namedOutputName is the label PromQL names a series' metric by. It is left
+// out of the key the outputs are aligned on, as the platform leaves it out
+// (bk-monitor 458f31c537, bkmonitor/data_source/unify_query/query.py:516,
+// from #12789; the UQ 007 spec's alignment rule, spec.md:49): a bare
+// selector keeps it and an expression over it drops it, so two outputs of
+// one strategy would otherwise never meet. Only the key leaves it out: the
+// series' own identity keeps every label it has.
 const namedOutputName = "__name__"
 
 // namedOutputAnswer is one entry of a named_outputs/v1 answer's outputs.
@@ -124,19 +127,24 @@ func (named *namedOutputDecoding) hold(bytes uint64) error {
 	return nil
 }
 
-// alignLabels is a series' labels as the alignment keys them: every group
-// key but __name__, in order, each with its value as the provider wrote it.
+// alignLabels is a series' labels as the alignment keys them, as the
+// platform keys them (extract_unify_query_series_dimensions, then
+// _index_named_output_records): each group key without its _tableN suffix,
+// a later key standing for an earlier one it then equals, __name__ left
+// out, and the pairs sorted, each value as the provider wrote it.
 func alignLabels(series responseSeries) string {
-	pairs := make([]string, 0, len(series.GroupKeys))
+	labels := make(map[string]string, len(series.GroupKeys))
 	for index, key := range series.GroupKeys {
-		if key == namedOutputName {
-			continue
-		}
 		value := nullDimension
 		if index < len(series.GroupValues) {
 			value = series.GroupValues[index]
 		}
-		pairs = append(pairs, key+"\x00"+string(value))
+		labels[stripTableSuffix(key)] = string(value)
+	}
+	delete(labels, namedOutputName)
+	pairs := make([]string, 0, len(labels))
+	for key, value := range labels {
+		pairs = append(pairs, key+"\x00"+value)
 	}
 	sort.Strings(pairs)
 	return strings.Join(pairs, "\x01")

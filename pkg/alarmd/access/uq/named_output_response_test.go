@@ -301,6 +301,39 @@ func TestAQueryWithoutNamedOutputsCarriesNothingBesideItsRecords(t *testing.T) {
 	}
 }
 
+// The alignment keys labels as the platform does
+// (extract_unify_query_series_dimensions, _index_named_output_records): a
+// group key's _tableN suffix is stripped, so an output that names a label
+// with it meets the record that names it without; and __name__ is left out,
+// so a bare selector meets the expression over it.
+func TestTheAlignmentKeysLabelsAsThePlatformDoes(t *testing.T) {
+	completion, sink := decodeNamed(t, namedAttempt(t, namedOutputsAB), namedAnswer(
+		namedOutput("A", "SUCCESS", false, "",
+			namedSeries([]string{"bk_target_ip_table0"}, ipOne, `[[1700123060000,1]]`)),
+		namedOutput("B", "SUCCESS", false, "",
+			namedSeries([]string{"__name__", "bk_target_ip"}, []string{"idle", "192.0.2.1"}, `[[1700123060000,2]]`)),
+		namedOutput("C", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,11]]`))))
+	values := valuesAt(t, completion, sink, "192.0.2.1", 1_700_123_060)
+	wantOutput(t, values, "A", "1", execution.NamedOutputSuccess)
+	wantOutput(t, values, "B", "2", execution.NamedOutputSuccess)
+	if labels := alignLabels(responseSeries{GroupKeys: []string{"x_table1", "__name__", "a"},
+		GroupValues: []json.RawMessage{json.RawMessage(`"1"`), json.RawMessage(`"m"`), json.RawMessage(`"2"`)}}); labels != "a\x00\"2\"\x01x\x00\"1\"" {
+		t.Fatalf("labels %q", labels)
+	}
+}
+
+// A state this build does not know is read as ERROR, found or not: a value
+// in it is not shown as a success.
+func TestAnOutputInAStateThisBuildDoesNotKnowReadsAsError(t *testing.T) {
+	completion, sink := decodeNamed(t, namedAttempt(t, namedOutputsAB), namedAnswer(
+		namedOutput("A", "STALE", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,1]]`)),
+		namedOutput("B", "STALE", false, ""),
+		namedOutput("C", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,11]]`))))
+	values := valuesAt(t, completion, sink, "192.0.2.1", 1_700_123_060)
+	wantOutput(t, values, "A", "1", execution.NamedOutputError)
+	wantOutput(t, values, "B", "", execution.NamedOutputError)
+}
+
 // The alignment holds no more than its Slot may keep: past the bound its
 // Slot's share left, the query is refused as an answer too large to hold,
 // which no retry makes smaller; under it, the same answer is aligned.
