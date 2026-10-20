@@ -338,3 +338,44 @@ func TestARefusalKeepsTheSinceTheObjectReachedTheThresholdAt(t *testing.T) {
 		t.Fatal("an object whose Slot completed at half its share is still on the row")
 	}
 }
+
+// A round that completes any way other than a Slot given up for the share
+// ends the refused reading, even when it carried no bytes to replace it: the
+// object leaves the line rather than reading refused until a completion
+// with usage comes.
+func TestARoundCompletedWithoutUsageEndsTheRefusedReading(t *testing.T) {
+	at := &clock{at: time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)}
+	tracker := newTracker(t, at)
+	const group = "qg-unrefused"
+	tracker.Observe(context.Background(), shareGivenUp(group, shareShare, 5000, shareShare, at.at))
+	if row, listed := shareRows(tracker)[group]; !listed || !row.RetainedShare.Refused {
+		t.Fatalf("fixture: listed %t row %+v, want the refused reading", listed, row.RetainedShare)
+	}
+	at.at = at.at.Add(time.Minute)
+	tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+		ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: "EXPIRED_REPLAY", ProgressCompletionReason: "GAP_SKIPPED",
+		Trace: observability.TraceFields{QueryGroupKey: group, StrategyID: "4101", BusinessID: "2", EvaluationTime: at.at.Unix()},
+	})
+	if row, listed := shareRows(tracker)[group]; listed {
+		t.Fatalf("a round completed for another cause left the refused reading on the line: %+v", row.RetainedShare)
+	}
+}
+
+// A Slot given up for the share itself keeps the reading: its own progress
+// line is not a round that ends the refusal.
+func TestAShareGiveUpsOwnCompletionKeepsTheRefusedReading(t *testing.T) {
+	at := &clock{at: time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)}
+	tracker := newTracker(t, at)
+	const group = "qg-still-refused"
+	tracker.Observe(context.Background(), shareGivenUp(group, shareShare, 5000, shareShare, at.at))
+	tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+		ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: observability.CompletionCauseResourceShareExceeded,
+		ProgressCompletionReason: "GAP_SKIPPED",
+		Trace:                    observability.TraceFields{QueryGroupKey: group, StrategyID: "4101", BusinessID: "2", EvaluationTime: at.at.Unix()},
+	})
+	if row, listed := shareRows(tracker)[group]; !listed || !row.RetainedShare.Refused {
+		t.Fatalf("listed %t row %+v: the give-up's own completion ended the refused reading", listed, row.RetainedShare)
+	}
+}

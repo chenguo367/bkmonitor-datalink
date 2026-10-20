@@ -1686,9 +1686,17 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.lastRoundSlot = trace.EvaluationTime
 		state.skipSpanOpen = completion == "GAP_SKIPPED"
 		// A round that completed any other way ends the run of Slots given
-		// up for the share: the next one starts its own count.
+		// up for the share: the next one starts its own count. It ends the
+		// refused reading on the share line too - the object is no longer
+		// refused - whether or not the round carried bytes to replace it: a
+		// round that did has already replaced it (noteShareUsage), and one
+		// that did not leaves the object with no reading rather than one
+		// saying it is still refused.
 		if observation.ProgressCompletionCause != string(model.CauseResourceShareExceeded) {
 			state.shareRefusal = nil
+			if state.shareUsage != nil && state.shareUsage.Refused {
+				state.shareUsage = nil
+			}
 		}
 		// Every completion, healthy or not, goes on the ring the holes are
 		// read against: a healthy round is exactly the one a later hole at
