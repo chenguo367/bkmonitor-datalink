@@ -154,6 +154,26 @@ func TestAnUnexplainedEvaluationIsStillExplainedBesideAWholeQuery(t *testing.T) 
 	}
 }
 
+// The evaluation line counts a Level that repeats a stored guard's reason in
+// a cell of its own, apart from the same reason met this round; that cell is
+// what level_outcome_total{origin="carried"} counts.
+func TestALevelOutcomeCellSeparatesACarriedReason(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "306"}
+	unknown := func(level uint32, carried bool) execution.LevelOutcome {
+		return execution.LevelOutcome{Plan: plan, LevelID: level, Outcome: execution.LevelOutcomeUnknown,
+			ReasonCode: contract.ReasonQueryTimeout, ReasonCarried: carried}
+	}
+	facts := levelOutcomeFacts(execution.DuePlan{Identity: plan}, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
+		Plan: plan, LevelOutcomes: []execution.LevelOutcome{unknown(1, false), unknown(2, true), unknown(3, true)}}}})
+	want := []observability.LevelOutcomeFact{
+		{Outcome: "UNKNOWN", Reason: contract.ReasonQueryTimeout, Count: 1},
+		{Outcome: "UNKNOWN", Reason: contract.ReasonQueryTimeout, Carried: true, Count: 2},
+	}
+	if len(facts) != len(want) || facts[0] != want[0] || facts[1] != want[1] {
+		t.Fatalf("level outcome facts %+v, want %+v", facts, want)
+	}
+}
+
 // A whole query under a whole evaluation is the routine line it always was:
 // counted, not written, with nothing carried.
 func TestAWholeQueryUnderAWholeEvaluationIsRoutine(t *testing.T) {

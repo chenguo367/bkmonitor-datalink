@@ -180,6 +180,37 @@ func TestAGuardFromAnOlderRecordIsCarriedWithoutAnInventedOrigin(t *testing.T) {
 	}
 }
 
+// A Level that does not advance on a record whose mutation is written for
+// another reason is carried as it stands, its origin with it, not
+// restamped with this Slot.
+func TestALevelCarriedAsItStandsKeepsItsOrigin(t *testing.T) {
+	plan := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil},
+		strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}})
+	request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{g4Record(99, `80`, nil)}, nil)
+	request.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, request,
+		map[string][]contract.CanonicalRecordV2{"primary": {g4Record(99, `80`, nil)}})}
+	origin := execution.ReasonOrigin{Slot: earlierSlot, Cause: contract.ReasonQueryTimeout}
+	view := request.State.Items[0]
+	level := &view.Levels[0]
+	level.HistoryCompleteness, level.GapReasonCode = execution.HistoryGapped, contract.ReasonQueryTimeout
+	level.GapReasonOriginSlot, level.GapReasonOriginCause = origin.Slot, origin.Cause
+	level.LastProcessedEventTime = 39
+	records, err := commonPrimaryRecords(request.Inputs)
+	if err != nil || len(records) == 0 {
+		t.Fatalf("records %d err %v", len(records), err)
+	}
+	mutation, err := buildMutation(request, request.Header.DuePlans[0], records[0], view, nil, nil,
+		map[uint32]execution.HistoryCompleteness{},
+		durableGuards{reasons: map[uint32]execution.ReasonCode{}, origins: map[uint32]execution.ReasonOrigin{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mutation.Levels) != 1 || mutation.Levels[0].GapReasonCode != contract.ReasonQueryTimeout ||
+		mutation.Levels[0].ReasonOrigin() != origin {
+		t.Fatalf("carried Level %+v, want %s kept with origin %+v", mutation.Levels, contract.ReasonQueryTimeout, origin)
+	}
+}
+
 // A Level held by a loaded gap marker carries the marker scope's reason and
 // the scope's origin - the Slot that opened it - onto its outcome and onto
 // the Level state the round writes under it.
