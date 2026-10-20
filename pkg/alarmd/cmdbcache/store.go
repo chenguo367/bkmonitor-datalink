@@ -344,9 +344,10 @@ func (store *Store) IdentityInstancesHeld() bool {
 
 // carryRefusedInstances is the instance identity after a load with
 // instances: that load's instances, and - when it refused instance records -
-// every instance the previous identity held that this load does not, no
-// more than the previous identity held; after a clean load, that load's
-// alone, and an instance absent from it is gone.
+// every instance the previous identity held that this load does not; after
+// a clean load, that load's alone, and an instance absent from it is gone.
+// Bounded as carryRefused is: what is carried is only ever the instances
+// seen since the last clean load.
 func carryRefusedInstances(index *Index, previous map[string]*ServiceInstanceFacts) map[string]*ServiceInstanceFacts {
 	if index.Refused().ServiceInstances == 0 || len(previous) == 0 {
 		return index.serviceInstances
@@ -355,14 +356,9 @@ func carryRefusedInstances(index *Index, previous map[string]*ServiceInstanceFac
 	for id, instance := range index.serviceInstances {
 		merged[id] = instance
 	}
-	carried := 0
 	for id, instance := range previous {
-		if carried >= len(previous) {
-			break
-		}
 		if _, present := merged[id]; !present {
 			merged[id] = instance
-			carried++
 		}
 	}
 	return merged

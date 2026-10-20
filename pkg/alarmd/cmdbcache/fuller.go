@@ -253,7 +253,13 @@ func overlayInstance(dimensions map[string]json.RawMessage, facts *admission.Fac
 		return
 	}
 	if instance.IP == "" {
-		facts.HostOverlay, facts.HostOverlaySource = nil, admission.HostIdentityInstanceWithoutAddress
+		// Named only from the index in force (source ""): a fresh instance
+		// cache built without the host. From the identity index the series
+		// is already counted as its facts unavailable.
+		facts.HostOverlay, facts.HostOverlaySource = nil, ""
+		if source == "" {
+			facts.HostOverlaySource = admission.HostIdentityInstanceWithoutAddress
+		}
 		return
 	}
 	facts.HostOverlay = instanceOverlay(dimensions, instance)

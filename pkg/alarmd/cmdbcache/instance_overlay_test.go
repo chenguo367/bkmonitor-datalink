@@ -111,6 +111,12 @@ func TestAnInstanceWithoutAddressAndAHostPlacedRecordAreLeftToTheirOwn(t *testin
 	if got, source := c.overlaid(); got != "null" || source != admission.HostIdentityInstanceWithoutAddress {
 		t.Fatalf("instance without address: overlay %s (source %q), want none, named %s", got, source, admission.HostIdentityInstanceWithoutAddress)
 	}
+	// From a stale index the series is counted as its facts unavailable
+	// already, and not named a second time.
+	c.now = c.now.Add(16 * time.Minute)
+	if got, source := c.overlaid(); got != "null" || source != "" {
+		t.Fatalf("instance without address, stale index: overlay %s (source %q), want none and unnamed", got, source)
+	}
 	byID := newIdentityCase(t, `{"bk_host_id":"720002","bk_target_service_instance_id":"7","bk_target_ip":"192.0.2.172"}`)
 	byID.refresh(instanceLoad([]string{"7", `{"service_instance_id":7,"bk_host_id":720003,"ip":"192.0.2.173","bk_cloud_id":0}`}, byID.now, 0))
 	if got, _ := byID.overlaid(); got != "null" {
