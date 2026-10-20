@@ -1693,6 +1693,10 @@ Access-path admission decisions by filter, outcome and bounded reason.
 
 Ready replicas whose registration does not declare the strategy-split contract (shard-aware.v1), as the latest reconcile round on this Control Leader saw them. A split is published only while this is zero, and a split fleet is collapsed to one piece per strategy while it is not. Across a rolling release it goes 0, n, 0; a rollback puts the rolled-back replica back on it. Which replicas they are is on /api/health rebalance.shard_aware.unaware. Meaningful on the Control Leader only; aggregate replicas with max, not sum.
 
+## alarmd_share_refusal_gaps_total
+
+Slots finalized without a query as RESOURCE_SHARE_EXCEEDED: refused twice the same way because their own retained bytes exceed the share one Query Group may hold of the replica's pool (QG_BUDGET_SHARE_EXCEEDED with no shared usage), and given up instead of re-read until the replay age. Each is one slot_skipped line with skip_cause=RESOURCE_SHARE_EXCEEDED naming the Query Group, its own bytes and the share; the strategy has to be sharded, and until it is every Slot of the group lands here.
+
 ## alarmd_short_period_slot_completion_lag_seconds
 
 Labels: `cohort`, `completion_kind`

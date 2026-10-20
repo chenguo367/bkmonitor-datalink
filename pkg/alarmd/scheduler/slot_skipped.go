@@ -70,6 +70,9 @@ func (runner *Runner) observeSlotSkipped(ctx context.Context, slot FrozenSlot, o
 			DistanceSlots: recovery.Distance, DistanceLimitSlots: recovery.DistanceLimit,
 		}
 	}
+	if result.QueryFreeCause == execution.CauseResourceShareExceeded {
+		facts.Share = runner.shareSkipFacts(slot)
+	}
 	observability.ObserveSlotSkipped(ctx, runner.skipObserver, frozenSkipTrace(slot.Contract, fence), observability.Operation(operation), facts)
 }
 

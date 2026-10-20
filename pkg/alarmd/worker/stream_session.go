@@ -659,6 +659,21 @@ func (err *provisionalBudgetExceededError) Error() string {
 	return "alarmd worker: provisional " + string(err.budget) + " budget exceeded"
 }
 
+// DeterministicShareRefusal marks a share refusal the scheduler may stop
+// retrying (execution.DeterministicShareRefusal): the share flag with no
+// shared usage behind it, so it is the Slot's own total that is over the
+// share (acquireEffects measures it against the Slot's own total, never what
+// is left of the pool), and the same window re-read is refused the same way.
+// A pool rejection - shared usage above zero, the share flag unset - is not
+// marked: other Slots release their part and a retry may fit.
+func (err *provisionalBudgetExceededError) DeterministicShareRefusal() (execution.ShareRefusal, bool) {
+	if err == nil || !err.share || err.facts == nil || err.facts.SharedUsed != 0 || err.facts.OwnUsed == nil {
+		return execution.ShareRefusal{}, false
+	}
+	return execution.ShareRefusal{Phase: err.facts.Phase, OwnUsedBytes: *err.facts.OwnUsed,
+		RequestedBytes: err.facts.Requested, LimitBytes: err.facts.Limit}, true
+}
+
 func resultRank(result observability.Result) int {
 	switch result {
 	case observability.ResultRetrying:

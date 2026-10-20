@@ -466,7 +466,7 @@ type Summary struct {
 	// (Anomaly.CauseOrigin): physical for what the round met itself, carried
 	// for a stored guard's reason repeated on it (with or without a recorded
 	// origin), derived for alarmd's own word a round is filed under
-	// (GAP_GUARD_WARMING, SNAPSHOT_CORRUPT), unknown for a row that never
+	// (GAP_GUARD_WARMING, SNAPSHOT_CORRUPT, RESOURCE_SHARE_EXCEEDED), unknown for a row that never
 	// learned it - restored from a summary, or from a replica on an older
 	// build. Unknown is never counted as physical, so QUERY_TIMEOUT under
 	// physical is this deployment's own timeouts alone. The four add up to

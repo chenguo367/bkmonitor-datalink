@@ -59,6 +59,12 @@ func slotFailureReason(err error) (observability.ReasonCode, string) {
 			reason = observability.ReasonCode(code)
 		}
 	}
+	// The Slot's own retained bytes over its Query Group's share: the same
+	// word the capacity rejection line already gives it. It arrived here as
+	// internal_unknown on every retry of a Slot no retry could fit.
+	if _, refused := execution.ShareRefusalOf(err); refused {
+		reason = observability.ReasonCode(contract.ReasonQGBudgetShareExceeded)
+	}
 	if conflict, named := worker.GapGuardConflictReason(err); named {
 		reason = observability.ReasonCode(conflict)
 	}

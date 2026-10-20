@@ -294,7 +294,7 @@ func (runner *Runner) deferUnavailableQuery(ctx context.Context, slot FrozenSlot
 	}
 	if state.until.IsZero() || !runner.now().Before(state.until) ||
 		slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired ||
-		runner.attempt != nil {
+		runner.attempt != nil || runner.shareExceeded(slot) {
 		return false
 	}
 	// Unknown deadlines fail open to execution; never invent a maintenance bound.
@@ -454,7 +454,10 @@ func startedLateBehindItself(result execution.SlotExecutionResult, busyUntil tim
 
 func (runner *Runner) recordQueryAvailability(ctx context.Context, slot FrozenSlot, operation execution.Operation,
 	result execution.SlotExecutionResult, intervalSeconds int64, decides bool) {
-	if !result.Completed || slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired {
+	if !result.Completed || slot.ExpiredRange != nil || slot.Recovery.Disposition == ReplayExpired ||
+		result.QueryFreeCause == execution.CauseResourceShareExceeded {
+		// A Slot finalized for its share sent no query: nothing about the
+		// backend to learn from it.
 		return
 	}
 	state := &runner.queryCooldown

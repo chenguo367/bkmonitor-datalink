@@ -480,6 +480,21 @@ func TestProductionFrozenExecutionSkipsExpiredNormalSlotWithoutRecoveryPermit(t 
 	if err := finalization.Validate(request); err != nil {
 		t.Fatalf("ResolveFinalization() produced invalid finalization: %v", err)
 	}
+	// A Slot the Runner gave up for its share is finalized without a query,
+	// under GAP_SKIPPED and named by its cause, on any operation.
+	for _, operation := range []execution.Operation{execution.OperationNormal, execution.OperationRetry} {
+		shared := request
+		shared.Operation, shared.ShareExceeded = operation, true
+		finalization, err = resolver.ResolveFinalization(context.Background(), shared)
+		if err != nil || finalization.Mode != execution.FinalizationGapSkipped ||
+			finalization.ReasonCode != execution.ReasonCode(contract.ReasonGapSkipped) ||
+			finalization.Cause != execution.CauseResourceShareExceeded || !finalization.Targets.Equal(shared.DuePlanTargets) {
+			t.Fatalf("ResolveFinalization(share exceeded, %s) = %+v, %v", operation, finalization, err)
+		}
+		if err := finalization.Validate(shared); err != nil {
+			t.Fatalf("ResolveFinalization(share exceeded, %s) produced invalid finalization: %v", operation, err)
+		}
+	}
 	request.ReplayExpired = true
 	finalization, err = resolver.ResolveFinalization(context.Background(), request)
 	if err != nil || finalization.Mode != execution.FinalizationGapSkipped ||

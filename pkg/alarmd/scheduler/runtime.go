@@ -563,14 +563,17 @@ type Runner struct {
 	// a round still waiting for the flight, or a supplement holding it, is
 	// never judged by the last execution's deadline. Read from the
 	// watchdog's goroutine.
-	stage          execution.StageMarker
-	queryGroup     execution.QueryGroupIdentity
-	session        OwnerSession
-	source         SlotSource
-	executor       Executor
-	flights        *FlightCoordinator
-	now            func() time.Time
-	attempt        *recoveryAttempt
+	stage      execution.StageMarker
+	queryGroup execution.QueryGroupIdentity
+	session    OwnerSession
+	source     SlotSource
+	executor   Executor
+	flights    *FlightCoordinator
+	now        func() time.Time
+	attempt    *recoveryAttempt
+	// shareRefusal counts the deterministic share refusals of the Slot this
+	// Runner is retrying (share_refusal.go): in memory, beside attempt.
+	shareRefusal   *shareRefusalState
 	sourceFailures uint32
 	sourceNextAt   time.Time
 	// lastExecutionReturnedAt is when this Runner's latest execution came
@@ -1041,7 +1044,10 @@ func (runner *Runner) runOneTracked(
 		RecoveryUntilUnixMilli:         slot.RecoveryUntilUnixMilli,
 		KeepUntilUnixMilli:             slot.KeepUntilUnixMilli,
 		ReplayExpired:                  slot.Recovery.Disposition == ReplayExpired,
-		Operation:                      operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
+		// Decided on the Slot's refusals so far (noteShareRefusal); an
+		// expired replay or range is finalized query-free by its own rule.
+		ShareExceeded: runner.shareExceeded(slot) && slot.Recovery.Disposition != ReplayExpired && slot.ExpiredRange == nil,
+		Operation:     operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
 		ContentScope: slot.Dispatch.ContentScope,
 	}
 	if err := request.Validate(); err != nil {
@@ -1118,13 +1124,21 @@ func (runner *Runner) runOneTracked(
 				return execution.SlotExecutionResult{}, true, nil
 			}
 		} else if executionErrorBacksOff(ctx, err) {
-			runner.recordExecutionFailure(slot, runner.now())
+			// A Slot refused for its share the same way again is not backed
+			// off: the next round finalizes it without a query, and waiting
+			// for that would only hold the Query Group's next Slot back.
+			if !runner.noteShareRefusal(slot, err) {
+				runner.recordExecutionFailure(slot, runner.now())
+			}
 		}
 	}
 	if err == nil {
 		runner.nextDeadline = time.Time{}
 		runner.recordResult(slot, result, runner.now())
 		runner.recordQueryAvailability(ctx, slot, operation, poolResult, sourceFacts.IntervalSeconds, decidesPool)
+		if result.Completed {
+			runner.forgetShareRefusal(slot)
+		}
 	}
 	decision = "execution_returned"
 	return result, true, err

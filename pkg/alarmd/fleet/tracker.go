@@ -461,6 +461,10 @@ type queryGroupState struct {
 	// one-object share of the pool it was admitted under, nil until a Slot
 	// has completed with both.
 	shareUsage *RetainedShareFacts
+	// shareRefusal is the object's Slots given up for its share
+	// (RESOURCE_SHARE_EXCEEDED), from their slot_skipped lines; cleared when
+	// a round completes any other way.
+	shareRefusal *ShareRefusalFacts
 	// upkeep is the last this process saw of the store keeping this object's
 	// memories alive, by Plan: the last read's stored shape and the last
 	// renewal that reached the store. Positive evidence, kept apart from the
@@ -802,7 +806,7 @@ func roundFiledUnder(cause, reason string) string {
 // FiledCauses are the completion causes a round is filed under in place of
 // its reason (roundFiledUnder): a vocabulary of its own beside the reason
 // catalogue, since these words reach the checks as a round's reason.
-var FiledCauses = []string{string(model.CauseGapGuardWarming), string(model.CauseSnapshotCorrupt)}
+var FiledCauses = []string{string(model.CauseGapGuardWarming), string(model.CauseSnapshotCorrupt), string(model.CauseResourceShareExceeded)}
 
 // undecidableReason is a completion reason that means the detection window
 // could not decide recovery, rather than that anything went wrong.
@@ -1148,7 +1152,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// passed; it carries nothing else the tracker keeps, and is read for that
 	// alone below.
 	outputACKed := observation.Stage == observability.StageEventACKed && observation.Err == nil
-	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
+	// A Slot given up for its Query Group's share: not a round (its
+	// completion is), but the only line with the refusal's bytes.
+	var shareSkip *observability.SlotSkippedFacts
+	if skipped := observation.SlotSkipped; observation.Stage == observability.StageSlotSkipped && skipped != nil && skipped.Share != nil {
+		shareSkip = skipped
+	}
+	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" && shareSkip == nil &&
 		failure == nil && !outputFailed && !outputACKed && observation.QueryCooldown == nil && cursorAdvance == nil &&
 		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
 		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil && observation.ExpiredRange == nil {
@@ -1167,6 +1177,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	at := tracker.now()
 	if state.firstSeenAt.IsZero() {
 		state.firstSeenAt = at
+	}
+	if shareSkip != nil {
+		state.noteShareRefusal(shareSkip.Share, shareSkip.FirstSlot, shareSkip.LastSlot, shareSkip.SlotCount, at)
+		return
 	}
 	// The round's events went to the sink: for an object whose own failure
 	// was the client refusing to send, this is the failed stage passing.
@@ -1448,6 +1462,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if state.lastFailure != nil && state.lastFailureSlot == trace.EvaluationTime {
 			state.gapSkip.Reason, state.gapSkip.ReasonCategory = state.lastFailure.Code, state.lastFailure.Category
 		}
+		// Given up for its share: the cause is the reason, whatever the
+		// last failure's budget word was - the refusal is the strategy's
+		// size, not this deployment falling behind.
+		if observation.ProgressCompletionCause == string(model.CauseResourceShareExceeded) {
+			state.gapSkip.Reason, state.gapSkip.ReasonCategory = observation.ProgressCompletionCause, observability.QueryFailureCategoryBudget
+		}
 	}
 	// Captured before this round is folded in: by the time the run-start block
 	// runs, this round has already made the object determined, and the question
@@ -1666,6 +1686,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.lastCompleted = completion
 		state.lastRoundSlot = trace.EvaluationTime
 		state.skipSpanOpen = completion == "GAP_SKIPPED"
+		// A round that completed any other way ends the run of Slots given
+		// up for the share: the next one starts its own count.
+		if observation.ProgressCompletionCause != string(model.CauseResourceShareExceeded) {
+			state.shareRefusal = nil
+		}
 		// Every completion, healthy or not, goes on the ring the holes are
 		// read against: a healthy round is exactly the one a later hole at
 		// its minute has to be matched to.
@@ -2367,6 +2392,12 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	// failed, has its own reason and the skip is the span's record alone.
 	if state.gapSkip != nil && state.reasonCode == "GAP_SKIPPED" && state.gapSkip.LastSlot == state.lastRoundSlot {
 		anomaly.HeldBy = state.gapSkip.HeldBy
+	}
+	// The share refusal's bytes, while the latest round is a Slot given up
+	// for it.
+	if state.shareRefusal != nil && state.cause == string(model.CauseResourceShareExceeded) {
+		facts := *state.shareRefusal
+		anomaly.ShareRefusal = &facts
 	}
 	if state.lastEvidence != nil {
 		evidence := *state.lastEvidence

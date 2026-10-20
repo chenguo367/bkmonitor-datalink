@@ -646,12 +646,17 @@ var codeChecks = map[string]verdict{
 	// Not a defect and not a dependency: this strategy asks for more of one
 	// replica than any single object may hold, and the answer is to shard it.
 	"QG_BUDGET_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
-	"KAFKA_UNAVAILABLE":        lands(CheckDependencyDown),
-	"STATE_WRITE_RETRYABLE":    lands(CheckDependencyDown),
-	"OUTPUT_ACK_UNKNOWN":       lands(CheckDependencyDown),
-	"SNAPSHOT_UNAVAILABLE":     lands(CheckDependencyDown),
-	"SNAPSHOT_RETRY_PENDING":   lands(CheckDependencyDown),
-	"ACTIVATION_READ_FAILED":   lands(CheckDependencyDown),
+	// The same refusal, after the Runner gave the Slot up for it without
+	// another read: a completion cause filed as the round's reason
+	// (FiledCauses). The strategy's line, not abandoned detection - waiting
+	// or adding replicas does not make one object's Slot fit its share.
+	"RESOURCE_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
+	"KAFKA_UNAVAILABLE":       lands(CheckDependencyDown),
+	"STATE_WRITE_RETRYABLE":   lands(CheckDependencyDown),
+	"OUTPUT_ACK_UNKNOWN":      lands(CheckDependencyDown),
+	"SNAPSHOT_UNAVAILABLE":    lands(CheckDependencyDown),
+	"SNAPSHOT_RETRY_PENDING":  lands(CheckDependencyDown),
+	"ACTIVATION_READ_FAILED":  lands(CheckDependencyDown),
 	// The store answered and the activation record was not in it. That is the
 	// infrastructure losing state rather than refusing a read, but it lands
 	// here for the same reason the rest do: nobody outside this deployment can

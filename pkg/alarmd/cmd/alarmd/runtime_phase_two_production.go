@@ -119,6 +119,19 @@ func (source *productionFrozenExecution) ResolveFinalization(
 	if err := request.Validate(); err != nil {
 		return execution.QueryFreeFinalization{}, err
 	}
+	// The Runner saw this Slot refused for its Query Group's share and decided
+	// no retry fits it (scheduler shareRefusalState): finalized without a
+	// query, under GAP_SKIPPED like an expired replay, so the gap markers and
+	// the evaluator read it as every other query-free gap, and named by its
+	// cause. Past the recovery bound it falls to the expiry below, which
+	// finalizes it the same way it would have.
+	if request.ShareExceeded && source.now().UnixMilli() < request.RecoveryUntilUnixMilli {
+		return execution.QueryFreeFinalization{
+			Contract: request.Contract, Mode: execution.FinalizationGapSkipped,
+			ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped),
+			Targets:    request.DuePlanTargets.Clone(), Cause: execution.CauseResourceShareExceeded,
+		}, nil
+	}
 	if request.ReplayExpired && source.now().UnixMilli() < request.RecoveryUntilUnixMilli {
 		return execution.QueryFreeFinalization{
 			Contract: request.Contract, Mode: execution.FinalizationGapSkipped,

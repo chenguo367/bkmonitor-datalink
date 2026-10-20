@@ -19,7 +19,13 @@ import (
 // the completion line take. "NONE" is a completion that carried no cause.
 var ProgressCompletionCauses = []string{"DATA_NOT_READY", "PLAN_UNAVAILABLE", "PRIMARY_INPUT_UNAVAILABLE",
 	"LEVEL_OUTCOME_UNKNOWN", "GAP_GUARD_WARMING", "PRIMARY_INPUT_PARTIAL", "CONFIG_DRIFT", "PLAN_REACTIVATED",
-	"PLAN_NOT_ACTIVE", "EXPIRED_REPLAY", "SNAPSHOT_CORRUPT", "SNAPSHOT_UNAVAILABLE_PAST_BOUND", "RESOLVE_FAILED_PAST_BOUND"}
+	"PLAN_NOT_ACTIVE", "EXPIRED_REPLAY", "SNAPSHOT_CORRUPT", "SNAPSHOT_UNAVAILABLE_PAST_BOUND", "RESOLVE_FAILED_PAST_BOUND",
+	CompletionCauseResourceShareExceeded}
+
+// CompletionCauseResourceShareExceeded is the cause of a Slot finalized
+// without a query after its own retained bytes were refused for its Query
+// Group's share (execution.CauseResourceShareExceeded).
+const CompletionCauseResourceShareExceeded = "RESOURCE_SHARE_EXCEEDED"
 
 // ProgressCompletionCauseNone is the cause word of a completion that carried
 // none.

@@ -12,6 +12,7 @@ type workflowMetrics struct {
 	progressCauses         *prometheus.CounterVec
 	active, ready, delayed prometheus.Gauge
 	abandonedSlots         prometheus.Counter
+	shareRefusalGaps       prometheus.Counter
 	permitWait             *prometheus.HistogramVec
 }
 
@@ -41,6 +42,8 @@ func newWorkflowMetrics() workflowMetrics {
 			[]string{"completion_kind", "cause", "reason", "origin"}),
 		abandonedSlots: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "unfinished_slots_abandoned_total",
 			Help: "Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it."}),
+		shareRefusalGaps: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "share_refusal_gaps_total",
+			Help: "Slots finalized without a query as RESOURCE_SHARE_EXCEEDED: refused twice the same way because their own retained bytes exceed the share one Query Group may hold of the replica's pool (QG_BUDGET_SHARE_EXCEEDED with no shared usage), and given up instead of re-read until the replay age. Each is one slot_skipped line with skip_cause=RESOURCE_SHARE_EXCEEDED naming the Query Group, its own bytes and the share; the strategy has to be sharded, and until it is every Slot of the group lands here."}),
 		active:     gauge("scheduler_active_executions", "Worker task occupancy, including preparation and execution, excluding pending result delivery."),
 		ready:      gauge("scheduler_ready_runners", "Runners in the outer ready queue."),
 		delayed:    gauge("scheduler_delayed_runners", "Runners in the outer delayed queue."),
@@ -48,7 +51,7 @@ func newWorkflowMetrics() workflowMetrics {
 	}
 }
 func (m workflowMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots}
+	return []prometheus.Collector{m.run, m.execute, m.progress, m.progressCauses, m.active, m.ready, m.delayed, m.permitWait, m.ranges, m.expiredSlots, m.abandonedSlots, m.shareRefusalGaps}
 }
 func (m workflowMetrics) observe(o observability.Observation) {
 	switch {
@@ -72,6 +75,9 @@ func (m workflowMetrics) observe(o observability.Observation) {
 		// Slot once its write applied, and nowhere else.
 		if f := o.SlotSkipped; f != nil && f.Path == observability.SlotSkippedProgressStore {
 			m.abandonedSlots.Inc()
+		}
+		if f := o.SlotSkipped; f != nil && f.Cause == observability.CompletionCauseResourceShareExceeded {
+			m.shareRefusalGaps.Add(float64(max(f.SlotCount, 1)))
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageRunnerReturned:
 		if observability.ValidRunOutcome(o.RunOutcome) {

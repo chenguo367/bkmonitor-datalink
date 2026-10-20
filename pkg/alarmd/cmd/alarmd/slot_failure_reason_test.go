@@ -53,6 +53,11 @@ func TestASlotFailureThatNamesItselfIsNotReportedAsUnnamed(t *testing.T) {
 			want: "QUERY_PERMIT_DEADLINE",
 		},
 		{
+			name: "the Slot's own retained bytes are over its Query Group's share",
+			err:  fmt.Errorf("alarmd worker: complete Slot: %w", ownTotalOverShare{}),
+			want: observability.ReasonCode(contract.ReasonQGBudgetShareExceeded),
+		},
+		{
 			name: "the query's request was cancelled at its deadline",
 			err:  fmt.Errorf("alarmd worker: query: %w", providerTimeout{}),
 			want: observability.ReasonCode(contract.ReasonQueryTimeout),
@@ -139,4 +144,16 @@ type deliveryTimeout struct{}
 func (deliveryTimeout) Error() string { return "decode answer: context deadline exceeded" }
 func (deliveryTimeout) QueryFailure() (string, string) {
 	return observability.QueryFailureCategoryDelivery, observability.QueryFailureCodeDeliveryTimeout
+}
+
+// ownTotalOverShare stands for the worker's share refusal of a Slot whose own
+// total is over its Query Group's share.
+type ownTotalOverShare struct{}
+
+func (ownTotalOverShare) Error() string {
+	return "alarmd worker: provisional retained_bytes budget exceeded"
+}
+
+func (ownTotalOverShare) DeterministicShareRefusal() (execution.ShareRefusal, bool) {
+	return execution.ShareRefusal{Phase: "normal_output", OwnUsedBytes: 530 << 20, LimitBytes: 512 << 20}, true
 }

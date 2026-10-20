@@ -119,3 +119,43 @@ func (tracker *Tracker) RetainedShare() []Anomaly {
 	})
 	return anomalies
 }
+
+// ShareRefusalFacts is what a row filed under RESOURCE_SHARE_EXCEEDED says for
+// itself: the object's Slots are being finalized without a query because each
+// one's own retained bytes are over the share one object may hold, and these
+// are the bytes of the latest refusal against that share. One row per object,
+// however many of its Slots are given up: until the strategy is sharded every
+// Slot of it lands here, and a line per Slot would bury the one fact.
+type ShareRefusalFacts struct {
+	// Phase is where the reservation was refused (normal_input,
+	// normal_output, normal_gap); OwnUsedBytes what the Slot held there,
+	// RequestedBytes what it asked for on top, LimitBytes the share.
+	Phase          string `json:"phase"`
+	OwnUsedBytes   uint64 `json:"own_used_bytes"`
+	RequestedBytes uint64 `json:"requested_bytes"`
+	LimitBytes     uint64 `json:"limit_bytes"`
+	// Refusals is how many identical refusals the latest Slot took before
+	// it was given up.
+	Refusals uint32 `json:"refusals"`
+	// Slots is how many of the object's Slots this process has given up for
+	// the share since FirstSlot, the latest being LastSlot.
+	Slots     int       `json:"slots"`
+	FirstSlot int64     `json:"first_slot"`
+	LastSlot  int64     `json:"last_slot"`
+	Since     time.Time `json:"since"`
+	At        time.Time `json:"at"`
+}
+
+// noteShareRefusal folds one RESOURCE_SHARE_EXCEEDED skip into the object's
+// share refusal. Called with the lock held.
+func (state *queryGroupState) noteShareRefusal(share *observability.SlotSkipShareFacts, first, last int64, slots uint32, at time.Time) {
+	facts := state.shareRefusal
+	if facts == nil {
+		facts = &ShareRefusalFacts{FirstSlot: first, Since: at}
+		state.shareRefusal = facts
+	}
+	facts.Phase, facts.OwnUsedBytes, facts.RequestedBytes, facts.LimitBytes = share.Phase, share.OwnUsedBytes, share.RequestedBytes, share.LimitBytes
+	facts.Refusals = share.Refusals
+	facts.Slots += int(max(slots, 1))
+	facts.LastSlot, facts.At = last, at
+}

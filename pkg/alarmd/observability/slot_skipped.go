@@ -90,6 +90,18 @@ type SlotSkipReplayFacts struct {
 	DistanceLimitSlots uint32
 }
 
+// SlotSkipShareFacts is the share refusal a RESOURCE_SHARE_EXCEEDED skip was
+// decided on: the phase it was refused in, what the Slot held and asked for,
+// the share it was measured against, and how many identical refusals the
+// Runner took before giving the Slot up. The bytes are the last refusal's.
+type SlotSkipShareFacts struct {
+	Phase          string
+	OwnUsedBytes   uint64
+	RequestedBytes uint64
+	LimitBytes     uint64
+	Refusals       uint32
+}
+
 // SlotSkippedFacts is one Slot, or one range of them, finalised as skipped.
 type SlotSkippedFacts struct {
 	Path      string
@@ -103,6 +115,8 @@ type SlotSkippedFacts struct {
 	// GapStrategies is the first few due Plans' strategy ids.
 	GapStrategies []string
 	Replay        *SlotSkipReplayFacts
+	// Share is set on a Slot finalized as RESOURCE_SHARE_EXCEEDED.
+	Share *SlotSkipShareFacts
 	// Range is the distance a range was sized by, when it was built this
 	// round; rendered as the range_distance_expired line renders it.
 	Range *RangeDistanceFacts
@@ -216,6 +230,15 @@ func appendSlotSkippedAttributes(attributes []slog.Attr, facts *SlotSkippedFacts
 			slog.Int64("replay_age_limit_ms", replay.AgeLimitMillis),
 			slog.Uint64("replay_distance_slots", uint64(replay.DistanceSlots)),
 			slog.Uint64("replay_distance_limit_slots", uint64(replay.DistanceLimitSlots)),
+		)
+	}
+	if share := facts.Share; share != nil {
+		attributes = append(attributes,
+			slog.String("share_refusal_phase", share.Phase),
+			slog.Uint64("share_own_used_bytes", share.OwnUsedBytes),
+			slog.Uint64("share_requested_bytes", share.RequestedBytes),
+			slog.Uint64("share_limit_bytes", share.LimitBytes),
+			slog.Uint64("share_refusals", uint64(share.Refusals)),
 		)
 	}
 	return attributes

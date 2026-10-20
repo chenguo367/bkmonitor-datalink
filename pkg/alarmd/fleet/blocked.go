@@ -213,12 +213,14 @@ var failureFacets = map[string]facets{
 	// The object is too big for one replica's share; no dependency is involved
 	// and waiting does not help.
 	"QG_BUDGET_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
-	"KAFKA_UNAVAILABLE":        {StageCommit, ClassUnavailable, DependencyKafka},
-	"STATE_WRITE_RETRYABLE":    {StageCommit, ClassUnavailable, ""},
-	"OUTPUT_ACK_UNKNOWN":       {StageCommit, ClassUnavailable, DependencyKafka},
-	"SNAPSHOT_UNAVAILABLE":     {StageConfig, ClassUnavailable, ""},
-	"SNAPSHOT_RETRY_PENDING":   {StageConfig, ClassUnavailable, ""},
-	"ACTIVATION_READ_FAILED":   {StageConfig, ClassUnavailable, ""},
+	// The Slot given up for that refusal (finding.go has the why).
+	"RESOURCE_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"KAFKA_UNAVAILABLE":       {StageCommit, ClassUnavailable, DependencyKafka},
+	"STATE_WRITE_RETRYABLE":   {StageCommit, ClassUnavailable, ""},
+	"OUTPUT_ACK_UNKNOWN":      {StageCommit, ClassUnavailable, DependencyKafka},
+	"SNAPSHOT_UNAVAILABLE":    {StageConfig, ClassUnavailable, ""},
+	"SNAPSHOT_RETRY_PENDING":  {StageConfig, ClassUnavailable, ""},
+	"ACTIVATION_READ_FAILED":  {StageConfig, ClassUnavailable, ""},
 	// The store answered and the activation record was not in it: the
 	// configuration step with nothing to load. The code names the record
 	// and the store it lives in, so the dependency is named by it; whether

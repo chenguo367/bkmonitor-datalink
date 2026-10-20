@@ -208,7 +208,12 @@ type SlotExecutionRequest struct {
 	KeepUntilUnixMilli             int64
 	// ReplayExpired is a non-identity scheduler fact. Finalization still uses
 	// RecoveryUntilUnixMilli to distinguish distance expiry from age expiry.
-	ReplayExpired    bool
+	ReplayExpired bool
+	// ShareExceeded is a non-identity scheduler fact, like ReplayExpired: the
+	// Runner saw this Slot refused for its Query Group's retained-byte share
+	// (ShareRefusal) and decided no retry can fit it. Finalization then names
+	// the Slot RESOURCE_SHARE_EXCEEDED and runs no query.
+	ShareExceeded    bool
 	Operation        Operation
 	AttemptNo        uint32
 	OwnerFence       OwnerFence
@@ -243,6 +248,9 @@ func (request SlotExecutionRequest) Validate() error {
 	}
 	if request.ReplayExpired && request.Operation != OperationNormal {
 		return errors.New("alarmd execution: replay-expired Slot must use normal dispatch")
+	}
+	if request.ShareExceeded && (request.ExpiredRange != nil || request.Supplement != nil || request.ReplayExpired) {
+		return errors.New("alarmd execution: a share refusal finalizes one live Slot, never a range, a supplement or an expired replay")
 	}
 	if err := request.Operation.Validate(); err != nil {
 		return err
@@ -3510,11 +3518,20 @@ const (
 	// CauseResolveFailedPastBound is any other failure to resolve the frozen
 	// Slot that lasted until its recovery bound passed.
 	CauseResolveFailedPastBound CompletionCause = "RESOLVE_FAILED_PAST_BOUND"
+	// CauseResourceShareExceeded is a Slot whose own retained bytes exceed
+	// the share one Query Group may hold of the replica's pool
+	// (QG_BUDGET_SHARE_EXCEEDED with no shared usage behind it), refused
+	// identically twice and then finalized without querying again: no
+	// retry in this process can make the same window smaller, and every
+	// retry re-read the whole window from the backend only to be refused.
+	// A capacity defect of the strategy - it has to be sharded - and every
+	// later Slot of the group meets it until it is.
+	CauseResourceShareExceeded CompletionCause = "RESOURCE_SHARE_EXCEEDED"
 )
 
 // QueryFreeCauses are the causes a query-free finalization may name.
 var QueryFreeCauses = []CompletionCause{CauseExpiredReplay, CauseSnapshotCorrupt, CauseSnapshotUnavailablePastBound,
-	CauseResolveFailedPastBound}
+	CauseResolveFailedPastBound, CauseResourceShareExceeded}
 
 // CompletionAttribution is why a Slot completed the way it did: the condition
 // that folded into the kind, and that condition's own reason.

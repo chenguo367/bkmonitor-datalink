@@ -1574,7 +1574,7 @@ type Anomaly struct {
 	// CauseOrigin is whose CauseReason is: physical (the round's own),
 	// carried (a stored guard's carried onto it; Slot and Cause when the
 	// guard recorded them), derived (alarmd's own word: a round filed under
-	// its cause, GAP_GUARD_WARMING or SNAPSHOT_CORRUPT), or unknown (a row
+	// its cause, GAP_GUARD_WARMING, SNAPSHOT_CORRUPT or RESOURCE_SHARE_EXCEEDED), or unknown (a row
 	// restored from a summary, or published by a build before this field,
 	// that never learned it). A
 	// LEVEL_OUTCOME_UNKNOWN round still counts as something wrong - the
@@ -1757,6 +1757,9 @@ type Anomaly struct {
 	// completed Slot's retained bytes against the one-object share it was
 	// admitted under.
 	RetainedShare *RetainedShareFacts `json:"retained_share,omitempty"`
+	// ShareRefusal is on a row whose latest round was a Slot finalized as
+	// RESOURCE_SHARE_EXCEEDED: the refusal's own bytes against the share.
+	ShareRefusal *ShareRefusalFacts `json:"share_refusal,omitempty"`
 	// ReadEarly is on rows of KindReadBeforeComplete: the time_delay the
 	// object's query runs under, the one that would have read its samples
 	// complete, and the samples.
