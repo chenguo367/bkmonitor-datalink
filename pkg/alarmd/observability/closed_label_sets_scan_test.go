@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,12 +55,6 @@ import (
 // labelSetFoldAllowed lists values the scan finds reaching a set that are
 // not in it, by set and value, each with why it is not a fold.
 var labelSetFoldAllowed = map[string]string{
-	// The State preflight that a store refused outright passes an empty
-	// result with its error; emitObservation writes failed over it, as it
-	// writes success over an empty result without one. No empty result
-	// reaches NormalizeResult from there.
-	"result|": "emitObservation fills an empty result from Err",
-
 	// (c) folded by design. LevelOutcomeReasonLabel keeps a Level outcome's
 	// reason as the level_outcome_total label only when it is a coverage
 	// reason, to keep that family bounded; the log line keeps the exact
@@ -123,6 +118,30 @@ func closedLabelSets() []labelSet {
 	}
 	return []labelSet{
 		{name: "result", fields: []fieldSink{{"observability.Observation", "Result"}}, known: isResult},
+		{
+			// Each against the catalogue's own list; the pair is held by
+			// NormalizeComponentStage, which folds an unlisted pair.
+			name: "component", fields: []fieldSink{{"observability.Observation", "Component"}},
+			known: func(v string) bool {
+				for _, pair := range AllComponentStages() {
+					if string(pair.Component) == v {
+						return true
+					}
+				}
+				return v == ComponentOther
+			},
+		},
+		{
+			name: "stage", fields: []fieldSink{{"observability.Observation", "Stage"}},
+			known: func(v string) bool {
+				for _, stage := range AllStages() {
+					if string(stage) == v {
+						return true
+					}
+				}
+				return v == StageOther
+			},
+		},
 		{
 			// Empty is how a line that is not query_completed says it has
 			// no evaluation outcome; normalizeEvaluationOutcome keeps it.
@@ -518,6 +537,28 @@ type scanCall struct {
 type scanWrite struct {
 	scope *scanScope
 	expr  ast.Expr
+	// zero is a field a literal leaves out: it holds the zero value, at
+	// the literal.
+	zero bool
+	at   token.Pos
+	// filled is a write whose empty value something fills before it is
+	// normalised (observationFillers, or an assignment to the field of the
+	// name the literal is bound to).
+	filled bool
+}
+
+// observationClosedFields are the closed-set fields of an Observation the
+// scan holds a literal to when it leaves them out: the empty value must be
+// one the set keeps, or something must fill it. ReasonCode has its own rule
+// (TestEveryLineThatIsNotASuccessNamesItsReason).
+var observationClosedFields = []string{"Result", "Stage", "Component", "Operation"}
+
+// observationFillers are the functions that fill an Observation field left
+// empty before it is normalised, by package directory, receiver type and
+// name, with the fields each fills. Each is held to it by a test of its own:
+// TestEmitObservationFillsAnEmptyResult (worker).
+var observationFillers = map[string][]string{
+	"worker|SlotExecutionCoordinator|emitObservation": {"Result"},
 }
 
 type scanIndex struct {
@@ -719,6 +760,7 @@ func (index *scanIndex) indexWrites() {
 				continue
 			}
 			scope := &scanScope{file: file, function: function}
+			fills := index.observationFills(scope, declaration)
 			ast.Inspect(declaration, func(node ast.Node) bool {
 				switch node := node.(type) {
 				case *ast.CompositeLit:
@@ -726,14 +768,24 @@ func (index *scanIndex) indexWrites() {
 					if index.fields[typ] == nil {
 						return true
 					}
+					keyed := map[string]bool{}
 					for _, element := range node.Elts {
 						pair, ok := element.(*ast.KeyValueExpr)
 						if !ok {
 							continue
 						}
 						if key, ok := pair.Key.(*ast.Ident); ok {
-							write := scanWrite{scope: scope, expr: pair.Value}
+							keyed[key.Name] = true
+							write := scanWrite{scope: scope, expr: pair.Value, at: pair.Value.Pos(), filled: fills[node][key.Name]}
 							index.writes[typ+"|"+key.Name] = append(index.writes[typ+"|"+key.Name], write)
+						}
+					}
+					if typ == "observability.Observation" && len(node.Elts) == len(keyed) {
+						for _, field := range observationClosedFields {
+							if !keyed[field] && !fills[node][field] {
+								write := scanWrite{scope: scope, zero: true, at: node.Pos()}
+								index.writes[typ+"|"+field] = append(index.writes[typ+"|"+field], write)
+							}
 						}
 					}
 				case *ast.AssignStmt:
@@ -759,6 +811,90 @@ func (index *scanIndex) indexWrites() {
 	}
 }
 
+// observationFills is, for each Observation literal of one declaration, the
+// fields filled after it: assigned through the name it is bound to, or filled
+// by a filler it, or that name, is handed to.
+func (index *scanIndex) observationFills(scope *scanScope, declaration ast.Decl) map[*ast.CompositeLit]map[string]bool {
+	fills := map[*ast.CompositeLit]map[string]bool{}
+	bound := map[string][]*ast.CompositeLit{}
+	mark := func(literal *ast.CompositeLit, fields ...string) {
+		if fills[literal] == nil {
+			fills[literal] = map[string]bool{}
+		}
+		for _, field := range fields {
+			fills[literal][field] = true
+		}
+	}
+	observation := func(expression ast.Expr) (*ast.CompositeLit, bool) {
+		literal, ok := unwrapLiteral(expression)
+		return literal, ok && qualifiedType(scope.file, literal.Type) == "observability.Observation"
+	}
+	ast.Inspect(declaration, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.AssignStmt:
+			if len(typed.Lhs) != len(typed.Rhs) {
+				return true
+			}
+			for i, left := range typed.Lhs {
+				if name, ok := left.(*ast.Ident); ok {
+					if literal, ok := observation(typed.Rhs[i]); ok {
+						bound[name.Name] = append(bound[name.Name], literal)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range typed.Names {
+				if i < len(typed.Values) {
+					if literal, ok := observation(typed.Values[i]); ok {
+						bound[name.Name] = append(bound[name.Name], literal)
+					}
+				}
+			}
+		}
+		return true
+	})
+	resolver := newScanResolver(index, nil)
+	ast.Inspect(declaration, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.AssignStmt:
+			for _, left := range typed.Lhs {
+				selector, ok := left.(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				if owner, ok := selector.X.(*ast.Ident); ok {
+					for _, literal := range bound[owner.Name] {
+						mark(literal, selector.Sel.Name)
+					}
+				}
+			}
+		case *ast.CallExpr:
+			for _, callee := range resolver.callees(scope, typed) {
+				receiver := ""
+				if callee.decl.Recv != nil {
+					receiver = types.ExprString(callee.decl.Recv.List[0].Type)
+					receiver = strings.TrimPrefix(receiver, "*")
+				}
+				fields := observationFillers[callee.file.dir+"|"+receiver+"|"+callee.decl.Name.Name]
+				if len(fields) == 0 {
+					continue
+				}
+				for _, arg := range typed.Args {
+					if literal, ok := observation(arg); ok {
+						mark(literal, fields...)
+					} else if name, ok := arg.(*ast.Ident); ok {
+						for _, literal := range bound[name.Name] {
+							mark(literal, fields...)
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	return fills
+}
+
 // collect is every value that reaches a set, one entry per distinct value,
 // sorted, and the expressions the scan could not read a value from.
 func (index *scanIndex) collect(set labelSet) ([]labelValue, map[string]int, map[string]string) {
@@ -777,7 +913,15 @@ func (index *scanIndex) collect(set labelSet) ([]labelValue, map[string]int, map
 	}
 	for _, sink := range set.fields {
 		for _, write := range index.writes[sink.typ+"|"+sink.field] {
-			record(resolver.values(write.scope, write.expr, 0), write.expr.Pos())
+			if write.zero {
+				record([]string{""}, write.at)
+				continue
+			}
+			values := resolver.values(write.scope, write.expr, 0)
+			if write.filled {
+				values = slices.DeleteFunc(values, func(value string) bool { return value == "" })
+			}
+			record(values, write.at)
 		}
 	}
 	for _, sink := range set.params {
@@ -1307,7 +1451,8 @@ func (r *scanResolver) values(scope *scanScope, expression ast.Expr, depth int) 
 
 // guarded keeps the values a read can have where it is: inside the branch of
 // an if or a switch on the very expression it reads, only the values that
-// branch admits. A read in if x == A || x == B { ... } is A or B; one in
+// branch admits, and after an if that returns on it, only what it lets
+// through. A read in if x == A || x == B { ... } is A or B; one in
 // if x != "" && ... { ... } is not empty; one in the default of a switch on x
 // is none of its cases.
 func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []string) []string {
@@ -1416,11 +1561,63 @@ func (r *scanResolver) guarded(scope *scanScope, expression ast.Expr, values []s
 		})
 		return found
 	}
+	// writtenSince reports a write to, or a new declaration of, the guarded
+	// expression after a point and before the read.
+	writtenSince := func(from token.Pos) bool {
+		found := false
+		ast.Inspect(scope.function.decl.Body, func(node ast.Node) bool {
+			if found || node == nil || node.End() <= from || node.Pos() >= pos {
+				return !found && node != nil && node.Pos() < pos
+			}
+			switch typed := node.(type) {
+			case *ast.AssignStmt:
+				for _, left := range typed.Lhs {
+					if types.ExprString(left) == text && typed.Pos() >= from {
+						found = true
+					}
+				}
+			case *ast.ValueSpec:
+				for _, name := range typed.Names {
+					if name.Name == text && typed.Pos() >= from {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	// returnsEarly is an if before the read, in a block the read is in, that
+	// leaves the function when it holds: if x == "" { return }. The read
+	// sees only what it lets through, unless x is written after it.
+	returnsEarly := func(list []ast.Stmt) {
+		for _, statement := range list {
+			guard, ok := statement.(*ast.IfStmt)
+			if !ok || guard.End() > pos || guard.Init != nil || guard.Else != nil || len(guard.Body.List) == 0 {
+				continue
+			}
+			if _, leaves := guard.Body.List[len(guard.Body.List)-1].(*ast.ReturnStmt); !leaves || writtenSince(guard.End()) {
+				continue
+			}
+			if compared, ok := terms(guard.Cond, token.LOR, token.EQL); ok {
+				for value := range constants(compared...) {
+					forbidden[value] = true
+				}
+			}
+			if compared, ok := terms(guard.Cond, token.LAND, token.NEQ); ok {
+				allowed = append(allowed, constants(compared...))
+			}
+		}
+	}
 	ast.Inspect(scope.function.decl.Body, func(node ast.Node) bool {
 		if !inside(node) {
 			return false
 		}
 		switch typed := node.(type) {
+		case *ast.BlockStmt:
+			returnsEarly(typed.List)
+		case *ast.CaseClause:
+			returnsEarly(typed.Body)
 		case *ast.IfStmt:
 			switch {
 			case inside(typed.Body) && rebound(typed.Body):
