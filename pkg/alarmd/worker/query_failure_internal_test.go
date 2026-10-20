@@ -10,6 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 func TestQueryFailureWrappedBudgetWinsOverProviderDiagnostic(t *testing.T) {
@@ -476,5 +477,35 @@ func TestASeriesIdentityFailureNamesItselfOnTheQueryLine(t *testing.T) {
 	}
 	if f := got.QueryFailure; f == nil || f.Category != observability.QueryFailureCategorySeriesIdentity {
 		t.Fatalf("failure facts = %+v, want series_identity", got.QueryFailure)
+	}
+}
+
+// A query whose permit was refused because the permit queue was full -
+// during replay, where its query_admission line says QUERY_PERMIT_QUEUE_FULL -
+// completes with that word as its reason and the admission category and
+// code on its failure facts, not internal_unknown and other/OTHER; and so
+// does one refused because recovery permits are off.
+func TestAPermitRefusedForRoomNamesItselfOnTheQueryLine(t *testing.T) {
+	for _, testCase := range []struct {
+		err  error
+		code string
+	}{
+		{scheduler.ErrQueryPermitQueueFull, "QUERY_PERMIT_QUEUE_FULL"},
+		{scheduler.ErrRecoveryPermitsOff, "QUERY_PERMIT_RECOVERY_OFF"},
+	} {
+		var got observability.Observation
+		c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+		named := fmt.Errorf("alarmd access: acquire physical query permit: %w", testCase.err)
+		c.observeQueryFailure(context.Background(), execution.OperationReplay, time.Now(), "execute", named)
+		if got.QueryFailure == nil || got.QueryFailure.Category != observability.QueryFailureCategoryAdmission ||
+			got.QueryFailure.Code != testCase.code {
+			t.Fatalf("failure facts = %+v, want admission / %s", got.QueryFailure, testCase.code)
+		}
+		if got.ReasonCode != observability.ReasonCode(testCase.code) {
+			t.Fatalf("reason = %q, want %s rather than internal_unknown", got.ReasonCode, testCase.code)
+		}
+		if !errors.Is(named, testCase.err) {
+			t.Fatalf("%v no longer is %v", named, testCase.err)
+		}
 	}
 }

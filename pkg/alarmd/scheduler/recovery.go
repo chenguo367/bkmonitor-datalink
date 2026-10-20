@@ -21,9 +21,28 @@ import (
 
 var (
 	ErrRecoveryLimitsInvalid = errors.New("alarmd scheduler: recovery limits are invalid")
-	ErrQueryPermitQueueFull  = errors.New("alarmd scheduler: query permit queue is full")
-	ErrRecoveryPermitsOff    = errors.New("alarmd scheduler: recovery query permits are disabled")
+	// ErrQueryPermitQueueFull and ErrRecoveryPermitsOff are permits not
+	// granted, and say so to whatever reads the failure: the query whose
+	// permit it was completes with the admission word the query_admission
+	// line already named, not internal_unknown and code OTHER.
+	ErrQueryPermitQueueFull error = &queryPermitRefusal{code: string(permitQueueFull), text: "alarmd scheduler: query permit queue is full"}
+	ErrRecoveryPermitsOff   error = &queryPermitRefusal{code: string(permitRecoveryOff), text: "alarmd scheduler: recovery query permits are disabled"}
 )
+
+// queryPermitRefusal is a permit refused for want of room or of recovery
+// permits. Each is one value, compared with errors.Is as before.
+type queryPermitRefusal struct {
+	code string
+	text string
+}
+
+func (err *queryPermitRefusal) Error() string { return err.text }
+
+// QueryFailure is the admission category and the refusal's word, as the
+// query failure facts read it.
+func (err *queryPermitRefusal) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryAdmission, err.code
+}
 
 // RecoveryLimits are process-wide fixed bounds. They deliberately do not
 // contain QG-specific weights or adaptive controls.
