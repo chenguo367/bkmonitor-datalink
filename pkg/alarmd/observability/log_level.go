@@ -61,14 +61,21 @@ var warnReasons = makeReasonSet([]ReasonCode{
 var infoActivationKinds = map[string]bool{"not_drained": true, "cas_conflict": true}
 
 // warnViewStreamReasons are the view stream's words for a configuration or a
-// defect -- a token, a protocol, a digest, a registry that does not answer.
+// defect -- a token, a protocol, a digest, a registry that does not answer --
+// and for a Worker that found its Leader and could not reach it or send it
+// its Hello (LEADER_UNAVAILABLE, CONNECT_FAILED, DIAL_FAILED,
+// HELLO_SEND_FAILED). Those four were written at WARN as reason_not_reported
+// before they had words, and keep it: a Leader restart that sets every
+// Worker off is bounded by the repeated-line limiter, not by a lower level.
 // Its other words are a session's ordinary life: no leader yet, not the
-// leader, a stream closed, replaced or idle.
+// leader, a stream closed, replaced or idle, and SEND_FAILED, the Leader's
+// own end of a session.
 var warnViewStreamReasons = makeReasonSet([]ReasonCode{
 	"LISTENER_UNPARSABLE", "DELTA_BASE_MISMATCH", "DELTA_DIGEST_MISMATCH", "SNAPSHOT_INVALID",
 	"SNAPSHOT_INCOMPLETE", "VIEW_FOR_ANOTHER_WORKER", "UNKNOWN_WORKER", "BAD_TOKEN", "PROTOCOL_VERSION",
 	"HELLO_EXPECTED", "REGISTRY_UNAVAILABLE", "DISCOVERY_FAILED", "NO_ROUTE", "RECV_FAILED",
 	"LEADER_NO_ENDPOINT", "LEADER_UNREGISTERED",
+	"LEADER_UNAVAILABLE", "CONNECT_FAILED", "DIAL_FAILED", "HELLO_SEND_FAILED",
 })
 
 // warnDecisionReasons are the scheduler decisions that say it could not

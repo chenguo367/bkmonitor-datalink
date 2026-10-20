@@ -2208,7 +2208,7 @@ func (r *scanResolver) returns(scope *scanScope, call *ast.CallExpr, result, dep
 //	B2 (10): a map key or composite key of an output aggregation;
 //	B3 (8): a call through an interface or a func value;
 //	B4 (5): a value decoded from the store;
-//	B5 (4): external or free text;
+//	B5 (3): external or free text;
 //	B6 (22): a field of a result whose type the scan does not see, or the result of a call it does not follow.
 var closedLabelSetUnresolved = map[string]string{
 	"capacity_budget|worker/sideeffect_reservation.go|checkEffectCounts|check.kind":                                                                                  "PENDING B6",
@@ -2251,7 +2251,6 @@ var closedLabelSetUnresolved = map[string]string{
 	"reason|state/execution_v2_store.go|decodeRuntime|reason":                                                                                                        "PENDING B4",
 	"reason|viewstream/client.go|reprobe|fmt.Sprintf(\"missing=%d probed=%t\", missing, probed)":                                                                     "PENDING B5",
 	"reason|viewstream/client.go|serveOnce|client.discovery.Leader(ctx)":                                                                                             "PENDING B3",
-	"reason|viewstream/client.go|serveOnce|leader.Endpoint":                                                                                                          "PENDING B5",
 	"reason|viewstream/client.go|session|body.Refusal.Reason":                                                                                                        "PENDING B5",
 	"reason|viewstream/server.go|admit|server.admission.Admit(ctx, hello.WorkerId, hello.StreamToken)":                                                               "PENDING B3",
 	"reason|worker/coordinator.go|Execute|begin.ReasonCode":                                                                                                          "PENDING B6",

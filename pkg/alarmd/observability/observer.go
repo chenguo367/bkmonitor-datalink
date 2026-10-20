@@ -1733,7 +1733,10 @@ type ViewStreamFacts struct {
 	ControlEpoch uint64 `json:"control_epoch"`
 	Revision     uint64 `json:"revision,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	Affected     int    `json:"affected,omitempty"`
+	// Endpoint is the Leader address a Worker dialled, on the events about
+	// reaching it; never in Reason, which is a word.
+	Endpoint string `json:"endpoint,omitempty"`
+	Affected int    `json:"affected,omitempty"`
 	// Closed is the revision whose ledger this publication closed, with
 	// its four numbers as they stood; zero when none was closed.
 	Closed    uint64 `json:"closed,omitempty"`
@@ -3787,6 +3790,14 @@ var ViewStreamReasons = []ReasonCode{
 	// The Leader's send to a Worker failing: the session's end on the
 	// Leader's side, as RECV_FAILED is on the Worker's.
 	"SEND_FAILED",
+	// The Worker's Hello not sent to the Leader it reached: a failure to
+	// join, not a session's end.
+	"HELLO_SEND_FAILED",
+	// A Worker that found its Leader and could not reach it: the address
+	// refused or unreachable (LEADER_UNAVAILABLE), the client not built for
+	// it (DIAL_FAILED), or the stream not opened for another cause
+	// (CONNECT_FAILED). The address itself is the line's endpoint.
+	"LEADER_UNAVAILABLE", "DIAL_FAILED", "CONNECT_FAILED",
 	// A process that cannot advertise an endpoint of its own, said once at
 	// startup rather than by every other Worker every discovery.
 	"LISTENER_UNPARSABLE", "NO_ROUTE",

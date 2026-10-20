@@ -317,3 +317,21 @@ func TestEveryNoDataStallIsWrittenAtWarn(t *testing.T) {
 		}
 	}
 }
+
+// A Worker that found its Leader and could not reach it writes its failure
+// at WARN, as it did as reason_not_reported before the words existed; a
+// stream this side closed, and the Leader's own end of a session
+// (SEND_FAILED), are a session's ordinary end, at INFO.
+func TestAWorkerThatCannotReachItsLeaderIsWrittenAtWarn(t *testing.T) {
+	for reason, want := range map[ReasonCode]slog.Level{
+		"LEADER_UNAVAILABLE": slog.LevelWarn, "CONNECT_FAILED": slog.LevelWarn,
+		"DIAL_FAILED": slog.LevelWarn, "HELLO_SEND_FAILED": slog.LevelWarn,
+		"SEND_FAILED": slog.LevelInfo, "STREAM_CLOSED": slog.LevelInfo,
+	} {
+		observation := NormalizeObservation(Observation{Component: ComponentOwnership, Stage: StageViewSession,
+			Result: ResultDegraded, ReasonCode: reason, Err: errors.New("stream")})
+		if got := observationLevel(observation); got != want {
+			t.Errorf("view_session %s: level %s, want %s", reason, got, want)
+		}
+	}
+}

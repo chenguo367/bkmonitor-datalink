@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -405,7 +407,7 @@ func (client *Client) serveOnce(ctx context.Context) (connected bool, err error)
 	}
 	service, closeConn, err := client.dial(ctx, leader.Endpoint)
 	if err != nil {
-		client.observe(ctx, "dial_failed", leader.Endpoint, err)
+		client.observeAt(ctx, "dial_failed", "DIAL_FAILED", leader.Endpoint, err)
 		return false, err
 	}
 	defer func() { _ = closeConn() }()
@@ -413,7 +415,7 @@ func (client *Client) serveOnce(ctx context.Context) (connected bool, err error)
 	defer cancel()
 	stream, err := service.Connect(streamCtx)
 	if err != nil {
-		client.observe(ctx, "connect_failed", leader.Endpoint, err)
+		client.observeAt(ctx, "connect_failed", connectFailureReason(streamCtx, err), leader.Endpoint, err)
 		return false, err
 	}
 	installed, _ := client.Installed()
@@ -423,7 +425,7 @@ func (client *Client) serveOnce(ctx context.Context) (connected bool, err error)
 		hello.Installed = versionToWire(installed.Version)
 	}
 	if err := stream.Send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Hello{Hello: hello}}); err != nil {
-		client.observe(ctx, "hello_failed", leader.Endpoint, err)
+		client.observeAt(ctx, "hello_failed", "HELLO_SEND_FAILED", leader.Endpoint, err)
 		return false, err
 	}
 	client.mu.Lock()
@@ -437,7 +439,7 @@ func (client *Client) serveOnce(ctx context.Context) (connected bool, err error)
 		client.stats.Connected = false
 		client.mu.Unlock()
 	}()
-	client.observe(ctx, "connected", leader.Endpoint, nil)
+	client.observeAt(ctx, "connected", "", leader.Endpoint, nil)
 	reason, err := client.session(streamCtx, stream, cancel)
 	client.observe(ctx, "disconnected", reason, err)
 	return true, err
@@ -725,18 +727,42 @@ func (client *Client) switchedIn(view View) int {
 }
 
 func (client *Client) observe(ctx context.Context, event, reason string, err error) {
+	client.observeAt(ctx, event, reason, "", err)
+}
+
+// connectFailureReason is the word for a stream to a found Leader that did
+// not open. When the stream's own context ended first - the Worker stopping,
+// the session given up - it is STREAM_CLOSED, this side closing it, not a
+// failure; that is decided on the context, not on the status, since a
+// cancel from the Leader's side arrives as the same Canceled code while this
+// context is still live, and that is a failure. Otherwise LEADER_UNAVAILABLE
+// when the transport could not reach the address (refused, unreachable,
+// reset), CONNECT_FAILED for any other cause.
+func connectFailureReason(streamCtx context.Context, err error) string {
+	if streamCtx.Err() != nil {
+		return "STREAM_CLOSED"
+	}
+	if status.Code(err) == codes.Unavailable {
+		return "LEADER_UNAVAILABLE"
+	}
+	return "CONNECT_FAILED"
+}
+
+// observeAt is observe for an event about reaching the Leader at endpoint,
+// which the line carries apart from the reason.
+func (client *Client) observeAt(ctx context.Context, event, reason, endpoint string, err error) {
 	result := observability.Result(observability.ResultSuccess)
 	if err != nil || event == "discovery_missed" || event == "install_refused" {
 		result = observability.ResultDegraded
 	}
 	installed, _ := client.Installed()
 	// The reason is the line's reason_code when it is one of the stream's
-	// words; an endpoint or a detail stays in the facts.
+	// words; a detail stays in the facts, and an endpoint in its own field.
 	client.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageViewSession, Result: result, Err: err,
 		ReasonCode: observability.ViewStreamReasonCode(reason),
 		ViewStream: &observability.ViewStreamFacts{Event: event, WorkerID: client.identity.WorkerID, Incarnation: client.identity.Incarnation,
-			ControlEpoch: installed.Version.ControlEpoch, Revision: installed.Version.Revision, Reason: reason},
+			ControlEpoch: installed.Version.ControlEpoch, Revision: installed.Version.Revision, Reason: reason, Endpoint: endpoint},
 	})
 }
 
