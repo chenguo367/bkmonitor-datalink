@@ -854,7 +854,9 @@ func (runner *Runner) runOne(ctx context.Context, admission ExecutionAdmission) 
 			defer func() { _ = recover() }()
 			runner.flights.observer.Observe(ctx, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
-				Result: observability.ResultTerminal, RunOutcome: outcome, Attempted: attempted, Err: refusal,
+				// The outcome is why the round returned, and so its reason.
+				Result: observability.ResultTerminal, RunOutcome: outcome, ReasonCode: observability.ReasonCode(outcome),
+				Attempted: attempted, Err: refusal,
 				// The view's one wait, kept apart from its other refusals:
 				// the fleet reads it here, the line it decides a blocked
 				// round on.

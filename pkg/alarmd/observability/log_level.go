@@ -78,6 +78,13 @@ var warnViewStreamReasons = makeReasonSet([]ReasonCode{
 	"LEADER_UNAVAILABLE", "CONNECT_FAILED", "DIAL_FAILED", "HELLO_SEND_FAILED",
 })
 
+// warnRunOutcomes are the Runner round outcomes the fleet page files under
+// this deployment or a backend not answering: the source refusing, failing
+// or blocked, and a round that panicked or failed otherwise. The
+// runner_returned line that carries them is not written; the set keeps the
+// log's reading of the word the same as the page's.
+var warnRunOutcomes = makeReasonSet([]ReasonCode{"source_retry", "source_blocked", "source_error", "panic", "other_error"})
+
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range
 // decided by design.
@@ -106,6 +113,7 @@ func ReasonLogLevel(reason ReasonCode) slog.Level {
 	case reason == ReasonNone:
 		return slog.LevelInfo
 	case inReasonSet(warnReasons, reason), inReasonSet(warnViewStreamReasons, reason), inReasonSet(warnDecisionReasons, reason),
+		inReasonSet(warnRunOutcomes, reason),
 		inReasonSet(warnMaintenanceReasons, reason), inReasonSet(warnAbsentCloseReasons, reason):
 		return slog.LevelWarn
 	case inReasonSet(activationFailureReasonSet, reason):

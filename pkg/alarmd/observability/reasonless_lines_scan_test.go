@@ -43,7 +43,6 @@ var reasonlessLinesAllowed = map[string]int{
 	"controlplane/redis_catalog.go|RenewCurrentActivationObjects|StageActiveQGSet":                    1,
 	"controlplane/timeline_prune.go|observeCutover|StageScheduleCutover":                              1,
 	"observability/observer.go|ObserveSlotWait|StageSlotWait":                                         1,
-	"scheduler/runtime.go|runOne|StageRunnerReturned":                                                 1,
 	"scheduler/slot_source.go|observeCursorAdvance|StageScheduleCursorAdvanced":                       1,
 }
 

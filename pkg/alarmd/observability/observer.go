@@ -3840,6 +3840,19 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 	return reasons
 }()
 
+// SlotPathReasons are the words the Slot path's own lines name as their
+// reason that no other list holds: a Runner round's outcome on its
+// runner_returned line (RunOutcomes), which said terminal with no reason.
+var SlotPathReasons = func() []ReasonCode {
+	reasons := make([]ReasonCode, 0, len(RunOutcomes))
+	for _, outcome := range RunOutcomes {
+		reasons = append(reasons, ReasonCode(outcome))
+	}
+	return reasons
+}()
+
+var slotPathReasonSet = makeReasonSet(SlotPathReasons)
+
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
@@ -3847,7 +3860,7 @@ var allResourceReasons = joinReasons(
 // allLogReasons is every reason NormalizeReason can return: the limiter keeps
 // a bucket for each, and refuses a reason it has none for, so a catalogue
 // NormalizeReason accepts and this list leaves out has its lines dropped.
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, SlotPathReasons, effectiveMaintenanceReasons, AbsentCloseReasons, CompletionAttributionReasons, AdmissionFailureReasons, NoDataStallReasons, contractClassReasons, []ReasonCode{ReasonHeldBySupplement, ReasonHeldByMaintenance, ReasonSlotCancelled}, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)

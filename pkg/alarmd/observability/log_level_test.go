@@ -335,3 +335,29 @@ func TestAWorkerThatCannotReachItsLeaderIsWrittenAtWarn(t *testing.T) {
 		}
 	}
 }
+
+// A Runner round's return line and a permit wait's line feed their counters
+// and are not written, whatever reason they carry: naming their reasons
+// moves no line's level.
+func TestTheRoundReturnAndPermitWaitLinesAreNotWritten(t *testing.T) {
+	limiter, err := NewScopedLogLimiter(ScopedLogLimiterConfig{Window: time.Hour, MaxEvents: 100, MaxScopes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewScopedBoundedLogPolicy(limiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	logging := NewLoggingObserver(New("alarmd", &output), policy)
+	for _, observation := range []Observation{
+		{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal, RunOutcome: "source_error", ReasonCode: "source_error"},
+		{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal, RunOutcome: "panic", ReasonCode: "panic"},
+		{Component: ComponentScheduler, Stage: StageQueryPermitWait, Result: ResultFailed, ReasonCode: "QUERY_PERMIT_QUEUE_FULL"},
+	} {
+		logging.Observe(context.Background(), observation)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("written: %s", output.String())
+	}
+}
