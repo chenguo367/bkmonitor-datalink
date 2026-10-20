@@ -211,6 +211,11 @@ type NamedOutput struct {
 
 var namedOutputRefPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// MaxNamedOutputRefLength is the longest reference name a named output may
+// have, the legacy output's included: the compiler refuses a longer one,
+// and a plan that carries one is refused here as well.
+const MaxNamedOutputRefLength = 64
+
 func (outputs NamedOutputs) validate(facts QueryPlanFacts) error {
 	if len(outputs.Outputs) == 0 || len(outputs.Outputs) > MaxNamedOutputs {
 		return fmt.Errorf("alarmd execution: %d named outputs, want 1 to %d", len(outputs.Outputs), MaxNamedOutputs)
@@ -221,7 +226,8 @@ func (outputs NamedOutputs) validate(facts QueryPlanFacts) error {
 	}
 	seen := make(map[string]bool, len(outputs.Outputs))
 	for _, output := range outputs.Outputs {
-		if !namedOutputRefPattern.MatchString(output.Ref) || seen[output.Ref] || output.Expression == "" {
+		if len(output.Ref) > MaxNamedOutputRefLength || !namedOutputRefPattern.MatchString(output.Ref) || seen[output.Ref] ||
+			output.Expression == "" {
 			return errors.New("alarmd execution: invalid or duplicate named output")
 		}
 		seen[output.Ref] = true

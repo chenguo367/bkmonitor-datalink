@@ -85,7 +85,9 @@ func snapshotFacts(snapshot contract.DetectionSnapshotV1, truncated bool) *Detec
 }
 
 // currentValue is the event's current value, as both outputs write it: the
-// observed value named value, or the one observed value there is.
+// observed value named value, or the one observed value there is. The two
+// agree: every observed record carries its value under the dataset's
+// CanonicalValueField, "value" (controlplane's legacy query compiler).
 func currentValue(observed contract.TriggerObservedV1) json.RawMessage {
 	if value, found := observed.Values["value"]; found {
 		return value

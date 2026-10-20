@@ -127,7 +127,8 @@ var namedOutputRefName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // The platform caps the aliases of input queries at 12 characters and the
 // legacy output's reference name not at all; this bound is alarmd's own,
 // so that four reference names always fit an event's detection snapshot.
-const maxNamedOutputRefLength = 64
+// The execution contract holds a compiled plan to the same bound.
+const maxNamedOutputRefLength = execution.MaxNamedOutputRefLength
 
 // namedOutputsOf is the item's query_output_config as the outputs facts asks
 // the provider for, or nil for an item without one.
