@@ -114,6 +114,7 @@ func (coordinator *SlotExecutionCoordinator) commitExpiredRange(ctx context.Cont
 			*count = request.ExpiredRange.Count
 		}
 		completed.QueryFreeCause = queryFreeCause(attribution.Cause)
+		completed.CompletionCause = attribution.SlotCause()
 	}
 	return completed, nil
 }

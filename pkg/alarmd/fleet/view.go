@@ -1059,6 +1059,70 @@ type CauseScope struct {
 	Query      string  `json:"query,omitempty"`
 }
 
+// CauseOrigin is whose a row's cause reason is. Origin is physical (the
+// round met it itself), carried (a stored guard's, repeated on this round)
+// or unknown (CauseOriginUnknown); Slot and Cause are where a carried guard
+// came from, absent when it was stamped by a build that did not record it.
+type CauseOrigin struct {
+	Origin string `json:"origin"`
+	Slot   int64  `json:"slot,omitempty"`
+	Cause  string `json:"cause,omitempty"`
+}
+
+// CauseOriginUnknown is the origin of a reason this process holds without
+// knowing whose it is: restored from a summary that never recorded it, or
+// published by a replica whose build did not. Never read as physical.
+const CauseOriginUnknown = "unknown"
+
+// CauseOriginDerived is the origin of a reason that is alarmd's own
+// judgement rather than anything a round met or carried: a cause word a
+// round is filed under, a check word, an UNKNOWN verdict's reason.
+const CauseOriginDerived = "derived"
+
+// unknownCauseOrigin is the origin a reason held without one carries.
+func unknownCauseOrigin() *CauseOrigin {
+	return &CauseOrigin{Origin: CauseOriginUnknown}
+}
+
+// heldCauseOrigin is the origin of a reason held without one - restored, or
+// from a replica on an older build: derived for a cause word a round is
+// filed under (FiledCauses), which is alarmd's own on every build, and
+// unknown for any other reason, which could have been either.
+func heldCauseOrigin(reason string) *CauseOrigin {
+	if slices.Contains(FiledCauses, reason) {
+		return &CauseOrigin{Origin: CauseOriginDerived}
+	}
+	return unknownCauseOrigin()
+}
+
+// settleCauseOrigin gives a row that has a reason and no origin the one a
+// held reason has, so an absent origin means only an absent reason.
+func settleCauseOrigin(anomaly *Anomaly) {
+	if anomaly.CauseReason != "" && anomaly.CauseOrigin == nil {
+		anomaly.CauseOrigin = heldCauseOrigin(anomaly.CauseReason)
+	}
+}
+
+// causeOriginOf is a round's cause origin as a row carries it; nil for a
+// round that named no reason.
+//
+// A round filed under its cause word (roundFiledUnder: GAP_GUARD_WARMING,
+// SNAPSHOT_CORRUPT) has alarmd's own classification for a reason: derived.
+// A carried guard behind it still names where it came from.
+func causeOriginOf(reason string, filedUnderCause bool, carried *observability.CarriedReasonFacts) *CauseOrigin {
+	if reason == "" {
+		return nil
+	}
+	origin := &CauseOrigin{Origin: observability.ReasonOriginLabel(carried != nil)}
+	if filedUnderCause {
+		origin.Origin = CauseOriginDerived
+	}
+	if carried != nil && carried.Known() {
+		origin.Slot, origin.Cause = carried.OriginSlot, string(carried.OriginCause)
+	}
+	return origin
+}
+
 // causeScopeOf is a round's cause scope as a row carries it.
 func causeScopeOf(facts *observability.CompletionScopeFacts) *CauseScope {
 	if facts == nil {
@@ -1507,6 +1571,17 @@ type Anomaly struct {
 	// and the Level for a Level's outcome or the physical query for the
 	// primary input. Nil when the cause named no place.
 	CauseScope *CauseScope `json:"cause_scope,omitempty"`
+	// CauseOrigin is whose CauseReason is: physical (the round's own),
+	// carried (a stored guard's carried onto it; Slot and Cause when the
+	// guard recorded them), derived (alarmd's own word: a round filed under
+	// its cause, GAP_GUARD_WARMING or SNAPSHOT_CORRUPT), or unknown (a row
+	// restored from a summary, or published by a build before this field,
+	// that never learned it). A
+	// LEVEL_OUTCOME_UNKNOWN round still counts as something wrong - the
+	// series really was not evaluated - but its QUERY_TIMEOUT may be one an
+	// earlier round raised, and the row says so. Present whenever
+	// CauseReason is; absent means only that the row has no reason.
+	CauseOrigin *CauseOrigin `json:"cause_origin,omitempty"`
 	// HeldBy is what held the latest round's Slot, on a row whose latest
 	// round gave the Slot up (GAP_SKIPPED): the completion's own word, the
 	// vocabulary of run_one_return_total{outcome} plus the readiness

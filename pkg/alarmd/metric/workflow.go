@@ -33,8 +33,12 @@ func newWorkflowMetrics() workflowMetrics {
 			Help: "Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by " +
 				"the cause the completion carried (the most actionable of what the round hit) and that cause's reason: " +
 				"which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, " +
-				"completion_level, completion_query). NONE is a completion that carried no cause."},
-			[]string{"completion_kind", "cause", "reason"}),
+				"completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the " +
+				"reason is: physical for what the round met itself - a primary input's reason always is - and carried " +
+				"for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, " +
+				"GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line " +
+				"(evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round."},
+			[]string{"completion_kind", "cause", "reason", "origin"}),
 		abandonedSlots: prometheus.NewCounter(prometheus.CounterOpts{Subsystem: metricSubsystem, Name: "unfinished_slots_abandoned_total",
 			Help: "Unfinished Slots the Progress store dropped because a later Segment moved the cursor past them, counted when the write recording the skip applied. Each is one slot_skipped line with finalizing_path=progress_store; its Slot was never queried and only the Progress record's recent gap holds it."}),
 		active:     gauge("scheduler_active_executions", "Worker task occupancy, including preparation and execution, excluding pending result delivery."),
@@ -86,7 +90,8 @@ func (m workflowMetrics) observe(o observability.Observation) {
 			case "COMPLETED_WITH_UNAVAILABLE", "COMPLETED_WITH_PARTIAL_GAP":
 				m.progressCauses.WithLabelValues(o.ProgressCompletionKind,
 					observability.NormalizeProgressCompletionCause(o.ProgressCompletionCause),
-					string(observability.NormalizeReason(observability.ReasonCode(o.ProgressCompletionReason), observability.ResultDegraded))).Inc()
+					string(observability.NormalizeReason(observability.ReasonCode(o.ProgressCompletionReason), observability.ResultDegraded)),
+					observability.ReasonOriginLabel(o.CarriedReason != nil)).Inc()
 			}
 		}
 	case o.Component == observability.ComponentScheduler && o.Stage == observability.StageDispatcherSnapshot:

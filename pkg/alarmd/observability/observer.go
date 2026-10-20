@@ -2146,7 +2146,13 @@ type AlgorithmEvaluationFact struct {
 	DetectorKind          AlgorithmDetectorKind     `json:"detector_kind"`
 	Result                AlgorithmEvaluationResult `json:"result"`
 	ReasonCode            ReasonCode                `json:"reason_code"`
-	Provenance            AlgorithmProvenance       `json:"provenance,omitempty"`
+	// ReasonCarried says the unavailable result's reason is the Level's
+	// stored guard's, copied from its UNKNOWN outcome, and not anything the
+	// algorithm met this round: an algorithm that detected nothing because a
+	// guard held its Level reads "unavailable QUERY_TIMEOUT" over a query
+	// that answered whole.
+	ReasonCarried bool                `json:"reason_carried,omitempty"`
+	Provenance    AlgorithmProvenance `json:"provenance,omitempty"`
 }
 
 // RecoveryGateCause is the state of the first other Level a RECOVERY record
@@ -2183,6 +2189,10 @@ type RecoveryGateFact struct {
 type LevelOutcomeFact struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason,omitempty"`
+	// Carried says the reason is a stored guard's, repeated on this round,
+	// not anything this round's inputs said (execution.LevelOutcome's
+	// ReasonCarried). Only an UNKNOWN outcome's reason can be.
+	Carried bool   `json:"carried,omitempty"`
 	Count   uint64 `json:"count"`
 }
 
@@ -2247,6 +2257,9 @@ func normalizeLevelOutcomeFacts(observation Observation) []LevelOutcomeFact {
 			}
 		} else {
 			fact.Reason = ""
+		}
+		if fact.Outcome != "UNKNOWN" {
+			fact.Carried = false
 		}
 		facts = append(facts, fact)
 	}
@@ -2407,6 +2420,27 @@ type Observation struct {
 	// ProgressCompletionScope is where that cause was found: the Plan, and the
 	// Level or the physical query. Nil when the completion carried no cause.
 	ProgressCompletionScope *CompletionScopeFacts
+	// EvaluationResult and EvaluationReason are the round's evaluation
+	// outcome on the query_completed line, beside the physical query's own
+	// Result and ReasonCode (evaluation_outcome.go). Empty elsewhere.
+	EvaluationResult Result
+	EvaluationReason ReasonCode
+	// CarriedReason says the line's evaluation reason - EvaluationReason on
+	// query_completed, ReasonCode on evaluation_completed - or its completion
+	// reason - on slot_completed and progress_committed - is a stored guard's
+	// rather than anything the round's inputs said, and where that guard
+	// came from. Nil when it is not carried.
+	CarriedReason *CarriedReasonFacts
+	// SlotCompletionCause and SlotCompletionReason are the completion's
+	// cause and its reason on the slot_completed line: the attribution the
+	// Progress commit reported as ProgressCompletionCause and
+	// ProgressCompletionReason. Separate fields so nothing that reads the
+	// progress line's cause counts a Slot twice.
+	SlotCompletionCause  string
+	SlotCompletionReason string
+	// ReadinessDeferral is what a Slot turned away as not ready waits for, on
+	// its QUERY_NOT_READY query_completed and slot_completed lines.
+	ReadinessDeferral *ReadinessDeferralFacts
 	// HistoryCoverage says how far short of the required window the series in
 	// this run actually were. HISTORY_WARMING alone cannot tell a series two
 	// rounds into its life, which converges by itself, from a series whose
@@ -2472,8 +2506,13 @@ type Observation struct {
 	SegmentContent      *SegmentContentFacts
 	RuntimeConfig       *RuntimeConfigFacts
 	QueryFailure        *QueryFailureFacts
-	QueryStatus         []QueryStatusFacts
-	QueryCodec          []QueryCodecFacts
+	// QueryRequest is the request a degraded or failed query_completed
+	// line's answer came from, for a line whose failure facts name none: a
+	// partial or empty answer, which the provider gave without failing. It
+	// is log-only and renders the same keys a failure's request does.
+	QueryRequest *QueryRequestFacts
+	QueryStatus  []QueryStatusFacts
+	QueryCodec   []QueryCodecFacts
 	// QueryTruncation is every physical query of the completion whose
 	// answer may have been cut by the query service's terms cap.
 	QueryTruncation []QueryTruncationFacts
@@ -2656,6 +2695,13 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
 	observation.QueryFailure = normalizeQueryFailure(observation.Component, observation.Stage, observation.QueryFailure)
+	observation = normalizeEvaluationOutcome(observation)
+	observation.ReadinessDeferral = normalizeReadinessDeferral(observation)
+	if observation.Component != ComponentAccess || observation.Stage != StageQueryCompleted ||
+		(observation.QueryFailure != nil && observation.QueryFailure.Request != nil) {
+		observation.QueryRequest = nil
+	}
+	observation.QueryRequest = normalizeQueryRequest(observation.QueryRequest)
 	observation.QueryStatus = normalizeQueryStatus(observation.Component, observation.Stage, observation.QueryStatus)
 	observation.QueryCodec = normalizeQueryCodec(observation.Component, observation.Stage, observation.QueryCodec)
 	observation.QueryTruncation = normalizeQueryTruncation(observation.QueryTruncation)

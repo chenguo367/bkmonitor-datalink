@@ -151,6 +151,12 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 	if errors.As(err, &requested) {
 		facts.Request = requested.QueryFailureRequest().Observed()
 	}
+	// A timeout the round filed at the query's own deadline names that
+	// branch over whatever the request's own error said.
+	var sourced interface{ QueryFailureTimeoutSource() string }
+	if facts.Request != nil && errors.As(err, &sourced) {
+		facts.Request.TimeoutSource = sourced.QueryFailureTimeoutSource()
+	}
 	var planned interface {
 		QueryFailurePlanned() *execution.PlannedQueryFacts
 	}
@@ -191,24 +197,34 @@ func (coordinator *SlotExecutionCoordinator) observeQueryFailure(ctx context.Con
 // reported an UNAVAILABLE physical query, the observation carries the failed
 // attempt's reason and bounded detail so the rate-limited log line explains
 // the failure without changing completeness semantics.
+//
+// The line's result and reason are the physical queries' own
+// (queryCompletedOutcome); the round's evaluation result travels beside them
+// as evaluation_result and evaluation_reason. They used to be one: the
+// evaluation's worst series, so a query that answered whole in 120 ms read as
+// "degraded QUERY_TIMEOUT" on every round a Level stayed UNKNOWN under a
+// guard an earlier timeout had raised.
 func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 	ctx context.Context,
 	operation execution.Operation,
 	started time.Time,
-	result observability.Result,
-	reason execution.ReasonCode,
 	completion execution.QueryExecutionCompletion,
 	evaluated execution.EvaluationResult,
 ) {
-	if result == "" {
-		result = observability.ResultSuccess
+	evaluationResult, evaluationReason := provisionalResult(evaluated)
+	if evaluationResult == "" {
+		evaluationResult = observability.ResultSuccess
 	}
-	if reason == "" {
-		reason = observability.ReasonNone
+	if evaluationReason == "" {
+		evaluationReason = observability.ReasonNone
 	}
+	result, reason := queryCompletedOutcome(completion, evaluated)
 	facts := providerFailureFacts(completion)
 	if facts == nil {
-		facts = unexplainedOutcomeFacts(result, reason, evaluated)
+		// An evaluation outcome that names no reason is explained here as it
+		// was: it is the evaluation's, by category, and is read from the
+		// evaluation's result, not the query's.
+		facts = unexplainedOutcomeFacts(evaluationResult, evaluationReason, evaluated)
 	}
 	observation := observability.Observation{
 		Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: result,
@@ -216,15 +232,107 @@ func (coordinator *SlotExecutionCoordinator) observeQueryCompleted(
 		ReasonCode: reason, Duration: time.Since(started),
 		QueryFailure: facts, QueryStatus: providerStatusFacts(completion), QueryCodec: providerCodecFacts(completion),
 		QueryUnavailable: providerUnavailableFacts(completion), QueryTruncation: providerTruncationFacts(completion),
-		QueryRanges: providerRangeFacts(completion),
+		QueryRanges:      providerRangeFacts(completion),
+		EvaluationResult: evaluationResult, EvaluationReason: evaluationReason,
+		CarriedReason: execution.CarriedReasonFacts(evaluated.ReasonCarried && evaluationReason != observability.ReasonNone,
+			evaluated.ReasonOrigin),
 	}
-	// A degraded or failed query explains itself as a lost round does.
-	if result == observability.ResultDegraded || result == observability.ResultFailed {
+	// A degraded or failed query explains itself as a lost round does. Only
+	// the query's own result: a query that answered whole under an
+	// evaluation a stored guard held lost nothing.
+	lost := result == observability.ResultDegraded || result == observability.ResultFailed
+	if lost {
 		observation.DivertDecision = observability.DivertDecisionWithBudget(ctx, observability.BudgetCaptureFromContext(ctx))
 		observation.QueryBudget = queryLineBudget(ctx)
 	}
+	// An answer degraded without failing (partial, empty) names the request
+	// it answered, as a failed one does in its failure facts. An empty answer
+	// is a whole one, so it degrades only the evaluation; the request is
+	// named on either.
+	if lost || evaluationResult == observability.ResultDegraded || evaluationResult == observability.ResultFailed {
+		if facts == nil || facts.Request == nil {
+			observation.QueryRequest = answeredRequestFacts(completion)
+		}
+	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// queryCompletedOutcome is the result and reason the query_completed line
+// reports: the round's physical queries' own.
+//
+// Success with no reason when every physical query of the round answered
+// FULL - with data or empty, as the codec delivered it - since none failed.
+// A round with a physical query PARTIAL or UNAVAILABLE keeps the result and
+// reason it has always reported, the evaluation's, which a physical failure
+// decides: the failed binding's reason is what the Plan folds to. The one
+// exception is an evaluation whose reason is a stored guard's (carried): it
+// says nothing about this round's queries, so the failed query's own reason
+// is reported instead, degraded.
+func queryCompletedOutcome(completion execution.QueryExecutionCompletion, evaluated execution.EvaluationResult) (observability.Result, execution.ReasonCode) {
+	failed, failedReason := physicalQueryFailure(completion)
+	if !failed {
+		return observability.ResultSuccess, observability.ReasonNone
+	}
+	result, reason := provisionalResult(evaluated)
+	if evaluated.ReasonCarried || result == "" || result == observability.ResultSuccess {
+		return observability.ResultDegraded, failedReason
+	}
+	if reason == "" {
+		reason = observability.ReasonNone
+	}
+	return result, reason
+}
+
+// physicalQueryFailure says whether a physical query of the round answered
+// short of FULL, and the first such query's reason: the attributed code an
+// UNAVAILABLE one completes with (the word its failure facts carry), or the
+// reason access gave a PARTIAL one's binding.
+func physicalQueryFailure(completion execution.QueryExecutionCompletion) (bool, execution.ReasonCode) {
+	for _, item := range completion.PhysicalQueries {
+		switch item.Completeness {
+		case execution.CompletenessUnavailable:
+			code, from := physicalFailureReason(item.RouteFacts)
+			return true, execution.AttributedReason(code, from)
+		case execution.CompletenessPartial:
+			for _, binding := range completion.CompletionBindings {
+				if binding.Provenance.PhysicalQuery == item.PhysicalQuery && binding.Completeness == item.Completeness && binding.ReasonCode != "" {
+					return true, binding.ReasonCode
+				}
+			}
+			return true, execution.ReasonCode(contract.ReasonQueryPartial)
+		}
+	}
+	return false, ""
+}
+
+// answeredRequestFacts is the request of the completion's first degraded
+// answer - partial, empty or unavailable, in that order of physical query -
+// or of its first answered query when none is; nil when no attempt carries
+// one.
+func answeredRequestFacts(completion execution.QueryExecutionCompletion) *observability.QueryRequestFacts {
+	var first *execution.RequestFacts
+	for _, item := range completion.PhysicalQueries {
+		attempt := lastAttempt(item.RouteFacts)
+		if attempt == nil || attempt.Request == nil {
+			continue
+		}
+		if item.Completeness != execution.CompletenessFull || item.DataState != execution.DataStateData {
+			return attempt.Request.Observed()
+		}
+		if first == nil {
+			first = attempt.Request
+		}
+	}
+	return first.Observed()
+}
+
+// lastAttempt is a physical query's last route attempt; nil for none.
+func lastAttempt(route execution.ProviderRouteFacts) *execution.RouteAttemptFact {
+	if len(route.Attempts) == 0 {
+		return nil
+	}
+	return &route.Attempts[len(route.Attempts)-1]
 }
 
 // providerStatusFacts projects every physical query that carried a backend

@@ -344,6 +344,14 @@ func objectExtentLine(result map[string]any) string {
 	reason, _ := fact["cause_reason"].(string)
 	if reason == "" {
 		reason, _ = fact["reason_code"].(string)
+	} else if origin, _ := fact["cause_origin"].(map[string]any); origin != nil && origin["origin"] == "carried" {
+		// A stored guard's reason, not this round's: say so, and from
+		// which Slot when it was recorded.
+		if slot, known := numberField(origin, "slot"); known && slot > 0 {
+			reason += fmt.Sprintf("，carried from slot %d", int64(slot))
+		} else {
+			reason += "，carried, origin unknown"
+		}
 	}
 	line := fmt.Sprintf("%s（%s）：", kind, reason)
 	switch {

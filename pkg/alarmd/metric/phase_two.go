@@ -1187,16 +1187,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not " +
 			"be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series " +
 			"per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over " +
-			"every cell for its share.",
-	}, []string{"outcome", "reason"})
+			"every cell for its share. origin says whose the reason is: physical for what this round met itself, " +
+			"carried for a stored guard's reason repeated on a later round (an UNKNOWN Level held by a guard an " +
+			"earlier round raised; the origin Slot is on the evaluation_completed line). Only UNKNOWN is ever carried.",
+	}, []string{"outcome", "reason", "origin"})
 	for _, outcome := range observability.LevelOutcomeKinds {
 		if outcome == "UNKNOWN" || outcome == "TERMINAL" {
 			for _, reason := range observability.LevelOutcomeReasons() {
-				metrics.levelOutcomes.WithLabelValues(outcome, reason)
+				metrics.levelOutcomes.WithLabelValues(outcome, reason, observability.ReasonOriginPhysical)
+				if outcome == "UNKNOWN" {
+					metrics.levelOutcomes.WithLabelValues(outcome, reason, observability.ReasonOriginCarried)
+				}
 			}
 			continue
 		}
-		metrics.levelOutcomes.WithLabelValues(outcome, "")
+		metrics.levelOutcomes.WithLabelValues(outcome, "", observability.ReasonOriginPhysical)
 	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "level_abnormal_total",
@@ -2052,7 +2057,8 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		if fact.Outcome == "UNKNOWN" || fact.Outcome == "TERMINAL" {
 			reason = observability.LevelOutcomeReasonLabel(fact.Reason)
 		}
-		m.levelOutcomes.WithLabelValues(fact.Outcome, reason).Add(float64(fact.Count))
+		m.levelOutcomes.WithLabelValues(fact.Outcome, reason,
+			observability.ReasonOriginLabel(fact.Outcome == "UNKNOWN" && fact.Carried)).Add(float64(fact.Count))
 	}
 	for _, fact := range observation.RecoveryGates {
 		m.recoveryBeside.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))

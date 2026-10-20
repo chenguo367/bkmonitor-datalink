@@ -198,9 +198,11 @@ type RouteAttemptFact struct {
 	// Rejection is what the backend said when it refused the query: nil
 	// where the attempt got no non-success answer.
 	Rejection *ProviderRejection `json:",omitempty"`
-	// Request is which deadline governed a failed attempt's request and which
-	// had expired when it failed; nil where the attempt did not fail on its
-	// request or body.
+	// Request is which deadline governed the attempt's request, which had
+	// expired when it ended, and what the provider answered; nil where no
+	// request was sent. An attempt the provider answered carries it whether
+	// the answer succeeded or not, so a degraded answer (partial, empty, a
+	// failing status) names the request it answered as a failed one does.
 	Request *RequestFacts `json:",omitempty"`
 	// Planned is the physical query's own plan: whose input it was and the
 	// deadlines access planned it under; nil until access annotates a
@@ -235,6 +237,22 @@ type RequestFacts struct {
 	// TraceID is the trace id of the traceparent the request was sent with,
 	// known at the send whether or not an answer came back.
 	TraceID string `json:"trace_id,omitempty"`
+	// AnswerStatus is the HTTP status the provider answered with, 200
+	// included; zero where no answer came back. AnsweredUnixMilli is when
+	// its headers arrived (zero where none did) and CompletedUnixMilli when
+	// the attempt ended: answered in full, or failed. A line is written
+	// after its round's work, so its own time is neither.
+	AnswerStatus       int   `json:"answer_status,omitempty"`
+	AnsweredUnixMilli  int64 `json:"answered_ms,omitempty"`
+	CompletedUnixMilli int64 `json:"completed_ms,omitempty"`
+	// TimeoutSource names which branch filed a timeout
+	// (observability.QueryTimeoutSources); empty for anything else.
+	TimeoutSource string `json:"timeout_source,omitempty"`
+	// Excerpt is the provider's own message from an answer's body,
+	// sanitized and bounded as a refusal's is. It can echo the query, so it
+	// is never serialized and never on a log line; it stays on the replica
+	// with the Query Group's kept refusal.
+	Excerpt string `json:"-"`
 }
 
 // MaxRequestErrorBytes bounds RequestFacts.ErrorChain, and
@@ -556,7 +574,9 @@ func (request *RequestFacts) Observed() *observability.QueryRequestFacts {
 	}
 	return &observability.QueryRequestFacts{DeadlineUnixMilli: request.DeadlineUnixMilli, DeadlineLeftAtDoMs: request.DeadlineLeftAtDoMs,
 		DeadlineSource: request.DeadlineSource, Expired: request.Expired, ErrorChain: request.ErrorChain,
-		ErrorTypes: append([]string(nil), request.ErrorTypes...), TraceID: request.TraceID}
+		ErrorTypes: append([]string(nil), request.ErrorTypes...), TraceID: request.TraceID,
+		AnswerStatus: request.AnswerStatus, AnsweredUnixMilli: request.AnsweredUnixMilli, CompletedUnixMilli: request.CompletedUnixMilli,
+		TimeoutSource: request.TimeoutSource, Excerpt: request.Excerpt}
 }
 
 // Observed is planned as a line renders it; nil for nil.

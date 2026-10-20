@@ -853,6 +853,11 @@ type RuntimeLevelStateView struct {
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
+	// GapReasonOriginSlot and GapReasonOriginCause: see
+	// RuntimeLevelStateMutation. Zero on a record that does not carry them,
+	// and then left out of any encoding of the view.
+	GapReasonOriginSlot  EvaluationTime `json:",omitempty"`
+	GapReasonOriginCause ReasonCode     `json:",omitempty"`
 }
 
 // StateRepresentation names the on-disk shape a Runtime State record was read
@@ -1510,6 +1515,9 @@ func decisionStateChanged(view RuntimeStateView, mutation StateMutation) bool {
 			stored.HistoryCompleteness != level.HistoryCompleteness || stored.GapReasonCode != level.GapReasonCode ||
 			stored.WarmupRequirementRef != level.WarmupRequirementRef ||
 			stored.LastProcessedEventTime != level.LastProcessedEventTime {
+			// The guard's reason origin is not compared: it describes the
+			// guard and changes nothing a later round decides on, as the
+			// digest leaves it out (digestLevelState).
 			return true
 		}
 	}
@@ -1564,6 +1572,15 @@ type GapScopeState struct {
 	ReasonCode        ReasonCode
 	RequiredFullSlots uint32
 	ObservedFullSlots uint32
+	// ReasonOriginSlot and ReasonOriginCause are where ReasonCode came from:
+	// the Slot whose write opened the scope and the reason it opened it with
+	// (StampGapScopeOrigins). Optional: absent on a marker written before
+	// they existed or by a build that does not write them. The JSON keys are
+	// the Go names, as the fields beside them are; omitempty keeps a marker
+	// without them byte-identical. Not in the Plan gap mutation digest,
+	// which is over the mutation, not the stored scopes.
+	ReasonOriginSlot  EvaluationTime `json:",omitempty"`
+	ReasonOriginCause ReasonCode     `json:",omitempty"`
 }
 
 type GapScopeMutation struct {
@@ -1806,6 +1823,12 @@ type PlanEvaluationResult struct {
 	// Validate does not check it -- nothing decides anything from it, and a
 	// sound decision must not be rejected over a wrong count beside it.
 	HistoryCoverage HistoryCoverage
+	// ReasonCarried and ReasonOrigin say whether ReasonCode is a stored
+	// guard's, carried by the Level outcome it was folded from
+	// (LevelOutcome.ReasonCarried), and where that guard came from.
+	// Observation only, like HistoryCoverage.
+	ReasonCarried bool
+	ReasonOrigin  ReasonOrigin
 }
 
 // HistoryCoverage is how far the detection window fell short of the points the
@@ -2286,6 +2309,11 @@ type EvaluationResult struct {
 	Plans      []PlanEvaluationResult
 	Result     Result
 	ReasonCode ReasonCode
+	// ReasonCarried and ReasonOrigin travel with ReasonCode: whether it is a
+	// stored guard's reason rather than this round's (PlanEvaluationResult),
+	// and where that guard came from. Observation only.
+	ReasonCarried bool
+	ReasonOrigin  ReasonOrigin
 }
 
 func buildEvaluationInternalExecution(request EvaluationRequest) (InternalExecution, error) {
@@ -3517,6 +3545,29 @@ type CompletionAttribution struct {
 	// one, so a round that did not answer whole names the Level or the query
 	// that did not.
 	Scope CompletionScope
+	// ReasonCarried says Reason is a stored guard's, carried by the Level
+	// outcome the cause was found on (LevelOutcome.ReasonCarried), not
+	// anything this round's inputs said; ReasonOrigin is where that guard
+	// came from. A primary input's reason is never carried.
+	ReasonCarried bool
+	ReasonOrigin  ReasonOrigin
+}
+
+// SlotCompletionCause is the part of a CompletionAttribution the Slot's
+// completion line reports: the cause, its reason, and whether that reason was
+// carried and from where. The scope and coverage stay on the progress line,
+// which already carries them.
+type SlotCompletionCause struct {
+	Cause         CompletionCause
+	Reason        ReasonCode
+	ReasonCarried bool
+	ReasonOrigin  ReasonOrigin
+}
+
+// SlotCause is the attribution as the Slot's completion line reports it.
+func (attribution CompletionAttribution) SlotCause() SlotCompletionCause {
+	return SlotCompletionCause{Cause: attribution.Cause, Reason: attribution.Reason,
+		ReasonCarried: attribution.ReasonCarried, ReasonOrigin: attribution.ReasonOrigin}
 }
 
 // CompletionScope is the part of a Slot a completion cause was found in.
@@ -3565,9 +3616,20 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 	// they were.
 	reason := ReasonCode("")
 	var scope CompletionScope
+	// carried and origin belong to the reason: whether it is a stored guard's
+	// rather than this round's, and where that guard came from. Only a Level
+	// outcome's reason can be carried.
+	carried, origin := false, ReasonOrigin{}
 	note := func(candidate CompletionCause, candidateReason ReasonCode, candidateScope CompletionScope) {
 		if causeRank(candidate) > causeRank(cause) {
 			cause, reason, scope = candidate, candidateReason, candidateScope
+			carried, origin = false, ReasonOrigin{}
+		}
+	}
+	noteOutcome := func(candidate CompletionCause, outcome LevelOutcome, candidateScope CompletionScope) {
+		if causeRank(candidate) > causeRank(cause) {
+			cause, reason, scope = candidate, outcome.ReasonCode, candidateScope
+			carried, origin = outcome.ReasonCarried, outcome.ReasonOrigin
 		}
 	}
 	hasPartial := primary.Completeness == CompletenessPartial
@@ -3626,9 +3688,9 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 					hasUnavailable = true
 					levelScope := CompletionScope{Plan: outcome.Plan, HasPlan: true, LevelID: outcome.LevelID, HasLevel: true}
 					if wholeness.UnknownIsGuardTail(outcome) {
-						note(CauseGapGuardWarming, outcome.ReasonCode, levelScope)
+						noteOutcome(CauseGapGuardWarming, outcome, levelScope)
 					} else {
-						note(CauseLevelOutcomeUnknown, outcome.ReasonCode, levelScope)
+						noteOutcome(CauseLevelOutcomeUnknown, outcome, levelScope)
 					}
 				}
 			}
@@ -3636,7 +3698,7 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 			return "", CompletionAttribution{}, errors.New("alarmd execution: invalid Plan disposition for completion")
 		}
 	}
-	attributed := CompletionAttribution{Cause: cause, Reason: reason, Scope: scope}
+	attributed := CompletionAttribution{Cause: cause, Reason: reason, Scope: scope, ReasonCarried: carried, ReasonOrigin: origin}
 	switch {
 	case hasTerminal:
 		return CompletionTerminal, CompletionAttribution{}, nil
@@ -4404,6 +4466,15 @@ type SlotExecutionResult struct {
 	// committed included. Observation only: the Runner reports each such
 	// Slot given up on, once.
 	QueryFreeCause CompletionCause
+	// CompletionCause is why the Slot completed the way it did, for its
+	// completion line (slot_completed): the same attribution the Progress
+	// commit reported. Zero on a Slot that did not commit.
+	CompletionCause SlotCompletionCause
+	// PhysicalQueryLoss says a physical query of the round answered short of
+	// FULL - PARTIAL or UNAVAILABLE - by the rule the query line reports it
+	// by. Observation only: it decides whether the completion line explains
+	// a lost query, whatever cause outranked it in the attribution.
+	PhysicalQueryLoss bool
 	// Usage is what this Slot took of each budget, carried out so the
 	// completion row can report it.
 	//

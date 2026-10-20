@@ -83,7 +83,7 @@ func (p *BoundedLogPolicy) ShouldLog(observation Observation) bool {
 // and not written, and how many earlier lines of the same bucket were merged
 // into a logged one.
 func (p *BoundedLogPolicy) Admit(observation Observation) LogAdmission {
-	if routineResult(observation.Result) {
+	if routineResult(observation.Result) && !evaluationHeldQuery(observation) {
 		switch {
 		case roundStages[observation.Stage] && roundChanged(observation):
 			return LogAdmission{Allowed: true, Candidate: true}
@@ -566,6 +566,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int64("failure_local_ms", timing.LocalMillis))
 		}
 	}
+	// A degraded answer the provider gave without failing - partial, empty -
+	// names the request it answered by the same keys.
+	attributes = appendQueryRequestAttributes(attributes, observation.QueryRequest, true)
 	// The answer the query service may have cut: the source and the
 	// dimension whose level held its bucket cap, for each such query.
 	for _, cut := range observation.QueryTruncation {
@@ -678,6 +681,8 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	attributes = appendQueryBudgetAttributes(attributes, observation.QueryBudget)
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
 	attributes = appendCompletionCause(attributes, observation)
+	attributes = appendEvaluationOutcome(attributes, observation)
+	attributes = appendReadinessDeferral(attributes, observation.ReadinessDeferral)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
@@ -1383,6 +1388,21 @@ func appendQueryRequestAttributes(attributes []slog.Attr, request *QueryRequestF
 	}
 	if withTrace && validTraceID(request.TraceID) {
 		attributes = append(attributes, slog.String("failure_provider_trace_id", request.TraceID))
+	}
+	// What the provider answered and when: the status (200 included, which
+	// failure_http_status never names), when its headers came and when the
+	// attempt ended. The excerpt is not written: it can echo the query.
+	if request.AnswerStatus != 0 {
+		attributes = append(attributes, slog.Int("provider_http_status", request.AnswerStatus))
+	}
+	if request.AnsweredUnixMilli > 0 {
+		attributes = append(attributes, slog.Int64("answered_at_ms", request.AnsweredUnixMilli))
+	}
+	if request.CompletedUnixMilli > 0 {
+		attributes = append(attributes, slog.Int64("completed_at_ms", request.CompletedUnixMilli))
+	}
+	if request.TimeoutSource != "" {
+		attributes = append(attributes, slog.String("timeout_source", request.TimeoutSource))
 	}
 	return attributes
 }

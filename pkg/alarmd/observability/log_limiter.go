@@ -74,7 +74,11 @@ type logBucketKey struct {
 
 func limiterBucketKey(observation Observation) logBucketKey {
 	key := logBucketKey{reason: observation.ReasonCode}
-	if observation.stageReasonBucket {
+	if evaluationHeldQuery(observation) {
+		// A query that answered whole under an evaluation that did not: the
+		// evaluation's reason is the word that repeats.
+		key.reason = observation.EvaluationReason
+	} else if observation.stageReasonBucket {
 		key.reason = ReasonNone
 		key.stage = observation.Stage
 	}

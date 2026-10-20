@@ -875,9 +875,9 @@ Level verdicts of ABNORMAL, by whether the detection window they were reached on
 
 ## alarmd_level_outcome_total
 
-Labels: `outcome`, `reason`
+Labels: `outcome`, `reason`, `origin`
 
-Level outcomes the evaluation concluded, by outcome kind and, for UNKNOWN and TERMINAL, by reason. NORMAL, ABNORMAL and RECOVERY carry no reason. UNKNOWN by reason is the reading for a Level that was not judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over every cell for its share.
+Level outcomes the evaluation concluded, by outcome kind and, for UNKNOWN and TERMINAL, by reason. NORMAL, ABNORMAL and RECOVERY carry no reason. UNKNOWN by reason is the reading for a Level that was not judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over every cell for its share. origin says whose the reason is: physical for what this round met itself, carried for a stored guard's reason repeated on a later round (an UNKNOWN Level held by a guard an earlier round raised; the origin Slot is on the evaluation_completed line). Only UNKNOWN is ever carried.
 
 ## alarmd_linkd_calibration_coverage
 
@@ -1381,9 +1381,9 @@ Acknowledged Progress commit observations by existing completion kind.
 
 ## alarmd_progress_completion_causes_total
 
-Labels: `completion_kind`, `cause`, `reason`
+Labels: `completion_kind`, `cause`, `reason`, `origin`
 
-Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause.
+Acknowledged Slots that completed short of whole - COMPLETED_WITH_UNAVAILABLE, COMPLETED_WITH_PARTIAL_GAP - by the cause the completion carried (the most actionable of what the round hit) and that cause's reason: which Plan, Level or query it was and when are on the progress_committed line (completion_strategy, completion_level, completion_query). NONE is a completion that carried no cause. origin says whose the reason is: physical for what the round met itself - a primary input's reason always is - and carried for a stored guard's reason a Level outcome repeated on a later round (LEVEL_OUTCOME_UNKNOWN, GAP_GUARD_WARMING); the guard's origin Slot is on the progress_committed line (evaluation_reason_origin_slot). reason=QUERY_TIMEOUT,origin=physical is a timeout this round.
 
 ## alarmd_query_cooldown_events_total
 

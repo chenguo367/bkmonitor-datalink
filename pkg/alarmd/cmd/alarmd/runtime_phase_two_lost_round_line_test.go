@@ -41,6 +41,27 @@ func TestALostRoundExplainsItselfOnItsCompletionLine(t *testing.T) {
 		{"timed out", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
 			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout)}, true},
 		{"succeeded", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull, Result: observability.ResultSuccess}, false},
+		// The primary input timed out this round: a lost query.
+		{"primary timed out", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CausePrimaryInputUnavailable,
+				Reason: execution.ReasonCode(contract.ReasonQueryTimeout)}}, true},
+		// Degraded only because a guard an earlier timeout raised still
+		// holds a Level: its queries answered, and it lost no query.
+		{"carried timeout", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseGapGuardWarming,
+				Reason: execution.ReasonCode(contract.ReasonQueryTimeout), ReasonCarried: true,
+				ReasonOrigin: execution.ReasonOrigin{Slot: 1_699_999_940, Cause: execution.ReasonCode(contract.ReasonQueryTimeout)}}}, false},
+		// Two Plans: B's Level held by a carried guard, A's primary came
+		// back PARTIAL. The carried Level outranks the partial primary in
+		// the attribution, and a query was short all the same.
+		{"carried cause over a partial primary", execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionUnavailable,
+			Result: observability.ResultDegraded, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout),
+			CompletionCause: execution.SlotCompletionCause{Cause: execution.CauseLevelOutcomeUnknown,
+				Reason: execution.ReasonCode(contract.ReasonQueryTimeout), ReasonCarried: true,
+				ReasonOrigin: execution.ReasonOrigin{Slot: 1_699_999_940, Cause: execution.ReasonCode(contract.ReasonQueryTimeout)}},
+			PhysicalQueryLoss: true}, true},
 	} {
 		var completion *observability.Observation
 		executor := observedProductionSlotExecutor{
@@ -62,9 +83,13 @@ func TestALostRoundExplainsItselfOnItsCompletionLine(t *testing.T) {
 		if completion == nil {
 			t.Fatalf("%s: no completion line", tc.name)
 		}
+		if completion.Result != tc.result.Result || completion.ReasonCode != observability.ReasonCode(tc.result.ReasonCode) {
+			t.Fatalf("%s: line result %s/%s, want the Slot's own %s/%s", tc.name, completion.Result, completion.ReasonCode,
+				tc.result.Result, tc.result.ReasonCode)
+		}
 		if !tc.lost {
 			if completion.DivertDecision != nil || completion.QueryBudget != nil {
-				t.Fatalf("%s: a successful round wrote %+v %+v", tc.name, completion.DivertDecision, completion.QueryBudget)
+				t.Fatalf("%s: a round that lost no query wrote %+v %+v", tc.name, completion.DivertDecision, completion.QueryBudget)
 			}
 			continue
 		}

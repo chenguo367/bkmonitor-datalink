@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A Slot carrying a read hold waits in the due index, not inside its
@@ -72,6 +73,32 @@ func TestAHeldSlotWithQueriesReadyAtDifferentTimesWaitsInTheDueIndex(t *testing.
 	}
 	if waited != 0 || consumer.begin != 0 || len(provider.attempts) != 0 || len(permits.attempts) != 0 {
 		t.Fatalf("deferred Slot did work: waited=%s begin=%d provider=%d permits=%d", waited, consumer.begin, len(provider.attempts), len(permits.attempts))
+	}
+	// And it names what it waits for: the primary's query and requirement,
+	// the time, and that the time is the read hold's.
+	facts := ReadinessDeferralOf(err)
+	if facts == nil || facts.Requirement != string(frozen.Requirements[0].RequirementID) || facts.PhysicalQuery == "" ||
+		facts.ReadyAtUnixMilli != evaluationTime.Add(310*time.Second).UnixMilli() ||
+		facts.Basis != observability.ReadinessBasisReadHold || facts.ReadHoldMillis != 300_000 {
+		t.Fatalf("readiness facts %+v, want the primary %s held 300000 ms to %d", facts,
+			frozen.Requirements[0].RequirementID, evaluationTime.Add(310*time.Second).UnixMilli())
+	}
+}
+
+// A Slot with no hold is deferred to its queries' shared settling moment, and
+// says so; the requirement named is the primary's.
+func TestASlotWithoutAHoldNamesTheSettlingWaitItIsDeferredTo(t *testing.T) {
+	now := time.UnixMilli(1_800_000_000_000)
+	queries := []PlannedQuery{
+		{Spec: execution.PhysicalQuerySpec{Digest: "physical-302"}, ReadyAtUnixMilli: now.Add(30 * time.Second).UnixMilli(),
+			Requirements: []execution.DataRequirement{{RequirementID: "dependency", Role: execution.InputRoleAlgorithmDependency},
+				{RequirementID: "primary", Role: execution.InputRolePrimary}}},
+	}
+	readyAt, index := slotPendingReadinessOf(queries, 0, now)
+	facts := readinessDeferral(queries, index, readyAt, 0)
+	if facts.Basis != observability.ReadinessBasisSettleWait || facts.ReadHoldMillis != 0 || facts.Requirement != "primary" ||
+		facts.PhysicalQuery != "physical-302" || facts.ReadyAtUnixMilli != now.Add(30*time.Second).UnixMilli() {
+		t.Fatalf("facts %+v, want primary on physical-302 settling to %d", facts, now.Add(30*time.Second).UnixMilli())
 	}
 }
 

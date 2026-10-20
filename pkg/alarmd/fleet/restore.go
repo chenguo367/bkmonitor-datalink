@@ -259,6 +259,10 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 		// attribute one nobody recorded.
 		if round := restored.LastRound; round != nil {
 			state.causeReason = round.ReasonCode
+			// The summary never recorded whose the reason was.
+			if state.causeReason != "" {
+				state.causeOrigin = heldCauseOrigin(state.causeReason)
+			}
 			if !round.CompletedAt.IsZero() {
 				// The round said its reason when it was committed: that is
 				// both ends of the reason's clock this process can vouch for.

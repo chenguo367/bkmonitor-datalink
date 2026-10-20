@@ -613,6 +613,10 @@ type queryGroupState struct {
 	causeReason string
 	// causeScope is where that cause was found (CauseScope).
 	causeScope *CauseScope
+	// causeOrigin is whose causeReason is (CauseOrigin): physical, carried,
+	// or empty where this process does not know - a row restored from a
+	// summary, which never recorded it.
+	causeOrigin *CauseOrigin
 	// coverage is the evidence behind causeReason when that reason is about
 	// the detection window. It is kept beside the reason and cleared with it,
 	// because a shortfall left over from an earlier round would be read as
@@ -1514,6 +1518,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if rejection := failure.Rejection; rejection != nil {
 			state.lastFailure.Rejection = &RejectionRef{Class: rejection.Class, TraceID: rejection.TraceID}
 			tracker.keepRejectionLocked(trace.QueryGroupKey, *rejection, failure.HTTPStatus, at)
+		} else if request := failure.Request; request != nil && request.Excerpt != "" {
+			// A failure the provider answered with its own message - a body
+			// status, an answer that broke - is kept by the same rule as a
+			// refusal: the words on this replica alone, for the session-gated
+			// read, and nothing of them on the row.
+			tracker.keepRejectionLocked(trace.QueryGroupKey, observability.QueryRejection{Class: failure.Code,
+				TraceID: request.TraceID, Excerpt: request.Excerpt}, request.AnswerStatus, at)
 		}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
@@ -1805,6 +1816,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
 		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
+		state.causeOrigin = causeOriginOf(roundReason,
+			observation.ProgressCompletionCause != "" && roundReason == observation.ProgressCompletionCause, observation.CarriedReason)
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run
@@ -2114,6 +2127,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.cause = ""
 	state.causeReason = ""
 	state.causeScope = nil
+	state.causeOrigin = nil
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0
@@ -2308,6 +2322,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		DemotedSince:  state.demotedSince,
 		Kind:          state.currentKind,
 		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
+		CauseOrigin:      state.causeOrigin,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,
 		Since:            state.runStartedAt,

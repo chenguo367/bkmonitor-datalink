@@ -631,17 +631,24 @@ func TestLevelOutcomesAreCountedByKindAndCoverageReason(t *testing.T) {
 		Operation: observability.OperationLoad, ReasonCode: observability.ReasonCode(contract.ReasonEffectiveTimeInactive),
 		LevelOutcomes: []observability.LevelOutcomeFact{
 			{Outcome: "UNKNOWN", Reason: contract.ReasonEffectiveTimeInactive, Count: 2},
+			// The same reason a stored guard repeated: its own cell.
+			{Outcome: "UNKNOWN", Reason: contract.ReasonEffectiveTimeInactive, Carried: true, Count: 5},
 			{Outcome: "TERMINAL", Reason: contract.ReasonStateCorrupt, Count: 1},
-			{Outcome: "ABNORMAL", Count: 3},
+			// Only UNKNOWN is ever carried; a flag on another kind is dropped.
+			{Outcome: "ABNORMAL", Carried: true, Count: 3},
 		},
 	})
-	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive)); got != 2 {
-		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE = %v, want 2", got)
+	physical, carried := observability.ReasonOriginPhysical, observability.ReasonOriginCarried
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, physical)); got != 2 {
+		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/physical = %v, want 2", got)
 	}
-	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("TERMINAL", observability.LevelOutcomeReasonOther)); got != 1 {
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive, carried)); got != 5 {
+		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE/carried = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("TERMINAL", observability.LevelOutcomeReasonOther, physical)); got != 1 {
 		t.Fatalf("TERMINAL/other = %v, want the deterministic reason folded to other", got)
 	}
-	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("ABNORMAL", "")); got != 3 {
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("ABNORMAL", "", physical)); got != 3 {
 		t.Fatalf("ABNORMAL = %v, want 3", got)
 	}
 	for _, line := range strings.Split(scrape(t, recorder), "\n") {

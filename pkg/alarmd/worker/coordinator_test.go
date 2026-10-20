@@ -120,12 +120,21 @@ func TestSlotExecutionCoordinatorObservesReadinessDeferralWithoutFailureOrSideEf
 	if reason := observability.NormalizeReason(observation.ReasonCode, observation.Result); reason != want {
 		t.Fatalf("readiness reason=%q (normalized %q), want %q", observation.ReasonCode, reason, want)
 	}
+	// And what it waits for, as the deferral named it.
+	if facts := observation.ReadinessDeferral; facts == nil || facts.PhysicalQuery != "physical-304" ||
+		facts.Requirement != "primary" || facts.ReadyAtUnixMilli != readyAt.UnixMilli() || facts.Basis != observability.ReadinessBasisSettleWait {
+		t.Fatalf("readiness facts=%+v, want the deferral's query, requirement, time and basis", facts)
+	}
 }
 
 type coordinatorReadinessDeferredError struct{ readyAt time.Time }
 
 func (err coordinatorReadinessDeferredError) Error() string               { return "readiness deferred" }
 func (err coordinatorReadinessDeferredError) ReadinessReadyAt() time.Time { return err.readyAt }
+func (err coordinatorReadinessDeferredError) ReadinessDeferral() *observability.ReadinessDeferralFacts {
+	return &observability.ReadinessDeferralFacts{Requirement: "primary", PhysicalQuery: "physical-304",
+		ReadyAtUnixMilli: err.readyAt.UnixMilli(), Basis: observability.ReadinessBasisSettleWait}
+}
 
 func TestSlotExecutionCoordinatorBindsAlwaysEffectiveTimeToRealSeries(t *testing.T) {
 	fixture := newFixture(t, true, "")
@@ -789,6 +798,15 @@ func TestSlotExecutionCoordinatorDiscardsProvisionalEffectsForPartialData(t *tes
 		fixture.ports.lastProgress.Completion.Primary == nil ||
 		fixture.ports.lastProgress.Completion.Primary.Completeness != execution.CompletenessPartial {
 		t.Fatalf("Progress=%+v", fixture.ports.lastProgress)
+	}
+	// The completion line's lost-round facts key on this, not on the cause.
+	if !result.PhysicalQueryLoss {
+		t.Fatal("a PARTIAL physical query did not mark the Slot's physical loss")
+	}
+	whole := newFixture(t, true, "")
+	if result, err := whole.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil ||
+		result.PhysicalQueryLoss {
+		t.Fatalf("whole round: result=%+v error=%v, want no physical loss", result, err)
 	}
 }
 

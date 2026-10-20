@@ -2895,6 +2895,8 @@ func (executor observedProductionSlotExecutor) Execute(
 	reason := result.ReasonCode
 	observedErr := err
 	retryingAfterFailure := false
+	// What a Slot turned away as not ready waits for, on its line.
+	var readiness *observability.ReadinessDeferralFacts
 	var notExecutable *scheduler.ViewNotExecutableError
 	if err != nil {
 		if errors.As(err, &notExecutable) {
@@ -2915,6 +2917,7 @@ func (executor observedProductionSlotExecutor) Execute(
 			observedResult = observability.ResultRetrying
 			reason = observability.ReasonCode(contract.ReasonQueryNotReady)
 			observedErr = nil
+			readiness = access.ReadinessDeferralOf(err)
 		} else {
 			observedResult = observability.ResultFailed
 			reason, gapApplySite = slotFailureReason(err)
@@ -2937,8 +2940,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		HeldBy: heldBy, GapApplySite: gapApplySite, DivertDecision: lostRoundDecision(ctx, observedResult, retryingAfterFailure, budget),
-		QueryBudget: lostRoundBudget(observedResult, retryingAfterFailure, budget),
+		HeldBy: heldBy, GapApplySite: gapApplySite,
+		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result), retryingAfterFailure, budget),
+		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result), retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
@@ -2946,8 +2950,17 @@ func (executor observedProductionSlotExecutor) Execute(
 		// which is indistinguishable on the reason alone from a Slot that was
 		// given up on before it ran.
 		SlotCompletionKind: string(result.CompletionKind),
-		ExecuteOutcome:     executeReturnOutcome(result, err),
-		Result:             observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
+		// And which of the conditions folded into that kind happened, with
+		// its reason: the attribution the progress line reports. Without it
+		// this line said UNAVAILABLE and QUERY_TIMEOUT for a Slot whose
+		// queries all answered and whose Level only waited on a guard an
+		// earlier timeout raised (GAP_GUARD_WARMING).
+		SlotCompletionCause:  string(result.CompletionCause.Cause),
+		SlotCompletionReason: string(result.CompletionCause.Reason),
+		CarriedReason:        result.CompletionCause.CarriedReason(),
+		ReadinessDeferral:    readiness,
+		ExecuteOutcome:       executeReturnOutcome(result, err),
+		Result:               observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 		SlotTiming:      slotTimingFacts(result.Timing),
@@ -2961,6 +2974,24 @@ func (executor observedProductionSlotExecutor) Execute(
 // lostRound says a round's completion is one that lost it or failed it: it
 // ended degraded or failed, or its attempt failed and is being retried. A
 // round that succeeded, or that is only waiting for its data, is none.
+// queryLossResult is the result the lost-round facts are keyed on: the
+// Slot's own, except for a completion whose cause's reason was carried from
+// a stored guard while none of its physical queries answered short. That
+// Slot's queries answered; it is degraded only because a guard an earlier
+// round raised still holds a Level, and it lost no query for a decision or
+// a budget to explain - the rule the query line follows (worker
+// observeQueryCompleted). The physical loss is asked of the round, not of
+// the cause: the attribution ranks a carried Level outcome above a primary
+// input that came back PARTIAL, and a Query Group whose one Plan was held by
+// a guard while another Plan's query was short lost that query all the
+// same. The Slot's result and reason on the line are unchanged.
+func queryLossResult(observed observability.Result, result execution.SlotExecutionResult) observability.Result {
+	if result.CompletionCause.Cause != "" && result.CompletionCause.ReasonCarried && !result.PhysicalQueryLoss {
+		return observability.ResultSuccess
+	}
+	return observed
+}
+
 func lostRound(result observability.Result, retryingAfterFailure bool) bool {
 	return result == observability.ResultDegraded || result == observability.ResultFailed ||
 		(result == observability.ResultRetrying && retryingAfterFailure)
