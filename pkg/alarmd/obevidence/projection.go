@@ -86,7 +86,7 @@ var algorithmConfigPolicy = func() *policy {
 var algorithmPolicy = fields("type version level unit_prefix", map[string]*policy{"config": algorithmConfigPolicy})
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
-var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset", map[string]*policy{
+var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset expression_mode", map[string]*policy{
 	"agg_condition": conditionPolicy, "functions": functionPolicy,
 	// A PromQL query's label filter (field -> value or values), read by the
 	// polling compiler as agg_condition is by the others: the same kind of
