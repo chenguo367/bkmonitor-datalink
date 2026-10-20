@@ -216,14 +216,22 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePollingQueryConfig(c legacyQu
 			c.MetricField, c.AggMethod = "_index", "COUNT"
 			// The event name and the recovery filter go into every OR group
 			// of the strategy's conditions, as the platform's extra filters
-			// do, after the group's own as they always were; recovery
-			// filtering is a dimensions field.
+			// do; recovery filtering is a dimensions field. With more than
+			// one group they go before each group's own, where the platform
+			// puts them: a group whose conditions all have no value then
+			// keeps its "or" on the filters and still counts the event, as
+			// the platform's query does. A strategy of one group keeps them
+			// after, as they always were, and so its query revision.
 			var filters []legacyCondition
 			if c.CustomEventName != "" {
 				filters = append(filters, scalarCondition("event_name", "eq", c.CustomEventName))
 			}
 			filters = append(filters, scalarCondition("dimensions.event_type", "neq", "recovery"))
-			c.AggConditions = andIntoEveryGroup(c.AggConditions, false, filters...)
+			multiGroup := false
+			for index, condition := range c.AggConditions {
+				multiGroup = multiGroup || (index > 0 && condition.Connector == "or")
+			}
+			c.AggConditions = andIntoEveryGroup(c.AggConditions, multiGroup, filters...)
 		} else {
 			c.MetricField = "event.count"
 			if strings.EqualFold(c.AggMethod, "COUNT") {

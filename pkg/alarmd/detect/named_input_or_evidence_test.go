@@ -21,8 +21,9 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-// compileTwoRingRatioPlan compiles one Level holding two SimpleRingRatio
-// algorithms joined by connector; both read the same primary/previous inputs.
+// compileTwoRingRatioPlan compiles one Level holding a SimpleRingRatio
+// algorithm per config, joined by connector, all reading the same
+// primary/previous inputs.
 func compileTwoRingRatioPlan(t *testing.T, connector string, configs ...map[string]any) *strategy.CompiledPlan {
 	t.Helper()
 	projection := strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}}
@@ -116,7 +117,6 @@ func TestNamedInputLevelEvidencePointsAtFirstDecidingAlgorithm(t *testing.T) {
 		plan := compileTwoRingRatioPlan(t, contract.LevelConnectorOR, anomalous(), normal())
 		fact := evaluateTwoRingRatioLevel(t, plan)
 		want := plan.Levels().At(0).Algorithms().At(0).AlgorithmPlanID()
-		t.Logf("fact.Result=%s evidence=%+v alg0=%s alg1=%s", fact.Result, fact.Evidence, want, plan.Levels().At(0).Algorithms().At(1).AlgorithmPlanID())
 		if fact.Result != FactResultAnomalous {
 			t.Fatalf("Result = %s, want ANOMALOUS", fact.Result)
 		}
@@ -128,12 +128,30 @@ func TestNamedInputLevelEvidencePointsAtFirstDecidingAlgorithm(t *testing.T) {
 		plan := compileTwoRingRatioPlan(t, contract.LevelConnectorAND, normal(), anomalous())
 		fact := evaluateTwoRingRatioLevel(t, plan)
 		want := plan.Levels().At(0).Algorithms().At(0).AlgorithmPlanID()
-		t.Logf("fact.Result=%s evidence=%+v alg0=%s alg1=%s", fact.Result, fact.Evidence, want, plan.Levels().At(0).Algorithms().At(1).AlgorithmPlanID())
 		if fact.Result != FactResultNormal {
 			t.Fatalf("Result = %s, want NORMAL", fact.Result)
 		}
 		if fact.Evidence.HasMatchedAlgorithm || fact.Evidence.PredicateDigest != want {
 			t.Fatalf("Evidence = %+v, want unmatched algorithm 0 with digest %s", fact.Evidence, want)
+		}
+	})
+	// The decider is not the first algorithm, which is also what the
+	// fallback holds: only these tell the decider from the first available.
+	t.Run("OR normal, anomalous, normal", func(t *testing.T) {
+		plan := compileTwoRingRatioPlan(t, contract.LevelConnectorOR, normal(), anomalous(), normal())
+		fact := evaluateTwoRingRatioLevel(t, plan)
+		want := plan.Levels().At(0).Algorithms().At(1).AlgorithmPlanID()
+		if fact.Result != FactResultAnomalous || !fact.Evidence.HasMatchedAlgorithm || fact.Evidence.MatchedAlgorithmOrdinal != 1 ||
+			fact.Evidence.PredicateDigest != want {
+			t.Fatalf("Result %s Evidence %+v, want ANOMALOUS matched algorithm 1 with digest %s", fact.Result, fact.Evidence, want)
+		}
+	})
+	t.Run("AND anomalous, normal, anomalous", func(t *testing.T) {
+		plan := compileTwoRingRatioPlan(t, contract.LevelConnectorAND, anomalous(), normal(), anomalous())
+		fact := evaluateTwoRingRatioLevel(t, plan)
+		want := plan.Levels().At(0).Algorithms().At(1).AlgorithmPlanID()
+		if fact.Result != FactResultNormal || fact.Evidence.HasMatchedAlgorithm || fact.Evidence.PredicateDigest != want {
+			t.Fatalf("Result %s Evidence %+v, want NORMAL unmatched algorithm 1 with digest %s", fact.Result, fact.Evidence, want)
 		}
 	})
 }

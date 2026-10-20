@@ -170,26 +170,29 @@ func cloneStringsPreservingNil(values []string) []string {
 }
 
 type legacyQueryConfig struct {
-	AlertName       string            `json:"alert_name"`
-	IndexSetID      json.RawMessage   `json:"index_set_id"`
-	PromQL          string            `json:"promql"`
-	CustomEventName string            `json:"custom_event_name"`
-	DataSourceLabel string            `json:"data_source_label"`
-	DataTypeLabel   string            `json:"data_type_label"`
-	MetricID        string            `json:"metric_id"`
-	MetricField     string            `json:"metric_field"`
-	Alias           string            `json:"alias"`
-	Values          []string          `json:"values"`
-	AggDimensions   []string          `json:"agg_dimension"`
-	AggMethod       string            `json:"agg_method"`
-	AggConditions   []legacyCondition `json:"agg_condition"`
-	AggInterval     int64             `json:"agg_interval"`
-	ResultTableID   string            `json:"result_table_id"`
-	TimeField       string            `json:"time_field"`
-	QueryString     string            `json:"query_string"`
-	Functions       []legacyFunction  `json:"functions"`
-	DataLabel       string            `json:"data_label"`
-	FilterDict      json.RawMessage   `json:"filter_dict"`
+	AlertName       string          `json:"alert_name"`
+	IndexSetID      json.RawMessage `json:"index_set_id"`
+	PromQL          string          `json:"promql"`
+	CustomEventName string          `json:"custom_event_name"`
+	DataSourceLabel string          `json:"data_source_label"`
+	DataTypeLabel   string          `json:"data_type_label"`
+	MetricID        string          `json:"metric_id"`
+	MetricField     string          `json:"metric_field"`
+	Alias           string          `json:"alias"`
+	// ExpressionMode is "promql" on each query of a multi-PromQL expression,
+	// absent on every other query.
+	ExpressionMode string            `json:"expression_mode"`
+	Values         []string          `json:"values"`
+	AggDimensions  []string          `json:"agg_dimension"`
+	AggMethod      string            `json:"agg_method"`
+	AggConditions  []legacyCondition `json:"agg_condition"`
+	AggInterval    int64             `json:"agg_interval"`
+	ResultTableID  string            `json:"result_table_id"`
+	TimeField      string            `json:"time_field"`
+	QueryString    string            `json:"query_string"`
+	Functions      []legacyFunction  `json:"functions"`
+	DataLabel      string            `json:"data_label"`
+	FilterDict     json.RawMessage   `json:"filter_dict"`
 }
 
 type legacyCondition struct {
@@ -251,6 +254,11 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 	stepSeconds := int64(0)
 	for _, config := range configs {
 		if config.DataSourceLabel == "prometheus" {
+			if allPrometheus(configs) && allExpressionMode(configs) {
+				// The multi-PromQL expression: the platform runs it as one
+				// PromQL. Not retired - this build does not compile it yet.
+				return execution.QueryPlanFacts{}, queryUnsupported("QUERY_PROMQL_EXPRESSION_NOT_MIGRATED", nil)
+			}
 			if allPrometheus(configs) {
 				// Several PromQL queries without expression_mode: the retired
 				// form, read by the platform as independent queries whose
@@ -1144,6 +1152,17 @@ func querySources(facts execution.QueryPlanFacts) []string {
 func allPrometheus(configs []legacyQueryConfig) bool {
 	for _, config := range configs {
 		if config.DataSourceLabel != "prometheus" {
+			return false
+		}
+	}
+	return true
+}
+
+// allExpressionMode says every query of an item is marked expression_mode
+// promql: the platform's multi-PromQL expression (promql_multi_expression).
+func allExpressionMode(configs []legacyQueryConfig) bool {
+	for _, config := range configs {
+		if config.ExpressionMode != "promql" {
 			return false
 		}
 	}

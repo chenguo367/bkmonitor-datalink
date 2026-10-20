@@ -250,7 +250,7 @@ var sourceChecks = map[string]Check{
 // a reason nobody has read.
 var DeclaredCapabilities = []string{
 	// Query sources and query features not yet carried over.
-	"QUERY_SOURCE_NOT_MIGRATED", "QUERY_MIXED_PROMQL_NOT_MIGRATED", "QUERY_CMDB_LEVEL_BYPASSES_UQ",
+	"QUERY_SOURCE_NOT_MIGRATED", "QUERY_MIXED_PROMQL_NOT_MIGRATED", "QUERY_PROMQL_EXPRESSION_NOT_MIGRATED", "QUERY_CMDB_LEVEL_BYPASSES_UQ",
 	"QUERY_BK_DATA_LOCAL_TIME_NOT_MIGRATED", "QUERY_FUNCTION_NOT_MIGRATED", "EXPRESSION_FUNCTION_NOT_MIGRATED",
 	// Detection algorithms (the AIOps ones among them) not carried over.
 	"ALGORITHM_NOT_MIGRATED", "ALGORITHM_UNSUPPORTED",
