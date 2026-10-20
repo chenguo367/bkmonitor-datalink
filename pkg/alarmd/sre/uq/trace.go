@@ -206,7 +206,7 @@ func validateTraceBody(body map[string]any, target TraceTarget) (*TracePage, err
 	if err := traceKeys(body, "query_list", "start_time", "end_time", "from", "limit", "order_by", "bk_biz_id", "space_uid", "bk_tenant_id", "tenant_id", "tenant", "metric_merge", "step", "timezone"); err != nil {
 		return nil, err
 	}
-	if err := validateScopeBody(body, target.Tenant, target.Space); err != nil {
+	if err := validateScopeBody(body, target.Tenant, target.Space, false); err != nil {
 		return nil, err
 	}
 	if value, exists := body["bk_biz_id"]; exists {

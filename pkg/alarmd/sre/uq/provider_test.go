@@ -302,3 +302,116 @@ func TestRegisteredConfigurationValidation(t *testing.T) {
 		t.Fatal("accepted ambiguous endpoint")
 	}
 }
+
+func promQLFixture(url string) []Egress {
+	e := fixture(url)
+	e[0].Endpoints = append(e[0].Endpoints, Endpoint{Path: "/query/ts/promql", StartField: "start", EndField: "end", TimeUnit: "s"})
+	return e
+}
+func promQLRequest(expr string) Request {
+	return Request{Egress: "primary", Endpoint: "/query/ts/promql", Tenant: "tenant-fixture", Space: "scope-fixture",
+		Body: map[string]any{"promql": expr, "match": "{}", "start": "1700000000", "end": "1700000060", "step": "60s"}}
+}
+
+// A PromQL request is the one the detection loop sends, so it reaches UQ
+// verbatim, an empty match included, and UQ's own refusal comes back as
+// native evidence rather than a local rewrite.
+func TestPromQLReachesUQVerbatim(t *testing.T) {
+	var got map[string]any
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/query/ts/promql" || r.Header.Get("X-Bk-Scope-Space-Uid") != "scope-fixture" {
+			t.Errorf("unexpected native wire %s", r.URL.Path)
+		}
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		if got["match"] == "{}" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"trace_id":"synthetic-trace","error":"parse error"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"series":[{"values":[[1700000000,1]]}],"trace_id":"synthetic-trace"}`)
+	}))
+	defer s.Close()
+	p, err := NewWithQuerySource(promQLFixture(s.URL), nil, "alarmd-sre")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	r := promQLRequest(`avg_over_time(bkmonitor:system:cpu:usage{bk_biz_id="2"}[1m])`)
+	receipt, err := p.Query(context.Background(), r)
+	if code(err) != "uq_http_error" || receipt.HTTPStatus != http.StatusBadRequest || !strings.Contains(string(receipt.Native), "parse error") || got["promql"] != r.Body["promql"] {
+		t.Fatalf("refusal receipt=%+v error=%v body=%v", receipt, err, got)
+	}
+	delete(r.Body, "match")
+	receipt, err = p.Query(context.Background(), r)
+	if err != nil || !receipt.Complete || !strings.Contains(string(receipt.Native), "series") {
+		t.Fatalf("receipt=%+v error=%v", receipt, err)
+	}
+}
+
+func TestPromQLScopeAndRouteRefusals(t *testing.T) {
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.WriteString(w, `{"series":[]}`)
+	}))
+	defer s.Close()
+	p, err := NewWithQuerySource(promQLFixture(s.URL), nil, "alarmd-sre")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	for _, tc := range []struct {
+		name, code string
+		change     func(*Request)
+	}{
+		{"bkdata metric", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `sum(rate(bkdata:fixture:value[1m]))` }},
+		{"bkdata name label", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `{__name__="bkdata:fixture:value"}` }},
+		{"bkdata case", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `BKDATA:fixture:value` }},
+		{"hex escape", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `{__name__="\x62kdata:fixture:value"}` }},
+		{"unicode escape", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `{__name__="\U00000062kdata:fixture:value"}` }},
+		{"octal escape", "uq_scope_denied", func(r *Request) { r.Body["promql"] = `{__name__="\142kdata:fixture:value"}` }},
+		{"empty", "invalid_input", func(r *Request) { r.Body["promql"] = " " }},
+		{"missing", "invalid_input", func(r *Request) { delete(r.Body, "promql") }},
+		{"aliases", "invalid_input", func(r *Request) { r.Body["PromQL"] = r.Body["promql"] }},
+		{"structured time fields", "invalid_input", func(r *Request) { delete(r.Body, "start"); r.Body["start_time"] = "1700000000" }},
+		{"physical storage override", "uq_scope_denied", func(r *Request) { r.Body["tsdb_map"] = map[string]any{} }},
+		{"body scope", "uq_scope_mismatch", func(r *Request) { r.Body["space_uid"] = "other-space" }},
+		{"window", "uq_window_exceeded", func(r *Request) { r.Body["end"] = "1702592001" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := promQLRequest(`fixture:value`)
+			tc.change(&r)
+			if receipt, err := p.Query(context.Background(), r); code(err) != tc.code || receipt.Complete {
+				t.Fatalf("error=%v complete=%v", err, receipt.Complete)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("refused PromQL reached native egress %d times", calls.Load())
+	}
+	for _, expr := range []string{`rate(mybkdata:fixture:value[1m])`, `bkmonitor:fixture:bkdata_value`, `fixture:value{name=~"a\\d+\\.b"}`} {
+		if _, err := p.Query(context.Background(), promQLRequest(expr)); err != nil {
+			t.Errorf("%s refused: %v", expr, err)
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("admitted PromQL reached native egress %d times", calls.Load())
+	}
+}
+
+func TestEndpointTimeFieldsFollowThePath(t *testing.T) {
+	if err := Validate(promQLFixture("http://query.invalid")); err != nil {
+		t.Fatalf("PromQL contract refused: %v", err)
+	}
+	e := promQLFixture("http://query.invalid")
+	e[0].Endpoints[1].StartField, e[0].Endpoints[1].EndField = "start_time", "end_time"
+	if Validate(e) == nil {
+		t.Fatal("accepted structured time fields on PromQL")
+	}
+	e = fixture("http://query.invalid")
+	e[0].Endpoints[0].StartField, e[0].Endpoints[0].EndField = "start", "end"
+	if Validate(e) == nil {
+		t.Fatal("accepted PromQL time fields on structured QueryTs")
+	}
+}
