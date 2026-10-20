@@ -88,3 +88,59 @@ func TestSlotsGivenUpForTheShareAreOneNamedCapacityRow(t *testing.T) {
 		}
 	}
 }
+
+// A run that ends takes its share refusal with it (a row is listed from
+// the third degraded round of a run, hence three Slots after the restart): the next run of Slots
+// given up for the share counts from its own first Slot and time, not from
+// the run before.
+func TestANewRunOfShareSkipsCountsFromItsOwnStart(t *testing.T) {
+	const group = "qg-share-102"
+	d := newDefectTracker(t, group)
+	trace := func(slot int64) observability.TraceFields {
+		return observability.TraceFields{QueryGroupKey: group, StrategyID: "102", BusinessID: "2", EvaluationTime: slot}
+	}
+	giveUp := func(slot int64) {
+		d.tick()
+		d.tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+			ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionCause: observability.CompletionCauseResourceShareExceeded,
+			ProgressCompletionReason: "GAP_SKIPPED", Trace: trace(slot),
+		})
+		observability.ObserveSlotSkipped(context.Background(), d.tracker, trace(slot), observability.OperationRetry,
+			observability.SlotSkippedFacts{Path: observability.SlotSkippedQueryFree, FirstSlot: slot, LastSlot: slot, SlotCount: 1,
+				Reason: "GAP_SKIPPED", Cause: observability.CompletionCauseResourceShareExceeded,
+				Share: &observability.SlotSkipShareFacts{Phase: "normal_output", OwnUsedBytes: 530 << 20, LimitBytes: 512 << 20, Refusals: 1}})
+	}
+	giveUp(100)
+	giveUp(160)
+	d.tick()
+	d.tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+		ProgressCompletionKind: "FULL_COMPLETED", Trace: trace(220),
+	})
+	d.tick()
+	restartedAt := d.at.Now()
+	giveUp(280)
+	giveUp(340)
+	giveUp(400)
+	var share *ShareRefusalFacts
+	for _, row := range d.tracker.Anomalies() {
+		if row.QueryGroup == group {
+			share = row.ShareRefusal
+		}
+	}
+	if share == nil || share.Slots != 3 || share.FirstSlot != 280 || share.Since.Before(restartedAt) {
+		t.Fatalf("share refusal = %+v, want three Slots from 280 since the new run", share)
+	}
+
+	// resetRun itself clears it, whichever path ends the run.
+	d.tracker.mu.Lock()
+	state := d.tracker.groups[group]
+	state.shareRefusal = &ShareRefusalFacts{Slots: 5, FirstSlot: 100}
+	d.tracker.resetRun(state)
+	cleared := state.shareRefusal == nil
+	d.tracker.mu.Unlock()
+	if !cleared {
+		t.Fatal("resetRun kept the share refusal of the run that ended")
+	}
+}

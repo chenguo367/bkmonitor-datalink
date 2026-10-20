@@ -3521,7 +3521,8 @@ const (
 	// CauseResourceShareExceeded is a Slot whose own retained bytes exceed
 	// the share one Query Group may hold of the replica's pool
 	// (QG_BUDGET_SHARE_EXCEEDED with no shared usage behind it), refused
-	// identically twice and then finalized without querying again: no
+	// identically - twice for the group's first such Slot, once for each
+	// later one - and then finalized without querying again: no
 	// retry in this process can make the same window smaller, and every
 	// retry re-read the whole window from the backend only to be refused.
 	// A capacity defect of the strategy - it has to be sharded - and every

@@ -111,7 +111,15 @@ func (executor *shareExecutor) Execute(_ context.Context, request execution.Slot
 
 func newShareRunner(t *testing.T, clock *mutableClock, errs ...error) (*Runner, *shareExecutor, *advancingSource) {
 	t.Helper()
-	source := &advancingSource{slots: []FrozenSlot{shareSlot(100), shareSlot(160)}}
+	return newShareRunnerOver(t, clock, []int64{100, 160}, errs...)
+}
+
+func newShareRunnerOver(t *testing.T, clock *mutableClock, evaluations []int64, errs ...error) (*Runner, *shareExecutor, *advancingSource) {
+	t.Helper()
+	source := &advancingSource{}
+	for _, evaluation := range evaluations {
+		source.slots = append(source.slots, shareSlot(evaluation))
+	}
 	executor := &shareExecutor{source: source, errs: errs}
 	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
 	if err != nil {
@@ -256,5 +264,98 @@ func TestShareRefusalsOfDifferentPhasesDoNotAddUp(t *testing.T) {
 	}
 	if result, _, err := runner.RunOne(context.Background()); err != nil || result.QueryFreeCause != "" || executor.queries != 3 {
 		t.Fatalf("third attempt: result=%+v err=%v queries=%d, want queried", result, err, executor.queries)
+	}
+}
+
+// Once a Slot of the group was finalized for the share, the group's next Slot
+// is finalized on its first identical refusal: one read per Slot of an
+// oversized strategy, not two and a backoff. A Slot that fits clears the
+// key, and the next refusal is a first one again, needing two.
+func TestAfterAShareFinalizationTheNextSlotNeedsOneRefusal(t *testing.T) {
+	clock := newMutableClock(time.Unix(102, 0))
+	runner, executor, _ := newShareRunnerOver(t, clock, []int64{100, 160, 220, 280},
+		ownTotalOverShare(), ownTotalOverShare(), // Slot 100: first time, two refusals
+		ownTotalOverShare(),                      // Slot 160: one refusal
+		nil,                                      // Slot 220: fits
+		ownTotalOverShare(), ownTotalOverShare()) // Slot 280: first time again
+	run := func(step string) execution.SlotExecutionResult {
+		t.Helper()
+		result, attempted, _ := runner.RunOne(context.Background())
+		if !attempted {
+			t.Fatalf("%s: not attempted", step)
+		}
+		if readyAt := runner.NextReadyAt(); !readyAt.IsZero() {
+			clock.Advance(readyAt.Sub(clock.Now()))
+		}
+		return result
+	}
+	finalized := func(step string, evaluation int64) {
+		t.Helper()
+		result := run(step)
+		last := executor.requests[len(executor.requests)-1]
+		if result.QueryFreeCause != execution.CauseResourceShareExceeded || !last.ShareExceeded ||
+			int64(last.Contract.Slot.EvaluationTime) != evaluation {
+			t.Fatalf("%s: result=%+v request=%+v, want Slot %d finalized for its share", step, result, last, evaluation)
+		}
+	}
+
+	if _, _, err := runner.RunOne(context.Background()); err == nil {
+		t.Fatal("Slot 100 first refusal did not fail")
+	}
+	if runner.NextReadyAt().IsZero() || runner.shareExceeded(shareSlot(100)) {
+		t.Fatal("one refusal of a first-time key finalized the Slot")
+	}
+	clock.Advance(runner.NextReadyAt().Sub(clock.Now()))
+	run("Slot 100 second refusal")
+	finalized("Slot 100 finalization", 100)
+	if executor.queries != 2 {
+		t.Fatalf("queries after Slot 100 = %d, want 2", executor.queries)
+	}
+
+	run("Slot 160 refusal")
+	finalized("Slot 160 finalization", 160)
+	if executor.queries != 3 {
+		t.Fatalf("queries after Slot 160 = %d, want 3: one read for the group's second Slot", executor.queries)
+	}
+
+	if result := run("Slot 220"); result.CompletionKind != execution.CompletionFull {
+		t.Fatalf("Slot 220 = %+v, want it to fit and complete", result)
+	}
+	if runner.shareRefusal != nil {
+		t.Fatalf("a Slot that fit left the key: %+v", runner.shareRefusal)
+	}
+
+	if _, _, err := runner.RunOne(context.Background()); err == nil {
+		t.Fatal("Slot 280 first refusal did not fail")
+	}
+	if runner.NextReadyAt().IsZero() || runner.shareExceeded(shareSlot(280)) {
+		t.Fatal("after a Slot that fit, one refusal finalized the next Slot: the key was not cleared")
+	}
+	clock.Advance(runner.NextReadyAt().Sub(clock.Now()))
+	run("Slot 280 second refusal")
+	finalized("Slot 280 finalization", 280)
+	if executor.queries != 6 {
+		t.Fatalf("queries = %d, want 6", executor.queries)
+	}
+}
+
+// A refusal against another share - the replica was resized - is a new key:
+// the group's next Slot needs two refusals again.
+func TestAShareChangeStartsTheKeyAgain(t *testing.T) {
+	clock := newMutableClock(time.Unix(102, 0))
+	resized := fmt.Errorf("wrapped: %w", &shareRefusalError{deterministic: true,
+		refusal: execution.ShareRefusal{Phase: "normal_output", OwnUsedBytes: 530 << 20, LimitBytes: 256 << 20}})
+	runner, _, _ := newShareRunnerOver(t, clock, []int64{100, 160}, ownTotalOverShare(), ownTotalOverShare(), resized)
+	for range 3 { // two refusals and the finalization of Slot 100
+		runner.RunOne(context.Background())
+		if readyAt := runner.NextReadyAt(); !readyAt.IsZero() {
+			clock.Advance(readyAt.Sub(clock.Now()))
+		}
+	}
+	if _, _, err := runner.RunOne(context.Background()); err == nil {
+		t.Fatal("Slot 160 was not refused")
+	}
+	if runner.NextReadyAt().IsZero() || runner.shareExceeded(shareSlot(160)) {
+		t.Fatal("a refusal against a changed share finalized on one refusal")
 	}
 }

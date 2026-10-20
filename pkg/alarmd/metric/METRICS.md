@@ -1695,7 +1695,7 @@ Ready replicas whose registration does not declare the strategy-split contract (
 
 ## alarmd_share_refusal_gaps_total
 
-Slots finalized without a query as RESOURCE_SHARE_EXCEEDED: refused twice the same way because their own retained bytes exceed the share one Query Group may hold of the replica's pool (QG_BUDGET_SHARE_EXCEEDED with no shared usage), and given up instead of re-read until the replay age. Each is one slot_skipped line with skip_cause=RESOURCE_SHARE_EXCEEDED naming the Query Group, its own bytes and the share; the strategy has to be sharded, and until it is every Slot of the group lands here.
+Slots finalized without a query as RESOURCE_SHARE_EXCEEDED: refused for the share - twice the first time a Query Group meets it, once for each later Slot of the group - because their own retained bytes exceed the share one Query Group may hold of the replica's pool (QG_BUDGET_SHARE_EXCEEDED with no shared usage), and given up instead of re-read until the replay age. Each is one slot_skipped line with skip_cause=RESOURCE_SHARE_EXCEEDED naming the Query Group, its own bytes and the share; the strategy has to be sharded, and until it is every Slot of the group lands here.
 
 ## alarmd_short_period_slot_completion_lag_seconds
 

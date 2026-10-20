@@ -666,6 +666,12 @@ func (err *provisionalBudgetExceededError) Error() string {
 // is left of the pool), and the same window re-read is refused the same way.
 // A pool rejection - shared usage above zero, the share flag unset - is not
 // marked: other Slots release their part and a retry may fit.
+//
+// SharedUsed != 0 is redundant today - shareRejection never sets it - and
+// stays on purpose: the marker's claim is "no other Query Group is part of
+// why", and if the share is ever measured against what others hold, a
+// refusal that reports their usage must fall back to the pool's retry rather
+// than give up Slots a later round could fit.
 func (err *provisionalBudgetExceededError) DeterministicShareRefusal() (execution.ShareRefusal, bool) {
 	if err == nil || !err.share || err.facts == nil || err.facts.SharedUsed != 0 || err.facts.OwnUsed == nil {
 		return execution.ShareRefusal{}, false

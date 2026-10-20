@@ -2153,6 +2153,9 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.causeReason = ""
 	state.causeScope = nil
 	state.causeOrigin = nil
+	// The Slots given up for the share belong to the run that ended: a new
+	// run counts its own, from its own first Slot and time.
+	state.shareRefusal = nil
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0

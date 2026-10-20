@@ -1319,6 +1319,13 @@ func (ports *recordingPorts) ResolveFinalization(
 	_ context.Context,
 	request execution.SlotExecutionRequest,
 ) (execution.QueryFreeFinalization, error) {
+	// A Slot the Runner gave up for its share, as the production source
+	// finalizes it (cmd/alarmd productionFrozenExecution).
+	if request.ShareExceeded {
+		return execution.QueryFreeFinalization{Contract: request.Contract, Mode: execution.FinalizationGapSkipped,
+			ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped), Targets: request.DuePlanTargets,
+			Cause: execution.CauseResourceShareExceeded}, nil
+	}
 	mode := ports.finalizationMode
 	if mode == "" {
 		mode = execution.FinalizationQueryRequired

@@ -1137,7 +1137,7 @@ func (runner *Runner) runOneTracked(
 		runner.recordResult(slot, result, runner.now())
 		runner.recordQueryAvailability(ctx, slot, operation, poolResult, sourceFacts.IntervalSeconds, decidesPool)
 		if result.Completed {
-			runner.forgetShareRefusal(slot)
+			runner.shareSlotCompleted(slot, result)
 		}
 	}
 	decision = "execution_returned"
