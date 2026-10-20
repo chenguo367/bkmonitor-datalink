@@ -160,6 +160,10 @@ type wireExtraData struct {
 	SignalType           string                     `json:"signal_type,omitempty"`
 	EvaluationFamily     string                     `json:"evaluation_family"`
 	Unit                 string                     `json:"unit,omitempty"`
+	// DetectionSnapshot is the decision's detection snapshot, as the event
+	// carries it (contract.DetectionSnapshotV1): only on the events of a
+	// strategy with named outputs, absent from every other message.
+	DetectionSnapshot json.RawMessage `json:"detection_snapshot,omitempty"`
 }
 
 type wireEvent struct {
@@ -280,6 +284,7 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 			EventSemanticDigest: event.EventSemanticDigest,
 			SignalType:          event.SignalType,
 			EvaluationFamily:    evaluationFamilyMetricAlgorithm,
+			DetectionSnapshot:   event.DetectionSnapshot,
 		},
 	}
 	if begin := primary.DecisionWindow.Trigger.AnomalyBeginTime; begin > 0 {
