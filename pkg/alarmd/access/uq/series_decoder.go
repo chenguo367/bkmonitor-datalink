@@ -41,7 +41,7 @@ type seriesDecoder struct {
 func (client *Client) newSeriesDecoder(attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) *seriesDecoder {
 	return &seriesDecoder{client: client, attempt: attempt, sink: sink, scanned: scanned,
 		ref: providerResultRef(attempt), cut: newTermsCutCounter(attempt.Spec), decodeStarted: client.now(),
-		named: newNamedOutputDecoding(attempt.Spec)}
+		named: newNamedOutputDecoding(attempt)}
 }
 
 func (session *seriesDecoder) accept(ctx context.Context, series responseSeries, encodedBytes uint64) error {
@@ -115,7 +115,7 @@ func (session *seriesDecoder) deliver(ctx context.Context, job *normalizing) err
 	}
 	session.delivery, err = execution.AccumulateSeriesDelivery(session.delivery, batch.Delivery)
 	if err == nil && session.named != nil {
-		session.named.noteDelivered(job.series, batch.Dataset, session.attempt.Spec.PlanFacts.Normalization.CanonicalValueField)
+		err = session.named.noteDelivered(job.series, batch.Dataset, session.attempt.Spec.PlanFacts.Normalization.CanonicalValueField)
 	}
 	return err
 }

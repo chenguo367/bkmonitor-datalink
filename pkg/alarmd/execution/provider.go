@@ -160,6 +160,12 @@ type QueryAttempt struct {
 	// on a request header and decide nothing. Empty for a read that serves
 	// no Plan.
 	Strategies []string
+
+	// NamedOutputBytes bounds what aligning a query's named outputs may
+	// hold while its answer is read: the share of retained bytes its Slot
+	// has left when the query is sent (RetainedShareReporter). Nil for a
+	// query without named outputs, or a Slot no share bounds.
+	NamedOutputBytes *uint64
 }
 
 func (attempt QueryAttempt) Validate() error {

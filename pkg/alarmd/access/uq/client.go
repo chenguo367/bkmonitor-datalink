@@ -175,7 +175,7 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 			attempt.Spec.PlanFacts.Normalization.Version != "uq-polling-normalization-v1",
 		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
 			DeadlineUnixMilli: attempt.DeadlineUnixMilli},
-		Strategies: attempt.Strategies}, sink, nil)
+		Strategies: attempt.Strategies, NamedOutputBytes: attempt.NamedOutputBytes}, sink, nil)
 }
 
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
@@ -192,6 +192,9 @@ type queryIdentity struct {
 	NoAppCarry bool
 	// Strategies are the strategy ids the query serves (headerStrategy).
 	Strategies []string
+	// NamedOutputBytes bounds what aligning the named outputs may hold
+	// (QueryAttempt.NamedOutputBytes); nil for no bound.
+	NamedOutputBytes *uint64
 }
 
 // queryBudget is a Slot query's budget as its attempt carries it: where it
@@ -758,7 +761,8 @@ func durationString(milliseconds int64) string {
 }
 
 func (client *Client) decode(ctx context.Context, reader io.Reader, attempt execution.QueryAttempt, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
-	return client.decodeQuery(ctx, reader, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo}, sink, nil)
+	return client.decodeQuery(ctx, reader, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
+		NamedOutputBytes: attempt.NamedOutputBytes}, sink, nil)
 }
 
 func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt queryIdentity, sink execution.ProviderSeriesSink, scanned *DiagnosticScan) (completion execution.ProviderCompletion, err error) {

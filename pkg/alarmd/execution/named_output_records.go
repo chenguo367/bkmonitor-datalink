@@ -52,3 +52,31 @@ type NamedOutputRecords struct {
 	Refs    []string
 	Records map[string][]NamedOutputValue
 }
+
+// What a table holds, measured (TestANamedOutputTableCostsWhatItIsCharged):
+// a record's map entry, its slice and its RecordID, and each output's
+// value beside its bytes; and each ref.
+const (
+	namedOutputRecordBytes = 112
+	namedOutputValueBytes  = 56
+	namedOutputRefBytes    = 16
+)
+
+// RetainedBytes is what the table holds for as long as it is kept: the
+// figure a Slot is charged for it. Zero for no table.
+func (records *NamedOutputRecords) RetainedBytes() uint64 {
+	if records == nil {
+		return 0
+	}
+	var total uint64
+	for _, ref := range records.Refs {
+		total += namedOutputRefBytes + uint64(len(ref))
+	}
+	for recordID, values := range records.Records {
+		total += namedOutputRecordBytes + uint64(len(recordID))
+		for _, value := range values {
+			total += namedOutputValueBytes + uint64(len(value.Value))
+		}
+	}
+	return total
+}

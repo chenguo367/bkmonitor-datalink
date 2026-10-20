@@ -12,6 +12,9 @@ package uq
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/racedetector"
 )
 
 // compiledNamedSpec is a physical query compiled from a strategy item of
@@ -294,5 +298,82 @@ func TestAQueryWithoutNamedOutputsCarriesNothingBesideItsRecords(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "NamedOutputs") {
 		t.Fatalf("completion encodes the named outputs: %s", encoded)
+	}
+}
+
+// The alignment holds no more than its Slot may keep: past the bound its
+// Slot's share left, the query is refused as an answer too large to hold,
+// which no retry makes smaller; under it, the same answer is aligned.
+func TestANamedOutputsAnswerPastItsByteBoundIsRefused(t *testing.T) {
+	answer := namedAnswer(
+		namedOutput("A", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,1],[1700123120000,2]]`)),
+		namedOutput("B", "SUCCESS", false, ""),
+		namedOutput("C", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,11],[1700123120000,12]]`)))
+	for _, test := range []struct {
+		bound   uint64
+		refused bool
+	}{{bound: 300, refused: true}, {bound: 1 << 20}} {
+		attempt := namedAttempt(t, namedOutputsAB)
+		bound := test.bound
+		attempt.NamedOutputBytes = &bound
+		completion, _ := decodeNamed(t, attempt, answer)
+		refused := completion.Completeness == execution.CompletenessUnavailable && completion.NamedOutputs == nil &&
+			completion.RouteFacts.Attempts[0].Detail == "response=limit_response_bytes"
+		if refused != test.refused || !test.refused && completion.NamedOutputs == nil {
+			t.Errorf("bound %d: completion %+v", test.bound, completion)
+		}
+	}
+}
+
+// What the alignment is charged while an answer is read is at least what it
+// measures on the heap, and not much more: an indexed point of an output,
+// and a delivered point of the legacy output beside its RecordID.
+func TestTheNamedOutputHoldingsAreWhatTheyCost(t *testing.T) {
+	if racedetector.Enabled {
+		t.Skip("the race detector changes what an allocation costs")
+	}
+	const points = 50000
+	labels := alignLabels(responseSeries{GroupKeys: hostOne, GroupValues: []json.RawMessage{json.RawMessage(`"192.0.2.1"`)}})
+	var charged uint64
+	var index map[alignKey]json.RawMessage
+	measured := heapGrowth(func() any {
+		index = map[alignKey]json.RawMessage{}
+		for point := 0; point < points; point++ {
+			value := json.RawMessage(strconv.Itoa(point))
+			charged += namedIndexPointBytes + uint64(len(value))
+			index[alignKey{time: int64(point), labels: labels}] = value
+		}
+		return index
+	})
+	wantCharged(t, "indexed point", charged, measured, points)
+	charged = 0
+	var legacy []legacyPoint
+	measured = heapGrowth(func() any {
+		for point := 0; point < points; point++ {
+			recordID, value := fmt.Sprintf("%064x", point), json.RawMessage(strconv.Itoa(point))
+			charged += namedLegacyPointBytes + uint64(len(recordID)+len(value))
+			legacy = append(legacy, legacyPoint{recordID: recordID, key: alignKey{time: int64(point), labels: labels}, value: value})
+		}
+		return legacy
+	})
+	wantCharged(t, "legacy point", charged, measured, points)
+}
+
+func heapGrowth(build func() any) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	kept := build()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(kept)
+	return after.HeapAlloc - before.HeapAlloc
+}
+
+func wantCharged(t *testing.T, what string, charged, measured, count uint64) {
+	t.Helper()
+	t.Logf("%s: measured %d bytes, charged %d", what, measured/count, charged/count)
+	if charged < measured || charged > measured+measured/4 {
+		t.Errorf("%s: charged %d, measured %d: want at least the measure and within a quarter of it", what, charged, measured)
 	}
 }

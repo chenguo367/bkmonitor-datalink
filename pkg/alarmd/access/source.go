@@ -456,7 +456,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		attempt := execution.QueryAttempt{Spec: query.Spec, Slot: request.Contract.Slot, Operation: request.Operation,
 			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit(),
 			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli,
-			Strategies: queryStrategies(query)}
+			Strategies: queryStrategies(query), NamedOutputBytes: namedOutputBytes(query.Spec, consumer)}
 		if err := attempt.Validate(); err != nil {
 			permit.Release()
 			dispatchErr = err
@@ -1595,6 +1595,39 @@ func (consumer *serializedQueryConsumer) RetainedInputBytesNow() uint64 {
 		return reporter.RetainedInputBytesNow()
 	}
 	return 0
+}
+
+// RetainedShareLeftBytes passes the wrapped consumer's reading through,
+// under the mutex the series are delivered under, so it is not read while
+// a series is being retained (execution.RetainedShareReporter).
+func (consumer *serializedQueryConsumer) RetainedShareLeftBytes() (uint64, bool) {
+	reporter, ok := consumer.QueryExecutionConsumer.(execution.RetainedShareReporter)
+	if !ok {
+		return 0, false
+	}
+	consumer.mu.Lock()
+	defer consumer.mu.Unlock()
+	return reporter.RetainedShareLeftBytes()
+}
+
+// namedOutputBytes is the bound on aligning a query's named outputs: what
+// its Slot may still retain under its share when the query is sent. The
+// alignment is held before the Slot sees the answer and charged to the Slot
+// with it, so it may not take more than the Slot could keep. Nil for a query
+// without named outputs or a consumer no share bounds.
+func namedOutputBytes(spec execution.PhysicalQuerySpec, consumer execution.QueryExecutionConsumer) *uint64 {
+	if spec.PlanFacts.NamedOutputs == nil {
+		return nil
+	}
+	reporter, ok := consumer.(execution.RetainedShareReporter)
+	if !ok {
+		return nil
+	}
+	left, bounded := reporter.RetainedShareLeftBytes()
+	if !bounded {
+		return nil
+	}
+	return &left
 }
 
 // queryStrategies are the strategy ids of the Plans a planned query serves,

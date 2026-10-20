@@ -84,13 +84,44 @@ type namedOutputDecoding struct {
 	// or by no name. duplicate is an output with two points at one key.
 	malformed bool
 	duplicate bool
+	// held is what the alignment holds so far, by the estimates below, and
+	// bound the most it may (queryIdentity.NamedOutputBytes); nil for none.
+	held  uint64
+	bound *uint64
 }
 
-func newNamedOutputDecoding(spec execution.PhysicalQuerySpec) *namedOutputDecoding {
-	if spec.PlanFacts.NamedOutputs == nil {
+// What the alignment holds while an answer is read, measured
+// (TestTheNamedOutputHoldingsAreWhatTheyCost): an indexed point of an
+// output, its key and value in the index, and a delivered point of the
+// legacy output, kept until the answer ends; each beside the bytes of its
+// value, and the legacy point beside its RecordID. An output's series are
+// held as they arrived while it is indexed, and charged as they are.
+const (
+	namedIndexPointBytes  = 96
+	namedLegacyPointBytes = 96
+)
+
+// errNamedOutputBytesExceeded is an alignment that would hold more than its
+// Slot may keep: the answer is too large for the Slot, as an answer over
+// the body limit is, and no retry makes it smaller.
+var errNamedOutputBytesExceeded error = &responseLimitError{code: "NAMED_OUTPUT_BYTES_EXCEEDED",
+	class: execution.ResponseFailureLimitResponseBytes}
+
+func newNamedOutputDecoding(attempt queryIdentity) *namedOutputDecoding {
+	if attempt.Spec.PlanFacts.NamedOutputs == nil {
 		return nil
 	}
-	return &namedOutputDecoding{outputs: spec.PlanFacts.NamedOutputs, answered: map[string]*answeredOutput{}}
+	return &namedOutputDecoding{outputs: attempt.Spec.PlanFacts.NamedOutputs, answered: map[string]*answeredOutput{},
+		bound: attempt.NamedOutputBytes}
+}
+
+// hold charges bytes to the alignment, refusing them past its bound.
+func (named *namedOutputDecoding) hold(bytes uint64) error {
+	named.held += bytes
+	if named.bound != nil && named.held > *named.bound {
+		return errNamedOutputBytesExceeded
+	}
+	return nil
 }
 
 // alignLabels is a series' labels as the alignment keys them: every group
@@ -191,6 +222,9 @@ func (session *seriesDecoder) indexOutput(ctx context.Context, answer namedOutpu
 		if int64(len(raw)) > session.client.limits.MaxSeriesBytes {
 			return ErrSeriesBytesExceeded
 		}
+		if err := session.named.hold(uint64(len(raw))); err != nil {
+			return err
+		}
 		var series responseSeries
 		if err := json.Unmarshal(raw, &series); err != nil {
 			return fmt.Errorf("alarmd access uq: decode series: %w", err)
@@ -224,6 +258,9 @@ func (session *seriesDecoder) indexOutput(ctx context.Context, answer namedOutpu
 				session.named.duplicate = true
 				continue
 			}
+			if err := session.named.hold(namedIndexPointBytes + uint64(len(value))); err != nil {
+				return err
+			}
 			output.points[key] = value
 		}
 	}
@@ -254,14 +291,18 @@ func answeredState(answer namedOutputAnswer) execution.NamedOutputState {
 }
 
 // noteDelivered keeps the points of a legacy series that was delivered.
-func (named *namedOutputDecoding) noteDelivered(series responseSeries, dataset *execution.Dataset, valueField string) {
+func (named *namedOutputDecoding) noteDelivered(series responseSeries, dataset *execution.Dataset, valueField string) error {
 	labels := alignLabels(series)
 	for index := 0; index < dataset.Len(); index++ {
 		record, _ := dataset.Record(index)
 		value, _ := record.Value(valueField)
+		if err := named.hold(namedLegacyPointBytes + uint64(len(record.RecordID())+len(value))); err != nil {
+			return err
+		}
 		named.points = append(named.points, legacyPoint{recordID: record.RecordID(),
 			key: alignKey{time: record.SourceTime(), labels: labels}, value: value})
 	}
+	return nil
 }
 
 // legacyAnswer is the status and is_partial the legacy output answered with,

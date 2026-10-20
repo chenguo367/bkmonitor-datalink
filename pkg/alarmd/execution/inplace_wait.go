@@ -41,3 +41,10 @@ type InPlaceWaitFacts struct {
 type RetainedInputReporter interface {
 	RetainedInputBytesNow() uint64
 }
+
+// RetainedShareReporter is a consumer that can say how many more bytes the
+// execution may retain before it is over the share one Query Group's Slot
+// may hold, and false when no share bounds it.
+type RetainedShareReporter interface {
+	RetainedShareLeftBytes() (uint64, bool)
+}

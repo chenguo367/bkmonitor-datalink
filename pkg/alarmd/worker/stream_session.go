@@ -218,6 +218,18 @@ func (stream *streamedExecution) RetainedInputBytesNow() uint64 {
 	return stream.retainedInputNow.Load()
 }
 
+// RetainedShareLeftBytes is what this execution may still retain before it
+// is over its Query Group's share (qgShareBytes), and false when the pool
+// sets no share (execution.RetainedShareReporter). The access source reads
+// it under the lock the series are retained under.
+func (stream *streamedExecution) RetainedShareLeftBytes() (uint64, bool) {
+	share := stream.coordinator.qgShareBytes()
+	if share == 0 {
+		return 0, false
+	}
+	return share - min(share, stream.retainedTotal()), true
+}
+
 // retainedTotal is what this execution holds across all phases.
 func (stream *streamedExecution) retainedTotal() uint64 {
 	if stream == nil {
@@ -412,6 +424,42 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
 	stream.series, stream.retainedByPhase = 0, [retainPhaseCount]uint64{}
 	stream.retainedInputNow.Store(0)
+}
+
+// retainNamedOutputs charges the Slot for the named outputs its queries
+// aligned (namedOutputRecordsRetainedBytes), kept from the completion until
+// the Slot ends and released with it. They are input the Slot retains, as
+// its series are, and are refused the way a series is: past the share one
+// Query Group's Slot may hold - its own total, before the pool, as every
+// share is judged - or past what the pool has left. Nothing for a Slot
+// whose queries asked for none.
+func (stream *streamedExecution) retainNamedOutputs(ctx context.Context, completion execution.QueryExecutionCompletion) error {
+	retained := namedOutputRecordsRetainedBytes(completion)
+	if retained == 0 {
+		return nil
+	}
+	phase := stream.reservationPhase("normal_input")
+	if share := stream.coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+retained > share {
+		err := shareRejection(phase, stream.retainedTotal(), retained, share, stream.ownBudgetUsage(stream.coordinator.budget))
+		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
+		return err
+	}
+	if err := stream.reserveProvisionalAt(ctx, 0, retained, phase); err != nil {
+		return err
+	}
+	stream.retainBytes(retainPhaseInput, retained)
+	return nil
+}
+
+// namedOutputRecordsRetainedBytes is what the named-output tables of a
+// completion's queries hold (execution.NamedOutputRecords.RetainedBytes).
+// Zero for a completion of queries that asked for none.
+func namedOutputRecordsRetainedBytes(completion execution.QueryExecutionCompletion) uint64 {
+	var total uint64
+	for _, query := range completion.PhysicalQueries {
+		total += query.NamedOutputs.RetainedBytes()
+	}
+	return total
 }
 
 // hostOverlaysRetainedBytes is what a batch's host overlays hold: their keys
@@ -757,6 +805,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	stream.spend(slotPhaseInput, stream.beganAt)
 	if err := completion.Validate(stream.header, stream.delivered); err != nil {
 		return wrapCompletionContractError(codeCompletionInvalid, err)
+	}
+	if err := stream.retainNamedOutputs(ctx, completion); err != nil {
+		return err
 	}
 	physical := make(map[execution.PhysicalQueryDigest]classifiedPhysicalCompletion, len(completion.PhysicalQueries))
 	for _, item := range completion.PhysicalQueries {
