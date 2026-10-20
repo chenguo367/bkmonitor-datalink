@@ -3849,10 +3849,11 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 // runner_returned line (RunOutcomes), which said terminal with no reason,
 // and the refusal a store found against skipping a pruned cursor
 // (CursorRefusals), which said retrying with none; and a slow wait inside a
-// Slot attempt, which said degraded with none.
+// Slot attempt, which said degraded with none; and an execution declined as
+// hung, which said failed with none.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+1)
-	reasons = append(reasons, ReasonSlotWaitSlow)
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals)+2)
+	reasons = append(reasons, ReasonSlotWaitSlow, ReasonExecutionHung)
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
 	}

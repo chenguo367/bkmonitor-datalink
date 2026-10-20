@@ -151,6 +151,19 @@ func (fixture *lifecycleFixture) hungFacts() []observability.ExecutionHungFacts 
 	return facts
 }
 
+// hungObservations are the execution_hung observations the fixture saw.
+func (fixture *lifecycleFixture) hungObservations() []observability.Observation {
+	fixture.observationsMu.Lock()
+	defer fixture.observationsMu.Unlock()
+	var hung []observability.Observation
+	for _, observation := range fixture.observations {
+		if observation.ExecutionHung != nil {
+			hung = append(hung, observation)
+		}
+	}
+	return hung
+}
+
 // replayedAfterTakeover says whether the Slot at evaluation was classified a
 // replay of a Slot due before the takeover.
 func (fixture *lifecycleFixture) replayedAfterTakeover(evaluation int64) bool {
@@ -258,6 +271,16 @@ func TestATakeoverReplayHungPastItsOwnDeadlineIsDeclined(t *testing.T) {
 	}
 	if len(declined) != 1 {
 		t.Fatalf("declined hung executions %+v, want the one replay", declined)
+	}
+	// The decline names itself, where it read reason_not_reported.
+	for _, observation := range fixture.hungObservations() {
+		if observation.ExecutionHung.Outcome != observability.ExecutionHungDeclined {
+			continue
+		}
+		if normalized := observability.NormalizeObservation(observation); normalized.Result != observability.ResultFailed ||
+			normalized.ReasonCode != observability.ReasonExecutionHung {
+			t.Fatalf("the decline reads %s %s, want failed EXECUTION_HUNG", normalized.Result, normalized.ReasonCode)
+		}
 	}
 	if declined[0].DeadlineUnixMilli != ownDeadline.UnixMilli() || declined[0].Stage != execution.SlotStageQuery {
 		t.Fatalf("the decline names deadline %d in stage %q, want the replay's own deadline %d (its arrival %d plus "+

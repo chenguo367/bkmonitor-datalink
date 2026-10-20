@@ -391,3 +391,13 @@ func TestARefusedCursorSkipTakesTheLevelItsReasonGives(t *testing.T) {
 		}
 	}
 }
+
+// An execution declined as hung is a failure of this deployment's own, at
+// ERROR as it was; its return after the decline is not written as one.
+func TestAHungExecutionIsWrittenAtError(t *testing.T) {
+	declined := NormalizeObservation(Observation{Component: ComponentScheduler, Stage: StageExecutionHung,
+		Result: ResultFailed, ReasonCode: ReasonExecutionHung, ExecutionHung: &ExecutionHungFacts{Outcome: ExecutionHungDeclined}})
+	if declined.ReasonCode != ReasonExecutionHung || observationLevel(declined) != slog.LevelError {
+		t.Fatalf("declined: reason %s level %s, want EXECUTION_HUNG at ERROR", declined.ReasonCode, observationLevel(declined))
+	}
+}

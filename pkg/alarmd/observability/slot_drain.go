@@ -62,6 +62,10 @@ const (
 	ExecutionHungReturned = "returned_after_decline"
 )
 
+// ReasonExecutionHung is the reason of an execution declined as hung: past
+// its deadline and grace, its Query Group let go on this replica.
+const ReasonExecutionHung ReasonCode = "EXECUTION_HUNG"
+
 // ExecutionHungOutcomes is every outcome, for closed label sets.
 var ExecutionHungOutcomes = []string{ExecutionHungDeclined, ExecutionHungReturned}
 

@@ -4100,13 +4100,15 @@ func (bundle *phaseTwoWorkerBundle) recordHungExecution(
 		facts.HungMS = now.Sub(entry.since).Milliseconds()
 	}
 	bundle.dependencies.Recorder.RecordExecutionHung(outcome)
-	result := observability.Result(observability.ResultFailed)
+	// A decline is a failure of this deployment's own and says which; the
+	// execution's return after one is not.
+	result, reason := observability.Result(observability.ResultFailed), observability.ReasonExecutionHung
 	if outcome == observability.ExecutionHungReturned {
-		result = observability.ResultSuccess
+		result, reason = observability.ResultSuccess, observability.ReasonNone
 	}
 	observeRuntime(context.Background(), bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageExecutionHung,
-		Result: result, ExecutionHung: &facts, Err: err,
+		Result: result, ReasonCode: reason, ExecutionHung: &facts, Err: err,
 		Trace: observability.TraceFields{QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID},
 	})
 }

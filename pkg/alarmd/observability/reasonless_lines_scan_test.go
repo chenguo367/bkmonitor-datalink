@@ -29,7 +29,6 @@ import (
 var reasonlessLinesAllowed = map[string]int{
 	"cmd/alarmd/runtime_phase_two.go|Shutdown|StageShutdown":                                          1,
 	"cmd/alarmd/runtime_phase_two.go|observe|stage":                                                   1,
-	"cmd/alarmd/runtime_phase_two.go|recordHungExecution|StageExecutionHung":                          1,
 	"cmd/alarmd/runtime_phase_two_bundle.go|observationWindowObserver|StageObservationWindow":         2,
 	"cmd/alarmd/runtime_phase_two_bundle.go|openProductionPhaseTwoBundleAssembly|StageLegacyPodCache": 1,
 	"cmd/alarmd/runtime_phase_two_bundle.go|openProductionPhaseTwoBundleAssembly|StageStartup":        1,
