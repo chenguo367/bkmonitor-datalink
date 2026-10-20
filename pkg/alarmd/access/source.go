@@ -456,7 +456,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		attempt := execution.QueryAttempt{Spec: query.Spec, Slot: request.Contract.Slot, Operation: request.Operation,
 			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit(),
 			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli,
-			Strategies: queryStrategies(query), NamedOutputBytes: namedOutputBytes(query.Spec, consumer)}
+			Strategies: queryStrategies(query)}
 		if err := attempt.Validate(); err != nil {
 			permit.Release()
 			dispatchErr = err
@@ -1597,37 +1597,50 @@ func (consumer *serializedQueryConsumer) RetainedInputBytesNow() uint64 {
 	return 0
 }
 
-// RetainedShareLeftBytes passes the wrapped consumer's reading through,
-// under the mutex the series are delivered under, so it is not read while
-// a series is being retained (execution.RetainedShareReporter).
-func (consumer *serializedQueryConsumer) RetainedShareLeftBytes() (uint64, bool) {
-	reporter, ok := consumer.QueryExecutionConsumer.(execution.RetainedShareReporter)
+// ReserveRetainedBytes and ReleaseRetainedBytes pass through to the
+// wrapped consumer under the mutex its series are delivered under: a query
+// aligning named outputs reserves beside the other queries of its Slot
+// delivering series, and both move the same retained total
+// (execution.RetainedBytesReserver). The reservation never waits - the
+// consumer's own refuses at once when there is no room - so holding the
+// mutex across it stalls no delivery.
+func (consumer *serializedQueryConsumer) ReserveRetainedBytes(ctx context.Context, bytes uint64) error {
+	reserver, ok := consumer.QueryExecutionConsumer.(execution.RetainedBytesReserver)
 	if !ok {
-		return 0, false
+		return nil
 	}
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
-	return reporter.RetainedShareLeftBytes()
+	return reserver.ReserveRetainedBytes(ctx, bytes)
 }
 
-// namedOutputBytes is the bound on aligning a query's named outputs: what
-// its Slot may still retain under its share when the query is sent. The
-// alignment is held before the Slot sees the answer and charged to the Slot
-// with it, so it may not take more than the Slot could keep. Nil for a query
-// without named outputs or a consumer no share bounds.
-func namedOutputBytes(spec execution.PhysicalQuerySpec, consumer execution.QueryExecutionConsumer) *uint64 {
-	if spec.PlanFacts.NamedOutputs == nil {
-		return nil
-	}
-	reporter, ok := consumer.(execution.RetainedShareReporter)
+func (consumer *serializedQueryConsumer) ReleaseRetainedBytes(bytes uint64) {
+	reserver, ok := consumer.QueryExecutionConsumer.(execution.RetainedBytesReserver)
 	if !ok {
-		return nil
+		return
 	}
-	left, bounded := reporter.RetainedShareLeftBytes()
-	if !bounded {
-		return nil
+	consumer.mu.Lock()
+	defer consumer.mu.Unlock()
+	reserver.ReleaseRetainedBytes(bytes)
+}
+
+// ReserveRetainedBytes and ReleaseRetainedBytes reserve, through the
+// consumer its series are delivered to, what the provider holds beside the
+// series of a query with named outputs - their alignment - so it is held to
+// the same share and pool as the Slot's series, as it grows
+// (execution.RetainedBytesReserver). A consumer that reserves nothing
+// refuses nothing.
+func (adapter *seriesAdapter) ReserveRetainedBytes(ctx context.Context, bytes uint64) error {
+	if reserver, ok := adapter.consumer.(execution.RetainedBytesReserver); ok {
+		return reserver.ReserveRetainedBytes(ctx, bytes)
 	}
-	return &left
+	return nil
+}
+
+func (adapter *seriesAdapter) ReleaseRetainedBytes(bytes uint64) {
+	if reserver, ok := adapter.consumer.(execution.RetainedBytesReserver); ok {
+		reserver.ReleaseRetainedBytes(bytes)
+	}
 }
 
 // queryStrategies are the strategy ids of the Plans a planned query serves,

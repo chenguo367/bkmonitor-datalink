@@ -109,6 +109,10 @@ type streamedExecution struct {
 	effects  effectCounts
 	gapFacts uint64
 	began    bool
+	// namedReserved is what this execution's queries reserved for their
+	// named outputs (ReserveRetainedBytes) and still hold: part of the input
+	// phase, settled to the aligned tables at the completion.
+	namedReserved uint64
 	// supplement is set on a supplement execution and nil on every Slot.
 	// See supplement.go.
 	supplement *supplementRun
@@ -218,16 +222,60 @@ func (stream *streamedExecution) RetainedInputBytesNow() uint64 {
 	return stream.retainedInputNow.Load()
 }
 
-// RetainedShareLeftBytes is what this execution may still retain before it
-// is over its Query Group's share (qgShareBytes), and false when the pool
-// sets no share (execution.RetainedShareReporter). The access source reads
-// it under the lock the series are retained under.
-func (stream *streamedExecution) RetainedShareLeftBytes() (uint64, bool) {
-	share := stream.coordinator.qgShareBytes()
-	if share == 0 {
-		return 0, false
+// ReserveRetainedBytes reserves bytes a query of this execution holds
+// beside its series - a named-outputs alignment as its answer is read -
+// against the same budget its series are reserved against, judged the same
+// way: the share one Query Group's Slot may hold, by this execution's own
+// total, then the pool (reserveRetainedInput). It refuses at once, as a
+// series is refused, and never waits (execution.RetainedBytesReserver). The
+// access source calls it under the lock series are delivered under.
+func (stream *streamedExecution) ReserveRetainedBytes(ctx context.Context, bytes uint64) error {
+	if err := stream.reserveRetainedInput(ctx, bytes); err != nil {
+		return err
 	}
-	return share - min(share, stream.retainedTotal()), true
+	stream.namedReserved += bytes
+	return nil
+}
+
+// ReleaseRetainedBytes gives back bytes ReserveRetainedBytes reserved, no
+// more than it holds.
+func (stream *streamedExecution) ReleaseRetainedBytes(bytes uint64) {
+	bytes = min(bytes, stream.namedReserved)
+	stream.namedReserved -= bytes
+	stream.unretainInput(bytes)
+}
+
+// reserveRetainedInput reserves input bytes beside the series: the share
+// first, against this execution's own total, then the pool through the
+// reservation a series takes; refused the way either refuses, observed as
+// a capacity rejection.
+func (stream *streamedExecution) reserveRetainedInput(ctx context.Context, bytes uint64) error {
+	if bytes == 0 {
+		return nil
+	}
+	phase := stream.reservationPhase("normal_input")
+	if share := stream.coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+bytes > share {
+		err := shareRejection(phase, stream.retainedTotal(), bytes, share, stream.ownBudgetUsage(stream.coordinator.budget))
+		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
+		return err
+	}
+	if err := stream.reserveProvisionalAt(ctx, 0, bytes, phase); err != nil {
+		return err
+	}
+	stream.retainBytes(retainPhaseInput, bytes)
+	return nil
+}
+
+// unretainInput gives back input bytes this execution reserved, to the
+// pool and from its own total.
+func (stream *streamedExecution) unretainInput(bytes uint64) {
+	if bytes == 0 {
+		return
+	}
+	bytes = min(bytes, stream.retainedByPhase[retainPhaseInput])
+	stream.retainedByPhase[retainPhaseInput] -= bytes
+	stream.retainedInputNow.Add(^(bytes - 1))
+	stream.coordinator.releaseProvisional(0, bytes)
 }
 
 // retainedTotal is what this execution holds across all phases.
@@ -422,32 +470,30 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
 	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
-	stream.series, stream.retainedByPhase = 0, [retainPhaseCount]uint64{}
+	stream.series, stream.retainedByPhase, stream.namedReserved = 0, [retainPhaseCount]uint64{}, 0
 	stream.retainedInputNow.Store(0)
 }
 
-// retainNamedOutputs charges the Slot for the named outputs its queries
-// aligned (namedOutputRecordsRetainedBytes), kept from the completion until
-// the Slot ends and released with it. They are input the Slot retains, as
-// its series are, and are refused the way a series is: past the share one
-// Query Group's Slot may hold - its own total, before the pool, as every
-// share is judged - or past what the pool has left. Nothing for a Slot
+// retainNamedOutputs settles what the Slot holds for the named outputs its
+// queries aligned: the tables (namedOutputRecordsRetainedBytes), kept from
+// the completion until the Slot ends and released with it. Their queries
+// reserved them as the answers were read (ReserveRetainedBytes) and left
+// the tables' own reserved, so the reservation is turned into the charge
+// rather than taken again: what was reserved beyond the tables - a query
+// whose answer was not used - is given back, and only what no query
+// reserved is reserved now, judged as every input is. Nothing for a Slot
 // whose queries asked for none.
 func (stream *streamedExecution) retainNamedOutputs(ctx context.Context, completion execution.QueryExecutionCompletion) error {
-	retained := namedOutputRecordsRetainedBytes(completion)
-	if retained == 0 {
-		return nil
+	tables := namedOutputRecordsRetainedBytes(completion)
+	reserved := stream.namedReserved
+	switch {
+	case reserved > tables:
+		stream.ReleaseRetainedBytes(reserved - tables)
+	case reserved < tables:
+		if err := stream.ReserveRetainedBytes(ctx, tables-reserved); err != nil {
+			return err
+		}
 	}
-	phase := stream.reservationPhase("normal_input")
-	if share := stream.coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+retained > share {
-		err := shareRejection(phase, stream.retainedTotal(), retained, share, stream.ownBudgetUsage(stream.coordinator.budget))
-		stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, observability.CapacityBudgetRetainedBytes, err)
-		return err
-	}
-	if err := stream.reserveProvisionalAt(ctx, 0, retained, phase); err != nil {
-		return err
-	}
-	stream.retainBytes(retainPhaseInput, retained)
 	return nil
 }
 

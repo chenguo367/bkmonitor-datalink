@@ -88,10 +88,17 @@ type namedOutputDecoding struct {
 	malformed bool
 	duplicate bool
 	// held is what the alignment holds so far, by the estimates below, and
-	// bound the most it may (queryIdentity.NamedOutputBytes); nil for none.
-	held  uint64
-	bound *uint64
+	// reserved what it has reserved for it through reserver
+	// (queryIdentity.NamedOutputs), in chunks ahead of held; nil reserves
+	// nothing.
+	held     uint64
+	reserved uint64
+	reserver execution.RetainedBytesReserver
 }
+
+// namedReserveChunk is how far ahead of what it holds the alignment
+// reserves: one reservation for many points rather than one for each.
+const namedReserveChunk = 64 << 10
 
 // What the alignment holds while an answer is read, measured
 // (TestTheNamedOutputHoldingsAreWhatTheyCost): an indexed point of an
@@ -104,9 +111,10 @@ const (
 	namedLegacyPointBytes = 96
 )
 
-// errNamedOutputBytesExceeded is an alignment that would hold more than its
-// Slot may keep: the answer is too large for the Slot, as an answer over
-// the body limit is, and no retry makes it smaller.
+// errNamedOutputBytesExceeded is an alignment its Slot refused to reserve
+// for: past the share one Query Group's Slot may hold, or past what the
+// pool has left, as a series past either is refused. The answer is too
+// large for the Slot to hold, as an answer over the body limit is.
 var errNamedOutputBytesExceeded error = &responseLimitError{code: "NAMED_OUTPUT_BYTES_EXCEEDED",
 	class: execution.ResponseFailureLimitResponseBytes}
 
@@ -115,16 +123,61 @@ func newNamedOutputDecoding(attempt queryIdentity) *namedOutputDecoding {
 		return nil
 	}
 	return &namedOutputDecoding{outputs: attempt.Spec.PlanFacts.NamedOutputs, answered: map[string]*answeredOutput{},
-		bound: attempt.NamedOutputBytes}
+		reserver: attempt.NamedOutputs}
 }
 
-// hold charges bytes to the alignment, refusing them past its bound.
-func (named *namedOutputDecoding) hold(bytes uint64) error {
+// namedOutputReserver is what a query with named outputs reserves its
+// alignment through: the sink its series go to, when it reserves
+// (execution.RetainedBytesReserver), so the alignment is held to the Slot's
+// own budget as it grows. Nil for a query without named outputs.
+func namedOutputReserver(spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) execution.RetainedBytesReserver {
+	if spec.PlanFacts.NamedOutputs == nil {
+		return nil
+	}
+	reserver, _ := sink.(execution.RetainedBytesReserver)
+	return reserver
+}
+
+// hold counts bytes the alignment holds and reserves them before it holds
+// them, a chunk ahead, refusing them the moment its Slot refuses.
+func (named *namedOutputDecoding) hold(ctx context.Context, bytes uint64) error {
 	named.held += bytes
-	if named.bound != nil && named.held > *named.bound {
+	if named.reserver == nil || named.held <= named.reserved {
+		return nil
+	}
+	need := named.held - named.reserved
+	chunk := max(need, namedReserveChunk)
+	err := named.reserver.ReserveRetainedBytes(ctx, chunk)
+	if err != nil && chunk > need {
+		// The chunk ahead is a convenience: what is held now may still fit.
+		chunk = need
+		err = named.reserver.ReserveRetainedBytes(ctx, chunk)
+	}
+	if err != nil {
 		return errNamedOutputBytesExceeded
 	}
+	named.reserved += chunk
 	return nil
+}
+
+// settle gives back what the alignment reserved beyond what it keeps once
+// its answer is read: the aligned table of a completion that carries one
+// (NamedOutputRecords.RetainedBytes), which its Slot then holds; nothing of
+// an answer that failed or was refused. The index and the kept points are
+// let go with it. Safe on a query without named outputs.
+func (named *namedOutputDecoding) settle(completion execution.ProviderCompletion, err error) {
+	if named == nil {
+		return
+	}
+	named.answered, named.points, named.legacy = nil, nil, nil
+	keep := uint64(0)
+	if err == nil {
+		keep = min(completion.NamedOutputs.RetainedBytes(), named.reserved)
+	}
+	if named.reserver != nil && named.reserved > keep {
+		named.reserver.ReleaseRetainedBytes(named.reserved - keep)
+	}
+	named.reserved, named.held = keep, keep
 }
 
 // alignLabels is a series' labels as the alignment keys them, as the
@@ -230,7 +283,7 @@ func (session *seriesDecoder) indexOutput(ctx context.Context, answer namedOutpu
 		if int64(len(raw)) > session.client.limits.MaxSeriesBytes {
 			return ErrSeriesBytesExceeded
 		}
-		if err := session.named.hold(uint64(len(raw))); err != nil {
+		if err := session.named.hold(ctx, uint64(len(raw))); err != nil {
 			return err
 		}
 		var series responseSeries
@@ -266,7 +319,7 @@ func (session *seriesDecoder) indexOutput(ctx context.Context, answer namedOutpu
 				session.named.duplicate = true
 				continue
 			}
-			if err := session.named.hold(namedIndexPointBytes + uint64(len(value))); err != nil {
+			if err := session.named.hold(ctx, namedIndexPointBytes+uint64(len(value))); err != nil {
 				return err
 			}
 			output.points[key] = value
@@ -299,12 +352,12 @@ func answeredState(answer namedOutputAnswer) execution.NamedOutputState {
 }
 
 // noteDelivered keeps the points of a legacy series that was delivered.
-func (named *namedOutputDecoding) noteDelivered(series responseSeries, dataset *execution.Dataset, valueField string) error {
+func (named *namedOutputDecoding) noteDelivered(ctx context.Context, series responseSeries, dataset *execution.Dataset, valueField string) error {
 	labels := alignLabels(series)
 	for index := 0; index < dataset.Len(); index++ {
 		record, _ := dataset.Record(index)
 		value, _ := record.Value(valueField)
-		if err := named.hold(namedLegacyPointBytes + uint64(len(record.RecordID())+len(value))); err != nil {
+		if err := named.hold(ctx, namedLegacyPointBytes+uint64(len(record.RecordID())+len(value))); err != nil {
 			return err
 		}
 		named.points = append(named.points, legacyPoint{recordID: record.RecordID(),
@@ -361,7 +414,11 @@ func (session *seriesDecoder) finishNamed(ctx context.Context, status *responseS
 	}
 	reason := execution.ReasonCode(contract.ReasonQueryUnavailable)
 	if refused == "" {
-		if records := named.align(completion.Completeness); records != nil && !named.duplicate {
+		records, err := named.align(ctx, completion.Completeness)
+		if err != nil {
+			return execution.ProviderCompletion{}, err
+		}
+		if records != nil && !named.duplicate {
 			completion.NamedOutputs = records
 			return completion, nil
 		}
@@ -382,7 +439,13 @@ func (session *seriesDecoder) finishNamed(ctx context.Context, status *responseS
 // MISSING otherwise. An output of an answer under no contract is
 // UNSUPPORTED, and so is one the answer left out. Nil when two records of
 // the legacy output sit at one key.
-func (named *namedOutputDecoding) align(completeness execution.Completeness) *execution.NamedOutputRecords {
+//
+// The table is held beside the index and the kept points until the answer
+// is settled, so it is counted as it is built, record by record, at what it
+// is charged at (execution.NamedOutputRecordRetainedBytes), with the keys
+// it is checked against: the alignment's peak is counted, and what is left
+// reserved once the index and the points go is the table's own.
+func (named *namedOutputDecoding) align(ctx context.Context, completeness execution.Completeness) (*execution.NamedOutputRecords, error) {
 	legacyState := execution.NamedOutputSuccess
 	if completeness == execution.CompletenessPartial {
 		legacyState = execution.NamedOutputPartial
@@ -393,11 +456,14 @@ func (named *namedOutputDecoding) align(completeness execution.Completeness) *ex
 		refs = append(refs, output.Ref)
 		answers = append(answers, named.answered[output.Ref])
 	}
+	if err := named.hold(ctx, execution.NamedOutputRefsRetainedBytes(refs)); err != nil {
+		return nil, err
+	}
 	records := &execution.NamedOutputRecords{Refs: refs, Records: make(map[string][]execution.NamedOutputValue, len(named.points))}
 	keys := make(map[alignKey]bool, len(named.points))
 	for _, point := range named.points {
 		if keys[point.key] {
-			return nil
+			return nil, nil
 		}
 		keys[point.key] = true
 		values := make([]execution.NamedOutputValue, len(refs))
@@ -418,7 +484,10 @@ func (named *namedOutputDecoding) align(completeness execution.Completeness) *ex
 				}
 			}
 		}
+		if err := named.hold(ctx, namedIndexPointBytes+execution.NamedOutputRecordRetainedBytes(point.recordID, values)); err != nil {
+			return nil, err
+		}
 		records.Records[point.recordID] = values
 	}
-	return records
+	return records, nil
 }

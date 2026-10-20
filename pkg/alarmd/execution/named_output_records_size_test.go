@@ -29,6 +29,10 @@ func heapGrowth(build func() any) uint64 {
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(kept)
+	if after.HeapAlloc <= before.HeapAlloc {
+		// The collector freed more than the build kept: no measure.
+		return 0
+	}
 	return after.HeapAlloc - before.HeapAlloc
 }
 
@@ -56,6 +60,9 @@ func TestANamedOutputTableCostsWhatItIsCharged(t *testing.T) {
 			}
 			return table
 		})
+		if measured == 0 {
+			t.Fatalf("%d outputs: the heap did not grow across the build, nothing was measured", outputs)
+		}
 		charged := table.RetainedBytes()
 		t.Logf("%d outputs: measured %d bytes a record, charged %d", outputs, measured/records, charged/records)
 		if charged < measured || charged > measured+measured/4 {

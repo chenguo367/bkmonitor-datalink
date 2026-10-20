@@ -12,8 +12,10 @@ package uq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -334,27 +336,91 @@ func TestAnOutputInAStateThisBuildDoesNotKnowReadsAsError(t *testing.T) {
 	wantOutput(t, values, "B", "", execution.NamedOutputError)
 }
 
-// The alignment holds no more than its Slot may keep: past the bound its
-// Slot's share left, the query is refused as an answer too large to hold,
-// which no retry makes smaller; under it, the same answer is aligned.
-func TestANamedOutputsAnswerPastItsByteBoundIsRefused(t *testing.T) {
-	answer := namedAnswer(
+// testReserver is a Slot's room for an alignment: it grants reservations
+// up to limit and keeps the peak of what it granted.
+type testReserver struct {
+	limit, held, peak uint64
+	refused           int
+}
+
+func (reserver *testReserver) ReserveRetainedBytes(_ context.Context, bytes uint64) error {
+	if reserver.held+bytes > reserver.limit {
+		reserver.refused++
+		return errors.New("refused")
+	}
+	reserver.held += bytes
+	reserver.peak = max(reserver.peak, reserver.held)
+	return nil
+}
+
+func (reserver *testReserver) ReleaseRetainedBytes(bytes uint64) {
+	reserver.held -= min(bytes, reserver.held)
+}
+
+// reservingSink is a sink a query's series go to that reserves through
+// reserver, as the access source's does through its Slot.
+type reservingSink struct {
+	*collectingSink
+	*testReserver
+}
+
+func decodeReserving(t *testing.T, body string, reserver *testReserver) execution.ProviderCompletion {
+	t.Helper()
+	client := &Client{limits: DefaultLimits(), now: time.Now}
+	completion, err := client.decode(context.Background(), strings.NewReader(body), namedAttempt(t, namedOutputsAB),
+		reservingSink{collectingSink: &collectingSink{}, testReserver: reserver})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return completion
+}
+
+func reservingAnswer() string {
+	return namedAnswer(
 		namedOutput("A", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,1],[1700123120000,2]]`)),
 		namedOutput("B", "SUCCESS", false, ""),
 		namedOutput("C", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,11],[1700123120000,12]]`)))
-	for _, test := range []struct {
-		bound   uint64
-		refused bool
-	}{{bound: 300, refused: true}, {bound: 1 << 20}} {
-		attempt := namedAttempt(t, namedOutputsAB)
-		bound := test.bound
-		attempt.NamedOutputBytes = &bound
-		completion, _ := decodeNamed(t, attempt, answer)
-		refused := completion.Completeness == execution.CompletenessUnavailable && completion.NamedOutputs == nil &&
-			completion.RouteFacts.Attempts[0].Detail == "response=limit_response_bytes"
-		if refused != test.refused || !test.refused && completion.NamedOutputs == nil {
-			t.Errorf("bound %d: completion %+v", test.bound, completion)
-		}
+}
+
+// The alignment reserves what it holds through its Slot as it holds it:
+// at its peak the index, the kept legacy points and the table being built
+// side by side; once the answer is read, the table alone, which the
+// completion carries and the Slot then holds.
+func TestANamedOutputsAlignmentReservesItsPeakAndKeepsItsTable(t *testing.T) {
+	reserver := &testReserver{limit: 1 << 20}
+	completion := decodeReserving(t, reservingAnswer(), reserver)
+	table := completion.NamedOutputs.RetainedBytes()
+	if completion.NamedOutputs == nil || reserver.held != table {
+		t.Fatalf("reserved %d after the answer, want the table's %d", reserver.held, table)
+	}
+	// The least room the answer is aligned in is its peak: two indexed
+	// points, two kept points and the two records of the table being built,
+	// side by side. Reservations run a chunk ahead and fall back to what is
+	// held, so the least room that succeeds is what was held at the peak.
+	least := sort.Search(1<<16, func(limit int) bool {
+		return decodeReserving(t, reservingAnswer(), &testReserver{limit: uint64(limit)}).NamedOutputs != nil
+	})
+	if floor := table + 2*namedIndexPointBytes + 2*namedLegacyPointBytes; uint64(least) < floor {
+		t.Fatalf("aligned in %d bytes, want at least the index, the points and the table, %d", least, floor)
+	}
+}
+
+// An alignment its Slot refuses to reserve for is refused at once, as an
+// answer too large to hold, and gives back everything it had reserved; so
+// does an answer that fails for any other reason.
+func TestARefusedOrFailedAlignmentLeavesNothingReserved(t *testing.T) {
+	refusing := &testReserver{limit: 300}
+	completion := decodeReserving(t, reservingAnswer(), refusing)
+	if completion.Completeness != execution.CompletenessUnavailable || completion.NamedOutputs != nil ||
+		completion.RouteFacts.Attempts[0].Detail != "response=limit_response_bytes" || refusing.refused == 0 || refusing.held != 0 {
+		t.Fatalf("held %d refused %d completion %+v", refusing.held, refusing.refused, completion)
+	}
+	failing := &testReserver{limit: 1 << 20}
+	completion = decodeReserving(t, namedAnswer(
+		namedOutput("A", "SUCCESS", false, "", namedSeries(hostOne, ipOne, `[[1700123060000,1]]`)),
+		namedOutput("C", "ERROR", true, "ERROR")), failing)
+	if completion.Completeness != execution.CompletenessUnavailable || failing.peak == 0 || failing.held != 0 {
+		t.Fatalf("a failed answer holds %d (peak %d): %+v", failing.held, failing.peak, completion)
 	}
 }
 
@@ -400,13 +466,35 @@ func heapGrowth(build func() any) uint64 {
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	runtime.KeepAlive(kept)
+	if after.HeapAlloc <= before.HeapAlloc {
+		// The collector freed more than the build kept: no measure.
+		return 0
+	}
 	return after.HeapAlloc - before.HeapAlloc
 }
 
 func wantCharged(t *testing.T, what string, charged, measured, count uint64) {
 	t.Helper()
+	if measured == 0 {
+		t.Fatalf("%s: the heap did not grow across the build, nothing was measured", what)
+	}
 	t.Logf("%s: measured %d bytes, charged %d", what, measured/count, charged/count)
 	if charged < measured || charged > measured+measured/4 {
 		t.Errorf("%s: charged %d, measured %d: want at least the measure and within a quarter of it", what, charged, measured)
+	}
+}
+
+// A query without named outputs reserves nothing, through a sink that
+// would reserve.
+func TestAQueryWithoutNamedOutputsReservesNothing(t *testing.T) {
+	reserver := &testReserver{limit: 1 << 20}
+	client := &Client{limits: DefaultLimits(), now: time.Now}
+	if _, err := client.decode(context.Background(), strings.NewReader(
+		`{"series":[`+namedSeries(hostOne, ipOne, `[[1700123060000,11]]`)+`],"is_partial":false}`),
+		namedAttempt(t, ""), reservingSink{collectingSink: &collectingSink{}, testReserver: reserver}); err != nil {
+		t.Fatal(err)
+	}
+	if reserver.peak != 0 {
+		t.Fatalf("a query without named outputs reserved %d", reserver.peak)
 	}
 }

@@ -85,20 +85,69 @@ func TestANamedOutputTablePastTheShareIsRefused(t *testing.T) {
 	}
 }
 
-// A Slot says how much it may still retain under its share - the bound the
-// access source puts on aligning named outputs - and nothing once it is at
-// or past it; a pool with no share bounds nothing.
-func TestASlotSaysWhatItsShareHasLeft(t *testing.T) {
-	_, stream := namedOutputStream(1000, 100)
-	if left, bounded := stream.RetainedShareLeftBytes(); !bounded || left != 650 {
-		t.Fatalf("left %d bounded %v, want 650 of a 750 share", left, bounded)
+// What a Slot's queries reserve for their named outputs is held to the
+// share between them, as its series are: once one query holds the share
+// the next is refused at once, as a share refusal of the Slot's own total,
+// and reserves nothing; a release makes the room again.
+func TestTwoNamedQueriesOfASlotCannotExceedTheShareBetweenThem(t *testing.T) {
+	co, stream := namedOutputStream(1000, 0) // a share of 750
+	if err := stream.ReserveRetainedBytes(context.Background(), 700); err != nil {
+		t.Fatal(err)
 	}
-	_, stream = namedOutputStream(1000, 900)
-	if left, bounded := stream.RetainedShareLeftBytes(); !bounded || left != 0 {
-		t.Fatalf("a Slot past its share has %d left (bounded %v)", left, bounded)
+	err := stream.ReserveRetainedBytes(context.Background(), 100)
+	if _, deterministic := execution.ShareRefusalOf(err); err == nil || !deterministic {
+		t.Fatalf("the second query past the share: %v", err)
 	}
-	_, stream = namedOutputStream(0, 0)
-	if _, bounded := stream.RetainedShareLeftBytes(); bounded {
-		t.Fatal("a pool with no share bounds the alignment")
+	if stream.namedReserved != 700 || co.reservations.retainedBytes != 700 || stream.retainedByPhase[retainPhaseInput] != 700 {
+		t.Fatalf("named %d pool %d input %d after a refusal", stream.namedReserved, co.reservations.retainedBytes, stream.retainedByPhase[retainPhaseInput])
+	}
+	stream.ReleaseRetainedBytes(700)
+	if err := stream.ReserveRetainedBytes(context.Background(), 100); err != nil || co.reservations.retainedBytes != 100 ||
+		stream.RetainedInputBytesNow() != 100 {
+		t.Fatalf("after the release: %v, pool %d input now %d", err, co.reservations.retainedBytes, stream.RetainedInputBytesNow())
+	}
+}
+
+// Named queries of two Slots are held to the pool between them: each
+// under its own share, the second is refused once the first and the second
+// would pass the pool, and that refusal is the pool's, not the share's.
+func TestNamedQueriesOfTwoSlotsCannotExceedThePool(t *testing.T) {
+	co, first := namedOutputStream(1000, 0)
+	second := &streamedExecution{coordinator: co, began: true}
+	if err := first.ReserveRetainedBytes(context.Background(), 600); err != nil {
+		t.Fatal(err)
+	}
+	err := second.ReserveRetainedBytes(context.Background(), 600)
+	if _, deterministic := execution.ShareRefusalOf(err); err == nil || deterministic {
+		t.Fatalf("the second Slot past the pool: %v (a share refusal: %v)", err, deterministic)
+	}
+	if co.reservations.retainedBytes != 600 || second.namedReserved != 0 || second.retainedTotal() != 0 {
+		t.Fatalf("pool %d second %d/%d after the refusal", co.reservations.retainedBytes, second.namedReserved, second.retainedTotal())
+	}
+}
+
+// At the completion what the queries reserved becomes the tables' charge,
+// not a second reservation of it: what is left reserved is the tables', a
+// query's reservation beyond them is given back, and a table no query
+// reserved for is reserved then. After the Slot, nothing.
+func TestTheNamedReservationBecomesTheTablesChargeAtTheCompletion(t *testing.T) {
+	completion := namedOutputCompletion(10)
+	table := namedOutputRecordsRetainedBytes(completion)
+	for _, reservedBefore := range []uint64{table, table + 500, table / 2} {
+		co, stream := namedOutputStream(1<<20, 0)
+		if err := stream.ReserveRetainedBytes(context.Background(), reservedBefore); err != nil {
+			t.Fatal(err)
+		}
+		if err := stream.retainNamedOutputs(context.Background(), completion); err != nil {
+			t.Fatal(err)
+		}
+		if stream.namedReserved != table || co.reservations.retainedBytes != table || stream.retainedByPhase[retainPhaseInput] != table {
+			t.Fatalf("reserved %d before: named %d pool %d input %d, want the table's %d", reservedBefore,
+				stream.namedReserved, co.reservations.retainedBytes, stream.retainedByPhase[retainPhaseInput], table)
+		}
+		stream.releaseProvisional()
+		if co.reservations.retainedBytes != 0 || stream.namedReserved != 0 {
+			t.Fatalf("after the Slot: pool %d named %d", co.reservations.retainedBytes, stream.namedReserved)
+		}
 	}
 }

@@ -9,6 +9,8 @@
 
 package execution
 
+import "context"
+
 // InPlaceWaitFacts is how long one execution waited, holding its execution
 // slot, for a later query of its Slot to become readable: a Slot whose
 // queries are readable at different times is not deferred as a whole, so its
@@ -42,9 +44,15 @@ type RetainedInputReporter interface {
 	RetainedInputBytesNow() uint64
 }
 
-// RetainedShareReporter is a consumer that can say how many more bytes the
-// execution may retain before it is over the share one Query Group's Slot
-// may hold, and false when no share bounds it.
-type RetainedShareReporter interface {
-	RetainedShareLeftBytes() (uint64, bool)
+// RetainedBytesReserver is a consumer that holds bytes retained outside its
+// series against the same budget its series are: ReserveRetainedBytes
+// reserves them, or refuses them past the share one Query Group's Slot may
+// hold or past what the pool has left, and ReleaseRetainedBytes gives back
+// what was reserved and is no longer held. Whatever is still reserved when
+// the execution ends is released with it. Safe to call from any query of
+// the execution while its series are delivered. A provider's sink that is
+// one is what a query with named outputs reserves its alignment through.
+type RetainedBytesReserver interface {
+	ReserveRetainedBytes(ctx context.Context, bytes uint64) error
+	ReleaseRetainedBytes(bytes uint64)
 }

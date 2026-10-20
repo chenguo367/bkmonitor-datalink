@@ -115,7 +115,7 @@ func (session *seriesDecoder) deliver(ctx context.Context, job *normalizing) err
 	}
 	session.delivery, err = execution.AccumulateSeriesDelivery(session.delivery, batch.Delivery)
 	if err == nil && session.named != nil {
-		err = session.named.noteDelivered(job.series, batch.Dataset, session.attempt.Spec.PlanFacts.Normalization.CanonicalValueField)
+		err = session.named.noteDelivered(ctx, job.series, batch.Dataset, session.attempt.Spec.PlanFacts.Normalization.CanonicalValueField)
 	}
 	return err
 }

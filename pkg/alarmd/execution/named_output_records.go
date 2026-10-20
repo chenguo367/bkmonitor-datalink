@@ -63,20 +63,34 @@ const (
 )
 
 // RetainedBytes is what the table holds for as long as it is kept: the
-// figure a Slot is charged for it. Zero for no table.
+// figure a Slot is charged for it, the sum of NamedOutputRefsRetainedBytes
+// and NamedOutputRecordRetainedBytes. Zero for no table.
 func (records *NamedOutputRecords) RetainedBytes() uint64 {
 	if records == nil {
 		return 0
 	}
+	total := NamedOutputRefsRetainedBytes(records.Refs)
+	for recordID, values := range records.Records {
+		total += NamedOutputRecordRetainedBytes(recordID, values)
+	}
+	return total
+}
+
+// NamedOutputRefsRetainedBytes is what a table's refs hold.
+func NamedOutputRefsRetainedBytes(refs []string) uint64 {
 	var total uint64
-	for _, ref := range records.Refs {
+	for _, ref := range refs {
 		total += namedOutputRefBytes + uint64(len(ref))
 	}
-	for recordID, values := range records.Records {
-		total += namedOutputRecordBytes + uint64(len(recordID))
-		for _, value := range values {
-			total += namedOutputValueBytes + uint64(len(value.Value))
-		}
+	return total
+}
+
+// NamedOutputRecordRetainedBytes is what one record of a table holds: its
+// entry, its RecordID and its values.
+func NamedOutputRecordRetainedBytes(recordID string, values []NamedOutputValue) uint64 {
+	total := namedOutputRecordBytes + uint64(len(recordID))
+	for _, value := range values {
+		total += namedOutputValueBytes + uint64(len(value.Value))
 	}
 	return total
 }
