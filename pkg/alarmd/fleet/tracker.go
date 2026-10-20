@@ -603,6 +603,10 @@ type queryGroupState struct {
 	causeReason string
 	// causeScope is where that cause was found (CauseScope).
 	causeScope *CauseScope
+	// causeOrigin is whose causeReason is (CauseOrigin): physical, carried,
+	// or empty where this process does not know - a row restored from a
+	// summary, which never recorded it.
+	causeOrigin *CauseOrigin
 	// coverage is the evidence behind causeReason when that reason is about
 	// the detection window. It is kept beside the reason and cleared with it,
 	// because a shortfall left over from an earlier round would be read as
@@ -1790,6 +1794,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = roundReason
 		state.causeScope = causeScopeOf(observation.ProgressCompletionScope)
+		state.causeOrigin = causeOriginOf(observation.ProgressCompletionCause, roundReason, observation.CarriedReason)
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run
@@ -2099,6 +2104,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.cause = ""
 	state.causeReason = ""
 	state.causeScope = nil
+	state.causeOrigin = nil
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0
@@ -2284,6 +2290,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		DemotedSince:  state.demotedSince,
 		Kind:          state.currentKind,
 		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason, CauseScope: state.causeScope,
+		CauseOrigin:      state.causeOrigin,
 		Coverage:         state.coverage,
 		CoverageRejected: state.coverageRejected,
 		Since:            state.runStartedAt,

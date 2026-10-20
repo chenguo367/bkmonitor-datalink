@@ -106,6 +106,24 @@ func TestAWholeQueryUnderACarriedTimeoutGuardReportsSuccessBesideTheEvaluation(t
 	}
 }
 
+// A guard stamped before origins were recorded is still carried on the line:
+// carried=true with no origin fields, never physical.
+func TestAGuardWithoutAnOriginReadsCarriedWithNoOrigin(t *testing.T) {
+	seen, line := queryLine(t, wholeAnswer(), execution.EvaluationResult{Result: observability.ResultDegraded,
+		ReasonCode: contract.ReasonQueryTimeout, ReasonCarried: true})
+	if seen.CarriedReason == nil || seen.CarriedReason.Known() {
+		t.Fatalf("carried %+v, want carried with no origin", seen.CarriedReason)
+	}
+	if line == nil || line["evaluation_reason_carried"] != true {
+		t.Fatalf("line %v, want evaluation_reason_carried=true", line)
+	}
+	for _, key := range []string{"evaluation_reason_origin_slot", "evaluation_reason_origin_cause"} {
+		if _, present := line[key]; present {
+			t.Fatalf("line names %s for a guard that recorded none: %v", key, line)
+		}
+	}
+}
+
 // A query that really timed out is a query failure: degraded under the
 // timeout, with its failure facts, and its reason is this round's - not
 // carried, with no origin.

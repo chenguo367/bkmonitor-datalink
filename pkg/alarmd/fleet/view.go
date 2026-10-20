@@ -1059,6 +1059,29 @@ type CauseScope struct {
 	Query      string  `json:"query,omitempty"`
 }
 
+// CauseOrigin is whose a row's cause reason is. Origin is physical (the
+// round met it itself) or carried (a stored guard's, repeated on this round);
+// Slot and Cause are where a carried guard came from, absent when it was
+// stamped by a build that did not record it.
+type CauseOrigin struct {
+	Origin string `json:"origin"`
+	Slot   int64  `json:"slot,omitempty"`
+	Cause  string `json:"cause,omitempty"`
+}
+
+// causeOriginOf is a round's cause origin as a row carries it; nil for a
+// round that named no cause reason.
+func causeOriginOf(cause, reason string, carried *observability.CarriedReasonFacts) *CauseOrigin {
+	if cause == "" || reason == "" {
+		return nil
+	}
+	origin := &CauseOrigin{Origin: observability.ReasonOriginLabel(carried != nil)}
+	if carried != nil && carried.Known() {
+		origin.Slot, origin.Cause = carried.OriginSlot, string(carried.OriginCause)
+	}
+	return origin
+}
+
 // causeScopeOf is a round's cause scope as a row carries it.
 func causeScopeOf(facts *observability.CompletionScopeFacts) *CauseScope {
 	if facts == nil {
@@ -1465,6 +1488,13 @@ type Anomaly struct {
 	// and the Level for a Level's outcome or the physical query for the
 	// primary input. Nil when the cause named no place.
 	CauseScope *CauseScope `json:"cause_scope,omitempty"`
+	// CauseOrigin is whose CauseReason is: the round's own, or a stored
+	// guard's carried onto it. A LEVEL_OUTCOME_UNKNOWN round still counts
+	// as something wrong - the series really was not evaluated - but its
+	// QUERY_TIMEOUT may be one an earlier round raised, and the row says so.
+	// Nil when the round named no reason, or the row was restored and never
+	// learned it: unknown, never physical.
+	CauseOrigin *CauseOrigin `json:"cause_origin,omitempty"`
 	// HeldBy is what held the latest round's Slot, on a row whose latest
 	// round gave the Slot up (GAP_SKIPPED): the completion's own word, the
 	// vocabulary of run_one_return_total{outcome} plus the readiness

@@ -102,7 +102,10 @@ type DiagnosisRow struct {
 	// reason for UNKNOWN, or the deciding row's own reason where it names
 	// one more precisely (cause_reason).
 	Reason string `json:"reason,omitempty"`
-	Check  Check  `json:"check,omitempty"`
+	// ReasonOrigin is the deciding row's CauseOrigin when Reason is that
+	// row's cause reason: whether it was carried from a stored guard.
+	ReasonOrigin *CauseOrigin `json:"reason_origin,omitempty"`
+	Check        Check        `json:"check,omitempty"`
 	// Catalog is the strategy's standing in the publication answered from.
 	Catalog        StrategyStandingKind `json:"catalog,omitempty"`
 	DecidingObject string               `json:"deciding_object,omitempty"`
@@ -286,7 +289,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 		row.Verdict, row.Action, row.Check = bestWords.State, bestWords.Action, bestWords.Check
 		row.Reason, row.DecidingObject = string(bestWords.Check), best.QueryGroup
 		if best.CauseReason != "" {
-			row.Reason = best.CauseReason
+			row.Reason, row.ReasonOrigin = best.CauseReason, best.CauseOrigin
 		}
 		if !best.LastHealthyAt.IsZero() {
 			last := best.LastHealthyAt
