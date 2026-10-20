@@ -246,3 +246,24 @@ func TestNamedOutputsOfAStructuredItemNameQueryListReferences(t *testing.T) {
 		t.Fatalf("named outputs %+v, metric_merge %q", facts.NamedOutputs, facts.MetricMerge)
 	}
 }
+
+// A reference name is at most 64 characters, the legacy output's as much as
+// any: alarmd's own bound, so that four names always fit an event's
+// detection snapshot. 64 compiles; 65 is refused by name.
+func TestAReferenceNamePastSixtyFourCharactersIsRefused(t *testing.T) {
+	compiler := namedOutputsTestCompiler(t)
+	config := func(legacy string) string {
+		return `{"response_contract":"named_outputs/v1","legacy_output_ref":"` + legacy + `","output_list":[` +
+			`{"reference_name":"A","expression":"a"},{"reference_name":"` + legacy + `","expression":"a + b"}]}`
+	}
+	fits := "R" + strings.Repeat("x", maxNamedOutputRefLength-1)
+	compiled, err := compiler.CompilePrimaryQuery(context.Background(), multiPromQLSource(config(fits)))
+	if err != nil || compiled.NamedOutputs == nil || compiled.NamedOutputs.LegacyRef != fits {
+		t.Fatalf("a %d-character reference name: %v", len(fits), err)
+	}
+	_, err = compiler.CompilePrimaryQuery(context.Background(), multiPromQLSource(config(fits+"x")))
+	var compileErr *QueryPlanCompileError
+	if !errors.As(err, &compileErr) || compileErr.Reason != "QUERY_OUTPUT_CONFIG_INVALID" {
+		t.Fatalf("a %d-character reference name: err = %v, want QUERY_OUTPUT_CONFIG_INVALID", len(fits)+1, err)
+	}
+}
