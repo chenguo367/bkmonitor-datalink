@@ -760,7 +760,7 @@ func openProductionPhaseTwoBundleAssembly(
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
-		NoData: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
+		NoData: executionStore, NoDataManualCloses: executionStore, Hosts: hostBusiness, State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
 		// The horizon the platform settings copy resolves now, read per Slot:
@@ -1158,7 +1158,8 @@ func openProductionPhaseTwoBundleAssembly(
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI: fleetAPI, PublicSurfaceRestricted: publicRestricted,
-		ControlStream: controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
+		NoDataCloseAPI: noDataCloseAPIOf(core.NoDataCloses, external.Now),
+		ControlStream:  controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
 		PublishFleet: func(ctx context.Context) {
 			publishRoleControlFacts(ctx, bundle, fleetStore, external.RoleRuntime)
 			observationRefresh.publish(ctx)

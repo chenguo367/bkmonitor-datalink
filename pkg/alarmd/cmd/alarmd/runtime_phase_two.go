@@ -296,6 +296,9 @@ func runPhaseTwoApplicationWithDependencies(
 		server.SetPublicSurfaceRestricted(bundle.dependencies.PublicSurfaceRestricted)
 		server.SetAPI(bundle.dependencies.FleetAPI)
 	}
+	if err == nil && bundle != nil && bundle.dependencies.NoDataCloseAPI != nil {
+		server.SetInternalAPI(bundle.dependencies.NoDataCloseAPI)
+	}
 	if err == nil && bundle != nil && bundle.dependencies.ControlStream != nil {
 		// The same for the control stream: a Worker that connects before
 		// this point is told the stream is not ready and tries again.
@@ -677,6 +680,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	RefreshPlatformSettings func(context.Context)
 	// PublishFleet writes this replica's contribution to them.
 	FleetAPI http.Handler
+	// NoDataCloseAPI records manual closes of no-data alerts (decision-024),
+	// served on the cluster-only listener; nil for a process without the
+	// control role.
+	NoDataCloseAPI http.Handler
 	// PublicSurfaceRestricted is whether the listener's public surface is
 	// restricted: asked for by the configuration and the CLI came up.
 	PublicSurfaceRestricted bool
@@ -4678,6 +4685,9 @@ type httpRuntime interface {
 	// SetAPI installs the observability API once the runtime that produces the
 	// object facts is open. The listener starts before that runtime does.
 	SetAPI(http.Handler)
+	// SetInternalAPI installs what the cluster-only listener serves under
+	// /internal/ once the stores it writes are open.
+	SetInternalAPI(http.Handler)
 	// SetGRPC installs the control stream the same way.
 	SetGRPC(http.Handler)
 	// SetLiveness installs what /healthz judges, once the loops it judges

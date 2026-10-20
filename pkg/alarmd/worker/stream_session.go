@@ -81,10 +81,13 @@ type streamedExecution struct {
 	noDataPlansSeen      int
 	noDataStateMutations uint64
 	noDataMutations      []execution.PlanNoDataMutation
-	effective            map[execution.ConsumerRef]strategy.EffectiveTimeFact
-	evaluated            execution.EvaluationResult
-	delivered            []execution.SeriesDelivery
-	series               uint64
+	// noDataAbsenceStarts carries each Plan's absent series to the output's
+	// manual-close check (decision-024).
+	noDataAbsenceStarts noDataAbsenceStarts
+	effective           map[execution.ConsumerRef]strategy.EffectiveTimeFact
+	evaluated           execution.EvaluationResult
+	delivered           []execution.SeriesDelivery
+	series              uint64
 	// retainedByPhase is this execution's retained bytes split by what they
 	// were retained for. The total is the sum rather than a counter of its
 	// own: a sixth budget's worth of memory arriving with no phase attached
@@ -1168,7 +1171,9 @@ func (stream *streamedExecution) observeNoDataRepresentations(ctx context.Contex
 			Trace: observability.TraceFields{
 				StrategyID: snapshot.Identity.Plan.StrategyID, BusinessID: snapshot.Identity.Plan.BusinessID,
 			},
-			NoDataMemoryRead: &observability.NoDataMemoryReadFacts{Representation: string(representation)},
+			NoDataMemoryRead: &observability.NoDataMemoryReadFacts{
+				Representation: string(representation), ManualClosesUnread: snapshot.ManualClosesUnread,
+			},
 		})
 	}
 }

@@ -56,6 +56,8 @@ type PlanSlotInput struct {
 	// decides what the effective horizon is, and the two would disagree the
 	// moment either changed.
 	TrackingHorizonSeconds int64
+	// ManualCloses is SlotInput.ManualCloses, forwarded.
+	ManualCloses *ManualCloses
 }
 
 // PlanSlotResult is everything the worker needs from one Plan's no-data round.
@@ -112,6 +114,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		// derive it from.
 		TrackingHorizonSeconds: input.TrackingHorizonSeconds,
 		TrackingExhaustedAt:    input.Snapshot.TrackingExhaustedAt,
+		ManualCloses:           input.ManualCloses,
 	})
 	if err != nil {
 		return PlanSlotResult{}, err

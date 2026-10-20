@@ -262,8 +262,16 @@ type NoDataMemorySnapshot struct {
 	// v2 record does not hold the field and zero is the right reading for it:
 	// no build that wrote one had a horizon to exhaust a roster with.
 	TrackingExhaustedAt int64
-	Groups              []NoDataGroupMemory
-	ReasonCode          ReasonCode
+	// ManualCloses is the strategy's manual closes (decision-024), alert
+	// fingerprint to the unix second alarmd recorded each, read in the same
+	// round trip as the memory. It is not part of the record: nothing in it is
+	// written back, and a snapshot without it is a strategy nobody closed.
+	ManualCloses map[string]int64
+	// ManualClosesUnread is a memory read whose closes could not be: the
+	// round runs without them rather than without its memory.
+	ManualClosesUnread bool
+	Groups             []NoDataGroupMemory
+	ReasonCode         ReasonCode
 }
 
 // NoDataMemoryRenewal is one renewal that actually reached the store.
@@ -319,7 +327,7 @@ func noDataSnapshotHasPayload(snapshot NoDataMemorySnapshot) bool {
 		snapshot.PersistedApplyVersion != (ApplyVersion{}) || snapshot.LastScheduleRevision != "" ||
 		snapshot.RosterVersion != "" || snapshot.PresentAsOf != 0 ||
 		snapshot.TrackingExhaustedAt != 0 || namesARecord ||
-		len(snapshot.Groups) != 0
+		len(snapshot.Groups) != 0 || len(snapshot.ManualCloses) != 0 || snapshot.ManualClosesUnread
 }
 
 func ValidateNoDataLoad(request NoDataLoadRequest, result NoDataLoadResult) error {

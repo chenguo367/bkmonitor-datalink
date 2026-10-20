@@ -387,6 +387,7 @@ func openProductionControlRoleBundle(
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Config: cfg, Health: health, Control: core.Control, Ownership: controlOwnership, Recorder: recorder, Observer: observer, Now: external.Now,
 		FleetAPI: native, PublicSurfaceRestricted: publicRestricted, ControlStream: controlStream, StreamIdentity: streamIdentity,
+		NoDataCloseAPI:  noDataCloseAPIOf(core.NoDataCloses, external.Now),
 		ViewStreamStats: viewServer.Stats, ActivationBlocked: core.Repository.ActivationBlockedReading,
 		ActivationSkipped: core.Repository.SkippedTimelinesReading, ActivationHeader: core.Repository.ActivationHeaderReading,
 		RunOpenAlerts: func(runCtx context.Context) error {

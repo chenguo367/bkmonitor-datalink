@@ -2115,7 +2115,17 @@ One per held gap scope per round that read it, by status, by why it is held, and
 
 Labels: `outcome`
 
-Groups of the Plans that detect no-data, summed over every Slot that judged them, by what the round counted each group as. expected is the roster's size and present what arrived; absent is the groups tracked and reported absent this round; unavailable the groups a round that did not see the whole period could not judge; dropped the series whose dimensions did not match the item. expired is the absences the tracking horizon stopped this round and suppressed the groups the round met already stopped -- the standing size of what the horizon is holding down. Read the last two against each other: expired moving is the horizon acting, suppressed is what it has acted on and is still holding; a deployment that switched the horizon on and reads zero on both has a horizon nothing reached. Both are counted where each group is decided, never by differencing one round's memory against the last, so the round that failed to load its memory does not read as a quiet one. Every label is created at startup so a zero can be told from a label nothing ever wrote. Read absent + expired + suppressed against the fleet page's per-object line, which carries the same counts per Plan for the round it last decided.
+Groups of the Plans that detect no-data, summed over every Slot that judged them, by what the round counted each group as. expected is the roster's size and present what arrived; absent is the groups tracked and reported absent this round; unavailable the groups a round that did not see the whole period could not judge; dropped the series whose dimensions did not match the item. expired is the absences the tracking horizon stopped this round and suppressed the groups the round met already stopped -- the standing size of what the horizon holds down and of what manual closes hold down. manual_closed is the absences a round stopped because a user closed their alert by hand (decision-024); each is in suppressed from the next round on unless its history roster forgot it. Read expired and suppressed against each other: expired moving is the horizon acting, suppressed is what it has acted on and is still holding; a deployment that switched the horizon on and reads zero on both has a horizon nothing reached. Both are counted where each group is decided, never by differencing one round's memory against the last, so the round that failed to load its memory does not read as a quiet one. Every label is created at startup so a zero can be told from a label nothing ever wrote. Read absent + expired + suppressed against the fleet page's per-object line, which carries the same counts per Plan for the round it last decided.
+
+## alarmd_worker_no_data_manual_close_dropped_total
+
+No-data alerts the output check held back because a user closed their absence while the round that produced them ran (decision-024). One per alert not sent; the round after applies the close to the memory and counts it as worker_no_data_absences_total{outcome="manual_closed"}.
+
+## alarmd_worker_no_data_manual_close_read_failures_total
+
+Labels: `site`
+
+Reads of a strategy's manual closes (decision-024) that failed, by where. memory_load is a Plan's no-data memory read whose closes could not be: the round ran on its memory without them. output_check is a batch sent unchecked. Both fail open - an alert nobody closed is never held back over a failed read - and a close missed by one is applied by the next round that reads it. Both labels are created at startup.
 
 ## alarmd_worker_no_data_memory_reads_total
 

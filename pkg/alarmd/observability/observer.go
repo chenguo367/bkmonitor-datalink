@@ -191,10 +191,14 @@ const (
 	// StageWarmingPeak names a replica's hourly line on its state writes to
 	// series still warming their history: the busiest minute and the groups
 	// behind it (WarmingPeak).
-	StageWarmingPeak       = "state_warming_peak"
-	StageEventACKed        = "event_acked"
-	StageStateApplied      = "state_applied"
-	StageProgressCommitted = "progress_committed"
+	StageWarmingPeak = "state_warming_peak"
+	StageEventACKed  = "event_acked"
+	// StageNoDataManualCloseChecked names the output's manual-close check of
+	// one Plan's batch, written only when it held an alert back or could not
+	// read the closes (NoDataManualClose).
+	StageNoDataManualCloseChecked = "no_data_manual_close_checked"
+	StageStateApplied             = "state_applied"
+	StageProgressCommitted        = "progress_committed"
 	// StageExecutionEvidenceWritten names the mark an attempt leaves when it
 	// wrote state and then could not write the Slot down. It is the only sign
 	// that the mark-writing works at all: nothing downstream fails when it does
@@ -534,6 +538,9 @@ type NoDataAbsenceFacts struct {
 	Dropped       uint64
 	Expired       uint64
 	Suppressed    uint64
+	// ManualClosed is the absences this round stopped because a user closed
+	// their alert by hand (decision-024).
+	ManualClosed uint64
 	// AbsentAges is Absent by how long each absence has been open at this
 	// round -- this round, under an hour, under a day, a day or more -- as
 	// the evaluation filed them from the same start the horizon reads. They
@@ -556,7 +563,7 @@ type NoDataAbsentAges struct {
 // the metric creates them, so a label nothing ever wrote can be told from one
 // that wrote zero.
 var NoDataAbsenceOutcomes = []string{
-	"expected", "present", "absent", "unavailable", "dropped", "expired", "suppressed",
+	"expected", "present", "absent", "unavailable", "dropped", "expired", "suppressed", "manual_closed",
 }
 
 // NoDataMemoryRefusalFacts is one Plan's refused absence-memory write: why the
@@ -620,6 +627,9 @@ type NoDataMemoryReadFacts struct {
 	// so the three add up to the Plans that were asked for, and a reader can
 	// check that rather than assume it.
 	Representation string
+	// ManualClosesUnread is a memory that was read when its strategy's manual
+	// closes could not be: the round ran without them.
+	ManualClosesUnread bool
 }
 
 // NoDataMemoryRenewalFacts is what one renewal did.
@@ -2392,6 +2402,9 @@ type Observation struct {
 	// NoDataEmission is what the write did with the no-data events in it, on
 	// the write's own observation; nil when it carried none.
 	NoDataEmission *NoDataEmissionFacts
+	// NoDataManualClose is the output's manual-close check of a batch, on its
+	// own observation.
+	NoDataManualClose *NoDataManualCloseFacts
 	// PlanSeriesMatched is how many PRIMARY series this Slot's query bound to
 	// the Plan an evaluation line is about, on every evaluation line of that
 	// Plan and on the completion-only line of a Plan bound to none. A Plan
@@ -3620,7 +3633,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission}, {ComponentState, StageWarmingPeak},
 	{ComponentState, StageStateApplied}, {ComponentState, StageOutputUnapplied},
-	{ComponentOutput, StageEventACKed},
+	{ComponentOutput, StageEventACKed}, {ComponentOutput, StageNoDataManualCloseChecked},
 	{ComponentProgress, StageProgressCommitted},
 }
 

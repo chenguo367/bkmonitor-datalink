@@ -50,11 +50,16 @@ type Ports struct {
 	// the same reason: without it every declared host would read as unknown, so
 	// every static target would expect nothing and no absence would ever be
 	// reported - a silence that looks exactly like health.
-	Hosts    execution.HostBusiness
-	Events   execution.EventSink
-	State    execution.StateStore
-	Progress execution.ProgressStore
-	Observer execution.Observer
+	Hosts execution.HostBusiness
+	// NoDataManualCloses is read just before a batch's no-data alerts go to
+	// the sink, to drop the ones a user closed while the round ran
+	// (decision-024). Optional: without it nothing is checked there, and a
+	// close still stops the absence at the Plan's next Slot.
+	NoDataManualCloses execution.NoDataManualCloseReader
+	Events             execution.EventSink
+	State              execution.StateStore
+	Progress           execution.ProgressStore
+	Observer           execution.Observer
 	// OpenAlerts is required: a worker that evaluates without it sends every
 	// RECOVERY envelope, and the trigger counts that as not_configured, which
 	// on a production worker is the wiring having come apart.
@@ -459,7 +464,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
-			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
+			withNoDataAbsenceStarts(sequenceCtx, stream.noDataAbsenceStarts), request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
 			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
@@ -1509,6 +1514,11 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				acceptedBytes = append(acceptedBytes, encodedBytes[index])
 			}
 			held.settle(acceptedBytes)
+			// A user may have closed one of these absences after the round
+			// read its memory; its alert must not go out (decision-024). The
+			// series' events are taken out where they are kept, so what is
+			// counted as sent below is what went to the sink.
+			eventsByState = coordinator.withoutManuallyClosed(planCtx, request.Operation, planResult.Plan, accepted, eventsByState)
 			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {

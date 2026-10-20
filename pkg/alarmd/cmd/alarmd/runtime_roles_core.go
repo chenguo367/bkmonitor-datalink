@@ -41,6 +41,10 @@ type phaseTwoCoreResources struct {
 	StorageRouter   *state.FixedRouter
 	ExecutionStore  *state.ExecutionStore
 	StrategySource  controlplane.StrategySource
+	// NoDataCloses is where the control role records manual closes of no-data
+	// alerts (decision-024): the runtime-state store workers read them from.
+	// Nil for a process without the control role.
+	NoDataCloses *state.ExecutionStore
 }
 
 func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder *metric.Recorder, observer observability.Observer,
@@ -295,6 +299,32 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		// says so: the Slots keep passing and the keys keep being renewed.
 		recorder.SetRenewalGateSource(executionStore.RenewalGateResets)
 	}
+	// The control role records manual closes in the runtime-state store the
+	// owning worker reads them from. A process that is also a worker reuses
+	// its store; a control-only one opens the store for this alone.
+	var noDataCloses *state.ExecutionStore
+	if cfg.HasRole(roles.Control) {
+		noDataCloses = executionStore
+		if noDataCloses == nil {
+			closeBackend, err := state.NewRedisBackendWithClient(productionRedisAddress(cfg.RuntimeStoreRedis()), redisForCaller(runtimeClient, redisfailure.CallerRuntimeState))
+			if err != nil {
+				return nil, err
+			}
+			closeRouter, err := state.NewFixedRouter("phase-two-primary", closeBackend)
+			if err != nil {
+				return nil, err
+			}
+			noDataCloses, err = state.NewExecutionStore(state.ExecutionStoreOptions{
+				Prefix: cfg.Redis.StatePrefix, Router: closeRouter, MaxValueBytes: cfg.Limits.Codec.MaxEncodedBytes,
+				MaxItemsPerCall: cfg.Limits.Store.MaxKeysPerBatch,
+				MinTTL:          cfg.Redis.MinTTL.Duration(), MaxTTL: cfg.Redis.MaxTTL.Duration(),
+				RestartMargin: cfg.Redis.RestartMargin.Duration(),
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	progressStore, err := progress.NewStore(progress.StoreOptions{
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), Control: ownershipStore,
 		Slots: catalog, Now: now, Observer: observer,
@@ -341,5 +371,6 @@ func openPhaseTwoCoreResources(ctx context.Context, cfg config.Config, recorder 
 		StorageRouter:   storageRouter,
 		ExecutionStore:  executionStore,
 		StrategySource:  strategySource,
+		NoDataCloses:    noDataCloses,
 	}, nil
 }

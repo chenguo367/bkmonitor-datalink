@@ -141,6 +141,10 @@ func TestEveryPointOfUseAssertionIsProbedAtOpen(t *testing.T) {
 		"CompareAndSetBackend": true, "LifetimeBackend": true, "NoDataHashBackend": true, "SlotAppliedBackend": true,
 		// Optional by design: the sequential path is its fallback.
 		"FencedBatchBackend": true,
+		// Optional by design: without it the no-data load reads the memory
+		// alone and a manual close is refused as store_unavailable, so the
+		// gap is a named refusal at the caller, never a silent stop.
+		"NoDataManualCloseBackend": true,
 	}
 	// The names above are the ones backendHas maps to capabilities; a name
 	// added here without a backendHas branch would pass the scan and probe

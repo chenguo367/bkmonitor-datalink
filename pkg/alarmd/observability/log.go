@@ -709,6 +709,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("no_data_dropped", facts.Dropped),
 			slog.Uint64("no_data_expired", facts.Expired),
 			slog.Uint64("no_data_suppressed", facts.Suppressed),
+			slog.Uint64("no_data_manual_closed", facts.ManualClosed),
 			// The ages beside the count, zeros included, for the same reason
 			// as the counts: whether the horizon can reach anything is read
 			// from the last bucket being zero or not.
@@ -764,6 +765,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("gap_full_slots_observed", uint64(facts.Observed)),
 			slog.String("gap_progress", facts.Progress),
 		)
+	}
+	if facts := observation.NoDataManualClose; facts != nil {
+		attributes = append(attributes,
+			slog.Uint64("no_data_manual_close_dropped", uint64(facts.Dropped)),
+			slog.Bool("no_data_manual_close_check_failed", facts.CheckFailed),
+		)
+	}
+	if facts := observation.NoDataMemoryRead; facts != nil && facts.ManualClosesUnread {
+		attributes = append(attributes, slog.Bool("no_data_manual_closes_unread", true))
 	}
 	if facts := observation.NoDataMemoryWrite; facts != nil {
 		// Both, always. The outcome alone makes a reader remember which of the

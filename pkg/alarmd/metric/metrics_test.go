@@ -559,6 +559,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_history_coverage_unsummarised_total"] = "variableLabels: {cause}"
 	expected["alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["alarmd_worker_no_data_absences_total"] = "variableLabels: {outcome}"
+	expected["alarmd_worker_no_data_manual_close_dropped_total"] = "variableLabels: {}"
+	expected["alarmd_worker_no_data_manual_close_read_failures_total"] = "variableLabels: {site}"
 	expected["alarmd_target_plan_resolution_total"] = "variableLabels: {state}"
 	expected["alarmd_target_selector_resolutions_total"] = "variableLabels: {kind,state,reason}"
 	expected["alarmd_target_excluded_absent_members_total"] = "variableLabels: {}"
@@ -1156,6 +1158,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// can be told from a label nothing ever wrote.
 	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
 	bounds[fqName("worker_no_data_absences_total")] = len(observability.NoDataAbsenceOutcomes)
+	bounds[fqName("worker_no_data_manual_close_dropped_total")] = 1
+	bounds[fqName("worker_no_data_manual_close_read_failures_total")] = len(noDataManualCloseReadSites)
 	bounds[fqName("target_plan_resolution_total")] = len(targetplan.ResolutionStates)
 	// Four kinds by four states by the closed reasons; cells are created on
 	// observation because most triples cannot happen.

@@ -61,6 +61,8 @@ type phaseTwoMetrics struct {
 	queryDownstreamDistress        *prometheus.CounterVec
 	noDataSlotPlans                *prometheus.CounterVec
 	noDataAbsences                 *prometheus.CounterVec
+	noDataManualCloseDropped       prometheus.Counter
+	noDataManualCloseReadFailures  *prometheus.CounterVec
 	targetPlanResolutions          *prometheus.CounterVec
 	targetSelectorResolutions      *prometheus.CounterVec
 	targetExcludedAbsentMembers    prometheus.Counter
@@ -509,6 +511,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"leader and the worker looks like, and it looks like nothing else: the Plans still " +
 				"execute, nothing fails, and every label here reads as a computed zero.",
 		}, []string{"outcome"}),
+		noDataManualCloseDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "worker_no_data_manual_close_dropped_total",
+			Help: "No-data alerts the output check held back because a user closed their absence while the round " +
+				"that produced them ran (decision-024). One per alert not sent; the round after applies the close " +
+				"to the memory and counts it as worker_no_data_absences_total{outcome=\"manual_closed\"}.",
+		}),
+		noDataManualCloseReadFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: metricSubsystem, Name: "worker_no_data_manual_close_read_failures_total",
+			Help: "Reads of a strategy's manual closes (decision-024) that failed, by where. memory_load is a " +
+				"Plan's no-data memory read whose closes could not be: the round ran on its memory without them. " +
+				"output_check is a batch sent unchecked. Both fail open - an alert nobody closed is never held " +
+				"back over a failed read - and a close missed by one is applied by the next round that reads it. " +
+				"Both labels are created at startup.",
+		}, []string{"site"}),
 		noDataAbsences: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: metricSubsystem, Name: "worker_no_data_absences_total",
 			Help: "Groups of the Plans that detect no-data, summed over every Slot that judged them, by what " +
@@ -517,7 +533,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"that did not see the whole period could not judge; dropped the series whose dimensions did " +
 				"not match the item. expired is the absences the tracking horizon stopped this round and " +
 				"suppressed the groups the round met already stopped -- the standing size of what the horizon " +
-				"is holding down. Read the last two against each other: expired moving is the horizon acting, " +
+				"holds down and of what manual closes hold down. manual_closed is the absences a round stopped " +
+				"because a user closed their alert by hand (decision-024); each is in suppressed from the next " +
+				"round on unless its history roster forgot it. Read expired and suppressed against each other: " +
+				"expired moving is the horizon acting, " +
 				"suppressed is what it has acted on and is still holding; a deployment that switched the " +
 				"horizon on and reads zero on both has a horizon nothing reached. Both are counted where each " +
 				"group is decided, never by differencing one round's memory against the last, so the round " +
@@ -1676,6 +1695,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.NoDataAbsenceOutcomes {
 		metrics.noDataAbsences.WithLabelValues(outcome)
 	}
+	for _, site := range noDataManualCloseReadSites {
+		metrics.noDataManualCloseReadFailures.WithLabelValues(site)
+	}
 	for _, state := range targetplan.ResolutionStates {
 		metrics.targetPlanResolutions.WithLabelValues(string(state))
 	}
@@ -1811,7 +1833,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission, m.queryDownstreamDistress,
-		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataAbsences, m.noDataManualCloseDropped, m.noDataManualCloseReadFailures, m.targetPlanResolutions, m.targetSelectorResolutions, m.targetExcludedAbsentMembers, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.inPlaceWaits, m.inPlaceHeldInputBytes, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -2095,6 +2117,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.observeNoDataStall(observation)
 		m.observeNoDataAbsence(observation)
 	}
+	if observation.Component == observability.ComponentOutput &&
+		observation.Stage == observability.StageNoDataManualCloseChecked {
+		m.observeNoDataManualClose(observation)
+	}
 	if facts := observation.TargetResolution; facts != nil {
 		m.observeTargetResolution(facts)
 	}
@@ -2145,6 +2171,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.NoDataMemoryRead; facts != nil {
 		m.noDataMemoryReads.WithLabelValues(facts.Representation).Inc()
+		if facts.ManualClosesUnread {
+			m.noDataManualCloseReadFailures.WithLabelValues("memory_load").Inc()
+		}
 	}
 	if observation.Stage == observability.StageNoDataMemoryRenewed && observation.NoDataMemoryRenewal != nil {
 		m.noDataMemoryRenewals.WithLabelValues(
@@ -2330,9 +2359,27 @@ func (m phaseTwoMetrics) observeNoDataAbsence(observation observability.Observat
 	for outcome, count := range map[string]uint64{
 		"expected": facts.Expected, "present": facts.Present, "absent": facts.Absent,
 		"unavailable": facts.Unavailable, "dropped": facts.Dropped,
-		"expired": facts.Expired, "suppressed": facts.Suppressed,
+		"expired": facts.Expired, "suppressed": facts.Suppressed, "manual_closed": facts.ManualClosed,
 	} {
 		m.noDataAbsences.WithLabelValues(outcome).Add(float64(count))
+	}
+}
+
+// noDataManualCloseReadSites is where a strategy's manual closes are read.
+var noDataManualCloseReadSites = []string{"memory_load", "output_check"}
+
+// observeNoDataManualClose counts what the output's manual-close check did
+// with one batch, from the check's own line.
+func (m phaseTwoMetrics) observeNoDataManualClose(observation observability.Observation) {
+	facts := observation.NoDataManualClose
+	if facts == nil {
+		return
+	}
+	if facts.Dropped > 0 {
+		m.noDataManualCloseDropped.Add(float64(facts.Dropped))
+	}
+	if facts.CheckFailed {
+		m.noDataManualCloseReadFailures.WithLabelValues("output_check").Inc()
 	}
 }
 

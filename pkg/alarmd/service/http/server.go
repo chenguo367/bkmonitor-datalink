@@ -48,6 +48,7 @@ import (
 type Server struct {
 	handler            http.Handler
 	apiHandler         atomic.Pointer[http.Handler]
+	internalAPI        atomic.Pointer[http.Handler]
 	grpcHandler        atomic.Pointer[http.Handler]
 	diagnosticsHandler http.Handler
 	diagnosticsAddress string
@@ -145,6 +146,14 @@ func (s *Server) SetPublicSurfaceRestricted(restricted bool) {
 // be indistinguishable from a deployment that has no API at all.
 func (s *Server) SetAPI(handler http.Handler) {
 	s.apiHandler.Store(&handler)
+}
+
+// SetInternalAPI installs what the cluster-only listener serves under
+// /internal/: calls between modules of one cluster, which carry no credential
+// and so are never on the query surface. Until it is called they answer 503,
+// as the API does.
+func (s *Server) SetInternalAPI(handler http.Handler) {
+	s.internalAPI.Store(&handler)
 }
 
 // SetGRPC installs the gRPC surface -- decision-016's control stream -- on
@@ -250,6 +259,14 @@ func newServer(recorder *metric.Recorder, options ...Option) *Server {
 	internal.HandleFunc("/healthz", server.health)
 	internal.HandleFunc("/readyz", server.readiness)
 	internal.Handle("/metrics", metrics)
+	internal.HandleFunc("/internal/", func(response http.ResponseWriter, request *http.Request) {
+		handler := server.internalAPI.Load()
+		if handler == nil || *handler == nil {
+			http.Error(response, "internal API not ready", http.StatusServiceUnavailable)
+			return
+		}
+		(*handler).ServeHTTP(response, request)
+	})
 	server.internalHandler = internal
 
 	mux := http.NewServeMux()

@@ -136,6 +136,10 @@ type AbsenceFacts struct {
 	// Suppressed counts the groups this round met already stopped, which is
 	// the standing size of what the horizon is holding down.
 	Suppressed uint64
+	// ManualClosed counts the absences this round stopped because a user
+	// closed their alert by hand (decision-024), deleted or marked as the
+	// horizon would. A marked one is in Suppressed from the next round on.
+	ManualClosed uint64
 	// AbsentAges is the absences still tracked and reported this round, by
 	// how long each has been open: since this round only, under an hour,
 	// under a day, a day or more. Counted where Absent is, from the same
@@ -399,6 +403,19 @@ func evaluateAbsence(input AbsenceInput) AbsenceResult {
 			// synthetic anomaly, and the entry is left exactly as it is: a
 			// horizon raised after the fact must not restart what a lower one
 			// stopped, and the only thing that restarts it is data arriving.
+			//
+			// Except that a history roster still forgets it at the horizon. The
+			// horizon never marks a history group - it forgets it - so a marked
+			// one is a manual close (decision-024), and the typical close is of a
+			// group whose data never returns. Kept, it would sit in a memory the
+			// running Plan renews every round; forgotten at the horizon it
+			// leaves exactly as an unmarked absence would, with nothing said.
+			if input.Roster.Source == RosterHistory &&
+				trackingExpired(entry.FirstAbsent, input.EvaluationTime, input.TrackingHorizonSeconds) {
+				result.Facts.Expired++
+				delete(result.Memory, key)
+				continue
+			}
 			result.Facts.Suppressed++
 			continue
 		}

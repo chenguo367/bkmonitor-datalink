@@ -43,6 +43,10 @@ type noDataRound struct {
 	// horizonSource is where that horizon came from, as compilation froze it
 	// beside the number; empty for none.
 	horizonSource string
+	// absenceStarts is when each absent series' absence began, by series
+	// identity digest: what the output checks a manual close recorded during
+	// this round against (decision-024).
+	absenceStarts map[string]int64
 }
 
 // seriesDimensionsFor is the dimensions of every series this Slot saw for one
@@ -144,6 +148,9 @@ func (stream *streamedExecution) noDataRoundFor(
 		// Plan was built rather than what the deployment says right now -
 		// which is what lets a retried Slot reach the same answer.
 		TrackingHorizonSeconds: config.TrackingHorizonSeconds,
+		// The strategy's manual closes, read with the memory: an absence a
+		// user closed stops being tracked before this round judges it.
+		ManualCloses: manualClosesFor(due, snapshot.ManualCloses),
 	})
 	if err != nil {
 		return noDataRound{}, derivationFailed(err)
@@ -165,6 +172,12 @@ func (stream *streamedExecution) noDataRoundFor(
 			return noDataRound{}, outputFailed(err)
 		}
 		round.series = append(round.series, entry)
+		if synthetic.Value == nodata.AbsentValue && synthetic.FirstAbsent > 0 {
+			if round.absenceStarts == nil {
+				round.absenceStarts = make(map[string]int64)
+			}
+			round.absenceStarts[string(entry.series)] = synthetic.FirstAbsent
+		}
 	}
 	return round, nil
 }
@@ -331,6 +344,12 @@ func (stream *streamedExecution) evaluateNoData(
 		stream.noDataStateMutations += uint64(len(round.series))
 		stream.recordNoDataOutcome(ctx, due, round.outcome)
 		stream.noDataJudged = append(stream.noDataJudged, noDataJudgment{due: due, round: round})
+		if len(round.absenceStarts) > 0 {
+			if stream.noDataAbsenceStarts == nil {
+				stream.noDataAbsenceStarts = make(noDataAbsenceStarts)
+			}
+			stream.noDataAbsenceStarts[due.Identity] = round.absenceStarts
+		}
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
@@ -669,7 +688,7 @@ func (stream *streamedExecution) observeNoDataAbsence(
 			Outcome: string(round.outcome), HorizonSeconds: round.horizon, HorizonSource: round.horizonSource,
 			RosterSource: string(facts.RosterSource),
 			Expected:     facts.Expected, Present: facts.Present, Absent: facts.Absent, Unavailable: facts.Unavailable,
-			Dropped: facts.Dropped, Expired: facts.Expired, Suppressed: facts.Suppressed,
+			Dropped: facts.Dropped, Expired: facts.Expired, Suppressed: facts.Suppressed, ManualClosed: facts.ManualClosed,
 			AbsentAges: observability.NoDataAbsentAges{
 				ThisRound: facts.AbsentAges.ThisRound, UnderHour: facts.AbsentAges.UnderHour,
 				UnderDay: facts.AbsentAges.UnderDay, DayOrMore: facts.AbsentAges.DayOrMore,
