@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
@@ -41,6 +42,6 @@ func publishRoleControlFacts(ctx context.Context, bundle *phaseTwoWorkerBundle, 
 	err := store.PublishControl(ctx, facts)
 	bundle.dependencies.Recorder.ObserveControlFactsWrite(fleet.ControlPublishResult(err))
 	if err != nil {
-		bundle.observe(ctx, "fleet", "control_facts", "failed", err)
+		bundle.observe(ctx, observability.ComponentRuntime, observability.StageFleetControlFactsPublish, observability.ResultFailed, err)
 	}
 }

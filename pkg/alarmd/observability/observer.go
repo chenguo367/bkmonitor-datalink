@@ -118,13 +118,16 @@ const (
 	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
 	StageFleetSnapshotPublish   = "fleet_snapshot_publish"
-	StageObservationWindow      = "observation_window"
-	StageQueryCompleted         = "query_completed"
-	StageQueryBudgetResolved    = "query_budget_resolved"
-	StageSlotReadinessArrival   = "slot_readiness_arrival"
-	StageStatePreflight         = "state_preflight"
-	StageGapLoaded              = "gap_loaded"
-	StageNoDataDecided          = "no_data_decided"
+	// StageFleetControlFactsPublish is the control leader's write of its
+	// control facts for the fleet view, beside each replica's snapshot.
+	StageFleetControlFactsPublish = "fleet_control_facts_publish"
+	StageObservationWindow        = "observation_window"
+	StageQueryCompleted           = "query_completed"
+	StageQueryBudgetResolved      = "query_budget_resolved"
+	StageSlotReadinessArrival     = "slot_readiness_arrival"
+	StageStatePreflight           = "state_preflight"
+	StageGapLoaded                = "gap_loaded"
+	StageNoDataDecided            = "no_data_decided"
 	// StageTargetResolved names what one Plan's target plan resolved to in
 	// one Slot: the state the admission filter and the absence judgement
 	// both read, and each selector's answer by name (decision-017).
@@ -3559,6 +3562,10 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageAbsentStrategyClose},
 	{ComponentControlPlane, StageSnapshotRefreshed}, {ComponentControlPlane, StageSnapshotUnavailable},
 	{ComponentControlPlane, StageActivationFailed},
+	// A failed write of the leader's control facts. It was written as
+	// fleet/control_facts, words no catalogue names, and read _other/_other;
+	// its own family (fleet_control_facts_writes_total) counts every write.
+	{ComponentRuntime, StageFleetControlFactsPublish},
 	// The catalog's three stages were emitted from the day the catalog
 	// existed and listed nowhere, so NormalizeComponentStage folded every one
 	// of them to (_other, _other) and the generic counter admitted them as
