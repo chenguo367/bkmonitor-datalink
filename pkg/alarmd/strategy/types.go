@@ -649,6 +649,28 @@ func (p *CompiledPlan) NoDataLevel() *CompiledLevel {
 //
 // Nil when the Plan detects no no-data, which is the caller asking for a view
 // of something that is not there.
+// RequiredFullSlots is how many whole Slots a gap marker of this Plan waits
+// for before it clears: the most history points any of its Levels reads,
+// the no-data Level included. The marker is the Plan's, and a round not read
+// whole leaves a hole in the no-data series' history as well as the real
+// ones'; a marker sized on the declared Levels alone clears while the no-data
+// Level's window still holds the unread round, which its recovery walk would
+// then read as a quiet minute. Positions and Slots are the same unit: the
+// trigger's step must equal the evaluation interval, which is the cadence.
+func (p *CompiledPlan) RequiredFullSlots() uint32 {
+	if p == nil {
+		return 0
+	}
+	var required uint32
+	for _, level := range p.levels {
+		required = max(required, level.RequiredDetectHistoryPoints())
+	}
+	if p.noDataLevel != nil {
+		required = max(required, p.noDataLevel.RequiredDetectHistoryPoints())
+	}
+	return required
+}
+
 func (p *CompiledPlan) NoDataView() *CompiledPlan {
 	if p == nil || p.noDataLevel == nil {
 		return nil

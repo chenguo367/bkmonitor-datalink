@@ -526,6 +526,12 @@ type Summary struct {
 	// likely cause of all of them, which is an unmeasured guess pointed at a
 	// population that contains both.
 	WindowSeriesChurn int `json:"window_series_churn"`
+	// SparserThanWindow is how many objects in the list are series that
+	// report less often than their window has positions
+	// (HistoryCoverage.SparserThanWindow). Never part of WindowNeverFills:
+	// their windows do not fill, but their recovery is decided, so "an alert
+	// can be raised and cannot clear itself" is not true of them.
+	SparserThanWindow int `json:"sparser_than_window"`
 }
 
 // momentOrNil drops a zero time rather than sending it.
@@ -603,6 +609,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	ours, external, unattributed, oursUnclassified := 0, 0, 0, 0
 	neverFills := 0
 	seriesChurn := 0
+	sparserThanWindow := 0
 	onset := Onset{}
 	for _, anomaly := range anomalies {
 		if anomaly.Stalled {
@@ -648,7 +655,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 			// HISTORY_GAPPED: data that arrived and then had holes, told back
 			// to the reader as "this series does not live long enough to fill
 			// its window", which is a different thing and sends them nowhere.
-			if windowNeverFillsReason(anomaly.CauseReason) && anomaly.Coverage.Persistent() {
+			if windowNeverFillsReason(anomaly.CauseReason) && anomaly.Coverage.Persistent() && !anomaly.Coverage.SparserThanWindow() {
 				neverFills++
 				// A subset of a subset, and the only one of these with a named
 				// owner. Persistent() says the shortfall will not resolve; it is
@@ -674,6 +681,9 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 			// this line reported every one of their objects as the
 			// deployment's own -- under a heading saying they are not.
 			unattributed++
+		}
+		if anomaly.Finding.Check == CheckSeriesSparserThanWindow {
+			sparserThanWindow++
 		}
 		kinds[anomaly.Kind]++
 		if anomaly.ReasonCode != "" {
@@ -715,7 +725,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 		ByReplica: rank(replicas), Stalled: stalled, Onset: onset,
 		Ours: ours, External: external, Unattributed: unattributed,
 		OursUnclassified: oursUnclassified, WindowNeverFills: neverFills,
-		WindowSeriesChurn: seriesChurn,
+		WindowSeriesChurn: seriesChurn, SparserThanWindow: sparserThanWindow,
 	}
 }
 

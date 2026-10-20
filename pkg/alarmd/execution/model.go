@@ -3342,6 +3342,11 @@ type PrimaryInputFact struct {
 	// round's - its target - so they go stale when the content moves, and a
 	// reader trusts the copy only under the same content.
 	QuietWhenEmpty bool
+	// UnfilledWhenEmpty says a FULL, EMPTY primary is a count its provider
+	// does not zero-fill (DataRequirement.UnfilledCounts), grouped or not: the
+	// answer is empty, and a quiet group and a missing one look the same.
+	// Set by the worker the same way, observation only.
+	UnfilledWhenEmpty bool
 }
 
 func DerivePrimaryInputFact(input InternalExecution) (PrimaryInputFact, error) {
@@ -4102,9 +4107,12 @@ type LastCompletionSummary struct {
 // round's word, so a reader trusts them only while the object runs the same
 // content, and a commit that declares no content writes none.
 type EmptyRoundSummary struct {
-	Quiet           bool   `json:"quiet,omitempty"`
-	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
-	ContentScope    string `json:"content_scope,omitempty"`
+	Quiet           bool `json:"quiet,omitempty"`
+	EmptiedByTarget bool `json:"emptied_by_target,omitempty"`
+	// Unfilled is PrimaryInputFact.UnfilledWhenEmpty, kept for the row a
+	// restarted replica restores, like Quiet.
+	Unfilled     bool   `json:"unfilled,omitempty"`
+	ContentScope string `json:"content_scope,omitempty"`
 	// IdentityRounds is how many rounds in a row, this one included, came
 	// back empty because every series was one the target's identity could
 	// not read (PrimaryInputFact.Identity), under this content; zero for

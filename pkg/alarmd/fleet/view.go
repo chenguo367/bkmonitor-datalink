@@ -1365,6 +1365,48 @@ func (coverage *HistoryCoverage) Churning() bool {
 		coverage.FreshRounds > coverage.WorstRequired
 }
 
+// SparserThanWindow reports a long-lived series that reports less often than
+// its window has positions. Points every five minutes under a one minute step
+// read like this, and no window of such a series is ever whole.
+//
+// Read on the evidence that tells a cadence from data that went missing,
+// not on the counts alone: every short window's holes are minutes the query
+// answered whole without the series (sparseEvidence), and every named short
+// window - and the worst one - holds a point in at most half its positions.
+// On top of Persistent, like Churning and exclusive with it: none of the
+// short windows belongs to a new series, and none holds an unusable record.
+// A long-lived series missing a few minutes keeps more than half its window
+// and stays SERIES_SPARSE's or SERIES_DATA_MISSING's.
+//
+// That is a cadence, not a fault. The recovery walk counts a settled hole as a
+// minute with no anomaly, as Python's recovery check does, so an alert on such
+// a series closes when Python's would; what never comes is NORMAL, which needs
+// a whole window. The strategy's window and step set it against how often the
+// series reports.
+func (coverage *HistoryCoverage) SparserThanWindow() bool {
+	if !coverage.Persistent() || coverage.ShortFresh != 0 || coverage.Unusable != 0 ||
+		coverage.WorstValid == 0 || coverage.WorstValid*2 > coverage.WorstRequired || !sparseEvidence(coverage) {
+		return false
+	}
+	for _, window := range coverage.Windows {
+		if window.Valid == 0 || window.Valid*2 > window.Required {
+			return false
+		}
+	}
+	return true
+}
+
+// PointEverySteps is how often a series SparserThanWindow reports, in the
+// window's own steps: the worst window's positions over its points, rounded
+// to the nearest step. Zero for any other coverage. With a one minute step it
+// is the minutes between points.
+func (coverage *HistoryCoverage) PointEverySteps() uint32 {
+	if !coverage.SparserThanWindow() {
+		return 0
+	}
+	return (coverage.WorstRequired + coverage.WorstValid/2) / coverage.WorstValid
+}
+
 // Starved reports a window that has held no points at all for longer than
 // filling it could take.
 //

@@ -797,8 +797,10 @@ var CHECK = {
   EMPTY_AFTER_TARGET:    '{n} 个对象的查询有数据，但全部不在所选监控目标内（{s} 条策略）：数据在，但不在所选目标内，请核对目标',
   IDENTITY_UNMATCHED:    '{n} 个对象的查询有数据，但数据的身份标签建不出策略要的对象（{s} 条策略）：数据在，但身份标签对不上，请策略或采集方对齐身份标签',
   QUIET:                 '{n} 个对象是分组的事件计数，这一轮查询完整、没有任何分组在问的范围里有事件（{s} 条策略）：检测在跑，事件流在静止，不是无数据',
+  LOG_COUNT_EMPTY:       '{n} 个对象是日志计数（分组或不分组），查询完整但回答为空（{s} 条策略）：空；日志计数不补零，安静和缺数据看起来一样——不当作无数据',
   ANSWER_TRUNCATED:      '{n} 个对象最近一轮回答可能被 UQ 截断（{s} 条策略）：某个分组维度在一层里恰好有一万个取值，是 UQ 每层的分组上限；回来的分组照常做阈值检测，配了无数据检测的这一轮整轮不判无数据（SKIPPED_ANSWER_TRUNCATED），回来的分组也不判',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
+  SERIES_SPARSER_THAN_WINDOW: '{n} 个对象的序列上报间隔比检测窗口稀（{g} 种间隔，{s} 条策略）：窗口永远填不满，但恢复照常判定、与 Python 同一时刻恢复，只是不会出 NORMAL——按配置工作，不是故障',
   SERIES_DATA_MISSING:   '{n} 个对象恢复所需的老序列数据不完整（{s} 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出',
   WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
   COVERAGE_READING_REFUSED: '{n} 个对象的窗口计数被观察器拒收，窗口满没满说不出（{g} 条规则，{s} 条策略）',
@@ -809,7 +811,7 @@ var CHECK = {
 // What the objects of a check are folded on, in words.
 var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
                 degradation: '超界的状态', loss: '损失是什么', blocked: '卡在哪一步 · 依赖 · 类型（原因码在组内计数）',
-                hour: '回到活动集的那个小时（UTC）'};
+                hour: '回到活动集的那个小时（UTC）', cadence: '上报间隔（约每几个周期一个点）'};
 
 // Where a problem is between failing and fixed, from the server's reading
 // of its objects' rows -- never from the dependency's own health. Held to
@@ -950,8 +952,10 @@ var EVIDENCE = {
   EMPTY_AFTER_TARGET:    '与 EMPTY_EVERY_ROUND 同一条空跑（同一把一小时的尺、同样从没见过数据），只差最近一个空轮的原因：查询返回了序列，而每条都被所有策略按"不在监控目标内"拒绝，且拒绝时缓存事实齐全、是目标本身的回答（admission.DefinitelyOutside）。有任何一条因为别的原因被拒（主机停用监控、缓存读不到、选择器没答全），就不归这一行。JSON：empty_every_round.cause=OUTSIDE_TARGET',
   IDENTITY_UNMATCHED:    '对象行"数据身份对不上"：连续轮数（同一把"排除偶发"的 3 轮，不等一小时：序列就在那里，只是建不出对象键）；最近一轮被扣下的序列总数、其中"身份字段缺失或模型门不成立"（target_key_missing）与"不在目标内"的条数；至多 3 条被扣序列的身份字段（只有字段名与值，值截到 64 字节）：策略的键字段、模型门字段与期望值、数据里的实际值，以及 canonical 的 model_id、model_inst_id 若在。只在一轮里被扣的序列全部是身份缺失时成立；混有"不在目标内"的仍归原来的行。JSON：identity_unmatched',
   QUIET:                 '对象行：最近一轮主查询完整（FULL）且为空，查询只读 custom/event、带分组维度，且没有任何序列被扣下（不是被目标拒绝的空）。事件计数向 UQ 要 N + R 个周期（触发窗口加恢复窗口），UQ 只给这个范围里有过事件的分组补 0；没有任何分组回来，就是这段时间里一条事件也没有。从第一轮空就是这一行，不等一小时，也不进 NO_DATA_PERSISTENT 或 EMPTY_EVERY_ROUND。JSON：no_data[].kind=QUIET',
+  LOG_COUNT_EMPTY:       '对象行：主查询完整（FULL）且为空，查询只读 bk_log_search/log、bk_monitor/log，或按 count / 去重计数读 bk_log_search/time_series（分组或不分组），且没有任何序列被扣下。这类计数来自 ES 日期直方图，没有文档的分组直接不出现、不补 0；不分组的多数在安静时回 0（那是数据点，不算空），少数在范围内没有文档时整条不回，所以这一轮的空既可能是分组安静，也可能是数据缺失；等待时长与无数据两行相同',
   ANSWER_TRUNCATED:      '对象行：最近一轮有回答的查询里，ES 类来源（custom/event、日志、bk_log_search 时序）的某个分组维度，在其余维度相同的一组序列里恰好有 10000 个不同取值，正是 UQ 每层 terms 聚合的上限（EsMaxSize 默认值）；UQ 截掉的分组不报任何标记。父桶恰好一万个、没截时回答长得一样，所以是"可能"。下一轮有回答且没有这个迹象即消失。JSON：no_data[].kind=ANSWER_TRUNCATED，answer_truncation 带来源与维度；计数 uq_answer_truncated_total{source_semantics}',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
+  SERIES_SPARSER_THAN_WINDOW: '对象行窗口计数：序列长期存在（没有新序列），最差窗口和每个列出的短窗口里有点的位置都不超过一半，缺口全是"查询正常返回、这条序列不在结果里"；分组键 every_N_steps 是最差窗口位置数除以有点数，约每 N 个周期一个点（周期 1 分钟时就是约每 N 分钟）',
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
   QUERY_TARGET_MISSING:  '分组的后端回答（表/字段不存在的状态词）；策略引用的表与字段看行上策略链接，与元数据逐个核',
   READ_BEFORE_COMPLETE: '对象行"首读早于数据到齐"：当前有效的 time_delay（current_time_delay_seconds，按周期向上取整、日志关键字不配时取 60）、建议值（suggested_time_delay_seconds：当前值加上样本里数据比首读晚到齐的最大秒数，再按周期向上取整；到齐时刻取的是第一次读全的那一档复查，数据实际在它和前一档之间到达，所以建议值是上界）、从何时起连续出现（since）。依据的样本（每个样本的 Slot、首读年龄、到齐年龄、在哪一档复查时看到首读已有的序列变了或首读为空后数据才到、变化的桶）在属主副本的 lookback.get 里（read_early）。回看按事实分四类，只有"整窗读早"进这一行；只是后来多出新序列的归补充检测，序列表被内存安全线拒绝而分不出的记为未分类，都不在这一行',
@@ -994,8 +998,10 @@ var NEXT = {
   EMPTY_AFTER_TARGET:    '交策略侧：数据在，但不在所选目标内，请核对目标——所选的主机、模块或分组里有没有正在上报这个指标的对象；数据源本身不用查',
   IDENTITY_UNMATCHED:    '交策略或采集方：按行上的样本对齐身份字段——策略（目标计划）要的字段与期望值，对数据实际带的标签；两边任一侧改都能好。不是数据没到，也不是目标选错',
   QUIET:                 '不用处理：事件计数没有事件可判。若事件源确实在产生事件、这里却一直安静，先核 UQ 那头：ES 索引或 mapping 查找失败、路由没有存储实例时，UQ 也回"完整且为空"，从回答里分不出来（外部服务审查第 8 节）',
+  LOG_COUNT_EMPTY:       '检测照常：空；日志计数不补零，安静和缺数据看起来一样。若该分组本应持续有日志，交数据侧核采集与入库；若安静是正常的，不必处理',
   ANSWER_TRUNCATED:      '收窄策略的分组：去掉或换掉取值上万的那个维度（对象行的 answer_truncation.dimension），或改用不按它分组的写法；部署调高过 UQ 的 EsMaxSize 的，alarmd 认的仍是默认一万',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
+  SERIES_SPARSER_THAN_WINDOW: '不用处理：告警照常触发，恢复按已落定的空缺算作无异常、与 Python 一致；策略侧若想要完整窗口（NORMAL），把检测周期或窗口调到不短于序列的上报间隔',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略；原因码为 DETECT_INTERVAL_STORAGE_NOT_SLIDING 时，是该指标的存储不支持按检测周期滑动，请去掉检测周期',
   QUERY_TARGET_MISSING:  '按策略核引用的表与字段是否真不存在（对元数据）：是就改策略或接入数据，不是就是查询构造或元数据问题回 alarmd；已降级的对象修好后会自动重试',
   READ_BEFORE_COMPLETE: '交策略负责人把策略的 time_delay 改到对象行的建议值（或更大）；这是整窗读早，服务会按确认到齐的样本自动推后首读，当前等待见 read_hold_ms；自动等待已达上限仍读早时需调整策略。改完新配置发布后，下一次抽样仍读早会继续留在这一行',
@@ -1042,8 +1048,10 @@ var RECOVERY = {
   EMPTY_AFTER_TARGET:    '任一轮有序列进入目标即消失；最近一个空轮不再是全部被目标拒绝时，回到 EMPTY_EVERY_ROUND',
   IDENTITY_UNMATCHED:    '任一轮有序列被准入、或查询返回空、或被扣的序列不再全部是身份缺失时消失（连续轮数清零）',
   QUIET:                 '任一轮有分组回来（范围里出现事件）即消失',
+  LOG_COUNT_EMPTY:       '任一轮有分组回来（范围里出现日志）即消失',
   ANSWER_TRUNCATED:      '任一轮有回答、且没有维度顶到一万即消失；查询失败的轮次不算',
   SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
+  SERIES_SPARSER_THAN_WINDOW: '序列上报变密到窗口能填满，或策略周期调到不短于上报间隔：该对象从这一行消失',
   PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',
   QUERY_TARGET_MISSING:  '策略改好或表接入后，冷却到期自动重试成功，对象离开降级池',
   READ_BEFORE_COMPLETE: '一次抽样发现首读时数据已经到齐（没有变化、或只是后来多出新序列）即消失；配置改完后要等这个对象的下一次抽样（约每小时一次）才会消失',
@@ -3900,6 +3908,7 @@ var KIND_TEXT = {
   NO_DATA: '持续无数据',
   EMPTY_EVERY_ROUND: '每轮都无数据',
   QUIET: '事件计数静止（无事件）',
+  LOG_COUNT_EMPTY: '日志计数为空（不补零，安静与缺数据分不出）',
   ANSWER_TRUNCATED: '回答可能被分组上限截断',
   READ_BEFORE_COMPLETE: '首读早于数据到齐',
   READ_HELD: 'alarmd 推后首读',

@@ -100,6 +100,13 @@ const (
 	// stopped or never came, so the object is on neither line above: it is
 	// detecting, and its row says why it has nothing to judge.
 	KindQuiet = "QUIET"
+	// KindLogCountEmpty: a log count, grouped or not, whose rounds came back empty
+	// for as long as the data lines above wait - empty; log counts aren't
+	// zero-filled, so quiet and missing look the same. Its provider answers
+	// a group with no document by leaving it out, not with a zero, so the
+	// same empty answer is a group at rest and a group whose data stopped,
+	// and the row does not claim either.
+	KindLogCountEmpty = "LOG_COUNT_EMPTY"
 	// KindIdentityUnmatched: an object whose rounds come back empty because
 	// every series its query returned was one the target's identity could
 	// not read -- the key's dimensions were missing or its model gate did
@@ -394,8 +401,11 @@ type queryGroupState struct {
 	// quiet is whether the latest empty round was an event count answering
 	// with no group (KindQuiet). Every empty round sets it, and it is read
 	// only while an empty run lasts, which a round with records ends.
-	quiet   bool
-	sawData bool
+	quiet bool
+	// unfilled is whether the latest empty round was a grouped count its
+	// provider does not zero-fill (KindLogCountEmpty), read like quiet.
+	unfilled bool
+	sawData  bool
 	// emptySinceSlot and lastEmptySlot bound the run of empty completions on
 	// the source's own clock: the Slot of the first empty round of the run and
 	// of the latest. The "every round" line gates on their distance, Slot to
@@ -806,6 +816,13 @@ var FiledCauses = []string{string(model.CauseGapGuardWarming), string(model.Caus
 // strategy working as configured. Both are normal; both mean the same thing,
 // which is that recovery has no basis to be decided on.
 //
+// A long-lived series that reports less often than its window has positions
+// is not either of those, and it is not undecidable. Its window never fills,
+// but its recovery is decided: a settled hole counts as a minute with no
+// anomaly, as in Python, so its alerts close when Python's would. It has a
+// line of its own (CheckSeriesSparserThanWindow) and a column that says it is
+// working as configured (columnOf), never this one.
+//
 // HISTORY_GAPPED is deliberately not here. It also blocks the gate, but it
 // says the data arrived, stopped, and came back -- a hole in a stream that was
 // flowing, which is a question about the data rather than about how long the
@@ -813,8 +830,12 @@ var FiledCauses = []string{string(model.CauseGapGuardWarming), string(model.Caus
 //
 // GAP_GUARD_WARMING is here. A round filed under it (roundFiledUnder) answered
 // whole, and its Level waits only for a guard an earlier gap opened: the
-// window's history is short, WARMING or GAPPED, State advances, and the guard
-// clears once enough whole rounds pass. The hole is not a question left open
+// window's history is short, WARMING or GAPPED, and State advances. The guard
+// clears on the first round whose loaded history forms a whole window, so for
+// a series whose windows fill it clears once enough whole rounds pass; for a
+// series sparser than its window no round ever forms one and the guard never
+// clears. That series is decided all the same - recovery does not wait on the
+// guard - and is filed as sparser than its window, not here. The hole is not a question left open
 // the way a bare HISTORY_GAPPED leaves one: the gap was a round of its own,
 // reported under its own reason, and a run that holds that round has seen
 // something wrong and stays in the anomaly column.
@@ -1671,6 +1692,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.identityRounds, state.identity = 0, nil
 			}
 			state.quiet = observation.PrimaryInput != nil && observation.PrimaryInput.QuietWhenEmpty
+			state.unfilled = observation.PrimaryInput != nil && observation.PrimaryInput.UnfilledWhenEmpty
 			if state.emptyRuns == 0 {
 				state.emptySince = at
 				state.emptySinceFrom = SinceSnapshotContinuity
@@ -2232,6 +2254,15 @@ func columnOf(state *queryGroupState) string {
 	// series producing nothing usable, which is a question for someone. It
 	// reports the same reason as the normal case, so the reason alone cannot
 	// keep it out of the column that says "nothing to do here".
+	// A series sparser than its window, under a reason that would otherwise
+	// call it undecidable, is decided: its recovery is read off settled holes
+	// as Python's is, and only NORMAL never comes, which is its configuration
+	// against its cadence. Ahead of the undecidable column, because that
+	// column says recovery has nothing to be decided on, and here it has.
+	if !state.sawSomethingWrong && state.currentKind == KindDegradedRun &&
+		undecidableReason(state.causeReason) && state.coverage.SparserThanWindow() {
+		return ColumnByDesign
+	}
 	if !state.sawSomethingWrong && state.currentKind == KindDegradedRun &&
 		undecidableReason(state.causeReason) && !state.coverage.Starved() {
 		return ColumnUndecidable
@@ -2958,6 +2989,13 @@ func (tracker *Tracker) NoData() []Anomaly {
 			}
 		default:
 			continue
+		}
+		// A log count's empty answer is the same for a quiet group and a
+		// missing one, so it is not told back as data that stopped or never
+		// came: same clock, its own line. Data the target turned away is
+		// still the target's.
+		if state.unfilled && (anomaly.Kind == KindNoData || anomaly.Kind == KindEmptyEveryRound && !state.emptiedByTarget) {
+			anomaly.Kind, anomaly.EmptyEveryRound = KindLogCountEmpty, nil
 		}
 		for strategy := range state.strategies {
 			anomaly.Strategies = append(anomaly.Strategies, strategy)

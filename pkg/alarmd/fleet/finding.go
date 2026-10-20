@@ -115,6 +115,17 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 	// got to the window line -- its own reason, a guard it is held under, or
 	// a code. The shape of it is a host that misses whole minutes, and it sat
 	// on this deployment's undetermined list.
+	// A window line whose series reports less often than its window has
+	// positions is that cadence, whichever window line the counts reached:
+	// a window that never fills because the series is sparser than it, not
+	// one that cannot be decided. Read before SERIES_SPARSE, whose evidence
+	// such a series also carries - every minute between its points is one
+	// the query answered without it - and which would send the data owner
+	// to look for points the series never sends.
+	if (check == CheckWindowUndecided || check == CheckSeriesDataMissing) && windowLineReason(anomaly.CauseReason) &&
+		anomaly.Coverage.SparserThanWindow() {
+		return CheckSeriesSparserThanWindow, true, false
+	}
 	if (check == CheckWindowUndecided || check == CheckSeriesDataMissing) && sparseEvidence(anomaly.Coverage) {
 		return CheckSeriesSparse, true, false
 	}
@@ -162,6 +173,8 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckEmptyEveryRound, true, false
 	case anomaly.Kind == KindQuiet:
 		return CheckQuiet, true, false
+	case anomaly.Kind == KindLogCountEmpty:
+		return CheckLogCountEmpty, true, false
 	case anomaly.Kind == KindAnswerTruncated:
 		return CheckAnswerTruncated, true, false
 	case anomaly.Kind == KindNoDataMemoryRefused:
@@ -451,6 +464,12 @@ func queryRejected(failure *FailureRef) bool {
 	return strings.HasPrefix(failure.Detail, routedetail.RouteDetailKindResponse+"="+routedetail.ResponseFailureStatusPrefix) ||
 		failure.HTTPStatus >= 400 && failure.HTTPStatus <= 499 ||
 		failure.HTTPStatus == 0 && strings.HasPrefix(failure.Detail, routedetail.RouteDetailKindHTTPStatus+"=4")
+}
+
+// windowLineReason is a reason that says the window is short: the two the
+// summary gives and the guard's.
+func windowLineReason(reason string) bool {
+	return reason == "HISTORY_WARMING" || reason == "HISTORY_GAPPED" || reason == string(routedetail.CauseGapGuardWarming)
 }
 
 // sparseEvidence says every short window of the object is short only by

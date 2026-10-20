@@ -2789,6 +2789,48 @@ func providerLeads(stepMillis int64, histories []levelHistory) map[int64]int64 {
 	return leads
 }
 
+// readsUnfilledCounts is whether a query's one source answers counts its
+// provider does not zero-fill: a log count (bk_log_search/log, bk_monitor/log)
+// or a log time series aggregated by count or a count-like distinct
+// (bk_log_search/time_series), all read from an Elasticsearch date histogram
+// whose groups are absent rather than zero while they have no document. Its
+// range is not widened as an event count's is - the store already refuses
+// the largest log groups at one period - so its empty answer is labelled for
+// what it is instead. avg, sum, max and the rest keep their diagnosis.
+func readsUnfilledCounts(query execution.QueryPlanFacts) bool {
+	if len(query.SourceSemantics) != 1 {
+		return false
+	}
+	switch query.SourceSemantics[0] {
+	case "bk_log_search/log", "bk_monitor/log":
+		return true
+	case "bk_log_search/time_series":
+		return countsEveryClause(query.QueryList)
+	}
+	return false
+}
+
+// countsEveryClause is whether every clause of a query is aggregated by count
+// or a count-like distinct: count_over_time or distinct_over_time over time,
+// or count without time (compileAggregation).
+func countsEveryClause(clauses []execution.QueryClause) bool {
+	if len(clauses) == 0 {
+		return false
+	}
+	for _, clause := range clauses {
+		switch clause.TimeAggregation.Method {
+		case "count_over_time", "distinct_over_time":
+			continue
+		case "":
+			if len(clause.Functions) == 1 && clause.Functions[0].Method == "count" {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // eventCountSourceSemantics is the source an event count reads.
 const eventCountSourceSemantics = "custom/event"
 
@@ -2830,7 +2872,8 @@ func (runtime *RedisCatalogRuntime) primaryRequirements(
 				return nil, err
 			}
 			requirement = &execution.DataRequirement{RequirementID: execution.RequirementID(identity), ProviderLeadSeconds: lead,
-				DatasetName: execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
+				UnfilledCounts: readsUnfilledCounts(group.QueryPlan),
+				DatasetName:    execution.DatasetName("primary:" + identity), Role: execution.InputRolePrimary,
 				LogicalQueryRef: execution.LogicalQueryRef(group.QueryPlan.QueryRevision),
 				RelativeWindow:  execution.RelativeQueryWindow{StartOffsetSeconds: -group.QueryPlan.QueryDelaySeconds - window, EndOffsetSeconds: -group.QueryPlan.QueryDelaySeconds, HalfOpen: true},
 				StepMillis:      group.QueryPlan.StepMillis, AlignmentMillis: group.QueryPlan.AlignmentMillis,

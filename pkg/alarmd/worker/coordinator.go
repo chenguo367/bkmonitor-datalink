@@ -1602,6 +1602,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	primary.EmptiedByTarget = query.emptiedByTarget(primary)
 	primary.Identity = query.identityEvidence(primary)
 	primary.QuietWhenEmpty = query.quietWhenEmpty(primary, header.Requirements)
+	primary.UnfilledWhenEmpty = query.unfilledWhenEmpty(primary, header.Requirements)
 	completion := execution.SlotCompletion{Contract: request.Contract, Primary: &primary, TargetResolutions: targets}
 	// Observation only. The cause is deliberately not put on
 	// completion.ReasonCode, which is persisted and decides how consecutive gaps
@@ -2885,7 +2886,8 @@ func primaryInputFacts(primary *execution.PrimaryInputFact) *observability.Prima
 		return nil
 	}
 	return &observability.PrimaryInputFacts{Completeness: string(primary.Completeness), DataState: string(primary.DataState),
-		EmptiedByTarget: primary.EmptiedByTarget, QuietWhenEmpty: primary.QuietWhenEmpty, Identity: identityFacts(primary.Identity)}
+		EmptiedByTarget: primary.EmptiedByTarget, QuietWhenEmpty: primary.QuietWhenEmpty, UnfilledWhenEmpty: primary.UnfilledWhenEmpty,
+		Identity: identityFacts(primary.Identity)}
 }
 
 // identityFacts restates a round's identity evidence for the observation.

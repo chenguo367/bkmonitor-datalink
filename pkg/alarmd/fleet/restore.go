@@ -129,9 +129,12 @@ type RestoredRound struct {
 // count of groups at rest, or every series outside the monitoring target,
 // and the content the round ran under.
 type RestoredEmptyRound struct {
-	Quiet           bool   `json:"quiet,omitempty"`
-	EmptiedByTarget bool   `json:"emptied_by_target,omitempty"`
-	ContentScope    string `json:"content_scope,omitempty"`
+	Quiet           bool `json:"quiet,omitempty"`
+	EmptiedByTarget bool `json:"emptied_by_target,omitempty"`
+	// Unfilled is the round's word that its empty answer was a grouped log
+	// count, not zero-filled (KindLogCountEmpty).
+	Unfilled     bool   `json:"unfilled,omitempty"`
+	ContentScope string `json:"content_scope,omitempty"`
 	// IdentityRounds is how many rounds in a row ended empty because the
 	// target's identity could read none of the data, this one included.
 	IdentityRounds int `json:"identity_rounds,omitempty"`
@@ -227,6 +230,7 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 		if round := restored.LastRound; round != nil && round.Empty != nil &&
 			round.Empty.ContentScope != "" && round.Empty.ContentScope == restored.ContentScopeNow {
 			state.quiet, state.emptiedByTarget = round.Empty.Quiet, round.Empty.EmptiedByTarget
+			state.unfilled = round.Empty.Unfilled
 			state.identityRounds = round.Empty.IdentityRounds
 		}
 	}

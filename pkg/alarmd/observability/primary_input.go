@@ -30,6 +30,10 @@ type PrimaryInputFacts struct {
 	// that came back with no group: no group had an event in the range
 	// asked - quiet, not absent.
 	QuietWhenEmpty bool `json:"quiet_when_empty,omitempty"`
+	// UnfilledWhenEmpty says an EMPTY primary is a count its provider does
+	// not zero-fill - a log count, grouped or not - so the answer is empty
+	// and a quiet group and a missing one look the same.
+	UnfilledWhenEmpty bool `json:"unfilled_when_empty,omitempty"`
 	// Identity says an EMPTY primary returned data its target's identity
 	// could read none of -- every series was refused because its key could
 	// not be built or its model gate did not hold -- with the counts by
@@ -92,6 +96,7 @@ func normalizePrimaryInputFacts(facts *PrimaryInputFacts) *PrimaryInputFacts {
 	}
 	// And quiet is a claim about a whole, empty one.
 	copied.QuietWhenEmpty = copied.QuietWhenEmpty && copied.Completeness == "FULL" && copied.DataState == "EMPTY"
+	copied.UnfilledWhenEmpty = copied.UnfilledWhenEmpty && copied.Completeness == "FULL" && copied.DataState == "EMPTY"
 	return &copied
 }
 

@@ -149,6 +149,13 @@ type HistoryView interface {
 type LevelHistory struct {
 	LevelID uint32
 	View    HistoryView
+	// ReadGapOpen says a round of this Level's Plan was not read whole and
+	// its gap marker is still open: a marker clears only after as many whole
+	// rounds as the Level's history needs, so while it is open the unread
+	// round may lie inside any window the recovery walk reads, and a hole
+	// there is a round nobody read rather than a minute with no point. The
+	// walk treats every window as unsettled until it clears.
+	ReadGapOpen bool
 }
 
 type LevelEffectiveTimeFact struct {
@@ -176,9 +183,32 @@ type EvaluationRequestV2 struct {
 	Histories          []LevelHistory
 	EffectiveTimeFacts []LevelEffectiveTimeFact
 	EvaluationTime     int64
-	ExecutionID        string
-	LateAccepted       bool
-	Limits             EvaluationLimitsV2
+	// ReadHoldMillis is the read hold of the Slot this record is evaluated
+	// in, as its frozen execution contract carries it
+	// (execution.FrozenExecutionContractRef.ReadHoldMillis): how much later
+	// than its schedule the Slot's read was made. It does not move the
+	// settled boundary - ReadEnd does - because the read it delays is the
+	// one that settles what it covers.
+	ReadHoldMillis int64
+	// ReadEnd is where the current Slot's own read of the Plan's primary
+	// input ends, exclusive: the evaluation time plus the primary
+	// requirement's EndOffsetSeconds, which is minus the query delay
+	// (controlplane buildRequirements). A position before it counts as
+	// settled. Zero names no read and settles nothing: every window keeps the
+	// skip rule. Production always names one - every due Level has exactly
+	// one PRIMARY requirement (execution/named_input_request.go, the worker's
+	// named-input index) - so zero comes only from a caller that builds the
+	// request without the header's requirements.
+	ReadEnd int64
+	// SeriesSeenBefore says the series' state held history before this
+	// round: it was observed before this record, even where retention has
+	// since dropped those positions. A series without it is new, and the
+	// recovery walk does not read minutes before its first position as quiet
+	// ones.
+	SeriesSeenBefore bool
+	ExecutionID      string
+	LateAccepted     bool
+	Limits           EvaluationLimitsV2
 	// OpenAlerts is the consumer's open alert set for the second recovery
 	// gate. Nil means the caller has no such gate, which is a different
 	// thing from a set that could not be loaded: the latter is a set that

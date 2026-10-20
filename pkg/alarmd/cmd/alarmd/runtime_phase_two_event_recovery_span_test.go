@@ -420,20 +420,16 @@ func TestAGroupedEventCountRecoversOnTheQueryServicesZeros(t *testing.T) {
 // An alert open when this build takes over from one that asked one period
 // at a time. That build lost the group the round after its event, so the
 // rounds between the event and the release left no record: holes in the
-// group's history. The recovery walk steps over a window holding a hole
-// rather than counting it as a miss (trigger evaluator_v2, "A window nobody
-// observed"), so R observed misses take R whole windows after the last hole:
-// with the first round of this build at t0 + j, RECOVERY comes at
-// t0 + j + N + R - 2. The group stays in the answer through t0 + N + R - 1.
+// group's history. Those rounds were read whole - the group was quiet, not
+// unread - so once past the read hold the recovery walk counts their holes
+// as minutes with no anomaly, as Python's recovery check does (trigger
+// evaluator_v2, "A settled window answers with what it holds").
 //
-// So an event in the last round before the release (j = 1) leaves no hole
-// and recovers on round 4 as if the release never happened; an event two
-// rounds before it (j = 2) would need round 5, where the group has already
-// left the range, and the alert stays open with nothing decided for it. That
-// is the release's one-time cost, bounded to the grouped event alerts that
-// opened 2 to N + R - 1 rounds before it; one opened earlier than that was
-// already past recovery under the build before.
-func TestAnEventCountAlertOpenAtTheReleaseRecoversOnlyWithoutAHole(t *testing.T) {
+// So the alert recovers on round 4, the first round whose R windows all
+// start after the event, whether the event was in the last round before the
+// release (j = 1, no hole) or two rounds before it (j = 2, a hole on round
+// 1): the hole costs nothing, and the group is still in the answer then.
+func TestAnEventCountAlertOpenAtTheReleaseRecoversWhetherOrNotItLeftAHole(t *testing.T) {
 	t.Run("event in the last round before the release", func(t *testing.T) {
 		run := runGroupedEventCount(t, eventSpanCase{oneWindowUntil: 1, takeover: 1, rounds: 8})
 		if !containsKind(run.sent[0], contract.TriggerEventAbnormal) {
@@ -456,16 +452,13 @@ func TestAnEventCountAlertOpenAtTheReleaseRecoversOnlyWithoutAHole(t *testing.T)
 			}
 		}
 		for round := 1; round <= 7; round++ {
-			if containsKind(run.sent[round], contract.TriggerEventRecovery) {
-				t.Fatalf("round %d decided %v: the hole on round 1 leaves R whole windows only on round 5, "+
-					"after the event left the range (all rounds: %v)", round, run.sent[round], run.sent)
+			if got := containsKind(run.sent[round], contract.TriggerEventRecovery); got != (round == 4) {
+				t.Fatalf("round %d RECOVERY %v, want it on round 4 alone: the hole on round 1 is a settled quiet "+
+					"minute (all rounds: %v)", round, got, run.sent)
 			}
 			if round >= 5 && len(run.sent[round]) != 0 {
 				t.Fatalf("round %d decided %v for a group not in the answer, want nothing", round, run.sent[round])
 			}
-		}
-		if kinds := controlledEventKinds(run.written); len(kinds) != 1 || kinds[0] != contract.TriggerEventAbnormal {
-			t.Fatalf("the sink took %v, want the ABNORMAL alone: the alert stays open", kinds)
 		}
 	})
 }

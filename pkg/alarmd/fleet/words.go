@@ -238,11 +238,18 @@ var checkWords = map[Check]wordPair{
 	CheckIdentityUnmatched: {StateIdentityMismatch, ActionIdentityAlign},
 	// Detecting: an event count with no event to judge.
 	CheckQuiet: {StateDetecting, ActionNone},
+	// Detecting: a log count with nothing in the answer, which may be a
+	// group at rest or data gone missing; the row says the answer cannot
+	// tell them apart.
+	CheckLogCountEmpty: {StateDetecting, ActionNone},
 	// Detecting what came back; the grouping is the strategy's to narrow.
-	CheckAnswerTruncated:    {StateDetecting, ActionStrategyEdit},
-	CheckSeriesChurning:     {StateResultUntrusted, ActionStrategyEdit},
-	CheckPlanUnevaluable:    {StateStrategyInvalid, ActionStrategyEdit},
-	CheckQueryTargetMissing: {StateStrategyInvalid, ActionStrategyEdit},
+	CheckAnswerTruncated: {StateDetecting, ActionStrategyEdit},
+	CheckSeriesChurning:  {StateResultUntrusted, ActionStrategyEdit},
+	// Detecting, and recovering where Python would; the owner acts only if
+	// whole windows are wanted.
+	CheckSeriesSparserThanWindow: {StateDetecting, ActionNone},
+	CheckPlanUnevaluable:         {StateStrategyInvalid, ActionStrategyEdit},
+	CheckQueryTargetMissing:      {StateStrategyInvalid, ActionStrategyEdit},
 	// Detecting: every round completes. The strategy's to act on before the
 	// share refuses it whole.
 	CheckRetainedShareApproaching: {StateDetecting, ActionStrategyEdit},

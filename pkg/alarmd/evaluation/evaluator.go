@@ -273,12 +273,14 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				completeness = string(current.HistoryCompleteness)
 			}
 		}
+		readGapOpen := false
 		if guarded, reason, found := gapCompleteness(request.Gaps, due, l.Definition().LevelID); found {
 			completeness = guarded
 			durableGuardReasons[l.Definition().LevelID] = reason
+			readGapOpen = true
 		}
 		held := historyView{HistoryView: h, completeness: completeness}
-		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held}
+		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held, ReadGapOpen: readGapOpen}
 		// One walk for the counts and the holes: the summary visits every
 		// position and classifies it, and a second walk over a day-long
 		// window would double the dearest read on this path for exactly the
@@ -396,7 +398,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		folded, proposed := execution.RoundGuardReasonForLevel(inputs(), due.Identity, levelID)
 		return string(folded), proposed
 	}
-	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
+	tr, err := trigger.EvaluateV2(trigger.EvaluationRequestV2{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, Plan: due.CompiledPlan, Record: trigger.DetectionRecord{RecordID: record.RecordID(), SourceTime: record.SourceTime(), ProjectedValues: tvalues, LevelFacts: tfacts}, RecordRef: contract.TriggerRecordRefV1{RecordID: record.RecordID(), SourceTime: record.SourceTime(), DimensionIdentityDigest: string(series), Dimensions: record.Dimensions()}, Observed: contract.TriggerObservedV1{Values: record.Values()}, Histories: histories, EffectiveTimeFacts: effective, EvaluationTime: int64(request.Header.Contract.Slot.EvaluationTime), ReadHoldMillis: request.Header.Contract.ReadHoldMillis, ReadEnd: primaryReadEnd(request.Header, due.Identity), SeriesSeenBefore: !fresh, ExecutionID: request.Header.ExecutionID, Limits: e.limits.Trigger, OpenAlerts: request.OpenAlerts, HoldRecovery: holdRecovery})
 	if err != nil {
 		return recordResult{}, err
 	}
@@ -1115,6 +1117,40 @@ func guardStaysActive(outcome trigger.LevelOutcomeV2, summary execution.HistoryC
 // evaluationBindings is every named input the request binds, across its
 // series requests, which is the set the result contract judges a Level's
 // inputs by; the predicate filters it to one Plan and Level itself.
+// primaryReadEnd is where the current Slot's own read of the Plan's primary
+// input ends, exclusive: the Slot's evaluation time plus the primary
+// requirement's EndOffsetSeconds - the field the query window's end is
+// resolved from, minus the query delay (controlplane buildRequirements). The
+// newest such end when several Levels of the Plan read a primary; zero, which
+// the trigger reads as nothing settled, when the header names none. That
+// cannot happen on the production path: every due Level has exactly one
+// PRIMARY requirement (execution/named_input_request.go, the worker's
+// named-input index), so zero is only a header built without them.
+//
+// The newest end across Levels holds because a Plan's Levels share one
+// primary read today: one query, one window. If Levels ever read different
+// primaries, the end must become per Level.
+func primaryReadEnd(header execution.InternalExecutionHeader, plan execution.PlanIdentity) int64 {
+	evaluationTime := int64(header.Contract.Slot.EvaluationTime)
+	end := int64(0)
+	for _, requirement := range header.Requirements {
+		if requirement.Role != execution.InputRolePrimary {
+			continue
+		}
+		for _, consumer := range requirement.Consumers {
+			if consumer.Consumer.Plan != plan {
+				continue
+			}
+			candidate := evaluationTime + requirement.RelativeWindow.EndOffsetSeconds
+			if !requirement.RelativeWindow.HalfOpen {
+				candidate++
+			}
+			end = max(end, min(candidate, evaluationTime))
+		}
+	}
+	return max(end, 0)
+}
+
 func evaluationBindings(request execution.EvaluationRequest) []execution.NamedInputBinding {
 	var bindings []execution.NamedInputBinding
 	for _, input := range request.Inputs {
