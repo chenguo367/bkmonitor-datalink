@@ -25,7 +25,7 @@ func TestAHostOverlayIsChargedOnlyWhereThereIsOne(t *testing.T) {
 	}
 	overlay := map[execution.PlanIdentity]map[string]json.RawMessage{
 		{TenantID: "tenant", BusinessID: "2", StrategyID: "101"}: {
-			"bk_target_ip": json.RawMessage(`"192.0.2.172"`), "bk_target_cloud_id": json.RawMessage(`"0"`), "bk_host_id": json.RawMessage(`720002`),
+			"bk_target_ip": json.RawMessage(`"192.0.2.172"`), "bk_target_cloud_id": json.RawMessage(`"0"`), "bk_host_id": json.RawMessage(`"720002"`),
 		},
 	}
 	if got := hostOverlaysRetainedBytes(overlay); got == 0 {

@@ -25,9 +25,11 @@ import (
 //
 // Everything it learns goes into the facts and nothing into the dimensions.
 // Python writes bk_topo_node, bk_target_ip and bk_host_id back into the
-// record; this side takes the decisions those writes lead to and not the
-// writes, because a dimension that follows CMDB changes the alert's identity
-// every time CMDB does.
+// record. Here the series' identity and its State stay on the record's own
+// dimensions, and for a host placed by bk_host_id or bk_agent_id the facts
+// carry what Python writes (Facts.HostOverlay): the alert identity reads the
+// record with it written over, so it moves when CMDB moves the host, as
+// Python's does.
 type HostTopologyFuller struct {
 	stores StoreSource
 	// acceptStale places on an index past its staleness bound, for a reader
@@ -384,11 +386,16 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 // host CMDB placed by bk_host_id or bk_agent_id (fullers.py:57-74): the
 // host's address as bk_target_ip, its cloud as bk_target_cloud_id - "0"
 // for none, as the platform writes the cloud it looked up in - and its id
-// as bk_host_id. Nil when the record's own address is the host's (reported,
-// the comparison the record was placed with) and its cloud reads as the
-// host's: the alert identity then reads the same either way, and the record
-// carries nothing - which is every such record on a deployment whose
+// as bk_host_id, a string, only when the record has no bk_host_id key at all
+// (fullers.py:66-71). Nil when the record's own address is the host's
+// (reported, the comparison the record was placed with) and its cloud reads
+// as the host's: the alert identity then reads the same either way, and the
+// record carries nothing - which is every such record on a deployment whose
 // records name their host's own address.
+//
+// bk_topo_node is not written: the readers of the topology take the placed
+// host's chain from the facts, which take precedence over the record's own
+// (admission/identity_fuller.go), as Python's written bk_topo_node does.
 func hostOverlay(dimensions map[string]json.RawMessage, host *HostFacts, reported admission.ReportedAddress) map[string]json.RawMessage {
 	cloud := host.CloudID
 	if cloud == "" {
@@ -404,26 +411,8 @@ func hostOverlay(dimensions map[string]json.RawMessage, host *HostFacts, reporte
 	address, _ := json.Marshal(host.IP)
 	cloudValue, _ := json.Marshal(cloud)
 	overlay := map[string]json.RawMessage{"bk_target_ip": address, "bk_target_cloud_id": cloudValue}
-	if host.HostID != "" {
-		// The platform writes the host's integer id; one that is not a
-		// number is carried as the string CMDB holds.
-		id := json.RawMessage(host.HostID)
-		if !numericID(host.HostID) {
-			id, _ = json.Marshal(host.HostID)
-		}
-		overlay["bk_host_id"] = id
+	if _, named := dimensions["bk_host_id"]; !named && host.HostID != "" {
+		overlay["bk_host_id"], _ = json.Marshal(host.HostID)
 	}
 	return overlay
-}
-
-func numericID(value string) bool {
-	if value == "" || len(value) > 19 {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }

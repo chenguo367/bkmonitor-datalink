@@ -70,6 +70,9 @@ type lifecycleStrategy struct {
 	horizon int64
 	// noDataOff leaves the no-data section out.
 	noDataOff bool
+	// unrevisioned leaves strategy_revision out of the document, as the
+	// platform's legacy document has none.
+	unrevisioned bool
 	// edit is applied to the item last, for a target shape the fields above
 	// do not express.
 	edit func(item map[string]any)
@@ -271,6 +274,9 @@ func (fixture *lifecycleFixture) install(strategy lifecycleStrategy) {
 	}
 	document["update_time"] = 1725000000 + strategy.revision
 	document["strategy_revision"] = strategy.revision
+	if strategy.unrevisioned {
+		delete(document, "strategy_revision")
+	}
 	document["name"] = "no data lifecycle"
 	document["scenario"] = "os"
 	item := document["items"].([]any)[0].(map[string]any)

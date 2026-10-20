@@ -83,7 +83,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 	if e == nil || len(request.Inputs) == 0 {
 		return execution.EvaluationResult{}, errors.New("alarmd evaluation: invalid or over-budget request")
 	}
-	plan, err := e.evaluateSeries(ctx, request.Header, request.Inputs, request.State, request.Gaps, request.OpenAlerts)
+	plan, err := e.evaluateSeriesWith(ctx, request.Header, request.Inputs, request.State, request.Gaps, request.OpenAlerts, request.HostOverlay)
 	if err != nil {
 		return execution.EvaluationResult{}, err
 	}
@@ -577,6 +577,20 @@ func (e *Evaluator) evaluateSeries(
 	gaps execution.GapLoadResult,
 	openAlerts contract.OpenAlertSet,
 ) (execution.PlanEvaluationResult, error) {
+	return e.evaluateSeriesWith(ctx, header, inputs, stateResult, gaps, openAlerts, nil)
+}
+
+// evaluateSeriesWith is evaluateSeries for a series whose alert identity
+// reads the host overlay over its own dimensions (EvaluationRequest.HostOverlay).
+func (e *Evaluator) evaluateSeriesWith(
+	ctx context.Context,
+	header execution.InternalExecutionHeader,
+	inputs []execution.SeriesEvaluationInputRequest,
+	stateResult execution.StatePreflightResult,
+	gaps execution.GapLoadResult,
+	openAlerts contract.OpenAlertSet,
+	hostOverlay map[string]json.RawMessage,
+) (execution.PlanEvaluationResult, error) {
 	if e == nil || len(inputs) == 0 {
 		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named inputs are required")
 	}
@@ -655,7 +669,8 @@ func (e *Evaluator) evaluateSeries(
 	// The record evaluator judges a Level's inputs by the same bindings the
 	// result contract will, so the series' named inputs travel with the
 	// request rather than only its header.
-	legacy := execution.EvaluationRequest{Header: header, Inputs: inputs, State: stateResult, Gaps: gaps, OpenAlerts: openAlerts}
+	legacy := execution.EvaluationRequest{Header: header, Inputs: inputs, State: stateResult, Gaps: gaps, OpenAlerts: openAlerts,
+		HostOverlay: hostOverlay}
 	result := execution.PlanEvaluationResult{Plan: due.Identity, Disposition: execution.PlanDecided, ReasonCode: observability.ReasonNone}
 	// What the loads decide, before anything is evaluated. A load that failed
 	// or is terminal settles the Plan's disposition on its own; the outcome

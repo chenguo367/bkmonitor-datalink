@@ -123,7 +123,8 @@ type Facts struct {
 	// HostOverlay is what Python's fuller writes into the record's
 	// dimensions on the branch CMDB placed its host by bk_host_id or
 	// bk_agent_id: the host's bk_target_ip, its bk_target_cloud_id ("0" for
-	// none) and its bk_host_id. The alert's target and fingerprint are read
+	// none) and, where the record has no bk_host_id key, its bk_host_id as a
+	// string. The alert's target and fingerprint are read
 	// from the dimensions as written. Nil unless the address or the cloud
 	// differs from the record's own - the record then already reads as the
 	// fuller would leave it - so a record placed the ordinary way carries
