@@ -40,7 +40,10 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"whose second did not arrive within two of the strategy's periods plus its Slot's read offset (at least "+
 				"half an hour), forgotten - the strategies counted there are ones this close could not reach, named in "+
 				"its facts; business_unknown closes of a global business strategy's alerts whose record names no "+
-				"business they were filed under, kept for the next step. Every cell exists from the start so a zero "+
+				"business they were filed under, kept for the next step; superseded_identity_close_sent counts, among close_sent, "+
+				"the closes of alerts a series opened under the fingerprint of its own address before its alert identity "+
+				"read CMDB's (reason superseded_identity), whose observations every other outcome counts with the target "+
+				"rejections. Every cell exists from the start so a zero "+
 				"is a reading and not an absence.",
 			[]string{"outcome"}, nil),
 	}

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
 // overlaySeries is one series the query service answers for the host
@@ -106,8 +109,8 @@ func overlayHostRecords() map[string]string {
 }
 
 // answerOverlaySeries is the query service for the case: the three series at
-// the window's last second, over the threshold.
-func answerOverlaySeries(fixture *lifecycleFixture) func(http.ResponseWriter, *http.Request) bool {
+// the window's last second, at the fixture's value.
+func answerOverlaySeries(fixture *lifecycleFixture, value *atomic.Int64) func(http.ResponseWriter, *http.Request) bool {
 	return func(writer http.ResponseWriter, request *http.Request) bool {
 		writer.Header().Set("Content-Type", "application/json")
 		var payload struct {
@@ -126,7 +129,7 @@ func answerOverlaySeries(fixture *lifecycleFixture) func(http.ResponseWriter, *h
 			series = append(series, `{"name":"_result0","columns":["_time","_result"],"types":["int64","float64"],`+
 				`"group_keys":["bk_agent_id","bk_target_cloud_id","bk_target_ip"],`+
 				`"group_values":["`+one.agent+`","`+one.cloud+`","`+one.ip+`"],`+
-				`"values":[[`+strconv.FormatInt((end-1)*1000, 10)+`,90]]}`)
+				`"values":[[`+strconv.FormatInt((end-1)*1000, 10)+`,`+strconv.FormatInt(value.Load(), 10)+`]]}`)
 		}
 		_, _ = writer.Write([]byte(`{"series":[` + strings.Join(series, ",") + `],"status":null,"trace_id":"host-overlay",` +
 			`"is_partial":false,"result_table_id":["system.cpu"]}`))
@@ -137,8 +140,9 @@ func answerOverlaySeries(fixture *lifecycleFixture) func(http.ResponseWriter, *h
 // startOverlayFixture is the lifecycle fixture on the given protocol with the
 // overlay case's hosts and agent hash in CMDB and its strategy installed:
 // the threshold item aggregated by agent, address and cloud, no target, no
-// no-data section.
-func startOverlayFixture(t *testing.T, protocol string) *lifecycleFixture {
+// no-data section. The series report the returned value, over the threshold
+// until a case lowers it.
+func startOverlayFixture(t *testing.T, protocol string) (*lifecycleFixture, *atomic.Int64) {
 	t.Helper()
 	address, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
@@ -162,8 +166,10 @@ func startOverlayFixture(t *testing.T, protocol string) *lifecycleFixture {
 	fixture := startLifecycleFixtureOn(t, address, client, strategy, overlayHostRecords(), func(cfg *config.Config) {
 		cfg.PhaseTwo.Output.Protocol = protocol
 	})
-	fixture.interceptQueries(answerOverlaySeries(fixture))
-	return fixture
+	value := &atomic.Int64{}
+	value.Store(90)
+	fixture.interceptQueries(answerOverlaySeries(fixture, value))
+	return fixture, value
 }
 
 // overlayThresholdEvents runs round 1 and returns its threshold ABNORMAL
@@ -263,7 +269,7 @@ func TestAHostPlacedByAgentAlertsUnderPythonsFingerprintFromCMDBsAddress(t *test
 	}
 
 	t.Run("native", func(t *testing.T) {
-		fixture := startOverlayFixture(t, config.OutputProtocolNative)
+		fixture, _ := startOverlayFixture(t, config.OutputProtocolNative)
 		events := overlayThresholdEvents(t, fixture)
 		for _, series := range overlaySeriesSet {
 			event := events[series.agent]
@@ -279,7 +285,7 @@ func TestAHostPlacedByAgentAlertsUnderPythonsFingerprintFromCMDBsAddress(t *test
 	})
 
 	t.Run("legacy", func(t *testing.T) {
-		fixture := startOverlayFixture(t, config.OutputProtocolLegacy)
+		fixture, _ := startOverlayFixture(t, config.OutputProtocolLegacy)
 		events := overlayThresholdEvents(t, fixture)
 		converter := legacyoutput.Converter{Store: discardingSnapshotStore{}, PluginID: "alarmd", Now: time.Now}
 		for _, series := range overlaySeriesSet {
@@ -315,4 +321,109 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// An alert a series opened under the fingerprint of its own address, before
+// its alert identity read CMDB's, is closed as a fact - reason
+// superseded_identity, not a recovery - through the production bundle: the
+// access path observes the old fingerprint of every admitted series whose
+// host overlay moves it, and the fact-close closes it under its own rules
+// (two Slots, the alert's own instance id, once). The series is abnormal
+// throughout and its alert under CMDB's address opens as usual. Nothing is
+// closed for a series whose old alert the consumer does not hold, for a
+// series whose overlay leaves its fingerprint as it was, nor for the alert
+// under the new fingerprint; and a later round does not write the close
+// again while the set still holds it.
+//
+// The consumer's alerts are there before the first round, so the copy
+// calibrates with them when the strategy is first tracked; the copy's
+// periodic calibration is what lists an alert opened later.
+func TestAnAlertOpenUnderTheRecordsOwnFingerprintIsClosedOnceTheOverlayApplies(t *testing.T) {
+	identity := contract.MonitorOutputIdentity{DimensionFields: overlayAggregation}
+	fingerprint := func(dimensions map[string]json.RawMessage) string {
+		t.Helper()
+		value, err := contract.MonitorDedupeMD5(lifecycleStrategyID, "2", dimensions, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	moved, bare, same := overlaySeriesSet[0], overlaySeriesSet[1], overlaySeriesSet[2]
+	old, current := fingerprint(moved.rawDimensions()), fingerprint(moved.pythonDimensions())
+	unmoved, bareOld := fingerprint(same.rawDimensions()), fingerprint(bare.rawDimensions())
+	if old == current || unmoved != fingerprint(same.pythonDimensions()) {
+		t.Fatal("the fixture's fingerprints do not move as the case needs")
+	}
+	fixture, _ := startOverlayFixture(t, config.OutputProtocolNative)
+	closer := fixture.bundle.targetScopeClose
+	if closer == nil {
+		t.Fatal("the fixture's bundle has no fact-close; it is wired with the link Console")
+	}
+	closes := func() []linkdoutput.CloseRequest {
+		fixture.sink.mu.Lock()
+		defer fixture.sink.mu.Unlock()
+		return append([]linkdoutput.CloseRequest(nil), fixture.sink.closes...)
+	}
+	step := func(round int64) {
+		fixture.mustAttempt(round)
+		closer.Step(context.Background())
+	}
+
+	// The consumer holds the old alert, the alert under the new fingerprint
+	// and the alert of the series whose fingerprint did not move; not the
+	// old alert of the series that reports no address.
+	for _, held := range []string{old, current, unmoved} {
+		fixture.publishOpenAlert(held)
+	}
+	step(1)
+	opened := false
+	fixture.sink.mu.Lock()
+	for _, event := range fixture.sink.written {
+		opened = opened || (event.DedupeMD5 == current && event.EventKind == contract.TriggerEventAbnormal)
+	}
+	fixture.sink.mu.Unlock()
+	if !opened {
+		t.Fatalf("round 1 did not open the alert under Python's %s", current)
+	}
+	if got := closes(); len(got) != 0 {
+		t.Fatalf("round 1 closed %+v before the copy read the consumer's set", got)
+	}
+	fixture.waitOpenAlertSetRead(1)
+	step(2)
+	if got := closes(); len(got) != 0 {
+		t.Fatalf("round 2 closed %+v on a first observation; the close waits for a second Slot", got)
+	}
+	step(3)
+	got := closes()
+	if len(got) != 1 {
+		t.Fatalf("round 3 closed %+v, want the old alert's one close; close outcomes %v", got, closer.Stats())
+	}
+	request := got[0]
+	if request.Fingerprint != old || request.Reason != linkdoutput.CloseReasonSupersededIdentity || request.AlertInstanceID != old {
+		t.Fatalf("round 3 closed %+v, want alert %s under reason %s", request, old, linkdoutput.CloseReasonSupersededIdentity)
+	}
+	event, err := linkdoutput.ConvertClose(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Action != linkdoutput.ActionClosed || event.AlertID != old {
+		t.Fatalf("the close converts to %+v", event)
+	}
+	if sent := closer.Stats()[scopeclose.OutcomeSupersededCloseSent]; sent != 1 {
+		t.Fatalf("superseded closes sent = %d, want 1", sent)
+	}
+
+	// The consumer has not closed it yet: the set still holds it, and the
+	// next rounds observe it again, but it was decided; nothing is written
+	// again.
+	step(4)
+	step(5)
+	if again := closes(); len(again) != 1 {
+		t.Fatalf("the old alert got %d closes by round 5, want the one: %+v", len(again), again)
+	}
+	for _, request := range closes() {
+		if request.Fingerprint == bareOld || request.Fingerprint == current || request.Fingerprint == unmoved {
+			t.Fatalf("closed %+v, an alert this close must leave alone", request)
+		}
+	}
 }

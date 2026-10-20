@@ -4,7 +4,11 @@
 // Licensed under the MIT License.
 
 // Package scopeclose closes the alerts of targets that left their strategy's
-// monitoring scope.
+// monitoring scope, and the alerts of series whose alert identity moved: a
+// host whose alerts were filed under the fingerprint of the record's own
+// address before its identity read CMDB's (Drop.CloseReason). Both are
+// fact-closes of an alert nothing evaluates any more, decided under the same
+// rules below; only the reason the close carries differs.
 //
 // A record the target filter turns away is never evaluated, so nothing this
 // process sends will ever end the alert its series opened while it was still
@@ -109,12 +113,18 @@ const (
 	// strategy files each alert under the business it is about, and a close
 	// must carry it; the fingerprint is kept and tried at the next step.
 	OutcomeBusinessUnknown = "business_unknown"
+	// OutcomeSupersededCloseSent counts, among close_sent, the closes sent
+	// with CloseReasonSupersededIdentity: alerts a series opened under the
+	// fingerprint of its own address before its alert identity read CMDB's.
+	// Every other outcome counts those observations with the target ones.
+	OutcomeSupersededCloseSent = "superseded_identity_close_sent"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeCloseSent, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
-	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired, OutcomeBusinessUnknown}
+	OutcomeStaleDeferred, OutcomeIndefinite, OutcomeIdentityInvalid, OutcomeObservationExpired, OutcomeBusinessUnknown,
+	OutcomeSupersededCloseSent}
 
 // The bounds of what the facts carry.
 const (
@@ -145,6 +155,12 @@ type Drop struct {
 	// the next Slot is read, which these two place.
 	IntervalSeconds int64
 	ReadOffset      time.Duration
+	// CloseReason is the reason the close carries
+	// (linkdoutput.CloseReason*): empty is CloseReasonTargetOutOfScope, a
+	// target the filter turned away; CloseReasonSupersededIdentity is a
+	// series whose alert identity now reads CMDB's address, observed with
+	// the fingerprint it was filed under before.
+	CloseReason string
 }
 
 // OpenSet is what the close asks the open alert copy.
@@ -192,12 +208,15 @@ type entryKey struct {
 }
 
 type entry struct {
-	businessID string
-	global     bool
-	revision   int64
-	firstRound int64
-	confirmed  bool
-	lastSeen   time.Time
+	// closeReason is the reason of the last observation
+	// (Drop.CloseReason).
+	closeReason string
+	businessID  string
+	global      bool
+	revision    int64
+	firstRound  int64
+	confirmed   bool
+	lastSeen    time.Time
 	// ttl is how long the observation waits for its second (lifetime).
 	ttl time.Duration
 }
@@ -382,12 +401,13 @@ func (closer *Closer) Observe(drop Drop) {
 			closer.countLocked(key, OutcomeMemoryFull, 1)
 			return
 		}
-		closer.entries[ek] = &entry{businessID: drop.BusinessID, global: drop.GlobalBusiness, revision: drop.StrategyRevision,
+		closer.entries[ek] = &entry{closeReason: closeReasonOf(drop), businessID: drop.BusinessID, global: drop.GlobalBusiness, revision: drop.StrategyRevision,
 			firstRound: drop.Round, lastSeen: now, ttl: closer.lifetime(drop)}
 		closer.countLocked(key, OutcomeUnconfirmed, 1)
 		return
 	}
 	existing.lastSeen = now
+	existing.closeReason = closeReasonOf(drop)
 	existing.businessID, existing.global, existing.revision = drop.BusinessID, drop.GlobalBusiness, drop.StrategyRevision
 	existing.ttl = closer.lifetime(drop)
 	if drop.Round != existing.firstRound {
@@ -536,8 +556,9 @@ func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time
 	closer.mu.Lock()
 	e := closer.entries[ek]
 	var global bool
+	var reason string
 	if e != nil {
-		global = e.global
+		global, reason = e.global, e.closeReason
 	}
 	closer.mu.Unlock()
 	if e == nil {
@@ -553,7 +574,7 @@ func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time
 	}
 	return linkdoutput.CloseRequest{TenantID: ek.key.TenantID, Fingerprint: ek.fingerprint, AlertInstanceID: alert.AlertID,
 		StrategyID: strategyID, StrategyRevision: e.revision, BusinessID: businessID, OccurredAt: now,
-		Reason: linkdoutput.CloseReasonTargetOutOfScope}, global, requestReady
+		Reason: reason}, global, requestReady
 }
 
 // alertBusiness is the business ek's alert was filed under, read through
@@ -579,6 +600,9 @@ func (closer *Closer) decide(decided []entryKey, outcome string, now time.Time) 
 		ttl := closer.options.ObservationTTL
 		if e := closer.entries[ek]; e != nil {
 			ttl = e.ttl
+			if outcome == OutcomeCloseSent && e.closeReason == linkdoutput.CloseReasonSupersededIdentity {
+				closer.countLocked(ek.key, OutcomeSupersededCloseSent, 1)
+			}
 		}
 		delete(closer.entries, ek)
 		if len(closer.decided) < closer.options.MaxEntries {
@@ -626,6 +650,14 @@ func (closer *Closer) tallyLocked(key openalerts.StrategyKey) *tally {
 		closer.tallies[key] = t
 	}
 	return t
+}
+
+// closeReasonOf is the reason a drop's close carries.
+func closeReasonOf(drop Drop) string {
+	if drop.CloseReason == "" {
+		return linkdoutput.CloseReasonTargetOutOfScope
+	}
+	return drop.CloseReason
 }
 
 // Stats is the outcome totals, every outcome present.

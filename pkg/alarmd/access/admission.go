@@ -13,6 +13,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 )
 
 // SeriesAdmission is the access-path decision Python makes in its filter chain:
@@ -54,6 +55,12 @@ type ScopeDrop struct {
 	// observation can come.
 	IntervalSeconds int64
 	ReadOffset      time.Duration
+	// CloseReason is empty for a target rejection. For an admitted series
+	// whose alert identity reads CMDB's address over its own
+	// (admission.Facts.HostOverlay) it is
+	// linkdoutput.CloseReasonSupersededIdentity, and Fingerprint is the one
+	// its alerts were filed under before: its own dimensions'.
+	CloseReason string
 }
 
 // The words the access path counts rejections under by itself, before the
@@ -198,6 +205,58 @@ func (output planOutput) fingerprint(businessID string, dimensions map[string]js
 		return ""
 	}
 	return fingerprint
+}
+
+// reportSuperseded hands the close the fingerprint an admitted series' alerts
+// were filed under before its alert identity read CMDB's address: its own
+// dimensions', when that is not the one its alert reads now. The close asks
+// its open alert copy whether the consumer still holds an alert under it,
+// and closes it under its own rules, with CloseReasonSupersededIdentity:
+// nothing evaluates that alert any more, whatever the series decides now.
+// A Plan the close screens out, one fed by several inputs, or one without a
+// fingerprinted alert hands nothing. What the close takes in is bounded and
+// counted there: past its entry bound an observation is refused as
+// memory_full and observed again by a later Slot.
+func (adapter *seriesAdapter) reportSuperseded(identity execution.PlanIdentity, facts *admission.Facts) {
+	if adapter.scopeSink == nil {
+		return
+	}
+	output := adapter.outputs[identity]
+	if output.multiInput {
+		return
+	}
+	screen, screened := adapter.scopeScreens[identity]
+	if !screened {
+		if adapter.scopeScreens == nil {
+			adapter.scopeScreens = make(map[execution.PlanIdentity]string, 1)
+		}
+		screen = adapter.scopeSink.Screen(identity)
+		adapter.scopeScreens[identity] = screen
+	}
+	if screen != "" {
+		return
+	}
+	own := output.fingerprint(identity.BusinessID, facts.Dimensions)
+	if own == "" {
+		return
+	}
+	alerted := make(map[string]json.RawMessage, len(facts.Dimensions)+len(facts.HostOverlay))
+	for key, value := range facts.Dimensions {
+		alerted[key] = value
+	}
+	for key, value := range facts.HostOverlay {
+		alerted[key] = value
+	}
+	if output.fingerprint(identity.BusinessID, alerted) == own {
+		return
+	}
+	var readOffset time.Duration
+	if ready := adapter.query.ReadyAtUnixMilli; ready > 0 {
+		readOffset = max(0, time.Duration(ready-adapter.round*1000)*time.Millisecond)
+	}
+	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Fingerprint: own, StrategyRevision: output.revision,
+		GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds,
+		ReadOffset: readOffset, CloseReason: linkdoutput.CloseReasonSupersededIdentity})
 }
 
 // scopeTallyKey is one bulk count the adapter keeps until its query ends.

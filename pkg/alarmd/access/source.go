@@ -1325,6 +1325,7 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 					overlays = make(map[execution.PlanIdentity]map[string]json.RawMessage, 1)
 				}
 				overlays[identity] = facts.HostOverlay
+				adapter.reportSuperseded(identity, &facts)
 			}
 			if admit && facts.PlacedByHostID && adapter.hostPlacement != nil {
 				adapter.hostPlacement(HostPlacement{Plan: identity, QueryGroup: adapter.queryGroup,

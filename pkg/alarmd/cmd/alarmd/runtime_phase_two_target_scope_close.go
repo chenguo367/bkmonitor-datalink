@@ -78,6 +78,7 @@ func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Close
 		closer.BindAlertBusiness(businesses.Of)
 	}
 	recorder.SetTargetScopeCloseSource(closer.Stats)
+	bundle.targetScopeClose = closer
 	bundle.dependencies.RunTargetScopeClose = targetScopeCloseLoop{bundle: bundle, closer: closer}.run
 }
 
@@ -93,7 +94,7 @@ func (sink scopeDropSink) Screen(plan execution.PlanIdentity) string {
 func (sink scopeDropSink) Observe(drop access.ScopeDrop) {
 	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
 		StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision, GlobalBusiness: drop.GlobalBusiness,
-		Round: drop.Round, IntervalSeconds: drop.IntervalSeconds, ReadOffset: drop.ReadOffset})
+		Round: drop.Round, IntervalSeconds: drop.IntervalSeconds, ReadOffset: drop.ReadOffset, CloseReason: drop.CloseReason})
 }
 
 func (sink scopeDropSink) Count(reporter access.ScopeDropReporter, word string, n int) {

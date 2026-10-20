@@ -37,6 +37,12 @@ const CloseReasonAbsent = "strategy_absent"
 // in it.
 const CloseReasonTargetOutOfScope = "target_out_of_scope"
 
+// CloseReasonSupersededIdentity is the close for an alert a series opened
+// under the fingerprint of its record's own address, before its alert
+// identity read CMDB's address for a host CMDB places by id or agent: the
+// series goes on under its new alert, and nothing evaluates the old one.
+const CloseReasonSupersededIdentity = "superseded_identity"
+
 // CloseRequest carries an active alert's identity. A SET member alone is
 // insufficient. It carries no severity: a close decided for a strategy closes
 // the alert at whatever level it is, which the message says with
@@ -64,6 +70,8 @@ var closeText = map[string]struct{ salt, title, content string }{
 		"Close requested because the strategy was disabled or deleted and nothing evaluates this alert any more; this does not indicate metric recovery."},
 	CloseReasonTargetOutOfScope: {"alarmd-target-out-of-scope-close-v1", "Target is no longer in the strategy's scope",
 		"Close requested because the target this alert is about left the strategy's monitoring scope and nothing evaluates this alert any more; this does not indicate metric recovery."},
+	CloseReasonSupersededIdentity: {"alarmd-superseded-identity-close-v1", "The alert's series is now identified under a new fingerprint",
+		"Close requested because alarmd now identifies this series under a new identity and nothing evaluates this alert any more; this does not indicate metric recovery."},
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {

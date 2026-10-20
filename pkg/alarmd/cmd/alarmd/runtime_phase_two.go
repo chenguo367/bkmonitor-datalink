@@ -37,6 +37,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/roles"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/storecensus"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
@@ -723,8 +724,12 @@ type phaseTwoWorkerBundleDependencies struct {
 }
 
 type phaseTwoWorkerBundle struct {
-	runtimeConfig *observability.RuntimeConfigFacts
-	dependencies  phaseTwoWorkerBundleDependencies
+	// targetScopeClose is the fact-close of alerts nothing evaluates any
+	// more (scopeclose), nil without the alert link's Console. Kept so a
+	// test can step it rather than wait for its loop.
+	targetScopeClose *scopeclose.Closer
+	runtimeConfig    *observability.RuntimeConfigFacts
+	dependencies     phaseTwoWorkerBundleDependencies
 	// liveness is what the liveness probe judges; see phaseTwoLiveness.
 	liveness *phaseTwoLiveness
 	// workerPorts is what this runtime actually handed the coordinator.

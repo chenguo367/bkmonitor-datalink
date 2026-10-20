@@ -689,3 +689,33 @@ func TestAnOrdinaryStrategysCloseReadsNoRecord(t *testing.T) {
 		t.Fatalf("sent %+v with %d record reads, want both under the strategy's business and no read", sent, records.reads)
 	}
 }
+
+// A superseded-identity observation is closed under the same rules as a
+// target rejection - two Slots, once, the alert's own id - and carries its
+// own reason; it is counted apart among the closes sent. A target rejection
+// of another alert beside it keeps its reason.
+func TestASupersededIdentityCloseCarriesItsReason(t *testing.T) {
+	superseded, target := fp(1), fp(2)
+	f := newFixture(openSet(ownSrc, superseded, target), nil)
+	moved := drop(superseded, 0)
+	moved.CloseReason = linkdoutput.CloseReasonSupersededIdentity
+	for i := int64(0); i < 4; i++ {
+		f.slot(1700000000+60*i, moved, drop(target, 0))
+	}
+	f.want(t, "four Slots", map[string]uint64{OutcomeUnconfirmed: 2, OutcomeCloseSent: 2, OutcomeSupersededCloseSent: 1})
+	reasons := map[string]string{}
+	for _, request := range f.writer.sent() {
+		reasons[request.Fingerprint] = request.Reason
+	}
+	if len(f.writer.sent()) != 2 || reasons[superseded] != linkdoutput.CloseReasonSupersededIdentity ||
+		reasons[target] != linkdoutput.CloseReasonTargetOutOfScope {
+		t.Fatalf("sent %+v, want one close of each alert under its own reason", f.writer.sent())
+	}
+	event, err := linkdoutput.ConvertClose(f.writer.sent()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Action != linkdoutput.ActionClosed {
+		t.Fatalf("event %+v is not a close", event)
+	}
+}
