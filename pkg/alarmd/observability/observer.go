@@ -3842,11 +3842,18 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 
 // SlotPathReasons are the words the Slot path's own lines name as their
 // reason that no other list holds: a Runner round's outcome on its
-// runner_returned line (RunOutcomes), which said terminal with no reason.
+// runner_returned line (RunOutcomes), which said terminal with no reason,
+// and the refusal a store found against skipping a pruned cursor
+// (CursorRefusals), which said retrying with none.
 var SlotPathReasons = func() []ReasonCode {
-	reasons := make([]ReasonCode, 0, len(RunOutcomes))
+	reasons := make([]ReasonCode, 0, len(RunOutcomes)+len(CursorRefusals))
 	for _, outcome := range RunOutcomes {
 		reasons = append(reasons, ReasonCode(outcome))
+	}
+	for _, refusal := range CursorRefusals {
+		if refusal != CursorRefusalOther {
+			reasons = append(reasons, ReasonCode(refusal))
+		}
 	}
 	return reasons
 }()

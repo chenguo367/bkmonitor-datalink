@@ -85,6 +85,14 @@ var warnViewStreamReasons = makeReasonSet([]ReasonCode{
 // log's reading of the word the same as the page's.
 var warnRunOutcomes = makeReasonSet([]ReasonCode{"source_retry", "source_blocked", "source_error", "panic", "other_error"})
 
+// warnCursorRefusals are a store's refusals of a pruned cursor's skip: the
+// cursor stays where nothing can read it and the Query Group evaluates
+// nothing until a later skip goes through. They were written at WARN as
+// reason_not_reported and keep it.
+var warnCursorRefusals = makeReasonSet([]ReasonCode{
+	CursorRefusalProgressMissing, CursorRefusalRangeInFlight, CursorRefusalCursorMoved, CursorRefusalCASConflict,
+})
+
 // warnDecisionReasons are the scheduler decisions that say it could not
 // decide or could not do what it decided; the others are a replay or range
 // decided by design.
@@ -113,7 +121,7 @@ func ReasonLogLevel(reason ReasonCode) slog.Level {
 	case reason == ReasonNone:
 		return slog.LevelInfo
 	case inReasonSet(warnReasons, reason), inReasonSet(warnViewStreamReasons, reason), inReasonSet(warnDecisionReasons, reason),
-		inReasonSet(warnRunOutcomes, reason),
+		inReasonSet(warnRunOutcomes, reason), inReasonSet(warnCursorRefusals, reason),
 		inReasonSet(warnMaintenanceReasons, reason), inReasonSet(warnAbsentCloseReasons, reason):
 		return slog.LevelWarn
 	case inReasonSet(activationFailureReasonSet, reason):

@@ -1878,22 +1878,26 @@ func (source *ProductionSlotSource) observeCursorAdvance(
 		Operation: observability.OperationWrite,
 		Trace:     observability.TraceFields{QueryGroupKey: string(source.queryGroup)}, CursorAdvance: facts,
 	}
+	// Each outcome names its reason: the refusal the store checked and found
+	// against the skip, the owner's fence moved, the store not answering.
+	// A store error the store did not classify says so.
 	switch {
 	case err != nil:
 		facts.Status = observability.CursorAdvanceFailed
 		observed.Result, observed.Err = observability.ResultFailed, err
+		observed.ReasonCode = observability.ReasonInternalUnknown
 	case result.Status == execution.ProgressCommitted:
 		facts.Status = observability.CursorAdvanceApplied
-		observed.Result = observability.ResultSuccess
+		observed.Result, observed.ReasonCode = observability.ResultSuccess, observability.ReasonNone
 	case result.Status == execution.ProgressConflict:
 		facts.Status = observability.CursorAdvanceConflict
-		observed.Result = observability.ResultRetrying
+		observed.Result, observed.ReasonCode = observability.ResultRetrying, observability.ReasonCode(result.Refusal)
 	case result.Status == execution.ProgressStaleOwner:
 		facts.Status = observability.CursorAdvanceStaleOwner
-		observed.Result = observability.ResultRetrying
+		observed.Result, observed.ReasonCode = observability.ResultRetrying, observability.ReasonCode(contract.ReasonOwnershipStaleFence)
 	default:
 		facts.Status = observability.CursorAdvanceRetryable
-		observed.Result = observability.ResultRetrying
+		observed.Result, observed.ReasonCode = observability.ResultRetrying, observability.ReasonCode(contract.ReasonRedisUnavailable)
 	}
 	if source.observer != nil {
 		source.observer.Observe(ctx, observed)

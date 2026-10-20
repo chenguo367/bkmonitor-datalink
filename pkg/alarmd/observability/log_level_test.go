@@ -361,3 +361,33 @@ func TestTheRoundReturnAndPermitWaitLinesAreNotWritten(t *testing.T) {
 		t.Fatalf("written: %s", output.String())
 	}
 }
+
+// A refused skip of a pruned cursor is written at WARN, as it was as
+// reason_not_reported: the cursor stays where nothing can read it. A fence
+// moved under the skip is an ownership refusal, written at INFO like every
+// other one met during a handover; a store error the store did not classify
+// is a failure, at ERROR.
+func TestARefusedCursorSkipTakesTheLevelItsReasonGives(t *testing.T) {
+	for _, testCase := range []struct {
+		result Result
+		reason ReasonCode
+		want   slog.Level
+	}{
+		{ResultRetrying, CursorRefusalCASConflict, slog.LevelWarn},
+		{ResultRetrying, CursorRefusalRangeInFlight, slog.LevelWarn},
+		{ResultRetrying, CursorRefusalCursorMoved, slog.LevelWarn},
+		{ResultRetrying, CursorRefusalProgressMissing, slog.LevelWarn},
+		{ResultRetrying, ReasonCode(contract.ReasonRedisUnavailable), slog.LevelWarn},
+		{ResultRetrying, ReasonCode(contract.ReasonOwnershipStaleFence), slog.LevelInfo},
+		{ResultFailed, ReasonInternalUnknown, slog.LevelError},
+	} {
+		observation := NormalizeObservation(Observation{Component: ComponentScheduler, Stage: StageScheduleCursorAdvanced,
+			Result: testCase.result, ReasonCode: testCase.reason, CursorAdvance: &CursorAdvanceFacts{}})
+		if observation.ReasonCode != testCase.reason {
+			t.Errorf("%s normalised to %s", testCase.reason, observation.ReasonCode)
+		}
+		if got := observationLevel(observation); got != testCase.want {
+			t.Errorf("schedule_cursor_advanced %s %s: level %s, want %s", testCase.result, testCase.reason, got, testCase.want)
+		}
+	}
+}
