@@ -213,6 +213,9 @@ var failureFacets = map[string]facets{
 	// The object is too big for one replica's share; no dependency is involved
 	// and waiting does not help.
 	"QG_BUDGET_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
+	// A supplement planned a query its kept read did not hold: the query
+	// stage, as this deployment's own contract between plan and read.
+	"SUPPLEMENT_KEPT_READ_ABSENT": {StageQuery, ClassContract, DependencyNone},
 	// The Slot given up for that refusal (finding.go has the why).
 	"RESOURCE_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
 	"KAFKA_UNAVAILABLE":       {StageCommit, ClassUnavailable, DependencyKafka},

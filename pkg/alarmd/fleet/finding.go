@@ -646,6 +646,11 @@ var codeChecks = map[string]verdict{
 	// Not a defect and not a dependency: this strategy asks for more of one
 	// replica than any single object may hold, and the answer is to shard it.
 	"QG_BUDGET_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
+	// A supplement whose kept read did not hold the Slot's planned query.
+	// Supplements never reach the tracker, so this records the decision:
+	// a defect until why the planned digest differed from the kept one is
+	// traced.
+	"SUPPLEMENT_KEPT_READ_ABSENT": lands(CheckDefect),
 	// The same refusal, after the Runner gave the Slot up for it without
 	// another read: a completion cause filed as the round's reason
 	// (FiledCauses). The strategy's line, not abandoned detection - waiting

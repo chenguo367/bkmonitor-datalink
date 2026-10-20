@@ -951,7 +951,7 @@ Bytes the early reads delivered, by source: part of lookback_directed_read_bytes
 
 Labels: `source`, `group`
 
-Directed Slots by what their early read -- once more before the Query Group's next Slot reads -- came to, by source and group: before_next, a supplement that ran with no later Slot of the group begun; not_ahead, attempted and not ahead; outside_mechanism, not attempted. The mechanism works as far as before_next is of before_next and not_ahead. Each outcome is in /api/lookback's early_reads.
+Directed Slots by what their early read -- once more before the Query Group's next Slot reads -- came to, by source and group: before_next, a supplement that ran with no later Slot of the group begun; not_ahead, attempted and not ahead; outside_mechanism, did not apply. The mechanism works as far as before_next is of before_next and not_ahead. Each outcome is in /api/lookback's early_reads.
 
 ## alarmd_lookback_directed_early_undecided_total
 

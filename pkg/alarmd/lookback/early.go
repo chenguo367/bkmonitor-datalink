@@ -74,10 +74,12 @@ var EarlyOutcomes = []string{EarlyBeforeNext, EarlyNothingLate, EarlyRungFirst, 
 
 // EarlyOutsideMechanism are the outcomes the early read's working is not
 // read by: a Slot it does not apply to, one it could not be anchored for,
-// or one read with nothing late. The rest are its attempts, before_next the
-// ones that worked.
+// one read with nothing late, or one whose kept read is not the Slot's
+// query - nothing a supplement could apply, whatever the timing. The rest
+// are its attempts, before_next the ones that worked.
 var EarlyOutsideMechanism = map[string]bool{EarlyNothingLate: true, EarlyRungFirst: true, EarlyMultiQuery: true,
-	EarlyFirstReadIncomplete: true, EarlyFirstReadRefused: true, EarlyOwnerLost: true, EarlyAnchorUnknown: true}
+	EarlyFirstReadIncomplete: true, EarlyFirstReadRefused: true, EarlyOwnerLost: true, EarlyAnchorUnknown: true,
+	EarlyKeptReadAbsent: true}
 
 // The early read's outcomes as the metric groups them: what its working is
 // read by, before_next over before_next and not_ahead, and the outcomes

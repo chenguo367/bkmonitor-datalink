@@ -185,7 +185,7 @@ func newLookbackCollector() *lookbackCollector {
 		earlyReads: desc("lookback_directed_early_total",
 			"Directed Slots by what their early read -- once more before the Query Group's next Slot reads -- came "+
 				"to, by source and group: before_next, a supplement that ran with no later Slot of the group begun; "+
-				"not_ahead, attempted and not ahead; outside_mechanism, not attempted. The mechanism works as far as "+
+				"not_ahead, attempted and not ahead; outside_mechanism, did not apply. The mechanism works as far as "+
 				"before_next is of before_next and not_ahead. Each outcome is in /api/lookback's early_reads.",
 			"source", "group"),
 		earlyUndecided: desc("lookback_directed_early_undecided_total",

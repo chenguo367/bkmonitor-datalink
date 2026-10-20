@@ -84,7 +84,17 @@ func (source *Source) executeSupplement(
 	// whole or not at all.
 	for _, query := range prepared.Queries {
 		if len(query.Requirements) != 0 && !read.Keeps(query.Spec.Digest) {
-			return execution.QueryExecutionCompletion{}, fmt.Errorf("%w: query %s", execution.ErrSupplementKeptReadAbsent, query.Spec.Digest)
+			// Both digests, planned and kept: whether the Slot's query was
+			// planned again differently or the read kept another query is
+			// what the next occurrence has to tell apart.
+			kept := execution.PhysicalQueryDigest("")
+			if digested, ok := read.(interface {
+				Digest() execution.PhysicalQueryDigest
+			}); ok {
+				kept = digested.Digest()
+			}
+			return execution.QueryExecutionCompletion{}, fmt.Errorf("%w: planned query %s, kept %s",
+				execution.ErrSupplementKeptReadAbsent, query.Spec.Digest, kept)
 		}
 	}
 	if err := consumer.Begin(ctx, prepared.Header); err != nil {

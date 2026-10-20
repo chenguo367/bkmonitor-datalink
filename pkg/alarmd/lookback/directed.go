@@ -164,6 +164,14 @@ type KeptRead struct {
 	completion execution.ProviderCompletion
 }
 
+// Digest is the physical query the read kept.
+func (read *KeptRead) Digest() execution.PhysicalQueryDigest {
+	if read == nil {
+		return ""
+	}
+	return read.digest
+}
+
 // Keeps says whether the read is of the physical query of digest.
 func (read *KeptRead) Keeps(digest execution.PhysicalQueryDigest) bool {
 	return read != nil && digest == read.digest
