@@ -83,7 +83,7 @@ const (
 var capabilityByReason = map[string]CapabilityClass{
 	"QUERY_SOURCE_NOT_MIGRATED":             {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"QUERY_MIXED_PROMQL_NOT_MIGRATED":       {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
-	"QUERY_PROMQL_EXPRESSION_NOT_MIGRATED":  {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
+	"QUERY_OUTPUT_CONFIG_NOT_MIGRATED":      {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"QUERY_BK_DATA_LOCAL_TIME_NOT_MIGRATED": {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"QUERY_CMDB_LEVEL_BYPASSES_UQ":          {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},
 	"QUERY_FUNCTION_NOT_MIGRATED":           {Area: CapabilitySource, Outcome: CapabilityNotYetSupported},

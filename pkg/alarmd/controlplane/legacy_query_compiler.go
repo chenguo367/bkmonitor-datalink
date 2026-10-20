@@ -179,8 +179,8 @@ type legacyQueryConfig struct {
 	MetricID        string          `json:"metric_id"`
 	MetricField     string          `json:"metric_field"`
 	Alias           string          `json:"alias"`
-	// ExpressionMode is "promql" on each query of a multi-PromQL expression,
-	// absent on every other query.
+	// ExpressionMode is "promql" on each query of a multi-PromQL expression
+	// (multiPromQLExpression), absent on every other query.
 	ExpressionMode string            `json:"expression_mode"`
 	Values         []string          `json:"values"`
 	AggDimensions  []string          `json:"agg_dimension"`
@@ -219,6 +219,25 @@ type legacyMetric struct {
 }
 
 func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Context, source PrimaryQuerySource) (execution.QueryPlanFacts, error) {
+	var configs []legacyQueryConfig
+	facts, err := compiler.compilePrimaryQueryConfigs(source, &configs)
+	if err != nil {
+		return execution.QueryPlanFacts{}, err
+	}
+	outputs, err := namedOutputsOf(source.QueryOutputConfig, configs, facts)
+	if err != nil {
+		return execution.QueryPlanFacts{}, err
+	}
+	if outputs == nil {
+		return facts, nil
+	}
+	facts.NamedOutputs, facts.QueryRevision = outputs, ""
+	return execution.BuildQueryPlanFacts(facts)
+}
+
+// compilePrimaryQueryConfigs is the item's query without its named outputs;
+// decoded is set to the query configs it read.
+func (compiler *LegacyPrimaryQueryCompiler) compilePrimaryQueryConfigs(source PrimaryQuerySource, decoded *[]legacyQueryConfig) (execution.QueryPlanFacts, error) {
 	if compiler == nil || compiler.providerRoute == "" || compiler.timezone == "" {
 		return execution.QueryPlanFacts{}, queryConfigRejected("QUERY_COMPILER_UNINITIALIZED", nil)
 	}
@@ -243,9 +262,13 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		// below participate in the effective UQ request.
 		configs = append(configs, config)
 	}
+	*decoded = configs
 
 	if len(configs) == 1 && configs[0].DataSourceLabel == "prometheus" {
 		return compiler.compilePromQL(source, configs[0])
+	}
+	if multiPromQLExpression(configs) {
+		return compiler.compileMultiPromQL(source, configs)
 	}
 	queryList := make([]execution.QueryClause, 0, len(configs))
 	aliases := map[string]string{}
@@ -254,11 +277,6 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 	stepSeconds := int64(0)
 	for _, config := range configs {
 		if config.DataSourceLabel == "prometheus" {
-			if allPrometheus(configs) && allExpressionMode(configs) {
-				// The multi-PromQL expression: the platform runs it as one
-				// PromQL. Not retired - this build does not compile it yet.
-				return execution.QueryPlanFacts{}, queryUnsupported("QUERY_PROMQL_EXPRESSION_NOT_MIGRATED", nil)
-			}
 			if allPrometheus(configs) {
 				// Several PromQL queries without expression_mode: the retired
 				// form, read by the platform as independent queries whose
@@ -1152,17 +1170,6 @@ func querySources(facts execution.QueryPlanFacts) []string {
 func allPrometheus(configs []legacyQueryConfig) bool {
 	for _, config := range configs {
 		if config.DataSourceLabel != "prometheus" {
-			return false
-		}
-	}
-	return true
-}
-
-// allExpressionMode says every query of an item is marked expression_mode
-// promql: the platform's multi-PromQL expression (promql_multi_expression).
-func allExpressionMode(configs []legacyQueryConfig) bool {
-	for _, config := range configs {
-		if config.ExpressionMode != "promql" {
 			return false
 		}
 	}

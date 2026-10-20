@@ -104,6 +104,9 @@ var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strateg
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
 		"target":      namedValues(fields("condition key field method type model_id target_type", map[string]*policy{"value": targetValuePolicy, "conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,
+		// A multi-PromQL expression's named outputs: which output the legacy
+		// event carries, and each output's name and expression.
+		"query_output_config": fields("response_contract legacy_output_ref", map[string]*policy{"output_list": fields("reference_name expression", nil)}),
 	}),
 	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": triggerPolicy, "effective_time": uptimePolicy}),
 	"effective_time": uptimePolicy, "uptime": uptimePolicy, "effective_time_snapshot": effectiveSnapshotPolicy,

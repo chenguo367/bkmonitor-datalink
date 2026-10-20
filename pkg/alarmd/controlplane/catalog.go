@@ -68,6 +68,9 @@ type PrimaryQuerySource struct {
 	IdentityFields    []string
 	Functions         []json.RawMessage
 	QueryConfigs      []json.RawMessage
+	// QueryOutputConfig is the item's query_output_config as the strategy
+	// cache carries it, absent for an item without named outputs.
+	QueryOutputConfig json.RawMessage
 }
 
 type PrimaryQueryCompiler interface {
@@ -1296,6 +1299,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		Identity: source.Identity, StrategyID: source.SourceID, ItemID: strconv.FormatInt(item.ID, 10),
 		TimeDelaySeconds: item.TimeDelay, QueryMD5: item.QueryMD5, Expression: primaryExpression, IdentityFields: identityFields,
 		Functions: functions, QueryConfigs: append([]json.RawMessage(nil), item.QueryConfigs...),
+		QueryOutputConfig: append(json.RawMessage(nil), item.QueryOutputConfig...),
 	}
 	// The step decides how the query reads; compilePlan reads it again and
 	// is where a step that cannot run is refused and a warned one noted.
@@ -1703,7 +1707,12 @@ type legacyItem struct {
 	Expression     string            `json:"expression"`
 	Functions      []json.RawMessage `json:"functions"`
 	QueryConfigs   []json.RawMessage `json:"query_configs"`
-	Algorithms     []legacyAlgorithm `json:"algorithms"`
+	// QueryOutputConfig is the item's named outputs (namedOutputsOf). Raw
+	// and omitted when absent, for the same reason as DetectInterval: a
+	// field that encoded itself when absent would move the revision of every
+	// strategy taken from a digest of this struct.
+	QueryOutputConfig json.RawMessage   `json:"query_output_config,omitempty"`
+	Algorithms        []legacyAlgorithm `json:"algorithms"`
 	// Unit is deliberately absent from this struct. The strategy cache has no
 	// unit on an item: Python's Item.unit is a derived property that walks
 	// query_configs and takes the first non-empty one, so reading a "unit" key

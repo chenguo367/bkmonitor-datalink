@@ -224,14 +224,14 @@ func TestTheRetiredMultiPromQLFormIsRefusedByName(t *testing.T) {
 		t.Fatalf("err = %v, want QUERY_PROMQL_FORM_RETIRED naming the rewrites", err)
 	}
 	// The same queries marked expression_mode are the platform's expression,
-	// which runs as one PromQL: not retired, not yet compiled here.
+	// which runs as one PromQL: not the retired form, and compiled as one.
 	marked := func(alias string) string {
 		return strings.Replace(promql(alias), `"alias"`, `"expression_mode":"promql","alias"`, 1)
 	}
 	expression := pollingTestSource(marked("a"))
 	expression.QueryConfigs = append(expression.QueryConfigs, json.RawMessage(marked("b")))
-	if _, err := planner.CompilePrimaryQuery(context.Background(), expression); !errors.As(err, &failure) || failure.Reason != "QUERY_PROMQL_EXPRESSION_NOT_MIGRATED" {
-		t.Fatalf("err = %v, want QUERY_PROMQL_EXPRESSION_NOT_MIGRATED for the marked expression", err)
+	if facts, err := planner.CompilePrimaryQuery(context.Background(), expression); err != nil || facts.PromQL == nil {
+		t.Fatalf("facts=%+v err=%v, want the marked expression compiled as one PromQL", facts.PromQL, err)
 	}
 	mixed := pollingTestSource(promql("a"))
 	mixed.QueryConfigs = append(mixed.QueryConfigs, json.RawMessage(`{"data_source_label":"bk_monitor","data_type_label":"time_series",`+
