@@ -759,7 +759,7 @@ func TestTheReconnectWaitIsJitteredUnderAnExponentialCeiling(t *testing.T) {
 // is where the two lists are held together.
 func TestEveryStreamReasonWordIsInTheVocabularyAndOnTheLine(t *testing.T) {
 	for _, word := range []string{
-		"NO_LEADER", "DISCOVERY_FAILED", "STREAM_CLOSED", "RECV_FAILED", viewstream.DisconnectLeaderSilent,
+		"NO_LEADER", "DISCOVERY_FAILED", "STREAM_CLOSED", "RECV_FAILED", "SEND_FAILED", viewstream.DisconnectLeaderSilent,
 		viewstream.FailureDeltaBaseMismatch, viewstream.FailureDeltaDigest, viewstream.FailureSnapshotInvalid,
 		viewstream.FailureSnapshotIncomplete, viewstream.FailureWrongWorker,
 		viewstream.RefusalNotLeader, viewstream.RefusalUnknownWorker, viewstream.RefusalBadToken, viewstream.RefusalProtocolVersion,

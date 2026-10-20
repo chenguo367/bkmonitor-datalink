@@ -193,7 +193,11 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 	}
 
 	for family, want := range map[string]int{
-		"alarmd_observation_duration_seconds": 810,
+		// 9 generic stages x 12 results x (6 buckets, +Inf, sum, count):
+		// skipped and recovered are results the code writes, so they are in
+		// the bound; both are written on phase-two stages only, so no
+		// generic cell is created for either.
+		"alarmd_observation_duration_seconds": 972,
 	} {
 		if got := bounds[family]; got != want {
 			t.Errorf("histogram family %s theoretical maximum = %d, want buckets/+Inf/sum/count total %d", family, got, want)

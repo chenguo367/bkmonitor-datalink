@@ -1013,8 +1013,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.statePreflights = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "state_preflight_total",
 		Help: "Runtime State preflight reads by how they ended: success when every series' state came back; " +
-			"degraded when some did not for a retryable reason (STATE_READ_TIMEOUT is this process's own read " +
-			"deadline, REDIS_UNAVAILABLE the store not answering); terminal when some cannot be read " +
+			"degraded when some did not for a retryable reason (STATE_READ_TIMEOUT is the connection's own read " +
+			"timeout, STATE_READ_DEADLINE a deadline on the call that ran out first, REDIS_UNAVAILABLE the store " +
+			"not answering); terminal when some cannot be read " +
 			"(STATE_CORRUPT, STATE_BUDGET_EXCEEDED); failed when the store refused the request outright. One " +
 			"per preflight call, not per series; the series it covered are in worker_work_total{work_kind=\"state_load\"}.",
 	}, []string{"result", "reason"})

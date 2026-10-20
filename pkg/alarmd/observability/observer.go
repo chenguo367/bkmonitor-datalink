@@ -2667,9 +2667,7 @@ func NormalizeObservation(observation Observation) Observation {
 	}
 	rawReason := observation.ReasonCode
 	observation.Component, observation.Stage = NormalizeComponentStage(observation.Component, observation.Stage)
-	if observation.Component != ComponentControlPlane || observation.Result != Result(ResultRecovered) {
-		observation.Result = NormalizeResult(observation.Result)
-	}
+	observation.Result = NormalizeResult(observation.Result)
 	observation.stageReasonBucket = rawReason == "" ||
 		(rawReason == ReasonNone && !resultAllowsNone(observation.Result))
 	observation.Operation = NormalizeOperation(observation.Operation)
@@ -3631,9 +3629,15 @@ var allComponentStages = append(
 	phaseTwoComponentStages...,
 )
 
+// allResults is every result an observation may carry. skipped is a Slot or
+// a supplement that ran nothing by name (held for a supplement or for
+// maintenance, a kept read that does not hold the query); recovered is the
+// control plane's end of a degraded episode. Both were written and folded to
+// _other on every line and cell until listed here.
 var allResults = []Result{
 	Result(ResultStarted), Result(ResultSuccess), ResultTerminal, ResultRetrying, ResultPaused,
-	ResultResumed, ResultDegraded, Result(ResultTimeout), Result(ResultFailed), ResultOther,
+	ResultResumed, ResultDegraded, Result(ResultTimeout), Result(ResultFailed),
+	Result(ResultSkipped), Result(ResultRecovered), ResultOther,
 }
 
 var metricOperations = []Operation{
@@ -3777,6 +3781,9 @@ var ViewStreamReasons = []ReasonCode{
 	// a live deployment they shared one, and the one word sent the reader to
 	// the lease when the endpoint was what was missing.
 	"NO_LEADER", "LEADER_UNREGISTERED", "LEADER_NO_ENDPOINT", "DISCOVERY_FAILED", "LEADER_SILENT", "STREAM_CLOSED", "RECV_FAILED",
+	// The Leader's send to a Worker failing: the session's end on the
+	// Leader's side, as RECV_FAILED is on the Worker's.
+	"SEND_FAILED",
 	// A process that cannot advertise an endpoint of its own, said once at
 	// startup rather than by every other Worker every discovery.
 	"LISTENER_UNPARSABLE", "NO_ROUTE",
