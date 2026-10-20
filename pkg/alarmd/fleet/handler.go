@@ -1019,6 +1019,7 @@ func NewHandler(
 		running, known := RunningStrategiesOf(&view, part)
 		health := healthOf(&view, part, at)
 		overview := overviewOf(health, running, known, at)
+		overview.CauseReasons = overviewCauseReasonsOf(summarize(view.Anomalies, at))
 		// The cache computes one at a time, so the readings it keeps are
 		// touched by one computation at once.
 		flows.apply(&overview, health, at)

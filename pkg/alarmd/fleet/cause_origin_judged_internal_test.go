@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -34,5 +35,26 @@ func TestARowsCauseOriginFollowsWhoseTheReasonIs(t *testing.T) {
 		if got := causeOriginOf(test.reason, test.filed, test.carried); got == nil || got.Origin != test.want {
 			t.Errorf("%s filed=%t carried=%t: origin %+v, want %s", test.reason, test.filed, test.carried != nil, got, test.want)
 		}
+	}
+}
+
+// The overview carries the object list's cause reasons, all and by origin,
+// as /api/objects counts them: the read every channel has answers whose each
+// degraded round is without a route to the object list.
+func TestTheOverviewCarriesTheCauseReasonsByOrigin(t *testing.T) {
+	rows := []Anomaly{
+		{QueryGroup: "qg-321", Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE", CauseOrigin: &CauseOrigin{Origin: CauseOriginDerived}},
+		{QueryGroup: "qg-322", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginPhysical}},
+		{QueryGroup: "qg-323", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginCarried}},
+	}
+	summary := summarize(rows, now)
+	got := overviewCauseReasonsOf(summary)
+	if !reflect.DeepEqual(got.ByCauseReason, summary.ByCauseReason) || !reflect.DeepEqual(got.ByCauseReasonPhysical, summary.ByCauseReasonPhysical) ||
+		!reflect.DeepEqual(got.ByCauseReasonCarried, summary.ByCauseReasonCarried) || !reflect.DeepEqual(got.ByCauseReasonDerived, summary.ByCauseReasonDerived) ||
+		!reflect.DeepEqual(got.ByCauseReasonUnknown, summary.ByCauseReasonUnknown) {
+		t.Fatalf("overview cause reasons %+v, want the summary's %+v", got, summary)
+	}
+	if len(got.ByCauseReasonDerived.Top) != 1 || got.ByCauseReasonDerived.Top[0].Value != "EFFECTIVE_TIME_INACTIVE" {
+		t.Fatalf("derived = %+v, want the out-of-hours row", got.ByCauseReasonDerived)
 	}
 }

@@ -74,6 +74,29 @@ type Overview struct {
 	// Late is the evaluate stage's late and overdue objects as the page's
 	// one line, with the strategy page's selection for them.
 	Late OverviewLate `json:"late"`
+	// CauseReasons is the anomaly rows' cause reasons as /api/objects
+	// summarizes them (Summary.ByCauseReason and its four origins), so the
+	// one read every channel has carries whose each degraded round is
+	// without a second route to the object list.
+	CauseReasons OverviewCauseReasons `json:"cause_reasons"`
+}
+
+// OverviewCauseReasons is Summary's cause reasons: all of them, and split by
+// whose the reason is - physical, carried, derived, unknown - the four
+// adding up to the first.
+type OverviewCauseReasons struct {
+	ByCauseReason         Distribution `json:"by_cause_reason"`
+	ByCauseReasonPhysical Distribution `json:"by_cause_reason_physical"`
+	ByCauseReasonCarried  Distribution `json:"by_cause_reason_carried"`
+	ByCauseReasonDerived  Distribution `json:"by_cause_reason_derived"`
+	ByCauseReasonUnknown  Distribution `json:"by_cause_reason_unknown"`
+}
+
+// overviewCauseReasonsOf is a summary's cause reasons for the overview.
+func overviewCauseReasonsOf(summary Summary) OverviewCauseReasons {
+	return OverviewCauseReasons{ByCauseReason: summary.ByCauseReason,
+		ByCauseReasonPhysical: summary.ByCauseReasonPhysical, ByCauseReasonCarried: summary.ByCauseReasonCarried,
+		ByCauseReasonDerived: summary.ByCauseReasonDerived, ByCauseReasonUnknown: summary.ByCauseReasonUnknown}
 }
 
 // BoardDrill is a strategy.board selection the overview writes for a count it
