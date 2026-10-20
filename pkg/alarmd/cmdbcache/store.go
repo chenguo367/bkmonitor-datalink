@@ -55,11 +55,23 @@ type Store struct {
 
 	observeRead func(result string)
 
-	mutex     sync.RWMutex
-	index     *Index
-	lastError error
-	refreshes uint64
-	unchanged uint64
+	mutex sync.RWMutex
+	index *Index
+	// identity is the last index read with hosts in it, newest first, and
+	// identityAgents the last agent hash read whole: what a record's alert
+	// identity is read from (IdentityHost, IdentityAgent) whether or not the
+	// index in force may be decided on. An alert's identity is not a
+	// decision, and the last CMDB that placed a host is a better answer for
+	// it than the record's raw address, which would file the alert under
+	// another fingerprint. A load that refused host records keeps the
+	// identity it replaced behind it, so a host refused in that load is still
+	// found where the last load placed it; a clean load stands alone, and a
+	// host absent from it is gone. At most maxIdentityLayers are kept.
+	identity       []*Index
+	identityAgents map[string]string
+	lastError      error
+	refreshes      uint64
+	unchanged      uint64
 }
 
 type StoreOptions struct {
@@ -166,6 +178,83 @@ func (store *Store) Usable() (*Index, string) {
 	return index, store.judge(index)
 }
 
+// IdentityHost is the host CMDB last placed at a key (an id, or an
+// ip|cloud address), read from the last index that held hosts, whether or
+// not the index in force may be decided on. For a record's alert identity
+// only: no filter, scope or target decision reads it.
+func (store *Store) IdentityHost(key string) (*HostFacts, bool) {
+	if store == nil {
+		return nil, false
+	}
+	store.mutex.RLock()
+	layers := store.identity
+	store.mutex.RUnlock()
+	for _, index := range layers {
+		if host, found := index.Lookup(key); found {
+			return host, true
+		}
+	}
+	return nil, false
+}
+
+// maxIdentityLayers bounds the loads the identity keeps behind a load that
+// refused host records: a writer that keeps publishing a record alarmd cannot
+// read leaves that host where the last few loads placed it, and the memory
+// is a few snapshots, not one per refresh.
+const maxIdentityLayers = 3
+
+// identityLayers is the identity after a load with hosts: that load alone
+// when it refused no host record, else that load in front of the identity
+// it replaces, at most maxIdentityLayers deep.
+func identityLayers(index *Index, previous []*Index) []*Index {
+	if index.Refused().Hosts == 0 || len(previous) == 0 {
+		return []*Index{index}
+	}
+	layers := append([]*Index{index}, previous...)
+	if len(layers) > maxIdentityLayers {
+		layers = layers[:maxIdentityLayers]
+	}
+	return layers
+}
+
+// IdentityAgent is the host CMDB last placed an agent at, read as
+// IdentityHost is, from the last agent hash read whole; held is false when
+// no index with hosts was ever read, which is a host nothing can name.
+func (store *Store) IdentityAgent(agent string) (host *HostFacts, found, held bool) {
+	if store == nil || agent == "" {
+		return nil, false, false
+	}
+	store.mutex.RLock()
+	layers, agents := store.identity, store.identityAgents
+	store.mutex.RUnlock()
+	if len(layers) == 0 || agents == nil {
+		return nil, false, false
+	}
+	id, named := agents[agent]
+	if !named {
+		return nil, false, true
+	}
+	for _, index := range layers {
+		if host, found := index.byHostID[id]; found {
+			if host.AgentID != agent {
+				return nil, false, true
+			}
+			return host, true, true
+		}
+	}
+	return nil, false, true
+}
+
+// IdentityHeld is whether any index with hosts was ever read.
+func (store *Store) IdentityHeld() bool {
+	if store == nil {
+		return false
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	return len(store.identity) > 0
+}
+
 // Current returns the index in force, or nil before the first successful load.
 func (store *Store) Current() *Index {
 	if store == nil {
@@ -221,6 +310,12 @@ func (store *Store) Refresh(ctx context.Context) error {
 	}
 	index.carryOptional(store.index)
 	store.index = index
+	if index.Hosts() > 0 {
+		store.identity = identityLayers(index, store.identity)
+	}
+	if !index.agentsUnreadable && index.Hosts() > 0 {
+		store.identityAgents = index.byAgent
+	}
 	store.lastError = nil
 	store.refreshes++
 	store.mutex.Unlock()
@@ -263,7 +358,10 @@ func (store *Store) publishUnchanged(ctx context.Context) bool {
 	store.mutex.RLock()
 	held := store.index
 	store.mutex.RUnlock()
-	if held == nil || held.PublishedAt().IsZero() || !held.SourceRefreshedAt().IsZero() {
+	// A held index whose agent hash could not be read is read again: kept
+	// on an unmoved publish time, it would leave every agent-named record
+	// unplaced until the writer's next round.
+	if held == nil || held.PublishedAt().IsZero() || !held.SourceRefreshedAt().IsZero() || held.agentsUnreadable {
 		return false
 	}
 	read, err := marks.ReadPublishMarks(ctx)

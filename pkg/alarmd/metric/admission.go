@@ -16,11 +16,11 @@ import (
 // counted directly rather than through an observation per decision. Only the
 // filter name, the outcome and a bounded reason are recorded; no host, plan or
 // strategy identity reaches the labels.
-var admissionResults = map[string]struct{}{"admitted": {}, "rejected": {}}
+var admissionResults = map[string]struct{}{"admitted": {}, "rejected": {}, "held": {}}
 
 // The reason vocabulary is closed on purpose: it is a metric label, and a
 // free-form reason turns one series into as many as there are strings.
-var admissionFilters = map[string]struct{}{"target_scope": {}, "target_plan": {}, "host_status": {}, "none": {}}
+var admissionFilters = map[string]struct{}{"target_scope": {}, "target_plan": {}, "host_status": {}, "host_identity": {}, "none": {}}
 var admissionReasons = map[string]struct{}{
 	"in_scope": {}, "out_of_scope": {}, "scope_empty": {}, "none": {},
 	// Target scope on object identity: a record that built no identity is a
@@ -49,6 +49,12 @@ var admissionReasons = map[string]struct{}{
 	// each names its own unavailability.
 	"monitoring_disabled": {}, "host_unknown": {}, "host_identity_invalid": {},
 	"host_facts_unavailable": {}, "service_instance_facts_unavailable": {},
+	// Host identity: a host-placed series whose alert identity was read from
+	// the index past its bound (stale_index) or from the last index that held
+	// its host (last_populated_index), while the filters saw the facts
+	// unavailable; and one held, its query failed and the Slot retried,
+	// because no index ever held hosts (held_no_index, result held).
+	admission.HostOverlayFromStaleIndex: {}, admission.HostOverlayFromLastPopulatedIndex: {}, admission.HostIdentityHeld: {},
 }
 
 // RecordSeriesAdmission counts one admission decision.

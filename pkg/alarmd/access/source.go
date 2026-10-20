@@ -1210,7 +1210,14 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 	if batch.PhysicalQuery != adapter.query.Spec.Digest || batch.CompletionRef == "" || batch.Dataset == nil || batch.Dataset.Len() == 0 {
 		return errors.New("alarmd access: provider delivered an invalid series")
 	}
-	admitted, outside, keyMissing, overlays := adapter.admittedPlans(batch)
+	admitted, outside, keyMissing, overlays, unreadable := adapter.admittedPlans(batch)
+	if unreadable {
+		// A host-placed series whose alert identity no CMDB index can give:
+		// emitting it would file its alerts under its raw address. The query
+		// fails instead, and the Slot is retried as for any query that could
+		// not be answered, once the index has been read.
+		return &hostIdentityUnavailableError{}
+	}
 	// Kept before the target filter returns: a recheck reads the whole
 	// dimension set, and a series every Plan turned away is still data.
 	adapter.lookback.Series(batch.Dataset, batch.Delivery.Bytes)
@@ -1288,10 +1295,11 @@ func (adapter *seriesAdapter) reconcileCompletion(completion execution.ProviderC
 // plan, and says whether every plan refused it as outside its monitoring
 // target, decided on facts that were all there. A nil result means no
 // filtering is installed and every plan is admitted.
-func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool, *execution.IdentitySample, map[execution.PlanIdentity]map[string]json.RawMessage) {
+func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch) (map[execution.PlanIdentity]bool, bool, *execution.IdentitySample, map[execution.PlanIdentity]map[string]json.RawMessage, bool) {
 	if adapter.admission == nil {
-		return nil, false, nil, nil
+		return nil, false, nil, nil, false
 	}
+	unreadable := false
 	var overlays map[execution.PlanIdentity]map[string]json.RawMessage
 	// keyMissing holds while every Plan refuses the series because its key
 	// could not be built; sample is the series' identity fields as the first
@@ -1319,6 +1327,18 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 			decisions[identity] = admit
 			if !admit {
 				adapter.reportScopeDrop(identity, plan, &facts, filter, reason)
+			}
+			unreadable = unreadable || (admit && facts.HostIdentityUnavailable)
+			if admit && adapter.observe != nil {
+				// Where the alert identity of a host-placed series came from
+				// when not from the index the filters decided on, and the
+				// series held for want of any.
+				switch {
+				case facts.HostIdentityUnavailable:
+					adapter.observe(hostIdentityFilter, "held", admission.HostIdentityHeld)
+				case facts.HostOverlay != nil && facts.HostOverlaySource != "":
+					adapter.observe(hostIdentityFilter, "admitted", facts.HostOverlaySource)
+				}
 			}
 			if admit && facts.HostOverlay != nil {
 				if overlays == nil {
@@ -1359,7 +1379,29 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 	if !keyMissing || len(decisions) == 0 || sample == nil {
 		sample = nil
 	}
-	return decisions, outside && len(decisions) > 0, sample, overlays
+	return decisions, outside && len(decisions) > 0, sample, overlays, unreadable
+}
+
+// hostIdentityFilter is the filter name the admission counter reads a
+// host-placed series' alert identity under: not a filter, a fact about the
+// identity the series' alerts will carry.
+const hostIdentityFilter = "host_identity"
+
+// hostIdentityUnavailableError fails a query that delivered a host-placed
+// series while no CMDB index that ever held hosts can say where its host is
+// (admission.Facts.HostIdentityUnavailable). Retryable: the store reads the
+// cache again on its next refresh.
+type hostIdentityUnavailableError struct{}
+
+func (*hostIdentityUnavailableError) Error() string {
+	return "alarmd access: a host-placed series has no CMDB index to read its alert identity from"
+}
+
+func (*hostIdentityUnavailableError) QueryFailure() (string, string) {
+	// The query could not be answered as a query whose provider failed
+	// could not: the word a Level may be unavailable for, should the
+	// binding carry it there. The series' own count is held_no_index.
+	return observability.QueryFailureCategorySeriesIdentity, contract.ReasonQueryUnavailable
 }
 
 // identitySampleOf is a series' identity fields as a target's identity reads

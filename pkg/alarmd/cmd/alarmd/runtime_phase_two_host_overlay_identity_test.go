@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/go-redis/redis/v8"
 	"net/http"
 	"sort"
 	"strconv"
@@ -145,6 +146,13 @@ func answerOverlaySeries(fixture *lifecycleFixture, value *atomic.Int64) func(ht
 func startOverlayFixture(t *testing.T, protocol string) (*lifecycleFixture, *atomic.Int64) {
 	t.Helper()
 	address, client := startPhaseTwoRedis(t)
+	return startOverlayFixtureOn(t, address, client, protocol)
+}
+
+// startOverlayFixtureOn is startOverlayFixture on a redis-server the case
+// started, for a case that writes what the bundle reads at its start.
+func startOverlayFixtureOn(t *testing.T, address string, client *redis.Client, protocol string) (*lifecycleFixture, *atomic.Int64) {
+	t.Helper()
 	ctx := context.Background()
 	prefix := validGoAccessRuntimeConfig().PlatformKeyPrefix()
 	for _, agents := range []string{prefix + ".cache.cmdb.agent_id", "tenant-a." + prefix + ".cache.cmdb.agent_id"} {

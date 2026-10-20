@@ -139,3 +139,103 @@ func TestARefusedSupersededOfferIsMadeAgainOnTheNextSlot(t *testing.T) {
 		t.Fatalf("superseded_identity_close_sent = %d, want 1", got)
 	}
 }
+
+// targetOverlayFuller places a record's host as the CMDB fuller does for a
+// host placed by agent at another address: known, and overlaid.
+type targetOverlayFuller struct{}
+
+func (targetOverlayFuller) Name() string { return "known_overlaid_host" }
+
+func (targetOverlayFuller) Fill(dimensions map[string]json.RawMessage, facts *admission.Facts) {
+	if facts.HostNaming.IDKey != "" {
+		facts.HostResolved = true
+		facts.HostOverlay = map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.172"`),
+			"bk_target_cloud_id": json.RawMessage(`"0"`)}
+	}
+}
+
+// A target rejection of a host-placed series names the fingerprint its alert
+// is filed under - the record's dimensions with the host overlay over them -
+// not the record's own, which no alert of it carries any more.
+func TestATargetRejectionOfAnOverlaidSeriesNamesItsAlertsFingerprint(t *testing.T) {
+	sink := &recordingSink{}
+	output := planOutput{strategyID: "42", revision: 3,
+		identity: &contract.MonitorOutputIdentity{DimensionFields: []string{"bk_host_id", "bk_target_ip", "bk_target_cloud_id"}}}
+	chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, targetOverlayFuller{}},
+		[]admission.Filter{admission.TargetScopeFilter{}, admission.TargetPlanFilter{}})
+	adapter, plan := scopeDropAdapter(t, chain, hostPlanContext(true), sink, output)
+	record := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"102"`), "bk_target_ip": json.RawMessage(`"198.51.100.9"`),
+		"bk_target_cloud_id": json.RawMessage(`"0"`)}
+	deliverSeries(t, adapter, record)
+	alerted := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"102"`), "bk_target_ip": json.RawMessage(`"192.0.2.172"`),
+		"bk_target_cloud_id": json.RawMessage(`"0"`)}
+	want := output.fingerprint(plan.BusinessID, alerted)
+	if want == "" || want == output.fingerprint(plan.BusinessID, record) {
+		t.Fatal("the fixture's overlay does not move the fingerprint")
+	}
+	if len(sink.observed) != 1 || sink.observed[0].Fingerprint != want {
+		t.Fatalf("observed %+v, want one rejection under the alert's fingerprint %s", sink.observed, want)
+	}
+}
+
+// identitySourceFuller hands every record a host overlay read from where the
+// case says, or says its identity cannot be read.
+type identitySourceFuller struct {
+	source      string
+	unavailable bool
+}
+
+func (identitySourceFuller) Name() string { return "identity_source" }
+
+func (fuller identitySourceFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
+	facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
+	if fuller.unavailable {
+		facts.HostIdentityUnavailable = true
+		return
+	}
+	facts.HostOverlay = map[string]json.RawMessage{"bk_target_ip": json.RawMessage(`"192.0.2.172"`)}
+	facts.HostOverlaySource = fuller.source
+}
+
+// A host-placed series whose alert identity was read from the index past its
+// bound, or from the last populated one, is counted under that name; one
+// whose identity no index can give fails its query and is counted held.
+func TestTheSourceOfAHostPlacedSeriesIdentityIsCounted(t *testing.T) {
+	record := map[string]json.RawMessage{"bk_agent_id": json.RawMessage(`"agent-live"`), "bk_target_ip": json.RawMessage(`"198.51.100.9"`)}
+	for _, c := range []struct {
+		name   string
+		fuller identitySourceFuller
+		want   string
+		fails  bool
+	}{
+		{"stale index", identitySourceFuller{source: admission.HostOverlayFromStaleIndex}, "host_identity/admitted/stale_index", false},
+		{"last populated index", identitySourceFuller{source: admission.HostOverlayFromLastPopulatedIndex}, "host_identity/admitted/last_populated_index", false},
+		{"no index", identitySourceFuller{unavailable: true}, "host_identity/held/held_no_index", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, c.fuller}, nil)
+			adapter, _ := scopeDropAdapter(t, chain, admission.PlanContext{}, nil, scopeOutput)
+			adapter.scopeSink = nil
+			var observed []string
+			adapter.observe = func(filter, result, reason string) {
+				observed = append(observed, filter+"/"+result+"/"+reason)
+			}
+			dataset := execution.NewDataset([]contract.CanonicalRecordV2{{RecordID: "record", SourceTime: 1, BusinessID: "2", Dimensions: record}})
+			err := adapter.ConsumeProviderSeries(context.Background(), execution.ProviderSeriesBatch{
+				PhysicalQuery: adapter.query.Spec.Digest, CompletionRef: "result", Dataset: dataset,
+				Delivery: execution.SeriesDelivery{PhysicalQuery: adapter.query.Spec.Digest,
+					QueryRevision: adapter.query.Spec.PlanFacts.QueryRevision, Series: 1, Records: 1, Digest: "digest"},
+			})
+			if (err != nil) != c.fails {
+				t.Fatalf("consume error %v, want failure %t", err, c.fails)
+			}
+			found := false
+			for _, line := range observed {
+				found = found || line == c.want
+			}
+			if !found {
+				t.Fatalf("observed %v, want %s among them", observed, c.want)
+			}
+		})
+	}
+}

@@ -130,6 +130,15 @@ type Facts struct {
 	// fuller would leave it - so a record placed the ordinary way carries
 	// nothing.
 	HostOverlay map[string]json.RawMessage
+	// HostIdentityUnavailable says the record names its host by a true
+	// bk_host_id or bk_agent_id and no CMDB index that ever held hosts can
+	// say where it is: its alert identity cannot be read, and it must not be
+	// emitted under its raw address in the meantime.
+	HostIdentityUnavailable bool
+	// HostOverlaySource names where HostOverlay was read when it was not the
+	// index in force that the filters decide on (HostOverlayFromStaleIndex,
+	// HostOverlayFromLastPopulatedIndex); empty otherwise.
+	HostOverlaySource string
 	// PlacedByHostID records that CMDB placed the record's host by its
 	// bk_host_id or bk_agent_id: the branch Python's fuller overwrites
 	// bk_target_ip on, whatever the record's own address. The count the
@@ -162,7 +171,16 @@ type Facts struct {
 // The indexes enrichment consults, as the reasons a filter reports when one
 // of them could not be.
 const (
-	FactsUnavailableHostIndex            = "host_facts_unavailable"
+	FactsUnavailableHostIndex = "host_facts_unavailable"
+	// HostOverlayFromStaleIndex is an identity overlay read from the index in
+	// force while it is past its staleness bound; HostOverlayFromLastPopulatedIndex
+	// one read from the last index that held the host, the one in force being
+	// empty, or its agent hash unreadable, or its load having refused the host.
+	HostOverlayFromStaleIndex         = "stale_index"
+	HostOverlayFromLastPopulatedIndex = "last_populated_index"
+	// HostIdentityHeld names a series held because no index can give its
+	// alert identity (HostIdentityUnavailable).
+	HostIdentityHeld                     = "held_no_index"
 	FactsUnavailableServiceInstanceIndex = "service_instance_facts_unavailable"
 )
 

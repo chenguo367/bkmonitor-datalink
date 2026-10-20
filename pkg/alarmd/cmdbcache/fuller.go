@@ -47,12 +47,24 @@ func (*HostTopologyFuller) Name() string { return "cmdb_host_topology" }
 
 func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, facts *admission.Facts) {
 	store := fuller.tenantStore(facts.TenantID)
+	agent := admission.TruthyDimension(dimensions, "bk_agent_id")
 	if store == nil {
+		facts.HostIdentityUnavailable = facts.HostNaming.IDKey != "" || agent != ""
 		facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 		return
 	}
 	index, unusable := store.Usable()
 	if unusable != "" && !(fuller.acceptStale && unusable == IndexStale) {
+		// The alert's identity is not a decision: it is read from the last
+		// index that held hosts (Store.IdentityHost), so an index past its
+		// bound or an empty one does not file a host-placed record's alert
+		// under its raw address for as long as it lasts. With no such index
+		// at all the record's identity cannot be read, and it is said so.
+		source := admission.HostOverlayFromLastPopulatedIndex
+		if unusable == IndexStale {
+			source = admission.HostOverlayFromStaleIndex
+		}
+		identityOverlay(store, dimensions, facts, agent, source)
 		// Never loaded, past the staleness bound, or empty (Store.judge). A
 		// filter that acts on "CMDB does not know this host" has to tell that
 		// apart from "CMDB was not asked": past the bound a host added since
@@ -74,7 +86,6 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	// target match then read the record as the fuller left it, so the host
 	// those judge is the one this order picks - and only that host: the
 	// identities of a record are not a union of everything that resolves.
-	agent := admission.TruthyDimension(dimensions, "bk_agent_id")
 	if id := facts.HostNaming.IDKey; id != "" {
 		if host, found := index.Lookup(id); found {
 			placeByID(facts, id, host)
@@ -86,12 +97,18 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 		// An id CMDB does not know is a host CMDB does not know: the status
 		// filter looks it up by that id and nothing else, whatever the
 		// address below resolves to. Python still takes the topology from
-		// the address, and so does this.
+		// the address, and so does this. The alert's identity reads the
+		// identity index, which still holds a host this load refused; a
+		// host absent from a clean load is gone, and keeps its raw address.
+		identityOverlay(store, dimensions, facts, "", admission.HostOverlayFromLastPopulatedIndex)
 	} else if agent != "" {
 		// No true id: Python looks the host up by agent next
 		// (fullers.py:57-74), and treats it as found by id.
 		host, found, unreadable := index.LookupAgent(agent)
 		if unreadable {
+			// The agent hash of this load could not be read: the alert's
+			// identity reads the last one that could.
+			identityOverlay(store, dimensions, facts, agent, admission.HostOverlayFromLastPopulatedIndex)
 			facts.MarkFactsUnavailable(admission.FactsUnavailableHostIndex)
 			return
 		}
@@ -126,6 +143,36 @@ func (fuller *HostTopologyFuller) Fill(dimensions map[string]json.RawMessage, fa
 	// Named, and placed by nothing: an id, an address or alias, or an
 	// instance the cache did not find.
 	facts.HostUnresolved = unknownID || agent != "" || address != "" || len(facts.ServiceInstanceKeys()) > 0
+}
+
+// identityOverlay sets a record's host overlay from the store's identity
+// index (Store.IdentityHost, IdentityAgent) - for its alert's identity only,
+// with no placement, so no filter or scope decides on it - by its true
+// bk_host_id, else by agent. A record that names either while the store has
+// never held an index with hosts is one whose identity cannot be read
+// (Facts.HostIdentityUnavailable).
+func identityOverlay(store *Store, dimensions map[string]json.RawMessage, facts *admission.Facts, agent, source string) {
+	id := facts.HostNaming.IDKey
+	if id == "" && agent == "" {
+		return
+	}
+	if !store.IdentityHeld() {
+		facts.HostIdentityUnavailable = true
+		return
+	}
+	var host *HostFacts
+	var found bool
+	if id != "" {
+		host, found = store.IdentityHost(id)
+	} else {
+		host, found, _ = store.IdentityAgent(agent)
+	}
+	if found {
+		facts.HostOverlay = hostOverlay(dimensions, host, reportedAddress(dimensions, host))
+		if facts.HostOverlay != nil {
+			facts.HostOverlaySource = source
+		}
+	}
 }
 
 // tenantStore is the store of the tenant a record is read for, nil when

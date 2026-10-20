@@ -1229,6 +1229,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// soon as the hold ends, not at its next turn.
 	flights.OnTurnedAwayReleased(bundle.noticeFlightReleased)
 	bundle.workerPorts = workerPorts
+	bundle.cmdbIndex = cmdbIndex
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	// One memory of which business each alert was filed under, for every

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/clirelease"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -735,8 +736,11 @@ type phaseTwoWorkerBundle struct {
 	// more (scopeclose), nil without the alert link's Console. Kept so a
 	// test can step it rather than wait for its loop.
 	targetScopeClose *scopeclose.Closer
-	runtimeConfig    *observability.RuntimeConfigFacts
-	dependencies     phaseTwoWorkerBundleDependencies
+	// cmdbIndex is the CMDB host index of every tenant the admission step
+	// reads. Kept so a test can refresh it rather than wait for its loop.
+	cmdbIndex     *cmdbcache.TenantStores
+	runtimeConfig *observability.RuntimeConfigFacts
+	dependencies  phaseTwoWorkerBundleDependencies
 	// liveness is what the liveness probe judges; see phaseTwoLiveness.
 	liveness *phaseTwoLiveness
 	// workerPorts is what this runtime actually handed the coordinator.

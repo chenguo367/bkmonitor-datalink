@@ -240,14 +240,7 @@ func (adapter *seriesAdapter) reportSuperseded(identity execution.PlanIdentity, 
 	if own == "" {
 		return
 	}
-	alerted := make(map[string]json.RawMessage, len(facts.Dimensions)+len(facts.HostOverlay))
-	for key, value := range facts.Dimensions {
-		alerted[key] = value
-	}
-	for key, value := range facts.HostOverlay {
-		alerted[key] = value
-	}
-	if output.fingerprint(identity.BusinessID, alerted) == own {
+	if output.fingerprint(identity.BusinessID, alertedDimensions(facts)) == own {
 		return
 	}
 	var readOffset time.Duration
@@ -257,6 +250,23 @@ func (adapter *seriesAdapter) reportSuperseded(identity execution.PlanIdentity, 
 	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Fingerprint: own, StrategyRevision: output.revision,
 		GlobalBusiness: output.globalBusiness, Round: adapter.round, IntervalSeconds: output.intervalSeconds,
 		ReadOffset: readOffset, CloseReason: linkdoutput.CloseReasonSupersededIdentity})
+}
+
+// alertedDimensions are a record's dimensions as its alert identity reads
+// them: its own, with its host overlay written over them where there is one
+// (evaluation's alertDimensions).
+func alertedDimensions(facts *admission.Facts) map[string]json.RawMessage {
+	if len(facts.HostOverlay) == 0 {
+		return facts.Dimensions
+	}
+	alerted := make(map[string]json.RawMessage, len(facts.Dimensions)+len(facts.HostOverlay))
+	for key, value := range facts.Dimensions {
+		alerted[key] = value
+	}
+	for key, value := range facts.HostOverlay {
+		alerted[key] = value
+	}
+	return alerted
 }
 
 // scopeTallyKey is one bulk count the adapter keeps until its query ends.
@@ -306,7 +316,10 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 		adapter.tallyScopeDrop(identity, ScopeDropFingerprintUnsupported)
 		return
 	}
-	fingerprint := output.fingerprint(identity.BusinessID, facts.Dimensions)
+	// The fingerprint the alert is filed under: with the host overlay over
+	// the record's dimensions, as the evaluator reads them, or the close
+	// would look for an alert the series no longer opens.
+	fingerprint := output.fingerprint(identity.BusinessID, alertedDimensions(facts))
 	if fingerprint == "" {
 		adapter.tallyScopeDrop(identity, ScopeDropNoFingerprint)
 		return
