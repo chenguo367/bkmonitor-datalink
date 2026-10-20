@@ -690,6 +690,18 @@ func (p *CompiledPlan) NoDataView() *CompiledPlan {
 	return &view
 }
 
+// NoDataOutputIdentity is the alert identity a no-data event of this Plan is
+// fingerprinted with: the no-data view's, which reads every dimension the
+// record carries - the group's no-data agg_dimension and the tag - not the
+// Plan's DimensionFields. Hashing a no-data group with OutputIdentity drops
+// any no-data field outside the item's dimensions, and two groups differing
+// only there share one fingerprint. Anything that recomputes a no-data
+// event's fingerprint asks here, so it hashes as the trigger does. Nil when
+// the Plan detects no no-data.
+func (p *CompiledPlan) NoDataOutputIdentity() *contract.MonitorOutputIdentity {
+	return p.NoDataView().OutputIdentity()
+}
+
 // TargetScope is the strategy's monitoring target, frozen with the Plan. Nil
 // means the strategy names no target; it never means one was dropped, because
 // a target the catalog cannot reduce rejects the Plan instead.
