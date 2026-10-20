@@ -90,7 +90,7 @@ func TestAnOpenReadGapHoldsRecoveryWhileTheLevelCarriesItsFirstStampedOrigin(t *
 		view.Status = execution.StateFoundGapped
 		level := &view.Levels[0]
 		level.HistoryCompleteness, level.GapReasonCode = execution.HistoryGapped, reason
-		level.GapReasonOriginSlot, level.GapReasonOriginCause = origin.Slot, origin.Cause
+		level.GapReasonOriginSlot = uint32(origin.Slot)
 		level.LastProcessedEventTime = anomalyAt
 		if open {
 			marker(t, &request, 0)
@@ -121,7 +121,7 @@ func TestAnOpenReadGapHoldsRecoveryWhileTheLevelCarriesItsFirstStampedOrigin(t *
 			t.Fatalf("%s: RECOVERY while the read gap is open: a round nobody read counted as a quiet minute", round)
 		}
 		if outcome.Outcome != execution.LevelOutcomeUnknown || outcome.ReasonCode != reason || !outcome.ReasonCarried ||
-			outcome.ReasonOrigin != origin {
+			outcome.ReasonOrigin() != origin {
 			t.Fatalf("%s: outcome %+v, want UNKNOWN %s carried from %+v", round, outcome, reason, origin)
 		}
 		if result.Result != observability.ResultDegraded || result.ReasonCode != reason || !result.ReasonCarried ||

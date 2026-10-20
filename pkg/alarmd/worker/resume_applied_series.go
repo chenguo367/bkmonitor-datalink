@@ -75,7 +75,7 @@ func resumedSeriesResult(header execution.InternalExecutionHeader, due execution
 				plan.ReasonCarried, plan.ReasonOrigin = carried, origin
 			}
 			plan.LevelOutcomes = append(plan.LevelOutcomes, execution.LevelOutcome{Plan: due.Identity, LevelID: level.LevelID, SeriesIdentityDigest: view.Identity.SeriesIdentityDigest, Outcome: execution.LevelOutcomeUnknown, ReasonCode: reason,
-				ReasonCarried: carried, ReasonOrigin: origin})
+				ReasonCarried: carried}.WithReasonOrigin(origin))
 			if result.Result == observability.ResultSuccess {
 				result.Result = observability.ResultDegraded
 				result.ReasonCode = reason

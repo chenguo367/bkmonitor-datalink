@@ -75,7 +75,7 @@ func TestAWriteThatDiffersOnlyInOriginIsDecisionStable(t *testing.T) {
 		Levels: []execution.RuntimeLevelStateView{{LevelID: stored.LevelID, LevelStateCompatibility: stored.LevelStateCompatibility,
 			HistoryCompleteness: stored.HistoryCompleteness, GapReasonCode: stored.GapReasonCode,
 			WarmupRequirementRef: stored.WarmupRequirementRef, LastProcessedEventTime: stored.LastProcessedEventTime,
-			GapReasonOriginSlot: 1_787_999_880, GapReasonOriginCause: contract.ReasonGapSkipped}}}
+			GapReasonOriginSlot: 1_787_999_880}}}
 	if got := execution.ClassifyStateWriteReuse(view, mutation); got != execution.StateWriteReuseDecisionStable {
 		t.Fatalf("reuse = %s, want %s for a write differing only in origin", got, execution.StateWriteReuseDecisionStable)
 	}
@@ -85,16 +85,12 @@ func TestAWriteThatDiffersOnlyInOriginIsDecisionStable(t *testing.T) {
 	}
 }
 
-// An origin is whole or absent, and only on a Level that holds a guard.
-func TestAStateMutationRefusesAHalfOriginOrOneWithoutAGuard(t *testing.T) {
-	half := originFixtureMutation(execution.ReasonOrigin{})
-	half.Levels[0].GapReasonOriginSlot = 1_787_999_940
-	if _, err := execution.BuildStateMutation(half); err == nil {
-		t.Fatal("a slot without a cause was accepted")
-	}
+// An origin is only on a Level that holds a guard: a stored Slot beside no
+// reason is refused, not read as an origin.
+func TestAStateMutationRefusesAnOriginWithoutAGuard(t *testing.T) {
 	full := originFixtureMutation(execution.ReasonOrigin{})
 	full.Levels[0].HistoryCompleteness, full.Levels[0].GapReasonCode = execution.HistoryFull, ""
-	full.Levels[0].GapReasonOriginSlot, full.Levels[0].GapReasonOriginCause = 1_787_999_940, contract.ReasonQueryTimeout
+	full.Levels[0].GapReasonOriginSlot = 1_787_999_940
 	if _, err := execution.BuildStateMutation(full); err == nil {
 		t.Fatal("an origin on a FULL Level was accepted")
 	}
@@ -108,8 +104,8 @@ func TestACompletionCauseSaysWhetherItsReasonWasCarried(t *testing.T) {
 	plan := input.Inputs[0].Consumer.Plan
 	origin := execution.ReasonOrigin{Slot: 1_787_999_940, Cause: contract.ReasonQueryTimeout}
 	held := execution.PlanEvaluationResult{Plan: plan, Disposition: execution.PlanDecided,
-		LevelOutcomes: []execution.LevelOutcome{{Plan: plan, LevelID: 3, Outcome: execution.LevelOutcomeUnknown,
-			ReasonCode: contract.ReasonQueryTimeout, GuardTail: true, ReasonCarried: true, ReasonOrigin: origin}}}
+		LevelOutcomes: []execution.LevelOutcome{execution.LevelOutcome{Plan: plan, LevelID: 3, Outcome: execution.LevelOutcomeUnknown,
+			ReasonCode: contract.ReasonQueryTimeout, GuardTail: true, ReasonCarried: true}.WithReasonOrigin(origin)}}
 	_, attribution, err := execution.DeriveCompletionAttribution(input, execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{held}})
 	if err != nil {
 		t.Fatal(err)

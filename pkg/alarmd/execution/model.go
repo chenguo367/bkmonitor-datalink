@@ -847,17 +847,15 @@ type StateGuardFact struct {
 }
 
 type RuntimeLevelStateView struct {
-	LevelID                 uint32
+	LevelID uint32
+	// GapReasonOriginSlot: see RuntimeLevelStateMutation. Zero on a record
+	// that does not carry it, and then left out of any encoding of the view.
+	GapReasonOriginSlot     uint32 `json:",omitempty"`
 	LevelStateCompatibility string
 	HistoryCompleteness     HistoryCompleteness
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
-	// GapReasonOriginSlot and GapReasonOriginCause: see
-	// RuntimeLevelStateMutation. Zero on a record that does not carry them,
-	// and then left out of any encoding of the view.
-	GapReasonOriginSlot  EvaluationTime `json:",omitempty"`
-	GapReasonOriginCause ReasonCode     `json:",omitempty"`
 }
 
 // StateRepresentation names the on-disk shape a Runtime State record was read
@@ -3629,7 +3627,7 @@ func deriveCompletionAttribution(input InternalExecution, result EvaluationResul
 	noteOutcome := func(candidate CompletionCause, outcome LevelOutcome, candidateScope CompletionScope) {
 		if causeRank(candidate) > causeRank(cause) {
 			cause, reason, scope = candidate, outcome.ReasonCode, candidateScope
-			carried, origin = outcome.ReasonCarried, outcome.ReasonOrigin
+			carried, origin = outcome.ReasonCarried, outcome.ReasonOrigin()
 		}
 	}
 	hasPartial := primary.Completeness == CompletenessPartial

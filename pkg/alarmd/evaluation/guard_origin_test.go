@@ -55,7 +55,7 @@ func TestAGuardRaisedThisRoundIsStampedWithThisSlotAndIsNotCarried(t *testing.T)
 		result.LevelOutcomes[0].ReasonCode != reason {
 		t.Fatalf("outcomes %+v, want one UNKNOWN under %s", result.LevelOutcomes, reason)
 	}
-	if outcome := result.LevelOutcomes[0]; outcome.ReasonCarried || outcome.ReasonOrigin != (execution.ReasonOrigin{}) {
+	if outcome := result.LevelOutcomes[0]; outcome.ReasonCarried || outcome.ReasonOrigin() != (execution.ReasonOrigin{}) {
 		t.Fatalf("this round's own timeout reads as carried: %+v", outcome)
 	}
 	if result.ReasonCarried {
@@ -94,7 +94,7 @@ func guardedRequests(t *testing.T, reason execution.ReasonCode, origin execution
 		request.State.Items[0].Status = status
 		level := &request.State.Items[0].Levels[0]
 		level.HistoryCompleteness, level.GapReasonCode = completeness, reason
-		level.GapReasonOriginSlot, level.GapReasonOriginCause = origin.Slot, origin.Cause
+		level.GapReasonOriginSlot = uint32(origin.Slot)
 		if len(history) != 0 {
 			level.LastProcessedEventTime = history[len(history)-1].SourceTime
 		}
@@ -136,7 +136,7 @@ func TestACarriedGuardReasonNamesItsOriginAndKeepsItWhenRewritten(t *testing.T) 
 			}
 			outcome := plan.LevelOutcomes[0]
 			if outcome.Outcome != execution.LevelOutcomeUnknown || outcome.ReasonCode != reason || !outcome.ReasonCarried ||
-				outcome.ReasonOrigin != origin {
+				outcome.ReasonOrigin() != origin {
 				t.Fatalf("outcome %+v, want UNKNOWN %s carried from %+v", outcome, reason, origin)
 			}
 			if result.ReasonCode != reason || !result.ReasonCarried || result.ReasonOrigin != origin {
@@ -168,7 +168,7 @@ func TestAGuardFromAnOlderRecordIsCarriedWithoutAnInventedOrigin(t *testing.T) {
 				t.Fatal(err)
 			}
 			outcome := result.Plans[0].LevelOutcomes[0]
-			if !outcome.ReasonCarried || outcome.ReasonOrigin != (execution.ReasonOrigin{}) {
+			if !outcome.ReasonCarried || outcome.ReasonOrigin() != (execution.ReasonOrigin{}) {
 				t.Fatalf("outcome %+v, want carried with no origin", outcome)
 			}
 			if test.advances {
@@ -193,7 +193,7 @@ func TestALevelCarriedAsItStandsKeepsItsOrigin(t *testing.T) {
 	view := request.State.Items[0]
 	level := &view.Levels[0]
 	level.HistoryCompleteness, level.GapReasonCode = execution.HistoryGapped, contract.ReasonQueryTimeout
-	level.GapReasonOriginSlot, level.GapReasonOriginCause = origin.Slot, origin.Cause
+	level.GapReasonOriginSlot = uint32(origin.Slot)
 	level.LastProcessedEventTime = 39
 	records, err := commonPrimaryRecords(request.Inputs)
 	if err != nil || len(records) == 0 {
@@ -240,7 +240,7 @@ func TestALevelUnderAGapMarkerCarriesTheScopesOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := result.Plans[0]
-	if len(plan.LevelOutcomes) != 1 || !plan.LevelOutcomes[0].ReasonCarried || plan.LevelOutcomes[0].ReasonOrigin != origin {
+	if len(plan.LevelOutcomes) != 1 || !plan.LevelOutcomes[0].ReasonCarried || plan.LevelOutcomes[0].ReasonOrigin() != origin {
 		t.Fatalf("outcomes %+v, want %s carried from %+v", plan.LevelOutcomes, reason, origin)
 	}
 	if len(plan.StateResults) != 1 || plan.StateResults[0].Mutation.Levels[0].GapReasonCode != reason ||

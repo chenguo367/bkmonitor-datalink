@@ -63,12 +63,27 @@ type LevelOutcome struct {
 	GuardTail bool
 	// ReasonCarried marks an UNKNOWN outcome whose reason is a stored guard's
 	// - the Level's saved state reason or a loaded gap marker scope's - and
-	// not anything this round's inputs said. ReasonOrigin is where that
-	// guard came from, zero when it was stamped without one. Observation
-	// only: set by the evaluator, read by the lines and counters that must
-	// not file a carried reason as this round's failure.
-	ReasonCarried bool
-	ReasonOrigin  ReasonOrigin
+	// not anything this round's inputs said. ReasonOriginSlot is the Slot
+	// that guard came from (ReasonOrigin, whose cause is ReasonCode), zero
+	// when it was stamped without one; stored as on the Level's state
+	// (RuntimeLevelStateMutation.GapReasonOriginSlot), in the alignment gap
+	// after the flags, so it costs an outcome no bytes. Observation only:
+	// set by the evaluator, read by the lines and counters that must not
+	// file a carried reason as this round's failure.
+	ReasonCarried    bool
+	ReasonOriginSlot uint32
+}
+
+// ReasonOrigin is where the outcome's carried reason came from.
+func (outcome LevelOutcome) ReasonOrigin() ReasonOrigin {
+	return unpackedOrigin(outcome.ReasonOriginSlot, outcome.ReasonCode)
+}
+
+// WithReasonOrigin is the outcome carrying origin for its reason. Set it
+// after ReasonCode: an origin that is not that reason's is not stored.
+func (outcome LevelOutcome) WithReasonOrigin(origin ReasonOrigin) LevelOutcome {
+	outcome.ReasonOriginSlot = packedOriginSlot(origin, outcome.ReasonCode)
+	return outcome
 }
 
 type levelOutcomeIdentity struct {
@@ -1093,7 +1108,7 @@ func runtimeLevelsFromMutation(levels []RuntimeLevelStateMutation) []RuntimeLeve
 			LevelID: level.LevelID, HistoryCompleteness: level.HistoryCompleteness,
 			GapReasonCode: level.GapReasonCode, WarmupRequirementRef: level.WarmupRequirementRef,
 			LevelStateCompatibility: level.LevelStateCompatibility,
-			GapReasonOriginSlot:     level.GapReasonOriginSlot, GapReasonOriginCause: level.GapReasonOriginCause,
+			GapReasonOriginSlot:     level.GapReasonOriginSlot,
 		}
 	}
 	return result

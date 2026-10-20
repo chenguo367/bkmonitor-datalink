@@ -11,6 +11,7 @@ package execution
 
 import (
 	"errors"
+	"math"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -70,22 +71,41 @@ func (cause SlotCompletionCause) CarriedReason() *observability.CarriedReasonFac
 	return CarriedReasonFacts(cause.Cause != "" && cause.ReasonCarried, cause.ReasonOrigin)
 }
 
+// packedOriginSlot is origin as a per-series record stores it next to
+// reason, the reason it is carried with: its Slot alone, the cause being
+// that reason. Zero - no origin - for an origin that is not known, is not
+// reason's, or whose Slot a uint32 cannot hold.
+func packedOriginSlot(origin ReasonOrigin, reason ReasonCode) uint32 {
+	if !origin.Known() || origin.Cause != reason || origin.Slot > math.MaxUint32 {
+		return 0
+	}
+	return uint32(origin.Slot)
+}
+
+// unpackedOrigin is the origin a per-series record stored as slot next to
+// reason. A Slot with no reason beside it comes back half, which the State
+// contract refuses (validateReasonOrigin).
+func unpackedOrigin(slot uint32, reason ReasonCode) ReasonOrigin {
+	if slot == 0 {
+		return ReasonOrigin{}
+	}
+	return ReasonOrigin{Slot: EvaluationTime(slot), Cause: reason}
+}
+
 // ReasonOrigin is the origin of the Level's stored guard reason.
 func (level RuntimeLevelStateView) ReasonOrigin() ReasonOrigin {
-	return ReasonOrigin{Slot: level.GapReasonOriginSlot, Cause: level.GapReasonOriginCause}
+	return unpackedOrigin(level.GapReasonOriginSlot, level.GapReasonCode)
 }
 
 // ReasonOrigin is the origin the mutation writes for the Level's guard reason.
 func (level RuntimeLevelStateMutation) ReasonOrigin() ReasonOrigin {
-	return ReasonOrigin{Slot: level.GapReasonOriginSlot, Cause: level.GapReasonOriginCause}
+	return unpackedOrigin(level.GapReasonOriginSlot, level.GapReasonCode)
 }
 
-// WithReasonOrigin is the mutation carrying origin for its guard reason.
+// WithReasonOrigin is the mutation carrying origin for its guard reason. Set
+// it after GapReasonCode: an origin that is not that reason's is not stored.
 func (level RuntimeLevelStateMutation) WithReasonOrigin(origin ReasonOrigin) RuntimeLevelStateMutation {
-	if !origin.Known() {
-		origin = ReasonOrigin{}
-	}
-	level.GapReasonOriginSlot, level.GapReasonOriginCause = origin.Slot, origin.Cause
+	level.GapReasonOriginSlot = packedOriginSlot(origin, level.GapReasonCode)
 	return level
 }
 

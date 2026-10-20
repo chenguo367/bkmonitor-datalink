@@ -489,7 +489,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// business outcome. A record the recovery gate held has RECOVERY
 			// outcomes and no envelope, and says so on each of them.
 			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
-			GuardTail:    guardTail, ReasonCarried: carried, ReasonOrigin: origin}
+			GuardTail:    guardTail, ReasonCarried: carried}.WithReasonOrigin(origin)
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
@@ -758,7 +758,7 @@ func (e *Evaluator) evaluateSeries(
 				result.Disposition, result.ReasonCode = execution.PlanDecidedDegraded, outcome.ReasonCode
 				// The Plan's reason is this outcome's, and so is whether it
 				// was carried from a stored guard and where that came from.
-				result.ReasonCarried, result.ReasonOrigin = outcome.ReasonCarried, outcome.ReasonOrigin
+				result.ReasonCarried, result.ReasonOrigin = outcome.ReasonCarried, outcome.ReasonOrigin()
 				break
 			}
 		}
@@ -1064,7 +1064,7 @@ func applyProvisional(view execution.RuntimeStateView, mutation execution.StateM
 	view.Levels = make([]execution.RuntimeLevelStateView, len(mutation.Levels))
 	for i, l := range mutation.Levels {
 		view.Levels[i] = execution.RuntimeLevelStateView{LevelID: l.LevelID, LevelStateCompatibility: l.LevelStateCompatibility, HistoryCompleteness: l.HistoryCompleteness, GapReasonCode: l.GapReasonCode, WarmupRequirementRef: l.WarmupRequirementRef, LastProcessedEventTime: l.LastProcessedEventTime,
-			GapReasonOriginSlot: l.GapReasonOriginSlot, GapReasonOriginCause: l.GapReasonOriginCause}
+			GapReasonOriginSlot: l.GapReasonOriginSlot}
 	}
 	view.SeriesGuard = mutation.SeriesGuard
 	return view, nil

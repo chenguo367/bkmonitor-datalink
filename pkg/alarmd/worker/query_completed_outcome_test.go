@@ -130,14 +130,14 @@ func TestAWholeQueryUnderAnOpenReadGapAndACarriedTimeoutGuardReportsSuccess(t *t
 		Plans: []execution.PlanEvaluationResult{{
 			Plan: plan, Disposition: execution.PlanDecidedDegraded, ReasonCode: reason,
 			ReasonCarried: true, ReasonOrigin: origin,
-			LevelOutcomes: []execution.LevelOutcome{{Plan: plan, LevelID: 5, SeriesIdentityDigest: series, Record: record,
+			LevelOutcomes: []execution.LevelOutcome{execution.LevelOutcome{Plan: plan, LevelID: 5, SeriesIdentityDigest: series, Record: record,
 				Outcome: execution.LevelOutcomeUnknown, ReasonCode: reason, GuardTail: true,
-				ReasonCarried: true, ReasonOrigin: origin}},
+				ReasonCarried: true}.WithReasonOrigin(origin)},
 			StateResults: []execution.StateEvaluation{{Mutation: execution.StateMutation{
 				Identity: execution.StateKeyIdentity{Plan: plan, StateGeneration: "state-v1", SeriesIdentityDigest: series},
 				Levels: []execution.RuntimeLevelStateMutation{{LevelID: 5, HistoryCompleteness: execution.HistoryGapped,
 					GapReasonCode: reason, LastProcessedEventTime: 6000,
-					GapReasonOriginSlot: origin.Slot, GapReasonOriginCause: origin.Cause}},
+					GapReasonOriginSlot: uint32(origin.Slot)}},
 			}}},
 			GuardAfterState: []execution.PlanGapMutation{{
 				Identity: execution.PlanGapIdentity{Plan: plan, StateGeneration: "state-v1"}, ExpectedMarkerRevision: 2,

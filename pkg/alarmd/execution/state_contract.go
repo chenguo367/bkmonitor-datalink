@@ -95,22 +95,27 @@ func (anchor RecordAnchor) Validate() error {
 // RuntimeLevelStateMutation is the typed new Level state written as part of
 // one Plan/series blob. Storage codecs may encode it, but cannot reinterpret it.
 type RuntimeLevelStateMutation struct {
-	LevelID                 uint32
+	LevelID uint32
+	// GapReasonOriginSlot is where GapReasonCode came from (ReasonOrigin):
+	// the Slot that first stamped the guard, in seconds. The origin's cause
+	// is GapReasonCode itself - a guard is stamped with its reason and its
+	// origin is carried only while that reason stays - so the Slot is all
+	// that is stored. A uint32 holds evaluation times to 2106 and fills the
+	// alignment gap after LevelID, so the origin costs a Level no bytes:
+	// every series of a Slot keeps these in memory, and retained accounting
+	// charges them.
+	//
+	// Optional: zero on a record written before it existed, or by a build
+	// that does not write it, and then zero on the guard it carries. The
+	// JSON key is the Go name, as the fields beside it are; omitempty keeps
+	// a record without it byte-identical to one written before it existed.
+	// Not in the State mutation digest (stateMutationDigestPayloadOf).
+	GapReasonOriginSlot     uint32 `json:",omitempty"`
 	LevelStateCompatibility string
 	HistoryCompleteness     HistoryCompleteness
 	GapReasonCode           ReasonCode
 	WarmupRequirementRef    string
 	LastProcessedEventTime  int64
-	// GapReasonOriginSlot and GapReasonOriginCause are where GapReasonCode
-	// came from (ReasonOrigin): the Slot that first stamped the guard and the
-	// reason it stamped it with. Optional: absent on a record written before
-	// they existed, or by a build that does not write them, and then absent
-	// on the guard it carries. The JSON keys are the Go names, as the
-	// fields beside them are; omitempty keeps a record without them
-	// byte-identical to one written before they existed. Not in the State
-	// mutation digest (stateMutationDigestPayloadOf).
-	GapReasonOriginSlot  EvaluationTime `json:",omitempty"`
-	GapReasonOriginCause ReasonCode     `json:",omitempty"`
 }
 
 // StateRetentionRequirement is one Level's retention need. It is the single
