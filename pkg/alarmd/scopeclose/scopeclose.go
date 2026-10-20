@@ -361,15 +361,27 @@ func (closer *Closer) Count(key openalerts.StrategyKey, reporter string, round i
 // memory, and a map update.
 func (closer *Closer) Observe(drop Drop) {
 	key := openalerts.StrategyKey{TenantID: drop.TenantID, StrategyID: drop.StrategyID}
+	// A superseded-identity offer is made for every admitted series whose
+	// host overlay moves its fingerprint, every Slot, whether or not an
+	// alert was ever opened under the old one. An offer that finds nothing
+	// to close - no such alert held, or a set that cannot say - counts
+	// nothing, so not_member and set_unavailable keep meaning target
+	// rejections; one the consumer holds is decided and counted as a target
+	// close is, and its close also as OutcomeSupersededCloseSent.
+	quiet := drop.CloseReason == linkdoutput.CloseReasonSupersededIdentity
 	if drop.Fingerprint == "" {
-		closer.count(key, OutcomeNotMember, 1)
+		if !quiet {
+			closer.count(key, OutcomeNotMember, 1)
+		}
 		return
 	}
 	closer.mu.Lock()
 	set := closer.set
 	closer.mu.Unlock()
 	if set == nil {
-		closer.count(key, OutcomeSetUnavailable, 1)
+		if !quiet {
+			closer.count(key, OutcomeSetUnavailable, 1)
+		}
 		return
 	}
 	held, judged := set.Holds(key, drop.Fingerprint)
@@ -379,11 +391,15 @@ func (closer *Closer) Observe(drop Drop) {
 	defer closer.mu.Unlock()
 	switch {
 	case !judged:
-		closer.countLocked(key, OutcomeSetUnavailable, 1)
+		if !quiet {
+			closer.countLocked(key, OutcomeSetUnavailable, 1)
+		}
 		return
 	case !held:
 		delete(closer.entries, ek)
-		closer.countLocked(key, OutcomeNotMember, 1)
+		if !quiet {
+			closer.countLocked(key, OutcomeNotMember, 1)
+		}
 		return
 	}
 	if until, done := closer.decided[ek]; done && now.Before(until) {

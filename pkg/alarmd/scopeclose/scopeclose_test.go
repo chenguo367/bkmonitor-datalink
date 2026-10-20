@@ -719,3 +719,30 @@ func TestASupersededIdentityCloseCarriesItsReason(t *testing.T) {
 		t.Fatalf("event %+v is not a close", event)
 	}
 }
+
+// A superseded-identity offer whose old fingerprint the consumer does not
+// hold - most overlaid series, every Slot - counts nothing, nor does one the
+// set cannot answer; a target rejection of the same kind still counts.
+func TestASupersededOfferWithNothingToCloseCountsNothing(t *testing.T) {
+	f := newFixture(openSet(ownSrc, fp(9)), nil)
+	offer := drop(fp(1), 0)
+	offer.CloseReason = linkdoutput.CloseReasonSupersededIdentity
+	for i := int64(0); i < 5; i++ {
+		offer.Round = 1700000000 + 60*i
+		f.closer.Observe(offer)
+		f.closer.Step(context.Background())
+		f.clock.at = f.clock.at.Add(time.Minute)
+	}
+	f.want(t, "five offers, none held", map[string]uint64{})
+	unbound := New(Options{})
+	unbound.Observe(offer)
+	if got := unbound.Stats()[OutcomeSetUnavailable]; got != 0 {
+		t.Fatalf("an offer to an unbound close counted set_unavailable %d, want nothing", got)
+	}
+	target := drop(fp(2), 1700000300)
+	f.closer.Observe(target)
+	f.want(t, "a target rejection", map[string]uint64{OutcomeNotMember: 1})
+	if len(f.writer.sent()) != 0 {
+		t.Fatalf("sent %+v, want nothing", f.writer.sent())
+	}
+}

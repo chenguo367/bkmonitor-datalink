@@ -42,8 +42,10 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"its facts; business_unknown closes of a global business strategy's alerts whose record names no "+
 				"business they were filed under, kept for the next step; superseded_identity_close_sent counts, among close_sent, "+
 				"the closes of alerts a series opened under the fingerprint of its own address before its alert identity "+
-				"read CMDB's (reason superseded_identity), whose observations every other outcome counts with the target "+
-				"rejections. Every cell exists from the start so a zero "+
+				"read CMDB's (reason superseded_identity). Such an offer is made for every series whose host overlay moves "+
+				"its fingerprint, every Slot; one that finds no open alert under the old fingerprint, or a set that cannot "+
+				"say, counts nothing, so not_member and set_unavailable at an offer stay target rejections; one the consumer "+
+				"holds is decided and counted as a target close is. Every cell exists from the start so a zero "+
 				"is a reading and not an absence.",
 			[]string{"outcome"}, nil),
 	}

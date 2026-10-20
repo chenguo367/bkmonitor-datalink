@@ -385,14 +385,15 @@ func TestAnAlertOpenUnderTheRecordsOwnFingerprintIsClosedOnceTheOverlayApplies(t
 	if !opened {
 		t.Fatalf("round 1 did not open the alert under Python's %s", current)
 	}
+	// One Slot is at most one observation, and the close waits for a
+	// second. Whether round 1 already observed depends on whether the copy
+	// read the consumer's set before that round's query ran, so the close
+	// comes on round 2's step or round 3's, and by round 3 it is there once.
 	if got := closes(); len(got) != 0 {
-		t.Fatalf("round 1 closed %+v before the copy read the consumer's set", got)
+		t.Fatalf("round 1 closed %+v on at most one observation; the close waits for a second Slot", got)
 	}
 	fixture.waitOpenAlertSetRead(1)
 	step(2)
-	if got := closes(); len(got) != 0 {
-		t.Fatalf("round 2 closed %+v on a first observation; the close waits for a second Slot", got)
-	}
 	step(3)
 	got := closes()
 	if len(got) != 1 {

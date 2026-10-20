@@ -91,3 +91,26 @@ func TestClosePreservesNativeSignedBusinessIdentity(t *testing.T) {
 		})
 	}
 }
+
+// The event id of each existing close reason, to the byte, for one fixed
+// request: a close a consumer already took keeps its id when a reason is
+// added beside it. "" is the inactive close, the reason every caller sent
+// before there was a second one.
+func TestTheExistingCloseReasonsKeepTheirEventIDs(t *testing.T) {
+	for reason, want := range map[string]string{
+		CloseReasonTargetOutOfScope: "1fae3870432d0a3505cd3a39a0562267c2d13546ef09bd52a433c4aa5e24adfa",
+		CloseReasonAbsent:           "5cd1810a66374277c3e69e491b8d0368ad0f77ada38fa809758d2b58ae543cb8",
+		CloseReasonInactive:         "3fa4c221a6f17cdfea54523e4bcde9ce6a7acaa2f5bff497da38547dc6f094a3",
+		"":                          "3fa4c221a6f17cdfea54523e4bcde9ce6a7acaa2f5bff497da38547dc6f094a3",
+	} {
+		event, err := ConvertClose(CloseRequest{TenantID: "tenant-test", Fingerprint: "0123456789abcdef0123456789abcdef",
+			AlertInstanceID: "active-instance", StrategyID: 123, StrategyRevision: 4, BusinessID: 2,
+			OccurredAt: time.Unix(1800000000, 0), Reason: reason})
+		if err != nil {
+			t.Fatalf("%q: %v", reason, err)
+		}
+		if event.EventID != want {
+			t.Errorf("%q: event id %s, want %s", reason, event.EventID, want)
+		}
+	}
+}
