@@ -444,11 +444,17 @@ func timestamp(value any, unit string) (time.Time, error) {
 }
 
 func validateScopeBody(body map[string]any, tenant, space string, promQL bool) error {
-	var queries []any
+	// The downstream Go decoder matches field names case-insensitively, with
+	// Unicode simple folding: U+017F folds to 's' and the Kelvin sign to 'k'.
+	// Every UQ field name is ASCII, so a non-ASCII key at any depth is refused
+	// and strings.ToLower below then matches exactly what the decoder matches.
+	if nonASCIIKey(body) {
+		return fail("invalid_input", "Native field names must be ASCII.")
+	}
+	var queries, outputs []any
 	var expr any
-	exprs := 0
+	exprs, lists := 0, 0
 	for key, value := range body {
-		// The downstream Go decoder accepts case-insensitive JSON field names.
 		switch strings.ToLower(key) {
 		case "bk_tenant_id", "tenant_id", "tenant":
 			if value != tenant {
@@ -467,12 +473,37 @@ func validateScopeBody(body map[string]any, tenant, space string, promQL bool) e
 			// syntactically empty override is not part of the public contract.
 			return fail("uq_scope_denied", "Direct physical storage overrides are not available through this operation.")
 		case "query_list":
-			if queries != nil {
+			if lists++; lists > 1 {
 				return fail("invalid_input", "Duplicate native query-list aliases are not accepted.")
 			}
 			queries, _ = value.([]any)
+		case "output_list":
+			// UQ runs each named output's expression as its own PromQL.
+			list, ok := value.([]any)
+			if !ok && value != nil {
+				return fail("invalid_input", "Native output_list must be a list.")
+			}
+			outputs = append(outputs, list...)
 		case "promql":
 			expr, exprs = value, exprs+1
+		}
+	}
+	for _, value := range outputs {
+		output, ok := value.(map[string]any)
+		if !ok {
+			return fail("invalid_input", "Native output_list entries must be objects.")
+		}
+		for key, value := range output {
+			if strings.ToLower(key) != "expression" {
+				continue
+			}
+			q, ok := value.(string)
+			if !ok && value != nil {
+				return fail("invalid_input", "A named output expression must be a string.")
+			}
+			if err := promQLRoute(q); err != nil {
+				return err
+			}
 		}
 	}
 	if promQL {
@@ -529,4 +560,28 @@ func promQLRoute(q string) error {
 }
 func nameByte(c byte) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}
+
+// nonASCIIKey reports an object key, at any depth, that is not ASCII.
+func nonASCIIKey(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			for i := 0; i < len(key); i++ {
+				if key[i] >= 0x80 {
+					return true
+				}
+			}
+			if nonASCIIKey(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if nonASCIIKey(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
