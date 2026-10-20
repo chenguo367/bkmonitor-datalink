@@ -10,8 +10,8 @@
 package fleet
 
 import (
-	"reflect"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -39,22 +39,50 @@ func TestARowsCauseOriginFollowsWhoseTheReasonIs(t *testing.T) {
 }
 
 // The overview carries the object list's cause reasons, all and by origin,
-// as /api/objects counts them: the read every channel has answers whose each
-// degraded round is without a route to the object list.
-func TestTheOverviewCarriesTheCauseReasonsByOrigin(t *testing.T) {
-	rows := []Anomaly{
-		{QueryGroup: "qg-321", Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE", CauseOrigin: &CauseOrigin{Origin: CauseOriginDerived}},
-		{QueryGroup: "qg-322", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginPhysical}},
-		{QueryGroup: "qg-323", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginCarried}},
+// through the path it is computed on in production: replica summaries, whose
+// heads hold no rows, aggregated into the merged part the overview reads.
+// Counted from hand-built rows instead, this read empty on every deployment.
+func TestTheOverviewCarriesTheCauseReasonsByOriginThroughSummaries(t *testing.T) {
+	snapshots := idleSnapshots()
+	snapshots[0].Anomalies = []Anomaly{
+		{QueryGroup: "qg-321", Replica: "pod-a", Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE",
+			CauseOrigin: &CauseOrigin{Origin: CauseOriginDerived}, Since: now.Add(-time.Hour)},
+		{QueryGroup: "qg-322", Replica: "pod-a", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+			CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginPhysical}, Since: now.Add(-time.Hour)},
 	}
-	summary := summarize(rows, now)
-	got := overviewCauseReasonsOf(summary)
-	if !reflect.DeepEqual(got.ByCauseReason, summary.ByCauseReason) || !reflect.DeepEqual(got.ByCauseReasonPhysical, summary.ByCauseReasonPhysical) ||
-		!reflect.DeepEqual(got.ByCauseReasonCarried, summary.ByCauseReasonCarried) || !reflect.DeepEqual(got.ByCauseReasonDerived, summary.ByCauseReasonDerived) ||
-		!reflect.DeepEqual(got.ByCauseReasonUnknown, summary.ByCauseReasonUnknown) {
-		t.Fatalf("overview cause reasons %+v, want the summary's %+v", got, summary)
+	snapshots[1].Anomalies = []Anomaly{
+		{QueryGroup: "qg-323", Replica: "pod-b", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+			CauseOrigin: &CauseOrigin{Origin: observability.ReasonOriginCarried}, Since: now.Add(-time.Hour)},
 	}
-	if len(got.ByCauseReasonDerived.Top) != 1 || got.ByCauseReasonDerived.Top[0].Value != "EFFECTIVE_TIME_INACTIVE" {
-		t.Fatalf("derived = %+v, want the out-of-hours row", got.ByCauseReasonDerived)
+	summaries := make([]ReplicaSummary, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		summary := SummaryOf(snapshot, snapshot.OwnedObjects, time.Minute)
+		if len(summary.Head.Anomalies) != 0 {
+			t.Fatal("fixture: a summary head carries rows, so this case could not show the part carrying them")
+		}
+		summaries = append(summaries, summary)
+	}
+	_, part := aggregateSummaries(Expectation{}, SetDigest{}, summaries, replicas(), now, freshness,
+		func([]string) ([][]string, bool) { return nil, false }, controlRead{})
+	got := overviewCauseReasonsOf(part)
+	count := func(distribution Distribution, reason string) int {
+		for _, entry := range distribution.Top {
+			if entry.Value == reason {
+				return entry.Count
+			}
+		}
+		return 0
+	}
+	if count(got.ByCauseReason, "QUERY_TIMEOUT") != 2 || count(got.ByCauseReasonPhysical, "QUERY_TIMEOUT") != 1 ||
+		count(got.ByCauseReasonCarried, "QUERY_TIMEOUT") != 1 || count(got.ByCauseReasonDerived, "EFFECTIVE_TIME_INACTIVE") != 1 {
+		t.Fatalf("overview cause reasons %+v, want both replicas' rows counted by origin", got)
+	}
+	if got.Partial {
+		t.Fatal("no replica cut its rows, yet the counts read partial")
+	}
+	missing := part
+	missing.CauseReasonsMissing = true
+	if !overviewCauseReasonsOf(missing).Partial {
+		t.Fatal("a replica without counts did not mark the overview's counts partial")
 	}
 }

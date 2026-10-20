@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // The overview: whether this deployment detects what it can, on time and
@@ -83,20 +85,79 @@ type Overview struct {
 
 // OverviewCauseReasons is Summary's cause reasons: all of them, and split by
 // whose the reason is - physical, carried, derived, unknown - the four
-// adding up to the first.
+// adding up to the first. Partial says some replica's anomaly rows were cut
+// to its budget, or a replica published no counts: the distributions are
+// then a floor.
 type OverviewCauseReasons struct {
 	ByCauseReason         Distribution `json:"by_cause_reason"`
 	ByCauseReasonPhysical Distribution `json:"by_cause_reason_physical"`
 	ByCauseReasonCarried  Distribution `json:"by_cause_reason_carried"`
 	ByCauseReasonDerived  Distribution `json:"by_cause_reason_derived"`
 	ByCauseReasonUnknown  Distribution `json:"by_cause_reason_unknown"`
+	Partial               bool         `json:"partial,omitempty"`
 }
 
-// overviewCauseReasonsOf is a summary's cause reasons for the overview.
-func overviewCauseReasonsOf(summary Summary) OverviewCauseReasons {
-	return OverviewCauseReasons{ByCauseReason: summary.ByCauseReason,
-		ByCauseReasonPhysical: summary.ByCauseReasonPhysical, ByCauseReasonCarried: summary.ByCauseReasonCarried,
-		ByCauseReasonDerived: summary.ByCauseReasonDerived, ByCauseReasonUnknown: summary.ByCauseReasonUnknown}
+// overviewCauseReasonsOf is the replicas' merged counts as the overview
+// carries them. The overview reads replica summaries, whose heads hold no
+// rows, so the counts travel in each summary's part, counted at the replica
+// from the rows it published (ReplicaPartOf).
+func overviewCauseReasonsOf(part ReplicaPart) OverviewCauseReasons {
+	counts := part.CauseReasons
+	if counts == nil {
+		counts = newCauseReasonCounts()
+	}
+	return OverviewCauseReasons{ByCauseReason: rank(counts.All),
+		ByCauseReasonPhysical: rank(counts.Physical), ByCauseReasonCarried: rank(counts.Carried),
+		ByCauseReasonDerived: rank(counts.Derived), ByCauseReasonUnknown: rank(counts.Unknown),
+		Partial: part.CauseReasonsMissing || part.Truncated&(1<<0) != 0}
+}
+
+// CauseReasonCounts counts anomaly rows' cause reasons: all of them, and by
+// whose each is (Anomaly.CauseOrigin). Counts add across replicas, as each
+// object is one replica's.
+type CauseReasonCounts struct {
+	All      map[string]int `json:"all"`
+	Physical map[string]int `json:"physical"`
+	Carried  map[string]int `json:"carried"`
+	Derived  map[string]int `json:"derived"`
+	Unknown  map[string]int `json:"unknown"`
+}
+
+func newCauseReasonCounts() *CauseReasonCounts {
+	return &CauseReasonCounts{All: map[string]int{}, Physical: map[string]int{}, Carried: map[string]int{},
+		Derived: map[string]int{}, Unknown: map[string]int{}}
+}
+
+// add counts one row's cause reason under its origin; a row without one is
+// not counted. Unknown is never counted as physical.
+func (counts *CauseReasonCounts) add(anomaly Anomaly) {
+	if anomaly.CauseReason == "" {
+		return
+	}
+	counts.All[anomaly.CauseReason]++
+	origin := ""
+	if anomaly.CauseOrigin != nil {
+		origin = anomaly.CauseOrigin.Origin
+	}
+	switch origin {
+	case observability.ReasonOriginPhysical:
+		counts.Physical[anomaly.CauseReason]++
+	case observability.ReasonOriginCarried:
+		counts.Carried[anomaly.CauseReason]++
+	case CauseOriginDerived:
+		counts.Derived[anomaly.CauseReason]++
+	default:
+		counts.Unknown[anomaly.CauseReason]++
+	}
+}
+
+func (counts *CauseReasonCounts) merge(other *CauseReasonCounts) {
+	for _, pair := range [][2]map[string]int{{counts.All, other.All}, {counts.Physical, other.Physical},
+		{counts.Carried, other.Carried}, {counts.Derived, other.Derived}, {counts.Unknown, other.Unknown}} {
+		for reason, count := range pair[1] {
+			pair[0][reason] += count
+		}
+	}
 }
 
 // BoardDrill is a strategy.board selection the overview writes for a count it

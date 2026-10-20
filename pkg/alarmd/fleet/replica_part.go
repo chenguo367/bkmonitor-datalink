@@ -98,6 +98,12 @@ type ReplicaPart struct {
 	// summary is read as none, and the replica is summarized from its
 	// snapshot (Service.summarize).
 	Metrics *MetricRows `json:"metrics,omitempty"`
+	// CauseReasons is the rows' cause reasons by origin, for the overview,
+	// which reads summaries and so no rows. Nil on a part a build before it
+	// published; merged, CauseReasonsMissing says some part had none, and
+	// the merged counts are a floor.
+	CauseReasons        *CauseReasonCounts `json:"cause_reasons,omitempty"`
+	CauseReasonsMissing bool               `json:"-"`
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -118,8 +124,10 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	if len(view.PerReplica) == 1 {
 		part.Replica = view.PerReplica[0].Replica
 	}
+	part.CauseReasons = newCauseReasonCounts()
 	for _, anomaly := range view.Anomalies {
 		part.Attribution.add(anomaly.Attribution)
+		part.CauseReasons.add(anomaly)
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
 	columns := viewColumns(&view)
@@ -149,7 +157,8 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
-	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}, Metrics: &MetricRows{}}
+	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}, CheckRows: checkTallies{}, Metrics: &MetricRows{},
+		CauseReasons: newCauseReasonCounts()}
 	running := len(parts) > 0
 	merged.RunningStrategies = map[StateWord]int{}
 	tallies := make([]ImpactTally, 0, len(parts))
@@ -160,6 +169,11 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		merged.Attribution.Other += part.Attribution.Other
 		tallies = append(tallies, part.Impact)
 		merged.EmptyEveryRound += part.EmptyEveryRound
+		if part.CauseReasons == nil || part.CauseReasonsMissing {
+			merged.CauseReasonsMissing = true
+		} else {
+			merged.CauseReasons.merge(part.CauseReasons)
+		}
 		merged.DemotedDue += part.DemotedDue
 		if !part.DemotedDueSince.IsZero() && (merged.DemotedDueSince.IsZero() || part.DemotedDueSince.Before(merged.DemotedDueSince)) {
 			merged.DemotedDueSince = part.DemotedDueSince

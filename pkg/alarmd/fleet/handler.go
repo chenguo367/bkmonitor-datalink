@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 )
 
@@ -616,9 +615,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	failures := map[string]int{}
 	codes := map[string]int{}
 	details := map[string]int{}
-	causeReasons := map[string]int{}
-	physicalCauseReasons, carriedCauseReasons, unknownCauseReasons := map[string]int{}, map[string]int{}, map[string]int{}
-	derivedCauseReasons := map[string]int{}
+	causeReasons := newCauseReasonCounts()
 	businesses := map[string]int{}
 	strategies := map[StrategyRef]struct{}{}
 	replicas := map[string]int{}
@@ -715,23 +712,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 		if anomaly.Failure != nil && anomaly.Failure.Detail != "" {
 			details[anomaly.Failure.Detail]++
 		}
-		if anomaly.CauseReason != "" {
-			causeReasons[anomaly.CauseReason]++
-			origin := ""
-			if anomaly.CauseOrigin != nil {
-				origin = anomaly.CauseOrigin.Origin
-			}
-			switch origin {
-			case observability.ReasonOriginPhysical:
-				physicalCauseReasons[anomaly.CauseReason]++
-			case observability.ReasonOriginCarried:
-				carriedCauseReasons[anomaly.CauseReason]++
-			case CauseOriginDerived:
-				derivedCauseReasons[anomaly.CauseReason]++
-			default:
-				unknownCauseReasons[anomaly.CauseReason]++
-			}
-		}
+		causeReasons.add(anomaly)
 		replicas[anomaly.Replica]++
 		// Counted per object, not per reference: one object naming the same
 		// business twice must not make that business look twice as affected.
@@ -751,9 +732,9 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 	}
 	return Summary{
 		ByKind: rank(kinds), ByReason: rank(reasons),
-		ByFailure: rank(failures), ByFailureCode: rank(codes), ByFailureDetail: rank(details), ByCauseReason: rank(causeReasons),
-		ByCauseReasonPhysical: rank(physicalCauseReasons), ByCauseReasonCarried: rank(carriedCauseReasons),
-		ByCauseReasonDerived: rank(derivedCauseReasons), ByCauseReasonUnknown: rank(unknownCauseReasons),
+		ByFailure: rank(failures), ByFailureCode: rank(codes), ByFailureDetail: rank(details), ByCauseReason: rank(causeReasons.All),
+		ByCauseReasonPhysical: rank(causeReasons.Physical), ByCauseReasonCarried: rank(causeReasons.Carried),
+		ByCauseReasonDerived: rank(causeReasons.Derived), ByCauseReasonUnknown: rank(causeReasons.Unknown),
 		ByBusiness: rank(businesses), Strategies: len(strategies),
 		ByReplica: rank(replicas), Stalled: stalled, Onset: onset,
 		Ours: ours, External: external, Unattributed: unattributed,
@@ -1019,7 +1000,7 @@ func NewHandler(
 		running, known := RunningStrategiesOf(&view, part)
 		health := healthOf(&view, part, at)
 		overview := overviewOf(health, running, known, at)
-		overview.CauseReasons = overviewCauseReasonsOf(summarize(view.Anomalies, at))
+		overview.CauseReasons = overviewCauseReasonsOf(part)
 		// The cache computes one at a time, so the readings it keeps are
 		// touched by one computation at once.
 		flows.apply(&overview, health, at)

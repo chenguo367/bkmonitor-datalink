@@ -70,7 +70,6 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonEffectiveTimeRepeatUntilInvalid:    ReasonSourceJudged,
 	ReasonCompilerTerminalUnclassified:       ReasonSourceJudged,
 	ReasonNoDataRosterUnsupported:            ReasonSourceJudged,
-	ReasonBackendCapabilityMissing:           ReasonSourceJudged,
 	ReasonProjectionInvalid:                  ReasonSourceJudged,
 	ReasonSelectorInvalid:                    ReasonSourceJudged,
 	ReasonLevelInvalid:                       ReasonSourceJudged,
@@ -110,7 +109,6 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonConfigDrift:              ReasonSourceJudged,
 	ReasonPlanReactivated:          ReasonSourceJudged,
 	ReasonQueryNotReady:            ReasonSourceJudged,
-	ReasonSnapshotUnavailable:      ReasonSourceJudged,
 	ReasonGapSkipped:               ReasonSourceJudged,
 	ReasonSchedulePruned:           ReasonSourceJudged,
 	ReasonPlanNotActive:            ReasonSourceJudged,
@@ -129,7 +127,12 @@ var reasonSourcesV2 = map[string]ReasonSourceV2{
 	ReasonStateLevelContractMismatch:      ReasonSourceJudged,
 	ReasonTriggerInvariant:                ReasonSourceJudged,
 	ReasonOutputConversionRejected:        ReasonSourceJudged,
-	// The stores, Kafka and the output client.
+	// The stores, Kafka and the output client. A snapshot unavailable is,
+	// in all but one of its producers, the control store's answer (missing,
+	// corrupt or unresolvable past the bound); a backend capability missing
+	// is the State store answering that Redis lacks the lifetime command.
+	ReasonSnapshotUnavailable:        ReasonSourceMet,
+	ReasonBackendCapabilityMissing:   ReasonSourceMet,
 	ReasonAuditDrop:                  ReasonSourceMet,
 	ReasonKafkaUnavailable:           ReasonSourceMet,
 	ReasonRedisUnavailable:           ReasonSourceMet,
