@@ -49,8 +49,11 @@ type NamedOutputValue struct {
 // delivery proof, and its fields the record digest, and neither may move
 // for what is read beside the detection.
 type NamedOutputRecords struct {
-	Refs    []string
-	Records map[string][]NamedOutputValue
+	Refs []string
+	// LegacyRef is which of Refs is the legacy output, the one detection
+	// reads; one of Refs' own strings, and charged with them.
+	LegacyRef string
+	Records   map[string][]NamedOutputValue
 }
 
 // What a table holds, measured (TestANamedOutputTableCostsWhatItIsCharged):

@@ -41,7 +41,7 @@ func detectionSnapshot(request EvaluationRequestV2, event *contract.TriggerEvent
 	snapshot := contract.DetectionSnapshotV1{Version: contract.DetectionSnapshotVersion, Levels: []contract.DetectionLevelV1{}}
 	_, noData := request.RecordRef.Dimensions[contract.NoDataDimensionTag]
 	if event.EventKind == contract.TriggerEventAbnormal && !noData {
-		snapshot.RefValues = refValues(request.NamedOutputs, request.Record.RecordID)
+		snapshot.RefValues = refValues(request.NamedOutputs, request.Record.RecordID, currentValue(event.Observed))
 	}
 	levels := make([]contract.LevelResultV1, 0, len(event.LevelResults))
 	for _, result := range event.LevelResults {
@@ -84,9 +84,26 @@ func snapshotFacts(snapshot contract.DetectionSnapshotV1, truncated bool) *Detec
 	return facts
 }
 
+// currentValue is the event's current value, as both outputs write it: the
+// observed value named value, or the one observed value there is.
+func currentValue(observed contract.TriggerObservedV1) json.RawMessage {
+	if value, found := observed.Values["value"]; found {
+		return value
+	}
+	if len(observed.Values) == 1 {
+		for _, value := range observed.Values {
+			return value
+		}
+	}
+	return nil
+}
+
 // refValues is the named outputs at one record, by reference name; nil
-// when the record is not in the table.
-func refValues(table *execution.NamedOutputRecords, recordID string) map[string]contract.DetectionRefValueV1 {
+// when the record is not in the table. The legacy output's value, where it
+// has one, is the event's current value, by assignment: the contract
+// promises the two equal, and the snapshot does not lean on the table
+// having read the same field of the same record.
+func refValues(table *execution.NamedOutputRecords, recordID string, current json.RawMessage) map[string]contract.DetectionRefValueV1 {
 	if table == nil {
 		return nil
 	}
@@ -99,6 +116,9 @@ func refValues(table *execution.NamedOutputRecords, recordID string) map[string]
 		entry := contract.DetectionRefValueV1{State: string(value.State)}
 		if value.State == execution.NamedOutputSuccess || value.State == execution.NamedOutputPartial {
 			entry.Value = value.Value
+			if table.Refs[index] == table.LegacyRef && current != nil {
+				entry.Value = current
+			}
 		}
 		refs[table.Refs[index]] = entry
 	}

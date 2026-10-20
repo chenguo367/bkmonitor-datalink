@@ -10,12 +10,17 @@
 package trigger
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
@@ -195,6 +200,92 @@ func TestTheLargestRealisticNamedStrategySnapshotIsWhole(t *testing.T) {
 	}
 	if facts := snapshot.Levels[2].Algorithms[2].Facts; len(facts) != 8 {
 		t.Fatalf("the third level's deciding algorithm has %d facts, want value, group and three conditions: %s", len(facts), result.TriggerEvent.DetectionSnapshot)
+	}
+}
+
+type discardSnapshots struct{}
+
+func (discardSnapshots) SaveBatch(context.Context, []legacyoutput.Snapshot) error { return nil }
+
+// The contract promises the consumer that the legacy output's ref value is
+// the event's current value. From the public entry, through each output:
+// a Plan decides a record whose table holds another value for its legacy
+// output, and both outputs write the legacy ref value as the very value they
+// write for the event - the legacy data.value, and the standard event's
+// value - byte for byte.
+func TestTheLegacyRefValueIsTheEventsCurrentValueInBothOutputs(t *testing.T) {
+	plan := compilePlanV2WithOutput(t, []contract.LevelIRV2{levelV2(1, 1, 1, 1, 1, nil)}, func(p *contract.EvaluationPlanV2) {
+		p.WireFormat = contract.WireFormatPythonCompatible
+		p.LegacyOutput = &contract.LegacyOutputContext{
+			Strategy: json.RawMessage(`{"id":1001,"bk_biz_id":2,"update_time":1756684800,"name":"cpu","scenario":"os",` +
+				`"items":[{"id":1,"name":"cpu usage","query_configs":[{"metric_id":"bk_monitor.system.cpu","data_type_label":"time_series"}]}]}`),
+			DimensionFields: []string{"host"}, ItemID: "1",
+		}
+	})
+	request := requestV2(t, plan, 300, []DetectionFact{factV2(plan.Levels().At(0), DetectionAnomalous)},
+		[]LevelHistory{{LevelID: 1, View: pointHistory{step: 60, points: map[int64]bool{300: true}}}}, activeFactsV2(t, plan, 300))
+	table := namedOutputsAt(request.Record.RecordID)
+	table.LegacyRef = "C"
+	table.Records[request.Record.RecordID][2].Value = json.RawMessage("49.9")
+	request.NamedOutputs = table
+	result, err := EvaluateV2(request)
+	if err != nil || result.TriggerEvent == nil {
+		t.Fatalf("EvaluateV2() = %+v, %v", result, err)
+	}
+	event := result.TriggerEvent
+
+	written, err := (&legacyoutput.Converter{Store: discardSnapshots{}, Now: func() time.Time { return time.Unix(400, 0) }}).
+		ConvertBatch(context.Background(), []contract.TriggerEventV1{*event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		ExtraInfo struct {
+			OriginAlarm struct {
+				Data struct {
+					Value     json.RawMessage `json:"value"`
+					RefValues map[string]struct {
+						Value json.RawMessage `json:"value"`
+					} `json:"ref_values"`
+				} `json:"data"`
+			} `json:"origin_alarm"`
+		} `json:"extra_info"`
+	}
+	if err := json.Unmarshal(written[0].Payload, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	data := legacy.ExtraInfo.OriginAlarm.Data
+	if len(data.Value) == 0 || string(data.RefValues["C"].Value) != string(data.Value) {
+		t.Fatalf("legacy data.value %s, ref_values.C.value %s: want them the same bytes", data.Value, data.RefValues["C"].Value)
+	}
+
+	standard := *event
+	standard.WireFormat = contract.WireFormatStandardRawEvent
+	standard.StrategyRef = &contract.StrategySnapshotRef{TenantID: "default", BusinessID: 2, StrategyID: 1001, Revision: 7}
+	standard.DedupeMD5 = strings.Repeat("b", 32)
+	converter, err := linkdoutput.NewConverter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := converter.Convert(&standard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Values    map[string]json.RawMessage `json:"values"`
+		ExtraData struct {
+			DetectionSnapshot struct {
+				RefValues map[string]struct {
+					Value json.RawMessage `json:"value"`
+				} `json:"ref_values"`
+			} `json:"detection_snapshot"`
+		} `json:"extra_data"`
+	}
+	if err := json.Unmarshal(message.Payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(wire.ExtraData.DetectionSnapshot.RefValues["C"].Value), string(wire.Values["value"]); got == "" || got != want {
+		t.Fatalf("standard values.value %s, ref_values.C.value %s: want them the same bytes", want, got)
 	}
 }
 

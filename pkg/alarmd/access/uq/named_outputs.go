@@ -459,7 +459,8 @@ func (named *namedOutputDecoding) align(ctx context.Context, completeness execut
 	if err := named.hold(ctx, execution.NamedOutputRefsRetainedBytes(refs)); err != nil {
 		return nil, err
 	}
-	records := &execution.NamedOutputRecords{Refs: refs, Records: make(map[string][]execution.NamedOutputValue, len(named.points))}
+	records := &execution.NamedOutputRecords{Refs: refs, LegacyRef: named.outputs.LegacyRef,
+		Records: make(map[string][]execution.NamedOutputValue, len(named.points))}
 	keys := make(map[alignKey]bool, len(named.points))
 	for _, point := range named.points {
 		if keys[point.key] {

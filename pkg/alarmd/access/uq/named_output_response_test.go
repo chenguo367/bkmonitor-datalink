@@ -172,7 +172,8 @@ func TestNamedOutputsAreAlignedToTheLegacyRecords(t *testing.T) {
 		completion.Stats.Series != 2 || completion.Stats.Records != 4 || len(sink.batches) != 2 {
 		t.Fatalf("completion %+v, %d batches", completion, len(sink.batches))
 	}
-	if refs := completion.NamedOutputs.Refs; strings.Join(refs, ",") != "A,B,C" || len(completion.NamedOutputs.Records) != 4 {
+	if refs := completion.NamedOutputs.Refs; strings.Join(refs, ",") != "A,B,C" || completion.NamedOutputs.LegacyRef != "C" ||
+		len(completion.NamedOutputs.Records) != 4 {
 		t.Fatalf("named outputs %+v", completion.NamedOutputs)
 	}
 	first := valuesAt(t, completion, sink, "192.0.2.1", 1_700_123_060)
