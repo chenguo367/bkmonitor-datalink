@@ -518,6 +518,22 @@ func mergeRuntimeFilterConditions(filter LegacyRuntimeFilterFact, source []legac
 	if err != nil {
 		return nil, err
 	}
+	return andIntoEveryGroup(source, true, legacyCondition{Key: filter.FieldName, Method: "neq", Value: value}), nil
+}
+
+// andIntoEveryGroup is a strategy's agg_condition with conditions of the
+// platform's own put into every group of it, as _filter_dict_to_conditions
+// puts its filters: the condition list is read as OR groups split on "or",
+// and each group becomes the filters ANDed before the group's own
+// conditions. Appending them once at the end joined them to the last group
+// only, so every OR group but the last went unfiltered. Every condition
+// alarmd adds to a strategy's own goes through here.
+//
+// before places the filters ahead of each group's conditions, after behind
+// them. The order changes no result; it is kept per caller as it was, so a
+// strategy of one group - every strategy the old placement was right for -
+// keeps its query revision and Query Group byte for byte.
+func andIntoEveryGroup(source []legacyCondition, before bool, filters ...legacyCondition) []legacyCondition {
 	groups := make([][]legacyCondition, 0, 1)
 	current := make([]legacyCondition, 0, len(source))
 	for _, condition := range source {
@@ -531,16 +547,23 @@ func mergeRuntimeFilterConditions(filter LegacyRuntimeFilterFact, source []legac
 	if len(current) > 0 || len(groups) == 0 {
 		groups = append(groups, current)
 	}
-	result := make([]legacyCondition, 0, len(source)+len(groups))
+	result := make([]legacyCondition, 0, len(source)+len(groups)*len(filters))
 	for index, group := range groups {
-		connector := "and"
-		if index > 0 {
-			connector = "or"
+		joined := make([]legacyCondition, 0, len(group)+len(filters))
+		if before {
+			joined = append(append(joined, filters...), group...)
+		} else {
+			joined = append(append(joined, group...), filters...)
 		}
-		result = append(result, legacyCondition{Connector: connector, Key: filter.FieldName, Method: "neq", Value: value})
-		result = append(result, group...)
+		for position := range joined {
+			joined[position].Connector = "and"
+		}
+		if index > 0 && len(joined) > 0 {
+			joined[0].Connector = "or"
+		}
+		result = append(result, joined...)
 	}
-	return result, nil
+	return result
 }
 
 func (compiler *LegacyPrimaryQueryCompiler) runtimeFilter(config legacyQueryConfig) (LegacyRuntimeFilterFact, bool, error) {

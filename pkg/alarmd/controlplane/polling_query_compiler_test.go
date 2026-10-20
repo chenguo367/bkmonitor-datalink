@@ -131,3 +131,58 @@ func TestLogSearchQueryString(t *testing.T) {
 		t.Fatalf("query=%+v", facts.QueryList[0])
 	}
 }
+
+// The event name and the recovery filter go into every OR group of a custom
+// event strategy's conditions, as the platform's _filter_dict_to_conditions
+// puts its filters, not once after the last group: appended at the end they
+// filtered only that group, and every other group counted every event of the
+// table, recoveries included.
+func TestCustomEventFiltersAreAndedIntoEveryOrGroup(t *testing.T) {
+	planner, _ := NewLegacyPrimaryQueryCompiler("uq", "UTC", LegacyQueryRuntimeFacts{})
+	facts, err := planner.CompilePrimaryQuery(context.Background(), pollingTestSource(`{"data_source_label":"custom","data_type_label":"event",
+		"result_table_id":"base_tenant_2_event","custom_event_name":"AgentLost","agg_method":"COUNT","agg_interval":60,
+		"agg_dimension":["bk_target_ip","bk_target_cloud_id","bk_agent_id"],
+		"agg_condition":[{"key":"bk_target_ip","method":"eq","value":["192.0.2.10"]},
+			{"condition":"or","key":"bk_target_ip","method":"eq","value":["192.0.2.11"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditions := facts.QueryList[0].Conditions
+	want := []string{"dimensions.bk_target_ip", "event_name", "dimensions.event_type", "dimensions.bk_target_ip", "event_name", "dimensions.event_type"}
+	wantConnectors := []string{"and", "and", "or", "and", "and"}
+	if len(conditions.Fields) != len(want) || len(conditions.Connectors) != len(wantConnectors) {
+		t.Fatalf("conditions %+v, want both OR groups filtered", conditions)
+	}
+	for index, field := range want {
+		if conditions.Fields[index].Field != field {
+			t.Fatalf("condition %d is %q, want %q: %+v", index, conditions.Fields[index].Field, field, conditions)
+		}
+	}
+	for index, connector := range wantConnectors {
+		if conditions.Connectors[index] != connector {
+			t.Fatalf("connector %d is %q, want %q: %+v", index, conditions.Connectors[index], connector, conditions)
+		}
+	}
+}
+
+// A dimension or condition key that already names a dimensions field keeps
+// its name, as the platform adds the prefix only to one that does not start
+// with it (is_dimensions_field).
+func TestAnEventFieldAlreadyUnderDimensionsIsNotPrefixedTwice(t *testing.T) {
+	planner, _ := NewLegacyPrimaryQueryCompiler("uq", "UTC", LegacyQueryRuntimeFacts{})
+	facts, err := planner.CompilePrimaryQuery(context.Background(), pollingTestSource(`{"data_source_label":"custom","data_type_label":"event",
+		"result_table_id":"k8s_event","custom_event_name":"PodError","agg_interval":60,"agg_dimension":["dimensions.namespace"],
+		"agg_condition":[{"key":"dimensions.pod","method":"eq","value":["api-0"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clause := facts.QueryList[0]
+	if clause.Dimensions[0] != "dimensions.namespace" {
+		t.Fatalf("dimension %q, want dimensions.namespace", clause.Dimensions[0])
+	}
+	for _, field := range clause.Conditions.Fields {
+		if field.Field == "dimensions.dimensions.pod" {
+			t.Fatalf("condition key prefixed twice: %+v", clause.Conditions)
+		}
+	}
+}
