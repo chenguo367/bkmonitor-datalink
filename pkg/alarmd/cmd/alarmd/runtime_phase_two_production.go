@@ -2940,8 +2940,9 @@ func (executor observedProductionSlotExecutor) Execute(
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
 		AwaitingView: notExecutable != nil && notExecutable.AwaitingView, RetryingAfterFailure: retryingAfterFailure,
-		HeldBy: heldBy, GapApplySite: gapApplySite, DivertDecision: lostRoundDecision(ctx, observedResult, retryingAfterFailure, budget),
-		QueryBudget: lostRoundBudget(observedResult, retryingAfterFailure, budget),
+		HeldBy: heldBy, GapApplySite: gapApplySite,
+		DivertDecision: lostRoundDecision(ctx, queryLossResult(observedResult, result.CompletionCause), retryingAfterFailure, budget),
+		QueryBudget:    lostRoundBudget(queryLossResult(observedResult, result.CompletionCause), retryingAfterFailure, budget),
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
@@ -2973,6 +2974,20 @@ func (executor observedProductionSlotExecutor) Execute(
 // lostRound says a round's completion is one that lost it or failed it: it
 // ended degraded or failed, or its attempt failed and is being retried. A
 // round that succeeded, or that is only waiting for its data, is none.
+// queryLossResult is the result the lost-round facts are keyed on: the
+// Slot's own, except for a completion whose cause's reason was carried from
+// a stored guard. That Slot's queries answered; it is degraded only because
+// a guard an earlier round raised still holds a Level, and it lost no query
+// for a decision or a budget to explain - the rule the query line follows
+// (worker observeQueryCompleted). The Slot's result and reason on the line
+// are unchanged.
+func queryLossResult(result observability.Result, cause execution.SlotCompletionCause) observability.Result {
+	if cause.Cause != "" && cause.ReasonCarried {
+		return observability.ResultSuccess
+	}
+	return result
+}
+
 func lostRound(result observability.Result, retryingAfterFailure bool) bool {
 	return result == observability.ResultDegraded || result == observability.ResultFailed ||
 		(result == observability.ResultRetrying && retryingAfterFailure)
