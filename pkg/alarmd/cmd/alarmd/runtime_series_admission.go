@@ -165,7 +165,14 @@ func cmdbIndexTransitionLineAt(logger *observability.Logger, now func() time.Tim
 		}
 		last[k] = &written{at: at}
 		mu.Unlock()
-		logger.Warn("cmdb_index_transition", observability.ResultDegraded, 0, 0,
+		// Into usable is the index coming back, or the first load at start:
+		// a line to read, not a warning. Into stale, empty or never loaded
+		// is the warning.
+		write, result := logger.Warn, observability.ResultDegraded
+		if transition.To == "" {
+			write, result = logger.Info, observability.ResultSuccess
+		}
+		write("cmdb_index_transition", result, 0, 0,
 			slog.Int("suppressed", suppressed),
 			slog.String("bk_tenant_id", transition.Tenant),
 			slog.String("from", word(transition.From)), slog.String("to", word(transition.To)),

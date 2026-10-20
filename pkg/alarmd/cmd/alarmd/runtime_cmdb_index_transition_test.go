@@ -35,8 +35,36 @@ func TestACMDBIndexTransitionIsOneWarnLine(t *testing.T) {
 			t.Errorf("the line into stale lacks %s: %s", want, lines[0])
 		}
 	}
-	if !strings.Contains(lines[0], `"WARN"`) || !strings.Contains(lines[1], `"from":"index_stale"`) || !strings.Contains(lines[1], `"to":"usable"`) {
+	if !strings.Contains(lines[0], `"WARN"`) || !strings.Contains(lines[0], `"result":"degraded"`) ||
+		!strings.Contains(lines[1], `"from":"index_stale"`) || !strings.Contains(lines[1], `"to":"usable"`) {
 		t.Errorf("lines %q, want WARN into stale and a line out of it", lines)
+	}
+	if !strings.Contains(lines[1], `"INFO"`) || !strings.Contains(lines[1], `"result":"success"`) {
+		t.Errorf("the line back into usable is %s, want INFO with result success", lines[1])
+	}
+}
+
+// The first load at start goes into usable from never loaded: INFO, not a
+// warning on every start. Any transition out of usable - into stale, into
+// empty, or back to never loaded - stays a WARN.
+func TestACMDBIndexTransitionWarnsOnlyOutOfUsable(t *testing.T) {
+	for _, test := range []struct {
+		from, to string
+		warn     bool
+	}{
+		{from: cmdbcache.IndexNeverLoaded, to: "", warn: false},
+		{from: cmdbcache.IndexEmpty, to: "", warn: false},
+		{from: "", to: cmdbcache.IndexStale, warn: true},
+		{from: "", to: cmdbcache.IndexEmpty, warn: true},
+		{from: "", to: cmdbcache.IndexNeverLoaded, warn: true},
+	} {
+		var out bytes.Buffer
+		cmdbIndexTransitionLine(observability.New("worker", &out))(cmdbcache.Transition{Tenant: "tenant-a", From: test.from, To: test.to})
+		warned := strings.Contains(out.String(), `"WARN"`) && strings.Contains(out.String(), `"result":"degraded"`)
+		informed := strings.Contains(out.String(), `"INFO"`) && strings.Contains(out.String(), `"result":"success"`)
+		if warned != test.warn || informed == test.warn {
+			t.Errorf("%q to %q: %s", test.from, test.to, out.String())
+		}
 	}
 }
 
