@@ -11,10 +11,12 @@ package trigger
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
 // namedOutputsAt is a table of outputs A, B, C and D - C the legacy one -
@@ -188,10 +190,68 @@ func TestTheLargestRealisticNamedStrategySnapshotIsWhole(t *testing.T) {
 	if err := json.Unmarshal(result.TriggerEvent.DetectionSnapshot, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if result.Snapshot.Truncated || size > contract.MaxDetectionSnapshotBytes || len(snapshot.Levels) != 3 || len(snapshot.RefValues) != 4 {
-		t.Fatalf("%d bytes, truncated %v: %s", size, result.Snapshot.Truncated, result.TriggerEvent.DetectionSnapshot)
+	if result.Snapshot.Result != contract.DetectionSnapshotWhole || size > contract.MaxDetectionSnapshotBytes || len(snapshot.Levels) != 3 || len(snapshot.RefValues) != 4 {
+		t.Fatalf("%d bytes, %s: %s", size, result.Snapshot.Result, result.TriggerEvent.DetectionSnapshot)
 	}
 	if facts := snapshot.Levels[2].Algorithms[2].Facts; len(facts) != 8 {
 		t.Fatalf("the third level's deciding algorithm has %d facts, want value, group and three conditions: %s", len(facts), result.TriggerEvent.DetectionSnapshot)
 	}
+}
+
+// A snapshot that cannot be held to its bounds is an optional field, and
+// never stops detection: the event is decided and sent as it would be
+// without one, the snapshot is left off, and it counts once as dropped,
+// with no output states.
+func TestASnapshotThatCannotBeEncodedIsDroppedAndTheEventStillGoes(t *testing.T) {
+	encodeDetectionSnapshot = func(contract.DetectionSnapshotV1) (json.RawMessage, bool, error) {
+		return nil, false, errors.New("past its size with no algorithm facts left to drop")
+	}
+	t.Cleanup(func() { encodeDetectionSnapshot = contract.EncodeDetectionSnapshotV1 })
+	request := abnormalRequest(t)
+	plain, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.NamedOutputs = namedOutputsAt(request.Record.RecordID)
+	result, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatalf("an optional snapshot stopped detection: %v", err)
+	}
+	if result.TriggerEvent == nil || result.TriggerEvent.DetectionSnapshot != nil || result.TriggerEvent.EventID != plain.TriggerEvent.EventID {
+		t.Fatalf("event %+v, want the event without its snapshot", result.TriggerEvent)
+	}
+	if result.Snapshot == nil || result.Snapshot.Result != contract.DetectionSnapshotDropped || len(result.Snapshot.States) != 0 {
+		t.Fatalf("snapshot facts %+v, want dropped with no states", result.Snapshot)
+	}
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	before := snapshotCount(t, recorder, "alarmd_event_detection_snapshots_total", "dropped")
+	recorder.ObserveDetectionSnapshot(result.Snapshot.States, result.Snapshot.Result)
+	if after := snapshotCount(t, recorder, "alarmd_event_detection_snapshots_total", "dropped"); after != before+1 {
+		t.Fatalf("dropped went %v to %v, want up by exactly one", before, after)
+	}
+	for _, state := range metric.DetectionSnapshotStates {
+		if count := snapshotCount(t, recorder, "alarmd_event_detection_snapshot_ref_states_total", state); count != 0 {
+			t.Fatalf("a dropped snapshot counted %v outputs %s", count, state)
+		}
+	}
+}
+
+func snapshotCount(t *testing.T, recorder *metric.Recorder, family, label string) float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range families {
+		if candidate.GetName() != family {
+			continue
+		}
+		for _, series := range candidate.GetMetric() {
+			if series.GetLabel()[0].GetValue() == label {
+				return series.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("%s{%s} is not pre-created", family, label)
+	return 0
 }

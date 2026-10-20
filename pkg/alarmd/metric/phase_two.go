@@ -1363,11 +1363,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.detectionSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "event_detection_snapshots_total",
-		Help: "Detection snapshots built onto events, by result: whole, or truncated (past the snapshot's size " +
+		Help: "Detection snapshots built onto events, by result: whole; truncated (past the snapshot's size " +
 			"bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows " +
-			"never are). Only the ABNORMAL and RECOVERY events of strategies with named outputs carry one. " +
+			"never are); dropped (the snapshot was past its size bound with no algorithm facts left to drop, " +
+			"so the event was sent without it - detection is never held for it). Only the ABNORMAL and " +
+			"RECOVERY events of strategies with named outputs carry one. " +
 			"Counted once per event built, where it is built and before the output sends it, so this is " +
-			"snapshots built, not sent; a retried Slot counts again. Both results exist from the start.",
+			"snapshots built, not sent; a retried Slot counts again. Every result exists from the start.",
 	}, []string{"result"})
 	for _, result := range DetectionSnapshotResults {
 		metrics.detectionSnapshots.WithLabelValues(result)
@@ -1379,7 +1381,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"in part), MISSING (it answered, not at the record's time under its labels - an output aggregated " +
 			"to other labels than the one detection reads lands here), ERROR (the query service failed to " +
 			"compute it), UNSUPPORTED (the query service answered as if no output was asked for), _other a " +
-			"state this build does not name. Read against event_detection_snapshots_total for the events. " +
+			"state this build does not name. Only snapshots an event carries count; a dropped one counts " +
+			"none. Read against event_detection_snapshots_total for the events. " +
 			"Every state exists from the start.",
 	}, []string{"state"})
 	for _, state := range DetectionSnapshotStates {
@@ -2848,26 +2851,33 @@ func (r *Recorder) ObserveEventBusinessAttribution(source string) {
 }
 
 // DetectionSnapshotResults and DetectionSnapshotStates are the closed label
-// values of the detection snapshot families: a snapshot whole or
-// truncated, and the states a named output can be in on one, with _other
-// for a state this build does not name.
+// values of the detection snapshot families: a snapshot whole, truncated or
+// dropped, and the states a named output can be in on one, with _other for
+// a state this build does not name.
 var (
-	DetectionSnapshotResults = []string{"whole", "truncated"}
+	DetectionSnapshotResults = contract.DetectionSnapshotResults
 	DetectionSnapshotStates  = []string{string(execution.NamedOutputSuccess), string(execution.NamedOutputPartial),
 		string(execution.NamedOutputMissing), string(execution.NamedOutputError), string(execution.NamedOutputUnsupported), "_other"}
 )
 
-// ObserveDetectionSnapshot counts one detection snapshot an event carries:
-// whole or truncated, and each of its named outputs by its state.
-func (r *Recorder) ObserveDetectionSnapshot(states []string, truncated bool) {
+// ObserveDetectionSnapshot counts one detection snapshot an event was to
+// carry by its result, and each named output of one it carries by its
+// state; a result outside contract.DetectionSnapshotResults is not counted.
+func (r *Recorder) ObserveDetectionSnapshot(states []string, result string) {
 	if r == nil || r.phaseTwo.detectionSnapshots == nil {
 		return
 	}
-	result := DetectionSnapshotResults[0]
-	if truncated {
-		result = DetectionSnapshotResults[1]
+	known := false
+	for _, candidate := range DetectionSnapshotResults {
+		known = known || candidate == result
+	}
+	if !known {
+		return
 	}
 	r.phaseTwo.detectionSnapshots.WithLabelValues(result).Inc()
+	if result == contract.DetectionSnapshotDropped {
+		return
+	}
 	for _, state := range states {
 		label := "_other"
 		for _, known := range DetectionSnapshotStates {

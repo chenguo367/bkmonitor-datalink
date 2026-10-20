@@ -155,13 +155,16 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 		// A Plan with named outputs carries what its detection decided on;
 		// every other Plan's event carries nothing more than it did.
 		if request.NamedOutputs != nil {
+			// An optional field never stops detection: a snapshot that cannot
+			// be held to its bounds is left off, and the event goes without it.
 			snapshot := detectionSnapshot(request, event)
-			encoded, truncated, snapshotErr := contract.EncodeDetectionSnapshotV1(snapshot)
+			encoded, truncated, snapshotErr := encodeDetectionSnapshot(snapshot)
 			if snapshotErr != nil {
-				return EvaluationResultV2{}, invariantV2("build detection snapshot", 0, snapshotErr)
+				result.Snapshot = &DetectionSnapshotFacts{Result: contract.DetectionSnapshotDropped}
+			} else {
+				event.DetectionSnapshot = encoded
+				result.Snapshot = snapshotFacts(snapshot, truncated)
 			}
-			event.DetectionSnapshot = encoded
-			result.Snapshot = snapshotFacts(snapshot, truncated)
 		}
 		// The compatibility context is attached whenever the Plan publishes that
 		// protocol. Before the format was stated, the only Plans that did were

@@ -59,16 +59,24 @@ func detectionSnapshot(request EvaluationRequestV2, event *contract.TriggerEvent
 	return snapshot
 }
 
+// encodeDetectionSnapshot is the encoder snapshots are held to their bounds
+// by; a test replaces it to make one fail.
+var encodeDetectionSnapshot = contract.EncodeDetectionSnapshotV1
+
 // DetectionSnapshotFacts is what one event's detection snapshot came to:
-// the state of each named output it holds - none on an event that carries
-// no ref_values - and whether it was truncated to its bound.
+// its result (contract.DetectionSnapshotResults), and the state of each
+// named output a snapshot the event carries holds - none on one that
+// carries no ref_values, or that was dropped.
 type DetectionSnapshotFacts struct {
-	States    []string
-	Truncated bool
+	Result string
+	States []string
 }
 
 func snapshotFacts(snapshot contract.DetectionSnapshotV1, truncated bool) *DetectionSnapshotFacts {
-	facts := &DetectionSnapshotFacts{Truncated: truncated}
+	facts := &DetectionSnapshotFacts{Result: contract.DetectionSnapshotWhole}
+	if truncated {
+		facts.Result = contract.DetectionSnapshotTruncated
+	}
 	for _, value := range snapshot.RefValues {
 		facts.States = append(facts.States, value.State)
 	}

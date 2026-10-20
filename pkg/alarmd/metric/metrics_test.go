@@ -1630,17 +1630,23 @@ func TestInPlaceWaitBucketsArePreCreated(t *testing.T) {
 	}
 }
 
-// A detection snapshot counts once, whole or truncated, and each of its
-// named outputs by its state; a state this build does not name folds to
-// _other. Every result and state exists before any snapshot.
+// A detection snapshot counts once by its result, and each named output of
+// one an event carries by its state; a state this build does not name folds
+// to _other, and a dropped snapshot - the event sent without it - counts no
+// state. Every result and state exists before any snapshot.
 func TestDetectionSnapshotsAreCountedByResultAndState(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 	if cells := gatherFamily(t, r, "alarmd_event_detection_snapshot_ref_states_total"); len(cells) != len(DetectionSnapshotStates) {
 		t.Fatalf("%d state cells before any snapshot, want every state", len(cells))
 	}
-	r.ObserveDetectionSnapshot([]string{"MISSING", "SUCCESS", "SUCCESS", "STALE"}, false)
-	r.ObserveDetectionSnapshot(nil, false)
-	r.ObserveDetectionSnapshot(nil, true)
+	if cells := gatherFamily(t, r, "alarmd_event_detection_snapshots_total"); len(cells) != len(DetectionSnapshotResults) {
+		t.Fatalf("%d result cells before any snapshot, want every result", len(cells))
+	}
+	r.ObserveDetectionSnapshot([]string{"MISSING", "SUCCESS", "SUCCESS", "STALE"}, "whole")
+	r.ObserveDetectionSnapshot(nil, "whole")
+	r.ObserveDetectionSnapshot(nil, "truncated")
+	r.ObserveDetectionSnapshot([]string{"ERROR"}, "dropped")
+	r.ObserveDetectionSnapshot([]string{"ERROR"}, "guessed")
 	results, states := map[string]float64{}, map[string]float64{}
 	for _, m := range gatherFamily(t, r, "alarmd_event_detection_snapshots_total") {
 		results[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
@@ -1648,8 +1654,8 @@ func TestDetectionSnapshotsAreCountedByResultAndState(t *testing.T) {
 	for _, m := range gatherFamily(t, r, "alarmd_event_detection_snapshot_ref_states_total") {
 		states[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
 	}
-	if results["whole"] != 2 || results["truncated"] != 1 {
-		t.Fatalf("results %v, want two whole and one truncated", results)
+	if results["whole"] != 2 || results["truncated"] != 1 || results["dropped"] != 1 || len(results) != 3 {
+		t.Fatalf("results %v, want two whole, one truncated and one dropped", results)
 	}
 	if states["SUCCESS"] != 2 || states["MISSING"] != 1 || states["_other"] != 1 || states["ERROR"] != 0 || len(states) != len(DetectionSnapshotStates) {
 		t.Fatalf("states %v", states)

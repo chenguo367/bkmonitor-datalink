@@ -94,9 +94,9 @@ func TestEvaluateHearsEachDetectionSnapshot(t *testing.T) {
 			}}
 		}
 		var heard [][]string
-		evaluator := newEvaluator(t).WithDetectionSnapshots(func(states []string, truncated bool) {
-			if truncated {
-				t.Error("a small snapshot was heard as truncated")
+		evaluator := newEvaluator(t).WithDetectionSnapshots(func(states []string, result string) {
+			if result != contract.DetectionSnapshotWhole {
+				t.Errorf("a small snapshot was heard as %s", result)
 			}
 			heard = append(heard, states)
 		})

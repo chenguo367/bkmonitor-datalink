@@ -34,6 +34,19 @@ const (
 	MaxDetectionSnapshotBytes     = 4 << 10
 )
 
+// What became of a detection snapshot an event was to carry: built whole,
+// built truncated to its bound, or dropped - past its size with no algorithm
+// facts left to drop - and the event sent without it. A snapshot is never
+// a reason not to send its event.
+const (
+	DetectionSnapshotWhole     = "whole"
+	DetectionSnapshotTruncated = "truncated"
+	DetectionSnapshotDropped   = "dropped"
+)
+
+// DetectionSnapshotResults is every result.
+var DetectionSnapshotResults = []string{DetectionSnapshotWhole, DetectionSnapshotTruncated, DetectionSnapshotDropped}
+
 // DetectionSnapshotV1 is what a detection decided on, carried on its
 // ABNORMAL and RECOVERY events under extra_data.detection_snapshot: the
 // value of each named output at the decided record, on ABNORMAL only, and
