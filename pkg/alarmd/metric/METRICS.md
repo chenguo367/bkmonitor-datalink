@@ -599,6 +599,18 @@ Labels: `source`
 
 Events of global business strategies by where the business they are filed under came from: target (the host's business, or the business configured on the matched Kubernetes static target), dimension (the record's bk_biz_id aggregation dimension), namespace (the business the platform published for the record's namespace of its cluster), cluster (the business published for the record's bcs_cluster_id), unmapped (the record named a cluster neither published mapping holds, so the strategy's own business), global (nothing answered, so the strategy's own business, global or ordinary). A strategy that configures a target or a business dimension and still lands on global or unmapped relied on a business the caches or the data did not have. Counted once per event built, where it is built and before the output sends it, so this is events built, not events sent; a retried Slot counts again. A RECOVERY under the compatibility protocol is not built and is not counted. Every other strategy's events are not counted.
 
+## alarmd_event_detection_snapshot_ref_states_total
+
+Labels: `state`
+
+Named outputs on the detection snapshots of ABNORMAL events, one per output per event, by the state the output was in at the decided record: SUCCESS or PARTIAL (it answered there, whole or in part), MISSING (it answered, not at the record's time under its labels - an output aggregated to other labels than the one detection reads lands here), ERROR (the query service failed to compute it), UNSUPPORTED (the query service answered as if no output was asked for), _other a state this build does not name. Read against event_detection_snapshots_total for the events. Every state exists from the start.
+
+## alarmd_event_detection_snapshots_total
+
+Labels: `result`
+
+Detection snapshots built onto events, by result: whole, or truncated (past the snapshot's size bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows never are). Only the ABNORMAL and RECOVERY events of strategies with named outputs carry one. Counted once per event built, where it is built and before the output sends it, so this is snapshots built, not sent; a retried Slot counts again. Both results exist from the start.
+
 ## alarmd_execute_return_total
 
 Labels: `outcome`

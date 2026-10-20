@@ -484,6 +484,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["alarmd_fleet_control_facts_writes_total"] = "variableLabels: {result}"
 	expected["alarmd_query_cooldown_loads_total"] = "variableLabels: {result}"
 	expected["alarmd_event_business_attribution_total"] = "variableLabels: {source}"
+	expected["alarmd_event_detection_snapshots_total"] = "variableLabels: {result}"
+	expected["alarmd_event_detection_snapshot_ref_states_total"] = "variableLabels: {state}"
 	expected["alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["alarmd_diagnostic_redis_dial_retries_total"] = "variableLabels: {client,reason}"
 	expected["alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
@@ -1101,6 +1103,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("fleet_control_facts_writes_total")] = len(ControlFactsWriteResults)
 	bounds[fqName("query_cooldown_loads_total")] = len(QueryCooldownLoadResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
+	bounds[fqName("event_detection_snapshots_total")] = len(DetectionSnapshotResults)
+	bounds[fqName("event_detection_snapshot_ref_states_total")] = len(DetectionSnapshotStates)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("diagnostic_redis_dial_retries_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
@@ -1623,5 +1627,31 @@ func TestInPlaceWaitBucketsArePreCreated(t *testing.T) {
 		if !seen[bucket] {
 			t.Fatalf("bucket %q not pre-created: %v", bucket, seen)
 		}
+	}
+}
+
+// A detection snapshot counts once, whole or truncated, and each of its
+// named outputs by its state; a state this build does not name folds to
+// _other. Every result and state exists before any snapshot.
+func TestDetectionSnapshotsAreCountedByResultAndState(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	if cells := gatherFamily(t, r, "alarmd_event_detection_snapshot_ref_states_total"); len(cells) != len(DetectionSnapshotStates) {
+		t.Fatalf("%d state cells before any snapshot, want every state", len(cells))
+	}
+	r.ObserveDetectionSnapshot([]string{"MISSING", "SUCCESS", "SUCCESS", "STALE"}, false)
+	r.ObserveDetectionSnapshot(nil, false)
+	r.ObserveDetectionSnapshot(nil, true)
+	results, states := map[string]float64{}, map[string]float64{}
+	for _, m := range gatherFamily(t, r, "alarmd_event_detection_snapshots_total") {
+		results[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	for _, m := range gatherFamily(t, r, "alarmd_event_detection_snapshot_ref_states_total") {
+		states[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if results["whole"] != 2 || results["truncated"] != 1 {
+		t.Fatalf("results %v, want two whole and one truncated", results)
+	}
+	if states["SUCCESS"] != 2 || states["MISSING"] != 1 || states["_other"] != 1 || states["ERROR"] != 0 || len(states) != len(DetectionSnapshotStates) {
+		t.Fatalf("states %v", states)
 	}
 }

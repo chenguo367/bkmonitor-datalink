@@ -155,11 +155,13 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 		// A Plan with named outputs carries what its detection decided on;
 		// every other Plan's event carries nothing more than it did.
 		if request.NamedOutputs != nil {
-			encoded, _, snapshotErr := contract.EncodeDetectionSnapshotV1(detectionSnapshot(request, event))
+			snapshot := detectionSnapshot(request, event)
+			encoded, truncated, snapshotErr := contract.EncodeDetectionSnapshotV1(snapshot)
 			if snapshotErr != nil {
 				return EvaluationResultV2{}, invariantV2("build detection snapshot", 0, snapshotErr)
 			}
 			event.DetectionSnapshot = encoded
+			result.Snapshot = snapshotFacts(snapshot, truncated)
 		}
 		// The compatibility context is attached whenever the Plan publishes that
 		// protocol. Before the format was stated, the only Plans that did were

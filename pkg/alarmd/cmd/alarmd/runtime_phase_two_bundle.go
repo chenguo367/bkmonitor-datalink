@@ -609,6 +609,7 @@ func openProductionPhaseTwoBundleAssembly(
 	// and for the cluster mapping read in the same snapshot.
 	hostBusiness := tenantHostLookup{cmdbcache.NewHostBusinessLookup(cmdbIndex)}
 	evaluator.WithBusinessAttribution(businessAttributionLookups(hostBusiness.HostBusinessLookup), recorder.ObserveEventBusinessAttribution)
+	evaluator.WithDetectionSnapshots(recorder.ObserveDetectionSnapshot)
 	sequencer, err := worker.NewKeyedSideEffectSequencer(cfg.PhaseTwo.Coordinator.MaxSequencerReservations)
 	if err != nil {
 		return nil, err

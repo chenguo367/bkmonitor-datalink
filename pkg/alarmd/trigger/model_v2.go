@@ -347,6 +347,9 @@ type EvaluationResultV2 struct {
 	// leaves TriggerEvent nil while RecordResult stays RECOVERY. Held is the
 	// union of both gates; Cause says which.
 	RecoveryGate RecoveryGateV2
+	// Snapshot is what the event's detection snapshot came to, for its
+	// counters; nil for an event that carries none.
+	Snapshot *DetectionSnapshotFacts
 	// WithoutMessageFormat is set when the record decided an event its
 	// Plan's protocol has no message for (contract.NoMessageFor): under the
 	// compatibility protocol, every RECOVERY that passed the gates. The

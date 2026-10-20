@@ -70,3 +70,44 @@ func TestEvaluateCarriesTheNamedOutputsToTheEventsSnapshot(t *testing.T) {
 		t.Fatal("the named outputs moved the event's identity")
 	}
 }
+
+// Each snapshot an event carries is heard once, with its named outputs'
+// states; an event without one is not heard.
+func TestEvaluateHearsEachDetectionSnapshot(t *testing.T) {
+	native := func(p *contract.EvaluationPlanV2) {
+		p.WireFormat = contract.WireFormatStandardRawEvent
+		p.StrategyRef.SnapshotRevision = 7
+		p.StrategyIR.StrategyRef.SnapshotRevision = 7
+		p.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
+	}
+	for _, named := range []bool{true, false} {
+		plan := compiledTwoLevelsShaped(t, "50", "50", native)
+		history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("a", 64), SourceTime: 40, Levels: []execution.StateLevelFact{
+			{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+			{LevelID: 6, DetectFingerprint: plan.Levels().At(1).Fingerprints().Detect, Result: execution.LevelFactAnomalous},
+		}}}
+		req := requestFixtureTwoLevels(t, plan, json.RawMessage(`60`), history)
+		record, _ := req.Inputs[0].Inputs[0].View.Record(0)
+		if named {
+			req.NamedOutputs = &execution.NamedOutputRecords{Refs: []string{"A", "RESULT"}, Records: map[string][]execution.NamedOutputValue{
+				record.RecordID(): {{State: execution.NamedOutputMissing}, {Value: json.RawMessage("60"), State: execution.NamedOutputSuccess}},
+			}}
+		}
+		var heard [][]string
+		evaluator := newEvaluator(t).WithDetectionSnapshots(func(states []string, truncated bool) {
+			if truncated {
+				t.Error("a small snapshot was heard as truncated")
+			}
+			heard = append(heard, states)
+		})
+		if _, err := evaluator.Evaluate(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		if named && (len(heard) != 1 || len(heard[0]) != 2 || heard[0][0] != "MISSING" || heard[0][1] != "SUCCESS") {
+			t.Fatalf("heard %v, want one snapshot of MISSING and SUCCESS", heard)
+		}
+		if !named && len(heard) != 0 {
+			t.Fatalf("an event without a snapshot was heard: %v", heard)
+		}
+	}
+}

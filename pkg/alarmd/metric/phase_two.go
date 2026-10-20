@@ -178,6 +178,8 @@ type phaseTwoMetrics struct {
 	controlFactsWrites              *prometheus.CounterVec
 	queryCooldownLoads              *prometheus.CounterVec
 	eventBusinessAttribution        *prometheus.CounterVec
+	detectionSnapshots              *prometheus.CounterVec
+	detectionSnapshotStates         *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
 	diagnosticRedisDialRetries      *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
@@ -1359,6 +1361,30 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, source := range contract.BusinessAttributionSources {
 		metrics.eventBusinessAttribution.WithLabelValues(source)
 	}
+	metrics.detectionSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "event_detection_snapshots_total",
+		Help: "Detection snapshots built onto events, by result: whole, or truncated (past the snapshot's size " +
+			"bound, the algorithm facts of the least severe levels were dropped; its ref_values and windows " +
+			"never are). Only the ABNORMAL and RECOVERY events of strategies with named outputs carry one. " +
+			"Counted once per event built, where it is built and before the output sends it, so this is " +
+			"snapshots built, not sent; a retried Slot counts again. Both results exist from the start.",
+	}, []string{"result"})
+	for _, result := range DetectionSnapshotResults {
+		metrics.detectionSnapshots.WithLabelValues(result)
+	}
+	metrics.detectionSnapshotStates = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: metricSubsystem, Name: "event_detection_snapshot_ref_states_total",
+		Help: "Named outputs on the detection snapshots of ABNORMAL events, one per output per event, by the " +
+			"state the output was in at the decided record: SUCCESS or PARTIAL (it answered there, whole or " +
+			"in part), MISSING (it answered, not at the record's time under its labels - an output aggregated " +
+			"to other labels than the one detection reads lands here), ERROR (the query service failed to " +
+			"compute it), UNSUPPORTED (the query service answered as if no output was asked for), _other a " +
+			"state this build does not name. Read against event_detection_snapshots_total for the events. " +
+			"Every state exists from the start.",
+	}, []string{"state"})
+	for _, state := range DetectionSnapshotStates {
+		metrics.detectionSnapshotStates.WithLabelValues(state)
+	}
 	metrics.diagnosticRedisFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: metricSubsystem, Name: "diagnostic_redis_failures_total",
 		Help: "Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's " +
@@ -1855,7 +1881,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), append(m.handover.collectors(), m.sreActions.actions, m.sreActions.rollouts, m.sreActions.watched, m.sreActions.receipts, m.cliAuth.total, m.cliAuth.rosterApplied)...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.fleetTracker, m.effectiveTimeRefresh, m.activationRebuild, m.timelineRepair, m.activationSkippedTimelines, m.timelineUnreadableReports, m.activationHeader, m.activationBlocked, m.liveReserve, m.roundMemory, m.targetGroup, m.effectiveClose, m.logLines, m.observerPanics, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.apmCarried, m.apmCarriedBytes, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.controlFactsWrites, m.queryCooldownLoads, m.eventBusinessAttribution, m.detectionSnapshots, m.detectionSnapshotStates, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbAddressDiffers, m.cmdbPlacedByHostID, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexPublish,
@@ -2818,6 +2844,39 @@ func (r *Recorder) ObserveEventBusinessAttribution(source string) {
 			r.phaseTwo.eventBusinessAttribution.WithLabelValues(source).Inc()
 			return
 		}
+	}
+}
+
+// DetectionSnapshotResults and DetectionSnapshotStates are the closed label
+// values of the detection snapshot families: a snapshot whole or
+// truncated, and the states a named output can be in on one, with _other
+// for a state this build does not name.
+var (
+	DetectionSnapshotResults = []string{"whole", "truncated"}
+	DetectionSnapshotStates  = []string{string(execution.NamedOutputSuccess), string(execution.NamedOutputPartial),
+		string(execution.NamedOutputMissing), string(execution.NamedOutputError), string(execution.NamedOutputUnsupported), "_other"}
+)
+
+// ObserveDetectionSnapshot counts one detection snapshot an event carries:
+// whole or truncated, and each of its named outputs by its state.
+func (r *Recorder) ObserveDetectionSnapshot(states []string, truncated bool) {
+	if r == nil || r.phaseTwo.detectionSnapshots == nil {
+		return
+	}
+	result := DetectionSnapshotResults[0]
+	if truncated {
+		result = DetectionSnapshotResults[1]
+	}
+	r.phaseTwo.detectionSnapshots.WithLabelValues(result).Inc()
+	for _, state := range states {
+		label := "_other"
+		for _, known := range DetectionSnapshotStates {
+			if state == known {
+				label = state
+				break
+			}
+		}
+		r.phaseTwo.detectionSnapshotStates.WithLabelValues(label).Inc()
 	}
 }
 

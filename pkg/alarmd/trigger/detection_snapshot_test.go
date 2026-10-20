@@ -131,3 +131,67 @@ func TestARecoveryEventCarriesItsLevelsAndNoRefValues(t *testing.T) {
 		t.Fatalf("snapshot %s", result.TriggerEvent.DetectionSnapshot)
 	}
 }
+
+// The largest snapshot a realistic named strategy decides, built as the
+// trigger builds it: four outputs under long reference names, three levels
+// all ABNORMAL, each of three Threshold algorithms whose matched OR group
+// has three conditions. It is whole, well under its bound; its size is
+// logged for the hand-over.
+func TestTheLargestRealisticNamedStrategySnapshotIsWhole(t *testing.T) {
+	threshold := map[string]any{
+		"value_field": "value", "data_unit": "percent", "threshold_unit_prefix": "", "precision": map[string]any{"decimal_places": 6, "rounding": "HALF_EVEN"},
+		"groups": []any{map[string]any{"conditions": []any{
+			map[string]any{"operator": "GTE", "threshold_decimal": "50.125"},
+			map[string]any{"operator": "LT", "threshold_decimal": "99.875"},
+			map[string]any{"operator": "NEQ", "threshold_decimal": "75.5"},
+		}}},
+	}
+	levels := make([]contract.LevelIRV2, 0, 3)
+	for id := uint32(1); id <= 3; id++ {
+		level := levelV2(id, id, 5, 3, 1, nil)
+		level.Connector = contract.LevelConnectorOR
+		level.DetectPlan.Algorithms = nil
+		for range 3 {
+			level.DetectPlan.Algorithms = append(level.DetectPlan.Algorithms, contract.AlgorithmIRV2{Type: "Threshold", Version: 1, Config: mustJSONV2(threshold)})
+		}
+		levels = append(levels, level)
+	}
+	plan := compilePlanV2(t, levels)
+	histories := make([]LevelHistory, 0, 3)
+	facts := make([]DetectionFact, 0, 3)
+	for index, level := range plan.Levels().All() {
+		histories = append(histories, LevelHistory{LevelID: level.Definition().LevelID,
+			View: pointHistory{step: 60, points: map[int64]bool{120: true, 180: true, 240: true, 300: true}}})
+		fact := factV2(level, DetectionAnomalous)
+		algorithm := uint32(index)
+		fact.Evidence.MatchedAlgorithmOrdinal = &algorithm
+		facts = append(facts, fact)
+	}
+	request := requestV2(t, plan, 300, facts, histories, activeFactsV2(t, plan, 300))
+	refs := []string{"REQUEST_SUCCESS_COUNT_FROM_GATEWAY", "REQUEST_FAILURE_COUNT_FROM_GATEWAY",
+		"REQUEST_TOTAL_COUNT_FROM_UPSTREAMS", "REQUEST_SUCCESS_RATE_PERCENTAGE_RESULT"}
+	values := make([]execution.NamedOutputValue, 0, len(refs))
+	for range refs {
+		values = append(values, execution.NamedOutputValue{Value: json.RawMessage("123456789.123456"), State: execution.NamedOutputSuccess})
+	}
+	request.NamedOutputs = &execution.NamedOutputRecords{Refs: refs, Records: map[string][]execution.NamedOutputValue{request.Record.RecordID: values}}
+	result, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TriggerEvent == nil || result.Snapshot == nil {
+		t.Fatalf("result %+v", result)
+	}
+	size := len(result.TriggerEvent.DetectionSnapshot)
+	t.Logf("largest realistic named strategy snapshot: %d bytes", size)
+	var snapshot contract.DetectionSnapshotV1
+	if err := json.Unmarshal(result.TriggerEvent.DetectionSnapshot, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if result.Snapshot.Truncated || size > contract.MaxDetectionSnapshotBytes || len(snapshot.Levels) != 3 || len(snapshot.RefValues) != 4 {
+		t.Fatalf("%d bytes, truncated %v: %s", size, result.Snapshot.Truncated, result.TriggerEvent.DetectionSnapshot)
+	}
+	if facts := snapshot.Levels[2].Algorithms[2].Facts; len(facts) != 8 {
+		t.Fatalf("the third level's deciding algorithm has %d facts, want value, group and three conditions: %s", len(facts), result.TriggerEvent.DetectionSnapshot)
+	}
+}

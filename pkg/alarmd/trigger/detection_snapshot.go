@@ -59,6 +59,23 @@ func detectionSnapshot(request EvaluationRequestV2, event *contract.TriggerEvent
 	return snapshot
 }
 
+// DetectionSnapshotFacts is what one event's detection snapshot came to:
+// the state of each named output it holds - none on an event that carries
+// no ref_values - and whether it was truncated to its bound.
+type DetectionSnapshotFacts struct {
+	States    []string
+	Truncated bool
+}
+
+func snapshotFacts(snapshot contract.DetectionSnapshotV1, truncated bool) *DetectionSnapshotFacts {
+	facts := &DetectionSnapshotFacts{Truncated: truncated}
+	for _, value := range snapshot.RefValues {
+		facts.States = append(facts.States, value.State)
+	}
+	sort.Strings(facts.States)
+	return facts
+}
+
 // refValues is the named outputs at one record, by reference name; nil
 // when the record is not in the table.
 func refValues(table *execution.NamedOutputRecords, recordID string) map[string]contract.DetectionRefValueV1 {

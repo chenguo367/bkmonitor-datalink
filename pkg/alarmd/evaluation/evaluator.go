@@ -36,6 +36,9 @@ type Evaluator struct {
 	// cache answers for nothing it would have held.
 	lookups            admission.BusinessLookups
 	observeAttribution func(source string)
+	// observeSnapshot hears each detection snapshot an event carries: its
+	// named outputs' states and whether it was truncated (WithDetectionSnapshots).
+	observeSnapshot func(states []string, truncated bool)
 	// rebuildGuardWindow makes the first record build its own window instead
 	// of taking the guard's. It exists for the tests that hold the two to the
 	// same result, and only they set it: no constructor, option or
@@ -51,6 +54,16 @@ type Evaluator struct {
 func (e *Evaluator) WithBusinessAttribution(lookups admission.BusinessLookups, observe func(source string)) *Evaluator {
 	if e != nil {
 		e.lookups, e.observeAttribution = lookups, observe
+	}
+	return e
+}
+
+// WithDetectionSnapshots has every detection snapshot an event carries
+// heard by observe, once per event built: its named outputs' states, and
+// whether it was truncated to its bound. Nil hears nothing.
+func (e *Evaluator) WithDetectionSnapshots(observe func(states []string, truncated bool)) *Evaluator {
+	if e != nil {
+		e.observeSnapshot = observe
 	}
 	return e
 }
@@ -528,6 +541,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		}
 	}
 	e.attributeBusiness(tr.TriggerEvent, due.CompiledPlan)
+	if tr.Snapshot != nil && e.observeSnapshot != nil {
+		e.observeSnapshot(tr.Snapshot.States, tr.Snapshot.Truncated)
+	}
 	events, withoutMessage := keptEvents(tr, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
 	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
 	if advance || len(missingInputGuards) > 0 {
