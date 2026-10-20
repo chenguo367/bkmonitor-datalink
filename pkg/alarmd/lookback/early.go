@@ -45,10 +45,13 @@ import (
 // Early read outcomes, closed: what became of each directed Slot's early
 // read. Every directed Slot comes to exactly one.
 const (
-	EarlyBeforeNext          = "before_next"
-	EarlyNothingLate         = "nothing_late"
-	EarlyRungFirst           = "rung_first"
-	EarlyMultiQuery          = "multi_query"
+	EarlyBeforeNext  = "before_next"
+	EarlyNothingLate = "nothing_late"
+	EarlyRungFirst   = "rung_first"
+	EarlyMultiQuery  = "multi_query"
+	// EarlyNamedOutputs is a Slot of a query with named outputs, which no
+	// supplement reads (UnobservedNamedOutputs).
+	EarlyNamedOutputs        = "named_outputs"
 	EarlyFirstReadIncomplete = "first_read_incomplete"
 	EarlyFirstReadRefused    = "first_read_refused"
 	EarlyOwnerLost           = "owner_lost"
@@ -70,7 +73,7 @@ const (
 var EarlyOutcomes = []string{EarlyBeforeNext, EarlyNothingLate, EarlyRungFirst, EarlyMultiQuery, EarlyFirstReadIncomplete,
 	EarlyFirstReadRefused, EarlyOwnerLost, EarlyAnchorUnknown, EarlyOvertaken, EarlyOlderSlotPending, EarlyYielded,
 	EarlyPermitRefused, EarlyAnchorPassed, EarlyReadFailed, EarlyMemoryRefused, EarlyFlightBusy, EarlyContractExpired,
-	EarlyKeptReadAbsent, EarlyFailed}
+	EarlyKeptReadAbsent, EarlyFailed, EarlyNamedOutputs}
 
 // EarlyOutsideMechanism are the outcomes the early read's working is not
 // read by: a Slot it does not apply to, one it could not be anchored for,
@@ -79,7 +82,7 @@ var EarlyOutcomes = []string{EarlyBeforeNext, EarlyNothingLate, EarlyRungFirst, 
 // are its attempts, before_next the ones that worked.
 var EarlyOutsideMechanism = map[string]bool{EarlyNothingLate: true, EarlyRungFirst: true, EarlyMultiQuery: true,
 	EarlyFirstReadIncomplete: true, EarlyFirstReadRefused: true, EarlyOwnerLost: true, EarlyAnchorUnknown: true,
-	EarlyKeptReadAbsent: true}
+	EarlyKeptReadAbsent: true, EarlyNamedOutputs: true}
 
 // The early read's outcomes as the metric groups them: what its working is
 // read by, before_next over before_next and not_ahead, and the outcomes
@@ -176,6 +179,8 @@ func (engine *Engine) planEarlyLocked(state *group, slot *directedSlot, now time
 	switch {
 	case len(slot.queries) != 1:
 		outcome = EarlyMultiQuery
+	case slot.queries[0].spec.PlanFacts.NamedOutputs != nil:
+		outcome = EarlyNamedOutputs
 	case slot.queries[0].first.refused:
 		outcome = EarlyFirstReadRefused
 	case !slot.queries[0].complete:

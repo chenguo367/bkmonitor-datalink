@@ -1123,7 +1123,7 @@ Labels: `source`, `outcome`
 
 Labels: `source`, `reason`
 
-Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, first_read_incomplete, multi_query, memory_refused.
+Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, first_read_incomplete, multi_query, memory_refused, named_outputs.
 
 ## alarmd_lookback_supplement_windows_total
 

@@ -31,7 +31,8 @@ import (
 // A Slot of more than one physical query is not read: its late series would
 // be found in one query and needed from all of them, which one read of each
 // in any order cannot keep. It is counted unobserved, multi_query, and a
-// supplement of it is not attempted.
+// supplement of it is not attempted. Nor is a Slot of a query with named
+// outputs read: unobserved, named_outputs.
 
 // Directed window outcomes, closed: what became of each Slot of a directed
 // Query Group. supplemented is a Slot read whose supplement ran, whatever
@@ -70,11 +71,16 @@ const (
 	// UnobservedMemoryRefused is a Slot whose series set or kept series the
 	// process's memory line refused.
 	UnobservedMemoryRefused = "memory_refused"
+	// UnobservedNamedOutputs is a Slot of a query with named outputs. It is
+	// one physical query, so multi_query does not take it; a supplement of
+	// it would evaluate a read of its legacy output alone, and its alerts
+	// would carry none of the outputs the Slot's own read aligned.
+	UnobservedNamedOutputs = "named_outputs"
 )
 
 // DirectedUnobservedReasons is every reason.
 var DirectedUnobservedReasons = []string{UnobservedYielded, UnobservedReadFailed, UnobservedFirstReadIncomplete,
-	UnobservedMultiQuery, UnobservedMemoryRefused}
+	UnobservedMultiQuery, UnobservedMemoryRefused, UnobservedNamedOutputs}
 
 // Series outcomes of the supplements that ran, closed: the names
 // execution.SupplementFacts counts, and the points the admitted ones were
@@ -363,6 +369,8 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 			reason = UnobservedYielded
 		case len(slot.queries) != 1:
 			reason = UnobservedMultiQuery
+		case slot.queries[0].spec.PlanFacts.NamedOutputs != nil:
+			reason = UnobservedNamedOutputs
 		case !slot.queries[0].finished || !slot.queries[0].complete:
 			reason = UnobservedFirstReadIncomplete
 			if slot.queries[0].first.refused {

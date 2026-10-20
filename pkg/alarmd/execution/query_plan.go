@@ -396,6 +396,21 @@ func (facts QueryPlanFacts) Validate() error {
 	return nil
 }
 
+// WithoutNamedOutputs is the same query asking for its own value alone: the
+// facts without NamedOutputs, under the revision they then have. The facts
+// themselves when they ask for none.
+func (facts QueryPlanFacts) WithoutNamedOutputs() (QueryPlanFacts, error) {
+	if facts.NamedOutputs == nil {
+		return facts, nil
+	}
+	if err := facts.Validate(); err != nil {
+		return QueryPlanFacts{}, err
+	}
+	facts.QueryRevision = ""
+	facts.NamedOutputs = nil
+	return BuildQueryPlanFacts(facts)
+}
+
 // WithMetricMerge derives an immutable logical query variant. It is used when
 // one algorithm needs the same physical source facts with different expression
 // semantics, such as OsRestart's filtered primary input and raw history input.

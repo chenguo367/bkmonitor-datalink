@@ -166,7 +166,7 @@ func newLookbackCollector() *lookbackCollector {
 				"unobserved.", "source", "outcome"),
 		supplementUnobserved: desc("lookback_supplement_unobserved_total",
 			"Slots of series_late Query Groups not read again, by source and why: yielded, read_failed, "+
-				"first_read_incomplete, multi_query, memory_refused.", "source", "reason"),
+				"first_read_incomplete, multi_query, memory_refused, named_outputs.", "source", "reason"),
 		supplementSeries: desc("lookback_supplement_series_total",
 			"(Plan, series) pairs the supplements that ran were given, by source and what each came to: candidates "+
 				"in all, and admitted, crossed_t, no_data_fact, config_drift, input_incomplete, withheld.",

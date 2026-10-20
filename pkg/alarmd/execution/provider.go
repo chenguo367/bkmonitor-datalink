@@ -115,6 +115,22 @@ func BuildPhysicalQuerySpec(spec PhysicalQuerySpec) (PhysicalQuerySpec, error) {
 	return spec, nil
 }
 
+// LegacyOutputOnly is the physical query asking for its own value alone,
+// under its own digest (QueryPlanFacts.WithoutNamedOutputs): the same
+// request but for the named outputs, so the same series identities and
+// record ids. The spec itself when it asks for none.
+func (spec PhysicalQuerySpec) LegacyOutputOnly() (PhysicalQuerySpec, error) {
+	if spec.PlanFacts.NamedOutputs == nil {
+		return spec, nil
+	}
+	facts, err := spec.PlanFacts.WithoutNamedOutputs()
+	if err != nil {
+		return PhysicalQuerySpec{}, err
+	}
+	spec.PlanFacts, spec.Digest = facts, ""
+	return BuildPhysicalQuerySpec(spec)
+}
+
 type RecoveryPermit struct {
 	PermitID           string
 	Slot               SlotIdentity
