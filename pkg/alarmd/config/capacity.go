@@ -190,8 +190,9 @@ const bytesPerParkedExecution = 3 << 20
 // from query_downstream_distress_total, not guessed from alarmd's demand.
 //
 // The ceiling is the memory the runtime may use beyond the retained pool -
-// the soft memory limit less the retained bytes - over what one parked
-// execution holds.
+// half the container less the retained bytes (executionRuntimeDivisor), not
+// the soft memory limit, which has room above it for the live heap's
+// overshoot - over what one parked execution holds.
 func DeriveScheduler(inputs CapacityInputs) DerivedScheduler {
 	ceiling := activeExecutionCeiling(inputs)
 	queries := max(ceiling/startQueryShareOfCeiling, 3)
@@ -319,9 +320,11 @@ type DerivedGoRuntime struct {
 // before the share grew - and the container, counting the measured non-heap
 // memory and a sampling allowance, stays within about 3.3 GiB.
 //
-// The collector target is a fixed 300 percent, set apart from the limit so
-// that moving the limit changes one thing: at 2 to 4 percent collector CPU
-// in bursts a higher target buys nothing and only raises the peak.
+// The collector target is a fixed 300 percent, set apart from the limit: at
+// 2 to 4 percent collector CPU in bursts a higher target buys nothing and
+// only raises the peak. The limit also bounds the observation memory line,
+// which reads it live (memoryline), so its consumers gain the same room;
+// they still refuse at the line.
 func DeriveGoRuntime(inputs CapacityInputs) DerivedGoRuntime {
 	if inputs.MemorySource == "" || inputs.MemorySource == memorySourceFallback {
 		return DerivedGoRuntime{}

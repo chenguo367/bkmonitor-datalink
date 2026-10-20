@@ -352,6 +352,12 @@ func TestGoRuntimeBudgetFollowsTheContainerAndClearsItsOwnCeilings(t *testing.T)
 			t.Fatalf("%d MiB container: soft limit %d leaves less than a quarter of the container",
 				inputs.MemoryLimitBytes>>20, derived.MemoryLimitBytes)
 		}
+		// The soft limit is five eighths of the container (decision-019
+		// §5.2): neither the half it was nor the three quarters the
+		// derivation rejects for the container's margin.
+		if want := inputs.MemoryLimitBytes / 8 * 5; uint64(derived.MemoryLimitBytes) != want {
+			t.Fatalf("%d MiB container: soft limit %d, want five eighths, %d", inputs.MemoryLimitBytes>>20, derived.MemoryLimitBytes, want)
+		}
 		if derived.GCPercent != 300 {
 			t.Fatalf("%d MiB container: GC percent %d, want the fixed 300 whatever the limit", inputs.MemoryLimitBytes>>20, derived.GCPercent)
 		}

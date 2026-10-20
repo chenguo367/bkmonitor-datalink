@@ -2600,6 +2600,22 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	coordinator.ports.Observer.Observe(ctx, observation)
 }
 
+// stateHorizon is how long this Plan's series keep their runtime state past
+// their last write: the Plan's own no-data horizon when it has one frozen -
+// the strategy's, or the platform's at compile time - else the platform's
+// horizon in force now. Zero when the worker was given no horizon at all.
+func (coordinator *SlotExecutionCoordinator) stateHorizon(due execution.DuePlan) int64 {
+	if due.CompiledPlan != nil {
+		if noData := due.CompiledPlan.NoData(); noData != nil && noData.TrackingHorizonSeconds > 0 {
+			return noData.TrackingHorizonSeconds
+		}
+	}
+	if coordinator.ports.StateHorizon == nil {
+		return 0
+	}
+	return max(coordinator.ports.StateHorizon(), 0)
+}
+
 // qgShareBytes is the most of the retained-byte pool one Query Group's Slot may
 // hold: three quarters of it.
 //
@@ -2618,22 +2634,6 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 // strategy that still does not fit is refused by name rather than let fill
 // the pool, and an object nearing its share is reported before it arrives
 // (fleet's RETAINED_SHARE_APPROACHING).
-// stateHorizon is how long this Plan's series keep their runtime state past
-// their last write: the Plan's own no-data horizon when it has one frozen -
-// the strategy's, or the platform's at compile time - else the platform's
-// horizon in force now. Zero when the worker was given no horizon at all.
-func (coordinator *SlotExecutionCoordinator) stateHorizon(due execution.DuePlan) int64 {
-	if due.CompiledPlan != nil {
-		if noData := due.CompiledPlan.NoData(); noData != nil && noData.TrackingHorizonSeconds > 0 {
-			return noData.TrackingHorizonSeconds
-		}
-	}
-	if coordinator.ports.StateHorizon == nil {
-		return 0
-	}
-	return max(coordinator.ports.StateHorizon(), 0)
-}
-
 func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
 	return coordinator.budget.MaxRetainedBytes / 4 * 3
 }
