@@ -26,8 +26,10 @@ import (
 // Everything it learns goes into the facts and nothing into the dimensions.
 // Python writes bk_topo_node, bk_target_ip and bk_host_id back into the
 // record. Here the series' identity and its State stay on the record's own
-// dimensions, and for a host placed by bk_host_id or bk_agent_id the facts
-// carry what Python writes (Facts.HostOverlay): the alert identity reads the
+// dimensions, and for a host placed by bk_host_id or bk_agent_id - or a
+// record placed through its service instance (ServiceInstanceTopologyFuller)
+// - the facts carry what Python writes (Facts.HostOverlay): the alert
+// identity reads the
 // record with it written over, so it moves when CMDB moves the host, as
 // Python's does.
 type HostTopologyFuller struct {
@@ -185,10 +187,79 @@ func identityOverlay(store *Store, dimensions map[string]json.RawMessage, facts 
 		host, found, _ = store.IdentityAgent(agent)
 	}
 	if found {
+		facts.IdentityHostFound = true
 		facts.HostOverlay = hostOverlay(dimensions, host, reportedAddress(dimensions, host))
 		if facts.HostOverlay != nil {
 			facts.HostOverlaySource = source
 		}
+	}
+}
+
+// instanceOverlay is what Python's TopoNodeFuller writes into a record whose
+// service instance it placed (fullers.py:76-89): the instance's address as
+// bk_target_ip and its cloud as bk_target_cloud_id, as the platform holds it
+// - a number, copied from the host when the cache was built, where the host
+// branch writes str(); count_md5 hashes the two alike, so the fingerprint
+// does not depend on it. No bk_host_id, which that branch never writes, and
+// no bk_topo_node: the instance's chain is in the facts, which the readers of
+// the topology take over the record's own. Nil when the record already names
+// the instance's address and cloud, as the host overlay is, and for an
+// instance without an address - one whose host the cache writer did not hold
+// when it built the instance, where Python's fuller raises - which keeps the
+// record's own address and is named (admission.HostIdentityInstanceWithoutAddress).
+func instanceOverlay(dimensions map[string]json.RawMessage, instance *ServiceInstanceFacts) map[string]json.RawMessage {
+	if instance.IP == "" {
+		return nil
+	}
+	cloud := instance.CloudID
+	if cloud == "" {
+		cloud = "0"
+	}
+	recordCloud := admission.TruthyDimension(dimensions, "bk_target_cloud_id")
+	if recordCloud == "" {
+		recordCloud = "0"
+	}
+	if admission.TruthyDimension(dimensions, "bk_target_ip") == instance.IP && recordCloud == cloud {
+		return nil
+	}
+	address, _ := json.Marshal(instance.IP)
+	cloudValue := json.RawMessage(cloud)
+	if !numericText(cloud) {
+		cloudValue, _ = json.Marshal(cloud)
+	}
+	return map[string]json.RawMessage{"bk_target_ip": address, "bk_target_cloud_id": cloudValue}
+}
+
+// numericText is whether a cloud id is written as a JSON number: decimal
+// digits, as the cache holds a cloud.
+func numericText(value string) bool {
+	if value == "" || len(value) > 18 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// overlayInstance sets an instance-placed record's host overlay from the
+// instance, and names an instance that has no address; nothing when the
+// record's host was placed by id or agent, which Python's fuller returns on
+// before it reaches the instance.
+func overlayInstance(dimensions map[string]json.RawMessage, facts *admission.Facts, instance *ServiceInstanceFacts, source string) {
+	if facts.IdentityHostFound {
+		return
+	}
+	if instance.IP == "" {
+		facts.HostOverlay, facts.HostOverlaySource = nil, admission.HostIdentityInstanceWithoutAddress
+		return
+	}
+	facts.HostOverlay = instanceOverlay(dimensions, instance)
+	facts.HostOverlaySource = ""
+	if facts.HostOverlay != nil {
+		facts.HostOverlaySource = source
 	}
 }
 
@@ -357,7 +428,9 @@ func resolveHostState(index *Index, facts *admission.Facts) {
 // host becomes the host the state filter judges - Python overwrites
 // bk_target_ip and bk_topo_node, and its host status filter then reads the
 // overwritten values. Here those become facts: the topology attribute, the
-// host identity attribute and HostNaming change; the dimensions do not.
+// host identity attribute and HostNaming change; the dimensions do not, and
+// the address and cloud Python writes are what the alert identity reads,
+// carried as the record's host overlay (instanceOverlay).
 type ServiceInstanceTopologyFuller struct {
 	stores      StoreSource
 	acceptStale bool
@@ -371,7 +444,7 @@ func NewServiceInstanceTopologyFuller(stores StoreSource) *ServiceInstanceTopolo
 
 func (*ServiceInstanceTopologyFuller) Name() string { return "cmdb_service_instance_topology" }
 
-func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, facts *admission.Facts) {
+func (fuller *ServiceInstanceTopologyFuller) Fill(dimensions map[string]json.RawMessage, facts *admission.Facts) {
 	instanceKeys := facts.ServiceInstanceKeys()
 	if len(instanceKeys) == 0 {
 		// Not instance data; nothing here applies.
@@ -396,6 +469,15 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 	}
 	index, unusable := store.Usable()
 	if (unusable != "" && !(fuller.acceptStale && unusable == IndexStale)) || index.ServiceInstances() == 0 {
+		// The alert's identity is not a decision: it reads the instances of
+		// the last load that held any (Store.IdentityServiceInstance), so a
+		// stale or empty index does not file an instance-placed record's
+		// alert under its own address while it lasts.
+		source := admission.HostOverlayFromLastPopulatedIndex
+		if unusable == IndexStale {
+			source = admission.HostOverlayFromStaleIndex
+		}
+		fuller.identityInstance(store, dimensions, facts, instanceKeys, source)
 		// The same reading as an empty host cache: a series that names an
 		// instance while the instance cache holds none is the signature of a
 		// cache nobody writes, not of a fleet without instances. Deciding on
@@ -442,7 +524,35 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		facts.HostNaming.AddressKey = instance.IP + "|" + instance.CloudID
 		facts.HostNaming.Usable = facts.HostNaming.Usable || instance.IP != ""
 		resolveHostState(index, facts)
+		overlayInstance(dimensions, facts, instance, "")
 		return
+	}
+	// No instance in this load: the identity may still read one a refusing
+	// load left out.
+	fuller.identityInstance(store, dimensions, facts, instanceKeys, admission.HostOverlayFromLastPopulatedIndex)
+}
+
+// identityInstance overlays a record from the instance identity
+// (Store.IdentityServiceInstance) by the first of its instance keys the
+// identity holds. Before the store's first read has succeeded, a record
+// with nothing else to name its host is held, as a host-placed one is; after
+// it, an identity without the instance leaves the record as it is.
+func (fuller *ServiceInstanceTopologyFuller) identityInstance(store *Store, dimensions map[string]json.RawMessage,
+	facts *admission.Facts, keys []string, source string) {
+	if facts.IdentityHostFound {
+		return
+	}
+	if !store.IdentityInstancesHeld() {
+		if store.IdentityPending() {
+			facts.HostIdentityUnavailable = true
+		}
+		return
+	}
+	for _, key := range keys {
+		if instance, found := store.IdentityServiceInstance(key); found {
+			overlayInstance(dimensions, facts, instance, source)
+			return
+		}
 	}
 }
 

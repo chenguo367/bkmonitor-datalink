@@ -57,7 +57,7 @@ var admissionReasons = map[string]struct{}{
 	// emitted under its own address because that load held no host
 	// (raw_no_index).
 	admission.HostOverlayFromStaleIndex: {}, admission.HostOverlayFromLastPopulatedIndex: {}, admission.HostIdentityHeld: {},
-	admission.HostIdentityRawNoIndex: {},
+	admission.HostIdentityRawNoIndex: {}, admission.HostIdentityInstanceWithoutAddress: {},
 }
 
 // RecordSeriesAdmission counts one admission decision.

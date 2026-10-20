@@ -139,6 +139,10 @@ type Facts struct {
 	// index in force that the filters decide on (HostOverlayFromStaleIndex,
 	// HostOverlayFromLastPopulatedIndex); empty otherwise.
 	HostOverlaySource string
+	// IdentityHostFound says the record's host was found by its id or agent
+	// in the identity index: Python's fuller returns there, so the service
+	// instance branch does not overlay it.
+	IdentityHostFound bool
 	// PlacedByHostID records that CMDB placed the record's host by its
 	// bk_host_id or bk_agent_id: the branch Python's fuller overwrites
 	// bk_target_ip on, whatever the record's own address. The count the
@@ -181,6 +185,10 @@ const (
 	// HostIdentityHeld names a series held because no index can give its
 	// alert identity (HostIdentityUnavailable).
 	HostIdentityHeld = "held_no_index"
+	// HostIdentityInstanceWithoutAddress names an instance-placed series
+	// whose instance carries no address - its host was not in the host cache
+	// when the instance was built - so it keeps its own.
+	HostIdentityInstanceWithoutAddress = "instance_without_address"
 	// HostIdentityRawNoIndex names a host-placed series emitted under its
 	// own address because no index ever held hosts once the store's first
 	// load returned: nothing can give its identity, as for Python.

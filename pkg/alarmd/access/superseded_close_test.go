@@ -220,6 +220,8 @@ func TestTheSourceOfAHostPlacedSeriesIdentityIsCounted(t *testing.T) {
 		{"last populated index", identitySourceFuller{source: admission.HostOverlayFromLastPopulatedIndex}, "host_identity/admitted/last_populated_index", false},
 		{"no index yet", identitySourceFuller{unavailable: true}, "host_identity/held/held_no_index", true},
 		{"no host in any load", identitySourceFuller{source: admission.HostIdentityRawNoIndex, raw: true}, "host_identity/admitted/raw_no_index", false},
+		{"instance without an address", identitySourceFuller{source: admission.HostIdentityInstanceWithoutAddress, raw: true},
+			"host_identity/admitted/instance_without_address", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			chain := admission.NewChain([]admission.Fuller{admission.IdentityFuller{}, c.fuller}, nil)

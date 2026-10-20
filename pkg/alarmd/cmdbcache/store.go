@@ -84,10 +84,17 @@ type Store struct {
 	// facts the last load that placed it gave it, until a clean load - one
 	// that refused nothing - no longer has it: the host is gone then. No
 	// more hosts are carried than the load holds.
-	identity       *Index
-	carried        map[string]*HostFacts
-	identityAgents map[string]string
-	lastError      error
+	identity *Index
+	carried  map[string]*HostFacts
+	// identityInstances are the service instances of the last load that held
+	// any, with the instances a later load refused carried as hosts are
+	// (carryRefusedInstances): what an instance-placed record's alert
+	// identity is read from (IdentityServiceInstance). The instance hash is
+	// published apart from the host hash, so its last populated load is
+	// tracked on its own.
+	identityInstances map[string]*ServiceInstanceFacts
+	identityAgents    map[string]string
+	lastError         error
 	// loaded says a read of the cache has succeeded, whatever it found, and
 	// firstAttempt is when the store first tried one. Until either a read
 	// succeeded or identityHoldBound has passed since the first try, a
@@ -311,6 +318,56 @@ func (store *Store) IdentityHost(key string) (*HostFacts, bool) {
 	return host, found
 }
 
+// IdentityServiceInstance is the service instance CMDB last placed under an
+// id, read as IdentityHost is: from the last load that held instances, and
+// the instances a later load refused. For a record's alert identity only.
+func (store *Store) IdentityServiceInstance(id string) (*ServiceInstanceFacts, bool) {
+	if store == nil || id == "" {
+		return nil, false
+	}
+	store.mutex.RLock()
+	instances := store.identityInstances
+	store.mutex.RUnlock()
+	instance, found := instances[id]
+	return instance, found
+}
+
+// IdentityInstancesHeld is whether any load ever held service instances.
+func (store *Store) IdentityInstancesHeld() bool {
+	if store == nil {
+		return false
+	}
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+	return len(store.identityInstances) > 0
+}
+
+// carryRefusedInstances is the instance identity after a load with
+// instances: that load's instances, and - when it refused instance records -
+// every instance the previous identity held that this load does not, no
+// more than the previous identity held; after a clean load, that load's
+// alone, and an instance absent from it is gone.
+func carryRefusedInstances(index *Index, previous map[string]*ServiceInstanceFacts) map[string]*ServiceInstanceFacts {
+	if index.Refused().ServiceInstances == 0 || len(previous) == 0 {
+		return index.serviceInstances
+	}
+	merged := make(map[string]*ServiceInstanceFacts, len(index.serviceInstances)+len(previous))
+	for id, instance := range index.serviceInstances {
+		merged[id] = instance
+	}
+	carried := 0
+	for id, instance := range previous {
+		if carried >= len(previous) {
+			break
+		}
+		if _, present := merged[id]; !present {
+			merged[id] = instance
+			carried++
+		}
+	}
+	return merged
+}
+
 // carryRefused is what the identity carries after a load with hosts: when
 // the load refused host records, every host the identity it replaces placed
 // - its index's and those it carried - that this load does not have, no
@@ -481,6 +538,9 @@ func (store *Store) Refresh(ctx context.Context) error {
 	}
 	if !index.agentsUnreadable && index.Hosts() > 0 {
 		store.identityAgents = index.byAgent
+	}
+	if index.ServiceInstances() > 0 {
+		store.identityInstances = carryRefusedInstances(index, store.identityInstances)
 	}
 	store.lastError = nil
 	store.refreshes++
